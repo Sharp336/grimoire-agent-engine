@@ -111,6 +111,9 @@ export default class Index extends Command {
 		"no-title": Flags.boolean({
 			description: "Disable title auto-generation",
 		}),
+		once: Flags.boolean({
+			description: "Run one prompt in TUI mode, then exit with a summary",
+		}),
 	};
 
 	static examples = [
@@ -122,6 +125,7 @@ export default class Index extends Command {
 		`# Use different model (fuzzy matching)\n  ${APP_NAME} --model opus "Help me refactor this code"`,
 		`# Limit model cycling to specific models\n  ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o`,
 		`# Export a session file to HTML\n  ${APP_NAME} --export ~/.omp/agent/sessions/--path--/session.jsonl`,
+		`# Run one prompt in TUI, then exit with summary\n  ${APP_NAME} --once "Refactor the auth module"`,
 	];
 
 	static strict = false;

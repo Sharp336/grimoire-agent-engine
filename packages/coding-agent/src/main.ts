@@ -9,14 +9,14 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { run } from "@oclif/core";
-import { type ImageContent, supportsXhigh } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, type ImageContent, supportsXhigh } from "@oh-my-pi/pi-ai";
 import { $env, postmortem } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import type { Args } from "./cli/args";
 import { processFileArguments } from "./cli/file-processor";
 import { listModels } from "./cli/list-models";
 import { selectSession } from "./cli/session-picker";
-import { findConfigFile, VERSION } from "./config";
+import { APP_NAME, findConfigFile, VERSION } from "./config";
 import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
 import { parseModelPattern, parseModelString, resolveModelScope, type ScopedModel } from "./config/model-resolver";
 import { Settings, settings } from "./config/settings";
@@ -89,6 +89,7 @@ async function runInteractiveMode(
 	mcpManager: import("./mcp").MCPManager | undefined,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
+	once?: boolean,
 ): Promise<void> {
 	const mode = new InteractiveMode(session, version, changelogMarkdown, setExtensionUIContext, lspServers, mcpManager);
 
@@ -135,7 +136,10 @@ async function runInteractiveMode(
 		}
 	}
 
-	while (true) {
+	// In --once mode, if we already sent an initial message, skip the input loop
+	const hasInitialPrompt = !!(initialMessage || initialMessages.length > 0);
+
+	while (!(once && hasInitialPrompt)) {
 		const { text, images } = await mode.getUserInput();
 		try {
 			await session.prompt(text, { images });
@@ -143,7 +147,51 @@ async function runInteractiveMode(
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
 		}
+		if (once) break;
 	}
+
+	if (once) {
+		await exitOnceMode(session, mode);
+	}
+}
+
+/** Extract last assistant message text and exit cleanly after --once mode */
+async function exitOnceMode(session: AgentSession, mode: InteractiveMode): Promise<void> {
+	// Extract text from the last assistant message
+	const messages = session.state.messages;
+	let summaryText = "";
+	for (let i = messages.length - 1; i >= 0; i--) {
+		if (messages[i].role === "assistant") {
+			const assistantMsg = messages[i] as AssistantMessage;
+			for (const content of assistantMsg.content) {
+				if (content.type === "text") {
+					summaryText += content.text;
+				}
+			}
+			break;
+		}
+	}
+
+	// Flush session and tear down TUI
+	await mode.sessionManager.flush();
+	await session.emitCustomToolSessionEvent("shutdown");
+	mode.stop();
+
+	// Print summary
+	if (summaryText) {
+		process.stderr.write(`\n${summaryText}\n`);
+	}
+
+	// Print resumption hint
+	const sessionId = mode.sessionManager.getSessionId();
+	const sessionFile = mode.sessionManager.getSessionFile();
+	if (sessionId && sessionFile) {
+		process.stderr.write(`\n${chalk.dim(`Resume this session with ${APP_NAME} --resume ${sessionId}`)}\n`);
+	}
+
+	await session.dispose();
+	stopThemeWatcher();
+	await postmortem.quit(0);
 }
 
 async function prepareInitialMessage(
@@ -533,7 +581,7 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 		initialMessage = initialMessage ? `${initialMessage}\n${pipedInput}` : pipedInput;
 	}
 	time("prepareInitialMessage");
-	const autoPrint = pipedInput !== undefined && !parsedArgs.print && parsedArgs.mode === undefined;
+	const autoPrint = pipedInput !== undefined && !parsedArgs.print && !parsedArgs.once && parsedArgs.mode === undefined;
 	const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
 	const mode = parsedArgs.mode || "text";
 
@@ -698,6 +746,7 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 			mcpManager,
 			initialMessage,
 			initialImages,
+			parsedArgs.once,
 		);
 	} else {
 		await runPrintMode(session, {

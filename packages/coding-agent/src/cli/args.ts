@@ -40,6 +40,7 @@ export interface Args {
 	skills?: string[];
 	listModels?: string | true;
 	noTitle?: boolean;
+	once?: boolean;
 	messages: string[];
 	fileArgs: string[];
 	/** Unknown flags (potentially extension flags) - map of flag name to value */
@@ -150,6 +151,8 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 			result.noSkills = true;
 		} else if (arg === "--no-title") {
 			result.noTitle = true;
+		} else if (arg === "--once") {
+			result.once = true;
 		} else if (arg === "--skills" && i + 1 < args.length) {
 			// Comma-separated glob patterns for skill filtering
 			result.skills = args[++i].split(",").map(s => s.trim());
