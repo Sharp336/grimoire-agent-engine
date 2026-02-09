@@ -160,12 +160,18 @@ async function exitOnceMode(session: AgentSession, mode: InteractiveMode): Promi
 	// Extract text from the last assistant message
 	const messages = session.state.messages;
 	let summaryText = "";
+	let exitCode = 0;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		if (messages[i].role === "assistant") {
 			const assistantMsg = messages[i] as AssistantMessage;
-			for (const content of assistantMsg.content) {
-				if (content.type === "text") {
-					summaryText += content.text;
+			if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
+				summaryText = assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`;
+				exitCode = 1;
+			} else {
+				for (const content of assistantMsg.content) {
+					if (content.type === "text") {
+						summaryText += content.text;
+					}
 				}
 			}
 			break;
@@ -191,7 +197,7 @@ async function exitOnceMode(session: AgentSession, mode: InteractiveMode): Promi
 
 	await session.dispose();
 	stopThemeWatcher();
-	await postmortem.quit(0);
+	await postmortem.quit(exitCode);
 }
 
 async function prepareInitialMessage(
