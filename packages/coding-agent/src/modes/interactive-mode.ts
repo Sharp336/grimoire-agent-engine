@@ -929,6 +929,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.commandController.handlePythonCommand(code, excludeFromContext);
 	}
 
+	async handleMCPCommand(text: string): Promise<void> {
+		const { MCPCommandController } = await import("./controllers/mcp-command-controller");
+		const controller = new MCPCommandController(this);
+		await controller.handle(text);
+	}
+
 	handleCompactCommand(customInstructions?: string): Promise<void> {
 		return this.commandController.handleCompactCommand(customInstructions);
 	}

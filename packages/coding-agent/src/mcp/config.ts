@@ -32,9 +32,15 @@ export interface LoadMCPConfigsResult {
 function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 	// Determine transport type
 	const transport = server.transport ?? (server.command ? "stdio" : server.url ? "http" : "stdio");
+	const shared = {
+		enabled: server.enabled,
+		timeout: server.timeout,
+		auth: server.auth,
+	};
 
 	if (transport === "stdio") {
 		const config: MCPServerConfig = {
+			...shared,
 			type: "stdio" as const,
 			command: server.command ?? "",
 		};
@@ -45,6 +51,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 
 	if (transport === "http") {
 		const config: MCPServerConfig = {
+			...shared,
 			type: "http" as const,
 			url: server.url ?? "",
 		};
@@ -54,6 +61,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 
 	if (transport === "sse") {
 		const config: MCPServerConfig = {
+			...shared,
 			type: "sse" as const,
 			url: server.url ?? "",
 		};
@@ -63,6 +71,7 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 
 	// Fallback to stdio
 	return {
+		...shared,
 		type: "stdio" as const,
 		command: server.command ?? "",
 	};
@@ -91,7 +100,11 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const configs: Record<string, MCPServerConfig> = {};
 	const sources: Record<string, import("../capability/types").SourceMeta> = {};
 	for (const server of servers) {
-		configs[server.name] = convertToLegacyConfig(server);
+		const config = convertToLegacyConfig(server);
+		if (config.enabled === false) {
+			continue;
+		}
+		configs[server.name] = config;
 		sources[server.name] = server._source;
 	}
 
