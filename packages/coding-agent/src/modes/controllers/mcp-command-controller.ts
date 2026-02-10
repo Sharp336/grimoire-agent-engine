@@ -107,6 +107,9 @@ export class MCPCommandController {
 			case "disable":
 				await this.handleSetEnabled(parts[2], false);
 				break;
+			case "reload":
+				await this.handleReload();
+				break;
 			default:
 				this.ctx.showError(`Unknown subcommand: ${subcommand}. Type /mcp help for usage.`);
 		}
@@ -132,6 +135,7 @@ export class MCPCommandController {
 			"  /mcp unauth <name>    Remove OAuth auth from an MCP server",
 			"  /mcp enable <name>    Enable an MCP server",
 			"  /mcp disable <name>   Disable an MCP server",
+			"  /mcp reload           Force reload and rediscover MCP runtime tools",
 			"  /mcp help             Show this help message",
 			"",
 		].join("\n");
@@ -631,6 +635,10 @@ export class MCPCommandController {
 			}
 			const state = this.ctx.mcpManager.getConnectionStatus(name);
 			if (state === "connected") {
+				// Connection may complete after initial reload; rebind runtime MCP tools now.
+				await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
+			}
+			if (state === "connected") {
 				statusText.setText(theme.fg("success", `✓ Connected to "${name}"`));
 			} else if (state === "connecting") {
 				statusText.setText(theme.fg("muted", `◌ "${name}" is still connecting...`));
@@ -652,6 +660,9 @@ export class MCPCommandController {
 		if (!this.ctx.mcpManager) return;
 		if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") return;
 		await this.ctx.mcpManager.connectServers({ [name]: config }, {});
+		if (this.ctx.mcpManager.getConnectionStatus(name) === "connected") {
+			await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
+		}
 	}
 
 	private async handleWizardComplete(name: string, config: MCPServerConfig, scope: "user" | "project"): Promise<void> {
@@ -1154,6 +1165,24 @@ export class MCPCommandController {
 			this.showMessage(lines.join("\n"));
 		} catch (error) {
 			this.ctx.showError(`Failed to reauthorize server: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private async handleReload(): Promise<void> {
+		try {
+			this.showMessage(["", theme.fg("muted", "Reloading MCP servers and runtime tools..."), ""].join("\n"));
+			await this.reloadMCP();
+			const connectedCount = this.ctx.mcpManager?.getConnectedServers().length ?? 0;
+			this.showMessage(
+				[
+					"",
+					theme.fg("success", "✓ MCP reload complete"),
+					`  Connected servers: ${connectedCount}`,
+					"",
+				].join("\n"),
+			);
+		} catch (error) {
+			this.ctx.showError(`Failed to reload MCP: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
