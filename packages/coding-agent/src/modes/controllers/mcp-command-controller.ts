@@ -62,6 +62,7 @@ type MCPAddParsed = {
 	scope: MCPAddScope;
 	quickConfig?: MCPServerConfig;
 	isCommandQuickAdd?: boolean;
+	hasAuthToken?: boolean;
 	error?: string;
 };
 
@@ -123,7 +124,7 @@ export class MCPCommandController {
 			"",
 			theme.fg("accent", "Commands:"),
 			"  /mcp add              Add a new MCP server (interactive wizard)",
-			"  /mcp add <name> [--scope project|user] [--url <url> --transport http|sse] [-- <command...>]",
+			"  /mcp add <name> [--scope project|user] [--url <url> --transport http|sse] [--token <token>] [-- <command...>]",
 			"  /mcp list             List all configured MCP servers",
 			"  /mcp remove <name> [--scope project|user]    Remove an MCP server (default: project)",
 			"  /mcp test <name>      Test connection to an MCP server",
@@ -154,6 +155,7 @@ export class MCPCommandController {
 		let scope: MCPAddScope = "project";
 		let url: string | undefined;
 		let transport: MCPAddTransport = "http";
+		let authToken: string | undefined;
 		let commandTokens: string[] | undefined;
 
 		let i = 0;
@@ -163,12 +165,12 @@ export class MCPCommandController {
 		}
 
 		while (i < tokens.length) {
-			const token = tokens[i];
-			if (token === "--") {
+			const argToken = tokens[i];
+			if (argToken === "--") {
 				commandTokens = tokens.slice(i + 1);
 				break;
 			}
-			if (token === "--scope") {
+			if (argToken === "--scope") {
 				const value = tokens[i + 1];
 				if (!value || (value !== "project" && value !== "user")) {
 					return { scope, error: "Invalid --scope value. Use project or user." };
@@ -177,7 +179,7 @@ export class MCPCommandController {
 				i += 2;
 				continue;
 			}
-			if (token === "--url") {
+			if (argToken === "--url") {
 				const value = tokens[i + 1];
 				if (!value) {
 					return { scope, error: "Missing value for --url." };
@@ -186,7 +188,7 @@ export class MCPCommandController {
 				i += 2;
 				continue;
 			}
-			if (token === "--transport") {
+			if (argToken === "--transport") {
 				const value = tokens[i + 1];
 				if (!value || (value !== "http" && value !== "sse")) {
 					return { scope, error: "Invalid --transport value. Use http or sse." };
@@ -195,7 +197,16 @@ export class MCPCommandController {
 				i += 2;
 				continue;
 			}
-			return { scope, error: `Unknown option: ${token}` };
+			if (argToken === "--token") {
+				const value = tokens[i + 1];
+				if (!value) {
+					return { scope, error: "Missing value for --token." };
+				}
+				authToken = value;
+				i += 2;
+				continue;
+			}
+			return { scope, error: `Unknown option: ${argToken}` };
 		}
 
 		const hasQuick = Boolean(url) || Boolean(commandTokens && commandTokens.length > 0);
@@ -207,6 +218,9 @@ export class MCPCommandController {
 		}
 		if (url && commandTokens && commandTokens.length > 0) {
 			return { scope, error: "Use either --url or -- <command...>, not both." };
+		}
+		if (authToken && !url) {
+			return { scope, error: "--token requires --url (HTTP/SSE transport)." };
 		}
 
 		if (commandTokens && commandTokens.length > 0) {
@@ -227,8 +241,9 @@ export class MCPCommandController {
 		const config: MCPServerConfig = {
 			type: useHttpTransport ? "http" : "sse",
 			url: normalizedUrl,
+			headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
 		};
-		return { scope, initialName: name, quickConfig: config, isCommandQuickAdd: false };
+		return { scope, initialName: name, quickConfig: config, isCommandQuickAdd: false, hasAuthToken: Boolean(authToken) };
 	}
 
 	/**
@@ -249,6 +264,9 @@ export class MCPCommandController {
 				try {
 					await this.handleTestConnection(finalConfig);
 				} catch (error) {
+					if (parsed.hasAuthToken) {
+						throw error;
+					}
 					const authResult = analyzeAuthError(error as Error);
 					if (authResult.requiresAuth) {
 						let oauth = authResult.authType === "oauth" ? authResult.oauth ?? null : null;
@@ -1152,6 +1170,7 @@ export class MCPCommandController {
 
 		// Rediscover and connect
 		const result = await this.ctx.mcpManager.discoverAndConnect();
+		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
 
 		// Show any connection errors
 		if (result.errors.size > 0) {

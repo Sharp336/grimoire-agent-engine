@@ -41,6 +41,9 @@ import {
 } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
+import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
+import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
+import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { exportSessionToHtml } from "../export/html";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -963,6 +966,50 @@ export class AgentSession {
 			this.#baseSystemPrompt = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
 			this.agent.setSystemPrompt(this.#baseSystemPrompt);
 		}
+	}
+
+	/**
+	 * Replace MCP tools in the registry and activate the latest MCP tool set immediately.
+	 * This allows /mcp add/remove/reauth to take effect without restarting the session.
+	 */
+	async refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
+		const prefix = "mcp_";
+		const existingNames = Array.from(this._toolRegistry.keys());
+		for (const name of existingNames) {
+			if (name.startsWith(prefix)) {
+				this._toolRegistry.delete(name);
+			}
+		}
+
+		const getCustomToolContext = (): CustomToolContext => ({
+			sessionManager: this.sessionManager,
+			modelRegistry: this._modelRegistry,
+			model: this.model,
+			isIdle: () => !this.isStreaming,
+			hasQueuedMessages: () => this.queuedMessageCount > 0,
+			abort: () => {
+				this.agent.abort();
+			},
+		});
+
+		for (const customTool of mcpTools) {
+			const wrapped = CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool;
+			const finalTool = (this._extensionRunner
+				? new ExtensionToolWrapper(wrapped, this._extensionRunner)
+				: wrapped) as AgentTool;
+			this._toolRegistry.set(finalTool.name, finalTool);
+		}
+
+		const currentActive = this.getActiveToolNames().filter(name => !name.startsWith(prefix) && this._toolRegistry.has(name));
+		const mcpToolNames = Array.from(this._toolRegistry.keys()).filter(name => name.startsWith(prefix));
+		const nextActive = [...currentActive];
+		for (const name of mcpToolNames) {
+			if (!nextActive.includes(name)) {
+				nextActive.push(name);
+			}
+		}
+
+		await this.setActiveToolsByName(nextActive);
 	}
 
 	/** Whether auto-compaction is currently running */
