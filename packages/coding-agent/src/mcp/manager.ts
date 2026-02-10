@@ -6,17 +6,16 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
+import type { SourceMeta } from "../capability/types";
+import { resolveConfigValue } from "../config/resolve-config-value";
 import type { CustomTool } from "../extensibility/custom-tools/types";
+import type { AuthStorage } from "../session/auth-storage";
 import { connectToServer, disconnectServer, listTools } from "./client";
 import { loadAllMCPConfigs, validateServerConfig } from "./config";
 import type { MCPToolDetails } from "./tool-bridge";
 import { DeferredMCPTool, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
 import type { MCPServerConfig, MCPServerConnection, MCPToolDefinition } from "./types";
-import { resolveConfigValue } from "../config/resolve-config-value";
-import type { AuthStorage } from "../session/auth-storage";
-
-type SourceMeta = import("../capability/types").SourceMeta;
 
 type ToolLoadResult = {
 	connection: MCPServerConnection;
@@ -403,60 +402,55 @@ export class MCPManager {
 	 * Resolve OAuth credentials and shell commands in config.
 	 */
 	private async resolveAuthConfig(config: MCPServerConfig): Promise<MCPServerConfig> {
-		const resolved = { ...config };
+		let resolved: MCPServerConfig = { ...config };
 
-		// Resolve OAuth credentials if present
-		if ((config as any).auth?.type === "oauth") {
-			const credentialId = (config as any).auth.credentialId;
-			if (credentialId && this.authStorage) {
-				try {
-					const credential = this.authStorage.get(credentialId);
-					if (credential && credential.type === "oauth") {
-						// Apply access token to config
-						if (config.type === "http" || config.type === "sse") {
-							// Add as Authorization header
-							(resolved as any).headers = {
-								...(resolved as any).headers,
+		const auth = config.auth;
+		if (auth?.type === "oauth" && auth.credentialId && this.authStorage) {
+			const credentialId = auth.credentialId;
+			try {
+				const credential = this.authStorage.get(credentialId);
+				if (credential?.type === "oauth") {
+					if (resolved.type === "http" || resolved.type === "sse") {
+						resolved = {
+							...resolved,
+							headers: {
+								...resolved.headers,
 								Authorization: `Bearer ${credential.access}`,
-							};
-						} else if (config.type === "stdio" || !config.type) {
-							// Add as environment variable
-							(resolved as any).env = {
-								...(resolved as any).env,
+							},
+						};
+					} else {
+						resolved = {
+							...resolved,
+							env: {
+								...resolved.env,
 								OAUTH_ACCESS_TOKEN: credential.access,
-							};
-						}
+							},
+						};
 					}
-				} catch (error) {
-					logger.warn("Failed to resolve OAuth credential", { credentialId, error });
 				}
+			} catch (error) {
+				logger.warn("Failed to resolve OAuth credential", { credentialId, error });
 			}
 		}
 
-		// Resolve shell commands in env vars
-		if ((resolved as any).env) {
-			const env = (resolved as any).env;
-			const resolvedEnv: Record<string, string> = {};
-			for (const [key, value] of Object.entries(env)) {
-				const resolvedValue = await resolveConfigValue(value as string);
-				if (resolvedValue) {
-					resolvedEnv[key] = resolvedValue;
+		if (resolved.type !== "http" && resolved.type !== "sse") {
+			if (resolved.env) {
+				const nextEnv: Record<string, string> = {};
+				for (const [key, value] of Object.entries(resolved.env)) {
+					const resolvedValue = await resolveConfigValue(value);
+					if (resolvedValue) nextEnv[key] = resolvedValue;
 				}
+				resolved = { ...resolved, env: nextEnv };
 			}
-			(resolved as any).env = resolvedEnv;
-		}
-
-		// Resolve shell commands in headers
-		if ((resolved as any).headers) {
-			const headers = (resolved as any).headers;
-			const resolvedHeaders: Record<string, string> = {};
-			for (const [key, value] of Object.entries(headers)) {
-				const resolvedValue = await resolveConfigValue(value as string);
-				if (resolvedValue) {
-					resolvedHeaders[key] = resolvedValue;
+		} else {
+			if (resolved.headers) {
+				const nextHeaders: Record<string, string> = {};
+				for (const [key, value] of Object.entries(resolved.headers)) {
+					const resolvedValue = await resolveConfigValue(value);
+					if (resolvedValue) nextHeaders[key] = resolvedValue;
 				}
+				resolved = { ...resolved, headers: nextHeaders };
 			}
-			(resolved as any).headers = resolvedHeaders;
 		}
 
 		return resolved;

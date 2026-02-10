@@ -41,12 +41,11 @@ import {
 } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
-import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
-import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
-import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import { exportSessionToHtml } from "../export/html";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
+import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
+import { CustomToolAdapter } from "../extensibility/custom-tools/wrapper";
 import type {
 	ExtensionCommandContext,
 	ExtensionRunner,
@@ -60,6 +59,7 @@ import type {
 	TurnStartEvent,
 } from "../extensibility/extensions";
 import type { CompactOptions, ContextUsage } from "../extensibility/extensions/types";
+import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
@@ -974,16 +974,16 @@ export class AgentSession {
 	 */
 	async refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
 		const prefix = "mcp_";
-		const existingNames = Array.from(this._toolRegistry.keys());
+		const existingNames = Array.from(this.#toolRegistry.keys());
 		for (const name of existingNames) {
 			if (name.startsWith(prefix)) {
-				this._toolRegistry.delete(name);
+				this.#toolRegistry.delete(name);
 			}
 		}
 
 		const getCustomToolContext = (): CustomToolContext => ({
 			sessionManager: this.sessionManager,
-			modelRegistry: this._modelRegistry,
+			modelRegistry: this.#modelRegistry,
 			model: this.model,
 			isIdle: () => !this.isStreaming,
 			hasQueuedMessages: () => this.queuedMessageCount > 0,
@@ -994,14 +994,16 @@ export class AgentSession {
 
 		for (const customTool of mcpTools) {
 			const wrapped = CustomToolAdapter.wrap(customTool, getCustomToolContext) as AgentTool;
-			const finalTool = (this._extensionRunner
-				? new ExtensionToolWrapper(wrapped, this._extensionRunner)
-				: wrapped) as AgentTool;
-			this._toolRegistry.set(finalTool.name, finalTool);
+			const finalTool = (
+				this.#extensionRunner ? new ExtensionToolWrapper(wrapped, this.#extensionRunner) : wrapped
+			) as AgentTool;
+			this.#toolRegistry.set(finalTool.name, finalTool);
 		}
 
-		const currentActive = this.getActiveToolNames().filter(name => !name.startsWith(prefix) && this._toolRegistry.has(name));
-		const mcpToolNames = Array.from(this._toolRegistry.keys()).filter(name => name.startsWith(prefix));
+		const currentActive = this.getActiveToolNames().filter(
+			name => !name.startsWith(prefix) && this.#toolRegistry.has(name),
+		);
+		const mcpToolNames = Array.from(this.#toolRegistry.keys()).filter(name => name.startsWith(prefix));
 		const nextActive = [...currentActive];
 		for (const name of mcpToolNames) {
 			if (!nextActive.includes(name)) {

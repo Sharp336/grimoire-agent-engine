@@ -9,6 +9,8 @@
 // JSON-RPC 2.0 Types
 // =============================================================================
 
+import type { SourceMeta } from "../capability/types";
+
 export interface JsonRpcRequest {
 	jsonrpc: "2.0";
 	id: string | number;
@@ -230,7 +232,7 @@ export interface MCPServerConnection {
 	/** Cached tools (populated on demand) */
 	tools?: MCPToolDefinition[];
 	/** Source metadata (for display) */
-	_source?: import("../capability/types").SourceMeta;
+	_source?: SourceMeta;
 }
 
 /** MCP tool with server context */

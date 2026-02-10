@@ -47,6 +47,7 @@ import { CommandController } from "./controllers/command-controller";
 import { EventController } from "./controllers/event-controller";
 import { ExtensionUiController } from "./controllers/extension-ui-controller";
 import { InputController } from "./controllers/input-controller";
+import { MCPCommandController } from "./controllers/mcp-command-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { setMermaidRenderCallback } from "./theme/mermaid-cache";
 import type { Theme } from "./theme/theme";
@@ -923,7 +924,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async handleMCPCommand(text: string): Promise<void> {
-		const { MCPCommandController } = await import("./controllers/mcp-command-controller");
 		const controller = new MCPCommandController(this);
 		await controller.handle(text);
 	}

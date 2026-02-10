@@ -4,6 +4,7 @@
  * Uses the capability system to load MCP servers from multiple sources.
  */
 import { mcpCapability } from "../capability/mcp";
+import type { SourceMeta } from "../capability/types";
 import type { MCPServer } from "../discovery";
 import { loadCapability } from "../discovery";
 import type { MCPServerConfig } from "./types";
@@ -23,7 +24,7 @@ export interface LoadMCPConfigsResult {
 	/** Extracted Exa API keys (if any were filtered) */
 	exaApiKeys: string[];
 	/** Source metadata for each server */
-	sources: Record<string, import("../capability/types").SourceMeta>;
+	sources: Record<string, SourceMeta>;
 }
 
 /**
@@ -98,7 +99,7 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 
 	// Convert to legacy format and preserve source metadata
 	const configs: Record<string, MCPServerConfig> = {};
-	const sources: Record<string, import("../capability/types").SourceMeta> = {};
+	const sources: Record<string, SourceMeta> = {};
 	for (const server of servers) {
 		const config = convertToLegacyConfig(server);
 		if (config.enabled === false) {
@@ -192,7 +193,7 @@ export interface ExaFilterResult {
 	/** Extracted Exa API keys (if any) */
 	exaApiKeys: string[];
 	/** Source metadata for remaining servers */
-	sources: Record<string, import("../capability/types").SourceMeta>;
+	sources: Record<string, SourceMeta>;
 }
 
 /**
@@ -201,10 +202,10 @@ export interface ExaFilterResult {
  */
 export function filterExaMCPServers(
 	configs: Record<string, MCPServerConfig>,
-	sources: Record<string, import("../capability/types").SourceMeta>,
+	sources: Record<string, SourceMeta>,
 ): ExaFilterResult {
 	const filtered: Record<string, MCPServerConfig> = {};
-	const filteredSources: Record<string, import("../capability/types").SourceMeta> = {};
+	const filteredSources: Record<string, SourceMeta> = {};
 	const exaApiKeys: string[] = [];
 
 	for (const [name, config] of Object.entries(configs)) {

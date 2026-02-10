@@ -142,9 +142,7 @@ export function extractOAuthEndpoints(error: Error): OAuthEndpoints | null {
 			challengeValues.get("authorize_url") ||
 			challengeValues.get("realm");
 		const tokenUrl =
-			challengeValues.get("token_url") ||
-			challengeValues.get("token_uri") ||
-			challengeValues.get("token_endpoint");
+			challengeValues.get("token_url") || challengeValues.get("token_uri") || challengeValues.get("token_endpoint");
 
 		if (authorizationUrl && tokenUrl) {
 			return {
@@ -259,10 +257,7 @@ export async function discoverOAuthEndpoints(serverUrl: string): Promise<OAuthEn
 						authorizationUrl: metadata.authorization_endpoint,
 						tokenUrl: metadata.token_endpoint,
 						clientId:
-							metadata.client_id ||
-							metadata.clientId ||
-							metadata.default_client_id ||
-							metadata.public_client_id,
+							metadata.client_id || metadata.clientId || metadata.default_client_id || metadata.public_client_id,
 						scopes: metadata.scopes_supported?.join(" ") || metadata.scopes || metadata.scope,
 					};
 				}

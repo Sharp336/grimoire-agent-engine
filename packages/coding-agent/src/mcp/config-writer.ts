@@ -4,8 +4,8 @@
  * Utilities for reading/writing .mcp.json files at user or project level.
  */
 import * as fs from "node:fs";
-import * as path from "node:path";
 import { homedir } from "node:os";
+import * as path from "node:path";
 import { validateServerConfig } from "./config";
 import type { MCPConfigFile, MCPServerConfig } from "./types";
 
@@ -81,11 +81,7 @@ export function validateServerName(name: string): string | undefined {
  *
  * @throws Error if server name already exists or validation fails
  */
-export async function addMCPServer(
-	filePath: string,
-	name: string,
-	config: MCPServerConfig,
-): Promise<void> {
+export async function addMCPServer(filePath: string, name: string, config: MCPServerConfig): Promise<void> {
 	// Validate server name
 	const nameError = validateServerName(name);
 	if (nameError) {
@@ -125,11 +121,7 @@ export async function addMCPServer(
  *
  * @throws Error if validation fails
  */
-export async function updateMCPServer(
-	filePath: string,
-	name: string,
-	config: MCPServerConfig,
-): Promise<void> {
+export async function updateMCPServer(filePath: string, name: string, config: MCPServerConfig): Promise<void> {
 	// Validate the config
 	const errors = validateServerConfig(name, config);
 	if (errors.length > 0) {

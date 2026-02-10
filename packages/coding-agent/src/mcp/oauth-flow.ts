@@ -4,8 +4,9 @@
  * Allows users to authenticate with any OAuth-compatible MCP server
  * by providing authorization URL, token URL, and client credentials.
  */
-import { OAuthCallbackFlow } from "@oh-my-pi/pi-ai/utils/oauth/callback-server";
+
 import type { OAuthController, OAuthCredentials } from "@oh-my-pi/pi-ai";
+import { OAuthCallbackFlow } from "@oh-my-pi/pi-ai/utils/oauth/callback-server";
 
 const DEFAULT_PORT = 3000;
 const CALLBACK_PATH = "/callback";
@@ -39,7 +40,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		this.resolvedClientId = this.resolveClientId(config);
 	}
 
-	protected async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
+	async generateAuthUrl(state: string, redirectUri: string): Promise<{ url: string; instructions?: string }> {
 		if (!this.resolvedClientId) {
 			await this.tryRegisterClient(redirectUri);
 		}
@@ -71,7 +72,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		return { url: authUrl.toString() };
 	}
 
-	protected async exchangeToken(code: string, _state: string, redirectUri: string): Promise<OAuthCredentials> {
+	async exchangeToken(code: string, _state: string, redirectUri: string): Promise<OAuthCredentials> {
 		const params = new URLSearchParams({
 			grant_type: "authorization_code",
 			code,
@@ -106,7 +107,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			throw new Error(`Token exchange failed: ${response.status} ${errorText}`);
 		}
 
-		const data = await response.json() as {
+		const data = (await response.json()) as {
 			access_token: string;
 			refresh_token?: string;
 			expires_in?: number;
