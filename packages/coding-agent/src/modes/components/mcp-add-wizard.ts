@@ -15,11 +15,11 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { validateServerName } from "../../mcp/config-writer";
 import { analyzeAuthError, discoverOAuthEndpoints } from "../../mcp/oauth-discovery";
-import type { MCPHttpServerConfig, MCPServerConfig, MCPSseServerConfig, MCPStdioServerConfig } from "../../mcp/types";
+import type { MCPHttpServerConfig, MCPServerConfig, MCPStdioServerConfig } from "../../mcp/types";
 import { theme } from "../theme/theme";
 import { DynamicBorder } from "./dynamic-border";
 
-type TransportType = "stdio" | "http" | "sse";
+type TransportType = "stdio" | "http";
 type AuthMethod = "none" | "oauth" | "manual";
 type AuthLocation = "env" | "header";
 type Scope = "user" | "project";
@@ -250,7 +250,6 @@ export class MCPAddWizard extends Container {
 		const options = [
 			{ value: "stdio" as const, label: "stdio (Local process)" },
 			{ value: "http" as const, label: "http (HTTP server)" },
-			{ value: "sse" as const, label: "sse (Server-Sent Events)" },
 		];
 
 		for (let i = 0; i < options.length; i++) {
@@ -608,7 +607,7 @@ export class MCPAddWizard extends Container {
 	#selectCurrentOption(): void {
 		switch (this.#currentStep) {
 			case "transport": {
-				const transports: TransportType[] = ["stdio", "http", "sse"];
+				const transports: TransportType[] = ["stdio", "http"];
 				this.#state.transport = transports[this.#selectedIndex];
 				this.#currentStep = this.#state.transport === "stdio" ? "command" : "url";
 				break;
@@ -672,7 +671,7 @@ export class MCPAddWizard extends Container {
 	#getMaxIndexForCurrentStep(): number {
 		switch (this.#currentStep) {
 			case "transport":
-				return 2; // 3 options
+				return 1; // 2 options
 			case "auth-method":
 				return 1; // 2 options
 			case "oauth-error":
@@ -697,7 +696,7 @@ export class MCPAddWizard extends Container {
 			case "command":
 			case "url":
 				this.#currentStep = "transport";
-				this.#selectedIndex = this.#state.transport === "stdio" ? 0 : this.#state.transport === "http" ? 1 : 2;
+				this.#selectedIndex = this.#state.transport === "stdio" ? 0 : 1;
 				break;
 			case "args":
 				this.#currentStep = "command";
@@ -1037,8 +1036,8 @@ export class MCPAddWizard extends Container {
 			return config;
 		}
 
-		// http or sse
-		const config: MCPHttpServerConfig | MCPSseServerConfig = {
+		// http
+		const config: MCPHttpServerConfig = {
 			type: transport,
 			url: this.#state.url,
 			timeout: 5000,
@@ -1258,8 +1257,8 @@ export class MCPAddWizard extends Container {
 			return config;
 		}
 
-		// HTTP or SSE — use concrete type
-		const config: MCPHttpServerConfig | MCPSseServerConfig = {
+		// HTTP
+		const config: MCPHttpServerConfig = {
 			type: this.#state.transport!,
 			url: this.#state.url,
 		};
@@ -1276,7 +1275,7 @@ export class MCPAddWizard extends Container {
 		if (this.#state.authMethod === "manual" && this.#state.apiKey) {
 			if (this.#state.authLocation === "env") {
 				// Env-based auth for HTTP: store the key in env on the config
-				// HTTP/SSE configs don't have an env field, so use headers as carrier
+				// HTTP configs don't have an env field, so use headers as carrier
 				const headerName = this.#state.headerName || "Authorization";
 				config.headers = {
 					[headerName]: this.#state.apiKey,

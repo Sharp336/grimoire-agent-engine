@@ -3,7 +3,7 @@
  *
  * Handles /mcp subcommands for managing MCP servers.
  */
-import { Spacer, Text } from "@oh-my-pi/pi-tui";
+import { type SelectItem, SelectList, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { analyzeAuthError, discoverOAuthEndpoints, MCPManager } from "../../mcp";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
 import {
@@ -12,13 +12,15 @@ import {
 	readMCPConfigFile,
 	removeMCPServer,
 	updateMCPServer,
+	validateServerName,
 } from "../../mcp/config-writer";
 import { MCPOAuthFlow } from "../../mcp/oauth-flow";
+import { type OfficialRegistrySearchResult, searchOfficialRegistry, toConfigName } from "../../mcp/official-registry";
 import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
 import type { OAuthCredential } from "../../session/auth-storage";
 import { DynamicBorder } from "../components/dynamic-border";
 import { MCPAddWizard } from "../components/mcp-add-wizard";
-import { theme } from "../theme/theme";
+import { getSelectListTheme, theme } from "../theme/theme";
 import type { InteractiveModeContext } from "../types";
 
 function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
@@ -61,7 +63,6 @@ function parseCommandArgs(argsString: string): string[] {
 }
 
 type MCPAddScope = "user" | "project";
-type MCPAddTransport = "http" | "sse";
 
 type MCPAddParsed = {
 	initialName?: string;
@@ -69,6 +70,13 @@ type MCPAddParsed = {
 	quickConfig?: MCPServerConfig;
 	isCommandQuickAdd?: boolean;
 	hasAuthToken?: boolean;
+	error?: string;
+};
+
+type MCPSearchParsed = {
+	keyword: string;
+	scope: MCPAddScope;
+	limit: number;
 	error?: string;
 };
 
@@ -116,6 +124,9 @@ export class MCPCommandController {
 			case "reload":
 				await this.#handleReload();
 				break;
+			case "search":
+				await this.#handleSearch(text);
+				break;
 			default:
 				this.ctx.showError(`Unknown subcommand: ${subcommand}. Type /mcp help for usage.`);
 		}
@@ -133,7 +144,7 @@ export class MCPCommandController {
 			"",
 			theme.fg("accent", "Commands:"),
 			"  /mcp add              Add a new MCP server (interactive wizard)",
-			"  /mcp add <name> [--scope project|user] [--url <url> --transport http|sse] [--token <token>] [-- <command...>]",
+			"  /mcp add <name> [--scope project|user] [--url <url> --token <token>] [-- <command...>]",
 			"  /mcp list             List all configured MCP servers",
 			"  /mcp remove <name> [--scope project|user]    Remove an MCP server (default: project)",
 			"  /mcp test <name>      Test connection to an MCP server",
@@ -141,6 +152,8 @@ export class MCPCommandController {
 			"  /mcp unauth <name>    Remove OAuth auth from an MCP server",
 			"  /mcp enable <name>    Enable an MCP server",
 			"  /mcp disable <name>   Disable an MCP server",
+			"  /mcp search <keyword> [--scope project|user] [--limit <1-100>]",
+			"                        Search official MCP registry and deploy from picker",
 			"  /mcp reload           Force reload and rediscover MCP runtime tools",
 			"  /mcp help             Show this help message",
 			"",
@@ -164,7 +177,6 @@ export class MCPCommandController {
 		let name: string | undefined;
 		let scope: MCPAddScope = "project";
 		let url: string | undefined;
-		let transport: MCPAddTransport = "http";
 		let authToken: string | undefined;
 		let commandTokens: string[] | undefined;
 
@@ -199,13 +211,7 @@ export class MCPCommandController {
 				continue;
 			}
 			if (argToken === "--transport") {
-				const value = tokens[i + 1];
-				if (!value || (value !== "http" && value !== "sse")) {
-					return { scope, error: "Invalid --transport value. Use http or sse." };
-				}
-				transport = value;
-				i += 2;
-				continue;
+				return { scope, error: "--transport is no longer supported. Use HTTP endpoints only." };
 			}
 			if (argToken === "--token") {
 				const value = tokens[i + 1];
@@ -230,7 +236,7 @@ export class MCPCommandController {
 			return { scope, error: "Use either --url or -- <command...>, not both." };
 		}
 		if (authToken && !url) {
-			return { scope, error: "--token requires --url (HTTP/SSE transport)." };
+			return { scope, error: "--token requires --url (HTTP transport)." };
 		}
 
 		if (commandTokens && commandTokens.length > 0) {
@@ -243,13 +249,12 @@ export class MCPCommandController {
 			return { scope, initialName: name, quickConfig: config, isCommandQuickAdd: true };
 		}
 
-		const useHttpTransport = transport === "http";
 		let normalizedUrl = url!;
 		if (!/^https?:\/\//i.test(normalizedUrl)) {
 			normalizedUrl = `https://${normalizedUrl}`;
 		}
 		const config: MCPServerConfig = {
-			type: useHttpTransport ? "http" : "sse",
+			type: "http",
 			url: normalizedUrl,
 			headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
 		};
@@ -262,6 +267,66 @@ export class MCPCommandController {
 		};
 	}
 
+	#parseSearchCommand(text: string): MCPSearchParsed {
+		const prefixMatch = text.match(/^\/mcp\s+search\b\s*(.*)$/i);
+		const rest = prefixMatch?.[1]?.trim() ?? "";
+		const tokens = parseCommandArgs(rest);
+		if (tokens.length === 0) {
+			return {
+				keyword: "",
+				scope: "project",
+				limit: 20,
+				error: "Keyword required. Usage: /mcp search <keyword> [--scope project|user] [--limit <1-100>]",
+			};
+		}
+
+		const keywordParts: string[] = [];
+		let scope: MCPAddScope = "project";
+		let limit = 20;
+
+		for (let i = 0; i < tokens.length; i++) {
+			const token = tokens[i];
+			if (token === "--scope") {
+				const value = tokens[i + 1];
+				if (!value || (value !== "project" && value !== "user")) {
+					return { keyword: "", scope, limit, error: "Invalid --scope value. Use project or user." };
+				}
+				scope = value;
+				i++;
+				continue;
+			}
+			if (token === "--limit") {
+				const value = tokens[i + 1];
+				if (!value) {
+					return { keyword: "", scope, limit, error: "Missing value for --limit." };
+				}
+				const parsed = Number(value);
+				if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+					return { keyword: "", scope, limit, error: "Invalid --limit value. Use an integer between 1 and 100." };
+				}
+				limit = parsed;
+				i++;
+				continue;
+			}
+			if (token.startsWith("--")) {
+				return { keyword: "", scope, limit, error: `Unknown option: ${token}` };
+			}
+			keywordParts.push(token);
+		}
+
+		const keyword = keywordParts.join(" ").trim();
+		if (!keyword) {
+			return {
+				keyword: "",
+				scope,
+				limit,
+				error: "Keyword required. Usage: /mcp search <keyword> [--scope project|user] [--limit <1-100>]",
+			};
+		}
+
+		return { keyword, scope, limit };
+	}
+
 	/**
 	 * Handle /mcp add - Launch interactive wizard or quick-add from args
 	 */
@@ -272,65 +337,17 @@ export class MCPCommandController {
 			return;
 		}
 		if (parsed.quickConfig && parsed.initialName) {
-			let finalConfig = parsed.quickConfig;
-
-			// Quick-add with URL should still perform auth detection and OAuth flow,
-			// matching wizard behavior. Command quick-add intentionally skips this.
-			if (!parsed.isCommandQuickAdd && (finalConfig.type === "http" || finalConfig.type === "sse")) {
-				try {
-					await this.#handleTestConnection(finalConfig);
-				} catch (error) {
-					if (parsed.hasAuthToken) {
-						this.ctx.showError(
-							`Authentication failed for "${parsed.initialName}": ${error instanceof Error ? error.message : String(error)}`,
-						);
-						return;
-					}
-					const authResult = analyzeAuthError(error as Error);
-					if (authResult.requiresAuth) {
-						let oauth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
-						if (!oauth && finalConfig.url) {
-							try {
-								oauth = await discoverOAuthEndpoints(finalConfig.url);
-							} catch {
-								// Ignore discovery error and handle below.
-							}
-						}
-
-						if (!oauth) {
-							this.ctx.showError(
-								`Authentication required for "${parsed.initialName}", but OAuth endpoints could not be discovered. ` +
-									`Use /mcp add ${parsed.initialName} (wizard) or configure auth manually.`,
-							);
-							return;
-						}
-
-						try {
-							const credentialId = await this.#handleOAuthFlow(
-								oauth.authorizationUrl,
-								oauth.tokenUrl,
-								oauth.clientId ?? "",
-								"",
-								oauth.scopes ?? "",
-							);
-							finalConfig = {
-								...finalConfig,
-								auth: {
-									type: "oauth",
-									credentialId,
-								},
-							};
-						} catch (oauthError) {
-							this.ctx.showError(
-								`OAuth flow failed for "${parsed.initialName}": ${oauthError instanceof Error ? oauthError.message : String(oauthError)}`,
-							);
-							return;
-						}
-					}
-				}
+			try {
+				await this.#deployConfig({
+					serverName: parsed.initialName,
+					scope: parsed.scope,
+					config: parsed.quickConfig,
+					prepareAuth: !parsed.isCommandQuickAdd,
+					hasManualCredentials: Boolean(parsed.hasAuthToken),
+				});
+			} catch (authError) {
+				this.ctx.showError(authError instanceof Error ? authError.message : String(authError));
 			}
-
-			await this.#handleWizardComplete(parsed.initialName, finalConfig, parsed.scope);
 			return;
 		}
 
@@ -753,6 +770,338 @@ export class MCPCommandController {
 			}
 
 			this.ctx.showError(`Failed to add server: ${errorMsg}${helpText}`);
+		}
+	}
+
+	async #pickRegistryResult(
+		results: OfficialRegistrySearchResult[],
+		keyword: string,
+	): Promise<OfficialRegistrySearchResult | null> {
+		return await this.ctx.showHookCustom<OfficialRegistrySearchResult | null>((_tui, _theme, _keys, done) => {
+			const items: SelectItem[] = results.map((result, index) => {
+				const transport = result.config.type ?? "stdio";
+				const source = result.sourceType === "remote" ? "remote" : "package";
+				return {
+					value: String(index),
+					label: result.name,
+					description: `[${transport}/${source}] ${result.description ?? "No description"}`,
+				};
+			});
+
+			const selectList = new SelectList(items, Math.min(items.length, 10), getSelectListTheme());
+			selectList.onSelect = item => {
+				const index = Number(item.value);
+				done(results[index] ?? null);
+			};
+			selectList.onCancel = () => {
+				done(null);
+			};
+
+			this.#showMessage(
+				[
+					"",
+					theme.bold(`Registry results for "${keyword}"`),
+					theme.fg("dim", "Use arrows to navigate, Enter to deploy, Esc to cancel."),
+					"",
+				].join("\n"),
+			);
+
+			return selectList;
+		});
+	}
+
+	async #nextAvailableServerName(scope: MCPAddScope, baseName: string): Promise<string> {
+		const filePath = getMCPConfigPath(scope, process.cwd());
+		const config = await readMCPConfigFile(filePath);
+		const existingNames = new Set(Object.keys(config.mcpServers ?? {}));
+		if (!existingNames.has(baseName)) return baseName;
+		for (let i = 2; i <= 999; i++) {
+			const candidate = `${baseName}-${i}`;
+			if (!existingNames.has(candidate)) {
+				return candidate;
+			}
+		}
+		return `${baseName}-${Date.now()}`;
+	}
+
+	async #deployRegistryResult(result: OfficialRegistrySearchResult, scope: MCPAddScope): Promise<void> {
+		const baseName = toConfigName(result.name);
+		const defaultName = await this.#nextAvailableServerName(scope, baseName);
+		const serverName = await this.#promptDeploymentServerName(scope, defaultName);
+		if (!serverName) {
+			this.ctx.showStatus("MCP deploy cancelled.");
+			return;
+		}
+
+		const config = await this.#resolveRegistryConfig(result);
+		if (!config) {
+			this.ctx.showStatus("MCP deploy cancelled.");
+			return;
+		}
+
+		try {
+			await this.#deployConfig({
+				serverName,
+				scope,
+				config,
+				prepareAuth: true,
+				hasManualCredentials: Boolean(config.type === "http" && config.headers?.Authorization),
+			});
+		} catch (authError) {
+			this.ctx.showError(authError instanceof Error ? authError.message : String(authError));
+			return;
+		}
+
+		if (result.warnings.length > 0) {
+			const warningLines = ["", theme.fg("warning", `Post-deploy steps for "${serverName}":`), ""];
+			for (const warning of result.warnings) {
+				warningLines.push(`  • ${warning}`);
+			}
+			warningLines.push("");
+			warningLines.push(
+				theme.fg(
+					"muted",
+					`Update settings with ${theme.fg("accent", `/mcp remove ${serverName}`)} and re-add manually if needed.`,
+				),
+			);
+			warningLines.push("");
+			this.#showMessage(warningLines.join("\n"));
+		}
+	}
+
+	async #deployConfig(options: {
+		serverName: string;
+		scope: MCPAddScope;
+		config: MCPServerConfig;
+		prepareAuth: boolean;
+		hasManualCredentials: boolean;
+	}): Promise<void> {
+		let config = options.config;
+		if (options.prepareAuth) {
+			config = await this.#prepareHttpConfigAuth(options.serverName, config, {
+				hasManualCredentials: options.hasManualCredentials,
+			});
+		}
+		await this.#handleWizardComplete(options.serverName, config, options.scope);
+	}
+
+	async #prepareHttpConfigAuth(
+		serverName: string,
+		config: MCPServerConfig,
+		options: { hasManualCredentials: boolean },
+	): Promise<MCPServerConfig> {
+		if (config.type !== "http" && config.type !== "sse") {
+			return config;
+		}
+
+		try {
+			await this.#handleTestConnection(config);
+			return config;
+		} catch (error) {
+			if (options.hasManualCredentials) {
+				throw new Error(
+					`Authentication failed for "${serverName}": ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+
+			const authResult = analyzeAuthError(error as Error);
+			if (!authResult.requiresAuth) {
+				return config;
+			}
+
+			let oauth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
+			if (!oauth && config.url) {
+				try {
+					oauth = await discoverOAuthEndpoints(config.url);
+				} catch {
+					// Ignore discovery failure and throw below.
+				}
+			}
+
+			if (!oauth) {
+				const fallbackConfig = await this.#promptBearerFallback(serverName, config, "OAuth endpoints unavailable");
+				if (fallbackConfig) return fallbackConfig;
+				throw new Error(
+					`Authentication required for "${serverName}", but OAuth endpoints could not be discovered. ` +
+						`Use /mcp add ${serverName} (wizard) or configure auth manually.`,
+				);
+			}
+
+			try {
+				const credentialId = await this.#handleOAuthFlow(
+					oauth.authorizationUrl,
+					oauth.tokenUrl,
+					oauth.clientId ?? "",
+					"",
+					oauth.scopes ?? "",
+				);
+
+				const oauthConfig: MCPServerConfig = {
+					...config,
+					auth: {
+						type: "oauth",
+						credentialId,
+					},
+				};
+
+				try {
+					await this.#handleTestConnection(oauthConfig);
+				} catch {
+					const fallbackConfig = await this.#promptBearerFallback(
+						serverName,
+						config,
+						"OAuth completed but server token validation failed",
+					);
+					if (fallbackConfig) return fallbackConfig;
+				}
+
+				return oauthConfig;
+			} catch (oauthError) {
+				const fallbackConfig = await this.#promptBearerFallback(
+					serverName,
+					config,
+					`OAuth flow failed: ${oauthError instanceof Error ? oauthError.message : String(oauthError)}`,
+				);
+				if (fallbackConfig) return fallbackConfig;
+				throw oauthError;
+			}
+		}
+	}
+
+	async #promptBearerFallback(
+		serverName: string,
+		config: MCPServerConfig,
+		reason: string,
+	): Promise<MCPServerConfig | null> {
+		if (config.type !== "http" && config.type !== "sse") return null;
+
+		this.#showMessage(
+			[
+				"",
+				theme.fg("warning", `OAuth fallback for "${serverName}"`),
+				theme.fg("muted", reason),
+				theme.fg("muted", "You can provide a bearer token manually."),
+				"",
+			].join("\n"),
+		);
+
+		for (;;) {
+			const tokenInput = await this.ctx.showHookInput(`Bearer token for ${serverName} (Esc to cancel)`);
+			if (tokenInput === undefined) return null;
+			const trimmed = tokenInput.trim();
+			if (trimmed.length === 0) {
+				this.ctx.showError("Bearer token cannot be empty.");
+				continue;
+			}
+
+			const authorization = /^bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
+			const candidateConfig: MCPServerConfig = {
+				...config,
+				headers: {
+					...(config.headers ?? {}),
+					Authorization: authorization,
+				},
+			};
+
+			try {
+				await this.#handleTestConnection(candidateConfig);
+				return candidateConfig;
+			} catch (error) {
+				this.ctx.showError(
+					`Bearer token validation failed for "${serverName}": ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+	}
+
+	async #resolveRegistryConfig(result: OfficialRegistrySearchResult): Promise<MCPServerConfig | null> {
+		if (result.config.type !== "http") {
+			return result.config;
+		}
+
+		if (result.requiredHeaders.length === 0) {
+			return result.config;
+		}
+
+		const resolvedHeaders: Record<string, string> = {};
+		for (const header of result.requiredHeaders) {
+			const promptLabel = header.placeholder
+				? `Value for ${header.name} (${header.placeholder})`
+				: `Value for required header ${header.name}`;
+			const promptDefault = header.template?.includes("{") ? "" : (header.template ?? "");
+			const input = await this.ctx.showHookInput(promptLabel, promptDefault);
+			if (input === undefined) return null;
+			const value = input.trim();
+			if (!value) {
+				this.ctx.showError(`Header "${header.name}" value cannot be empty.`);
+				return null;
+			}
+			if (header.template && header.placeholder) {
+				const token = `{${header.placeholder}}`;
+				resolvedHeaders[header.name] = header.template.replace(token, value);
+			} else {
+				resolvedHeaders[header.name] = value;
+			}
+		}
+
+		return {
+			...result.config,
+			headers: {
+				...(result.config.headers ?? {}),
+				...resolvedHeaders,
+			},
+		};
+	}
+
+	async #promptDeploymentServerName(scope: MCPAddScope, defaultName: string): Promise<string | null> {
+		for (;;) {
+			const input = await this.ctx.showHookInput(`Server name for deploy (default: ${defaultName})`, defaultName);
+			if (input === undefined) return null;
+			const proposed = input.trim().length > 0 ? input.trim() : defaultName;
+			const validationError = validateServerName(proposed);
+			if (validationError) {
+				this.ctx.showError(validationError);
+				continue;
+			}
+
+			const filePath = getMCPConfigPath(scope, process.cwd());
+			const config = await readMCPConfigFile(filePath);
+			if (config.mcpServers?.[proposed]) {
+				this.ctx.showError(`Server "${proposed}" already exists in ${scope} config.`);
+				continue;
+			}
+			return proposed;
+		}
+	}
+
+	async #handleSearch(text: string): Promise<void> {
+		const parsed = this.#parseSearchCommand(text);
+		if (parsed.error) {
+			this.ctx.showError(parsed.error);
+			return;
+		}
+
+		try {
+			this.#showMessage(
+				["", theme.fg("muted", `Searching official MCP registry for "${parsed.keyword}"...`), ""].join("\n"),
+			);
+			const results = await searchOfficialRegistry(parsed.keyword, { limit: parsed.limit });
+			if (results.length === 0) {
+				this.#showMessage(
+					["", theme.fg("warning", `No registry results found for "${parsed.keyword}".`), ""].join("\n"),
+				);
+				return;
+			}
+
+			const selected = await this.#pickRegistryResult(results, parsed.keyword);
+			if (!selected) {
+				this.ctx.showStatus("MCP registry selection cancelled.");
+				return;
+			}
+
+			await this.#deployRegistryResult(selected, parsed.scope);
+		} catch (error) {
+			this.ctx.showError(`Registry search failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 

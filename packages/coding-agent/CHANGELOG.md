@@ -4,39 +4,16 @@
 
 ### Added
 
-- Added `resolveFileDisplayMode` utility to centralize file display mode resolution across tools (read, grep, file mentions)
-- Added automatic hashline formatting to @file mentions when hashline mode is active
-- Added `replace` hashline edit operation for substr-style fuzzy text replacement without line references, with optional `all` flag for replace-all behavior
-- Added `noopEdits` array to `applyHashlineEdits` return value to report edits that produced no changes, including edit index, location, and current content for diagnostics
-- Added validation to detect and reject hashline edits using wrong-format fields (`old_text`/`new_text` from replace mode, `diff` from patch mode) with helpful error messages
-- Added `additionalProperties: true` to all hashline edit schemas (`single`, `range`, `insertAfter`, and root) to tolerate extra fields from models
 - Added whitespace normalization in line reference parsing to tolerate spaces around colons (e.g., `5 : ab` now parses as `5:ab`)
 - Added `remaps` property to `HashlineMismatchError` providing quick-fix mapping of stale line references to corrected hashes
 - Added warnings detection in `applyHashlineEdits` to alert users when edits affect significantly more lines than expected, indicating possible unintended reformatting
 - Added diagnostic output showing target line content when an edit produces no changes, helping users identify hash mismatches or incorrect replacement content
 - Added `{{hashline}}` Handlebars helper to compute accurate `LINE:HASH` references for prompt examples and documentation
-- Added deduplication of identical hashline edits targeting the same line(s) in a single call
-- Added `replacement` as accepted alias for `content` in `insertAfter` operations
-- Added graceful degradation of `range` edits with missing `end` field to single-line edits
-- Added `additionalProperties: true` to hashline edit schemas to tolerate extra fields from models
+- Added `/mcp search <keyword>` integration with the official MCP registry, including interactive result selection, editable server naming before deploy, required-header prompts for tokenized providers, HTTP-only remote endpoint filtering, and immediate runtime reload so selected MCP tools are available without restarting
+- Added OAuth failure fallback in `/mcp search` deploy flow to prompt for manual bearer tokens and validate them before saving configuration
 
 ### Changed
 
-- Changed hashline display format from `LINE:HASH| content` to `LINE:HASH  content` (two spaces instead of pipe separator) for improved readability
-- Removed `lines` and `hashes` parameters from `read` tool—file display mode (line numbers, hashlines) now determined automatically by settings and edit mode
-- Simplified `read` tool prompt to reflect automatic display mode detection based on configuration
-- Updated `grep` tool to respect file display mode settings, showing hashline-prefixed output when hashline mode is active
-- Renamed hashline edit operation keys from `single`/`range`/`insertAfter` to `set_line`/`replace_lines`/`insert_after` for clearer semantics
-- Renamed hashline edit fields: `loc` → `anchor`, `replacement` → `new_text`, `content` → `text` for consistency across all operation types
-- Separated hashline anchor-based edits (`set_line`, `replace_lines`, `insert_after`) from content-replace edits (`replace`) in application pipeline
-- Improved no-op edit diagnostics to use `noopEdits` array from `applyHashlineEdits`, providing precise line-by-line comparison when replacements match current content
-- Enhanced error messages for wrong-format hashline edits to guide users toward correct operation syntax
-- Strengthened hashline prompt guidance to emphasize that `replacement` must differ from current line content and clarify no-op error recovery procedures
-- Improved hashline prompt to clarify atomicity: all edits in one call are validated against the original file state, with line numbers and hashes referring to the pre-edit state
-- Added explicit instruction in hashline prompt to preserve exact whitespace and formatting when replacing lines, changing only the targeted token/expression
-- Added guidance in hashline prompt for swap operations: use two `single` operations in one call rather than attempting to account for line number shifts
-- Strengthened anti-reformatting instructions in hashline prompt to reduce formatting-only failures
-- Improved no-op error recovery guidance in hashline prompt to prevent infinite retry loops
 - Renamed hashline edit operation keys from `replaceLine`/`replaceLines` to `single`/`range` for clearer semantics
 - Renamed hashline edit field `content` to `replacement` in `single` and `range` operations to distinguish from `insertAfter.content`
 - Improved no-op edit diagnostics to show specific line-by-line comparisons when replacements match current content, helping users identify hash mismatches or formatting issues
@@ -64,12 +41,6 @@
 
 ### Fixed
 
-- Fixed `parseLineRef` to handle both legacy pipe-separator format (`LINE:HASH| content`) and new two-space format (`LINE:HASH  content`) for backward compatibility
-- Fixed resource leak in browser query handler by properly disposing owned proxy elements for non-winning candidates
-- Fixed script evaluation to support async functions and await expressions in browser evaluate operations
-- Fixed `range` edits with missing `end` field to gracefully degrade to single-line edits instead of crashing
-- Fixed `insertAfter` operations to accept both `content` and `replacement` field names for consistency with other edit types
-- Fixed deduplication logic to correctly identify and remove identical hashline edits targeting the same line(s) in a single call
 - Fixed range-based edits to prevent invalid mutations when hash relocation changes the number of lines in the target range
 - Fixed multi-edit application to use original file state for all anchor references, preventing incorrect line numbers when earlier edits change file length
 

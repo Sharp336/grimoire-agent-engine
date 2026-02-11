@@ -135,6 +135,11 @@ const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = [
 			{ name: "unauth", description: "Remove OAuth auth from a server", usage: "<name>" },
 			{ name: "enable", description: "Enable an MCP server", usage: "<name>" },
 			{ name: "disable", description: "Disable an MCP server", usage: "<name>" },
+			{
+				name: "search",
+				description: "Search official MCP registry and deploy from a picker",
+				usage: "<keyword> [--scope project|user] [--limit <1-100>]",
+			},
 			{ name: "reload", description: "Force reload MCP runtime tools" },
 			{ name: "help", description: "Show help message" },
 		],

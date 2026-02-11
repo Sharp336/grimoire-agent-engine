@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import { type Static, Type } from "@sinclair/typebox";
+import { Type } from "@sinclair/typebox";
 import { renderPromptTemplate } from "../config/prompt-templates";
 import exitPlanModeDescription from "../prompts/tools/exit-plan-mode.md" with { type: "text" };
 import type { ToolSession } from ".";
@@ -9,8 +9,6 @@ import { resolvePlanPath } from "./plan-mode-guard";
 import { ToolError } from "./tool-errors";
 
 const exitPlanModeSchema = Type.Object({});
-
-type ExitPlanModeParams = Static<typeof exitPlanModeSchema>;
 
 export interface ExitPlanModeDetails {
 	planFilePath: string;
@@ -29,7 +27,7 @@ export class ExitPlanModeTool implements AgentTool<typeof exitPlanModeSchema, Ex
 
 	async execute(
 		_toolCallId: string,
-		_params: ExitPlanModeParams,
+		_params: Record<string, never>,
 		_signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<ExitPlanModeDetails>,
 		_context?: AgentToolContext,

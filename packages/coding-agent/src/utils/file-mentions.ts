@@ -8,7 +8,6 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { formatHashLines } from "../patch/hashline";
 import type { FileMentionMessage } from "../session/messages";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatAge } from "../tools/render-utils";
@@ -168,7 +167,7 @@ export function extractFileMentions(text: string): string[] {
 export async function generateFileMentionMessages(
 	filePaths: string[],
 	cwd: string,
-	options?: { autoResizeImages?: boolean; useHashLines?: boolean },
+	options?: { autoResizeImages?: boolean },
 ): Promise<AgentMessage[]> {
 	if (filePaths.length === 0) return [];
 
@@ -236,10 +235,7 @@ export async function generateFileMentionMessages(
 			}
 
 			const content = await Bun.file(absolutePath).text();
-			let { output, lineCount } = buildTextOutput(content);
-			if (options?.useHashLines) {
-				output = formatHashLines(output);
-			}
+			const { output, lineCount } = buildTextOutput(content);
 			files.push({ path: filePath, content: output, lineCount });
 		} catch {
 			// File doesn't exist or isn't readable - skip silently

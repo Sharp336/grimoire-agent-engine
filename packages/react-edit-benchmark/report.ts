@@ -45,6 +45,7 @@ function truncateText(text: string, maxLength: number): string {
 	return `${text.slice(0, maxLength - 3)}...`;
 }
 
+
 function formatEditArgsBlock(args: unknown): string {
 	if (!args || typeof args !== "object") return "—";
 	const diff = (args as { diff?: unknown }).diff;
@@ -164,7 +165,7 @@ export function generateReport(result: BenchmarkResult): string {
 			lines.push("");
 			lines.push("| Operation | Count | % |");
 			lines.push("|-----------|-------|---|");
-			const order = ["set_line", "replace_lines", "insert_after", "replace"];
+			const order = ["single", "range", "insertAfter"];
 			for (const key of order) {
 				const count = summary.hashlineEditSubtypes[key] ?? 0;
 				const pct = formatPercent(count / total);

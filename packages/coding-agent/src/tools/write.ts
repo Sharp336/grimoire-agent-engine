@@ -62,7 +62,7 @@ function getLspBatchRequest(toolCall: ToolCallContext | undefined): { id: string
 // Tool Class
 // ═══════════════════════════════════════════════════════════════════════════
 
-type WriteParams = WriteToolInput;
+type WriteParams = { path: string; content: string };
 
 /**
  * Write tool implementation.

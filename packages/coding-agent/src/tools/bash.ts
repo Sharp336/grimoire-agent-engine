@@ -60,7 +60,13 @@ export class BashTool implements AgentTool<typeof bashSchema, BashToolDetails> {
 
 	async execute(
 		_toolCallId: string,
-		{ command: rawCommand, timeout: rawTimeout = 300, cwd, head, tail }: BashToolInput,
+		{
+			command: rawCommand,
+			timeout: rawTimeout = 300,
+			cwd,
+			head,
+			tail,
+		}: { command: string; timeout?: number; cwd?: string; head?: number; tail?: number },
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>,
 		ctx?: AgentToolContext,

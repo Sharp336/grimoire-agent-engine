@@ -86,10 +86,9 @@ interface EditRenderArgs {
 }
 
 type HashlineEditPreview =
-	| { set_line: { anchor: string; new_text: string } }
-	| { replace_lines: { start_anchor: string; end_anchor: string; new_text: string } }
-	| { insert_after: { anchor: string; text: string } }
-	| { replace: { old_text: string; new_text: string; all?: boolean } };
+	| { single: { loc: string; replacement: string } }
+	| { range: { start: string; end: string; replacement: string } }
+	| { insertAfter: { loc: string; content: string } };
 
 /** Extended context for edit tool rendering */
 export interface EditRenderContext {
@@ -157,27 +156,21 @@ function formatStreamingHashlineEdits(edits: HashlineEditPreview[], uiTheme: The
 
 	return text.trimEnd();
 	function formatHashlineEdit(edit: HashlineEditPreview): { srcLabel: string; dst: string } {
-		if ("set_line" in edit) {
+		if ("single" in edit) {
 			return {
-				srcLabel: `• set_line ${edit.set_line.anchor}`,
-				dst: edit.set_line.new_text,
+				srcLabel: `• single ${edit.single.loc}`,
+				dst: edit.single.replacement,
 			};
 		}
-		if ("replace_lines" in edit) {
+		if ("range" in edit) {
 			return {
-				srcLabel: `• replace_lines ${edit.replace_lines.start_anchor}..${edit.replace_lines.end_anchor}`,
-				dst: edit.replace_lines.new_text,
-			};
-		}
-		if ("replace" in edit) {
-			return {
-				srcLabel: `• replace old_text→new_text${edit.replace.all ? " (all)" : ""}`,
-				dst: edit.replace.new_text,
+				srcLabel: `• range ${edit.range.start}..${edit.range.end}`,
+				dst: edit.range.replacement,
 			};
 		}
 		return {
-			srcLabel: `• insert_after ${edit.insert_after.anchor}..`,
-			dst: edit.insert_after.text,
+			srcLabel: `• insertAfter ${edit.insertAfter.loc}..`,
+			dst: edit.insertAfter.content,
 		};
 	}
 }

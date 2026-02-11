@@ -17,7 +17,6 @@ import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import { renderCodeCell, renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
-import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { detectSupportedImageMimeTypeFromFile } from "../utils/mime";
 import { ensureTool } from "../utils/tools-manager";
@@ -516,6 +515,8 @@ const readSchema = Type.Object({
 	path: Type.String({ description: "Path to the file to read (relative or absolute)" }),
 	offset: Type.Optional(Type.Number({ description: "Line number to start reading from (1-indexed)" })),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of lines to read" })),
+	lines: Type.Optional(Type.Boolean({ description: "Prepend line numbers to output (default: false)" })),
+	hashes: Type.Optional(Type.Boolean({ description: "Include line hashes (format: LINE:HASH| content)" })),
 });
 
 export type ReadToolInput = Static<typeof readSchema>;
@@ -527,7 +528,7 @@ export interface ReadToolDetails {
 	meta?: OutputMeta;
 }
 
-type ReadParams = ReadToolInput;
+type ReadParams = { path: string; offset?: number; limit?: number; lines?: boolean; hashes?: boolean };
 
 /**
  * Read tool implementation.
@@ -543,14 +544,18 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly nonAbortable = true;
 
 	readonly #autoResizeImages: boolean;
+	readonly #defaultLineNumbers: boolean;
+	readonly #defaultHashLines: boolean;
 
 	constructor(private readonly session: ToolSession) {
-		const displayMode = resolveFileDisplayMode(session.settings);
 		this.#autoResizeImages = session.settings.get("images.autoResize");
+		this.#defaultLineNumbers = session.settings.get("readLineNumbers");
+		this.#defaultHashLines =
+			session.settings.get("readHashLines") ||
+			session.settings.get("edit.mode") === "hashline" ||
+			Bun.env.PI_EDIT_VARIANT === "hashline";
 		this.description = renderPromptTemplate(readDescription, {
 			DEFAULT_MAX_LINES: String(DEFAULT_MAX_LINES),
-			IS_HASHLINE_MODE: displayMode.hashLines,
-			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
 		});
 	}
 
@@ -561,14 +566,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		_onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
 		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
-		const { path: readPath, offset, limit } = params;
-
-		const displayMode = resolveFileDisplayMode(this.session.settings);
+		const { path: readPath, offset, limit, lines, hashes } = params;
 
 		// Handle internal URLs (agent://, skill://)
 		const internalRouter = this.session.internalRouter;
 		if (internalRouter?.canHandle(readPath)) {
-			return this.#handleInternalUrl(readPath, offset, limit);
+			return this.#handleInternalUrl(readPath, offset, limit, lines, hashes);
 		}
 
 		const absolutePath = resolveReadPath(readPath, this.session.cwd);
@@ -757,8 +760,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				maxBytes: DEFAULT_MAX_BYTES,
 			};
 
-			const shouldAddHashLines = displayMode.hashLines;
-			const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
+			const shouldAddHashLines = hashes || this.#defaultHashLines;
+			const shouldAddLineNumbers = lines || this.#defaultLineNumbers;
 			const prependLineNumbers = (text: string, startNum: number): string => {
 				const textLines = text.split("\n");
 				const lastLineNum = startNum + textLines.length - 1;
@@ -773,7 +776,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			const prependHashLines = (text: string, startNum: number): string => {
 				const textLines = text.split("\n");
 				return textLines
-					.map((line, i) => `${startNum + i}:${computeLineHash(startNum + i, line)}  ${line}`)
+					.map((line, i) => `${startNum + i}:${computeLineHash(startNum + i, line)}| ${line}`)
 					.join("\n");
 			};
 			const formatText = (text: string, startNum: number): string => {
@@ -846,10 +849,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	 * Handle internal URLs (agent://, skill://).
 	 * Supports pagination via offset/limit but rejects them when query extraction is used.
 	 */
-	async #handleInternalUrl(url: string, offset?: number, limit?: number): Promise<AgentToolResult<ReadToolDetails>> {
+	async #handleInternalUrl(
+		url: string,
+		offset?: number,
+		limit?: number,
+		lines?: boolean,
+		hashes?: boolean,
+	): Promise<AgentToolResult<ReadToolDetails>> {
 		const internalRouter = this.session.internalRouter!;
-
-		const displayMode = resolveFileDisplayMode(this.session.settings);
 
 		// Check if URL has query extraction (agent:// only)
 		let parsed: URL;
@@ -915,8 +922,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// Apply truncation
 		const truncation = truncateHead(selectedContent);
 
-		const shouldAddHashLines = displayMode.hashLines;
-		const shouldAddLineNumbers = shouldAddHashLines ? false : displayMode.lineNumbers;
+		const shouldAddHashLines = hashes ?? this.#defaultHashLines;
+		const shouldAddLineNumbers = shouldAddHashLines ? false : (lines ?? this.#defaultLineNumbers);
 		const prependLineNumbers = (text: string, startNum: number): string => {
 			const textLines = text.split("\n");
 			const lastLineNum = startNum + textLines.length - 1;
@@ -931,7 +938,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		const prependHashLines = (text: string, startNum: number): string => {
 			const textLines = text.split("\n");
 			return textLines
-				.map((line, i) => `${startNum + i}:${computeLineHash(startNum + i, line)}  ${line}`)
+				.map((line, i) => `${startNum + i}:${computeLineHash(startNum + i, line)}| ${line}`)
 				.join("\n");
 		};
 		const formatText = (text: string, startNum: number): string => {
