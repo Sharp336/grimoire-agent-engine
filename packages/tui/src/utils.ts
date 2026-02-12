@@ -57,7 +57,9 @@ export function visibleWidthRaw(str: string): number {
 	if (isPureAscii) {
 		return str.length + tabLength;
 	}
-	return Bun.stringWidth(str) + tabLength;
+	// Strip OSC sequences (e.g. \x1b]8;;\x07 hyperlink close) that Bun.stringWidth miscounts
+	const stripped = str.indexOf("\x1b]") !== -1 ? str.replace(/\x1b\][^\x07]*\x07/g, "") : str;
+	return Bun.stringWidth(stripped) + tabLength;
 }
 
 /**

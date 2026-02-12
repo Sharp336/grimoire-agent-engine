@@ -84,10 +84,10 @@ export class SelectList implements Component {
 					// Calculate how much space we have for value + description
 					const maxValueWidth = Math.min(30, width - prefixWidth - 4);
 					const truncatedValue = truncateToWidth(displayValue, maxValueWidth, Ellipsis.Omit);
-					const spacing = padding(Math.max(1, 32 - truncatedValue.length));
+					const spacing = padding(Math.max(1, 32 - visibleWidth(truncatedValue)));
 
 					// Calculate remaining space for description using visible widths
-					const descriptionStart = prefixWidth + truncatedValue.length + spacing.length;
+					const descriptionStart = prefixWidth + visibleWidth(truncatedValue) + spacing.length;
 					const remainingWidth = width - descriptionStart - 2; // -2 for safety
 
 					if (remainingWidth > 10) {
@@ -112,10 +112,10 @@ export class SelectList implements Component {
 					// Calculate how much space we have for value + description
 					const maxValueWidth = Math.min(30, width - prefix.length - 4);
 					const truncatedValue = truncateToWidth(displayValue, maxValueWidth, Ellipsis.Omit);
-					const spacing = padding(Math.max(1, 32 - truncatedValue.length));
+					const spacing = padding(Math.max(1, 32 - visibleWidth(truncatedValue)));
 
 					// Calculate remaining space for description
-					const descriptionStart = prefix.length + truncatedValue.length + spacing.length;
+					const descriptionStart = prefix.length + visibleWidth(truncatedValue) + spacing.length;
 					const remainingWidth = width - descriptionStart - 2; // -2 for safety
 
 					if (remainingWidth > 10) {
