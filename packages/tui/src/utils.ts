@@ -35,6 +35,10 @@ export function getSegmenter(): Intl.Segmenter {
 //const WIDTH_CACHE_SIZE = 512;
 //const widthCache = new Map<string, number>();
 
+// Strip OSC sequences (e.g. OSC 8 hyperlinks: \x1b]8;...;\x07 or \x1b]8;...;\x1b\\)
+// Bun.stringWidth doesn't handle these, so they get counted as visible characters.
+const OSC_RE = /\x1b\][\s\S]*?(?:\x07|\x1b\\)/g;
+
 /**
  * Calculate the visible width of a string in terminal columns.
  */
@@ -57,7 +61,9 @@ export function visibleWidthRaw(str: string): number {
 	if (isPureAscii) {
 		return str.length + tabLength;
 	}
-	return Bun.stringWidth(str) + tabLength;
+	// Strip OSC sequences before measuring since Bun.stringWidth doesn't handle them
+	const cleaned = str.replace(OSC_RE, "");
+	return Bun.stringWidth(cleaned) + tabLength;
 }
 
 /**
