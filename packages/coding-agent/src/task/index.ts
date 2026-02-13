@@ -33,6 +33,7 @@ import { discoverAgents, getAgent } from "./discovery";
 import { runSubprocess } from "./executor";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimit } from "./parallel";
+import { TaskRegistry } from "./registry";
 import { renderCall, renderResult } from "./render";
 import { renderTemplate } from "./template";
 import {
@@ -147,6 +148,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 	readonly renderResult = renderResult;
 
 	readonly #blockedAgent: string | undefined;
+	#registry: TaskRegistry;
 
 	private constructor(
 		private readonly session: ToolSession,
@@ -155,6 +157,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 	) {
 		this.parameters = isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
+		this.#registry = new TaskRegistry();
 	}
 
 	/**
@@ -164,7 +167,15 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 		const maxConcurrency = session.settings.get("task.maxConcurrency");
 		const isolationEnabled = session.settings.get("task.isolation.enabled");
 		const description = await buildDescription(session.cwd, maxConcurrency, isolationEnabled);
-		return new TaskTool(session, description, isolationEnabled);
+		const tool = new TaskTool(session, description, isolationEnabled);
+		if (session.taskRegistry === undefined) {
+			session.taskRegistry = tool.#registry;
+		}
+		return tool;
+	}
+
+	get registry(): TaskRegistry {
+		return this.#registry;
 	}
 
 	async execute(
@@ -486,6 +497,174 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 				});
 			}
 			emitProgress();
+
+			// ── Async (fire-and-forget) execution path ──────────────────────────
+			if (params.async) {
+				// Async + isolated not supported in v1
+				if (isIsolated) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "Async execution is not supported with task isolation. Remove either async or isolated.",
+							},
+						],
+						details: {
+							projectAgentsDir,
+							results: [],
+							totalDurationMs: Date.now() - startTime,
+						},
+					};
+				}
+
+				const maxAsync = this.session.settings.get("task.maxAsyncTasks");
+				const runningCount = this.#registry.list().filter(t => t.status === "running").length;
+				if (runningCount >= maxAsync) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Async task limit reached (${maxAsync}). Wait for running tasks to complete or cancel some.`,
+							},
+						],
+						details: {
+							projectAgentsDir,
+							results: [],
+							totalDurationMs: Date.now() - startTime,
+						},
+					};
+				}
+
+				const taskId = Snowflake.next();
+				const asyncAbort = new AbortController();
+
+				// Link parent signal to async abort
+				if (signal) {
+					signal.addEventListener("abort", () => asyncAbort.abort(), {
+						once: true,
+					});
+				}
+
+				// Start background execution (NOT awaited)
+				const backgroundPromise = (async (): Promise<AgentToolResult<TaskToolDetails>> => {
+					// Reuse the same runTask/mapWithConcurrencyLimit pattern
+					const asyncRunTask = async (task: (typeof tasksWithSkills)[number], index: number) => {
+						if (!isIsolated) {
+							return runSubprocess({
+								cwd: this.session.cwd,
+								agent: effectiveAgent,
+								task: task.task,
+								description: task.description,
+								index,
+								id: task.id,
+								taskDepth,
+								modelOverride,
+								thinkingLevel: thinkingLevelOverride,
+								outputSchema: effectiveOutputSchema,
+								sessionFile,
+								persistArtifacts: !!artifactsDir,
+								artifactsDir: effectiveArtifactsDir,
+								contextFile: contextFilePath,
+								enableLsp: false,
+								signal: asyncAbort.signal,
+								eventBus: undefined,
+								onProgress: progress => {
+									progressMap.set(index, { ...structuredClone(progress) });
+								},
+								authStorage: this.session.authStorage,
+								modelRegistry: this.session.modelRegistry,
+								settings: this.session.settings,
+								mcpManager: this.session.mcpManager,
+								contextFiles,
+								skills: task.resolvedSkills,
+								preloadedSkills: task.preloadedSkills,
+								promptTemplates,
+							});
+						}
+						// Isolated path not executed in async mode
+						return {
+							index,
+							id: task.id,
+							agent: agentName,
+							agentSource: effectiveAgent.source,
+							task: task.task,
+							description: task.description,
+							exitCode: 1,
+							output: "",
+							stderr: "Isolated execution not supported in async mode",
+							truncated: false,
+							durationMs: 0,
+							tokens: 0,
+							modelOverride,
+							error: "Isolated execution not supported in async mode",
+						};
+					};
+
+					const { results: partialResults } = await mapWithConcurrencyLimit(
+						tasksWithSkills,
+						maxConcurrency,
+						asyncRunTask,
+						asyncAbort.signal,
+					);
+
+					const results: SingleResult[] = partialResults.map((result, index) => {
+						if (result !== undefined) return result;
+						const task = tasksWithSkills[index];
+						return {
+							index,
+							id: task.id,
+							agent: agentName,
+							agentSource: effectiveAgent.source,
+							task: task.task,
+							description: task.description,
+							exitCode: 1,
+							output: "",
+							stderr: "Skipped (cancelled before start)",
+							truncated: false,
+							durationMs: 0,
+							tokens: 0,
+							modelOverride,
+							error: "Skipped",
+							aborted: true,
+						};
+					});
+
+					return {
+						content: [{ type: "text", text: `Async task ${taskId} completed` }],
+						details: {
+							projectAgentsDir,
+							results,
+							totalDurationMs: Date.now() - startTime,
+						},
+					};
+				})();
+
+				// Register in TaskRegistry — the registry auto-attaches completion handlers
+				this.#registry.register(taskId, {
+					id: taskId,
+					status: "running",
+					agent: agentName,
+					description: params.tasks.map(t => t.description).join(", "),
+					createdAt: Date.now(),
+					progress: [],
+					abortController: asyncAbort,
+					promise: backgroundPromise,
+				});
+
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Task ${taskId} dispatched (async). ${params.tasks.length} subtask(s) running in background.`,
+						},
+					],
+					details: {
+						projectAgentsDir,
+						results: [],
+						totalDurationMs: Date.now() - startTime,
+					},
+				};
+			}
 
 			const runTask = async (task: (typeof tasksWithSkills)[number], index: number) => {
 				if (!isIsolated) {
