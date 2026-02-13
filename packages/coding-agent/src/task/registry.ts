@@ -51,15 +51,16 @@ export class TaskRegistry {
 	static readonly MAX_TASKS = 100;
 
 	#tasks = new Map<string, AsyncTaskHandle>();
-	#completionCallbacks = new Map<string, Set<() => void>>();
+	#completionCallbacks = new Map<string, Set<(handle: AsyncTaskHandle) => void>>();
 
 	/**
 	 * Register a new task.
-	 * Throws if max task limit is exceeded.
+	 * Throws if max running task limit is exceeded.
 	 */
 	register(id: string, handle: AsyncTaskHandle): void {
-		if (this.#tasks.size >= TaskRegistry.MAX_TASKS) {
-			throw new Error(`Task limit of ${TaskRegistry.MAX_TASKS} exceeded`);
+		const runningCount = Array.from(this.#tasks.values()).filter(t => t.status === "running").length;
+		if (runningCount >= TaskRegistry.MAX_TASKS) {
+			throw new Error(`Task limit of ${TaskRegistry.MAX_TASKS} running tasks exceeded`);
 		}
 
 		this.#tasks.set(id, handle);
@@ -114,7 +115,7 @@ export class TaskRegistry {
 	/**
 	 * Register a callback to fire when a task completes (success, error, or cancellation).
 	 */
-	onComplete(id: string, callback: () => void): void {
+	onComplete(id: string, callback: (handle: AsyncTaskHandle) => void): void {
 		if (!this.#completionCallbacks.has(id)) {
 			this.#completionCallbacks.set(id, new Set());
 		}
@@ -136,9 +137,14 @@ export class TaskRegistry {
 
 	#fireCompletion(id: string): void {
 		const callbacks = this.#completionCallbacks.get(id);
-		if (callbacks) {
+		const handle = this.#tasks.get(id);
+		if (callbacks && handle) {
 			for (const callback of callbacks) {
-				callback();
+				try {
+					callback(handle);
+				} catch {
+					// Callbacks handle their own errors
+				}
 			}
 			this.#completionCallbacks.delete(id);
 		}

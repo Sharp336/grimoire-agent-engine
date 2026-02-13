@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import { type Static, Type } from "@sinclair/typebox";
 import { renderPromptTemplate } from "../config/prompt-templates";
 import checkTaskDescription from "../prompts/tools/check-task.md" with { type: "text" };
-import type { TaskRegistry } from "../task/registry";
+import type { AsyncTaskHandle, TaskRegistry } from "../task/registry";
 
 const checkTaskSchema = Type.Object({
 	task_id: Type.String({
@@ -81,7 +81,7 @@ export class CheckTaskTool implements AgentTool<typeof checkTaskSchema, CheckTas
 		};
 	}
 
-	#formatTaskStatus(task: ReturnType<TaskRegistry["get"]>): string {
+	#formatTaskStatus(task: AsyncTaskHandle | undefined): string {
 		if (!task) return "";
 
 		const lines = [

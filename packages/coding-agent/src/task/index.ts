@@ -17,7 +17,7 @@ import * as os from "node:os";
 import path from "node:path";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { $env, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import type { ToolSession } from "..";
 import { isDefaultModelAlias } from "../config/model-resolver";
@@ -655,38 +655,44 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 				// Deliver follow-up message when async task completes
 				const deliverFollowUp = this.session.deliverFollowUp;
 				if (deliverFollowUp) {
-					this.#registry.onComplete(taskId, () => {
-						const handle = this.#registry.get(taskId);
-						if (!handle) return;
+					this.#registry.onComplete(taskId, handle => {
+						try {
+							if (handle.status === "cancelled") return;
 
-						const duration = handle.completedAt ? handle.completedAt - handle.createdAt : 0;
-						const durationStr = duration > 0 ? ` (${Math.round(duration / 1000)}s)` : "";
+							const duration = handle.completedAt ? handle.completedAt - handle.createdAt : 0;
+							const durationStr = duration > 0 ? ` (${Math.round(duration / 1000)}s)` : "";
 
-						if (handle.status === "completed") {
-							const resultCount = handle.result?.length ?? 0;
-							deliverFollowUp(
-								renderPromptTemplate(asyncTaskCompleteTemplate, {
-									taskId,
-									agent: agentName,
-									status: "completed",
-									duration: durationStr,
-									description: handle.description,
-									statusMessage: `completed${durationStr}.`,
-									resultCount: resultCount > 0 ? resultCount : undefined,
-								}),
-							);
-						} else if (handle.status === "failed") {
-							deliverFollowUp(
-								renderPromptTemplate(asyncTaskCompleteTemplate, {
-									taskId,
-									agent: agentName,
-									status: "failed",
-									duration: durationStr,
-									description: handle.description,
-									statusMessage: `failed${durationStr}.`,
-									error: handle.error ?? "unknown error",
-								}),
-							);
+							if (handle.status === "completed") {
+								const resultCount = handle.result?.length ?? 0;
+								deliverFollowUp(
+									renderPromptTemplate(asyncTaskCompleteTemplate, {
+										taskId,
+										agent: agentName,
+										status: "completed",
+										duration: durationStr,
+										description: handle.description,
+										statusMessage: `completed${durationStr}.`,
+										resultCount: resultCount > 0 ? resultCount : undefined,
+									}),
+								);
+							} else if (handle.status === "failed") {
+								deliverFollowUp(
+									renderPromptTemplate(asyncTaskCompleteTemplate, {
+										taskId,
+										agent: agentName,
+										status: "failed",
+										duration: durationStr,
+										description: handle.description,
+										statusMessage: `failed${durationStr}.`,
+										error: handle.error ?? "unknown error",
+									}),
+								);
+							}
+						} catch (err) {
+							logger.error("Async task follow-up delivery failed", {
+								taskId,
+								error: String(err),
+							});
 						}
 					});
 				}

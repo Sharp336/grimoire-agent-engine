@@ -199,8 +199,8 @@ describe("TaskRegistry", () => {
 			promise,
 		});
 
-		registry.onComplete(taskId, () => {
-			completed = true;
+		registry.onComplete(taskId, handle => {
+			completed = handle.status === "completed";
 		});
 
 		resolve({
@@ -231,8 +231,8 @@ describe("TaskRegistry", () => {
 			promise,
 		});
 
-		registry.onComplete(taskId, () => {
-			completed = true;
+		registry.onComplete(taskId, handle => {
+			completed = handle.status === "failed";
 		});
 
 		reject(new Error("Test error"));
