@@ -105,7 +105,15 @@ export { loadBundledAgents as BUNDLED_AGENTS } from "./agents";
 export { discoverCommands, expandCommand, getCommand } from "./commands";
 export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
-export type { AgentDefinition, AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./types";
+export type { AsyncTaskHandle } from "./registry";
+export { TaskRegistry } from "./registry";
+export type {
+	AgentDefinition,
+	AgentProgress,
+	SingleResult,
+	TaskParams,
+	TaskToolDetails,
+} from "./types";
 export { taskSchema } from "./types";
 
 /**
@@ -370,7 +378,12 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 			if (!isSpawnAllowed()) {
 				const allowed = parentSpawns === "" ? "none (spawns disabled for this agent)" : parentSpawns;
 				return {
-					content: [{ type: "text", text: `Cannot spawn '${agentName}'. Allowed: ${allowed}` }],
+					content: [
+						{
+							type: "text",
+							text: `Cannot spawn '${agentName}'. Allowed: ${allowed}`,
+						},
+					],
 					details: {
 						projectAgentsDir,
 						results: [],
@@ -393,7 +406,10 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 			const outputManager =
 				this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
 			const uniqueIds = await outputManager.allocateBatch(tasks.map(t => t.id));
-			const tasksWithUniqueIds = tasks.map((t, i) => ({ ...t, id: uniqueIds[i] }));
+			const tasksWithUniqueIds = tasks.map((t, i) => ({
+				...t,
+				id: uniqueIds[i],
+			}));
 
 			// Build full prompts with context prepended
 			const tasksWithContext = tasksWithUniqueIds.map(t => renderTemplate(context, t));
@@ -405,7 +421,11 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 			const missingSkillsByTask: Array<{ id: string; missing: string[] }> = [];
 			const tasksWithSkills = tasksWithContext.map(task => {
 				if (task.skills === undefined) {
-					return { ...task, resolvedSkills: availableSkills, preloadedSkills: undefined };
+					return {
+						...task,
+						resolvedSkills: availableSkills,
+						preloadedSkills: undefined,
+					};
 				}
 				const requested = task.skills;
 				const resolved = [] as typeof availableSkillList;
