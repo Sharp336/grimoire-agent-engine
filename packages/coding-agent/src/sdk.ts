@@ -180,15 +180,26 @@ export interface CreateAgentSessionResult {
 	/** Warning if session was restored with a different model than saved */
 	modelFallbackMessage?: string;
 	/** LSP servers that were warmed up at startup */
-	lspServers?: Array<{ name: string; status: "ready" | "error"; fileTypes: string[]; error?: string }>;
+	lspServers?: Array<{
+		name: string;
+		status: "ready" | "error";
+		fileTypes: string[];
+		error?: string;
+	}>;
 }
 
 // Re-exports
 
 export type { PromptTemplate } from "./config/prompt-templates";
 export { Settings, type SkillsSettings } from "./config/settings";
-export type { CustomCommand, CustomCommandFactory } from "./extensibility/custom-commands/types";
-export type { CustomTool, CustomToolFactory } from "./extensibility/custom-tools/types";
+export type {
+	CustomCommand,
+	CustomCommandFactory,
+} from "./extensibility/custom-commands/types";
+export type {
+	CustomTool,
+	CustomToolFactory,
+} from "./extensibility/custom-tools/types";
 export type {
 	ExtensionAPI,
 	ExtensionCommandContext,
@@ -198,7 +209,12 @@ export type {
 } from "./extensibility/extensions";
 export type { Skill } from "./extensibility/skills";
 export type { FileSlashCommand } from "./extensibility/slash-commands";
-export type { MCPManager, MCPServerConfig, MCPServerConnection, MCPToolsLoadResult } from "./mcp";
+export type {
+	MCPManager,
+	MCPServerConfig,
+	MCPServerConnection,
+	MCPToolsLoadResult,
+} from "./mcp";
 export type { Tool } from "./tools";
 
 export {
@@ -397,7 +413,11 @@ function customToolToDefinition(tool: CustomTool): ToolDefinition {
 			? (result, options, theme): Component => {
 					const component = tool.renderResult?.(
 						result,
-						{ expanded: options.expanded, isPartial: options.isPartial, spinnerFrame: options.spinnerFrame },
+						{
+							expanded: options.expanded,
+							isPartial: options.isPartial,
+							spinnerFrame: options.spinnerFrame,
+						},
 						theme,
 					);
 					// Return empty component if undefined to match Component type requirement
@@ -421,7 +441,10 @@ function createCustomToolsExtension(tools: CustomTool[]): ExtensionFactory {
 				try {
 					await tool.onSession(event, createCustomToolContext(ctx));
 				} catch (err) {
-					logger.warn("Custom tool onSession error", { tool: tool.name, error: String(err) });
+					logger.warn("Custom tool onSession error", {
+						tool: tool.name,
+						error: String(err),
+					});
 				}
 			}
 		};
@@ -600,7 +623,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (!model) {
 		const allModels = modelRegistry.getAll();
 		const keyResults = await Promise.all(
-			allModels.map(async m => ({ model: m, hasKey: !!(await modelRegistry.getApiKey(m, sessionId)) })),
+			allModels.map(async m => ({
+				model: m,
+				hasKey: !!(await modelRegistry.getApiKey(m, sessionId)),
+			})),
 		);
 		model = keyResults.find(r => r.hasKey)?.model;
 		time("findAvailableModel");
@@ -717,6 +743,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		getPlanModeState: () => session.getPlanModeState(),
 		getCompactContext: () => session.formatCompactContext(),
+		deliverFollowUp: (text: string) => session.followUp(text),
 		settings,
 		authStorage,
 		modelRegistry,
@@ -1045,7 +1072,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					const hasImages = content.some(c => c.type === "image");
 					if (hasImages) {
 						const filteredContent = content
-							.map(c => (c.type === "image" ? { type: "text" as const, text: "Image reading is disabled." } : c))
+							.map(c =>
+								c.type === "image"
+									? {
+											type: "text" as const,
+											text: "Image reading is disabled.",
+										}
+									: c,
+							)
 							.filter(
 								(c, i, arr) =>
 									// Dedupe consecutive "Image reading is disabled." texts

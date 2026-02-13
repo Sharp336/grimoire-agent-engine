@@ -24,6 +24,7 @@ import { isDefaultModelAlias } from "../config/model-resolver";
 import { renderPromptTemplate } from "../config/prompt-templates";
 import type { Theme } from "../modes/theme/theme";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
+import asyncTaskCompleteTemplate from "../prompts/tools/async-task-complete.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { formatDuration } from "../tools/render-utils";
@@ -650,6 +651,45 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 					abortController: asyncAbort,
 					promise: backgroundPromise,
 				});
+
+				// Deliver follow-up message when async task completes
+				const deliverFollowUp = this.session.deliverFollowUp;
+				if (deliverFollowUp) {
+					this.#registry.onComplete(taskId, () => {
+						const handle = this.#registry.get(taskId);
+						if (!handle) return;
+
+						const duration = handle.completedAt ? handle.completedAt - handle.createdAt : 0;
+						const durationStr = duration > 0 ? ` (${Math.round(duration / 1000)}s)` : "";
+
+						if (handle.status === "completed") {
+							const resultCount = handle.result?.length ?? 0;
+							deliverFollowUp(
+								renderPromptTemplate(asyncTaskCompleteTemplate, {
+									taskId,
+									agent: agentName,
+									status: "completed",
+									duration: durationStr,
+									description: handle.description,
+									statusMessage: `completed${durationStr}.`,
+									resultCount: resultCount > 0 ? resultCount : undefined,
+								}),
+							);
+						} else if (handle.status === "failed") {
+							deliverFollowUp(
+								renderPromptTemplate(asyncTaskCompleteTemplate, {
+									taskId,
+									agent: agentName,
+									status: "failed",
+									duration: durationStr,
+									description: handle.description,
+									statusMessage: `failed${durationStr}.`,
+									error: handle.error ?? "unknown error",
+								}),
+							);
+						}
+					});
+				}
 
 				return {
 					content: [

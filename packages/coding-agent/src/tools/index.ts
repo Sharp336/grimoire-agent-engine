@@ -196,6 +196,8 @@ export interface ToolSession {
 	getCompactContext?: () => string;
 	/** Task registry for tracking async task execution */
 	taskRegistry?: import("../task/registry").TaskRegistry;
+	/** Callback to deliver a follow-up message after a tool returns (for async task completion) */
+	deliverFollowUp?: (text: string) => void;
 }
 
 type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
