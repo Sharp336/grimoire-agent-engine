@@ -53,7 +53,9 @@ export type TaskItem = Static<typeof taskItemSchema>;
 
 const createTaskSchema = (options: { isolationEnabled: boolean }) => {
 	const properties = {
-		agent: Type.String({ description: "Agent type for all tasks in this batch" }),
+		agent: Type.String({
+			description: "Agent type for all tasks in this batch",
+		}),
 		context: Type.Optional(
 			Type.String({
 				description:
@@ -70,6 +72,12 @@ const createTaskSchema = (options: { isolationEnabled: boolean }) => {
 			description:
 				"Tasks to execute in parallel. Each must be small-scoped (3-5 files max) and self-contained given context + assignment.",
 		}),
+		async: Type.Optional(
+			Type.Boolean({
+				description:
+					"Fire-and-forget mode: returns a task ID immediately. Results auto-deliver via notification when complete. Default false (blocking).",
+			}),
+		),
 	};
 
 	if (options.isolationEnabled) {
@@ -87,7 +95,9 @@ const createTaskSchema = (options: { isolationEnabled: boolean }) => {
 };
 
 export const taskSchema = createTaskSchema({ isolationEnabled: true });
-export const taskSchemaNoIsolation = createTaskSchema({ isolationEnabled: false });
+export const taskSchemaNoIsolation = createTaskSchema({
+	isolationEnabled: false,
+});
 
 export type TaskSchema = typeof taskSchema | typeof taskSchemaNoIsolation;
 

@@ -144,13 +144,23 @@ export const SETTINGS_SCHEMA = {
 	theme: {
 		type: "string",
 		default: undefined,
-		ui: { tab: "display", label: "Theme", description: "Color theme for the interface", submenu: true },
+		ui: {
+			tab: "display",
+			label: "Theme",
+			description: "Color theme for the interface",
+			submenu: true,
+		},
 	},
 	symbolPreset: {
 		type: "enum",
 		values: ["unicode", "nerd", "ascii"] as const,
 		default: "unicode",
-		ui: { tab: "display", label: "Symbol preset", description: "Icon/symbol style", submenu: true },
+		ui: {
+			tab: "display",
+			label: "Symbol preset",
+			description: "Icon/symbol style",
+			submenu: true,
+		},
 	},
 	colorBlindMode: {
 		type: "boolean",
@@ -185,7 +195,11 @@ export const SETTINGS_SCHEMA = {
 	hideThinkingBlock: {
 		type: "boolean",
 		default: false,
-		ui: { tab: "agent", label: "Hide thinking", description: "Hide thinking blocks in assistant responses" },
+		ui: {
+			tab: "agent",
+			label: "Hide thinking",
+			description: "Hide thinking blocks in assistant responses",
+		},
 	},
 	steeringMode: {
 		type: "enum",
@@ -211,7 +225,11 @@ export const SETTINGS_SCHEMA = {
 		type: "enum",
 		values: ["immediate", "wait"] as const,
 		default: "immediate",
-		ui: { tab: "agent", label: "Interrupt mode", description: "When steering messages interrupt tool execution" },
+		ui: {
+			tab: "agent",
+			label: "Interrupt mode",
+			description: "When steering messages interrupt tool execution",
+		},
 	},
 	doubleEscapeAction: {
 		type: "enum",
@@ -227,7 +245,11 @@ export const SETTINGS_SCHEMA = {
 	collapseChangelog: {
 		type: "boolean",
 		default: false,
-		ui: { tab: "input", label: "Collapse changelog", description: "Show condensed changelog after updates" },
+		ui: {
+			tab: "input",
+			label: "Collapse changelog",
+			description: "Show condensed changelog after updates",
+		},
 	},
 	normativeRewrite: {
 		type: "boolean",
@@ -259,7 +281,11 @@ export const SETTINGS_SCHEMA = {
 	showHardwareCursor: {
 		type: "boolean",
 		default: true, // will be computed based on platform if undefined
-		ui: { tab: "display", label: "Hardware cursor", description: "Show terminal cursor for IME support" },
+		ui: {
+			tab: "display",
+			label: "Hardware cursor",
+			description: "Show terminal cursor for IME support",
+		},
 	},
 	clearOnShrink: {
 		type: "boolean",
@@ -299,7 +325,11 @@ export const SETTINGS_SCHEMA = {
 	"branchSummary.enabled": {
 		type: "boolean",
 		default: false,
-		ui: { tab: "agent", label: "Branch summaries", description: "Prompt to summarize when leaving a branch" },
+		ui: {
+			tab: "agent",
+			label: "Branch summaries",
+			description: "Prompt to summarize when leaving a branch",
+		},
 	},
 	"branchSummary.reserveTokens": { type: "number", default: 16384 },
 
@@ -352,7 +382,11 @@ export const SETTINGS_SCHEMA = {
 	"todo.reminders": {
 		type: "boolean",
 		default: false,
-		ui: { tab: "agent", label: "Todo reminders", description: "Remind agent to complete todos before stopping" },
+		ui: {
+			tab: "agent",
+			label: "Todo reminders",
+			description: "Remind agent to complete todos before stopping",
+		},
 	},
 	"todo.reminders.max": {
 		type: "number",
@@ -371,17 +405,29 @@ export const SETTINGS_SCHEMA = {
 	"todo.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Enable Todos", description: "Enable the todo_write tool for task tracking" },
+		ui: {
+			tab: "tools",
+			label: "Enable Todos",
+			description: "Enable the todo_write tool for task tracking",
+		},
 	},
 	"find.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Enable Find", description: "Enable the find tool for file searching" },
+		ui: {
+			tab: "tools",
+			label: "Enable Find",
+			description: "Enable the find tool for file searching",
+		},
 	},
 	"grep.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Enable Grep", description: "Enable the grep tool for content searching" },
+		ui: {
+			tab: "tools",
+			label: "Enable Grep",
+			description: "Enable the grep tool for content searching",
+		},
 	},
 	"grep.contextBefore": {
 		type: "number",
@@ -406,22 +452,38 @@ export const SETTINGS_SCHEMA = {
 	"notebook.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Enable Notebook", description: "Enable the notebook tool for notebook editing" },
+		ui: {
+			tab: "tools",
+			label: "Enable Notebook",
+			description: "Enable the notebook tool for notebook editing",
+		},
 	},
 	"fetch.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Enable Fetch", description: "Enable the fetch tool for URL fetching" },
+		ui: {
+			tab: "tools",
+			label: "Enable Fetch",
+			description: "Enable the fetch tool for URL fetching",
+		},
 	},
 	"web_search.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Enable Web Search", description: "Enable the web_search tool for web searching" },
+		ui: {
+			tab: "tools",
+			label: "Enable Web Search",
+			description: "Enable the web_search tool for web searching",
+		},
 	},
 	"lsp.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Enable LSP", description: "Enable the lsp tool for language server protocol" },
+		ui: {
+			tab: "tools",
+			label: "Enable LSP",
+			description: "Enable the lsp tool for language server protocol",
+		},
 	},
 	"calc.enabled": {
 		type: "boolean",
@@ -484,6 +546,16 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
+	"task.maxAsyncTasks": {
+		type: "number",
+		default: 15,
+		ui: {
+			tab: "tools",
+			label: "Task max async tasks",
+			description: "Maximum concurrent background async tasks per session",
+			submenu: true,
+		},
+	},
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// Startup settings
@@ -491,7 +563,11 @@ export const SETTINGS_SCHEMA = {
 	"startup.quiet": {
 		type: "boolean",
 		default: false,
-		ui: { tab: "input", label: "Startup quiet", description: "Skip welcome screen and startup status messages" },
+		ui: {
+			tab: "input",
+			label: "Startup quiet",
+			description: "Skip welcome screen and startup status messages",
+		},
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -501,7 +577,11 @@ export const SETTINGS_SCHEMA = {
 		type: "enum",
 		values: ["on", "off"] as const,
 		default: "on",
-		ui: { tab: "input", label: "Completion notification", description: "Notify when the agent completes" },
+		ui: {
+			tab: "input",
+			label: "Completion notification",
+			description: "Notify when the agent completes",
+		},
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -521,7 +601,11 @@ export const SETTINGS_SCHEMA = {
 		type: "enum",
 		values: ["on", "off"] as const,
 		default: "on",
-		ui: { tab: "input", label: "Ask notification", description: "Notify when ask tool is waiting for input" },
+		ui: {
+			tab: "input",
+			label: "Ask notification",
+			description: "Notify when ask tool is waiting for input",
+		},
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -553,7 +637,11 @@ export const SETTINGS_SCHEMA = {
 	"images.blockImages": {
 		type: "boolean",
 		default: false,
-		ui: { tab: "display", label: "Block images", description: "Prevent images from being sent to LLM providers" },
+		ui: {
+			tab: "display",
+			label: "Block images",
+			description: "Prevent images from being sent to LLM providers",
+		},
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -563,7 +651,11 @@ export const SETTINGS_SCHEMA = {
 	"skills.enableSkillCommands": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Skill commands", description: "Register skills as /skill:name commands" },
+		ui: {
+			tab: "tools",
+			label: "Skill commands",
+			description: "Register skills as /skill:name commands",
+		},
 	},
 	"skills.enableCodexUser": { type: "boolean", default: true },
 	"skills.enableClaudeUser": { type: "boolean", default: true },
@@ -580,12 +672,20 @@ export const SETTINGS_SCHEMA = {
 	"commands.enableClaudeUser": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Claude user commands", description: "Load commands from ~/.claude/commands/" },
+		ui: {
+			tab: "tools",
+			label: "Claude user commands",
+			description: "Load commands from ~/.claude/commands/",
+		},
 	},
 	"commands.enableClaudeProject": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Claude project commands", description: "Load commands from .claude/commands/" },
+		ui: {
+			tab: "tools",
+			label: "Claude project commands",
+			description: "Load commands from .claude/commands/",
+		},
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -595,7 +695,12 @@ export const SETTINGS_SCHEMA = {
 		type: "enum",
 		values: ["auto", "exa", "jina", "perplexity", "anthropic"] as const,
 		default: "auto",
-		ui: { tab: "services", label: "Web search provider", description: "Provider for web search tool", submenu: true },
+		ui: {
+			tab: "services",
+			label: "Web search provider",
+			description: "Provider for web search tool",
+			submenu: true,
+		},
 	},
 	"providers.image": {
 		type: "enum",
@@ -637,32 +742,56 @@ export const SETTINGS_SCHEMA = {
 	"exa.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "services", label: "Exa enabled", description: "Master toggle for all Exa search tools" },
+		ui: {
+			tab: "services",
+			label: "Exa enabled",
+			description: "Master toggle for all Exa search tools",
+		},
 	},
 	"exa.enableSearch": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "services", label: "Exa search", description: "Basic search, deep search, code search, crawl" },
+		ui: {
+			tab: "services",
+			label: "Exa search",
+			description: "Basic search, deep search, code search, crawl",
+		},
 	},
 	"exa.enableLinkedin": {
 		type: "boolean",
 		default: false,
-		ui: { tab: "services", label: "Exa LinkedIn", description: "Search LinkedIn for people and companies" },
+		ui: {
+			tab: "services",
+			label: "Exa LinkedIn",
+			description: "Search LinkedIn for people and companies",
+		},
 	},
 	"exa.enableCompany": {
 		type: "boolean",
 		default: false,
-		ui: { tab: "services", label: "Exa company", description: "Comprehensive company research tool" },
+		ui: {
+			tab: "services",
+			label: "Exa company",
+			description: "Comprehensive company research tool",
+		},
 	},
 	"exa.enableResearcher": {
 		type: "boolean",
 		default: false,
-		ui: { tab: "services", label: "Exa researcher", description: "AI-powered deep research tasks" },
+		ui: {
+			tab: "services",
+			label: "Exa researcher",
+			description: "AI-powered deep research tasks",
+		},
 	},
 	"exa.enableWebsets": {
 		type: "boolean",
 		default: false,
-		ui: { tab: "services", label: "Exa websets", description: "Webset management and enrichment tools" },
+		ui: {
+			tab: "services",
+			label: "Exa websets",
+			description: "Webset management and enrichment tools",
+		},
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -682,7 +811,11 @@ export const SETTINGS_SCHEMA = {
 	"bashInterceptor.enabled": {
 		type: "boolean",
 		default: false,
-		ui: { tab: "bash", label: "Interceptor", description: "Block shell commands that have dedicated tools" },
+		ui: {
+			tab: "bash",
+			label: "Interceptor",
+			description: "Block shell commands that have dedicated tools",
+		},
 	},
 	"bashInterceptor.simpleLs": {
 		type: "boolean",
@@ -701,7 +834,11 @@ export const SETTINGS_SCHEMA = {
 	"mcp.enableProjectConfig": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "MCP project config", description: "Load .mcp.json/mcp.json from project root" },
+		ui: {
+			tab: "tools",
+			label: "MCP project config",
+			description: "Load .mcp.json/mcp.json from project root",
+		},
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -719,12 +856,20 @@ export const SETTINGS_SCHEMA = {
 	"lsp.diagnosticsOnWrite": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "lsp", label: "Diagnostics on write", description: "Return LSP diagnostics after writing code files" },
+		ui: {
+			tab: "lsp",
+			label: "Diagnostics on write",
+			description: "Return LSP diagnostics after writing code files",
+		},
 	},
 	"lsp.diagnosticsOnEdit": {
 		type: "boolean",
 		default: false,
-		ui: { tab: "lsp", label: "Diagnostics on edit", description: "Return LSP diagnostics after editing code files" },
+		ui: {
+			tab: "lsp",
+			label: "Diagnostics on edit",
+			description: "Return LSP diagnostics after editing code files",
+		},
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -734,7 +879,11 @@ export const SETTINGS_SCHEMA = {
 		type: "enum",
 		values: ["ipy-only", "bash-only", "both"] as const,
 		default: "both",
-		ui: { tab: "config", label: "Python tool mode", description: "How Python code is executed" },
+		ui: {
+			tab: "config",
+			label: "Python tool mode",
+			description: "How Python code is executed",
+		},
 	},
 	"python.kernelMode": {
 		type: "enum",
@@ -815,7 +964,11 @@ export const SETTINGS_SCHEMA = {
 		type: "enum",
 		values: ["discard", "keep"] as const,
 		default: "discard",
-		ui: { tab: "ttsr", label: "TTSR context mode", description: "What to do with partial output when TTSR triggers" },
+		ui: {
+			tab: "ttsr",
+			label: "TTSR context mode",
+			description: "What to do with partial output when TTSR triggers",
+		},
 	},
 	"ttsr.repeatMode": {
 		type: "enum",
@@ -863,7 +1016,12 @@ export const SETTINGS_SCHEMA = {
 		type: "enum",
 		values: ["default", "minimal", "compact", "full", "nerd", "ascii", "custom"] as const,
 		default: "default",
-		ui: { tab: "status", label: "Preset", description: "Pre-built status line configurations", submenu: true },
+		ui: {
+			tab: "status",
+			label: "Preset",
+			description: "Pre-built status line configurations",
+			submenu: true,
+		},
 	},
 	"statusLine.separator": {
 		type: "enum",
@@ -885,9 +1043,18 @@ export const SETTINGS_SCHEMA = {
 			description: "Display hook status messages below status line",
 		},
 	},
-	"statusLine.leftSegments": { type: "array", default: [] as StatusLineSegmentId[] },
-	"statusLine.rightSegments": { type: "array", default: [] as StatusLineSegmentId[] },
-	"statusLine.segmentOptions": { type: "record", default: {} as Record<string, unknown> },
+	"statusLine.leftSegments": {
+		type: "array",
+		default: [] as StatusLineSegmentId[],
+	},
+	"statusLine.rightSegments": {
+		type: "array",
+		default: [] as StatusLineSegmentId[],
+	},
+	"statusLine.segmentOptions": {
+		type: "record",
+		default: {} as Record<string, unknown>,
+	},
 } as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -900,7 +1067,9 @@ type Schema = typeof SETTINGS_SCHEMA;
 export type SettingPath = keyof Schema;
 
 /** Infer the value type for a setting path */
-export type SettingValue<P extends SettingPath> = Schema[P] extends { type: "boolean" }
+export type SettingValue<P extends SettingPath> = Schema[P] extends {
+	type: "boolean";
+}
 	? boolean
 	: Schema[P] extends { type: "string" }
 		? string | undefined
