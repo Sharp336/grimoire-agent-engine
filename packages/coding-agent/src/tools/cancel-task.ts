@@ -19,7 +19,10 @@ import type { TaskRegistry } from "../task/registry";
 // =============================================================================
 
 const cancelTaskSchema = Type.Object({
-	task_id: Type.String({ description: "The ID of the async task to cancel" }),
+	task_id: Type.String({
+		description: "The ID of the async task to cancel",
+		maxLength: 64,
+	}),
 });
 
 export type CancelTaskInput = Static<typeof cancelTaskSchema>;

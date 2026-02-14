@@ -68,16 +68,26 @@ export class TaskRegistry {
 		// Attach completion handler to the promise
 		handle.promise
 			.then(result => {
-				handle.status = "completed";
-				handle.result = result.details?.results;
-				handle.completedAt = Date.now();
-				this.#fireCompletion(id);
+				// Only update status if still running (not cancelled)
+				if (handle.status === "running") {
+					handle.status = "completed";
+					handle.result = result.details?.results;
+					handle.completedAt = Date.now();
+					this.#fireCompletion(id);
+					// Schedule auto-eviction after retention period (5 minutes)
+					this.#scheduleEviction(id);
+				}
 			})
 			.catch(err => {
-				handle.status = "failed";
-				handle.error = err instanceof Error ? err.message : String(err);
-				handle.completedAt = Date.now();
-				this.#fireCompletion(id);
+				// Only update status if still running (not cancelled)
+				if (handle.status === "running") {
+					handle.status = "failed";
+					handle.error = err instanceof Error ? err.message : String(err);
+					handle.completedAt = Date.now();
+					this.#fireCompletion(id);
+					// Schedule auto-eviction after retention period (5 minutes)
+					this.#scheduleEviction(id);
+				}
 			});
 	}
 
@@ -114,12 +124,25 @@ export class TaskRegistry {
 
 	/**
 	 * Register a callback to fire when a task completes (success, error, or cancellation).
+	 * Handles being called before the task is registered (stores callbacks for later).
 	 */
 	onComplete(id: string, callback: (handle: AsyncTaskHandle) => void): void {
 		if (!this.#completionCallbacks.has(id)) {
 			this.#completionCallbacks.set(id, new Set());
 		}
-		this.#completionCallbacks.get(id)!.add(callback);
+		const callbacks = this.#completionCallbacks.get(id)!;
+		callbacks.add(callback);
+
+		// If task already exists and is completed, fire the callback immediately
+		const handle = this.#tasks.get(id);
+		if (handle && handle.status !== "running") {
+			try {
+				callback(handle);
+			} catch {
+				// Callbacks handle their own errors
+			}
+			callbacks.delete(callback);
+		}
 	}
 
 	/**
@@ -148,5 +171,17 @@ export class TaskRegistry {
 			}
 			this.#completionCallbacks.delete(id);
 		}
+	}
+
+	#scheduleEviction(id: string): void {
+		// Schedule auto-eviction after 5 minutes to allow check_task to work with recently completed tasks
+		const RETENTION_MS = 5 * 60 * 1000; // 5 minutes
+		setTimeout(() => {
+			const handle = this.#tasks.get(id);
+			if (handle && handle.status !== "running") {
+				this.#tasks.delete(id);
+				this.#completionCallbacks.delete(id);
+			}
+		}, RETENTION_MS);
 	}
 }

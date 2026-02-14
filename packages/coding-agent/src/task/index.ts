@@ -570,7 +570,11 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 								signal: asyncAbort.signal,
 								eventBus: undefined,
 								onProgress: progress => {
-									progressMap.set(index, { ...structuredClone(progress) });
+									try {
+										progressMap.set(index, { ...structuredClone(progress) });
+									} catch {
+										// Non-serializable progress, skip update
+									}
 								},
 								authStorage: this.session.authStorage,
 								modelRegistry: this.session.modelRegistry,
@@ -640,31 +644,23 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 					};
 				})();
 
-				// Register in TaskRegistry — the registry auto-attaches completion handlers
-				this.#registry.register(taskId, {
-					id: taskId,
-					status: "running",
-					agent: agentName,
-					description: params.tasks.map(t => t.description).join(", "),
-					createdAt: Date.now(),
-					progress: [],
-					abortController: asyncAbort,
-					promise: backgroundPromise,
-				});
-
-				// Deliver follow-up message when async task completes
-				const deliverFollowUp = this.session.deliverFollowUp;
-				if (deliverFollowUp) {
+				// Register callback BEFORE task registration to prevent race condition
+				// If task completes instantly, callback won't be missed
+				if (this.session.deliverFollowUp) {
 					this.#registry.onComplete(taskId, handle => {
 						try {
 							if (handle.status === "cancelled") return;
+
+							// Re-check deliverFollowUp inside callback instead of using captured variable
+							const followUp = this.session.deliverFollowUp;
+							if (!followUp) return;
 
 							const duration = handle.completedAt ? handle.completedAt - handle.createdAt : 0;
 							const durationStr = duration > 0 ? ` (${Math.round(duration / 1000)}s)` : "";
 
 							if (handle.status === "completed") {
 								const resultCount = handle.result?.length ?? 0;
-								deliverFollowUp(
+								followUp(
 									renderPromptTemplate(asyncTaskCompleteTemplate, {
 										taskId,
 										agent: agentName,
@@ -676,7 +672,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 									}),
 								);
 							} else if (handle.status === "failed") {
-								deliverFollowUp(
+								followUp(
 									renderPromptTemplate(asyncTaskCompleteTemplate, {
 										taskId,
 										agent: agentName,
@@ -697,6 +693,18 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 					});
 				}
 
+				// Register in TaskRegistry — the registry auto-attaches completion handlers
+				this.#registry.register(taskId, {
+					id: taskId,
+					status: "running",
+					agent: agentName,
+					description: params.tasks.map(t => t.description).join(", "),
+					createdAt: Date.now(),
+					progress: [],
+					abortController: asyncAbort,
+					promise: backgroundPromise,
+				});
+
 				return {
 					content: [
 						{
@@ -716,7 +724,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 				if (!isIsolated) {
 					return runSubprocess({
 						cwd: this.session.cwd,
-						agent,
+						agent: effectiveAgent,
 						task: task.task,
 						description: task.description,
 						index,
@@ -733,9 +741,13 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 						signal,
 						eventBus: undefined,
 						onProgress: progress => {
-							progressMap.set(index, {
-								...structuredClone(progress),
-							});
+							try {
+								progressMap.set(index, {
+									...structuredClone(progress),
+								});
+							} catch {
+								// Non-serializable progress, skip update
+							}
 							emitProgress();
 						},
 						authStorage: this.session.authStorage,
@@ -760,7 +772,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 					const result = await runSubprocess({
 						cwd: this.session.cwd,
 						worktree: worktreeDir,
-						agent,
+						agent: effectiveAgent,
 						task: task.task,
 						description: task.description,
 						index,
@@ -777,9 +789,13 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 						signal,
 						eventBus: undefined,
 						onProgress: progress => {
-							progressMap.set(index, {
-								...structuredClone(progress),
-							});
+							try {
+								progressMap.set(index, {
+									...structuredClone(progress),
+								});
+							} catch {
+								// Non-serializable progress, skip update
+							}
 							emitProgress();
 						},
 						authStorage: this.session.authStorage,

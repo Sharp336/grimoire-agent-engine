@@ -75,7 +75,7 @@ const createTaskSchema = (options: { isolationEnabled: boolean }) => {
 		async: Type.Optional(
 			Type.Boolean({
 				description:
-					"Fire-and-forget mode: returns a task ID immediately. Results auto-deliver via notification when complete. Default false (blocking).",
+					"Fire-and-forget mode: returns a task ID immediately. Results auto-deliver via notification when complete. Default false (blocking). Requires active session (does not survive session restarts). Parent exit cancels all async tasks.",
 			}),
 		),
 	};

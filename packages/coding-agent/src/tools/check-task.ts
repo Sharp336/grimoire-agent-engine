@@ -7,6 +7,7 @@ import type { AsyncTaskHandle, TaskRegistry } from "../task/registry";
 const checkTaskSchema = Type.Object({
 	task_id: Type.String({
 		description: "The ID of the async task to check",
+		maxLength: 64,
 	}),
 });
 
