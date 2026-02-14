@@ -39,11 +39,7 @@ import { WriteTool } from "./write";
 // Exa MCP tools (22 tools)
 
 export { exaTools } from "../exa";
-export type {
-	ExaRenderDetails,
-	ExaSearchResponse,
-	ExaSearchResult,
-} from "../exa/types";
+export type { ExaRenderDetails, ExaSearchResponse, ExaSearchResult } from "../exa/types";
 export {
 	type FileDiagnosticsResult,
 	type FileFormatResult,
@@ -74,12 +70,7 @@ export {
 	webSearchLinkedinTool,
 } from "../web/search";
 export { AskTool, type AskToolDetails } from "./ask";
-export {
-	BashTool,
-	type BashToolDetails,
-	type BashToolInput,
-	type BashToolOptions,
-} from "./bash";
+export { BashTool, type BashToolDetails, type BashToolInput, type BashToolOptions } from "./bash";
 export { BrowserTool, type BrowserToolDetails } from "./browser";
 export { CalculatorTool, type CalculatorToolDetails } from "./calculator";
 export {
@@ -90,13 +81,7 @@ export {
 export { type CheckTaskDetails, CheckTaskTool } from "./check-task";
 export { type ExitPlanModeDetails, ExitPlanModeTool } from "./exit-plan-mode";
 export { FetchTool, type FetchToolDetails } from "./fetch";
-export {
-	type FindOperations,
-	FindTool,
-	type FindToolDetails,
-	type FindToolInput,
-	type FindToolOptions,
-} from "./find";
+export { type FindOperations, FindTool, type FindToolDetails, type FindToolInput, type FindToolOptions } from "./find";
 export { setPreferredImageProvider } from "./gemini-image";
 export { GrepTool, type GrepToolDetails, type GrepToolInput } from "./grep";
 export {
@@ -105,20 +90,12 @@ export {
 	ListTasksTool,
 } from "./list-tasks";
 export { NotebookTool, type NotebookToolDetails } from "./notebook";
-export {
-	PythonTool,
-	type PythonToolDetails,
-	type PythonToolOptions,
-} from "./python";
+export { PythonTool, type PythonToolDetails, type PythonToolOptions } from "./python";
 export { ReadTool, type ReadToolDetails, type ReadToolInput } from "./read";
 export { reportFindingTool, type SubmitReviewDetails } from "./review";
 export { loadSshTool, type SSHToolDetails, SshTool } from "./ssh";
 export { SubmitResultTool } from "./submit-result";
-export {
-	type TodoItem,
-	TodoWriteTool,
-	type TodoWriteToolDetails,
-} from "./todo-write";
+export { type TodoItem, TodoWriteTool, type TodoWriteToolDetails } from "./todo-write";
 export {
 	DEFAULT_MAX_BYTES,
 	DEFAULT_MAX_LINES,
@@ -198,6 +175,7 @@ export interface ToolSession {
 	taskRegistry?: import("../task/registry").TaskRegistry;
 	/** Callback to deliver a follow-up message after a tool returns (for async task completion) */
 	deliverFollowUp?: (text: string) => void;
+	getCompactContext?: () => string;
 }
 
 type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
@@ -317,10 +295,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	) {
 		requestedTools.push("bash");
 	}
-	const allTools: Record<string, ToolFactory> = {
-		...BUILTIN_TOOLS,
-		...HIDDEN_TOOLS,
-	};
+	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	const isToolAllowed = (name: string) => {
 		if (name === "lsp") return enableLsp;
 		if (name === "bash") return allowBash;

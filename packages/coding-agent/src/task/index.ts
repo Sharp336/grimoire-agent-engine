@@ -107,13 +107,7 @@ export { loadBundledAgents as BUNDLED_AGENTS } from "./agents";
 export { discoverCommands, expandCommand, getCommand } from "./commands";
 export { discoverAgents, getAgent } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
-export type {
-	AgentDefinition,
-	AgentProgress,
-	SingleResult,
-	TaskParams,
-	TaskToolDetails,
-} from "./types";
+export type { AgentDefinition, AgentProgress, SingleResult, TaskParams, TaskToolDetails } from "./types";
 export { taskSchema } from "./types";
 
 /**
