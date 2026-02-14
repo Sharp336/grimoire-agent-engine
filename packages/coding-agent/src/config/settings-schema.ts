@@ -484,6 +484,18 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
+	"task.maxAsyncTasks": {
+		type: "number",
+		default: 15,
+		minimum: 1,
+		maximum: 100,
+		ui: {
+			tab: "tools",
+			label: "Task max async tasks",
+			description: "Maximum concurrent background async tasks per session",
+			submenu: true,
+		},
+	},
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// Startup settings
