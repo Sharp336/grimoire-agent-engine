@@ -9,7 +9,23 @@
 
 - Fixed `session.abort()` not clearing `promptInFlight` flag due to microtask ordering, which blocked subsequent prompts
 
+### Added
+
+- Added async task execution mode with `async: true` parameter for fire-and-forget task dispatch
+- Added `check_task` tool for querying status of background async tasks
+- Added `list_tasks` tool for overview of all running and completed async tasks
+- Added `cancel_task` tool for cancelling running async tasks
+- Added `task.maxAsyncTasks` setting to limit concurrent async tasks (default: 15, range: 1-100)
+- Added TaskRegistry for async task state management with automatic eviction of completed tasks
+- Added follow-up message delivery for async task completion results
+
+### Changed
+
+- Updated task tool to support both blocking (default) and async execution paths
+- Updated settings schema with async task configuration options
+
 ## [12.4.0] - 2026-02-14
+
 ### Changed
 
 - Moved `sanitizeText` function from `@oh-my-pi/pi-utils` to `@oh-my-pi/pi-natives` for better code organization
@@ -25,6 +41,7 @@
 - Fixed Cloudflare returning corrupted bytes when compression is negotiated in web scraper requests
 
 ## [12.3.0] - 2026-02-14
+
 ### Added
 
 - Added autonomous memory extraction and consolidation system with configurable settings
@@ -120,6 +137,7 @@
 - Removed @types/jsdom dependency
 
 ## [11.14.1] - 2026-02-12
+
 ### Changed
 
 - Improved Bun binary detection to check `Bun.env.PI_COMPILED` environment variable
@@ -131,6 +149,7 @@
 - Fixed Bun update process to properly handle version pinning and report installation mismatches
 
 ## [11.14.0] - 2026-02-12
+
 ### Added
 
 - Added SwiftLint linter client with JSON reporter support for Swift file linting
@@ -183,6 +202,7 @@
 - Refactored browser/file opening across multiple modules to use unified `openPath` utility for improved maintainability
 
 ## [11.12.0] - 2026-02-11
+
 ### Added
 
 - Added `resolveFileDisplayMode` utility to centralize file display mode resolution across tools (read, grep, file mentions)
@@ -271,6 +291,7 @@
 - Refactored hash line formatting to use async `streamHashLinesFromLines` for better performance
 
 ## [11.10.3] - 2026-02-10
+
 ### Added
 
 - Exported `./patch/*` subpath for direct access to patch utilities
@@ -296,6 +317,7 @@
 - Removed AggregateError unwrapping from console.warn in CLI initialization
 
 ## [11.10.1] - 2026-02-10
+
 ### Changed
 
 - Migrated CLI framework from oclif to lightweight pi-utils CLI runner
@@ -310,6 +332,7 @@
 - Removed custom oclif help renderer (oclif-help.ts)
 
 ## [11.10.0] - 2026-02-10
+
 ### Breaking Changes
 
 - Changed `HashlineEdit.src` from string format (e.g., `"5:ab"`, `"5:ab..9:ef"`) to structured `SrcSpec` object with discriminated union types (`{ kind: "single", ref: "..." }`, `{ kind: "range", start: "...", end: "..." }`, etc.)
@@ -460,6 +483,7 @@
 - Improved bash tool output draining after foreground completion to reduce tail output truncation
 
 ## [11.8.0] - 2026-02-10
+
 ### Added
 
 - Added `ctx.reload()` method to extension command context to reload extensions, skills, prompts, and themes from disk
@@ -482,6 +506,7 @@
 - Fixed archive extraction error handling to provide clear error messages on failure
 
 ## [11.7.0] - 2026-02-07
+
 ### Changed
 
 - Enhanced error messages for failed Python cells to include full combined output context instead of just the error message
@@ -493,6 +518,7 @@
 - Fixed tab character rendering in Python tool output display to properly format whitespace in cell output and status events
 
 ## [11.6.1] - 2026-02-07
+
 ### Fixed
 
 - Fixed potential crash when rendering results with undefined details.results
@@ -541,6 +567,7 @@
 - Removed ability to save screenshots to custom paths or artifacts directory
 
 ## [11.4.1] - 2026-02-06
+
 ### Fixed
 
 - Fixed tab character display in error messages and bash tool output by properly replacing tabs with spaces
