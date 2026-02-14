@@ -1,20 +1,18 @@
 # List Tasks
 
-List all async tasks in the current session with their status.
+List all async tasks in the current session. Use after spawning tasks with `task` tool using `async: true`.
 
 <instruction>
-- Use this to see all running and completed tasks
-- Results auto-deliver when tasks complete - do NOT use this to poll for results
-- By default includes both running and completed/failed tasks
+- Call this to see all running, completed, and failed async tasks
+- Returns task count and per-task details (ID, status, agent, description, time)
+- Results auto-deliver when tasks complete — do NOT use this to poll for completion
 - Set `include_completed: false` to see only running tasks
-- Returns task count and detailed status for each task
+- Use `check_task` with a specific task ID to get detailed results
 </instruction>
 
 <output>
 Returns a list of all tasks including:
-- Task ID
-- Current status (running, completed, failed, cancelled)
-- Description
-- Agent type
+- Task ID and current status (running, completed, failed, cancelled)
+- Description and agent type
 - Time since creation
 </output>
