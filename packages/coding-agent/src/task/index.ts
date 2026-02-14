@@ -572,8 +572,11 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 								onProgress: progress => {
 									try {
 										progressMap.set(index, { ...structuredClone(progress) });
-									} catch {
-										// Non-serializable progress, skip update
+									} catch (err) {
+										logger.warn("Failed to clone progress", {
+											taskId,
+											error: String(err),
+										});
 									}
 								},
 								authStorage: this.session.authStorage,
@@ -745,8 +748,11 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 								progressMap.set(index, {
 									...structuredClone(progress),
 								});
-							} catch {
-								// Non-serializable progress, skip update
+							} catch (err) {
+								logger.warn("Failed to clone progress", {
+									taskId: task.id,
+									error: String(err),
+								});
 							}
 							emitProgress();
 						},
@@ -793,8 +799,11 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 								progressMap.set(index, {
 									...structuredClone(progress),
 								});
-							} catch {
-								// Non-serializable progress, skip update
+							} catch (err) {
+								logger.warn("Failed to clone progress", {
+									taskId: task.id,
+									error: String(err),
+								});
 							}
 							emitProgress();
 						},

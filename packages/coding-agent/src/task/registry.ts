@@ -52,6 +52,7 @@ export class TaskRegistry {
 
 	#tasks = new Map<string, AsyncTaskHandle>();
 	#completionCallbacks = new Map<string, Set<(handle: AsyncTaskHandle) => void>>();
+	#evictionTimers = new Map<string, NodeJS.Timeout>();
 
 	/**
 	 * Register a new task.
@@ -130,8 +131,10 @@ export class TaskRegistry {
 		if (!this.#completionCallbacks.has(id)) {
 			this.#completionCallbacks.set(id, new Set());
 		}
-		const callbacks = this.#completionCallbacks.get(id)!;
-		callbacks.add(callback);
+		const callbacks = this.#completionCallbacks.get(id);
+		if (callbacks) {
+			callbacks.add(callback);
+		}
 
 		// If task already exists and is completed, fire the callback immediately
 		const handle = this.#tasks.get(id);
@@ -141,7 +144,9 @@ export class TaskRegistry {
 			} catch {
 				// Callbacks handle their own errors
 			}
-			callbacks.delete(callback);
+			if (callbacks) {
+				callbacks.delete(callback);
+			}
 		}
 	}
 
@@ -156,6 +161,10 @@ export class TaskRegistry {
 				this.#completionCallbacks.delete(id);
 			}
 		}
+		for (const timer of this.#evictionTimers.values()) {
+			clearTimeout(timer);
+		}
+		this.#evictionTimers.clear();
 	}
 
 	#fireCompletion(id: string): void {
@@ -176,12 +185,14 @@ export class TaskRegistry {
 	#scheduleEviction(id: string): void {
 		// Schedule auto-eviction after 5 minutes to allow check_task to work with recently completed tasks
 		const RETENTION_MS = 5 * 60 * 1000; // 5 minutes
-		setTimeout(() => {
+		const timer = setTimeout(() => {
 			const handle = this.#tasks.get(id);
 			if (handle && handle.status !== "running") {
 				this.#tasks.delete(id);
 				this.#completionCallbacks.delete(id);
 			}
+			this.#evictionTimers.delete(id);
 		}, RETENTION_MS);
+		this.#evictionTimers.set(id, timer);
 	}
 }
