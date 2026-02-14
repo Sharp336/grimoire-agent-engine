@@ -120,6 +120,7 @@ export class TaskRegistry {
 		task.completedAt = Date.now();
 		task.abortController.abort();
 		this.#fireCompletion(id);
+		this.#scheduleEviction(id);
 		return true;
 	}
 
@@ -157,10 +158,16 @@ export class TaskRegistry {
 	cleanup(): void {
 		for (const [id, task] of this.#tasks.entries()) {
 			if (task.status !== "running") {
+				// Clear timer first (exception safety)
+				const timer = this.#evictionTimers.get(id);
+				if (timer) clearTimeout(timer);
+				this.#evictionTimers.delete(id);
+				// Then clean task and callbacks
 				this.#tasks.delete(id);
 				this.#completionCallbacks.delete(id);
 			}
 		}
+		// Safety net for any remaining timers
 		for (const timer of this.#evictionTimers.values()) {
 			clearTimeout(timer);
 		}

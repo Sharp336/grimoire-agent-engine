@@ -21,9 +21,9 @@ describe("async task follow-up delivery", () => {
 		const taskId = Snowflake.next();
 		const { promise, resolve } = Promise.withResolvers<AgentToolResult<TaskToolDetails>>();
 
-		let callbackFired = false;
+		let callbackFireCount = 0;
 		registry.onComplete(taskId, handle => {
-			callbackFired = true;
+			callbackFireCount++;
 			expect(handle.status).toBe("completed");
 			expect(handle.result).toBeDefined();
 			expect(handle.result?.length).toBe(1);
@@ -66,7 +66,7 @@ describe("async task follow-up delivery", () => {
 
 		// Wait for promise chain to complete
 		await Bun.sleep(50);
-		expect(callbackFired).toBe(true);
+		expect(callbackFireCount).toBe(1);
 	});
 
 	it("failed task triggers deliverFollowUp with error", async () => {

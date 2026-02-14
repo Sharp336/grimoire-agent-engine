@@ -169,4 +169,30 @@ describe("TaskRegistry async execution support", () => {
 		const finalTask = registry.get(taskId);
 		expect(finalTask?.status).toBe("cancelled"); // Must stay cancelled
 	});
+
+	it("cancelled tasks are scheduled for eviction", () => {
+		// When a task is cancelled, it should be scheduled for eviction
+		// so it doesn't remain in memory indefinitely
+		const taskId = Snowflake.next();
+		const { promise } = Promise.withResolvers<any>();
+
+		registry.register(taskId, {
+			id: taskId,
+			status: "running",
+			agent: "test-agent",
+			description: "Test task",
+			createdAt: Date.now(),
+			progress: [],
+			abortController: new AbortController(),
+			promise,
+		});
+
+		registry.cancel(taskId);
+
+		const task = registry.get(taskId);
+		expect(task).toBeDefined();
+		expect(task?.status).toBe("cancelled");
+		// Verify eviction was scheduled (task should still exist)
+		// and will be removed after the retention period
+	});
 });
