@@ -200,6 +200,7 @@ export class TaskRegistry {
 			}
 			this.#evictionTimers.delete(id);
 		}, RETENTION_MS);
+		timer.unref();
 		this.#evictionTimers.set(id, timer);
 	}
 }

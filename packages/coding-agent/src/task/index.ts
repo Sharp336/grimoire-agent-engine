@@ -483,6 +483,9 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 			if (params.async) {
 				// Async + isolated not supported in v1
 				if (isIsolated) {
+					if (tempArtifactsDir) {
+						await fs.rm(tempArtifactsDir, { recursive: true, force: true }).catch(() => {});
+					}
 					return {
 						content: [
 							{
@@ -501,6 +504,9 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 				const maxAsync = this.session.settings.get("task.maxAsyncTasks");
 				const runningCount = this.#registry.list().filter(t => t.status === "running").length;
 				if (runningCount >= maxAsync) {
+					if (tempArtifactsDir) {
+						await fs.rm(tempArtifactsDir, { recursive: true, force: true }).catch(() => {});
+					}
 					return {
 						content: [
 							{
@@ -643,29 +649,43 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 
 							if (handle.status === "completed") {
 								const resultCount = handle.result?.length ?? 0;
-								followUp(
-									renderPromptTemplate(asyncTaskCompleteTemplate, {
+								Promise.resolve(
+									followUp(
+										renderPromptTemplate(asyncTaskCompleteTemplate, {
+											taskId,
+											agent: agentName,
+											status: "completed",
+											duration: durationStr,
+											description: handle.description,
+											statusMessage: `completed${durationStr}.`,
+											resultCount: resultCount > 0 ? resultCount : undefined,
+										}),
+									),
+								).catch(e => {
+									logger.error("Async task follow-up delivery failed", {
 										taskId,
-										agent: agentName,
-										status: "completed",
-										duration: durationStr,
-										description: handle.description,
-										statusMessage: `completed${durationStr}.`,
-										resultCount: resultCount > 0 ? resultCount : undefined,
-									}),
-								);
+										error: String(e),
+									});
+								});
 							} else if (handle.status === "failed") {
-								followUp(
-									renderPromptTemplate(asyncTaskCompleteTemplate, {
+								Promise.resolve(
+									followUp(
+										renderPromptTemplate(asyncTaskCompleteTemplate, {
+											taskId,
+											agent: agentName,
+											status: "failed",
+											duration: durationStr,
+											description: handle.description,
+											statusMessage: `failed${durationStr}.`,
+											error: handle.error ?? "unknown error",
+										}),
+									),
+								).catch(e => {
+									logger.error("Async task follow-up delivery failed", {
 										taskId,
-										agent: agentName,
-										status: "failed",
-										duration: durationStr,
-										description: handle.description,
-										statusMessage: `failed${durationStr}.`,
-										error: handle.error ?? "unknown error",
-									}),
-								);
+										error: String(e),
+									});
+								});
 							}
 						} catch (err) {
 							logger.error("Async task follow-up delivery failed", {
@@ -1008,6 +1028,10 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 				},
 			};
 		} catch (err) {
+			// Cleanup temp artifacts directory on error
+			if (tempArtifactsDir) {
+				await fs.rm(tempArtifactsDir, { recursive: true, force: true }).catch(() => {});
+			}
 			return {
 				content: [{ type: "text", text: `Task execution failed: ${err}` }],
 				details: {
