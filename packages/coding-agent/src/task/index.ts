@@ -145,7 +145,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 
 	private constructor(
 		private readonly session: ToolSession,
-		public readonly description: string,
+		public description: string,
 		isolationEnabled: boolean,
 	) {
 		this.parameters = isolationEnabled ? taskSchema : taskSchemaNoIsolation;
@@ -159,11 +159,14 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 	static async create(session: ToolSession): Promise<TaskTool> {
 		const maxConcurrency = session.settings.get("task.maxConcurrency");
 		const isolationEnabled = session.settings.get("task.isolation.enabled");
-		const description = await buildDescription(session.cwd, maxConcurrency, isolationEnabled);
-		const tool = new TaskTool(session, description, isolationEnabled);
+		const tool = new TaskTool(session, "", isolationEnabled);
+		// Set registry synchronously before any await so that concurrent
+		// factory calls (check_task, cancel_task, list_tasks) can see it.
 		if (session.taskRegistry === undefined) {
 			session.taskRegistry = tool.#registry;
 		}
+		const description = await buildDescription(session.cwd, maxConcurrency, isolationEnabled);
+		tool.description = description;
 		return tool;
 	}
 
@@ -631,7 +634,12 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 							totalDurationMs: Date.now() - startTime,
 						},
 					};
-				})();
+				})().finally(async () => {
+					// Clean up temp artifacts directory for async tasks
+					if (tempArtifactsDir) {
+						await fs.rm(tempArtifactsDir, { recursive: true, force: true }).catch(() => {});
+					}
+				});
 
 				// Register callback BEFORE task registration to prevent race condition
 				// If task completes instantly, callback won't be missed
