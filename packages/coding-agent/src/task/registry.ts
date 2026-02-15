@@ -185,25 +185,25 @@ export class TaskRegistry {
 	/**
 	 * Clean up completed tasks from the registry.
 	 * Keeps running tasks.
+	 *
+	 * Order matters: cancel all timers before clearing data structures to prevent
+	 * race where eviction callbacks fire during cleanup.
 	 */
 	cleanup(): void {
-		this.#deliveredResults.clear();
-		for (const [id, task] of this.#tasks.entries()) {
-			if (task.status !== "running") {
-				// Clear timer first (exception safety)
-				const timer = this.#evictionTimers.get(id);
-				if (timer) clearTimeout(timer);
-				this.#evictionTimers.delete(id);
-				// Then clean task and callbacks
-				this.#tasks.delete(id);
-				this.#completionCallbacks.delete(id);
-			}
-		}
-		// Safety net for any remaining timers
+		// Step 1: Cancel ALL eviction timers first
 		for (const timer of this.#evictionTimers.values()) {
 			clearTimeout(timer);
 		}
 		this.#evictionTimers.clear();
+
+		// Step 2: Clear data structures (safe now that no timers can fire)
+		this.#deliveredResults.clear();
+		for (const [id, task] of this.#tasks.entries()) {
+			if (task.status !== "running") {
+				this.#tasks.delete(id);
+				this.#completionCallbacks.delete(id);
+			}
+		}
 	}
 
 	#fireCompletion(id: string): void {
@@ -229,6 +229,8 @@ export class TaskRegistry {
 			if (handle && handle.status !== "running") {
 				this.#tasks.delete(id);
 				this.#completionCallbacks.delete(id);
+				// Prune delivered results entry - delete is idempotent, safe even if entry was never added
+				this.#deliveredResults.delete(id);
 			}
 			this.#evictionTimers.delete(id);
 		}, RETENTION_MS);

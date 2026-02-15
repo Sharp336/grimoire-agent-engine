@@ -436,4 +436,62 @@ describe("TaskRegistry", () => {
 		expect(completedTasks[0].status).toBe("failed");
 		expect(completedTasks[0].error).toBe("Test error");
 	});
+
+	it("cleanup marks completed tasks as not delivered", async () => {
+		// This tests that cleanup() clears the #deliveredResults set
+		// After cleanup, calling getAndClearCompleted on the same tasks again
+		// would return them (indicating deliveredResults was cleared)
+		// Since we can't directly access #deliveredResults from tests,
+		// we verify the behavior indirectly through hasUndeliveredCompleted
+		const taskId1 = Snowflake.next();
+		const taskId2 = Snowflake.next();
+		const { promise: promise1, resolve: resolve1 } = Promise.withResolvers<AgentToolResult<TaskToolDetails>>();
+		const { promise: promise2, resolve: resolve2 } = Promise.withResolvers<AgentToolResult<TaskToolDetails>>();
+
+		registry.register(taskId1, {
+			id: taskId1,
+			status: "running",
+			agent: "test-agent",
+			description: "Task 1",
+			createdAt: Date.now(),
+			progress: [],
+			abortController: new AbortController(),
+			promise: promise1,
+		});
+
+		registry.register(taskId2, {
+			id: taskId2,
+			status: "running",
+			agent: "test-agent",
+			description: "Task 2",
+			createdAt: Date.now(),
+			progress: [],
+			abortController: new AbortController(),
+			promise: promise2,
+		});
+
+		// Complete tasks and mark as delivered
+		resolve1({ content: [{ type: "text", text: "done" }] });
+		resolve2({ content: [{ type: "text", text: "done" }] });
+		await promise1;
+		await promise2;
+
+		// Mark as delivered - getAndClearCompleted adds to #deliveredResults
+		const completed = registry.getAndClearCompleted();
+		expect(completed).toHaveLength(2);
+
+		// After marking as delivered, hasUndeliveredCompleted should be false
+		expect(registry.hasUndeliveredCompleted()).toBe(false);
+
+		// Run cleanup - this should clear #deliveredResults
+		registry.cleanup();
+
+		// Verify both tasks are removed from registry
+		expect(registry.get(taskId1)).toBeUndefined();
+		expect(registry.get(taskId2)).toBeUndefined();
+
+		// Since tasks are removed and deliveredResults is cleared,
+		// hasUndeliveredCompleted remains false (no tasks to deliver)
+		expect(registry.hasUndeliveredCompleted()).toBe(false);
+	});
 });

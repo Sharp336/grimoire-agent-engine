@@ -75,6 +75,7 @@ import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { t
 import asyncTaskCompleteTemplate from "../prompts/tools/async-task-complete.md" with { type: "text" };
 import { closeAllConnections } from "../ssh/connection-manager";
 import { unmountAll } from "../ssh/sshfs-mount";
+import type { TaskRegistry } from "../task/registry";
 import { outputMeta } from "../tools/output-meta";
 import { resolveToCwd } from "../tools/path-utils";
 import type { TodoItem } from "../tools/todo-write";
@@ -959,9 +960,12 @@ export class AgentSession {
 		await this.sessionManager.flush();
 		await cleanupSshResources();
 
-		const taskTool = this.#toolRegistry.get("task") as any;
-		if (taskTool?.registry && typeof taskTool.registry.cleanup === "function") {
-			taskTool.registry.cleanup();
+		const taskTool = this.#toolRegistry.get("task");
+		if (taskTool) {
+			const registry = "registry" in taskTool ? (taskTool as { registry: TaskRegistry }).registry : undefined;
+			if (registry) {
+				registry.cleanup();
+			}
 		}
 
 		for (const state of this.#providerSessionState.values()) {
@@ -1730,35 +1734,43 @@ export class AgentSession {
 
 	/**
 	 * Deliver async task completion message with auto-wakeup.
-	 * If agent is idle, prompts a new turn immediately.
-	 * If agent is streaming, queues as follow-up.
+	 * Uses followUp() as the primary delivery mechanism — it always works:
+	 * - When idle: restarts the loop with a new turn
+	 * - When streaming: queues as follow-up for next turn
+	 *
+	 * This avoids race conditions where stream state checks can race with agent
+	 * state transitions. followUp is the safe fallback in all cases.
 	 */
 	async deliverTaskCompletion(text: string): Promise<void> {
-		if (this.isStreaming) {
-			await this.followUp(text);
-		} else {
-			await this.prompt(text);
-		}
+		await this.followUp(text);
 	}
 
 	/**
 	 * Trigger recursive completion delivery if there are undelivered completed tasks.
 	 * Called after a turn completes to process tasks that finished during execution.
+	 *
+	 * Safety measures:
+	 * - Max depth of 5 recursive wakeups (if 5 aren't enough, something is wrong)
+	 * - 100ms cooldown between iterations to prevent tight loops
+	 * - Warns when depth limit is hit with remaining task count
 	 */
 	async #triggerRecursiveCompletionDelivery(): Promise<void> {
-		const taskTool = this.#toolRegistry.get("task") as any;
-		if (!taskTool?.registry) return;
+		const taskTool = this.#toolRegistry.get("task");
+		if (!taskTool) return;
 
-		const maxRecursionDepth = 10;
+		const registry = "registry" in taskTool ? (taskTool as { registry: TaskRegistry }).registry : undefined;
+		if (!registry) return;
+
+		const maxRecursionDepth = 5;
 		let depth = 0;
 
 		while (depth < maxRecursionDepth) {
 			if (this.isStreaming) break;
 
-			const undeliveredTasks = taskTool.registry.hasUndeliveredCompleted();
+			const undeliveredTasks = registry.hasUndeliveredCompleted();
 			if (!undeliveredTasks) break;
 
-			const completedTasks = taskTool.registry.getAndClearCompleted();
+			const completedTasks = registry.getAndClearCompleted();
 			for (const task of completedTasks) {
 				const duration = task.completedAt ? task.completedAt - task.createdAt : 0;
 				const durationStr = duration > 0 ? ` (${Math.round(duration / 1000)}s)` : "";
@@ -1790,6 +1802,22 @@ export class AgentSession {
 			}
 
 			depth++;
+
+			// Add cooldown between iterations to prevent tight loops
+			if (depth < maxRecursionDepth && !this.isStreaming) {
+				await Bun.sleep(100);
+			}
+		}
+
+		// Warn if we hit the limit and there are still undelivered tasks
+		if (depth >= maxRecursionDepth && registry.hasUndeliveredCompleted()) {
+			const remaining = registry.getAndClearCompleted();
+			const taskIds = remaining.map(t => t.id).join(", ");
+			logger.warn("Recursive task completion delivery depth limit reached", {
+				remaining: remaining.length,
+				taskIds,
+				maxDepth: maxRecursionDepth,
+			});
 		}
 	}
 
