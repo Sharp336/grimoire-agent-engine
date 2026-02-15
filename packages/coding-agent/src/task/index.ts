@@ -136,6 +136,7 @@ async function buildDescription(cwd: string, maxConcurrency: number, isolationEn
 export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 	readonly name = "task";
 	readonly label = "Task";
+	readonly description: string;
 	readonly parameters: TaskSchema;
 	readonly renderCall = renderCall;
 	readonly renderResult = renderResult;
@@ -143,14 +144,15 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 	readonly #blockedAgent: string | undefined;
 	#registry: TaskRegistry;
 
-	private constructor(
-		private readonly session: ToolSession,
-		public description: string,
+	constructor(
+		readonly session: ToolSession,
+		description: string,
 		isolationEnabled: boolean,
 	) {
 		this.parameters = isolationEnabled ? taskSchema : taskSchemaNoIsolation;
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
 		this.#registry = new TaskRegistry();
+		this.description = description;
 	}
 
 	/**
@@ -159,15 +161,13 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 	static async create(session: ToolSession): Promise<TaskTool> {
 		const maxConcurrency = session.settings.get("task.maxConcurrency");
 		const isolationEnabled = session.settings.get("task.isolation.enabled");
-		const tool = new TaskTool(session, "", isolationEnabled);
+		const description = await buildDescription(session.cwd, maxConcurrency, isolationEnabled);
+		const tool = new TaskTool(session, description, isolationEnabled);
 		// Set registry synchronously before any await so that concurrent
 		// factory calls (check_task, cancel_task, list_tasks) can see it.
 		if (session.taskRegistry === undefined) {
 			session.taskRegistry = tool.#registry;
 		}
-		// TODO: Wire registry.cleanup() to session lifecycle when onCleanup hook is available
-		const description = await buildDescription(session.cwd, maxConcurrency, isolationEnabled);
-		tool.description = description;
 		return tool;
 	}
 
@@ -505,11 +505,11 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 					};
 				}
 
-const maxAsync = Math.min(
-	this.session.settings.get("task.maxAsyncTasks"),
-	TaskRegistry.MAX_TASKS,
-);
-const runningCount = this.#registry.list().filter(t => t.status === "running").length;
+				const maxAsync = Math.min(
+					this.session.settings.get("task.maxAsyncTasks"),
+					TaskRegistry.MAX_TASKS,
+				);
+				const runningCount = this.#registry.list().filter(t => t.status === "running").length;
 				if (runningCount >= maxAsync) {
 					if (tempArtifactsDir) {
 						await fs.rm(tempArtifactsDir, { recursive: true, force: true }).catch(() => {});
@@ -533,10 +533,9 @@ const runningCount = this.#registry.list().filter(t => t.status === "running").l
 				const asyncAbort = new AbortController();
 
 				// Link parent signal to async abort
+				const abortListener = () => asyncAbort.abort();
 				if (signal) {
-					signal.addEventListener("abort", () => asyncAbort.abort(), {
-						once: true,
-					});
+					signal.addEventListener("abort", abortListener, { once: true });
 				}
 
 				// Start background execution (NOT awaited)
@@ -643,6 +642,10 @@ const runningCount = this.#registry.list().filter(t => t.status === "running").l
 					if (tempArtifactsDir) {
 						await fs.rm(tempArtifactsDir, { recursive: true, force: true }).catch(() => {});
 					}
+					// Remove abort signal listener to prevent leak
+					if (signal && typeof abortListener === "function") {
+						signal.removeEventListener("abort", abortListener);
+					}
 				});
 
 				// Register callback BEFORE task registration to prevent race condition
@@ -678,6 +681,8 @@ const runningCount = this.#registry.list().filter(t => t.status === "running").l
 										taskId,
 										error: String(e),
 									});
+									const task = this.#registry.get(taskId);
+									if (task) task.followUpDeliveryFailed = true;
 								});
 							} else if (handle.status === "failed") {
 								Promise.resolve(
@@ -697,13 +702,17 @@ const runningCount = this.#registry.list().filter(t => t.status === "running").l
 										taskId,
 										error: String(e),
 									});
+									const task = this.#registry.get(taskId);
+									if (task) task.followUpDeliveryFailed = true;
 								});
 							}
 						} catch (err) {
-							logger.error("Async task follow-up delivery failed", {
+logger.error("Async task follow-up delivery failed", {
 								taskId,
 								error: String(err),
 							});
+							const task = this.#registry.get(taskId);
+							if (task) task.followUpDeliveryFailed = true;
 						}
 					});
 				}

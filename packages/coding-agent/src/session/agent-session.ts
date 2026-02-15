@@ -956,6 +956,12 @@ export class AgentSession {
 	async dispose(): Promise<void> {
 		await this.sessionManager.flush();
 		await cleanupSshResources();
+
+		const taskTool = this.#toolRegistry.get("task") as any;
+		if (taskTool?.registry && typeof taskTool.registry.cleanup === "function") {
+			taskTool.registry.cleanup();
+		}
+
 		for (const state of this.#providerSessionState.values()) {
 			state.close();
 		}

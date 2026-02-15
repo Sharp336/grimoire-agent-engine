@@ -8,6 +8,7 @@ List all async tasks in the current session. Use after spawning tasks with `task
 - Results auto-deliver when tasks complete — do NOT use this to poll for completion
 - Set `include_completed: false` to see only running tasks
 - Use `check_task` with a specific task ID to get detailed results
+- Task results are automatically evicted from memory after approximately 5 minutes
 </instruction>
 
 <output>

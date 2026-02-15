@@ -19,6 +19,7 @@ export interface CheckTaskDetails {
 	message?: string;
 	result?: unknown;
 	error?: string;
+	followUpDeliveryFailed?: boolean;
 }
 
 export class CheckTaskTool implements AgentTool<typeof checkTaskSchema, CheckTaskDetails> {
@@ -71,6 +72,10 @@ export class CheckTaskTool implements AgentTool<typeof checkTaskSchema, CheckTas
 			details.error = task.error;
 		}
 
+		if (task.followUpDeliveryFailed) {
+			details.followUpDeliveryFailed = true;
+		}
+
 		return {
 			content: [
 				{
@@ -101,6 +106,10 @@ export class CheckTaskTool implements AgentTool<typeof checkTaskSchema, CheckTas
 			lines.push(`Results: ${task.result.length} item(s)`);
 		} else if (task.status === "failed" && task.error) {
 			lines.push(`Error: ${task.error}`);
+		}
+
+		if (task.followUpDeliveryFailed) {
+			lines.push(`⚠️ Task completion notification failed - check task result manually`);
 		}
 
 		return lines.join("\n");

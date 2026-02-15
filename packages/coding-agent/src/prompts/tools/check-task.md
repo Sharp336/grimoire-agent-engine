@@ -9,6 +9,7 @@ Query the status of an async task by ID. Use after spawning tasks with `task` to
 - For failed tasks, includes error message
 - Results auto-deliver when tasks complete — do NOT poll check_task in a loop
 - Use `list_tasks` to see all tasks; use this for detailed results from ONE specific task
+- Task results are automatically evicted from memory after approximately 5 minutes
 </instruction>
 
 <output>

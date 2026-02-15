@@ -33,6 +33,9 @@ export interface AsyncTaskHandle {
 	/** Error message, only set when status === "failed" */
 	error?: string;
 
+	/** Whether followUp delivery failed (user must check task result manually) */
+	followUpDeliveryFailed?: boolean;
+
 	/** Abort controller for cancellation */
 	abortController: AbortController;
 
