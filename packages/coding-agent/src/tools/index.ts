@@ -192,7 +192,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	notebook: s => new NotebookTool(s),
 	read: s => new ReadTool(s),
 	browser: s => new BrowserTool(s),
-	task: TaskTool.create,
+	task: s => TaskTool.create(s),
 	check_task: s => (s.taskRegistry ? new CheckTaskTool(s.taskRegistry) : null),
 	cancel_task: s => (s.taskRegistry ? new CancelTaskTool(s.taskRegistry) : null),
 	list_tasks: s => (s.taskRegistry ? new ListTasksTool(s, s.taskRegistry) : null),

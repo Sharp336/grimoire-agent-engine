@@ -73,7 +73,7 @@ describe("blocking task execution (regression)", () => {
 		const taskTool = await TaskTool.create(toolSession);
 
 		const params = {
-			agent: "developer",
+			agent: "task",
 			context: "Test context",
 			tasks: [
 				{
@@ -96,7 +96,7 @@ describe("blocking task execution (regression)", () => {
 		const taskTool = await TaskTool.create(toolSession);
 
 		const params = {
-			agent: "developer",
+			agent: "task",
 			context: "Test",
 			tasks: [
 				{
@@ -121,7 +121,7 @@ describe("blocking task execution (regression)", () => {
 		const taskTool = await TaskTool.create(toolSession);
 
 		const params = {
-			agent: "developer",
+			agent: "task",
 			context: "Test",
 			tasks: [
 				{
@@ -176,7 +176,7 @@ describe("blocking task execution (regression)", () => {
 		const taskTool = await TaskTool.create(toolSession);
 
 		const params = {
-			agent: "developer",
+			agent: "task",
 			context: "Test",
 			tasks: [],
 		};
@@ -195,7 +195,7 @@ describe("blocking task execution (regression)", () => {
 		const taskTool = await TaskTool.create(toolSession);
 
 		const params = {
-			agent: "developer",
+			agent: "task",
 			context: "Test",
 			tasks: [
 				{
@@ -224,7 +224,7 @@ describe("blocking task execution (regression)", () => {
 		const taskTool = await TaskTool.create(toolSession);
 
 		const params = {
-			agent: "developer",
+			agent: "task",
 			context: "Test",
 			tasks: [
 				{
@@ -267,7 +267,7 @@ describe("blocking task execution (regression)", () => {
 		const taskTool = await TaskTool.create(restrictedSession);
 
 		const params = {
-			agent: "developer", // Different from allowed agent
+			agent: "task", // Different from allowed agent
 			context: "Test",
 			tasks: [
 				{
@@ -290,7 +290,7 @@ describe("blocking task execution (regression)", () => {
 
 	it("handles disabled isolation gracefully", async () => {
 		const isolatedParams = {
-			agent: "developer",
+			agent: "task",
 			context: "Test",
 			isolated: true, // Requested but isolation is disabled
 			tasks: [
@@ -318,7 +318,7 @@ describe("blocking task execution (regression)", () => {
 
 		// Without context (optional)
 		const paramsNoContext = {
-			agent: "developer",
+			agent: "task",
 			tasks: [
 				{
 					id: "noCtx",
@@ -333,7 +333,7 @@ describe("blocking task execution (regression)", () => {
 
 		// With context
 		const paramsWithContext = {
-			agent: "developer",
+			agent: "task",
 			context: "Shared context",
 			tasks: [
 				{
@@ -352,7 +352,7 @@ describe("blocking task execution (regression)", () => {
 		const taskTool = await TaskTool.create(toolSession);
 
 		const params = {
-			agent: "developer",
+			agent: "task",
 			context: "Test",
 			schema: {
 				type: "object",
