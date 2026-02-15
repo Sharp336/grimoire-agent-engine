@@ -1190,24 +1190,18 @@
 
 ### Added
 
-- Added `resolveFileDisplayMode` utility to centralize file display mode resolution across tools (read, grep, file mentions)
-- Added automatic hashline formatting to @file mentions when hashline mode is active
-- Added `replace` hashline edit operation for substr-style fuzzy text replacement without line references, with optional `all` flag for replace-all behavior
-- Added `noopEdits` array to `applyHashlineEdits` return value to report edits that produced no changes, including edit index, location, and current content for diagnostics
-- Added validation to detect and reject hashline edits using wrong-format fields (`old_text`/`new_text` from replace mode, `diff` from patch mode) with helpful error messages
-- Added `additionalProperties: true` to all hashline edit schemas (`single`, `range`, `insertAfter`, and root) to tolerate extra fields from models
 - Added whitespace normalization in line reference parsing to tolerate spaces around colons (e.g., `5 : ab` now parses as `5:ab`)
 - Added `remaps` property to `HashlineMismatchError` providing quick-fix mapping of stale line references to corrected hashes
 - Added warnings detection in `applyHashlineEdits` to alert users when edits affect significantly more lines than expected, indicating possible unintended reformatting
 - Added diagnostic output showing target line content when an edit produces no changes, helping users identify hash mismatches or incorrect replacement content
 - Added `{{hashline}}` Handlebars helper to compute accurate `LINE:HASH` references for prompt examples and documentation
-- Added deduplication of identical hashline edits targeting the same line(s) in a single call
-- Added `replacement` as accepted alias for `content` in `insertAfter` operations
-- Added graceful degradation of `range` edits with missing `end` field to single-line edits
-- Added `additionalProperties: true` to hashline edit schemas to tolerate extra fields from models
+- Added `/mcp search <keyword>` integration with Smithery, including interactive result selection, editable server naming before deploy, Smithery `configSchema` prompts, and immediate runtime reload so selected MCP tools are available without restarting
+- Added OAuth failure fallback in `/mcp search` deploy flow to prompt for manual bearer tokens and validate them before saving configuration
+- Added Smithery auth support for `/mcp search` with cached API key login (`/mcp login`, `/mcp logout`) and automatic login prompt/retry on auth or rate-limit responses
 
 ### Changed
 
+<<<<<<< HEAD
 - Reverted hashline display format from `LINE:HASH  content` (two spaces) back to `LINE:HASH|content` (pipe separator) for consistency with legacy format
 - Changed hashline display format from `LINE:HASH| content` to `LINE:HASH  content` (two spaces instead of pipe separator) for improved readability
 - Removed `lines` and `hashes` parameters from `read` tool—file display mode (line numbers, hashlines) now determined automatically by settings and edit mode
@@ -1224,6 +1218,8 @@
 - Added guidance in hashline prompt for swap operations: use two `single` operations in one call rather than attempting to account for line number shifts
 - Strengthened anti-reformatting instructions in hashline prompt to reduce formatting-only failures
 - Improved no-op error recovery guidance in hashline prompt to prevent infinite retry loops
+=======
+>>>>>>> c0adc9a8 ([Feature] Official MCP registery support with /mcp search)
 - Renamed hashline edit operation keys from `replaceLine`/`replaceLines` to `single`/`range` for clearer semantics
 - Renamed hashline edit field `content` to `replacement` in `single` and `range` operations to distinguish from `insertAfter.content`
 - Improved no-op edit diagnostics to show specific line-by-line comparisons when replacements match current content, helping users identify hash mismatches or formatting issues
@@ -1251,12 +1247,6 @@
 
 ### Fixed
 
-- Fixed `parseLineRef` to handle both legacy pipe-separator format (`LINE:HASH| content`) and new two-space format (`LINE:HASH  content`) for backward compatibility
-- Fixed resource leak in browser query handler by properly disposing owned proxy elements for non-winning candidates
-- Fixed script evaluation to support async functions and await expressions in browser evaluate operations
-- Fixed `range` edits with missing `end` field to gracefully degrade to single-line edits instead of crashing
-- Fixed `insertAfter` operations to accept both `content` and `replacement` field names for consistency with other edit types
-- Fixed deduplication logic to correctly identify and remove identical hashline edits targeting the same line(s) in a single call
 - Fixed range-based edits to prevent invalid mutations when hash relocation changes the number of lines in the target range
 - Fixed multi-edit application to use original file state for all anchor references, preventing incorrect line numbers when earlier edits change file length
 

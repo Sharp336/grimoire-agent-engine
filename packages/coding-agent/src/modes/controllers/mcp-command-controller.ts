@@ -5,6 +5,9 @@
  */
 import { Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
+import { type Component, matchesKey, replaceTabs, Spacer, Text, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { getConfigRootDir, getProjectAgentDir, getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import type { SourceMeta } from "../../capability/types";
 import { analyzeAuthError, discoverOAuthEndpoints, MCPManager } from "../../mcp";
 import { connectToServer, disconnectServer, listTools } from "../../mcp/client";
@@ -15,8 +18,33 @@ import {
 	removeMCPServer,
 	setServerDisabled,
 	updateMCPServer,
+	validateServerName,
 } from "../../mcp/config-writer";
 import { MCPOAuthFlow } from "../../mcp/oauth-flow";
+import {
+	clearSmitheryApiKey,
+	createSmitheryCliAuthSession,
+	getSmitheryApiKey,
+	getSmitheryLoginUrl,
+	pollSmitheryCliAuthSession,
+	saveSmitheryApiKey,
+} from "../../mcp/smithery-auth";
+import {
+	createSmitheryConnection,
+	deleteSmitheryConnection,
+	getSmitheryApiBaseUrl,
+	getSmitheryConnection,
+	listSmitheryConnectionsByUrl,
+	resolveSmitheryNamespace,
+	SmitheryConnectError,
+	type SmitheryConnection,
+} from "../../mcp/smithery-connect";
+import {
+	SmitheryRegistryError,
+	type SmitherySearchResult,
+	searchSmitheryRegistry,
+	toConfigName,
+} from "../../mcp/smithery-registry";
 import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
 import type { OAuthCredential } from "../../session/auth-storage";
 import { shortenPath } from "../../tools/render-utils";
@@ -33,8 +61,56 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 	return Promise.race([promise, timeoutPromise]).finally(() => clearTimeout(timer));
 }
 
+function getMCPConfigPath(scope: "user" | "project", cwd: string): string {
+	return scope === "user" ? path.join(getConfigRootDir(), "mcp.json") : path.join(getProjectAgentDir(cwd), "mcp.json");
+}
+
+function parseCommandArgs(argsString: string): string[] {
+	const args: string[] = [];
+	let current = "";
+	let inQuote: string | null = null;
+
+	for (let i = 0; i < argsString.length; i++) {
+		const char = argsString[i];
+
+		if (inQuote) {
+			if (char === inQuote) {
+				inQuote = null;
+			} else {
+				current += char;
+			}
+		} else if (char === '"' || char === "'") {
+			inQuote = char;
+		} else if (char === " " || char === "\t") {
+			if (current) {
+				args.push(current);
+				current = "";
+			}
+		} else {
+			current += char;
+		}
+	}
+
+	if (current) {
+		args.push(current);
+	}
+
+	return args;
+}
+
+function sanitizeSelectText(text: string): string {
+	return replaceTabs(text)
+		.replace(/[\r\n]+/g, " ")
+		.replace(/\s+/g, " ")
+		.trim();
+}
+
+function formatUseCount(value: number | undefined): string {
+	if (typeof value !== "number" || Number.isNaN(value)) return "0";
+	return value.toLocaleString("en-US");
+}
+
 type MCPAddScope = "user" | "project";
-type MCPAddTransport = "http" | "sse";
 
 type MCPAddParsed = {
 	initialName?: string;
@@ -44,6 +120,146 @@ type MCPAddParsed = {
 	hasAuthToken?: boolean;
 	error?: string;
 };
+
+type MCPSearchParsed = {
+	keyword: string;
+	scope: MCPAddScope;
+	limit: number;
+	semantic: boolean;
+	error?: string;
+};
+
+type RegistryPickerItem = {
+	index: number;
+	name: string;
+	displayName: string;
+	description: string;
+	useCount: number;
+	verified: boolean;
+	deployed: boolean;
+	transport: string;
+	connectionType: string;
+	createdAt?: string;
+	homepage?: string;
+	schemaParams: string[];
+	tools: Array<{
+		name: string;
+		description?: string;
+		params: string[];
+	}>;
+};
+
+class RegistryResultPicker implements Component {
+	#selectedIndex = 0;
+	#expanded = new Set<number>();
+	#maxVisible: number;
+
+	onSelect?: (index: number) => void;
+	onCancel?: () => void;
+
+	constructor(
+		private readonly items: RegistryPickerItem[],
+		maxVisible = 8,
+	) {
+		this.#maxVisible = Math.max(4, maxVisible);
+	}
+
+	invalidate(): void {
+		// No cached state to invalidate.
+	}
+
+	render(width: number): string[] {
+		if (this.items.length === 0) {
+			return [theme.fg("muted", "  No registry results")];
+		}
+
+		const lines: string[] = [];
+		const startIndex = Math.max(
+			0,
+			Math.min(this.#selectedIndex - Math.floor(this.#maxVisible / 2), this.items.length - this.#maxVisible),
+		);
+		const endIndex = Math.min(startIndex + this.#maxVisible, this.items.length);
+
+		for (let i = startIndex; i < endIndex; i++) {
+			const item = this.items[i];
+			if (!item) continue;
+			const isSelected = i === this.#selectedIndex;
+			const isExpanded = this.#expanded.has(i);
+			const cursor = isSelected ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
+			const chevron = isExpanded ? "▾ " : "▸ ";
+			const base = `${cursor}${chevron}${item.name} ${theme.fg("muted", `[${item.transport}]`)}`;
+			lines.push(truncateToWidth(base, width));
+
+			if (!isExpanded) continue;
+			const indent = "    ";
+			const boolLabel = (value: boolean): string => (value ? theme.fg("success", "✓") : theme.fg("error", "✗"));
+			const rows: Array<[string, string]> = [
+				["displayedname", item.displayName],
+				["description", item.description],
+				["usecount", formatUseCount(item.useCount)],
+				["verified", boolLabel(item.verified)],
+				["deployed", boolLabel(item.deployed)],
+				["transport", item.transport],
+				["connectiontype", item.connectionType],
+				["createdate", item.createdAt ?? "n/a"],
+				["homepage", item.homepage ?? "n/a"],
+				["schemaparams", item.schemaParams.length > 0 ? `[${item.schemaParams.join(", ")}]` : "[0 params]"],
+			];
+			for (let j = 0; j < rows.length; j++) {
+				const [key, rawValue] = rows[j] ?? ["", ""];
+				const isLastMeta = j === rows.length - 1 && item.tools.length === 0;
+				const branch = theme.fg("dim", `${indent}${isLastMeta ? theme.tree.last : theme.tree.branch} `);
+				const value = /^https?:\/\//i.test(rawValue) ? `\x1b]8;;${rawValue}\x07${rawValue}\x1b]8;;\x07` : rawValue;
+				lines.push(truncateToWidth(`${branch}${theme.fg("dim", `${key}:`)} ${theme.fg("muted", value)}`, width));
+			}
+			const toolsBranch = theme.fg("dim", `${indent}${theme.tree.last} `);
+			lines.push(truncateToWidth(`${toolsBranch}${theme.fg("dim", "tools:")}`, width));
+			const toolIndent = `${indent}  `;
+			if (item.tools.length === 0) {
+				lines.push(truncateToWidth(`${toolIndent}${theme.fg("muted", "none")}`, width));
+			} else {
+				for (const tool of item.tools) {
+					const params = `[${tool.params.length} params]`;
+					const toolDescription = tool.description ? sanitizeSelectText(tool.description) : "No description";
+					const toolLine = `${tool.name}: ${toolDescription} ${params}`;
+					lines.push(truncateToWidth(`${toolIndent}${theme.fg("muted", toolLine)}`, width));
+				}
+			}
+		}
+
+		if (startIndex > 0 || endIndex < this.items.length) {
+			lines.push(theme.fg("muted", `  (${this.#selectedIndex + 1}/${this.items.length})`));
+		}
+
+		return lines;
+	}
+
+	handleInput(keyData: string): void {
+		if (matchesKey(keyData, "up")) {
+			this.#selectedIndex = this.#selectedIndex === 0 ? this.items.length - 1 : this.#selectedIndex - 1;
+			return;
+		}
+		if (matchesKey(keyData, "down")) {
+			this.#selectedIndex = this.#selectedIndex === this.items.length - 1 ? 0 : this.#selectedIndex + 1;
+			return;
+		}
+		if (matchesKey(keyData, "right")) {
+			this.#expanded.add(this.#selectedIndex);
+			return;
+		}
+		if (matchesKey(keyData, "left")) {
+			this.#expanded.delete(this.#selectedIndex);
+			return;
+		}
+		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
+			this.onSelect?.(this.#selectedIndex);
+			return;
+		}
+		if (matchesKey(keyData, "escape") || matchesKey(keyData, "esc") || matchesKey(keyData, "ctrl+c")) {
+			this.onCancel?.();
+		}
+	}
+}
 
 export class MCPCommandController {
 	constructor(private ctx: InteractiveModeContext) {}
@@ -74,6 +290,7 @@ export class MCPCommandController {
 			case "test":
 				await this.#handleTest(parts[2]);
 				break;
+			case "auth":
 			case "reauth":
 				await this.#handleReauth(parts[2]);
 				break;
@@ -98,6 +315,10 @@ export class MCPCommandController {
 			case "reload":
 				await this.#handleReload();
 				break;
+			case "registry":
+			case "registery":
+				await this.#handleRegistry(text);
+				break;
 			default:
 				this.ctx.showError(`Unknown subcommand: ${subcommand}. Type /mcp help for usage.`);
 		}
@@ -115,14 +336,19 @@ export class MCPCommandController {
 			"",
 			theme.fg("accent", "Commands:"),
 			"  /mcp add              Add a new MCP server (interactive wizard)",
-			"  /mcp add <name> [--scope project|user] [--url <url> --transport http|sse] [--token <token>] [-- <command...>]",
+			"  /mcp add <name> [--scope project|user] [--url <url> --token <token>] [-- <command...>]",
 			"  /mcp list             List all configured MCP servers",
 			"  /mcp remove <name> [--scope project|user]    Remove an MCP server (default: project)",
 			"  /mcp test <name>      Test connection to an MCP server",
-			"  /mcp reauth <name>    Reauthorize OAuth for an MCP server",
+			"  /mcp auth <name>      Reauthorize OAuth for an MCP server",
 			"  /mcp unauth <name>    Remove OAuth auth from an MCP server",
 			"  /mcp enable <name>    Enable an MCP server",
 			"  /mcp disable <name>   Disable an MCP server",
+			"  /mcp registry search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
+			"                        Search Smithery registry and deploy from picker",
+			"                        Use --semantic to keep raw Smithery ranking/results (no local filtering)",
+			"  /mcp registry login   Configure cached Smithery API key",
+			"  /mcp registry logout  Remove cached Smithery API key",
 			"  /mcp reload           Force reload and rediscover MCP runtime tools",
 			"  /mcp resources        List available resources from connected servers",
 			"  /mcp prompts          List available prompts from connected servers",
@@ -149,7 +375,6 @@ export class MCPCommandController {
 		let name: string | undefined;
 		let scope: MCPAddScope = "project";
 		let url: string | undefined;
-		let transport: MCPAddTransport = "http";
 		let authToken: string | undefined;
 		let commandTokens: string[] | undefined;
 
@@ -184,13 +409,7 @@ export class MCPCommandController {
 				continue;
 			}
 			if (argToken === "--transport") {
-				const value = tokens[i + 1];
-				if (!value || (value !== "http" && value !== "sse")) {
-					return { scope, error: "Invalid --transport value. Use http or sse." };
-				}
-				transport = value;
-				i += 2;
-				continue;
+				return { scope, error: "--transport is no longer supported. Use HTTP endpoints only." };
 			}
 			if (argToken === "--token") {
 				const value = tokens[i + 1];
@@ -215,7 +434,7 @@ export class MCPCommandController {
 			return { scope, error: "Use either --url or -- <command...>, not both." };
 		}
 		if (authToken && !url) {
-			return { scope, error: "--token requires --url (HTTP/SSE transport)." };
+			return { scope, error: "--token requires --url (HTTP transport)." };
 		}
 
 		if (commandTokens && commandTokens.length > 0) {
@@ -228,13 +447,12 @@ export class MCPCommandController {
 			return { scope, initialName: name, quickConfig: config, isCommandQuickAdd: true };
 		}
 
-		const useHttpTransport = transport === "http";
 		let normalizedUrl = url!;
 		if (!/^https?:\/\//i.test(normalizedUrl)) {
 			normalizedUrl = `https://${normalizedUrl}`;
 		}
 		const config: MCPServerConfig = {
-			type: useHttpTransport ? "http" : "sse",
+			type: "http",
 			url: normalizedUrl,
 			headers: authToken ? { Authorization: `Bearer ${authToken}` } : undefined,
 		};
@@ -245,6 +463,124 @@ export class MCPCommandController {
 			isCommandQuickAdd: false,
 			hasAuthToken: Boolean(authToken),
 		};
+	}
+
+	#parseSearchCommand(text: string): MCPSearchParsed {
+		const prefixMatch = text.match(/^\/mcp\s+(?:registry\s+)?search\b\s*(.*)$/i);
+		const rest = prefixMatch?.[1]?.trim() ?? "";
+		const tokens = parseCommandArgs(rest);
+		if (tokens.length === 0) {
+			return {
+				keyword: "",
+				scope: "project",
+				limit: 20,
+				semantic: false,
+				error: "Keyword required. Usage: /mcp registry search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
+			};
+		}
+
+		const keywordParts: string[] = [];
+		let scope: MCPAddScope = "project";
+		let limit = 20;
+		let semantic = false;
+
+		for (let i = 0; i < tokens.length; i++) {
+			const token = tokens[i];
+			if (token === "--scope") {
+				const value = tokens[i + 1];
+				if (!value || (value !== "project" && value !== "user")) {
+					return { keyword: "", scope, limit, semantic, error: "Invalid --scope value. Use project or user." };
+				}
+				scope = value;
+				i++;
+				continue;
+			}
+			if (token === "--limit") {
+				const value = tokens[i + 1];
+				if (!value) {
+					return { keyword: "", scope, limit, semantic, error: "Missing value for --limit." };
+				}
+				const parsed = Number(value);
+				if (!Number.isInteger(parsed) || parsed < 1 || parsed > 100) {
+					return {
+						keyword: "",
+						scope,
+						limit,
+						semantic,
+						error: "Invalid --limit value. Use an integer between 1 and 100.",
+					};
+				}
+				limit = parsed;
+				i++;
+				continue;
+			}
+			if (token === "--semantic") {
+				semantic = true;
+				continue;
+			}
+			if (token.startsWith("--")) {
+				return { keyword: "", scope, limit, semantic, error: `Unknown option: ${token}` };
+			}
+			keywordParts.push(token);
+		}
+
+		const keyword = keywordParts.join(" ").trim();
+		if (!keyword) {
+			return {
+				keyword: "",
+				scope,
+				limit,
+				semantic,
+				error: "Keyword required. Usage: /mcp registry search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
+			};
+		}
+
+		return { keyword, scope, limit, semantic };
+	}
+
+	async #handleRegistry(text: string): Promise<void> {
+		const prefixMatch = text.match(/^\/mcp\s+(?:registry|registery)\b\s*(.*)$/i);
+		const rest = prefixMatch?.[1]?.trim() ?? "";
+		if (!rest || rest === "help") {
+			this.#showMessage(
+				[
+					"",
+					theme.bold("MCP Registry Commands"),
+					"",
+					theme.fg("muted", "Registry provider: Smithery (registry.smithery.ai + api.smithery.ai)."),
+					theme.fg(
+						"muted",
+						"Remote HTTP-based providers require Smithery API access. Run /mcp registry login before search/deploy.",
+					),
+					"",
+					"  /mcp registry search <keyword> [--scope project|user] [--limit <1-100>] [--semantic]",
+					"    --semantic: keep raw Smithery ranking/results (no local filtering)",
+					"  /mcp registry login",
+					"  /mcp registry logout",
+					"",
+				].join("\n"),
+			);
+			return;
+		}
+
+		const firstSpace = rest.indexOf(" ");
+		const action = (firstSpace === -1 ? rest : rest.slice(0, firstSpace)).toLowerCase();
+		const tail = firstSpace === -1 ? "" : rest.slice(firstSpace + 1);
+
+		if (action === "search") {
+			await this.#handleSearch(`/mcp search ${tail}`.trimEnd());
+			return;
+		}
+		if (action === "login") {
+			await this.#handleSmitheryLogin();
+			return;
+		}
+		if (action === "logout") {
+			await this.#handleSmitheryLogout();
+			return;
+		}
+
+		this.ctx.showError(`Unknown registry subcommand: ${action}. Use /mcp registry help.`);
 	}
 
 	/**
@@ -314,9 +650,17 @@ export class MCPCommandController {
 						}
 					}
 				}
+			try {
+				await this.#deployConfig({
+					serverName: parsed.initialName,
+					scope: parsed.scope,
+					config: parsed.quickConfig,
+					prepareAuth: !parsed.isCommandQuickAdd,
+					hasManualCredentials: Boolean(parsed.hasAuthToken),
+				});
+			} catch (authError) {
+				this.ctx.showError(authError instanceof Error ? authError.message : String(authError));
 			}
-
-			await this.#handleWizardComplete(parsed.initialName, finalConfig, parsed.scope);
 			return;
 		}
 
@@ -380,7 +724,8 @@ export class MCPCommandController {
 			);
 		}
 
-		const resolvedClientId = clientId.trim() || parsedAuthUrl.searchParams.get("client_id") || undefined;
+		let resolvedClientId = clientId.trim() || parsedAuthUrl.searchParams.get("client_id") || undefined;
+		let promptedForClientId = false;
 
 		try {
 			// Create OAuth flow
@@ -418,92 +763,180 @@ export class MCPCommandController {
 						);
 						this.ctx.ui.requestRender();
 						const isWindows = process.platform === "win32";
+		for (;;) {
+			try {
+				const authUrlForFlow = new URL(parsedAuthUrl.toString());
+				if (resolvedClientId) {
+					authUrlForFlow.searchParams.set("client_id", resolvedClientId);
+				}
 
-						// Try to open browser automatically
-						try {
-							openPath(info.url);
-
-							// Show confirmation that browser should open
-							this.ctx.chatContainer.addChild(new Spacer(1));
-							this.ctx.chatContainer.addChild(
-								new Text(theme.fg("success", "→ Opening browser automatically..."), 1, 0),
-							);
-							this.ctx.chatContainer.addChild(new Spacer(1));
-							this.ctx.chatContainer.addChild(
-								new Text(theme.fg("muted", "Alternative if browser did not open:"), 1, 0),
-							);
-							this.ctx.chatContainer.addChild(
-								new Text(theme.fg("success", "Copy this exact URL in your browser:"), 1, 0),
-							);
-							this.ctx.chatContainer.addChild(new Text(theme.fg("accent", info.url), 1, 0));
-							if (isWindows) {
-								const openCmd = `rundll32.exe url.dll,FileProtocolHandler "${info.url.replace(/"/g, '""')}"`;
-								this.ctx.chatContainer.addChild(new Spacer(1));
-								this.ctx.chatContainer.addChild(new Text("Windows manual open command:", 1, 0));
-								this.ctx.chatContainer.addChild(new Text(openCmd, 1, 0));
-							}
-							this.ctx.ui.requestRender();
-						} catch (_error) {
-							// Show error if browser doesn't open
-							this.ctx.chatContainer.addChild(new Spacer(1));
-							this.ctx.chatContainer.addChild(
-								new Text(theme.fg("warning", "→ Could not open browser automatically"), 1, 0),
-							);
-							this.ctx.chatContainer.addChild(
-								new Text(theme.fg("success", "Copy this exact URL in your browser:"), 1, 0),
-							);
-							this.ctx.chatContainer.addChild(new Text(theme.fg("accent", info.url), 1, 0));
-							if (isWindows) {
-								const openCmd = `rundll32.exe url.dll,FileProtocolHandler "${info.url.replace(/"/g, '""')}"`;
-								this.ctx.chatContainer.addChild(new Spacer(1));
-								this.ctx.chatContainer.addChild(new Text("Windows manual open command:", 1, 0));
-								this.ctx.chatContainer.addChild(new Text(openCmd, 1, 0));
-							}
-							this.ctx.ui.requestRender();
-						}
+				// Create OAuth flow
+				const flow = new MCPOAuthFlow(
+					{
+						authorizationUrl: authUrlForFlow.toString(),
+						tokenUrl: tokenUrl,
+						clientId: resolvedClientId,
+						clientSecret: clientSecret || undefined,
+						scopes: scopes || undefined,
 					},
-					onProgress: (message: string) => {
-						this.ctx.chatContainer.addChild(new Spacer(1));
-						this.ctx.chatContainer.addChild(new Text(theme.fg("muted", message), 1, 0));
-						this.ctx.ui.requestRender();
+					{
+						onAuth: (info: { url: string; instructions?: string }) => {
+							// Show auth URL prominently in chat
+							this.ctx.chatContainer.addChild(new Spacer(1));
+							this.ctx.chatContainer.addChild(
+								new Text(theme.fg("accent", "━━━ OAuth Authorization Required ━━━"), 1, 0),
+							);
+							this.ctx.chatContainer.addChild(new Spacer(1));
+							this.ctx.chatContainer.addChild(
+								new Text(theme.fg("muted", "Preparing browser authorization..."), 1, 0),
+							);
+							this.ctx.chatContainer.addChild(new Spacer(1));
+							this.ctx.chatContainer.addChild(
+								new Text(
+									theme.fg("muted", "Waiting for authorization... (Press Ctrl+C to cancel, 5 minute timeout)"),
+									1,
+									0,
+								),
+							);
+							this.ctx.chatContainer.addChild(new Spacer(1));
+							this.ctx.chatContainer.addChild(
+								new Text(theme.fg("accent", "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"), 1, 0),
+							);
+							this.ctx.ui.requestRender();
+							const isWindows = process.platform === "win32";
+							const isMac = process.platform === "darwin";
+							const isLinux = process.platform === "linux";
+
+							// Try to open browser automatically
+							try {
+								if (isWindows) {
+									// Windows: use URL protocol handler directly to avoid cmd quoting issues.
+									Bun.spawn(["rundll32.exe", "url.dll,FileProtocolHandler", info.url], {
+										stdout: "ignore",
+										stderr: "ignore",
+										stdin: "ignore",
+									});
+								} else if (isMac) {
+									// macOS: Use 'open' command
+									Bun.spawn(["open", info.url], {
+										stdout: "ignore",
+										stderr: "ignore",
+										stdin: "ignore",
+									});
+								} else if (isLinux) {
+									// Linux: Try xdg-open
+									Bun.spawn(["xdg-open", info.url], {
+										stdout: "ignore",
+										stderr: "ignore",
+										stdin: "ignore",
+									});
+								}
+
+								// Show confirmation that browser should open
+								this.ctx.chatContainer.addChild(new Spacer(1));
+								this.ctx.chatContainer.addChild(
+									new Text(theme.fg("success", "→ Opening browser automatically..."), 1, 0),
+								);
+								this.ctx.chatContainer.addChild(new Spacer(1));
+								this.ctx.chatContainer.addChild(
+									new Text(theme.fg("muted", "Alternative if browser did not open:"), 1, 0),
+								);
+								this.ctx.chatContainer.addChild(
+									new Text(theme.fg("success", "Copy this exact URL in your browser:"), 1, 0),
+								);
+								this.ctx.chatContainer.addChild(new Text(theme.fg("accent", info.url), 1, 0));
+								if (isWindows) {
+									const openCmd = `rundll32.exe url.dll,FileProtocolHandler "${info.url.replace(/"/g, '""')}"`;
+									this.ctx.chatContainer.addChild(new Spacer(1));
+									this.ctx.chatContainer.addChild(new Text("Windows manual open command:", 1, 0));
+									this.ctx.chatContainer.addChild(new Text(openCmd, 1, 0));
+								}
+								this.ctx.ui.requestRender();
+							} catch (_error) {
+								// Show error if browser doesn't open
+								this.ctx.chatContainer.addChild(new Spacer(1));
+								this.ctx.chatContainer.addChild(
+									new Text(theme.fg("warning", "→ Could not open browser automatically"), 1, 0),
+								);
+								this.ctx.chatContainer.addChild(
+									new Text(theme.fg("success", "Copy this exact URL in your browser:"), 1, 0),
+								);
+								this.ctx.chatContainer.addChild(new Text(theme.fg("accent", info.url), 1, 0));
+								if (isWindows) {
+									const openCmd = `rundll32.exe url.dll,FileProtocolHandler "${info.url.replace(/"/g, '""')}"`;
+									this.ctx.chatContainer.addChild(new Spacer(1));
+									this.ctx.chatContainer.addChild(new Text("Windows manual open command:", 1, 0));
+									this.ctx.chatContainer.addChild(new Text(openCmd, 1, 0));
+								}
+								this.ctx.ui.requestRender();
+							}
+						},
+						onProgress: (message: string) => {
+							this.ctx.chatContainer.addChild(new Spacer(1));
+							this.ctx.chatContainer.addChild(new Text(theme.fg("muted", message), 1, 0));
+							this.ctx.ui.requestRender();
+						},
 					},
-				},
-			);
+				);
 
-			// Execute OAuth flow with 5 minute timeout
-			const credentials = await withTimeout(flow.login(), 5 * 60 * 1000, "OAuth flow timed out after 5 minutes");
+				// Execute OAuth flow with 5 minute timeout
+				const credentials = await withTimeout(flow.login(), 5 * 60 * 1000, "OAuth flow timed out after 5 minutes");
 
-			this.ctx.chatContainer.addChild(new Spacer(1));
-			this.ctx.chatContainer.addChild(new Text(theme.fg("success", "✓ Authorization completed in browser."), 1, 0));
-			this.ctx.ui.requestRender();
+				this.ctx.chatContainer.addChild(new Spacer(1));
+				this.ctx.chatContainer.addChild(
+					new Text(theme.fg("success", "✓ Authorization completed in browser."), 1, 0),
+				);
+				this.ctx.ui.requestRender();
 
-			// Generate a unique credential ID
-			const credentialId = `mcp_oauth_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+				// Generate a unique credential ID
+				const credentialId = `mcp_oauth_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
 
-			// Store credentials in auth storage
-			const oauthCredential: OAuthCredential = {
-				type: "oauth",
-				...credentials,
-			};
+				// Store credentials in auth storage
+				const oauthCredential: OAuthCredential = {
+					type: "oauth",
+					...credentials,
+				};
 
-			// Store under a synthetic provider name
-			await authStorage.set(credentialId, oauthCredential);
+				// Store under a synthetic provider name
+				await authStorage.set(credentialId, oauthCredential);
 
-			return credentialId;
-		} catch (error) {
-			const errorMsg = error instanceof Error ? error.message : String(error);
+				return credentialId;
+			} catch (error) {
+				const errorMsg = error instanceof Error ? error.message : String(error);
+				const isTimeoutError = /timeout|timed out/i.test(errorMsg);
+				const requiresClientId =
+					/client[_-]?id/i.test(errorMsg) && /(required|missing|invalid_request|must be provided)/i.test(errorMsg);
+				const shouldPromptForClientId =
+					!resolvedClientId && !promptedForClientId && (requiresClientId || isTimeoutError);
+				if (shouldPromptForClientId) {
+					promptedForClientId = true;
+					const manualClientId = await this.ctx.showHookInput(
+						'OAuth may require "client_id". Enter client ID to retry (Esc to cancel)',
+					);
+					if (manualClientId === undefined) {
+						throw new Error("OAuth cancelled. Provider requires a client_id.");
+					}
+					const trimmedClientId = manualClientId.trim();
+					if (!trimmedClientId) {
+						throw new Error("OAuth cancelled. Provider requires a non-empty client_id.");
+					}
+					resolvedClientId = trimmedClientId;
+					this.#showMessage(["", theme.fg("muted", 'Retrying OAuth with provided "client_id"...'), ""].join("\n"));
+					continue;
+				}
 
-			// Provide helpful error messages based on failure type
-			if (errorMsg.includes("timeout") || errorMsg.includes("timed out")) {
-				throw new Error("OAuth flow timed out. Please try again.");
-			} else if (errorMsg.includes("403") || errorMsg.includes("unauthorized")) {
-				throw new Error("OAuth authorization failed. Please check your client credentials.");
-			} else if (errorMsg.includes("invalid_grant")) {
-				throw new Error("OAuth authorization code is invalid or expired. Please try again.");
-			} else if (errorMsg.includes("ECONNREFUSED") || errorMsg.includes("fetch failed")) {
-				throw new Error("Could not connect to OAuth server. Please check the URLs and your network connection.");
-			} else {
-				throw new Error(`OAuth authentication failed: ${errorMsg}`);
+				// Provide helpful error messages based on failure type
+				if (isTimeoutError) {
+					throw new Error("OAuth flow timed out. Please try again.");
+				} else if (errorMsg.includes("403") || errorMsg.includes("unauthorized")) {
+					throw new Error("OAuth authorization failed. Please check your client credentials.");
+				} else if (errorMsg.includes("invalid_grant")) {
+					throw new Error("OAuth authorization code is invalid or expired. Please try again.");
+				} else if (errorMsg.includes("ECONNREFUSED") || errorMsg.includes("fetch failed")) {
+					throw new Error("Could not connect to OAuth server. Please check the URLs and your network connection.");
+				} else {
+					throw new Error(`OAuth authentication failed: ${errorMsg}`);
+				}
 			}
 		}
 	}
@@ -519,7 +952,7 @@ export class MCPCommandController {
 		if (this.ctx.mcpManager) {
 			resolvedConfig = await this.ctx.mcpManager.prepareConfig(config);
 		} else {
-			const tempManager = new MCPManager(getProjectDir());
+			const tempManager = new MCPManager(process.cwd());
 			tempManager.setAuthStorage(this.ctx.session.modelRegistry.authStorage);
 			resolvedConfig = await tempManager.prepareConfig(config);
 		}
@@ -531,7 +964,7 @@ export class MCPCommandController {
 	async #findConfiguredServer(
 		name: string,
 	): Promise<{ filePath: string; scope: "user" | "project"; config: MCPServerConfig } | null> {
-		const cwd = getProjectDir();
+		const cwd = process.cwd();
 		const userPath = getMCPConfigPath("user", cwd);
 		const projectPath = getMCPConfigPath("project", cwd);
 
@@ -558,6 +991,62 @@ export class MCPCommandController {
 		const next = { ...config } as MCPServerConfig & { auth?: { type: "oauth" | "apikey"; credentialId?: string } };
 		delete next.auth;
 		return next;
+	}
+
+	#extractSmitheryConnectionRef(config: MCPServerConfig): { namespace: string; connectionId: string } | null {
+		if (config.type !== "http" && config.type !== "sse") return null;
+		let parsedConfigUrl: URL;
+		let parsedSmitheryApiUrl: URL;
+		try {
+			parsedConfigUrl = new URL(config.url);
+			parsedSmitheryApiUrl = new URL(getSmitheryApiBaseUrl());
+		} catch {
+			return null;
+		}
+		if (parsedConfigUrl.origin !== parsedSmitheryApiUrl.origin) return null;
+		const pathMatch = parsedConfigUrl.pathname.match(/^\/connect\/([^/]+)\/([^/]+)\/mcp\/?$/);
+		if (!pathMatch) return null;
+		const namespace = decodeURIComponent(pathMatch[1] ?? "");
+		const connectionId = decodeURIComponent(pathMatch[2] ?? "");
+		if (!namespace || !connectionId) return null;
+		return { namespace, connectionId };
+	}
+
+	async #cleanupSmitheryConnection(name: string, config: MCPServerConfig): Promise<void> {
+		const reference = this.#extractSmitheryConnectionRef(config);
+		if (!reference) return;
+
+		const deleteWithKey = async (apiKey: string): Promise<void> => {
+			await deleteSmitheryConnection(apiKey, reference.namespace, reference.connectionId);
+		};
+
+		try {
+			await this.#runSmitheryOperationWithAuthRetry(
+				deleteWithKey,
+				`required to remove Smithery connection for "${name}"`,
+			);
+		} catch (error) {
+			if (error instanceof Error && error.message.includes("cancelled")) {
+				this.ctx.showWarning(`Skipped Smithery connection cleanup for "${name}" (not authenticated).`);
+				return;
+			}
+			const status = this.#getSmitheryErrorStatus(error);
+			if (status === 404) {
+				return;
+			}
+			this.ctx.showWarning(
+				`Failed to remove Smithery connection for "${name}": ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
+
+	async #cleanupServerAuthArtifacts(name: string, config: MCPServerConfig): Promise<void> {
+		const authConfig = (config as MCPServerConfig & { auth?: { type: "oauth" | "apikey"; credentialId?: string } })
+			.auth;
+		if (authConfig?.type === "oauth") {
+			await this.#removeManagedOAuthCredential(authConfig.credentialId);
+		}
+		await this.#cleanupSmitheryConnection(name, config);
 	}
 
 	async #resolveOAuthEndpointsFromServer(config: MCPServerConfig): Promise<{
@@ -621,7 +1110,19 @@ export class MCPCommandController {
 			} catch {
 				// Ignore timeout/errors here and use status check below.
 			}
-			const state = this.ctx.mcpManager.getConnectionStatus(name);
+			const settleDeadline = Date.now() + 12_000;
+			let hadConnectingState = false;
+			let state = this.ctx.mcpManager.getConnectionStatus(name);
+			while (Date.now() < settleDeadline) {
+				state = this.ctx.mcpManager.getConnectionStatus(name);
+				if (state === "connected") {
+					break;
+				}
+				if (state === "connecting") {
+					hadConnectingState = true;
+				}
+				await Bun.sleep(400);
+			}
 			if (state === "connected") {
 				// Connection may complete after initial reload; rebind runtime MCP tools now.
 				await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
@@ -630,10 +1131,13 @@ export class MCPCommandController {
 				statusText.setText(theme.fg("success", `✓ Connected to "${name}"`));
 			} else if (state === "connecting") {
 				statusText.setText(theme.fg("muted", `◌ "${name}" is still connecting...`));
+			} else if (hadConnectingState) {
+				state = "connecting";
+				statusText.setText(theme.fg("muted", `◌ "${name}" is still connecting...`));
 			} else {
 				statusText.setText(
 					options?.suppressDisconnectedWarning
-						? theme.fg("muted", `◌ Connection check complete for "${name}"`)
+						? theme.fg("muted", `◌ "${name}" is still initializing in the background`)
 						: theme.fg("warning", `⚠ Could not connect to "${name}" yet`),
 				);
 			}
@@ -656,14 +1160,28 @@ export class MCPCommandController {
 	async #handleWizardComplete(name: string, config: MCPServerConfig, scope: "user" | "project"): Promise<void> {
 		try {
 			// Determine file path
-			const cwd = getProjectDir();
+			const cwd = process.cwd();
 			const filePath = getMCPConfigPath(scope, cwd);
 
 			// Add server to config
 			await addMCPServer(filePath, name, config);
 
 			// Reload MCP manager
-			await this.#reloadMCP();
+			await this.#reloadMCP({ suppressedErrorServers: new Set([name]) });
+			const hasApiLikeEnv =
+				config.type === "stdio" &&
+				Object.keys(config.env ?? {}).some(key => /API[_-]?KEY|ACCESS[_-]?TOKEN|TOKEN/i.test(key));
+			if (hasApiLikeEnv && this.ctx.mcpManager) {
+				try {
+					if (this.ctx.mcpManager.getConnectionStatus(name) !== "disconnected") {
+						await this.ctx.mcpManager.disconnectServer(name);
+					}
+					await this.ctx.mcpManager.connectServers({ [name]: config }, {});
+					await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
+				} catch {
+					// Keep default reload state; connection status handling below will report outcome.
+				}
+			}
 			const state =
 				config.enabled === false
 					? "disconnected"
@@ -721,6 +1239,745 @@ export class MCPCommandController {
 		}
 	}
 
+	async #pickRegistryResult(results: SmitherySearchResult[], keyword: string): Promise<SmitherySearchResult | null> {
+		const items: RegistryPickerItem[] = results.map((result, index) => {
+			const transport = sanitizeSelectText(result.display.transport);
+			return {
+				index,
+				name: sanitizeSelectText(result.name),
+				displayName: sanitizeSelectText(result.display.displayName),
+				description: sanitizeSelectText(result.display.description),
+				useCount: result.display.useCount,
+				verified: result.display.verified,
+				deployed: result.display.deployed,
+				transport,
+				connectionType: sanitizeSelectText(result.display.connectionType),
+				createdAt: result.display.createdAt ? sanitizeSelectText(result.display.createdAt) : undefined,
+				homepage: result.display.homepage ? sanitizeSelectText(result.display.homepage) : undefined,
+				schemaParams: result.requiredInputs.map(input => sanitizeSelectText(input.key)),
+				tools: result.display.tools.map(tool => ({
+					name: sanitizeSelectText(tool.name),
+					description: tool.description ? sanitizeSelectText(tool.description) : undefined,
+					params: tool.params.map(param => sanitizeSelectText(param)),
+				})),
+			};
+		});
+
+		this.#showMessage(
+			[
+				"",
+				theme.bold(`Registry results for "${keyword}"`),
+				theme.fg(
+					"dim",
+					"Use Up/Down to navigate, Right to expand, Left to collapse, Enter to deploy, Esc to cancel.",
+				),
+				"",
+			].join("\n"),
+		);
+
+		return await this.ctx.showHookCustom<SmitherySearchResult | null>((_tui, _theme, _keys, done) => {
+			const selector = new RegistryResultPicker(items, Math.min(items.length, 10));
+			selector.onSelect = index => {
+				done(results[index] ?? null);
+			};
+			selector.onCancel = () => {
+				done(null);
+			};
+
+			return selector;
+		});
+	}
+
+	async #nextAvailableServerName(scope: MCPAddScope, baseName: string): Promise<string> {
+		const filePath = getMCPConfigPath(scope, process.cwd());
+		const config = await readMCPConfigFile(filePath);
+		const existingNames = new Set(Object.keys(config.mcpServers ?? {}));
+		if (!existingNames.has(baseName)) return baseName;
+		for (let i = 2; i <= 999; i++) {
+			const candidate = `${baseName}-${i}`;
+			if (!existingNames.has(candidate)) {
+				return candidate;
+			}
+		}
+		return `${baseName}-${Date.now()}`;
+	}
+
+	async #deployRegistryResult(result: SmitherySearchResult, scope: MCPAddScope): Promise<void> {
+		const baseName = toConfigName(result.name);
+		const defaultName = await this.#nextAvailableServerName(scope, baseName);
+		const serverName = await this.#promptDeploymentServerName(scope, defaultName);
+		if (!serverName) {
+			this.ctx.showStatus("MCP deploy cancelled.");
+			return;
+		}
+		try {
+			const smitheryConfig = await this.#createSmitheryRuntimeConfig(result, serverName);
+			await this.#deployConfig({
+				serverName,
+				scope,
+				config: smitheryConfig,
+				prepareAuth: false,
+				hasManualCredentials: true,
+			});
+		} catch (authError) {
+			this.ctx.showError(authError instanceof Error ? authError.message : String(authError));
+			return;
+		}
+	}
+
+	async #ensureSmitheryConnectedConnection(
+		apiKey: string,
+		mcpUrl: string,
+		connectionName: string,
+	): Promise<{ namespace: string; connection: SmitheryConnection }> {
+		const namespace = await resolveSmitheryNamespace(apiKey);
+		const existingConnections = await listSmitheryConnectionsByUrl(apiKey, namespace, mcpUrl);
+		let connection = existingConnections[0];
+		if (!connection) {
+			connection = await createSmitheryConnection(apiKey, namespace, {
+				mcpUrl,
+				name: connectionName,
+			});
+		}
+
+		const connectionStatus = connection.status;
+		if (connectionStatus?.state !== "auth_required") {
+			return { namespace, connection };
+		}
+
+		const authUrl =
+			typeof connectionStatus.authorizationUrl === "string" ? connectionStatus.authorizationUrl : undefined;
+		if (authUrl) {
+			this.#showMessage(
+				[
+					"",
+					theme.bold(`Smithery authorization required for "${connectionName}"`),
+					theme.fg("dim", "Complete authorization in your browser to continue."),
+					theme.fg("accent", authUrl),
+					"",
+				].join("\n"),
+			);
+			await this.#openExternalUrl(authUrl);
+		}
+
+		const timeoutMs = 300_000;
+		const pollMs = 2_000;
+		const startedAt = Date.now();
+		for (;;) {
+			if (Date.now() - startedAt >= timeoutMs) {
+				throw new Error(`Timed out waiting for Smithery authorization for "${connectionName}".`);
+			}
+
+			const nextConnection = await getSmitheryConnection(apiKey, namespace, connection.connectionId);
+			const nextStatus = nextConnection.status?.state;
+			if (nextStatus === "connected") {
+				return { namespace, connection: nextConnection };
+			}
+			if (nextStatus === "error") {
+				const message =
+					nextConnection.status && "message" in nextConnection.status
+						? String(nextConnection.status.message)
+						: "Unknown error";
+				throw new Error(`Smithery connection error for "${connectionName}": ${message}`);
+			}
+
+			await Bun.sleep(pollMs);
+		}
+	}
+
+	async #createSmitheryRuntimeConfig(result: SmitherySearchResult, connectionName: string): Promise<MCPServerConfig> {
+		const mcpUrl = `https://server.smithery.ai/${result.name}`;
+		const getConfig = async (apiKey: string): Promise<MCPServerConfig> => {
+			const { namespace, connection } = await this.#ensureSmitheryConnectedConnection(
+				apiKey,
+				mcpUrl,
+				connectionName,
+			);
+			const runtimeUrl = `${getSmitheryApiBaseUrl()}/connect/${encodeURIComponent(namespace)}/${encodeURIComponent(connection.connectionId)}/mcp`;
+			return {
+				type: "http",
+				url: runtimeUrl,
+				headers: {
+					Authorization: `Bearer ${apiKey}`,
+				},
+			};
+		};
+		return await this.#runSmitheryOperationWithAuthRetry(getConfig, "required for Smithery connect");
+	}
+
+	async #deployConfig(options: {
+		serverName: string;
+		scope: MCPAddScope;
+		config: MCPServerConfig;
+		prepareAuth: boolean;
+		hasManualCredentials: boolean;
+	}): Promise<void> {
+		let config = options.config;
+		if (options.prepareAuth && config.type !== "stdio") {
+			config = await this.#prepareHttpConfigAuth(options.serverName, config, {
+				hasManualCredentials: options.hasManualCredentials,
+			});
+		}
+		await this.#handleWizardComplete(options.serverName, config, options.scope);
+	}
+
+	async #prepareHttpConfigAuth(
+		serverName: string,
+		config: MCPServerConfig,
+		options: { hasManualCredentials: boolean },
+	): Promise<MCPServerConfig> {
+		if (config.type !== "http" && config.type !== "sse") {
+			return config;
+		}
+
+		try {
+			await this.#handleTestConnection(config);
+			return config;
+		} catch (error) {
+			if (options.hasManualCredentials) {
+				throw new Error(
+					`Authentication failed for "${serverName}": ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+
+			const authResult = analyzeAuthError(error as Error);
+			if (!authResult.requiresAuth) {
+				return config;
+			}
+
+			let oauth = authResult.authType === "oauth" ? (authResult.oauth ?? null) : null;
+			if (!oauth && config.url) {
+				try {
+					oauth = await discoverOAuthEndpoints(config.url);
+				} catch {
+					// Ignore discovery failure and throw below.
+				}
+			}
+
+			if (!oauth) {
+				const fallbackConfig = await this.#promptBearerFallback(serverName, config, "OAuth endpoints unavailable");
+				if (fallbackConfig) return fallbackConfig;
+				throw new Error(
+					`Authentication required for "${serverName}", but OAuth endpoints could not be discovered. ` +
+						`Use /mcp add ${serverName} (wizard) or configure auth manually.`,
+				);
+			}
+
+			try {
+				const credentialId = await this.#handleOAuthFlow(
+					oauth.authorizationUrl,
+					oauth.tokenUrl,
+					oauth.clientId ?? "",
+					"",
+					oauth.scopes ?? "",
+				);
+
+				const oauthConfig: MCPServerConfig = {
+					...config,
+					auth: {
+						type: "oauth",
+						credentialId,
+					},
+				};
+
+				try {
+					await this.#handleTestConnection(oauthConfig);
+				} catch {
+					const fallbackConfig = await this.#promptBearerFallback(
+						serverName,
+						config,
+						"OAuth completed but server token validation failed",
+					);
+					if (fallbackConfig) return fallbackConfig;
+				}
+
+				return oauthConfig;
+			} catch (oauthError) {
+				const oauthErrorMessage = oauthError instanceof Error ? oauthError.message : String(oauthError);
+				const shouldTryClientIdFallback =
+					this.#isClientIdRequiredError(oauthErrorMessage) ||
+					(!oauth.clientId && /timeout|timed out/i.test(oauthErrorMessage));
+				if (shouldTryClientIdFallback) {
+					const clientIdFallback = await this.#promptClientIdFallback(serverName, config, oauth);
+					if (clientIdFallback) return clientIdFallback;
+				}
+
+				const fallbackConfig = await this.#promptBearerFallback(
+					serverName,
+					config,
+					`OAuth flow failed: ${oauthErrorMessage}`,
+				);
+				if (fallbackConfig) return fallbackConfig;
+				throw oauthError;
+			}
+		}
+	}
+
+	#isClientIdRequiredError(message: string): boolean {
+		const hasClientIdSignal = (value: string): boolean => /(?:^|[^a-z])client(?:[_\-\s]?id)(?:[^a-z]|$)/i.test(value);
+		const hasMissingSignal = (value: string): boolean =>
+			/(required|requires|missing|not provided|must be provided|absent|mandatory|expected)/i.test(value);
+		const hasInvalidSignal = (value: string): boolean => /(invalid_request|invalid_client|invalid)/i.test(value);
+		const decode = (value: string): string => {
+			try {
+				return decodeURIComponent(value.replace(/\+/g, "%20"));
+			} catch {
+				return value;
+			}
+		};
+		const combineSignals = (value: string): boolean =>
+			hasClientIdSignal(value) && (hasMissingSignal(value) || hasInvalidSignal(value));
+		if (combineSignals(message)) return true;
+		if (combineSignals(decode(message))) return true;
+
+		// Parse inline JSON error payloads when present.
+		const jsonMatch = message.match(/\{[\s\S]*\}/);
+		if (jsonMatch) {
+			try {
+				const data = JSON.parse(jsonMatch[0]) as Record<string, unknown>;
+				const fields = [
+					data.error,
+					data.error_description,
+					data.error_uri,
+					data.message,
+					data.detail,
+					data.title,
+					data.hint,
+				]
+					.filter((value): value is string => typeof value === "string")
+					.join(" ");
+				if (combineSignals(fields)) return true;
+				if ((data.error === "invalid_request" || data.error === "invalid_client") && hasClientIdSignal(fields)) {
+					return true;
+				}
+			} catch {
+				// Ignore JSON parse failures and continue with other strategies.
+			}
+		}
+
+		// Parse WWW-Authenticate style key/value pairs.
+		const challengePairs = Array.from(message.matchAll(/([a-zA-Z_][a-zA-Z0-9_-]*)="([^"]+)"/g));
+		if (challengePairs.length > 0) {
+			const challenge = new Map<string, string>();
+			for (const [, key, value] of challengePairs) {
+				challenge.set(key.toLowerCase(), decode(value));
+			}
+			const errorText = `${challenge.get("error") ?? ""} ${challenge.get("error_description") ?? ""} ${
+				challenge.get("message") ?? ""
+			}`.trim();
+			if (combineSignals(errorText)) return true;
+		}
+
+		// Parse URLs with query params that may encode OAuth errors.
+		const urls = Array.from(message.matchAll(/https?:\/\/[^\s)\]]+/g)).map(match => match[0]);
+		for (const rawUrl of urls) {
+			try {
+				const parsedUrl = new URL(rawUrl);
+				const queryText = [
+					parsedUrl.searchParams.get("error"),
+					parsedUrl.searchParams.get("error_description"),
+					parsedUrl.searchParams.get("message"),
+				]
+					.filter((value): value is string => typeof value === "string")
+					.map(decode)
+					.join(" ");
+				if (combineSignals(queryText)) return true;
+			} catch {
+				// Ignore malformed URL-like strings.
+			}
+		}
+
+		return false;
+	}
+
+	async #promptClientIdFallback(
+		serverName: string,
+		config: MCPServerConfig,
+		oauth: { authorizationUrl: string; tokenUrl: string; scopes?: string },
+	): Promise<MCPServerConfig | null> {
+		const clientIdInput = await this.ctx.showHookInput(
+			`OAuth provider for ${serverName} requires client_id. Enter client_id (Esc to skip)`,
+		);
+		if (clientIdInput === undefined) return null;
+
+		const clientId = clientIdInput.trim();
+		if (!clientId) {
+			this.ctx.showError("client_id cannot be empty.");
+			return null;
+		}
+
+		try {
+			const credentialId = await this.#handleOAuthFlow(
+				oauth.authorizationUrl,
+				oauth.tokenUrl,
+				clientId,
+				"",
+				oauth.scopes ?? "",
+			);
+			const oauthConfig: MCPServerConfig = {
+				...config,
+				auth: {
+					type: "oauth",
+					credentialId,
+				},
+			};
+			await this.#handleTestConnection(oauthConfig);
+			return oauthConfig;
+		} catch (error) {
+			this.ctx.showError(
+				`OAuth retry with client_id failed for "${serverName}": ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return null;
+		}
+	}
+
+	async #promptBearerFallback(
+		serverName: string,
+		config: MCPServerConfig,
+		reason: string,
+	): Promise<MCPServerConfig | null> {
+		if (config.type !== "http" && config.type !== "sse") return null;
+
+		this.#showMessage(
+			[
+				"",
+				theme.fg("warning", `OAuth fallback for "${serverName}"`),
+				theme.fg("muted", reason),
+				theme.fg("muted", "You can provide a bearer token manually."),
+				"",
+			].join("\n"),
+		);
+
+		for (;;) {
+			const tokenInput = await this.ctx.showHookInput(`Bearer token for ${serverName} (Esc to cancel)`);
+			if (tokenInput === undefined) return null;
+			const trimmed = tokenInput.trim();
+			if (trimmed.length === 0) {
+				this.ctx.showError("Bearer token cannot be empty.");
+				continue;
+			}
+
+			const authorization = /^bearer\s+/i.test(trimmed) ? trimmed : `Bearer ${trimmed}`;
+			const candidateConfig: MCPServerConfig = {
+				...config,
+				headers: {
+					...(config.headers ?? {}),
+					Authorization: authorization,
+				},
+			};
+
+			try {
+				await this.#handleTestConnection(candidateConfig);
+				return candidateConfig;
+			} catch (error) {
+				this.ctx.showError(
+					`Bearer token validation failed for "${serverName}": ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+	}
+
+	async #promptDeploymentServerName(scope: MCPAddScope, defaultName: string): Promise<string | null> {
+		for (;;) {
+			const input = await this.ctx.showHookInput(`Server name for deploy (default: ${defaultName})`, defaultName);
+			if (input === undefined) return null;
+			const proposed = input.trim().length > 0 ? input.trim() : defaultName;
+			const validationError = validateServerName(proposed);
+			if (validationError) {
+				this.ctx.showError(validationError);
+				continue;
+			}
+
+			const filePath = getMCPConfigPath(scope, process.cwd());
+			const config = await readMCPConfigFile(filePath);
+			if (config.mcpServers?.[proposed]) {
+				this.ctx.showError(`Server "${proposed}" already exists in ${scope} config.`);
+				continue;
+			}
+			return proposed;
+		}
+	}
+
+	async #openExternalUrl(url: string): Promise<void> {
+		const isWindows = process.platform === "win32";
+		const isMac = process.platform === "darwin";
+		const isLinux = process.platform === "linux";
+		if (isWindows) {
+			Bun.spawn(["rundll32.exe", "url.dll,FileProtocolHandler", url], {
+				stdout: "ignore",
+				stderr: "ignore",
+				stdin: "ignore",
+			});
+			return;
+		}
+		if (isMac) {
+			Bun.spawn(["open", url], {
+				stdout: "ignore",
+				stderr: "ignore",
+				stdin: "ignore",
+			});
+			return;
+		}
+		if (isLinux) {
+			Bun.spawn(["xdg-open", url], {
+				stdout: "ignore",
+				stderr: "ignore",
+				stdin: "ignore",
+			});
+		}
+	}
+
+	async #validateSmitheryApiKey(apiKey: string): Promise<void> {
+		await searchSmitheryRegistry("mcp", { limit: 1, apiKey });
+	}
+
+	async #promptSmitheryApiKey(promptLabel: string): Promise<string | null> {
+		for (;;) {
+			const input = await this.ctx.showHookInput(promptLabel);
+			if (input === undefined) return null;
+			const apiKey = input.trim();
+			if (!apiKey) {
+				this.ctx.showError("Smithery API key cannot be empty.");
+				continue;
+			}
+			try {
+				await this.#validateSmitheryApiKey(apiKey);
+				return apiKey;
+			} catch (error) {
+				this.ctx.showError(
+					`Smithery API key validation failed: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+	}
+
+	async #handleSmitheryLoginWithApiKey(): Promise<boolean> {
+		const apiKey = await this.#promptSmitheryApiKey("Smithery API key (Esc to cancel)");
+		if (!apiKey) return false;
+		await saveSmitheryApiKey(apiKey);
+		this.ctx.showStatus("Smithery API key saved.");
+		return true;
+	}
+
+	async #waitForSmitheryCliApiKey(sessionId: string, signal: AbortSignal): Promise<string> {
+		const pollIntervalMs = 2_000;
+		const timeoutMs = 300_000;
+		const startedAt = Date.now();
+
+		while (!signal.aborted) {
+			if (Date.now() - startedAt >= timeoutMs) {
+				throw new Error("Smithery authorization timed out after 5 minutes.");
+			}
+
+			const response = await pollSmitheryCliAuthSession(sessionId, signal);
+			if (response.status === "success" && response.apiKey) {
+				return response.apiKey;
+			}
+			if (response.status === "error") {
+				throw new Error(response.message ?? "Smithery authorization failed.");
+			}
+			await Bun.sleep(pollIntervalMs);
+		}
+
+		throw new Error("Smithery authorization cancelled.");
+	}
+
+	async #handleSmitheryBrowserLogin(): Promise<boolean> {
+		const session = await createSmitheryCliAuthSession();
+		const fallbackLoginUrl = getSmitheryLoginUrl();
+		this.#showMessage(
+			[
+				"",
+				theme.bold("Smithery Login"),
+				theme.fg(
+					"muted",
+					"Browser authorization started. You can also paste an API key; whichever completes first is used.",
+				),
+				theme.fg("dim", "Authorize URL:"),
+				theme.fg("accent", session.authUrl),
+				theme.fg("dim", `Fallback: ${fallbackLoginUrl}`),
+				"",
+			].join("\n"),
+		);
+		try {
+			await this.#openExternalUrl(session.authUrl);
+		} catch {
+			// URL is shown in chat as fallback.
+		}
+
+		const abortController = new AbortController();
+		const { promise, resolve, reject } = Promise.withResolvers<string | null>();
+		let settled = false;
+		let manualDone = false;
+		let browserDone = false;
+		let browserError: unknown;
+
+		const settleResolve = (value: string | null) => {
+			if (settled) return;
+			settled = true;
+			resolve(value);
+		};
+		const settleReject = (error: unknown) => {
+			if (settled) return;
+			settled = true;
+			reject(error);
+		};
+
+		void (async () => {
+			try {
+				const apiKey = await this.#promptSmitheryApiKey(
+					"Paste Smithery API key (or wait for browser auth). Esc skips manual entry.",
+				);
+				manualDone = true;
+				if (apiKey) {
+					abortController.abort();
+					settleResolve(apiKey);
+					return;
+				}
+				if (browserDone && !settled) {
+					if (browserError) {
+						settleReject(browserError);
+						return;
+					}
+					settleResolve(null);
+				}
+			} catch (error) {
+				manualDone = true;
+				settleReject(error);
+			}
+		})();
+
+		void (async () => {
+			try {
+				const apiKey = await this.#waitForSmitheryCliApiKey(session.sessionId, abortController.signal);
+				browserDone = true;
+				this.ctx.hideHookInput();
+				settleResolve(apiKey);
+			} catch (error) {
+				browserDone = true;
+				browserError = error;
+				if (manualDone && !settled) {
+					settleReject(error);
+				}
+			}
+		})();
+
+		const apiKey = await promise;
+		if (!apiKey) return false;
+		await this.#validateSmitheryApiKey(apiKey);
+		await saveSmitheryApiKey(apiKey);
+		this.ctx.showStatus("Smithery API key saved.");
+		return true;
+	}
+
+	async #promptSmitheryLogin(reason: string): Promise<boolean> {
+		this.#showMessage(["", theme.fg("muted", `Smithery authentication required (${reason}).`), ""].join("\n"));
+		try {
+			return await this.#handleSmitheryBrowserLogin();
+		} catch (error) {
+			this.ctx.showWarning(
+				`Browser authorization failed: ${error instanceof Error ? error.message : String(error)}. Falling back to API key.`,
+			);
+			return await this.#handleSmitheryLoginWithApiKey();
+		}
+	}
+
+	#getSmitheryErrorStatus(error: unknown): number | undefined {
+		if (error instanceof SmitheryRegistryError || error instanceof SmitheryConnectError) {
+			return error.status;
+		}
+		return undefined;
+	}
+
+	#toSmitheryAuthReason(status: number): string {
+		return status === 429 ? "rate limited by Smithery" : "forbidden/unauthorized with Smithery";
+	}
+
+	async #requireSmitheryApiKey(reason: string): Promise<string> {
+		let apiKey = await getSmitheryApiKey();
+		if (apiKey) return apiKey;
+
+		const loggedIn = await this.#promptSmitheryLogin(reason);
+		if (!loggedIn) {
+			throw new Error("Smithery authentication was cancelled.");
+		}
+
+		apiKey = await getSmitheryApiKey();
+		if (!apiKey) {
+			throw new Error("Smithery API key not found after login.");
+		}
+		return apiKey;
+	}
+
+	async #runSmitheryOperationWithAuthRetry<T>(operation: (apiKey: string) => Promise<T>, reason: string): Promise<T> {
+		const apiKey = await this.#requireSmitheryApiKey(reason);
+		try {
+			return await operation(apiKey);
+		} catch (error) {
+			const status = this.#getSmitheryErrorStatus(error);
+			if (status === undefined || ![401, 403, 429].includes(status)) {
+				throw error;
+			}
+			const loggedIn = await this.#promptSmitheryLogin(this.#toSmitheryAuthReason(status));
+			if (!loggedIn) {
+				throw error;
+			}
+			const retryApiKey = await this.#requireSmitheryApiKey(reason);
+			return await operation(retryApiKey);
+		}
+	}
+
+	async #handleSmitheryLogin(): Promise<void> {
+		const ok = await this.#promptSmitheryLogin("login");
+		if (!ok) {
+			this.ctx.showStatus("Smithery login cancelled.");
+		}
+	}
+
+	async #handleSmitheryLogout(): Promise<void> {
+		const removed = await clearSmitheryApiKey();
+		this.ctx.showStatus(removed ? "Smithery API key removed." : "No cached Smithery API key found.");
+	}
+
+	async #handleSearch(text: string): Promise<void> {
+		const parsed = this.#parseSearchCommand(text);
+		if (parsed.error) {
+			this.ctx.showError(parsed.error);
+			return;
+		}
+
+		try {
+			this.#showMessage(
+				["", theme.fg("muted", `Searching Smithery registry for "${parsed.keyword}"...`), ""].join("\n"),
+			);
+			const results = await this.#runSmitheryOperationWithAuthRetry(
+				apiKey =>
+					searchSmitheryRegistry(parsed.keyword, {
+						limit: parsed.limit,
+						apiKey,
+						includeSemantic: parsed.semantic,
+					}),
+				"required for registry search",
+			);
+			if (results.length === 0) {
+				this.#showMessage(
+					["", theme.fg("warning", `No registry results found for "${parsed.keyword}".`), ""].join("\n"),
+				);
+				return;
+			}
+
+			const selected = await this.#pickRegistryResult(results, parsed.keyword);
+			if (!selected) {
+				this.ctx.showStatus("MCP registry selection cancelled.");
+				return;
+			}
+
+			await this.#deployRegistryResult(selected, parsed.scope);
+		} catch (error) {
+			this.ctx.showError(`Registry search failed: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
 	#handleWizardCancel(): void {
 		this.#showMessage(
 			[
@@ -738,7 +1995,7 @@ export class MCPCommandController {
 	 */
 	async #handleList(): Promise<void> {
 		try {
-			const cwd = getProjectDir();
+			const cwd = process.cwd();
 
 			// Load from both user and project configs
 			const userPath = getMCPConfigPath("user", cwd);
@@ -921,7 +2178,7 @@ export class MCPCommandController {
 		}
 
 		try {
-			const cwd = getProjectDir();
+			const cwd = process.cwd();
 			const userPath = getMCPConfigPath("user", cwd);
 			const projectPath = getMCPConfigPath("project", cwd);
 			const filePath = scope === "user" ? userPath : projectPath;
@@ -935,6 +2192,8 @@ export class MCPCommandController {
 			if (this.ctx.mcpManager?.getConnection(name)) {
 				await this.ctx.mcpManager.disconnectServer(name);
 			}
+
+			await this.#cleanupServerAuthArtifacts(name, config.mcpServers[name]);
 
 			// Remove from config
 			await removeMCPServer(filePath, name);
@@ -965,7 +2224,7 @@ export class MCPCommandController {
 
 		let connection: MCPServerConnection | undefined;
 		try {
-			const cwd = getProjectDir();
+			const cwd = process.cwd();
 			const userPath = getMCPConfigPath("user", cwd);
 			const projectPath = getMCPConfigPath("project", cwd);
 
@@ -997,7 +2256,7 @@ export class MCPCommandController {
 			if (this.ctx.mcpManager) {
 				resolvedConfig = await this.ctx.mcpManager.prepareConfig(config);
 			} else {
-				const tempManager = new MCPManager(getProjectDir());
+				const tempManager = new MCPManager(process.cwd());
 				tempManager.setAuthStorage(this.ctx.session.modelRegistry.authStorage);
 				resolvedConfig = await tempManager.prepareConfig(config);
 			}
@@ -1161,12 +2420,7 @@ export class MCPCommandController {
 				return;
 			}
 
-			const currentAuth = (
-				found.config as MCPServerConfig & { auth?: { type: "oauth" | "apikey"; credentialId?: string } }
-			).auth;
-			if (currentAuth?.type === "oauth") {
-				await this.#removeManagedOAuthCredential(currentAuth.credentialId);
-			}
+			await this.#cleanupServerAuthArtifacts(name, found.config);
 
 			const updated = this.#stripOAuthAuth(found.config);
 			await updateMCPServer(found.filePath, name, updated);
@@ -1182,7 +2436,7 @@ export class MCPCommandController {
 
 	async #handleReauth(name: string | undefined): Promise<void> {
 		if (!name) {
-			this.ctx.showError("Server name required. Usage: /mcp reauth <name>");
+			this.ctx.showError("Server name required. Usage: /mcp auth <name>");
 			return;
 		}
 
@@ -1265,7 +2519,7 @@ export class MCPCommandController {
 	/**
 	 * Reload MCP manager with new configs
 	 */
-	async #reloadMCP(): Promise<void> {
+	async #reloadMCP(options?: { suppressedErrorServers?: Set<string> }): Promise<void> {
 		if (!this.ctx.mcpManager) {
 			return;
 		}
@@ -1279,8 +2533,14 @@ export class MCPCommandController {
 
 		// Show any connection errors
 		if (result.errors.size > 0) {
+			const visibleErrors = [...result.errors.entries()].filter(([serverName]) => {
+				return !options?.suppressedErrorServers?.has(serverName);
+			});
+			if (visibleErrors.length === 0) {
+				return;
+			}
 			const errorLines = ["", theme.fg("warning", "Some servers failed to connect:"), ""];
-			for (const [serverName, error] of result.errors.entries()) {
+			for (const [serverName, error] of visibleErrors) {
 				errorLines.push(`  ${serverName}: ${error}`);
 			}
 			errorLines.push("");
