@@ -718,6 +718,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		getPlanModeState: () => session.getPlanModeState(),
 		getCompactContext: () => session.formatCompactContext(),
 		deliverFollowUp: (text: string) => session.followUp(text),
+		deliverTaskCompletion: (text: string) => session.deliverTaskCompletion(text),
 		settings,
 		authStorage,
 		modelRegistry,

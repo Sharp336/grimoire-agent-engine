@@ -505,10 +505,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 					};
 				}
 
-				const maxAsync = Math.min(
-					this.session.settings.get("task.maxAsyncTasks"),
-					TaskRegistry.MAX_TASKS,
-				);
+				const maxAsync = Math.min(this.session.settings.get("task.maxAsyncTasks"), TaskRegistry.MAX_TASKS);
 				const runningCount = this.#registry.list().filter(t => t.status === "running").length;
 				if (runningCount >= maxAsync) {
 					if (tempArtifactsDir) {
@@ -650,14 +647,14 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 
 				// Register callback BEFORE task registration to prevent race condition
 				// If task completes instantly, callback won't be missed
-				if (this.session.deliverFollowUp) {
+				if (this.session.deliverTaskCompletion) {
 					this.#registry.onComplete(taskId, handle => {
 						try {
 							if (handle.status === "cancelled") return;
 
-							// Re-check deliverFollowUp inside callback instead of using captured variable
-							const followUp = this.session.deliverFollowUp;
-							if (!followUp) return;
+							// Re-check deliverTaskCompletion inside callback instead of using captured variable
+							const deliverCompletion = this.session.deliverTaskCompletion;
+							if (!deliverCompletion) return;
 
 							const duration = handle.completedAt ? handle.completedAt - handle.createdAt : 0;
 							const durationStr = duration > 0 ? ` (${Math.round(duration / 1000)}s)` : "";
@@ -665,7 +662,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 							if (handle.status === "completed") {
 								const resultCount = handle.result?.length ?? 0;
 								Promise.resolve(
-									followUp(
+									deliverCompletion(
 										renderPromptTemplate(asyncTaskCompleteTemplate, {
 											taskId,
 											agent: agentName,
@@ -677,7 +674,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 										}),
 									),
 								).catch(e => {
-									logger.error("Async task follow-up delivery failed", {
+									logger.error("Async task completion delivery failed", {
 										taskId,
 										error: String(e),
 									});
@@ -686,7 +683,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 								});
 							} else if (handle.status === "failed") {
 								Promise.resolve(
-									followUp(
+									deliverCompletion(
 										renderPromptTemplate(asyncTaskCompleteTemplate, {
 											taskId,
 											agent: agentName,
@@ -698,7 +695,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 										}),
 									),
 								).catch(e => {
-									logger.error("Async task follow-up delivery failed", {
+									logger.error("Async task completion delivery failed", {
 										taskId,
 										error: String(e),
 									});
@@ -707,7 +704,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 								});
 							}
 						} catch (err) {
-logger.error("Async task follow-up delivery failed", {
+							logger.error("Async task completion delivery failed", {
 								taskId,
 								error: String(err),
 							});

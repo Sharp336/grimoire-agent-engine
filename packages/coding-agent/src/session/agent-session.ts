@@ -72,6 +72,7 @@ import type { PlanModeState } from "../plan-mode/state";
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
+import asyncTaskCompleteTemplate from "../prompts/tools/async-task-complete.md" with { type: "text" };
 import { closeAllConnections } from "../ssh/connection-manager";
 import { unmountAll } from "../ssh/sshfs-mount";
 import { outputMeta } from "../tools/output-meta";
@@ -858,6 +859,7 @@ export class AgentSession {
 			await this.#extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
 			await this.#extensionRunner.emit({ type: "agent_end", messages: event.messages });
+			await this.#triggerRecursiveCompletionDelivery();
 		} else if (event.type === "turn_start") {
 			const hookEvent: TurnStartEvent = {
 				type: "turn_start",
@@ -1723,6 +1725,71 @@ export class AgentSession {
 			throw new Error(
 				`Extension command "/${commandName}" cannot be queued. Use prompt() or execute the command when not streaming.`,
 			);
+		}
+	}
+
+	/**
+	 * Deliver async task completion message with auto-wakeup.
+	 * If agent is idle, prompts a new turn immediately.
+	 * If agent is streaming, queues as follow-up.
+	 */
+	async deliverTaskCompletion(text: string): Promise<void> {
+		if (this.isStreaming) {
+			await this.followUp(text);
+		} else {
+			await this.prompt(text);
+		}
+	}
+
+	/**
+	 * Trigger recursive completion delivery if there are undelivered completed tasks.
+	 * Called after a turn completes to process tasks that finished during execution.
+	 */
+	async #triggerRecursiveCompletionDelivery(): Promise<void> {
+		const taskTool = this.#toolRegistry.get("task") as any;
+		if (!taskTool?.registry) return;
+
+		const maxRecursionDepth = 10;
+		let depth = 0;
+
+		while (depth < maxRecursionDepth) {
+			if (this.isStreaming) break;
+
+			const undeliveredTasks = taskTool.registry.hasUndeliveredCompleted();
+			if (!undeliveredTasks) break;
+
+			const completedTasks = taskTool.registry.getAndClearCompleted();
+			for (const task of completedTasks) {
+				const duration = task.completedAt ? task.completedAt - task.createdAt : 0;
+				const durationStr = duration > 0 ? ` (${Math.round(duration / 1000)}s)` : "";
+
+				if (task.status === "completed") {
+					const resultCount = task.result?.length ?? 0;
+					const message = renderPromptTemplate(asyncTaskCompleteTemplate, {
+						taskId: task.id,
+						agent: task.agent,
+						status: "completed",
+						duration: durationStr,
+						description: task.description,
+						statusMessage: `completed${durationStr}.`,
+						resultCount: resultCount > 0 ? resultCount : undefined,
+					});
+					await this.deliverTaskCompletion(message);
+				} else if (task.status === "failed") {
+					const message = renderPromptTemplate(asyncTaskCompleteTemplate, {
+						taskId: task.id,
+						agent: task.agent,
+						status: "failed",
+						duration: durationStr,
+						description: task.description,
+						statusMessage: `failed${durationStr}.`,
+						error: task.error ?? "unknown error",
+					});
+					await this.deliverTaskCompletion(message);
+				}
+			}
+
+			depth++;
 		}
 	}
 

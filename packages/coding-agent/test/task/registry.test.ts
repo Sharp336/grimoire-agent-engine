@@ -261,11 +261,10 @@ describe("TaskRegistry", () => {
 
 		registry.register(taskId1, {
 			id: taskId1,
-			status: "completed",
+			status: "running",
 			agent: "test-agent",
 			description: "Completed task",
 			createdAt: Date.now(),
-			completedAt: Date.now(),
 			progress: [],
 			abortController: new AbortController(),
 			promise: promise1,
@@ -282,12 +281,159 @@ describe("TaskRegistry", () => {
 			promise: promise2,
 		});
 
+		resolve1({ content: [{ type: "text", text: "done" }] });
+		await promise1;
+
 		registry.cleanup();
 
 		expect(registry.get(taskId1)).toBeUndefined();
 		expect(registry.get(taskId2)).toBeDefined();
 
-		resolve1({ content: [{ type: "text", text: "done" }] });
 		resolve2({ content: [{ type: "text", text: "done" }] });
+	});
+
+	it("getAndClearCompleted returns completed tasks not yet delivered", async () => {
+		const completedTaskId1 = Snowflake.next();
+		const completedTaskId2 = Snowflake.next();
+		const runningTaskId = Snowflake.next();
+
+		const { promise: promise1, resolve: resolve1 } = Promise.withResolvers<AgentToolResult<TaskToolDetails>>();
+		const { promise: promise2, resolve: resolve2 } = Promise.withResolvers<AgentToolResult<TaskToolDetails>>();
+		const { promise: promise3 } = Promise.withResolvers<AgentToolResult<TaskToolDetails>>();
+
+		registry.register(completedTaskId1, {
+			id: completedTaskId1,
+			status: "running",
+			agent: "test-agent",
+			description: "Completed task 1",
+			createdAt: Date.now(),
+			progress: [],
+			abortController: new AbortController(),
+			promise: promise1,
+		});
+
+		registry.register(runningTaskId, {
+			id: runningTaskId,
+			status: "running",
+			agent: "test-agent",
+			description: "Running task",
+			createdAt: Date.now(),
+			progress: [],
+			abortController: new AbortController(),
+			promise: promise3,
+		});
+
+		resolve1({ content: [{ type: "text", text: "done" }] });
+		await promise1;
+
+		const completedTasks1 = registry.getAndClearCompleted();
+		expect(completedTasks1).toHaveLength(1);
+		expect(completedTasks1[0].id).toBe(completedTaskId1);
+
+		registry.register(completedTaskId2, {
+			id: completedTaskId2,
+			status: "running",
+			agent: "test-agent",
+			description: "Completed task 2",
+			createdAt: Date.now(),
+			progress: [],
+			abortController: new AbortController(),
+			promise: promise2,
+		});
+
+		resolve2({ content: [{ type: "text", text: "done" }] });
+		await promise2;
+
+		const completedTasks2 = registry.getAndClearCompleted();
+		expect(completedTasks2).toHaveLength(1);
+		expect(completedTasks2[0].id).toBe(completedTaskId2);
+
+		const completedTasks3 = registry.getAndClearCompleted();
+		expect(completedTasks3).toHaveLength(0);
+	});
+
+	it("hasUndeliveredCompleted returns true when tasks completed but not delivered", async () => {
+		const taskId = Snowflake.next();
+		const { promise, resolve } = Promise.withResolvers<AgentToolResult<TaskToolDetails>>();
+
+		registry.register(taskId, {
+			id: taskId,
+			status: "running",
+			agent: "test-agent",
+			description: "Test task",
+			createdAt: Date.now(),
+			progress: [],
+			abortController: new AbortController(),
+			promise,
+		});
+
+		expect(registry.hasUndeliveredCompleted()).toBe(false);
+
+		resolve({ content: [{ type: "text", text: "done" }] });
+		await promise;
+		await Bun.sleep(10);
+
+		expect(registry.hasUndeliveredCompleted()).toBe(true);
+
+		registry.getAndClearCompleted();
+
+		expect(registry.hasUndeliveredCompleted()).toBe(false);
+	});
+
+	it("delivery tracking prevents double delivery", async () => {
+		const taskId = Snowflake.next();
+		const { promise, resolve } = Promise.withResolvers<AgentToolResult<TaskToolDetails>>();
+
+		registry.register(taskId, {
+			id: taskId,
+			status: "running",
+			agent: "test-agent",
+			description: "Test task",
+			createdAt: Date.now(),
+			progress: [],
+			abortController: new AbortController(),
+			promise,
+		});
+
+		resolve({ content: [{ type: "text", text: "done" }] });
+		await promise;
+
+		const delivery1 = registry.getAndClearCompleted();
+		expect(delivery1).toHaveLength(1);
+		expect(delivery1[0].id).toBe(taskId);
+
+		const delivery2 = registry.getAndClearCompleted();
+		expect(delivery2).toHaveLength(0);
+	});
+
+	it("getAndClearCompleted returns failed tasks", async () => {
+		const taskId = Snowflake.next();
+		const { promise, reject } = Promise.withResolvers<AgentToolResult<TaskToolDetails>>();
+
+		registry.register(taskId, {
+			id: taskId,
+			status: "running",
+			agent: "test-agent",
+			description: "Test task",
+			createdAt: Date.now(),
+			progress: [],
+			abortController: new AbortController(),
+			promise,
+		});
+
+		reject(new Error("Test error"));
+
+		try {
+			await promise;
+		} catch {
+			// Expected
+		}
+
+		await Bun.sleep(10);
+
+		const completedTasks = registry.getAndClearCompleted();
+		expect(completedTasks).toHaveLength(1);
+		expect(completedTasks[0].status).toBe("failed");
+		expect(completedTasks[0].error).toBe("Test error");
 	});
 });

@@ -56,6 +56,7 @@ export class TaskRegistry {
 	#tasks = new Map<string, AsyncTaskHandle>();
 	#completionCallbacks = new Map<string, Set<(handle: AsyncTaskHandle) => void>>();
 	#evictionTimers = new Map<string, NodeJS.Timeout>();
+	#deliveredResults = new Set<string>();
 
 	/**
 	 * Register a new task.
@@ -155,10 +156,38 @@ export class TaskRegistry {
 	}
 
 	/**
+	 * Get and clear completed tasks that haven't been delivered yet.
+	 * Marks them as delivered to prevent double delivery.
+	 */
+	getAndClearCompleted(): AsyncTaskHandle[] {
+		const completed: AsyncTaskHandle[] = [];
+		for (const [id, task] of this.#tasks.entries()) {
+			if ((task.status === "completed" || task.status === "failed") && !this.#deliveredResults.has(id)) {
+				completed.push(task);
+				this.#deliveredResults.add(id);
+			}
+		}
+		return completed;
+	}
+
+	/**
+	 * Check if there are completed tasks that haven't been delivered yet.
+	 */
+	hasUndeliveredCompleted(): boolean {
+		for (const [id, task] of this.#tasks.entries()) {
+			if ((task.status === "completed" || task.status === "failed") && !this.#deliveredResults.has(id)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	/**
 	 * Clean up completed tasks from the registry.
 	 * Keeps running tasks.
 	 */
 	cleanup(): void {
+		this.#deliveredResults.clear();
 		for (const [id, task] of this.#tasks.entries()) {
 			if (task.status !== "running") {
 				// Clear timer first (exception safety)

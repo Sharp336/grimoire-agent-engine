@@ -175,6 +175,8 @@ export interface ToolSession {
 	taskRegistry?: import("../task/registry").TaskRegistry;
 	/** Callback to deliver a follow-up message after a tool returns (for async task completion) */
 	deliverFollowUp?: (text: string) => void;
+	/** Callback to deliver async task completion with auto-wakeup support */
+	deliverTaskCompletion?: (text: string) => void;
 }
 
 type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
@@ -194,8 +196,10 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	browser: s => new BrowserTool(s),
 	task: s => TaskTool.create(s),
 	check_task: s => (s.settings.get("task.asyncEnabled") && s.taskRegistry ? new CheckTaskTool(s.taskRegistry) : null),
-	cancel_task: s => (s.settings.get("task.asyncEnabled") && s.taskRegistry ? new CancelTaskTool(s.taskRegistry) : null),
-	list_tasks: s => (s.settings.get("task.asyncEnabled") && s.taskRegistry ? new ListTasksTool(s, s.taskRegistry) : null),
+	cancel_task: s =>
+		s.settings.get("task.asyncEnabled") && s.taskRegistry ? new CancelTaskTool(s.taskRegistry) : null,
+	list_tasks: s =>
+		s.settings.get("task.asyncEnabled") && s.taskRegistry ? new ListTasksTool(s, s.taskRegistry) : null,
 	todo_write: s => new TodoWriteTool(s),
 	fetch: s => new FetchTool(s),
 	web_search: s => new SearchTool(s),
