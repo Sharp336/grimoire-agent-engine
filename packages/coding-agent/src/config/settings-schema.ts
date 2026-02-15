@@ -496,6 +496,15 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
+	"task.asyncEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Async tasks",
+			description: "Enable async task execution and companion tools (check_task, list_tasks, cancel_task)",
+		},
+	},
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// Startup settings

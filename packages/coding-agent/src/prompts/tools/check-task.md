@@ -17,4 +17,5 @@ Returns task status summary including:
 - Task metadata (agent, description, duration)
 - Result data (for completed tasks)
 - Error message (for failed tasks)
+- Note: Real-time progress is not available for async tasks; only final status and results are returned
 </output>

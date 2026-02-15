@@ -15,4 +15,5 @@ Returns a list of all tasks including:
 - Task ID and current status (running, completed, failed, cancelled)
 - Description and agent type
 - Time since creation
+- Note: Real-time progress is not available for async tasks; only final status and results are returned
 </output>

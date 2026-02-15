@@ -165,6 +165,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 		if (session.taskRegistry === undefined) {
 			session.taskRegistry = tool.#registry;
 		}
+		// TODO: Wire registry.cleanup() to session lifecycle when onCleanup hook is available
 		const description = await buildDescription(session.cwd, maxConcurrency, isolationEnabled);
 		tool.description = description;
 		return tool;
@@ -483,7 +484,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 			emitProgress();
 
 			// ── Async (fire-and-forget) execution path ──────────────────────────
-			if (params.async) {
+			if (params.async && this.session.settings.get("task.asyncEnabled")) {
 				// Async + isolated not supported in v1
 				if (isIsolated) {
 					if (tempArtifactsDir) {
@@ -504,8 +505,11 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 					};
 				}
 
-				const maxAsync = this.session.settings.get("task.maxAsyncTasks");
-				const runningCount = this.#registry.list().filter(t => t.status === "running").length;
+const maxAsync = Math.min(
+	this.session.settings.get("task.maxAsyncTasks"),
+	TaskRegistry.MAX_TASKS,
+);
+const runningCount = this.#registry.list().filter(t => t.status === "running").length;
 				if (runningCount >= maxAsync) {
 					if (tempArtifactsDir) {
 						await fs.rm(tempArtifactsDir, { recursive: true, force: true }).catch(() => {});
