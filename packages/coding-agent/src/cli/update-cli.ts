@@ -341,6 +341,14 @@ async function withUpdateLock<T>(retries: number, fn: () => Promise<T>): Promise
 	});
 }
 
+function shouldUpdateViaBun(): boolean {
+	return !isBunBinary && hasBun();
+}
+
+function canInstallViaBinaryInCurrentProcess(): boolean {
+	return !(process.platform === "win32" && isBunBinary);
+}
+
 /**
  * Update via bun package manager.
  */
@@ -512,8 +520,10 @@ export async function runAutoUpdate(options: AutoUpdateOptions): Promise<AutoUpd
 			}
 
 			try {
-				if (!isBunBinary && hasBun()) {
+				if (shouldUpdateViaBun()) {
 					await updateViaBun(release.version, true);
+				} else if (!canInstallViaBinaryInCurrentProcess()) {
+					return { status: "update-available", latestVersion: release.version };
 				} else {
 					await updateViaBinary(release, true);
 				}
@@ -560,8 +570,12 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 			}
 			// Choose update method
 			try {
-				if (!isBunBinary && hasBun()) {
+				if (shouldUpdateViaBun()) {
 					await updateViaBun(release.version);
+				} else if (!canInstallViaBinaryInCurrentProcess()) {
+					throw new Error(
+						`In-place updates are not supported on Windows compiled binaries due to file locking. Run "${APP_NAME} update --check" and reinstall manually.`,
+					);
 				} else {
 					await updateViaBinary(release);
 				}

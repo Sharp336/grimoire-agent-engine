@@ -551,7 +551,7 @@ export class Settings {
 				raw.autoUpdateCheckOnStartup = raw.autoUpdate;
 			}
 			if (!("autoUpdateAutoInstall" in raw)) {
-				raw.autoUpdateAutoInstall = raw.autoUpdate;
+				raw.autoUpdateAutoInstall = false;
 			}
 			delete raw.autoUpdate;
 		}

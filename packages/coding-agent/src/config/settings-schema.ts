@@ -152,11 +152,11 @@ export const SETTINGS_SCHEMA = {
 	},
 	autoUpdateAutoInstall: {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "config",
 			label: "Install updates automatically",
-			description: "Install available updates after startup check",
+			description: "Install available updates after startup check (off by default)",
 		},
 	},
 	autoUpdateInNonInteractive: {
