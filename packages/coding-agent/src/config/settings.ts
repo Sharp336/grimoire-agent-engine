@@ -545,6 +545,17 @@ export class Settings {
 			}
 		}
 
+		// autoUpdate (legacy boolean) -> new granular auto-update controls
+		if (typeof raw.autoUpdate === "boolean") {
+			if (!("autoUpdateCheckOnStartup" in raw)) {
+				raw.autoUpdateCheckOnStartup = raw.autoUpdate;
+			}
+			if (!("autoUpdateAutoInstall" in raw)) {
+				raw.autoUpdateAutoInstall = raw.autoUpdate;
+			}
+			delete raw.autoUpdate;
+		}
+
 		return raw;
 	}
 

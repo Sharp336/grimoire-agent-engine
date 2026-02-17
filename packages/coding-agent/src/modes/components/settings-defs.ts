@@ -124,6 +124,16 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "60", label: "60 seconds" },
 		{ value: "120", label: "120 seconds" },
 	],
+	// Auto update check interval
+	autoUpdateCheckIntervalHours: [
+		{ value: "1", label: "1 hour" },
+		{ value: "6", label: "6 hours" },
+		{ value: "12", label: "12 hours" },
+		{ value: "24", label: "24 hours" },
+		{ value: "48", label: "48 hours" },
+		{ value: "72", label: "72 hours" },
+		{ value: "168", label: "7 days" },
+	],
 	// Edit fuzzy threshold
 	"edit.fuzzyThreshold": [
 		{ value: "0.85", label: "0.85", description: "Lenient" },
