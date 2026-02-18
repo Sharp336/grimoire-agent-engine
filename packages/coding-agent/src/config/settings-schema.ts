@@ -141,6 +141,44 @@ export const SETTINGS_SCHEMA = {
 	// Top-level settings
 	// ─────────────────────────────────────────────────────────────────────────
 	lastChangelogVersion: { type: "string", default: undefined },
+	autoUpdateCheckOnStartup: {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "config",
+			label: "Check updates on startup",
+			description: "Check npm for new omp versions when the CLI starts",
+		},
+	},
+	autoUpdateAutoInstall: {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "config",
+			label: "Install updates automatically",
+			description: "Install available updates after startup check (off by default)",
+		},
+	},
+	autoUpdateInNonInteractive: {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "config",
+			label: "Check in non-interactive mode",
+			description: "Also run startup update checks for --print and piped invocations",
+		},
+	},
+	autoUpdateCheckIntervalHours: {
+		type: "number",
+		default: 24,
+		ui: {
+			tab: "config",
+			label: "Update check interval (hours)",
+			description: "Minimum hours between startup update checks",
+			submenu: true,
+		},
+	},
+	autoUpdateLastCheckAt: { type: "string", default: undefined },
 	"theme.dark": {
 		type: "string",
 		default: "titanium",

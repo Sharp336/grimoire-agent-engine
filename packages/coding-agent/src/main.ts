@@ -12,12 +12,13 @@ import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { type ImageContent, supportsXhigh } from "@oh-my-pi/pi-ai";
 import { $env, postmortem } from "@oh-my-pi/pi-utils";
-import { getProjectDir, setProjectDir, VERSION } from "@oh-my-pi/pi-utils/dirs";
+import { APP_NAME, getProjectDir, setProjectDir, VERSION } from "@oh-my-pi/pi-utils/dirs";
 import chalk from "chalk";
 import type { Args } from "./cli/args";
 import { processFileArguments } from "./cli/file-processor";
 import { listModels } from "./cli/list-models";
 import { selectSession } from "./cli/session-picker";
+import { runAutoUpdate } from "./cli/update-cli";
 import { findConfigFile } from "./config";
 import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
 import { parseModelString, resolveCliModel, resolveModelScope, type ScopedModel } from "./config/model-resolver";
@@ -36,24 +37,6 @@ import { printTimings, time } from "./utils/timings";
 
 /** Conditional startup debug prints (stderr) when PI_DEBUG_STARTUP is set */
 const debugStartup = $env.PI_DEBUG_STARTUP ? (stage: string) => process.stderr.write(`[startup] ${stage}\n`) : () => {};
-
-async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
-	try {
-		const response = await fetch("https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest");
-		if (!response.ok) return undefined;
-
-		const data = (await response.json()) as { version?: string };
-		const latestVersion = data.version;
-
-		if (latestVersion && latestVersion !== currentVersion) {
-			return latestVersion;
-		}
-
-		return undefined;
-	} catch {
-		return undefined;
-	}
-}
 
 const writeStdout = (message: string): void => {
 	process.stdout.write(`${message}\n`);
@@ -84,7 +67,6 @@ async function runInteractiveMode(
 	version: string,
 	changelogMarkdown: string | undefined,
 	notifs: (InteractiveModeNotify | null)[],
-	versionCheckPromise: Promise<string | undefined>,
 	initialMessages: string[],
 	setExtensionUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	lspServers: Array<{ name: string; status: "ready" | "error"; fileTypes: string[]; error?: string }> | undefined,
@@ -95,14 +77,6 @@ async function runInteractiveMode(
 	const mode = new InteractiveMode(session, version, changelogMarkdown, setExtensionUIContext, lspServers, mcpManager);
 
 	await mode.init();
-
-	versionCheckPromise
-		.then(newVersion => {
-			if (newVersion) {
-				mode.showNewVersionNotification(newVersion);
-			}
-		})
-		.catch(() => {});
 
 	mode.renderInitialMessages();
 
@@ -567,6 +541,45 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 	const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
 	const mode = parsedArgs.mode || "text";
 
+	const shouldRunAutoUpdate =
+		settings.get("autoUpdateCheckOnStartup") &&
+		(isInteractive || (settings.get("autoUpdateInNonInteractive") && mode !== "rpc"));
+
+	if (shouldRunAutoUpdate) {
+		const autoUpdateResult = await runAutoUpdate({
+			enabled: true,
+			installUpdate: settings.get("autoUpdateAutoInstall"),
+			currentVersion: VERSION,
+			checkIntervalHours: settings.get("autoUpdateCheckIntervalHours"),
+			lastCheckAt: settings.get("autoUpdateLastCheckAt"),
+			setLastCheckAt: value => settings.set("autoUpdateLastCheckAt", value),
+		});
+		if (isInteractive) {
+			if (autoUpdateResult.status === "updated" && autoUpdateResult.latestVersion) {
+				notifs.push({
+					kind: "info",
+					message: `Auto-updated to v${autoUpdateResult.latestVersion}. Restart ${APP_NAME} to use the new version.`,
+				});
+			} else if (autoUpdateResult.status === "update-available" && autoUpdateResult.latestVersion) {
+				notifs.push({
+					kind: "info",
+					message: `Update v${autoUpdateResult.latestVersion} is available. Run "${APP_NAME} update" to install.`,
+				});
+			} else if (autoUpdateResult.status === "update-failed" && autoUpdateResult.latestVersion) {
+				const errorText = autoUpdateResult.error ? ` (${autoUpdateResult.error})` : "";
+				notifs.push({
+					kind: "warn",
+					message: `Auto-update to v${autoUpdateResult.latestVersion} failed${errorText}. Run "${APP_NAME} update" manually.`,
+				});
+			} else if (autoUpdateResult.status === "check-failed") {
+				const errorText = autoUpdateResult.error ? ` (${autoUpdateResult.error})` : "";
+				notifs.push({ kind: "warn", message: `Update check failed${errorText}.` });
+			} else if (autoUpdateResult.status === "busy") {
+				notifs.push({ kind: "info", message: "Update check skipped: another omp process is already updating." });
+			}
+		}
+	}
+
 	// Initialize discovery system with settings for provider persistence
 	initializeWithSettings(settings);
 	time("initializeWithSettings");
@@ -724,7 +737,6 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 	if (mode === "rpc") {
 		await runRpcMode(session);
 	} else if (isInteractive) {
-		const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 		const changelogMarkdown = await getChangelogForDisplay(parsedArgs);
 
 		const scopedModelsForDisplay = sessionOptions.scopedModels ?? scopedModels;
@@ -745,7 +757,6 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 			VERSION,
 			changelogMarkdown,
 			notifs,
-			versionCheckPromise,
 			parsedArgs.messages,
 			setToolUIContext,
 			lspServers,
