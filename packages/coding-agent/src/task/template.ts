@@ -10,6 +10,8 @@ interface RenderResult {
 	assignment: string;
 	id: string;
 	description: string;
+	skills?: string[];
+	model?: string;
 }
 
 /**
@@ -22,7 +24,7 @@ export function renderTemplate(
 	task: TaskItem,
 	simpleMode: TaskSimpleMode = "default",
 ): RenderResult {
-	let { id, description, assignment } = task;
+	let { id, description, assignment, skills, model } = task;
 	assignment = assignment.trim();
 	const { contextEnabled } = getTaskSimpleModeCapabilities(simpleMode);
 	context = contextEnabled ? context?.trim() : undefined;
@@ -34,14 +36,18 @@ export function renderTemplate(
 				assignment,
 				id,
 				description,
+				skills,
+				model,
 			};
 		}
-		return { task: assignment || context!, assignment: assignment || context!, id, description };
+		return { task: assignment || context!, assignment: assignment || context!, id, description, skills, model };
 	}
 	return {
 		task: prompt.render(subagentUserPromptTemplate, { context, assignment, independentMode: false }),
 		assignment,
 		id,
 		description,
+		skills,
+		model,
 	};
 }
