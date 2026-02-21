@@ -74,6 +74,17 @@ const createTaskItemSchema = (contextEnabled: boolean) =>
 		assignment: Type.String({
 			description: contextEnabled ? assignmentDescriptionForContextEnabled : assignmentDescriptionForContextDisabled,
 		}),
+		skills: Type.Optional(
+			Type.Array(Type.String(), {
+				description: "Skill names to preload into the subagent. Use only where it changes correctness.",
+			}),
+		),
+		model: Type.Optional(
+			Type.String({
+				description:
+					"Override the model for this specific task. Format: 'provider/modelId' (e.g. 'openai/gpt-4o', 'litellm/rutmaster'). Inherits parent session model when omitted.",
+			}),
+		),
 	});
 
 /** Single task item for parallel execution (default shape with context enabled). */
