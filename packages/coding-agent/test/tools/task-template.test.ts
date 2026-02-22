@@ -43,4 +43,66 @@ describe("renderTemplate", () => {
 		});
 		expect(result.task).toBe("just the assignment");
 	});
+
+	test("passes through skills", () => {
+		const result = renderTemplate(undefined, {
+			id: "X",
+			description: "label",
+			assignment: "do stuff",
+			skills: ["react", "postgres"],
+		});
+		expect(result.skills).toEqual(["react", "postgres"]);
+	});
+
+	describe("model field preservation", () => {
+		test("passes through model when context and assignment both present", () => {
+			const result = renderTemplate("Shared context", {
+				id: "T",
+				description: "label",
+				assignment: "do work",
+				model: "anthropic/claude-haiku-4-5",
+			});
+			expect(result.model).toBe("anthropic/claude-haiku-4-5");
+		});
+
+		test("passes through model when no context", () => {
+			const result = renderTemplate(undefined, {
+				id: "T",
+				description: "label",
+				assignment: "do work",
+				model: "openai/gpt-4o",
+			});
+			expect(result.model).toBe("openai/gpt-4o");
+		});
+
+		test("passes through model when no assignment (context-only path)", () => {
+			const result = renderTemplate("only context here", {
+				id: "T",
+				description: "label",
+				assignment: "",
+				model: "litellm/my-model",
+			});
+			expect(result.model).toBe("litellm/my-model");
+		});
+
+		test("model is undefined when not set on task", () => {
+			const result = renderTemplate("context", {
+				id: "T",
+				description: "label",
+				assignment: "do work",
+			});
+			expect(result.model).toBeUndefined();
+		});
+
+		test("model preserved alongside skills", () => {
+			const result = renderTemplate(undefined, {
+				id: "T",
+				description: "label",
+				assignment: "do work",
+				skills: ["react"],
+				model: "anthropic/claude-sonnet-4-5",
+			});
+			expect(result.model).toBe("anthropic/claude-sonnet-4-5");
+			expect(result.skills).toEqual(["react"]);
+		});
 });
