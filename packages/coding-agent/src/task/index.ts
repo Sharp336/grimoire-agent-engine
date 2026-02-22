@@ -840,7 +840,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 						index,
 						id: task.id,
 						taskDepth,
-					modelOverride: task.model ?? modelOverride,
+						modelOverride: task.model ?? modelOverride,
 						thinkingLevel: thinkingLevelOverride,
 						outputSchema: effectiveOutputSchema,
 						sessionFile,
