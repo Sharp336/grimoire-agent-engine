@@ -1,10 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import {
-	isDefaultModelAlias,
-	resolveModelOverride,
-} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import { isDefaultModelAlias, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
 // ---------------------------------------------------------------------------
 // Shared fixtures
@@ -137,19 +134,13 @@ describe("resolveModelOverride", () => {
 
 	test("first matching pattern wins — subsequent patterns ignored", () => {
 		// haiku comes before sonnet in the pattern list; haiku should be returned
-		const result = resolveModelOverride(
-			["claude-haiku-4-5", "claude-sonnet-4-5"],
-			mockRegistry(allModels),
-		);
+		const result = resolveModelOverride(["claude-haiku-4-5", "claude-sonnet-4-5"], mockRegistry(allModels));
 		expect(result.model?.id).toBe("claude-haiku-4-5");
 	});
 
 	test("skips non-matching patterns and returns first match", () => {
 		// "nonexistent" won't match; should fall through to sonnet
-		const result = resolveModelOverride(
-			["nonexistent-model", "claude-sonnet-4-5"],
-			mockRegistry(allModels),
-		);
+		const result = resolveModelOverride(["nonexistent-model", "claude-sonnet-4-5"], mockRegistry(allModels));
 		expect(result.model?.id).toBe("claude-sonnet-4-5");
 	});
 
@@ -172,10 +163,7 @@ describe("resolveModelOverride", () => {
 	});
 
 	test("default alias followed by real model — default skipped, real returned", () => {
-		const result = resolveModelOverride(
-			["pi/default", "claude-haiku-4-5"],
-			mockRegistry(allModels),
-		);
+		const result = resolveModelOverride(["pi/default", "claude-haiku-4-5"], mockRegistry(allModels));
 		expect(result.model?.id).toBe("claude-haiku-4-5");
 	});
 });
