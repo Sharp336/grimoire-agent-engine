@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+### Fixed
+- Fixed changelog tools to enforce category-specific arrays and reuse the shared category list for generation
 ## [13.1.2] - 2026-02-23
 ### Breaking Changes
 
