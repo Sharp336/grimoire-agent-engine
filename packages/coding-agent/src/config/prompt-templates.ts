@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
-import { getProjectDir, getProjectPromptsDir, getPromptsDir } from "@oh-my-pi/pi-utils/dirs";
+import { getProjectDir, getProjectPromptsDir, getPromptsDir, logger } from "@oh-my-pi/pi-utils";
 import Handlebars from "handlebars";
 import { computeLineHash } from "../patch/hashline";
 import { jtdToTypeScript } from "../tools/jtd-to-typescript";
@@ -229,6 +228,19 @@ handlebars.registerHelper("not", (value: unknown): boolean => !value);
 handlebars.registerHelper("jtdToTypeScript", (schema: unknown): string => jtdToTypeScript(schema));
 
 handlebars.registerHelper("jsonStringify", (value: unknown): string => JSON.stringify(value));
+
+/**
+ * Renders a section separator:
+ *
+ * ═══════════════════════════════
+ *  Name
+ * ═══════════════════════════════
+ */
+export function sectionSeparator(name: string): string {
+	return `\n\n═══════════${name}═══════════\n`;
+}
+
+handlebars.registerHelper("SECTION_SEPERATOR", (name: unknown): string => sectionSeparator(String(name)));
 
 /**
  * {{hlineref lineNum "content"}} — compute a real hashline ref for prompt examples.

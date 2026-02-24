@@ -4,6 +4,33 @@
 
 ### Fixed
 - Fixed changelog tools to enforce category-specific arrays and reuse the shared category list for generation
+- Non-interactive environment variables (pager, editor, prompt suppression) were not applied to non-PTY bash execution, causing commands to potentially block on pagers or prompts
+
+### Changed
+
+- Extracted non-interactive environment config from `bash-interactive.ts` into shared `non-interactive-env.ts` module, applied consistently to all bash execution paths
+
+## [13.2.0] - 2026-02-23
+### Breaking Changes
+
+- Made `description` field required in CustomTool interface
+
+### Changed
+
+- Reorganized imports from `@oh-my-pi/pi-utils/dirs` to consolidate with main `@oh-my-pi/pi-utils` exports for cleaner dependency management
+- Renamed `loadSkillsFromDir` to `scanSkillsFromDir` with updated interface for improved clarity on skill discovery behavior
+- Moved `tryParseJson` utility from local scrapers module to `@oh-my-pi/pi-utils` for centralized JSON parsing
+- Simplified patch module exports by consolidating type re-exports with `export * from './types'`
+- Removed `emitCustomToolSessionEvent` method from AgentSession for streamlined session lifecycle management
+- Changed skill discovery from recursive to non-recursive (one level deep only) for improved performance and clarity
+- Simplified skill loading logic by removing recursive directory traversal and consolidating ignore rule handling
+
+### Removed
+
+- Removed `parseJSON` helper function from discovery module (replaced by `tryParseJson` from pi-utils)
+- Removed backwards compatibility comment from `AskToolDetails.question` field
+- Removed unused SSH resource cleanup functions `closeAllConnections` and `unmountAll` from session imports
+
 ## [13.1.2] - 2026-02-23
 ### Breaking Changes
 

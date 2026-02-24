@@ -895,7 +895,7 @@ function convertTools(tools: Tool[], compat: ResolvedOpenAICompat): OpenAI.Chat.
 			type: "function",
 			function: {
 				name: tool.name,
-				description: tool.description,
+				description: tool.description || "",
 				parameters: strict
 					? enforceStrictSchema(tool.parameters as unknown as Record<string, unknown>)
 					: (tool.parameters as unknown as Record<string, unknown>),
@@ -926,7 +926,8 @@ function mapStopReason(reason: ChatCompletionChunk.Choice["finish_reason"]): Sto
 }
 
 function detectStrictModeSupport(provider: string, baseUrl: string): boolean {
-	if (provider === "openai" || provider === "cerebras" || provider === "together") return true;
+	if (provider === "openai" || provider === "cerebras" || provider === "together" || provider === "github-copilot")
+		return true;
 
 	const normalizedBaseUrl = baseUrl.toLowerCase();
 	return (

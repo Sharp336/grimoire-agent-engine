@@ -1,7 +1,6 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isEnoent, logger } from "@oh-my-pi/pi-utils";
-import { getRemoteHostDir, getSshControlDir } from "@oh-my-pi/pi-utils/dirs";
+import { getRemoteHostDir, getSshControlDir, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { buildSshTarget, sanitizeHostName } from "./utils";
 
@@ -69,6 +68,7 @@ async function validateKeyPermissions(keyPath?: string): Promise<void> {
 
 function buildCommonArgs(host: SSHConnectionTarget): string[] {
 	const args = [
+		"-n",
 		"-o",
 		"ControlMaster=auto",
 		"-o",
@@ -362,6 +362,8 @@ export async function buildRemoteCommand(host: SSHConnectionTarget, command: str
 	return [...buildCommonArgs(host), buildSshTarget(host.username, host.host), command];
 }
 
+let registered = false;
+
 export async function ensureConnection(host: SSHConnectionTarget): Promise<void> {
 	const key = host.name;
 	const pending = pendingConnections.get(key);
@@ -374,6 +376,13 @@ export async function ensureConnection(host: SSHConnectionTarget): Promise<void>
 		ensureSshBinary();
 		ensureControlDir();
 		await validateKeyPermissions(host.keyPath);
+
+		if (!registered) {
+			registered = true;
+			postmortem.register("ssh-cleanup", async () => {
+				await closeAllConnections();
+			});
+		}
 
 		const target = buildSshTarget(host.username, host.host);
 		const check = await runSshSync(["-O", "check", ...buildCommonArgs(host), target]);

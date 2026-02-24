@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [13.2.0] - 2026-02-23
+
+### Added
+
+- Added support for GitHub Copilot provider in strict mode for both openai-completions and openai-responses tool schemas
+
+### Fixed
+
+- Fixed tool descriptions being rejected when undefined by providing empty string fallback across all providers
+
 ## [12.19.1] - 2026-02-22
 ### Added
 

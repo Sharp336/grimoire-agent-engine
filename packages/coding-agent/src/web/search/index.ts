@@ -353,13 +353,6 @@ async function executeExaTool(
 ): Promise<{ content: Array<{ type: "text"; text: string }>; details: ExaRenderDetails }> {
 	try {
 		const apiKey = await findExaKey();
-		if (!apiKey) {
-			return {
-				content: [{ type: "text" as const, text: "Error: EXA_API_KEY not found" }],
-				details: { error: "EXA_API_KEY not found", toolName },
-			};
-		}
-
 		const response = await callExaTool(mcpToolName, params, apiKey);
 
 		if (isSearchResponse(response)) {
@@ -402,7 +395,7 @@ Parameters:
 
 	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
 		const { num_results, ...rest } = params as Record<string, unknown>;
-		const args = { ...rest, type: "deep", numResults: num_results ?? 10 };
+		const args = { ...rest, type: "auto", numResults: num_results ?? 10 };
 		return executeExaTool("web_search_exa", args, "web_search_deep");
 	},
 
@@ -462,7 +455,7 @@ Parameters:
 	parameters: webSearchCrawlSchema,
 
 	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
-		return executeExaTool("crawling", params as Record<string, unknown>, "web_search_crawl");
+		return executeExaTool("crawling_exa", params as Record<string, unknown>, "web_search_crawl");
 	},
 
 	renderCall(args, _options, theme) {
@@ -493,7 +486,7 @@ Parameters:
 	parameters: webSearchLinkedinSchema,
 
 	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
-		return executeExaTool("linkedin_search", params as Record<string, unknown>, "web_search_linkedin");
+		return executeExaTool("linkedin_search_exa", params as Record<string, unknown>, "web_search_linkedin");
 	},
 
 	renderCall(args, _options, theme) {
@@ -523,7 +516,7 @@ Parameters:
 	parameters: webSearchCompanySchema,
 
 	async execute(_toolCallId, params, _onUpdate, _ctx, _signal) {
-		return executeExaTool("company_research", params as Record<string, unknown>, "web_search_company");
+		return executeExaTool("company_research_exa", params as Record<string, unknown>, "web_search_company");
 	},
 
 	renderCall(args, _options, theme) {
@@ -561,17 +554,20 @@ export interface SearchToolsOptions {
  *
  * Returns:
  * - Always: web_search (unified, works with Anthropic/Perplexity/Exa)
- * - With EXA_API_KEY: web_search_deep, web_search_code_context, web_search_crawl
+ * - Always: web_search_deep, web_search_code_context (public Exa MCP tools)
+ * - With EXA_API_KEY: web_search_crawl
  * - With EXA_API_KEY + options.enableLinkedin: web_search_linkedin
  * - With EXA_API_KEY + options.enableCompany: web_search_company
  */
 export async function getSearchTools(options: SearchToolsOptions = {}): Promise<CustomTool<any, any>[]> {
 	const tools: CustomTool<any, any>[] = [webSearchCustomTool];
 
-	// Check for Exa API key
+	tools.push(webSearchDeepTool, webSearchCodeContextTool);
+
+	// Advanced/add-on tools remain key-gated to avoid exposing known unauthenticated failures
 	const exaKey = await findExaKey();
 	if (exaKey) {
-		tools.push(...exaSearchTools);
+		tools.push(webSearchCrawlTool);
 
 		if (options.enableLinkedin) {
 			tools.push(...linkedinSearchTools);
