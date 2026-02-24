@@ -1,0 +1,94 @@
+name: Exa MCP Method Mismatch
+description: Report Exa MCP tool name mismatches (e.g., crawling vs crawling_exa)
+labels: ["bug", "mcp", "exa"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Use this form when Exa-backed tools fail with `MCP error: Method not found`.
+
+  - type: textarea
+    id: summary
+    attributes:
+      label: Summary
+      description: What Exa tool failed and what was the visible error?
+      placeholder: web_search_crawl fails with MCP error Method not found
+    validations:
+      required: true
+
+  - type: textarea
+    id: failing-mapping
+    attributes:
+      label: Failing mapping
+      description: Include the internal tool and MCP method name that failed
+      placeholder: |
+        web_search_crawl -> crawling
+        web_search_linkedin -> linkedin_search
+        web_search_company -> company_research
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected-mapping
+    attributes:
+      label: Expected Exa MCP method names
+      description: Include the working method names from direct MCP probes or docs
+      placeholder: |
+        web_search_crawl -> crawling_exa
+        web_search_linkedin -> linkedin_search_exa
+        web_search_company -> company_research_exa
+      render: shell
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant logs
+      description: Paste `MCP tools/call error` lines with code/message
+      render: shell
+    validations:
+      required: true
+
+  - type: input
+    id: omp-version
+    attributes:
+      label: omp version
+      description: Output of `omp --version`
+      placeholder: "e.g. omp/13.2.0"
+    validations:
+      required: true
+
+  - type: input
+    id: bun-version
+    attributes:
+      label: Bun version
+      description: Output of `bun --version`
+      placeholder: "e.g. 1.3.9"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Linux
+        - macOS
+        - Windows
+    validations:
+      required: true
+
+  - type: textarea
+    id: verification
+    attributes:
+      label: Verification run
+      description: Include probe commands or steps proving old names fail and _exa names succeed
+      render: shell
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Links to PRs, commits, or upstream Exa docs
