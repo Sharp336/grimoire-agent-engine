@@ -106,7 +106,17 @@ export class StatusLineComponent implements Component {
 
 		try {
 			this.#gitWatcher = fs.watch(gitHeadPath, () => {
-				this.#cachedBranch = undefined;
+				// Read branch synchronously when change detected
+				try {
+					const content = fs.readFileSync(gitHeadPath, "utf8").trim();
+					if (content.startsWith("ref: refs/heads/")) {
+						this.#cachedBranch = content.slice(16);
+					} else {
+						this.#cachedBranch = "detached";
+					}
+				} catch {
+					this.#cachedBranch = null;
+				}
 				if (this.#onBranchChange) {
 					this.#onBranchChange();
 				}

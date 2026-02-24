@@ -5,7 +5,7 @@ import { getProjectDir } from "@oh-my-pi/pi-utils/dirs";
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { shortenPath } from "../../tools/render-utils";
-import { findGitHeadPathAsync, sanitizeStatusText } from "../shared";
+import { findGitHeadPathSync, sanitizeStatusText } from "../shared";
 
 /**
  * Footer component that shows pwd, token stats, and context usage
@@ -54,22 +54,29 @@ export class FooterComponent implements Component {
 			this.#gitWatcher = null;
 		}
 
-		findGitHeadPathAsync().then(result => {
-			if (!result) {
-				return;
-			}
+		const gitHeadPath = findGitHeadPathSync();
+		if (!gitHeadPath) return;
 
-			try {
-				this.#gitWatcher = fs.watch(result.path, () => {
-					this.#cachedBranch = undefined; // Invalidate cache
-					if (this.#onBranchChange) {
-						this.#onBranchChange();
+		try {
+			this.#gitWatcher = fs.watch(gitHeadPath, () => {
+				// Read branch synchronously when change detected
+				try {
+					const content = fs.readFileSync(gitHeadPath, "utf8").trim();
+					if (content.startsWith("ref: refs/heads/")) {
+						this.#cachedBranch = content.slice(16);
+					} else {
+						this.#cachedBranch = "detached";
 					}
-				});
-			} catch {
-				// Silently fail if we can't watch
-			}
-		});
+				} catch {
+					this.#cachedBranch = null;
+				}
+				if (this.#onBranchChange) {
+					this.#onBranchChange();
+				}
+			});
+		} catch {
+			// Silently fail if we can't watch
+		}
 	}
 
 	/**
@@ -97,30 +104,25 @@ export class FooterComponent implements Component {
 			return this.#cachedBranch;
 		}
 
-		// Note: fire-and-forget async call - will return undefined on first call
-		// This is acceptable since it's a cached value that will update on next render
-		findGitHeadPathAsync().then(result => {
-			if (!result) {
-				this.#cachedBranch = null;
-				if (this.#onBranchChange) {
-					this.#onBranchChange();
-				}
-				return;
-			}
-			const content = result.content.trim();
+		// Read branch synchronously
+		const gitHeadPath = findGitHeadPathSync();
+		if (!gitHeadPath) {
+			this.#cachedBranch = null;
+			return null;
+		}
 
+		try {
+			const content = fs.readFileSync(gitHeadPath, "utf8").trim();
 			if (content.startsWith("ref: refs/heads/")) {
 				this.#cachedBranch = content.slice(16);
 			} else {
 				this.#cachedBranch = "detached";
 			}
-			if (this.#onBranchChange) {
-				this.#onBranchChange();
-			}
-		});
+		} catch {
+			this.#cachedBranch = null;
+		}
 
-		// Return undefined while loading (will show on next render once loaded)
-		return null;
+		return this.#cachedBranch ?? null;
 	}
 
 	render(width: number): string[] {
