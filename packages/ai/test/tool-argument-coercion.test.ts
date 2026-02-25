@@ -325,7 +325,7 @@ describe("Tool argument coercion", () => {
 
 		expect(() => validateToolArguments(tool, toolCall)).toThrow('Validation failed for tool "t6"');
 	});
-	
+
 	it("coerces numeric string for Optional<number> (anyOf:[number,null])", () => {
 		const tool: Tool = {
 			name: "t14",
