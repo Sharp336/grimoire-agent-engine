@@ -60,7 +60,7 @@ function getFallbackImageProtocol(terminalId: TerminalId): ImageProtocol | null 
 	if (!process.stdout.isTTY) return null;
 	if (terminalId === "vscode" || terminalId === "alacritty") return null;
 	const term = Bun.env.TERM?.toLowerCase() ?? "";
-	if (term.includes("xterm") || term.includes("screen") || term.includes("tmux") || term.includes("ghostty")) {
+	if (term.includes("screen") || term.includes("tmux") || term.includes("ghostty")) {
 		return ImageProtocol.Kitty;
 	}
 	return null;

@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Restored terminal image protocol override and fallback detection for image rendering, including `PI_FORCE_IMAGE_PROTOCOL` support and Kitty fallback for xterm/screen/tmux/ghostty-style TERM environments.
+- Restored terminal image protocol override and fallback detection for image rendering, including `PI_FORCE_IMAGE_PROTOCOL` support and Kitty fallback for screen/tmux/ghostty-style TERM environments.
 ## [12.19.0] - 2026-02-22
 
 ### Added
