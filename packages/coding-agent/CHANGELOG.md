@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Restored inline rendering for `read` tool image results in assistant transcript components, including streaming and rebuilt session history paths.
+- Fixed shell-escaped read paths (for example, pasted `\ `-escaped screenshot filenames) by resolving unescaped fallback candidates before macOS filename normalization variants.
 ## [13.3.7] - 2026-02-27
 ### Breaking Changes
 
