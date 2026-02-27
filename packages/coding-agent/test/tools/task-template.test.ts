@@ -105,4 +105,5 @@ describe("renderTemplate", () => {
 			expect(result.model).toBe("anthropic/claude-sonnet-4-5");
 			expect(result.skills).toEqual(["react"]);
 		});
+	});
 });

@@ -1,8 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ListModelsTool } from "@oh-my-pi/pi-coding-agent/tools/list-models-tool";
-import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
@@ -23,7 +23,9 @@ function makeModel(provider: string, id: string, opts?: Partial<Model<Api>>): Mo
 }
 
 function mockRegistry(models: Model<Api>[]) {
-	return { getAvailable: () => models } as unknown as import("@oh-my-pi/pi-coding-agent/config/model-registry").ModelRegistry;
+	return {
+		getAvailable: () => models,
+	} as unknown as import("@oh-my-pi/pi-coding-agent/config/model-registry").ModelRegistry;
 }
 
 function createTestSession(overrides: Partial<ToolSession> = {}): ToolSession {
