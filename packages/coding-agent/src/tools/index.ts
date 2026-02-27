@@ -37,6 +37,7 @@ import { HindsightRetainTool } from "./hindsight-retain";
 import { InspectImageTool } from "./inspect-image";
 import { IrcTool } from "./irc";
 import { JobTool } from "./job";
+import { ListModelsTool } from "./list-models-tool";
 import { NotebookTool } from "./notebook";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
@@ -80,6 +81,7 @@ export * from "./image-gen";
 export * from "./inspect-image";
 export * from "./irc";
 export * from "./job";
+export * from "./list-models-tool";
 export * from "./notebook";
 export * from "./read";
 export * from "./recipe";
@@ -243,6 +245,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	retain: HindsightRetainTool.createIf,
 	recall: HindsightRecallTool.createIf,
 	reflect: HindsightReflectTool.createIf,
+	list_models: ListModelsTool.createIf,
 };
 
 export const HIDDEN_TOOLS: Record<string, ToolFactory> = {

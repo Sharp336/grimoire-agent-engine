@@ -82,7 +82,7 @@ const createTaskItemSchema = (contextEnabled: boolean) =>
 		model: Type.Optional(
 			Type.String({
 				description:
-					"Override the model for this specific task. Format: 'provider/modelId' (e.g. 'openai/gpt-4o', 'litellm/rutmaster'). Inherits parent session model when omitted.",
+					"Override the model for this specific task. Format: 'provider/modelId' (e.g. 'openai/gpt-4o', 'anthropic/claude-haiku-4-5'). Inherits parent session model when omitted. When the user requests a specific model, you MUST call list_models to verify the exact provider/modelId before using it here. If the model is not found, do NOT proceed with the task — report the mismatch to the user instead.",
 			}),
 		),
 	});
