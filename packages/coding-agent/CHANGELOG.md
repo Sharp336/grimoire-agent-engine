@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+- Fixed Ollama discovery to be more broadly compatible with self
+hosted providers by migrating from the Ollama specific `/api/tags`
+endpoint to the OpenAI compatible `/v1/models` endpoint
 
 ## [13.3.7] - 2026-02-27
 ### Breaking Changes

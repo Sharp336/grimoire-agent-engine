@@ -149,7 +149,7 @@ If `ollama` is not explicitly configured, registry adds an implicit discoverable
 - base URL: `OLLAMA_BASE_URL` or `http://127.0.0.1:11434`
 - auth mode: keyless (`auth: none` behavior)
 
-Runtime discovery calls `GET /api/tags` on Ollama and synthesizes model entries with local defaults.
+Runtime discovery calls `GET /v1/models` on selfhosted providers like Ollama and synthesizes model entries with local defaults.
 
 ### Explicit provider discovery
 

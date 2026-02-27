@@ -827,7 +827,7 @@ export class ModelRegistry {
 
 	async #discoverOllamaModels(providerConfig: DiscoveryProviderConfig): Promise<Model<Api>[]> {
 		const endpoint = this.#normalizeOllamaBaseUrl(providerConfig.baseUrl);
-		const tagsUrl = `${endpoint}/api/tags`;
+		const tagsUrl = `${endpoint}/v1/models`;
 		try {
 			const response = await fetch(tagsUrl, {
 				headers: { ...(providerConfig.headers ?? {}) },
@@ -841,15 +841,15 @@ export class ModelRegistry {
 				});
 				return [];
 			}
-			const payload = (await response.json()) as { models?: Array<{ name?: string; model?: string }> };
-			const models = payload.models ?? [];
+			const payload = (await response.json()) as { data?: Array<{ id?: string }> };
+			const models = payload.data ?? [];
 			const discovered: Model<Api>[] = [];
 			for (const item of models) {
-				const id = item.model || item.name;
+				const id = item.id;
 				if (!id) continue;
 				discovered.push({
 					id,
-					name: item.name || id,
+					name: id,
 					api: providerConfig.api,
 					provider: providerConfig.provider,
 					baseUrl: `${endpoint}/v1`,

@@ -554,8 +554,8 @@ describe("ModelRegistry", () => {
 		test("auto-discovers ollama models without provider config", async () => {
 			const originalFetch = globalThis.fetch;
 			globalThis.fetch = (async (input: string | URL | Request) => {
-				expect(String(input)).toBe("http://127.0.0.1:11434/api/tags");
-				return new Response(JSON.stringify({ models: [{ name: "phi4-mini" }] }), {
+				expect(String(input)).toBe("http://127.0.0.1:11434/v1/models");
+				return new Response(JSON.stringify({ data: [{ id: "phi4-mini" }] }), {
 					status: 200,
 					headers: { "Content-Type": "application/json" },
 				});
@@ -585,10 +585,10 @@ describe("ModelRegistry", () => {
 
 			const originalFetch = globalThis.fetch;
 			globalThis.fetch = (async (input: string | URL | Request) => {
-				expect(String(input)).toBe("http://127.0.0.1:11434/api/tags");
+				expect(String(input)).toBe("http://127.0.0.1:11434/v1/models");
 				return new Response(
 					JSON.stringify({
-						models: [{ name: "qwen2.5-coder:7b" }, { model: "llama3.2:3b", name: "llama3.2:3b" }],
+						data: [{ id: "qwen2.5-coder:7b" }, { id: "llama3.2:3b" }],
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
