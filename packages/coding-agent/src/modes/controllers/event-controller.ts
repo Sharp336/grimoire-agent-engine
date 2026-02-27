@@ -173,6 +173,14 @@ export class EventController {
 						if (content.type !== "toolCall") continue;
 						if (content.name === "read") {
 							this.#trackReadToolCall(content.id, content.arguments);
+							const component = this.ctx.pendingTools.get(content.id);
+							if (component) {
+								component.updateArgs(content.arguments, content.id);
+							} else {
+								const group = this.#getReadGroup();
+								group.updateArgs(content.arguments, content.id);
+								this.ctx.pendingTools.set(content.id, group);
+							}
 							continue;
 						}
 
@@ -257,6 +265,15 @@ export class EventController {
 				if (!this.ctx.pendingTools.has(event.toolCallId)) {
 					if (event.toolName === "read") {
 						this.#trackReadToolCall(event.toolCallId, event.args);
+						const component = this.ctx.pendingTools.get(event.toolCallId);
+						if (component) {
+							component.updateArgs(event.args, event.toolCallId);
+						} else {
+							const group = this.#getReadGroup();
+							group.updateArgs(event.args, event.toolCallId);
+							this.ctx.pendingTools.set(event.toolCallId, group);
+						}
+						this.ctx.ui.requestRender();
 						break;
 					}
 
@@ -305,6 +322,10 @@ export class EventController {
 			case "tool_execution_end": {
 				if (event.toolName === "read") {
 					if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
+						const component = this.ctx.pendingTools.get(event.toolCallId);
+						if (component) {
+							component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
+						}
 						this.ctx.pendingTools.delete(event.toolCallId);
 						this.#backgroundToolCallIds.delete(event.toolCallId);
 						this.#clearReadToolCall(event.toolCallId);
