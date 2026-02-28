@@ -230,6 +230,15 @@ export function enforceStrictSchema(schema: Record<string, unknown>): Record<str
 			);
 		}
 	}
+	// Strict mode requires every schema node to declare a concrete type (or combinator/$ref).
+	// Schemas like `{}` (match anything) or `{items: {}}` are not representable in strict mode.
+	if (
+		result.type === undefined &&
+		result.$ref === undefined &&
+		!COMBINATOR_KEYS.some(key => Array.isArray(result[key]))
+	) {
+		throw new Error("Schema node has no type, combinator, or $ref — cannot enforce strict mode");
+	}
 	return result;
 }
 
