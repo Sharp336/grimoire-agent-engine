@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@oh-my-pi/pi-ai",
-	"version": "13.3.7",
+	"version": "13.3.10",
 	"description": "Unified LLM API with automatic model discovery and provider configuration",
 	"homepage": "https://github.com/can1357/oh-my-pi",
 	"author": "Can Boluk",
@@ -40,20 +40,15 @@
 		"@anthropic-ai/sdk": "^0.78",
 		"@aws-sdk/client-bedrock-runtime": "^3.998",
 		"@bufbuild/protobuf": "^2.11",
-		"@connectrpc/connect": "^2.1",
-		"@connectrpc/connect-node": "^2.1",
 		"@google/genai": "^1.43",
-		"@mistralai/mistralai": "^1.14",
 		"@oh-my-pi/pi-utils": "workspace:*",
 		"@sinclair/typebox": "^0.34",
 		"@smithy/node-http-handler": "^4.4",
 		"ajv": "^8.18",
 		"ajv-formats": "^3.0",
-		"chalk": "^5.6",
 		"openai": "^6.25",
 		"partial-json": "^0.1",
-		"zod": "^4.3",
-		"zod-to-json-schema": "^3.25"
+		"zod": "^4.3"
 	},
 	"devDependencies": {
 		"@types/bun": "^1.3"

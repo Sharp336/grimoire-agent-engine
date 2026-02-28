@@ -187,7 +187,11 @@ function isCodexWebSocketTransportError(error: unknown): boolean {
 function isCodexWebSocketRetryableStreamError(error: unknown): boolean {
 	if (!(error instanceof Error) || !isCodexWebSocketTransportError(error)) return false;
 	const message = error.message.toLowerCase();
-	return message.includes("websocket closed (") || message.includes("websocket closed before response completion");
+	return (
+		message.includes("websocket closed (") ||
+		message.includes("websocket closed before response completion") ||
+		message.includes("websocket connection is unavailable")
+	);
 }
 
 function toCodexHeaderRecord(value: unknown): Record<string, string> | null {
@@ -1440,7 +1444,7 @@ async function fetchWithRetry(url: string, init: RequestInit, signal?: AbortSign
 			}
 			if (signal?.aborted) return response;
 			// Read error body for retry delay parsing
-			const errorBody = await response.text();
+			const errorBody = await response.clone().text();
 			const { delay, serverProvided } = getRetryDelayMs(response, attempt, errorBody);
 			// For 429s with a server-provided delay, use a time budget instead of attempt count
 			if (response.status === 429 && serverProvided) {

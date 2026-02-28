@@ -1,8 +1,11 @@
 export { truncate } from "@oh-my-pi/pi-utils";
 
 import path from "node:path";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "../modes/theme/theme";
 import type {
+	CodeAction,
+	Command,
 	Diagnostic,
 	DiagnosticSeverity,
 	DocumentSymbol,
@@ -475,7 +478,8 @@ export function formatDocumentSymbol(symbol: DocumentSymbol, indent = 0): string
 	const prefix = "  ".repeat(indent);
 	const icon = symbolKindToIcon(symbol.kind);
 	const line = symbol.range.start.line + 1;
-	const results = [`${prefix}${icon} ${symbol.name} @ line ${line}`];
+	const detail = symbol.detail ? ` ${symbol.detail}` : "";
+	const results = [`${prefix}${icon} ${symbol.name}${detail} @ line ${line}`];
 
 	if (symbol.children) {
 		for (const child of symbol.children) {
@@ -496,6 +500,110 @@ export function formatSymbolInformation(symbol: SymbolInformation, cwd: string):
 	return `${icon} ${symbol.name}${container} @ ${location}`;
 }
 
+export function filterWorkspaceSymbols(symbols: SymbolInformation[], query: string): SymbolInformation[] {
+	const needle = query.trim().toLowerCase();
+	if (!needle) return symbols;
+	return symbols.filter(symbol => {
+		const fields = [symbol.name, symbol.containerName ?? "", uriToFile(symbol.location.uri)];
+		return fields.some(field => field.toLowerCase().includes(needle));
+	});
+}
+
+export function dedupeWorkspaceSymbols(symbols: SymbolInformation[]): SymbolInformation[] {
+	const seen = new Set<string>();
+	const unique: SymbolInformation[] = [];
+	for (const symbol of symbols) {
+		const key = [
+			symbol.name,
+			symbol.containerName ?? "",
+			symbol.kind,
+			symbol.location.uri,
+			symbol.location.range.start.line,
+			symbol.location.range.start.character,
+		].join(":");
+		if (seen.has(key)) continue;
+		seen.add(key);
+		unique.push(symbol);
+	}
+	return unique;
+}
+
+export function formatCodeAction(action: CodeAction | Command, index: number): string {
+	const kind = "kind" in action && action.kind ? action.kind : "action";
+	const preferred = "isPreferred" in action && action.isPreferred ? " (preferred)" : "";
+	const disabled = "disabled" in action && action.disabled ? ` (disabled: ${action.disabled.reason})` : "";
+	return `${index}: [${kind}] ${action.title}${preferred}${disabled}`;
+}
+
+export interface CodeActionApplyDependencies {
+	resolveCodeAction?: (action: CodeAction) => Promise<CodeAction>;
+	applyWorkspaceEdit: (edit: WorkspaceEdit) => Promise<string[]>;
+	executeCommand: (command: Command) => Promise<void>;
+}
+
+export interface AppliedCodeActionResult {
+	title: string;
+	edits: string[];
+	executedCommands: string[];
+}
+
+function isCommandItem(action: CodeAction | Command): action is Command {
+	return typeof action.command === "string";
+}
+
+export async function applyCodeAction(
+	action: CodeAction | Command,
+	dependencies: CodeActionApplyDependencies,
+): Promise<AppliedCodeActionResult | null> {
+	if (isCommandItem(action)) {
+		await dependencies.executeCommand(action);
+		return { title: action.title, edits: [], executedCommands: [action.command] };
+	}
+
+	let resolvedAction = action;
+	if (!resolvedAction.edit && dependencies.resolveCodeAction) {
+		try {
+			resolvedAction = await dependencies.resolveCodeAction(resolvedAction);
+		} catch {
+			// Resolve is optional; continue with unresolved action.
+		}
+	}
+
+	const edits = resolvedAction.edit ? await dependencies.applyWorkspaceEdit(resolvedAction.edit) : [];
+	const executedCommands: string[] = [];
+	if (resolvedAction.command) {
+		await dependencies.executeCommand(resolvedAction.command);
+		executedCommands.push(resolvedAction.command.command);
+	}
+
+	if (edits.length === 0 && executedCommands.length === 0) {
+		return null;
+	}
+
+	return { title: resolvedAction.title, edits, executedCommands };
+}
+
+const GLOB_PATTERN_CHARS = /[*?[{]/;
+
+export function hasGlobPattern(value: string): boolean {
+	return GLOB_PATTERN_CHARS.test(value);
+}
+
+export async function collectGlobMatches(
+	pattern: string,
+	cwd: string,
+	maxMatches: number,
+): Promise<{ matches: string[]; truncated: boolean }> {
+	const normalizedLimit = Number.isFinite(maxMatches) ? Math.max(1, Math.trunc(maxMatches)) : 1;
+	const matches: string[] = [];
+	for await (const match of new Bun.Glob(pattern).scan({ cwd })) {
+		if (matches.length >= normalizedLimit) {
+			return { matches, truncated: true };
+		}
+		matches.push(match);
+	}
+	return { matches, truncated: false };
+}
 // =============================================================================
 // Hover Content Extraction
 // =============================================================================
@@ -525,3 +633,87 @@ export function extractHoverText(
 
 // =============================================================================
 // General Utilities
+
+function firstNonWhitespaceColumn(lineText: string): number {
+	const match = lineText.match(/\S/);
+	return match ? (match.index ?? 0) : 0;
+}
+
+function findSymbolMatchIndexes(lineText: string, symbol: string, caseInsensitive = false): number[] {
+	if (symbol.length === 0) return [];
+	const haystack = caseInsensitive ? lineText.toLowerCase() : lineText;
+	const needle = caseInsensitive ? symbol.toLowerCase() : symbol;
+	const indexes: number[] = [];
+	let fromIndex = 0;
+	while (fromIndex <= haystack.length - needle.length) {
+		const matchIndex = haystack.indexOf(needle, fromIndex);
+		if (matchIndex === -1) break;
+		indexes.push(matchIndex);
+		fromIndex = matchIndex + needle.length;
+	}
+	return indexes;
+}
+
+function normalizeOccurrence(occurrence?: number): number {
+	if (occurrence === undefined || !Number.isFinite(occurrence)) return 1;
+	return Math.max(1, Math.trunc(occurrence));
+}
+
+export async function resolveSymbolColumn(
+	filePath: string,
+	line: number,
+	symbol?: string,
+	occurrence?: number,
+): Promise<number> {
+	const lineNumber = Math.max(1, line);
+	const matchOccurrence = normalizeOccurrence(occurrence);
+	try {
+		const fileText = await Bun.file(filePath).text();
+		const lines = fileText.split("\n");
+		const targetLine = lines[lineNumber - 1] ?? "";
+		if (!symbol) {
+			return firstNonWhitespaceColumn(targetLine);
+		}
+
+		const exactIndexes = findSymbolMatchIndexes(targetLine, symbol);
+		const fallbackIndexes = exactIndexes.length > 0 ? exactIndexes : findSymbolMatchIndexes(targetLine, symbol, true);
+		if (fallbackIndexes.length === 0) {
+			throw new Error(`Symbol "${symbol}" not found on line ${lineNumber}`);
+		}
+		if (matchOccurrence > fallbackIndexes.length) {
+			throw new Error(
+				`Symbol "${symbol}" occurrence ${matchOccurrence} is out of bounds on line ${lineNumber} (found ${fallbackIndexes.length})`,
+			);
+		}
+		return fallbackIndexes[matchOccurrence - 1];
+	} catch (error) {
+		if (isEnoent(error)) {
+			throw new Error(`File not found: ${filePath}`);
+		}
+		throw error;
+	}
+}
+
+export async function readLocationContext(filePath: string, line: number, contextLines = 1): Promise<string[]> {
+	const targetLine = Math.max(1, line);
+	const surrounding = Math.max(0, contextLines);
+	try {
+		const fileText = await Bun.file(filePath).text();
+		const lines = fileText.split("\n");
+		if (lines.length === 0) return [];
+
+		const startLine = Math.max(1, targetLine - surrounding);
+		const endLine = Math.min(lines.length, targetLine + surrounding);
+		const context: string[] = [];
+		for (let currentLine = startLine; currentLine <= endLine; currentLine++) {
+			const content = lines[currentLine - 1] ?? "";
+			context.push(`${currentLine}: ${content}`);
+		}
+		return context;
+	} catch (error) {
+		if (isEnoent(error)) {
+			return [];
+		}
+		throw error;
+	}
+}

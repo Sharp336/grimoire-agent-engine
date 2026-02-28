@@ -6,6 +6,89 @@
 
 - Restored inline rendering for `read` tool image results in assistant transcript components, including streaming and rebuilt session history paths.
 - Fixed shell-escaped read paths (for example, pasted `\ `-escaped screenshot filenames) by resolving unescaped fallback candidates before macOS filename normalization variants.
+
+## [13.3.8] - 2026-02-28
+
+### Added
+
+- Added `ast_find` tool for structural code search using AST matching via ast-grep, enabling syntax-aware pattern discovery across codebases
+- Added `ast_replace` tool for structural AST-aware rewrites via ast-grep, enabling safe syntax-level codemods without text-based fragility
+- Added `astFind.enabled` and `astReplace.enabled` settings to control availability of AST tools
+- Added system prompt guidance to prefer AST tools over bash text manipulation (grep/sed/awk/perl) for syntax-aware operations
+- Extracted prompt formatting logic into reusable `formatPromptContent()` utility with configurable render phases and formatting options
+- Added `type_definition` action to navigate to symbol type definitions with source context
+- Added `implementation` action to find concrete implementations of symbols with source context
+- Added `code_actions` action to list and apply language server code fixes, refactors, and import suggestions
+- Added `symbol` parameter to automatically resolve column position by searching for substring on target line
+- Added `occurrence` parameter to disambiguate repeated `symbol` matches on the same line
+- Added source code context display (3 lines) for definition, type definition, and implementation results
+- Added context display for first 50 references with remaining references shown location-only to balance detail and performance
+- Added support for glob patterns in `file` parameter for diagnostics action (e.g., `src/**/*.ts`)
+- Added `waitForIdle()` method to ensure prompt completion waits for all deferred recovery work (TTSR continuations, context promotions, compaction retries) to fully settle
+- Added `getLastAssistantMessage()` method to retrieve the most recent assistant message from session state without manual array indexing
+- Implemented TTSR resume gate to ensure `prompt()` blocks until TTSR interrupt continuations complete, preventing race conditions between TTSR injections and subsequent prompts
+- Added `tools.maxTimeout` setting to enforce a global timeout ceiling across all tool calls
+
+### Changed
+
+- Replaced `globSync` from `glob` package with native `Bun.Glob` API for glob pattern matching
+- Replaced `fileTypeFromBuffer` from `file-type` package with inline MIME type detection for JPEG, PNG, GIF, and WebP formats
+- Reduced MIME type sniffing buffer size from 4100 bytes to 12 bytes for improved performance
+- Changed mermaid cache key type from `string` to `bigint` for more efficient hashing
+- Replaced `smol-toml` dependency with native `Bun.TOML.parse()` for TOML parsing, reducing external dependencies
+- Replaced `node-html-parser` dependency with `linkedom` for HTML parsing, improving performance and reducing bundle size
+- Updated HTML parsing API calls from `node-html-parser` to `linkedom` across all web scrapers (arXiv, IACR, Go pkg, Read the Docs, Twitter, Wikipedia)
+- Changed element text extraction from `.text` property to `.textContent` property for compatibility with linkedom DOM API
+- Optimized document link extraction to use regex-based parsing with deduplication and a 20-link limit instead of full DOM traversal
+- Unified `path` parameter in ast_find and ast_replace tools to accept files, directories, or glob patterns directly, eliminating the separate `glob` parameter
+- Removed `strictness` parameter from ast_find and ast_replace tools
+- Removed `fail_on_parse_error` parameter from ast_replace tool (now always false)
+- Updated ast_find and ast_replace prompt guidance to clarify that `path` accepts glob patterns and no longer requires separate glob specification
+- Refactored prompt template rendering to use unified `formatPromptContent()` function with phase-aware formatting (pre-render vs post-render)
+- Updated `format-prompts.ts` script to use centralized prompt formatting utility instead of inline implementation
+- Replaced `column` parameter with `symbol` parameter for more intuitive position specification
+- Removed `files` parameter; use glob patterns in `file` parameter instead
+- Removed `end_line` and `end_character` parameters; range operations now use single position
+- Changed `include_declaration` parameter to always be true for references (removed from API)
+- Updated LSP client capabilities to advertise support for `typeDefinition` and `implementation` requests
+- Improved definition results to include source context alongside location information
+- Refactored deferred continuation scheduling to use centralized post-prompt task tracking instead of raw `setTimeout()` calls, improving reliability of concurrent recovery operations
+- Updated subagent executor to explicitly await `waitForIdle()` after each prompt and reminder, ensuring terminal assistant state is determined only after all background work completes
+- Replaced `#waitForRetry()` with `#waitForPostPromptRecovery()` to handle both retry and TTSR resume gates, ensuring prompt completion waits for all post-prompt recovery operations
+- Introduced structured post-prompt recovery task tracking in `AgentSession` and added explicit session completion APIs (`waitForIdle()`, `getLastAssistantMessage()`) for callers that need deterministic turn finalization
+- Updated intent field parameter name from `agent__intent` to `_i` for cleaner tool call contracts
+- Refined intent parameter guidance to require concise 2-6 word sentences in present participle form
+- Centralized per-tool timeout constants and clamping into `tool-timeouts.ts`
+
+### Removed
+
+- Removed `file-type` dependency, reducing external dependencies
+- Removed `glob` dependency in favor of native `Bun.Glob` API
+- Removed `ignore` dependency and ignore file handling utilities
+- Removed `marked` dependency
+- Removed `zod` dependency
+- Removed `ms` and `@types/ms` dev dependencies
+- Removed `rootDir` and `ignoreMatcher` parameters from `loadFilesFromDir()` (kept for API compatibility)
+- Removed `smol-toml` dependency from package.json
+- Removed `node-html-parser` dependency from package.json
+- Removed `files` array parameter for batch file operations
+- Removed `column`, `end_line`, and `end_character` parameters in favor of symbol-based positioning
+- Removed `include_declaration` parameter from references action
+
+### Fixed
+
+- Fixed TTSR violations during subagent execution aborting the entire subagent run; `#waitForPostPromptRecovery()` now also awaits agent idle after TTSR/retry gates resolve, preventing `prompt()` from returning while a fire-and-forget `agent.continue()` is still streaming
+- Fixed deferred TTSR/context-promotion continuations still racing `prompt()` completion by tracking compaction checks and deferred `agent.continue()` tasks under a shared post-prompt recovery orchestrator
+- Fixed subagent reminder/finalization sequencing to await session-level idle recovery between prompts before determining terminal assistant stop state
+- Fixed `code_actions` apply mode to execute command-based actions via `workspace/executeCommand`
+- Fixed diagnostics glob detection to recognize bracket character class patterns (e.g., `src/[ab].ts`)
+- Fixed LSP render metadata sanitization for `symbol` values to prevent tab/newline layout breakage
+- Fixed LSP diagnostics glob requests that appeared stuck by capping glob expansion and shortening per-file diagnostic waits in batch mode
+- Fixed workspace symbol search to query all configured LSP servers and filter out non-matching results
+- Fixed `references`/`rename`/`hover` symbol targeting to error when `symbol` is missing on the line or `occurrence` is out of bounds
+- Fixed `reload` without a file to reload all active configured language servers instead of only the first server
+- Fixed `todo_write` task normalization to auto-activate the first remaining task and include explicit remaining-items output in tool results, removing the need for an immediate follow-up start update
+
 ## [13.3.7] - 2026-02-27
 ### Breaking Changes
 

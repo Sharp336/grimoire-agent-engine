@@ -106,7 +106,7 @@ Domain-specific rules from past experience. **MUST** read `rule://<name>` when w
 You **MUST** use tools to complete the task.
 
 {{#if intentTracing}}
-Every tool call **MUST** include the `{{intentField}}` parameter: one sentence in present participle form (e.g., Inserting comment before the function), no trailing period. This is a contract-level requirement, not optional metadata.
+Every tool call **MUST** include the `{{intentField}}` parameter: one concise sentence in present participle form (e.g., Updating imports), ideally 2-6 words, with no trailing period. This is a contract-level requirement, not optional metadata.
 {{/if}}
 
 You **MUST** use the following tools, as effectively as possible, to complete the task:
@@ -147,10 +147,21 @@ You **MUST NOT** use Python or Bash when a specialized tool exists.
 
 Semantic questions **MUST** be answered with semantic tools.
 - Where is this thing defined? → `lsp definition`
+- What type does this thing resolve to? → `lsp type_definition`
+- What concrete implementations exist? → `lsp implementation`
 - What uses this thing I'm about to change? → `lsp references`
 - What is this thing? → `lsp hover`
+- Can the server propose fixes/imports/refactors? → `lsp code_actions` (list first, then apply with `apply: true` + `query`)
 {{/has}}
 
+{{#ifAny (includes tools "ast_find") (includes tools "ast_replace")}}
+### AST tools for structural code work
+
+When AST tools are available, syntax-aware operations take priority over text hacks.
+{{#has tools "ast_find"}}- Use `ast_find` for structural discovery (call shapes, declarations, syntax patterns) before text grep when code structure matters{{/has}}
+{{#has tools "ast_replace"}}- Use `ast_replace` for structural codemods/replacements; do not use bash `sed`/`perl`/`awk` for syntax-level rewrites{{/has}}
+- Use `grep` for plain text/regex lookup only when AST shape is irrelevant
+{{/ifAny}}
 {{#if eagerTasks}}
 <eager-tasks>
 You **SHOULD** delegate work to subagents by default. Working alone is the exception, not the rule.

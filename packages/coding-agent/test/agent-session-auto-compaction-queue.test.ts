@@ -177,10 +177,18 @@ describe("AgentSession auto-compaction queue resume", () => {
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
 
-		// Wait for the async compaction handler to finish, then advance past setTimeout(100)
+		// Wait for compaction completion, then verify waitForIdle blocks on queued continuation.
 		await compactionDone;
 		await Promise.resolve();
+		const idlePromise = session.waitForIdle();
+		let idleResolved = false;
+		void idlePromise.then(() => {
+			idleResolved = true;
+		});
+		await Promise.resolve();
+		expect(idleResolved).toBe(false);
 		vi.advanceTimersByTime(200);
+		await idlePromise;
 
 		expect(continueSpy).toHaveBeenCalledTimes(1);
 		const runtimeSignals = getRuntimeSignals();

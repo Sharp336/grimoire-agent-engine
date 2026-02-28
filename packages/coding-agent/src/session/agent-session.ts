@@ -355,6 +355,13 @@ export class AgentSession {
 	#pendingTtsrInjections: Rule[] = [];
 	#ttsrAbortPending = false;
 	#ttsrRetryToken = 0;
+	#ttsrResumePromise: Promise<void> | undefined = undefined;
+	#ttsrResumeResolve: (() => void) | undefined = undefined;
+	#postPromptTaskCounter = 0;
+	#postPromptTaskIds = new Set<number>();
+	#postPromptTasksPromise: Promise<void> | undefined = undefined;
+	#postPromptTasksResolve: (() => void) | undefined = undefined;
+	#postPromptTasksAbortController = new AbortController();
 
 	#streamingEditAbortTriggered = false;
 	#streamingEditCheckedLineCounts = new Map<string, number>();
@@ -509,6 +516,7 @@ export class AgentSession {
 					if (this.#shouldInterruptForTtsrMatch(matchContext)) {
 						// Abort the stream immediately — do not gate on extension callbacks
 						this.#ttsrAbortPending = true;
+						this.#ensureTtsrResumePromise();
 						this.agent.abort();
 						// Notify extensions (fire-and-forget, does not block abort)
 						this.#emitSessionEvent({ type: "ttsr_triggered", rules: matches }).catch(() => {});
@@ -517,49 +525,58 @@ export class AgentSession {
 						const generation = this.#promptGeneration;
 						const targetMessageTimestamp =
 							event.message.role === "assistant" ? event.message.timestamp : undefined;
-						setTimeout(async () => {
-							if (this.#ttsrRetryToken !== retryToken) {
-								return;
-							}
+						this.#schedulePostPromptTask(
+							async () => {
+								if (this.#ttsrRetryToken !== retryToken) {
+									this.#resolveTtsrResume();
+									return;
+								}
 
-							const targetAssistantIndex = this.#findTtsrAssistantIndex(targetMessageTimestamp);
-							if (
-								!this.#ttsrAbortPending ||
-								this.#promptGeneration !== generation ||
-								targetAssistantIndex === -1
-							) {
+								const targetAssistantIndex = this.#findTtsrAssistantIndex(targetMessageTimestamp);
+								if (
+									!this.#ttsrAbortPending ||
+									this.#promptGeneration !== generation ||
+									targetAssistantIndex === -1
+								) {
+									this.#ttsrAbortPending = false;
+									this.#pendingTtsrInjections = [];
+									this.#resolveTtsrResume();
+									return;
+								}
 								this.#ttsrAbortPending = false;
-								this.#pendingTtsrInjections = [];
-								return;
-							}
-							this.#ttsrAbortPending = false;
-							const ttsrSettings = this.#ttsrManager?.getSettings();
-							if (ttsrSettings?.contextMode === "discard") {
-								// Remove the partial/aborted assistant turn from agent state
-								this.agent.replaceMessages(this.agent.state.messages.slice(0, targetAssistantIndex));
-							}
-							// Inject TTSR rules as system reminder before retry
-							const injection = this.#getTtsrInjectionContent();
-							if (injection) {
-								const details = { rules: injection.rules.map(rule => rule.name) };
-								this.agent.appendMessage({
-									role: "custom",
-									customType: "ttsr-injection",
-									content: injection.content,
-									display: false,
-									details,
-									timestamp: Date.now(),
-								});
-								this.sessionManager.appendCustomMessageEntry(
-									"ttsr-injection",
-									injection.content,
-									false,
-									details,
-								);
-								this.#markTtsrInjected(details.rules);
-							}
-							this.agent.continue().catch(() => {});
-						}, 50);
+								const ttsrSettings = this.#ttsrManager?.getSettings();
+								if (ttsrSettings?.contextMode === "discard") {
+									// Remove the partial/aborted assistant turn from agent state
+									this.agent.replaceMessages(this.agent.state.messages.slice(0, targetAssistantIndex));
+								}
+								// Inject TTSR rules as system reminder before retry
+								const injection = this.#getTtsrInjectionContent();
+								if (injection) {
+									const details = { rules: injection.rules.map(rule => rule.name) };
+									this.agent.appendMessage({
+										role: "custom",
+										customType: "ttsr-injection",
+										content: injection.content,
+										display: false,
+										details,
+										timestamp: Date.now(),
+									});
+									this.sessionManager.appendCustomMessageEntry(
+										"ttsr-injection",
+										injection.content,
+										false,
+										details,
+									);
+									this.#markTtsrInjected(details.rules);
+								}
+								try {
+									await this.agent.continue();
+								} catch {
+									this.#resolveTtsrResume();
+								}
+							},
+							{ delayMs: 50 },
+						);
 						return;
 					}
 				}
@@ -607,6 +624,13 @@ export class AgentSession {
 			if (event.message.role === "assistant") {
 				this.#lastAssistantMessage = event.message;
 				const assistantMsg = event.message as AssistantMessage;
+				// Resolve TTSR resume gate before checking for new deferred injections.
+				// Gate on #ttsrAbortPending, not stopReason: a non-TTSR abort (e.g. streaming
+				// edit) also produces stopReason === "aborted" but has no continuation coming.
+				// Only skip when #ttsrAbortPending is true (TTSR continuation is imminent).
+				if (!this.#ttsrAbortPending) {
+					this.#resolveTtsrResume();
+				}
 				this.#queueDeferredTtsrInjectionIfNeeded(assistantMsg);
 				if (this.#handoffAbortController) {
 					this.#skipPostTurnMaintenanceAssistantTimestamp = assistantMsg.timestamp;
@@ -683,8 +707,9 @@ export class AgentSession {
 				if (didRetry) return; // Retry was initiated, don't proceed to compaction
 			}
 
-			await this.#checkCompaction(msg);
-
+			const compactionTask = this.#checkCompaction(msg);
+			this.#trackPostPromptTask(compactionTask);
+			await compactionTask;
 			// Check for incomplete todos (unless there was an error or abort)
 			if (msg.stopReason !== "error" && msg.stopReason !== "aborted") {
 				await this.#checkTodoCompletion();
@@ -698,6 +723,141 @@ export class AgentSession {
 			this.#retryResolve();
 			this.#retryResolve = undefined;
 			this.#retryPromise = undefined;
+		}
+	}
+
+	/** Create the TTSR resume gate promise if one doesn't already exist. */
+	#ensureTtsrResumePromise(): void {
+		if (this.#ttsrResumePromise) return;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#ttsrResumePromise = promise;
+		this.#ttsrResumeResolve = resolve;
+	}
+
+	/** Resolve and clear the TTSR resume gate. */
+	#resolveTtsrResume(): void {
+		if (!this.#ttsrResumeResolve) return;
+		this.#ttsrResumeResolve();
+		this.#ttsrResumeResolve = undefined;
+		this.#ttsrResumePromise = undefined;
+	}
+
+	#ensurePostPromptTasksPromise(): void {
+		if (this.#postPromptTasksPromise) return;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#postPromptTasksPromise = promise;
+		this.#postPromptTasksResolve = resolve;
+	}
+
+	#resolvePostPromptTasks(): void {
+		if (!this.#postPromptTasksResolve) return;
+		this.#postPromptTasksResolve();
+		this.#postPromptTasksResolve = undefined;
+		this.#postPromptTasksPromise = undefined;
+	}
+
+	#trackPostPromptTask(task: Promise<void>): void {
+		const taskId = ++this.#postPromptTaskCounter;
+		this.#postPromptTaskIds.add(taskId);
+		this.#ensurePostPromptTasksPromise();
+		void task
+			.catch(() => {})
+			.finally(() => {
+				this.#postPromptTaskIds.delete(taskId);
+				if (this.#postPromptTaskIds.size === 0) {
+					this.#resolvePostPromptTasks();
+				}
+			});
+	}
+
+	#schedulePostPromptTask(
+		task: (signal: AbortSignal) => Promise<void>,
+		options?: { delayMs?: number; generation?: number; onSkip?: () => void },
+	): void {
+		const delayMs = options?.delayMs ?? 0;
+		const signal = this.#postPromptTasksAbortController.signal;
+		const scheduled = (async () => {
+			if (delayMs > 0) {
+				try {
+					await abortableSleep(delayMs, signal);
+				} catch {
+					return;
+				}
+			}
+			if (signal.aborted) {
+				options?.onSkip?.();
+				return;
+			}
+			if (options?.generation !== undefined && this.#promptGeneration !== options.generation) {
+				options.onSkip?.();
+				return;
+			}
+			await task(signal);
+		})();
+		this.#trackPostPromptTask(scheduled);
+	}
+
+	#scheduleAgentContinue(options?: {
+		delayMs?: number;
+		generation?: number;
+		shouldContinue?: () => boolean;
+		onSkip?: () => void;
+		onError?: () => void;
+	}): void {
+		this.#schedulePostPromptTask(
+			async () => {
+				if (options?.shouldContinue && !options.shouldContinue()) {
+					options.onSkip?.();
+					return;
+				}
+				try {
+					await this.agent.continue();
+				} catch {
+					options?.onError?.();
+				}
+			},
+			{
+				delayMs: options?.delayMs,
+				generation: options?.generation,
+				onSkip: options?.onSkip,
+			},
+		);
+	}
+
+	#cancelPostPromptTasks(): void {
+		this.#postPromptTasksAbortController.abort();
+		this.#postPromptTasksAbortController = new AbortController();
+		this.#postPromptTaskIds.clear();
+		this.#resolvePostPromptTasks();
+	}
+	/**
+	 * Wait for retry, TTSR resume, and any background continuation to settle.
+	 * Loops because a TTSR continuation can trigger a retry (or vice-versa),
+	 * and fire-and-forget `agent.continue()` may still be streaming after
+	 * the TTSR resume gate resolves.
+	 */
+	async #waitForPostPromptRecovery(): Promise<void> {
+		while (true) {
+			if (this.#retryPromise) {
+				await this.#retryPromise;
+				continue;
+			}
+			if (this.#ttsrResumePromise) {
+				await this.#ttsrResumePromise;
+				continue;
+			}
+			if (this.#postPromptTasksPromise) {
+				await this.#postPromptTasksPromise;
+				continue;
+			}
+			// Tracked post-prompt tasks cover deferred continuations scheduled from
+			// event handlers. Keep the streaming fallback for direct agent activity
+			// outside the scheduler.
+			if (this.agent.state.isStreaming) {
+				await this.agent.waitForIdle();
+				continue;
+			}
+			break;
 		}
 	}
 
@@ -792,14 +952,26 @@ export class AgentSession {
 			details: { rules: injection.rules.map(rule => rule.name) },
 			timestamp: Date.now(),
 		});
+		this.#ensureTtsrResumePromise();
 		// Mark as injected after this custom message is delivered and persisted (handled in message_end).
 		// followUp() only enqueues; resume on the next tick once streaming settles.
-		setTimeout(() => {
-			if (this.agent.state.isStreaming || !this.agent.hasQueuedMessages()) {
-				return;
-			}
-			this.agent.continue().catch(() => {});
-		}, 0);
+		this.#scheduleAgentContinue({
+			delayMs: 1,
+			generation: this.#promptGeneration,
+			onSkip: () => {
+				this.#resolveTtsrResume();
+			},
+			shouldContinue: () => {
+				if (this.agent.state.isStreaming || !this.agent.hasQueuedMessages()) {
+					this.#resolveTtsrResume();
+					return false;
+				}
+				return true;
+			},
+			onError: () => {
+				this.#resolveTtsrResume();
+			},
+		});
 	}
 
 	/** Build TTSR match context for tool call argument deltas. */
@@ -1271,6 +1443,7 @@ export class AgentSession {
 		} catch (error) {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
+		this.#cancelPostPromptTasks();
 		const drained = await this.#asyncJobManager?.dispose({ timeoutMs: 3_000 });
 		const deliveryState = this.#asyncJobManager?.getDeliveryState();
 		if (drained === false && deliveryState) {
@@ -1322,6 +1495,16 @@ export class AgentSession {
 		return this.agent.state.isStreaming || this.#promptInFlight;
 	}
 
+	/** Wait until streaming and deferred recovery work are fully settled. */
+	async waitForIdle(): Promise<void> {
+		await this.agent.waitForIdle();
+		await this.#waitForPostPromptRecovery();
+	}
+
+	/** Most recent assistant message in agent state. */
+	getLastAssistantMessage(): AssistantMessage | undefined {
+		return this.#findLastAssistantMessage();
+	}
 	/** Current effective system prompt (includes any per-turn extension modifications) */
 	get systemPrompt(): string {
 		return this.agent.state.systemPrompt;
@@ -1721,7 +1904,7 @@ export class AgentSession {
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
-		options?: Pick<PromptOptions, "toolChoice" | "images">,
+		options?: Pick<PromptOptions, "toolChoice" | "images"> & { skipPostPromptRecoveryWait?: boolean },
 	): Promise<void> {
 		this.#promptInFlight = true;
 		const generation = this.#promptGeneration;
@@ -1826,7 +2009,9 @@ export class AgentSession {
 
 			const agentPromptOptions = options?.toolChoice ? { toolChoice: options.toolChoice } : undefined;
 			await this.#promptAgentWithIdleRetry(messages, agentPromptOptions);
-			await this.#waitForRetry();
+			if (!options?.skipPostPromptRecoveryWait) {
+				await this.#waitForPostPromptRecovery();
+			}
 		} finally {
 			this.#promptInFlight = false;
 		}
@@ -1886,7 +2071,7 @@ export class AgentSession {
 			},
 			hasQueuedMessages: () => this.queuedMessageCount > 0,
 			getContextUsage: () => this.getContextUsage(),
-			waitForIdle: () => this.agent.waitForIdle(),
+			waitForIdle: () => this.waitForIdle(),
 			newSession: async options => {
 				const success = await this.newSession({ parentSession: options?.parentSession });
 				if (!success) {
@@ -2217,6 +2402,8 @@ export class AgentSession {
 	async abort(): Promise<void> {
 		this.abortRetry();
 		this.#promptGeneration++;
+		this.#resolveTtsrResume();
+		this.#cancelPostPromptTasks();
 		this.agent.abort();
 		await this.agent.waitForIdle();
 		// Clear promptInFlight: waitForIdle resolves when the agent loop's finally
@@ -3004,6 +3191,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return;
 		const contextWindow = this.model?.contextWindow ?? 0;
+		const generation = this.#promptGeneration;
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
 		// to a larger-context model (e.g. codex) - the overflow error from the old model
@@ -3029,9 +3217,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (promoted) {
 				// Retry on the promoted (larger) model without compacting
-				setTimeout(() => {
-					this.agent.continue().catch(() => {});
-				}, 100);
+				this.#scheduleAgentContinue({ delayMs: 100, generation });
 				return;
 			}
 
@@ -3132,7 +3318,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			content: [{ type: "text", text: reminder }],
 			timestamp: Date.now(),
 		});
-		this.agent.continue().catch(() => {});
+		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
 	}
 
 	/**
@@ -3302,6 +3488,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 	async #runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<void> {
 		const compactionSettings = this.settings.getGroup("compaction");
 
+		const generation = this.#promptGeneration;
 		await this.#emitSessionEvent({ type: "auto_compaction_start", reason });
 		// Properly abort and null existing controller before replacing
 		if (this.#autoCompactionAbortController) {
@@ -3541,10 +3728,15 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			await this.#emitSessionEvent({ type: "auto_compaction_end", result, aborted: false, willRetry });
 
 			if (!willRetry && compactionSettings.autoContinue !== false) {
-				await this.prompt("Continue if you have next steps.", {
-					expandPromptTemplates: false,
-					synthetic: true,
-				});
+				await this.#promptWithMessage(
+					{
+						role: "developer",
+						content: [{ type: "text", text: "Continue if you have next steps." }],
+						timestamp: Date.now(),
+					},
+					"Continue if you have next steps.",
+					{ skipPostPromptRecoveryWait: true },
+				);
 			}
 
 			if (willRetry) {
@@ -3554,15 +3746,15 @@ Be thorough - include exact file paths, function names, error messages, and tech
 					this.agent.replaceMessages(messages.slice(0, -1));
 				}
 
-				setTimeout(() => {
-					this.agent.continue().catch(() => {});
-				}, 100);
+				this.#scheduleAgentContinue({ delayMs: 100, generation });
 			} else if (this.agent.hasQueuedMessages()) {
 				// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
 				// Kick the loop so queued messages are actually delivered.
-				setTimeout(() => {
-					this.agent.continue().catch(() => {});
-				}, 100);
+				this.#scheduleAgentContinue({
+					delayMs: 100,
+					generation,
+					shouldContinue: () => this.agent.hasQueuedMessages(),
+				});
 			}
 		} catch (error) {
 			if (this.#autoCompactionAbortController?.signal.aborted) {
@@ -3685,6 +3877,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		const retrySettings = this.settings.getGroup("retry");
 		if (!retrySettings.enabled) return false;
 
+		const generation = this.#promptGeneration;
 		this.#retryAttempt++;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
@@ -3764,12 +3957,8 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		}
 		this.#retryAbortController = undefined;
 
-		// Retry via continue() - use setTimeout to break out of event handler chain
-		setTimeout(() => {
-			this.agent.continue().catch(() => {
-				// Retry failed - will be caught by next agent_end
-			});
-		}, 0);
+		// Retry via continue() outside the agent_end event callback chain.
+		this.#scheduleAgentContinue({ delayMs: 1, generation });
 
 		return true;
 	}
@@ -3781,16 +3970,6 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		this.#retryAbortController?.abort();
 		// Note: _retryAttempt is reset in the catch block of _autoRetry
 		this.#resolveRetry();
-	}
-
-	/**
-	 * Wait for any in-progress retry to complete.
-	 * Returns immediately if no retry is in progress.
-	 */
-	async #waitForRetry(): Promise<void> {
-		if (this.#retryPromise) {
-			await this.#retryPromise;
-		}
 	}
 
 	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {

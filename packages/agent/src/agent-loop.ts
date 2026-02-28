@@ -123,7 +123,7 @@ function normalizeMessagesForProvider(
 	return changed ? normalized : messages;
 }
 
-export const INTENT_FIELD = "agent__intent";
+export const INTENT_FIELD = "_i";
 
 function injectIntentIntoSchema(schema: unknown): unknown {
 	if (!schema || typeof schema !== "object" || Array.isArray(schema)) return schema;
@@ -636,9 +636,9 @@ function createAbortedToolResult(
 	reason: "aborted" | "error",
 	errorMessage?: string,
 ): ToolResultMessage {
-	const message = reason === "aborted" ? "Tool execution was aborted." : "Tool execution failed due to an error.";
+	const message = reason === "aborted" ? "Tool execution was aborted" : "Tool execution failed due to an error";
 	const result: AgentToolResult<any> = {
-		content: [{ type: "text", text: errorMessage ? `${message}: ${errorMessage}` : message }],
+		content: [{ type: "text", text: errorMessage ? `${message}: ${errorMessage}` : `${message}.` }],
 		details: {},
 	};
 

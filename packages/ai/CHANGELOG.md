@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+## [13.3.8] - 2026-02-28
+### Fixed
+
+- Fixed response body reuse error when handling 429 rate limit responses with retry logic
+
 ## [13.3.7] - 2026-02-27
 ### Added
 

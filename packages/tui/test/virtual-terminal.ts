@@ -1,4 +1,4 @@
-import type { Terminal } from "@oh-my-pi/pi-tui/terminal";
+import type { Terminal, TerminalAppearance } from "@oh-my-pi/pi-tui/terminal";
 import type { Terminal as XtermTerminalType } from "@xterm/headless";
 import xterm from "@xterm/headless";
 
@@ -64,6 +64,14 @@ export class VirtualTerminal implements Terminal {
 		return true;
 	}
 
+	get appearance(): TerminalAppearance | undefined {
+		return undefined;
+	}
+
+	onAppearanceChange(_callback: (appearance: TerminalAppearance) => void): void {
+		// No-op for virtual terminal
+	}
+
 	moveBy(lines: number): void {
 		if (lines > 0) {
 			// Move down
@@ -92,7 +100,7 @@ export class VirtualTerminal implements Terminal {
 	}
 
 	clearScreen(): void {
-		this.xterm.write("\x1b[2J\x1b[H"); // Clear screen and move to home (1,1)
+		this.xterm.write("\x1b[H\x1b[0J"); // Move to home (1,1) and clear from cursor to end
 	}
 
 	setTitle(title: string): void {

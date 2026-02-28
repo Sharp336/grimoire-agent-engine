@@ -455,6 +455,20 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
+	"astFind.enabled": {
+		type: "boolean",
+		default: true,
+		ui: { tab: "tools", label: "Enable AST Find", description: "Enable the ast_find tool for structural AST search" },
+	},
+	"astReplace.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Enable AST Replace",
+			description: "Enable the ast_replace tool for structural AST rewrites",
+		},
+	},
 	"notebook.enabled": {
 		type: "boolean",
 		default: true,
@@ -509,6 +523,16 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Intent tracing",
 			description: "Ask the agent to describe the intent of each tool call before executing it",
+		},
+	},
+	"tools.maxTimeout": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "tools",
+			label: "Max tool timeout",
+			description: "Maximum timeout in seconds the agent can set for any tool (0 = no limit)",
+			submenu: true,
 		},
 	},
 	"async.enabled": {

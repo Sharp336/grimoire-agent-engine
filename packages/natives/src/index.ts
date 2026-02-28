@@ -9,6 +9,23 @@
 export { type ClipboardImage, copyToClipboard, readImageFromClipboard } from "./clipboard";
 
 // =============================================================================
+// AST (structural search and rewrite)
+// =============================================================================
+
+export {
+	type AstFindMatch,
+	type AstFindOptions,
+	type AstFindResult,
+	type AstReplaceChange,
+	type AstReplaceFileChange,
+	type AstReplaceOptions,
+	type AstReplaceResult,
+	type AstStrictness,
+	astFind,
+	astReplace,
+} from "./ast";
+
+// =============================================================================
 // Grep (ripgrep-based regex search)
 // =============================================================================
 
@@ -123,3 +140,9 @@ export { killTree, listDescendants } from "./ps";
 // =============================================================================
 
 export { getWorkProfile, type WorkProfile } from "./work";
+
+// =============================================================================
+// macOS appearance detection
+// =============================================================================
+
+export { detectMacOSAppearance, type MacAppearanceObserver, startMacAppearanceObserver } from "./appearance";

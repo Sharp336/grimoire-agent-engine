@@ -5,7 +5,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { ptree, truncate } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
-import { parse as parseHtml } from "node-html-parser";
+import { parseHTML } from "linkedom";
 import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { type Theme, theme } from "../modes/theme/theme";
@@ -24,6 +24,7 @@ import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
 import { formatExpandHint, getDomain } from "./render-utils";
 import { ToolAbortError } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import { clampTimeout } from "./tool-timeouts";
 
 // =============================================================================
 // Types and Constants
@@ -249,19 +250,53 @@ async function tryContentNegotiation(
 }
 
 /**
+ * Read a single HTML attribute from a tag string
+ */
+function getHtmlAttribute(tag: string, attribute: string): string | null {
+	const pattern = new RegExp(`\\b${attribute}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s"'=<>]+))`, "i");
+	const match = tag.match(pattern);
+	if (!match) return null;
+	return (match[1] ?? match[2] ?? match[3] ?? "").trim();
+}
+
+/**
+ * Extract bounded <head> markup to avoid expensive whole-page parsing
+ */
+function extractHeadHtml(html: string): string {
+	const lower = html.toLowerCase();
+	const headStart = lower.indexOf("<head");
+	if (headStart === -1) {
+		return html.slice(0, 32 * 1024);
+	}
+
+	const headTagEnd = html.indexOf(">", headStart);
+	if (headTagEnd === -1) {
+		return html.slice(headStart, headStart + 32 * 1024);
+	}
+
+	const headEnd = lower.indexOf("</head>", headTagEnd + 1);
+	const fallbackEnd = Math.min(html.length, headTagEnd + 1 + 32 * 1024);
+	return html.slice(headStart, headEnd === -1 ? fallbackEnd : headEnd + 7);
+}
+
+/**
  * Parse alternate links from HTML head
  */
 function parseAlternateLinks(html: string, pageUrl: string): string[] {
 	const links: string[] = [];
 
 	try {
-		const doc = parseHtml(html.slice(0, 262144));
-		const alternateLinks = doc.querySelectorAll('link[rel="alternate"]');
+		const pagePath = new URL(pageUrl).pathname;
+		const headHtml = extractHeadHtml(html);
+		const linkTags = headHtml.match(/<link\b[^>]*>/gi) ?? [];
 
-		for (const link of alternateLinks) {
-			const href = link.getAttribute("href");
-			const type = link.getAttribute("type")?.toLowerCase() ?? "";
+		for (const tag of linkTags) {
+			const rel = getHtmlAttribute(tag, "rel")?.toLowerCase() ?? "";
+			const relTokens = rel.split(/\s+/).filter(Boolean);
+			if (!relTokens.includes("alternate")) continue;
 
+			const href = getHtmlAttribute(tag, "href");
+			const type = getHtmlAttribute(tag, "type")?.toLowerCase() ?? "";
 			if (!href) continue;
 
 			// Skip site-wide feeds
@@ -278,7 +313,7 @@ function parseAlternateLinks(html: string, pageUrl: string): string[] {
 				links.push(href);
 			} else if (
 				(type.includes("rss") || type.includes("atom") || type.includes("feed")) &&
-				(href.includes(new URL(pageUrl).pathname) || href.includes("comments"))
+				(href.includes(pagePath) || href.includes("comments"))
 			) {
 				links.push(href);
 			}
@@ -293,20 +328,22 @@ function parseAlternateLinks(html: string, pageUrl: string): string[] {
  */
 function extractDocumentLinks(html: string, baseUrl: string): string[] {
 	const links: string[] = [];
+	const seen = new Set<string>();
 
 	try {
-		const doc = parseHtml(html);
-		const anchors = doc.querySelectorAll("a[href]");
-
-		for (const anchor of anchors) {
-			const href = anchor.getAttribute("href");
+		const anchorTags = html.slice(0, 512 * 1024).match(/<a\b[^>]*>/gi) ?? [];
+		for (const tag of anchorTags) {
+			const href = getHtmlAttribute(tag, "href");
 			if (!href) continue;
 
 			const ext = path.extname(href).toLowerCase();
-			if (CONVERTIBLE_EXTENSIONS.has(ext)) {
-				const resolved = href.startsWith("http") ? href : new URL(href, baseUrl).href;
-				links.push(resolved);
-			}
+			if (!CONVERTIBLE_EXTENSIONS.has(ext)) continue;
+
+			const resolved = href.startsWith("http") ? href : new URL(href, baseUrl).href;
+			if (seen.has(resolved)) continue;
+			seen.add(resolved);
+			links.push(resolved);
+			if (links.length >= 20) break;
 		}
 	} catch {}
 
@@ -333,7 +370,7 @@ function cleanFeedText(text: string): string {
  */
 function parseFeedToMarkdown(content: string, maxItems = 10): string {
 	try {
-		const doc = parseHtml(content, { parseNoneClosedTags: true });
+		const doc = parseHTML(content).document;
 
 		// Try RSS
 		const channel = doc.querySelector("channel");
@@ -872,7 +909,7 @@ export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails
 		const { url, timeout: rawTimeout = 20, raw = false } = params;
 
 		// Clamp to valid range (seconds)
-		const effectiveTimeout = Math.min(Math.max(rawTimeout, 1), 45);
+		const effectiveTimeout = clampTimeout("fetch", rawTimeout);
 
 		if (signal?.aborted) {
 			throw new ToolAbortError();
