@@ -86,6 +86,12 @@ export class MCPCommandController {
 			case "disable":
 				await this.#handleSetEnabled(parts[2], false);
 				break;
+			case "resources":
+				await this.#handleResources();
+				break;
+			case "prompts":
+				await this.#handlePrompts();
+				break;
 			case "reload":
 				await this.#handleReload();
 				break;
@@ -1274,6 +1280,90 @@ export class MCPCommandController {
 			errorLines.push("");
 			this.#showMessage(errorLines.join("\n"));
 		}
+	}
+
+	/**
+	 * Handle /mcp resources - Show available resources from connected servers
+	 */
+	async #handleResources(): Promise<void> {
+		if (!this.ctx.mcpManager) {
+			this.ctx.showError("No MCP manager available.");
+			return;
+		}
+
+		const servers = this.ctx.mcpManager.getConnectedServers();
+		const lines: string[] = ["", theme.bold("MCP Resources"), ""];
+		let hasAny = false;
+
+		for (const name of servers) {
+			const data = this.ctx.mcpManager.getServerResources(name);
+			if (!data) continue;
+			const { resources, templates } = data;
+			if (resources.length === 0 && templates.length === 0) continue;
+			hasAny = true;
+
+			lines.push(`${theme.fg("accent", name)}:`);
+			for (const r of resources) {
+				const desc = r.description ? ` ${theme.fg("dim", r.description)}` : "";
+				const mime = r.mimeType ? ` ${theme.fg("dim", `[${r.mimeType}]`)}` : "";
+				lines.push(`  ${theme.fg("success", r.uri)}${mime}${desc}`);
+			}
+			if (templates.length > 0) {
+				lines.push(`  ${theme.fg("muted", "Templates:")}`);
+				for (const t of templates) {
+					const desc = t.description ? ` ${theme.fg("dim", t.description)}` : "";
+					lines.push(`    ${theme.fg("accent", t.uriTemplate)}${desc}`);
+				}
+			}
+			lines.push("");
+		}
+
+		if (!hasAny) {
+			lines.push(theme.fg("muted", "No resources available on connected servers."));
+			lines.push("");
+		}
+		this.#showMessage(lines.join("\n"));
+	}
+
+	/**
+	 * Handle /mcp prompts - Show available prompts from connected servers
+	 */
+	async #handlePrompts(): Promise<void> {
+		if (!this.ctx.mcpManager) {
+			this.ctx.showError("No MCP manager available.");
+			return;
+		}
+
+		const servers = this.ctx.mcpManager.getConnectedServers();
+		const lines: string[] = ["", theme.bold("MCP Prompts"), ""];
+		let hasAny = false;
+
+		for (const name of servers) {
+			const prompts = this.ctx.mcpManager.getServerPrompts(name);
+			if (!prompts?.length) continue;
+			hasAny = true;
+
+			lines.push(`${theme.fg("accent", name)}:`);
+			for (const p of prompts) {
+				const commandName = `${name}:${p.name}`;
+				const desc = p.description ? ` ${theme.fg("dim", p.description)}` : "";
+				lines.push(`  ${theme.fg("success", `/${commandName}`)}${desc}`);
+				if (p.arguments?.length) {
+					for (const arg of p.arguments) {
+						const required = arg.required ? theme.fg("warning", " *") : "";
+						const argDesc = arg.description ? ` - ${arg.description}` : "";
+						lines.push(`    ${arg.name}=${required}${theme.fg("dim", argDesc)}`);
+					}
+				}
+			}
+			lines.push("");
+		}
+
+		if (!hasAny) {
+			lines.push(theme.fg("muted", "No prompts available on connected servers."));
+			lines.push("");
+		}
+		this.#showMessage(lines.join("\n"));
 	}
 
 	/**
