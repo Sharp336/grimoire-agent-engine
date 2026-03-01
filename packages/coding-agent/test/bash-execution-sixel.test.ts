@@ -33,6 +33,35 @@ describe("BashExecutionComponent SIXEL sanitization", () => {
 		expect(component.getOutput()).toContain(SIXEL);
 	});
 
+	it("does not truncate long SIXEL payload lines", () => {
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		const payload = `\x1bPq${"A".repeat(5000)}\x1b\\`;
+		const component = new BashExecutionComponent("echo sixel", ui, false);
+		component.appendOutput(payload);
+		component.setComplete(0, false);
+
+		const output = component.getOutput();
+		expect(output).toContain("\x1bPq");
+		expect(output).toContain("\x1b\\");
+		expect(output).not.toContain("chars omitted");
+	});
+
+	it("still truncates long non-SIXEL lines", () => {
+		Bun.env.PI_FORCE_IMAGE_PROTOCOL = "sixel";
+		Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH = "1";
+
+		const longText = "x".repeat(5000);
+		const component = new BashExecutionComponent("echo text", ui, false);
+		component.appendOutput(longText);
+		component.setComplete(0, false);
+
+		const output = component.getOutput();
+		expect(output).toContain("chars omitted");
+		expect(output).not.toContain("\x1bPq");
+	});
+
 	it("strips SIXEL control escapes when passthrough gates are disabled", () => {
 		delete Bun.env.PI_FORCE_IMAGE_PROTOCOL;
 		delete Bun.env.PI_ALLOW_SIXEL_PASSTHROUGH;

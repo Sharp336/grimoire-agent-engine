@@ -218,6 +218,7 @@ export class TUI extends Container {
 	#cellSizeQueryPending = false;
 	#sixelProbePendingDa = false;
 	#sixelProbePendingGraphics = false;
+	#sixelProbeBuffer = "";
 	#sixelProbeTimeout?: NodeJS.Timeout;
 	#sixelProbeUnsubscribe?: () => void;
 	#showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
@@ -423,40 +424,84 @@ export class TUI extends Container {
 			return undefined;
 		}
 
-		if (this.#sixelProbePendingDa) {
-			const daMatch = data.match(/^\x1b\[\?([0-9;]+)c$/u);
-			if (daMatch) {
+		this.#sixelProbeBuffer += data;
+		let passthrough = "";
+		let probeOutcome: boolean | null = null;
+
+		while (this.#sixelProbeBuffer.length > 0) {
+			const daMatch = this.#sixelProbeBuffer.match(/\x1b\[\?([0-9;]+)c/u);
+			const graphicsMatch = this.#sixelProbeBuffer.match(/\x1b\[\?2;(\d+);([0-9;]+)S/u);
+
+			if (!daMatch && !graphicsMatch) break;
+
+			const daIndex = daMatch?.index ?? Number.POSITIVE_INFINITY;
+			const graphicsIndex = graphicsMatch?.index ?? Number.POSITIVE_INFINITY;
+			const useDa = daIndex <= graphicsIndex;
+			const match = useDa ? daMatch : graphicsMatch;
+			if (!match || match.index === undefined) break;
+
+			passthrough += this.#sixelProbeBuffer.slice(0, match.index);
+			this.#sixelProbeBuffer = this.#sixelProbeBuffer.slice(match.index + match[0].length);
+
+			if (useDa && this.#sixelProbePendingDa) {
 				this.#sixelProbePendingDa = false;
-				const attributes = daMatch[1]
+				const attributes = (match[1] ?? "")
 					.split(";")
 					.map(value => Number.parseInt(value, 10))
 					.filter(value => Number.isFinite(value));
 				const hasSixelAttribute = attributes.includes(4);
 				if (hasSixelAttribute) {
-					this.#finishSixelProbe(true);
+					this.#sixelProbePendingGraphics = false;
+					probeOutcome = true;
 				} else if (!this.#sixelProbePendingGraphics) {
-					this.#finishSixelProbe(false);
+					probeOutcome = false;
 				}
-				return { consume: true };
-			}
-		}
-
-		if (this.#sixelProbePendingGraphics) {
-			const graphicsMatch = data.match(/^\x1b\[\?2;(\d+);([0-9;]+)S$/u);
-			if (graphicsMatch) {
+			} else if (!useDa && this.#sixelProbePendingGraphics) {
 				this.#sixelProbePendingGraphics = false;
-				const status = Number.parseInt(graphicsMatch[1] ?? "", 10);
+				const status = Number.parseInt(match[1] ?? "", 10);
 				const supportsSixel = !Number.isNaN(status) && status !== 0;
 				if (supportsSixel) {
-					this.#finishSixelProbe(true);
+					this.#sixelProbePendingDa = false;
+					probeOutcome = true;
 				} else if (!this.#sixelProbePendingDa) {
-					this.#finishSixelProbe(false);
+					probeOutcome = false;
 				}
-				return { consume: true };
 			}
 		}
 
-		return undefined;
+		if (this.#sixelProbePendingDa || this.#sixelProbePendingGraphics) {
+			const partialStart = this.#getSixelProbePartialStart(this.#sixelProbeBuffer);
+			if (partialStart >= 0) {
+				passthrough += this.#sixelProbeBuffer.slice(0, partialStart);
+				this.#sixelProbeBuffer = this.#sixelProbeBuffer.slice(partialStart);
+			} else {
+				passthrough += this.#sixelProbeBuffer;
+				this.#sixelProbeBuffer = "";
+			}
+		} else {
+			passthrough += this.#sixelProbeBuffer;
+			this.#sixelProbeBuffer = "";
+		}
+
+		if (probeOutcome !== null) {
+			this.#finishSixelProbe(probeOutcome);
+		}
+
+		if (passthrough.length === 0) {
+			return { consume: true };
+		}
+
+		return { data: passthrough };
+	}
+
+	#getSixelProbePartialStart(buffer: string): number {
+		const lastEsc = buffer.lastIndexOf("\x1b");
+		if (lastEsc < 0) return -1;
+		const tail = buffer.slice(lastEsc);
+		if (/^\x1b\[\?[0-9;]*$/u.test(tail)) {
+			return lastEsc;
+		}
+		return -1;
 	}
 
 	#clearSixelProbeState(): void {
@@ -470,12 +515,12 @@ export class TUI extends Container {
 		}
 		this.#sixelProbePendingDa = false;
 		this.#sixelProbePendingGraphics = false;
+		this.#sixelProbeBuffer = "";
 	}
 
 	#finishSixelProbe(supported: boolean): void {
-		const wasPending = this.#sixelProbePendingDa || this.#sixelProbePendingGraphics;
 		this.#clearSixelProbeState();
-		if (!wasPending || !supported || TERMINAL.imageProtocol) return;
+		if (!supported || TERMINAL.imageProtocol) return;
 
 		setTerminalImageProtocol(ImageProtocol.Sixel);
 		this.#queryCellSize();

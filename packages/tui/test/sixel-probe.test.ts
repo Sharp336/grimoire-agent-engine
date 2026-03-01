@@ -50,6 +50,41 @@ describe("TUI SIXEL capability probe", () => {
 		tui.stop();
 	});
 
+	it("enables SIXEL when DA and graphics replies are coalesced in one chunk", () => {
+		if (process.platform !== "win32") return;
+		setTerminalImageProtocol(null);
+		terminalInfo.imageProtocol = null;
+		Bun.env.WT_SESSION = "test-wt-session";
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		tui.start();
+		terminal.sendInput("\x1b[?1;2;4c\x1b[?2;1;0S");
+
+		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
+		tui.stop();
+	});
+
+	it("enables SIXEL when DA reply arrives split across chunks", () => {
+		if (process.platform !== "win32") return;
+		setTerminalImageProtocol(null);
+		terminalInfo.imageProtocol = null;
+		Bun.env.WT_SESSION = "test-wt-session";
+		Object.defineProperty(process.stdin, "isTTY", { value: true, configurable: true });
+		Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
+
+		const terminal = new VirtualTerminal(80, 24);
+		const tui = new TUI(terminal);
+		tui.start();
+		terminal.sendInput("\x1b[?1;2;");
+		terminal.sendInput("4c");
+
+		expect(TERMINAL.imageProtocol).toBe(ImageProtocol.Sixel);
+		tui.stop();
+	});
+
 	it("keeps SIXEL disabled when capability responses are negative", () => {
 		if (process.platform !== "win32") return;
 		setTerminalImageProtocol(null);

@@ -8,12 +8,12 @@
 
 use std::{io::Cursor, sync::Arc};
 
+use icy_sixel::{EncodeOptions, sixel_encode};
 use image::{
 	DynamicImage, ImageFormat, ImageReader,
 	codecs::{jpeg::JpegEncoder, webp::WebPEncoder},
 	imageops::FilterType,
 };
-use icy_sixel::{EncodeOptions, sixel_encode};
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
@@ -118,7 +118,11 @@ impl PhotonImage {
 /// # Errors
 /// Returns an error if decoding, resizing, or SIXEL encoding fails.
 #[napi(js_name = "encodeSixel")]
-pub fn encode_sixel(bytes: Uint8Array, target_width_px: u32, target_height_px: u32) -> Result<String> {
+pub fn encode_sixel(
+	bytes: Uint8Array,
+	target_width_px: u32,
+	target_height_px: u32,
+) -> Result<String> {
 	if target_width_px == 0 || target_height_px == 0 {
 		return Err(Error::from_reason("Target SIXEL dimensions must be greater than zero"));
 	}
@@ -131,13 +135,8 @@ pub fn encode_sixel(bytes: Uint8Array, target_width_px: u32, target_height_px: u
 	};
 	let rgba = resized.to_rgba8();
 	let options = EncodeOptions::default();
-	sixel_encode(
-		rgba.as_raw(),
-		target_width_px as usize,
-		target_height_px as usize,
-		&options,
-	)
-	.map_err(|err| Error::from_reason(format!("Failed to encode SIXEL: {err}")))
+	sixel_encode(rgba.as_raw(), target_width_px as usize, target_height_px as usize, &options)
+		.map_err(|err| Error::from_reason(format!("Failed to encode SIXEL: {err}")))
 }
 
 fn decode_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage> {
@@ -145,7 +144,9 @@ fn decode_image_from_bytes(bytes: &[u8]) -> Result<DynamicImage> {
 		.with_guessed_format()
 		.map_err(|e| Error::from_reason(format!("Failed to detect image format: {e}")))?;
 
-	reader.decode().map_err(|e| Error::from_reason(format!("Failed to decode image: {e}")))
+	reader
+		.decode()
+		.map_err(|e| Error::from_reason(format!("Failed to decode image: {e}")))
 }
 fn encode_image(img: &DynamicImage, format: u8, quality: u8) -> Result<Vec<u8>> {
 	let (w, h) = (img.width(), img.height());
