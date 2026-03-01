@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { getCrashLogPath, getDebugLogPath } from "@oh-my-pi/pi-utils";
 import { isKeyRelease, matchesKey } from "./keys";
 import type { Terminal } from "./terminal";
-import { setCellDimensions, TERMINAL } from "./terminal-capabilities";
+import { ImageProtocol, setCellDimensions, setTerminalImageProtocol, TERMINAL } from "./terminal-capabilities";
 import { extractSegments, sliceByColumn, sliceWithWidth, visibleWidth } from "./utils";
 
 const SEGMENT_RESET = "\x1b[0m";
@@ -216,6 +216,10 @@ export class TUI extends Container {
 	#viewportTopRow = 0; // Content row currently mapped to screen row 0
 	#inputBuffer = ""; // Buffer for parsing terminal responses
 	#cellSizeQueryPending = false;
+	#sixelProbePendingDa = false;
+	#sixelProbePendingGraphics = false;
+	#sixelProbeTimeout?: NodeJS.Timeout;
+	#sixelProbeUnsubscribe?: () => void;
 	#showHardwareCursor = process.env.PI_HARDWARE_CURSOR === "1";
 	#clearOnShrink = process.env.PI_CLEAR_ON_SHRINK === "1"; // Clear empty rows when content shrinks (default: off)
 	#maxLinesRendered = 0; // High-water line count used for clear-on-shrink policy
@@ -381,6 +385,7 @@ export class TUI extends Container {
 			() => this.requestRender(),
 		);
 		this.terminal.hideCursor();
+		this.#querySixelSupport();
 		this.#queryCellSize();
 		this.requestRender(true);
 	}
@@ -396,6 +401,87 @@ export class TUI extends Container {
 		this.#inputListeners.delete(listener);
 	}
 
+	#querySixelSupport(): void {
+		if (TERMINAL.imageProtocol) return;
+		if (process.platform !== "win32") return;
+		if (!Bun.env.WT_SESSION) return;
+		if (!process.stdin.isTTY || !process.stdout.isTTY) return;
+
+		this.#clearSixelProbeState();
+		this.#sixelProbePendingDa = true;
+		this.#sixelProbePendingGraphics = true;
+		this.#sixelProbeUnsubscribe = this.addInputListener(data => this.#handleSixelProbeInput(data));
+		this.terminal.write("\x1b[c");
+		this.terminal.write("\x1b[?2;1;0S");
+		this.#sixelProbeTimeout = setTimeout(() => {
+			this.#finishSixelProbe(false);
+		}, 250);
+	}
+
+	#handleSixelProbeInput(data: string): InputListenerResult {
+		if (!this.#sixelProbePendingDa && !this.#sixelProbePendingGraphics) {
+			return undefined;
+		}
+
+		if (this.#sixelProbePendingDa) {
+			const daMatch = data.match(/^\x1b\[\?([0-9;]+)c$/u);
+			if (daMatch) {
+				this.#sixelProbePendingDa = false;
+				const attributes = daMatch[1]
+					.split(";")
+					.map(value => Number.parseInt(value, 10))
+					.filter(value => Number.isFinite(value));
+				const hasSixelAttribute = attributes.includes(4);
+				if (hasSixelAttribute) {
+					this.#finishSixelProbe(true);
+				} else if (!this.#sixelProbePendingGraphics) {
+					this.#finishSixelProbe(false);
+				}
+				return { consume: true };
+			}
+		}
+
+		if (this.#sixelProbePendingGraphics) {
+			const graphicsMatch = data.match(/^\x1b\[\?2;(\d+);([0-9;]+)S$/u);
+			if (graphicsMatch) {
+				this.#sixelProbePendingGraphics = false;
+				const status = Number.parseInt(graphicsMatch[1] ?? "", 10);
+				const supportsSixel = !Number.isNaN(status) && status !== 0;
+				if (supportsSixel) {
+					this.#finishSixelProbe(true);
+				} else if (!this.#sixelProbePendingDa) {
+					this.#finishSixelProbe(false);
+				}
+				return { consume: true };
+			}
+		}
+
+		return undefined;
+	}
+
+	#clearSixelProbeState(): void {
+		if (this.#sixelProbeTimeout) {
+			clearTimeout(this.#sixelProbeTimeout);
+			this.#sixelProbeTimeout = undefined;
+		}
+		if (this.#sixelProbeUnsubscribe) {
+			this.#sixelProbeUnsubscribe();
+			this.#sixelProbeUnsubscribe = undefined;
+		}
+		this.#sixelProbePendingDa = false;
+		this.#sixelProbePendingGraphics = false;
+	}
+
+	#finishSixelProbe(supported: boolean): void {
+		const wasPending = this.#sixelProbePendingDa || this.#sixelProbePendingGraphics;
+		this.#clearSixelProbeState();
+		if (!wasPending || !supported || TERMINAL.imageProtocol) return;
+
+		setTerminalImageProtocol(ImageProtocol.Sixel);
+		this.#queryCellSize();
+		this.invalidate();
+		this.requestRender(true);
+	}
 	#queryCellSize(): void {
 		// Only query if terminal supports images (cell size is only used for image rendering)
 		if (!TERMINAL.imageProtocol) {
@@ -408,6 +494,7 @@ export class TUI extends Container {
 	}
 
 	stop(): void {
+		this.#clearSixelProbeState();
 		this.#stopped = true;
 		// Move cursor below the visible working area to prevent overwriting/artifacts on exit
 		if (this.#previousLines.length > 0) {

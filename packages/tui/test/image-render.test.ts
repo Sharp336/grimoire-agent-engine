@@ -114,7 +114,7 @@ describe("terminal image rendering", () => {
 });
 
 describe("Windows Terminal Preview SIXEL detection", () => {
-	it("uses 1.22+ when version is present and falls back to WT session when missing", () => {
+	it("requires Windows platform, WT session, and known version 1.22+", () => {
 		expect(
 			isWindowsTerminalPreviewSixelSupported(
 				{ WT_SESSION: "1", TERM_PROGRAM: "Windows_Terminal", TERM_PROGRAM_VERSION: "1.22.2362.0" },
@@ -129,7 +129,7 @@ describe("Windows Terminal Preview SIXEL detection", () => {
 		).toBe(false);
 		expect(
 			isWindowsTerminalPreviewSixelSupported({ WT_SESSION: "1", TERM_PROGRAM: "Windows_Terminal" }, "win32"),
-		).toBe(true);
+		).toBe(false);
 		expect(
 			isWindowsTerminalPreviewSixelSupported(
 				{ WT_SESSION: "1", TERM_PROGRAM: "Windows_Terminal", TERM_PROGRAM_VERSION: "1.22.2362.0" },

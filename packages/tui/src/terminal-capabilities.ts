@@ -74,11 +74,9 @@ function parseMajorMinorVersion(versionRaw?: string): { major: number; minor: nu
 }
 
 /**
- * Returns true when running in Windows Terminal with SIXEL support.
+ * Returns true when running in Windows Terminal with known SIXEL support.
  *
  * Windows Terminal introduced SIXEL support in preview 1.22.
- * Some installs omit TERM_PROGRAM_VERSION; when that happens we assume
- * support if WT_SESSION is present to avoid false negatives.
  */
 export function isWindowsTerminalPreviewSixelSupported(
 	env: NodeJS.ProcessEnv = Bun.env,
@@ -90,12 +88,11 @@ export function isWindowsTerminalPreviewSixelSupported(
 		return false;
 	}
 	const version = parseMajorMinorVersion(env.TERM_PROGRAM_VERSION);
-	if (!version) return true;
+	if (!version) return false;
 	return version.major > 1 || (version.major === 1 && version.minor >= 22);
 }
 function getFallbackImageProtocol(terminalId: TerminalId): ImageProtocol | null {
 	if (!process.stdout.isTTY) return null;
-	if (isWindowsTerminalPreviewSixelSupported()) return ImageProtocol.Sixel;
 	if (terminalId === "vscode" || terminalId === "alacritty") return null;
 	const term = Bun.env.TERM?.toLowerCase() ?? "";
 	if (term.includes("screen") || term.includes("tmux") || term.includes("ghostty")) {
@@ -183,6 +180,17 @@ export const TERMINAL = (() => {
 	}
 	return terminal;
 })();
+
+type MutableTerminalInfo = {
+	imageProtocol: ImageProtocol | null;
+};
+
+/**
+ * Override terminal image protocol at runtime after capability probes complete.
+ */
+export function setTerminalImageProtocol(imageProtocol: ImageProtocol | null): void {
+	(TERMINAL as unknown as MutableTerminalInfo).imageProtocol = imageProtocol;
+}
 
 export function getTerminalInfo(terminalId: TerminalId): TerminalInfo {
 	return KNOWN_TERMINALS[terminalId];
