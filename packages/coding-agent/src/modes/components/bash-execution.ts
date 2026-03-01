@@ -3,9 +3,10 @@
  */
 
 import { sanitizeText } from "@oh-my-pi/pi-natives";
-import { Container, Loader, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { Container, ImageProtocol, Loader, Spacer, TERMINAL, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import { formatTruncationMetaNotice, type TruncationMeta } from "../../tools/output-meta";
+import { getSixelLineMask, sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import { DynamicBorder } from "./dynamic-border";
 import { truncateToVisualLines } from "./visual-truncate";
 
@@ -75,7 +76,7 @@ export class BashExecutionComponent extends Container {
 	}
 
 	appendOutput(chunk: string): void {
-		const clean = sanitizeText(chunk);
+		const clean = sanitizeWithOptionalSixelPassthrough(chunk, sanitizeText);
 
 		// Append to output lines
 		const newLines = clean.split("\n").map(line => this.#clampDisplayLine(line));
@@ -120,6 +121,9 @@ export class BashExecutionComponent extends Container {
 		// Apply preview truncation based on expanded state
 		const previewLogicalLines = availableLines.slice(-PREVIEW_LINES);
 		const hiddenLineCount = availableLines.length - previewLogicalLines.length;
+		const sixelLineMask =
+			TERMINAL.imageProtocol === ImageProtocol.Sixel ? getSixelLineMask(availableLines) : undefined;
+		const hasSixelOutput = sixelLineMask?.some(Boolean) ?? false;
 
 		// Rebuild content container
 		this.#contentContainer.clear();
@@ -130,9 +134,10 @@ export class BashExecutionComponent extends Container {
 
 		// Output
 		if (availableLines.length > 0) {
-			if (this.#expanded) {
-				// Show all lines
-				const displayText = availableLines.map(line => theme.fg("muted", line)).join("\n");
+			if (this.#expanded || hasSixelOutput) {
+				const displayText = availableLines
+					.map((line, index) => (sixelLineMask?.[index] ? line : theme.fg("muted", line)))
+					.join("\n");
 				this.#contentContainer.addChild(new Text(`\n${displayText}`, 1, 0));
 			} else {
 				// Use shared visual truncation utility, recomputed per render width
@@ -155,7 +160,7 @@ export class BashExecutionComponent extends Container {
 			const statusParts: string[] = [];
 
 			// Show how many lines are hidden (collapsed preview)
-			if (hiddenLineCount > 0) {
+			if (hiddenLineCount > 0 && !hasSixelOutput) {
 				statusParts.push(theme.fg("dim", `… ${hiddenLineCount} more lines (ctrl+o to expand)`));
 			}
 
@@ -184,7 +189,7 @@ export class BashExecutionComponent extends Container {
 	}
 
 	#setOutput(output: string): void {
-		const clean = sanitizeText(output);
+		const clean = sanitizeWithOptionalSixelPassthrough(output, sanitizeText);
 		this.#outputLines = clean ? clean.split("\n").map(line => this.#clampDisplayLine(line)) : [];
 	}
 
