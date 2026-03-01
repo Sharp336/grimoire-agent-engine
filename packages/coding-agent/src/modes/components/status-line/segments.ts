@@ -14,6 +14,10 @@ function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
 }
 
+function normalizePremiumRequests(value: number): number {
+	return Math.round((value + Number.EPSILON) * 100) / 100;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Implementations
 // ═══════════════════════════════════════════════════════════════════════════
@@ -189,16 +193,21 @@ const tokenTotalSegment: StatusLineSegment = {
 const costSegment: StatusLineSegment = {
 	id: "cost",
 	render(ctx) {
-		const { cost } = ctx.usageStats;
+		const { cost, premiumRequests } = ctx.usageStats;
+		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
 		const usingSubscription = state.model ? ctx.session.modelRegistry.isUsingOAuth(state.model) : false;
 
-		if (!cost && !usingSubscription) {
+		if (!cost && !usingSubscription && !normalizedPremiumRequests) {
 			return { content: "", visible: false };
 		}
 
-		const costDisplay = usingSubscription ? "(sub)" : `$${cost.toFixed(2)}`;
-		return { content: theme.fg("statusLineCost", costDisplay), visible: true };
+		const billingParts: string[] = [];
+		if (cost) billingParts.push(`$${cost.toFixed(2)}`);
+		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
+		if (usingSubscription) billingParts.push("(sub)");
+
+		return { content: theme.fg("statusLineCost", billingParts.join(" ")), visible: true };
 	},
 };
 

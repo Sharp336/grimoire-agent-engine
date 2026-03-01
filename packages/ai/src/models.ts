@@ -9,6 +9,11 @@ import type { Api, KnownProvider, Model, Usage } from "./types";
  *
  * For runtime-aware resolution, use `createModelManager()` / `resolveProviderModels()`.
  */
+type CostMode = "usage" | "none";
+
+const DEFAULT_COST_MODE_BY_PROVIDER: Partial<Record<KnownProvider, CostMode>> = {
+	"github-copilot": "none",
+};
 const modelRegistry: Map<string, Map<string, Model<Api>>> = new Map();
 for (const [provider, models] of Object.entries(MODELS)) {
 	const providerModels = new Map<string, Model<Api>>();
@@ -34,7 +39,19 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 	return models ? (Array.from(models.values()) as Model<Api>[]) : [];
 }
 
+const ZERO_USAGE_COST: Usage["cost"] = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 };
+
+function resetUsageCost(usage: Usage): Usage["cost"] {
+	usage.cost = { ...ZERO_USAGE_COST };
+	return usage.cost;
+}
+
 export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
+	const costMode = DEFAULT_COST_MODE_BY_PROVIDER[model.provider as KnownProvider] ?? "usage";
+	if (costMode === "none") {
+		return resetUsageCost(usage);
+	}
+
 	usage.cost.input = (model.cost.input / 1000000) * usage.input;
 	usage.cost.output = (model.cost.output / 1000000) * usage.output;
 	usage.cost.cacheRead = (model.cost.cacheRead / 1000000) * usage.cacheRead;

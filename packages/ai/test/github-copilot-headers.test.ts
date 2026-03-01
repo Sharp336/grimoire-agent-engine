@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	buildCopilotDynamicHeaders,
 	getCopilotInitiatorOverride,
+	getCopilotPremiumMultiplier,
 	hasCopilotVisionInput,
 	inferCopilotInitiator,
 } from "../src/providers/github-copilot-headers";
@@ -167,28 +168,70 @@ describe("hasCopilotVisionInput", () => {
 	});
 });
 
-describe("buildCopilotDynamicHeaders", () => {
-	it("sets X-Initiator and Openai-Intent", () => {
-		const headers = buildCopilotDynamicHeaders({ messages: [], hasImages: false });
-		expect(headers["X-Initiator"]).toBe("user");
-		expect(headers["Openai-Intent"]).toBe("conversation-edits");
+describe("getCopilotPremiumMultiplier", () => {
+	it("returns published multipliers from the Copilot billing table", () => {
+		expect(getCopilotPremiumMultiplier("claude-haiku-4.5")).toBe(0.33);
+		expect(getCopilotPremiumMultiplier("claude-opus-4.6")).toBe(3);
+		expect(getCopilotPremiumMultiplier("gpt-4o")).toBe(0);
+		expect(getCopilotPremiumMultiplier("grok-code-fast-1")).toBe(0.25);
 	});
 
-	it("preserves explicit initiator override over inferred value", () => {
-		const headers = buildCopilotDynamicHeaders({
+	it("defaults unknown models to 1x", () => {
+		expect(getCopilotPremiumMultiplier("unknown-model")).toBe(1);
+	});
+});
+
+describe("buildCopilotDynamicHeaders", () => {
+	it("uses model multiplier for user-initiated requests", () => {
+		const { headers, premiumRequests } = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: false,
+			modelId: "claude-haiku-4.5",
+		});
+		expect(headers["X-Initiator"]).toBe("user");
+		expect(headers["Openai-Intent"]).toBe("conversation-edits");
+		expect(premiumRequests).toBe(0.33);
+	});
+
+	it("uses 0x multiplier for included models", () => {
+		const { premiumRequests } = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: false,
+			modelId: "gpt-4o",
+		});
+		expect(premiumRequests).toBe(0);
+	});
+
+	it("preserves explicit initiator override over inferred value and sets 0 premium requests for agent", () => {
+		const { headers, premiumRequests } = buildCopilotDynamicHeaders({
 			messages: [{ role: "user", content: "what time is it?" }],
 			hasImages: false,
+			modelId: "claude-opus-4.6",
 			initiatorOverride: "agent",
 		});
 		expect(headers["X-Initiator"]).toBe("agent");
-	});
-	it("sets Copilot-Vision-Request when hasImages is true", () => {
-		const headers = buildCopilotDynamicHeaders({ messages: [], hasImages: true });
-		expect(headers["Copilot-Vision-Request"]).toBe("true");
+		expect(headers["Openai-Intent"]).toBe("conversation-edits");
+		expect(premiumRequests).toBe(0);
 	});
 
-	it("does not set Copilot-Vision-Request when hasImages is false", () => {
-		const headers = buildCopilotDynamicHeaders({ messages: [], hasImages: false });
-		expect(headers["Copilot-Vision-Request"]).toBeUndefined();
+	it("sets Copilot-Vision-Request when hasImages is true", () => {
+		const { headers, premiumRequests } = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: true,
+			modelId: "claude-opus-4.6",
+		});
+		expect(headers["X-Initiator"]).toBe("user");
+		expect(headers["Openai-Intent"]).toBe("conversation-edits");
+		expect(headers["Copilot-Vision-Request"]).toBe("true");
+		expect(premiumRequests).toBe(3);
+	});
+
+	it("defaults to 1x for unknown model ids", () => {
+		const { premiumRequests } = buildCopilotDynamicHeaders({
+			messages: [],
+			hasImages: false,
+			modelId: "future-model",
+		});
+		expect(premiumRequests).toBe(1);
 	});
 });

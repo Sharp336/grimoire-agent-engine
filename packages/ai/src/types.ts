@@ -243,6 +243,7 @@ export interface Usage {
 	cacheRead: number;
 	cacheWrite: number;
 	totalTokens: number;
+	premiumRequests?: number;
 	cost: {
 		input: number;
 		output: number;

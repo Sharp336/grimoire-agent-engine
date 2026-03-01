@@ -44,6 +44,7 @@ async function printStats(): Promise<void> {
 	console.log(`  Total Tokens: ${formatNumber(overall.totalInputTokens + overall.totalOutputTokens)}`);
 	console.log(`  Cache Rate: ${formatPercent(overall.cacheRate)}`);
 	console.log(`  Total Cost: ${formatCost(overall.totalCost)}`);
+	console.log(`  Premium Requests: ${formatNumber(overall.totalPremiumRequests ?? 0)}`);
 	console.log(`  Avg Duration: ${overall.avgDuration !== null ? formatDuration(overall.avgDuration) : "-"}`);
 	console.log(`  Avg TTFT: ${overall.avgTtft !== null ? formatDuration(overall.avgTtft) : "-"}`);
 	if (overall.avgTokensPerSecond !== null) {
