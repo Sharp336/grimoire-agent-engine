@@ -186,16 +186,7 @@ fn fuzzy_find_sync(config: FuzzyFindConfig, ct: task::CancelToken) -> Result<Fuz
 
 	let use_cache = config.cache.unwrap_or(false);
 	let mut scored = if use_cache {
-		let scan = fs_cache::get_or_scan(
-			&root,
-			fs_cache::ScanConfig {
-				include_hidden,
-				use_gitignore: respect_gitignore,
-				collect_mtime: false,
-				deterministic_sort: false,
-			},
-			&ct,
-		)?;
+		let scan = fs_cache::get_or_scan(&root, include_hidden, respect_gitignore, &ct)?;
 		let mut scored =
 			score_entries(&scan.entries, &query_lower, &normalized_query, &query_chars, &ct)?;
 		// Empty-result recheck: if the query was non-trivial but produced zero matches
@@ -204,32 +195,12 @@ fn fuzzy_find_sync(config: FuzzyFindConfig, ct: task::CancelToken) -> Result<Fuz
 			&& !query_lower.is_empty()
 			&& scan.cache_age_ms >= fs_cache::empty_recheck_ms()
 		{
-			let fresh = fs_cache::force_rescan(
-				&root,
-				fs_cache::ScanConfig {
-					include_hidden,
-					use_gitignore: respect_gitignore,
-					collect_mtime: false,
-					deterministic_sort: false,
-				},
-				true,
-				&ct,
-			)?;
+			let fresh = fs_cache::force_rescan(&root, include_hidden, respect_gitignore, true, &ct)?;
 			scored = score_entries(&fresh, &query_lower, &normalized_query, &query_chars, &ct)?;
 		}
 		scored
 	} else {
-		let fresh = fs_cache::force_rescan(
-			&root,
-			fs_cache::ScanConfig {
-				include_hidden,
-				use_gitignore: respect_gitignore,
-				collect_mtime: false,
-				deterministic_sort: false,
-			},
-			false,
-			&ct,
-		)?;
+		let fresh = fs_cache::force_rescan(&root, include_hidden, respect_gitignore, false, &ct)?;
 		score_entries(&fresh, &query_lower, &normalized_query, &query_chars, &ct)?
 	};
 
@@ -247,7 +218,7 @@ fn score_entries(
 	query_chars: &[char],
 	ct: &task::CancelToken,
 ) -> Result<Vec<FuzzyFindMatch>> {
-	let mut scored = Vec::with_capacity(entries.len());
+	let mut scored = Vec::with_capacity(entries.len().min(256));
 	for entry in entries {
 		ct.heartbeat()?;
 		if entry.file_type == fs_cache::FileType::Symlink {
