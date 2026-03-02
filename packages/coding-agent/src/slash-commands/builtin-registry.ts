@@ -318,6 +318,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 			{ name: "reload", description: "Force reload MCP runtime tools" },
 			{ name: "resources", description: "List available resources from connected servers" },
 			{ name: "prompts", description: "List available prompts from connected servers" },
+			{ name: "notifications", description: "Show notification capabilities and subscriptions" },
 			{ name: "help", description: "Show help message" },
 		],
 		allowArgs: true,

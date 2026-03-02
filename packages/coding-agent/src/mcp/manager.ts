@@ -710,6 +710,16 @@ export class MCPManager {
 	}
 
 	/**
+	 * Get notification state for display.
+	 */
+	getNotificationState(): { enabled: boolean; subscriptions: Map<string, ReadonlySet<string>> } {
+		return {
+			enabled: this.#notificationsEnabled,
+			subscriptions: this.#subscribedResources as Map<string, ReadonlySet<string>>,
+		};
+	}
+
+	/**
 	 * Resolve OAuth credentials and shell commands in config.
 	 */
 	async #resolveAuthConfig(config: MCPServerConfig): Promise<MCPServerConfig> {
