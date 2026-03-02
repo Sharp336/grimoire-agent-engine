@@ -149,6 +149,12 @@ export class MCPManager {
 	 */
 	setOnPromptsChanged(handler: (serverName: string) => void): void {
 		this.#onPromptsChanged = handler;
+		// Fire immediately for servers that already have prompts loaded
+		for (const [name, connection] of this.#connections) {
+			if (connection.prompts?.length) {
+				handler(name);
+			}
+		}
 	}
 
 	setNotificationsEnabled(enabled: boolean): void {
@@ -596,10 +602,23 @@ export class MCPManager {
 			// Reload
 			const [resources] = await Promise.all([listResources(connection), listResourceTemplates(connection)]);
 			if (this.#notificationsEnabled && connection.capabilities.resources?.subscribe) {
-				const uris = resources.map(r => r.uri);
-				void subscribeToResources(connection, uris)
+				const newUris = new Set(resources.map(r => r.uri));
+				const oldUris = this.#subscribedResources.get(name);
+
+				// Unsubscribe URIs that were removed
+				if (oldUris) {
+					const removed = [...oldUris].filter(uri => !newUris.has(uri));
+					if (removed.length > 0) {
+						void unsubscribeFromResources(connection, removed).catch(error => {
+							logger.debug("Failed to unsubscribe stale MCP resources", { path: `mcp:${name}`, error });
+						});
+					}
+				}
+
+				// Subscribe to the current set
+				void subscribeToResources(connection, [...newUris])
 					.then(() => {
-						this.#subscribedResources.set(name, new Set(uris));
+						this.#subscribedResources.set(name, newUris);
 					})
 					.catch(error => {
 						logger.debug("Failed to re-subscribe to MCP resources", { path: `mcp:${name}`, error });
