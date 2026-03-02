@@ -52,6 +52,10 @@ export class StatusLineComponent implements Component {
 	#gitStatusLastFetch = 0;
 	#gitStatusInFlight = false;
 
+	// PR lookup caching (invalidated on branch change)
+	#cachedPr: { number: number; url: string } | null | undefined = undefined;
+	#prLookupInFlight = false;
+
 	constructor(private readonly session: AgentSession) {
 		this.#settings = {
 			preset: settings.get("statusLine.preset"),
@@ -108,6 +112,7 @@ export class StatusLineComponent implements Component {
 		try {
 			this.#gitWatcher = fs.watch(gitHeadPath, () => {
 				this.#cachedBranch = undefined;
+				this.#cachedPr = undefined;
 				if (this.#onBranchChange) {
 					this.#onBranchChange();
 				}
@@ -126,6 +131,7 @@ export class StatusLineComponent implements Component {
 
 	invalidate(): void {
 		this.#cachedBranch = undefined;
+		this.#cachedPr = undefined;
 	}
 
 	#getCurrentBranch(): string | null {
@@ -207,6 +213,61 @@ export class StatusLineComponent implements Component {
 		return this.#cachedGitStatus;
 	}
 
+	#lookupPr(): { number: number; url: string } | null {
+		if (this.#cachedPr !== undefined) {
+			return this.#cachedPr;
+		}
+
+		// Don't look up if no branch, detached HEAD, default branch, or already in flight
+		const branch = this.#getCurrentBranch();
+		if (!branch || branch === "detached" || branch === "main" || branch === "master" || this.#prLookupInFlight) {
+			return null;
+		}
+
+		this.#prLookupInFlight = true;
+
+		// Fire async lookup, return null until resolved
+		(async () => {
+			try {
+				// Resolve GitHub owner/repo from remotes (prefer upstream, fall back to origin)
+				const upstream = await $`git remote get-url upstream`.quiet().nothrow();
+				const remoteUrl =
+					upstream.exitCode === 0
+						? upstream.stdout.toString().trim()
+						: (await $`git remote get-url origin`.quiet().nothrow()).stdout.toString().trim();
+				const match = remoteUrl.match(/github\.com[:/]([^/]+\/[^/.]+)/);
+				if (!match) {
+					this.#cachedPr = null;
+					return;
+				}
+				const repo = match[1];
+				// Use gh pr list --head which works reliably for fork PRs (gh pr view doesn't)
+				const result = await $`gh pr list --head ${branch} --json number,url --limit 1 -R ${repo}`
+					.quiet()
+					.nothrow();
+				if (result.exitCode !== 0) {
+					this.#cachedPr = null;
+					return;
+				}
+				const list = JSON.parse(result.stdout.toString()) as { number: number; url: string }[];
+				if (list.length > 0 && typeof list[0].number === "number") {
+					this.#cachedPr = { number: list[0].number, url: list[0].url };
+				} else {
+					this.#cachedPr = null;
+				}
+			} catch {
+				this.#cachedPr = null;
+			} finally {
+				this.#prLookupInFlight = false;
+				if (this.#cachedPr && this.#onBranchChange) {
+					this.#onBranchChange();
+				}
+			}
+		})();
+
+		return null;
+	}
+
 	#buildSegmentContext(width: number): SegmentContext {
 		const state = this.session.state;
 
@@ -248,6 +309,7 @@ export class StatusLineComponent implements Component {
 			git: {
 				branch: this.#getCurrentBranch(),
 				status: this.#getGitStatus(),
+				pr: this.#lookupPr(),
 			},
 		};
 	}
