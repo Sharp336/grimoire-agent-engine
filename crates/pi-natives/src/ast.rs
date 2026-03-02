@@ -576,14 +576,17 @@ fn compile_find_patterns(
 	languages: &HashMap<String, SupportLang>,
 	selector: Option<&str>,
 	strictness: &MatchStrictness,
-) -> Vec<CompiledFindPattern> {
+	ct: &task::CancelToken,
+) -> Result<Vec<CompiledFindPattern>> {
 	let mut compiled = Vec::with_capacity(patterns.len());
 
 	for pattern in patterns {
+		ct.heartbeat()?;
 		let mut compiled_by_lang = HashMap::with_capacity(languages.len());
 		let mut compile_errors_by_lang = HashMap::new();
 
 		for (lang_key, &language) in languages {
+			ct.heartbeat()?;
 			match compile_pattern(pattern, selector, strictness, language) {
 				Ok(compiled_pattern) => {
 					compiled_by_lang.insert(lang_key.clone(), compiled_pattern);
@@ -601,7 +604,7 @@ fn compile_find_patterns(
 		});
 	}
 
-	compiled
+	Ok(compiled)
 }
 #[napi(js_name = "astGrep")]
 pub fn ast_grep(options: AstFindOptions<'_>) -> task::Async<AstFindResult> {
@@ -636,8 +639,13 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Async<AstFindResult> {
 
 		let (resolved_candidates, languages) =
 			resolve_candidates_for_find(candidates, lang_str, &ct)?;
-		let compiled_patterns =
-			compile_find_patterns(&patterns, &languages, selector.as_deref(), &strictness);
+		let compiled_patterns = compile_find_patterns(
+			&patterns,
+			&languages,
+			selector.as_deref(),
+			&strictness,
+			&ct,
+		)?;
 		let files_searched = to_u32(resolved_candidates.len());
 
 		let mut all_matches = Vec::new();
@@ -801,6 +809,7 @@ pub fn ast_edit(options: AstReplaceOptions<'_>) -> task::Async<AstReplaceResult>
 		let mut parse_errors = Vec::new();
 		let mut compiled_rules = Vec::new();
 		for (pattern, rewrite) in rewrite_rules {
+			ct.heartbeat()?;
 			match compile_pattern(&pattern, selector.as_deref(), &strictness, language) {
 				Ok(compiled) => compiled_rules.push((pattern, rewrite, compiled)),
 				Err(err) => {
