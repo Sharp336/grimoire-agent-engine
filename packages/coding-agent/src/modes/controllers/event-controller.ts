@@ -374,6 +374,7 @@ export class EventController {
 			this.ctx.pendingTools.set(event.toolCallId, component);
 			this.ctx.ui.requestRender();
 		}
+		this.ctx.pendingTools.get(event.toolCallId)?.notifyExecutionStarted();
 	}
 
 	async #handleToolExecutionUpdate(

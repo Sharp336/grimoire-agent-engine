@@ -20,7 +20,7 @@ import { applyHeadTail } from "./bash-normalize";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
 import { formatStyledTruncationWarning, type OutputMeta } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
-import { formatToolWorkingDirectory, replaceTabs } from "./render-utils";
+import { formatTimeoutLine, formatToolWorkingDirectory, replaceTabs } from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
@@ -709,6 +709,8 @@ interface BashRenderContext {
 	previewLines?: number;
 	/** Timeout in seconds */
 	timeout?: number;
+	/** Wall-clock time (ms since epoch) when execution started */
+	executionStartMs?: number;
 }
 
 function formatBashCommand(args: BashRenderArgs): string {
@@ -759,16 +761,11 @@ export const bashToolRenderer = {
 				// Build truncation warning
 				const timeoutSeconds = details?.timeoutSeconds ?? renderContext?.timeout;
 				const requestedTimeoutSeconds = details?.requestedTimeoutSeconds;
-				const timeoutLabel =
-					typeof timeoutSeconds === "number"
-						? requestedTimeoutSeconds !== undefined && requestedTimeoutSeconds !== timeoutSeconds
-							? `Timeout: ${timeoutSeconds}s (requested ${requestedTimeoutSeconds}s clamped)`
-							: `Timeout: ${timeoutSeconds}s`
-						: undefined;
+				const isClamped = requestedTimeoutSeconds !== undefined && requestedTimeoutSeconds !== timeoutSeconds;
 				const timeoutLine =
-					timeoutLabel !== undefined
-						? uiTheme.fg("dim", `${uiTheme.format.bracketLeft}${timeoutLabel}${uiTheme.format.bracketRight}`)
-						: undefined;
+					isClamped
+						? uiTheme.fg("dim", `${uiTheme.format.bracketLeft}Timeout: ${timeoutSeconds}s (requested ${requestedTimeoutSeconds}s clamped)${uiTheme.format.bracketRight}`)
+						: formatTimeoutLine(timeoutSeconds, renderContext?.executionStartMs, options.isPartial ?? false, uiTheme);
 				let warningLine: string | undefined;
 				if (details?.meta?.truncation && !showingFullOutput) {
 					warningLine = formatStyledTruncationWarning(details.meta, uiTheme) ?? undefined;
