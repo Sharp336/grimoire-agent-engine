@@ -73,7 +73,7 @@ export { loginKimi, refreshKimiToken } from "./kimi";
 // LiteLLM (API key)
 export { loginLiteLLM } from "./litellm";
 // LM Studio (optional API key)
-export { loginLmStudio } from "./lm-studio";
+export { DEFAULT_LOCAL_TOKEN, loginLmStudio } from "./lm-studio";
 // MiniMax Coding Plan (API key)
 export { loginMiniMaxCode, loginMiniMaxCodeCn } from "./minimax-code";
 // Moonshot (API key)
@@ -426,13 +426,13 @@ export async function getOAuthApiKey(
 	const needsProjectId = provider === "google-gemini-cli" || provider === "google-antigravity";
 	const apiKey = needsProjectId
 		? JSON.stringify({
-				token: creds.access,
-				projectId: creds.projectId,
-				refreshToken: creds.refresh,
-				expiresAt: creds.expires,
-				email: creds.email,
-				accountId: creds.accountId,
-			})
+			token: creds.access,
+			projectId: creds.projectId,
+			refreshToken: creds.refresh,
+			expiresAt: creds.expires,
+			email: creds.email,
+			accountId: creds.accountId,
+		})
 		: creds.access;
 	return { newCredentials: creds, apiKey };
 }
