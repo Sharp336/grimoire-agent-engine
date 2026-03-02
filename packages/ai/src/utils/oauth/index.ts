@@ -426,13 +426,13 @@ export async function getOAuthApiKey(
 	const needsProjectId = provider === "google-gemini-cli" || provider === "google-antigravity";
 	const apiKey = needsProjectId
 		? JSON.stringify({
-			token: creds.access,
-			projectId: creds.projectId,
-			refreshToken: creds.refresh,
-			expiresAt: creds.expires,
-			email: creds.email,
-			accountId: creds.accountId,
-		})
+				token: creds.access,
+				projectId: creds.projectId,
+				refreshToken: creds.refresh,
+				expiresAt: creds.expires,
+				email: creds.email,
+				accountId: creds.accountId,
+			})
 		: creds.access;
 	return { newCredentials: creds, apiKey };
 }

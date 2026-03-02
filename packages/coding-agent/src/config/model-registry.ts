@@ -695,8 +695,8 @@ export class ModelRegistry {
 			this.#discoverableProviders.length === 0
 				? Promise.resolve<Model<Api>[]>([])
 				: Promise.all(this.#discoverableProviders.map(provider => this.#discoverProviderModels(provider))).then(
-					results => results.flat(),
-				);
+						results => results.flat(),
+					);
 		const [configuredDiscovered, builtInDiscovered] = await Promise.all([
 			configuredDiscoveriesPromise,
 			this.#discoverBuiltInProviderModels(strategy),
@@ -713,10 +713,10 @@ export class ModelRegistry {
 					this.#models.find(candidate => candidate.provider === model.provider);
 				return existing
 					? {
-						...model,
-						baseUrl: existing.baseUrl,
-						headers: existing.headers ? { ...existing.headers, ...model.headers } : model.headers,
-					}
+							...model,
+							baseUrl: existing.baseUrl,
+							headers: existing.headers ? { ...existing.headers, ...model.headers } : model.headers,
+						}
 					: model;
 			}),
 		);
@@ -753,36 +753,36 @@ export class ModelRegistry {
 			resolveKey: (value: string | undefined) => string | undefined;
 			createOptions: (key: string) => ModelManagerOptions<Api>;
 		}> = [
-				{
-					providerId: "google-antigravity",
-					resolveKey: extractGoogleOAuthToken,
-					createOptions: oauthToken =>
-						googleAntigravityModelManagerOptions({
-							oauthToken,
-							endpoint: this.getProviderBaseUrl("google-antigravity"),
-						}),
+			{
+				providerId: "google-antigravity",
+				resolveKey: extractGoogleOAuthToken,
+				createOptions: oauthToken =>
+					googleAntigravityModelManagerOptions({
+						oauthToken,
+						endpoint: this.getProviderBaseUrl("google-antigravity"),
+					}),
+			},
+			{
+				providerId: "google-gemini-cli",
+				resolveKey: extractGoogleOAuthToken,
+				createOptions: oauthToken =>
+					googleGeminiCliModelManagerOptions({
+						oauthToken,
+						endpoint: this.getProviderBaseUrl("google-gemini-cli"),
+					}),
+			},
+			{
+				providerId: "openai-codex",
+				resolveKey: value => value,
+				createOptions: accessToken => {
+					const accountId = resolveOAuthAccountIdForAccessToken(this.authStorage, "openai-codex", accessToken);
+					return openaiCodexModelManagerOptions({
+						accessToken,
+						accountId,
+					});
 				},
-				{
-					providerId: "google-gemini-cli",
-					resolveKey: extractGoogleOAuthToken,
-					createOptions: oauthToken =>
-						googleGeminiCliModelManagerOptions({
-							oauthToken,
-							endpoint: this.getProviderBaseUrl("google-gemini-cli"),
-						}),
-				},
-				{
-					providerId: "openai-codex",
-					resolveKey: value => value,
-					createOptions: accessToken => {
-						const accountId = resolveOAuthAccountIdForAccessToken(this.authStorage, "openai-codex", accessToken);
-						return openaiCodexModelManagerOptions({
-							accessToken,
-							accountId,
-						});
-					},
-				},
-			];
+			},
+		];
 		// Use peekApiKey to avoid OAuth token refresh during discovery.
 		// The token is only needed if the dynamic fetch fires (cache miss),
 		// and failures there are handled gracefully.
