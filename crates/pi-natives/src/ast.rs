@@ -639,13 +639,8 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Async<AstFindResult> {
 
 		let (resolved_candidates, languages) =
 			resolve_candidates_for_find(candidates, lang_str, &ct)?;
-		let compiled_patterns = compile_find_patterns(
-			&patterns,
-			&languages,
-			selector.as_deref(),
-			&strictness,
-			&ct,
-		)?;
+		let compiled_patterns =
+			compile_find_patterns(&patterns, &languages, selector.as_deref(), &strictness, &ct)?;
 		let files_searched = to_u32(resolved_candidates.len());
 
 		let mut all_matches = Vec::new();

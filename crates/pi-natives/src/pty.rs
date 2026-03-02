@@ -421,7 +421,12 @@ fn run_pty_sync(
 				Ok(ReaderEvent::Chunk(chunk)) => emit_chunk(&chunk, on_chunk.as_ref()),
 				Ok(ReaderEvent::Done) => reader_done = true,
 				Err(mpsc::RecvTimeoutError::Timeout) => {},
-				Err(mpsc::RecvTimeoutError::Disconnected) => reader_done = true,
+				Err(mpsc::RecvTimeoutError::Disconnected) => {
+					reader_done = true;
+					if exit_code.is_none() {
+						std::thread::sleep(wait_duration);
+					}
+				},
 			}
 		}
 	}
