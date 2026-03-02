@@ -55,6 +55,7 @@ export class StatusLineComponent implements Component {
 	// PR lookup caching (invalidated on branch change)
 	#cachedPr: { number: number; url: string } | null | undefined = undefined;
 	#prLookupInFlight = false;
+	#defaultBranch?: string;
 
 	constructor(private readonly session: AgentSession) {
 		this.#settings = {
@@ -159,6 +160,24 @@ export class StatusLineComponent implements Component {
 		return this.#cachedBranch ?? null;
 	}
 
+	#isDefaultBranch(branch: string): boolean {
+		if (this.#defaultBranch === undefined) {
+			// Kick off async resolution, use hardcoded fallback until it resolves
+			this.#defaultBranch = "main";
+			$`git rev-parse --abbrev-ref origin/HEAD`
+				.quiet()
+				.nothrow()
+				.then(result => {
+					if (result.exitCode === 0) {
+						const ref = result.stdout.toString().trim(); // "origin/main" -> "main"
+						const slash = ref.indexOf("/");
+						this.#defaultBranch = slash >= 0 ? ref.slice(slash + 1) : ref;
+					}
+				});
+		}
+		return branch === this.#defaultBranch;
+	}
+
 	#getGitStatus(): { staged: number; unstaged: number; untracked: number } | null {
 		if (this.#gitStatusInFlight || Date.now() - this.#gitStatusLastFetch < 1000) {
 			return this.#cachedGitStatus;
@@ -220,7 +239,7 @@ export class StatusLineComponent implements Component {
 
 		// Don't look up if no branch, detached HEAD, default branch, or already in flight
 		const branch = this.#getCurrentBranch();
-		if (!branch || branch === "detached" || branch === "main" || branch === "master" || this.#prLookupInFlight) {
+		if (!branch || branch === "detached" || this.#isDefaultBranch(branch) || this.#prLookupInFlight) {
 			return null;
 		}
 
