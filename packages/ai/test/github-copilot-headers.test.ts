@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { getBundledModel } from "../src/models";
 import {
 	buildCopilotDynamicHeaders,
 	getCopilotInitiatorOverride,
@@ -169,15 +170,21 @@ describe("hasCopilotVisionInput", () => {
 });
 
 describe("getCopilotPremiumMultiplier", () => {
-	it("returns published multipliers from the Copilot billing table", () => {
-		expect(getCopilotPremiumMultiplier("claude-haiku-4.5")).toBe(0.33);
-		expect(getCopilotPremiumMultiplier("claude-opus-4.6")).toBe(3);
-		expect(getCopilotPremiumMultiplier("gpt-4o")).toBe(0);
-		expect(getCopilotPremiumMultiplier("grok-code-fast-1")).toBe(0.25);
+	it("returns multiplier metadata from bundled Copilot models", () => {
+		expect(getCopilotPremiumMultiplier(getBundledModel("github-copilot", "claude-haiku-4.5").premiumMultiplier)).toBe(
+			0.33,
+		);
+		expect(getCopilotPremiumMultiplier(getBundledModel("github-copilot", "claude-opus-4.6").premiumMultiplier)).toBe(
+			3,
+		);
+		expect(getCopilotPremiumMultiplier(getBundledModel("github-copilot", "gpt-4o").premiumMultiplier)).toBe(0);
+		expect(getCopilotPremiumMultiplier(getBundledModel("github-copilot", "grok-code-fast-1").premiumMultiplier)).toBe(
+			0.25,
+		);
 	});
 
-	it("defaults unknown models to 1x", () => {
-		expect(getCopilotPremiumMultiplier("unknown-model")).toBe(1);
+	it("defaults to 1x when multiplier metadata is missing", () => {
+		expect(getCopilotPremiumMultiplier(undefined)).toBe(1);
 	});
 });
 
@@ -186,7 +193,7 @@ describe("buildCopilotDynamicHeaders", () => {
 		const { headers, premiumRequests } = buildCopilotDynamicHeaders({
 			messages: [],
 			hasImages: false,
-			modelId: "claude-haiku-4.5",
+			premiumMultiplier: 0.33,
 		});
 		expect(headers["X-Initiator"]).toBe("user");
 		expect(headers["Openai-Intent"]).toBe("conversation-edits");
@@ -197,7 +204,7 @@ describe("buildCopilotDynamicHeaders", () => {
 		const { premiumRequests } = buildCopilotDynamicHeaders({
 			messages: [],
 			hasImages: false,
-			modelId: "gpt-4o",
+			premiumMultiplier: 0,
 		});
 		expect(premiumRequests).toBe(0);
 	});
@@ -206,7 +213,7 @@ describe("buildCopilotDynamicHeaders", () => {
 		const { headers, premiumRequests } = buildCopilotDynamicHeaders({
 			messages: [{ role: "user", content: "what time is it?" }],
 			hasImages: false,
-			modelId: "claude-opus-4.6",
+			premiumMultiplier: 3,
 			initiatorOverride: "agent",
 		});
 		expect(headers["X-Initiator"]).toBe("agent");
@@ -218,7 +225,7 @@ describe("buildCopilotDynamicHeaders", () => {
 		const { headers, premiumRequests } = buildCopilotDynamicHeaders({
 			messages: [],
 			hasImages: true,
-			modelId: "claude-opus-4.6",
+			premiumMultiplier: 3,
 		});
 		expect(headers["X-Initiator"]).toBe("user");
 		expect(headers["Openai-Intent"]).toBe("conversation-edits");
@@ -226,11 +233,10 @@ describe("buildCopilotDynamicHeaders", () => {
 		expect(premiumRequests).toBe(3);
 	});
 
-	it("defaults to 1x for unknown model ids", () => {
+	it("defaults to 1x when premium multiplier is not provided", () => {
 		const { premiumRequests } = buildCopilotDynamicHeaders({
 			messages: [],
 			hasImages: false,
-			modelId: "future-model",
 		});
 		expect(premiumRequests).toBe(1);
 	});

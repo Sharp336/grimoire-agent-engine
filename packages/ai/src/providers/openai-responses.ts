@@ -396,7 +396,7 @@ function createClient(
 		const copilot = buildCopilotDynamicHeaders({
 			messages: context.messages,
 			hasImages,
-			modelId: model.id,
+			premiumMultiplier: model.premiumMultiplier,
 			headers,
 		});
 		Object.assign(headers, copilot.headers);

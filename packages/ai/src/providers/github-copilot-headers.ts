@@ -1,5 +1,4 @@
 import type { Message } from "../types";
-import { COPILOT_PREMIUM_MULTIPLIER_BY_MODEL_ID } from "./github-copilot-premium-multipliers";
 /**
  * Infer whether the current request to Copilot is user-initiated or agent-initiated.
  * Accepts `unknown[]` because providers may pass pre-converted message shapes.
@@ -72,16 +71,16 @@ export function getCopilotInitiatorOverride(headers: Record<string, string> | un
 	return override;
 }
 
-export function getCopilotPremiumMultiplier(modelId: string): number {
-	return COPILOT_PREMIUM_MULTIPLIER_BY_MODEL_ID[modelId] ?? 1;
+export function getCopilotPremiumMultiplier(premiumMultiplier: number | undefined): number {
+	return premiumMultiplier ?? 1;
 }
 
 export function getCopilotPremiumRequests(params: {
 	initiator: CopilotInitiator;
-	modelId: string;
+	premiumMultiplier?: number;
 }): CopilotPremiumRequests {
 	if (params.initiator === "agent") return 0;
-	return getCopilotPremiumMultiplier(params.modelId);
+	return getCopilotPremiumMultiplier(params.premiumMultiplier);
 }
 
 /**
@@ -91,7 +90,7 @@ export function getCopilotPremiumRequests(params: {
 export function buildCopilotDynamicHeaders(params: {
 	messages: unknown[];
 	hasImages: boolean;
-	modelId: string;
+	premiumMultiplier?: number;
 	headers?: Record<string, string>;
 	initiatorOverride?: CopilotInitiator;
 }): CopilotDynamicHeaders {
@@ -106,5 +105,9 @@ export function buildCopilotDynamicHeaders(params: {
 		headers["Copilot-Vision-Request"] = "true";
 	}
 
-	return { headers, initiator, premiumRequests: getCopilotPremiumRequests({ initiator, modelId: params.modelId }) };
+	return {
+		headers,
+		initiator,
+		premiumRequests: getCopilotPremiumRequests({ initiator, premiumMultiplier: params.premiumMultiplier }),
+	};
 }

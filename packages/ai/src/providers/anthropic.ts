@@ -451,7 +451,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				? buildCopilotDynamicHeaders({
 						messages: context.messages,
 						hasImages: hasCopilotVisionInput(context.messages),
-						modelId: model.id,
+						premiumMultiplier: model.premiumMultiplier,
 						headers: { ...(model.headers ?? {}), ...(options?.headers ?? {}) },
 					})
 				: undefined;

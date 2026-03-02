@@ -3,7 +3,7 @@ import { calculateCost, getBundledModel } from "../src/models";
 import type { Usage } from "../src/types";
 
 describe("calculateCost", () => {
-	it("forces monetary cost to zero for GitHub Copilot models", () => {
+	it("keeps token-based calculation for GitHub Copilot models", () => {
 		const model = {
 			...getBundledModel("github-copilot", "gpt-4o"),
 			cost: {
@@ -30,13 +30,11 @@ describe("calculateCost", () => {
 
 		calculateCost(model, usage);
 
-		expect(usage.cost).toEqual({
-			input: 0,
-			output: 0,
-			cacheRead: 0,
-			cacheWrite: 0,
-			total: 0,
-		});
+		expect(usage.cost.input).toBeCloseTo(1, 8);
+		expect(usage.cost.output).toBeCloseTo(1, 8);
+		expect(usage.cost.cacheRead).toBeCloseTo(0.1, 8);
+		expect(usage.cost.cacheWrite).toBeCloseTo(0.08, 8);
+		expect(usage.cost.total).toBeCloseTo(2.18, 8);
 	});
 
 	it("keeps token-based calculation for non-Copilot providers", () => {
