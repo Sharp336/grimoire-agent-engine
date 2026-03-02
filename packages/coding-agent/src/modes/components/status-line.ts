@@ -133,7 +133,6 @@ export class StatusLineComponent implements Component {
 
 	invalidate(): void {
 		this.#cachedBranch = undefined;
-		this.#cachedPr = undefined;
 	}
 
 	#getCurrentBranch(): string | null {
@@ -246,6 +245,12 @@ export class StatusLineComponent implements Component {
 
 		// Fire async lookup, return null until resolved
 		(async () => {
+			// Helper: only write cache if branch hasn't changed since launch
+			const setCachedPr = (value: { number: number; url: string } | null) => {
+				if (this.#getCurrentBranch() === branch) {
+					this.#cachedPr = value;
+				}
+			};
 			try {
 				// Resolve GitHub owner/repo from remotes (prefer upstream, fall back to origin)
 				const upstream = await $`git remote get-url upstream`.quiet().nothrow();
@@ -255,7 +260,7 @@ export class StatusLineComponent implements Component {
 						: (await $`git remote get-url origin`.quiet().nothrow()).stdout.toString().trim();
 				const repo = parseGitHubRepo(remoteUrl);
 				if (!repo) {
-					this.#cachedPr = null;
+					setCachedPr(null);
 					return;
 				}
 				// Use gh pr list --head which works reliably for fork PRs (gh pr view doesn't)
@@ -263,17 +268,17 @@ export class StatusLineComponent implements Component {
 					.quiet()
 					.nothrow();
 				if (result.exitCode !== 0) {
-					this.#cachedPr = null;
+					setCachedPr(null);
 					return;
 				}
 				const list = JSON.parse(result.stdout.toString()) as { number: number; url: string }[];
 				if (list.length > 0 && typeof list[0].number === "number") {
-					this.#cachedPr = { number: list[0].number, url: list[0].url };
+					setCachedPr({ number: list[0].number, url: list[0].url });
 				} else {
-					this.#cachedPr = null;
+					setCachedPr(null);
 				}
 			} catch {
-				this.#cachedPr = null;
+				setCachedPr(null);
 			} finally {
 				this.#prLookupInFlight = false;
 				if (this.#cachedPr && this.#onBranchChange) {

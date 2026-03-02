@@ -37,6 +37,18 @@ describe("parseGitHubRepo", () => {
 	test("handles GitHub Enterprise-style URLs (no match)", () => {
 		expect(parseGitHubRepo("https://github.corp.com/org/repo.git")).toBeNull();
 	});
+
+	test("parses HTTPS URL with dots in repo name", () => {
+		expect(parseGitHubRepo("https://github.com/org/my.repo.name.git")).toBe("org/my.repo.name");
+	});
+
+	test("parses SSH URL with dots in repo name", () => {
+		expect(parseGitHubRepo("git@github.com:org/dotted.repo.git")).toBe("org/dotted.repo");
+	});
+
+	test("parses URL with dots in repo name and no .git suffix", () => {
+		expect(parseGitHubRepo("https://github.com/org/my.repo")).toBe("org/my.repo");
+	});
 });
 
 describe("parseDefaultBranch", () => {

@@ -5,8 +5,9 @@
  * @returns "owner/repo" or null if the URL isn't a recognized GitHub remote.
  */
 export function parseGitHubRepo(remoteUrl: string): string | null {
-	const match = remoteUrl.match(/github\.com[:/]([^/]+\/[^/.]+)/);
-	return match ? match[1] : null;
+	const match = remoteUrl.match(/github\.com[:/]([^/]+\/[^/]+)/);
+	if (!match) return null;
+	return match[1].replace(/\.git$/, "");
 }
 
 /**
