@@ -8,6 +8,7 @@ import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } 
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { findGitHeadPathSync, sanitizeStatusText } from "../shared";
+import { parseDefaultBranch, parseGitHubRepo } from "./status-line/git-utils";
 import { getPreset } from "./status-line/presets";
 import { renderSegment, type SegmentContext } from "./status-line/segments";
 import { getSeparator } from "./status-line/separators";
@@ -169,9 +170,7 @@ export class StatusLineComponent implements Component {
 				.nothrow()
 				.then(result => {
 					if (result.exitCode === 0) {
-						const ref = result.stdout.toString().trim(); // "origin/main" -> "main"
-						const slash = ref.indexOf("/");
-						this.#defaultBranch = slash >= 0 ? ref.slice(slash + 1) : ref;
+						this.#defaultBranch = parseDefaultBranch(result.stdout.toString().trim());
 					}
 				});
 		}
@@ -254,12 +253,11 @@ export class StatusLineComponent implements Component {
 					upstream.exitCode === 0
 						? upstream.stdout.toString().trim()
 						: (await $`git remote get-url origin`.quiet().nothrow()).stdout.toString().trim();
-				const match = remoteUrl.match(/github\.com[:/]([^/]+\/[^/.]+)/);
-				if (!match) {
+				const repo = parseGitHubRepo(remoteUrl);
+				if (!repo) {
 					this.#cachedPr = null;
 					return;
 				}
-				const repo = match[1];
 				// Use gh pr list --head which works reliably for fork PRs (gh pr view doesn't)
 				const result = await $`gh pr list --head ${branch} --json number,url --limit 1 -R ${repo}`
 					.quiet()
