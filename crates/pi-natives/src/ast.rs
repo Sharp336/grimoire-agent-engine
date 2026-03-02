@@ -671,27 +671,35 @@ pub fn ast_grep(options: AstFindOptions<'_>) -> task::Async<AstFindResult> {
 				},
 			};
 
-			let ast = language.ast_grep(source);
-			if has_syntax_error(&ast) {
-				for compiled in &compiled_patterns {
-					parse_errors.push(format!(
-						"{}: {}: parse error (syntax tree contains error nodes)",
-						compiled.pattern, candidate.display_path
-					));
-				}
-				continue;
-			}
-
+			let mut runnable_patterns: Vec<(&str, &Pattern)> = Vec::new();
 			for compiled in &compiled_patterns {
+				ct.heartbeat()?;
 				if let Some(error) = compiled.compile_errors_by_lang.get(lang_key) {
 					parse_errors
 						.push(format!("{}: {}: {error}", compiled.pattern, candidate.display_path));
 					continue;
 				}
-				let Some(pattern) = compiled.compiled_by_lang.get(lang_key) else {
-					continue;
-				};
+				if let Some(pattern) = compiled.compiled_by_lang.get(lang_key) {
+					runnable_patterns.push((compiled.pattern.as_str(), pattern));
+				}
+			}
+			if runnable_patterns.is_empty() {
+				continue;
+			}
 
+			let ast = language.ast_grep(source);
+			if has_syntax_error(&ast) {
+				for (pattern_name, _) in &runnable_patterns {
+					parse_errors.push(format!(
+						"{pattern_name}: {}: parse error (syntax tree contains error nodes)",
+						candidate.display_path
+					));
+				}
+				continue;
+			}
+
+			for (_, pattern) in runnable_patterns {
+				ct.heartbeat()?;
 				for matched in ast.root().find_all(pattern.clone()) {
 					ct.heartbeat()?;
 					total_matches = total_matches.saturating_add(1);
