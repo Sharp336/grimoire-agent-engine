@@ -121,6 +121,8 @@ export class MCPCommandController {
 			"  /mcp enable <name>    Enable an MCP server",
 			"  /mcp disable <name>   Disable an MCP server",
 			"  /mcp reload           Force reload and rediscover MCP runtime tools",
+			"  /mcp resources        List available resources from connected servers",
+			"  /mcp prompts          List available prompts from connected servers",
 			"  /mcp help             Show this help message",
 			"",
 		].join("\n");
