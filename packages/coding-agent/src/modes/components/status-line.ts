@@ -8,7 +8,7 @@ import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } 
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import { findGitHeadPathSync, sanitizeStatusText } from "../shared";
-import { parseDefaultBranch, parseGitHubRepo } from "./status-line/git-utils";
+import { parseDefaultBranch } from "./status-line/git-utils";
 import { getPreset } from "./status-line/presets";
 import { renderSegment, type SegmentContext } from "./status-line/segments";
 import { getSeparator } from "./status-line/separators";
@@ -164,14 +164,18 @@ export class StatusLineComponent implements Component {
 		if (this.#defaultBranch === undefined) {
 			// Kick off async resolution, use hardcoded fallback until it resolves
 			this.#defaultBranch = "main";
-			$`git rev-parse --abbrev-ref origin/HEAD`
-				.quiet()
-				.nothrow()
-				.then(result => {
-					if (result.exitCode === 0) {
-						this.#defaultBranch = parseDefaultBranch(result.stdout.toString().trim());
-					}
-				});
+			(async () => {
+				// Try origin/HEAD first, fall back to upstream/HEAD
+				const origin = await $`git rev-parse --abbrev-ref origin/HEAD`.quiet().nothrow();
+				if (origin.exitCode === 0) {
+					this.#defaultBranch = parseDefaultBranch(origin.stdout.toString().trim());
+					return;
+				}
+				const upstream = await $`git rev-parse --abbrev-ref upstream/HEAD`.quiet().nothrow();
+				if (upstream.exitCode === 0) {
+					this.#defaultBranch = parseDefaultBranch(upstream.stdout.toString().trim());
+				}
+			})();
 		}
 		return branch === this.#defaultBranch;
 	}
@@ -252,28 +256,15 @@ export class StatusLineComponent implements Component {
 				}
 			};
 			try {
-				// Resolve GitHub owner/repo from remotes (prefer upstream, fall back to origin)
-				const upstream = await $`git remote get-url upstream`.quiet().nothrow();
-				const remoteUrl =
-					upstream.exitCode === 0
-						? upstream.stdout.toString().trim()
-						: (await $`git remote get-url origin`.quiet().nothrow()).stdout.toString().trim();
-				const repo = parseGitHubRepo(remoteUrl);
-				if (!repo) {
-					setCachedPr(null);
-					return;
-				}
-				// Use gh pr list --head which works reliably for fork PRs (gh pr view doesn't)
-				const result = await $`gh pr list --head ${branch} --json number,url --limit 1 -R ${repo}`
-					.quiet()
-					.nothrow();
+				// Requires `gh repo set-default` to be configured; fails gracefully if not
+				const result = await $`gh pr view --json number,url`.quiet().nothrow();
 				if (result.exitCode !== 0) {
 					setCachedPr(null);
 					return;
 				}
-				const list = JSON.parse(result.stdout.toString()) as { number: number; url: string }[];
-				if (list.length > 0 && typeof list[0].number === "number") {
-					setCachedPr({ number: list[0].number, url: list[0].url });
+				const pr = JSON.parse(result.stdout.toString()) as { number: number; url: string };
+				if (typeof pr.number === "number") {
+					setCachedPr({ number: pr.number, url: pr.url });
 				} else {
 					setCachedPr(null);
 				}
