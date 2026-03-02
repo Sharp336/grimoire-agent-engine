@@ -1510,6 +1510,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				key,
 				setTimeout(() => {
 					notificationDebounceTimers.delete(key);
+					// Re-check: user may have disabled notifications during the debounce window
+					if (!settings.get("mcp.notifications")) return;
 					void session.followUp(
 						`[MCP notification] Server "${serverName}" reports resource \`${uri}\` was updated. Use read_resource to inspect if relevant.`,
 					);

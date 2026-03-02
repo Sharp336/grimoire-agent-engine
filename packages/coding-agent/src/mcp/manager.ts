@@ -168,7 +168,10 @@ export class MCPManager {
 					const uris = connection.resources.map(r => r.uri);
 					void subscribeToResources(connection, uris)
 						.then(() => {
-							this.#subscribedResources.set(name, new Set(uris));
+							// Guard: if disabled while subscribe was in-flight, don't repopulate
+							if (this.#notificationsEnabled) {
+								this.#subscribedResources.set(name, new Set(uris));
+							}
 						})
 						.catch(error => {
 							logger.debug("Failed to subscribe to MCP resources", { path: `mcp:${name}`, error });
@@ -537,8 +540,13 @@ export class MCPManager {
 			this.#connections.delete(name);
 		}
 
-		// Remove tools from this server
+		// Remove tools from this server and notify consumers
+		const hadTools = this.#tools.some(t => t.name.startsWith(`mcp_${name}_`));
 		this.#tools = this.#tools.filter(t => !t.name.startsWith(`mcp_${name}_`));
+		if (hadTools) this.#onToolsChanged?.(this.#tools);
+
+		// Notify prompt consumers so stale commands are cleared
+		if (connection?.prompts?.length) this.#onPromptsChanged?.(name);
 	}
 
 	/**
@@ -609,20 +617,21 @@ export class MCPManager {
 				if (oldUris) {
 					const removed = [...oldUris].filter(uri => !newUris.has(uri));
 					if (removed.length > 0) {
-						void unsubscribeFromResources(connection, removed).catch(error => {
+						try {
+							await unsubscribeFromResources(connection, removed);
+						} catch (error) {
 							logger.debug("Failed to unsubscribe stale MCP resources", { path: `mcp:${name}`, error });
-						});
+						}
 					}
 				}
 
-				// Subscribe to the current set
-				void subscribeToResources(connection, [...newUris])
-					.then(() => {
-						this.#subscribedResources.set(name, newUris);
-					})
-					.catch(error => {
-						logger.debug("Failed to re-subscribe to MCP resources", { path: `mcp:${name}`, error });
-					});
+				// Subscribe to the current set and update tracking atomically
+				try {
+					await subscribeToResources(connection, [...newUris]);
+					this.#subscribedResources.set(name, newUris);
+				} catch (error) {
+					logger.debug("Failed to re-subscribe to MCP resources", { path: `mcp:${name}`, error });
+				}
 			}
 		};
 
