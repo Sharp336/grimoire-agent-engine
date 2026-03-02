@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added LM Studio provider support with OpenAI-compatible model discovery and OAuth login.
+- Added support for `LM_STUDIO_API_KEY` and `LM_STUDIO_BASE_URL` environment variables for authentication and custom host configuration.
 
 ## [13.5.8] - 2026-03-02
 ### Fixed

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added LM Studio integration to the model registry and discovery flow.
+- Added support for authenticating with LM Studio using the `/login lm-studio` command.
+
 ## [13.5.6] - 2026-03-01
 ### Changed
 
