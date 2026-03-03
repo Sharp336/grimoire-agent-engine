@@ -38,7 +38,6 @@ import { shortenPath } from "../../tools/render-utils";
 import { openPath } from "../../utils/open";
 import { DynamicBorder } from "../components/dynamic-border";
 import { MCPAddWizard } from "../components/mcp-add-wizard";
-import { getMCPScopePathLabels } from "../mcp-path-labels";
 import { parseCommandArgs } from "../shared";
 import { theme } from "../theme/theme";
 import type { InteractiveModeContext } from "../types";
@@ -840,7 +839,8 @@ export class MCPCommandController {
 			const userPath = getMCPConfigPath("user", cwd);
 			const projectPath = getMCPConfigPath("project", cwd);
 
-			const { user: userPathLabel, project: projectPathLabel } = getMCPScopePathLabels(cwd);
+			const userPathLabel = shortenPath(userPath);
+			const projectPathLabel = shortenPath(projectPath);
 			const [userConfig, projectConfig] = await Promise.all([
 				readMCPConfigFile(userPath),
 				readMCPConfigFile(projectPath),

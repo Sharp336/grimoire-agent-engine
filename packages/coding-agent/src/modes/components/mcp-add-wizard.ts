@@ -13,11 +13,11 @@ import {
 	TruncatedText,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
-import { getProjectDir } from "@oh-my-pi/pi-utils";
+import { getMCPConfigPath, getProjectDir } from "@oh-my-pi/pi-utils";
 import { validateServerName } from "../../mcp/config-writer";
 import { analyzeAuthError, discoverOAuthEndpoints } from "../../mcp/oauth-discovery";
 import type { MCPHttpServerConfig, MCPServerConfig, MCPSseServerConfig, MCPStdioServerConfig } from "../../mcp/types";
-import { getMCPScopePathLabels } from "../mcp-path-labels";
+import { shortenPath } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
 import { DynamicBorder } from "./dynamic-border";
 
@@ -369,7 +369,10 @@ export class MCPAddWizard extends Container {
 		this.#contentContainer.addChild(new Text(theme.fg("accent", "Step: Configuration Scope")));
 		this.#contentContainer.addChild(new Spacer(1));
 
-		const { user: userPathLabel, project: projectPathLabel } = getMCPScopePathLabels(getProjectDir());
+		const cwd = getProjectDir();
+
+		const userPathLabel = shortenPath(getMCPConfigPath("user", cwd));
+		const projectPathLabel = shortenPath(getMCPConfigPath("project", cwd));
 		const options = [
 			{ value: "user" as const, label: `User level (${userPathLabel})` },
 			{ value: "project" as const, label: `Project level (${projectPathLabel})` },
