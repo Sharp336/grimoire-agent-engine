@@ -10,7 +10,7 @@
 		"dev": "bun --cwd=packages/coding-agent src/cli.ts",
 		"stats": "bun --cwd=packages/coding-agent src/cli.ts stats",
 		"test": "bun run --workspaces --if-present --parallel test",
-		"check": "bun run check:ts && bun run check:rs",
+		"check": "bun run --parallel check:ts check:rs",
 		"check:ts": "biome check . && tsgo -p tsconfig.json && tsgo -p packages/stats/tsconfig.client.json",
 		"check:rs": "cargo fmt --all -- --check && cargo clippy --workspace -- -D warnings && cargo check -Z minimal-versions --workspace",
 		"lint": "bun run --parallel lint:ts lint:rs",
