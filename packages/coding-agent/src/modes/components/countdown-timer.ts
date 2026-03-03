@@ -38,6 +38,11 @@ export class CountdownTimer {
 			this.onExpire();
 		}, this.#initialMs);
 
+		this.#startInterval();
+	}
+
+	#startInterval(): void {
+		this.dispose();
 		this.#intervalId = setInterval(() => {
 			const remainingSeconds = this.#calculateRemainingSeconds();
 			if (remainingSeconds !== this.#remainingSeconds) {

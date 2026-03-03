@@ -61,6 +61,8 @@ export class HookInputComponent extends Container {
 	}
 
 	handleInput(keyData: string): void {
+		// Reset countdown on any interaction
+		this.#countdown?.reset();
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			this.#onSubmitCallback(this.#input.getValue());
 		} else if (matchesKey(keyData, "escape") || matchesKey(keyData, "esc")) {
