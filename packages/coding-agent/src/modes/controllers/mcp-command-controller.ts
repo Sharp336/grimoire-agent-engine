@@ -38,8 +38,8 @@ import { shortenPath } from "../../tools/render-utils";
 import { openPath } from "../../utils/open";
 import { DynamicBorder } from "../components/dynamic-border";
 import { MCPAddWizard } from "../components/mcp-add-wizard";
-import { parseCommandArgs } from "../shared";
 import { getMCPScopePathLabels } from "../mcp-path-labels";
+import { parseCommandArgs } from "../shared";
 import { theme } from "../theme/theme";
 import type { InteractiveModeContext } from "../types";
 
