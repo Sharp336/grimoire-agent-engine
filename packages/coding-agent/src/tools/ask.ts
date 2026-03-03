@@ -122,7 +122,10 @@ interface UIContext {
 			onTimeout?: () => void;
 		},
 	): Promise<string | undefined>;
-	input(prompt: string, options_?: { signal?: AbortSignal }): Promise<string | undefined>;
+	input(
+		prompt: string,
+		options_?: { signal?: AbortSignal; timeout?: number; onTimeout?: () => void },
+	): Promise<string | undefined>;
 }
 
 async function askSingleQuestion(
@@ -168,6 +171,17 @@ async function askSingleQuestion(
 		return { choice, timedOut: timeoutTriggered };
 	};
 
+	const promptForInput = async (): Promise<{ input: string | undefined; timedOut: boolean }> => {
+		let inputTimedOut = false;
+		const onTimeout = () => {
+			inputTimedOut = true;
+		};
+		const input = signal
+			? await untilAborted(signal, () => ui.input("Enter your response:", { signal, timeout, onTimeout }))
+			: await ui.input("Enter your response:", { signal, timeout, onTimeout });
+		return { input, timedOut: inputTimedOut };
+	};
+
 	if (multi) {
 		const selected = new Set<string>();
 		let cursorIndex = Math.min(Math.max(recommended ?? 0, 0), optionLabels.length - 1);
@@ -199,10 +213,9 @@ async function askSingleQuestion(
 					timedOut = true;
 					break;
 				}
-				const input = signal
-					? await untilAborted(signal, () => ui.input("Enter your response:", { signal }))
-					: await ui.input("Enter your response:", { signal });
-				if (input) customInput = input;
+				const inputResult = await promptForInput();
+				if (inputResult.input) customInput = inputResult.input;
+				if (inputResult.timedOut) timedOut = true;
 				break;
 			}
 
@@ -245,10 +258,9 @@ async function askSingleQuestion(
 
 		if (choice === OTHER_OPTION) {
 			if (!selectTimedOut) {
-				const input = signal
-					? await untilAborted(signal, () => ui.input("Enter your response:", { signal }))
-					: await ui.input("Enter your response:", { signal });
-				if (input) customInput = input;
+				const inputResult = await promptForInput();
+				if (inputResult.input) customInput = inputResult.input;
+				if (inputResult.timedOut) timedOut = true;
 			}
 		} else if (choice) {
 			selectedOptions = [stripRecommendedSuffix(choice)];

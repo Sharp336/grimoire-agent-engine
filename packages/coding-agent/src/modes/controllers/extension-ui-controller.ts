@@ -652,6 +652,11 @@ export class ExtensionUiController {
 				this.hideHookInput();
 				finish(undefined);
 			},
+			{
+				timeout: dialogOptions?.timeout,
+				onTimeout: dialogOptions?.onTimeout,
+				tui: this.ctx.ui,
+			},
 		);
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(this.ctx.hookInput);

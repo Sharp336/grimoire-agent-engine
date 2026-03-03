@@ -9,6 +9,7 @@ import { DynamicBorder } from "./dynamic-border";
 export interface HookInputOptions {
 	tui?: TUI;
 	timeout?: number;
+	onTimeout?: () => void;
 }
 
 export class HookInputComponent extends Container {
@@ -44,7 +45,10 @@ export class HookInputComponent extends Container {
 				opts.timeout,
 				opts.tui,
 				s => this.#titleText.setText(theme.fg("accent", `${this.#baseTitle} (${s}s)`)),
-				() => this.#onCancelCallback(),
+				() => {
+					opts.onTimeout?.();
+					this.#onCancelCallback();
+				},
 			);
 		}
 

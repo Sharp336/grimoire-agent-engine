@@ -29,7 +29,14 @@ function createContext(args: {
 			onTimeout?: () => void;
 		},
 	) => Promise<string | undefined>;
-	input?: (prompt: string) => Promise<string | undefined>;
+	input?: (
+		prompt: string,
+		dialogOptions?: {
+			timeout?: number;
+			signal?: AbortSignal;
+			onTimeout?: () => void;
+		},
+	) => Promise<string | undefined>;
 	abort?: () => void;
 }): AgentToolContext {
 	// AgentToolContext includes many runtime fields; tests only need UI + abort behavior.
@@ -37,7 +44,15 @@ function createContext(args: {
 		hasUI: true,
 		ui: {
 			select: args.select,
-			input: args.input ?? (async () => undefined),
+			input: (
+				prompt: string,
+				_placeholder: string | undefined,
+				dialogOptions?: {
+					timeout?: number;
+					signal?: AbortSignal;
+					onTimeout?: () => void;
+				},
+			) => args.input?.(prompt, dialogOptions) ?? Promise.resolve(undefined),
 		},
 		abort: args.abort ?? (() => {}),
 	} as unknown as AgentToolContext;
@@ -201,6 +216,49 @@ describe("AskTool cancellation", () => {
 		expect(abort).not.toHaveBeenCalled();
 	});
 
+	it("does not abort when custom input times out after selecting Other", async () => {
+		const tool = new AskTool(
+			createSession({
+				settings: Settings.isolated({ "ask.timeout": 0.001 }),
+			}),
+		);
+		const abort = vi.fn();
+		const input = vi.fn(async (_prompt: string, dialogOptions?: { timeout?: number; onTimeout?: () => void }) => {
+			const timeout = dialogOptions?.timeout ?? 1;
+			await Bun.sleep(timeout + 5);
+			dialogOptions?.onTimeout?.();
+			return undefined;
+		});
+		const context = createContext({
+			select: async () => "Other (type your own)",
+			input,
+			abort,
+		});
+
+		const result = await tool.execute(
+			"call-timeout-input",
+			{
+				questions: [
+					{
+						id: "confirm",
+						question: "Proceed?",
+						options: [{ label: "yes" }, { label: "no" }],
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type !== "text") {
+			throw new Error("Expected text result");
+		}
+		expect(result.content[0].text).toContain("User cancelled the selection");
+		expect(input).toHaveBeenCalledTimes(1);
+		expect(abort).not.toHaveBeenCalled();
+	});
 	it("does not prompt for custom input when timeout resolves to Other in multi-select", async () => {
 		const tool = new AskTool(
 			createSession({
