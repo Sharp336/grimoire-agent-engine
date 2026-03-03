@@ -43,7 +43,7 @@ mod imp {
 		Err(Error::from_reason(format!("{PROJFS_UNAVAILABLE_PREFIX} {UNSUPPORTED_REASON}")))
 	}
 
-	pub fn stop(_projection_root: &str) {}
+	pub const fn stop(_projection_root: &str) {}
 }
 
 #[cfg(windows)]
@@ -54,7 +54,7 @@ mod imp {
 )]
 mod imp {
 	use std::{
-		collections::BTreeMap,
+		collections::{BTreeMap, btree_map::Entry},
 		ffi::{OsStr, OsString, c_void},
 		fs,
 		io::{self, ErrorKind, Read, Seek, SeekFrom},
@@ -241,9 +241,17 @@ mod imp {
 		api_handle:             Arc<ProjfsApi>,
 	}
 
+	// SAFETY: Session ownership is synchronized through `PROJFS_SESSIONS`; raw
+	// pointers are only created/freed on controlled start/stop paths and not
+	// concurrently aliased.
 	unsafe impl Send for ProjfsSession {}
 
-	static PROJFS_SESSIONS: LazyLock<Mutex<BTreeMap<String, ProjfsSession>>> =
+	enum ProjfsSessionState {
+		Starting,
+		Active(ProjfsSession),
+	}
+
+	static PROJFS_SESSIONS: LazyLock<Mutex<BTreeMap<String, ProjfsSessionState>>> =
 		LazyLock::new(|| Mutex::new(BTreeMap::new()));
 
 	pub fn probe() -> ProjfsOverlayProbeResult {
@@ -260,18 +268,20 @@ mod imp {
 		let projection_key = normalize_session_key(&projection_root_path);
 
 		{
-			let sessions = PROJFS_SESSIONS.lock();
+			let mut sessions = PROJFS_SESSIONS.lock();
 			if sessions.contains_key(&projection_key) {
 				return Err(Error::from_reason(format!(
 					"ProjFS overlay is already active for {}",
 					projection_root_path.display()
 				)));
 			}
+			sessions.insert(projection_key.clone(), ProjfsSessionState::Starting);
 		}
 
 		let mut instance_id = GUID::default();
 		let guid_hr = unsafe { CoCreateGuid(&raw mut instance_id) };
 		if is_failed(guid_hr) {
+			PROJFS_SESSIONS.lock().remove(&projection_key);
 			return Err(Error::from_reason(format!(
 				"Unable to create ProjFS instance identifier ({})",
 				format_hresult(guid_hr)
@@ -288,6 +298,7 @@ mod imp {
 			)
 		};
 		if is_failed(mark_hr) {
+			PROJFS_SESSIONS.lock().remove(&projection_key);
 			return Err(classify_start_error("mark placeholder root", mark_hr));
 		}
 
@@ -317,31 +328,67 @@ mod imp {
 			)
 		};
 		if is_failed(start_hr) {
+			PROJFS_SESSIONS.lock().remove(&projection_key);
+			// SAFETY: `provider_context_ptr` comes from `Box::into_raw` above and start
+			// failed, so ProjFS never took ownership and this function remains the sole
+			// owner.
 			unsafe {
 				drop(Box::from_raw(provider_context_ptr));
 			}
 			return Err(classify_start_error("start virtualization", start_hr));
 		}
 
-		PROJFS_SESSIONS
-			.lock()
-			.insert(projection_key, ProjfsSession {
-				virtualization_context,
-				provider_context: provider_context_ptr,
-				callbacks,
-				api_handle: api,
-			});
-		Ok(())
+		let started_session = ProjfsSession {
+			virtualization_context,
+			provider_context: provider_context_ptr,
+			callbacks,
+			api_handle: api,
+		};
+
+		let mut sessions = PROJFS_SESSIONS.lock();
+		match sessions.entry(projection_key) {
+			Entry::Occupied(mut entry) => {
+				if matches!(entry.get(), ProjfsSessionState::Starting) {
+					entry.insert(ProjfsSessionState::Active(started_session));
+					Ok(())
+				} else {
+					drop(entry);
+					drop(sessions);
+					stop_projfs_session(started_session);
+					Err(Error::from_reason(format!(
+						"ProjFS overlay is already active for {}",
+						projection_root_path.display()
+					)))
+				}
+			},
+			Entry::Vacant(_) => {
+				drop(sessions);
+				stop_projfs_session(started_session);
+				Err(Error::from_reason(format!(
+					"ProjFS overlay start was canceled for {}",
+					projection_root_path.display()
+				)))
+			},
+		}
 	}
 
 	pub fn stop(projection_root: &str) {
 		let projection_root_path = resolve_absolute_path(Path::new(projection_root));
+		let projection_root_path =
+			fs::canonicalize(&projection_root_path).unwrap_or(projection_root_path);
 		let key = normalize_session_key(&projection_root_path);
-		let session = PROJFS_SESSIONS.lock().remove(&key);
-		let Some(session) = session else {
+		let session_state = PROJFS_SESSIONS.lock().remove(&key);
+		let Some(ProjfsSessionState::Active(session)) = session_state else {
 			return;
 		};
 
+		stop_projfs_session(session);
+	}
+
+	fn stop_projfs_session(session: ProjfsSession) {
+		// SAFETY: The session holds the live ProjFS context and provider pointer
+		// created in `start`; this function consumes ownership and runs the
+		// corresponding one-time teardown.
 		unsafe {
 			(session.api_handle.prj_stop_virtualizing)(session.virtualization_context);
 			drop(Box::from_raw(session.provider_context));
