@@ -590,21 +590,24 @@ export class ModelRegistry {
 	}
 
 	#addImplicitDiscoverableProviders(configuredProviders: Set<string>): void {
-		if (configuredProviders.has("ollama")) return;
-		this.#discoverableProviders.push({
-			provider: "ollama",
-			api: "openai-completions",
-			baseUrl: Bun.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434",
-			discovery: { type: "ollama" },
-		});
-		this.#keylessProviders.add("ollama");
-		if (configuredProviders.has("lm-studio")) return;
-		this.#discoverableProviders.push({
-			provider: "lm-studio",
-			api: "openai-completions",
-			baseUrl: Bun.env.LM_STUDIO_BASE_URL || "http://127.0.0.1:1234/v1",
-			discovery: { type: "lm-studio" },
-		});
+		if (!configuredProviders.has("ollama")) {
+			this.#discoverableProviders.push({
+				provider: "ollama",
+				api: "openai-completions",
+				baseUrl: Bun.env.OLLAMA_BASE_URL || "http://127.0.0.1:11434",
+				discovery: { type: "ollama" },
+			});
+			this.#keylessProviders.add("ollama");
+		}
+		if (!configuredProviders.has("lm-studio")) {
+			this.#discoverableProviders.push({
+				provider: "lm-studio",
+				api: "openai-completions",
+				baseUrl: Bun.env.LM_STUDIO_BASE_URL || "http://127.0.0.1:1234/v1",
+				discovery: { type: "lm-studio" },
+			});
+			this.#keylessProviders.add("lm-studio");
+		}
 	}
 
 	#loadCustomModels(): CustomModelsResult {
@@ -887,6 +890,8 @@ export class ModelRegistry {
 		let baseUrl = endpoint;
 		if (!baseUrl.endsWith("/v1")) {
 			baseUrl = baseUrl.endsWith("/") ? `${baseUrl}v1` : `${baseUrl}/v1`;
+		} else if (baseUrl.endsWith("/v1/")) {
+			baseUrl = baseUrl.slice(0, -1);
 		}
 		const modelsUrl = `${baseUrl}/models`;
 
