@@ -21,7 +21,13 @@ function createContext(args: {
 	select: (
 		prompt: string,
 		options: string[],
-		dialogOptions?: { initialIndex?: number; timeout?: number; signal?: AbortSignal; outline?: boolean },
+		dialogOptions?: {
+			initialIndex?: number;
+			timeout?: number;
+			signal?: AbortSignal;
+			outline?: boolean;
+			onTimeout?: () => void;
+		},
 	) => Promise<string | undefined>;
 	input?: (prompt: string) => Promise<string | undefined>;
 	abort?: () => void;
@@ -70,6 +76,37 @@ describe("AskTool cancellation", () => {
 		expect(abort).toHaveBeenCalledTimes(1);
 	});
 
+	it("still aborts when user explicitly cancels with timeout configured", async () => {
+		const tool = new AskTool(
+			createSession({
+				settings: Settings.isolated({ "ask.timeout": 30 }),
+			}),
+		);
+		const abort = vi.fn();
+		const context = createContext({
+			select: async () => undefined,
+			abort,
+		});
+
+		expect(
+			tool.execute(
+				"call-timeout-cancel",
+				{
+					questions: [
+						{
+							id: "confirm",
+							question: "Proceed?",
+							options: [{ label: "yes" }, { label: "no" }],
+						},
+					],
+				},
+				undefined,
+				undefined,
+				context,
+			),
+		).rejects.toBeInstanceOf(ToolAbortError);
+		expect(abort).toHaveBeenCalledTimes(1);
+	});
 	it("auto-selects the recommended option on ask timeout", async () => {
 		const tool = new AskTool(
 			createSession({
@@ -78,9 +115,14 @@ describe("AskTool cancellation", () => {
 		);
 		const abort = vi.fn();
 		const select = vi.fn(
-			async (_prompt: string, options: string[], dialogOptions?: { initialIndex?: number; timeout?: number }) => {
+			async (
+				_prompt: string,
+				options: string[],
+				dialogOptions?: { initialIndex?: number; timeout?: number; onTimeout?: () => void },
+			) => {
 				const timeout = dialogOptions?.timeout ?? 1;
 				await Bun.sleep(timeout + 5);
+				dialogOptions?.onTimeout?.();
 				return options[dialogOptions?.initialIndex ?? 0];
 			},
 		);
@@ -129,6 +171,7 @@ describe("AskTool cancellation", () => {
 			select: async (_prompt, _options, dialogOptions) => {
 				const timeout = dialogOptions?.timeout ?? 1;
 				await Bun.sleep(timeout + 5);
+				dialogOptions?.onTimeout?.();
 				return undefined;
 			},
 			abort,
@@ -170,6 +213,7 @@ describe("AskTool cancellation", () => {
 			select: async (_prompt, _options, dialogOptions) => {
 				const timeout = dialogOptions?.timeout ?? 1;
 				await Bun.sleep(timeout + 5);
+				dialogOptions?.onTimeout?.();
 				return "Other (type your own)";
 			},
 			input,

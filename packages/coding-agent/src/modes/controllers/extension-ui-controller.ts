@@ -579,6 +579,7 @@ export class ExtensionUiController {
 			{
 				initialIndex: dialogOptions?.initialIndex,
 				timeout: dialogOptions?.timeout,
+				onTimeout: dialogOptions?.onTimeout,
 				tui: this.ctx.ui,
 				outline: dialogOptions?.outline,
 				maxVisible,

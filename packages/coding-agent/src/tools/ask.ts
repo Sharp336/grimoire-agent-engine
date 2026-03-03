@@ -114,7 +114,13 @@ interface UIContext {
 	select(
 		prompt: string,
 		options: string[],
-		options_?: { initialIndex?: number; timeout?: number; signal?: AbortSignal; outline?: boolean },
+		options_?: {
+			initialIndex?: number;
+			timeout?: number;
+			signal?: AbortSignal;
+			outline?: boolean;
+			onTimeout?: () => void;
+		},
 	): Promise<string | undefined>;
 	input(prompt: string, options_?: { signal?: AbortSignal }): Promise<string | undefined>;
 }
@@ -139,33 +145,27 @@ async function askSingleQuestion(
 		initialIndex?: number,
 	): Promise<{ choice: string | undefined; timedOut: boolean }> => {
 		let timeoutTriggered = false;
-		let timeoutId: NodeJS.Timeout | undefined;
-		if (timeout !== undefined && timeout > 0) {
-			timeoutId = setTimeout(() => {
-				timeoutTriggered = true;
-			}, timeout);
-		}
-
-		try {
-			const choice = signal
-				? await untilAborted(signal, () =>
-						ui.select(prompt, options, {
-							initialIndex,
-							timeout,
-							signal,
-							outline: true,
-						}),
-					)
-				: await ui.select(prompt, options, {
+		const onTimeout = () => {
+			timeoutTriggered = true;
+		};
+		const choice = signal
+			? await untilAborted(signal, () =>
+					ui.select(prompt, options, {
 						initialIndex,
 						timeout,
 						signal,
 						outline: true,
-					});
-			return { choice, timedOut: timeoutTriggered };
-		} finally {
-			if (timeoutId) clearTimeout(timeoutId);
-		}
+						onTimeout,
+					}),
+				)
+			: await ui.select(prompt, options, {
+					initialIndex,
+					timeout,
+					signal,
+					outline: true,
+					onTimeout,
+				});
+		return { choice, timedOut: timeoutTriggered };
 	};
 
 	if (multi) {

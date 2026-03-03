@@ -98,6 +98,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 
 			if (opts?.timeout !== undefined) {
 				timeoutId = setTimeout(() => {
+					opts.onTimeout?.();
 					cleanup();
 					resolve(defaultValue);
 				}, opts.timeout);
@@ -119,12 +120,14 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 				dialogOptions,
 				undefined,
 				{ method: "select", title, options, timeout: dialogOptions?.timeout },
-				response =>
-					"cancelled" in response && response.cancelled
-						? undefined
-						: "value" in response
-							? response.value
-							: undefined,
+				response => {
+					if ("cancelled" in response && response.cancelled) {
+						if (response.timedOut) dialogOptions?.onTimeout?.();
+						return undefined;
+					}
+					if ("value" in response) return response.value;
+					return undefined;
+				},
 			);
 		}
 
