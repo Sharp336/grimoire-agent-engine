@@ -68,6 +68,8 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	model: string;
 	/** Role: "default", "smol", "slow", etc. Undefined treated as "default" */
 	role?: string;
+	/** Whether the model was using extended (1M) context window */
+	extendedContext?: boolean;
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {
@@ -198,6 +200,8 @@ export interface SessionContext {
 	thinkingLevel: string;
 	/** Model roles: { default: "provider/modelId", small: "provider/modelId", ... } */
 	models: Record<string, string>;
+	/** Which model roles had extended context active */
+	extendedContextModels: Record<string, boolean>;
 	/** Names of TTSR rules that have been injected this session */
 	injectedTtsrRules: string[];
 	/** Active mode (e.g. "plan") or "none" if no special mode is active */
@@ -416,7 +420,14 @@ export function buildSessionContext(
 	let leaf: SessionEntry | undefined;
 	if (leafId === null) {
 		// Explicitly null - return no messages (navigated to before first entry)
-		return { messages: [], thinkingLevel: "off", models: {}, injectedTtsrRules: [], mode: "none" };
+		return {
+			messages: [],
+			thinkingLevel: "off",
+			models: {},
+			extendedContextModels: {},
+			injectedTtsrRules: [],
+			mode: "none",
+		};
 	}
 	if (leafId) {
 		leaf = byId.get(leafId);
@@ -427,7 +438,14 @@ export function buildSessionContext(
 	}
 
 	if (!leaf) {
-		return { messages: [], thinkingLevel: "off", models: {}, injectedTtsrRules: [], mode: "none" };
+		return {
+			messages: [],
+			thinkingLevel: "off",
+			models: {},
+			extendedContextModels: {},
+			injectedTtsrRules: [],
+			mode: "none",
+		};
 	}
 
 	// Walk from leaf to root, collecting path
@@ -441,6 +459,7 @@ export function buildSessionContext(
 	// Extract settings and find compaction
 	let thinkingLevel = "off";
 	const models: Record<string, string> = {};
+	const extendedContextModels: Record<string, boolean> = {};
 	let compaction: CompactionEntry | null = null;
 	const injectedTtsrRulesSet = new Set<string>();
 	let mode = "none";
@@ -454,6 +473,11 @@ export function buildSessionContext(
 			if (entry.model) {
 				const role = entry.role ?? "default";
 				models[role] = entry.model;
+				if (entry.extendedContext) {
+					extendedContextModels[role] = true;
+				} else {
+					delete extendedContextModels[role];
+				}
 			}
 		} else if (entry.type === "message" && entry.message.role === "assistant") {
 			// Infer default model from assistant messages
@@ -537,7 +561,7 @@ export function buildSessionContext(
 		}
 	}
 
-	return { messages, thinkingLevel, models, injectedTtsrRules, mode, modeData };
+	return { messages, thinkingLevel, models, extendedContextModels, injectedTtsrRules, mode, modeData };
 }
 
 /**
@@ -1814,7 +1838,7 @@ export class SessionManager {
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
 	 */
-	appendModelChange(model: string, role?: string): string {
+	appendModelChange(model: string, role?: string, extendedContext?: boolean): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			id: generateId(this.#byId),
@@ -1822,6 +1846,7 @@ export class SessionManager {
 			timestamp: new Date().toISOString(),
 			model,
 			role,
+			extendedContext: extendedContext || undefined,
 		};
 		this.#appendEntry(entry);
 		return entry.id;

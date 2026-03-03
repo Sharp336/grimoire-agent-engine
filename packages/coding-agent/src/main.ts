@@ -10,7 +10,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
-import { type ImageContent, supportsXhigh } from "@oh-my-pi/pi-ai";
+import { applyExtendedContext, type ImageContent, supportsXhigh } from "@oh-my-pi/pi-ai";
 import { $env, getProjectDir, logger, postmortem, setProjectDir, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import type { Args } from "./cli/args";
@@ -19,7 +19,13 @@ import { listModels } from "./cli/list-models";
 import { selectSession } from "./cli/session-picker";
 import { findConfigFile } from "./config";
 import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
-import { parseModelString, resolveCliModel, resolveModelScope, type ScopedModel } from "./config/model-resolver";
+import {
+	extractExtendedContextSuffix,
+	parseModelString,
+	resolveCliModel,
+	resolveModelScope,
+	type ScopedModel,
+} from "./config/model-resolver";
 import { Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import { exportFromFile } from "./export/html";
@@ -376,7 +382,7 @@ async function buildSessionOptions(
 				process.exit(1);
 			}
 		} else if (resolved.model) {
-			options.model = resolved.model;
+			options.model = applyExtendedContext(resolved.model, resolved.extendedContext);
 			settings.overrideModelRoles({ default: `${resolved.model.provider}/${resolved.model.id}` });
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
@@ -386,20 +392,26 @@ async function buildSessionOptions(
 	} else if (scopedModels.length > 0 && !parsed.continue && !parsed.resume) {
 		const remembered = settings.getModelRole("default");
 		if (remembered) {
-			const parsedModel = parseModelString(remembered);
+			// Strip extended context suffix before ID lookup; carry the flag into applyExtendedContext.
+			const { cleaned: cleanedRemembered, extendedContext: rememberedExtended } =
+				extractExtendedContextSuffix(remembered);
+			const parsedModel = parseModelString(cleanedRemembered);
 			const rememberedModel = parsedModel
 				? scopedModels.find(
 						scopedModel =>
 							scopedModel.model.provider === parsedModel.provider && scopedModel.model.id === parsedModel.id,
 					)
-				: scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase());
+				: scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === cleanedRemembered.toLowerCase());
 			if (rememberedModel) {
-				options.model = rememberedModel.model;
+				options.model = applyExtendedContext(
+					rememberedModel.model,
+					rememberedModel.extendedContext || rememberedExtended,
+				);
 			}
 		}
-		if (!options.model) {
-			options.model = scopedModels[0].model;
-		}
+	}
+	if (!options.model && scopedModels.length > 0) {
+		options.model = applyExtendedContext(scopedModels[0].model, scopedModels[0].extendedContext);
 	}
 
 	// Thinking level

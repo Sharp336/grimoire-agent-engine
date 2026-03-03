@@ -39,17 +39,21 @@ import type {
 	UsageReport,
 } from "@oh-my-pi/pi-ai";
 import {
+	applyExtendedContext,
 	calculateRateLimitBackoffMs,
+	extendedContextSuffix,
 	isContextOverflow,
+	isExtendedContext,
 	modelsAreEqual,
 	parseRateLimitReason,
+	supportsExtendedContext,
 	supportsXhigh,
 } from "@oh-my-pi/pi-ai";
-import { abortableSleep, getAgentDbPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { $env, abortableSleep, getAgentDbPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import { MODEL_ROLE_IDS, type ModelRegistry, type ModelRole } from "../config/model-registry";
-import { expandRoleAlias, parseModelString } from "../config/model-resolver";
+import { expandRoleAlias, extractExtendedContextSuffix, parseModelString } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate, renderPromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
@@ -2629,8 +2633,10 @@ export class AgentSession {
 		}
 
 		this.#setModelWithProviderSessionReset(model);
-		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, role);
-		this.settings.setModelRole(role, `${model.provider}/${model.id}`);
+		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, role, isExtendedContext(model));
+		const modelKey = `${model.provider}/${model.id}`;
+		const suffix = extendedContextSuffix(model);
+		this.settings.setModelRole(role, suffix ? `${modelKey}${suffix}` : modelKey);
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 
 		// Re-clamp thinking level for new model's capabilities without persisting settings
@@ -2649,7 +2655,7 @@ export class AgentSession {
 		}
 
 		this.#setModelWithProviderSessionReset(model);
-		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, "temporary");
+		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, "temporary", isExtendedContext(model));
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 
 		// Re-clamp thinking level for new model's capabilities without persisting settings
@@ -2694,7 +2700,8 @@ export class AgentSession {
 			if (!roleModelStr) continue;
 
 			const expandedRoleModelStr = expandRoleAlias(roleModelStr, this.settings);
-			const parsed = parseModelString(expandedRoleModelStr);
+			const { cleaned: cleanedRoleStr } = extractExtendedContextSuffix(expandedRoleModelStr);
+			const parsed = parseModelString(cleanedRoleStr);
 			let match: Model | undefined;
 			if (parsed) {
 				match = availableModels.find(m => m.provider === parsed.provider && m.id === parsed.id);
@@ -3507,6 +3514,26 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			return false;
 		const contextWindow = currentModel.contextWindow ?? 0;
 		if (contextWindow <= 0) return false;
+
+		// Self-promote to 1M first (same model, no provider session reset needed)
+		if (
+			$env.PI_DISABLE_EXTENDED_CONTEXT !== "1" &&
+			supportsExtendedContext(currentModel) &&
+			!isExtendedContext(currentModel)
+		) {
+			const apiKey = await this.#modelRegistry.getApiKey(currentModel, this.sessionId);
+			if (apiKey) {
+				const promoted = applyExtendedContext(currentModel, true);
+				this.agent.setModel(this.#applySessionModelOverrides(promoted));
+				this.sessionManager.appendModelChange(`${currentModel.provider}/${currentModel.id}`, "temporary", true);
+				this.settings.getStorage()?.recordModelUsage(`${currentModel.provider}/${currentModel.id}`);
+				this.setThinkingLevel(this.thinkingLevel);
+				logger.debug("Context promotion: expanded to 1M on same model", {
+					model: `${currentModel.provider}/${currentModel.id}`,
+				});
+				return true;
+			}
+		}
 		const targetModel = await this.#resolveContextPromotionTarget(currentModel, contextWindow);
 		if (!targetModel) return false;
 
@@ -3619,11 +3646,12 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		if (!roleModelStr) return undefined;
 
-		const parsed = parseModelString(roleModelStr);
+		const { cleaned: cleanedStr } = extractExtendedContextSuffix(roleModelStr);
+		const parsed = parseModelString(cleanedStr);
 		if (parsed) {
 			return availableModels.find(m => m.provider === parsed.provider && m.id === parsed.id);
 		}
-		const roleLower = roleModelStr.toLowerCase();
+		const roleLower = cleanedStr.toLowerCase();
 		return availableModels.find(m => m.id.toLowerCase() === roleLower);
 	}
 
@@ -4489,7 +4517,8 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				const availableModels = this.#modelRegistry.getAvailable();
 				const match = availableModels.find(m => m.provider === provider && m.id === modelId);
 				if (match) {
-					this.#setModelWithProviderSessionReset(match);
+					const extCtx = sessionContext.extendedContextModels.default ?? false;
+					this.#setModelWithProviderSessionReset(applyExtendedContext(match, extCtx));
 				}
 			}
 		}

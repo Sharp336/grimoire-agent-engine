@@ -709,6 +709,7 @@ export class ModelRegistry {
 					this.#models.find(candidate => candidate.provider === model.provider);
 				return existing
 					? {
+							...existing,
 							...model,
 							baseUrl: existing.baseUrl,
 							headers: existing.headers ? { ...existing.headers, ...model.headers } : model.headers,

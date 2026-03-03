@@ -5,7 +5,7 @@
  */
 import path from "node:path";
 import type { AgentEvent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Api, Model, ToolChoice } from "@oh-my-pi/pi-ai";
+import { type Api, applyExtendedContext, type Model, type ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
 import Ajv, { type ValidateFunction } from "ajv";
@@ -938,11 +938,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			await modelRegistry.refresh();
 			checkAbort();
 
-			const { model, thinkingLevel: resolvedThinkingLevel } = resolveModelOverride(
-				modelPatterns,
-				modelRegistry,
-				settings,
-			);
+			const {
+				model,
+				thinkingLevel: resolvedThinkingLevel,
+				extendedContext,
+			} = resolveModelOverride(modelPatterns, modelRegistry, settings);
 			const effectiveThinkingLevel = thinkingLevel ?? resolvedThinkingLevel;
 
 			const sessionManager = sessionFile
@@ -959,7 +959,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				authStorage,
 				modelRegistry,
 				settings: subagentSettings,
-				model,
+				model: model ? applyExtendedContext(model, !!extendedContext) : undefined,
 				thinkingLevel: effectiveThinkingLevel,
 				toolNames,
 				outputSchema,

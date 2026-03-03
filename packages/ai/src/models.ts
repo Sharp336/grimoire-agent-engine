@@ -35,10 +35,24 @@ export function getBundledModels(provider: GeneratedProvider): Model<Api>[] {
 }
 
 export function calculateCost<TApi extends Api>(model: Model<TApi>, usage: Usage): Usage["cost"] {
-	usage.cost.input = (model.cost.input / 1000000) * usage.input;
-	usage.cost.output = (model.cost.output / 1000000) * usage.output;
-	usage.cost.cacheRead = (model.cost.cacheRead / 1000000) * usage.cacheRead;
-	usage.cost.cacheWrite = (model.cost.cacheWrite / 1000000) * usage.cacheWrite;
+	let { input: inputRate, output: outputRate, cacheRead: cacheReadRate, cacheWrite: cacheWriteRate } = model.cost;
+
+	// Apply premium long-context rates when total input exceeds the model's threshold.
+	if (model.longContextPricing) {
+		const totalInput = usage.input + usage.cacheRead + usage.cacheWrite;
+		if (totalInput > model.longContextPricing.inputThreshold) {
+			const { multipliers } = model.longContextPricing;
+			inputRate *= multipliers.input;
+			outputRate *= multipliers.output;
+			cacheReadRate *= multipliers.cacheRead;
+			cacheWriteRate *= multipliers.cacheWrite;
+		}
+	}
+
+	usage.cost.input = (inputRate / 1_000_000) * usage.input;
+	usage.cost.output = (outputRate / 1_000_000) * usage.output;
+	usage.cost.cacheRead = (cacheReadRate / 1_000_000) * usage.cacheRead;
+	usage.cost.cacheWrite = (cacheWriteRate / 1_000_000) * usage.cacheWrite;
 	usage.cost.total = usage.cost.input + usage.cost.output + usage.cost.cacheRead + usage.cost.cacheWrite;
 	return usage.cost;
 }

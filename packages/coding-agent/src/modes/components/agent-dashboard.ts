@@ -17,6 +17,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { applyExtendedContext } from "@oh-my-pi/pi-ai";
 import {
 	type Component,
 	Container,
@@ -622,7 +623,7 @@ export class AgentDashboard extends Container {
 				this.modelContext.defaultModelPattern ??
 				settings?.getModelRole("default"),
 		);
-		const { model } = resolveModelOverride(modelPatterns, modelRegistry, settings);
+		const { model, extendedContext } = resolveModelOverride(modelPatterns, modelRegistry, settings);
 		const fallbackModel = modelRegistry.getAvailable()[0];
 		const selectedModel = model ?? fallbackModel;
 		if (!selectedModel) {
@@ -637,7 +638,7 @@ export class AgentDashboard extends Container {
 			authStorage: modelRegistry.authStorage,
 			modelRegistry,
 			settings,
-			model: selectedModel,
+			model: applyExtendedContext(selectedModel, !!extendedContext),
 			systemPrompt,
 			hasUI: false,
 			enableLsp: false,

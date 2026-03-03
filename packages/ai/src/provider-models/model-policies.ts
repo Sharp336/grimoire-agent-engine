@@ -9,6 +9,9 @@ import type { Api, Model } from "../types";
 
 const CLOUDFLARE_AI_GATEWAY_BASE_URL = "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic";
 
+/** Providers known to support 1M extended context activation for Claude Opus/Sonnet 4.6. */
+const EXTENDED_CONTEXT_PROVIDERS = new Set(["anthropic", "amazon-bedrock"]);
+
 /**
  * Static fallback model injected when Cloudflare AI Gateway discovery
  * returns no results. Ensures the provider always has at least one usable
@@ -52,14 +55,29 @@ export function applyGeneratedModelPolicies(models: Model<Api>[]): void {
 			model.cost.cacheWrite = 6.25;
 		}
 
-		// Opus 4.6 / Sonnet 4.6: 1M context is beta; clamp to 200K
-		if (
+		// Opus 4.6 / Sonnet 4.6: default context is 200K across all providers.
+		const isOpusOrSonnet46 =
 			model.id.includes("opus-4-6") ||
 			model.id.includes("opus-4.6") ||
 			model.id.includes("sonnet-4-6") ||
-			model.id.includes("sonnet-4.6")
-		) {
-			model.contextWindow = 200000;
+			model.id.includes("sonnet-4.6");
+		if (isOpusOrSonnet46) {
+			model.contextWindow = 200_000;
+		}
+
+		// 1M extended context is only available on providers that support the activation
+		// mechanism (Anthropic beta header, Bedrock inference profile, etc.).
+		const supports1m = isOpusOrSonnet46 && EXTENDED_CONTEXT_PROVIDERS.has(model.provider);
+		if (supports1m) {
+			model.extendedContextWindow = 1_000_000;
+			model.longContextPricing = {
+				inputThreshold: 200_000,
+				multipliers: { input: 2, output: 1.5, cacheRead: 2, cacheWrite: 2 },
+			};
+		} else if (isOpusOrSonnet46) {
+			// Ensure unsupported providers don't carry stale 1M metadata from fallback.
+			delete model.extendedContextWindow;
+			delete model.longContextPricing;
 		}
 
 		// OpenCode: Claude Sonnet 4/4.5 listed with 1M context, actual limit is 200K

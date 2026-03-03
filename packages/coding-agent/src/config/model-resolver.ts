@@ -17,6 +17,7 @@ export interface ScopedModel {
 	model: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel: boolean;
+	extendedContext: boolean;
 }
 
 /**
@@ -34,6 +35,19 @@ export function parseModelString(modelStr: string): { provider: string; id: stri
  */
 export function formatModelString(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
+}
+
+const EXTENDED_CONTEXT_SUFFIX_RE = /\[\d+[km]\]$/i;
+
+/**
+ * Strip extended context suffix (e.g. `[1m]`, `[500k]`) from a model pattern
+ * plus whether extended context was requested.
+ */
+export function extractExtendedContextSuffix(pattern: string): { cleaned: string; extendedContext: boolean } {
+	if (EXTENDED_CONTEXT_SUFFIX_RE.test(pattern)) {
+		return { cleaned: pattern.replace(EXTENDED_CONTEXT_SUFFIX_RE, ""), extendedContext: true };
+	}
+	return { cleaned: pattern, extendedContext: false };
 }
 
 export interface ModelMatchPreferences {
@@ -211,6 +225,7 @@ export interface ParsedModelResult {
 	thinkingLevel?: ThinkingLevel;
 	warning: string | undefined;
 	explicitThinkingLevel: boolean;
+	extendedContext: boolean;
 }
 
 /**
@@ -226,23 +241,42 @@ export interface ParsedModelResult {
  *
  * @internal Exported for testing
  */
-function parseModelPatternWithContext(
+export function parseModelPatternWithContext(
 	pattern: string,
 	availableModels: Model<Api>[],
 	context: ModelPreferenceContext,
 	options?: { allowInvalidThinkingLevelFallback?: boolean },
 ): ParsedModelResult {
+	// Extract extended context suffix before any model matching
+	const { cleaned, extendedContext } = extractExtendedContextSuffix(pattern);
+	if (cleaned !== pattern) {
+		const result = parseModelPatternWithContext(cleaned, availableModels, context, options);
+		return { ...result, extendedContext: result.extendedContext || extendedContext };
+	}
+
 	// Try exact match first
 	const exactMatch = tryMatchModel(pattern, availableModels, context);
 	if (exactMatch) {
-		return { model: exactMatch, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
+		return {
+			model: exactMatch,
+			thinkingLevel: undefined,
+			warning: undefined,
+			explicitThinkingLevel: false,
+			extendedContext: false,
+		};
 	}
 
 	// No match - try splitting on last colon if present
 	const lastColonIndex = pattern.lastIndexOf(":");
 	if (lastColonIndex === -1) {
 		// No colons, pattern simply doesn't match any model
-		return { model: undefined, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
+		return {
+			model: undefined,
+			thinkingLevel: undefined,
+			warning: undefined,
+			explicitThinkingLevel: false,
+			extendedContext: false,
+		};
 	}
 
 	const prefix = pattern.substring(0, lastColonIndex);
@@ -259,6 +293,7 @@ function parseModelPatternWithContext(
 				thinkingLevel: explicitThinkingLevel ? suffix : undefined,
 				warning: result.warning,
 				explicitThinkingLevel,
+				extendedContext: result.extendedContext,
 			};
 		}
 		return result;
@@ -266,7 +301,13 @@ function parseModelPatternWithContext(
 
 	const allowFallback = options?.allowInvalidThinkingLevelFallback ?? true;
 	if (!allowFallback) {
-		return { model: undefined, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
+		return {
+			model: undefined,
+			thinkingLevel: undefined,
+			warning: undefined,
+			explicitThinkingLevel: false,
+			extendedContext: false,
+		};
 	}
 
 	// Invalid suffix - recurse on prefix and warn
@@ -277,6 +318,7 @@ function parseModelPatternWithContext(
 			thinkingLevel: undefined,
 			warning: `Invalid thinking level "${suffix}" in pattern "${pattern}". Using default instead.`,
 			explicitThinkingLevel: false,
+			extendedContext: result.extendedContext,
 		};
 	}
 	return result;
@@ -361,7 +403,7 @@ export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelRegistry,
 	settings?: Settings,
-): { model?: Model<Api>; thinkingLevel?: ThinkingLevel } {
+): { model?: Model<Api>; thinkingLevel?: ThinkingLevel; extendedContext?: boolean } {
 	if (modelPatterns.length === 0) return {};
 	const matchPreferences = { usageOrder: settings?.getStorage()?.getModelUsageOrder() };
 	for (const pattern of modelPatterns) {
@@ -370,13 +412,13 @@ export function resolveModelOverride(
 			continue;
 		}
 		const effectivePattern = expandRoleAlias(pattern, settings);
-		const { model, thinkingLevel } = parseModelPattern(
+		const { model, thinkingLevel, extendedContext } = parseModelPattern(
 			effectivePattern,
 			modelRegistry.getAvailable(),
 			matchPreferences,
 		);
 		if (model) {
-			return { model, thinkingLevel: thinkingLevel !== "off" ? thinkingLevel : undefined };
+			return { model, thinkingLevel: thinkingLevel !== "off" ? thinkingLevel : undefined, extendedContext };
 		}
 	}
 	return {};
@@ -402,8 +444,11 @@ export async function resolveModelScope(
 	const context = buildPreferenceContext(availableModels, preferences);
 	const scopedModels: ScopedModel[] = [];
 
-	for (const pattern of patterns) {
-		// Check if pattern contains glob characters
+	for (const rawPattern of patterns) {
+		// Extract extended context suffix before glob detection (brackets overlap with glob character classes)
+		const { cleaned: pattern, extendedContext } = extractExtendedContextSuffix(rawPattern);
+
+		// Check if pattern contains glob characters (after extended context extraction)
 		if (pattern.includes("*") || pattern.includes("?") || pattern.includes("[")) {
 			// Extract optional thinking level suffix (e.g., "provider/*:high")
 			const colonIdx = pattern.lastIndexOf(":");
@@ -429,36 +474,43 @@ export async function resolveModelScope(
 			});
 
 			if (matchingModels.length === 0) {
-				console.warn(chalk.yellow(`Warning: No models match pattern "${pattern}"`));
+				console.warn(chalk.yellow(`Warning: No models match pattern "${rawPattern}"`));
 				continue;
 			}
 
 			for (const model of matchingModels) {
 				if (!scopedModels.find(sm => modelsAreEqual(sm.model, model))) {
-					scopedModels.push({ model, thinkingLevel, explicitThinkingLevel });
+					scopedModels.push({ model, thinkingLevel, explicitThinkingLevel, extendedContext });
 				}
 			}
 			continue;
 		}
 
-		const { model, thinkingLevel, warning, explicitThinkingLevel } = parseModelPatternWithContext(
-			pattern,
-			availableModels,
-			context,
-		);
+		const {
+			model,
+			thinkingLevel,
+			warning,
+			explicitThinkingLevel,
+			extendedContext: parsedExtCtx,
+		} = parseModelPatternWithContext(pattern, availableModels, context);
 
 		if (warning) {
 			console.warn(chalk.yellow(`Warning: ${warning}`));
 		}
 
 		if (!model) {
-			console.warn(chalk.yellow(`Warning: No models match pattern "${pattern}"`));
+			console.warn(chalk.yellow(`Warning: No models match pattern "${rawPattern}"`));
 			continue;
 		}
 
 		// Avoid duplicates
 		if (!scopedModels.find(sm => modelsAreEqual(sm.model, model))) {
-			scopedModels.push({ model, thinkingLevel, explicitThinkingLevel });
+			scopedModels.push({
+				model,
+				thinkingLevel,
+				explicitThinkingLevel,
+				extendedContext: extendedContext || parsedExtCtx,
+			});
 		}
 	}
 
@@ -470,6 +522,7 @@ export interface ResolveCliModelResult {
 	thinkingLevel?: ThinkingLevel;
 	warning: string | undefined;
 	error: string | undefined;
+	extendedContext: boolean;
 }
 
 /**
@@ -481,11 +534,14 @@ export function resolveCliModel(options: {
 	modelRegistry: ModelRegistry;
 	preferences?: ModelMatchPreferences;
 }): ResolveCliModelResult {
-	const { cliProvider, cliModel, modelRegistry, preferences } = options;
+	const { cliProvider, cliModel: rawCliModel, modelRegistry, preferences } = options;
 
-	if (!cliModel) {
-		return { model: undefined, warning: undefined, error: undefined };
+	if (!rawCliModel) {
+		return { model: undefined, warning: undefined, error: undefined, extendedContext: false };
 	}
+
+	// Extract extended context suffix before resolution
+	const { cleaned: cliModel, extendedContext } = extractExtendedContextSuffix(rawCliModel);
 
 	const availableModels = modelRegistry.getAll();
 	if (availableModels.length === 0) {
@@ -493,9 +549,9 @@ export function resolveCliModel(options: {
 			model: undefined,
 			warning: undefined,
 			error: "No models available. Check your installation or add models to models.json.",
+			extendedContext: false,
 		};
 	}
-
 	const providerMap = new Map<string, string>();
 	for (const model of availableModels) {
 		providerMap.set(model.provider.toLowerCase(), model.provider);
@@ -507,6 +563,7 @@ export function resolveCliModel(options: {
 			model: undefined,
 			warning: undefined,
 			error: `Unknown provider "${cliProvider}". Use --list-models to see available providers/models.`,
+			extendedContext: false,
 		};
 	}
 
@@ -516,7 +573,7 @@ export function resolveCliModel(options: {
 			model => model.id.toLowerCase() === lower || `${model.provider}/${model.id}`.toLowerCase() === lower,
 		);
 		if (exact) {
-			return { model: exact, warning: undefined, thinkingLevel: undefined, error: undefined };
+			return { model: exact, warning: undefined, thinkingLevel: undefined, error: undefined, extendedContext };
 		}
 	}
 
@@ -540,7 +597,12 @@ export function resolveCliModel(options: {
 	}
 
 	const candidates = provider ? availableModels.filter(model => model.provider === provider) : availableModels;
-	const { model, thinkingLevel, warning } = parseModelPattern(pattern, candidates, preferences, {
+	const {
+		model,
+		thinkingLevel,
+		warning,
+		extendedContext: parsedExtCtx,
+	} = parseModelPattern(pattern, candidates, preferences, {
 		allowInvalidThinkingLevelFallback: false,
 	});
 
@@ -551,16 +613,18 @@ export function resolveCliModel(options: {
 			thinkingLevel: undefined,
 			warning,
 			error: `Model "${display}" not found. Use --list-models to see available models.`,
+			extendedContext: false,
 		};
 	}
 
-	return { model, thinkingLevel, warning, error: undefined };
+	return { model, thinkingLevel, warning, error: undefined, extendedContext: extendedContext || parsedExtCtx };
 }
 
 export interface InitialModelResult {
 	model: Model<Api> | undefined;
 	thinkingLevel: ThinkingLevel;
 	fallbackMessage: string | undefined;
+	extendedContext: boolean;
 }
 
 /**
@@ -602,7 +666,7 @@ export async function findInitialModel(options: {
 			console.error(chalk.red(`Model ${cliProvider}/${cliModel} not found`));
 			process.exit(1);
 		}
-		return { model: found, thinkingLevel: "off", fallbackMessage: undefined };
+		return { model: found, thinkingLevel: "off", fallbackMessage: undefined, extendedContext: false };
 	}
 
 	// 2. Use first model from scoped models (skip if continuing/resuming)
@@ -613,9 +677,9 @@ export async function findInitialModel(options: {
 			model: scoped.model,
 			thinkingLevel: scopedThinkingLevel,
 			fallbackMessage: undefined,
+			extendedContext: scoped.extendedContext,
 		};
 	}
-
 	// 3. Try saved default from settings
 	if (defaultProvider && defaultModelId) {
 		const found = modelRegistry.find(defaultProvider, defaultModelId);
@@ -624,7 +688,7 @@ export async function findInitialModel(options: {
 			if (defaultThinkingLevel) {
 				thinkingLevel = defaultThinkingLevel;
 			}
-			return { model, thinkingLevel, fallbackMessage: undefined };
+			return { model, thinkingLevel, fallbackMessage: undefined, extendedContext: false };
 		}
 	}
 
@@ -637,16 +701,16 @@ export async function findInitialModel(options: {
 			const defaultId = defaultModelPerProvider[provider];
 			const match = availableModels.find(m => m.provider === provider && m.id === defaultId);
 			if (match) {
-				return { model: match, thinkingLevel: "off", fallbackMessage: undefined };
+				return { model: match, thinkingLevel: "off", fallbackMessage: undefined, extendedContext: false };
 			}
 		}
 
 		// If no default found, use first available
-		return { model: availableModels[0], thinkingLevel: "off", fallbackMessage: undefined };
+		return { model: availableModels[0], thinkingLevel: "off", fallbackMessage: undefined, extendedContext: false };
 	}
 
 	// 5. No model found
-	return { model: undefined, thinkingLevel: "off", fallbackMessage: undefined };
+	return { model: undefined, thinkingLevel: "off", fallbackMessage: undefined, extendedContext: false };
 }
 
 /**

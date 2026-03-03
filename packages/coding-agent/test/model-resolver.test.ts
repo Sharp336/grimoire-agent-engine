@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
-import { parseModelPattern, resolveCliModel } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
+import {
+	extractExtendedContextSuffix,
+	parseModelPattern,
+	resolveCliModel,
+} from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
 // Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [
@@ -369,5 +373,84 @@ describe("resolveCliModel", () => {
 		expect(result.error).toBeUndefined();
 		expect(result.model?.provider).toBe("openrouter");
 		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+	});
+});
+
+describe("extractExtendedContextSuffix", () => {
+	test("strips [1m] and returns extendedContext: true", () => {
+		const result = extractExtendedContextSuffix("anthropic/claude-opus-4-6[1m]");
+		expect(result.cleaned).toBe("anthropic/claude-opus-4-6");
+		expect(result.extendedContext).toBe(true);
+	});
+
+	test("strips [500k] and returns extendedContext: true", () => {
+		const result = extractExtendedContextSuffix("openai/gpt-5[500k]");
+		expect(result.cleaned).toBe("openai/gpt-5");
+		expect(result.extendedContext).toBe(true);
+	});
+
+	test("strips [2M] case-insensitively", () => {
+		const result = extractExtendedContextSuffix("anthropic/claude-opus-4-6[2M]");
+		expect(result.cleaned).toBe("anthropic/claude-opus-4-6");
+		expect(result.extendedContext).toBe(true);
+	});
+
+	test("does not strip non-matching brackets", () => {
+		const result = extractExtendedContextSuffix("openai/gpt-4o:extended");
+		expect(result.cleaned).toBe("openai/gpt-4o:extended");
+		expect(result.extendedContext).toBe(false);
+	});
+
+	test("does not strip [1m] in the middle of the string", () => {
+		const result = extractExtendedContextSuffix("model[1m]-variant");
+		expect(result.cleaned).toBe("model[1m]-variant");
+		expect(result.extendedContext).toBe(false);
+	});
+
+	test("returns unchanged for plain model strings", () => {
+		const result = extractExtendedContextSuffix("claude-sonnet-4-5");
+		expect(result.cleaned).toBe("claude-sonnet-4-5");
+		expect(result.extendedContext).toBe(false);
+	});
+
+	test("does not match when suffix is not at end of string", () => {
+		const result = extractExtendedContextSuffix("opus[1m]:high");
+		expect(result.cleaned).toBe("opus[1m]:high");
+		expect(result.extendedContext).toBe(false);
+	});
+
+	test("strips [128k] for larger K values", () => {
+		const result = extractExtendedContextSuffix("model[128k]");
+		expect(result.cleaned).toBe("model");
+		expect(result.extendedContext).toBe(true);
+	});
+
+	test("handles suffix-only input", () => {
+		const result = extractExtendedContextSuffix("[1m]");
+		expect(result.cleaned).toBe("");
+		expect(result.extendedContext).toBe(true);
+	});
+});
+
+describe("parseModelPattern with extended context suffix", () => {
+	test("strips [1m] suffix and resolves base model with extendedContext: true", () => {
+		const result = parseModelPattern("claude-sonnet-4-5[1m]", allModels);
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.extendedContext).toBe(true);
+	});
+});
+
+describe("resolveCliModel with extended context suffix", () => {
+	test("returns extendedContext: true when [1m] suffix is present", () => {
+		const modelRegistry = {
+			getAll: () => allModels,
+		} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"];
+		const result = resolveCliModel({
+			cliModel: "anthropic/claude-sonnet-4-5[1m]",
+			modelRegistry,
+		});
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.extendedContext).toBe(true);
+		expect(result.error).toBeUndefined();
 	});
 });

@@ -1,7 +1,8 @@
-import { type Model, modelsAreEqual } from "@oh-my-pi/pi-ai";
+import { extendedContextSuffix, hasExtendedContextAccess, type Model, modelsAreEqual } from "@oh-my-pi/pi-ai";
 import { Container, Input, matchesKey, Spacer, type Tab, TabBar, Text, type TUI, visibleWidth } from "@oh-my-pi/pi-tui";
+import { $env } from "@oh-my-pi/pi-utils";
 import { MODEL_ROLE_IDS, MODEL_ROLES, type ModelRegistry, type ModelRole } from "../../config/model-registry";
-import { parseModelString } from "../../config/model-resolver";
+import { extractExtendedContextSuffix, parseModelString } from "../../config/model-resolver";
 import type { Settings } from "../../config/settings";
 import { type ThemeColor, theme } from "../../modes/theme/theme";
 import { fuzzyFilter } from "../../utils/fuzzy";
@@ -89,9 +90,6 @@ export class ModelSelectorComponent extends Container {
 		this.#temporaryOnly = options?.temporaryOnly ?? false;
 		const initialSearchInput = options?.initialSearchInput;
 
-		// Load current role assignments from settings
-		this.#loadRoleModels();
-
 		// Add top border
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
@@ -140,8 +138,12 @@ export class ModelSelectorComponent extends Container {
 
 		// Load models and do initial render
 		this.#loadModels().then(() => {
+			// Resolve role assignments against the full list (including [1m] variants).
+			this.#loadRoleModels();
 			this.#buildProviderTabs();
 			this.#updateTabBar();
+			// Pre-select the current default model.
+			this.#selectCurrentModel();
 			// Always apply the current search query — the user may have typed
 			// while models were loading asynchronously.
 			const currentQuery = this.#searchInput.getValue();
@@ -156,18 +158,36 @@ export class ModelSelectorComponent extends Container {
 	}
 
 	#loadRoleModels(): void {
-		const allModels = this.#modelRegistry.getAll();
+		const models = this.#allModels;
 		for (const role of MODEL_ROLE_IDS) {
-			const modelId = this.#settings.getModelRole(role);
-			if (!modelId) continue;
+			const rawModelId = this.#settings.getModelRole(role);
+			if (!rawModelId) continue;
+			// Try exact match first (preserves [1m] suffix for extended variants).
+			const exactParsed = parseModelString(rawModelId);
+			if (exactParsed) {
+				const exact = models.find(m => m.provider === exactParsed.provider && m.id === exactParsed.id);
+				if (exact) {
+					this.#roles[role] = exact.model;
+					continue;
+				}
+			}
+			// Fall back to base model (suffix stripped).
+			const { cleaned: modelId } = extractExtendedContextSuffix(rawModelId);
 			const parsed = parseModelString(modelId);
 			if (parsed) {
-				const model = allModels.find(m => m.provider === parsed.provider && m.id === parsed.id);
+				const model = models.find(m => m.provider === parsed.provider && m.id === parsed.id);
 				if (model) {
-					this.#roles[role] = model;
+					this.#roles[role] = model.model;
 				}
 			}
 		}
+	}
+
+	#selectCurrentModel(): void {
+		const defaultModel = this.#roles.default;
+		if (!defaultModel) return;
+		const idx = this.#filteredModels.findIndex(m => modelsAreEqual(m.model, defaultModel));
+		if (idx !== -1) this.#selectedIndex = idx;
 	}
 
 	#sortModels(models: ModelItem[]): void {
@@ -279,6 +299,29 @@ export class ModelSelectorComponent extends Container {
 			}
 		}
 
+		// Generate extended context variants for eligible models
+		if ($env.PI_DISABLE_EXTENDED_CONTEXT !== "1") {
+			const extendedModels: ModelItem[] = [];
+			for (const item of models) {
+				const suffix = extendedContextSuffix(item.model);
+				if (!suffix) continue;
+				// Gate: OAuth users need overage entitlement from API response headers
+				const isOAuth = this.#modelRegistry.isUsingOAuth(item.model);
+				if (!hasExtendedContextAccess(isOAuth)) continue;
+				const tag = suffix.toUpperCase();
+				extendedModels.push({
+					provider: item.provider,
+					id: `${item.id}${suffix}`,
+					model: {
+						...item.model,
+						id: `${item.model.id}${suffix}`,
+						name: `${item.model.name ?? item.model.id} ${tag}`,
+						contextWindow: item.model.extendedContextWindow!,
+					},
+				});
+			}
+			models.push(...extendedModels);
+		}
 		this.#sortModels(models);
 
 		this.#allModels = models;
@@ -567,22 +610,22 @@ export class ModelSelectorComponent extends Container {
 	}
 
 	#handleSelect(model: Model, role: ModelRole | null): void {
-		// For temporary role, don't save to settings - just notify caller
+		// Strip extended context suffix for session callback — providers require the real model ID.
+		const { cleaned: cleanId } = extractExtendedContextSuffix(model.id);
+		const modelForSession: Model = cleanId !== model.id ? { ...model, id: cleanId } : model;
 		if (role === null) {
-			this.#onSelectCallback(model, null);
+			this.#onSelectCallback(modelForSession, null);
 			return;
 		}
 
-		// Save to settings
+		// Keep extended context suffix in settings so the preference is remembered on restart.
 		this.#settings.setModelRole(role, `${model.provider}/${model.id}`);
 
-		// Update local state for UI
+		// Update local state for UI (keep suffixed id so modelsAreEqual tags only the extended entry).
 		this.#roles[role] = model;
+		this.#onSelectCallback(modelForSession, role);
 
-		// Notify caller (for updating agent state if needed)
-		this.#onSelectCallback(model, role);
-
-		// Update list to show new badges
+		// Update list to show new badges.
 		this.#updateList();
 	}
 

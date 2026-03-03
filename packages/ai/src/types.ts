@@ -181,6 +181,13 @@ export interface StreamOptions {
 	 * The payload format is provider-specific.
 	 */
 	onPayload?: (payload: unknown) => void;
+	/**
+	 * Optional hook to observe HTTP response headers from the provider.
+	 * Fired once after the first successful response is received.
+	 * Used to extract rate-limit and entitlement signals without coupling
+	 * the provider to higher-level business logic.
+	 */
+	onResponseHeaders?: (headers: Record<string, string>) => void;
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;
 }
@@ -445,6 +452,13 @@ export interface Model<TApi extends Api = any> {
 	contextWindow: number;
 	maxTokens: number;
 	headers?: Record<string, string>;
+	/** Extended context window size (tokens). When set, model supports opt-in larger context via suffix (e.g. `[1m]`, `[500k]`). */
+	extendedContextWindow?: number;
+	/** Long-context pricing: premium rates when total input exceeds the threshold. */
+	longContextPricing?: {
+		inputThreshold: number;
+		multipliers: { input: number; output: number; cacheRead: number; cacheWrite: number };
+	};
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
 	/** Preferred model to switch to when context promotion is triggered (model id or provider/id). */

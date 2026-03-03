@@ -30,6 +30,7 @@ import type {
 } from "../types";
 import { isAnthropicOAuthToken, normalizeToolCallId, resolveCacheRetention } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
+import { CONTEXT_1M_BETA, isExtendedContext } from "../utils/extended-context";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
 import {
@@ -595,7 +596,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 			const { client, isOAuthToken } = createClient(model, {
 				model,
 				apiKey,
-				extraBetas: normalizeExtraBetas(options?.betas),
+				extraBetas: injectContextBetas(normalizeExtraBetas(options?.betas), model),
 				stream: true,
 				interleavedThinking: options?.interleavedThinking ?? true,
 				headers: options?.headers,
@@ -627,6 +628,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					output.usage.premiumRequests = copilotDynamicHeaders.premiumRequests;
 				}
 
+				// Fire onResponseHeaders once after the HTTP response is available.
+				// The SDK exposes .response after the stream begins (SSE headers received).
+				let headersFired = false;
 				try {
 					for await (const event of anthropicStream) {
 						started = true;
@@ -641,6 +645,22 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 							output.usage.totalTokens =
 								output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 							calculateCost(model, output.usage);
+							// Fire response headers callback once
+							if (!headersFired && options?.onResponseHeaders) {
+								headersFired = true;
+								try {
+									const resp = anthropicStream.response;
+									if (resp?.headers) {
+										const h: Record<string, string> = {};
+										resp.headers.forEach((v, k) => {
+											h[k] = v;
+										});
+										options.onResponseHeaders(h);
+									}
+								} catch {
+									// Ignore header extraction failures — never block streaming
+								}
+							}
 						} else if (event.type === "content_block_start") {
 							if (!firstTokenTime) firstTokenTime = Date.now();
 							if (event.content_block.type === "text") {
@@ -925,6 +945,17 @@ export function normalizeExtraBetas(betas?: string[] | string): string[] {
 	if (!betas) return [];
 	const raw = Array.isArray(betas) ? betas : betas.split(",");
 	return raw.map(beta => beta.trim()).filter(beta => beta.length > 0);
+}
+
+/**
+ * Conditionally inject the context-1m beta header when the model uses an extended context window.
+ * The beta is required by the Anthropic API to unlock 1M token contexts.
+ */
+function injectContextBetas(betas: string[], model: Model): string[] {
+	if (isExtendedContext(model) && !betas.includes(CONTEXT_1M_BETA)) {
+		return [...betas, CONTEXT_1M_BETA];
+	}
+	return betas;
 }
 
 export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): AnthropicClientOptionsResult {

@@ -6,7 +6,14 @@ import {
 	INTENT_FIELD,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import { type Message, type Model, supportsXhigh } from "@oh-my-pi/pi-ai";
+import {
+	applyExtendedContext,
+	isExtendedContext,
+	type Message,
+	type Model,
+	supportsXhigh,
+	updateOverageDisabledReason,
+} from "@oh-my-pi/pi-ai";
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { $env, getAgentDbPath, getAgentDir, getProjectDir, logger, postmortem } from "@oh-my-pi/pi-utils";
@@ -15,7 +22,12 @@ import { AsyncJobManager } from "./async";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability } from "./capability/rule";
 import { ModelRegistry } from "./config/model-registry";
-import { formatModelString, parseModelPattern, parseModelString } from "./config/model-resolver";
+import {
+	extractExtendedContextSuffix,
+	formatModelString,
+	parseModelPattern,
+	parseModelString,
+} from "./config/model-resolver";
 import {
 	loadPromptTemplates as loadPromptTemplatesInternal,
 	type PromptTemplate,
@@ -657,11 +669,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Skip restore when an explicit model was requested.
 	const defaultModelStr = existingSession.models.default;
 	if (!hasExplicitModel && !model && hasExistingSession && defaultModelStr) {
+		const savedExtCtx = existingSession.extendedContextModels.default ?? false;
 		const parsedModel = parseModelString(defaultModelStr);
 		if (parsedModel) {
 			const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
 			if (restoredModel && (await hasModelApiKey(restoredModel))) {
-				model = restoredModel;
+				model = applyExtendedContext(restoredModel, savedExtCtx);
 			}
 		}
 		if (!model) {
@@ -672,13 +685,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// If still no model, try settings default.
 	// Skip settings fallback when an explicit model was requested.
 	if (!hasExplicitModel && !model) {
-		const settingsDefaultModel = settings.getModelRole("default");
-		if (settingsDefaultModel) {
-			const parsedModel = parseModelString(settingsDefaultModel);
+		const rawDefault = settings.getModelRole("default");
+		if (rawDefault) {
+			const { cleaned, extendedContext: savedExtCtx } = extractExtendedContextSuffix(rawDefault);
+			const parsedModel = parseModelString(cleaned);
 			if (parsedModel) {
 				const settingsModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
 				if (settingsModel && (await hasModelApiKey(settingsModel))) {
-					model = settingsModel;
+					model = applyExtendedContext(settingsModel, savedExtCtx);
 				}
 			}
 		}
@@ -1061,9 +1075,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const matchPreferences = {
 			usageOrder: settings.getStorage()?.getModelUsageOrder(),
 		};
-		const { model: resolved } = parseModelPattern(options.modelPattern, availableModels, matchPreferences);
+		const { model: resolved, extendedContext } = parseModelPattern(
+			options.modelPattern,
+			availableModels,
+			matchPreferences,
+		);
 		if (resolved) {
-			model = resolved;
+			model = applyExtendedContext(resolved, extendedContext);
 			modelFallbackMessage = undefined;
 		} else {
 			modelFallbackMessage = `Model "${options.modelPattern}" not found`;
@@ -1384,6 +1402,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 			return key;
 		},
+		onResponseHeaders: headers => {
+			// Cache Anthropic's overage-disabled-reason for extended context entitlement checks.
+			// Only Anthropic sends this header; calling it for other providers is harmless (no-op).
+			updateOverageDisabledReason(headers);
+		},
 		cursorExecHandlers,
 		transformToolCallArguments: (args, _toolName) => {
 			let result = args;
@@ -1415,7 +1438,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	} else {
 		// Save initial model and thinking level for new sessions so they can be restored on resume
 		if (model) {
-			sessionManager.appendModelChange(`${model.provider}/${model.id}`);
+			sessionManager.appendModelChange(`${model.provider}/${model.id}`, undefined, isExtendedContext(model));
 		}
 		sessionManager.appendThinkingLevelChange(thinkingLevel);
 	}

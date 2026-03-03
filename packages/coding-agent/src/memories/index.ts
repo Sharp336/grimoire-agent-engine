@@ -6,7 +6,7 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { completeSimple, type Model } from "@oh-my-pi/pi-ai";
 import { getAgentDbPath, logger, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
-import { parseModelString } from "../config/model-resolver";
+import { extractExtendedContextSuffix, parseModelString } from "../config/model-resolver";
 import { renderPromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
 import consolidationTemplate from "../prompts/memories/consolidation.md" with { type: "text" };
@@ -1039,7 +1039,8 @@ async function resolveMemoryModel(options: {
 	const { modelRegistry, session, fallbackRole } = options;
 	const requestedModel = session.settings.getModelRole(fallbackRole) || session.settings.getModelRole("default");
 	if (requestedModel) {
-		const parsed = parseModelString(requestedModel);
+		const { cleaned } = extractExtendedContextSuffix(requestedModel);
+		const parsed = parseModelString(cleaned);
 		if (parsed) {
 			const found = modelRegistry.find(parsed.provider, parsed.id);
 			if (found) return found;

@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `extendedContextWindow` and `longContextPricing` fields to `Model` type for per-model extended context configuration
+- Added `extendedContextSuffix(model)` helper that derives dynamic suffix tags (e.g. `[1m]`, `[500k]`) from model metadata
+- Added `EXTENDED_CONTEXT_PROVIDERS` set in model-policies to scope 1M context activation to Anthropic and Amazon Bedrock
+
+### Changed
+
+- `supportsExtendedContext()` now takes a `Model` object instead of a string model ID
+- `calculateCost()` now reads long-context pricing multipliers from `model.longContextPricing` instead of hardcoded constants
+- `applyExtendedContext()` derives context window size and display tag from per-model metadata
+
 ## [13.6.0] - 2026-03-03
 ### Added
 

@@ -302,8 +302,6 @@ async function generateModels() {
 		}
 	}
 
-	applyGeneratedModelPolicies(allModels);
-	linkSparkPromotionTargets(allModels);
 
 	// Merge previous models.json entries as fallback for any provider/model
 	// not fetched dynamically. This replaces all hardcoded fallback lists —
@@ -321,6 +319,11 @@ async function generateModels() {
 			}
 		}
 	}
+
+	// Apply policies after all sources (including fallback) are merged so every
+	// model gets normalized context windows, extended-context fields, and promotion links.
+	applyGeneratedModelPolicies(allModels);
+	linkSparkPromotionTargets(allModels);
 
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
@@ -351,9 +354,15 @@ async function generateModels() {
 		}
 	}
 
+	// Sort providers alphabetically for stable output ordering
+	const sorted: Record<string, Record<string, Model>> = {};
+	for (const key of Object.keys(providers).sort()) {
+		sorted[key] = providers[key];
+	}
+
 	// Generate JSON file
-	const MODELS = providers;
-	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(MODELS, null, "	"));
+	const MODELS = sorted;
+	await Bun.write(path.join(packageRoot, "src/models.json"), JSON.stringify(MODELS, null, "\t"));
 	console.log("Generated src/models.json");
 
 	// Print statistics

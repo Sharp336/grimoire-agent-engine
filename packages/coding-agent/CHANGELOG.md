@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added 1M extended context window support for Claude Opus 4.6 and Sonnet 4.6 via `[1m]` model suffix
+- Model selector shows virtual extended context entries for eligible models with dynamic size tags
+- Extended context preference persists across sessions and survives `/resume`
+- Context promotion to 1M triggers automatically on context overflow before trying different models
+- Kill switch via `PI_DISABLE_EXTENDED_CONTEXT=1` environment variable
+
+### Changed
+
+- Extended context suffix parsing generalized from `[1m]` to `[\d+[km]]` pattern, supporting future models with different context sizes (e.g. `[500k]`, `[2m]`)
+
 ## [13.7.0] - 2026-03-03
 
 ### Fixed
