@@ -95,6 +95,14 @@ function addRecommendedSuffix(labels: string[], recommendedIndex?: number): stri
 	});
 }
 
+function getAutoSelectionOnTimeout(optionLabels: string[], recommended?: number): string[] {
+	if (optionLabels.length === 0) return [];
+	if (typeof recommended === "number" && recommended >= 0 && recommended < optionLabels.length) {
+		return [optionLabels[recommended]];
+	}
+	return [optionLabels[0]];
+}
+
 /** Strip "(Recommended)" suffix from a label */
 function stripRecommendedSuffix(label: string): string {
 	return label.endsWith(RECOMMENDED_SUFFIX) ? label.slice(0, -RECOMMENDED_SUFFIX.length) : label;
@@ -267,6 +275,9 @@ async function askSingleQuestion(
 		}
 	}
 
+	if (timedOut && selectedOptions.length === 0 && !customInput) {
+		selectedOptions = getAutoSelectionOnTimeout(optionLabels, recommended);
+	}
 	return { selectedOptions, customInput, timedOut };
 }
 

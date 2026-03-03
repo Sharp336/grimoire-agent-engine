@@ -175,7 +175,7 @@ describe("AskTool cancellation", () => {
 		expect(select.mock.calls[0]?.[2]?.timeout).toBeGreaterThan(0);
 	});
 
-	it("does not abort when timeout elapses without a selected option", async () => {
+	it("auto-selects the first option when timeout elapses without a selected option", async () => {
 		const tool = new AskTool(
 			createSession({
 				settings: Settings.isolated({ "ask.timeout": 0.001 }),
@@ -212,7 +212,8 @@ describe("AskTool cancellation", () => {
 		if (result.content[0]?.type !== "text") {
 			throw new Error("Expected text result");
 		}
-		expect(result.content[0].text).toContain("User cancelled the selection");
+		expect(result.content[0].text).toContain("User selected: yes");
+		expect(result.details?.selectedOptions).toEqual(["yes"]);
 		expect(abort).not.toHaveBeenCalled();
 	});
 
@@ -255,7 +256,8 @@ describe("AskTool cancellation", () => {
 		if (result.content[0]?.type !== "text") {
 			throw new Error("Expected text result");
 		}
-		expect(result.content[0].text).toContain("User cancelled the selection");
+		expect(result.content[0].text).toContain("User selected: yes");
+		expect(result.details?.selectedOptions).toEqual(["yes"]);
 		expect(input).toHaveBeenCalledTimes(1);
 		expect(abort).not.toHaveBeenCalled();
 	});
@@ -299,7 +301,8 @@ describe("AskTool cancellation", () => {
 		if (result.content[0]?.type !== "text") {
 			throw new Error("Expected text result");
 		}
-		expect(result.content[0].text).toContain("User cancelled the selection");
+		expect(result.content[0].text).toContain("User selected: yes");
+		expect(result.details?.selectedOptions).toEqual(["yes"]);
 		expect(result.details?.customInput).toBeUndefined();
 		expect(input).not.toHaveBeenCalled();
 		expect(abort).not.toHaveBeenCalled();
