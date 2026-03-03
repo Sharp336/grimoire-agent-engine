@@ -391,28 +391,43 @@ export async function searchSmitheryRegistry(
 	if (!query) return [];
 
 	const limit = clampLimit(options?.limit);
-	const url = new URL(`${SMITHERY_REGISTRY_BASE_URL}/servers`);
-	url.searchParams.set("q", query);
-	url.searchParams.set("pageSize", String(Math.max(limit * 2, 20)));
+	const isSemantic = options?.includeSemantic === true;
+	const pageSize = Math.max(limit * 2, 20);
 	const headers = new Headers();
 	if (options?.apiKey) {
 		headers.set("Authorization", `Bearer ${options.apiKey}`);
 	}
-	const response = await fetch(url.toString(), {
-		headers,
-	});
-	if (!response.ok) {
-		throw new SmitheryRegistryError(`Smithery search failed with status ${response.status}`, response.status);
+
+	// Fetch pages until we have enough filtered entries or run out of results.
+	const maxPages = 3;
+	const allEntries: SmitherySearchEntry[] = [];
+	for (let page = 1; page <= maxPages; page++) {
+		const url = new URL(`${SMITHERY_REGISTRY_BASE_URL}/servers`);
+		url.searchParams.set("q", query);
+		url.searchParams.set("pageSize", String(pageSize));
+		if (page > 1) url.searchParams.set("page", String(page));
+		const response = await fetch(url.toString(), { headers });
+		if (!response.ok) {
+			throw new SmitheryRegistryError(`Smithery search failed with status ${response.status}`, response.status);
+		}
+		const payload = (await response.json()) as { servers?: SmitherySearchEntry[] };
+		const pageEntries = payload.servers ?? [];
+		if (pageEntries.length === 0) break;
+		allEntries.push(...pageEntries);
+
+		// Stop early if we already have enough identity-matching entries.
+		const filtered = isSemantic ? allEntries : allEntries.filter(entry => matchesIdentityQuery(query, entry));
+		if (filtered.length >= limit * 2) break;
+		if (pageEntries.length < pageSize) break;
 	}
 
-	const payload = (await response.json()) as { servers?: SmitherySearchEntry[] };
-	const entries =
-		options?.includeSemantic === true
-			? [...(payload.servers ?? [])]
-			: [...(payload.servers ?? [])].filter(entry => matchesIdentityQuery(query, entry));
-	entries.sort((a, b) => {
-		return (b.useCount ?? 0) - (a.useCount ?? 0);
-	});
+	const entries = isSemantic ? [...allEntries] : [...allEntries].filter(entry => matchesIdentityQuery(query, entry));
+
+	// Only apply local useCount sort when not in semantic mode (preserve API relevance ranking).
+	if (!isSemantic) {
+		entries.sort((a, b) => (b.useCount ?? 0) - (a.useCount ?? 0));
+	}
+
 	const uniqueEntries = entries.filter((entry, index) => {
 		const identity = getEntryIdentityKey(entry);
 		if (!identity) return false;

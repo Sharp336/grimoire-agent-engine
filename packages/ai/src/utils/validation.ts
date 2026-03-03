@@ -455,7 +455,7 @@ const ajv = new Ajv({
 	allErrors: true,
 	strict: false,
 });
-addFormats(ajv as unknown as Parameters<typeof addFormats>[0]);
+addFormats(ajv);
 
 const MAX_TYPE_COERCION_PASSES = 5;
 

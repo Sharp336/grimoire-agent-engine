@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { getAgentDir } from "@oh-my-pi/pi-utils/dirs";
 
 const SMITHERY_AUTH_FILENAME = "smithery.json";
@@ -71,7 +71,8 @@ export async function getSmitheryApiKey(): Promise<string | undefined> {
 		return normalizeApiKey(payload.apiKey);
 	} catch (error) {
 		if (isEnoent(error)) return undefined;
-		throw error;
+		logger.warn("Failed to read Smithery auth file, treating as missing", { path: authPath, error });
+		return undefined;
 	}
 }
 
@@ -86,8 +87,8 @@ export async function saveSmitheryApiKey(apiKey: string): Promise<void> {
 	await Bun.write(authPath, `${JSON.stringify(payload, null, 2)}\n`);
 	try {
 		await fs.chmod(authPath, 0o600);
-	} catch {
-		// Ignore chmod errors on unsupported filesystems/platforms.
+	} catch (error) {
+		logger.warn("Could not set restrictive permissions on Smithery auth file", { path: authPath, error });
 	}
 }
 
