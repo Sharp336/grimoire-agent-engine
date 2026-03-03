@@ -21,7 +21,10 @@ afterEach(async () => {
 		setAgentDir(fallbackAgentDir);
 		delete process.env.PI_CODING_AGENT_DIR;
 	}
-	await fs.rm(testAgentDir, { recursive: true, force: true });
+	if (testAgentDir) {
+		await fs.rm(testAgentDir, { recursive: true, force: true });
+		testAgentDir = "";
+	}
 });
 
 describe("getMCPScopePathLabels", () => {
@@ -38,6 +41,14 @@ describe("getMCPScopePathLabels", () => {
 		setAgentDir(customUserDir);
 
 		const labels = getMCPScopePathLabels(path.join(os.tmpdir(), "omp-mcp-labels-project"));
-		expect(labels.user).toBe("~/.omp/agents/mcp.json");
+		expect(labels.user).toBe(path.join("~", ".omp", "agents", "mcp.json"));
+	});
+
+	it("does not shorten paths that only share a home prefix", () => {
+		const customUserDir = path.join(`${os.homedir()}-alt`, ".omp", "agents");
+		setAgentDir(customUserDir);
+
+		const labels = getMCPScopePathLabels(path.join(os.tmpdir(), "omp-mcp-labels-project"));
+		expect(labels.user).toBe(path.join(customUserDir, "mcp.json"));
 	});
 });
