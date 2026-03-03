@@ -39,6 +39,7 @@ import { openPath } from "../../utils/open";
 import { DynamicBorder } from "../components/dynamic-border";
 import { MCPAddWizard } from "../components/mcp-add-wizard";
 import { parseCommandArgs } from "../shared";
+import { getMCPScopePathLabels } from "../mcp-path-labels";
 import { theme } from "../theme/theme";
 import type { InteractiveModeContext } from "../types";
 
@@ -839,6 +840,7 @@ export class MCPCommandController {
 			const userPath = getMCPConfigPath("user", cwd);
 			const projectPath = getMCPConfigPath("project", cwd);
 
+			const { user: userPathLabel, project: projectPathLabel } = getMCPScopePathLabels(cwd);
 			const [userConfig, projectConfig] = await Promise.all([
 				readMCPConfigFile(userPath),
 				readMCPConfigFile(projectPath),
@@ -884,7 +886,7 @@ export class MCPCommandController {
 
 			// Show user-level servers
 			if (userServers.length > 0) {
-				lines.push(theme.fg("accent", "User level") + theme.fg("muted", ` (~/.omp/mcp.json):`));
+				lines.push(theme.fg("accent", "User level") + theme.fg("muted", ` (${userPathLabel}):`));
 				for (const name of userServers) {
 					const config = userConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
@@ -907,7 +909,7 @@ export class MCPCommandController {
 
 			// Show project-level servers
 			if (projectServers.length > 0) {
-				lines.push(theme.fg("accent", "Project level") + theme.fg("muted", ` (.omp/mcp.json):`));
+				lines.push(theme.fg("accent", "Project level") + theme.fg("muted", ` (${projectPathLabel}):`));
 				for (const name of projectServers) {
 					const config = projectConfig.mcpServers![name];
 					const type = config.type ?? "stdio";
