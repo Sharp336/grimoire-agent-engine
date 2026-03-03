@@ -78,7 +78,7 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 		_onUpdate?: AgentToolUpdateCallback<GrepToolDetails>,
 		_toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<GrepToolDetails>> {
-		const { pattern, path: searchDir, glob, type, i, pre, post, multiline, gitignore, limit, offset } = params;
+		const { pattern, path: searchDir, glob, type, i, gitignore, pre, post, multiline, limit, offset } = params;
 
 		return untilAborted(signal, async () => {
 			const normalizedPattern = pattern.trim();
@@ -371,6 +371,7 @@ interface GrepRenderArgs {
 	glob?: string;
 	type?: string;
 	i?: boolean;
+	gitignore?: boolean;
 	pre?: number;
 	post?: number;
 	multiline?: boolean;
@@ -388,6 +389,7 @@ export const grepToolRenderer = {
 		if (args.glob) meta.push(`glob:${args.glob}`);
 		if (args.type) meta.push(`type:${args.type}`);
 		if (args.i) meta.push("case:insensitive");
+		if (args.gitignore === false) meta.push("gitignore:false");
 		if (args.pre !== undefined && args.pre > 0) {
 			meta.push(`pre:${args.pre}`);
 		}
