@@ -1,4 +1,5 @@
 import * as os from "node:os";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import { theme } from "../../../modes/theme/theme";
 import { shortenPath } from "../../../tools/render-utils";
@@ -12,6 +13,10 @@ export type { SegmentContext } from "./types";
 
 function withIcon(icon: string, text: string): string {
 	return icon ? `${icon} ${text}` : text;
+}
+
+function normalizePremiumRequests(value: number): number {
+	return Math.round((value + Number.EPSILON) * 100) / 100;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -141,6 +146,18 @@ const gitSegment: StatusLineSegment = {
 	},
 };
 
+const prSegment: StatusLineSegment = {
+	id: "pr",
+	render(ctx) {
+		const { pr } = ctx.git;
+		if (!pr) return { content: "", visible: false };
+
+		const label = withIcon(theme.icon.pr, `#${pr.number}`);
+		const content = TERMINAL.hyperlinks ? `\x1b]8;;${pr.url}\x07${label}\x1b]8;;\x07` : label;
+		return { content: theme.fg("accent", content), visible: true };
+	},
+};
+
 const subagentsSegment: StatusLineSegment = {
 	id: "subagents",
 	render(ctx) {
@@ -189,16 +206,21 @@ const tokenTotalSegment: StatusLineSegment = {
 const costSegment: StatusLineSegment = {
 	id: "cost",
 	render(ctx) {
-		const { cost } = ctx.usageStats;
+		const { cost, premiumRequests } = ctx.usageStats;
+		const normalizedPremiumRequests = normalizePremiumRequests(premiumRequests);
 		const state = ctx.session.state;
 		const usingSubscription = state.model ? ctx.session.modelRegistry.isUsingOAuth(state.model) : false;
 
-		if (!cost && !usingSubscription) {
+		if (!cost && !usingSubscription && !normalizedPremiumRequests) {
 			return { content: "", visible: false };
 		}
 
-		const costDisplay = usingSubscription ? "(sub)" : `$${cost.toFixed(2)}`;
-		return { content: theme.fg("statusLineCost", costDisplay), visible: true };
+		const billingParts: string[] = [];
+		if (cost) billingParts.push(`$${cost.toFixed(2)}`);
+		if (normalizedPremiumRequests) billingParts.push(`★ ${formatNumber(normalizedPremiumRequests)}`);
+		if (usingSubscription) billingParts.push("(sub)");
+
+		return { content: theme.fg("statusLineCost", billingParts.join(" ")), visible: true };
 	},
 };
 
@@ -324,6 +346,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	plan_mode: planModeSegment,
 	path: pathSegment,
 	git: gitSegment,
+	pr: prSegment,
 	subagents: subagentsSegment,
 	token_in: tokenInSegment,
 	token_out: tokenOutSegment,

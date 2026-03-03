@@ -30,6 +30,7 @@ export interface SegmentContext {
 		output: number;
 		cacheRead: number;
 		cacheWrite: number;
+		premiumRequests: number;
 		cost: number;
 	};
 	contextPercent: number;
@@ -40,6 +41,7 @@ export interface SegmentContext {
 	git: {
 		branch: string | null;
 		status: { staged: number; unstaged: number; untracked: number } | null;
+		pr: { number: number; url: string } | null;
 	};
 }
 

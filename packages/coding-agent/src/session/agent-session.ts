@@ -237,6 +237,7 @@ export interface SessionStats {
 		cacheWrite: number;
 		total: number;
 	};
+	premiumRequests: number;
 	cost: number;
 }
 
@@ -352,6 +353,8 @@ export class AgentSession {
 
 	// Custom commands (TypeScript slash commands)
 	#customCommands: LoadedCustomCommand[] = [];
+	/** MCP prompt commands (updated dynamically when prompts are loaded) */
+	#mcpPromptCommands: LoadedCustomCommand[] = [];
 
 	#skillsSettings: Required<SkillsSettings> | undefined;
 
@@ -1769,9 +1772,15 @@ export class AgentSession {
 		this.#slashCommands = [...slashCommands];
 	}
 
-	/** Custom commands (TypeScript slash commands) */
+	/** Custom commands (TypeScript slash commands and MCP prompts) */
 	get customCommands(): ReadonlyArray<LoadedCustomCommand> {
-		return this.#customCommands;
+		if (this.#mcpPromptCommands.length === 0) return this.#customCommands;
+		return [...this.#customCommands, ...this.#mcpPromptCommands];
+	}
+
+	/** Update the MCP prompt commands list. Called when server prompts are (re)loaded. */
+	setMCPPromptCommands(commands: LoadedCustomCommand[]): void {
+		this.#mcpPromptCommands = commands;
 	}
 
 	// =========================================================================
@@ -2173,7 +2182,7 @@ export class AgentSession {
 	 * If the command returns void, returns empty string to indicate it was handled.
 	 */
 	async #tryExecuteCustomCommand(text: string): Promise<string | null> {
-		if (this.#customCommands.length === 0) return null;
+		if (this.#customCommands.length === 0 && this.#mcpPromptCommands.length === 0) return null;
 
 		// Parse command name and args
 		const spaceIndex = text.indexOf(" ");
@@ -2181,7 +2190,9 @@ export class AgentSession {
 		const argsString = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1);
 
 		// Find matching command
-		const loaded = this.#customCommands.find(c => c.command.name === commandName);
+		const loaded =
+			this.#customCommands.find(c => c.command.name === commandName) ??
+			this.#mcpPromptCommands.find(c => c.command.name === commandName);
 		if (!loaded) return null;
 
 		// Get command context from extension runner (includes session control methods)
@@ -4781,6 +4792,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		let totalCacheWrite = 0;
 		let totalCost = 0;
 
+		let totalPremiumRequests = 0;
 		const getTaskToolUsage = (details: unknown): Usage | undefined => {
 			if (!details || typeof details !== "object") return undefined;
 			const record = details as Record<string, unknown>;
@@ -4797,6 +4809,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				totalOutput += assistantMsg.usage.output;
 				totalCacheRead += assistantMsg.usage.cacheRead;
 				totalCacheWrite += assistantMsg.usage.cacheWrite;
+				totalPremiumRequests += assistantMsg.usage.premiumRequests ?? 0;
 				totalCost += assistantMsg.usage.cost.total;
 			}
 
@@ -4807,6 +4820,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 					totalOutput += usage.output;
 					totalCacheRead += usage.cacheRead;
 					totalCacheWrite += usage.cacheWrite;
+					totalPremiumRequests += usage.premiumRequests ?? 0;
 					totalCost += usage.cost.total;
 				}
 			}
@@ -4828,6 +4842,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				total: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
 			},
 			cost: totalCost,
+			premiumRequests: totalPremiumRequests,
 		};
 	}
 

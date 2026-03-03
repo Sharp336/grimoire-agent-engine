@@ -1,4 +1,5 @@
 import * as nodeCrypto from "node:crypto";
+import * as fs from "node:fs";
 import * as tls from "node:tls";
 import Anthropic, { type ClientOptions as AnthropicSdkClientOptions } from "@anthropic-ai/sdk";
 import type {
@@ -6,7 +7,7 @@ import type {
 	MessageCreateParamsStreaming,
 	MessageParam,
 } from "@anthropic-ai/sdk/resources/messages";
-import { abortableSleep } from "@oh-my-pi/pi-utils";
+import { $env, abortableSleep, isEnoent } from "@oh-my-pi/pi-utils";
 import { calculateCost } from "../models";
 import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
@@ -31,11 +32,7 @@ import { isAnthropicOAuthToken, normalizeToolCallId, resolveCacheRetention } fro
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { parseStreamingJson } from "../utils/json-parse";
-import {
-	buildCopilotDynamicHeaders,
-	getCopilotInitiatorOverride,
-	hasCopilotVisionInput,
-} from "./github-copilot-headers";
+import { buildCopilotDynamicHeaders, hasCopilotVisionInput } from "./github-copilot-headers";
 import { transformMessages } from "./transform-messages";
 
 export type AnthropicHeaderOptions = {
@@ -381,26 +378,132 @@ export type AnthropicClientOptionsResult = {
 
 const CLAUDE_CODE_TLS_CIPHERS = tls.DEFAULT_CIPHERS;
 
+type FoundryTlsOptions = {
+	ca?: string;
+	cert?: string;
+	key?: string;
+};
+
+function isFoundryEnabled(): boolean {
+	const value = $env.CLAUDE_CODE_USE_FOUNDRY;
+	if (!value) return false;
+	const normalized = value.trim().toLowerCase();
+	return normalized === "1" || normalized === "true" || normalized === "yes" || normalized === "on";
+}
+
+function normalizeBaseUrl(baseUrl: string | undefined): string | undefined {
+	const trimmed = baseUrl?.trim();
+	return trimmed ? trimmed.replace(/\/+$/, "") : undefined;
+}
+
+function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">): string | undefined {
+	if (model.provider === "anthropic" && isFoundryEnabled()) {
+		const foundryBaseUrl = normalizeBaseUrl($env.FOUNDRY_BASE_URL);
+		if (foundryBaseUrl) {
+			return foundryBaseUrl;
+		}
+	}
+	if (model.provider === "anthropic") {
+		return normalizeBaseUrl(model.baseUrl) ?? "https://api.anthropic.com";
+	}
+	return normalizeBaseUrl(model.baseUrl);
+}
+
+function parseAnthropicCustomHeaders(rawHeaders: string | undefined): Record<string, string> | undefined {
+	const source = rawHeaders?.trim();
+	if (!source) return undefined;
+
+	const parsed: Record<string, string> = {};
+	for (const token of source.split(/\r?\n|,/)) {
+		const entry = token.trim();
+		if (!entry) continue;
+		const separatorIndex = entry.indexOf(":");
+		if (separatorIndex <= 0) continue;
+		const key = entry.slice(0, separatorIndex).trim();
+		const value = entry.slice(separatorIndex + 1).trim();
+		if (!key || !value) continue;
+		parsed[key] = value;
+	}
+
+	return Object.keys(parsed).length > 0 ? parsed : undefined;
+}
+
+function resolveAnthropicCustomHeaders(model: Model<"anthropic-messages">): Record<string, string> | undefined {
+	if (model.provider !== "anthropic") return undefined;
+	if (!isFoundryEnabled()) return undefined;
+	return parseAnthropicCustomHeaders($env.ANTHROPIC_CUSTOM_HEADERS);
+}
+
+function looksLikeFilePath(value: string): boolean {
+	return value.includes("/") || value.includes("\\") || /\.(pem|crt|cer|key)$/i.test(value);
+}
+
+function resolvePemValue(value: string | undefined, name: string): string | undefined {
+	const trimmed = value?.trim();
+	if (!trimmed) return undefined;
+
+	const inline = trimmed.replace(/\\n/g, "\n");
+	if (inline.includes("-----BEGIN")) {
+		return inline;
+	}
+
+	if (looksLikeFilePath(trimmed)) {
+		try {
+			return fs.readFileSync(trimmed, "utf8");
+		} catch (error) {
+			if (isEnoent(error)) {
+				throw new Error(`${name} path does not exist: ${trimmed}`);
+			}
+			throw error;
+		}
+	}
+
+	return inline;
+}
+
+function resolveFoundryTlsOptions(model: Model<"anthropic-messages">): FoundryTlsOptions | undefined {
+	if (model.provider !== "anthropic") return undefined;
+	if (!isFoundryEnabled()) return undefined;
+
+	const ca = resolvePemValue($env.NODE_EXTRA_CA_CERTS, "NODE_EXTRA_CA_CERTS");
+	const cert = resolvePemValue($env.CLAUDE_CODE_CLIENT_CERT, "CLAUDE_CODE_CLIENT_CERT");
+	const key = resolvePemValue($env.CLAUDE_CODE_CLIENT_KEY, "CLAUDE_CODE_CLIENT_KEY");
+
+	if ((cert && !key) || (!cert && key)) {
+		throw new Error("Both CLAUDE_CODE_CLIENT_CERT and CLAUDE_CODE_CLIENT_KEY must be set for mTLS.");
+	}
+
+	const options: FoundryTlsOptions = {};
+	if (ca) options.ca = ca;
+	if (cert) options.cert = cert;
+	if (key) options.key = key;
+	return Object.keys(options).length > 0 ? options : undefined;
+}
+
 function buildClaudeCodeTlsFetchOptions(
 	model: Model<"anthropic-messages">,
+	baseUrl: string | undefined,
 ): AnthropicSdkClientOptions["fetchOptions"] | undefined {
 	if (model.provider !== "anthropic") return undefined;
-	if (!model.baseUrl) return undefined;
+	if (!baseUrl) return undefined;
 
 	let serverName: string;
 	try {
-		serverName = new URL(model.baseUrl).hostname;
+		serverName = new URL(baseUrl).hostname;
 	} catch {
 		return undefined;
 	}
 
 	if (!serverName) return undefined;
 
+	const foundryTlsOptions = resolveFoundryTlsOptions(model);
+
 	return {
 		tls: {
 			rejectUnauthorized: true,
 			serverName,
 			...(CLAUDE_CODE_TLS_CIPHERS ? { ciphers: CLAUDE_CODE_TLS_CIPHERS } : {}),
+			...(foundryTlsOptions ?? {}),
 		},
 	};
 }
@@ -450,6 +553,15 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 		const startTime = Date.now();
 		let firstTokenTime: number | undefined;
 
+		const copilotDynamicHeaders =
+			model.provider === "github-copilot"
+				? buildCopilotDynamicHeaders({
+						messages: context.messages,
+						hasImages: hasCopilotVisionInput(context.messages),
+						premiumMultiplier: model.premiumMultiplier,
+						headers: { ...(model.headers ?? {}), ...(options?.headers ?? {}) },
+					})
+				: undefined;
 		const output: AssistantMessage = {
 			role: "assistant",
 			content: [],
@@ -471,20 +583,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 
 		try {
 			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
-
-			let copilotDynamicHeaders: Record<string, string> | undefined;
-			if (model.provider === "github-copilot") {
-				const hasImages = hasCopilotVisionInput(context.messages);
-				const initiatorOverride = getCopilotInitiatorOverride({
-					...(model.headers ?? {}),
-					...(options?.headers ?? {}),
-				});
-				copilotDynamicHeaders = buildCopilotDynamicHeaders({
-					messages: context.messages,
-					hasImages,
-					initiatorOverride,
-				});
-			}
+			const baseUrl = resolveAnthropicBaseUrl(model) ?? "https://api.anthropic.com";
 
 			const { client, isOAuthToken } = createClient(model, {
 				model,
@@ -493,17 +592,17 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				stream: true,
 				interleavedThinking: options?.interleavedThinking ?? true,
 				headers: options?.headers,
-				dynamicHeaders: copilotDynamicHeaders,
+				dynamicHeaders: copilotDynamicHeaders?.headers,
 				isOAuth: options?.isOAuth,
 			});
-			const params = buildParams(model, context, isOAuthToken, options);
+			const params = buildParams(model, baseUrl, context, isOAuthToken, options);
 			options?.onPayload?.(params);
 			rawRequestDump = {
 				provider: model.provider,
 				api: output.api,
 				model: model.id,
 				method: "POST",
-				url: `${model.baseUrl ?? "https://api.anthropic.com"}/v1/messages`,
+				url: `${baseUrl}/v1/messages`,
 				body: params,
 			};
 
@@ -517,6 +616,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 			let started = false;
 			do {
 				const anthropicStream = client.messages.stream({ ...params, stream: true }, { signal: options?.signal });
+				if (copilotDynamicHeaders && output.usage.premiumRequests === undefined) {
+					output.usage.premiumRequests = copilotDynamicHeaders.premiumRequests;
+				}
 
 				try {
 					for await (const event of anthropicStream) {
@@ -830,8 +932,9 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		isOAuth,
 	} = args;
 	const oauthToken = isOAuth ?? isAnthropicOAuthToken(apiKey);
-
-	const tlsFetchOptions = buildClaudeCodeTlsFetchOptions(model);
+	const baseUrl = resolveAnthropicBaseUrl(model);
+	const foundryCustomHeaders = resolveAnthropicCustomHeaders(model);
+	const tlsFetchOptions = buildClaudeCodeTlsFetchOptions(model, baseUrl);
 	if (model.provider === "github-copilot") {
 		const betaFeatures = [...extraBetas];
 		if (interleavedThinking) {
@@ -853,7 +956,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			isOAuthToken: false,
 			apiKey: null,
 			authToken: apiKey,
-			baseURL: model.baseUrl,
+			baseURL: baseUrl,
 			maxRetries: 5,
 			dangerouslyAllowBrowser: true,
 			defaultHeaders,
@@ -868,18 +971,18 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 
 	const defaultHeaders = buildAnthropicHeaders({
 		apiKey,
-		baseUrl: model.baseUrl,
+		baseUrl,
 		isOAuth: oauthToken,
 		extraBetas: betaFeatures,
 		stream,
-		modelHeaders: mergeHeaders(model.headers, headers, dynamicHeaders),
+		modelHeaders: mergeHeaders(model.headers, foundryCustomHeaders, headers, dynamicHeaders),
 	});
 
 	return {
 		isOAuthToken: oauthToken,
 		apiKey: oauthToken ? null : apiKey,
 		authToken: oauthToken ? apiKey : undefined,
-		baseURL: model.baseUrl,
+		baseURL: baseUrl,
 		maxRetries: 5,
 		dangerouslyAllowBrowser: true,
 		defaultHeaders,
@@ -1152,11 +1255,12 @@ function enforceCacheControlLimit(params: MessageCreateParamsStreaming, maxBreak
 }
 function buildParams(
 	model: Model<"anthropic-messages">,
+	baseUrl: string,
 	context: Context,
 	isOAuthToken: boolean,
 	options?: AnthropicOptions,
 ): MessageCreateParamsStreaming {
-	const { cacheControl } = getCacheControl(model.baseUrl, options?.cacheRetention);
+	const { cacheControl } = getCacheControl(baseUrl, options?.cacheRetention);
 	const params: AnthropicSamplingParams = {
 		model: model.id,
 		messages: convertAnthropicMessages(context.messages, model, isOAuthToken),

@@ -63,6 +63,7 @@ export type StatusLineSegmentId =
 	| "plan_mode"
 	| "path"
 	| "git"
+	| "pr"
 	| "subagents"
 	| "token_in"
 	| "token_out"
@@ -857,6 +858,24 @@ export const SETTINGS_SCHEMA = {
 		type: "boolean",
 		default: true,
 		ui: { tab: "tools", label: "MCP project config", description: "Load .mcp.json/mcp.json from project root" },
+	},
+	"mcp.notifications": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "MCP update injection",
+			description: "Inject MCP resource updates into the agent conversation",
+		},
+	},
+	"mcp.notificationDebounceMs": {
+		type: "number",
+		default: 500,
+		ui: {
+			tab: "tools",
+			label: "MCP notification debounce (ms)",
+			description: "Debounce window for MCP resource update notifications before injecting into conversation",
+		},
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
