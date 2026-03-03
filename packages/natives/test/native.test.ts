@@ -106,6 +106,47 @@ describe("pi-natives", () => {
 			expect(result.totalMatches).toBe(0);
 			expect(result.filesWithMatches).toBe(0);
 		});
+		it("should respect .gitignore by default", async () => {
+			const scenarioDir = path.join(testDir, "grep-gitignore-default");
+			try {
+				await fs.mkdir(path.join(scenarioDir, ".git"), { recursive: true });
+				await fs.writeFile(path.join(scenarioDir, ".gitignore"), "ignored.txt\n");
+				await fs.writeFile(path.join(scenarioDir, "ignored.txt"), "needle from ignored\n");
+				await fs.writeFile(path.join(scenarioDir, "kept.txt"), "needle from kept\n");
+
+				const result = await grep({
+					pattern: "needle",
+					path: scenarioDir,
+				});
+
+				expect(result.totalMatches).toBe(1);
+				expect(result.matches).toHaveLength(1);
+				expect(result.matches[0]?.path).toBe("kept.txt");
+			} finally {
+				await fs.rm(scenarioDir, { recursive: true, force: true });
+			}
+		});
+
+		it("should include ignored files when gitignore is false", async () => {
+			const scenarioDir = path.join(testDir, "grep-gitignore-off");
+			try {
+				await fs.mkdir(path.join(scenarioDir, ".git"), { recursive: true });
+				await fs.writeFile(path.join(scenarioDir, ".gitignore"), "ignored.txt\n");
+				await fs.writeFile(path.join(scenarioDir, "ignored.txt"), "needle from ignored\n");
+
+				const result = await grep({
+					pattern: "needle",
+					path: scenarioDir,
+					gitignore: false,
+				});
+
+				expect(result.totalMatches).toBe(1);
+				expect(result.matches).toHaveLength(1);
+				expect(result.matches[0]?.path).toBe("ignored.txt");
+			} finally {
+				await fs.rm(scenarioDir, { recursive: true, force: true });
+			}
+		});
 	});
 
 	describe("fuzzyFind", () => {
