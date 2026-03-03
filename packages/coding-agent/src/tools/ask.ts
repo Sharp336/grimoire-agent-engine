@@ -18,7 +18,7 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { TERMINAL, Text } from "@oh-my-pi/pi-tui";
-import { ptree, untilAborted } from "@oh-my-pi/pi-utils";
+import { untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -107,13 +107,14 @@ function stripRecommendedSuffix(label: string): string {
 interface SelectionResult {
 	selectedOptions: string[];
 	customInput?: string;
+	timedOut: boolean;
 }
 
 interface UIContext {
 	select(
 		prompt: string,
 		options: string[],
-		options_?: { initialIndex?: number; signal?: AbortSignal; outline?: boolean },
+		options_?: { initialIndex?: number; timeout?: number; signal?: AbortSignal; outline?: boolean },
 	): Promise<string | undefined>;
 	input(prompt: string, options_?: { signal?: AbortSignal }): Promise<string | undefined>;
 }
@@ -124,11 +125,48 @@ async function askSingleQuestion(
 	optionLabels: string[],
 	multi: boolean,
 	recommended?: number,
+	timeout?: number,
 	signal?: AbortSignal,
 ): Promise<SelectionResult> {
 	const doneLabel = getDoneOptionLabel();
 	let selectedOptions: string[] = [];
 	let customInput: string | undefined;
+	let timedOut = false;
+
+	const selectOption = async (
+		prompt: string,
+		options: string[],
+		initialIndex?: number,
+	): Promise<{ choice: string | undefined; timedOut: boolean }> => {
+		let timeoutTriggered = false;
+		let timeoutId: NodeJS.Timeout | undefined;
+		if (timeout !== undefined && timeout > 0) {
+			timeoutId = setTimeout(() => {
+				timeoutTriggered = true;
+			}, timeout);
+		}
+
+		try {
+			const choice = signal
+				? await untilAborted(signal, () =>
+						ui.select(prompt, options, {
+							initialIndex,
+							timeout,
+							signal,
+							outline: true,
+						}),
+					)
+				: await ui.select(prompt, options, {
+						initialIndex,
+						timeout,
+						signal,
+						outline: true,
+					});
+			return { choice, timedOut: timeoutTriggered };
+		} finally {
+			if (timeoutId) clearTimeout(timeoutId);
+		}
+	};
 
 	if (multi) {
 		const selected = new Set<string>();
@@ -149,23 +187,18 @@ async function askSingleQuestion(
 			opts.push(OTHER_OPTION);
 
 			const prefix = selected.size > 0 ? `(${selected.size} selected) ` : "";
-			const choice = signal
-				? await untilAborted(signal, () =>
-						ui.select(`${prefix}${question}`, opts, {
-							initialIndex: cursorIndex,
-							signal,
-							outline: true,
-						}),
-					)
-				: await ui.select(`${prefix}${question}`, opts, {
-						initialIndex: cursorIndex,
-						signal,
-						outline: true,
-					});
+			const { choice, timedOut: selectTimedOut } = await selectOption(`${prefix}${question}`, opts, cursorIndex);
 
-			if (choice === undefined || choice === doneLabel) break;
+			if (choice === undefined || choice === doneLabel) {
+				timedOut = selectTimedOut;
+				break;
+			}
 
 			if (choice === OTHER_OPTION) {
+				if (selectTimedOut) {
+					timedOut = true;
+					break;
+				}
 				const input = signal
 					? await untilAborted(signal, () => ui.input("Enter your response:", { signal }))
 					: await ui.input("Enter your response:", { signal });
@@ -194,35 +227,35 @@ async function askSingleQuestion(
 					selected.add(opt);
 				}
 			}
+
+			if (selectTimedOut) {
+				timedOut = true;
+				break;
+			}
 		}
 		selectedOptions = Array.from(selected);
 	} else {
 		const displayLabels = addRecommendedSuffix(optionLabels, recommended);
-		const choice = signal
-			? await untilAborted(signal, () =>
-					ui.select(question, [...displayLabels, OTHER_OPTION], {
-						initialIndex: recommended,
-						signal,
-						outline: true,
-					}),
-				)
-			: await ui.select(question, [...displayLabels, OTHER_OPTION], {
-					initialIndex: recommended,
-					signal,
-					outline: true,
-				});
+		const { choice, timedOut: selectTimedOut } = await selectOption(
+			question,
+			[...displayLabels, OTHER_OPTION],
+			recommended,
+		);
+		timedOut = selectTimedOut;
 
 		if (choice === OTHER_OPTION) {
-			const input = signal
-				? await untilAborted(signal, () => ui.input("Enter your response:", { signal }))
-				: await ui.input("Enter your response:", { signal });
-			if (input) customInput = input;
+			if (!selectTimedOut) {
+				const input = signal
+					? await untilAborted(signal, () => ui.input("Enter your response:", { signal }))
+					: await ui.input("Enter your response:", { signal });
+				if (input) customInput = input;
+			}
 		} else if (choice) {
 			selectedOptions = [stripRecommendedSuffix(choice)];
 		}
 	}
 
-	return { selectedOptions, customInput };
+	return { selectedOptions, customInput, timedOut };
 }
 
 function formatQuestionResult(result: QuestionResult): string {
@@ -311,26 +344,20 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 
 		const askQuestion = async (q: AskParams["questions"][number]) => {
 			const optionLabels = q.options.map(o => o.label);
-			const timeoutSignal = timeout == null ? undefined : AbortSignal.timeout(timeout);
-			const questionSignal = ptree.combineSignals(signal, timeoutSignal);
 			try {
-				const { selectedOptions, customInput } = await askSingleQuestion(
+				const { selectedOptions, customInput, timedOut } = await askSingleQuestion(
 					ui,
 					q.question,
 					optionLabels,
 					q.multi ?? false,
 					q.recommended,
-					questionSignal,
+					timeout ?? undefined,
+					signal,
 				);
-				return { optionLabels, selectedOptions, customInput, timedOut: false };
+				return { optionLabels, selectedOptions, customInput, timedOut };
 			} catch (error) {
 				if (error instanceof Error && error.name === "AbortError") {
-					if (signal?.aborted) {
-						throw new ToolAbortError("Ask input was cancelled");
-					}
-					if (timeoutSignal?.aborted) {
-						return { optionLabels, selectedOptions: [], customInput: undefined, timedOut: true };
-					}
+					throw new ToolAbortError("Ask input was cancelled");
 				}
 				throw error;
 			}
