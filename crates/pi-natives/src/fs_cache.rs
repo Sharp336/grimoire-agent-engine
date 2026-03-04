@@ -303,7 +303,7 @@ pub fn get_or_scan(
 	let key = CacheKey { root: root.to_path_buf(), include_hidden, use_gitignore };
 
 	let now = Instant::now();
-	let stale_cached = if let Some(entry) = FS_CACHE.get(&key) {
+	if let Some(entry) = FS_CACHE.get(&key) {
 		let age = now.duration_since(entry.created_at);
 		if age < Duration::from_millis(ttl) {
 			return Ok(ScanResult {
@@ -311,11 +311,7 @@ pub fn get_or_scan(
 				cache_age_ms: age.as_millis() as u64,
 			});
 		}
-		true
-	} else {
-		false
-	};
-	if stale_cached {
+		drop(entry);
 		FS_CACHE.remove(&key);
 	}
 
