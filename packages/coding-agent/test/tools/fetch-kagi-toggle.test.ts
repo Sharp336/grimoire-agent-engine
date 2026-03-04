@@ -275,6 +275,29 @@ describe("fetch tool Kagi summarization toggle", () => {
 		expect(textBlock?.text).toContain("<html><body>not really an image</body></html>");
 	});
 
+	it("falls back to textual output when inline image refetch fails", async () => {
+		const session = createSession({ "fetch.useKagiSummarizer": false });
+		const tool = new FetchTool(session);
+		const convertSpy = vi.spyOn(scraperUtils, "convertWithMarkitdown");
+		vi.spyOn(scrapers, "loadPage").mockResolvedValue({
+			ok: true,
+			status: 200,
+			contentType: "image/png",
+			finalUrl: "https://example.com/transient.png",
+			content: "<html><body>temporary gateway page</body></html>",
+		});
+		vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({ ok: false, error: "upstream blocked" });
+
+		const result = await tool.execute("fetch-image-refetch-failed", { url: "https://example.com/transient.png" });
+		const imageBlock = result.content.find(content => content.type === "image");
+		const textBlock = result.content.find(content => content.type === "text");
+
+		expect(result.details?.method).toBe("raw");
+		expect(imageBlock).toBeUndefined();
+		expect(textBlock?.type).toBe("text");
+		expect(textBlock?.text).toContain("<html><body>temporary gateway page</body></html>");
+		expect(convertSpy).not.toHaveBeenCalled();
+	});
 	it("falls back to text-only output when image payload bytes are invalid", async () => {
 		const session = createSession({ "fetch.useKagiSummarizer": false });
 		const tool = new FetchTool(session);

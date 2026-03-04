@@ -764,17 +764,7 @@ async function renderUrl(
 			};
 		}
 		notes.push(binary.error ? `Binary fetch failed: ${binary.error}` : "Binary fetch failed");
-		const output = finalizeOutput(`Failed to fetch image content (${imageMimeType}).`);
-		return {
-			url,
-			finalUrl,
-			contentType: imageMimeType,
-			method: "image-fetch-failed",
-			content: output.content,
-			fetchedAt,
-			truncated: output.truncated,
-			notes,
-		};
+		notes.push("Falling back to textual rendering from initial response");
 	}
 
 	// Step 3: Handle convertible binary files (PDF, DOCX, etc.)
