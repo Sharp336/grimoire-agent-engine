@@ -716,6 +716,26 @@ async function renderUrl(
 				{ type: "image", data: binary.buffer.toBase64(), mimeType: imageMimeType },
 				{ maxBytes: MAX_INLINE_IMAGE_OUTPUT_BYTES },
 			);
+			const isDecodedImage =
+				resized.originalWidth > 0 && resized.originalHeight > 0 && resized.width > 0 && resized.height > 0;
+			if (!isDecodedImage) {
+				notes.push(`Fetched payload could not be decoded as ${imageMimeType}; returning text metadata only`);
+				const output = finalizeOutput(
+					convertedText ??
+						rawContent ??
+						`Fetched payload was labeled ${imageMimeType}, but bytes were not a valid image.`,
+				);
+				return {
+					url,
+					finalUrl,
+					contentType: imageMimeType,
+					method: convertedText ? "markitdown" : "image-invalid",
+					content: output.content,
+					fetchedAt,
+					truncated: output.truncated,
+					notes,
+				};
+			}
 			if (resized.buffer.length > MAX_INLINE_IMAGE_OUTPUT_BYTES) {
 				notes.push(
 					`Image exceeds inline output limit after resize (${resized.buffer.length} bytes > ${MAX_INLINE_IMAGE_OUTPUT_BYTES} bytes)`,

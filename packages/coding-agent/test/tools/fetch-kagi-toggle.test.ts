@@ -116,6 +116,18 @@ describe("fetch tool Kagi summarization toggle", () => {
 			content: "",
 			error: "markitdown unavailable",
 		});
+		vi.spyOn(imageResize, "resizeImage").mockResolvedValue({
+			buffer: imageBytes,
+			mimeType: "image/png",
+			originalWidth: 1,
+			originalHeight: 1,
+			width: 1,
+			height: 1,
+			wasResized: false,
+			get data() {
+				return imageBytes.toBase64();
+			},
+		});
 
 		const result = await tool.execute("fetch-image", { url: "https://example.com/image.png" });
 		const imageBlock = result.content.find(
@@ -261,5 +273,47 @@ describe("fetch tool Kagi summarization toggle", () => {
 		expect(imageBlock).toBeUndefined();
 		expect(textBlock?.type).toBe("text");
 		expect(textBlock?.text).toContain("<html><body>not really an image</body></html>");
+	});
+
+	it("falls back to text-only output when image payload bytes are invalid", async () => {
+		const session = createSession({ "fetch.useKagiSummarizer": false });
+		const tool = new FetchTool(session);
+		vi.spyOn(scrapers, "loadPage").mockResolvedValue({
+			ok: true,
+			status: 200,
+			contentType: "image/png",
+			finalUrl: "https://example.com/broken.png",
+			content: "<html><body>gateway error</body></html>",
+		});
+		vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({
+			ok: true,
+			buffer: new Uint8Array([60, 104, 116, 109, 108]),
+		});
+		vi.spyOn(scraperUtils, "convertWithMarkitdown").mockResolvedValue({
+			ok: false,
+			content: "",
+			error: "conversion failed",
+		});
+		vi.spyOn(imageResize, "resizeImage").mockResolvedValue({
+			buffer: new Uint8Array([60, 104, 116, 109, 108]),
+			mimeType: "image/png",
+			originalWidth: 0,
+			originalHeight: 0,
+			width: 0,
+			height: 0,
+			wasResized: false,
+			get data() {
+				return "PGh0bWw=";
+			},
+		});
+
+		const result = await tool.execute("fetch-broken-image", { url: "https://example.com/broken.png" });
+		const imageBlock = result.content.find(content => content.type === "image");
+		const textBlock = result.content.find(content => content.type === "text");
+
+		expect(result.details?.method).toBe("image-invalid");
+		expect(imageBlock).toBeUndefined();
+		expect(textBlock?.type).toBe("text");
+		expect(textBlock?.text).toContain("<html><body>gateway error</body></html>");
 	});
 });
