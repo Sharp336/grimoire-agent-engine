@@ -654,26 +654,13 @@ async function renderUrl(
 	const extHint = getExtensionHint(finalUrl);
 
 	const imageMimeType = resolveImageMimeType(mime);
-	if (imageMimeType) {
-		if (!isInlineImageMimeTypeSupported(imageMimeType)) {
-			notes.push(
-				`Image MIME type ${imageMimeType} is unsupported for inline model serialization; returning text metadata only`,
-			);
-			const output = finalizeOutput(
-				`Fetched image content (${imageMimeType}). Inline image rendering is not available for this format.`,
-			);
-			return {
-				url,
-				finalUrl,
-				contentType: imageMimeType,
-				method: "image-unsupported",
-				content: output.content,
-				fetchedAt,
-				truncated: output.truncated,
-				notes,
-			};
-		}
-
+	const canInlineImage = Boolean(imageMimeType && isInlineImageMimeTypeSupported(imageMimeType));
+	if (imageMimeType && !canInlineImage) {
+		notes.push(
+			`Image MIME type ${imageMimeType} is unsupported for inline model serialization; falling back to textual rendering`,
+		);
+	}
+	if (canInlineImage && imageMimeType) {
 		const binary = await fetchBinary(finalUrl, timeout, signal);
 		if (binary.ok) {
 			notes.push("Fetched image binary");
