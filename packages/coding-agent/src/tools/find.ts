@@ -159,7 +159,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 
 			const hasGlob = hasGlobChars(normalizedPattern);
 			const { basePath, globPattern } = parsePatternPath(normalizedPattern);
-			const searchPath = resolveToCwd(basePath, this.session.cwd);
+			const searchPath = resolveToCwd(basePath, this.session.cwd, this.session.extraRoots);
 
 			if (searchPath === "/") {
 				throw new ToolError("Searching from root directory '/' is not allowed");

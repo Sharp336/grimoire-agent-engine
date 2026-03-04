@@ -102,12 +102,12 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 					searchPath = resource.sourcePath;
 				} else {
 					const parsedPath = parseSearchPath(rawPath);
-					searchPath = resolveToCwd(parsedPath.basePath, this.session.cwd);
+					searchPath = resolveToCwd(parsedPath.basePath, this.session.cwd, this.session.extraRoots);
 					globFilter = combineSearchGlobs(parsedPath.glob, globFilter);
 				}
 			}
 
-			const resolvedSearchPath = searchPath ?? resolveToCwd(".", this.session.cwd);
+			const resolvedSearchPath = searchPath ?? resolveToCwd(".", this.session.cwd, this.session.extraRoots);
 			const scopePath = (() => {
 				const relative = path.relative(this.session.cwd, resolvedSearchPath).replace(/\\/g, "/");
 				return relative.length === 0 ? "." : relative;

@@ -82,14 +82,33 @@ export function expandPath(filePath: string): string {
 	return expandTilde(normalized);
 }
 
+function resolveExtraRootAlias(filePath: string, extraRoots: readonly string[]): string | undefined {
+	if (!filePath.startsWith("@") || extraRoots.length === 0) return undefined;
+
+	const normalized = filePath.replace(/\\/g, "/");
+	const slashIndex = normalized.indexOf("/");
+	const alias = slashIndex === -1 ? normalized.slice(1) : normalized.slice(1, slashIndex);
+	if (!alias) return undefined;
+
+	const root = extraRoots.find(candidate => path.basename(candidate) === alias);
+	if (!root) return undefined;
+
+	const rest = slashIndex === -1 ? "" : normalized.slice(slashIndex + 1);
+	return rest.length === 0 ? root : path.resolve(root, rest);
+}
+
 /**
  * Resolve a path relative to the given cwd.
  * Handles ~ expansion and absolute paths.
  */
-export function resolveToCwd(filePath: string, cwd: string): string {
+export function resolveToCwd(filePath: string, cwd: string, extraRoots: readonly string[] = []): string {
 	const expanded = expandPath(filePath);
 	if (path.isAbsolute(expanded)) {
 		return expanded;
+	}
+	const aliased = resolveExtraRootAlias(expanded, extraRoots);
+	if (aliased) {
+		return aliased;
 	}
 	return path.resolve(cwd, expanded);
 }
@@ -138,8 +157,8 @@ export function combineSearchGlobs(prefixGlob?: string, suffixGlob?: string): st
 	return `${normalizedPrefix}/${normalizedSuffix}`;
 }
 
-export function resolveReadPath(filePath: string, cwd: string): string {
-	const resolved = resolveToCwd(filePath, cwd);
+export function resolveReadPath(filePath: string, cwd: string, extraRoots: readonly string[] = []): string {
+	const resolved = resolveToCwd(filePath, cwd, extraRoots);
 	const shellEscapedVariant = tryShellEscapedPath(resolved);
 	const baseCandidates = shellEscapedVariant !== resolved ? [resolved, shellEscapedVariant] : [resolved];
 

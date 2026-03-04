@@ -992,6 +992,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleMoveCommand(targetPath);
 	}
 
+	handleRootCommand(text: string): Promise<void> {
+		return this.#commandController.handleRootCommand(text);
+	}
+
+	handleSkillManageCommand(text: string): Promise<void> {
+		return this.#commandController.handleSkillManageCommand(text);
+	}
+
 	handleMemoryCommand(text: string): Promise<void> {
 		return this.#commandController.handleMemoryCommand(text);
 	}

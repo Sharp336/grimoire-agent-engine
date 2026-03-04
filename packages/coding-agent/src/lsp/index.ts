@@ -1018,7 +1018,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			for (const target of targets) {
 				throwIfAborted(signal);
-				const resolved = resolveToCwd(target, this.session.cwd);
+				const resolved = resolveToCwd(target, this.session.cwd, this.session.extraRoots);
 				const servers = getServersForFile(config, resolved);
 				if (servers.length === 0) {
 					results.push(`${theme.status.error} ${target}: No language server found`);
@@ -1115,7 +1115,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 
-		const resolvedFile = file ? resolveToCwd(file, this.session.cwd) : null;
+		const resolvedFile = file ? resolveToCwd(file, this.session.cwd, this.session.extraRoots) : null;
 		if (action === "symbols" && !resolvedFile) {
 			const normalizedQuery = query?.trim();
 			if (!normalizedQuery) {

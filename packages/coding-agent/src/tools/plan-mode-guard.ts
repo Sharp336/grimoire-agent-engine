@@ -13,7 +13,7 @@ export function resolvePlanPath(session: ToolSession, targetPath: string): strin
 		});
 	}
 
-	return resolveToCwd(targetPath, session.cwd);
+	return resolveToCwd(targetPath, session.cwd, session.extraRoots);
 }
 
 export function enforcePlanModeWrite(

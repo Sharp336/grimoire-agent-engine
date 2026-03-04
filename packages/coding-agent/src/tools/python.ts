@@ -197,7 +197,7 @@ export class PythonTool implements AgentTool<typeof pythonSchema> {
 				throw new ToolAbortError();
 			}
 
-			const commandCwd = cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd;
+			const commandCwd = cwd ? resolveToCwd(cwd, this.session.cwd, this.session.extraRoots) : this.session.cwd;
 			let cwdStat: fs.Stats;
 			try {
 				cwdStat = await Bun.file(commandCwd).stat();

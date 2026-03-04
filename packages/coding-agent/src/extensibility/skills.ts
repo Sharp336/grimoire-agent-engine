@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
+import * as path from "node:path";
 import { getProjectDir } from "@oh-my-pi/pi-utils";
 import { skillCapability } from "../capability/skill";
 import type { SourceMeta } from "../capability/types";
@@ -14,6 +15,7 @@ export interface Skill {
 	filePath: string;
 	baseDir: string;
 	source: string;
+	alwaysApply?: boolean;
 	/** Source metadata for display */
 	_source?: SourceMeta;
 }
@@ -56,6 +58,7 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 			filePath: capSkill.path,
 			baseDir: capSkill.path.replace(/\/SKILL\.md$/, ""),
 			source: options.source,
+			alwaysApply: capSkill.frontmatter?.alwaysApply === true,
 			_source: capSkill._source,
 		})),
 		warnings: (result.warnings ?? []).map(message => ({ skillPath: options.dir, message })),
@@ -65,6 +68,76 @@ export async function loadSkillsFromDir(options: LoadSkillsFromDirOptions): Prom
 export interface LoadSkillsOptions extends SkillsSettings {
 	/** Working directory for project-local skills. Default: getProjectDir() */
 	cwd?: string;
+}
+
+function normalizePathForComparison(value: string): string {
+	const resolved = path.resolve(value);
+	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function extractDisabledSkillPathsFromCodexToml(
+	toml: Record<string, unknown>,
+	configPath: string,
+): { disabled: Set<string>; warnings: string[] } {
+	const warnings: string[] = [];
+	const disabled = new Set<string>();
+	const skillsSection = toml.skills;
+	if (!skillsSection || typeof skillsSection !== "object") {
+		return { disabled, warnings };
+	}
+
+	const configEntries = (skillsSection as Record<string, unknown>).config;
+	if (!Array.isArray(configEntries)) {
+		return { disabled, warnings };
+	}
+
+	for (const entry of configEntries) {
+		if (!entry || typeof entry !== "object") continue;
+		const record = entry as Record<string, unknown>;
+		if (record.enabled !== false) continue;
+		const configuredPath = typeof record.path === "string" ? record.path.trim() : "";
+		if (!configuredPath) {
+			warnings.push(`Invalid codex skills.config entry in ${configPath}: missing path`);
+			continue;
+		}
+		const resolvedPath = path.resolve(path.dirname(configPath), configuredPath);
+		disabled.add(normalizePathForComparison(resolvedPath));
+		// Accept directory-level disables as well.
+		disabled.add(normalizePathForComparison(path.join(resolvedPath, "SKILL.md")));
+	}
+
+	return { disabled, warnings };
+}
+
+async function loadCodexDisabledSkillPaths(cwd: string): Promise<{ disabled: Set<string>; warnings: string[] }> {
+	const warnings: string[] = [];
+	const disabled = new Set<string>();
+	const configPaths = [path.join(os.homedir(), ".codex", "config.toml"), path.join(cwd, ".codex", "config.toml")];
+
+	const contents = await Promise.all(
+		configPaths.map(async configPath => {
+			try {
+				const content = await fs.readFile(configPath, "utf8");
+				return { configPath, content };
+			} catch {
+				return null;
+			}
+		}),
+	);
+
+	for (const item of contents) {
+		if (!item) continue;
+		try {
+			const parsed = Bun.TOML.parse(item.content) as Record<string, unknown>;
+			const extracted = extractDisabledSkillPathsFromCodexToml(parsed, item.configPath);
+			for (const p of extracted.disabled) disabled.add(p);
+			warnings.push(...extracted.warnings);
+		} catch (error) {
+			warnings.push(`Failed to parse codex config.toml at ${item.configPath}: ${String(error)}`);
+		}
+	}
+
+	return { disabled, warnings };
 }
 
 /**
@@ -110,6 +183,8 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	const skillMap = new Map<string, Skill>();
 	const realPathSet = new Set<string>();
 	const collisionWarnings: SkillWarning[] = [];
+	const codexDisabled = await loadCodexDisabledSkillPaths(cwd);
+	const codexDisabledPaths = codexDisabled.disabled;
 
 	// Check if skill name matches any of the include patterns
 	function matchesIncludePatterns(name: string): boolean {
@@ -126,6 +201,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 	// Filter skills by source and patterns first
 	const filteredSkills = result.items.filter(capSkill => {
 		if (!isSourceEnabled(capSkill._source)) return false;
+		if (codexDisabledPaths.has(normalizePathForComparison(capSkill.path))) return false;
 		if (matchesIgnorePatterns(capSkill.name)) return false;
 		if (!matchesIncludePatterns(capSkill.name)) return false;
 		return true;
@@ -165,6 +241,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				filePath: capSkill.path,
 				baseDir: capSkill.path.replace(/\/SKILL\.md$/, ""),
 				source: `${capSkill._source.provider}:${capSkill.level}`,
+				alwaysApply: capSkill.frontmatter?.alwaysApply === true,
 				_source: capSkill._source,
 			});
 			realPathSet.add(resolvedPath);
@@ -200,6 +277,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 					filePath: capSkill.path,
 					baseDir: capSkill.path.replace(/\/SKILL\.md$/, ""),
 					source: "custom:user",
+					alwaysApply: capSkill.frontmatter?.alwaysApply === true,
 					_source: { ...capSkill._source, providerName: "Custom" },
 				},
 				path: capSkill.path,
@@ -241,6 +319,10 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 
 	return {
 		skills,
-		warnings: [...(result.warnings ?? []).map(w => ({ skillPath: "", message: w })), ...collisionWarnings],
+		warnings: [
+			...(result.warnings ?? []).map(w => ({ skillPath: "", message: w })),
+			...codexDisabled.warnings.map(message => ({ skillPath: "", message })),
+			...collisionWarnings,
+		],
 	};
 }

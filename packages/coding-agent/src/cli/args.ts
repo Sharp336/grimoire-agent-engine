@@ -11,6 +11,7 @@ export type Mode = "text" | "json" | "rpc";
 
 export interface Args {
 	cwd?: string;
+	extraRoots?: string[];
 	allowHome?: boolean;
 	provider?: string;
 	model?: string;
@@ -65,6 +66,12 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 			result.version = true;
 		} else if (arg === "--allow-home") {
 			result.allowHome = true;
+		} else if (arg === "--extra-root" && i + 1 < args.length) {
+			const extraRoot = args[++i];
+			if (extraRoot !== undefined) {
+				result.extraRoots = result.extraRoots ?? [];
+				result.extraRoots.push(extraRoot);
+			}
 		} else if (arg === "--mode" && i + 1 < args.length) {
 			const mode = args[++i];
 			if (mode === "text" || mode === "json" || mode === "rpc") {

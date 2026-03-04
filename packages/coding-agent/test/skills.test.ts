@@ -345,6 +345,64 @@ description: Skill loaded from a tilde-expanded custom directory.
 			});
 			expect(withEmpty.length).toBe(withoutOption.length);
 		});
+
+		it("should respect codex skills.config disabled entries from project config.toml", async () => {
+			const tempProjectDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-codex-skill-disable-"));
+			try {
+				const codexDir = path.join(tempProjectDir, ".codex");
+				const enabledSkillDir = path.join(codexDir, "skills", "codex-enabled-skill");
+				const disabledSkillDir = path.join(codexDir, "skills", "codex-disabled-skill");
+				await fs.mkdir(enabledSkillDir, { recursive: true });
+				await fs.mkdir(disabledSkillDir, { recursive: true });
+
+				await fs.writeFile(
+					path.join(enabledSkillDir, "SKILL.md"),
+					[
+						"---",
+						"name: codex-enabled-skill",
+						"description: Enabled codex project skill",
+						"---",
+						"",
+						"# Enabled Skill",
+					].join("\n"),
+				);
+				await fs.writeFile(
+					path.join(disabledSkillDir, "SKILL.md"),
+					[
+						"---",
+						"name: codex-disabled-skill",
+						"description: Disabled codex project skill",
+						"---",
+						"",
+						"# Disabled Skill",
+					].join("\n"),
+				);
+
+				const disabledSkillPath = path.join(disabledSkillDir, "SKILL.md");
+				await fs.writeFile(
+					path.join(codexDir, "config.toml"),
+					`[[skills.config]]
+path = "${disabledSkillPath.replaceAll("\\", "\\\\")}"
+enabled = false
+`,
+				);
+
+				const { skills } = await loadSkills({
+					cwd: tempProjectDir,
+					enableCodexUser: true,
+					enableClaudeUser: false,
+					enableClaudeProject: false,
+					enablePiUser: false,
+					enablePiProject: false,
+					includeSkills: ["codex-*"],
+				});
+
+				expect(skills.some(skill => skill.name === "codex-enabled-skill")).toBe(true);
+				expect(skills.some(skill => skill.name === "codex-disabled-skill")).toBe(false);
+			} finally {
+				await fs.rm(tempProjectDir, { recursive: true, force: true });
+			}
+		});
 	});
 
 	describe("collision handling", () => {

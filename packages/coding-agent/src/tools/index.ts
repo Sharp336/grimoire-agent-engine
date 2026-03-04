@@ -89,6 +89,8 @@ export type ContextFileEntry = {
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
+	/** Additional allowed workspace roots for multi-repo sessions */
+	extraRoots?: string[];
 	/** Whether UI is available */
 	hasUI: boolean;
 	/** Skip Python kernel availability check and warmup */

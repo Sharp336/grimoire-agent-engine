@@ -136,6 +136,7 @@ function buildSubmitResultToolChoice(model?: Model<Api>): ToolChoice | undefined
 /** Options for subagent execution */
 export interface ExecutorOptions {
 	cwd: string;
+	extraRoots?: string[];
 	worktree?: string;
 	agent: AgentDefinition;
 	task: string;
@@ -958,6 +959,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const { session } = await createAgentSession({
 				cwd: worktree ?? cwd,
+				extraRoots: options.extraRoots,
 				authStorage,
 				modelRegistry,
 				settings: subagentSettings,

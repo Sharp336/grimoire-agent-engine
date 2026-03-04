@@ -507,6 +507,34 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		},
 	},
 	{
+		name: "root",
+		description: "Manage extra workspace roots during the session",
+		subcommands: [
+			{ name: "list", description: "List current extra roots" },
+			{ name: "add", description: "Add an extra root", usage: "<path>" },
+			{ name: "remove", description: "Remove an extra root", usage: "<path|@alias>" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleRootCommand(command.text);
+		},
+	},
+	{
+		name: "skill",
+		description: "Manage skill pinning for the current session",
+		subcommands: [
+			{ name: "list", description: "List currently loaded skills and pin state" },
+			{ name: "pin", description: "Pin a skill for every prompt", usage: "<name>" },
+			{ name: "unpin", description: "Remove pinned state for a skill", usage: "<name>" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleSkillManageCommand(command.text);
+		},
+	},
+	{
 		name: "exit",
 		description: "Exit the application",
 		handle: shutdownHandler,

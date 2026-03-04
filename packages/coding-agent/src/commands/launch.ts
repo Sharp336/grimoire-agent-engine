@@ -48,6 +48,10 @@ export default class Index extends Command {
 		"allow-home": Flags.boolean({
 			description: "Allow starting in ~ without auto-switching to a temp dir",
 		}),
+		"extra-root": Flags.string({
+			description: "Additional workspace root (repeatable). Enables @<root-name>/... path aliases",
+			multiple: true,
+		}),
 		mode: Flags.string({
 			description: "Output mode: text (default), json, or rpc",
 			options: ["text", "json", "rpc"],

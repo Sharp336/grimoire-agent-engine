@@ -123,13 +123,13 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 					searchPath = resource.sourcePath;
 				} else {
 					const parsedPath = parseSearchPath(rawPath);
-					searchPath = resolveToCwd(parsedPath.basePath, this.session.cwd);
+					searchPath = resolveToCwd(parsedPath.basePath, this.session.cwd, this.session.extraRoots);
 					if (parsedPath.glob) {
 						globFilter = combineSearchGlobs(parsedPath.glob, globFilter);
 					}
 				}
 			} else {
-				searchPath = resolveToCwd(".", this.session.cwd);
+				searchPath = resolveToCwd(".", this.session.cwd, this.session.extraRoots);
 			}
 			const scopePath = (() => {
 				const relative = path.relative(this.session.cwd, searchPath).replace(/\\/g, "/");

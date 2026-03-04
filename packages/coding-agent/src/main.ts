@@ -335,9 +335,38 @@ async function buildSessionOptions(
 	sessionManager: SessionManager | undefined,
 	modelRegistry: ModelRegistry,
 ): Promise<{ options: CreateAgentSessionOptions }> {
+	const sessionCwd = parsed.cwd ?? getProjectDir();
 	const options: CreateAgentSessionOptions = {
-		cwd: parsed.cwd ?? getProjectDir(),
+		cwd: sessionCwd,
 	};
+
+	if (parsed.extraRoots && parsed.extraRoots.length > 0) {
+		const seen = new Set<string>([normalizePathForComparison(sessionCwd)]);
+		const normalizedExtraRoots: string[] = [];
+
+		for (const inputRoot of parsed.extraRoots) {
+			const resolvedRoot = path.resolve(sessionCwd, inputRoot);
+			try {
+				const stat = await fs.stat(resolvedRoot);
+				if (!stat.isDirectory()) {
+					process.stderr.write(chalk.yellow(`Warning: --extra-root is not a directory: ${inputRoot}\n`));
+					continue;
+				}
+			} catch {
+				process.stderr.write(chalk.yellow(`Warning: --extra-root not found: ${inputRoot}\n`));
+				continue;
+			}
+
+			const key = normalizePathForComparison(resolvedRoot);
+			if (seen.has(key)) continue;
+			seen.add(key);
+			normalizedExtraRoots.push(resolvedRoot);
+		}
+
+		if (normalizedExtraRoots.length > 0) {
+			options.extraRoots = normalizedExtraRoots;
+		}
+	}
 
 	// Auto-discover SYSTEM.md if no CLI system prompt provided
 	const systemPromptSource = parsed.systemPrompt ?? discoverSystemPromptFile();

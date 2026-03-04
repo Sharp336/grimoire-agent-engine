@@ -78,7 +78,7 @@ export class NotebookTool implements AgentTool<typeof notebookSchema, NotebookTo
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<NotebookToolDetails>> {
 		const { action, notebook_path, cell_index, content, cell_type } = params;
-		const absolutePath = resolveToCwd(notebook_path, this.session.cwd);
+		const absolutePath = resolveToCwd(notebook_path, this.session.cwd, this.session.extraRoots);
 
 		return untilAborted(signal, async () => {
 			// Read and parse notebook

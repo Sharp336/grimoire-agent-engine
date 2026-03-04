@@ -110,6 +110,8 @@ import { EventBus } from "./utils/event-bus";
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: getProjectDir() */
 	cwd?: string;
+	/** Additional workspace roots for multi-repo sessions */
+	extraRoots?: string[];
 	/** Global config directory. Default: ~/.omp/agent */
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
@@ -602,6 +604,7 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
  */
 export async function createAgentSession(options: CreateAgentSessionOptions = {}): Promise<CreateAgentSessionResult> {
 	const cwd = options.cwd ?? getProjectDir();
+	const extraRoots = options.extraRoots ?? [];
 	const agentDir = options.agentDir ?? getDefaultAgentDir();
 	const eventBus = options.eventBus ?? new EventBus();
 
@@ -831,6 +834,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const pendingActionStore = new PendingActionStore();
 	const toolSession: ToolSession = {
 		cwd,
+		extraRoots,
 		hasUI: options.hasUI ?? false,
 		enableLsp,
 		get hasEditTool() {
@@ -1427,6 +1431,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		agent,
 		thinkingLevel,
 		sessionManager,
+		extraRoots,
 		settings,
 		scopedModels: options.scopedModels,
 		promptTemplates,

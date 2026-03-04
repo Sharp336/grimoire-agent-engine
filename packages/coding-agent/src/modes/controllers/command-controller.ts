@@ -606,7 +606,7 @@ export class CommandController {
 		}
 
 		const cwd = this.ctx.sessionManager.getCwd();
-		const resolvedPath = resolveToCwd(targetPath, cwd);
+		const resolvedPath = resolveToCwd(targetPath, cwd, this.ctx.session.extraRoots);
 
 		try {
 			const stat = await fs.stat(resolvedPath);
@@ -637,6 +637,122 @@ export class CommandController {
 		} catch (err) {
 			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
+	}
+
+	async handleRootCommand(text: string): Promise<void> {
+		const parts = text.split(/\s+/).filter(Boolean);
+		const subcommand = (parts[1] ?? "list").toLowerCase();
+
+		if (subcommand === "list" || subcommand === "ls") {
+			if (this.ctx.session.extraRoots.length === 0) {
+				this.ctx.showStatus("No extra roots configured. Use /root add <path>.");
+				return;
+			}
+			const lines = ["Extra roots:"];
+			for (const root of this.ctx.session.extraRoots) {
+				lines.push(`- @${path.basename(root)} -> ${root}`);
+			}
+			this.ctx.showStatus(lines.join("\n"));
+			return;
+		}
+
+		if (subcommand === "add") {
+			const pathArg = text.replace(/^\/root\s+add\s+/i, "").trim();
+			if (!pathArg || pathArg === text.trim()) {
+				this.ctx.showError("Usage: /root add <path>");
+				return;
+			}
+			const cwd = this.ctx.sessionManager.getCwd();
+			const resolvedPath = resolveToCwd(pathArg, cwd, this.ctx.session.extraRoots);
+			try {
+				const stat = await fs.stat(resolvedPath);
+				if (!stat.isDirectory()) {
+					this.ctx.showError(`Not a directory: ${resolvedPath}`);
+					return;
+				}
+			} catch {
+				this.ctx.showError(`Directory does not exist: ${resolvedPath}`);
+				return;
+			}
+			const added = this.ctx.session.addExtraRoot(resolvedPath);
+			if (!added) {
+				this.ctx.showWarning(`Extra root already present (or matches session cwd): ${resolvedPath}`);
+				return;
+			}
+			this.ctx.showStatus(`Added extra root: @${path.basename(resolvedPath)} -> ${resolvedPath}`);
+			return;
+		}
+
+		if (subcommand === "remove" || subcommand === "rm") {
+			const pathArg = text.replace(/^\/root\s+(remove|rm)\s+/i, "").trim();
+			if (!pathArg || pathArg === text.trim()) {
+				this.ctx.showError("Usage: /root remove <path|@alias>");
+				return;
+			}
+			const cwd = this.ctx.sessionManager.getCwd();
+			const resolvedPath = resolveToCwd(pathArg, cwd, this.ctx.session.extraRoots);
+			const removed = this.ctx.session.removeExtraRoot(resolvedPath);
+			if (!removed) {
+				this.ctx.showWarning(`Extra root not found: ${resolvedPath}`);
+				return;
+			}
+			this.ctx.showStatus(`Removed extra root: ${resolvedPath}`);
+			return;
+		}
+
+		this.ctx.showError("Usage: /root <list|add|remove> [path]");
+	}
+
+	async handleSkillManageCommand(text: string): Promise<void> {
+		const parts = text.split(/\s+/).filter(Boolean);
+		const subcommand = (parts[1] ?? "list").toLowerCase();
+
+		if (subcommand === "list" || subcommand === "ls") {
+			if (this.ctx.session.skills.length === 0) {
+				this.ctx.showStatus("No skills loaded.");
+				return;
+			}
+			const pinned = new Set(this.ctx.session.pinnedSkillNames.map(name => name.toLowerCase()));
+			const lines = ["Skills:"];
+			for (const skill of this.ctx.session.skills) {
+				const marker = pinned.has(skill.name.toLowerCase()) ? " [pinned]" : "";
+				lines.push(`- ${skill.name}${marker} — ${skill.description}`);
+			}
+			this.ctx.showStatus(lines.join("\n"));
+			return;
+		}
+
+		if (subcommand === "pin") {
+			const skillName = parts.slice(2).join(" ").trim();
+			if (!skillName) {
+				this.ctx.showError("Usage: /skill pin <name>");
+				return;
+			}
+			const pinned = this.ctx.session.pinSkill(skillName);
+			if (!pinned) {
+				this.ctx.showWarning(`Skill not found or already pinned: ${skillName}`);
+				return;
+			}
+			this.ctx.showStatus(`Pinned skill: ${skillName}`);
+			return;
+		}
+
+		if (subcommand === "unpin") {
+			const skillName = parts.slice(2).join(" ").trim();
+			if (!skillName) {
+				this.ctx.showError("Usage: /skill unpin <name>");
+				return;
+			}
+			const unpinned = this.ctx.session.unpinSkill(skillName);
+			if (!unpinned) {
+				this.ctx.showWarning(`Skill not pinned: ${skillName}`);
+				return;
+			}
+			this.ctx.showStatus(`Unpinned skill: ${skillName}`);
+			return;
+		}
+
+		this.ctx.showError("Usage: /skill <list|pin|unpin> [name]");
 	}
 
 	async handleBashCommand(command: string, excludeFromContext = false): Promise<void> {

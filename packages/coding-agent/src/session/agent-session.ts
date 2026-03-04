@@ -82,6 +82,7 @@ import type { CompactOptions, ContextUsage } from "../extensibility/extensions/t
 import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
+import { selectPromptSkills } from "../extensibility/skill-selection";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { executePython as executePythonCommand, type PythonResult } from "../ipy/executor";
@@ -165,6 +166,8 @@ export interface AsyncJobSnapshot {
 export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
+	/** Additional workspace roots for multi-repo sessions */
+	extraRoots?: string[];
 	settings: Settings;
 	/** Async background jobs launched by tools */
 	asyncJobManager?: AsyncJobManager;
@@ -362,9 +365,11 @@ export class AgentSession {
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	#turnIndex = 0;
+	#extraRoots: string[] = [];
 
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
+	#pinnedSkillNames: Set<string>;
 
 	// Custom commands (TypeScript slash commands)
 	#customCommands: LoadedCustomCommand[] = [];
@@ -409,6 +414,7 @@ export class AgentSession {
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
+		this.#extraRoots = config.extraRoots ?? [];
 		this.settings = config.settings;
 		this.#asyncJobManager = config.asyncJobManager;
 		this.#scopedModels = config.scopedModels ?? [];
@@ -418,6 +424,9 @@ export class AgentSession {
 		this.#extensionRunner = config.extensionRunner;
 		this.#skills = config.skills ?? [];
 		this.#skillWarnings = config.skillWarnings ?? [];
+		this.#pinnedSkillNames = new Set<string>(
+			this.#skills.filter(skill => skill.alwaysApply).map(skill => skill.name.toLowerCase()),
+		);
 		this.#customCommands = config.customCommands ?? [];
 		this.#skillsSettings = config.skillsSettings;
 		this.#modelRegistry = config.modelRegistry;
@@ -460,6 +469,40 @@ export class AgentSession {
 	/** Provider-scoped mutable state store for transport/session caches. */
 	get providerSessionState(): Map<string, ProviderSessionState> {
 		return this.#providerSessionState;
+	}
+
+	get extraRoots(): readonly string[] {
+		return this.#extraRoots;
+	}
+
+	addExtraRoot(rootPath: string): boolean {
+		const resolved = path.resolve(rootPath);
+		const normalizedResolved = this.#normalizePathForComparison(resolved);
+		const normalizedCwd = this.#normalizePathForComparison(this.sessionManager.getCwd());
+		if (normalizedResolved === normalizedCwd) {
+			return false;
+		}
+		const exists = this.#extraRoots.some(root => this.#normalizePathForComparison(root) === normalizedResolved);
+		if (exists) {
+			return false;
+		}
+		this.#extraRoots = [...this.#extraRoots, resolved];
+		return true;
+	}
+
+	removeExtraRoot(rootPath: string): boolean {
+		const normalizedTarget = this.#normalizePathForComparison(path.resolve(rootPath));
+		const next = this.#extraRoots.filter(root => this.#normalizePathForComparison(root) !== normalizedTarget);
+		if (next.length === this.#extraRoots.length) {
+			return false;
+		}
+		this.#extraRoots = next;
+		return true;
+	}
+
+	#normalizePathForComparison(value: string): string {
+		const resolved = path.resolve(value);
+		return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 	}
 
 	/** TTSR manager for time-traveling stream rules */
@@ -1187,7 +1230,7 @@ export class AgentSession {
 		const path = typeof args.path === "string" ? args.path : undefined;
 		if (!path) return;
 
-		const resolvedPath = resolveToCwd(path, this.sessionManager.getCwd());
+		const resolvedPath = resolveToCwd(path, this.sessionManager.getCwd(), this.#extraRoots);
 		this.#ensureFileCache(resolvedPath);
 	}
 
@@ -1205,7 +1248,7 @@ export class AgentSession {
 
 	/** Invalidate cache for a file after an edit completes to prevent stale data */
 	#invalidateFileCacheForPath(path: string): void {
-		const resolvedPath = resolveToCwd(path, this.sessionManager.getCwd());
+		const resolvedPath = resolveToCwd(path, this.sessionManager.getCwd(), this.#extraRoots);
 		this.#streamingEditFileCache.delete(resolvedPath);
 	}
 
@@ -1259,7 +1302,7 @@ export class AgentSession {
 			.filter(line => line.startsWith("-") && !line.startsWith("--- "))
 			.map(line => line.slice(1));
 		if (removedLines.length > 0) {
-			const resolvedPath = resolveToCwd(path, this.sessionManager.getCwd());
+			const resolvedPath = resolveToCwd(path, this.sessionManager.getCwd(), this.#extraRoots);
 			let cachedContent = this.#streamingEditFileCache.get(resolvedPath);
 			if (cachedContent === undefined) {
 				this.#ensureFileCache(resolvedPath);
@@ -1862,7 +1905,7 @@ export class AgentSession {
 					getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
 					getSessionId: () => this.sessionManager.getSessionId(),
 				})
-			: resolveToCwd(state.planFilePath, this.sessionManager.getCwd());
+			: resolveToCwd(state.planFilePath, this.sessionManager.getCwd(), this.#extraRoots);
 		const resolvedSessionPlan = resolveLocalUrlToPath(sessionPlanUrl, {
 			getArtifactsDir: () => this.sessionManager.getArtifactsDir(),
 			getSessionId: () => this.sessionManager.getSessionId(),
@@ -2043,6 +2086,24 @@ export class AgentSession {
 			const planModeMessage = await this.#buildPlanModeMessage();
 			if (planModeMessage) {
 				messages.push(planModeMessage);
+			}
+			const activeSkills = selectPromptSkills(
+				this.#skills,
+				expandedText,
+				Array.from(this.#pinnedSkillNames.values()),
+				3,
+			);
+			if (activeSkills.length > 0) {
+				const skillLines = activeSkills.map(skill => `- skill://${skill.name}`).join("\n");
+				messages.push({
+					role: "custom",
+					customType: "skill-focus",
+					content:
+						`Use these skills first when relevant to this request. Read each via the read tool before applying.\n${skillLines}`,
+					display: false,
+					attribution: "agent",
+					timestamp: Date.now(),
+				});
 			}
 
 			messages.push(message);
@@ -2467,6 +2528,26 @@ export class AgentSession {
 	/** Skills loaded by SDK (empty if --no-skills or skills: [] was passed) */
 	get skills(): readonly Skill[] {
 		return this.#skills;
+	}
+
+	get pinnedSkillNames(): readonly string[] {
+		return Array.from(this.#pinnedSkillNames.values());
+	}
+
+	pinSkill(name: string): boolean {
+		const normalized = name.trim().toLowerCase();
+		if (!normalized) return false;
+		const exists = this.#skills.some(skill => skill.name.toLowerCase() === normalized);
+		if (!exists) return false;
+		const before = this.#pinnedSkillNames.size;
+		this.#pinnedSkillNames.add(normalized);
+		return this.#pinnedSkillNames.size > before;
+	}
+
+	unpinSkill(name: string): boolean {
+		const normalized = name.trim().toLowerCase();
+		if (!normalized) return false;
+		return this.#pinnedSkillNames.delete(normalized);
 	}
 
 	/** Skill loading warnings captured by SDK */

@@ -747,6 +747,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 				if (!isIsolated) {
 					return runSubprocess({
 						cwd: this.session.cwd,
+						extraRoots: this.session.extraRoots ? [...this.session.extraRoots] : undefined,
 						agent,
 						task: task.task,
 						description: task.description,
@@ -798,6 +799,7 @@ export class TaskTool implements AgentTool<TaskSchema, TaskToolDetails, Theme> {
 
 					const result = await runSubprocess({
 						cwd: this.session.cwd,
+						extraRoots: this.session.extraRoots ? [...this.session.extraRoots] : undefined,
 						worktree: isolationDir,
 						agent,
 						task: task.task,

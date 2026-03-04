@@ -114,12 +114,12 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					searchPath = resource.sourcePath;
 				} else {
 					const parsedPath = parseSearchPath(rawPath);
-					searchPath = resolveToCwd(parsedPath.basePath, this.session.cwd);
+					searchPath = resolveToCwd(parsedPath.basePath, this.session.cwd, this.session.extraRoots);
 					globFilter = combineSearchGlobs(parsedPath.glob, globFilter);
 				}
 			}
 
-			const resolvedSearchPath = searchPath ?? resolveToCwd(".", this.session.cwd);
+			const resolvedSearchPath = searchPath ?? resolveToCwd(".", this.session.cwd, this.session.extraRoots);
 			const scopePath = path.relative(this.session.cwd, resolvedSearchPath).replace(/\\/g, "/") || ".";
 			let isDirectory: boolean;
 			try {
