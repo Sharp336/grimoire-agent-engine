@@ -676,18 +676,35 @@ async function renderUrl(
 
 		const binary = await fetchBinary(finalUrl, timeout, signal);
 		if (binary.ok) {
+			notes.push("Fetched image binary");
+			const conversionExtension = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
+			let convertedText: string | null = null;
+			const converted = await convertWithMarkitdown(binary.buffer, conversionExtension, timeout, signal);
+			if (converted.ok) {
+				if (converted.content.trim().length > 50) {
+					notes.push("Converted with markitdown");
+					convertedText = converted.content;
+				} else {
+					notes.push("markitdown conversion produced no usable output");
+				}
+			} else if (converted.error) {
+				notes.push(`markitdown conversion failed: ${converted.error}`);
+			} else {
+				notes.push("markitdown conversion failed");
+			}
+
 			if (binary.buffer.byteLength > MAX_INLINE_IMAGE_SOURCE_BYTES) {
 				notes.push(
 					`Image exceeds inline source limit (${binary.buffer.byteLength} bytes > ${MAX_INLINE_IMAGE_SOURCE_BYTES} bytes)`,
 				);
 				const output = finalizeOutput(
-					`Fetched image content (${imageMimeType}), but it is too large to inline render.`,
+					convertedText ?? `Fetched image content (${imageMimeType}), but it is too large to inline render.`,
 				);
 				return {
 					url,
 					finalUrl,
 					contentType: imageMimeType,
-					method: "image-too-large",
+					method: convertedText ? "markitdown" : "image-too-large",
 					content: output.content,
 					fetchedAt,
 					truncated: output.truncated,
@@ -695,7 +712,6 @@ async function renderUrl(
 				};
 			}
 
-			notes.push("Fetched image binary");
 			const resized = await resizeImage(
 				{ type: "image", data: binary.buffer.toBase64(), mimeType: imageMimeType },
 				{ maxBytes: MAX_INLINE_IMAGE_OUTPUT_BYTES },
@@ -705,13 +721,13 @@ async function renderUrl(
 					`Image exceeds inline output limit after resize (${resized.buffer.length} bytes > ${MAX_INLINE_IMAGE_OUTPUT_BYTES} bytes)`,
 				);
 				const output = finalizeOutput(
-					`Fetched image content (${imageMimeType}), but it is too large to inline render.`,
+					convertedText ?? `Fetched image content (${imageMimeType}), but it is too large to inline render.`,
 				);
 				return {
 					url,
 					finalUrl,
 					contentType: imageMimeType,
-					method: "image-too-large",
+					method: convertedText ? "markitdown" : "image-too-large",
 					content: output.content,
 					fetchedAt,
 					truncated: output.truncated,
@@ -720,7 +736,7 @@ async function renderUrl(
 			}
 
 			const dimensionNote = formatDimensionNote(resized);
-			let imageSummary = `Fetched image content (${resized.mimeType}).`;
+			let imageSummary = convertedText ?? `Fetched image content (${resized.mimeType}).`;
 			if (dimensionNote) {
 				imageSummary += `\n${dimensionNote}`;
 			}

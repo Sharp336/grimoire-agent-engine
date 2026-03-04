@@ -111,6 +111,11 @@ describe("fetch tool Kagi summarization toggle", () => {
 			ok: true,
 			buffer: imageBytes,
 		});
+		vi.spyOn(scraperUtils, "convertWithMarkitdown").mockResolvedValue({
+			ok: false,
+			content: "",
+			error: "markitdown unavailable",
+		});
 
 		const result = await tool.execute("fetch-image", { url: "https://example.com/image.png" });
 		const imageBlock = result.content.find(
@@ -149,6 +154,11 @@ describe("fetch tool Kagi summarization toggle", () => {
 			ok: true,
 			buffer: new Uint8Array([137, 80, 78, 71]),
 		});
+		vi.spyOn(scraperUtils, "convertWithMarkitdown").mockResolvedValue({
+			ok: false,
+			content: "",
+			error: "markitdown unavailable",
+		});
 
 		const result = await tool.execute("fetch-image-resized", { url: "https://example.com/image.png" });
 		const imageBlock = result.content.find(
@@ -162,6 +172,51 @@ describe("fetch tool Kagi summarization toggle", () => {
 		expect(imageBlock?.data).toBe("cmVzaXplZA==");
 		expect(textBlock?.type).toBe("text");
 		expect(textBlock?.text).toContain("displayed at 1000x500");
+	});
+
+	it("keeps markitdown extracted text for image responses", async () => {
+		const session = createSession({ "fetch.useKagiSummarizer": false });
+		const tool = new FetchTool(session);
+		const extractedText = "Converted image text content that is definitely longer than fifty characters.";
+		vi.spyOn(imageResize, "resizeImage").mockResolvedValue({
+			buffer: new Uint8Array([1, 2, 3]),
+			mimeType: "image/png",
+			originalWidth: 100,
+			originalHeight: 100,
+			width: 100,
+			height: 100,
+			wasResized: false,
+			get data() {
+				return "aW1hZ2U=";
+			},
+		});
+		vi.spyOn(scrapers, "loadPage").mockResolvedValue({
+			ok: true,
+			status: 200,
+			contentType: "image/png",
+			finalUrl: "https://example.com/image.png",
+			content: "",
+		});
+		vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({
+			ok: true,
+			buffer: new Uint8Array([137, 80, 78, 71]),
+		});
+		vi.spyOn(scraperUtils, "convertWithMarkitdown").mockResolvedValue({
+			ok: true,
+			content: extractedText,
+		});
+
+		const result = await tool.execute("fetch-image-with-ocr", { url: "https://example.com/image.png" });
+		const textBlock = result.content.find(content => content.type === "text");
+		const imageBlock = result.content.find(
+			(content): content is { type: "image"; data: string; mimeType: string } => content.type === "image",
+		);
+
+		expect(result.details?.method).toBe("image");
+		expect(textBlock?.type).toBe("text");
+		expect(textBlock?.text).toContain(extractedText);
+		expect(imageBlock?.mimeType).toBe("image/png");
+		expect(imageBlock?.data).toBe("aW1hZ2U=");
 	});
 	it("falls back to text-only output for unsupported image MIME types", async () => {
 		const session = createSession({ "fetch.useKagiSummarizer": false });
