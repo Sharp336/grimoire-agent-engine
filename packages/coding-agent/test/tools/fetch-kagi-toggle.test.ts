@@ -121,4 +121,27 @@ describe("fetch tool Kagi summarization toggle", () => {
 		expect(imageBlock?.mimeType).toBe("image/png");
 		expect(imageBlock?.data).toBe(imageBytes.toBase64());
 	});
+
+	it("falls back to text-only output for unsupported image MIME types", async () => {
+		const session = createSession({ "fetch.useKagiSummarizer": false });
+		const tool = new FetchTool(session);
+		const fetchBinarySpy = vi.spyOn(scraperUtils, "fetchBinary");
+		vi.spyOn(scrapers, "loadPage").mockResolvedValue({
+			ok: true,
+			status: 200,
+			contentType: "image/svg+xml",
+			finalUrl: "https://example.com/image.svg",
+			content: "<svg></svg>",
+		});
+
+		const result = await tool.execute("fetch-image-unsupported", { url: "https://example.com/image.svg" });
+		const imageBlock = result.content.find(content => content.type === "image");
+		const textBlock = result.content.find(content => content.type === "text");
+
+		expect(result.details?.method).toBe("image-unsupported");
+		expect(fetchBinarySpy).not.toHaveBeenCalled();
+		expect(imageBlock).toBeUndefined();
+		expect(textBlock?.type).toBe("text");
+		expect(textBlock?.text).toContain("Inline image rendering is not available for this format.");
+	});
 });

@@ -80,6 +80,7 @@ const IMAGE_MIME_BY_EXTENSION = new Map<string, string>([
 	[".gif", "image/gif"],
 	[".webp", "image/webp"],
 ]);
+const SUPPORTED_INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024;
 
 // =============================================================================
@@ -158,6 +159,10 @@ function isConvertible(mime: string, extensionHint: string): boolean {
 function resolveImageMimeType(mime: string, extensionHint: string): string | null {
 	if (mime.startsWith("image/")) return mime;
 	return IMAGE_MIME_BY_EXTENSION.get(extensionHint) ?? null;
+}
+
+function isInlineImageMimeTypeSupported(mimeType: string): boolean {
+	return SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(mimeType);
 }
 
 /**
@@ -656,6 +661,25 @@ async function renderUrl(
 
 	const imageMimeType = resolveImageMimeType(mime, extHint);
 	if (imageMimeType) {
+		if (!isInlineImageMimeTypeSupported(imageMimeType)) {
+			notes.push(
+				`Image MIME type ${imageMimeType} is unsupported for inline model serialization; returning text metadata only`,
+			);
+			const output = finalizeOutput(
+				`Fetched image content (${imageMimeType}). Inline image rendering is not available for this format.`,
+			);
+			return {
+				url,
+				finalUrl,
+				contentType: imageMimeType,
+				method: "image-unsupported",
+				content: output.content,
+				fetchedAt,
+				truncated: output.truncated,
+				notes,
+			};
+		}
+
 		const binary = await fetchBinary(finalUrl, timeout, signal);
 		if (binary.ok) {
 			if (binary.buffer.byteLength > MAX_INLINE_IMAGE_BYTES) {
