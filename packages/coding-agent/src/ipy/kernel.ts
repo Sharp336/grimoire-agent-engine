@@ -6,6 +6,7 @@ import { acquireSharedGateway, releaseSharedGateway, shutdownSharedGateway } fro
 import { loadPythonModules } from "./modules";
 import { PYTHON_PRELUDE } from "./prelude";
 import { filterEnv, resolvePythonRuntime } from "./runtime";
+import type { ToolBridgeHandler } from "./tool-bridge";
 
 const TEXT_ENCODER = new TextEncoder();
 const TEXT_DECODER = new TextDecoder();
@@ -314,6 +315,7 @@ export class PythonKernel {
 	#messageHandlers = new Map<string, (msg: JupyterMessage) => void>();
 	#channelHandlers = new Map<string, Set<(msg: JupyterMessage) => void>>();
 	#pendingExecutions = new Map<string, (reason: string) => void>();
+	#toolBridgeHandler: ToolBridgeHandler | null = null;
 
 	private constructor(
 		readonly id: string,
@@ -593,6 +595,27 @@ export class PythonKernel {
 		return this.#alive && !this.#disposed && this.#ws?.readyState === WebSocket.OPEN;
 	}
 
+	#sendInputReply(parentHeader: Record<string, unknown>, value: string): void {
+		this.#sendMessage({
+			channel: "stdin",
+			header: {
+				msg_id: Snowflake.next(),
+				session: this.sessionId,
+				username: this.username,
+				date: new Date().toISOString(),
+				msg_type: "input_reply",
+				version: "5.5",
+			},
+			parent_header: parentHeader,
+			metadata: {},
+			content: { value },
+		});
+	}
+
+	setToolBridgeHandler(handler: ToolBridgeHandler | null): void {
+		this.#toolBridgeHandler = handler;
+	}
+
 	async execute(code: string, options?: KernelExecuteOptions): Promise<KernelExecuteResult> {
 		if (!this.isAlive()) {
 			throw new Error("Python kernel is not running");
@@ -616,7 +639,7 @@ export class PythonKernel {
 				silent: options?.silent ?? false,
 				store_history: options?.storeHistory ?? !(options?.silent ?? false),
 				user_expressions: {},
-				allow_stdin: options?.allowStdin ?? false,
+				allow_stdin: (options?.allowStdin ?? false) || this.#toolBridgeHandler !== null,
 				stop_on_error: true,
 			},
 		};
@@ -755,26 +778,30 @@ export class PythonKernel {
 					break;
 				}
 				case "input_request": {
-					stdinRequested = true;
-					if (options?.onChunk) {
-						await options.onChunk(
-							"[stdin] Kernel requested input. Interactive stdin is not supported; provide input programmatically.\n",
-						);
+					const prompt = String(response.content.prompt ?? "");
+					if (prompt.startsWith("__omp_tool__:") && this.#toolBridgeHandler) {
+						// Tool bridge call — dispatch and reply with result
+						const payload = prompt.slice("__omp_tool__:".length);
+						let bridgeResult: string;
+						try {
+							const { tool, args } = JSON.parse(payload) as { tool: string; args: Record<string, unknown> };
+							const result = await this.#toolBridgeHandler(tool, args);
+							bridgeResult = JSON.stringify(result);
+						} catch (err) {
+							const msg = err instanceof Error ? err.message : String(err);
+							bridgeResult = JSON.stringify({ error: msg });
+						}
+						this.#sendInputReply(response.header as unknown as Record<string, unknown>, bridgeResult);
+					} else {
+						// Standard stdin request — not supported
+						stdinRequested = true;
+						if (options?.onChunk) {
+							await options.onChunk(
+								"[stdin] Kernel requested input. Interactive stdin is not supported; provide input programmatically.\n",
+							);
+						}
+						this.#sendInputReply(response.header as unknown as Record<string, unknown>, "");
 					}
-					this.#sendMessage({
-						channel: "stdin",
-						header: {
-							msg_id: Snowflake.next(),
-							session: this.sessionId,
-							username: this.username,
-							date: new Date().toISOString(),
-							msg_type: "input_reply",
-							version: "5.5",
-						},
-						parent_header: response.header as unknown as Record<string, unknown>,
-						metadata: {},
-						content: { value: "" },
-					});
 					break;
 				}
 			}

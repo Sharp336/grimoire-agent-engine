@@ -58,3 +58,23 @@ cells: [
 ]
 ```
 </example>
+
+{{#if toolBridge}}
+<tool-bridge>
+Bridged tools call agent tools from Python via `call_tool(name, **kwargs)` or typed wrappers (same name as tool). Returns `{"content": ..., "isError": bool}`.
+
+Available: {{toolBridgeList}}
+
+Use for **batch/loop** operations — same action applied to N items in one cell:
+```python
+results = call_tool("ast_grep", patterns=["// TODO: $MSG"], path="src/", lang="typescript")
+for match in results["content"]["matches"]:
+    info = call_tool("lsp", action="hover", file=match["file"], line=match["line"])
+    print(f"{match['file']}:{match['line']} -> {info['content']}")
+```
+
+You **MUST NOT** use bridged tools for:
+- Single tool calls (direct calls have better TUI rendering, lower overhead)
+- Adaptive chains where each step depends on the previous result's content — use separate tool calls so you can reason between steps
+</tool-bridge>
+{{/if}}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Python tool bridge: expose agent tools (builtin + MCP) as callable Python functions in the IPython kernel via `python.toolBridge` setting
+
 ## [13.7.6] - 2026-03-04
 ### Added
 

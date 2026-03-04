@@ -940,6 +940,15 @@ export const SETTINGS_SCHEMA = {
 			description: "Share IPython kernel gateway across pi instances",
 		},
 	},
+	"python.toolBridge": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "config",
+			label: "Python tool bridge",
+			description: "Expose agent tools (MCP, LSP, etc.) as callable functions in the Python kernel",
+		},
+	},
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// STT settings

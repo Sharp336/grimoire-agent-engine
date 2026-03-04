@@ -12,6 +12,7 @@ import {
 } from "./kernel";
 import { discoverPythonModules } from "./modules";
 import { PYTHON_PRELUDE } from "./prelude";
+import type { ToolBridgeHandler } from "./tool-bridge";
 
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_KERNEL_SESSIONS = 4;
@@ -41,6 +42,10 @@ export interface PythonExecutorOptions {
 	/** Artifact path/id for full output storage */
 	artifactPath?: string;
 	artifactId?: string;
+	/** Tool bridge handler for dispatching Python tool calls to real tools */
+	toolBridgeHandler?: ToolBridgeHandler;
+	/** Python code to inject as tool bridge prelude */
+	toolBridgePrelude?: string;
 }
 
 export interface PythonKernelExecutor {
@@ -523,6 +528,7 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		const env: Record<string, string> | undefined = sessionFile ? { PI_SESSION_FILE: sessionFile } : undefined;
 		const kernel = await PythonKernel.start({ cwd, useSharedGateway, env });
 		try {
+			await setupToolBridge(kernel, options);
 			return await executeWithKernel(kernel, code, options);
 		} finally {
 			await kernel.shutdown();
@@ -539,8 +545,35 @@ export async function executePython(code: string, options?: PythonExecutorOption
 	return await withKernelSession(
 		sessionId,
 		cwd,
-		async kernel => executeWithKernel(kernel, code, options),
+		async kernel => {
+			await setupToolBridge(kernel, options);
+			return executeWithKernel(kernel, code, options);
+		},
 		useSharedGateway,
 		sessionFile,
 	);
+}
+
+/** Track which kernels already have the bridge prelude injected. */
+const bridgeInjectedKernels = new WeakSet<PythonKernel>();
+
+/**
+ * Set up the tool bridge on a kernel if configured in options.
+ * Injects the bridge prelude once per kernel and sets the dispatch handler.
+ */
+async function setupToolBridge(kernel: PythonKernel, options?: PythonExecutorOptions): Promise<void> {
+	if (!options?.toolBridgeHandler) return;
+	// Early return if bridge already configured — assumes handler reference is stable per kernel lifetime.
+	if (bridgeInjectedKernels.has(kernel)) return;
+
+	kernel.setToolBridgeHandler(options.toolBridgeHandler);
+
+	if (options.toolBridgePrelude) {
+		const result = await kernel.execute(options.toolBridgePrelude, { silent: true, storeHistory: false });
+		if (result.status === "error") {
+			logger.warn("Failed to inject tool bridge prelude", { error: result.error?.value });
+			return;
+		}
+	}
+	bridgeInjectedKernels.add(kernel);
 }

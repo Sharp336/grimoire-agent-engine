@@ -10,6 +10,7 @@ import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { executePython, getPreludeDocs, type PythonExecutorOptions } from "../ipy/executor";
 import type { PreludeHelper, PythonStatusEvent } from "../ipy/kernel";
+import type { ToolBridgeHandler } from "../ipy/tool-bridge";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
 import pythonDescription from "../prompts/tools/python.md" with { type: "text" };
@@ -133,10 +134,11 @@ function renderJsonTree(value: unknown, theme: Theme, expanded: boolean, maxDept
 	return renderNode(value, "", 0, true);
 }
 
-export function getPythonToolDescription(): string {
+export function getPythonToolDescription(toolBridgeList?: string): string {
 	const helpers = getPreludeDocs();
 	const categories = groupPreludeHelpers(helpers);
-	return renderPromptTemplate(pythonDescription, { categories });
+	const toolBridge = !!toolBridgeList;
+	return renderPromptTemplate(pythonDescription, { categories, toolBridge, toolBridgeList: toolBridgeList ?? "" });
 }
 
 export interface PythonToolOptions {
@@ -146,10 +148,12 @@ export interface PythonToolOptions {
 export class PythonTool implements AgentTool<typeof pythonSchema> {
 	readonly name = "python";
 	readonly label = "Python";
-	readonly description: string;
+	description: string;
 	readonly parameters = pythonSchema;
 	readonly concurrency = "exclusive";
 	readonly strict = true;
+	#toolBridgeHandler?: ToolBridgeHandler;
+	#toolBridgePrelude?: string;
 
 	readonly #proxyExecutor?: PythonProxyExecutor;
 
@@ -159,6 +163,17 @@ export class PythonTool implements AgentTool<typeof pythonSchema> {
 	) {
 		this.#proxyExecutor = options?.proxyExecutor;
 		this.description = getPythonToolDescription();
+	}
+
+	/**
+	 * Configure the tool bridge with pre-created tools.
+	 * Called after createTools() when python.toolBridge is enabled.
+	 */
+	configureToolBridge(handler: ToolBridgeHandler, prelude: string, toolList: string): void {
+		this.#toolBridgeHandler = handler;
+		this.#toolBridgePrelude = prelude;
+		// Re-generate description with bridge info
+		this.description = getPythonToolDescription(toolList);
 	}
 
 	async execute(
@@ -273,6 +288,8 @@ export class PythonTool implements AgentTool<typeof pythonSchema> {
 				kernelMode: this.session.settings.get("python.kernelMode"),
 				useSharedGateway: this.session.settings.get("python.sharedGateway"),
 				sessionFile: sessionFile ?? undefined,
+				toolBridgeHandler: this.#toolBridgeHandler,
+				toolBridgePrelude: this.#toolBridgePrelude,
 			};
 
 			for (let i = 0; i < cells.length; i++) {

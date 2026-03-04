@@ -7,6 +7,7 @@ import type { Skill } from "../extensibility/skills";
 import type { InternalUrlRouter } from "../internal-urls";
 import { getPreludeDocs, warmPythonEnvironment } from "../ipy/executor";
 import { checkPythonKernelAvailability } from "../ipy/kernel";
+import { collectBridgeableTools, createToolBridgeHandler, generateToolBridgePrelude } from "../ipy/tool-bridge";
 import { LspTool } from "../lsp";
 import { EditTool } from "../patch";
 import type { PlanModeState } from "../plan-mode/state";
@@ -346,6 +347,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}),
 	);
 	const tools = baseResults.filter((r): r is Tool => r !== null);
+
+	// Set up Python tool bridge if enabled
+	if (session.settings.get("python.toolBridge")) {
+		setupPythonToolBridge(tools, session);
+	}
+
 	const hasDeferrableTools = tools.some(tool => tool.deferrable === true);
 	if (!hasDeferrableTools) {
 		return tools;
@@ -358,4 +365,24 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		tools.push(wrapToolWithMetaNotice(resolveTool));
 	}
 	return tools;
+}
+
+/**
+ * Configure the Python tool bridge when python.toolBridge is enabled.
+ * Collects bridgeable tools, generates the Python prelude, and sets up dispatch.
+ */
+function setupPythonToolBridge(tools: Tool[], session: ToolSession): void {
+	const pythonTool = tools.find(t => t.name === "python");
+	if (!pythonTool || !(pythonTool instanceof PythonTool)) return;
+
+	const mcpTools = session.mcpManager?.getTools() ?? [];
+	const bridgeableTools = collectBridgeableTools(tools as AgentTool[], mcpTools);
+	if (bridgeableTools.length === 0) return;
+
+	const prelude = generateToolBridgePrelude(bridgeableTools);
+	const handler = createToolBridgeHandler(tools as AgentTool[], session);
+	const toolList = bridgeableTools.map(t => `\`${t.name}\``).join(", ");
+
+	pythonTool.configureToolBridge(handler, prelude, toolList);
+	logger.debug("Python tool bridge configured", { toolCount: bridgeableTools.length });
 }
