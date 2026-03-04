@@ -246,11 +246,11 @@ describe("fetch tool Kagi summarization toggle", () => {
 		const imageBlock = result.content.find(content => content.type === "image");
 		const textBlock = result.content.find(content => content.type === "text");
 
-		expect(result.details?.method).toBe("raw");
+		expect(result.details?.method).toBe("image-unsupported");
 		expect(fetchBinarySpy).not.toHaveBeenCalled();
 		expect(imageBlock).toBeUndefined();
 		expect(textBlock?.type).toBe("text");
-		expect(textBlock?.text).toContain("<svg></svg>");
+		expect(textBlock?.text).toContain("Inline image rendering is not available for this format.");
 	});
 
 	it("does not treat text/html at .png paths as inline images", async () => {
