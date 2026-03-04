@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { FetchTool } from "@oh-my-pi/pi-coding-agent/tools/fetch";
+import * as imageResize from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import * as toolsManager from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
 import * as kagi from "@oh-my-pi/pi-coding-agent/web/kagi";
 import type { LoadPageResult } from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
@@ -122,6 +123,46 @@ describe("fetch tool Kagi summarization toggle", () => {
 		expect(imageBlock?.data).toBe(imageBytes.toBase64());
 	});
 
+	it("resizes fetched images before emitting image content blocks", async () => {
+		const session = createSession({ "fetch.useKagiSummarizer": false });
+		const tool = new FetchTool(session);
+		const resizeSpy = vi.spyOn(imageResize, "resizeImage").mockResolvedValue({
+			buffer: new Uint8Array([1, 2, 3]),
+			mimeType: "image/jpeg",
+			originalWidth: 2000,
+			originalHeight: 1000,
+			width: 1000,
+			height: 500,
+			wasResized: true,
+			get data() {
+				return "cmVzaXplZA==";
+			},
+		});
+		vi.spyOn(scrapers, "loadPage").mockResolvedValue({
+			ok: true,
+			status: 200,
+			contentType: "image/png",
+			finalUrl: "https://example.com/image.png",
+			content: "",
+		});
+		vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({
+			ok: true,
+			buffer: new Uint8Array([137, 80, 78, 71]),
+		});
+
+		const result = await tool.execute("fetch-image-resized", { url: "https://example.com/image.png" });
+		const imageBlock = result.content.find(
+			(content): content is { type: "image"; data: string; mimeType: string } => content.type === "image",
+		);
+		const textBlock = result.content.find(content => content.type === "text");
+
+		expect(resizeSpy).toHaveBeenCalledTimes(1);
+		expect(result.details?.method).toBe("image");
+		expect(imageBlock?.mimeType).toBe("image/jpeg");
+		expect(imageBlock?.data).toBe("cmVzaXplZA==");
+		expect(textBlock?.type).toBe("text");
+		expect(textBlock?.text).toContain("displayed at 1000x500");
+	});
 	it("falls back to text-only output for unsupported image MIME types", async () => {
 		const session = createSession({ "fetch.useKagiSummarizer": false });
 		const tool = new FetchTool(session);

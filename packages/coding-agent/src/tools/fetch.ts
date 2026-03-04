@@ -13,6 +13,7 @@ import fetchDescription from "../prompts/tools/fetch.md" with { type: "text" };
 import { DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
+import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { ensureTool } from "../utils/tools-manager";
 import { summarizeUrlWithKagi } from "../web/kagi";
 import { specialHandlers } from "../web/scrapers";
@@ -74,7 +75,8 @@ const CONVERTIBLE_EXTENSIONS = new Set([
 ]);
 
 const SUPPORTED_INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
-const MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024;
+const MAX_INLINE_IMAGE_SOURCE_BYTES = 20 * 1024 * 1024;
+const MAX_INLINE_IMAGE_OUTPUT_BYTES = 0.75 * 1024 * 1024;
 
 // =============================================================================
 // Utilities
@@ -674,9 +676,9 @@ async function renderUrl(
 
 		const binary = await fetchBinary(finalUrl, timeout, signal);
 		if (binary.ok) {
-			if (binary.buffer.byteLength > MAX_INLINE_IMAGE_BYTES) {
+			if (binary.buffer.byteLength > MAX_INLINE_IMAGE_SOURCE_BYTES) {
 				notes.push(
-					`Image exceeds inline rendering limit (${binary.buffer.byteLength} bytes > ${MAX_INLINE_IMAGE_BYTES} bytes)`,
+					`Image exceeds inline source limit (${binary.buffer.byteLength} bytes > ${MAX_INLINE_IMAGE_SOURCE_BYTES} bytes)`,
 				);
 				const output = finalizeOutput(
 					`Fetched image content (${imageMimeType}), but it is too large to inline render.`,
@@ -692,20 +694,49 @@ async function renderUrl(
 					notes,
 				};
 			}
+
 			notes.push("Fetched image binary");
-			const output = finalizeOutput(`Fetched image content (${imageMimeType}).`);
+			const resized = await resizeImage(
+				{ type: "image", data: binary.buffer.toBase64(), mimeType: imageMimeType },
+				{ maxBytes: MAX_INLINE_IMAGE_OUTPUT_BYTES },
+			);
+			if (resized.buffer.length > MAX_INLINE_IMAGE_OUTPUT_BYTES) {
+				notes.push(
+					`Image exceeds inline output limit after resize (${resized.buffer.length} bytes > ${MAX_INLINE_IMAGE_OUTPUT_BYTES} bytes)`,
+				);
+				const output = finalizeOutput(
+					`Fetched image content (${imageMimeType}), but it is too large to inline render.`,
+				);
+				return {
+					url,
+					finalUrl,
+					contentType: imageMimeType,
+					method: "image-too-large",
+					content: output.content,
+					fetchedAt,
+					truncated: output.truncated,
+					notes,
+				};
+			}
+
+			const dimensionNote = formatDimensionNote(resized);
+			let imageSummary = `Fetched image content (${resized.mimeType}).`;
+			if (dimensionNote) {
+				imageSummary += `\n${dimensionNote}`;
+			}
+			const output = finalizeOutput(imageSummary);
 			return {
 				url,
 				finalUrl,
-				contentType: imageMimeType,
+				contentType: resized.mimeType,
 				method: "image",
 				content: output.content,
 				fetchedAt,
 				truncated: output.truncated,
 				notes,
 				image: {
-					data: binary.buffer.toBase64(),
-					mimeType: imageMimeType,
+					data: resized.data,
+					mimeType: resized.mimeType,
 				},
 			};
 		}
