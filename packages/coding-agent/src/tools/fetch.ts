@@ -655,6 +655,7 @@ async function renderUrl(
 
 	const imageMimeType = resolveImageMimeType(mime);
 	const canInlineImage = Boolean(imageMimeType && isInlineImageMimeTypeSupported(imageMimeType));
+	let skipConvertibleBinaryRetry = false;
 	if (imageMimeType && !canInlineImage) {
 		notes.push(
 			`Image MIME type ${imageMimeType} is unsupported for inline model serialization; falling back to textual rendering`,
@@ -765,10 +766,11 @@ async function renderUrl(
 		}
 		notes.push(binary.error ? `Binary fetch failed: ${binary.error}` : "Binary fetch failed");
 		notes.push("Falling back to textual rendering from initial response");
+		skipConvertibleBinaryRetry = true;
 	}
 
 	// Step 3: Handle convertible binary files (PDF, DOCX, etc.)
-	if (isConvertible(mime, extHint)) {
+	if (!skipConvertibleBinaryRetry && isConvertible(mime, extHint)) {
 		const binary = await fetchBinary(finalUrl, timeout, signal);
 		if (binary.ok) {
 			const ext = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;

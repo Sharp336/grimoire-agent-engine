@@ -286,7 +286,9 @@ describe("fetch tool Kagi summarization toggle", () => {
 			finalUrl: "https://example.com/transient.png",
 			content: "<html><body>temporary gateway page</body></html>",
 		});
-		vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({ ok: false, error: "upstream blocked" });
+		const fetchBinarySpy = vi
+			.spyOn(scraperUtils, "fetchBinary")
+			.mockResolvedValue({ ok: false, error: "upstream blocked" });
 
 		const result = await tool.execute("fetch-image-refetch-failed", { url: "https://example.com/transient.png" });
 		const imageBlock = result.content.find(content => content.type === "image");
@@ -297,6 +299,7 @@ describe("fetch tool Kagi summarization toggle", () => {
 		expect(textBlock?.type).toBe("text");
 		expect(textBlock?.text).toContain("<html><body>temporary gateway page</body></html>");
 		expect(convertSpy).not.toHaveBeenCalled();
+		expect(fetchBinarySpy).toHaveBeenCalledTimes(1);
 	});
 	it("falls back to text-only output when image payload bytes are invalid", async () => {
 		const session = createSession({ "fetch.useKagiSummarizer": false });
