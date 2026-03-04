@@ -75,11 +75,11 @@ const CONVERTIBLE_EXTENSIONS = new Set([
 ]);
 
 const IMAGE_MIME_BY_EXTENSION = new Map<string, string>([
-    [".png", "image/png"],
-    [".jpg", "image/jpeg"],
-    [".jpeg", "image/jpeg"],
-    [".gif", "image/gif"],
-    [".webp", "image/webp"],
+	[".png", "image/png"],
+	[".jpg", "image/jpeg"],
+	[".jpeg", "image/jpeg"],
+	[".gif", "image/gif"],
+	[".webp", "image/webp"],
 ]);
 const SUPPORTED_INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_INLINE_IMAGE_SOURCE_BYTES = 20 * 1024 * 1024;
@@ -159,15 +159,11 @@ function isConvertible(mime: string, extensionHint: string): boolean {
 }
 
 function resolveImageMimeType(mime: string, extensionHint: string): string | null {
-    if (mime.startsWith("image/")) return mime;
-    const shouldUseExtensionHint =
-        mime.length === 0 || mime === "application/octet-stream" || mime === "binary/octet-stream" || mime === "unknown";
-    if (!shouldUseExtensionHint) return null;
-    return IMAGE_MIME_BY_EXTENSION.get(extensionHint) ?? null;
-}
-
-function isInlineImageMimeTypeSupported(mimeType: string): boolean {
-    return SUPPORTED_INLINE_IMAGE_MIME_TYPES.has(mimeType);
+	if (mime.startsWith("image/")) return mime;
+	const shouldUseExtensionHint =
+		mime.length === 0 || mime === "application/octet-stream" || mime === "binary/octet-stream" || mime === "unknown";
+	if (!shouldUseExtensionHint) return null;
+	return IMAGE_MIME_BY_EXTENSION.get(extensionHint) ?? null;
 }
 
 function isInlineImageMimeTypeSupported(mimeType: string): boolean {
