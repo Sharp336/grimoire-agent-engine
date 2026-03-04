@@ -9,6 +9,7 @@ import * as toolsManager from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
 import * as kagi from "@oh-my-pi/pi-coding-agent/web/kagi";
 import type { LoadPageResult } from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
+import * as scraperUtils from "@oh-my-pi/pi-coding-agent/web/scrapers/utils";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("fetch tool Kagi summarization toggle", () => {
@@ -92,5 +93,32 @@ describe("fetch tool Kagi summarization toggle", () => {
 		expect(loadPageSpy).toHaveBeenCalled();
 		expect(summarizeSpy).not.toHaveBeenCalled();
 		expect(result.details?.method).not.toBe("kagi");
+	});
+
+	it("returns an image content block when fetching image URLs", async () => {
+		const session = createSession({ "fetch.useKagiSummarizer": false });
+		const tool = new FetchTool(session);
+		const imageBytes = new Uint8Array([137, 80, 78, 71]);
+		vi.spyOn(scrapers, "loadPage").mockResolvedValue({
+			ok: true,
+			status: 200,
+			contentType: "image/png",
+			finalUrl: "https://example.com/image.png",
+			content: "",
+		});
+		vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({
+			ok: true,
+			buffer: imageBytes,
+		});
+
+		const result = await tool.execute("fetch-image", { url: "https://example.com/image.png" });
+		const imageBlock = result.content.find(
+			(content): content is { type: "image"; data: string; mimeType: string } => content.type === "image",
+		);
+
+		expect(result.details?.method).toBe("image");
+		expect(imageBlock).toBeDefined();
+		expect(imageBlock?.mimeType).toBe("image/png");
+		expect(imageBlock?.data).toBe(imageBytes.toBase64());
 	});
 });

@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { ptree, truncate } from "@oh-my-pi/pi-utils";
@@ -72,6 +73,15 @@ const CONVERTIBLE_EXTENSIONS = new Set([
 	".ogg",
 ]);
 
+const IMAGE_MIME_BY_EXTENSION = new Map<string, string>([
+	[".png", "image/png"],
+	[".jpg", "image/jpeg"],
+	[".jpeg", "image/jpeg"],
+	[".gif", "image/gif"],
+	[".webp", "image/webp"],
+]);
+const MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024;
+
 // =============================================================================
 // Utilities
 // =============================================================================
@@ -143,6 +153,11 @@ function isConvertible(mime: string, extensionHint: string): boolean {
 	if (mime === "application/octet-stream" && CONVERTIBLE_EXTENSIONS.has(extensionHint)) return true;
 	if (CONVERTIBLE_EXTENSIONS.has(extensionHint)) return true;
 	return false;
+}
+
+function resolveImageMimeType(mime: string, extensionHint: string): string | null {
+	if (mime.startsWith("image/")) return mime;
+	return IMAGE_MIME_BY_EXTENSION.get(extensionHint) ?? null;
 }
 
 /**
@@ -542,6 +557,15 @@ function formatJson(content: string): string {
 	}
 }
 
+interface FetchImagePayload {
+	data: string;
+	mimeType: string;
+}
+
+type FetchRenderResult = RenderResult & {
+	image?: FetchImagePayload;
+};
+
 // =============================================================================
 // Unified Special Handler Dispatch
 // =============================================================================
@@ -549,7 +573,11 @@ function formatJson(content: string): string {
 /**
  * Try all special handlers
  */
-async function handleSpecialUrls(url: string, timeout: number, signal?: AbortSignal): Promise<RenderResult | null> {
+async function handleSpecialUrls(
+	url: string,
+	timeout: number,
+	signal?: AbortSignal,
+): Promise<FetchRenderResult | null> {
 	for (const handler of specialHandlers) {
 		if (signal?.aborted) {
 			throw new ToolAbortError();
@@ -573,7 +601,7 @@ async function renderUrl(
 	raw: boolean,
 	useKagiSummarizer: boolean,
 	signal?: AbortSignal,
-): Promise<RenderResult> {
+): Promise<FetchRenderResult> {
 	const notes: string[] = [];
 	const fetchedAt = new Date().toISOString();
 	if (signal?.aborted) {
@@ -625,6 +653,59 @@ async function renderUrl(
 	const { finalUrl, content: rawContent } = response;
 	const mime = normalizeMime(response.contentType);
 	const extHint = getExtensionHint(finalUrl);
+
+	const imageMimeType = resolveImageMimeType(mime, extHint);
+	if (imageMimeType) {
+		const binary = await fetchBinary(finalUrl, timeout, signal);
+		if (binary.ok) {
+			if (binary.buffer.byteLength > MAX_INLINE_IMAGE_BYTES) {
+				notes.push(
+					`Image exceeds inline rendering limit (${binary.buffer.byteLength} bytes > ${MAX_INLINE_IMAGE_BYTES} bytes)`,
+				);
+				const output = finalizeOutput(
+					`Fetched image content (${imageMimeType}), but it is too large to inline render.`,
+				);
+				return {
+					url,
+					finalUrl,
+					contentType: imageMimeType,
+					method: "image-too-large",
+					content: output.content,
+					fetchedAt,
+					truncated: output.truncated,
+					notes,
+				};
+			}
+			notes.push("Fetched image binary");
+			const output = finalizeOutput(`Fetched image content (${imageMimeType}).`);
+			return {
+				url,
+				finalUrl,
+				contentType: imageMimeType,
+				method: "image",
+				content: output.content,
+				fetchedAt,
+				truncated: output.truncated,
+				notes,
+				image: {
+					data: binary.buffer.toBase64(),
+					mimeType: imageMimeType,
+				},
+			};
+		}
+		notes.push(binary.error ? `Binary fetch failed: ${binary.error}` : "Binary fetch failed");
+		const output = finalizeOutput(`Failed to fetch image content (${imageMimeType}).`);
+		return {
+			url,
+			finalUrl,
+			contentType: imageMimeType,
+			method: "image-fetch-failed",
+			content: output.content,
+			fetchedAt,
+			truncated: output.truncated,
+			notes,
+		};
+	}
 
 	// Step 3: Handle convertible binary files (PDF, DOCX, etc.)
 	if (isConvertible(mime, extHint)) {
@@ -976,7 +1057,12 @@ export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails
 			notes: result.notes,
 		};
 
-		const resultBuilder = toolResult(details).text(output).sourceUrl(result.finalUrl);
+		const contentBlocks: Array<TextContent | ImageContent> = [{ type: "text", text: output }];
+		if (result.image) {
+			contentBlocks.push({ type: "image", data: result.image.data, mimeType: result.image.mimeType });
+		}
+
+		const resultBuilder = toolResult(details).content(contentBlocks).sourceUrl(result.finalUrl);
 		if (needsArtifact) {
 			resultBuilder.truncation(truncation, { direction: "head", artifactId });
 		} else if (result.truncated) {
