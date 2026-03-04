@@ -144,4 +144,26 @@ describe("fetch tool Kagi summarization toggle", () => {
 		expect(textBlock?.type).toBe("text");
 		expect(textBlock?.text).toContain("Inline image rendering is not available for this format.");
 	});
+
+	it("does not treat text/html at .png paths as inline images", async () => {
+		const session = createSession({ "fetch.useKagiSummarizer": false });
+		const tool = new FetchTool(session);
+		vi.spyOn(scraperUtils, "fetchBinary").mockResolvedValue({ ok: false, error: "not an image" });
+		vi.spyOn(scrapers, "loadPage").mockResolvedValue({
+			ok: true,
+			status: 200,
+			contentType: "text/html",
+			finalUrl: "https://example.com/foo.png",
+			content: "<html><body>not really an image</body></html>",
+		});
+
+		const result = await tool.execute("fetch-html-png-path", { url: "https://example.com/foo.png", raw: true });
+		const imageBlock = result.content.find(content => content.type === "image");
+		const textBlock = result.content.find(content => content.type === "text");
+
+		expect(result.details?.method).toBe("raw");
+		expect(imageBlock).toBeUndefined();
+		expect(textBlock?.type).toBe("text");
+		expect(textBlock?.text).toContain("<html><body>not really an image</body></html>");
+	});
 });

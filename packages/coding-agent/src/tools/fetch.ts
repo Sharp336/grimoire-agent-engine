@@ -73,13 +73,6 @@ const CONVERTIBLE_EXTENSIONS = new Set([
 	".ogg",
 ]);
 
-const IMAGE_MIME_BY_EXTENSION = new Map<string, string>([
-	[".png", "image/png"],
-	[".jpg", "image/jpeg"],
-	[".jpeg", "image/jpeg"],
-	[".gif", "image/gif"],
-	[".webp", "image/webp"],
-]);
 const SUPPORTED_INLINE_IMAGE_MIME_TYPES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const MAX_INLINE_IMAGE_BYTES = 20 * 1024 * 1024;
 
@@ -156,9 +149,8 @@ function isConvertible(mime: string, extensionHint: string): boolean {
 	return false;
 }
 
-function resolveImageMimeType(mime: string, extensionHint: string): string | null {
-	if (mime.startsWith("image/")) return mime;
-	return IMAGE_MIME_BY_EXTENSION.get(extensionHint) ?? null;
+function resolveImageMimeType(mime: string): string | null {
+	return mime.startsWith("image/") ? mime : null;
 }
 
 function isInlineImageMimeTypeSupported(mimeType: string): boolean {
@@ -659,7 +651,7 @@ async function renderUrl(
 	const mime = normalizeMime(response.contentType);
 	const extHint = getExtensionHint(finalUrl);
 
-	const imageMimeType = resolveImageMimeType(mime, extHint);
+	const imageMimeType = resolveImageMimeType(mime);
 	if (imageMimeType) {
 		if (!isInlineImageMimeTypeSupported(imageMimeType)) {
 			notes.push(
