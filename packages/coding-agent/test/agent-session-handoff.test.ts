@@ -166,6 +166,16 @@ describe("AgentSession handoff", () => {
 		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);
 	});
 
+	it("restores context-full strategy when enabling auto-compaction from off strategy", () => {
+		session.settings.set("compaction.enabled", true);
+		session.settings.set("compaction.strategy", "off");
+
+		expect(session.autoCompactionEnabled).toBe(false);
+		session.setAutoCompactionEnabled(true);
+		expect(session.settings.get("compaction.strategy")).toBe("context-full");
+		expect(session.autoCompactionEnabled).toBe(true);
+	});
+
 	it("falls back to context-full maintenance for overflow when strategy is handoff", async () => {
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("contextPromotion.enabled", false);

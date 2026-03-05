@@ -4069,6 +4069,9 @@ Be thorough - include exact file paths, function names, error messages, and tech
 	 */
 	setAutoCompactionEnabled(enabled: boolean): void {
 		this.settings.set("compaction.enabled", enabled);
+		if (enabled && this.settings.get("compaction.strategy") === "off") {
+			this.settings.set("compaction.strategy", "context-full");
+		}
 	}
 
 	/** Whether auto-compaction is enabled */
