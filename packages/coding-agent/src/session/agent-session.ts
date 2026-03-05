@@ -245,6 +245,7 @@ export interface SessionStats {
 /** Result from handoff() */
 export interface HandoffResult {
 	document: string;
+	savedPath?: string;
 }
 
 /** Internal marker for hook messages queued through the agent loop */
@@ -3246,13 +3247,32 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			// Inject the handoff document as a custom message
 			const handoffContent = `<handoff-context>\n${handoffText}\n</handoff-context>\n\nThe above is a handoff document from a previous session. Use this context to continue the work seamlessly.`;
 			this.sessionManager.appendCustomMessageEntry("handoff", handoffContent, true, undefined, "agent");
+			let savedPath: string | undefined;
+			if (this.settings.get("compaction.handoffSaveToDisk")) {
+				const artifactsDir = this.sessionManager.getArtifactsDir();
+				if (artifactsDir) {
+					const fileTimestamp = new Date().toISOString().replace(/[:.]/g, "-");
+					const handoffFilePath = path.join(artifactsDir, `handoff-${fileTimestamp}.md`);
+					try {
+						await Bun.write(handoffFilePath, `${handoffText}\n`);
+						savedPath = handoffFilePath;
+					} catch (error) {
+						logger.warn("Failed to save handoff document to disk", {
+							path: handoffFilePath,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				} else {
+					logger.debug("Skipping handoff document save because session is not persisted");
+				}
+			}
 
 			// Rebuild agent messages from session
 			const sessionContext = this.sessionManager.buildSessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#syncTodoPhasesFromBranch();
 
-			return { document: handoffText };
+			return { document: handoffText, savedPath };
 		} finally {
 			this.#handoffAbortController = undefined;
 		}

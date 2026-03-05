@@ -22,7 +22,7 @@ describe("AgentSession handoff", () => {
 		tempDir = TempDir.createSync("@pi-handoff-");
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		modelRegistry = new ModelRegistry(authStorage);
-		sessionManager = SessionManager.inMemory();
+		sessionManager = SessionManager.create(tempDir.path());
 		events = [];
 
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -213,5 +213,46 @@ describe("AgentSession handoff", () => {
 			willRetry: false,
 			errorMessage: "Auto-handoff failed: no handoff document was generated",
 		});
+	});
+
+	it("saves handoff document to disk when enabled", async () => {
+		session.settings.set("compaction.handoffSaveToDisk", true);
+
+		const model = session.model;
+		if (!model) {
+			throw new Error("Expected model to be set");
+		}
+
+		const handoffText = "## Goal\nContinue from here";
+		const handoffAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: handoffText }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 190_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 191_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		vi.spyOn(session, "prompt").mockImplementation(async () => {
+			session.agent.replaceMessages([handoffAssistant]);
+			session.agent.emitExternalEvent({ type: "message_end", message: handoffAssistant });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [handoffAssistant] });
+		});
+
+		const result = await session.handoff();
+		expect(result?.savedPath).toBeDefined();
+		if (!result?.savedPath) throw new Error("Expected handoff document path");
+		expect(result.savedPath.endsWith(".md")).toBe(true);
+		const savedText = await Bun.file(result.savedPath).text();
+		expect(savedText).toContain(handoffText);
 	});
 });

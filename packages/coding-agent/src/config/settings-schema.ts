@@ -366,6 +366,15 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
+	"compaction.handoffSaveToDisk": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "agent",
+			label: "Save handoff docs",
+			description: "Save generated handoff documents as markdown files in the active session artifacts directory",
+		},
+	},
 	"compaction.reserveTokens": { type: "number", default: 16384 },
 	"compaction.keepRecentTokens": { type: "number", default: 20000 },
 	"compaction.autoContinue": { type: "boolean", default: true },
@@ -1290,6 +1299,7 @@ export interface CompactionSettings {
 	thresholdPercent: number;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	handoffSaveToDisk: boolean;
 	autoContinue: boolean;
 	remoteEndpoint: string | undefined;
 }
