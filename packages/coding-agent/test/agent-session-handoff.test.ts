@@ -128,6 +128,44 @@ describe("AgentSession handoff", () => {
 		expect(sessionManager.getEntries().filter(entry => entry.type === "compaction")).toHaveLength(0);
 	});
 
+	it("does not run auto maintenance when strategy is off", async () => {
+		session.settings.set("compaction.strategy", "off");
+		session.settings.set("compaction.thresholdPercent", 1);
+		session.settings.set("contextPromotion.enabled", false);
+
+		const model = session.model;
+		if (!model) {
+			throw new Error("Expected model to be set");
+		}
+
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "maintenance trigger" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 10_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 11_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		const handoffSpy = vi.spyOn(session, "handoff");
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+		await Bun.sleep(20);
+
+		expect(handoffSpy).not.toHaveBeenCalled();
+		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(0);
+		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);
+	});
+
 	it("uses handoff strategy for threshold-triggered auto maintenance", async () => {
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
@@ -163,7 +201,9 @@ describe("AgentSession handoff", () => {
 		await Bun.sleep(20);
 
 		expect(handoffSpy).toHaveBeenCalledTimes(1);
-		expect(handoffSpy).toHaveBeenCalledWith(expect.stringContaining("Threshold-triggered maintenance"));
+		expect(handoffSpy).toHaveBeenCalledWith(expect.stringContaining("Threshold-triggered maintenance"), {
+			autoTriggered: true,
+		});
 		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(1);
 		const endEvents = events.filter(event => event.type === "auto_compaction_end");
 		expect(endEvents).toHaveLength(1);
@@ -215,7 +255,7 @@ describe("AgentSession handoff", () => {
 		});
 	});
 
-	it("saves handoff document to disk when enabled", async () => {
+	it("saves auto-handoff document to disk when enabled", async () => {
 		session.settings.set("compaction.handoffSaveToDisk", true);
 
 		const model = session.model;
@@ -248,11 +288,47 @@ describe("AgentSession handoff", () => {
 			session.agent.emitExternalEvent({ type: "agent_end", messages: [handoffAssistant] });
 		});
 
-		const result = await session.handoff();
+		const result = await session.handoff(undefined, { autoTriggered: true });
 		expect(result?.savedPath).toBeDefined();
 		if (!result?.savedPath) throw new Error("Expected handoff document path");
 		expect(result.savedPath.endsWith(".md")).toBe(true);
 		const savedText = await Bun.file(result.savedPath).text();
 		expect(savedText).toContain(handoffText);
+	});
+
+	it("does not save manual handoff document when save setting is enabled", async () => {
+		session.settings.set("compaction.handoffSaveToDisk", true);
+
+		const model = session.model;
+		if (!model) {
+			throw new Error("Expected model to be set");
+		}
+
+		const handoffAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "## Goal\nManual handoff" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "stop",
+			usage: {
+				input: 190_000,
+				output: 1_000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 191_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		vi.spyOn(session, "prompt").mockImplementation(async () => {
+			session.agent.replaceMessages([handoffAssistant]);
+			session.agent.emitExternalEvent({ type: "message_end", message: handoffAssistant });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [handoffAssistant] });
+		});
+
+		const result = await session.handoff();
+		expect(result?.savedPath).toBeUndefined();
 	});
 });

@@ -248,6 +248,10 @@ export interface HandoffResult {
 	savedPath?: string;
 }
 
+interface HandoffOptions {
+	autoTriggered?: boolean;
+}
+
 /** Internal marker for hook messages queued through the agent loop */
 // ============================================================================
 // Constants
@@ -3141,9 +3145,10 @@ export class AgentSession {
 	 * waits for completion, then starts a fresh session with the handoff as context.
 	 *
 	 * @param customInstructions Optional focus for the handoff document
+	 * @param options Handoff execution options
 	 * @returns The handoff document text, or undefined if cancelled/failed
 	 */
-	async handoff(customInstructions?: string): Promise<HandoffResult | undefined> {
+	async handoff(customInstructions?: string, options?: HandoffOptions): Promise<HandoffResult | undefined> {
 		const entries = this.sessionManager.getBranch();
 		const messageCount = entries.filter(e => e.type === "message").length;
 
@@ -3248,7 +3253,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			const handoffContent = `<handoff-context>\n${handoffText}\n</handoff-context>\n\nThe above is a handoff document from a previous session. Use this context to continue the work seamlessly.`;
 			this.sessionManager.appendCustomMessageEntry("handoff", handoffContent, true, undefined, "agent");
 			let savedPath: string | undefined;
-			if (this.settings.get("compaction.handoffSaveToDisk")) {
+			if (options?.autoTriggered && this.settings.get("compaction.handoffSaveToDisk")) {
 				const artifactsDir = this.sessionManager.getArtifactsDir();
 				if (artifactsDir) {
 					const fileTimestamp = new Date().toISOString().replace(/[:.]/g, "-");
@@ -3326,13 +3331,13 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 			// No promotion target available fall through to compaction
 			const compactionSettings = this.settings.getGroup("compaction");
-			if (compactionSettings.enabled) {
+			if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
 				await this.#runAutoCompaction("overflow", true);
 			}
 			return;
 		}
 		const compactionSettings = this.settings.getGroup("compaction");
-		if (!compactionSettings.enabled) return;
+		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
 
 		// Case 2: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
@@ -3675,6 +3680,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 	async #runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean): Promise<void> {
 		const compactionSettings = this.settings.getGroup("compaction");
 
+		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
 		const generation = this.#promptGeneration;
 		await this.#emitSessionEvent({ type: "auto_compaction_start", reason });
 		// Properly abort and null existing controller before replacing
@@ -3689,7 +3695,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 					reason === "overflow"
 						? "Context overflow recovery: preserve critical implementation state and immediate next actions."
 						: "Threshold-triggered maintenance: preserve critical implementation state and immediate next actions.";
-				const handoffResult = await this.handoff(handoffFocus);
+				const handoffResult = await this.handoff(handoffFocus, { autoTriggered: true });
 				if (!handoffResult) {
 					const aborted = this.#autoCompactionAbortController.signal.aborted;
 					await this.#emitSessionEvent({
@@ -4005,7 +4011,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 	/** Whether auto-compaction is enabled */
 	get autoCompactionEnabled(): boolean {
-		return this.settings.get("compaction.enabled");
+		return this.settings.get("compaction.enabled") && this.settings.get("compaction.strategy") !== "off";
 	}
 
 	// =========================================================================

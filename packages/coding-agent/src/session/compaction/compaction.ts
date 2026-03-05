@@ -115,7 +115,7 @@ export interface CompactionResult<T = unknown> {
 
 export interface CompactionSettings {
 	enabled: boolean;
-	strategy?: "compact" | "handoff";
+	strategy?: "context-full" | "handoff" | "off";
 	thresholdPercent?: number;
 	reserveTokens: number;
 	keepRecentTokens: number;
@@ -125,7 +125,7 @@ export interface CompactionSettings {
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
 	enabled: true,
-	strategy: "compact",
+	strategy: "context-full",
 	thresholdPercent: -1,
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
@@ -191,7 +191,7 @@ export function effectiveReserveTokens(contextWindow: number, settings: Compacti
  * Check if compaction should trigger based on context usage.
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
-	if (!settings.enabled || contextWindow <= 0) return false;
+	if (!settings.enabled || settings.strategy === "off" || contextWindow <= 0) return false;
 	const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
 	return contextTokens > thresholdTokens;
 }

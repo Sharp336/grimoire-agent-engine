@@ -347,12 +347,12 @@ export const SETTINGS_SCHEMA = {
 	},
 	"compaction.strategy": {
 		type: "enum",
-		values: ["compact", "handoff"] as const,
-		default: "compact",
+		values: ["context-full", "handoff", "off"] as const,
+		default: "context-full",
 		ui: {
 			tab: "agent",
-			label: "Context strategy",
-			description: "Use in-place compaction or generate a handoff and start a new session",
+			label: "Context-full strategy",
+			description: "Choose in-place context-full maintenance, auto-handoff, or disable auto maintenance (off)",
 			submenu: true,
 		},
 	},
@@ -371,8 +371,8 @@ export const SETTINGS_SCHEMA = {
 		default: false,
 		ui: {
 			tab: "agent",
-			label: "Save handoff docs",
-			description: "Save generated handoff documents as markdown files in the active session artifacts directory",
+			label: "Save auto-handoff docs",
+			description: "Save generated handoff documents to markdown files for the auto-handoff flow",
 		},
 	},
 	"compaction.reserveTokens": { type: "number", default: 16384 },
@@ -1295,7 +1295,7 @@ export type StatusLineSeparatorStyle = SettingValue<"statusLine.separator">;
 
 export interface CompactionSettings {
 	enabled: boolean;
-	strategy: "compact" | "handoff";
+	strategy: "context-full" | "handoff" | "off";
 	thresholdPercent: number;
 	reserveTokens: number;
 	keepRecentTokens: number;

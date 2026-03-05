@@ -70,8 +70,13 @@ type OptionProvider = (() => OptionList) | OptionList;
 const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 	// Context maintenance strategy
 	"compaction.strategy": [
-		{ value: "compact", label: "Compact", description: "Summarize in-place and keep current session" },
+		{ value: "context-full", label: "Context-full", description: "Summarize in-place and keep the current session" },
 		{ value: "handoff", label: "Handoff", description: "Generate handoff and continue in a new session" },
+		{
+			value: "off",
+			label: "Off",
+			description: "Disable automatic context maintenance (same behavior as Auto-compact off)",
+		},
 	],
 	// Context maintenance threshold
 	"compaction.thresholdPercent": [

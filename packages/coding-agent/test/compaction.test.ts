@@ -226,6 +226,18 @@ describe("shouldCompact", () => {
 		expect(shouldCompact(70_001, 100_000, settings)).toBe(true);
 	});
 
+	it("should return false when strategy is off", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			strategy: "off",
+			thresholdPercent: 1,
+			reserveTokens: 10000,
+			keepRecentTokens: 20000,
+		};
+
+		expect(shouldCompact(99_000, 100_000, settings)).toBe(false);
+	});
+
 	it("should return false when disabled", () => {
 		const settings: CompactionSettings = {
 			enabled: false,
