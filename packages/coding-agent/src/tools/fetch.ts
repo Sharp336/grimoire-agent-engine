@@ -671,8 +671,13 @@ async function renderUrl(
 			notes.push(
 				`Image MIME type ${imageMimeType} is unsupported for inline model serialization; returning text metadata only`,
 			);
-			notes.push("Falling back to textual rendering from initial response");
-			skipConvertibleBinaryRetry = true;
+			const shouldTryConvertibleFallback = isConvertible(mime, extHint);
+			if (shouldTryConvertibleFallback) {
+				notes.push("Attempting binary conversion fallback for unsupported image MIME type");
+			} else {
+				notes.push("Falling back to textual rendering from initial response");
+			}
+			skipConvertibleBinaryRetry = !shouldTryConvertibleFallback;
 		} else {
 			const binary = await fetchBinary(finalUrl, timeout, signal);
 			if (binary.ok) {
