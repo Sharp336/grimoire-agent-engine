@@ -166,6 +166,50 @@ describe("AgentSession handoff", () => {
 		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);
 	});
 
+	it("falls back to context-full maintenance for overflow when strategy is handoff", async () => {
+		session.settings.set("compaction.strategy", "handoff");
+		session.settings.set("contextPromotion.enabled", false);
+
+		const model = session.model;
+		if (!model) {
+			throw new Error("Expected model to be set");
+		}
+		const handoffSpy = vi.spyOn(session, "handoff");
+
+		const overflowAssistant: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "overflow" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			stopReason: "error",
+			errorMessage: "maximum context length is 200000 tokens, however you requested 200001 tokens",
+			usage: {
+				input: 120_000,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 120_000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: overflowAssistant });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [overflowAssistant] });
+		await Bun.sleep(20);
+
+		expect(handoffSpy).not.toHaveBeenCalled();
+		const startEvents = events.filter(event => event.type === "auto_compaction_start");
+		expect(startEvents).toHaveLength(1);
+		expect(startEvents[0]).toMatchObject({ type: "auto_compaction_start", reason: "overflow" });
+		const endEvents = events.filter(event => event.type === "auto_compaction_end");
+		expect(endEvents).toHaveLength(1);
+		expect(endEvents[0]).not.toMatchObject({
+			errorMessage: "Auto-handoff failed: no handoff document was generated",
+		});
+	});
+
 	it("uses handoff strategy for threshold-triggered auto maintenance", async () => {
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
@@ -203,6 +247,7 @@ describe("AgentSession handoff", () => {
 		expect(handoffSpy).toHaveBeenCalledTimes(1);
 		expect(handoffSpy).toHaveBeenCalledWith(expect.stringContaining("Threshold-triggered maintenance"), {
 			autoTriggered: true,
+			signal: expect.any(AbortSignal),
 		});
 		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(1);
 		const endEvents = events.filter(event => event.type === "auto_compaction_end");
@@ -330,5 +375,24 @@ describe("AgentSession handoff", () => {
 
 		const result = await session.handoff();
 		expect(result?.savedPath).toBeUndefined();
+	});
+
+	it("aborts handoff generation when provided signal is cancelled", async () => {
+		const controller = new AbortController();
+		const { promise: promptPromise, resolve: resolvePrompt } = Promise.withResolvers<void>();
+		const promptSpy = vi.spyOn(session, "prompt").mockImplementation(async () => {
+			await promptPromise;
+		});
+		const abortSpy = vi.spyOn(session.agent, "abort").mockImplementation(() => {
+			resolvePrompt();
+		});
+
+		const handoffPromise = session.handoff(undefined, { signal: controller.signal });
+		await Bun.sleep(10);
+		controller.abort();
+
+		await expect(handoffPromise).rejects.toThrow("Handoff cancelled");
+		expect(promptSpy).toHaveBeenCalledTimes(1);
+		expect(abortSpy).toHaveBeenCalled();
 	});
 });

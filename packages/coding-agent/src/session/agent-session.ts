@@ -250,6 +250,7 @@ export interface HandoffResult {
 
 interface HandoffOptions {
 	autoTriggered?: boolean;
+	signal?: AbortSignal;
 }
 
 /** Internal marker for hook messages queued through the agent loop */
@@ -3159,6 +3160,25 @@ export class AgentSession {
 		this.#skipPostTurnMaintenanceAssistantTimestamp = undefined;
 
 		this.#handoffAbortController = new AbortController();
+		const handoffAbortController = this.#handoffAbortController;
+		const handoffSignal = handoffAbortController.signal;
+		const sourceSignal = options?.signal;
+		const onSourceAbort = () => {
+			if (!handoffSignal.aborted) {
+				handoffAbortController.abort();
+			}
+		};
+		if (sourceSignal) {
+			if (sourceSignal.aborted) {
+				onSourceAbort();
+			} else {
+				sourceSignal.addEventListener("abort", onSourceAbort, { once: true });
+			}
+		}
+		const onHandoffAbort = () => {
+			this.agent.abort();
+		};
+		handoffSignal.addEventListener("abort", onHandoffAbort, { once: true });
 
 		// Build the handoff prompt
 		let handoffPrompt = `Write a comprehensive handoff document that will allow another instance of yourself to seamlessly continue this work. The document should capture everything needed to resume without access to this conversation.
@@ -3199,34 +3219,42 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		// Create a promise that resolves when the agent completes
 		let handoffText: string | undefined;
-		const completionPromise = new Promise<void>((resolve, reject) => {
-			const unsubscribe = this.subscribe(event => {
-				if (this.#handoffAbortController?.signal.aborted) {
-					unsubscribe();
-					reject(new Error("Handoff cancelled"));
-					return;
-				}
-
-				if (event.type === "agent_end") {
-					unsubscribe();
-					// Extract text from the last assistant message
-					const messages = this.agent.state.messages;
-					for (let i = messages.length - 1; i >= 0; i--) {
-						const msg = messages[i];
-						if (msg.role === "assistant") {
-							const content = (msg as AssistantMessage).content;
-							const textParts = content
-								.filter((c): c is { type: "text"; text: string } => c.type === "text")
-								.map(c => c.text);
-							if (textParts.length > 0) {
-								handoffText = textParts.join("\n");
-								break;
-							}
+		const {
+			promise: completionPromise,
+			resolve: resolveCompletion,
+			reject: rejectCompletion,
+		} = Promise.withResolvers<void>();
+		let unsubscribe: (() => void) | undefined;
+		const onCompletionAbort = () => {
+			unsubscribe?.();
+			rejectCompletion(new Error("Handoff cancelled"));
+		};
+		if (handoffSignal.aborted) {
+			onCompletionAbort();
+		} else {
+			handoffSignal.addEventListener("abort", onCompletionAbort, { once: true });
+		}
+		unsubscribe = this.subscribe(event => {
+			if (event.type === "agent_end") {
+				unsubscribe?.();
+				handoffSignal.removeEventListener("abort", onCompletionAbort);
+				// Extract text from the last assistant message
+				const messages = this.agent.state.messages;
+				for (let i = messages.length - 1; i >= 0; i--) {
+					const msg = messages[i];
+					if (msg.role === "assistant") {
+						const content = (msg as AssistantMessage).content;
+						const textParts = content
+							.filter((c): c is { type: "text"; text: string } => c.type === "text")
+							.map(c => c.text);
+						if (textParts.length > 0) {
+							handoffText = textParts.join("\n");
+							break;
 						}
 					}
-					resolve();
 				}
-			});
+				resolveCompletion();
+			}
 		});
 
 		try {
@@ -3234,7 +3262,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			await this.prompt(handoffPrompt, { expandPromptTemplates: false, synthetic: true });
 			await completionPromise;
 
-			if (!handoffText || this.#handoffAbortController.signal.aborted) {
+			if (!handoffText || handoffSignal.aborted) {
 				return undefined;
 			}
 
@@ -3279,6 +3307,10 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 			return { document: handoffText, savedPath };
 		} finally {
+			unsubscribe?.();
+			handoffSignal.removeEventListener("abort", onCompletionAbort);
+			handoffSignal.removeEventListener("abort", onHandoffAbort);
+			sourceSignal?.removeEventListener("abort", onSourceAbort);
 			this.#handoffAbortController = undefined;
 		}
 	}
@@ -3690,12 +3722,13 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		this.#autoCompactionAbortController = new AbortController();
 
 		try {
-			if (compactionSettings.strategy === "handoff") {
+			if (compactionSettings.strategy === "handoff" && reason !== "overflow") {
 				const handoffFocus =
-					reason === "overflow"
-						? "Context overflow recovery: preserve critical implementation state and immediate next actions."
-						: "Threshold-triggered maintenance: preserve critical implementation state and immediate next actions.";
-				const handoffResult = await this.handoff(handoffFocus, { autoTriggered: true });
+					"Threshold-triggered maintenance: preserve critical implementation state and immediate next actions.";
+				const handoffResult = await this.handoff(handoffFocus, {
+					autoTriggered: true,
+					signal: this.#autoCompactionAbortController.signal,
+				});
 				if (!handoffResult) {
 					const aborted = this.#autoCompactionAbortController.signal.aborted;
 					await this.#emitSessionEvent({

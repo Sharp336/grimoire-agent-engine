@@ -439,7 +439,8 @@ export class EventController {
 				this.ctx.statusContainer.clear();
 				const reasonText = event.reason === "overflow" ? "Context overflow detected, " : "";
 				const strategy = this.ctx.settings.get("compaction.strategy");
-				const actionLabel = strategy === "handoff" ? "Auto-handoff" : "Auto context-full maintenance";
+				const actionLabel =
+					strategy === "handoff" && event.reason !== "overflow" ? "Auto-handoff" : "Auto context-full maintenance";
 				this.ctx.autoCompactionLoader = new Loader(
 					this.ctx.ui,
 					spinner => theme.fg("accent", spinner),
