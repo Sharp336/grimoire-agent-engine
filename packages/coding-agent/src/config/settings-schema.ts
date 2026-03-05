@@ -358,11 +358,11 @@ export const SETTINGS_SCHEMA = {
 	},
 	"compaction.thresholdPercent": {
 		type: "number",
-		default: 85,
+		default: -1,
 		ui: {
 			tab: "agent",
 			label: "Context threshold",
-			description: "Trigger context maintenance when usage exceeds this percentage of model context window",
+			description: "Percent threshold for context maintenance; set to Default to use legacy reserve-based behavior",
 			submenu: true,
 		},
 	},

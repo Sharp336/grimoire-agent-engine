@@ -75,10 +75,11 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 	],
 	// Context maintenance threshold
 	"compaction.thresholdPercent": [
+		{ value: "-1", label: "Default", description: "Legacy reserve-based threshold" },
 		{ value: "70", label: "70%", description: "Very early maintenance" },
 		{ value: "75", label: "75%", description: "Early maintenance" },
 		{ value: "80", label: "80%", description: "Balanced" },
-		{ value: "85", label: "85%", description: "Default" },
+		{ value: "85", label: "85%", description: "Typical threshold" },
 		{ value: "90", label: "90%", description: "Aggressive context usage" },
 		{ value: "95", label: "95%", description: "Near context limit" },
 	],
