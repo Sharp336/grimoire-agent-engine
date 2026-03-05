@@ -122,6 +122,10 @@ describe("AgentSession handoff", () => {
 		await Bun.sleep(20);
 
 		expect(promptSpy).toHaveBeenCalledTimes(1);
+		expect(promptSpy).toHaveBeenCalledWith(
+			expect.any(String),
+			expect.objectContaining({ skipCompactionCheck: true }),
+		);
 		expect(result?.document).toBe(handoffText);
 		expect(events.filter(event => event.type === "auto_compaction_start")).toHaveLength(0);
 		expect(events.filter(event => event.type === "auto_compaction_end")).toHaveLength(0);

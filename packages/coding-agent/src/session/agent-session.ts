@@ -207,6 +207,8 @@ export interface PromptOptions {
 	toolChoice?: ToolChoice;
 	/** Send as developer/system message instead of user. Providers that support it use the developer role; others fall back to user. */
 	synthetic?: boolean;
+	/** Skip pre-send compaction checks for this prompt (internal use for maintenance flows). */
+	skipCompactionCheck?: boolean;
 }
 
 /** Result from cycleModel() */
@@ -1982,7 +1984,9 @@ export class AgentSession {
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
-		options?: Pick<PromptOptions, "toolChoice" | "images"> & { skipPostPromptRecoveryWait?: boolean },
+		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck"> & {
+			skipPostPromptRecoveryWait?: boolean;
+		},
 	): Promise<void> {
 		this.#promptInFlight = true;
 		const generation = this.#promptGeneration;
@@ -2014,7 +2018,7 @@ export class AgentSession {
 
 			// Check if we need to compact before sending (catches aborted responses)
 			const lastAssistant = this.#findLastAssistantMessage();
-			if (lastAssistant) {
+			if (lastAssistant && !options?.skipCompactionCheck) {
 				await this.#checkCompaction(lastAssistant, false);
 			}
 
@@ -3268,7 +3272,11 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			if (handoffSignal.aborted) {
 				throw new Error("Handoff cancelled");
 			}
-			await this.prompt(handoffPrompt, { expandPromptTemplates: false, synthetic: true });
+			await this.prompt(handoffPrompt, {
+				expandPromptTemplates: false,
+				synthetic: true,
+				skipCompactionCheck: true,
+			});
 			await completionPromise;
 
 			if (handoffCancelled || handoffSignal.aborted) {
