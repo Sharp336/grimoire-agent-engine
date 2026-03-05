@@ -3163,22 +3163,21 @@ export class AgentSession {
 		const handoffAbortController = this.#handoffAbortController;
 		const handoffSignal = handoffAbortController.signal;
 		const sourceSignal = options?.signal;
+		const onHandoffAbort = () => {
+			this.agent.abort();
+		};
+		handoffSignal.addEventListener("abort", onHandoffAbort, { once: true });
 		const onSourceAbort = () => {
 			if (!handoffSignal.aborted) {
 				handoffAbortController.abort();
 			}
 		};
 		if (sourceSignal) {
+			sourceSignal.addEventListener("abort", onSourceAbort, { once: true });
 			if (sourceSignal.aborted) {
 				onSourceAbort();
-			} else {
-				sourceSignal.addEventListener("abort", onSourceAbort, { once: true });
 			}
 		}
-		const onHandoffAbort = () => {
-			this.agent.abort();
-		};
-		handoffSignal.addEventListener("abort", onHandoffAbort, { once: true });
 
 		// Build the handoff prompt
 		let handoffPrompt = `Write a comprehensive handoff document that will allow another instance of yourself to seamlessly continue this work. The document should capture everything needed to resume without access to this conversation.
@@ -3219,15 +3218,13 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		// Create a promise that resolves when the agent completes
 		let handoffText: string | undefined;
-		const {
-			promise: completionPromise,
-			resolve: resolveCompletion,
-			reject: rejectCompletion,
-		} = Promise.withResolvers<void>();
+		const { promise: completionPromise, resolve: resolveCompletion } = Promise.withResolvers<void>();
+		let handoffCancelled = false;
 		let unsubscribe: (() => void) | undefined;
 		const onCompletionAbort = () => {
 			unsubscribe?.();
-			rejectCompletion(new Error("Handoff cancelled"));
+			handoffCancelled = true;
+			resolveCompletion();
 		};
 		if (handoffSignal.aborted) {
 			onCompletionAbort();
@@ -3259,10 +3256,16 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		try {
 			// Send the prompt and wait for completion
+			if (handoffSignal.aborted) {
+				throw new Error("Handoff cancelled");
+			}
 			await this.prompt(handoffPrompt, { expandPromptTemplates: false, synthetic: true });
 			await completionPromise;
 
-			if (!handoffText || handoffSignal.aborted) {
+			if (handoffCancelled || handoffSignal.aborted) {
+				throw new Error("Handoff cancelled");
+			}
+			if (!handoffText) {
 				return undefined;
 			}
 

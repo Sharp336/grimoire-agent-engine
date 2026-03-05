@@ -377,6 +377,18 @@ describe("AgentSession handoff", () => {
 		expect(result?.savedPath).toBeUndefined();
 	});
 
+	it("does not start handoff prompt when provided signal is already cancelled", async () => {
+		const controller = new AbortController();
+		controller.abort();
+
+		const promptSpy = vi.spyOn(session, "prompt");
+		const abortSpy = vi.spyOn(session.agent, "abort");
+
+		await expect(session.handoff(undefined, { signal: controller.signal })).rejects.toThrow("Handoff cancelled");
+		expect(promptSpy).not.toHaveBeenCalled();
+		expect(abortSpy).toHaveBeenCalledTimes(1);
+	});
+
 	it("aborts handoff generation when provided signal is cancelled", async () => {
 		const controller = new AbortController();
 		const { promise: promptPromise, resolve: resolvePrompt } = Promise.withResolvers<void>();

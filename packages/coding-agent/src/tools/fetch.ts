@@ -671,126 +671,115 @@ async function renderUrl(
 			notes.push(
 				`Image MIME type ${imageMimeType} is unsupported for inline model serialization; returning text metadata only`,
 			);
-			const output = finalizeOutput(
-				`Fetched image content (${imageMimeType}). Inline image rendering is not available for this format.`,
-			);
-			return {
-				url,
-				finalUrl,
-				contentType: imageMimeType,
-				method: "image-unsupported",
-				content: output.content,
-				fetchedAt,
-				truncated: output.truncated,
-				notes,
-			};
-		}
-
-		const binary = await fetchBinary(finalUrl, timeout, signal);
-		if (binary.ok) {
-			notes.push("Fetched image binary");
-			const conversionExtension = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
-			let convertedText: string | null = null;
-			const converted = await convertWithMarkitdown(binary.buffer, conversionExtension, timeout, signal);
-			if (converted.ok) {
-				if (converted.content.trim().length > 50) {
-					notes.push("Converted with markitdown");
-					convertedText = converted.content;
+			notes.push("Falling back to textual rendering from initial response");
+			skipConvertibleBinaryRetry = true;
+		} else {
+			const binary = await fetchBinary(finalUrl, timeout, signal);
+			if (binary.ok) {
+				notes.push("Fetched image binary");
+				const conversionExtension = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
+				let convertedText: string | null = null;
+				const converted = await convertWithMarkitdown(binary.buffer, conversionExtension, timeout, signal);
+				if (converted.ok) {
+					if (converted.content.trim().length > 50) {
+						notes.push("Converted with markitdown");
+						convertedText = converted.content;
+					} else {
+						notes.push("markitdown conversion produced no usable output");
+					}
+				} else if (converted.error) {
+					notes.push(`markitdown conversion failed: ${converted.error}`);
 				} else {
-					notes.push("markitdown conversion produced no usable output");
+					notes.push("markitdown conversion failed");
 				}
-			} else if (converted.error) {
-				notes.push(`markitdown conversion failed: ${converted.error}`);
-			} else {
-				notes.push("markitdown conversion failed");
-			}
 
-			if (binary.buffer.byteLength > MAX_INLINE_IMAGE_SOURCE_BYTES) {
-				notes.push(
-					`Image exceeds inline source limit (${binary.buffer.byteLength} bytes > ${MAX_INLINE_IMAGE_SOURCE_BYTES} bytes)`,
+				if (binary.buffer.byteLength > MAX_INLINE_IMAGE_SOURCE_BYTES) {
+					notes.push(
+						`Image exceeds inline source limit (${binary.buffer.byteLength} bytes > ${MAX_INLINE_IMAGE_SOURCE_BYTES} bytes)`,
+					);
+					const output = finalizeOutput(
+						convertedText ?? `Fetched image content (${imageMimeType}), but it is too large to inline render.`,
+					);
+					return {
+						url,
+						finalUrl,
+						contentType: imageMimeType,
+						method: convertedText ? "markitdown" : "image-too-large",
+						content: output.content,
+						fetchedAt,
+						truncated: output.truncated,
+						notes,
+					};
+				}
+
+				const resized = await resizeImage(
+					{ type: "image", data: binary.buffer.toBase64(), mimeType: imageMimeType },
+					{ maxBytes: MAX_INLINE_IMAGE_OUTPUT_BYTES },
 				);
-				const output = finalizeOutput(
-					convertedText ?? `Fetched image content (${imageMimeType}), but it is too large to inline render.`,
-				);
+				const isDecodedImage =
+					resized.originalWidth > 0 && resized.originalHeight > 0 && resized.width > 0 && resized.height > 0;
+				if (!isDecodedImage) {
+					notes.push(`Fetched payload could not be decoded as ${imageMimeType}; returning text metadata only`);
+					const output = finalizeOutput(
+						convertedText ??
+							rawContent ??
+							`Fetched payload was labeled ${imageMimeType}, but bytes were not a valid image.`,
+					);
+					return {
+						url,
+						finalUrl,
+						contentType: imageMimeType,
+						method: convertedText ? "markitdown" : "image-invalid",
+						content: output.content,
+						fetchedAt,
+						truncated: output.truncated,
+						notes,
+					};
+				}
+				if (resized.buffer.length > MAX_INLINE_IMAGE_OUTPUT_BYTES) {
+					notes.push(
+						`Image exceeds inline output limit after resize (${resized.buffer.length} bytes > ${MAX_INLINE_IMAGE_OUTPUT_BYTES} bytes)`,
+					);
+					const output = finalizeOutput(
+						convertedText ?? `Fetched image content (${imageMimeType}), but it is too large to inline render.`,
+					);
+					return {
+						url,
+						finalUrl,
+						contentType: imageMimeType,
+						method: convertedText ? "markitdown" : "image-too-large",
+						content: output.content,
+						fetchedAt,
+						truncated: output.truncated,
+						notes,
+					};
+				}
+
+				const dimensionNote = formatDimensionNote(resized);
+				let imageSummary = convertedText ?? `Fetched image content (${resized.mimeType}).`;
+				if (dimensionNote) {
+					imageSummary += `\n${dimensionNote}`;
+				}
+				const output = finalizeOutput(imageSummary);
 				return {
 					url,
 					finalUrl,
-					contentType: imageMimeType,
-					method: convertedText ? "markitdown" : "image-too-large",
+					contentType: resized.mimeType,
+					method: "image",
 					content: output.content,
 					fetchedAt,
 					truncated: output.truncated,
 					notes,
+					image: {
+						data: resized.data,
+						mimeType: resized.mimeType,
+					},
 				};
 			}
-
-			const resized = await resizeImage(
-				{ type: "image", data: binary.buffer.toBase64(), mimeType: imageMimeType },
-				{ maxBytes: MAX_INLINE_IMAGE_OUTPUT_BYTES },
-			);
-			const isDecodedImage =
-				resized.originalWidth > 0 && resized.originalHeight > 0 && resized.width > 0 && resized.height > 0;
-			if (!isDecodedImage) {
-				notes.push(`Fetched payload could not be decoded as ${imageMimeType}; returning text metadata only`);
-				const output = finalizeOutput(
-					convertedText ??
-						rawContent ??
-						`Fetched payload was labeled ${imageMimeType}, but bytes were not a valid image.`,
-				);
-				return {
-					url,
-					finalUrl,
-					contentType: imageMimeType,
-					method: convertedText ? "markitdown" : "image-invalid",
-					content: output.content,
-					fetchedAt,
-					truncated: output.truncated,
-					notes,
-				};
-			}
-			if (resized.buffer.length > MAX_INLINE_IMAGE_OUTPUT_BYTES) {
-				notes.push(
-					`Image exceeds inline output limit after resize (${resized.buffer.length} bytes > ${MAX_INLINE_IMAGE_OUTPUT_BYTES} bytes)`,
-				);
-				const output = finalizeOutput(
-					convertedText ?? `Fetched image content (${imageMimeType}), but it is too large to inline render.`,
-				);
-				return {
-					url,
-					finalUrl,
-					contentType: imageMimeType,
-					method: convertedText ? "markitdown" : "image-too-large",
-					content: output.content,
-					fetchedAt,
-					truncated: output.truncated,
-					notes,
-				};
-			}
-
-			const dimensionNote = formatDimensionNote(resized);
-			let imageSummary = convertedText ?? `Fetched image content (${resized.mimeType}).`;
-			if (dimensionNote) {
-				imageSummary += `\n${dimensionNote}`;
-			}
-			const output = finalizeOutput(imageSummary);
-			return {
-				url,
-				finalUrl,
-				contentType: resized.mimeType,
-				method: "image",
-				content: output.content,
-				fetchedAt,
-				truncated: output.truncated,
-				notes,
-				image: {
-					data: resized.data,
-					mimeType: resized.mimeType,
-				},
-			};
+			notes.push(binary.error ? `Binary fetch failed: ${binary.error}` : "Binary fetch failed");
+			notes.push("Falling back to textual rendering from initial response");
+			skipConvertibleBinaryRetry = true;
 		}
-		notes.push(binary.error ? `Binary fetch failed: ${binary.error}` : "Binary fetch failed");
-		notes.push("Falling back to textual rendering from initial response");
-		skipConvertibleBinaryRetry = true;
 	}
 
 	// Step 3: Handle convertible binary files (PDF, DOCX, etc.)
