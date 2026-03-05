@@ -194,10 +194,22 @@ describe("shouldCompact", () => {
 			keepRecentTokens: 20000,
 		};
 
-		// effective reserve = max(floor(100000 * 0.15), 10000) = 15000, threshold = 85000
+		// default thresholdPercent = 85 (trigger above 85,000 tokens for a 100,000-token window)
 		expect(shouldCompact(95000, 100000, settings)).toBe(true);
 		expect(shouldCompact(86000, 100000, settings)).toBe(true);
 		expect(shouldCompact(84000, 100000, settings)).toBe(false);
+	});
+
+	it("should use configured threshold percent", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdPercent: 90,
+			reserveTokens: 10000,
+			keepRecentTokens: 20000,
+		};
+
+		expect(shouldCompact(89_000, 100_000, settings)).toBe(false);
+		expect(shouldCompact(90_001, 100_000, settings)).toBe(true);
 	});
 
 	it("should return false when disabled", () => {

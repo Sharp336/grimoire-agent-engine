@@ -345,6 +345,27 @@ export const SETTINGS_SCHEMA = {
 			description: "Automatically compact context when it gets too large",
 		},
 	},
+	"compaction.strategy": {
+		type: "enum",
+		values: ["compact", "handoff"] as const,
+		default: "compact",
+		ui: {
+			tab: "agent",
+			label: "Context strategy",
+			description: "Use in-place compaction or generate a handoff and start a new session",
+			submenu: true,
+		},
+	},
+	"compaction.thresholdPercent": {
+		type: "number",
+		default: 85,
+		ui: {
+			tab: "agent",
+			label: "Context threshold",
+			description: "Trigger context maintenance when usage exceeds this percentage of model context window",
+			submenu: true,
+		},
+	},
 	"compaction.reserveTokens": { type: "number", default: 16384 },
 	"compaction.keepRecentTokens": { type: "number", default: 20000 },
 	"compaction.autoContinue": { type: "boolean", default: true },
@@ -1265,6 +1286,8 @@ export type StatusLineSeparatorStyle = SettingValue<"statusLine.separator">;
 
 export interface CompactionSettings {
 	enabled: boolean;
+	strategy: "compact" | "handoff";
+	thresholdPercent: number;
 	reserveTokens: number;
 	keepRecentTokens: number;
 	autoContinue: boolean;

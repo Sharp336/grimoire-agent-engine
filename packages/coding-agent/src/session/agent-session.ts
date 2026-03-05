@@ -3104,11 +3104,12 @@ export class AgentSession {
 	}
 
 	/**
-	 * Cancel in-progress compaction (manual or auto).
+	 * Cancel in-progress context maintenance (manual compaction, auto-compaction, or auto-handoff).
 	 */
 	abortCompaction(): void {
 		this.#compactionAbortController?.abort();
 		this.#autoCompactionAbortController?.abort();
+		this.#handoffAbortController?.abort();
 	}
 
 	/**
@@ -3258,13 +3259,13 @@ Be thorough - include exact file paths, function names, error messages, and tech
 	}
 
 	/**
-	 * Check if compaction or context promotion is needed and run it.
+	 * Check if context maintenance or promotion is needed and run it.
 	 * Called after agent_end and before prompt submission.
 	 *
 	 * Three cases (in order):
-	 * 1. Overflow + promotion: promote to larger model, retry without compacting
-	 * 2. Overflow + no promotion target: compact, auto-retry on same model
-	 * 3. Threshold: Context over threshold, compact, NO auto-retry (user continues manually)
+	 * 1. Overflow + promotion: promote to larger model, retry without maintenance
+	 * 2. Overflow + no promotion target: run context maintenance, auto-retry on same model
+	 * 3. Threshold: Context over threshold, run context maintenance (no auto-retry)
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
@@ -3663,6 +3664,32 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		this.#autoCompactionAbortController = new AbortController();
 
 		try {
+			if (compactionSettings.strategy === "handoff") {
+				const handoffFocus =
+					reason === "overflow"
+						? "Context overflow recovery: preserve critical implementation state and immediate next actions."
+						: "Threshold-triggered maintenance: preserve critical implementation state and immediate next actions.";
+				const handoffResult = await this.handoff(handoffFocus);
+				if (!handoffResult) {
+					const aborted = this.#autoCompactionAbortController.signal.aborted;
+					await this.#emitSessionEvent({
+						type: "auto_compaction_end",
+						result: undefined,
+						aborted,
+						willRetry: false,
+						errorMessage: aborted ? undefined : "Auto-handoff failed: no handoff document was generated",
+					});
+					return;
+				}
+				await this.#emitSessionEvent({
+					type: "auto_compaction_end",
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+				});
+				return;
+			}
+
 			if (!this.model) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",

@@ -438,11 +438,13 @@ export class EventController {
 				};
 				this.ctx.statusContainer.clear();
 				const reasonText = event.reason === "overflow" ? "Context overflow detected, " : "";
+				const strategy = this.ctx.settings.get("compaction.strategy");
+				const actionLabel = strategy === "handoff" ? "Auto-handoff" : "Auto-compacting";
 				this.ctx.autoCompactionLoader = new Loader(
 					this.ctx.ui,
 					spinner => theme.fg("accent", spinner),
 					text => theme.fg("muted", text),
-					`${reasonText}Auto-compacting… (esc to cancel)`,
+					`${reasonText}${actionLabel}… (esc to cancel)`,
 					getSymbolTheme().spinnerFrames,
 				);
 				this.ctx.statusContainer.addChild(this.ctx.autoCompactionLoader);
@@ -460,8 +462,10 @@ export class EventController {
 					this.ctx.autoCompactionLoader = undefined;
 					this.ctx.statusContainer.clear();
 				}
+				const strategy = this.ctx.settings.get("compaction.strategy");
+				const isHandoffStrategy = strategy === "handoff";
 				if (event.aborted) {
-					this.ctx.showStatus("Auto-compaction cancelled");
+					this.ctx.showStatus(isHandoffStrategy ? "Auto-handoff cancelled" : "Auto-compaction cancelled");
 				} else if (event.result) {
 					this.ctx.chatContainer.clear();
 					this.ctx.rebuildChatFromMessages();
@@ -474,6 +478,15 @@ export class EventController {
 					});
 					this.ctx.statusLine.invalidate();
 					this.ctx.updateEditorTopBorder();
+				} else if (event.errorMessage) {
+					this.ctx.showWarning(event.errorMessage);
+				} else if (isHandoffStrategy) {
+					this.ctx.chatContainer.clear();
+					this.ctx.rebuildChatFromMessages();
+					this.ctx.statusLine.invalidate();
+					this.ctx.updateEditorTopBorder();
+					await this.ctx.reloadTodos();
+					this.ctx.showStatus("Auto-handoff completed");
 				} else {
 					this.ctx.showWarning("Auto-compaction failed; continuing without compaction");
 				}
