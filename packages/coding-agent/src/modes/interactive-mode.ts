@@ -123,6 +123,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	retryEscapeHandler?: () => void;
 	unsubscribe?: () => void;
 	onInputCallback?: (input: { text: string; images?: ImageContent[] }) => void;
+	optimisticUserMessageSignature: string | undefined = undefined;
 	lastSigintTime = 0;
 	lastEscapeTime = 0;
 	shutdownRequested = false;
@@ -855,6 +856,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	showError(message: string): void {
+		this.optimisticUserMessageSignature = undefined;
 		this.#uiHelpers.showError(message);
 	}
 
