@@ -3726,7 +3726,8 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
 		const generation = this.#promptGeneration;
-		const action = compactionSettings.strategy === "handoff" && reason !== "overflow" ? "handoff" : "context-full";
+		let action: "context-full" | "handoff" =
+			compactionSettings.strategy === "handoff" && reason !== "overflow" ? "handoff" : "context-full";
 		await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 		// Properly abort and null existing controller before replacing
 		if (this.#autoCompactionAbortController) {
@@ -3743,24 +3744,31 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				});
 				if (!handoffResult) {
 					const aborted = this.#autoCompactionAbortController.signal.aborted;
+					if (aborted) {
+						await this.#emitSessionEvent({
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: true,
+							willRetry: false,
+						});
+						return;
+					}
+					logger.warn("Auto-handoff returned no document; falling back to context-full maintenance", {
+						reason,
+					});
+					action = "context-full";
+				}
+				if (handoffResult) {
 					await this.#emitSessionEvent({
 						type: "auto_compaction_end",
 						action,
 						result: undefined,
-						aborted,
+						aborted: false,
 						willRetry: false,
-						errorMessage: aborted ? undefined : "Auto-handoff failed: no handoff document was generated",
 					});
 					return;
 				}
-				await this.#emitSessionEvent({
-					type: "auto_compaction_end",
-					action,
-					result: undefined,
-					aborted: false,
-					willRetry: false,
-				});
-				return;
 			}
 
 			if (!this.model) {

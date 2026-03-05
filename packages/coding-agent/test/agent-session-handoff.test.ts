@@ -255,7 +255,7 @@ describe("AgentSession handoff", () => {
 		expect(endEvents[0]).toMatchObject({ type: "auto_compaction_end", aborted: false, willRetry: false });
 	});
 
-	it("emits auto_compaction_end error when handoff strategy returns no document", async () => {
+	it("falls back to context-full when handoff strategy returns no document", async () => {
 		session.settings.set("compaction.strategy", "handoff");
 		session.settings.set("compaction.thresholdPercent", 1);
 		session.settings.set("contextPromotion.enabled", false);
@@ -294,8 +294,11 @@ describe("AgentSession handoff", () => {
 		expect(endEvents).toHaveLength(1);
 		expect(endEvents[0]).toMatchObject({
 			type: "auto_compaction_end",
+			action: "context-full",
 			aborted: false,
 			willRetry: false,
+		});
+		expect(endEvents[0]).not.toMatchObject({
 			errorMessage: "Auto-handoff failed: no handoff document was generated",
 		});
 	});
