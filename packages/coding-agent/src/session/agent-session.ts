@@ -87,6 +87,7 @@ import { executePython as executePythonCommand, type PythonResult } from "../ipy
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../patch";
 import type { PlanModeState } from "../plan-mode/state";
+import autoHandoffThresholdFocusPrompt from "../prompts/system/auto-handoff-threshold-focus.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
 import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool-decision-reminder.md" with {
@@ -130,9 +131,10 @@ import { getLatestCompactionEntry } from "./session-manager";
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
 	| AgentEvent
-	| { type: "auto_compaction_start"; reason: "threshold" | "overflow" }
+	| { type: "auto_compaction_start"; reason: "threshold" | "overflow"; action: "context-full" | "handoff" }
 	| {
 			type: "auto_compaction_end";
+			action: "context-full" | "handoff";
 			result: CompactionResult | undefined;
 			aborted: boolean;
 			willRetry: boolean;
@@ -259,6 +261,8 @@ interface HandoffOptions {
 // ============================================================================
 
 /** Standard thinking levels */
+
+const AUTO_HANDOFF_THRESHOLD_FOCUS = renderPromptTemplate(autoHandoffThresholdFocusPrompt);
 
 const noOpUIContext: ExtensionUIContext = {
 	select: async (_title, _options, _dialogOptions) => undefined,
@@ -1401,10 +1405,15 @@ export class AgentSession {
 			};
 			await this.#extensionRunner.emit(extensionEvent);
 		} else if (event.type === "auto_compaction_start") {
-			await this.#extensionRunner.emit({ type: "auto_compaction_start", reason: event.reason });
+			await this.#extensionRunner.emit({
+				type: "auto_compaction_start",
+				reason: event.reason,
+				action: event.action,
+			});
 		} else if (event.type === "auto_compaction_end") {
 			await this.#extensionRunner.emit({
 				type: "auto_compaction_end",
+				action: event.action,
 				result: event.result,
 				aborted: event.aborted,
 				willRetry: event.willRetry,
@@ -3717,7 +3726,8 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
 		const generation = this.#promptGeneration;
-		await this.#emitSessionEvent({ type: "auto_compaction_start", reason });
+		const action = compactionSettings.strategy === "handoff" && reason !== "overflow" ? "handoff" : "context-full";
+		await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 		// Properly abort and null existing controller before replacing
 		if (this.#autoCompactionAbortController) {
 			this.#autoCompactionAbortController.abort();
@@ -3726,8 +3736,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 
 		try {
 			if (compactionSettings.strategy === "handoff" && reason !== "overflow") {
-				const handoffFocus =
-					"Threshold-triggered maintenance: preserve critical implementation state and immediate next actions.";
+				const handoffFocus = AUTO_HANDOFF_THRESHOLD_FOCUS;
 				const handoffResult = await this.handoff(handoffFocus, {
 					autoTriggered: true,
 					signal: this.#autoCompactionAbortController.signal,
@@ -3736,6 +3745,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 					const aborted = this.#autoCompactionAbortController.signal.aborted;
 					await this.#emitSessionEvent({
 						type: "auto_compaction_end",
+						action,
 						result: undefined,
 						aborted,
 						willRetry: false,
@@ -3745,6 +3755,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				}
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
+					action,
 					result: undefined,
 					aborted: false,
 					willRetry: false,
@@ -3755,6 +3766,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			if (!this.model) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
+					action,
 					result: undefined,
 					aborted: false,
 					willRetry: false,
@@ -3766,6 +3778,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			if (availableModels.length === 0) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
+					action,
 					result: undefined,
 					aborted: false,
 					willRetry: false,
@@ -3779,6 +3792,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			if (!preparation) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
+					action,
 					result: undefined,
 					aborted: false,
 					willRetry: false,
@@ -3804,6 +3818,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				if (hookResult?.cancel) {
 					await this.#emitSessionEvent({
 						type: "auto_compaction_end",
+						action,
 						result: undefined,
 						aborted: true,
 						willRetry: false,
@@ -3937,6 +3952,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			if (this.#autoCompactionAbortController.signal.aborted) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
+					action,
 					result: undefined,
 					aborted: true,
 					willRetry: false,
@@ -3980,7 +3996,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				details,
 				preserveData,
 			};
-			await this.#emitSessionEvent({ type: "auto_compaction_end", result, aborted: false, willRetry });
+			await this.#emitSessionEvent({ type: "auto_compaction_end", action, result, aborted: false, willRetry });
 
 			if (!willRetry && compactionSettings.autoContinue !== false) {
 				await this.#promptWithMessage(
@@ -4016,6 +4032,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			if (this.#autoCompactionAbortController?.signal.aborted) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
+					action,
 					result: undefined,
 					aborted: true,
 					willRetry: false,
@@ -4025,6 +4042,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			await this.#emitSessionEvent({
 				type: "auto_compaction_end",
+				action,
 				result: undefined,
 				aborted: false,
 				willRetry: false,

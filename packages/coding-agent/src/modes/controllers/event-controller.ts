@@ -438,9 +438,7 @@ export class EventController {
 				};
 				this.ctx.statusContainer.clear();
 				const reasonText = event.reason === "overflow" ? "Context overflow detected, " : "";
-				const strategy = this.ctx.settings.get("compaction.strategy");
-				const actionLabel =
-					strategy === "handoff" && event.reason !== "overflow" ? "Auto-handoff" : "Auto context-full maintenance";
+				const actionLabel = event.action === "handoff" ? "Auto-handoff" : "Auto context-full maintenance";
 				this.ctx.autoCompactionLoader = new Loader(
 					this.ctx.ui,
 					spinner => theme.fg("accent", spinner),
@@ -463,11 +461,10 @@ export class EventController {
 					this.ctx.autoCompactionLoader = undefined;
 					this.ctx.statusContainer.clear();
 				}
-				const strategy = this.ctx.settings.get("compaction.strategy");
-				const isHandoffStrategy = strategy === "handoff";
+				const isHandoffAction = event.action === "handoff";
 				if (event.aborted) {
 					this.ctx.showStatus(
-						isHandoffStrategy ? "Auto-handoff cancelled" : "Auto context-full maintenance cancelled",
+						isHandoffAction ? "Auto-handoff cancelled" : "Auto context-full maintenance cancelled",
 					);
 				} else if (event.result) {
 					this.ctx.chatContainer.clear();
@@ -483,7 +480,7 @@ export class EventController {
 					this.ctx.updateEditorTopBorder();
 				} else if (event.errorMessage) {
 					this.ctx.showWarning(event.errorMessage);
-				} else if (isHandoffStrategy) {
+				} else if (isHandoffAction) {
 					this.ctx.chatContainer.clear();
 					this.ctx.rebuildChatFromMessages();
 					this.ctx.statusLine.invalidate();
