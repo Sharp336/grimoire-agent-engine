@@ -63,6 +63,12 @@ describe("openai-codex reasoning effort clamping", () => {
 		const xhigh = await transformRequestBody({ ...body }, { reasoningEffort: "xhigh" });
 		expect(xhigh.reasoning?.effort).toBe("high");
 	});
+
+	it("clamps gpt-5.4 minimal reasoning effort to low", async () => {
+		const body: RequestBody = { model: "gpt-5.4", input: [] };
+		const transformed = await transformRequestBody(body, { reasoningEffort: "minimal" });
+		expect(transformed.reasoning?.effort).toBe("low");
+	});
 });
 
 describe("openai-codex error parsing", () => {

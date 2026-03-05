@@ -56,7 +56,10 @@ function clampReasoningEffort(model: string, effort: ReasoningConfig["effort"]):
 		return "high";
 	}
 
-	if ((modelId.startsWith("gpt-5.2") || modelId.startsWith("gpt-5.3")) && effort === "minimal") {
+	if (
+		(modelId.startsWith("gpt-5.2") || modelId.startsWith("gpt-5.3") || modelId.startsWith("gpt-5.4")) &&
+		effort === "minimal"
+	) {
 		return "low";
 	}
 

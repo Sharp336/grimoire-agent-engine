@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Model } from "@oh-my-pi/pi-ai";
 import {
+	findSlowModel,
 	parseModelPattern,
 	parseModelString,
 	resolveCliModel,
@@ -541,5 +542,42 @@ describe("parseModelString", () => {
 			// Empty string is not a valid thinking level, so colon stays as part of ID
 			expect(result).toEqual({ provider: "anthropic", id: "claude-sonnet-4-5:" });
 		});
+	});
+});
+
+describe("findSlowModel", () => {
+	test("prefers GPT-5.4 before older slow-model fallbacks", async () => {
+		const candidateModels: Model<"anthropic-messages">[] = [
+			{
+				id: "gpt-5.3-codex",
+				name: "GPT-5.3 Codex",
+				api: "anthropic-messages",
+				provider: "openai-codex",
+				baseUrl: "https://api.openai.com",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 1.5, output: 6, cacheRead: 0.15, cacheWrite: 1.5 },
+				contextWindow: 200000,
+				maxTokens: 8192,
+			},
+			{
+				id: "gpt-5.4",
+				name: "GPT-5.4",
+				api: "anthropic-messages",
+				provider: "openai",
+				baseUrl: "https://api.openai.com",
+				reasoning: true,
+				input: ["text", "image"],
+				cost: { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
+				contextWindow: 1050000,
+				maxTokens: 128000,
+			},
+		];
+		const modelRegistry = {
+			getAvailable: () => candidateModels,
+		} as unknown as Parameters<typeof findSlowModel>[0];
+		const resolved = await findSlowModel(modelRegistry);
+
+		expect(resolved?.id).toBe("gpt-5.4");
 	});
 });
