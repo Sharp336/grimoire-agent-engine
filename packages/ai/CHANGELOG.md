@@ -2,10 +2,9 @@
 
 ## [Unreleased]
 
-### Fixed
+### Changed
 
-- ZenMux model mapper now uses bundled model `maxTokens` fallback for known models, preventing premature truncation from the generic 8888 token cap
-
+- ZenMux provider now uses bundled models exclusively instead of dynamic API discovery, ensuring correct `maxTokens` values without API calls
 ## [13.9.2] - 2026-03-05
 
 ### Added
