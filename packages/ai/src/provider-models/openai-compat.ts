@@ -834,6 +834,7 @@ export function alibabaCodingPlanModelManagerOptions(
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? "https://coding-intl.dashscope.aliyuncs.com/v1";
+	const references = createBundledReferenceMap<"openai-completions">("alibaba-coding-plan");
 	return {
 		providerId: "alibaba-coding-plan",
 		fetchDynamicModels: () =>
@@ -842,6 +843,10 @@ export function alibabaCodingPlanModelManagerOptions(
 				provider: "alibaba-coding-plan",
 				baseUrl,
 				apiKey,
+				mapModel: (entry, defaults) => {
+					const reference = references.get(defaults.id);
+					return mapWithBundledReference(entry, defaults, reference);
+				},
 			}),
 	};
 }
