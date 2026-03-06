@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, mock } from "bun:test";
+import { afterEach, describe, expect, it, mock } from "bun:test";
 import { refreshMCPOAuthToken, sanitizeTokenError, validateTokenUrl } from "../src/mcp/oauth-refresh";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -14,7 +14,11 @@ describe("validateTokenUrl", () => {
 
 	it("accepts HTTPS URLs with matching auth server origin", () => {
 		expect(() => {
-			validateTokenUrl("https://auth.provider.com/oauth/token", "https://api.example.com", "https://auth.provider.com");
+			validateTokenUrl(
+				"https://auth.provider.com/oauth/token",
+				"https://api.example.com",
+				"https://auth.provider.com",
+			);
 		}).not.toThrow();
 	});
 

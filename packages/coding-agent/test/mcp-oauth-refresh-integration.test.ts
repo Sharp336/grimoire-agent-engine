@@ -4,9 +4,9 @@
  * Tests the full refresh path through MCPManager without real network calls.
  * Verifies: expiry detection, mutex behavior, transport header update, credential persistence.
  */
-import { afterEach, beforeEach, describe, expect, it, mock, spyOn } from "bun:test";
-import { refreshMCPOAuthToken, sanitizeTokenError, validateTokenUrl } from "../src/mcp/oauth-refresh";
+import { afterEach, describe, expect, it } from "bun:test";
 import { discoverOAuthEndpoints } from "../src/mcp/oauth-discovery";
+import { refreshMCPOAuthToken, validateTokenUrl } from "../src/mcp/oauth-refresh";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Full refresh path: expiry detection → discovery → validation → refresh → persist
@@ -20,10 +20,10 @@ describe("token refresh integration", () => {
 	});
 
 	it("full refresh path: discover → validate → refresh → return new creds", async () => {
-		let callCount = 0;
+		let _callCount = 0;
 		globalThis.fetch = (async (url: string | URL | Request, init?: RequestInit) => {
 			const urlStr = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
-			callCount++;
+			_callCount++;
 
 			// Call 1: OAuth discovery (well-known)
 			if (urlStr.includes("/.well-known/oauth-authorization-server")) {
