@@ -67,9 +67,15 @@ export class WelcomeComponent implements Component {
 		const leftCol = showRightColumn ? dualLeftCol : boxWidth - 2;
 		const rightCol = showRightColumn ? dualRightCol : 0;
 
-		// Block-based OMP logo (gradient: magenta → cyan)
+		// Talking Shops-inspired cart mark (Chelsea blue gradient)
 		// biome-ignore format: preserve ASCII art layout
-		const piLogo = ["▀████████████▀", " ╘███    ███  ", "  ███    ███  ", "  ███    ███  ", " ▄███▄  ▄███▄ "];
+		const piLogo = [
+			"╭────────────╮",
+			"│  ╭──────╮  │",
+			"│  ╰┬────┬╯  │",
+			"│   ○    ○   │",
+			"╰────╲__/────╯",
+		];
 
 		// Apply gradient to logo
 		const logoColored = piLogo.map(line => this.#gradientLine(line));
@@ -80,6 +86,7 @@ export class WelcomeComponent implements Component {
 			this.#centerText(theme.bold("Welcome back!"), leftCol),
 			"",
 			...logoColored.map(l => this.#centerText(l, leftCol)),
+			this.#centerText(this.#brandBlue("talking shops"), leftCol),
 			"",
 			this.#centerText(theme.fg("muted", this.modelName), leftCol),
 			this.#centerText(theme.fg("borderMuted", this.providerName), leftCol),
@@ -191,15 +198,15 @@ export class WelcomeComponent implements Component {
 		return padding(leftPad) + text + padding(rightPad);
 	}
 
-	/** Apply magenta→cyan gradient to a string */
+	/** Apply Chelsea-style blue gradient to a string */
 	#gradientLine(line: string): string {
 		const colors = [
-			"\x1b[38;5;199m", // bright magenta
-			"\x1b[38;5;171m", // magenta-purple
-			"\x1b[38;5;135m", // purple
-			"\x1b[38;5;99m", // purple-blue
-			"\x1b[38;5;75m", // cyan-blue
-			"\x1b[38;5;51m", // bright cyan
+			"\x1b[38;2;227;242;253m", // very light blue
+			"\x1b[38;2;147;197;253m", // sky blue
+			"\x1b[38;2;96;165;250m", // bright blue
+			"\x1b[38;2;59;130;246m", // royal blue
+			"\x1b[38;2;37;99;235m", // deep royal blue
+			"\x1b[38;2;3;70;148m", // Chelsea-inspired blue
 		];
 		const reset = "\x1b[0m";
 
@@ -219,6 +226,10 @@ export class WelcomeComponent implements Component {
 			}
 		}
 		return result;
+	}
+
+	#brandBlue(text: string): string {
+		return `\x1b[38;2;3;70;148m${text}\x1b[0m`;
 	}
 
 	/** Fit string to exact width with ANSI-aware truncation/padding */

@@ -330,6 +330,8 @@ export interface BuildSystemPromptOptions {
 	skillsSettings?: SkillsSettings;
 	/** Working directory. Default: getProjectDir() */
 	cwd?: string;
+	/** Additional workspace roots accessible via @alias paths. */
+	extraRoots?: string[];
 	/** Pre-loaded context files (skips discovery if provided). */
 	contextFiles?: Array<{ path: string; content: string; depth?: number }>;
 	/** Skills provided directly to system prompt construction. */
@@ -356,6 +358,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		skillsSettings,
 		toolNames: providedToolNames,
 		cwd,
+		extraRoots = [],
 		contextFiles: providedContextFiles,
 		skills: providedSkills,
 		rules,
@@ -505,6 +508,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		date,
 		dateTime,
 		cwd: resolvedCwd,
+		extraRoots: extraRoots.map(root => ({ alias: path.basename(root), path: root })),
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
 		eagerTasks,

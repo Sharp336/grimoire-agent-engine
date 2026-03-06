@@ -2093,13 +2093,23 @@ export class AgentSession {
 				Array.from(this.#pinnedSkillNames.values()),
 				3,
 			);
+			const superpowersSkill = this.#skills.find(skill => skill.name.toLowerCase() === "using-superpowers");
+			if (superpowersSkill && !activeSkills.some(skill => skill.name.toLowerCase() === "using-superpowers")) {
+				activeSkills.unshift(superpowersSkill);
+			}
 			if (activeSkills.length > 0) {
 				const skillLines = activeSkills.map(skill => `- skill://${skill.name}`).join("\n");
 				messages.push({
 					role: "custom",
 					customType: "skill-focus",
 					content:
-						`Use these skills first when relevant to this request. Read each via the read tool before applying.\n${skillLines}`,
+						`Skill protocol:\n` +
+						`1) If user names a skill (plain text or $SkillName), you must use that skill this turn.\n` +
+						`2) If "using-superpowers" is available, apply it first as the skill-routing policy.\n` +
+						`3) For each listed skill, read SKILL.md before acting and follow its workflow.\n` +
+						`4) Use the minimal set of skills that covers the request; if multiple are required, apply in sequence.\n` +
+						`5) Start your first response with an explicit workflow acknowledgment (e.g. "I’ve loaded ... and I’ll follow ...").\n` +
+						`Active skills for this turn:\n${skillLines}`,
 					display: false,
 					attribution: "agent",
 					timestamp: Date.now(),

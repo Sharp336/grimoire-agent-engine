@@ -344,6 +344,7 @@ export interface BuildSystemPromptOptions {
 	skills?: Skill[];
 	contextFiles?: Array<{ path: string; content: string }>;
 	cwd?: string;
+	extraRoots?: string[];
 	appendPrompt?: string;
 	repeatToolDescriptions?: boolean;
 }
@@ -354,6 +355,7 @@ export interface BuildSystemPromptOptions {
 export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}): Promise<string> {
 	return await buildSystemPromptInternal({
 		cwd: options.cwd,
+		extraRoots: options.extraRoots,
 		skills: options.skills,
 		contextFiles: options.contextFiles,
 		appendSystemPrompt: options.appendPrompt,
@@ -1220,6 +1222,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		const defaultPrompt = await buildSystemPromptInternal({
 			cwd,
+			extraRoots,
 			skills,
 			contextFiles,
 			tools,
@@ -1238,6 +1241,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (typeof options.systemPrompt === "string") {
 			return await buildSystemPromptInternal({
 				cwd,
+				extraRoots,
 				skills,
 				contextFiles,
 				tools,

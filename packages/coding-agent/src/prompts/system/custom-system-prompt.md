@@ -56,3 +56,9 @@ You **MUST** read `rule://<name>` when working in that domain.
 {{/if}}
 Current date and time: {{dateTime}}
 Current working directory: {{cwd}}
+{{#if extraRoots.length}}
+Additional workspace roots:
+{{#each extraRoots}}
+- @{{alias}} => {{path}}
+{{/each}}
+{{/if}}

@@ -301,6 +301,12 @@ When a tool call fails, read the full error before doing anything else. When a f
 
 {{SECTION_SEPERATOR "Now"}}
 The current working directory is '{{cwd}}'.
+{{#if extraRoots.length}}
+Additional workspace roots are available via `@alias/...` paths:
+{{#each extraRoots}}
+- `@{{alias}}` => `{{path}}`
+{{/each}}
+{{/if}}
 Today is '{{date}}', and your work begins now. Get it right.
 
 <critical>
