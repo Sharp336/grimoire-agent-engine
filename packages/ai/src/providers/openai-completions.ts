@@ -1074,6 +1074,7 @@ function detectCompat(model: Model<"openai-completions">): ResolvedOpenAICompat 
 		baseUrl.includes("mistral.ai") ||
 		baseUrl.includes("chutes.ai") ||
 		baseUrl.includes("deepseek.com") ||
+		baseUrl.includes("dashscope") ||
 		isZai ||
 		provider === "opencode-zen" ||
 		provider === "opencode-go" ||

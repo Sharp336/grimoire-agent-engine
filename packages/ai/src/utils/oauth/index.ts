@@ -38,9 +38,11 @@ import type {
  * - Venice
  * - vLLM
  * - ZenMux
+ * - Alibaba Coding Plan
  */
+// Alibaba Coding Plan
+export { loginAlibabaCodingPlan } from "./alibaba-coding-plan";
 // Anthropic
-export { loginAnthropic, refreshAnthropicToken } from "./anthropic";
 // Cerebras (API key)
 export { loginCerebras } from "./cerebras";
 // Cloudflare AI Gateway (API key)
@@ -119,6 +121,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 	{
 		id: "anthropic",
 		name: "Anthropic (Claude Pro/Max)",
+		available: true,
+	},
+	{
+		id: "alibaba-coding-plan",
+		name: "Alibaba Coding Plan",
 		available: true,
 	},
 	{

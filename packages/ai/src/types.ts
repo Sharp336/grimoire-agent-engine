@@ -67,6 +67,7 @@ export type OptionsForApi<TApi extends Api> =
 	| (TApi extends keyof ApiOptionsMap ? ApiOptionsMap[TApi] : never);
 
 export type KnownProvider =
+	| "alibaba-coding-plan"
 	| "amazon-bedrock"
 	| "anthropic"
 	| "google"

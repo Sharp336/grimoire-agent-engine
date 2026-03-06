@@ -821,6 +821,32 @@ export function kiloModelManagerOptions(config?: KiloModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// Alibaba Coding Plan
+// ---------------------------------------------------------------------------
+
+export interface AlibabaCodingPlanModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+export function alibabaCodingPlanModelManagerOptions(
+	config?: AlibabaCodingPlanModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://coding-intl.dashscope.aliyuncs.com/v1";
+	return {
+		providerId: "alibaba-coding-plan",
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "alibaba-coding-plan",
+				baseUrl,
+				apiKey,
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 11. Vercel AI Gateway
 // ---------------------------------------------------------------------------
 
@@ -1935,6 +1961,17 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 			reasoningContentField: "reasoning_content",
 		},
 	}),
+	// --- Alibaba Coding Plan ---
+	openAiCompletionsDescriptor(
+		"alibaba-coding-plan",
+		"alibaba-coding-plan",
+		"https://coding-intl.dashscope.aliyuncs.com/v1",
+		{
+			compat: {
+				supportsDeveloperRole: false,
+			},
+		},
+	),
 ];
 
 const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDescriptor[] = [
