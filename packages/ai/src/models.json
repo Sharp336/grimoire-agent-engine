@@ -1646,8 +1646,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 128000,
-			"maxTokens": 8192
+			"contextWindow": 1000000,
+			"maxTokens": 8888
 		},
 		"qwen3-max-2026-01-23": {
 			"id": "qwen3-max-2026-01-23",
@@ -1665,7 +1665,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 128000,
+			"contextWindow": 262144,
 			"maxTokens": 8192
 		},
 		"qwen3-coder-next": {
@@ -1684,8 +1684,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 128000,
-			"maxTokens": 8192
+			"contextWindow": 262144,
+			"maxTokens": 65536
 		},
 		"qwen3-coder-plus": {
 			"id": "qwen3-coder-plus",
@@ -1703,8 +1703,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 128000,
-			"maxTokens": 8192
+			"contextWindow": 1000000,
+			"maxTokens": 65536
 		},
 		"glm-5": {
 			"id": "glm-5",
@@ -1722,8 +1722,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 128000,
-			"maxTokens": 8192
+			"contextWindow": 202752,
+			"maxTokens": 131072
 		},
 		"glm-4.7": {
 			"id": "glm-4.7",
@@ -1741,8 +1741,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 128000,
-			"maxTokens": 8192
+			"contextWindow": 202752,
+			"maxTokens": 131072
 		},
 		"kimi-k2.5": {
 			"id": "kimi-k2.5",
@@ -1780,8 +1780,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 128000,
-			"maxTokens": 8192
+			"contextWindow": 1000000,
+			"maxTokens": 131072
 		}
 	},
 	"anthropic": {
