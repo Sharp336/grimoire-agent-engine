@@ -9,6 +9,8 @@
  */
 
 import { describe, expect, test } from "bun:test";
+import { expandPromptTemplate, type PromptTemplate } from "@oh-my-pi/pi-coding-agent/config/prompt-templates";
+import { expandSlashCommand, type FileSlashCommand } from "@oh-my-pi/pi-coding-agent/extensibility/slash-commands";
 import { parseCommandArgs, substituteArgs } from "@oh-my-pi/pi-coding-agent/utils/command-args";
 
 // ============================================================================
@@ -293,5 +295,71 @@ describe("parseCommandArgs + substituteArgs integration", () => {
 		const template1 = "Implement: $@";
 		const template2 = "Implement: $ARGUMENTS";
 		expect(substituteArgs(template1, args)).toBe(substituteArgs(template2, args));
+	});
+});
+
+// ============================================================================
+// expandSlashCommand + expandPromptTemplate fallback behavior
+// ============================================================================
+
+describe("template expansion fallback", () => {
+	function createSlashCommand(content: string): FileSlashCommand {
+		return {
+			name: "test-command",
+			description: "Test command",
+			content,
+			source: "test",
+		};
+	}
+
+	function createPromptTemplate(content: string): PromptTemplate {
+		return {
+			name: "test-template",
+			description: "Test template",
+			content,
+			source: "test",
+		};
+	}
+
+	test("should append trailing inline args for slash command without placeholders", () => {
+		const result = expandSlashCommand("/test-command sample input text", [createSlashCommand("Do something.")]);
+		expect(result).toBe("Do something.\n\nsample input text");
+	});
+
+	test("should append trailing inline args for prompt template without placeholders", () => {
+		const result = expandPromptTemplate("/test-template sample input text", [createPromptTemplate("Do something.")]);
+		expect(result).toBe("Do something.\n\nsample input text");
+	});
+
+	test("should not append fallback text when $ARGUMENTS consumes args", () => {
+		const result = expandSlashCommand("/test-command sample input text", [createSlashCommand("Do: $ARGUMENTS")]);
+		expect(result).toBe("Do: sample input text");
+	});
+
+	test("should not append fallback text when Handlebars arguments consumes args", () => {
+		const result = expandPromptTemplate("/test-template sample input text", [
+			createPromptTemplate("Do: {{arguments}}"),
+		]);
+		expect(result).toBe("Do: sample input text");
+	});
+
+	test("should keep output unchanged when slash command has no trailing args", () => {
+		const result = expandSlashCommand("/test-command", [createSlashCommand("Do something.")]);
+		expect(result).toBe("Do something.");
+	});
+
+	test("should keep output unchanged when prompt template has no trailing args", () => {
+		const result = expandPromptTemplate("/test-template", [createPromptTemplate("Do something.")]);
+		expect(result).toBe("Do something.");
+	});
+
+	test("should use single appended newline when slash command output already ends with newline", () => {
+		const result = expandSlashCommand("/test-command sample", [createSlashCommand("Do something.\n")]);
+		expect(result).toBe("Do something.\n\nsample");
+	});
+
+	test("should use single appended newline when prompt template output already ends with newline", () => {
+		const result = expandPromptTemplate("/test-template sample", [createPromptTemplate("Do something.\n")]);
+		expect(result).toBe("Do something.\n\nsample");
 	});
 });

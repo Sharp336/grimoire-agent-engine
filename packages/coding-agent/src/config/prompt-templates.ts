@@ -406,7 +406,19 @@ export function expandPromptTemplate(text: string, templates: PromptTemplate[]):
 		const args = parseCommandArgs(argsString);
 		const argsText = args.join(" ");
 		const substituted = substituteArgs(template.content, args);
-		return renderPromptTemplate(substituted, { args, ARGUMENTS: argsText, arguments: argsText });
+		const rendered = renderPromptTemplate(substituted, { args, ARGUMENTS: argsText, arguments: argsText });
+		if (argsText.length === 0) return rendered;
+
+		const substitutedWithoutArgs = substituteArgs(template.content, []);
+		const renderedWithoutArgs = renderPromptTemplate(substitutedWithoutArgs, {
+			args: [],
+			ARGUMENTS: "",
+			arguments: "",
+		});
+		if (rendered !== renderedWithoutArgs) return rendered;
+
+		const separator = rendered.endsWith("\n") ? "\n" : "\n\n";
+		return `${rendered}${separator}${argsText}`;
 	}
 
 	return text;
