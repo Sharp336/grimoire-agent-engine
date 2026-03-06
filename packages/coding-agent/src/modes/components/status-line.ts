@@ -363,7 +363,7 @@ export class StatusLineComponent implements Component {
 			.find(m => m.role === "assistant" && m.stopReason !== "aborted") as AssistantMessage | undefined;
 
 		const contextTokens = lastAssistantMessage ? calculatePromptTokens(lastAssistantMessage.usage) : 0;
-		const contextWindow = state.model?.contextWindow || 0;
+		const contextWindow = this.session.contextBudget;
 		const contextPercent = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
 
 		return {
