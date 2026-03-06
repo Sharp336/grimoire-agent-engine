@@ -6,6 +6,7 @@ export type OAuthCredentials = {
 	projectId?: string;
 	email?: string;
 	accountId?: string;
+	scopes?: string;
 };
 
 export type OAuthProvider =

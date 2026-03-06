@@ -143,13 +143,18 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mcpServerName: string;
 
 	/** Create MCPTool instances for all tools from an MCP server connection */
-	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[]): MCPTool[] {
-		return tools.map(tool => new MCPTool(connection, tool));
+	static fromTools(
+		connection: MCPServerConnection,
+		tools: MCPToolDefinition[],
+		refreshAuth?: () => Promise<void>,
+	): MCPTool[] {
+		return tools.map(tool => new MCPTool(connection, tool, refreshAuth));
 	}
 
 	constructor(
 		private readonly connection: MCPServerConnection,
 		private readonly tool: MCPToolDefinition,
+		private readonly refreshAuth?: () => Promise<void>,
 	) {
 		this.name = createMCPToolName(connection.name, tool.name);
 		this.label = `${connection.name}/${tool.name}`;
@@ -176,6 +181,15 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		throwIfAborted(signal);
 		try {
+			// Refresh auth token if needed before making the call
+			if (this.refreshAuth) {
+				try {
+					await this.refreshAuth();
+				} catch {
+					// Best-effort: proceed with existing token if refresh fails
+				}
+			}
+			throwIfAborted(signal);
 			const result = await callTool(this.connection, this.tool.name, params as Record<string, unknown>, { signal });
 
 			const text = formatMCPContent(result.content);
@@ -245,8 +259,9 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		tools: MCPToolDefinition[],
 		getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
+		refreshAuth?: () => Promise<void>,
 	): DeferredMCPTool[] {
-		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source));
+		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, refreshAuth));
 	}
 
 	constructor(
@@ -254,6 +269,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly tool: MCPToolDefinition,
 		private readonly getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
+		private readonly refreshAuth?: () => Promise<void>,
 	) {
 		this.name = createMCPToolName(serverName, tool.name);
 		this.label = `${serverName}/${tool.name}`;
@@ -283,6 +299,15 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		throwIfAborted(signal);
 		try {
 			const connection = await withAbort(this.getConnection(), signal);
+			throwIfAborted(signal);
+			// Refresh auth token if needed before making the call
+			if (this.refreshAuth) {
+				try {
+					await this.refreshAuth();
+				} catch {
+					// Best-effort: proceed with existing token if refresh fails
+				}
+			}
 			throwIfAborted(signal);
 			const result = await callTool(connection, this.tool.name, params as Record<string, unknown>, { signal });
 

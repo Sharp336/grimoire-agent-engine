@@ -24,6 +24,8 @@ import {
 	subscribeToResources,
 	unsubscribeFromResources,
 } from "./client";
+import { discoverOAuthEndpoints } from "./oauth-discovery";
+import { refreshMCPOAuthToken, validateTokenUrl } from "./oauth-refresh";
 import { loadAllMCPConfigs, validateServerConfig } from "./config";
 import type { MCPToolDetails } from "./tool-bridge";
 import { DeferredMCPTool, MCPTool } from "./tool-bridge";
@@ -127,6 +129,10 @@ export class MCPManager {
 	#notificationsEpoch = 0;
 	#subscribedResources = new Map<string, Set<string>>();
 	#pendingResourceRefresh = new Map<string, { connection: MCPServerConnection; promise: Promise<void> }>();
+	#configs = new Map<string, MCPServerConfig>();
+	#refreshLocks = new Map<string, Promise<void>>();
+	/** Buffer in ms before actual expiry to trigger proactive refresh */
+	static readonly #EXPIRY_BUFFER_MS = 60_000;
 
 	constructor(
 		private cwd: string,
@@ -277,6 +283,9 @@ export class MCPManager {
 				}
 			}
 
+			// Store original config for token refresh
+			this.#configs.set(name, config);
+
 			// Skip if already connected
 			if (this.#connections.has(name)) {
 				connectedServers.add(name);
@@ -339,7 +348,8 @@ export class MCPManager {
 				.then(async ({ connection, serverTools }) => {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
-					const customTools = MCPTool.fromTools(connection, serverTools);
+					const refreshAuth = () => this.refreshConnectionAuth(name);
+					const customTools = MCPTool.fromTools(connection, serverTools, refreshAuth);
 					this.#replaceServerTools(name, customTools);
 					this.#onToolsChanged?.(this.#tools);
 					void this.toolCache?.set(name, config, serverTools);
@@ -443,7 +453,7 @@ export class MCPManager {
 					if (!value) continue;
 					const { connection, serverTools } = value;
 					connectedServers.add(name);
-					allTools.push(...MCPTool.fromTools(connection, serverTools));
+					allTools.push(...MCPTool.fromTools(connection, serverTools, () => this.refreshConnectionAuth(name)));
 				} else if (task.tracked.status === "rejected") {
 					const message =
 						task.tracked.reason instanceof Error ? task.tracked.reason.message : String(task.tracked.reason);
@@ -453,7 +463,7 @@ export class MCPManager {
 					const cached = cachedTools.get(name);
 					if (cached) {
 						const source = this.#sources.get(name);
-						allTools.push(...DeferredMCPTool.fromTools(name, cached, () => this.waitForConnection(name), source));
+						allTools.push(...DeferredMCPTool.fromTools(name, cached, () => this.waitForConnection(name), source, () => this.refreshConnectionAuth(name)));
 					}
 				}
 			}
@@ -591,6 +601,7 @@ export class MCPManager {
 		this.#pendingToolLoads.delete(name);
 		this.#sources.delete(name);
 		this.#pendingResourceRefresh.delete(name);
+		this.#configs.delete(name);
 
 		const connection = this.#connections.get(name);
 
@@ -628,6 +639,8 @@ export class MCPManager {
 		this.#connections.clear();
 		this.#tools = [];
 		this.#subscribedResources.clear();
+		this.#configs.clear();
+		this.#refreshLocks.clear();
 	}
 
 	/**
@@ -642,7 +655,7 @@ export class MCPManager {
 
 		// Reload tools
 		const serverTools = await listTools(connection);
-		const customTools = MCPTool.fromTools(connection, serverTools);
+		const customTools = MCPTool.fromTools(connection, serverTools, () => this.refreshConnectionAuth(name));
 		void this.toolCache?.set(name, connection.config, serverTools);
 
 		// Replace tools from this server
@@ -821,8 +834,22 @@ export class MCPManager {
 		if (auth?.type === "oauth" && auth.credentialId && this.#authStorage) {
 			const credentialId = auth.credentialId;
 			try {
-				const credential = this.#authStorage.get(credentialId);
+				let credential = this.#authStorage.get(credentialId);
 				if (credential?.type === "oauth") {
+					// Proactive refresh: if token is expired or about to expire, refresh before connecting
+					if (credential.refresh && credential.expires <= Date.now() + MCPManager.#EXPIRY_BUFFER_MS) {
+						try {
+							const refreshed = await this.#performTokenRefresh(credentialId, credential, config);
+							if (refreshed) {
+								credential = refreshed;
+							}
+						} catch (refreshError) {
+							logger.warn("OAuth token refresh failed at connect time, using existing token", {
+								credentialId,
+								error: refreshError instanceof Error ? refreshError.message : String(refreshError),
+							});
+						}
+					}
 					if (resolved.type === "http" || resolved.type === "sse") {
 						resolved = {
 							...resolved,
@@ -867,6 +894,112 @@ export class MCPManager {
 		}
 
 		return resolved;
+	}
+
+	/**
+	 * Perform a token refresh for an OAuth credential.
+	 * Re-derives tokenUrl from server config + discovery (never persisted).
+	 */
+	async #performTokenRefresh(
+		credentialId: string,
+		credential: { type: "oauth"; access: string; refresh: string; expires: number; scopes?: string },
+		serverConfig: MCPServerConfig,
+	): Promise<{ type: "oauth"; access: string; refresh: string; expires: number; scopes?: string } | null> {
+		if (!credential.refresh) return null;
+
+		// Derive server URL for origin validation
+		const serverUrl = (serverConfig as { url?: string }).url;
+		if (!serverUrl) return null; // stdio servers can't refresh this way
+
+		// Discover token endpoint from server's well-known endpoints
+		const authServerUrl = undefined; // Could be extracted from Mcp-Auth-Server header in future
+		const endpoints = await discoverOAuthEndpoints(serverUrl, authServerUrl);
+		if (!endpoints?.tokenUrl) {
+			logger.debug("Could not discover token endpoint for refresh", { credentialId, serverUrl });
+			return null;
+		}
+
+		// Validate token URL for security
+		const serverOrigin = new URL(serverUrl).origin;
+		validateTokenUrl(endpoints.tokenUrl, serverOrigin, authServerUrl);
+
+		// Get clientId from discovery or server config
+		const clientId = endpoints.clientId ?? serverConfig.oauth?.clientId;
+
+		// Perform refresh
+		const refreshed = await refreshMCPOAuthToken({
+			refreshToken: credential.refresh,
+			tokenUrl: endpoints.tokenUrl,
+			clientId,
+			scopes: credential.scopes,
+		});
+
+		// Persist refreshed credential
+		const newCredential = { type: "oauth" as const, ...refreshed };
+		await this.#authStorage!.set(credentialId, newCredential);
+
+		return newCredential;
+	}
+
+	/**
+	 * Refresh OAuth token for a connected server's transport.
+	 * Uses a per-credential mutex to prevent concurrent refresh storms.
+	 */
+	async refreshConnectionAuth(serverName: string): Promise<void> {
+		const connection = this.#connections.get(serverName);
+		const config = this.#configs.get(serverName);
+		if (!connection || !config) return;
+
+		const auth = config.auth;
+		if (auth?.type !== "oauth" || !auth.credentialId || !this.#authStorage) return;
+
+		const credentialId = auth.credentialId;
+		const credential = this.#authStorage.get(credentialId);
+		if (credential?.type !== "oauth") return;
+
+		// Check if token is still valid (with buffer)
+		if (credential.expires > Date.now() + MCPManager.#EXPIRY_BUFFER_MS) return;
+
+		// No refresh token means we can't refresh
+		if (!credential.refresh) return;
+
+		// Acquire per-credential mutex
+		const existingLock = this.#refreshLocks.get(credentialId);
+		if (existingLock) {
+			await existingLock;
+			return; // Another refresh completed while we waited
+		}
+
+		const refreshPromise = (async () => {
+			// Re-read credential from storage (may have been refreshed by another call)
+			const freshCredential = this.#authStorage!.get(credentialId);
+			if (freshCredential?.type !== "oauth") return;
+			if (freshCredential.expires > Date.now() + MCPManager.#EXPIRY_BUFFER_MS) return;
+
+			try {
+				const refreshed = await this.#performTokenRefresh(credentialId, freshCredential, config);
+				if (refreshed) {
+					// Update transport header if supported
+					connection.transport.updateBearerToken?.(refreshed.access);
+					logger.debug("Refreshed OAuth token for MCP server", { serverName, credentialId });
+				}
+			} catch (error) {
+				logger.warn("Failed to refresh OAuth token for MCP server", {
+					serverName,
+					credentialId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		})();
+
+		this.#refreshLocks.set(credentialId, refreshPromise);
+		try {
+			await refreshPromise;
+		} finally {
+			if (this.#refreshLocks.get(credentialId) === refreshPromise) {
+				this.#refreshLocks.delete(credentialId);
+			}
+		}
 	}
 }
 

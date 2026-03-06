@@ -219,6 +219,8 @@ export interface MCPTransport {
 	onClose?: () => void;
 	onError?: (error: Error) => void;
 	onNotification?: (method: string, params: unknown) => void;
+	/** Update the Bearer token for auth refresh (HTTP transports only) */
+	updateBearerToken?(token: string): void;
 }
 
 /** Transport factory function */

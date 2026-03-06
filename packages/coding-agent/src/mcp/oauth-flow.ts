@@ -130,6 +130,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			access: data.access_token,
 			refresh: data.refresh_token ?? "",
 			expires,
+			scopes: this.config.scopes,
 		};
 	}
 

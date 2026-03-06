@@ -315,6 +315,20 @@ export class HttpTransport implements MCPTransport {
 
 		this.onClose?.();
 	}
+
+	/**
+	 * Update the Authorization Bearer token.
+	 * Used for OAuth token refresh without reconnecting.
+	 */
+	updateBearerToken(token: string): void {
+		this.config = {
+			...this.config,
+			headers: {
+				...this.config.headers,
+				Authorization: `Bearer ${token}`,
+			},
+		};
+	}
 }
 
 /**
