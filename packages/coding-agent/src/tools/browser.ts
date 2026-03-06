@@ -527,7 +527,8 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		if (proxy) {
 			launchArgs.push(`--proxy-server=${proxy}`);
 		}
-		if (process.env.PUPPETEER_PROXY_IGNORE_CERT_ERRORS) {
+		const ignoreCert = process.env.PUPPETEER_PROXY_IGNORE_CERT_ERRORS?.toLowerCase();
+		if (ignoreCert === "true" || ignoreCert === "1" || ignoreCert === "yes" || ignoreCert === "on") {
 			launchArgs.push("--ignore-certificate-errors");
 		}
 		this.#browser = await puppeteer.launch({
