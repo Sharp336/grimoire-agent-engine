@@ -6,13 +6,7 @@ import {
 	INTENT_FIELD,
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
-import {
-	clampContextBudget,
-	type Message,
-	type Model,
-	resetOverageCache,
-	updateOverageDisabledReason,
-} from "@oh-my-pi/pi-ai";
+import { clampContextBudget, type Message, type Model, updateOverageDisabledReason } from "@oh-my-pi/pi-ai";
 
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -1370,10 +1364,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 	}
-	// Register response-header callback so entitlement check fires on first streaming response.
-	// Reset entitlement cache so the first streaming response re-checks the header.
-	resetOverageCache();
-
 	agent = new Agent({
 		initialState: {
 			systemPrompt,
