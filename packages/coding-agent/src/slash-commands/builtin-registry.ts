@@ -439,7 +439,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		},
 	},
 	{
-		name: "context",
+		name: "window",
 		description: "Set context window budget",
 		inlineHint: "[reset|max|<number>k|<number>m]",
 		allowArgs: true,

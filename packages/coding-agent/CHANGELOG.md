@@ -161,7 +161,7 @@
 - Added fast mode indicator (⚡) to model segment in status line when priority service tier is active
 - Added context usage threshold levels (normal, warning, purple, error) with token-aware thresholds for better context awareness
 - Added `isFastModeEnabled()`, `setFastMode()`, and `toggleFastMode()` methods to AgentSession for fast mode control
-- Added `/context` command for inspecting and adjusting the active token budget (syntax: `reset | max | Nk | Nm | <tokens>`); extended context (up to 1M tokens) is supported on Anthropic direct API and Amazon Bedrock
+- Added `/window` command for inspecting and adjusting the active token budget (syntax: `reset | max | Nk | Nm | <tokens>`); extended context (up to 1M tokens) is supported on Anthropic direct API and Amazon Bedrock
 - Context budget persists per model across sessions and survives `/resume`
 
 ### Changed

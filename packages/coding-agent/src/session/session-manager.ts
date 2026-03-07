@@ -159,7 +159,7 @@ export interface ModeChangeEntry extends SessionEntryBase {
 	data?: Record<string, unknown>;
 }
 
-/** Context budget change entry - tracks /context command changes for session restore. */
+/** Context budget change entry - tracks /window command changes for session restore. */
 export interface ContextBudgetChangeEntry extends SessionEntryBase {
 	type: "context_budget_change";
 	budget: number;
