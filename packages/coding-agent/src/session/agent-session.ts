@@ -4088,7 +4088,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				return;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
-			
+
 			// Track overflow recovery failures to avoid retry loops (especially for API errors like 529)
 			if (reason === "overflow") {
 				this.#lastOverflowRecoveryAttempt = {
@@ -4096,7 +4096,7 @@ Be thorough - include exact file paths, function names, error messages, and tech
 					error: errorMessage,
 				};
 			}
-			
+
 			await this.#emitSessionEvent({
 				type: "auto_compaction_end",
 				action,
