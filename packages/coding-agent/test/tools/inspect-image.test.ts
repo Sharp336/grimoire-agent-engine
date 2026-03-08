@@ -40,6 +40,11 @@ interface CreateSessionOptions {
 	configureVisionRole?: boolean;
 }
 
+interface CompleteSimpleStub {
+	calls: unknown[][];
+	fn: typeof completeSimple;
+}
+
 function createSession(
 	cwd: string,
 	model: Model<"openai-responses">,
@@ -68,6 +73,42 @@ function createSession(
 	};
 }
 
+function createCompleteSimpleSuccessStub(text: string): CompleteSimpleStub {
+	const calls: unknown[][] = [];
+	const fn = (async (...args: unknown[]) => {
+		calls.push(args);
+		return {
+			role: "assistant",
+			api: visionModel.api,
+			provider: visionModel.provider,
+			model: visionModel.id,
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+			content: [{ type: "text", text }],
+		};
+	}) as typeof completeSimple;
+
+	return { calls, fn };
+}
+
+function createCompleteSimpleForbiddenStub(): CompleteSimpleStub {
+	const calls: unknown[][] = [];
+	const fn = (async (...args: unknown[]) => {
+		calls.push(args);
+		throw new Error("completeSimple should not be called");
+	}) as typeof completeSimple;
+
+	return { calls, fn };
+}
+
 describe("InspectImageTool", () => {
 	let testDir: string;
 
@@ -83,32 +124,8 @@ describe("InspectImageTool", () => {
 		const imagePath = path.join(testDir, "screen.png");
 		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const calls: unknown[][] = [];
-		const completeSimpleMock = async (...args: unknown[]) => {
-			calls.push(args);
-			return {
-				role: "assistant",
-				api: visionModel.api,
-				provider: visionModel.provider,
-				model: visionModel.id,
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				},
-				stopReason: "stop",
-				timestamp: Date.now(),
-				content: [{ type: "text", text: "Detected text: Settings" }],
-			};
-		};
-
-		const tool = new InspectImageTool(
-			createSession(testDir, visionModel),
-			completeSimpleMock as typeof completeSimple,
-		);
+		const stub = createCompleteSimpleSuccessStub("Detected text: Settings");
+		const tool = new InspectImageTool(createSession(testDir, visionModel), stub.fn);
 		const result = await tool.execute("call-1", {
 			path: imagePath,
 			question: "Extract visible UI labels.",
@@ -116,9 +133,9 @@ describe("InspectImageTool", () => {
 
 		expect(result.content).toEqual([{ type: "text", text: "Detected text: Settings" }]);
 		expect((result.content as Array<{ type: string }>).some(c => c.type === "image")).toBe(false);
-		expect(calls).toHaveLength(1);
+		expect(stub.calls).toHaveLength(1);
 
-		const request = calls[0]?.[1] as { messages?: Array<{ content?: unknown }> } | undefined;
+		const request = stub.calls[0]?.[1] as { messages?: Array<{ content?: unknown }> } | undefined;
 		const userMessage = request?.messages?.[0];
 		const content = userMessage?.content;
 		expect(Array.isArray(content)).toBe(true);
@@ -131,35 +148,11 @@ describe("InspectImageTool", () => {
 		const imagePath = path.join(testDir, "screen.png");
 		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const calls: unknown[][] = [];
-		const completeSimpleMock = async (...args: unknown[]) => {
-			calls.push(args);
-			return {
-				role: "assistant",
-				api: visionModel.api,
-				provider: visionModel.provider,
-				model: visionModel.id,
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				},
-				stopReason: "stop",
-				timestamp: Date.now(),
-				content: [{ type: "text", text: "Looks clear" }],
-			};
-		};
-
-		const tool = new InspectImageTool(
-			createSession(testDir, visionModel),
-			completeSimpleMock as typeof completeSimple,
-		);
+		const stub = createCompleteSimpleSuccessStub("Looks clear");
+		const tool = new InspectImageTool(createSession(testDir, visionModel), stub.fn);
 		await tool.execute("call-1b", { path: imagePath, question: "What warning is shown?" });
 
-		const request = calls[0]?.[1] as { messages?: Array<{ content?: unknown }> } | undefined;
+		const request = stub.calls[0]?.[1] as { messages?: Array<{ content?: unknown }> } | undefined;
 		const userMessage = request?.messages?.[0];
 		const content = userMessage?.content;
 		const contentParts = (Array.isArray(content) ? content : []) as Array<{ type: string; text?: string }>;
@@ -217,21 +210,14 @@ describe("InspectImageTool", () => {
 		const imagePath = path.join(testDir, "screen.png");
 		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const calls: unknown[][] = [];
-		const completeSimpleMock = async (...args: unknown[]) => {
-			calls.push(args);
-			throw new Error("completeSimpleMock should not be called");
-		};
+		const stub = createCompleteSimpleForbiddenStub();
 		const settings = Settings.isolated({ "images.blockImages": true });
-		const tool = new InspectImageTool(
-			createSession(testDir, visionModel, "test-key", settings),
-			completeSimpleMock as typeof completeSimple,
-		);
+		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
 
 		await expect(tool.execute("call-blocked", { path: imagePath, question: "What is visible?" })).rejects.toThrow(
 			/Image submission is disabled/i,
 		);
-		expect(calls).toHaveLength(0);
+		expect(stub.calls).toHaveLength(0);
 	});
 
 	it("falls back to pi/default when vision role is unset", async () => {
@@ -241,41 +227,20 @@ describe("InspectImageTool", () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("default", `${visionModel.provider}/${visionModel.id}`);
 
-		const calls: unknown[][] = [];
-		const completeSimpleMock = async (...args: unknown[]) => {
-			calls.push(args);
-			return {
-				role: "assistant",
-				api: visionModel.api,
-				provider: visionModel.provider,
-				model: visionModel.id,
-				usage: {
-					input: 1,
-					output: 1,
-					cacheRead: 0,
-					cacheWrite: 0,
-					totalTokens: 2,
-					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				},
-				stopReason: "stop",
-				timestamp: Date.now(),
-				content: [{ type: "text", text: "Fallback default model used" }],
-			};
-		};
-
+		const stub = createCompleteSimpleSuccessStub("Fallback default model used");
 		const tool = new InspectImageTool(
 			createSession(testDir, textOnlyModel, "test-key", settings, {
 				configureVisionRole: false,
 				availableModels: [textOnlyModel, visionModel],
 				activeModel: textOnlyModel,
 			}),
-			completeSimpleMock as typeof completeSimple,
+			stub.fn,
 		);
 
 		const result = await tool.execute("call-1c", { path: imagePath, question: "What text is visible?" });
 		expect(result.details?.model).toBe("openai/gpt-4o");
-		expect(calls).toHaveLength(1);
-		const selectedModel = calls[0]?.[0] as { id?: string } | undefined;
+		expect(stub.calls).toHaveLength(1);
+		const selectedModel = stub.calls[0]?.[0] as { id?: string } | undefined;
 		expect(selectedModel?.id).toBe("gpt-4o");
 	});
 
@@ -283,39 +248,25 @@ describe("InspectImageTool", () => {
 		const imagePath = path.join(testDir, "screen.png");
 		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const calls: unknown[][] = [];
-		const completeSimpleMock = async (...args: unknown[]) => {
-			calls.push(args);
-			throw new Error("completeSimpleMock should not be called");
-		};
-		const tool = new InspectImageTool(
-			createSession(testDir, textOnlyModel),
-			completeSimpleMock as typeof completeSimple,
-		);
+		const stub = createCompleteSimpleForbiddenStub();
+		const tool = new InspectImageTool(createSession(testDir, textOnlyModel), stub.fn);
 
 		await expect(tool.execute("call-2", { path: imagePath, question: "What is visible?" })).rejects.toThrow(
 			/does not support image input/i,
 		);
-		expect(calls).toHaveLength(0);
+		expect(stub.calls).toHaveLength(0);
 	});
 
 	it("fails with actionable error when API key is missing", async () => {
 		const imagePath = path.join(testDir, "screen.png");
 		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const calls: unknown[][] = [];
-		const completeSimpleMock = async (...args: unknown[]) => {
-			calls.push(args);
-			throw new Error("completeSimpleMock should not be called");
-		};
-		const tool = new InspectImageTool(
-			createSession(testDir, visionModel, ""),
-			completeSimpleMock as typeof completeSimple,
-		);
+		const stub = createCompleteSimpleForbiddenStub();
+		const tool = new InspectImageTool(createSession(testDir, visionModel, ""), stub.fn);
 
 		await expect(tool.execute("call-3", { path: imagePath, question: "What is visible?" })).rejects.toThrow(
 			/No API key available/i,
 		);
-		expect(calls).toHaveLength(0);
+		expect(stub.calls).toHaveLength(0);
 	});
 });
