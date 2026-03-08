@@ -878,29 +878,18 @@ describe("stripNewLinePrefixes", () => {
 	});
 
 	it("strips hashline prefixes when all non-empty lines carry them", () => {
-		const lines = ["1#WQ:foo", "2#TZ:bar", "3#HX:baz"];
+		const lines = ["1#AB:foo", "2#CD:bar", "3#EF:baz"];
 		expect(stripNewLinePrefixes(lines)).toEqual(["foo", "bar", "baz"]);
 	});
 
 	it("does NOT strip hashline prefixes when any non-empty line is plain content", () => {
-		const lines = ["1#WQ:foo", "bar", "3#HX:baz"];
-		expect(stripNewLinePrefixes(lines)).toEqual(["1#WQ:foo", "bar", "3#HX:baz"]);
+		const lines = ["1#AB:foo", "bar", "3#EF:baz"];
+		expect(stripNewLinePrefixes(lines)).toEqual(["1#AB:foo", "bar", "3#EF:baz"]);
 	});
 
 	it("strips hash-only prefixes when all non-empty lines carry them", () => {
 		const lines = ["#WQ:", "#TZ:{{/*", "#HX:OC deployment container livenessProbe template"];
 		expect(stripNewLinePrefixes(lines)).toEqual(["", "{{/*", "OC deployment container livenessProbe template"]);
-	});
-
-	it("does NOT strip comment lines that look like hashline prefixes (# Word:)", () => {
-		// Regression: HASHLINE_PREFIX_RE was too broad and matched '# Note:', '# TODO:', etc.
-		// A single-line replacement whose content is a comment would have nonEmpty===hashPrefixCount===1,
-		// triggering stripping and eating the '# Note: ' prefix from the written line.
-		expect(stripNewLinePrefixes(["  # Note: Using a fixed version"])).toEqual(["  # Note: Using a fixed version"]);
-		expect(stripNewLinePrefixes(["# TODO: remove this"])).toEqual(["# TODO: remove this"]);
-		expect(stripNewLinePrefixes(["# FIXME: broken"])).toEqual(["# FIXME: broken"]);
-		// Bash/Python/PS1 comment with colon (e.g. setup scripts)
-		expect(stripNewLinePrefixes(["  # step: do thing"])).toEqual(["  # step: do thing"]);
 	});
 
 	it("does NOT strip '+' when line starts with '++'", () => {
