@@ -276,6 +276,15 @@ describe("Editor component", () => {
 			expect(text).toBe("Hello äöü 😀");
 		});
 
+		it("inserts NumLock keypad digits instead of treating them as navigation", () => {
+			const editor = new Editor(defaultEditorTheme);
+
+			editor.handleInput("a");
+			editor.handleInput("\x1b[57400;129u");
+
+			expect(editor.getText()).toBe("a1");
+		});
+
 		it("deletes single-code-unit unicode characters (umlauts) with Backspace", () => {
 			const editor = new Editor(defaultEditorTheme);
 
