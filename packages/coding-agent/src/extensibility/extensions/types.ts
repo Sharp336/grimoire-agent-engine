@@ -447,10 +447,16 @@ export type SessionEvent =
 // Agent Events
 // ============================================================================
 
-/** Fired before each LLM call. Can modify messages. */
-export interface ContextEvent {
-	type: "context";
-	messages: AgentMessage[];
+}
+
+/** Fired before each provider request. Can modify the context (messages, tools, systemPrompt). */
+export interface BeforeProviderRequestEvent {
+	type: "before_provider_request";
+	context: {
+		systemPrompt?: string;
+		messages: AgentMessage[];
+		tools?: unknown[];
+	};
 }
 
 /** Fired after user submits prompt but before agent loop. */
@@ -765,10 +771,10 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
 }
 
 /** Union of all event types */
-export type ExtensionEvent =
 	| ResourcesDiscoverEvent
 	| SessionEvent
 	| ContextEvent
+	| BeforeProviderRequestEvent
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
@@ -798,6 +804,14 @@ export type ExtensionEvent =
 
 export interface ContextEventResult {
 	messages?: AgentMessage[];
+}
+
+export interface BeforeProviderRequestEventResult {
+	context?: {
+		systemPrompt?: string;
+		messages?: AgentMessage[];
+		tools?: unknown[];
+	};
 }
 
 export interface ToolCallEventResult {
@@ -943,6 +957,10 @@ export interface ExtensionAPI {
 	on(event: "session_before_tree", handler: ExtensionHandler<SessionBeforeTreeEvent, SessionBeforeTreeResult>): void;
 	on(event: "session_tree", handler: ExtensionHandler<SessionTreeEvent>): void;
 	on(event: "context", handler: ExtensionHandler<ContextEvent, ContextEventResult>): void;
+	on(
+		event: "before_provider_request",
+		handler: ExtensionHandler<BeforeProviderRequestEvent, BeforeProviderRequestEventResult>,
+	): void;
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;

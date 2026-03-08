@@ -331,6 +331,8 @@ export class AgentSession {
 
 	// Compaction state
 	#compactionAbortController: AbortController | undefined = undefined;
+	/** Track last overflow recovery attempt to avoid retry loops after API errors (529, etc.) */
+	#lastOverflowRecoveryAttempt: { timestamp: number; error?: string } | undefined = undefined;
 	#autoCompactionAbortController: AbortController | undefined = undefined;
 
 	// Branch summarization state
@@ -3367,6 +3369,20 @@ Be thorough - include exact file paths, function names, error messages, and tech
 		const errorIsFromBeforeCompaction =
 			compactionEntry !== null && assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime();
 		if (sameModel && !errorIsFromBeforeCompaction && isContextOverflow(assistantMessage, contextWindow)) {
+			// Skip if we recently attempted overflow recovery and failed (avoid retry loops after API errors like 529)
+			if (this.#lastOverflowRecoveryAttempt) {
+				const timeSinceAttempt = Date.now() - this.#lastOverflowRecoveryAttempt.timestamp;
+				// Allow retry after 5 minutes
+				if (timeSinceAttempt < 5 * 60 * 1000) {
+					logger.warn("Skipping overflow compaction - recent recovery attempt failed", {
+						error: this.#lastOverflowRecoveryAttempt.error,
+						timeSinceAttemptMs: timeSinceAttempt,
+					});
+					return;
+				}
+				this.#lastOverflowRecoveryAttempt = undefined;
+			}
+
 			// Remove the error message from agent state (it IS saved to session for history,
 			// but we don't want it in context for the retry)
 			const messages = this.agent.state.messages;
@@ -4025,6 +4041,9 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				details,
 				preserveData,
 			};
+			// Clear overflow recovery tracking on success
+			this.#lastOverflowRecoveryAttempt = undefined;
+
 			await this.#emitSessionEvent({ type: "auto_compaction_end", action, result, aborted: false, willRetry });
 
 			if (!willRetry && compactionSettings.autoContinue !== false) {
@@ -4069,6 +4088,15 @@ Be thorough - include exact file paths, function names, error messages, and tech
 				return;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			
+			// Track overflow recovery failures to avoid retry loops (especially for API errors like 529)
+			if (reason === "overflow") {
+				this.#lastOverflowRecoveryAttempt = {
+					timestamp: Date.now(),
+					error: errorMessage,
+				};
+			}
+			
 			await this.#emitSessionEvent({
 				type: "auto_compaction_end",
 				action,

@@ -8,6 +8,7 @@
 
 - Added `glob` parameter to `ast_grep` and `ast_edit` tools for additional glob filtering relative to the `path` parameter
 - Added `combineSearchGlobs` utility function to merge glob patterns from `path` and `glob` parameters
+- Added `before_provider_request` extension hook allowing extensions to intercept and modify provider request context (messages, tools, systemPrompt) before LLM calls
 
 ### Changed
 
@@ -15,6 +16,9 @@
 - Renamed `selector` parameter to `sel` in `ast_grep` and `ast_edit` tools for brevity
 - Updated tool documentation with expanded guidance on AST pattern syntax, metavariable usage, and contextual matching strategies
 - Updated `grep` tool to combine glob patterns from `path` and `glob` parameters instead of throwing an error when both are provided
+- Truncated tool results to 2k characters during context compaction to prevent overflow in summarization
+- Added overflow recovery tracking to prevent auto-compaction retry loops after API errors (e.g., 529 overloaded)
+
 
 ## [13.9.4] - 2026-03-07
 ### Added

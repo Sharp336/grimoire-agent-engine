@@ -5,8 +5,23 @@ Use it for any merge: single file, feature branch, or full release sync.
 
 ## Last Sync Point
 
-**Commit:** `5133697`
-**Date:** 2026-02-16
+**Commit:** `SYNC_PI_MONO_V0_57_0`
+**Date:** 2026-03-07
+**Sync Range:** pi-mono v0.53.0 (2026-02-16) → v0.57.0 (2026-03-07)
+
+### Phase 1 Completed (Critical)
+
+✅ **1.1 RPC JSONL Framing (v0.57.0)** — No changes needed; `Bun.JSONL.parseChunk()` handles Unicode separators correctly
+✅ **1.2 before_provider_request Hook (v0.57.0)** — Extension hook infrastructure added
+✅ **1.3 Compaction Tool Truncation (v0.56.3)** — Tool results truncated to 2k chars during summarization
+✅ **1.4 Auto-compaction Resilience (v0.56.3)** — Overflow recovery tracking prevents retry loops after API errors (529)
+✅ **1.5 ContextUsage Null Handling (v0.52.10)** — Already implemented; returns `null` after compaction
+
+### Phases 2-3 Pending
+
+Phase 2 (TUI improvements) and Phase 3 (architecture adaptations) deferred for future sync.
+
+See `SYNC_PROGRESS_V0_57_0.md` for detailed progress report.
 
 Update this section after each sync; do not reuse the previous range.
 

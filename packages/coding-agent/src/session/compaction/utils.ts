@@ -156,7 +156,9 @@ export function serializeConversation(messages: Message[]): string {
 				.map(c => c.text)
 				.join("");
 			if (content) {
-				parts.push(`[Tool result]: ${content}`);
+				// Truncate tool results to 2k chars to avoid context overflow during summarization
+				const truncated = content.length > 2048 ? content.slice(0, 2048) + "… (truncated)" : content;
+				parts.push(`[Tool result]: ${truncated}`);
 			}
 		}
 	}

@@ -11,6 +11,8 @@ import type { SessionManager } from "../../session/session-manager";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
+	BeforeProviderRequestEvent,
+	BeforeProviderRequestEventResult,
 	CompactOptions,
 	ContextEvent,
 	ContextEventResult,
@@ -67,6 +69,7 @@ type RunnerEmitEvent = Exclude<
 	| ToolResultEvent
 	| UserBashEvent
 	| ContextEvent
+	| BeforeProviderRequestEvent
 	| BeforeAgentStartEvent
 	| ResourcesDiscoverEvent
 	| InputEvent
@@ -713,6 +716,56 @@ export class ExtensionRunner {
 		}
 
 		return currentMessages;
+	}
+
+	async emitBeforeProviderRequest(context: {
+		systemPrompt?: string;
+		messages: AgentMessage[];
+		tools?: unknown[];
+	}): Promise<{ systemPrompt?: string; messages?: AgentMessage[]; tools?: unknown[] } | undefined> {
+		const ctx = this.createContext();
+		let currentContext = { ...context };
+
+		for (const ext of this.extensions) {
+			const handlers = ext.handlers.get("before_provider_request");
+			if (!handlers || handlers.length === 0) continue;
+
+			for (const handler of handlers) {
+				try {
+					const event: BeforeProviderRequestEvent = {
+						type: "before_provider_request",
+						context: currentContext,
+					};
+					const handlerResult = await handler(event, ctx);
+
+					if (handlerResult) {
+						const result = handlerResult as BeforeProviderRequestEventResult;
+						if (result.context) {
+							if (result.context.systemPrompt !== undefined) {
+								currentContext.systemPrompt = result.context.systemPrompt;
+							}
+							if (result.context.messages !== undefined) {
+								currentContext.messages = result.context.messages;
+							}
+							if (result.context.tools !== undefined) {
+								currentContext.tools = result.context.tools;
+							}
+						}
+					}
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					const stack = err instanceof Error ? err.stack : undefined;
+					this.emitError({
+						extensionPath: ext.path,
+						event: "before_provider_request",
+						error: message,
+						stack,
+					});
+				}
+			}
+		}
+
+		return currentContext;
 	}
 
 	async emitBeforeAgentStart(
