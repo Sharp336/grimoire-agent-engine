@@ -724,7 +724,7 @@ export class ExtensionRunner {
 		tools?: unknown[];
 	}): Promise<{ systemPrompt?: string; messages?: AgentMessage[]; tools?: unknown[] } | undefined> {
 		const ctx = this.createContext();
-		let currentContext = { ...context };
+		const currentContext = { ...context };
 
 		for (const ext of this.extensions) {
 			const handlers = ext.handlers.get("before_provider_request");

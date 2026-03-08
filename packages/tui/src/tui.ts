@@ -146,6 +146,14 @@ export interface OverlayOptions {
 	 * Called each render cycle with current terminal dimensions.
 	 */
 	visible?: (termWidth: number, termHeight: number) => boolean;
+
+	// === Focus control ===
+	/**
+	 * If true, don't capture focus when shown. User can focus later via handle.focus() or focusOverlay().
+	 * Useful for overlays that display information (timer, realtime info) while user works with pi.
+	 * Default is false (overlay captures focus like a modal).
+	 */
+	nonCapturing?: boolean;
 }
 
 /**
@@ -158,6 +166,12 @@ export interface OverlayHandle {
 	setHidden(hidden: boolean): void;
 	/** Check if overlay is temporarily hidden */
 	isHidden(): boolean;
+	/** Focus this overlay (for non-capturing overlays) */
+	focus(): void;
+	/** Return focus to previous target (pops focus stack) */
+	unfocus(): void;
+	/** Check if this overlay currently has focus */
+	isFocused(): boolean;
 }
 
 /**
@@ -232,6 +246,7 @@ export class TUI extends Container {
 		options?: OverlayOptions;
 		preFocus: Component | null;
 		hidden: boolean;
+		focused: boolean;
 	}[] = [];
 
 	constructor(terminal: Terminal, showHardwareCursor?: boolean) {
@@ -291,10 +306,16 @@ export class TUI extends Container {
 	 * Returns a handle to control the overlay's visibility.
 	 */
 	showOverlay(component: Component, options?: OverlayOptions): OverlayHandle {
-		const entry = { component, options, preFocus: this.#focusedComponent, hidden: false };
+		const entry = {
+			component,
+			options,
+			preFocus: this.#focusedComponent,
+			hidden: false,
+			focused: !options?.nonCapturing,
+		};
 		this.overlayStack.push(entry);
-		// Only focus if overlay is actually visible
-		if (this.#isOverlayVisible(entry)) {
+		// Only focus if overlay is actually visible and not non-capturing
+		if (this.#isOverlayVisible(entry) && !options?.nonCapturing) {
 			this.setFocus(component);
 		}
 		this.terminal.hideCursor();
@@ -334,9 +355,24 @@ export class TUI extends Container {
 				this.requestRender();
 			},
 			isHidden: () => entry.hidden,
+			focus: () => {
+				if (entry.hidden || !this.#isOverlayVisible(entry)) return;
+				// Mark all overlays as unfocused
+				for (const o of this.overlayStack) o.focused = false;
+				// Mark this overlay as focused
+				entry.focused = true;
+				this.setFocus(component);
+			},
+			unfocus: () => {
+				if (!entry.focused) return;
+				entry.focused = false;
+				// Find next focusable overlay or restore preFocus
+				const topVisible = this.#getTopmostVisibleOverlay();
+				this.setFocus(topVisible?.component ?? entry.preFocus);
+			},
+			isFocused: () => entry.focused,
 		};
 	}
-
 	/** Hide the topmost overlay and restore previous focus. */
 	hideOverlay(): void {
 		const overlay = this.overlayStack.pop();

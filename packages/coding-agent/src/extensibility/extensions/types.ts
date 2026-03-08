@@ -447,6 +447,10 @@ export type SessionEvent =
 // Agent Events
 // ============================================================================
 
+/** Fired to allow extensions to modify the message context. */
+export interface ContextEvent {
+	type: "context";
+	messages: AgentMessage[];
 }
 
 /** Fired before each provider request. Can modify the context (messages, tools, systemPrompt). */
@@ -769,8 +773,8 @@ export function isToolCallEventType<TName extends string, TInput extends Record<
 export function isToolCallEventType(toolName: string, event: ToolCallEvent): boolean {
 	return event.toolName === toolName;
 }
-
-/** Union of all event types */
+export type ExtensionEventType =
+	/** Union of all event types */
 	| ResourcesDiscoverEvent
 	| SessionEvent
 	| ContextEvent
@@ -797,6 +801,9 @@ export function isToolCallEventType(toolName: string, event: ToolCallEvent): boo
 	| InputEvent
 	| ToolCallEvent
 	| ToolResultEvent;
+
+/** @deprecated Use ExtensionEventType instead */
+export type ExtensionEvent = ExtensionEventType;
 
 // ============================================================================
 // Event Results

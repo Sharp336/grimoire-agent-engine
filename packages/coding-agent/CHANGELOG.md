@@ -18,6 +18,10 @@
 - Updated `grep` tool to combine glob patterns from `path` and `glob` parameters instead of throwing an error when both are provided
 - Truncated tool results to 2k characters during context compaction to prevent overflow in summarization
 - Added overflow recovery tracking to prevent auto-compaction retry loops after API errors (e.g., 529 overloaded)
+### Fixed
+
+- Fixed missing `ContextEvent` interface definition for extension event system
+- Fixed missing `ExtensionEvent` type export (added as alias for `ExtensionEventType`)
 
 
 ## [13.9.4] - 2026-03-07

@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Added `focused` property to overlay stack entry type for proper focus tracking in non-capturing overlays
 
 ## [13.7.5] - 2026-03-04
 ### Changed
