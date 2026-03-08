@@ -45,7 +45,10 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 	readonly parameters = inspectImageSchema;
 	readonly strict = true;
 
-	constructor(private readonly session: ToolSession) {
+	constructor(
+		private readonly session: ToolSession,
+		private readonly completeImageRequest: typeof completeSimple = completeSimple,
+	) {
 		this.description = renderPromptTemplate(inspectImageDescription);
 	}
 
@@ -121,7 +124,7 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 			throw new ToolError("inspect_image only supports PNG, JPEG, GIF, and WEBP files detected by file content.");
 		}
 
-		const response = await completeSimple(
+		const response = await this.completeImageRequest(
 			model,
 			{
 				systemPrompt: renderPromptTemplate(inspectImageSystemPromptTemplate),

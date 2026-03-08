@@ -1,9 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { Model } from "@oh-my-pi/pi-ai";
-import * as ai from "@oh-my-pi/pi-ai";
+import type { completeSimple, Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -77,7 +76,6 @@ describe("InspectImageTool", () => {
 	});
 
 	afterEach(() => {
-		vi.restoreAllMocks();
 		fs.rmSync(testDir, { recursive: true, force: true });
 	});
 
@@ -85,25 +83,32 @@ describe("InspectImageTool", () => {
 		const imagePath = path.join(testDir, "screen.png");
 		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const completeSimpleSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			role: "assistant",
-			api: visionModel.api,
-			provider: visionModel.provider,
-			model: visionModel.id,
-			usage: {
-				input: 1,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 2,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-			content: [{ type: "text", text: "Detected text: Settings" }],
-		} as any);
+		const calls: unknown[][] = [];
+		const completeSimpleMock = async (...args: unknown[]) => {
+			calls.push(args);
+			return {
+				role: "assistant",
+				api: visionModel.api,
+				provider: visionModel.provider,
+				model: visionModel.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+				content: [{ type: "text", text: "Detected text: Settings" }],
+			};
+		};
 
-		const tool = new InspectImageTool(createSession(testDir, visionModel));
+		const tool = new InspectImageTool(
+			createSession(testDir, visionModel),
+			completeSimpleMock as typeof completeSimple,
+		);
 		const result = await tool.execute("call-1", {
 			path: imagePath,
 			question: "Extract visible UI labels.",
@@ -111,9 +116,9 @@ describe("InspectImageTool", () => {
 
 		expect(result.content).toEqual([{ type: "text", text: "Detected text: Settings" }]);
 		expect((result.content as Array<{ type: string }>).some(c => c.type === "image")).toBe(false);
-		expect(completeSimpleSpy).toHaveBeenCalledTimes(1);
+		expect(calls).toHaveLength(1);
 
-		const request = completeSimpleSpy.mock.calls[0]?.[1];
+		const request = calls[0]?.[1] as { messages?: Array<{ content?: unknown }> } | undefined;
 		const userMessage = request?.messages?.[0];
 		const content = userMessage?.content;
 		expect(Array.isArray(content)).toBe(true);
@@ -126,28 +131,35 @@ describe("InspectImageTool", () => {
 		const imagePath = path.join(testDir, "screen.png");
 		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const completeSimpleSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			role: "assistant",
-			api: visionModel.api,
-			provider: visionModel.provider,
-			model: visionModel.id,
-			usage: {
-				input: 1,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 2,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-			content: [{ type: "text", text: "Looks clear" }],
-		} as any);
+		const calls: unknown[][] = [];
+		const completeSimpleMock = async (...args: unknown[]) => {
+			calls.push(args);
+			return {
+				role: "assistant",
+				api: visionModel.api,
+				provider: visionModel.provider,
+				model: visionModel.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+				content: [{ type: "text", text: "Looks clear" }],
+			};
+		};
 
-		const tool = new InspectImageTool(createSession(testDir, visionModel));
+		const tool = new InspectImageTool(
+			createSession(testDir, visionModel),
+			completeSimpleMock as typeof completeSimple,
+		);
 		await tool.execute("call-1b", { path: imagePath, question: "What warning is shown?" });
 
-		const request = completeSimpleSpy.mock.calls[0]?.[1];
+		const request = calls[0]?.[1] as { messages?: Array<{ content?: unknown }> } | undefined;
 		const userMessage = request?.messages?.[0];
 		const content = userMessage?.content;
 		const contentParts = (Array.isArray(content) ? content : []) as Array<{ type: string; text?: string }>;
@@ -205,14 +217,21 @@ describe("InspectImageTool", () => {
 		const imagePath = path.join(testDir, "screen.png");
 		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const completeSimpleSpy = vi.spyOn(ai, "completeSimple");
+		const calls: unknown[][] = [];
+		const completeSimpleMock = async (...args: unknown[]) => {
+			calls.push(args);
+			throw new Error("completeSimpleMock should not be called");
+		};
 		const settings = Settings.isolated({ "images.blockImages": true });
-		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings));
+		const tool = new InspectImageTool(
+			createSession(testDir, visionModel, "test-key", settings),
+			completeSimpleMock as typeof completeSimple,
+		);
 
 		await expect(tool.execute("call-blocked", { path: imagePath, question: "What is visible?" })).rejects.toThrow(
 			/Image submission is disabled/i,
 		);
-		expect(completeSimpleSpy).not.toHaveBeenCalled();
+		expect(calls).toHaveLength(0);
 	});
 
 	it("falls back to pi/default when vision role is unset", async () => {
@@ -222,23 +241,27 @@ describe("InspectImageTool", () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("default", `${visionModel.provider}/${visionModel.id}`);
 
-		const completeSimpleSpy = vi.spyOn(ai, "completeSimple").mockResolvedValue({
-			role: "assistant",
-			api: visionModel.api,
-			provider: visionModel.provider,
-			model: visionModel.id,
-			usage: {
-				input: 1,
-				output: 1,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 2,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			},
-			stopReason: "stop",
-			timestamp: Date.now(),
-			content: [{ type: "text", text: "Fallback default model used" }],
-		} as any);
+		const calls: unknown[][] = [];
+		const completeSimpleMock = async (...args: unknown[]) => {
+			calls.push(args);
+			return {
+				role: "assistant",
+				api: visionModel.api,
+				provider: visionModel.provider,
+				model: visionModel.id,
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				},
+				stopReason: "stop",
+				timestamp: Date.now(),
+				content: [{ type: "text", text: "Fallback default model used" }],
+			};
+		};
 
 		const tool = new InspectImageTool(
 			createSession(testDir, textOnlyModel, "test-key", settings, {
@@ -246,12 +269,13 @@ describe("InspectImageTool", () => {
 				availableModels: [textOnlyModel, visionModel],
 				activeModel: textOnlyModel,
 			}),
+			completeSimpleMock as typeof completeSimple,
 		);
 
 		const result = await tool.execute("call-1c", { path: imagePath, question: "What text is visible?" });
 		expect(result.details?.model).toBe("openai/gpt-4o");
-		expect(completeSimpleSpy).toHaveBeenCalledTimes(1);
-		const selectedModel = completeSimpleSpy.mock.calls[0]?.[0];
+		expect(calls).toHaveLength(1);
+		const selectedModel = calls[0]?.[0] as { id?: string } | undefined;
 		expect(selectedModel?.id).toBe("gpt-4o");
 	});
 
@@ -259,25 +283,39 @@ describe("InspectImageTool", () => {
 		const imagePath = path.join(testDir, "screen.png");
 		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const completeSimpleSpy = vi.spyOn(ai, "completeSimple");
-		const tool = new InspectImageTool(createSession(testDir, textOnlyModel));
+		const calls: unknown[][] = [];
+		const completeSimpleMock = async (...args: unknown[]) => {
+			calls.push(args);
+			throw new Error("completeSimpleMock should not be called");
+		};
+		const tool = new InspectImageTool(
+			createSession(testDir, textOnlyModel),
+			completeSimpleMock as typeof completeSimple,
+		);
 
 		await expect(tool.execute("call-2", { path: imagePath, question: "What is visible?" })).rejects.toThrow(
 			/does not support image input/i,
 		);
-		expect(completeSimpleSpy).not.toHaveBeenCalled();
+		expect(calls).toHaveLength(0);
 	});
 
 	it("fails with actionable error when API key is missing", async () => {
 		const imagePath = path.join(testDir, "screen.png");
 		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
-		const completeSimpleSpy = vi.spyOn(ai, "completeSimple");
-		const tool = new InspectImageTool(createSession(testDir, visionModel, ""));
+		const calls: unknown[][] = [];
+		const completeSimpleMock = async (...args: unknown[]) => {
+			calls.push(args);
+			throw new Error("completeSimpleMock should not be called");
+		};
+		const tool = new InspectImageTool(
+			createSession(testDir, visionModel, ""),
+			completeSimpleMock as typeof completeSimple,
+		);
 
 		await expect(tool.execute("call-3", { path: imagePath, question: "What is visible?" })).rejects.toThrow(
 			/No API key available/i,
 		);
-		expect(completeSimpleSpy).not.toHaveBeenCalled();
+		expect(calls).toHaveLength(0);
 	});
 });
