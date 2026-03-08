@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { Effort } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { isDefaultModelAlias, resolveModelOverride } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 
@@ -31,6 +33,7 @@ const sonnet: Model<"anthropic-messages"> = {
 	cost: { input: 3, output: 15, cacheRead: 0.3, cacheWrite: 3.75 },
 	contextWindow: 200000,
 	maxTokens: 8192,
+	thinking: { mode: "anthropic-budget-effort", minLevel: Effort.Minimal, maxLevel: Effort.XHigh },
 };
 
 const gpt4o: Model<"anthropic-messages"> = {
@@ -147,14 +150,14 @@ describe("resolveModelOverride", () => {
 	test("pattern with thinking level extracts both model and level", () => {
 		const result = resolveModelOverride(["claude-sonnet-4-5:high"], mockRegistry(allModels));
 		expect(result.model?.id).toBe("claude-sonnet-4-5");
-		expect(result.thinkingLevel).toBe("high");
+		expect(result.thinkingLevel).toBe(ThinkingLevel.High);
 	});
 
-	test("thinking level off is normalized to undefined", () => {
-		// :off means no thinking — resolveModelOverride converts it to undefined
+	test("thinking level off disables reasoning", () => {
+		// :off means no thinking — resolveModelOverride preserves ThinkingLevel.Off
 		const result = resolveModelOverride(["claude-sonnet-4-5:off"], mockRegistry(allModels));
 		expect(result.model?.id).toBe("claude-sonnet-4-5");
-		expect(result.thinkingLevel).toBeUndefined();
+		expect(result.thinkingLevel).toBe(ThinkingLevel.Off);
 	});
 
 	test("no models available — all patterns fail to match", () => {
