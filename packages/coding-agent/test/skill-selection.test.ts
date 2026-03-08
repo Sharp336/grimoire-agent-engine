@@ -24,13 +24,26 @@ describe("selectPromptSkills", () => {
 		expect(selected.map(skill => skill.name)).toContain("linear");
 	});
 
-	it("auto-selects relevant skills from prompt text", () => {
+	it("selects explicitly named skills from prompt text", () => {
+		const selected = selectPromptSkills(
+			skills,
+			"use vercel-react-best-practices for this optimization task",
+			[],
+		);
+		expect(selected.map(skill => skill.name)).toContain("vercel-react-best-practices");
+	});
+
+	it("does not auto-select skills from generic semantic similarity", () => {
 		const selected = selectPromptSkills(skills, "optimize React Next.js bundle size and performance", []);
-		expect(selected[0]?.name).toBe("vercel-react-best-practices");
+		expect(selected).toHaveLength(0);
 	});
 
 	it("keeps pinned skills first and avoids duplicates", () => {
-		const selected = selectPromptSkills(skills, "please optimize react performance", ["vercel-react-best-practices"]);
+		const selected = selectPromptSkills(
+			skills,
+			"please use vercel-react-best-practices to optimize react performance",
+			["vercel-react-best-practices"],
+		);
 		const names = selected.map(skill => skill.name);
 		expect(names[0]).toBe("vercel-react-best-practices");
 		expect(names.filter(name => name === "vercel-react-best-practices")).toHaveLength(1);

@@ -70,15 +70,6 @@ export interface LoadSkillsOptions extends SkillsSettings {
 	cwd?: string;
 }
 
-const CORE_SKILL_NAMES = new Set([
-	"using-superpowers",
-	"brainstorming",
-	"writing-plans",
-	"systematic-debugging",
-	"test-driven-development",
-	"verification-before-completion",
-]);
-
 function normalizePathForComparison(value: string): string {
 	const resolved = path.resolve(value);
 	return process.platform === "win32" ? resolved.toLowerCase() : resolved;
@@ -197,7 +188,6 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 
 	// Check if skill name matches any of the include patterns
 	function matchesIncludePatterns(name: string): boolean {
-		if (CORE_SKILL_NAMES.has(name.toLowerCase())) return true;
 		if (includeSkills.length === 0) return true;
 		return includeSkills.some(pattern => new Bun.Glob(pattern).match(name));
 	}

@@ -39,6 +39,9 @@ const RE_SIGNIFICANT = /[\p{L}\p{N}]/u;
  * The line input should not include a trailing newline.
  */
 export function computeLineHash(idx: number, line: string): string {
+	if (typeof line !== "string") {
+		line = line === null || line === undefined ? "" : String(line);
+	}
 	if (line.endsWith("\r")) {
 		line = line.slice(0, -1);
 	}

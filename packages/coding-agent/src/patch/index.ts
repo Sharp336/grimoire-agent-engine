@@ -134,13 +134,29 @@ export function stripNewLinePrefixes(lines: string[]): string[] {
 	});
 }
 
+function coerceHashlineLines(input: unknown[]): string[] {
+	const output: string[] = [];
+	for (const entry of input) {
+		if (typeof entry === "string") {
+			output.push(entry);
+			continue;
+		}
+		if (entry === null || entry === undefined) {
+			output.push("");
+			continue;
+		}
+		output.push(String(entry));
+	}
+	return output;
+}
+
 export function hashlineParseText(edit: string[] | string | null): string[] {
 	if (edit === null) return [];
 	if (typeof edit === "string") {
 		const normalizedEdit = edit.endsWith("\n") ? edit.slice(0, -1) : edit;
 		edit = normalizedEdit.replaceAll("\r", "").split("\n");
 	}
-	return stripNewLinePrefixes(edit);
+	return stripNewLinePrefixes(coerceHashlineLines(edit as unknown[]));
 }
 
 const hashlineEditSchema = Type.Object(
@@ -160,7 +176,10 @@ const hashlineEditSchema = Type.Object(
 const hashlineEditParamsSchema = Type.Object(
 	{
 		path: Type.String({ description: "path" }),
-		edits: Type.Array(hashlineEditSchema, { description: "edits over $path" }),
+		edits: Type.Union([
+			Type.Array(hashlineEditSchema, { description: "edits over $path" }),
+			Type.String({ description: "JSON-encoded edits array (compat mode)" }),
+		]),
 		delete: Type.Optional(Type.Boolean({ description: "If true, delete $path" })),
 		move: Type.Optional(Type.String({ description: "If set, move $path to $move" })),
 	},
@@ -169,6 +188,33 @@ const hashlineEditParamsSchema = Type.Object(
 
 export type HashlineToolEdit = Static<typeof hashlineEditSchema>;
 export type HashlineParams = Static<typeof hashlineEditParamsSchema>;
+const editAnyParamsSchema = Type.Union([replaceEditSchema, patchEditSchema, hashlineEditParamsSchema]);
+
+function inferEditModeFromParams(params: ReplaceParams | PatchParams | HashlineParams): EditMode | undefined {
+	const record = params as Record<string, unknown>;
+	if (
+		Object.prototype.hasOwnProperty.call(record, "edits") ||
+		Object.prototype.hasOwnProperty.call(record, "delete") ||
+		Object.prototype.hasOwnProperty.call(record, "move")
+	) {
+		return "hashline";
+	}
+	if (
+		Object.prototype.hasOwnProperty.call(record, "old_text") ||
+		Object.prototype.hasOwnProperty.call(record, "new_text") ||
+		Object.prototype.hasOwnProperty.call(record, "all")
+	) {
+		return "replace";
+	}
+	if (
+		Object.prototype.hasOwnProperty.call(record, "diff") ||
+		Object.prototype.hasOwnProperty.call(record, "op") ||
+		Object.prototype.hasOwnProperty.call(record, "rename")
+	) {
+		return "patch";
+	}
+	return undefined;
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Resilient anchor resolution
@@ -226,6 +272,51 @@ function tryParseTag(raw: string): Anchor | undefined {
 	} catch {
 		return undefined;
 	}
+}
+
+function parseHashlineEditsInput(input: HashlineParams["edits"]): HashlineToolEdit[] {
+	if (Array.isArray(input)) return input;
+	const raw = input.trim();
+	if (raw.length === 0) {
+		throw new Error("Invalid edits: expected a non-empty array or JSON-encoded array.");
+	}
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		throw new Error("Invalid edits: expected array or JSON-encoded array.");
+	}
+	if (!Array.isArray(parsed)) {
+		throw new Error("Invalid edits: JSON value must be an array.");
+	}
+	return parsed.map((entry, index) => {
+		if (!entry || typeof entry !== "object") {
+			throw new Error(`Invalid edits[${index}]: expected object.`);
+		}
+		const record = entry as Record<string, unknown>;
+		const op = record.op;
+		if (op !== "replace" && op !== "append" && op !== "prepend") {
+			throw new Error(`Invalid edits[${index}].op: expected one of replace|append|prepend.`);
+		}
+		const pos = record.pos;
+		const end = record.end;
+		const lines = Object.prototype.hasOwnProperty.call(record, "lines") ? record.lines : null;
+		if (pos !== undefined && typeof pos !== "string") {
+			throw new Error(`Invalid edits[${index}].pos: expected string.`);
+		}
+		if (end !== undefined && typeof end !== "string") {
+			throw new Error(`Invalid edits[${index}].end: expected string.`);
+		}
+		if (lines !== null && typeof lines !== "string" && !Array.isArray(lines)) {
+			throw new Error(`Invalid edits[${index}].lines: expected string, array, or null.`);
+		}
+		return {
+			op,
+			pos: typeof pos === "string" ? pos : undefined,
+			end: typeof end === "string" ? end : undefined,
+			lines: lines as string[] | string | null,
+		};
+	});
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -321,6 +412,7 @@ type TInput = typeof replaceEditSchema | typeof patchEditSchema | typeof hashlin
 export type EditMode = "replace" | "patch" | "hashline";
 
 export const DEFAULT_EDIT_MODE: EditMode = "hashline";
+const MAX_DUPLICATE_EDIT_BATCHES = 64;
 
 const EDIT_ID: Record<string, EditMode> = Object.fromEntries(
 	["replace", "patch", "hashline"].map(mode => [mode, mode as EditMode]),
@@ -343,6 +435,8 @@ export class EditTool implements AgentTool<TInput> {
 	readonly #fuzzyThreshold: number;
 	readonly #writethrough: WritethroughCallback;
 	readonly #editMode?: EditMode | null;
+	readonly #seenEditSignaturesByBatch = new Map<string, Set<string>>();
+	readonly #seenBatchOrder: string[] = [];
 
 	constructor(private readonly session: ToolSession) {
 		const {
@@ -431,14 +525,44 @@ export class EditTool implements AgentTool<TInput> {
 	 * Dynamic parameters schema based on current edit mode (which depends on current model).
 	 */
 	get parameters(): TInput {
-		switch (this.mode) {
-			case "patch":
-				return patchEditSchema;
-			case "hashline":
-				return hashlineEditParamsSchema;
-			default:
-				return replaceEditSchema;
+		// Compat: allow alternate edit payload shapes and route in execute().
+		return editAnyParamsSchema as unknown as TInput;
+	}
+
+	#isDuplicateBatchEdit(signature: string, context?: AgentToolContext): boolean {
+		const batchId = context?.toolCall?.batchId;
+		if (!batchId) return false;
+		let batchSignatures = this.#seenEditSignaturesByBatch.get(batchId);
+		if (!batchSignatures) {
+			batchSignatures = new Set<string>();
+			this.#seenEditSignaturesByBatch.set(batchId, batchSignatures);
+			this.#seenBatchOrder.push(batchId);
+			while (this.#seenBatchOrder.length > MAX_DUPLICATE_EDIT_BATCHES) {
+				const evictedBatch = this.#seenBatchOrder.shift();
+				if (evictedBatch) {
+					this.#seenEditSignaturesByBatch.delete(evictedBatch);
+				}
+			}
 		}
+		if (batchSignatures.has(signature)) return true;
+		batchSignatures.add(signature);
+		return false;
+	}
+
+	#duplicateEditSkipped(path: string): AgentToolResult<EditToolDetails, TInput> {
+		return {
+			content: [
+				{
+					type: "text",
+					text: `Skipped duplicate edit in the same tool batch for ${path}. Continue with other edits.`,
+				},
+			],
+			details: {
+				diff: "",
+				firstChangedLine: undefined,
+				meta: outputMeta().get(),
+			},
+		};
 	}
 
 	async execute(
@@ -449,21 +573,39 @@ export class EditTool implements AgentTool<TInput> {
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
 		const batchRequest = getLspBatchRequest(context?.toolCall);
+		const effectiveMode = inferEditModeFromParams(params) ?? this.mode;
 
 		// ─────────────────────────────────────────────────────────────────
 		// Hashline mode execution
 		// ─────────────────────────────────────────────────────────────────
-		if (this.mode === "hashline") {
-			const { path, edits, delete: deleteFile, move } = params as HashlineParams;
+		if (effectiveMode === "hashline") {
+			const { path, edits: rawEdits, delete: deleteFile, move } = params as HashlineParams;
+			const edits = parseHashlineEditsInput(rawEdits);
 
 			enforcePlanModeWrite(this.session, path, { op: deleteFile ? "delete" : "update", move });
 
-			if (path.endsWith(".ipynb") && edits?.length > 0) {
+			if (path.endsWith(".ipynb") && edits.length > 0) {
 				throw new Error("Cannot edit Jupyter notebooks with the Edit tool. Use the NotebookEdit tool instead.");
 			}
 
 			const absolutePath = resolvePlanPath(this.session, path);
 			const resolvedMove = move ? resolvePlanPath(this.session, move) : undefined;
+			const normalizedHashlineEdits = edits.map(edit => ({
+				op: edit.op,
+				pos: edit.pos ?? "",
+				end: edit.end ?? "",
+				lines: hashlineParseText(edit.lines),
+			}));
+			const hashlineSignature = JSON.stringify({
+				mode: "hashline",
+				path: absolutePath,
+				delete: !!deleteFile,
+				move: resolvedMove ?? "",
+				edits: normalizedHashlineEdits,
+			});
+			if (this.#isDuplicateBatchEdit(hashlineSignature, context)) {
+				return this.#duplicateEditSkipped(path);
+			}
 
 			if (deleteFile) {
 				if (await fs.exists(absolutePath)) {
@@ -577,7 +719,14 @@ export class EditTool implements AgentTool<TInput> {
 						diagnostic += `\nThe file currently contains these lines:\n${preview}\nYour edits were normalized back to the original content (whitespace-only differences are preserved as-is). Ensure your replacement changes actual code, not just formatting.`;
 					}
 				}
-				throw new Error(diagnostic);
+				return {
+					content: [{ type: "text", text: `${diagnostic}\nNo-op edit skipped; continue with other changes.` }],
+					details: {
+						diff: "",
+						firstChangedLine: undefined,
+						meta: outputMeta().get(),
+					},
+				};
 			}
 
 			const finalContent = bom + restoreLineEndings(result.text, originalEnding);
@@ -627,7 +776,7 @@ export class EditTool implements AgentTool<TInput> {
 		// ─────────────────────────────────────────────────────────────────
 		// Patch mode execution
 		// ─────────────────────────────────────────────────────────────────
-		if (this.mode === "patch") {
+		if (effectiveMode === "patch") {
 			const { path, op: rawOp, rename, diff } = params as PatchParams;
 
 			// Normalize unrecognized operations to "update"
@@ -636,6 +785,16 @@ export class EditTool implements AgentTool<TInput> {
 			enforcePlanModeWrite(this.session, path, { op, move: rename });
 			const resolvedPath = resolvePlanPath(this.session, path);
 			const resolvedRename = rename ? resolvePlanPath(this.session, rename) : undefined;
+			const patchSignature = JSON.stringify({
+				mode: "patch",
+				path: resolvedPath,
+				op,
+				rename: resolvedRename ?? "",
+				diff: normalizeToLF(diff ?? ""),
+			});
+			if (this.#isDuplicateBatchEdit(patchSignature, context)) {
+				return this.#duplicateEditSkipped(path);
+			}
 
 			if (path.endsWith(".ipynb")) {
 				throw new Error("Cannot edit Jupyter notebooks with the Edit tool. Use the NotebookEdit tool instead.");
@@ -723,6 +882,34 @@ export class EditTool implements AgentTool<TInput> {
 		}
 
 		const absolutePath = resolvePlanPath(this.session, path);
+		const normalizedOldText = normalizeToLF(old_text);
+		const normalizedNewText = normalizeToLF(new_text);
+		const replaceSignature = JSON.stringify({
+			mode: "replace",
+			path: absolutePath,
+			oldText: normalizedOldText,
+			newText: normalizedNewText,
+			all: all ?? false,
+		});
+		if (this.#isDuplicateBatchEdit(replaceSignature, context)) {
+			return this.#duplicateEditSkipped(path);
+		}
+
+		if (normalizedOldText === normalizedNewText) {
+			return {
+				content: [
+					{
+						type: "text",
+						text: `No changes made to ${path}. old_text and new_text are identical; no-op edit skipped.`,
+					},
+				],
+				details: {
+					diff: "",
+					firstChangedLine: undefined,
+					meta: outputMeta().get(),
+				},
+			};
+		}
 
 		if (!(await fs.exists(absolutePath))) {
 			throw new Error(`File not found: ${path}`);
@@ -732,8 +919,6 @@ export class EditTool implements AgentTool<TInput> {
 		const { bom, text: content } = stripBom(rawContent);
 		const originalEnding = detectLineEnding(content);
 		const normalizedContent = normalizeToLF(content);
-		const normalizedOldText = normalizeToLF(old_text);
-		const normalizedNewText = normalizeToLF(new_text);
 
 		const result = replaceText(normalizedContent, normalizedOldText, normalizedNewText, {
 			fuzzy: this.#allowFuzzy,
@@ -765,9 +950,21 @@ export class EditTool implements AgentTool<TInput> {
 		}
 
 		if (normalizedContent === result.content) {
-			throw new Error(
-				`No changes made to ${path}. The replacement produced identical content. This might indicate an issue with special characters or the text not existing as expected.`,
-			);
+			return {
+				content: [
+					{
+						type: "text",
+						text:
+							`No changes made to ${path}. The replacement produced identical content. ` +
+							`This no-op was skipped; re-read and apply a materially different edit if needed.`,
+					},
+				],
+				details: {
+					diff: "",
+					firstChangedLine: undefined,
+					meta: outputMeta().get(),
+				},
+			};
 		}
 
 		const finalContent = bom + restoreLineEndings(result.content, originalEnding);

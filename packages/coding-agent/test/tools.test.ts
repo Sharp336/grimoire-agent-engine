@@ -2,8 +2,10 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/patch";
+import { computeLineHash } from "@oh-my-pi/pi-coding-agent/patch/hashline";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/find";
@@ -444,6 +446,55 @@ function b() {
 			expect(getTextOutput(result)).toContain("Successfully replaced text");
 			const content = await Bun.file(testFile).text();
 			expect(content).toBe("hello universe");
+		});
+
+		it("should skip duplicate replace edits in the same tool batch", async () => {
+			const testFile = path.join(testDir, "edit-duplicate-batch.txt");
+			fs.writeFileSync(testFile, "hello world");
+
+			const batchToolCalls = [
+				{ id: "edit-dup-1", name: "edit" },
+				{ id: "edit-dup-2", name: "edit" },
+			];
+			const ctx0 = {
+				toolCall: { batchId: "batch-duplicate", index: 0, total: 2, toolCalls: batchToolCalls },
+			} as AgentToolContext;
+			const ctx1 = {
+				toolCall: { batchId: "batch-duplicate", index: 1, total: 2, toolCalls: batchToolCalls },
+			} as AgentToolContext;
+
+			const firstResult = await editTool.execute(
+				"edit-dup-1",
+				{ path: testFile, old_text: "world", new_text: "universe" },
+				undefined,
+				undefined,
+				ctx0,
+			);
+			expect(getTextOutput(firstResult)).toContain("Successfully replaced");
+
+			const secondResult = await editTool.execute(
+				"edit-dup-2",
+				{ path: testFile, old_text: "world", new_text: "universe" },
+				undefined,
+				undefined,
+				ctx1,
+			);
+			expect(getTextOutput(secondResult)).toContain("Skipped duplicate edit in the same tool batch");
+			expect(await Bun.file(testFile).text()).toBe("hello universe");
+		});
+
+		it("should skip no-op replace when old_text and new_text are identical", async () => {
+			const testFile = path.join(testDir, "edit-identical-input.txt");
+			fs.writeFileSync(testFile, "const x = 1;\n");
+
+			const result = await editTool.execute("edit-identical-input", {
+				path: testFile,
+				old_text: "const x = 1;\n",
+				new_text: "const x = 1;\n",
+			});
+
+			expect(getTextOutput(result)).toContain("old_text and new_text are identical");
+			expect(await Bun.file(testFile).text()).toBe("const x = 1;\n");
 		});
 	});
 
@@ -949,6 +1000,87 @@ describe("edit tool CRLF handling", () => {
 			expect(fs.existsSync(sourceFile)).toBe(false);
 			expect(fs.existsSync(targetFile)).toBe(true);
 			expect(await Bun.file(targetFile).text()).toBe("unchanged content\n");
+		} finally {
+			fs.rmSync(hashDir, { recursive: true, force: true });
+			if (originalEditVariant === undefined) delete Bun.env.PI_EDIT_VARIANT;
+			else Bun.env.PI_EDIT_VARIANT = originalEditVariant;
+		}
+	});
+
+	it("should accept JSON-encoded edits string in hashline mode", async () => {
+		const originalEditVariant = Bun.env.PI_EDIT_VARIANT;
+		Bun.env.PI_EDIT_VARIANT = "hashline";
+
+		const hashDir = path.join(os.tmpdir(), `coding-agent-hashline-json-edits-${Snowflake.next()}`);
+		fs.mkdirSync(hashDir, { recursive: true });
+		const testFile = path.join(hashDir, "json-edits.txt");
+		fs.writeFileSync(testFile, "hello\n");
+
+		try {
+			const session = createTestToolSession(hashDir);
+			const hashlineEditTool = new EditTool(session);
+			const lineHash = `1#${computeLineHash(1, "hello")}`;
+			const payload = JSON.stringify([{ op: "replace", pos: lineHash, lines: ["hi"] }]);
+			const result = await hashlineEditTool.execute("hashline-json-edits-1", {
+				path: testFile,
+				edits: payload,
+			} as any);
+
+			expect(getTextOutput(result)).toContain("Updated");
+			expect(await Bun.file(testFile).text()).toBe("hi\n");
+		} finally {
+			fs.rmSync(hashDir, { recursive: true, force: true });
+			if (originalEditVariant === undefined) delete Bun.env.PI_EDIT_VARIANT;
+			else Bun.env.PI_EDIT_VARIANT = originalEditVariant;
+		}
+	});
+
+	it("should return friendly error for invalid JSON edits string in hashline mode", async () => {
+		const originalEditVariant = Bun.env.PI_EDIT_VARIANT;
+		Bun.env.PI_EDIT_VARIANT = "hashline";
+
+		const hashDir = path.join(os.tmpdir(), `coding-agent-hashline-json-invalid-${Snowflake.next()}`);
+		fs.mkdirSync(hashDir, { recursive: true });
+		const testFile = path.join(hashDir, "json-invalid.txt");
+		fs.writeFileSync(testFile, "hello\n");
+
+		try {
+			const session = createTestToolSession(hashDir);
+			const hashlineEditTool = new EditTool(session);
+			await expect(
+				hashlineEditTool.execute("hashline-json-edits-invalid", {
+					path: testFile,
+					edits: "{not-valid-json}",
+				} as any),
+			).rejects.toThrow(/expected array or JSON-encoded array/i);
+		} finally {
+			fs.rmSync(hashDir, { recursive: true, force: true });
+			if (originalEditVariant === undefined) delete Bun.env.PI_EDIT_VARIANT;
+			else Bun.env.PI_EDIT_VARIANT = originalEditVariant;
+		}
+	});
+
+	it("should route hashline-shaped args even when default mode is replace", async () => {
+		const originalEditVariant = Bun.env.PI_EDIT_VARIANT;
+		Bun.env.PI_EDIT_VARIANT = "replace";
+
+		const hashDir = path.join(os.tmpdir(), `coding-agent-edit-infer-hashline-${Snowflake.next()}`);
+		fs.mkdirSync(hashDir, { recursive: true });
+		const testFile = path.join(hashDir, "infer-hashline.txt");
+		fs.writeFileSync(testFile, "hello\n");
+
+		try {
+			const session = createTestToolSession(hashDir);
+			const editToolCompat = new EditTool(session);
+			const lineHash = `1#${computeLineHash(1, "hello")}`;
+			const payload = JSON.stringify([{ op: "replace", pos: lineHash, lines: ["hi"] }]);
+			const result = await editToolCompat.execute("edit-infer-hashline-1", {
+				path: testFile,
+				edits: payload,
+			} as any);
+
+			expect(getTextOutput(result)).toContain("Updated");
+			expect(await Bun.file(testFile).text()).toBe("hi\n");
 		} finally {
 			fs.rmSync(hashDir, { recursive: true, force: true });
 			if (originalEditVariant === undefined) delete Bun.env.PI_EDIT_VARIANT;

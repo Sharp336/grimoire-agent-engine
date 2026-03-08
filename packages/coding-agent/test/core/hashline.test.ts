@@ -56,6 +56,11 @@ describe("computeLineHash", () => {
 		const b = computeLineHash(2, "hello");
 		expect(a).toBe(b);
 	});
+
+	it("does not crash on non-string input at runtime", () => {
+		const hash = computeLineHash(1, undefined as unknown as string);
+		expect(hash).toMatch(/^[ZPMQVRWSNKTXJBYH]{2}$/);
+	});
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -918,9 +923,9 @@ describe("hashlineParseContent", () => {
 		expect(hashlineParseText(null)).toEqual([]);
 	});
 
-	it("returns array input as-is when no strip heuristic applies", () => {
+	it("returns equivalent array input when no strip heuristic applies", () => {
 		const input = ["- [x] done", "- [ ] todo"];
-		expect(hashlineParseText(input)).toBe(input);
+		expect(hashlineParseText(input)).toEqual(input);
 	});
 
 	it("strips hashline prefixes from array input when all non-empty lines are prefixed", () => {
@@ -953,6 +958,11 @@ describe("hashlineParseContent", () => {
 
 	it("still strips trailing empty from string split", () => {
 		expect(hashlineParseText("foo\n")).toEqual(["foo"]);
+	});
+
+	it("coerces non-string array items to safe strings", () => {
+		const malformed = [undefined, null, 42, true, "ok"] as unknown as string[];
+		expect(hashlineParseText(malformed)).toEqual(["", "", "42", "true", "ok"]);
 	});
 
 	it("regression: set op with Markdown list string content preserves '-' in file", () => {
