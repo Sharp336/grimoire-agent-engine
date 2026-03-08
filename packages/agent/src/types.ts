@@ -131,6 +131,18 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * When set and returns a value, overrides the static `toolChoice`.
 	 */
 	getToolChoice?: () => ToolChoice | undefined;
+
+	/**
+	 * Extension runner for invoking before_provider_request hook.
+	 * If provided, called before each LLM request to allow extensions to modify context.
+	 */
+	extensionRunner?: {
+		emitBeforeProviderRequest: (context: {
+			systemPrompt: string;
+			messages: AgentMessage[];
+			tools: AgentTool[];
+		}) => Promise<{ systemPrompt?: string; messages?: AgentMessage[]; tools?: unknown[] } | undefined>;
+	};
 }
 
 export interface ToolCallContext {

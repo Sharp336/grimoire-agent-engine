@@ -159,6 +159,18 @@ export interface AgentOptions {
 	 * Cursor tool result callback for exec tool responses.
 	 */
 	cursorOnToolResult?: CursorToolResultHandler;
+
+	/**
+	 * Extension runner for invoking before_provider_request hook.
+	 * If provided, called before each LLM request to allow extensions to modify context.
+	 */
+	extensionRunner?: {
+		emitBeforeProviderRequest: (context: {
+			systemPrompt: string;
+			messages: AgentMessage[];
+			tools: AgentTool[];
+		}) => Promise<{ systemPrompt?: string; messages?: AgentMessage[]; tools?: unknown[] } | undefined>;
+	};
 }
 
 export interface AgentPromptOptions {

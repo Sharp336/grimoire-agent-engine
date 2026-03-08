@@ -1406,6 +1406,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 			return undefined;
 		},
+		extensionRunner: extensionRunner
+			? { emitBeforeProviderRequest: ctx => extensionRunner.emitBeforeProviderRequest(ctx) }
+			: undefined,
 	});
 	cursorEventEmitter = event => agent.emitExternalEvent(event);
 

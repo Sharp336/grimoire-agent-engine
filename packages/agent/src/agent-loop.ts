@@ -319,12 +319,20 @@ async function streamAssistantResponse(
 		messages: normalizedMessages,
 		tools: normalizeTools(context.tools, !!config.intentTracing),
 	};
-
 	const streamFunction = streamFn || streamSimple;
 
 	// Resolve API key (important for expiring tokens)
 	const resolvedApiKey =
 		(config.getApiKey ? await config.getApiKey(config.model.provider) : undefined) || config.apiKey;
+
+	// Invoke before_provider_request hook to allow extensions to modify context
+	if (config.extensionRunner) {
+		await config.extensionRunner.emitBeforeProviderRequest({
+			systemPrompt: llmContext.systemPrompt ?? "",
+			messages: context.messages,
+			tools: context.tools ?? [],
+		});
+	}
 
 	const dynamicToolChoice = config.getToolChoice?.();
 	const response = await streamFunction(config.model, llmContext, {
