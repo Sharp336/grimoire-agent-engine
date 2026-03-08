@@ -366,9 +366,14 @@ export class TUI extends Container {
 			unfocus: () => {
 				if (!entry.focused) return;
 				entry.focused = false;
-				// Find next focusable overlay or restore preFocus
+				// Find next focusable overlay (excluding current) or restore preFocus
 				const topVisible = this.#getTopmostVisibleOverlay();
-				this.setFocus(topVisible?.component ?? entry.preFocus);
+				// Only focus if it's a different overlay
+				if (topVisible && topVisible !== entry) {
+					this.setFocus(topVisible.component);
+				} else if (entry.preFocus) {
+					this.setFocus(entry.preFocus);
+				}
 			},
 			isFocused: () => entry.focused,
 		};
