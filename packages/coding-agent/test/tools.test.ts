@@ -496,6 +496,18 @@ function b() {
 			expect(getTextOutput(result)).toContain("old_text and new_text are identical");
 			expect(await Bun.file(testFile).text()).toBe("const x = 1;\n");
 		});
+
+		it("should return actionable error when path is missing", async () => {
+			await expect(editTool.execute("edit-missing-path", {} as any)).rejects.toThrow(/requires a 'path' string/i);
+		});
+
+		it("should return actionable error when replace payload misses old/new text", async () => {
+			const testFile = path.join(testDir, "edit-missing-fields.txt");
+			fs.writeFileSync(testFile, "hello world");
+			await expect(editTool.execute("edit-missing-old-new", { path: testFile } as any)).rejects.toThrow(
+				/old_text.*new_text/i,
+			);
+		});
 	});
 
 	describe("bash tool", () => {

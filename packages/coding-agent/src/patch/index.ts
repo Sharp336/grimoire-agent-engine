@@ -188,9 +188,24 @@ const hashlineEditParamsSchema = Type.Object(
 
 export type HashlineToolEdit = Static<typeof hashlineEditSchema>;
 export type HashlineParams = Static<typeof hashlineEditParamsSchema>;
-const editAnyParamsSchema = Type.Union([replaceEditSchema, patchEditSchema, hashlineEditParamsSchema]);
+const editCompatParamsSchema = Type.Object(
+	{
+		path: Type.Optional(Type.String({ description: "File path (required for all edit modes)" })),
+		old_text: Type.Optional(Type.String()),
+		new_text: Type.Optional(Type.String()),
+		all: Type.Optional(Type.Boolean()),
+		op: Type.Optional(StringEnum(["create", "delete", "update"])),
+		rename: Type.Optional(Type.String()),
+		diff: Type.Optional(Type.String()),
+		edits: Type.Optional(Type.Union([Type.Array(hashlineEditSchema), Type.String()])),
+		delete: Type.Optional(Type.Boolean()),
+		move: Type.Optional(Type.String()),
+	},
+	{ additionalProperties: false },
+);
+export type EditCompatParams = Static<typeof editCompatParamsSchema>;
 
-function inferEditModeFromParams(params: ReplaceParams | PatchParams | HashlineParams): EditMode | undefined {
+function inferEditModeFromParams(params: EditCompatParams): EditMode | undefined {
 	const record = params as Record<string, unknown>;
 	if (
 		Object.prototype.hasOwnProperty.call(record, "edits") ||
@@ -275,6 +290,9 @@ function tryParseTag(raw: string): Anchor | undefined {
 }
 
 function parseHashlineEditsInput(input: HashlineParams["edits"]): HashlineToolEdit[] {
+	if (input === undefined) {
+		throw new Error("Invalid edits: missing edits field for hashline mode.");
+	}
 	if (Array.isArray(input)) return input;
 	const raw = input.trim();
 	if (raw.length === 0) {
@@ -407,7 +425,7 @@ function mergeDiagnosticsWithWarnings(
 // Tool Class
 // ═══════════════════════════════════════════════════════════════════════════
 
-type TInput = typeof replaceEditSchema | typeof patchEditSchema | typeof hashlineEditParamsSchema;
+type TInput = typeof editCompatParamsSchema;
 
 export type EditMode = "replace" | "patch" | "hashline";
 
@@ -525,8 +543,8 @@ export class EditTool implements AgentTool<TInput> {
 	 * Dynamic parameters schema based on current edit mode (which depends on current model).
 	 */
 	get parameters(): TInput {
-		// Compat: allow alternate edit payload shapes and route in execute().
-		return editAnyParamsSchema as unknown as TInput;
+		// Compat mode: single schema avoids brittle anyOf validation failures.
+		return editCompatParamsSchema;
 	}
 
 	#isDuplicateBatchEdit(signature: string, context?: AgentToolContext): boolean {
@@ -567,13 +585,24 @@ export class EditTool implements AgentTool<TInput> {
 
 	async execute(
 		_toolCallId: string,
-		params: ReplaceParams | PatchParams | HashlineParams,
+		params: EditCompatParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<EditToolDetails, TInput>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
 		const batchRequest = getLspBatchRequest(context?.toolCall);
 		const effectiveMode = inferEditModeFromParams(params) ?? this.mode;
+		const fallbackPath = typeof params.path === "string" ? params.path : "<missing path>";
+
+		if (typeof params.path !== "string" || params.path.trim().length === 0) {
+			throw new Error(
+				`Edit requires a 'path' string.\n` +
+					`Examples:\n` +
+					`- replace: {\"path\":\"src/app.ts\",\"old_text\":\"foo\",\"new_text\":\"bar\"}\n` +
+					`- hashline: {\"path\":\"src/app.ts\",\"edits\":[{\"op\":\"replace\",\"pos\":\"12#AB\",\"lines\":[\"bar\"]}]}\n` +
+					`- patch: {\"path\":\"src/app.ts\",\"op\":\"update\",\"diff\":\"@@ ...\"}`,
+			);
+		}
 
 		// ─────────────────────────────────────────────────────────────────
 		// Hashline mode execution
@@ -604,7 +633,7 @@ export class EditTool implements AgentTool<TInput> {
 				edits: normalizedHashlineEdits,
 			});
 			if (this.#isDuplicateBatchEdit(hashlineSignature, context)) {
-				return this.#duplicateEditSkipped(path);
+				return this.#duplicateEditSkipped(path ?? fallbackPath);
 			}
 
 			if (deleteFile) {
@@ -870,6 +899,12 @@ export class EditTool implements AgentTool<TInput> {
 		// Replace mode execution
 		// ─────────────────────────────────────────────────────────────────
 		const { path, old_text, new_text, all } = params as ReplaceParams;
+		if (typeof old_text !== "string" || typeof new_text !== "string") {
+			throw new Error(
+				`Replace edit requires 'old_text' and 'new_text' strings.\n` +
+					`Example: {"path":"${path}","old_text":"before","new_text":"after"}`,
+			);
+		}
 
 		enforcePlanModeWrite(this.session, path);
 
