@@ -730,6 +730,13 @@ export class Agent {
 			onPayload: this.#onPayload,
 			getApiKey: this.getApiKey,
 			getToolContext: this.#getToolContext,
+			syncContextBeforeModelCall: async context => {
+				if (this.#listeners.size > 0) {
+					await Bun.sleep(0);
+				}
+				context.systemPrompt = this.#state.systemPrompt;
+				context.tools = this.#state.tools;
+			},
 			cursorExecHandlers: this.#cursorExecHandlers,
 			cursorOnToolResult,
 			transformToolCallArguments: this.#transformToolCallArguments,

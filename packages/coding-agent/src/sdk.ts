@@ -65,6 +65,7 @@ import {
 } from "./internal-urls";
 import { disposeAllKernelSessions } from "./ipy/executor";
 import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } from "./mcp";
+import { collectDiscoverableMCPTools, summarizeDiscoverableMCPTools } from "./mcp/discoverable-tool-metadata";
 import { buildMemoryToolDeveloperInstructions, getMemoryRoot, startMemoryStartupTask } from "./memories";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { collectEnvSecrets, loadSecrets, obfuscateMessages, SecretObfuscator } from "./secrets";
@@ -76,6 +77,7 @@ import { closeAllConnections } from "./ssh/connection-manager";
 import { unmountAll } from "./ssh/sshfs-mount";
 import {
 	buildSystemPrompt as buildSystemPromptInternal,
+	buildSystemPromptToolMetadata,
 	loadProjectContextFiles as loadContextFilesInternal,
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
@@ -96,6 +98,7 @@ import {
 	ReadTool,
 	ResolveTool,
 	setPreferredCodeSearchProvider,
+	renderSearchToolBm25Description,
 	setPreferredImageProvider,
 	setPreferredSearchProvider,
 	type Tool,
@@ -864,6 +867,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		getCompactContext: () => session.formatCompactContext(),
 		getTodoPhases: () => session.getTodoPhases(),
 		setTodoPhases: phases => session.setTodoPhases(phases),
+		isMCPDiscoveryEnabled: () => session.isMCPDiscoveryEnabled(),
+		getDiscoverableMCPTools: () => session.getDiscoverableMCPTools(),
+		getDiscoverableMCPSearchIndex: () => session.getDiscoverableMCPSearchIndex(),
+		getSelectedMCPToolNames: () => session.getSelectedMCPToolNames(),
+		activateDiscoveredMCPTools: toolNames => session.activateDiscoveredMCPTools(toolNames),
 		getCheckpointState: () => session.getCheckpointState(),
 		setCheckpointState: state => session.setCheckpointState(state ?? undefined),
 		allocateOutputArtifact: async toolType => {
@@ -1189,6 +1197,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const intentField = settings.get("tools.intentTracing") || $env.PI_INTENT_TRACING === "1" ? INTENT_FIELD : undefined;
 	const rebuildSystemPrompt = async (toolNames: string[], tools: Map<string, AgentTool>): Promise<string> => {
 		toolContextStore.setToolNames(toolNames);
+		const discoverableMCPTools = mcpDiscoveryEnabled ? collectDiscoverableMCPTools(tools.values()) : [];
+		const discoverableMCPSummary = summarizeDiscoverableMCPTools(discoverableMCPTools);
+		const hasDiscoverableMCPTools =
+			mcpDiscoveryEnabled && toolNames.includes("search_tool_bm25") && discoverableMCPTools.length > 0;
+		const promptTools = buildSystemPromptToolMetadata(tools, {
+			search_tool_bm25: { description: renderSearchToolBm25Description(discoverableMCPTools) },
+		});
 		const memoryInstructions = await buildMemoryToolDeveloperInstructions(agentDir, settings);
 
 		// Build combined append prompt: memory instructions + MCP server instructions
@@ -1214,14 +1229,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			cwd,
 			skills,
 			contextFiles,
-			tools,
+			tools: promptTools,
 			toolNames,
 			rules: rulebookRules,
 			skillsSettings: settings.getGroup("skills"),
 			appendSystemPrompt: appendPrompt,
 			repeatToolDescriptions,
-			eagerTasks,
 			intentField,
+			mcpDiscoveryMode: hasDiscoverableMCPTools,
+			mcpDiscoveryServerNames: discoverableMCPSummary.serverNames,
+			eagerTasks,
 		});
 
 		if (options.systemPrompt === undefined) {
@@ -1232,15 +1249,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				cwd,
 				skills,
 				contextFiles,
-				tools,
+				tools: promptTools,
 				toolNames,
 				rules: rulebookRules,
 				skillsSettings: settings.getGroup("skills"),
 				customPrompt: options.systemPrompt,
 				appendSystemPrompt: appendPrompt,
 				repeatToolDescriptions,
-				eagerTasks,
 				intentField,
+				mcpDiscoveryMode: hasDiscoverableMCPTools,
+				mcpDiscoveryServerNames: discoverableMCPSummary.serverNames,
+				eagerTasks,
 			});
 		}
 		return options.systemPrompt(defaultPrompt);
@@ -1250,9 +1269,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const requestedToolNames = options.toolNames?.map(name => name.toLowerCase()) ?? toolNamesFromRegistry;
 	const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
 	const includeExitPlanMode = requestedToolNames.includes("exit_plan_mode");
-	const initialToolNames = includeExitPlanMode
+	const mcpDiscoveryEnabled = settings.get("mcp.discoveryMode") ?? false;
+	const requestedActiveToolNames = includeExitPlanMode
 		? normalizedRequested
 		: normalizedRequested.filter(name => name !== "exit_plan_mode");
+	const initialToolNames = mcpDiscoveryEnabled
+		? requestedActiveToolNames.filter(name => !name.startsWith("mcp_"))
+		: [...requestedActiveToolNames];
 
 	// Custom tools and extension-registered tools are always included regardless of toolNames filter
 	const alwaysInclude: string[] = [
@@ -1260,6 +1283,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		...registeredTools.map(t => t.definition.name),
 	];
 	for (const name of alwaysInclude) {
+		if (mcpDiscoveryEnabled && name.startsWith("mcp_")) {
+			continue;
+		}
 		if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 			initialToolNames.push(name);
 		}
@@ -1440,6 +1466,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		onPayload,
 		convertToLlm: convertToLlmFinal,
 		rebuildSystemPrompt,
+		mcpDiscoveryEnabled,
+		initialSelectedMCPToolNames: [],
 		ttsrManager,
 		obfuscator,
 		asyncJobManager,
