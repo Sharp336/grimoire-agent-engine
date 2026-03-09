@@ -1635,7 +1635,11 @@ function detectTerminalBackground(): "dark" | "light" {
 	// Tier 1: Terminal-reported appearance from OSC 11 background color luminance.
 	// Set asynchronously when terminal responds to OSC 11 at startup,
 	// and updated when Mode 2031 triggers a re-query or periodic poll.
-	if (terminalReportedAppearance) return terminalReportedAppearance;
+	// On macOS inside Zellij, OSC 11 can spuriously report pure black; when that
+	// manifests as a dark reading without COLORFGBG, prefer the lower-tier fallbacks.
+	const shouldIgnoreTerminalReport =
+		process.platform === "darwin" && !!Bun.env.ZELLIJ && terminalReportedAppearance === "dark" && !Bun.env.COLORFGBG;
+	if (terminalReportedAppearance && !shouldIgnoreTerminalReport) return terminalReportedAppearance;
 
 	// Tier 2: COLORFGBG env var (set by some terminals: iTerm2, Konsole, rxvt).
 	// Static at process start, never updates mid-session.
