@@ -1010,11 +1010,11 @@ export class Editor implements Component, Focusable {
 		} else if (kb.matches(data, "jumpBackward")) {
 			this.#jumpMode = "backward";
 		}
-		// Printable characters, including Kitty CSI-u text-producing sequences.
+		// Printable keystrokes, including Kitty CSI-u text-producing sequences.
 		else {
 			const printableText = extractPrintableText(data);
 			if (printableText) {
-				this.insertText(printableText);
+				this.#insertCharacter(printableText);
 			}
 		}
 	}
