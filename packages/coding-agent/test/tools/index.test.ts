@@ -177,6 +177,27 @@ describe("createTools", () => {
 
 		expect(names).toContain("inspect_image");
 	});
+
+	it("excludes search_tool_bm25 by default", async () => {
+		const session = createTestSession();
+		const tools = await createTools(session);
+		const names = tools.map(t => t.name);
+
+		expect(names).not.toContain("search_tool_bm25");
+	});
+
+	it("includes search_tool_bm25 when MCP tool discovery is enabled", async () => {
+		const session = createTestSession({
+			settings: createSettingsWithOverrides({
+				"mcp.discoveryMode": true,
+			}),
+		});
+		const tools = await createTools(session);
+		const names = tools.map(t => t.name);
+
+		expect(names).toContain("search_tool_bm25");
+	});
+
 	it("HIDDEN_TOOLS contains review tools", () => {
 		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual([
 			"exit_plan_mode",

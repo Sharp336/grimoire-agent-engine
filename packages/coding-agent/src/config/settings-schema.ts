@@ -932,6 +932,15 @@ export const SETTINGS_SCHEMA = {
 		default: true,
 		ui: { tab: "tools", label: "MCP project config", description: "Load .mcp.json/mcp.json from project root" },
 	},
+	"mcp.discoveryMode": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "MCP tool discovery",
+			description: "Hide MCP tools by default and expose them through a tool discovery tool",
+		},
+	},
 	"mcp.notifications": {
 		type: "boolean",
 		default: false,

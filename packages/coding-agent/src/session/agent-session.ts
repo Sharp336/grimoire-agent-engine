@@ -85,6 +85,13 @@ import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { executePython as executePythonCommand, type PythonResult } from "../ipy/executor";
+import {
+	buildDiscoverableMCPSearchIndex,
+	collectDiscoverableMCPTools,
+	type DiscoverableMCPSearchIndex,
+	type DiscoverableMCPTool,
+	isMCPToolName,
+} from "../mcp/discoverable-tool-metadata";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../patch";
 import type { PlanModeState } from "../plan-mode/state";
@@ -191,6 +198,10 @@ export interface AgentSessionConfig {
 	toolRegistry?: Map<string, AgentTool>;
 	/** System prompt builder that can consider tool availability */
 	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<string>;
+	/** Enable hidden-by-default MCP tool discovery for this session. */
+	mcpDiscoveryEnabled?: boolean;
+	/** MCP tool names previously selected via discovery in this session. */
+	initialSelectedMCPToolNames?: string[];
 	/** TTSR manager for time-traveling stream rules */
 	ttsrManager?: TtsrManager;
 	/** Force X-Initiator: agent for GitHub Copilot model selections in this session. */
@@ -380,6 +391,10 @@ export class AgentSession {
 	#toolRegistry: Map<string, AgentTool>;
 	#rebuildSystemPrompt: ((toolNames: string[], tools: Map<string, AgentTool>) => Promise<string>) | undefined;
 	#baseSystemPrompt: string;
+	#mcpDiscoveryEnabled = false;
+	#discoverableMCPTools = new Map<string, DiscoverableMCPTool>();
+	#discoverableMCPSearchIndex: DiscoverableMCPSearchIndex | null = null;
+	#selectedMCPToolNames = new Set<string>();
 	#forceCopilotAgentInitiator = false;
 
 	// TTSR manager for time-traveling stream rules
@@ -424,6 +439,10 @@ export class AgentSession {
 		this.#toolRegistry = config.toolRegistry ?? new Map();
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
+		this.#mcpDiscoveryEnabled = config.mcpDiscoveryEnabled ?? false;
+		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
+		this.#selectedMCPToolNames = new Set(config.initialSelectedMCPToolNames ?? []);
+		this.#pruneSelectedMCPToolNames();
 		this.#ttsrManager = config.ttsrManager;
 		this.#forceCopilotAgentInitiator = config.forceCopilotAgentInitiator ?? false;
 		this.#obfuscator = config.obfuscator;
@@ -1584,6 +1603,36 @@ export class AgentSession {
 		return this.#retryAttempt;
 	}
 
+	#collectDiscoverableMCPToolsFromRegistry(): Map<string, DiscoverableMCPTool> {
+		return new Map(collectDiscoverableMCPTools(this.#toolRegistry.values()).map(tool => [tool.name, tool] as const));
+	}
+
+	#setDiscoverableMCPTools(discoverableMCPTools: Map<string, DiscoverableMCPTool>): void {
+		this.#discoverableMCPTools = discoverableMCPTools;
+		this.#discoverableMCPSearchIndex = null;
+	}
+
+	#pruneSelectedMCPToolNames(): void {
+		for (const name of Array.from(this.#selectedMCPToolNames)) {
+			if (!this.#discoverableMCPTools.has(name) || !this.#toolRegistry.has(name)) {
+				this.#selectedMCPToolNames.delete(name);
+			}
+		}
+	}
+
+	#getVisibleMCPToolNames(): string[] {
+		if (!this.#mcpDiscoveryEnabled) {
+			return Array.from(this.#toolRegistry.keys()).filter(name => isMCPToolName(name));
+		}
+		return Array.from(this.#selectedMCPToolNames).filter(
+			name => this.#discoverableMCPTools.has(name) && this.#toolRegistry.has(name),
+		);
+	}
+
+	#getActiveNonMCPToolNames(): string[] {
+		return this.getActiveToolNames().filter(name => !isMCPToolName(name) && this.#toolRegistry.has(name));
+	}
+
 	/**
 	 * Get the names of currently active tools.
 	 * Returns the names of tools currently set on the agent.
@@ -1611,11 +1660,47 @@ export class AgentSession {
 		return Array.from(this.#toolRegistry.keys());
 	}
 
+	isMCPDiscoveryEnabled(): boolean {
+		return this.#mcpDiscoveryEnabled;
+	}
+
+	getDiscoverableMCPTools(): DiscoverableMCPTool[] {
+		return Array.from(this.#discoverableMCPTools.values());
+	}
+
+	getDiscoverableMCPSearchIndex(): DiscoverableMCPSearchIndex {
+		if (!this.#discoverableMCPSearchIndex) {
+			this.#discoverableMCPSearchIndex = buildDiscoverableMCPSearchIndex(this.#discoverableMCPTools.values());
+		}
+		return this.#discoverableMCPSearchIndex;
+	}
+
+	getSelectedMCPToolNames(): string[] {
+		return this.#getVisibleMCPToolNames();
+	}
+
+	async activateDiscoveredMCPTools(toolNames: string[]): Promise<string[]> {
+		const activated: string[] = [];
+		for (const name of toolNames) {
+			if (!isMCPToolName(name) || !this.#discoverableMCPTools.has(name) || !this.#toolRegistry.has(name)) {
+				continue;
+			}
+			this.#selectedMCPToolNames.add(name);
+			activated.push(name);
+		}
+		if (activated.length === 0) {
+			return [];
+		}
+		const nextActive = [...this.#getActiveNonMCPToolNames(), ...this.#getVisibleMCPToolNames()];
+		await this.setActiveToolsByName(nextActive);
+		return [...new Set(activated)];
+	}
+
 	/**
 	 * Set active tools by name.
 	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
 	 * Also rebuilds the system prompt to reflect the new tool set.
-	 * Changes take effect on the next agent turn.
+	 * Changes take effect before the next model call.
 	 */
 	async setActiveToolsByName(toolNames: string[]): Promise<void> {
 		const tools: AgentTool[] = [];
@@ -1626,6 +1711,13 @@ export class AgentSession {
 				tools.push(tool);
 				validToolNames.push(name);
 			}
+		}
+		if (this.#mcpDiscoveryEnabled) {
+			this.#selectedMCPToolNames = new Set(
+				validToolNames.filter(
+					name => isMCPToolName(name) && this.#discoverableMCPTools.has(name) && this.#toolRegistry.has(name),
+				),
+			);
 		}
 		this.agent.setTools(tools);
 
@@ -1645,14 +1737,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Replace MCP tools in the registry and activate the latest MCP tool set immediately.
+	 * Replace MCP tools in the registry and recompute the visible MCP tool set immediately.
 	 * This allows /mcp add/remove/reauth to take effect without restarting the session.
 	 */
 	async refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
-		const prefix = "mcp_";
 		const existingNames = Array.from(this.#toolRegistry.keys());
 		for (const name of existingNames) {
-			if (name.startsWith(prefix)) {
+			if (isMCPToolName(name)) {
 				this.#toolRegistry.delete(name);
 			}
 		}
@@ -1676,17 +1767,10 @@ export class AgentSession {
 			this.#toolRegistry.set(finalTool.name, finalTool);
 		}
 
-		const currentActive = this.getActiveToolNames().filter(
-			name => !name.startsWith(prefix) && this.#toolRegistry.has(name),
-		);
-		const mcpToolNames = Array.from(this.#toolRegistry.keys()).filter(name => name.startsWith(prefix));
-		const nextActive = [...currentActive];
-		for (const name of mcpToolNames) {
-			if (!nextActive.includes(name)) {
-				nextActive.push(name);
-			}
-		}
+		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
+		this.#pruneSelectedMCPToolNames();
 
+		const nextActive = [...this.#getActiveNonMCPToolNames(), ...this.#getVisibleMCPToolNames()];
 		await this.setActiveToolsByName(nextActive);
 	}
 
