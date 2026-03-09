@@ -490,7 +490,24 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 		let mut parsed_codepoint = p.codepoint;
 		let mut parsed_base = p.base_layout_key;
 		if p.text_codepoint.is_none() {
-			if p.modifier & MOD_NUM_LOCK == 0 {
+			if p.modifier & MOD_NUM_LOCK != 0 {
+				if actual_mod == 0
+					&& let Some(text) = keypad_num_lock_text(parsed_codepoint)
+					&& let Some(byte) = text.as_bytes().first()
+				{
+					parsed_codepoint = i32::from(*byte);
+					parsed_base = None;
+				} else {
+					if let Some(mapped) = map_keypad_nav(parsed_codepoint) {
+						parsed_codepoint = mapped;
+					}
+					if let Some(base) = parsed_base
+						&& let Some(mapped) = map_keypad_nav(base)
+					{
+						parsed_base = Some(mapped);
+					}
+				}
+			} else {
 				if let Some(mapped) = map_keypad_nav(parsed_codepoint) {
 					parsed_codepoint = mapped;
 				}
@@ -499,12 +516,6 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 				{
 					parsed_base = Some(mapped);
 				}
-			} else if actual_mod == 0
-				&& let Some(text) = keypad_num_lock_text(parsed_codepoint)
-				&& let Some(byte) = text.as_bytes().first()
-			{
-				parsed_codepoint = i32::from(*byte);
-				parsed_base = None;
 			}
 		}
 		if parsed_codepoint == codepoint {
@@ -1357,5 +1368,12 @@ mod tests {
 		assert_eq!(parse_key_inner(b"\x1b[57400;129u", true).as_deref(), Some("1"));
 		assert!(matches_key_inner(b"\x1b[57400;129u", "1", true));
 		assert!(!matches_key_inner(b"\x1b[57400;129u", "end", true));
+	}
+
+	#[test]
+	fn modified_num_lock_keypad_keys_still_match_navigation() {
+		assert_eq!(parse_key_inner(b"\x1b[57400;133u", true).as_deref(), Some("ctrl+end"));
+		assert!(matches_key_inner(b"\x1b[57400;133u", "ctrl+end", true));
+		assert!(!matches_key_inner(b"\x1b[57400;133u", "1", true));
 	}
 }
