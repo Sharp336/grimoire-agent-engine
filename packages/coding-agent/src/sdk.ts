@@ -1273,8 +1273,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const requestedActiveToolNames = includeExitPlanMode
 		? normalizedRequested
 		: normalizedRequested.filter(name => name !== "exit_plan_mode");
+	const explicitlyRequestedMCPToolNames = options.toolNames
+		? requestedActiveToolNames.filter(name => name.startsWith("mcp_"))
+		: [];
 	const initialToolNames = mcpDiscoveryEnabled
-		? requestedActiveToolNames.filter(name => !name.startsWith("mcp_"))
+		? [...requestedActiveToolNames.filter(name => !name.startsWith("mcp_")), ...explicitlyRequestedMCPToolNames]
 		: [...requestedActiveToolNames];
 
 	// Custom tools and extension-registered tools are always included regardless of toolNames filter
