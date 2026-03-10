@@ -114,7 +114,9 @@ export class ProcessTerminal implements Terminal {
 	#appearanceCallbacks: Array<(appearance: TerminalAppearance) => void> = [];
 	#appearance: TerminalAppearance | undefined;
 	#osc11Pending = false;
+	#osc11QueryQueued = false;
 	#osc11ResponseBuffer = "";
+	#pendingDa1Sentinels = 0;
 	#osc11PollTimer?: Timer;
 	#mode2031Active = false;
 	#mode2031DebounceTimer?: Timer;
@@ -282,11 +284,13 @@ export class ProcessTerminal implements Terminal {
 				}
 			}
 
-			// DA1 response: if OSC 11 is still pending, terminal doesn't support it.
-			// This also clears any partial OSC 11 fragment we buffered after a timeout flush.
-			if (this.#osc11Pending && da1ResponsePattern.test(sequence)) {
-				this.#osc11Pending = false;
-				this.#osc11ResponseBuffer = "";
+			// DA1 response: swallow our sentinel reply regardless of whether OSC 11
+			// already succeeded. Other terminal probes should never see these replies.
+			if (da1ResponsePattern.test(sequence) && this.#pendingDa1Sentinels > 0) {
+				this.#pendingDa1Sentinels--;
+				if (this.#osc11Pending) {
+					this.#finishOsc11Query();
+				}
 				return;
 			}
 
@@ -296,9 +300,9 @@ export class ProcessTerminal implements Terminal {
 				this.#osc11ResponseBuffer += sequence;
 				const osc11Match = this.#osc11ResponseBuffer.match(osc11ResponsePattern);
 				if (!osc11Match) return;
-				this.#osc11Pending = false;
-				this.#osc11ResponseBuffer = "";
-				this.#handleOsc11Response(osc11Match[1]!, osc11Match[2]!, osc11Match[3]!);
+				const [, rHex, gHex, bHex] = osc11Match;
+				this.#finishOsc11Query();
+				this.#handleOsc11Response(rHex!, gHex!, bHex!);
 				return;
 			}
 
@@ -341,10 +345,28 @@ export class ProcessTerminal implements Terminal {
 	 * the terminal does not support OSC 11.
 	 */
 	#queryBackgroundColor(): void {
+		if (this.#dead) return;
+		if (this.#osc11Pending) {
+			this.#osc11QueryQueued = true;
+			return;
+		}
+		this.#startOsc11Query();
+	}
+
+	#startOsc11Query(): void {
 		this.#osc11Pending = true;
 		this.#osc11ResponseBuffer = "";
+		this.#pendingDa1Sentinels++;
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
+	}
+
+	#finishOsc11Query(): void {
+		this.#osc11Pending = false;
+		this.#osc11ResponseBuffer = "";
+		if (!this.#osc11QueryQueued || this.#dead) return;
+		this.#osc11QueryQueued = false;
+		this.#startOsc11Query();
 	}
 
 	/**
@@ -477,7 +499,9 @@ export class ProcessTerminal implements Terminal {
 		}
 		this.#appearanceCallbacks = [];
 		this.#osc11Pending = false;
+		this.#osc11QueryQueued = false;
 		this.#osc11ResponseBuffer = "";
+		this.#pendingDa1Sentinels = 0;
 		this.#mode2031Active = false;
 
 		// Disable Kitty keyboard protocol if not already done by drainInput()
