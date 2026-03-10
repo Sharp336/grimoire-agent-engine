@@ -111,11 +111,11 @@ describe("SearchToolBm25Tool", () => {
 			},
 		});
 		const tool = new SearchToolBm25Tool(session);
-		expect(rawToolsCalls).toBe(1);
+		expect(rawToolsCalls).toBe(0);
 
 		const result = await tool.execute("call-index", { query: "github" });
 		expect(searchIndexCalls).toBe(1);
-		expect(rawToolsCalls).toBe(1);
+		expect(rawToolsCalls).toBe(0);
 		expect(result.details?.tools.map(match => match.name)).toEqual([
 			"mcp_github_create_issue",
 			"mcp_github_list_pull_requests",
@@ -187,7 +187,7 @@ describe("SearchToolBm25Tool", () => {
 			{
 				content: [{ type: "text", text: "" }],
 				details: {
-					query: "github issue",
+					query: "github\tissue",
 					limit: 2,
 					total_tools: 1,
 					active_selected_tools: ["mcp_github_create_issue"],
@@ -209,6 +209,7 @@ describe("SearchToolBm25Tool", () => {
 		);
 		const renderedText = renderedResult.render(120).join("\n");
 		expect(renderedText).not.toContain("\t");
+		expect(renderedText).toContain("github   issue");
 		expect(renderedText).toContain("git   hub");
 		expect(renderedText).toContain("Create   a GitHub issue");
 	});

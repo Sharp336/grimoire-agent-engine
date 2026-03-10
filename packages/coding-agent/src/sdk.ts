@@ -97,8 +97,8 @@ import {
 	PythonTool,
 	ReadTool,
 	ResolveTool,
-	setPreferredCodeSearchProvider,
 	renderSearchToolBm25Description,
+	setPreferredCodeSearchProvider,
 	setPreferredImageProvider,
 	setPreferredSearchProvider,
 	type Tool,
@@ -1279,6 +1279,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const initialToolNames = mcpDiscoveryEnabled
 		? [...requestedActiveToolNames.filter(name => !name.startsWith("mcp_")), ...explicitlyRequestedMCPToolNames]
 		: [...requestedActiveToolNames];
+	const initialSelectedMCPToolNames = mcpDiscoveryEnabled ? [...explicitlyRequestedMCPToolNames] : [];
 
 	// Custom tools and extension-registered tools are always included regardless of toolNames filter
 	const alwaysInclude: string[] = [
@@ -1470,7 +1471,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		convertToLlm: convertToLlmFinal,
 		rebuildSystemPrompt,
 		mcpDiscoveryEnabled,
-		initialSelectedMCPToolNames: [],
+		initialSelectedMCPToolNames,
 		ttsrManager,
 		obfuscator,
 		asyncJobManager,

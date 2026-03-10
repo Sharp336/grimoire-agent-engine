@@ -112,13 +112,13 @@ function renderFallbackResult(text: string, theme: Theme): Component {
 export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema, SearchToolBm25Details> {
 	readonly name = "search_tool_bm25";
 	readonly label = "SearchToolBm25";
-	description: string;
+	get description(): string {
+		return renderSearchToolBm25Description(getDiscoverableMCPToolsForDescription(this.session));
+	}
 	readonly parameters = searchToolBm25Schema;
 	readonly strict = true;
 
-	constructor(private readonly session: ToolSession) {
-		this.description = renderSearchToolBm25Description(getDiscoverableMCPToolsForDescription(session));
-	}
+	constructor(private readonly session: ToolSession) {}
 
 	async execute(
 		_toolCallId: string,
@@ -179,7 +179,10 @@ export const searchToolBm25Renderer = {
 		const query = typeof args.query === "string" ? replaceTabs(args.query.trim()) : "";
 		const meta = args.limit ? [`limit:${args.limit}`] : [];
 		return new Text(
-			renderStatusLine({ icon: "pending", title: TOOL_DISCOVERY_TITLE, description: query || "(empty query)", meta }, uiTheme),
+			renderStatusLine(
+				{ icon: "pending", title: TOOL_DISCOVERY_TITLE, description: query || "(empty query)", meta },
+				uiTheme,
+			),
 			0,
 			0,
 		);
@@ -206,11 +209,12 @@ export const searchToolBm25Renderer = {
 			`${details.total_tools} total`,
 			`limit:${details.limit}`,
 		];
+		const safeQuery = replaceTabs(details.query);
 		const header = renderStatusLine(
 			{
 				icon: details.tools.length > 0 ? "success" : "warning",
 				title: TOOL_DISCOVERY_TITLE,
-				description: truncateToWidth(details.query, MATCH_LABEL_LEN),
+				description: truncateToWidth(safeQuery, MATCH_LABEL_LEN),
 				meta,
 			},
 			uiTheme,
