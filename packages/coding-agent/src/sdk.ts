@@ -65,7 +65,11 @@ import {
 } from "./internal-urls";
 import { disposeAllKernelSessions } from "./ipy/executor";
 import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } from "./mcp";
-import { collectDiscoverableMCPTools, summarizeDiscoverableMCPTools } from "./mcp/discoverable-tool-metadata";
+import {
+	collectDiscoverableMCPTools,
+	type DiscoverableMCPTool,
+	summarizeDiscoverableMCPTools,
+} from "./mcp/discoverable-tool-metadata";
 import { buildMemoryToolDeveloperInstructions, getMemoryRoot, startMemoryStartupTask } from "./memories";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { collectEnvSecrets, loadSecrets, obfuscateMessages, SecretObfuscator } from "./secrets";
@@ -1283,6 +1287,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const initialToolNames = mcpDiscoveryEnabled
 		? [...requestedActiveToolNames.filter(name => !name.startsWith("mcp_")), ...explicitlyRequestedMCPToolNames]
 		: [...requestedActiveToolNames];
+	const initialSelectedMCPToolNames = mcpDiscoveryEnabled ? [...explicitlyRequestedMCPToolNames] : [];
 
 	// Custom tools and extension-registered tools are always included regardless of toolNames filter
 	const alwaysInclude: string[] = [
@@ -1297,6 +1302,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			initialToolNames.push(name);
 		}
 	}
+
+	const discoverableMCPToolsForPrompt = mcpDiscoveryEnabled ? collectDiscoverableMCPTools(toolRegistry.values()) : [];
+	const searchTool = toolRegistry.get("search_tool_bm25") as
+		| { setDiscoverableTools?: (tools: DiscoverableMCPTool[]) => void }
+		| undefined;
+	searchTool?.setDiscoverableTools?.(discoverableMCPToolsForPrompt);
 
 	const systemPrompt = await logger.timeAsync(
 		"buildSystemPrompt",
@@ -1474,7 +1485,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		toolRegistry,
 		rebuildSystemPrompt,
 		mcpDiscoveryEnabled,
-		initialSelectedMCPToolNames: [],
+		initialSelectedMCPToolNames,
 		ttsrManager,
 		forceCopilotAgentInitiator,
 		obfuscator,

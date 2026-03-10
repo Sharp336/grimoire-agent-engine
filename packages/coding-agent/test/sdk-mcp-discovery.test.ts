@@ -15,11 +15,13 @@ function createMcpCustomTool(name: string, serverName: string, mcpToolName: stri
 		name,
 		label: `${serverName}/${mcpToolName}`,
 		description: `Tool ${mcpToolName} from ${serverName}`,
+		mcpServerName: serverName,
+		mcpToolName,
 		parameters: Type.Object({ query: Type.String() }),
 		async execute() {
 			return { content: [{ type: "text", text: `${name} executed` }] };
 		},
-	};
+	} as CustomTool;
 }
 
 describe("createAgentSession MCP discovery prompt gating", () => {
@@ -72,11 +74,45 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
-			toolNames: ["read", "mcp_github_create_issue"],
-			customTools: [createMcpCustomTool("mcp_github_create_issue", "github", "create_issue")],
+			toolNames: ["read", "mcp_github_create_issue", "search_tool_bm25"],
+			customTools: [
+				createMcpCustomTool("mcp_github_create_issue", "github", "create_issue"),
+				createMcpCustomTool("mcp_slack_post_message", "slack", "post_message"),
+			],
 		});
 
 		expect(session.getActiveToolNames()).toContain("mcp_github_create_issue");
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp_github_create_issue"]);
 		expect(session.systemPrompt).toContain("mcp_github_create_issue");
+
+		await session.activateDiscoveredMCPTools(["mcp_slack_post_message"]);
+
+		expect(session.getActiveToolNames()).toEqual(
+			expect.arrayContaining(["read", "search_tool_bm25", "mcp_github_create_issue", "mcp_slack_post_message"]),
+		);
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp_github_create_issue", "mcp_slack_post_message"]);
+	});
+
+	it("builds search_tool_bm25 descriptions from the loaded MCP catalog", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			toolNames: ["read", "search_tool_bm25"],
+			customTools: [createMcpCustomTool("mcp_github_create_issue", "github", "create_issue")],
+		});
+
+		const searchTool = session.agent.state.tools.find(tool => tool.name === "search_tool_bm25");
+		expect(searchTool?.description).toContain("Total discoverable MCP tools loaded: 1.");
+		expect(searchTool?.description).toContain("- `server_name`");
 	});
 });

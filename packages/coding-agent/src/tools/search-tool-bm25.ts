@@ -120,6 +120,10 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 		this.description = renderSearchToolBm25Description(getDiscoverableMCPToolsForDescription(session));
 	}
 
+	setDiscoverableTools(discoverableTools: DiscoverableMCPTool[]): void {
+		this.description = renderSearchToolBm25Description(discoverableTools);
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: SearchToolBm25Params,
@@ -209,11 +213,12 @@ export const searchToolBm25Renderer = {
 			`${details.total_tools} total`,
 			`limit:${details.limit}`,
 		];
+		const safeQuery = replaceTabs(details.query);
 		const header = renderStatusLine(
 			{
 				icon: details.tools.length > 0 ? "success" : "warning",
 				title: TOOL_DISCOVERY_TITLE,
-				description: truncateToWidth(details.query, MATCH_LABEL_LEN),
+				description: truncateToWidth(safeQuery, MATCH_LABEL_LEN),
 				meta,
 			},
 			uiTheme,
