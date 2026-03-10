@@ -179,7 +179,10 @@ export const searchToolBm25Renderer = {
 		const query = typeof args.query === "string" ? replaceTabs(args.query.trim()) : "";
 		const meta = args.limit ? [`limit:${args.limit}`] : [];
 		return new Text(
-			renderStatusLine({ icon: "pending", title: TOOL_DISCOVERY_TITLE, description: query || "(empty query)", meta }, uiTheme),
+			renderStatusLine(
+				{ icon: "pending", title: TOOL_DISCOVERY_TITLE, description: query || "(empty query)", meta },
+				uiTheme,
+			),
 			0,
 			0,
 		);

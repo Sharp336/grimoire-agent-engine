@@ -58,25 +58,25 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		expect(session.systemPrompt).not.toContain("call `search_tool_bm25` before concluding no such tool exists");
 	});
 
-it("preserves explicitly requested MCP tools in discovery mode", async () => {
-	const { session } = await createAgentSession({
-		cwd: tempDir,
-		agentDir: tempDir,
-		sessionManager: SessionManager.inMemory(),
-		settings: Settings.isolated({ "mcp.discoveryMode": true }),
-		model: getBundledModel("openai", "gpt-4o-mini"),
-		disableExtensionDiscovery: true,
-		skills: [],
-		contextFiles: [],
-		promptTemplates: [],
-		slashCommands: [],
-		enableMCP: false,
-		enableLsp: false,
-		toolNames: ["read", "mcp_github_create_issue"],
-		customTools: [createMcpCustomTool("mcp_github_create_issue", "github", "create_issue")],
-	});
+	it("preserves explicitly requested MCP tools in discovery mode", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			toolNames: ["read", "mcp_github_create_issue"],
+			customTools: [createMcpCustomTool("mcp_github_create_issue", "github", "create_issue")],
+		});
 
-	expect(session.getActiveToolNames()).toContain("mcp_github_create_issue");
-	expect(session.systemPrompt).toContain("mcp_github_create_issue");
-});
+		expect(session.getActiveToolNames()).toContain("mcp_github_create_issue");
+		expect(session.systemPrompt).toContain("mcp_github_create_issue");
+	});
 });
