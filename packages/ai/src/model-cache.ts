@@ -4,7 +4,7 @@
  */
 import { Database } from "bun:sqlite";
 import * as path from "node:path";
-import { getAgentDir } from "@oh-my-pi/pi-utils";
+import { closeWalDb, getAgentDir } from "@oh-my-pi/pi-utils";
 import type { Api, Model } from "./types";
 
 const CACHE_SCHEMA_VERSION = 2;
@@ -37,7 +37,7 @@ function getDb(dbPath?: string): Database {
 		return sharedDb;
 	}
 	if (sharedDb) {
-		sharedDb.close();
+		closeWalDb(sharedDb);
 	}
 	const db = new Database(resolvedPath, { create: true });
 	db.run("PRAGMA journal_mode = WAL");

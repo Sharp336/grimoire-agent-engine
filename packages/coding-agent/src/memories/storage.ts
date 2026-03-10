@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { closeWalDb } from "@oh-my-pi/pi-utils";
 
 export interface MemoryThread {
 	id: string;
@@ -82,7 +83,7 @@ CREATE TABLE IF NOT EXISTS jobs (
 }
 
 export function closeMemoryDb(db: Database): void {
-	db.close();
+	closeWalDb(db);
 }
 
 export function clearMemoryData(db: Database): void {

@@ -10,7 +10,7 @@
 import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
+import { closeWalDb, getAgentDir, logger } from "@oh-my-pi/pi-utils";
 import { getEnvApiKey } from "./stream";
 import type { Provider } from "./types";
 import type {
@@ -2569,6 +2569,6 @@ export class AuthCredentialStore {
 	}
 
 	close(): void {
-		this.#db.close();
+		closeWalDb(this.#db);
 	}
 }

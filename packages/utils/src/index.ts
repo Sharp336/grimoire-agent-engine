@@ -17,6 +17,7 @@ export { setNativeKillTree } from "./procmgr";
 export * as ptree from "./ptree";
 export { AbortError, ChildProcess, Exception, NonZeroExitError } from "./ptree";
 export * from "./snowflake";
+export * from "./sqlite";
 export * from "./stream";
 export * from "./temp";
 export * from "./type-guards";
