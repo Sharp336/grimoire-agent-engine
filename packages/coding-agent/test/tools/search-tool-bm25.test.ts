@@ -120,6 +120,17 @@ describe("SearchToolBm25Tool", () => {
 			"mcp_github_create_issue",
 			"mcp_github_list_pull_requests",
 		]);
+		expect(result.content).toEqual([
+			{
+				type: "text",
+				text: JSON.stringify({
+					query: "github",
+					activated_tools: ["mcp_github_create_issue", "mcp_github_list_pull_requests"],
+					match_count: 2,
+					total_tools: 3,
+				}),
+			},
+		]);
 	});
 
 	it("renders a titled discovery summary instead of the raw tool name", async () => {
@@ -141,6 +152,7 @@ describe("SearchToolBm25Tool", () => {
 					query: "github issue",
 					limit: 2,
 					total_tools: 3,
+					activated_tools: ["mcp_github_create_issue"],
 					active_selected_tools: ["mcp_github_create_issue"],
 					tools: [
 						{
@@ -190,6 +202,7 @@ describe("SearchToolBm25Tool", () => {
 					query: "github\tissue",
 					limit: 2,
 					total_tools: 1,
+					activated_tools: ["mcp_github_create_issue"],
 					active_selected_tools: ["mcp_github_create_issue"],
 					tools: [
 						{
@@ -234,6 +247,7 @@ describe("SearchToolBm25Tool", () => {
 					query: "github tools",
 					limit: 8,
 					total_tools: 6,
+					activated_tools: tools.map(tool => tool.name),
 					active_selected_tools: tools.map(tool => tool.name),
 					tools,
 				},
@@ -262,6 +276,17 @@ describe("SearchToolBm25Tool", () => {
 		expect(defaultResult.details?.limit).toBe(8);
 		expect(defaultResult.details?.tools).toHaveLength(8);
 		expect(defaultResult.details?.active_selected_tools).toHaveLength(8);
+		const defaultContent = defaultResult.content[0];
+		expect(defaultContent).toBeDefined();
+		expect(defaultContent).toEqual({
+			type: "text",
+			text: JSON.stringify({
+				query: "github",
+				activated_tools: defaultResult.details?.activated_tools,
+				match_count: 8,
+				total_tools: 10,
+			}),
+		});
 
 		const limitedTool = new SearchToolBm25Tool(createSession(manyTools));
 		const limitedResult = await limitedTool.execute("call-limited", { query: "github", limit: 3 });

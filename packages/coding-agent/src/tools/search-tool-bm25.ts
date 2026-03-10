@@ -46,6 +46,7 @@ export interface SearchToolBm25Details {
 	query: string;
 	limit: number;
 	total_tools: number;
+	activated_tools: string[];
 	active_selected_tools: string[];
 	tools: SearchToolBm25Match[];
 }
@@ -60,6 +61,15 @@ function formatMatch(tool: DiscoverableMCPTool, score: number): SearchToolBm25Ma
 		schema_keys: tool.schemaKeys,
 		score: Number(score.toFixed(6)),
 	};
+}
+
+function buildSearchToolBm25Content(details: SearchToolBm25Details): string {
+	return JSON.stringify({
+		query: details.query,
+		activated_tools: details.activated_tools,
+		match_count: details.tools.length,
+		total_tools: details.total_tools,
+	});
 }
 
 function getDiscoverableMCPToolsForDescription(session: ToolSession): DiscoverableMCPTool[] {
@@ -161,18 +171,18 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			ranked.length > 0
 				? await this.session.activateDiscoveredMCPTools?.(ranked.map(result => result.tool.name))
 				: [];
-		void activated;
 
 		const details: SearchToolBm25Details = {
 			query,
 			limit,
 			total_tools: searchIndex.documents.length,
+			activated_tools: activated ?? [],
 			active_selected_tools: this.session.getSelectedMCPToolNames?.() ?? [],
 			tools: ranked.map(result => formatMatch(result.tool, result.score)),
 		};
 
 		return {
-			content: [{ type: "text", text: JSON.stringify(details, null, 2) }],
+			content: [{ type: "text", text: buildSearchToolBm25Content(details) }],
 			details,
 		};
 	}
