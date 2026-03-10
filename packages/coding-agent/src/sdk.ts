@@ -65,11 +65,7 @@ import {
 } from "./internal-urls";
 import { disposeAllKernelSessions } from "./ipy/executor";
 import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } from "./mcp";
-import {
-	collectDiscoverableMCPTools,
-	type DiscoverableMCPTool,
-	summarizeDiscoverableMCPTools,
-} from "./mcp/discoverable-tool-metadata";
+import { collectDiscoverableMCPTools, summarizeDiscoverableMCPTools } from "./mcp/discoverable-tool-metadata";
 import { buildMemoryToolDeveloperInstructions, getMemoryRoot, startMemoryStartupTask } from "./memories";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { collectEnvSecrets, loadSecrets, obfuscateMessages, SecretObfuscator } from "./secrets";
@@ -102,6 +98,7 @@ import {
 	renderSearchToolBm25Description,
 	setPreferredImageProvider,
 	setPreferredSearchProvider,
+	setSearchToolBm25DiscoverableTools,
 	type Tool,
 	type ToolSession,
 	WriteTool,
@@ -1304,10 +1301,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	const discoverableMCPToolsForPrompt = mcpDiscoveryEnabled ? collectDiscoverableMCPTools(toolRegistry.values()) : [];
-	const searchTool = toolRegistry.get("search_tool_bm25") as
-		| { setDiscoverableTools?: (tools: DiscoverableMCPTool[]) => void }
-		| undefined;
-	searchTool?.setDiscoverableTools?.(discoverableMCPToolsForPrompt);
+	setSearchToolBm25DiscoverableTools(toolRegistry.get("search_tool_bm25"), discoverableMCPToolsForPrompt);
 
 	const systemPrompt = await logger.timeAsync(
 		"buildSystemPrompt",

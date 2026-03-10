@@ -97,6 +97,16 @@ export function renderSearchToolBm25Description(discoverableTools: DiscoverableM
 	});
 }
 
+export function setSearchToolBm25DiscoverableTools(
+	tool: AgentTool | undefined,
+	discoverableTools: DiscoverableMCPTool[],
+): void {
+	const searchTool = tool as
+		| (AgentTool & { setDiscoverableTools?: (tools: DiscoverableMCPTool[]) => void })
+		| undefined;
+	searchTool?.setDiscoverableTools?.(discoverableTools);
+}
+
 function renderMatchLines(match: SearchToolBm25Match, theme: Theme): string[] {
 	const safeServerName = match.server_name ? replaceTabs(match.server_name) : undefined;
 	const safeLabel = replaceTabs(match.label);

@@ -109,6 +109,7 @@ import type { CheckpointState } from "../tools/checkpoint";
 import { outputMeta } from "../tools/output-meta";
 import { resolveToCwd } from "../tools/path-utils";
 import type { PendingActionStore } from "../tools/pending-action";
+import { setSearchToolBm25DiscoverableTools } from "../tools/search-tool-bm25";
 import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo-write";
 import { parseCommandArgs } from "../utils/command-args";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -1767,8 +1768,12 @@ export class AgentSession {
 			this.#toolRegistry.set(finalTool.name, finalTool);
 		}
 
-		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
+		const discoverableMCPTools = this.#collectDiscoverableMCPToolsFromRegistry();
+		this.#setDiscoverableMCPTools(discoverableMCPTools);
 		this.#pruneSelectedMCPToolNames();
+		setSearchToolBm25DiscoverableTools(this.#toolRegistry.get("search_tool_bm25"), [
+			...discoverableMCPTools.values(),
+		]);
 
 		const nextActive = [...this.#getActiveNonMCPToolNames(), ...this.#getVisibleMCPToolNames()];
 		await this.setActiveToolsByName(nextActive);

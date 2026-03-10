@@ -7,6 +7,8 @@ import { Settings } from "../src/config/settings";
 import type { CustomTool } from "../src/extensibility/custom-tools/types";
 import { AgentSession } from "../src/session/agent-session";
 import { SessionManager } from "../src/session/session-manager";
+import type { ToolSession } from "../src/tools";
+import { SearchToolBm25Tool } from "../src/tools/search-tool-bm25";
 
 function createModel(): Model<"openai-responses"> {
 	return {
@@ -71,11 +73,13 @@ function createMcpCustomTool(
 		name,
 		label: `${serverName}/${mcpToolName}`,
 		description,
+		mcpServerName: serverName,
+		mcpToolName,
 		parameters: Type.Object(properties),
 		async execute() {
 			return { content: [{ type: "text", text: `${name} executed` }] };
 		},
-	};
+	} as CustomTool;
 }
 
 describe("AgentSession MCP discovery", () => {
@@ -219,5 +223,51 @@ describe("AgentSession MCP discovery", () => {
 		expect(session.getSelectedMCPToolNames()).toEqual(["mcp_docs_search", "mcp_slack_send_message"]);
 		expect(session.getActiveToolNames()).toEqual(["read", "mcp_docs_search", "mcp_slack_send_message"]);
 		expect(session.systemPrompt).toBe("tools:read,mcp_docs_search,mcp_slack_send_message");
+	});
+	it("refreshes search_tool_bm25 descriptions when MCP tools are reloaded", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const searchTool = new SearchToolBm25Tool({
+			cwd: "/tmp/test",
+			hasUI: false,
+			getSessionFile: () => null,
+			getSessionSpawns: () => "*",
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			isMCPDiscoveryEnabled: () => true,
+			getDiscoverableMCPTools: () => [],
+			getSelectedMCPToolNames: () => [],
+			activateDiscoveredMCPTools: async () => [],
+		} as ToolSession);
+		const toolRegistry = new Map<string, AgentTool>([
+			[readTool.name, readTool],
+			[searchTool.name, searchTool as unknown as AgentTool],
+		]);
+		const agent = new Agent({
+			initialState: {
+				model: createModel(),
+				systemPrompt: "initial",
+				tools: [readTool, searchTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async toolNames => `tools:${toolNames.join(",")}`,
+		});
+		sessions.push(session);
+
+		expect(searchTool.description).not.toContain("Discoverable MCP servers in this session: pager.");
+
+		await session.refreshMCPTools([
+			createMcpCustomTool("mcp_pager_list", "pager", "list", "List pager alerts", ["service"]),
+		]);
+
+		expect(searchTool.description).toContain("Discoverable MCP servers in this session: pager.");
+		expect(searchTool.description).toContain("Total discoverable MCP tools loaded: 1.");
+		expect(session.getActiveToolNames()).toEqual(["read", "search_tool_bm25"]);
 	});
 });
