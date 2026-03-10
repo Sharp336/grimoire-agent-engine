@@ -114,6 +114,7 @@ export class ProcessTerminal implements Terminal {
 	#appearanceCallbacks: Array<(appearance: TerminalAppearance) => void> = [];
 	#appearance: TerminalAppearance | undefined;
 	#osc11Pending = false;
+	#osc11ResponseBuffer = "";
 	#osc11PollTimer?: Timer;
 	#mode2031Active = false;
 	#mode2031DebounceTimer?: Timer;
@@ -252,8 +253,9 @@ export class ProcessTerminal implements Terminal {
 		// Mode 2031 DSR response: \x1b[?997;{1=dark,2=light}n
 		const appearanceDsrPattern = /^\x1b\[\?997;([12])n$/;
 
-		// OSC 11 response: \x1b]11;rgb:RRRR/GGGG/BBBB(ST or BEL)
-		const osc11ResponsePattern = /^\x1b\]11;rgba?:([0-9a-fA-F]+)\/([0-9a-fA-F]+)\/([0-9a-fA-F]+)/;
+		// OSC 11 response: \x1b]11;rgb:RR/GG/BB or rgba:RR/GG/BB, terminated by BEL or ST.
+		const osc11ResponsePattern =
+			/^\x1b\]11;rgba?:([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})\/([0-9a-fA-F]{1,4})(?:\x07|\x1b\\)$/;
 
 		// DA1 (Primary Device Attributes) response: \x1b[?...c
 		const da1ResponsePattern = /^\x1b\[\?[\d;]*c$/;
@@ -280,17 +282,23 @@ export class ProcessTerminal implements Terminal {
 				}
 			}
 
-			// OSC 11 response: parse RGB and compute luminance for dark/light
-			const osc11Match = sequence.match(osc11ResponsePattern);
-			if (osc11Match) {
+			// DA1 response: if OSC 11 is still pending, terminal doesn't support it.
+			// This also clears any partial OSC 11 fragment we buffered after a timeout flush.
+			if (this.#osc11Pending && da1ResponsePattern.test(sequence)) {
 				this.#osc11Pending = false;
-				this.#handleOsc11Response(osc11Match[1]!, osc11Match[2]!, osc11Match[3]!);
+				this.#osc11ResponseBuffer = "";
 				return;
 			}
 
-			// DA1 response: if OSC 11 is still pending, terminal doesn't support it
-			if (this.#osc11Pending && da1ResponsePattern.test(sequence)) {
+			// OSC 11 replies can be split if the stdin buffer flushes a partial sequence.
+			// Accumulate fragments until the BEL/ST terminator arrives, then parse once.
+			if (this.#osc11Pending && (this.#osc11ResponseBuffer || sequence.startsWith("\x1b]11;"))) {
+				this.#osc11ResponseBuffer += sequence;
+				const osc11Match = this.#osc11ResponseBuffer.match(osc11ResponsePattern);
+				if (!osc11Match) return;
 				this.#osc11Pending = false;
+				this.#osc11ResponseBuffer = "";
+				this.#handleOsc11Response(osc11Match[1]!, osc11Match[2]!, osc11Match[3]!);
 				return;
 			}
 
@@ -334,19 +342,21 @@ export class ProcessTerminal implements Terminal {
 	 */
 	#queryBackgroundColor(): void {
 		this.#osc11Pending = true;
+		this.#osc11ResponseBuffer = "";
 		this.#safeWrite("\x1b]11;?\x07"); // OSC 11 query (BEL terminated)
 		this.#safeWrite("\x1b[c"); // DA1 sentinel
 	}
 
 	/**
 	 * Parse an OSC 11 background color response and compute BT.601 luminance.
-	 * Handles both 4-digit (rgb:1a1a/2b2b/3c3c) and 2-digit (rgb:1a/2b/3c) forms.
+	 * Handles 1-, 2-, 3-, and 4-digit XParseColor hex components.
 	 */
 	#handleOsc11Response(rHex: string, gHex: string, bHex: string): void {
 		const normalize = (hex: string): number => {
 			const value = parseInt(hex, 16);
 			if (Number.isNaN(value)) return 0;
-			return hex.length <= 2 ? value / 0xff : value / 0xffff;
+			const max = 16 ** hex.length - 1;
+			return max > 0 ? value / max : 0;
 		};
 		const luminance = 0.299 * normalize(rHex) + 0.587 * normalize(gHex) + 0.114 * normalize(bHex);
 		const mode: TerminalAppearance = luminance < 0.5 ? "dark" : "light";
@@ -467,6 +477,7 @@ export class ProcessTerminal implements Terminal {
 		}
 		this.#appearanceCallbacks = [];
 		this.#osc11Pending = false;
+		this.#osc11ResponseBuffer = "";
 		this.#mode2031Active = false;
 
 		// Disable Kitty keyboard protocol if not already done by drainInput()

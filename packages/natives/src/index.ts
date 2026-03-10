@@ -1,3 +1,4 @@
+export * from "./appearance";
 export * from "./ast";
 export * from "./clipboard";
 export * from "./glob";

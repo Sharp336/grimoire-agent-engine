@@ -3,9 +3,11 @@ import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Effort } from "@oh-my-pi/pi-ai";
 import {
+	detectMacOSAppearance,
 	type HighlightColors as NativeHighlightColors,
 	highlightCode as nativeHighlightCode,
 	supportsLanguage as nativeSupportsLanguage,
+	startMacAppearanceObserver as startNativeMacObserver,
 } from "@oh-my-pi/pi-natives";
 import type { EditorTheme, MarkdownTheme, SelectListTheme, SymbolTheme } from "@oh-my-pi/pi-tui";
 import { adjustHsv, getCustomThemesDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
@@ -1631,18 +1633,23 @@ export async function getThemeByName(name: string): Promise<Theme | undefined> {
 /** Appearance detected via OSC 11 background color query, or undefined if not yet available. */
 var terminalReportedAppearance: "dark" | "light" | undefined;
 
-function detectTerminalBackground(): "dark" | "light" {
-	// Tier 1: Terminal-reported appearance from OSC 11 background color luminance.
-	// Set asynchronously when terminal responds to OSC 11 at startup,
-	// and updated when Mode 2031 triggers a re-query or periodic poll.
-	// On macOS inside Zellij, OSC 11 can spuriously report pure black; when that
-	// manifests as a dark reading without COLORFGBG, prefer the lower-tier fallbacks.
-	const shouldIgnoreTerminalReport =
-		process.platform === "darwin" && !!Bun.env.ZELLIJ && terminalReportedAppearance === "dark" && !Bun.env.COLORFGBG;
-	if (terminalReportedAppearance && !shouldIgnoreTerminalReport) return terminalReportedAppearance;
+/** Appearance reported by the macOS fallback observer, or undefined if not yet available. */
+var macOSReportedAppearance: "dark" | "light" | undefined;
 
-	// Tier 2: COLORFGBG env var (set by some terminals: iTerm2, Konsole, rxvt).
-	// Static at process start, never updates mid-session.
+function shouldUseMacOSAppearanceFallback(): boolean {
+	// Zellij currently breaks OSC 11 passthrough on macOS, so terminal-derived
+	// appearance cannot be trusted there. Fall back to host macOS appearance
+	// without letting it override valid terminal signals elsewhere.
+	return process.platform === "darwin" && !!Bun.env.ZELLIJ;
+}
+
+function detectTerminalBackground(): "dark" | "light" {
+	// Tier 1: terminal-reported appearance from OSC 11 luminance.
+	if (!shouldUseMacOSAppearanceFallback() && terminalReportedAppearance) {
+		return terminalReportedAppearance;
+	}
+
+	// Tier 2: COLORFGBG env var (static at process start, but still terminal-derived).
 	const colorfgbg = Bun.env.COLORFGBG || "";
 	if (colorfgbg) {
 		const parts = colorfgbg.split(";");
@@ -1652,15 +1659,10 @@ function detectTerminalBackground(): "dark" | "light" {
 		}
 	}
 
-	// Tier 3: macOS system appearance (Zellij edge case — OSC 11 returns black there).
-	if (process.platform === "darwin") {
-		try {
-			const result = Bun.spawnSync(["defaults", "read", "-g", "AppleInterfaceStyle"]);
-			if (result.exitCode === 0 && result.stdout.toString().trim() === "Dark") return "dark";
-			return "light";
-		} catch {
-			// defaults command unavailable
-		}
+	// Tier 3: host macOS appearance for known-broken terminal paths only.
+	if (shouldUseMacOSAppearanceFallback()) {
+		const macAppearance = macOSReportedAppearance ?? detectMacOSAppearance();
+		if (macAppearance) return macAppearance;
 	}
 
 	return "dark";
@@ -1959,7 +1961,7 @@ async function startThemeWatcher(): Promise<void> {
 
 /**
  * Shared logic for re-evaluating the auto-detected theme.
- * Called from SIGWINCH and terminal appearance change handler.
+ * Called from SIGWINCH, terminal appearance change handler, and macOS fallback observer.
  */
 function reevaluateAutoTheme(debugLabel: string): void {
 	if (!autoDetectedTheme) return;
@@ -1979,6 +1981,34 @@ function reevaluateAutoTheme(debugLabel: string): void {
 }
 
 // ============================================================================
+// macOS Appearance Fallback Observer
+// ============================================================================
+
+var macObserver: { stop(): void } | undefined;
+
+function startMacAppearanceObserver(): void {
+	stopMacAppearanceObserver();
+	if (!shouldUseMacOSAppearanceFallback()) return;
+	try {
+		macOSReportedAppearance = detectMacOSAppearance();
+		macObserver = startNativeMacObserver(appearance => {
+			macOSReportedAppearance = appearance;
+			reevaluateAutoTheme("macOS fallback");
+		});
+	} catch (err) {
+		logger.warn("Failed to start macOS appearance observer", { err });
+	}
+}
+
+function stopMacAppearanceObserver(): void {
+	if (macObserver) {
+		macObserver.stop();
+		macObserver = undefined;
+	}
+	macOSReportedAppearance = undefined;
+}
+
+// ============================================================================
 // SIGWINCH Listener
 // ============================================================================
 
@@ -1989,6 +2019,7 @@ function startSigwinchListener(): void {
 		reevaluateAutoTheme("SIGWINCH");
 	};
 	process.on("SIGWINCH", sigwinchHandler);
+	startMacAppearanceObserver();
 }
 
 function stopSigwinchListener(): void {
@@ -1996,6 +2027,7 @@ function stopSigwinchListener(): void {
 		process.removeListener("SIGWINCH", sigwinchHandler);
 		sigwinchHandler = undefined;
 	}
+	stopMacAppearanceObserver();
 }
 
 export function stopThemeWatcher(): void {
@@ -2004,6 +2036,7 @@ export function stopThemeWatcher(): void {
 		themeWatcher = undefined;
 	}
 	stopSigwinchListener();
+	terminalReportedAppearance = undefined;
 }
 
 // ============================================================================
