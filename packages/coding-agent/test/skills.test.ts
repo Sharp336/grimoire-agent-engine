@@ -403,6 +403,55 @@ enabled = false
 				await fs.rm(tempProjectDir, { recursive: true, force: true });
 			}
 		});
+
+		it("should fall back to agents skill when same-name claude skill source is disabled", async () => {
+			const tempProjectDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-skill-fallback-"));
+			try {
+				const claudeSkillDir = path.join(tempProjectDir, ".claude", "skills", "pocketbase-foundations");
+				const agentsSkillDir = path.join(tempProjectDir, ".agents", "skills", "pocketbase-foundations");
+				await fs.mkdir(claudeSkillDir, { recursive: true });
+				await fs.mkdir(agentsSkillDir, { recursive: true });
+
+				await fs.writeFile(
+					path.join(claudeSkillDir, "SKILL.md"),
+					[
+						"---",
+						"name: pocketbase-foundations",
+						"description: Claude variant",
+						"---",
+						"",
+						"# Claude variant",
+					].join("\n"),
+				);
+				await fs.writeFile(
+					path.join(agentsSkillDir, "SKILL.md"),
+					[
+						"---",
+						"name: pocketbase-foundations",
+						"description: Agents variant",
+						"---",
+						"",
+						"# Agents variant",
+					].join("\n"),
+				);
+
+				const { skills } = await loadSkills({
+					cwd: tempProjectDir,
+					enableCodexUser: true,
+					enableClaudeUser: false,
+					enableClaudeProject: false,
+					enablePiUser: false,
+					enablePiProject: false,
+					includeSkills: ["pocketbase-foundations"],
+				});
+
+				expect(skills).toHaveLength(1);
+				expect(skills[0].name).toBe("pocketbase-foundations");
+				expect(skills[0].filePath).toContain(`${path.sep}.agents${path.sep}skills${path.sep}pocketbase-foundations`);
+			} finally {
+				await fs.rm(tempProjectDir, { recursive: true, force: true });
+			}
+		});
 	});
 
 	describe("collision handling", () => {

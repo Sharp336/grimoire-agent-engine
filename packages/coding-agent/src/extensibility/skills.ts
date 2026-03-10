@@ -198,8 +198,11 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 		return ignoredSkills.some(pattern => new Bun.Glob(pattern).match(name));
 	}
 
-	// Filter skills by source and patterns first
-	const filteredSkills = result.items.filter(capSkill => {
+	// Filter skills by source and patterns first.
+	// Use `result.all` (includes shadowed lower-priority entries) so disabling
+	// a higher-priority source still allows fallback to another provider.
+	const allDiscoveredSkills = (result.all && result.all.length > 0 ? result.all : result.items) as CapabilitySkill[];
+	const filteredSkills = allDiscoveredSkills.filter(capSkill => {
 		if (!isSourceEnabled(capSkill._source)) return false;
 		if (codexDisabledPaths.has(normalizePathForComparison(capSkill.path))) return false;
 		if (matchesIgnorePatterns(capSkill.name)) return false;
