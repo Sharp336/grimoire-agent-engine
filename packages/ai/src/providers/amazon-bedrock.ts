@@ -126,11 +126,15 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			let additionalModelRequestFields = buildAdditionalModelRequestFields(model, options);
 
 			// Bedrock rejects thinking + forced tool_choice ("any" or specific tool).
-			// When tool_choice forces tool use, disable thinking to avoid API errors.
+			// Strip thinking fields but preserve other fields (e.g. anthropic_beta for 1M context).
 			if (toolConfig?.toolChoice && additionalModelRequestFields) {
 				const tc = toolConfig.toolChoice;
 				if ("any" in tc || "tool" in tc) {
-					additionalModelRequestFields = undefined;
+					delete additionalModelRequestFields.thinking;
+					delete additionalModelRequestFields.output_config;
+					if (Object.keys(additionalModelRequestFields).length === 0) {
+						additionalModelRequestFields = undefined;
+					}
 				}
 			}
 
