@@ -167,6 +167,52 @@ describe("SearchToolBm25Tool", () => {
 		expect(renderedText).not.toContain("search_tool_bm25");
 	});
 
+	it("tolerates partially streamed render-call arguments", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const uiTheme = theme!;
+		const renderedCall = searchToolBm25Renderer.renderCall(
+			{} as never,
+			{ expanded: false, isPartial: true },
+			uiTheme,
+		);
+		expect(renderedCall.render(120).join("\n")).toContain("(empty query)");
+	});
+
+	it("sanitizes MCP metadata before rendering discovery output", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const uiTheme = theme!;
+		const renderedResult = searchToolBm25Renderer.renderResult(
+			{
+				content: [{ type: "text", text: "" }],
+				details: {
+					query: "github issue",
+					limit: 2,
+					total_tools: 1,
+					active_selected_tools: ["mcp_github_create_issue"],
+					tools: [
+						{
+							name: "mcp_github_create_issue",
+							label: "github\t/create_issue",
+							description: "Create\ta GitHub issue",
+							server_name: "git\thub",
+							mcp_tool_name: "create_issue",
+							schema_keys: ["owner", "repo"],
+							score: 1.234567,
+						},
+					],
+				},
+			},
+			{ expanded: true, isPartial: false },
+			uiTheme,
+		);
+		const renderedText = renderedResult.render(120).join("\n");
+		expect(renderedText).not.toContain("\t");
+		expect(renderedText).toContain("git   hub");
+		expect(renderedText).toContain("Create   a GitHub issue");
+	});
+
 	it("shows at most five tools in collapsed renderer output", async () => {
 		const theme = await getThemeByName("dark");
 		expect(theme).toBeDefined();

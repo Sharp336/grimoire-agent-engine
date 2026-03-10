@@ -88,14 +88,17 @@ export function renderSearchToolBm25Description(discoverableTools: DiscoverableM
 }
 
 function renderMatchLines(match: SearchToolBm25Match, theme: Theme): string[] {
+	const safeServerName = match.server_name ? replaceTabs(match.server_name) : undefined;
+	const safeLabel = replaceTabs(match.label);
+	const safeDescription = replaceTabs(match.description.trim());
 	const metaParts: string[] = [];
-	if (match.server_name) metaParts.push(theme.fg("muted", match.server_name));
+	if (safeServerName) metaParts.push(theme.fg("muted", safeServerName));
 	metaParts.push(theme.fg("dim", `score ${match.score.toFixed(3)}`));
 	const metaSep = theme.fg("dim", theme.sep.dot);
 	const metaSuffix = metaParts.length > 0 ? ` ${metaParts.join(metaSep)}` : "";
-	const lines = [`${theme.fg("accent", truncateToWidth(match.label, MATCH_LABEL_LEN))}${metaSuffix}`];
-	if (match.description.trim()) {
-		lines.push(theme.fg("muted", truncateToWidth(match.description.trim(), MATCH_DESCRIPTION_LEN)));
+	const lines = [`${theme.fg("accent", truncateToWidth(safeLabel, MATCH_LABEL_LEN))}${metaSuffix}`];
+	if (safeDescription) {
+		lines.push(theme.fg("muted", truncateToWidth(safeDescription, MATCH_DESCRIPTION_LEN)));
 	}
 	return lines;
 }
@@ -173,10 +176,10 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 
 export const searchToolBm25Renderer = {
 	renderCall(args: SearchToolBm25Params, _options: RenderResultOptions, uiTheme: Theme): Component {
-		const query = args.query.trim() || "(empty query)";
+		const query = typeof args.query === "string" ? replaceTabs(args.query.trim()) : "";
 		const meta = args.limit ? [`limit:${args.limit}`] : [];
 		return new Text(
-			renderStatusLine({ icon: "pending", title: TOOL_DISCOVERY_TITLE, description: query, meta }, uiTheme),
+			renderStatusLine({ icon: "pending", title: TOOL_DISCOVERY_TITLE, description: query || "(empty query)", meta }, uiTheme),
 			0,
 			0,
 		);
