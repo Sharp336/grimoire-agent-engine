@@ -2,18 +2,8 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added subcommands to `/copy` command: `code` (copy last code block), `all` (copy all code blocks), `cmd` (copy last bash/python command), and `last` (copy full message)
-- Added support for copying last executed bash or python command via `/copy cmd` subcommand
-- Added `assignment` field to task progress and result objects to track the raw per-task assignment text separately from the full templated task
-- Added `details` field to todo items for storing implementation specifics, file paths, and edge cases (shown only when task is active)
-- Added support for multi-line details in todo items with automatic indentation in interactive and reminder displays
-- Added `todo.eager` setting to automatically create a comprehensive todo list after the first user message
-- Added `buildNamedToolChoice` utility function to build provider-aware tool choice constraints for named tools
-- Support for comma/space-separated path lists in `find`, `grep`, `ast_grep`, and `ast_edit` tools (e.g., `apps/,packages/,phases/` or `apps/ packages/ phases/`)
-- New `resolveMultiSearchPath` and `resolveMultiFindPattern` functions to handle multi-path search inputs with automatic common base path detection
-
+- Added `llama.cpp` as local provider
+- 
 ### Changed
 
 - Updated hashline tool documentation with explicit guidance on `replace` operation semantics, clarifying that `lines` must not extend past `end` to avoid unintended line duplication

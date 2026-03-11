@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Added `llama.cpp` as local provider
+
 ## [13.9.16] - 2026-03-10
 ### Added
 
