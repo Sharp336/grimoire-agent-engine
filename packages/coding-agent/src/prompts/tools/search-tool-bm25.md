@@ -30,6 +30,6 @@ This is not repository search, file search, or code search. Use it only for MCP 
 
 Returns JSON with:
 - `query`
+- `activated_tools` — MCP tools activated by this search call
+- `match_count` — number of ranked matches returned by the search
 - `total_tools`
-- `active_selected_tools`
-- `tools`

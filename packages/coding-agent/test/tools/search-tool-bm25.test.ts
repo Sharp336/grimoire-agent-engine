@@ -94,6 +94,10 @@ describe("SearchToolBm25Tool", () => {
 		expect(description).toContain("- `label`");
 		expect(description).toContain("- `mcp_tool_name`");
 		expect(description).toContain("input schema property keys (`schema_keys`)");
+		expect(description).toContain("- `activated_tools` — MCP tools activated by this search call");
+		expect(description).toContain("- `match_count` — number of ranked matches returned by the search");
+		expect(description).not.toContain("- `active_selected_tools`");
+		expect(description).not.toContain("- `tools`");
 	});
 
 	it("uses the session-provided cached search index during execution", async () => {
@@ -177,6 +181,24 @@ describe("SearchToolBm25Tool", () => {
 		expect(renderedText).toContain("limit:2");
 		expect(renderedText).not.toContain("keys:");
 		expect(renderedText).not.toContain("search_tool_bm25");
+	});
+
+	it("truncates fallback discovery text before rendering", async () => {
+		const theme = await getThemeByName("dark");
+		expect(theme).toBeDefined();
+		const uiTheme = theme!;
+		const longLine = "Long discovery output ".repeat(20);
+		const renderedResult = searchToolBm25Renderer.renderResult(
+			{
+				content: [{ type: "text", text: longLine }],
+			},
+			{ expanded: false, isPartial: false },
+			uiTheme,
+		);
+		const renderedText = renderedResult.render(200).join("\n");
+		expect(renderedText).toContain("Tool Discovery");
+		expect(renderedText).toContain("Long discovery output Long discovery output");
+		expect(renderedText).not.toContain(longLine);
 	});
 
 	it("tolerates partially streamed render-call arguments", async () => {
