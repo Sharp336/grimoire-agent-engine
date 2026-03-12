@@ -697,7 +697,7 @@ export class ModelRegistry {
 		if (!configuredProviders.has("llama.cpp")) {
 			this.#discoverableProviders.push({
 				provider: "llama.cpp",
-				api: "openai-completions",
+				api: "openai-responses",
 				baseUrl: Bun.env.LLAMA_CPP_BASE_URL || "http://127.0.0.1:8080",
 				discovery: { type: "llama.cpp" },
 				optional: true,
