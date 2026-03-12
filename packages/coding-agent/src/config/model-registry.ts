@@ -702,7 +702,10 @@ export class ModelRegistry {
 				discovery: { type: "llama.cpp" },
 				optional: true,
 			});
-			this.#keylessProviders.add("llama.cpp");
+			// Only mark as keyless if no API key is configured
+			if (!this.authStorage.hasAuth("llama.cpp")) {
+				this.#keylessProviders.add("llama.cpp");
+			}
 		}
 		if (!configuredProviders.has("lm-studio")) {
 			this.#discoverableProviders.push({
