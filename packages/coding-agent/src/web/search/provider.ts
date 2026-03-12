@@ -16,6 +16,21 @@ import type { SearchProviderId } from "./types";
 export type { SearchParams } from "./providers/base";
 export { SearchProvider } from "./providers/base";
 
+const SEARCH_PROVIDER_LABELS: Record<SearchProviderId, string> = {
+	tavily: "Tavily",
+	perplexity: "Perplexity",
+	brave: "Brave",
+	jina: "Jina",
+	kimi: "Kimi",
+	anthropic: "Anthropic",
+	gemini: "Gemini",
+	codex: "Codex",
+	zai: "Z.AI",
+	exa: "Exa",
+	kagi: "Kagi",
+	synthetic: "Synthetic",
+};
+
 const SEARCH_PROVIDERS: Record<SearchProviderId, SearchProvider> = {
 	exa: new ExaProvider(),
 	brave: new BraveProvider(),
@@ -46,6 +61,8 @@ export const SEARCH_PROVIDER_ORDER: SearchProviderId[] = [
 	"synthetic",
 ];
 
+export const SEARCH_PROVIDER_PRIORITY_DESCRIPTION = `Priority: ${SEARCH_PROVIDER_ORDER.map(id => SEARCH_PROVIDER_LABELS[id]).join(" > ")}`;
+
 export function getSearchProvider(provider: SearchProviderId): SearchProvider {
 	return SEARCH_PROVIDERS[provider];
 }
@@ -58,7 +75,7 @@ export function setPreferredSearchProvider(provider: SearchProviderId | "auto"):
 	preferredProvId = provider;
 }
 
-/** Determine which providers are configured (priority: Perplexity → Brave → Jina → Kimi → Anthropic → Gemini → Codex → Z.AI → Exa → Tavily → Kagi → Synthetic) */
+/** Determine which providers are configured (priority follows SEARCH_PROVIDER_ORDER) */
 export async function resolveProviderChain(
 	preferredProvider: SearchProviderId | "auto" = preferredProvId,
 ): Promise<SearchProvider[]> {

@@ -20,6 +20,7 @@ import {
 	type SettingTab,
 } from "../../config/settings-schema";
 import { getThinkingLevelMetadata } from "../../thinking";
+import { SEARCH_PROVIDER_PRIORITY_DESCRIPTION } from "../../web/search/provider";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UI Definition Types
@@ -224,7 +225,7 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{
 			value: "auto",
 			label: "Auto",
-			description: "Preferred web-search provider",
+			description: SEARCH_PROVIDER_PRIORITY_DESCRIPTION,
 		},
 		{ value: "exa", label: "Exa", description: "Uses Exa API when EXA_API_KEY is set; falls back to Exa MCP" },
 		{ value: "brave", label: "Brave", description: "Requires BRAVE_API_KEY" },
