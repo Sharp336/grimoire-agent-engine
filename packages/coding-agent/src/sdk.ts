@@ -1370,6 +1370,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (!obfuscator?.hasSecrets()) return converted;
 		return obfuscateMessages(obfuscator, converted);
 	};
+	const transformContext = extensionRunner
+		? async (messages: AgentMessage[], _signal?: AbortSignal) => {
+				return await extensionRunner.emitContext(messages);
+			}
+		: undefined;
 
 	const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
 		toolContextStore.setUIContext(uiContext, hasUI);
@@ -1398,11 +1403,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			: undefined,
 		sessionId: sessionManager.getSessionId(),
-		transformContext: extensionRunner
-			? async messages => {
-					return extensionRunner.emitContext(messages);
-				}
-			: undefined,
+		transformContext,
 		steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
 		followUpMode: settings.get("followUpMode") ?? "one-at-a-time",
 		interruptMode: settings.get("interruptMode") ?? "immediate",
@@ -1477,6 +1478,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		skillsSettings: settings.getGroup("skills") as Required<SkillsSettings>,
 		modelRegistry,
 		toolRegistry,
+		transformContext,
+		convertToLlm: convertToLlmFinal,
 		rebuildSystemPrompt,
 		mcpDiscoveryEnabled,
 		initialSelectedMCPToolNames,
