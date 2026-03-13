@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { Message } from "@oh-my-pi/pi-ai";
+import type { Message, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -62,5 +62,32 @@ describe("AgentSession message pipeline", () => {
 		expect(transformContext).toHaveBeenCalledWith(inputMessages, abortController.signal);
 		expect(convertToLlm).toHaveBeenCalledWith(transformedMessages);
 		expect(result).toEqual(convertedMessages);
+	});
+
+	it("composes session payload hooks into direct side-request options", async () => {
+		const sessionOnPayload = vi.fn(async (payload: unknown) => ({
+			...(payload as Record<string, unknown>),
+			session: true,
+		}));
+		const requestOnPayload = vi.fn(async () => undefined);
+		const session = new AgentSession({
+			agent: createAgent(),
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+			onPayload: sessionOnPayload,
+		});
+		sessions.push(session);
+		const options: SimpleStreamOptions = {
+			apiKey: "key",
+			onPayload: requestOnPayload,
+		};
+
+		const prepared = session.prepareSimpleStreamOptions(options);
+		const result = await prepared.onPayload?.({ original: true });
+
+		expect(sessionOnPayload).toHaveBeenCalledWith({ original: true }, undefined);
+		expect(requestOnPayload).toHaveBeenCalledWith({ original: true, session: true }, undefined);
+		expect(result).toEqual({ original: true, session: true });
 	});
 });

@@ -1,11 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import {
-	type AssistantMessage,
-	type Context,
-	type Message,
-	type SimpleStreamOptions,
-	streamSimple,
-} from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, type Context, type Message, streamSimple } from "@oh-my-pi/pi-ai";
 import { renderPromptTemplate } from "../../config/prompt-templates";
 import btwUserPrompt from "../../prompts/system/btw-user.md" with { type: "text" };
 import { toReasoningEffort } from "../../thinking";
@@ -88,14 +82,14 @@ export class BtwController {
 				systemPrompt: this.ctx.session.systemPrompt,
 				messages: [...llmMessages, this.#buildQuestionMessage(request.question)],
 			};
-			const options: SimpleStreamOptions = {
+			const options = this.ctx.session.prepareSimpleStreamOptions({
 				apiKey,
 				sessionId: this.ctx.session.sessionId,
 				reasoning: toReasoningEffort(this.ctx.session.thinkingLevel),
 				serviceTier: this.ctx.session.serviceTier,
 				signal: request.abortController.signal,
 				toolChoice: "none",
-			};
+			});
 			const stream = this.#streamFn(model, context, options);
 
 			for await (const event of stream) {
@@ -153,22 +147,22 @@ export class BtwController {
 
 	#buildMessageSnapshot(): AgentMessage[] {
 		const messages = this.ctx.session.messages.slice();
-		if (!this.ctx.session.isStreaming || !this.ctx.streamingMessage || messages.length === 0) {
-			return messages;
-		}
-		const lastMessage = messages.at(-1);
-		if (!lastMessage || lastMessage.role !== "assistant") {
+		if (!this.ctx.session.isStreaming || !this.ctx.streamingMessage) {
 			return messages;
 		}
 		const streamingText = this.ctx.extractAssistantText(this.ctx.streamingMessage);
+		const lastMessage = messages.at(-1);
 		if (!streamingText) {
-			return messages.slice(0, -1);
+			return lastMessage?.role === "assistant" ? messages.slice(0, -1) : messages;
 		}
 		const normalizedStreamingMessage: AssistantMessage = {
 			...this.ctx.streamingMessage,
 			content: [{ type: "text", text: streamingText }],
 		};
-		return [...messages.slice(0, -1), normalizedStreamingMessage];
+		if (lastMessage?.role === "assistant") {
+			return [...messages.slice(0, -1), normalizedStreamingMessage];
+		}
+		return [...messages, normalizedStreamingMessage];
 	}
 
 	#assistantText(message: AssistantMessage): string {

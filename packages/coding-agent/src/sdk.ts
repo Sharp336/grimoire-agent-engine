@@ -1345,6 +1345,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return await extensionRunner.emitContext(messages);
 			}
 		: undefined;
+	const onPayload = extensionRunner
+		? async (payload: unknown, _model?: Model) => {
+				return await extensionRunner.emitBeforeProviderRequest(payload);
+			}
+		: undefined;
 
 	const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
 		toolContextStore.setUIContext(uiContext, hasUI);
@@ -1367,11 +1372,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: initialTools,
 		},
 		convertToLlm: convertToLlmFinal,
-		onPayload: extensionRunner
-			? async (payload, _model) => {
-					return extensionRunner.emitBeforeProviderRequest(payload);
-				}
-			: undefined,
+		onPayload,
 		sessionId: sessionManager.getSessionId(),
 		transformContext,
 		steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
@@ -1449,6 +1450,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		modelRegistry,
 		toolRegistry,
 		transformContext,
+		onPayload,
 		convertToLlm: convertToLlmFinal,
 		rebuildSystemPrompt,
 		ttsrManager,

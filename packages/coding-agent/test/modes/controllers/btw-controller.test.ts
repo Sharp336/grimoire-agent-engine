@@ -44,10 +44,12 @@ beforeAll(async () => {
 });
 
 describe("BtwController", () => {
-	it("builds a tool-less side request from the current session prefix and renders it in the btw panel", async () => {
+	it("builds a tool-less side request from the current session prefix and preserves payload hooks", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const convertMessagesToLlm = vi.fn(async () => [createUserMessage("prefix")]);
 		const getApiKey = vi.fn(async () => "key");
+		const onPayload = vi.fn(async payload => payload);
+		const prepareSimpleStreamOptions = vi.fn(options => ({ ...options, onPayload }));
 		const prompt = vi.fn();
 		const requestRender = vi.fn();
 		const btwContainer = new Container();
@@ -72,6 +74,7 @@ describe("BtwController", () => {
 				systemPrompt: "system prompt",
 				modelRegistry: { getApiKey } as unknown as InteractiveModeContext["session"]["modelRegistry"],
 				convertMessagesToLlm,
+				prepareSimpleStreamOptions,
 				prompt,
 			} as unknown as InteractiveModeContext["session"],
 			streamingMessage: undefined,
@@ -93,6 +96,7 @@ describe("BtwController", () => {
 		expect(convertCall[0]).toEqual(ctx.session.messages);
 		expect(convertCall[1]).toBeInstanceOf(AbortSignal);
 		expect(getApiKey).toHaveBeenCalledWith(model, "session-1");
+		expect(prepareSimpleStreamOptions).toHaveBeenCalledTimes(1);
 		expect(streamFn).toHaveBeenCalledTimes(1);
 		const [, context, options] = streamFn.mock.calls[0] as [
 			unknown,
@@ -109,6 +113,7 @@ describe("BtwController", () => {
 		expect(options.serviceTier).toBe("priority");
 		expect(options.reasoning).toBe(ThinkingLevel.High);
 		expect(options.toolChoice).toBe("none");
+		expect(options.onPayload).toBe(onPayload);
 		expect("providerSessionState" in options).toBe(false);
 		expect(prompt).not.toHaveBeenCalled();
 		expect(ctx.session.messages).toEqual(sessionMessages);
@@ -116,7 +121,7 @@ describe("BtwController", () => {
 		expect(controller.hasActiveRequest()).toBe(true);
 	});
 
-	it("sanitizes an active streaming assistant snapshot to text-only content", async () => {
+	it("appends the active streaming assistant snapshot when session history still ends with the user message", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
 		const convertMessagesToLlm = vi.fn(async () => []);
 		const streamFn = vi.fn((_model, _context, _options) => {
@@ -138,7 +143,7 @@ describe("BtwController", () => {
 			btwContainer: new Container(),
 			session: {
 				model,
-				messages: [createAssistantMessage("old"), streamingMessage],
+				messages: [createUserMessage("latest user")],
 				isStreaming: true,
 				sessionId: "session-1",
 				serviceTier: undefined,
@@ -148,6 +153,8 @@ describe("BtwController", () => {
 					getApiKey: async () => "key",
 				} as unknown as InteractiveModeContext["session"]["modelRegistry"],
 				convertMessagesToLlm,
+				prepareSimpleStreamOptions: (options =>
+					options) as InteractiveModeContext["session"]["prepareSimpleStreamOptions"],
 			} as unknown as InteractiveModeContext["session"],
 			streamingMessage,
 			extractAssistantText: () => "partial answer",
@@ -159,11 +166,13 @@ describe("BtwController", () => {
 		await controller.start("Why?");
 		await Bun.sleep(0);
 
-		const firstCall = convertMessagesToLlm.mock.calls[0] as unknown as [AssistantMessage[], AbortSignal];
+		const firstCall = convertMessagesToLlm.mock.calls[0] as unknown as [Message[], AbortSignal];
 		expect(firstCall).toBeDefined();
 		expect(firstCall[1]).toBeInstanceOf(AbortSignal);
 		const snapshot = firstCall[0];
 		expect(snapshot).toHaveLength(2);
+		expect(snapshot[0]?.role).toBe("user");
+		expect(snapshot[1]?.role).toBe("assistant");
 		expect(snapshot[1]?.content).toEqual([{ type: "text", text: "partial answer" }]);
 	});
 
@@ -196,6 +205,8 @@ describe("BtwController", () => {
 					getApiKey: async () => "key",
 				} as unknown as InteractiveModeContext["session"]["modelRegistry"],
 				convertMessagesToLlm: async () => [],
+				prepareSimpleStreamOptions: (options =>
+					options) as InteractiveModeContext["session"]["prepareSimpleStreamOptions"],
 			} as unknown as InteractiveModeContext["session"],
 			streamingMessage: undefined,
 			extractAssistantText: vi.fn(),
@@ -234,6 +245,8 @@ describe("BtwController", () => {
 					getApiKey: async () => "key",
 				} as unknown as InteractiveModeContext["session"]["modelRegistry"],
 				convertMessagesToLlm: async () => [],
+				prepareSimpleStreamOptions: (options =>
+					options) as InteractiveModeContext["session"]["prepareSimpleStreamOptions"],
 			} as unknown as InteractiveModeContext["session"],
 			streamingMessage: undefined,
 			extractAssistantText: vi.fn(),
