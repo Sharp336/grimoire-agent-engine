@@ -496,14 +496,16 @@ async function spillLargeResultToArtifact(
 	newContent.push({ type: "text", text: truncated.content });
 
 	// Build truncation meta
-	const shownStart = truncated.totalLines - truncated.outputLines + 1;
+	const outputLines = truncated.outputLines ?? truncated.totalLines;
+	const outputBytes = truncated.outputBytes ?? truncated.totalBytes;
+	const shownStart = truncated.totalLines - outputLines + 1;
 	const truncationMeta: TruncationMeta = {
 		direction: "tail",
 		truncatedBy: truncated.truncatedBy ?? "bytes",
 		totalLines: truncated.totalLines,
 		totalBytes: truncated.totalBytes,
-		outputLines: truncated.outputLines,
-		outputBytes: truncated.outputBytes,
+		outputLines,
+		outputBytes,
 		maxBytes: RESULT_ARTIFACT_TAIL_BYTES,
 		shownRange: { start: shownStart, end: truncated.totalLines },
 		artifactId,
