@@ -473,6 +473,15 @@ function b() {
 			).rejects.toThrow(/Invalid bash env name: BAD-NAME/);
 		});
 
+		it("should preserve empty string env values", async () => {
+			const result = await bashTool.execute("test-call-8-empty-string-env", {
+				command: 'if [ "${EMPTY_VAR+x}" = "x" ] && [ -z "$EMPTY_VAR" ]; then echo empty-but-set; else echo wrong; fi',
+				env: { EMPTY_VAR: "" },
+			});
+
+			expect(getTextOutput(result)).toContain("empty-but-set");
+		});
+
 		it("should expose env values without shell re-parsing", async () => {
 			const mermaid = [
 				"flowchart TD",
