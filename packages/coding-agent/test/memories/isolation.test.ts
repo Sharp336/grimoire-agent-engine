@@ -1,3 +1,8 @@
+// Regression tests for #369: Phase 2 memory consolidation must be isolated
+// per project working directory. Before the fix, a single global job key
+// caused all projects' stage1 outputs to be merged into whichever project
+// triggered consolidation first.
+
 import { describe, expect, it } from "bun:test";
 import {
 	closeMemoryDb,
