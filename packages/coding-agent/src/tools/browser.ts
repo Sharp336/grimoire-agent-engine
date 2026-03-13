@@ -526,6 +526,9 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		const proxy = process.env.PUPPETEER_PROXY;
 		if (proxy) {
 			launchArgs.push(`--proxy-server=${proxy}`);
+			// Chrome (since v72) bypasses proxies for localhost by default; <-loopback> disables that
+			// so traffic to localhost:3000 reaches mitmdump and can be captured for auth flow analysis
+			launchArgs.push("--proxy-bypass-list=<-loopback>");
 		}
 		const ignoreCert = process.env.PUPPETEER_PROXY_IGNORE_CERT_ERRORS?.toLowerCase();
 		if (ignoreCert === "true" || ignoreCert === "1" || ignoreCert === "yes" || ignoreCert === "on") {
