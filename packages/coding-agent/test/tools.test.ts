@@ -455,6 +455,15 @@ function b() {
 			expect(result.details).toBeUndefined();
 		});
 
+		it("should reject invalid env variable names before execution", async () => {
+			await expect(
+				bashTool.execute("test-call-8-invalid-env", {
+					command: "echo test",
+					env: { "BAD-NAME": "value" },
+				}),
+			).rejects.toThrow(/Invalid bash env name: BAD-NAME/);
+		});
+
 		it("should expose env values without shell re-parsing", async () => {
 			const mermaid = [
 				"flowchart TD",
