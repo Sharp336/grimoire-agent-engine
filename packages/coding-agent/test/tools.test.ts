@@ -455,6 +455,15 @@ function b() {
 			expect(result.details).toBeUndefined();
 		});
 
+		it("should treat empty env like no env", async () => {
+			const result = await bashTool.execute("test-call-8-empty-env", {
+				command: "echo 'empty env ok'",
+				env: {},
+			});
+
+			expect(getTextOutput(result)).toContain("empty env ok");
+		});
+
 		it("should reject invalid env variable names before execution", async () => {
 			await expect(
 				bashTool.execute("test-call-8-invalid-env", {
