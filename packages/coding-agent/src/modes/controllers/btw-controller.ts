@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type AssistantMessage, type Context, type Message, streamSimple } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, type Context, streamSimple } from "@oh-my-pi/pi-ai";
 import { renderPromptTemplate } from "../../config/prompt-templates";
 import btwUserPrompt from "../../prompts/system/btw-user.md" with { type: "text" };
 import { toReasoningEffort } from "../../thinking";
@@ -75,12 +75,12 @@ export class BtwController {
 			}
 
 			const llmMessages = await this.ctx.session.convertMessagesToLlm(
-				this.#buildMessageSnapshot(),
+				[...this.#buildMessageSnapshot(), this.#buildQuestionMessage(request.question)],
 				request.abortController.signal,
 			);
 			const context: Context = {
 				systemPrompt: this.ctx.session.systemPrompt,
-				messages: [...llmMessages, this.#buildQuestionMessage(request.question)],
+				messages: llmMessages,
 			};
 			const options = this.ctx.session.prepareSimpleStreamOptions({
 				apiKey,
@@ -131,7 +131,7 @@ export class BtwController {
 		}
 	}
 
-	#buildQuestionMessage(question: string): Message {
+	#buildQuestionMessage(question: string): AgentMessage {
 		return {
 			role: "user",
 			content: [

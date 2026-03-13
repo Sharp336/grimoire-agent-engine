@@ -1,5 +1,5 @@
 import { beforeAll, describe, expect, it, vi } from "bun:test";
-import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Usage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -46,7 +46,20 @@ beforeAll(async () => {
 describe("BtwController", () => {
 	it("builds a tool-less side request from the current session prefix and preserves payload hooks", async () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
-		const convertMessagesToLlm = vi.fn(async () => [createUserMessage("prefix")]);
+		const convertMessagesToLlm = vi.fn(async (messages: AgentMessage[]) => {
+			const question = messages.at(-1);
+			if (!question || !("content" in question)) {
+				throw new Error("Expected the /btw question to be present in the conversion pipeline");
+			}
+			const questionText =
+				typeof question.content === "string"
+					? question.content
+					: question.content
+							.filter(content => content.type === "text")
+							.map(content => content.text)
+							.join("");
+			return [createUserMessage(sessionMessages[0].content), createUserMessage(questionText)];
+		});
 		const getApiKey = vi.fn(async () => "key");
 		const onPayload = vi.fn(async payload => payload);
 		const prepareSimpleStreamOptions = vi.fn(options => ({ ...options, onPayload }));
@@ -91,10 +104,19 @@ describe("BtwController", () => {
 		await controller.start("What changed?");
 		await Bun.sleep(0);
 
-		const convertCall = convertMessagesToLlm.mock.calls[0] as unknown as [typeof ctx.session.messages, AbortSignal];
+		const convertCall = convertMessagesToLlm.mock.calls[0] as unknown as [AgentMessage[], AbortSignal];
 		expect(convertCall).toBeDefined();
-		expect(convertCall[0]).toEqual(ctx.session.messages);
+		expect(convertCall[0]).toHaveLength(2);
+		expect(convertCall[0][0]).toEqual(ctx.session.messages[0]);
+		expect(convertCall[0][1]?.role).toBe("user");
 		expect(convertCall[1]).toBeInstanceOf(AbortSignal);
+		const appendedQuestion = convertCall[0][1] as {
+			role: "user";
+			content: Array<{ type: string; text?: string }>;
+		};
+		expect(appendedQuestion.content[0]?.type).toBe("text");
+		expect(appendedQuestion.content[0]?.text).toContain("What changed?");
+
 		expect(getApiKey).toHaveBeenCalledWith(model, "session-1");
 		expect(prepareSimpleStreamOptions).toHaveBeenCalledTimes(1);
 		expect(streamFn).toHaveBeenCalledTimes(1);
@@ -166,14 +188,18 @@ describe("BtwController", () => {
 		await controller.start("Why?");
 		await Bun.sleep(0);
 
-		const firstCall = convertMessagesToLlm.mock.calls[0] as unknown as [Message[], AbortSignal];
+		const firstCall = convertMessagesToLlm.mock.calls[0] as unknown as [AgentMessage[], AbortSignal];
 		expect(firstCall).toBeDefined();
 		expect(firstCall[1]).toBeInstanceOf(AbortSignal);
 		const snapshot = firstCall[0];
-		expect(snapshot).toHaveLength(2);
+		expect(snapshot).toHaveLength(3);
 		expect(snapshot[0]?.role).toBe("user");
-		expect(snapshot[1]?.role).toBe("assistant");
-		expect(snapshot[1]?.content).toEqual([{ type: "text", text: "partial answer" }]);
+		const normalizedAssistant = snapshot[1] as AssistantMessage;
+		expect(normalizedAssistant.role).toBe("assistant");
+		expect(normalizedAssistant.content).toEqual([{ type: "text", text: "partial answer" }]);
+		const appendedQuestion = snapshot[2] as { role: "user"; content: Array<{ type: string; text?: string }> };
+		expect(appendedQuestion.role).toBe("user");
+		expect(appendedQuestion.content[0]?.text).toContain("Why?");
 	});
 
 	it("replaces an existing request by aborting the previous btw stream and keeping one panel", async () => {
