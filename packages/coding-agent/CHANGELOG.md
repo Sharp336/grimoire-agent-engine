@@ -38,6 +38,7 @@
 
 ### Fixed
 
+- Fixed `providers.webSearch=auto` settings text to mirror the actual runtime fallback order (including Gemini before Exa and Kagi in the chain)
 - Fixed hashline line normalization to trim trailing whitespace and strip carriage returns instead of removing all whitespace, preserving intentional spacing in code
 - Fixed noop detection in hashline replace operations to check array length equality before comparing lines, preventing false noop classification when single-line replacements expand to multiple lines
 - Fixed path resolution to accept bare directory names without trailing slashes in comma/space-separated path lists (e.g., `apps packages phases`)

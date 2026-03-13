@@ -224,7 +224,7 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{
 			value: "auto",
 			label: "Auto",
-			description: "Preferred web-search provider",
+			description: "Priority: Tavily > Perplexity > Brave > Jina > Kimi > Anthropic > Gemini > Codex > Z.AI > Exa > Parallel > Kagi > Synthetic",
 		},
 		{ value: "exa", label: "Exa", description: "Uses Exa API when EXA_API_KEY is set; falls back to Exa MCP" },
 		{ value: "brave", label: "Brave", description: "Requires BRAVE_API_KEY" },
