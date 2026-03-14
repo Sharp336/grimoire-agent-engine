@@ -1,33 +1,23 @@
 # Changelog
 
 ## [Unreleased]
+
 ### Added
 
 - Added `close()` method to SessionManager for properly closing persistent writers after flushing pending data
+- Added `omp config init-xdg` command to initialize XDG Base Directory structure on Linux
+- Added `getHistoryDbPath()`, `getModelDbPath()`, `getMemoriesDir()`, `getTerminalSessionsDir()` path helpers
+
+### Changed
+
+- Path resolution on Linux redirects to XDG locations when `XDG_DATA_HOME` / `XDG_STATE_HOME` / `XDG_CACHE_HOME` environment variables are set
 
 ### Fixed
 
 - Fixed timeout handling in RpcClient to properly clear timeouts and prevent resource leaks
 - Fixed AgentSession disposal to call SessionManager's `close()` method when available, ensuring proper cleanup of persistent writers
-
-### Added
-
-- Added `omp config migrate` command to migrate data to XDG Base Directory compliant locations
-- Added `--dry-run` flag to preview migration without executing
-- Added `--force` flag to overwrite existing files during migration
-- Added `getMemoriesDir()` function for memories directory path
-- Added `getTerminalSessionsDir()` function for terminal sessions directory path
-
-### Changed
-
-- Path resolution now checks XDG locations first ($XDG_DATA_HOME, $XDG_STATE_HOME), falls back to legacy paths
-- Databases and persistent data available at $XDG_DATA_HOME/omp/ (~/.local/share/omp/) after migration
-- State data (memories, terminal-sessions) available at $XDG_STATE_HOME/omp/ (~/.local/state/omp/) after migration
-- No automatic migration - users must run `omp config migrate` to opt in
-
-### Fixed
-
 - Removed redundant `path.join()` call wrapping `getHistoryDbPath()` in history-storage.ts
+
 ## [13.11.1] - 2026-03-13
 
 ### Added

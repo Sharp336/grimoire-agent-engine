@@ -19,13 +19,13 @@ import {
 } from "../config/settings";
 import { SETTINGS_SCHEMA } from "../config/settings-schema";
 import { theme } from "../modes/theme/theme";
-import { migrateToXdg } from "./commands/migrate-xdg";
+import { initXdg } from "./commands/init-xdg";
 
 // =============================================================================
 // Types
 // =============================================================================
 
-export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "migrate";
+export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg";
 
 export interface ConfigCommandArgs {
 	action: ConfigAction;
@@ -33,8 +33,6 @@ export interface ConfigCommandArgs {
 	value?: string;
 	flags: {
 		json?: boolean;
-		dryRun?: boolean;
-		force?: boolean;
 	};
 }
 // =============================================================================
@@ -75,7 +73,7 @@ function getSettingValues(def: CliSettingDef): readonly string[] | undefined {
 // Argument Parser
 // =============================================================================
 
-const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path"];
+const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg"];
 
 /**
  * Parse config subcommand arguments.
@@ -253,8 +251,8 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 		case "path":
 			handlePath();
 			break;
-		case "migrate":
-			await handleMigrate(cmd.flags);
+		case "init-xdg":
+			await initXdg();
 			break;
 	}
 }
@@ -386,10 +384,6 @@ function handlePath(): void {
 	console.log(getAgentDir());
 }
 
-async function handleMigrate(flags: { dryRun?: boolean; force?: boolean }): Promise<void> {
-	await migrateToXdg({ dryRun: flags.dryRun, force: flags.force });
-}
-
 // =============================================================================
 // Help
 // =============================================================================
@@ -403,12 +397,10 @@ ${chalk.bold("Commands:")}
   set <key> <value>  Set a setting value
   reset <key>        Reset a setting to its default value
   path               Print the config directory path
-  migrate            Migrate data to XDG Base Directory locations
+  init-xdg           Initialize XDG Base Directory structure (Linux only)
 
 ${chalk.bold("Options:")}
   --json             Output as JSON
-  --dry-run          Preview migration without executing (migrate only)
-  --force            Force migration even if target exists (migrate only)
 
 ${chalk.bold("Examples:")}
   ${APP_NAME} config list
@@ -418,9 +410,7 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} config set defaultThinkingLevel medium
   ${APP_NAME} config reset steeringMode
   ${APP_NAME} config list --json
-  ${APP_NAME} config migrate --dry-run
-  ${APP_NAME} config migrate
-  ${APP_NAME} config migrate --force
+  ${APP_NAME} config init-xdg
 
 ${chalk.bold("Boolean Values:")}
   true, false, yes, no, on, off, 1, 0
