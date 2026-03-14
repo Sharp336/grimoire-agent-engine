@@ -5,7 +5,7 @@ import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { type ConfigAction, type ConfigCommandArgs, runConfigCommand } from "../cli/config-cli";
 import { initTheme } from "../modes/theme/theme";
 
-const ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path"];
+const ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "migrate"];
 
 export default class Config extends Command {
 	static description = "Manage configuration settings";
@@ -29,6 +29,8 @@ export default class Config extends Command {
 
 	static flags = {
 		json: Flags.boolean({ description: "Output JSON" }),
+		"dry-run": Flags.boolean({ description: "Preview migration without executing" }),
+		force: Flags.boolean({ description: "Force migration even if target exists" }),
 	};
 
 	async run(): Promise<void> {
@@ -42,6 +44,8 @@ export default class Config extends Command {
 			value,
 			flags: {
 				json: flags.json,
+				dryRun: flags["dry-run"],
+				force: flags.force,
 			},
 		};
 
