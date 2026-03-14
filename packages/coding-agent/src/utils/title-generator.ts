@@ -19,6 +19,7 @@ const MAX_INPUT_CHARS = 2000;
 function getTitleModel(
 	registry: ModelRegistry,
 	settings: Settings,
+	currentModel?: Model<Api>,
 ): { model: Model<Api>; thinkingLevel?: ThinkingLevel } | undefined {
 	const availableModels = registry.getAvailable();
 	if (availableModels.length === 0) return undefined;
@@ -30,6 +31,10 @@ function getTitleModel(
 	});
 	if (configuredSmol.model) {
 		return { model: configuredSmol.model, thinkingLevel: configuredSmol.thinkingLevel };
+	}
+
+	if (currentModel) {
+		return { model: currentModel };
 	}
 
 	return undefined;
@@ -48,10 +53,11 @@ export async function generateSessionTitle(
 	registry: ModelRegistry,
 	settings: Settings,
 	sessionId?: string,
+	currentModel?: Model<Api>,
 ): Promise<string | null> {
-	const candidate = getTitleModel(registry, settings);
+	const candidate = getTitleModel(registry, settings, currentModel);
 	if (!candidate) {
-		logger.debug("title-generator: no smol model found");
+		logger.debug("title-generator: no title model found");
 		return null;
 	}
 
