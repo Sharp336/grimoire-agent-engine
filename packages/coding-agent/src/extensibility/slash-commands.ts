@@ -203,8 +203,17 @@ export async function loadSlashCommands(options: LoadSlashCommandsOptions = {}):
 }
 
 /**
+ * Check if content contains argument placeholders ($1, $2, $@, $ARGUMENTS, etc.)
+ */
+function hasArgumentPlaceholders(content: string): boolean {
+	return /\$(?:\d+|@|ARGUMENTS|@\[\d+)/.test(content);
+}
+
+/**
  * Expand a slash command if it matches a file-based command.
  * Returns the expanded content or the original text if not a slash command.
+ * If the template has no argument placeholders and trailing args exist,
+ * the args are appended to the template by default.
  */
 export function expandSlashCommand(text: string, fileCommands: FileSlashCommand[]): string {
 	if (!text.startsWith("/")) return text;
@@ -217,8 +226,16 @@ export function expandSlashCommand(text: string, fileCommands: FileSlashCommand[
 	if (fileCommand) {
 		const args = parseCommandArgs(argsString);
 		const argsText = args.join(" ");
-		const substituted = substituteArgs(fileCommand.content, args);
-		return renderPromptTemplate(substituted, { args, ARGUMENTS: argsText, arguments: argsText });
+		let content = fileCommand.content;
+
+		// If no placeholders and there are trailing args, append them by default
+		if (!hasArgumentPlaceholders(content) && argsText) {
+			content = content.trimEnd() + " " + argsText;
+		} else {
+			content = substituteArgs(content, args);
+		}
+
+		return renderPromptTemplate(content, { args, ARGUMENTS: argsText, arguments: argsText });
 	}
 
 	return text;
