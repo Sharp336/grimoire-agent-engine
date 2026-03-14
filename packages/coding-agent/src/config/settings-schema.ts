@@ -847,6 +847,12 @@ export const SETTINGS_SCHEMA = {
 		default: "auto",
 		ui: { tab: "services", label: "Web search provider", description: "Provider for web search tool", submenu: true },
 	},
+	"providers.webSearchGeminiModel": {
+		type: "enum",
+		values: ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"] as const,
+		default: "gemini-2.5-flash",
+		ui: { tab: "services", label: "Gemini web search model", description: "Model for Gemini web search provider", submenu: true, dependsOn: { setting: "providers.webSearch", value: "gemini" } },
+	},
 	"providers.image": {
 		type: "enum",
 		values: ["auto", "gemini", "openrouter"] as const,

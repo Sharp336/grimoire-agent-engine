@@ -247,6 +247,13 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "openai", label: "OpenAI", description: "api.kimi.com" },
 		{ value: "anthropic", label: "Anthropic", description: "api.moonshot.ai" },
 	],
+	"providers.webSearchGeminiModel": [
+		{ value: "gemini-2.5-flash", label: "Gemini 2.5 Flash", description: "Fast, efficient model (default)" },
+		{ value: "gemini-2.5-pro", label: "Gemini 2.5 Pro", description: "Higher quality, slower" },
+		{ value: "gemini-2.0-flash", label: "Gemini 2.0 Flash", description: "Previous generation flash" },
+		{ value: "gemini-1.5-flash", label: "Gemini 1.5 Flash", description: "Legacy flash model" },
+		{ value: "gemini-1.5-pro", label: "Gemini 1.5 Pro", description: "Legacy pro model" },
+	],
 	"providers.openaiWebsockets": [
 		{ value: "auto", label: "Auto", description: "Use model/provider default websocket behavior" },
 		{ value: "off", label: "Off", description: "Disable websockets for OpenAI Codex models" },

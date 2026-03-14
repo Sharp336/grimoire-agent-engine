@@ -13,6 +13,7 @@ import {
 	refreshGoogleCloudToken,
 } from "@oh-my-pi/pi-ai";
 import { getAgentDbPath } from "@oh-my-pi/pi-utils";
+import { settings } from "../../../config/settings";
 import { AgentStorage } from "../../../session/agent-storage";
 import type { SearchCitation, SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
@@ -42,6 +43,8 @@ export interface GeminiSearchParams extends GeminiToolParams {
 	max_output_tokens?: number;
 	/** Sampling temperature (0–1). Lower = more focused/factual. */
 	temperature?: number;
+	/** Model to use for the search. Defaults to gemini-2.5-flash. */
+	model?: string;
 }
 
 export function buildGeminiRequestTools(params: GeminiToolParams): Array<Record<string, Record<string, unknown>>> {
@@ -209,6 +212,7 @@ async function callGeminiSearch(
 	maxOutputTokens?: number,
 	temperature?: number,
 	toolParams: GeminiToolParams = {},
+	model?: string,
 ): Promise<{
 	answer: string;
 	sources: SearchSource[];
@@ -219,6 +223,7 @@ async function callGeminiSearch(
 }> {
 	const endpoints = auth.isAntigravity ? ANTIGRAVITY_ENDPOINT_FALLBACKS : [DEFAULT_ENDPOINT];
 	const headers = auth.isAntigravity ? getAntigravityHeaders() : getGeminiCliHeaders();
+	const selectedModel = model ?? DEFAULT_MODEL;
 
 	const requestMetadata = auth.isAntigravity
 		? {
@@ -244,7 +249,7 @@ async function callGeminiSearch(
 
 	const requestBody: Record<string, unknown> = {
 		project: auth.projectId,
-		model: DEFAULT_MODEL,
+		model: selectedModel,
 		request: {
 			contents: [
 				{
@@ -522,6 +527,7 @@ export async function searchGemini(params: GeminiSearchParams): Promise<SearchRe
 			code_execution: params.code_execution,
 			url_context: params.url_context,
 		},
+		params.model,
 	);
 
 	let sources = result.sources;
@@ -552,6 +558,9 @@ export class GeminiProvider extends SearchProvider {
 	}
 
 	search(params: SearchParams): Promise<SearchResponse> {
+		// Read configured model from settings, fallback to default
+		const configuredModel = settings.get("providers.webSearchGeminiModel") as string | undefined;
+
 		return searchGemini({
 			query: params.query,
 			system_prompt: params.systemPrompt,
@@ -561,6 +570,7 @@ export class GeminiProvider extends SearchProvider {
 			google_search: params.googleSearch,
 			code_execution: params.codeExecution,
 			url_context: params.urlContext,
+			model: configuredModel,
 		});
 	}
 }
