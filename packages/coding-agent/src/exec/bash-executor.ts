@@ -71,8 +71,12 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		artifactId: options?.artifactId,
 	});
 
+	let stopped = false;
 	let pendingChunks = Promise.resolve();
 	const enqueueChunk = (chunk: string) => {
+		// Reject late chunks that arrive after the race has been decided.
+		// This prevents them from being lost in an un-awaited promise chain.
+		if (stopped) return;
 		pendingChunks = pendingChunks.then(() => sink.push(chunk)).catch(() => {});
 	};
 
@@ -160,6 +164,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			hardTimeoutDeferred.promise.then(() => ({ kind: "hard-timeout" as const })),
 		]);
 
+		// Stop accepting new chunks; guarantee all prior chunks are processed before returning.
+		stopped = true;
 		await pendingChunks;
 
 		if (winner.kind === "hard-timeout") {
@@ -215,6 +221,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		if (userSignal) {
 			userSignal.removeEventListener("abort", abortHandler);
 		}
+		// Ensure no late chunks are accepted during cleanup.
+		stopped = true;
 		await pendingChunks;
 		if (resetSession) {
 			shellSessions.delete(sessionKey);
