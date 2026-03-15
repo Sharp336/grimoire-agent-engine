@@ -15,6 +15,7 @@ type PromptActionOptions = {
 	moveCursorToLineEnd: () => void;
 };
 type PromptActionSuggestion = {
+	value: string;
 	label: string;
 	description?: string;
 };
@@ -42,7 +43,7 @@ type KeybindingsManagerLike = {
 };
 
 function toKeyList(value: string | readonly string[]): string[] {
-	return Array.isArray(value) ? [...value] : [value];
+	return typeof value === "string" ? [value] : [...value];
 }
 
 const DEFAULT_EDITOR_KEYBINDINGS = {
@@ -118,7 +119,7 @@ beforeAll(async () => {
 	KeybindingsManager = (await import("../src/config/keybindings"))
 		.KeybindingsManager as unknown as KeybindingsManagerLike;
 	createPromptActionAutocompleteProvider = (await import("../src/modes/prompt-action-autocomplete"))
-		.createPromptActionAutocompleteProvider as (options: PromptActionOptions) => PromptActionProvider;
+		.createPromptActionAutocompleteProvider as unknown as (options: PromptActionOptions) => PromptActionProvider;
 });
 
 describe("prompt action autocomplete", () => {

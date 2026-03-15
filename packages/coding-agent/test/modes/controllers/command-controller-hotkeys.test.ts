@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { buildHotkeysMarkdown } from "../../../src/modes/utils/hotkeys-markdown.ts";
+import { buildHotkeysMarkdown } from "../../../src/modes/utils/hotkeys-markdown";
 
 describe("buildHotkeysMarkdown", () => {
 	it("emits flush-left markdown so headings and tables are parsed instead of treated as indented text", () => {
