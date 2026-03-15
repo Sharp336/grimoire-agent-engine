@@ -141,7 +141,7 @@ Behavior:
 6. Create symlink.
 7. Add runtime lockfile entry enabled with default features (`null`).
 
-Caveat: current `PluginManager.link` does not enforce the `cwd` path-boundary check present in legacy `installer.ts` (`normalizedPath.startsWith(normalizedCwd)`), so trust is the caller’s responsibility.
+`PluginManager.link()` now enforces the same cwd path-boundary guard as the legacy installer helper, so local plugin link targets that resolve outside the working directory are rejected on the active path as well.
 
 ## Runtime loading: from installed plugin to callable capabilities
 
