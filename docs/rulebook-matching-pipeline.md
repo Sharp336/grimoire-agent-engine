@@ -64,9 +64,8 @@ Normalization:
 - `name` = filename without `.md`/`.mdc`
 - frontmatter parsed via `parseFrontmatter`
 - `content` = body (frontmatter stripped)
-- `globs`, `alwaysApply`, `description`, `ttsr_trigger` mapped directly
-
-Important caveat: `globs` is cast as `string[] | undefined` with no element filtering in this provider.
+- `globs`, `alwaysApply`, `description`, `ttsr_trigger` normalized via the shared markdown-rule helper
+- `globs` accepts either a single string or an array, with non-string array elements filtered out
 
 ### Cursor provider (`cursor.ts`)
 
