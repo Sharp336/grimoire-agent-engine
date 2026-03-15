@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `compaction.thresholdTokens` setting as a fixed token limit alternative to percentage-based compaction threshold
+- Added more artifact spill threshold options (1 KB to 1 MB) with size descriptions
+- Added more artifact tail bytes and tail lines options with descriptions
+
 ## [13.12.1] - 2026-03-15
 ### Added
 
