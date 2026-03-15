@@ -118,6 +118,7 @@ export class CommandController {
 			return;
 		}
 
+		let customShareFailure: string | undefined;
 		try {
 			const customShare = await loadCustomShare();
 			if (customShare) {
@@ -132,12 +133,12 @@ export class CommandController {
 					this.ctx.editorContainer.clear();
 					this.ctx.editorContainer.addChild(this.ctx.editor);
 					this.ctx.ui.setFocus(this.ctx.editor);
-					await cleanupTempFile();
 				};
 
 				try {
 					const result = await customShare.fn(tmpFile);
 					await restoreEditor();
+					await cleanupTempFile();
 
 					if (typeof result === "string") {
 						this.ctx.showStatus(`Share URL: ${result}`);
@@ -154,14 +155,11 @@ export class CommandController {
 					return;
 				} catch (err) {
 					await restoreEditor();
-					this.ctx.showError(`Custom share failed: ${err instanceof Error ? err.message : String(err)}`);
-					return;
+					customShareFailure = err instanceof Error ? err.message : String(err);
 				}
 			}
 		} catch (err) {
-			await cleanupTempFile();
-			this.ctx.showError(err instanceof Error ? err.message : String(err));
-			return;
+			customShareFailure = err instanceof Error ? err.message : String(err);
 		}
 
 		try {
@@ -216,7 +214,10 @@ export class CommandController {
 			}
 
 			const previewUrl = `https://gistpreview.github.io/?${gistId}`;
-			this.ctx.showStatus(`Share URL: ${previewUrl}\nGist: ${gistUrl}`);
+			const prefix = customShareFailure
+				? `Custom share failed, fell back to gist: ${customShareFailure}\n`
+				: "";
+			this.ctx.showStatus(`${prefix}Share URL: ${previewUrl}\nGist: ${gistUrl}`);
 			this.openInBrowser(previewUrl);
 		} catch (error: unknown) {
 			if (!loader.signal.aborted) {
