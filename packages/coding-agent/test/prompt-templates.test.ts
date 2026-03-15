@@ -321,45 +321,78 @@ describe("template expansion fallback", () => {
 		};
 	}
 
+	function expandSlash(invocation: string, content: string): string {
+		return expandSlashCommand(invocation, [createSlashCommand(content)]);
+	}
+
+	function expandPrompt(invocation: string, content: string): string {
+		return expandPromptTemplate(invocation, [createPromptTemplate(content)]);
+	}
+
+	const helperConsumptionCases = [
+		{ name: "slash command", invocation: "/test-command none", expand: expandSlash },
+		{ name: "prompt template", invocation: "/test-template none", expand: expandPrompt },
+	] as const;
+
 	test("should append trailing inline args for slash command without placeholders", () => {
-		const result = expandSlashCommand("/test-command sample input text", [createSlashCommand("Do something.")]);
+		const result = expandSlash("/test-command sample input text", "Do something.");
 		expect(result).toBe("Do something.\n\nsample input text");
 	});
 
 	test("should append trailing inline args for prompt template without placeholders", () => {
-		const result = expandPromptTemplate("/test-template sample input text", [createPromptTemplate("Do something.")]);
+		const result = expandPrompt("/test-template sample input text", "Do something.");
 		expect(result).toBe("Do something.\n\nsample input text");
 	});
 
 	test("should not append fallback text when $ARGUMENTS consumes args", () => {
-		const result = expandSlashCommand("/test-command sample input text", [createSlashCommand("Do: $ARGUMENTS")]);
+		const result = expandSlash("/test-command sample input text", "Do: $ARGUMENTS");
 		expect(result).toBe("Do: sample input text");
 	});
 
 	test("should not append fallback text when Handlebars arguments consumes args", () => {
-		const result = expandPromptTemplate("/test-template sample input text", [
-			createPromptTemplate("Do: {{arguments}}"),
-		]);
+		const result = expandPrompt("/test-template sample input text", "Do: {{arguments}}");
 		expect(result).toBe("Do: sample input text");
 	});
 
+	for (const { name, invocation, expand } of helperConsumptionCases) {
+		test(`should not append fallback text when Handlebars default consumes args for ${name} even when the rendered text is unchanged`, () => {
+			const result = expand(invocation, '{{default arguments "none"}}');
+			expect(result).toBe("none");
+		});
+
+		test(`should not append fallback text when Handlebars arg helper consumes args for ${name}`, () => {
+			const result = expand(invocation, "{{arg 1}}");
+			expect(result).toBe("none");
+		});
+
+		test(`should not append fallback text when Handlebars lookup consumes args for ${name}`, () => {
+			const result = expand(invocation, '{{default (lookup . "arguments") "none"}}');
+			expect(result).toBe("none");
+		});
+
+		test(`should return inline args without a leading newline when the template body is empty for ${name}`, () => {
+			const result = expand(invocation, "");
+			expect(result).toBe("none");
+		});
+	}
+
 	test("should keep output unchanged when slash command has no trailing args", () => {
-		const result = expandSlashCommand("/test-command", [createSlashCommand("Do something.")]);
+		const result = expandSlash("/test-command", "Do something.");
 		expect(result).toBe("Do something.");
 	});
 
 	test("should keep output unchanged when prompt template has no trailing args", () => {
-		const result = expandPromptTemplate("/test-template", [createPromptTemplate("Do something.")]);
+		const result = expandPrompt("/test-template", "Do something.");
 		expect(result).toBe("Do something.");
 	});
 
-	test("should use single appended newline when slash command output already ends with newline", () => {
-		const result = expandSlashCommand("/test-command sample", [createSlashCommand("Do something.\n")]);
+	test("should append two fallback newlines for slash command output even when template source ends with newline", () => {
+		const result = expandSlash("/test-command sample", "Do something.\n");
 		expect(result).toBe("Do something.\n\nsample");
 	});
 
-	test("should use single appended newline when prompt template output already ends with newline", () => {
-		const result = expandPromptTemplate("/test-template sample", [createPromptTemplate("Do something.\n")]);
+	test("should append two fallback newlines for prompt template output even when template source ends with newline", () => {
+		const result = expandPrompt("/test-template sample", "Do something.\n");
 		expect(result).toBe("Do something.\n\nsample");
 	});
 });
