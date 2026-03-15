@@ -144,7 +144,7 @@ Empty-list render behavior:
 - Enter on empty does nothing (no callback)
 - Esc/Ctrl+C still work
 
-Caveat: UI text says `Press Tab to view all`, but this component currently has no Tab handler and current wiring only lists current-scope sessions.
+Current empty-state copy avoids advertising a `Tab` shortcut, which matches the component's actual behavior: current wiring only lists current-scope sessions and the selector has no Tab handler.
 
 ## Runtime switch execution (`AgentSession.switchSession`)
 

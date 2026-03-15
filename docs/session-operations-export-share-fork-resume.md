@@ -32,7 +32,7 @@ This document describes operator-visible behavior for session export/share/fork/
 Flow:
 
 1. `InputController` routes `/export...` to `CommandController.handleExportCommand`.
-2. The command splits on whitespace and uses only the first argument after `/export` as `outputPath`.
+2. The command parses the optional output path as a single trailing argument and preserves one matching pair of surrounding quotes.
 3. `AgentSession.exportToHtml()` calls `exportSessionToHtml(sessionManager, state, { outputPath, themeName })`.
 4. On success, UI shows path and opens the file in browser.
 
@@ -42,9 +42,7 @@ Behavior details:
 - Export embeds session header/entries/leaf plus current `systemPrompt` and tool descriptions from agent state.
 - No session entries are appended during export.
 
-Caveat:
-
-- Argument parsing is whitespace-based (`text.split(/\s+/)`), so quoted paths with spaces are not preserved as a single path by this command path.
+Quoted output paths are preserved for both single-quoted and double-quoted forms, so `/export "~/Desktop/session export.html"` is treated as one path argument.
 
 ### `--export <inputSessionFile> [outputPath]` (CLI)
 
@@ -113,10 +111,9 @@ If present and valid:
 
 Critical fallback behavior:
 
-- If custom handler exists but loading fails, command errors and returns.
-- If custom handler executes and throws, command errors and returns.
-- In both failure cases, it **does not** fall back to GitHub gist.
-- Gist fallback happens only when no custom share script exists.
+- If custom handler exists and succeeds, its result is used directly.
+- If custom handler loading fails, or the handler throws at runtime, the command records the failure and falls back to the default GitHub gist flow.
+- The final gist status message includes the custom-share failure so the fallback remains visible.
 
 ### Phase 3: default gist fallback
 
@@ -178,7 +175,8 @@ Flow:
 
 1. Opens session selector populated via `SessionManager.list(currentCwd, currentSessionDir)`.
 2. On selection, `SelectorController.handleResumeSession(sessionPath)` calls `session.switchSession(sessionPath)`.
-3. UI clears/rebuilds chat and todos, then reports `Resumed session`.
+3. If the switch succeeds, UI clears/rebuilds chat and todos, then reports `Resumed session`.
+4. If a hook cancels the switch (`switchSession()` returns `false`), the controller exits without repainting the chat or showing a false success status.
 
 Notes:
 
@@ -281,8 +279,6 @@ When session manager is created with `SessionManager.inMemory()` (`--no-session`
 - `/dump` still works because it serializes in-memory agent state.
 - CLI resume/continue semantics are bypassed if `--no-session` is set, because manager creation returns in-memory immediately.
 
-## Known implementation caveats (as of current code)
+## Remaining implementation caveats (as of current code)
 
-- `SelectorController.handleResumeSession()` does not check the boolean result from `session.switchSession(...)`; a hook-cancelled switch can still proceed through UI "Resumed session" repaint/status path.
-- `/share` custom-share failures do not degrade to default gist fallback; they terminate the command with error.
-- `/export` argument tokenization is simplistic and does not preserve quoted paths with spaces.
+- `/share` still uses a UI-level abort path for gist creation; it does not currently wire process-kill semantics into the underlying `gh gist create` command.

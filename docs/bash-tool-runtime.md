@@ -30,9 +30,7 @@ Then it merges extracted limits with explicit tool args:
 - explicit `head`/`tail` args override extracted values,
 - extracted values are fallback only.
 
-### Caveat
-
-`bash-normalize.ts` comments mention stripping `2>&1`, but current implementation does not remove it. Runtime behavior is still correct (stdout/stderr are already merged), but the normalization behavior is narrower than comments suggest.
+`normalizeBashCommand()` also strips a trailing `2>&1` before extracting trailing `head`/`tail` limits, so commands like `... | head -n 5 2>&1` still normalize correctly.
 
 ## 2) Optional interception (blocked-command path)
 
@@ -56,9 +54,7 @@ Default rule patterns (defined in code) target common misuses:
 - in-place editors (`sed -i`, `perl -i`, `awk -i inplace`)
 - shell redirection writes (`echo ... > file`, heredoc redirection)
 
-### Caveat
-
-`InterceptionResult` includes `suggestedTool`, but `BashTool` currently surfaces only the message text (no structured suggested-tool field in `details`).
+When interception blocks a command, `BashTool` preserves `suggestedTool` in the thrown `ToolError` context so downstream UI/agent flows can consume the structured hint in addition to the message text.
 
 ## 3) CWD validation and timeout clamping
 
