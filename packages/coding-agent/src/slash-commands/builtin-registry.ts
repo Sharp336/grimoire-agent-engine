@@ -65,6 +65,16 @@ function parseBuiltinSlashCommand(text: string): ParsedBuiltinSlashCommand | nul
 	};
 }
 
+function stripMatchingQuotes(value: string): string {
+	if (value.length < 2) return value;
+	const first = value[0];
+	const last = value[value.length - 1];
+	if ((first === '"' || first === "'") && first === last) {
+		return value.slice(1, -1);
+	}
+	return value;
+}
+
 const shutdownHandler = (_command: ParsedBuiltinSlashCommand, runtime: BuiltinSlashCommandRuntime): void => {
 	runtime.ctx.editor.setText("");
 	void runtime.ctx.shutdown();
@@ -504,7 +514,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		inlineHint: "<path>",
 		allowArgs: true,
 		handle: async (command, runtime) => {
-			const targetPath = command.args;
+			const targetPath = stripMatchingQuotes(command.args);
 			if (!targetPath) {
 				runtime.ctx.showError("Usage: /move <path>");
 				runtime.ctx.editor.setText("");
