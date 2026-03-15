@@ -366,8 +366,8 @@ export interface BuildSystemPromptOptions {
 	intentField?: string;
 	/** Whether MCP tool discovery is active for this prompt build. */
 	mcpDiscoveryMode?: boolean;
-	/** Discoverable MCP server names to advertise when discovery mode is active. */
-	mcpDiscoveryServerNames?: string[];
+	/** Discoverable MCP server summaries to advertise when discovery mode is active. */
+	mcpDiscoveryServerSummaries?: string[];
 	/** Encourage the agent to delegate via tasks unless changes are trivial. */
 	eagerTasks?: boolean;
 }
@@ -391,7 +391,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		rules,
 		intentField,
 		mcpDiscoveryMode = false,
-		mcpDiscoveryServerNames = [],
+		mcpDiscoveryServerSummaries = [],
 		eagerTasks = false,
 	} = options;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -527,8 +527,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
 		mcpDiscoveryMode,
-		hasMCPDiscoveryServers: mcpDiscoveryServerNames.length > 0,
-		mcpDiscoveryServerNames,
+		hasMCPDiscoveryServers: mcpDiscoveryServerSummaries.length > 0,
+		mcpDiscoveryServerSummaries,
 		eagerTasks,
 	};
 	return renderPromptTemplate(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);

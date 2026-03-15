@@ -87,7 +87,7 @@ describe("SearchToolBm25Tool", () => {
 
 	it("advertises discoverable MCP servers and search guidance in its description", () => {
 		const description = renderSearchToolBm25Description(discoverableTools);
-		expect(description).toContain("Discoverable MCP servers in this session: github, slack.");
+		expect(description).toContain("Discoverable MCP servers in this session: github (2 tools), slack (1 tool).");
 		expect(description).not.toContain("Example discoverable MCP tools:");
 		expect(description).toContain("Total discoverable MCP tools loaded: 3.");
 		expect(description).toContain("If you are unsure, start with `limit` between 5 and 10");

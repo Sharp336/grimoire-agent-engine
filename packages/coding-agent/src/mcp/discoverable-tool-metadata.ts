@@ -9,9 +9,19 @@ export interface DiscoverableMCPTool {
 	schemaKeys: string[];
 }
 
-export interface DiscoverableMCPToolSummary {
-	serverNames: string[];
+export interface DiscoverableMCPToolServerSummary {
+	name: string;
 	toolCount: number;
+}
+
+export interface DiscoverableMCPToolSummary {
+	servers: DiscoverableMCPToolServerSummary[];
+	toolCount: number;
+}
+
+export function formatDiscoverableMCPToolServerSummary(server: DiscoverableMCPToolServerSummary): string {
+	const toolLabel = server.toolCount === 1 ? "tool" : "tools";
+	return `${server.name} (${server.toolCount} ${toolLabel})`;
 }
 
 export interface DiscoverableMCPSearchDocument {
@@ -115,11 +125,16 @@ export function collectDiscoverableMCPTools(tools: Iterable<AgentTool>): Discove
 }
 
 export function summarizeDiscoverableMCPTools(tools: DiscoverableMCPTool[]): DiscoverableMCPToolSummary {
-	const serverNames = [
-		...new Set(tools.map(tool => tool.serverName).filter((name): name is string => Boolean(name))),
-	].sort((left, right) => left.localeCompare(right));
+	const serverToolCounts = new Map<string, number>();
+	for (const tool of tools) {
+		if (!tool.serverName) continue;
+		serverToolCounts.set(tool.serverName, (serverToolCounts.get(tool.serverName) ?? 0) + 1);
+	}
+	const servers = Array.from(serverToolCounts.entries())
+		.sort(([left], [right]) => left.localeCompare(right))
+		.map(([name, toolCount]) => ({ name, toolCount }));
 	return {
-		serverNames,
+		servers,
 		toolCount: tools.length,
 	};
 }

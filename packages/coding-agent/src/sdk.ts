@@ -65,7 +65,11 @@ import {
 } from "./internal-urls";
 import { disposeAllKernelSessions } from "./ipy/executor";
 import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } from "./mcp";
-import { collectDiscoverableMCPTools, summarizeDiscoverableMCPTools } from "./mcp/discoverable-tool-metadata";
+import {
+	collectDiscoverableMCPTools,
+	formatDiscoverableMCPToolServerSummary,
+	summarizeDiscoverableMCPTools,
+} from "./mcp/discoverable-tool-metadata";
 import { buildMemoryToolDeveloperInstructions, getMemoryRoot, startMemoryStartupTask } from "./memories";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { collectEnvSecrets, loadSecrets, obfuscateMessages, SecretObfuscator } from "./secrets";
@@ -1237,7 +1241,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			repeatToolDescriptions,
 			intentField,
 			mcpDiscoveryMode: hasDiscoverableMCPTools,
-			mcpDiscoveryServerNames: discoverableMCPSummary.serverNames,
+			mcpDiscoveryServerSummaries: discoverableMCPSummary.servers.map(formatDiscoverableMCPToolServerSummary),
 			eagerTasks,
 		});
 
@@ -1258,7 +1262,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				repeatToolDescriptions,
 				intentField,
 				mcpDiscoveryMode: hasDiscoverableMCPTools,
-				mcpDiscoveryServerNames: discoverableMCPSummary.serverNames,
+				mcpDiscoveryServerSummaries: discoverableMCPSummary.servers.map(formatDiscoverableMCPToolServerSummary),
 				eagerTasks,
 			});
 		}

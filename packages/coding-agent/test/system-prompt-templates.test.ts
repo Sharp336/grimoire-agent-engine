@@ -153,11 +153,11 @@ describe("system Handlebars prompt templates", () => {
 			...baseRenderContext,
 			mcpDiscoveryMode: true,
 			hasMCPDiscoveryServers: true,
-			mcpDiscoveryServerNames: ["github", "slack"],
+			mcpDiscoveryServerSummaries: ["github (2 tools)", "slack (1 tool)"],
 		});
 
 		expect(rendered).toContain("### MCP tool discovery");
-		expect(rendered).toContain("Discoverable MCP servers in this session: github, slack.");
+		expect(rendered).toContain("Discoverable MCP servers in this session: github (2 tools), slack (1 tool).");
 		expect(rendered).not.toContain("Example discoverable MCP tools:");
 		expect(rendered).toContain("call `search_tool_bm25` before concluding no such tool exists");
 	});

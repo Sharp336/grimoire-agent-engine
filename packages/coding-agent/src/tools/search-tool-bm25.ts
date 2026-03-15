@@ -7,6 +7,7 @@ import {
 	buildDiscoverableMCPSearchIndex,
 	type DiscoverableMCPSearchIndex,
 	type DiscoverableMCPTool,
+	formatDiscoverableMCPToolServerSummary,
 	searchDiscoverableMCPTools,
 	summarizeDiscoverableMCPTools,
 } from "../mcp/discoverable-tool-metadata";
@@ -92,8 +93,8 @@ export function renderSearchToolBm25Description(discoverableTools: DiscoverableM
 	const summary = summarizeDiscoverableMCPTools(discoverableTools);
 	return renderPromptTemplate(searchToolBm25Description, {
 		discoverableMCPToolCount: summary.toolCount,
-		discoverableMCPServerNames: summary.serverNames,
-		hasDiscoverableMCPServers: summary.serverNames.length > 0,
+		discoverableMCPServerSummaries: summary.servers.map(formatDiscoverableMCPToolServerSummary),
+		hasDiscoverableMCPServers: summary.servers.length > 0,
 	});
 }
 

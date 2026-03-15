@@ -2,7 +2,7 @@ Search hidden MCP tool metadata when MCP tool discovery is enabled.
 
 Use this tool to discover MCP tools that are loaded into the session but not exposed to the model by default.
 
-{{#if hasDiscoverableMCPServers}}Discoverable MCP servers in this session: {{#list discoverableMCPServerNames join=", "}}{{this}}{{/list}}.{{/if}}
+{{#if hasDiscoverableMCPServers}}Discoverable MCP servers in this session: {{#list discoverableMCPServerSummaries join=", "}}{{this}}{{/list}}.{{/if}}
 {{#if discoverableMCPToolCount}}Total discoverable MCP tools loaded: {{discoverableMCPToolCount}}.{{/if}}
 
 Input:
