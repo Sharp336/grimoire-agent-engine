@@ -315,6 +315,11 @@ export class PluginManager {
 	 */
 	async link(localPath: string): Promise<InstalledPlugin> {
 		const absolutePath = path.resolve(this.#cwd, localPath);
+		const normalizedCwd = path.resolve(this.#cwd);
+		const normalizedPath = path.resolve(absolutePath);
+		if (!normalizedPath.startsWith(`${normalizedCwd}/`) && normalizedPath !== normalizedCwd) {
+			throw new Error(`Invalid path: ${localPath} resolves outside working directory`);
+		}
 
 		const pkgFilePath = path.join(absolutePath, "package.json");
 		let pkg: { name?: string; version: string; omp?: PluginManifest; pi?: PluginManifest };
