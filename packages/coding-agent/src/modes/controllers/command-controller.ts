@@ -32,6 +32,19 @@ import { replaceTabs } from "../../tools/render-utils";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog";
 import { openPath } from "../../utils/open";
 
+function parseOptionalQuotedCommandArg(text: string, commandName: string): string | undefined {
+	const remainder = text.slice(commandName.length).trim();
+	if (!remainder) return undefined;
+	if (remainder.length >= 2) {
+		const first = remainder[0];
+		const last = remainder[remainder.length - 1];
+		if ((first === '"' || first === "'") && first === last) {
+			return remainder.slice(1, -1);
+		}
+	}
+	return remainder;
+}
+
 export class CommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
 
@@ -40,8 +53,7 @@ export class CommandController {
 	}
 
 	async handleExportCommand(text: string): Promise<void> {
-		const parts = text.split(/\s+/);
-		const arg = parts.length > 1 ? parts[1] : undefined;
+		const arg = parseOptionalQuotedCommandArg(text, "/export");
 
 		if (arg === "--copy" || arg === "clipboard" || arg === "copy") {
 			this.ctx.showWarning("Use /dump to copy the session to clipboard.");
