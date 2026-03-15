@@ -1162,7 +1162,6 @@ export class Editor implements Component, Focusable {
 		this.#moveToMessageEnd();
 	}
 
-
 	/**
 	 * Undo the last meaningful edit while ignoring transient text that is still present at the cursor.
 	 * Used for command-like autocomplete actions whose typed trigger should not count as the edit being undone.
