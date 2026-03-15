@@ -293,7 +293,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			const rules = this.session.settings.getBashInterceptorRules();
 			const interception = checkBashInterception(command, ctx?.toolNames ?? [], rules);
 			if (interception.block) {
-				throw new ToolError(interception.message ?? "Command blocked");
+				throw new ToolError(interception.message ?? "Command blocked", {
+					suggestedTool: interception.suggestedTool,
+				});
 			}
 		}
 
