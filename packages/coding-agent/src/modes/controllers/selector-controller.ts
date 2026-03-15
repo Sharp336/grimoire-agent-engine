@@ -624,7 +624,10 @@ export class SelectorController {
 		this.ctx.pendingTools.clear();
 
 		// Switch session via AgentSession (emits hook and tool session events)
-		await this.ctx.session.switchSession(sessionPath);
+		const switched = await this.ctx.session.switchSession(sessionPath);
+		if (!switched) {
+			return;
+		}
 
 		// Clear and re-render the chat
 		this.ctx.chatContainer.clear();
