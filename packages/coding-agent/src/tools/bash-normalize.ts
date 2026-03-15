@@ -28,6 +28,7 @@ export interface NormalizedCommand {
  * Does NOT match head/tail with other flags or without line count.
  */
 const TRAILING_HEAD_TAIL_PATTERN = /\|\s*(head|tail)\s+(?:-n\s*(\d+)|(-\d+))\s*$/;
+const TRAILING_STDERR_REDIRECT_PATTERN = /\s+2>&1\s*$/;
 
 /**
  * Normalize a bash command by stripping patterns better handled natively.
@@ -41,6 +42,9 @@ export function normalizeBashCommand(command: string): NormalizedCommand {
 	let normalized = command;
 	let headLines: number | undefined;
 	let tailLines: number | undefined;
+
+	// Strip redundant stderr merge redirect since runtime already merges stdout/stderr.
+	normalized = normalized.replace(TRAILING_STDERR_REDIRECT_PATTERN, "");
 
 	// Extract trailing head/tail
 	const match = normalized.match(TRAILING_HEAD_TAIL_PATTERN);

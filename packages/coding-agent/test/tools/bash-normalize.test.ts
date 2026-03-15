@@ -63,6 +63,20 @@ describe("normalizeBashCommand", () => {
 			expect(result.tailLines).toBeUndefined();
 		});
 
+		it("strips trailing 2>&1 redirection", () => {
+			const result = normalizeBashCommand("git status 2>&1");
+			expect(result.command).toBe("git status");
+			expect(result.headLines).toBeUndefined();
+			expect(result.tailLines).toBeUndefined();
+		});
+
+		it("strips trailing 2>&1 after extracting head", () => {
+			const result = normalizeBashCommand("ls -la | head -n 5 2>&1");
+			expect(result.command).toBe("ls -la");
+			expect(result.headLines).toBe(5);
+			expect(result.tailLines).toBeUndefined();
+		});
+
 		it("preserves internal spacing and tabs", () => {
 			const result = normalizeBashCommand("echo 'a    b\t\tc'");
 			expect(result.command).toBe("echo 'a    b\t\tc'");
