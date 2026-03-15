@@ -1,6 +1,10 @@
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { slashCommandCapability } from "../capability/slash-command";
-import { appendInlineArgsFallback, renderPromptTemplate, templateUsesInlineArgPlaceholders } from "../config/prompt-templates";
+import {
+	appendInlineArgsFallback,
+	renderPromptTemplate,
+	templateUsesInlineArgPlaceholders,
+} from "../config/prompt-templates";
 import type { SlashCommand } from "../discovery";
 import { loadCapability } from "../discovery";
 import {

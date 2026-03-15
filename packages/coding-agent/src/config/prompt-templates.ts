@@ -286,7 +286,11 @@ export function templateUsesInlineArgPlaceholders(templateSource: string): boole
 	return INLINE_ARG_SHELL_PATTERN.test(templateSource) || INLINE_ARG_TEMPLATE_PATTERN.test(templateSource);
 }
 
-export function appendInlineArgsFallback(rendered: string, argsText: string, usesInlineArgPlaceholders: boolean): string {
+export function appendInlineArgsFallback(
+	rendered: string,
+	argsText: string,
+	usesInlineArgPlaceholders: boolean,
+): string {
 	if (argsText.length === 0 || usesInlineArgPlaceholders) return rendered;
 	if (rendered.length === 0) return argsText;
 
