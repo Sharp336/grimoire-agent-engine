@@ -1,0 +1,28 @@
+{
+  "name": "can1357/oh-my-pi",
+  "description": "⌥  AI Coding agent for the terminal — hash-anchored edits, optimized tool harness, LSP, Python, browser, subagents, and more",
+  "accepts": [
+    {
+      "network": "eip155:8453",
+      "asset": "USDC",
+      "address": "YOUR_WALLET_ADDRESS"
+    }
+  ],
+  "resources": [
+    {
+      "path": "/diagnostics",
+      "price": "0.01",
+      "description": "Pay-per-call access to diagnostics"
+    },
+    {
+      "path": "/review",
+      "price": "0.01",
+      "description": "Pay-per-call access to /review"
+    },
+    {
+      "path": "/debug",
+      "price": "0.01",
+      "description": "Pay-per-call access to /debug"
+    }
+  ]
+}
