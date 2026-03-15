@@ -734,7 +734,7 @@ export class Editor implements Component, Focusable {
 
 		// Ctrl+- / Ctrl+_ - Undo last edit
 		if (matchesKey(data, "ctrl+-") || matchesKey(data, "ctrl+_")) {
-			this.undo();
+			this.#applyUndo();
 			return;
 		}
 
@@ -1162,9 +1162,6 @@ export class Editor implements Component, Focusable {
 		this.#moveToMessageEnd();
 	}
 
-	undo(): void {
-		this.#applyUndo();
-	}
 
 	/**
 	 * Undo the last meaningful edit while ignoring transient text that is still present at the cursor.
