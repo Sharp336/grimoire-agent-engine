@@ -1615,6 +1615,7 @@ export interface SkillsSettings {
 	customDirectories?: string[];
 	ignoredSkills?: string[];
 	includeSkills?: string[];
+	disabledExtensions?: string[];
 }
 
 export interface CommitSettings {
