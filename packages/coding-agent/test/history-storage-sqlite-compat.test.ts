@@ -59,6 +59,12 @@ it("migrates legacy history schema away from unixepoch defaults", async () => {
 		expect(prompts).toEqual([{ prompt: "legacy prompt" }, { prompt: "new prompt" }]);
 		expect(readTableSql(dbPath, "history")).not.toContain("unixepoch(");
 		expect(readTableSql(dbPath, "history")).toContain("strftime('%s','now')");
+		const indexRow = db
+			.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'index' AND name = 'idx_history_created_at'")
+			.get() as
+			| { present?: number }
+			| undefined;
+		expect(indexRow?.present).toBe(1);
 		const ftsRow = db.prepare("SELECT 1 AS present FROM sqlite_master WHERE type = 'table' AND name = 'history_fts'").get() as
 			| { present?: number }
 			| undefined;

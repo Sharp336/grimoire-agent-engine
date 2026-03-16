@@ -151,6 +151,7 @@ CREATE TRIGGER IF NOT EXISTS history_ai AFTER INSERT ON history BEGIN
 	#migrateHistorySchema(): void {
 		const migrate = this.#db.transaction(() => {
 			this.#db.exec("ALTER TABLE history RENAME TO history_legacy");
+			this.#db.exec("DROP INDEX IF EXISTS idx_history_created_at");
 			this.#db.exec("DROP TRIGGER IF EXISTS history_ai");
 			this.#db.exec("DROP TABLE IF EXISTS history_fts");
 			this.#db.exec(`
