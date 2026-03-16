@@ -232,6 +232,7 @@ describe("mcp oauth flow", () => {
 		const busyServer = Bun.serve({
 			hostname: "localhost",
 			port: 14569,
+			reusePort: false,
 			fetch: () => new Response("busy"),
 		});
 
