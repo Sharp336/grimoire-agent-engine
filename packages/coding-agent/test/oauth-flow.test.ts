@@ -1,6 +1,12 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { MCPOAuthFlow } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import { hookFetch } from "@oh-my-pi/pi-utils";
+
+const originalFetch = global.fetch;
+
+afterEach(() => {
+	global.fetch = originalFetch;
+});
 
 describe("mcp oauth flow", () => {
 	it("uses Codex client name for dynamic client registration", async () => {
@@ -44,5 +50,154 @@ describe("mcp oauth flow", () => {
 		expect((registrationPayload as { client_name?: string } | null)?.client_name).toBe("Codex");
 		expect(authUrl.searchParams.get("client_id")).toBe("registered-client-id");
 		expect(authUrl.searchParams.get("state")).toBe("test-state");
+	});
+
+	it("uses configured callbackPath for the local redirect URI", async () => {
+		let observedRedirectUri = "";
+		let tokenRequestBody = "";
+
+		using _hook = hookFetch((input, init) => {
+			const url = String(input);
+			if (url === "https://provider.example/token") {
+				tokenRequestBody = String(init?.body ?? "");
+				return new Response(
+					JSON.stringify({
+						access_token: "access-token",
+						refresh_token: "refresh-token",
+						expires_in: 3600,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			throw new Error(`Unexpected fetch: ${url}`);
+		});
+
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize",
+				tokenUrl: "https://provider.example/token",
+				clientId: "client-id",
+				callbackPort: 14567,
+				callbackPath: "slack/oauth_redirect",
+			},
+			{
+				onAuth: info => {
+					const authUrl = new URL(info.url);
+					observedRedirectUri = authUrl.searchParams.get("redirect_uri") ?? "";
+					const state = authUrl.searchParams.get("state") ?? "";
+					queueMicrotask(() => {
+						void originalFetch(`${observedRedirectUri}?code=test-code&state=${state}`);
+					});
+				},
+				signal: AbortSignal.timeout(1_000),
+			},
+		);
+
+		const credentials = await flow.login();
+		const redirectUrl = new URL(observedRedirectUri);
+		const tokenParams = new URLSearchParams(tokenRequestBody);
+
+		expect(redirectUrl.pathname).toBe("/slack/oauth_redirect");
+		expect(tokenParams.get("redirect_uri")).toBe(observedRedirectUri);
+		expect(credentials).toMatchObject({
+			access: "access-token",
+			refresh: "refresh-token",
+		});
+	});
+
+	it("uses exact redirectUri and clientSecret for provider requests", async () => {
+		let observedRedirectUri = "";
+		let tokenRequestBody = "";
+
+		using _hook = hookFetch((input, init) => {
+			const url = String(input);
+			if (url === "https://provider.example/token") {
+				tokenRequestBody = String(init?.body ?? "");
+				return new Response(
+					JSON.stringify({
+						access_token: "access-token",
+						refresh_token: "refresh-token",
+						expires_in: 3600,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			throw new Error(`Unexpected fetch: ${url}`);
+		});
+
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize",
+				tokenUrl: "https://provider.example/token",
+				clientId: "client-id",
+				clientSecret: "client-secret",
+				redirectUri: "https://public.example/slack/oauth_redirect",
+				callbackPort: 14568,
+				callbackPath: "slack/oauth_redirect",
+			},
+			{
+				onAuth: info => {
+					const authUrl = new URL(info.url);
+					observedRedirectUri = authUrl.searchParams.get("redirect_uri") ?? "";
+					const state = authUrl.searchParams.get("state") ?? "";
+					queueMicrotask(() => {
+						void originalFetch(`http://localhost:14568/slack/oauth_redirect?code=test-code&state=${state}`);
+					});
+				},
+				signal: AbortSignal.timeout(1_000),
+			},
+		);
+
+		const credentials = await flow.login();
+		const tokenParams = new URLSearchParams(tokenRequestBody);
+
+		expect(observedRedirectUri).toBe("https://public.example/slack/oauth_redirect");
+		expect(tokenParams.get("redirect_uri")).toBe("https://public.example/slack/oauth_redirect");
+		expect(tokenParams.get("client_secret")).toBe("client-secret");
+		expect(credentials).toMatchObject({
+			access: "access-token",
+			refresh: "refresh-token",
+		});
+	});
+
+	it("rejects https loopback redirectUri values", () => {
+		expect(
+			() =>
+				new MCPOAuthFlow(
+					{
+						authorizationUrl: "https://provider.example/authorize",
+						tokenUrl: "https://provider.example/token",
+						redirectUri: "https://localhost:3000/slack/oauth_redirect",
+					},
+					{},
+				),
+		).toThrow("HTTPS loopback redirect URIs are not supported");
+	});
+
+	it("fails instead of falling back to a random port when redirectUri is exact", async () => {
+		const busyServer = Bun.serve({
+			hostname: "localhost",
+			port: 14569,
+			fetch: () => new Response("busy"),
+		});
+
+		try {
+			const flow = new MCPOAuthFlow(
+				{
+					authorizationUrl: "https://provider.example/authorize",
+					tokenUrl: "https://provider.example/token",
+					redirectUri: "https://public.example/slack/oauth_redirect",
+					callbackPort: 14569,
+					callbackPath: "/slack/oauth_redirect",
+				},
+				{ signal: AbortSignal.timeout(1_000) },
+			);
+
+			await expect(flow.login()).rejects.toThrow("exact redirect URI requires a fixed local listener");
+		} finally {
+			busyServer.stop();
+		}
 	});
 });

@@ -6,10 +6,72 @@
  */
 
 import type { OAuthController, OAuthCredentials } from "@oh-my-pi/pi-ai";
+import type { OAuthCallbackFlowOptions } from "@oh-my-pi/pi-ai/utils/oauth/callback-server";
 import { OAuthCallbackFlow } from "@oh-my-pi/pi-ai/utils/oauth/callback-server";
 
 const DEFAULT_PORT = 3000;
 const CALLBACK_PATH = "/callback";
+
+function isLoopbackHostname(hostname: string): boolean {
+	return hostname === "localhost" || hostname === "127.0.0.1";
+}
+
+function resolveRedirectUri(redirectUri: string | undefined): string | undefined {
+	const trimmed = redirectUri?.trim();
+	if (!trimmed) return undefined;
+
+	const parsed = new URL(trimmed);
+	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+		throw new Error("OAuth redirect URI must use http or https");
+	}
+	if (parsed.protocol === "https:" && isLoopbackHostname(parsed.hostname)) {
+		throw new Error(
+			"HTTPS loopback redirect URIs are not supported; use a public HTTPS tunnel or a local HTTP redirect URI",
+		);
+	}
+	return parsed.toString();
+}
+
+function parseRedirectUri(redirectUri: string | undefined): URL | undefined {
+	return redirectUri ? new URL(redirectUri) : undefined;
+}
+
+function resolveCallbackPort(callbackPort: number | undefined, redirectUri: string | undefined): number {
+	if (callbackPort !== undefined) return callbackPort;
+
+	const parsed = parseRedirectUri(redirectUri);
+	if (!parsed || parsed.protocol !== "http:" || !isLoopbackHostname(parsed.hostname) || parsed.port === "") {
+		return DEFAULT_PORT;
+	}
+
+	const port = Number(parsed.port);
+	return Number.isFinite(port) && port > 0 ? port : DEFAULT_PORT;
+}
+
+function resolveCallbackPath(callbackPath: string | undefined, redirectUri: string | undefined): string {
+	const trimmed = callbackPath?.trim();
+	if (trimmed) return trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+
+	const parsed = parseRedirectUri(redirectUri);
+	if (parsed?.pathname) return parsed.pathname;
+	return CALLBACK_PATH;
+}
+
+function resolveCallbackHostname(redirectUri: string | undefined): string | undefined {
+	const parsed = parseRedirectUri(redirectUri);
+	if (!parsed || !isLoopbackHostname(parsed.hostname)) return undefined;
+	return parsed.hostname;
+}
+
+function resolveCallbackOptions(config: MCPOAuthConfig): OAuthCallbackFlowOptions {
+	const redirectUri = resolveRedirectUri(config.redirectUri);
+	return {
+		preferredPort: resolveCallbackPort(config.callbackPort, redirectUri),
+		callbackPath: resolveCallbackPath(config.callbackPath, redirectUri),
+		callbackHostname: resolveCallbackHostname(redirectUri),
+		redirectUri,
+	};
+}
 
 export interface MCPOAuthConfig {
 	/** Authorization endpoint URL */
@@ -22,8 +84,12 @@ export interface MCPOAuthConfig {
 	clientSecret?: string;
 	/** OAuth scopes (space-separated) */
 	scopes?: string;
+	/** Exact redirect URI to advertise to the provider */
+	redirectUri?: string;
 	/** Custom callback port (default: 3000) */
 	callbackPort?: number;
+	/** Custom callback path (default: /callback or redirectUri pathname) */
+	callbackPath?: string;
 }
 
 /**
@@ -39,7 +105,7 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 		private config: MCPOAuthConfig,
 		ctrl: OAuthController,
 	) {
-		super(ctrl, config.callbackPort ?? DEFAULT_PORT, CALLBACK_PATH);
+		super(ctrl, resolveCallbackOptions(config));
 		this.#resolvedClientId = this.#resolveClientId(config);
 	}
 

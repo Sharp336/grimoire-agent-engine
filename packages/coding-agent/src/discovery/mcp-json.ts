@@ -34,9 +34,18 @@ interface MCPConfigFile {
 			auth?: {
 				type: "oauth" | "apikey";
 				credentialId?: string;
+				tokenUrl?: string;
+				clientId?: string;
+				clientSecret?: string;
 			};
 			type?: "stdio" | "sse" | "http";
-			oauth?: { clientId?: string; callbackPort?: number };
+			oauth?: {
+				clientId?: string;
+				clientSecret?: string;
+				redirectUri?: string;
+				callbackPort?: number;
+				callbackPath?: string;
+			};
 		}
 	>;
 }
