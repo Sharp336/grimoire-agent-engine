@@ -162,7 +162,59 @@ describe("mcp oauth flow", () => {
 		});
 	});
 
-	it("rejects https loopback redirectUri values", () => {
+	it("supports https loopback redirectUri values behind a separate local callback port", async () => {
+		let observedRedirectUri = "";
+		let tokenRequestBody = "";
+
+		using _hook = hookFetch((input, init) => {
+			const url = String(input);
+			if (url === "https://provider.example/token") {
+				tokenRequestBody = String(init?.body ?? "");
+				return new Response(
+					JSON.stringify({
+						access_token: "access-token",
+						refresh_token: "refresh-token",
+						expires_in: 3600,
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			throw new Error(`Unexpected fetch: ${url}`);
+		});
+
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize",
+				tokenUrl: "https://provider.example/token",
+				redirectUri: "https://localhost:3443/slack/oauth_redirect",
+				callbackPort: 14570,
+			},
+			{
+				onAuth: info => {
+					const authUrl = new URL(info.url);
+					observedRedirectUri = authUrl.searchParams.get("redirect_uri") ?? "";
+					const state = authUrl.searchParams.get("state") ?? "";
+					queueMicrotask(() => {
+						void originalFetch(`http://localhost:14570/slack/oauth_redirect?code=test-code&state=${state}`);
+					});
+				},
+				signal: AbortSignal.timeout(1_000),
+			},
+		);
+
+		const credentials = await flow.login();
+		const tokenParams = new URLSearchParams(tokenRequestBody);
+
+		expect(observedRedirectUri).toBe("https://localhost:3443/slack/oauth_redirect");
+		expect(tokenParams.get("redirect_uri")).toBe("https://localhost:3443/slack/oauth_redirect");
+		expect(credentials).toMatchObject({
+			access: "access-token",
+			refresh: "refresh-token",
+		});
+	});
+
+	it("rejects https loopback redirectUri values without a separate callback port", () => {
 		expect(
 			() =>
 				new MCPOAuthFlow(
@@ -173,7 +225,7 @@ describe("mcp oauth flow", () => {
 					},
 					{},
 				),
-		).toThrow("HTTPS loopback redirect URIs are not supported");
+		).toThrow("HTTPS loopback redirect URIs require oauth.callbackPort");
 	});
 
 	it("fails instead of falling back to a random port when redirectUri is exact", async () => {
@@ -195,7 +247,7 @@ describe("mcp oauth flow", () => {
 				{ signal: AbortSignal.timeout(1_000) },
 			);
 
-			await expect(flow.login()).rejects.toThrow("exact redirect URI requires a fixed local listener");
+			await expect(flow.login()).rejects.toThrow("cannot fall back to a random port when oauth.redirectUri is set");
 		} finally {
 			busyServer.stop();
 		}

@@ -24,16 +24,35 @@ function resolveRedirectUri(redirectUri: string | undefined): string | undefined
 	if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
 		throw new Error("OAuth redirect URI must use http or https");
 	}
-	if (parsed.protocol === "https:" && isLoopbackHostname(parsed.hostname)) {
-		throw new Error(
-			"HTTPS loopback redirect URIs are not supported; use a public HTTPS tunnel or a local HTTP redirect URI",
-		);
-	}
 	return parsed.toString();
 }
 
 function parseRedirectUri(redirectUri: string | undefined): URL | undefined {
 	return redirectUri ? new URL(redirectUri) : undefined;
+}
+
+function getUriPort(uri: URL): number {
+	if (uri.port !== "") return Number(uri.port);
+	return uri.protocol === "https:" ? 443 : 80;
+}
+
+function validateRedirectConfig(config: MCPOAuthConfig, redirectUri: string | undefined): void {
+	const parsed = parseRedirectUri(redirectUri);
+	if (!parsed || parsed.protocol !== "https:" || !isLoopbackHostname(parsed.hostname)) {
+		return;
+	}
+
+	if (config.callbackPort === undefined) {
+		throw new Error(
+			"HTTPS loopback redirect URIs require oauth.callbackPort to point at the local HTTP callback listener behind your TLS terminator",
+		);
+	}
+
+	if (config.callbackPort === getUriPort(parsed)) {
+		throw new Error(
+			"HTTPS loopback redirect URIs cannot reuse the same local port; terminate TLS separately and forward to oauth.callbackPort",
+		);
+	}
 }
 
 function resolveCallbackPort(callbackPort: number | undefined, redirectUri: string | undefined): number {
@@ -65,6 +84,7 @@ function resolveCallbackHostname(redirectUri: string | undefined): string | unde
 
 function resolveCallbackOptions(config: MCPOAuthConfig): OAuthCallbackFlowOptions {
 	const redirectUri = resolveRedirectUri(config.redirectUri);
+	validateRedirectConfig(config, redirectUri);
 	return {
 		preferredPort: resolveCallbackPort(config.callbackPort, redirectUri),
 		callbackPath: resolveCallbackPath(config.callbackPath, redirectUri),
