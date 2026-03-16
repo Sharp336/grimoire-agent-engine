@@ -4,7 +4,6 @@ Use this tool to discover MCP tools that are loaded into the session but not exp
 
 {{#if hasDiscoverableMCPServers}}Discoverable MCP servers in this session: {{#list discoverableMCPServerSummaries join=", "}}{{this}}{{/list}}.{{/if}}
 {{#if discoverableMCPToolCount}}Total discoverable MCP tools loaded: {{discoverableMCPToolCount}}.{{/if}}
-
 Input:
 - `query` — required natural-language or keyword query
 - `limit` — optional maximum number of tools to return and activate (default `8`)

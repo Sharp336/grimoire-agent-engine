@@ -334,6 +334,31 @@ describe("SearchToolBm25Tool", () => {
 		expect(session.getSelected()).toEqual(["mcp_github_create_issue", "mcp_slack_post_message"]);
 	});
 
+	it("skips already-selected matches before applying limit", async () => {
+		const session = createSession(discoverableTools);
+		const tool = new SearchToolBm25Tool(session);
+
+		const firstResult = await tool.execute("call-github-1", { query: "github", limit: 1 });
+		expect(firstResult.details?.tools.map(match => match.name)).toEqual(["mcp_github_create_issue"]);
+		expect(firstResult.details?.activated_tools).toEqual(["mcp_github_create_issue"]);
+
+		const secondResult = await tool.execute("call-github-2", { query: "github", limit: 1 });
+		expect(secondResult.details?.tools.map(match => match.name)).toEqual(["mcp_github_list_pull_requests"]);
+		expect(secondResult.details?.activated_tools).toEqual(["mcp_github_list_pull_requests"]);
+		expect(secondResult.details?.active_selected_tools).toEqual([
+			"mcp_github_create_issue",
+			"mcp_github_list_pull_requests",
+		]);
+
+		const exhaustedResult = await tool.execute("call-github-3", { query: "github", limit: 1 });
+		expect(exhaustedResult.details?.tools).toEqual([]);
+		expect(exhaustedResult.details?.activated_tools).toEqual([]);
+		expect(exhaustedResult.details?.active_selected_tools).toEqual([
+			"mcp_github_create_issue",
+			"mcp_github_list_pull_requests",
+		]);
+	});
+
 	it("rejects invalid input", async () => {
 		const tool = new SearchToolBm25Tool(createSession(discoverableTools));
 

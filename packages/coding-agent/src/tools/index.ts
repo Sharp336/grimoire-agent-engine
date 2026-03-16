@@ -197,7 +197,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	todo_write: s => new TodoWriteTool(s),
 	fetch: s => new FetchTool(s),
 	web_search: s => new SearchTool(s),
-	search_tool_bm25: s => new SearchToolBm25Tool(s),
+	search_tool_bm25: SearchToolBm25Tool.createIf,
 	write: s => new WriteTool(s),
 };
 

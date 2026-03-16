@@ -89,6 +89,14 @@ function getDiscoverableMCPSearchIndexForExecution(session: ToolSession): Discov
 	return buildDiscoverableMCPSearchIndex(session.getDiscoverableMCPTools?.() ?? []);
 }
 
+function supportsMCPToolDiscoveryExecution(session: ToolSession): boolean {
+	return (
+		typeof session.isMCPDiscoveryEnabled === "function" &&
+		typeof session.getSelectedMCPToolNames === "function" &&
+		typeof session.activateDiscoveredMCPTools === "function"
+	);
+}
+
 export function renderSearchToolBm25Description(discoverableTools: DiscoverableMCPTool[] = []): string {
 	const summary = summarizeDiscoverableMCPTools(discoverableTools);
 	return renderPromptTemplate(searchToolBm25Description, {
@@ -133,6 +141,11 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 
 	constructor(private readonly session: ToolSession) {}
 
+	static createIf(session: ToolSession): SearchToolBm25Tool | null {
+		if (!session.settings.get("mcp.discoveryMode")) return null;
+		return supportsMCPToolDiscoveryExecution(session) ? new SearchToolBm25Tool(session) : null;
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: SearchToolBm25Params,
@@ -140,7 +153,10 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 		_onUpdate?: AgentToolUpdateCallback<SearchToolBm25Details>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<SearchToolBm25Details>> {
-		if (!this.session.isMCPDiscoveryEnabled?.()) {
+		if (!supportsMCPToolDiscoveryExecution(this.session)) {
+			throw new ToolError("MCP tool discovery is unavailable in this session.");
+		}
+		if (!this.session.isMCPDiscoveryEnabled()) {
 			throw new ToolError("MCP tool discovery is disabled. Enable mcp.discoveryMode to use search_tool_bm25.");
 		}
 
@@ -154,29 +170,27 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 		}
 
 		const searchIndex = getDiscoverableMCPSearchIndexForExecution(this.session);
+		const selectedToolNames = new Set(this.session.getSelectedMCPToolNames());
 		let ranked: Array<{ tool: DiscoverableMCPTool; score: number }> = [];
 		try {
-			ranked = searchDiscoverableMCPTools(searchIndex, query, limit);
+			ranked = searchDiscoverableMCPTools(searchIndex, query, searchIndex.documents.length)
+				.filter(result => !selectedToolNames.has(result.tool.name))
+				.slice(0, limit);
 		} catch (error) {
 			if (error instanceof Error) {
 				throw new ToolError(error.message);
 			}
 			throw error;
 		}
-		if (ranked.length > 0 && !this.session.activateDiscoveredMCPTools) {
-			throw new ToolError("MCP discovery activation is unavailable in this session.");
-		}
 		const activated =
-			ranked.length > 0
-				? await this.session.activateDiscoveredMCPTools?.(ranked.map(result => result.tool.name))
-				: [];
+			ranked.length > 0 ? await this.session.activateDiscoveredMCPTools(ranked.map(result => result.tool.name)) : [];
 
 		const details: SearchToolBm25Details = {
 			query,
 			limit,
 			total_tools: searchIndex.documents.length,
-			activated_tools: activated ?? [],
-			active_selected_tools: this.session.getSelectedMCPToolNames?.() ?? [],
+			activated_tools: activated,
+			active_selected_tools: this.session.getSelectedMCPToolNames(),
 			tools: ranked.map(result => formatMatch(result.tool, result.score)),
 		};
 

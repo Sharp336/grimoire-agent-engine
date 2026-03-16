@@ -1696,7 +1696,12 @@ export class AgentSession {
 	}
 
 	getSelectedMCPToolNames(): string[] {
-		return this.#getVisibleMCPToolNames();
+		if (!this.#mcpDiscoveryEnabled) {
+			return this.getActiveToolNames().filter(name => isMCPToolName(name) && this.#toolRegistry.has(name));
+		}
+		return Array.from(this.#selectedMCPToolNames).filter(
+			name => this.#discoverableMCPTools.has(name) && this.#toolRegistry.has(name),
+		);
 	}
 
 	async activateDiscoveredMCPTools(toolNames: string[]): Promise<string[]> {
@@ -1790,7 +1795,7 @@ export class AgentSession {
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
 		this.#pruneSelectedMCPToolNames();
 
-		const nextActive = [...this.#getActiveNonMCPToolNames(), ...this.#getVisibleMCPToolNames()];
+		const nextActive = [...this.#getActiveNonMCPToolNames(), ...this.getSelectedMCPToolNames()];
 		await this.setActiveToolsByName(nextActive);
 	}
 
