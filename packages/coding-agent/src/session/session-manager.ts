@@ -238,6 +238,8 @@ export interface SessionContext {
 	injectedTtsrRules: string[];
 	/** MCP tool names selected through discovery for this session branch. */
 	selectedMCPToolNames: string[];
+	/** Whether this branch contains an explicit persisted MCP selection entry. */
+	hasPersistedMCPToolSelection: boolean;
 	/** Active mode (e.g. "plan") or "none" if no special mode is active */
 	mode: string;
 	/** Mode-specific data from the last mode_change entry */
@@ -510,6 +512,7 @@ export function buildSessionContext(
 			models: {},
 			injectedTtsrRules: [],
 			selectedMCPToolNames: [],
+			hasPersistedMCPToolSelection: false,
 			mode: "none",
 		};
 	}
@@ -529,6 +532,7 @@ export function buildSessionContext(
 			models: {},
 			injectedTtsrRules: [],
 			selectedMCPToolNames: [],
+			hasPersistedMCPToolSelection: false,
 			mode: "none",
 		};
 	}
@@ -548,6 +552,7 @@ export function buildSessionContext(
 	let compaction: CompactionEntry | null = null;
 	const injectedTtsrRulesSet = new Set<string>();
 	let selectedMCPToolNames: string[] = [];
+	let hasPersistedMCPToolSelection = false;
 	let mode = "none";
 	let modeData: Record<string, unknown> | undefined;
 
@@ -574,6 +579,7 @@ export function buildSessionContext(
 			}
 		} else if (entry.type === "mcp_tool_selection") {
 			selectedMCPToolNames = [...entry.selectedToolNames];
+			hasPersistedMCPToolSelection = true;
 		} else if (entry.type === "mode_change") {
 			mode = entry.mode;
 			modeData = entry.data;
@@ -663,7 +669,17 @@ export function buildSessionContext(
 		}
 	}
 
-	return { messages, thinkingLevel, serviceTier, models, injectedTtsrRules, selectedMCPToolNames, mode, modeData };
+	return {
+		messages,
+		thinkingLevel,
+		serviceTier,
+		models,
+		injectedTtsrRules,
+		selectedMCPToolNames,
+		hasPersistedMCPToolSelection,
+		mode,
+		modeData,
+	};
 }
 
 /**

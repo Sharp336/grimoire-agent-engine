@@ -1794,7 +1794,9 @@ export class AgentSession {
 	async #restoreMCPSelectionsForSessionContext(sessionContext: SessionContext): Promise<void> {
 		if (!this.#mcpDiscoveryEnabled) return;
 		const nextActiveNonMCPToolNames = this.#getActiveNonMCPToolNames();
-		const restoredMCPToolNames = this.#filterSelectableMCPToolNames(sessionContext.selectedMCPToolNames);
+		const restoredMCPToolNames = sessionContext.hasPersistedMCPToolSelection
+			? this.#filterSelectableMCPToolNames(sessionContext.selectedMCPToolNames)
+			: this.#filterSelectableMCPToolNames(this.#defaultSelectedMCPToolNames);
 		await this.#applyActiveToolsByName([...nextActiveNonMCPToolNames, ...restoredMCPToolNames], {
 			persistMCPSelection: false,
 		});
