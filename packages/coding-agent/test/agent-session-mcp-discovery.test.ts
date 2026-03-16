@@ -307,4 +307,109 @@ describe("AgentSession MCP discovery", () => {
 		expect(session.getActiveToolNames()).toEqual(["read", "mcp_docs_search", "mcp_slack_send_message"]);
 		expect(session.systemPrompt).toBe("tools:read,mcp_docs_search,mcp_slack_send_message");
 	});
+	it("persists cleared MCP selections when refresh removes a selected tool", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const docsSearchTool = createMcpTool("mcp_docs_search", "docs", "search", "Search internal docs", ["query"]);
+		const toolRegistry = new Map([
+			[readTool.name, readTool],
+			[docsSearchTool.name, docsSearchTool],
+		]);
+		const sessionManager = SessionManager.inMemory();
+		const agent = new Agent({
+			initialState: {
+				model: createModel(),
+				systemPrompt: "initial",
+				tools: [readTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async toolNames => `tools:${toolNames.join(",")}`,
+		});
+		sessions.push(session);
+
+		await session.activateDiscoveredMCPTools(["mcp_docs_search"]);
+		expect(sessionManager.buildSessionContext().selectedMCPToolNames).toEqual(["mcp_docs_search"]);
+
+		await session.refreshMCPTools([]);
+
+		expect(session.getSelectedMCPToolNames()).toEqual([]);
+		expect(session.getActiveToolNames()).toEqual(["read"]);
+		expect(sessionManager.buildSessionContext().selectedMCPToolNames).toEqual([]);
+	});
+
+	it("persists corrected empty MCP selections when restored tools are unavailable", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const sessionManager = SessionManager.inMemory();
+		sessionManager.appendMCPToolSelection(["mcp_docs_search"]);
+		const agent = new Agent({
+			initialState: {
+				model: createModel(),
+				systemPrompt: "initial",
+				tools: [readTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry: new Map([[readTool.name, readTool]]),
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async toolNames => `tools:${toolNames.join(",")}`,
+		});
+		sessions.push(session);
+
+		expect(session.getSelectedMCPToolNames()).toEqual([]);
+		expect(sessionManager.buildSessionContext().selectedMCPToolNames).toEqual([]);
+	});
+
+	it("clears discovered MCP selections when starting a brand-new session", async () => {
+		const readTool = createBasicTool("read", "Read");
+		const docsSearchTool = createMcpTool("mcp_docs_search", "docs", "search", "Search internal docs", ["query"]);
+		const slackSendTool = createMcpTool("mcp_slack_send_message", "slack", "send_message", "Send a Slack message", [
+			"channel",
+			"text",
+		]);
+		const toolRegistry = new Map([
+			[readTool.name, readTool],
+			[docsSearchTool.name, docsSearchTool],
+			[slackSendTool.name, slackSendTool],
+		]);
+		const agent = new Agent({
+			initialState: {
+				model: createModel(),
+				systemPrompt: "initial",
+				tools: [readTool],
+				messages: [],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			rebuildSystemPrompt: async toolNames => `tools:${toolNames.join(",")}`,
+		});
+		sessions.push(session);
+
+		await session.activateDiscoveredMCPTools(["mcp_docs_search"]);
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp_docs_search"]);
+		expect(session.getActiveToolNames()).toEqual(["read", "mcp_docs_search"]);
+
+		await session.newSession();
+
+		expect(session.getSelectedMCPToolNames()).toEqual([]);
+		expect(session.getActiveToolNames()).toEqual(["read"]);
+		expect(session.systemPrompt).toBe("tools:read");
+	});
 });
