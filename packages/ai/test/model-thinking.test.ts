@@ -237,6 +237,38 @@ describe("model thinking runtime helpers", () => {
 		expect(clampThinkingLevelForModel(model, Effort.High)).toBeUndefined();
 	});
 
+	it("enables xhigh for openai-completions API (custom models)", () => {
+		const model = createModel({
+			id: "custom-model",
+			api: "openai-completions",
+			provider: "custom",
+		});
+
+		// openai-completions should support xhigh by default
+		expect(model.thinking?.maxLevel).toBe(Effort.XHigh);
+		expect(requireSupportedEffort(model, Effort.XHigh)).toBe(Effort.XHigh);
+	});
+
+	it("enables xhigh for openai-responses and openai-codex-responses APIs", () => {
+		const responsesModel = createModel({
+			id: "custom-responses",
+			api: "openai-responses",
+			provider: "custom",
+		});
+
+		const codexModel = createModel({
+			id: "custom-codex",
+			api: "openai-codex-responses",
+			provider: "custom",
+		});
+
+		// Both should support xhigh
+		expect(responsesModel.thinking?.maxLevel).toBe(Effort.XHigh);
+		expect(codexModel.thinking?.maxLevel).toBe(Effort.XHigh);
+		expect(requireSupportedEffort(responsesModel, Effort.XHigh)).toBe(Effort.XHigh);
+		expect(requireSupportedEffort(codexModel, Effort.XHigh)).toBe(Effort.XHigh);
+	});
+
 	it("rejects reasoning models that are missing thinking metadata at runtime", () => {
 		const model = {
 			id: "broken-reasoner",

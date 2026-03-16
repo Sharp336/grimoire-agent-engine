@@ -386,6 +386,10 @@ function inferFallbackEfforts<TApi extends Api>(model: ApiModel<TApi>): readonly
 	if (model.api === "bedrock-converse-stream") {
 		return DEFAULT_REASONING_EFFORTS;
 	}
+	// OpenAI-compatible APIs and OpenAI Responses API support xhigh
+	if (model.api === "openai-completions" || model.api === "openai-responses" || model.api === "openai-codex-responses") {
+		return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
+	}
 	return DEFAULT_REASONING_EFFORTS;
 }
 
