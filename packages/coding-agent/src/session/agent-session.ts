@@ -142,7 +142,13 @@ import {
 	type PythonExecutionMessage,
 	pythonExecutionToText,
 } from "./messages";
-import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionManager } from "./session-manager";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	NewSessionOptions,
+	SessionContext,
+	SessionManager,
+} from "./session-manager";
 import { getLatestCompactionEntry } from "./session-manager";
 
 /** Session-specific events that extend the core AgentEvent */
@@ -1785,6 +1791,14 @@ export class AgentSession {
 		await this.#applyActiveToolsByName(toolNames);
 	}
 
+	async #restoreMCPSelectionsForSessionContext(sessionContext: SessionContext): Promise<void> {
+		if (!this.#mcpDiscoveryEnabled) return;
+		const nextActiveNonMCPToolNames = this.#getActiveNonMCPToolNames();
+		const restoredMCPToolNames = this.#filterSelectableMCPToolNames(sessionContext.selectedMCPToolNames);
+		await this.#applyActiveToolsByName([...nextActiveNonMCPToolNames, ...restoredMCPToolNames], {
+			persistMCPSelection: false,
+		});
+	}
 	/** Rebuild the base system prompt using the current active tool set. */
 	async refreshBaseSystemPrompt(): Promise<void> {
 		if (!this.#rebuildSystemPrompt) return;
@@ -4878,7 +4892,6 @@ export class AgentSession {
 	 */
 	async switchSession(sessionPath: string): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
-		const nextActiveNonMCPToolNames = this.#mcpDiscoveryEnabled ? this.#getActiveNonMCPToolNames() : undefined;
 
 		// Emit session_before_switch event (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -4908,12 +4921,7 @@ export class AgentSession {
 
 		// Reload messages
 		const sessionContext = this.sessionManager.buildSessionContext();
-		if (nextActiveNonMCPToolNames) {
-			const restoredMCPToolNames = this.#filterSelectableMCPToolNames(sessionContext.selectedMCPToolNames);
-			await this.#applyActiveToolsByName([...nextActiveNonMCPToolNames, ...restoredMCPToolNames], {
-				persistMCPSelection: false,
-			});
-		}
+		await this.#restoreMCPSelectionsForSessionContext(sessionContext);
 
 		// Emit session_switch event to hooks
 		if (this.#extensionRunner) {
@@ -5016,6 +5024,8 @@ export class AgentSession {
 
 		// Reload messages from entries (works for both file and in-memory mode)
 		const sessionContext = this.sessionManager.buildSessionContext();
+
+		await this.#restoreMCPSelectionsForSessionContext(sessionContext);
 
 		// Emit session_branch event to hooks (after branch completes)
 		if (this.#extensionRunner) {
@@ -5180,6 +5190,7 @@ export class AgentSession {
 
 		// Update agent state
 		const sessionContext = this.sessionManager.buildSessionContext();
+		await this.#restoreMCPSelectionsForSessionContext(sessionContext);
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#syncTodoPhasesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
