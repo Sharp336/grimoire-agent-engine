@@ -1,10 +1,11 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { MCPOAuthFlow } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
 import { hookFetch } from "@oh-my-pi/pi-utils";
 
 const originalFetch = global.fetch;
 
 afterEach(() => {
+	vi.restoreAllMocks();
 	global.fetch = originalFetch;
 });
 
@@ -229,28 +230,21 @@ describe("mcp oauth flow", () => {
 	});
 
 	it("fails instead of falling back to a random port when redirectUri is exact", async () => {
-		const busyServer = Bun.serve({
-			hostname: "localhost",
-			port: 14569,
-			reusePort: false,
-			fetch: () => new Response("busy"),
+		vi.spyOn(Bun, "serve").mockImplementation(() => {
+			throw new Error("EADDRINUSE");
 		});
 
-		try {
-			const flow = new MCPOAuthFlow(
-				{
-					authorizationUrl: "https://provider.example/authorize",
-					tokenUrl: "https://provider.example/token",
-					redirectUri: "https://public.example/slack/oauth_redirect",
-					callbackPort: 14569,
-					callbackPath: "/slack/oauth_redirect",
-				},
-				{ signal: AbortSignal.timeout(1_000) },
-			);
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize",
+				tokenUrl: "https://provider.example/token",
+				redirectUri: "https://public.example/slack/oauth_redirect",
+				callbackPort: 14569,
+				callbackPath: "/slack/oauth_redirect",
+			},
+			{ signal: AbortSignal.timeout(1_000) },
+		);
 
-			await expect(flow.login()).rejects.toThrow("cannot fall back to a random port when oauth.redirectUri is set");
-		} finally {
-			busyServer.stop();
-		}
+		await expect(flow.login()).rejects.toThrow("cannot fall back to a random port when oauth.redirectUri is set");
 	});
 });
