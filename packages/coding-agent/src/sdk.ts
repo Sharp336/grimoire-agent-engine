@@ -1289,7 +1289,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let initialToolNames = [...requestedActiveToolNames];
 	if (mcpDiscoveryEnabled) {
 		const restoredSelectedMCPToolNames = existingSession.selectedMCPToolNames.filter(name => toolRegistry.has(name));
-		initialSelectedMCPToolNames = [...new Set([...restoredSelectedMCPToolNames, ...explicitlyRequestedMCPToolNames])];
+		initialSelectedMCPToolNames = existingSession.hasPersistedMCPToolSelection
+			? restoredSelectedMCPToolNames
+			: [...new Set([...restoredSelectedMCPToolNames, ...explicitlyRequestedMCPToolNames])];
 		defaultSelectedMCPToolNames = [...explicitlyRequestedMCPToolNames];
 		initialToolNames = [
 			...new Set([

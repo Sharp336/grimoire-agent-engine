@@ -173,4 +173,61 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 			await resumedSession.dispose();
 		}
 	});
+
+	it("keeps a cleared MCP selection empty when resuming with explicitly requested MCP tools", async () => {
+		const firstManager = SessionManager.create(tempDir, tempDir);
+		const { session: firstSession } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: firstManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			toolNames: ["read", "search_tool_bm25", "mcp_github_create_issue"],
+			customTools: [
+				createMcpCustomTool("mcp_github_create_issue", "github", "create_issue"),
+				createMcpCustomTool("mcp_slack_post_message", "slack", "post_message"),
+			],
+		});
+		await firstSession.setActiveToolsByName(["read", "search_tool_bm25"]);
+		expect(firstSession.getSelectedMCPToolNames()).toEqual([]);
+		const sessionFile = firstSession.sessionFile;
+		expect(sessionFile).toBeDefined();
+		await firstSession.sessionManager.rewriteEntries();
+		await firstSession.dispose();
+
+		const resumedManager = await SessionManager.open(sessionFile!, tempDir);
+		const { session: resumedSession } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: resumedManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			toolNames: ["read", "search_tool_bm25", "mcp_github_create_issue"],
+			customTools: [
+				createMcpCustomTool("mcp_github_create_issue", "github", "create_issue"),
+				createMcpCustomTool("mcp_slack_post_message", "slack", "post_message"),
+			],
+		});
+		try {
+			expect(resumedSession.getSelectedMCPToolNames()).toEqual([]);
+			expect(resumedSession.getActiveToolNames()).toEqual(expect.arrayContaining(["read", "search_tool_bm25"]));
+			expect(resumedSession.getActiveToolNames()).not.toContain("mcp_github_create_issue");
+		} finally {
+			await resumedSession.dispose();
+		}
+	});
 });
