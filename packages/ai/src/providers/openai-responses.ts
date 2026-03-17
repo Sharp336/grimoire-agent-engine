@@ -365,9 +365,7 @@ function convertConversationMessages(
 			const providerPayload = (msg as { providerPayload?: AssistantMessage["providerPayload"] }).providerPayload;
 			const historyItems = getOpenAIResponsesHistoryItems(providerPayload, model.provider);
 			if (historyItems) {
-				messages.push(
-					...(sanitizeOpenAIResponsesHistoryItemsForReplay(historyItems) as Array<ResponseInput[number]>),
-				);
+				messages.push(...sanitizeOpenAIResponsesHistoryItemsForReplay(historyItems));
 				knownCallIds = collectKnownCallIds(messages);
 				msgIndex++;
 				continue;
@@ -386,9 +384,9 @@ function convertConversationMessages(
 			if (historyItems) {
 				const sanitizedHistoryItems = sanitizeOpenAIResponsesHistoryItemsForReplay(historyItems);
 				if (providerPayload?.dt) {
-					messages.push(...(sanitizedHistoryItems as Array<ResponseInput[number]>));
+					messages.push(...sanitizedHistoryItems);
 				} else {
-					messages.splice(0, messages.length, ...(sanitizedHistoryItems as Array<ResponseInput[number]>));
+					messages.splice(0, messages.length, ...sanitizedHistoryItems);
 				}
 				knownCallIds = collectKnownCallIds(messages);
 				msgIndex++;

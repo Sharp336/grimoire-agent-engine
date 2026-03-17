@@ -356,7 +356,9 @@ describe("OpenAI responses history payload", () => {
 		expect(functionCallOutputItem?.id).toBeUndefined();
 		expect(itemReference).toBeUndefined();
 		expect(
-			(payload.input ?? []).some(item => item && typeof item === "object" && "id" in (item as Record<string, unknown>)),
+			(payload.input ?? []).some(
+				item => item && typeof item === "object" && "id" in (item as Record<string, unknown>),
+			),
 		).toBe(false);
 		expect(reasoningItem?.encrypted_content).toBe("enc_opaque");
 		expect(functionCallItem?.call_id).toBe(expectedCallId);
