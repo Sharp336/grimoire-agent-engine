@@ -62,6 +62,43 @@ export function truncateResponseItemId(id: string, prefix: string): string {
 	return `${prefix}_${Bun.hash.xxHash64(id).toString(36)}`;
 }
 
+export function sanitizeOpenAIResponsesHistoryItemsForReplay(
+	items: Array<Record<string, unknown>>,
+): Array<Record<string, unknown>> {
+	const normalizedCallIds = new Map<string, string>();
+	return items.flatMap(item => {
+		const sanitized = sanitizeOpenAIResponsesHistoryItemForReplay(item, normalizedCallIds);
+		return sanitized ? [sanitized] : [];
+	});
+}
+
+function sanitizeOpenAIResponsesHistoryItemForReplay(
+	item: Record<string, unknown>,
+	normalizedCallIds: Map<string, string>,
+): Record<string, unknown> | undefined {
+	if (item.type === "item_reference") return undefined;
+
+	const { id: _id, ...sanitizedItem } = item;
+	const callId = normalizeReplayedResponsesHistoryCallId(item.call_id, normalizedCallIds);
+	if (typeof item.call_id === "string") {
+		sanitizedItem.call_id = callId;
+	}
+
+	return sanitizedItem;
+}
+
+function normalizeReplayedResponsesHistoryCallId(
+	value: unknown,
+	normalizedValues: Map<string, string>,
+): string | undefined {
+	if (typeof value !== "string") return undefined;
+	const normalized = normalizedValues.get(value);
+	if (normalized) return normalized;
+	const next = truncateResponseItemId(value, getIdPrefix(value, "call"));
+	normalizedValues.set(value, next);
+	return next;
+}
+
 export function createOpenAIResponsesHistoryPayload(
 	provider: string,
 	items: Array<Record<string, unknown>>,
