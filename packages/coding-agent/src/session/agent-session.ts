@@ -424,6 +424,7 @@ export class AgentSession {
 	#discoverableMCPSearchIndex: DiscoverableMCPSearchIndex | null = null;
 	#selectedMCPToolNames = new Set<string>();
 	#defaultSelectedMCPToolNames = new Set<string>();
+	#sessionDefaultSelectedMCPToolNames = new Map<string, string[]>();
 
 	// TTSR manager for time-traveling stream rules
 	#ttsrManager: TtsrManager | undefined = undefined;
@@ -486,6 +487,7 @@ export class AgentSession {
 		) {
 			this.sessionManager.appendMCPToolSelection(currentSelectedMCPToolNames);
 		}
+		this.#rememberSessionDefaultSelectedMCPToolNames(this.sessionManager.getSessionFile(), this.#defaultSelectedMCPToolNames);
 		this.#ttsrManager = config.ttsrManager;
 		this.#obfuscator = config.obfuscator;
 		this.agent.providerSessionState = this.#providerSessionState;
@@ -1665,6 +1667,19 @@ export class AgentSession {
 		return left.length === right.length && left.every((name, index) => name === right[index]);
 	}
 
+	#rememberSessionDefaultSelectedMCPToolNames(sessionFile: string | null | undefined, toolNames: Iterable<string>): void {
+		if (!sessionFile) return;
+		this.#sessionDefaultSelectedMCPToolNames.set(
+			path.resolve(sessionFile),
+			this.#filterSelectableMCPToolNames(toolNames),
+		);
+	}
+
+	#getSessionDefaultSelectedMCPToolNames(sessionFile: string | null | undefined): string[] {
+		if (!sessionFile) return [];
+		return this.#sessionDefaultSelectedMCPToolNames.get(path.resolve(sessionFile)) ?? [];
+	}
+
 	#persistSelectedMCPToolNamesIfChanged(previousSelectedMCPToolNames: string[]): void {
 		if (!this.#mcpDiscoveryEnabled) return;
 		const nextSelectedMCPToolNames = this.getSelectedMCPToolNames();
@@ -1791,12 +1806,17 @@ export class AgentSession {
 		await this.#applyActiveToolsByName(toolNames);
 	}
 
-	async #restoreMCPSelectionsForSessionContext(sessionContext: SessionContext): Promise<void> {
+	async #restoreMCPSelectionsForSessionContext(
+		sessionContext: SessionContext,
+		options?: { fallbackSelectedMCPToolNames?: Iterable<string> },
+	): Promise<void> {
 		if (!this.#mcpDiscoveryEnabled) return;
 		const nextActiveNonMCPToolNames = this.#getActiveNonMCPToolNames();
+		const fallbackSelectedMCPToolNames = options?.fallbackSelectedMCPToolNames ?? this.#defaultSelectedMCPToolNames;
 		const restoredMCPToolNames = sessionContext.hasPersistedMCPToolSelection
 			? this.#filterSelectableMCPToolNames(sessionContext.selectedMCPToolNames)
-			: this.#filterSelectableMCPToolNames(this.#defaultSelectedMCPToolNames);
+			: this.#filterSelectableMCPToolNames(fallbackSelectedMCPToolNames);
+		this.#rememberSessionDefaultSelectedMCPToolNames(this.sessionFile, restoredMCPToolNames);
 		await this.#applyActiveToolsByName([...nextActiveNonMCPToolNames, ...restoredMCPToolNames], {
 			persistMCPSelection: false,
 		});
@@ -2835,6 +2855,7 @@ export class AgentSession {
 				this.sessionManager.appendMCPToolSelection(this.getSelectedMCPToolNames());
 			}
 		}
+		this.#rememberSessionDefaultSelectedMCPToolNames(this.sessionFile, this.#defaultSelectedMCPToolNames);
 
 		this.#todoReminderCount = 0;
 		this.#planReferenceSent = false;
@@ -4923,7 +4944,8 @@ export class AgentSession {
 
 		// Reload messages
 		const sessionContext = this.sessionManager.buildSessionContext();
-		await this.#restoreMCPSelectionsForSessionContext(sessionContext);
+		const fallbackSelectedMCPToolNames = this.#getSessionDefaultSelectedMCPToolNames(sessionPath);
+		await this.#restoreMCPSelectionsForSessionContext(sessionContext, { fallbackSelectedMCPToolNames });
 
 		// Emit session_switch event to hooks
 		if (this.#extensionRunner) {

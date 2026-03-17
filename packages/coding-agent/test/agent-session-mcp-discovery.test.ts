@@ -1,4 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
@@ -80,10 +83,14 @@ function createMcpCustomTool(
 
 describe("AgentSession MCP discovery", () => {
 	const sessions: AgentSession[] = [];
+	const tempDirs: string[] = [];
 
 	afterEach(async () => {
 		for (const session of sessions.splice(0)) {
 			await session.dispose();
+		}
+		for (const tempDir of tempDirs.splice(0)) {
+			fs.rmSync(tempDir, { recursive: true, force: true });
 		}
 	});
 
@@ -536,6 +543,61 @@ describe("AgentSession MCP discovery", () => {
 		const result = await session.navigateTree(userEntryId, { summarize: false });
 
 		expect(result.cancelled).toBe(false);
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp_docs_search"]);
+		expect(session.getActiveToolNames()).toEqual(["read", "mcp_docs_search"]);
+		expect(session.systemPrompt).toBe("tools:read,mcp_docs_search");
+	});
+
+	it("does not leak MCP defaults across session switches without persisted selections", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-session-mcp-switch-"));
+		tempDirs.push(tempDir);
+		const readTool = createBasicTool("read", "Read");
+		const docsSearchTool = createMcpTool("mcp_docs_search", "docs", "search", "Search internal docs", ["query"]);
+		const toolRegistry = new Map([
+			[readTool.name, readTool],
+			[docsSearchTool.name, docsSearchTool],
+		]);
+
+		const olderSessionManager = SessionManager.create(tempDir, tempDir);
+		const olderSessionFile = olderSessionManager.getSessionFile();
+		expect(olderSessionFile).toBeString();
+		await olderSessionManager.flush();
+
+		const sessionManager = SessionManager.create(tempDir, tempDir);
+		const originalSessionFile = sessionManager.getSessionFile();
+		expect(originalSessionFile).toBeString();
+		await sessionManager.flush();
+
+		const agent = new Agent({
+			initialState: {
+				model: createModel(),
+				systemPrompt: "initial",
+				tools: [readTool, docsSearchTool],
+				messages: sessionManager.buildSessionContext().messages,
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "mcp.discoveryMode": true }),
+			modelRegistry: {} as never,
+			toolRegistry,
+			mcpDiscoveryEnabled: true,
+			initialSelectedMCPToolNames: ["mcp_docs_search"],
+			defaultSelectedMCPToolNames: ["mcp_docs_search"],
+			rebuildSystemPrompt: async toolNames => `tools:${toolNames.join(",")}`,
+		});
+		sessions.push(session);
+
+		expect(session.getSelectedMCPToolNames()).toEqual(["mcp_docs_search"]);
+		expect(sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(true);
+
+		await session.switchSession(olderSessionFile!);
+		expect(session.getSelectedMCPToolNames()).toEqual([]);
+		expect(session.getActiveToolNames()).toEqual(["read"]);
+		expect(session.systemPrompt).toBe("tools:read");
+
+		await session.switchSession(originalSessionFile!);
 		expect(session.getSelectedMCPToolNames()).toEqual(["mcp_docs_search"]);
 		expect(session.getActiveToolNames()).toEqual(["read", "mcp_docs_search"]);
 		expect(session.systemPrompt).toBe("tools:read,mcp_docs_search");
