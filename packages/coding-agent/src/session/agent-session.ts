@@ -476,9 +476,6 @@ export class AgentSession {
 		this.#selectedMCPToolNames = new Set(config.initialSelectedMCPToolNames ?? []);
 		this.#defaultSelectedMCPToolNames = new Set(config.defaultSelectedMCPToolNames ?? []);
 		this.#pruneSelectedMCPToolNames();
-		this.#defaultSelectedMCPToolNames = new Set(
-			this.#filterSelectableMCPToolNames(this.#defaultSelectedMCPToolNames),
-		);
 		const persistedSelectedMCPToolNames = this.sessionManager.buildSessionContext().selectedMCPToolNames;
 		const currentSelectedMCPToolNames = this.getSelectedMCPToolNames();
 		if (
