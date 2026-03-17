@@ -59,11 +59,11 @@ function resolveCallbackPort(callbackPort: number | undefined, redirectUri: stri
 	if (callbackPort !== undefined) return callbackPort;
 
 	const parsed = parseRedirectUri(redirectUri);
-	if (!parsed || parsed.protocol !== "http:" || !isLoopbackHostname(parsed.hostname) || parsed.port === "") {
+	if (!parsed || parsed.protocol !== "http:" || !isLoopbackHostname(parsed.hostname)) {
 		return DEFAULT_PORT;
 	}
 
-	const port = Number(parsed.port);
+	const port = getUriPort(parsed);
 	return Number.isFinite(port) && port > 0 ? port : DEFAULT_PORT;
 }
 

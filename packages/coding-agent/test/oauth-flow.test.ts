@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { MCPOAuthFlow } from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
-import { hookFetch } from "@oh-my-pi/pi-utils";
+import { MCPOAuthFlow } from "../src/mcp/oauth-flow";
+import { hookFetch } from "../../utils/src/hook-fetch";
 
 const originalFetch = global.fetch;
 
@@ -228,6 +228,49 @@ describe("mcp oauth flow", () => {
 				),
 		).toThrow("HTTPS loopback redirect URIs require oauth.callbackPort");
 	});
+
+	it("listens on the implied port for exact HTTP loopback redirectUri values", async () => {
+		const serveSpy = vi.spyOn(Bun, "serve").mockImplementation(options => {
+			expect(options.port).toBe(80);
+			throw new Error("EADDRINUSE");
+		});
+
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize",
+				tokenUrl: "https://provider.example/token",
+				redirectUri: "http://localhost/callback",
+			},
+			{ signal: AbortSignal.timeout(1_000) },
+		);
+
+		await expect(flow.login()).rejects.toThrow(
+			"OAuth callback port 80 unavailable; cannot fall back to a random port when oauth.redirectUri is set",
+		);
+		expect(serveSpy).toHaveBeenCalledTimes(1);
+	});
+
+	it("listens on the explicit port for exact HTTP loopback redirectUri values", async () => {
+		const serveSpy = vi.spyOn(Bun, "serve").mockImplementation(options => {
+			expect(options.port).toBe(3000);
+			throw new Error("EADDRINUSE");
+		});
+
+		const flow = new MCPOAuthFlow(
+			{
+				authorizationUrl: "https://provider.example/authorize",
+				tokenUrl: "https://provider.example/token",
+				redirectUri: "http://localhost:3000/callback",
+			},
+			{ signal: AbortSignal.timeout(1_000) },
+		);
+
+		await expect(flow.login()).rejects.toThrow(
+			"OAuth callback port 3000 unavailable; cannot fall back to a random port when oauth.redirectUri is set",
+		);
+		expect(serveSpy).toHaveBeenCalledTimes(1);
+	});
+
 
 	it("fails instead of falling back to a random port when redirectUri is exact", async () => {
 		vi.spyOn(Bun, "serve").mockImplementation(() => {
