@@ -102,7 +102,8 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 			if (server.env) server.env = expandEnvVarsDeep(server.env);
 			if (server.url) server.url = expandEnvVarsDeep(server.url);
 			if (server.headers) server.headers = expandEnvVarsDeep(server.headers);
-
+			if (server.auth) server.auth = expandEnvVarsDeep(server.auth);
+			if (server.oauth) server.oauth = expandEnvVarsDeep(server.oauth);
 			servers.push(server);
 		}
 	}
