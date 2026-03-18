@@ -119,7 +119,11 @@ export class StdioTransport implements MCPTransport {
 		}
 	}
 
-	#handleMessage(message: JsonRpcMessage): void {
+	#handleMessage(message: JsonRpcMessage | JsonRpcMessage[]): void {
+		if (Array.isArray(message)) {
+			for (const m of message) this.#handleMessage(m);
+			return;
+		}
 		// Server-to-client request: has both method and id
 		if ("method" in message && "id" in message && message.id != null) {
 			void this.#handleServerRequest(message as JsonRpcRequest);

@@ -111,8 +111,12 @@ export class HttpTransport implements MCPTransport {
 		}
 	}
 
-	/** Route an SSE message to the appropriate handler. */
-	#dispatchSSEMessage(message: JsonRpcMessage): void {
+	/** Route an SSE message (or batch) to the appropriate handler. */
+	#dispatchSSEMessage(message: JsonRpcMessage | JsonRpcMessage[]): void {
+		if (Array.isArray(message)) {
+			for (const m of message) this.#dispatchSSEMessage(m);
+			return;
+		}
 		// Server-to-client request: has both method and id
 		if ("method" in message && "id" in message && message.id != null) {
 			void this.#handleServerRequest(message as JsonRpcRequest);
