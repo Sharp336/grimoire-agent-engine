@@ -258,20 +258,27 @@ export class HttpTransport implements MCPTransport {
 			: abortController.signal;
 
 		try {
+			let result: T | undefined;
+			let captured = false;
 			for await (const message of readSseJson<JsonRpcMessage>(response.body, operationSignal)) {
 				if ("id" in message && message.id === expectedId && ("result" in message || "error" in message)) {
 					clearTimeout(timeoutId);
 					if (message.error) {
 						throw new Error(`MCP error ${message.error.code}: ${message.error.message}`);
 					}
-					// Return immediately — drain remaining messages in the background
-					// so we don't block on servers that hold the SSE stream open.
-					this.#drainSSEBackground(response.body, operationSignal);
-					return message.result as T;
+					result = message.result as T;
+					captured = true;
+					break;
 				}
 				this.#dispatchSSEMessage(message);
 			}
-			throw new Error(`No response received for request ID ${expectedId}`);
+			if (!captured) {
+				throw new Error(`No response received for request ID ${expectedId}`);
+			}
+			// Reader released after break — safe to start a background drain
+			// for piggybacked notifications/requests on the same stream.
+			this.#drainSSEBackground(response.body, operationSignal);
+			return result as T;
 		} catch (error) {
 			if (error instanceof Error && error.name === "AbortError") {
 				if (options?.signal?.aborted) {

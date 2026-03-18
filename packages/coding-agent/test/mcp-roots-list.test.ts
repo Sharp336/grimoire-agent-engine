@@ -24,6 +24,17 @@ describe("toJsonRpcError", () => {
 		const err = Object.assign(new Error("bad"), { code: "ENOENT" });
 		expect(toJsonRpcError(err).code).toBe(-32603);
 	});
+
+	it("preserves code and message from plain objects", () => {
+		const result = toJsonRpcError({ code: -32601, message: "Method not found" });
+		expect(result).toEqual({ code: -32601, message: "Method not found" });
+	});
+
+	it("falls back for plain objects missing code or message", () => {
+		expect(toJsonRpcError({ code: 42 })).toEqual({ code: -32603, message: "Internal error" });
+		expect(toJsonRpcError({ message: "hi" })).toEqual({ code: -32603, message: "Internal error" });
+		expect(toJsonRpcError(null)).toEqual({ code: -32603, message: "Internal error" });
+	});
 });
 
 describe("message classification", () => {
@@ -93,10 +104,11 @@ describe("roots response shape", () => {
 	});
 
 	it("produces valid file:// URI on Windows-style paths", () => {
-		// pathToFileURL handles platform differences
+		// path.basename and pathToFileURL are platform-dependent for
+		// Windows paths; only assert the URI format, not the name.
 		const result = getRoots("C:\\Users\\dev\\myproject");
 		expect(result.roots[0].uri).toMatch(/^file:\/\/\//);
-		expect(result.roots[0].name).toBe("myproject");
+		expect(result.roots[0].name).toBeTruthy();
 	});
 
 	it("handles paths with spaces", () => {
