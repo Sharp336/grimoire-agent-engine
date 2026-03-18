@@ -228,6 +228,8 @@ export interface MCPTransport {
 	onClose?: () => void;
 	onError?: (error: Error) => void;
 	onNotification?: (method: string, params: unknown) => void;
+	/** Handler for server-to-client requests (e.g. roots/list). Returns result or throws a JsonRpcError. */
+	onRequest?: (method: string, params: unknown) => Promise<unknown>;
 }
 
 /** Transport factory function */
@@ -400,3 +402,10 @@ export const MCPNotificationMethods = {
 	RESOURCES_UPDATED: "notifications/resources/updated",
 	PROMPTS_LIST_CHANGED: "notifications/prompts/list_changed",
 } as const;
+
+/** Extract a JsonRpcError from a thrown value. Preserves `.code` if present, defaults to -32603. */
+export function toJsonRpcError(error: unknown): JsonRpcError {
+	const message = error instanceof Error ? error.message : "Internal error";
+	const code = error instanceof Error && "code" in error && typeof error.code === "number" ? error.code : -32603;
+	return { code, message };
+}
