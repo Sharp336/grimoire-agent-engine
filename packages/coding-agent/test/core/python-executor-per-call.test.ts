@@ -1,0 +1,51 @@
+import { describe, expect, it } from "bun:test";
+import { executePython } from "@oh-my-pi/pi-coding-agent/ipy/executor";
+import type { KernelExecuteOptions, KernelExecuteResult } from "@oh-my-pi/pi-coding-agent/ipy/kernel";
+import { PythonKernel } from "@oh-my-pi/pi-coding-agent/ipy/kernel";
+import { TempDir } from "@oh-my-pi/pi-utils";
+
+interface KernelStub {
+	execute: (code: string, options?: KernelExecuteOptions) => Promise<KernelExecuteResult>;
+	shutdown: () => Promise<void>;
+}
+
+describe("executePython (per-call)", () => {
+	it("shuts down kernel on timed-out cancellation", async () => {
+		Bun.env.PI_PYTHON_SKIP_CHECK = "1";
+		using tempDir = TempDir.createSync("@omp-python-executor-per-call-");
+
+		let shutdownCalls = 0;
+		const kernel: KernelStub = {
+			execute: async () => ({
+				status: "ok",
+				cancelled: true,
+				timedOut: true,
+				stdinRequested: false,
+			}),
+			shutdown: async () => {
+				shutdownCalls += 1;
+			},
+		};
+
+		const kernelClass = PythonKernel as unknown as {
+			start: (options: { cwd: string }) => Promise<KernelStub>;
+		};
+		const originalStart = kernelClass.start;
+		kernelClass.start = async () => kernel;
+
+		try {
+			const result = await executePython("sleep(10)", {
+				kernelMode: "per-call",
+				timeoutMs: 2000,
+				cwd: tempDir.path(),
+			});
+
+			expect(result.cancelled).toBe(true);
+			expect(result.exitCode).toBeUndefined();
+			expect(result.output).toContain("Command timed out after 2 seconds");
+			expect(shutdownCalls).toBe(1);
+		} finally {
+			kernelClass.start = originalStart;
+		}
+	});
+});
