@@ -260,17 +260,27 @@ export class HttpTransport implements MCPTransport {
 		try {
 			let result: T | undefined;
 			let captured = false;
-			for await (const message of readSseJson<JsonRpcMessage>(response.body, operationSignal)) {
-				if ("id" in message && message.id === expectedId && ("result" in message || "error" in message)) {
-					clearTimeout(timeoutId);
-					if (message.error) {
-						throw new Error(`MCP error ${message.error.code}: ${message.error.message}`);
+			for await (const raw of readSseJson<JsonRpcMessage | JsonRpcMessage[]>(response.body, operationSignal)) {
+				// Flatten batches (JSON-RPC 2.0 section 6) into individual messages.
+				const messages = Array.isArray(raw) ? raw : [raw];
+				for (const message of messages) {
+					if (
+						!captured &&
+						"id" in message &&
+						message.id === expectedId &&
+						("result" in message || "error" in message)
+					) {
+						clearTimeout(timeoutId);
+						if (message.error) {
+							throw new Error(`MCP error ${message.error.code}: ${message.error.message}`);
+						}
+						result = message.result as T;
+						captured = true;
+						continue;
 					}
-					result = message.result as T;
-					captured = true;
-					break;
+					this.#dispatchSSEMessage(message);
 				}
-				this.#dispatchSSEMessage(message);
+				if (captured) break;
 			}
 			if (!captured) {
 				throw new Error(`No response received for request ID ${expectedId}`);
@@ -331,6 +341,24 @@ export class HttpTransport implements MCPTransport {
 				body: JSON.stringify(body),
 				signal: AbortSignal.timeout(this.config.timeout ?? 30000),
 			});
+			// Retry once on auth failure if onAuthError is wired
+			if (this.onAuthError && (resp.status === 401 || resp.status === 403)) {
+				await resp.body?.cancel();
+				const newHeaders = await this.onAuthError();
+				if (newHeaders) {
+					this.config.headers ??= {};
+					Object.assign(this.config.headers, newHeaders);
+					Object.assign(headers, newHeaders);
+					const retry = await fetch(this.config.url, {
+						method: "POST",
+						headers,
+						body: JSON.stringify(body),
+						signal: AbortSignal.timeout(this.config.timeout ?? 30000),
+					});
+					await retry.body?.cancel();
+					return;
+				}
+			}
 			await resp.body?.cancel();
 		} catch {
 			// Best-effort response delivery — server may have disconnected
