@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed coding-agent app-level keybindings to honor remaps and unbinds, added a truthful todo-expansion action with `Ctrl+T`, left thinking-block visibility configurable but unbound by default, removed the dead named-filter action, and made `/hotkeys` reflect effective bindings ([#468](https://github.com/can1357/oh-my-pi/issues/468))
+
+
 ## [13.12.10] - 2026-03-17
 ### Added
 

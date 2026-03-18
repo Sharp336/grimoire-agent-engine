@@ -1,13 +1,48 @@
 export interface HotkeysMarkdownBindings {
-	expandToolsKey: string;
+	interruptKey: string;
+	clearKey: string;
+	exitKey: string;
+	suspendKey: string;
+	cycleThinkingLevelKey: string;
+	cycleModelForwardKey: string;
+	cycleModelBackwardKey: string;
+	selectModelKey: string;
 	planModeKey: string;
+	historySearchKey: string;
+	expandToolsKey: string;
+	toggleTodoExpansionKey: string;
+	toggleThinkingKey: string;
+	externalEditorKey: string;
 	sttKey: string;
 	copyLineKey: string;
 	copyPromptKey: string;
 }
 
+function renderBinding(key: string): string {
+	return key || "(unbound)";
+}
+
 export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string {
-	const { expandToolsKey, planModeKey, sttKey, copyLineKey, copyPromptKey } = bindings;
+	const {
+		interruptKey,
+		clearKey,
+		exitKey,
+		suspendKey,
+		cycleThinkingLevelKey,
+		cycleModelForwardKey,
+		cycleModelBackwardKey,
+		selectModelKey,
+		planModeKey,
+		historySearchKey,
+		expandToolsKey,
+		toggleTodoExpansionKey,
+		toggleThinkingKey,
+		externalEditorKey,
+		sttKey,
+		copyLineKey,
+		copyPromptKey,
+	} = bindings;
+
 	return [
 		"**Navigation**",
 		"| Key | Action |",
@@ -25,28 +60,29 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"| `Ctrl+W` / `Option+Backspace` | Delete word backwards |",
 		"| `Ctrl+U` | Delete to start of line |",
 		"| `Ctrl+K` | Delete to end of line |",
-		`| \`${copyLineKey}\` | Copy current line |`,
-		`| \`${copyPromptKey}\` | Copy whole prompt |`,
+		`| \`${renderBinding(copyLineKey)}\` | Copy current line |`,
+		`| \`${renderBinding(copyPromptKey)}\` | Copy whole prompt |`,
 		"",
 		"**Other**",
 		"| Key | Action |",
 		"|-----|--------|",
 		"| `Tab` | Path completion / accept autocomplete |",
-		"| `Escape` | Cancel autocomplete / abort streaming |",
-		"| `Ctrl+C` | Clear editor (first) / exit (second) |",
-		"| `Ctrl+D` | Exit (when editor is empty) |",
-		"| `Ctrl+Z` | Suspend to background |",
-		"| `Shift+Tab` | Cycle thinking level |",
-		"| `Ctrl+P` | Cycle role models (slow/default/smol) |",
-		"| `Shift+Ctrl+P` | Cycle role models (temporary) |",
+		`| \`${renderBinding(interruptKey)}\` | Cancel autocomplete / abort streaming |`,
+		`| \`${renderBinding(clearKey)}\` | Clear editor (press twice quickly to exit) |`,
+		`| \`${renderBinding(exitKey)}\` | Exit (when editor is empty) |`,
+		`| \`${renderBinding(suspendKey)}\` | Suspend to background |`,
+		`| \`${renderBinding(cycleThinkingLevelKey)}\` | Cycle thinking level |`,
+		`| \`${renderBinding(cycleModelForwardKey)}\` | Cycle role models (slow/default/smol) |`,
+		`| \`${renderBinding(cycleModelBackwardKey)}\` | Cycle role models (temporary) |`,
 		"| `Alt+P` | Select model (temporary) |",
-		"| `Ctrl+L` | Select model (set roles) |",
-		`| \`${planModeKey}\` | Toggle plan mode |`,
-		"| `Ctrl+R` | Search prompt history |",
-		`| \`${expandToolsKey}\` | Toggle tool output expansion |`,
-		"| `Ctrl+T` | Toggle todo list expansion |",
-		"| `Ctrl+G` | Edit message in external editor |",
-		`| \`${sttKey}\` | Toggle speech-to-text recording |`,
+		`| \`${renderBinding(selectModelKey)}\` | Select model (set roles) |`,
+		`| \`${renderBinding(planModeKey)}\` | Toggle plan mode |`,
+		`| \`${renderBinding(historySearchKey)}\` | Search prompt history |`,
+		`| \`${renderBinding(expandToolsKey)}\` | Toggle tool output expansion |`,
+		`| \`${renderBinding(toggleTodoExpansionKey)}\` | Toggle todo list expansion |`,
+		`| \`${renderBinding(toggleThinkingKey)}\` | Toggle thinking block visibility |`,
+		`| \`${renderBinding(externalEditorKey)}\` | Edit message in external editor |`,
+		`| \`${renderBinding(sttKey)}\` | Toggle speech-to-text recording |`,
 		"| `#` | Open prompt actions |",
 		"| `/` | Slash commands |",
 		"| `!` | Run bash command |",

@@ -24,8 +24,8 @@ export type AppAction =
 	| "selectModel"
 	| "togglePlanMode"
 	| "expandTools"
+	| "toggleTodoExpansion"
 	| "toggleThinking"
-	| "toggleSessionNamedFilter"
 	| "externalEditor"
 	| "historySearch"
 	| "followUp"
@@ -66,8 +66,8 @@ export const DEFAULT_APP_KEYBINDINGS: Record<AppAction, KeyId | KeyId[]> = {
 	togglePlanMode: "alt+shift+p",
 	historySearch: "ctrl+r",
 	expandTools: "ctrl+o",
-	toggleThinking: "ctrl+t",
-	toggleSessionNamedFilter: "ctrl+n",
+	toggleTodoExpansion: "ctrl+t",
+	toggleThinking: [],
 	externalEditor: "ctrl+g",
 	followUp: "ctrl+enter",
 	dequeue: "alt+up",
@@ -102,8 +102,8 @@ const APP_ACTIONS: AppAction[] = [
 	"togglePlanMode",
 	"historySearch",
 	"expandTools",
+	"toggleTodoExpansion",
 	"toggleThinking",
-	"toggleSessionNamedFilter",
 	"externalEditor",
 	"followUp",
 	"dequeue",

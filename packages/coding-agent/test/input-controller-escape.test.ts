@@ -1,6 +1,66 @@
-import { describe, expect, it, vi } from "bun:test";
-import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
+import { describe, expect, it, mock, vi } from "bun:test";
 import type { InteractiveModeContext, SubmittedUserInput } from "@oh-my-pi/pi-coding-agent/modes/types";
+
+const themeModulePath = new URL("../src/modes/theme/theme.ts", import.meta.url).pathname;
+
+mock.module(themeModulePath, () => ({
+	getEditorTheme: () => ({ borderColor: (text: string) => text }),
+	getMarkdownTheme: () => ({}),
+	getSymbolTheme: () => ({}),
+	highlightCode: (text: string) => text,
+	getLanguageFromPath: () => undefined,
+	isLightTheme: () => false,
+	setAutoThemeMapping: () => Promise.resolve(),
+	setColorBlindMode: () => Promise.resolve(),
+	setSymbolPreset: () => Promise.resolve(),
+	onTerminalAppearanceChange: () => {},
+	onThemeChange: () => {},
+	theme: {
+		fg: (_tone: string, text: string) => text,
+	},
+}));
+
+mock.module("@oh-my-pi/pi-natives", () => ({
+	copyToClipboard: vi.fn(),
+	readImageFromClipboard: vi.fn(),
+	sanitizeText: (text: string) => text,
+	fuzzyFind: vi.fn(async () => ({ matches: [] })),
+	glob: vi.fn(async () => []),
+	FileType: { File: "file", Directory: "directory", Symlink: "symlink" },
+	ImageFormat: { Png: "png", Jpeg: "jpeg" },
+	SamplingFilter: { Lanczos3: "Lanczos3" },
+	PhotonImage: class PhotonImage {},
+	Shell: class Shell {},
+	PtySession: class PtySession {},
+	matchesKey: (data: string, keyId: string) => {
+		if (keyId === "escape" || keyId === "esc") return data === "\x1b";
+		const match = keyId.match(/^ctrl\+([a-z])$/i);
+		if (!match) return false;
+		return data === String.fromCharCode(match[1]!.toLowerCase().charCodeAt(0) & 0x1f);
+	},
+	parseKey: vi.fn(() => undefined),
+	parseKittySequence: vi.fn(() => null),
+	encodeSixel: vi.fn(),
+	sliceWithWidth: (text: string) => text,
+	Ellipsis: { Omit: "omit" },
+	extractSegments: vi.fn(() => []),
+	truncateToWidth: (text: string) => text,
+	wrapTextWithAnsi: (text: string) => [text],
+	executeShell: vi.fn(),
+	getWorkProfile: vi.fn(),
+	highlightCode: vi.fn((code: string) => code),
+	supportsLanguage: vi.fn(() => false),
+	projfsOverlayProbe: vi.fn(),
+	projfsOverlayStart: vi.fn(),
+	projfsOverlayStop: vi.fn(),
+	astEdit: vi.fn(),
+	astGrep: vi.fn(),
+	grep: vi.fn(),
+	htmlToMarkdown: vi.fn(),
+	invalidateFsScanCache: vi.fn(),
+}));
+
+const { InputController } = await import("@oh-my-pi/pi-coding-agent/modes/controllers/input-controller");
 
 type FakeEditor = {
 	onEscape?: () => void;
@@ -23,7 +83,10 @@ type FakeEditor = {
 	setText(text: string): void;
 	getText(): string;
 	addToHistory(text: string): void;
+	setAppActionHandler(action: string, keys: string[], handler: (() => void) | undefined): void;
+	clearAppActionHandlers(): void;
 	setCustomKeyHandler(key: string, handler: () => void): void;
+	clearCustomKeyHandlers(): void;
 };
 
 function createSubmission(input: {
@@ -47,6 +110,8 @@ function createContext(): {
 		abortPython: ReturnType<typeof vi.fn>;
 		addMessageToChat: ReturnType<typeof vi.fn>;
 		cancelPendingSubmission: ReturnType<typeof vi.fn>;
+		clearAppActionHandlers: ReturnType<typeof vi.fn>;
+		clearCustomKeyHandlers: ReturnType<typeof vi.fn>;
 		clearQueue: ReturnType<typeof vi.fn>;
 		ensureLoadingAnimation: ReturnType<typeof vi.fn>;
 		handleBtwCommand: ReturnType<typeof vi.fn>;
@@ -55,6 +120,7 @@ function createContext(): {
 		onInputCallback: ReturnType<typeof vi.fn>;
 		prompt: ReturnType<typeof vi.fn>;
 		requestRender: ReturnType<typeof vi.fn>;
+		setAppActionHandler: ReturnType<typeof vi.fn>;
 		startPendingSubmission: ReturnType<typeof vi.fn>;
 	};
 } {
@@ -75,6 +141,9 @@ function createContext(): {
 		ensureLoadingAnimation();
 		return createSubmission(input);
 	});
+	const clearAppActionHandlers = vi.fn();
+	const clearCustomKeyHandlers = vi.fn();
+	const setAppActionHandler = vi.fn();
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
@@ -83,7 +152,10 @@ function createContext(): {
 			return editorText;
 		},
 		addToHistory: vi.fn(),
+		setAppActionHandler,
+		clearAppActionHandlers,
 		setCustomKeyHandler: vi.fn(),
+		clearCustomKeyHandlers,
 	};
 
 	let ctx!: InteractiveModeContext;
@@ -118,7 +190,7 @@ function createContext(): {
 			getSessionName: () => "existing session",
 		} as unknown as InteractiveModeContext["sessionManager"],
 		keybindings: {
-			getKeys: () => [],
+			getKeys: (action: string) => (action === "interrupt" ? ["escape"] : []),
 		} as unknown as InteractiveModeContext["keybindings"],
 		pendingImages: [],
 		isBashMode: false,
@@ -155,6 +227,8 @@ function createContext(): {
 			abortPython,
 			addMessageToChat,
 			cancelPendingSubmission,
+			clearAppActionHandlers,
+			clearCustomKeyHandlers,
 			clearQueue,
 			ensureLoadingAnimation,
 			handleBtwCommand,
@@ -163,12 +237,24 @@ function createContext(): {
 			onInputCallback,
 			prompt,
 			requestRender,
+			setAppActionHandler,
 			startPendingSubmission,
 		},
 	};
 }
 
 describe("InputController escape behavior", () => {
+	it("registers escape as the interrupt app action through the editor app-action API", () => {
+		const { ctx, spies } = createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		expect(spies.clearAppActionHandlers).toHaveBeenCalledTimes(1);
+		expect(spies.clearCustomKeyHandlers).toHaveBeenCalledTimes(1);
+		expect(spies.setAppActionHandler).toHaveBeenCalledWith("interrupt", ["escape"], expect.any(Function));
+	});
+
 	it("prefers canceling a pending optimistic submission before aborting the session", async () => {
 		const { ctx, editor, spies } = createContext();
 		const submission = createSubmission({ text: "hello" });

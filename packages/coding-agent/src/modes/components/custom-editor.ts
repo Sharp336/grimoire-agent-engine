@@ -1,34 +1,39 @@
 import { Editor, type KeyId, matchesKey, parseKittySequence } from "@oh-my-pi/pi-tui";
+import type { AppAction } from "../../config/keybindings";
+
+type AppActionHandler = {
+	keys: KeyId[];
+	handler: () => void;
+};
 
 /**
- * Custom editor that handles Escape and Ctrl+C keys for coding-agent
+ * Custom editor that dispatches coding-agent app actions before editor defaults.
  */
 export class CustomEditor extends Editor {
 	onEscape?: () => void;
 	shouldBypassAutocompleteOnEscape?: () => boolean;
-	onCtrlC?: () => void;
-	onCtrlD?: () => void;
-	onShiftTab?: () => void;
-	onCtrlP?: () => void;
-	onShiftCtrlP?: () => void;
-	onCtrlL?: () => void;
-	onCtrlR?: () => void;
-	onCtrlO?: () => void;
-	onCtrlT?: () => void;
-	onCtrlG?: () => void;
-	onCtrlZ?: () => void;
 	onQuestionMark?: () => void;
 	onCapsLock?: () => void;
 	onAltP?: () => void;
-	/** Called when Alt+Shift+C is pressed to copy prompt to clipboard. */
-	onCopyPrompt?: () => void;
-	/** Called when Ctrl+V is pressed. Returns true if handled (image found), false to fall through to text paste. */
-	onCtrlV?: () => Promise<boolean>;
-	/** Called when Alt+Up is pressed (dequeue keybinding). */
-	onAltUp?: () => void;
 
-	/** Custom key handlers from extensions */
+	#appActionHandlers = new Map<AppAction, AppActionHandler>();
 	#customKeyHandlers = new Map<KeyId, () => void>();
+
+	setAppActionHandler(action: AppAction, keys: KeyId[], handler: (() => void) | undefined): void {
+		if (!handler || keys.length === 0) {
+			this.#appActionHandlers.delete(action);
+			return;
+		}
+		this.#appActionHandlers.set(action, { keys, handler });
+	}
+
+	removeAppActionHandler(action: AppAction): void {
+		this.#appActionHandlers.delete(action);
+	}
+
+	clearAppActionHandlers(): void {
+		this.#appActionHandlers.clear();
+	}
 
 	/**
 	 * Register a custom key handler. Extensions use this for shortcuts.
@@ -51,6 +56,38 @@ export class CustomEditor extends Editor {
 		this.#customKeyHandlers.clear();
 	}
 
+	#matchesAnyKey(data: string, keys: KeyId[]): boolean {
+		for (const key of keys) {
+			if (matchesKey(data, key)) {
+				return true;
+			}
+		}
+		return false;
+	}
+
+	#handleAppAction(data: string): boolean {
+		for (const [action, { keys, handler }] of this.#appActionHandlers) {
+			if (!this.#matchesAnyKey(data, keys)) {
+				continue;
+			}
+
+			// Escape keeps its autocomplete-cancel behavior unless interrupt explicitly wins.
+			if (
+				action === "interrupt" &&
+				(matchesKey(data, "escape") || matchesKey(data, "esc")) &&
+				this.isShowingAutocomplete() &&
+				!this.shouldBypassAutocompleteOnEscape?.()
+			) {
+				continue;
+			}
+
+			handler();
+			return true;
+		}
+
+		return false;
+	}
+
 	handleInput(data: string): void {
 		const parsed = parseKittySequence(data);
 		if (parsed && (parsed.modifier & 64) !== 0 && this.onCapsLock) {
@@ -59,115 +96,20 @@ export class CustomEditor extends Editor {
 			return;
 		}
 
-		// Intercept Ctrl+V for image paste (async - fires and handles result)
-		if (matchesKey(data, "ctrl+v") && this.onCtrlV) {
-			void this.onCtrlV();
+		if (this.#handleAppAction(data)) {
 			return;
 		}
 
-		// Intercept Ctrl+G for external editor
-		if (matchesKey(data, "ctrl+g") && this.onCtrlG) {
-			this.onCtrlG();
-			return;
-		}
-
-		// Intercept Alt+P for quick model switching
 		if (matchesKey(data, "alt+p") && this.onAltP) {
 			this.onAltP();
 			return;
 		}
 
-		// Intercept Ctrl+Z for suspend
-		if (matchesKey(data, "ctrl+z") && this.onCtrlZ) {
-			this.onCtrlZ();
-			return;
-		}
-
-		// Intercept Ctrl+T for thinking block visibility toggle
-		if (matchesKey(data, "ctrl+t") && this.onCtrlT) {
-			this.onCtrlT();
-			return;
-		}
-
-		// Intercept Ctrl+L for model selector
-		if (matchesKey(data, "ctrl+l") && this.onCtrlL) {
-			this.onCtrlL();
-			return;
-		}
-
-		// Intercept Ctrl+R for history search
-		if (matchesKey(data, "ctrl+r") && this.onCtrlR) {
-			this.onCtrlR();
-			return;
-		}
-
-		// Intercept Ctrl+O for tool output expansion
-		if (matchesKey(data, "ctrl+o") && this.onCtrlO) {
-			this.onCtrlO();
-			return;
-		}
-
-		// Intercept Shift+Ctrl+P for backward model cycling (check before Ctrl+P)
-		if ((matchesKey(data, "shift+ctrl+p") || matchesKey(data, "ctrl+shift+p")) && this.onShiftCtrlP) {
-			this.onShiftCtrlP();
-			return;
-		}
-
-		// Intercept Ctrl+P for model cycling
-		if (matchesKey(data, "ctrl+p") && this.onCtrlP) {
-			this.onCtrlP();
-			return;
-		}
-
-		// Intercept Shift+Tab for thinking level cycling
-		if (matchesKey(data, "shift+tab") && this.onShiftTab) {
-			this.onShiftTab();
-			return;
-		}
-
-		// Intercept Escape key.
-		// Default behavior keeps autocomplete dismissal, but parent can prioritize global escape handling.
-		if ((matchesKey(data, "escape") || matchesKey(data, "esc")) && this.onEscape) {
-			if (!this.isShowingAutocomplete() || this.shouldBypassAutocompleteOnEscape?.()) {
-				this.onEscape();
-				return;
-			}
-		}
-
-		// Intercept Ctrl+C
-		if (matchesKey(data, "ctrl+c") && this.onCtrlC) {
-			this.onCtrlC();
-			return;
-		}
-
-		// Intercept Ctrl+D (only when editor is empty)
-		if (matchesKey(data, "ctrl+d")) {
-			if (this.getText().length === 0 && this.onCtrlD) {
-				this.onCtrlD();
-			}
-			// Always consume Ctrl+D (don't pass to parent)
-			return;
-		}
-
-		// Intercept Alt+Up for dequeue (restore queued message to editor)
-		if (matchesKey(data, "alt+up") && this.onAltUp) {
-			this.onAltUp();
-			return;
-		}
-
-		// Intercept Alt+Shift+C to copy prompt to clipboard
-		if (matchesKey(data, "alt+shift+c") && this.onCopyPrompt) {
-			this.onCopyPrompt();
-			return;
-		}
-
-		// Intercept ? when editor is empty to show hotkeys
 		if (data === "?" && this.getText().length === 0 && this.onQuestionMark) {
 			this.onQuestionMark();
 			return;
 		}
 
-		// Check custom key handlers (extensions)
 		for (const [keyId, handler] of this.#customKeyHandlers) {
 			if (matchesKey(data, keyId)) {
 				handler();
@@ -175,7 +117,6 @@ export class CustomEditor extends Editor {
 			}
 		}
 
-		// Pass to parent for normal handling
 		super.handleInput(data);
 	}
 }

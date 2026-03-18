@@ -659,6 +659,8 @@ Bundled custom slash commands include `/review` (interactive code review launche
 
 ### Keyboard Shortcuts
 
+Defaults below are the built-in app bindings. Remap them in `~/.omp/agent/keybindings.json`; `/hotkeys` shows your effective bindings.
+
 **Navigation:**
 
 | Key                      | Action                                       |
@@ -684,17 +686,18 @@ Bundled custom slash commands include `/review` (interactive code review launche
 | --------------------- | --------------------------------------------------------- |
 | Tab                   | Path completion / accept autocomplete                     |
 | Escape                | Cancel autocomplete / abort streaming                     |
-| Ctrl+C                | Clear editor (first) / exit (second)                      |
+| Ctrl+C                | Clear editor (press twice quickly to exit)                |
 | Ctrl+D                | Exit (when editor is empty)                               |
 | Ctrl+Z                | Suspend to background (use `fg` in shell to resume)       |
 | Shift+Tab             | Cycle thinking level                                      |
 | Ctrl+P / Shift+Ctrl+P | Cycle role models (slow/default/smol), temporary on shift |
 | Alt+P                 | Select model temporarily                                  |
-| Ctrl+L                | Open model selector                                       |
+| Ctrl+L                | Select model (set roles)                                  |
 | Alt+Shift+P           | Toggle plan mode                                          |
 | Ctrl+R                | Search prompt history                                     |
 | Ctrl+O                | Toggle tool output expansion                              |
 | Ctrl+T                | Toggle todo list expansion                                |
+| Unbound by default    | Toggle thinking block visibility                          |
 | Ctrl+G                | Edit message in external editor (`$VISUAL` or `$EDITOR`)  |
 | Alt+H                 | Toggle speech-to-text recording                           |
 

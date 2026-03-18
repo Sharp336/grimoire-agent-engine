@@ -14,6 +14,7 @@ import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi
 import { formatDuration, Snowflake, setProjectDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { reset as resetCapabilities } from "../../capability";
+import type { AppAction } from "../../config/keybindings";
 import { loadCustomShare } from "../../export/custom-share";
 import type { CompactOptions } from "../../extensibility/extensions/types";
 import { getGatewayStatus } from "../../ipy/gateway-coordinator";
@@ -505,17 +506,31 @@ export class CommandController {
 	}
 
 	handleHotkeysCommand(): void {
-		const expandToolsKey = this.ctx.keybindings.getDisplayString("expandTools") || "Ctrl+O";
-		const planModeKey = this.ctx.keybindings.getDisplayString("togglePlanMode") || "Alt+Shift+P";
-		const sttKey = this.ctx.keybindings.getDisplayString("toggleSTT") || "Alt+H";
-		const copyLineKey = this.ctx.keybindings.getDisplayString("copyLine") || "Alt+Shift+L";
-		const copyPromptKey = this.ctx.keybindings.getDisplayString("copyPrompt") || "Alt+Shift+C";
+		const getAppActionKey = (action: AppAction): string => {
+			if (this.ctx.keybindings.getKeys(action).length === 0) {
+				return "";
+			}
+			return this.ctx.keybindings.getDisplayString(action);
+		};
+
 		const hotkeys = buildHotkeysMarkdown({
-			expandToolsKey,
-			planModeKey,
-			sttKey,
-			copyLineKey,
-			copyPromptKey,
+			interruptKey: getAppActionKey("interrupt"),
+			clearKey: getAppActionKey("clear"),
+			exitKey: getAppActionKey("exit"),
+			suspendKey: getAppActionKey("suspend"),
+			cycleThinkingLevelKey: getAppActionKey("cycleThinkingLevel"),
+			cycleModelForwardKey: getAppActionKey("cycleModelForward"),
+			cycleModelBackwardKey: getAppActionKey("cycleModelBackward"),
+			selectModelKey: getAppActionKey("selectModel"),
+			planModeKey: getAppActionKey("togglePlanMode"),
+			historySearchKey: getAppActionKey("historySearch"),
+			expandToolsKey: getAppActionKey("expandTools"),
+			toggleTodoExpansionKey: getAppActionKey("toggleTodoExpansion"),
+			toggleThinkingKey: getAppActionKey("toggleThinking"),
+			externalEditorKey: getAppActionKey("externalEditor"),
+			sttKey: getAppActionKey("toggleSTT"),
+			copyLineKey: getAppActionKey("copyLine"),
+			copyPromptKey: getAppActionKey("copyPrompt"),
 		});
 		this.ctx.chatContainer.addChild(new Spacer(1));
 		this.ctx.chatContainer.addChild(new DynamicBorder());
