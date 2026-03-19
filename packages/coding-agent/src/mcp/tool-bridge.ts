@@ -17,7 +17,7 @@ import type { Theme } from "../modes/theme/theme";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { callTool } from "./client";
 import { renderMCPCall, renderMCPResult } from "./render";
-import type { MCPContent, MCPServerConnection, MCPToolDefinition } from "./types";
+import type { MCPContent, MCPServerConnection, MCPToolCallResult, MCPToolDefinition } from "./types";
 
 function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 	if (!signal) return promise;
@@ -33,6 +33,33 @@ function withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 	signal.addEventListener("abort", onAbort, { once: true });
 	promise.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
 	return wrapped;
+}
+
+/** Reconnect callback: tears down stale connection, returns new one or null. */
+export type MCPReconnect = () => Promise<MCPServerConnection | null>;
+
+/**
+ * Network-level and stale-session errors that warrant a reconnect + single retry.
+ * Conservative: only catches errors where the server is likely alive but the
+ * connection object is stale (dead SSE, expired session, refused after restart).
+ */
+const RETRIABLE_PATTERNS = [
+	"ECONNREFUSED",
+	"ECONNRESET",
+	"EPIPE",
+	"ENETUNREACH",
+	"EHOSTUNREACH",
+	"fetch failed",
+	"Transport not connected",
+	"network error",
+];
+
+export function isRetriableConnectionError(error: unknown): boolean {
+	if (!(error instanceof Error)) return false;
+	const msg = error.message;
+	// Stale session (server restarted, old session ID is gone)
+	if (/^HTTP (404|502|503):/.test(msg)) return true;
+	return RETRIABLE_PATTERNS.some(p => msg.includes(p));
 }
 
 /** Details included in MCP tool results for rendering */
@@ -75,6 +102,51 @@ function formatMCPContent(content: MCPContent[]): string {
 	}
 
 	return parts.join("\n\n");
+}
+
+/** Build a CustomToolResult from a callTool response. */
+function buildResult(
+	result: MCPToolCallResult,
+	serverName: string,
+	mcpToolName: string,
+	provider?: string,
+	providerName?: string,
+): CustomToolResult<MCPToolDetails> {
+	const text = formatMCPContent(result.content);
+	const details: MCPToolDetails = {
+		serverName,
+		mcpToolName,
+		isError: result.isError,
+		rawContent: result.content,
+		provider,
+		providerName,
+	};
+	if (result.isError) {
+		return { content: [{ type: "text", text: `Error: ${text}` }], details };
+	}
+	return { content: [{ type: "text", text }], details };
+}
+
+/** Build an error CustomToolResult from a caught exception. */
+function buildErrorResult(
+	error: unknown,
+	serverName: string,
+	mcpToolName: string,
+	provider?: string,
+	providerName?: string,
+): CustomToolResult<MCPToolDetails> {
+	const message = error instanceof Error ? error.message : String(error);
+	return {
+		content: [{ type: "text", text: `MCP error: ${message}` }],
+		details: { serverName, mcpToolName, isError: true, provider, providerName },
+	};
+}
+
+/** Re-throw abort-related errors so they bypass error-result handling. */
+function rethrowIfAborted(error: unknown, signal?: AbortSignal): void {
+	if (error instanceof ToolAbortError) throw error;
+	if (error instanceof Error && error.name === "AbortError") throw new ToolAbortError();
+	if (signal?.aborted) throw new ToolAbortError();
 }
 
 /**
@@ -143,13 +215,14 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mcpServerName: string;
 
 	/** Create MCPTool instances for all tools from an MCP server connection */
-	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[]): MCPTool[] {
-		return tools.map(tool => new MCPTool(connection, tool));
+	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
+		return tools.map(tool => new MCPTool(connection, tool, reconnect));
 	}
 
 	constructor(
 		private readonly connection: MCPServerConnection,
 		private readonly tool: MCPToolDefinition,
+		private readonly reconnect?: MCPReconnect,
 	) {
 		this.name = createMCPToolName(connection.name, tool.name);
 		this.label = `${connection.name}/${tool.name}`;
@@ -175,51 +248,34 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		throwIfAborted(signal);
+		const args = params as Record<string, unknown>;
+		const provider = this.connection._source?.provider;
+		const providerName = this.connection._source?.providerName;
+
 		try {
-			const result = await callTool(this.connection, this.tool.name, params as Record<string, unknown>, { signal });
-
-			const text = formatMCPContent(result.content);
-			const details: MCPToolDetails = {
-				serverName: this.connection.name,
-				mcpToolName: this.tool.name,
-				isError: result.isError,
-				rawContent: result.content,
-				provider: this.connection._source?.provider,
-				providerName: this.connection._source?.providerName,
-			};
-
-			if (result.isError) {
-				return {
-					content: [{ type: "text", text: `Error: ${text}` }],
-					details,
-				};
-			}
-
-			return {
-				content: [{ type: "text", text }],
-				details,
-			};
+			const result = await callTool(this.connection, this.tool.name, args, { signal });
+			return buildResult(result, this.connection.name, this.tool.name, provider, providerName);
 		} catch (error) {
-			if (error instanceof ToolAbortError) {
-				throw error;
+			rethrowIfAborted(error, signal);
+			if (this.reconnect && isRetriableConnectionError(error)) {
+				const newConn = await this.reconnect().catch(() => null);
+				if (newConn) {
+					try {
+						const result = await callTool(newConn, this.tool.name, args, { signal });
+						return buildResult(
+							result,
+							newConn.name,
+							this.tool.name,
+							newConn._source?.provider ?? provider,
+							newConn._source?.providerName ?? providerName,
+						);
+					} catch (retryError) {
+						rethrowIfAborted(retryError, signal);
+						return buildErrorResult(retryError, this.connection.name, this.tool.name, provider, providerName);
+					}
+				}
 			}
-			if (error instanceof Error && error.name === "AbortError") {
-				throw new ToolAbortError();
-			}
-			if (signal?.aborted) {
-				throw new ToolAbortError();
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return {
-				content: [{ type: "text", text: `MCP error: ${message}` }],
-				details: {
-					serverName: this.connection.name,
-					mcpToolName: this.tool.name,
-					isError: true,
-					provider: this.connection._source?.provider,
-					providerName: this.connection._source?.providerName,
-				},
-			};
+			return buildErrorResult(error, this.connection.name, this.tool.name, provider, providerName);
 		}
 	}
 }
@@ -245,8 +301,9 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		tools: MCPToolDefinition[],
 		getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
+		reconnect?: MCPReconnect,
 	): DeferredMCPTool[] {
-		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source));
+		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect));
 	}
 
 	constructor(
@@ -254,6 +311,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly tool: MCPToolDefinition,
 		private readonly getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
+		private readonly reconnect?: MCPReconnect,
 	) {
 		this.name = createMCPToolName(serverName, tool.name);
 		this.label = `${serverName}/${tool.name}`;
@@ -281,53 +339,42 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		signal?: AbortSignal,
 	): Promise<CustomToolResult<MCPToolDetails>> {
 		throwIfAborted(signal);
+		const args = params as Record<string, unknown>;
+		const provider = this.#fallbackProvider;
+		const providerName = this.#fallbackProviderName;
+
 		try {
 			const connection = await withAbort(this.getConnection(), signal);
 			throwIfAborted(signal);
-			const result = await callTool(connection, this.tool.name, params as Record<string, unknown>, { signal });
-
-			const text = formatMCPContent(result.content);
-			const details: MCPToolDetails = {
-				serverName: this.serverName,
-				mcpToolName: this.tool.name,
-				isError: result.isError,
-				rawContent: result.content,
-				provider: connection._source?.provider ?? this.#fallbackProvider,
-				providerName: connection._source?.providerName ?? this.#fallbackProviderName,
-			};
-
-			if (result.isError) {
-				return {
-					content: [{ type: "text", text: `Error: ${text}` }],
-					details,
-				};
-			}
-
-			return {
-				content: [{ type: "text", text }],
-				details,
-			};
+			const result = await callTool(connection, this.tool.name, args, { signal });
+			return buildResult(
+				result,
+				this.serverName,
+				this.tool.name,
+				connection._source?.provider ?? provider,
+				connection._source?.providerName ?? providerName,
+			);
 		} catch (error) {
-			if (error instanceof ToolAbortError) {
-				throw error;
+			rethrowIfAborted(error, signal);
+			if (this.reconnect && isRetriableConnectionError(error)) {
+				const newConn = await this.reconnect().catch(() => null);
+				if (newConn) {
+					try {
+						const result = await callTool(newConn, this.tool.name, args, { signal });
+						return buildResult(
+							result,
+							this.serverName,
+							this.tool.name,
+							newConn._source?.provider ?? provider,
+							newConn._source?.providerName ?? providerName,
+						);
+					} catch (retryError) {
+						rethrowIfAborted(retryError, signal);
+						return buildErrorResult(retryError, this.serverName, this.tool.name, provider, providerName);
+					}
+				}
 			}
-			if (error instanceof Error && error.name === "AbortError") {
-				throw new ToolAbortError();
-			}
-			if (signal?.aborted) {
-				throw new ToolAbortError();
-			}
-			const message = error instanceof Error ? error.message : String(error);
-			return {
-				content: [{ type: "text", text: `MCP error: ${message}` }],
-				details: {
-					serverName: this.serverName,
-					mcpToolName: this.tool.name,
-					isError: true,
-					provider: this.#fallbackProvider,
-					providerName: this.#fallbackProviderName,
-				},
-			};
+			return buildErrorResult(error, this.serverName, this.tool.name, provider, providerName);
 		}
 	}
 }
