@@ -134,6 +134,8 @@ export class MCPManager {
 	#pendingReconnections = new Map<string, Promise<MCPServerConnection | null>>();
 	/** Preserved configs for reconnection after connection loss. */
 	#serverConfigs = new Map<string, MCPServerConfig>();
+	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
+	#epoch = 0;
 
 	constructor(
 		private cwd: string,
@@ -290,7 +292,11 @@ export class MCPManager {
 				continue;
 			}
 
-			if (this.#pendingConnections.has(name) || this.#pendingToolLoads.has(name)) {
+			if (
+				this.#pendingConnections.has(name) ||
+				this.#pendingToolLoads.has(name) ||
+				this.#pendingReconnections.has(name)
+			) {
 				continue;
 			}
 
@@ -301,6 +307,10 @@ export class MCPManager {
 				reportedErrors.add(name);
 				continue;
 			}
+
+			// Save config early so reconnection works even if the initial connect times out
+			// and falls back to cached/deferred tools.
+			this.#serverConfigs.set(name, config);
 
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
@@ -548,7 +558,12 @@ export class MCPManager {
 	 */
 	getConnectionStatus(name: string): "connected" | "connecting" | "disconnected" {
 		if (this.#connections.has(name)) return "connected";
-		if (this.#pendingConnections.has(name) || this.#pendingToolLoads.has(name)) return "connecting";
+		if (
+			this.#pendingConnections.has(name) ||
+			this.#pendingToolLoads.has(name) ||
+			this.#pendingReconnections.has(name)
+		)
+			return "connecting";
 		return "disconnected";
 	}
 
@@ -567,6 +582,12 @@ export class MCPManager {
 		if (connection) return connection;
 		const pending = this.#pendingConnections.get(name);
 		if (pending) return pending;
+		// If a reconnection is in flight, wait for it to complete
+		const reconnecting = this.#pendingReconnections.get(name);
+		if (reconnecting) {
+			const result = await reconnecting;
+			if (result) return result;
+		}
 		throw new Error(`MCP server not connected: ${name}`);
 	}
 
@@ -634,6 +655,9 @@ export class MCPManager {
 	 * Disconnect from all servers.
 	 */
 	async disconnectAll(): Promise<void> {
+		// Invalidate any in-flight reconnection attempts that outlive this call.
+		// They captured the old epoch; after increment they'll detect staleness.
+		this.#epoch++;
 		// Detach onClose before closing to prevent spurious reconnect attempts
 		for (const conn of this.#connections.values()) {
 			if (conn.transport instanceof HttpTransport) {
@@ -726,6 +750,7 @@ export class MCPManager {
 		config: MCPServerConfig,
 		source: SourceMeta | undefined,
 	): Promise<MCPServerConnection> {
+		const epoch = this.#epoch;
 		const resolvedConfig = await this.#resolveAuthConfig(config);
 		const connection = await connectToServer(name, resolvedConfig, {
 			onNotification: (method, params) => {
@@ -739,8 +764,9 @@ export class MCPManager {
 		connection.config = config;
 		if (source) connection._source = source;
 
-		// Bail out if the server was disconnected while we were connecting
-		if (!this.#serverConfigs.has(name)) {
+		// Bail out if the server was disconnected or the manager was reset
+		// while we were connecting (e.g. /mcp reload called disconnectAll).
+		if (!this.#serverConfigs.has(name) || this.#epoch !== epoch) {
 			await connection.transport.close().catch(() => {});
 			throw new Error(`Server "${name}" was disconnected during reconnection`);
 		}
