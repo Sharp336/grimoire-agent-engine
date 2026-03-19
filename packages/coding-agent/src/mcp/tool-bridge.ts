@@ -346,17 +346,43 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		try {
 			const connection = await withAbort(this.getConnection(), signal);
 			throwIfAborted(signal);
-			const result = await callTool(connection, this.tool.name, args, { signal });
-			return buildResult(
-				result,
-				this.serverName,
-				this.tool.name,
-				connection._source?.provider ?? provider,
-				connection._source?.providerName ?? providerName,
-			);
-		} catch (error) {
-			rethrowIfAborted(error, signal);
-			if (this.reconnect && isRetriableConnectionError(error)) {
+			try {
+				const result = await callTool(connection, this.tool.name, args, { signal });
+				return buildResult(
+					result,
+					this.serverName,
+					this.tool.name,
+					connection._source?.provider ?? provider,
+					connection._source?.providerName ?? providerName,
+				);
+			} catch (callError) {
+				rethrowIfAborted(callError, signal);
+				if (this.reconnect && isRetriableConnectionError(callError)) {
+					const newConn = await this.reconnect().catch(() => null);
+					if (newConn) {
+						try {
+							const result = await callTool(newConn, this.tool.name, args, { signal });
+							return buildResult(
+								result,
+								this.serverName,
+								this.tool.name,
+								newConn._source?.provider ?? provider,
+								newConn._source?.providerName ?? providerName,
+							);
+						} catch (retryError) {
+							rethrowIfAborted(retryError, signal);
+							return buildErrorResult(retryError, this.serverName, this.tool.name, provider, providerName);
+						}
+					}
+				}
+				return buildErrorResult(callError, this.serverName, this.tool.name, provider, providerName);
+			}
+		} catch (connError) {
+			// getConnection() failed — server never connected or connection lost.
+			// This is always worth a reconnect attempt for deferred tools, since the
+			// error ("MCP server not connected") isn't a network error from callTool.
+			rethrowIfAborted(connError, signal);
+			if (this.reconnect) {
 				const newConn = await this.reconnect().catch(() => null);
 				if (newConn) {
 					try {
@@ -374,7 +400,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 					}
 				}
 			}
-			return buildErrorResult(error, this.serverName, this.tool.name, provider, providerName);
+			return buildErrorResult(connError, this.serverName, this.tool.name, provider, providerName);
 		}
 	}
 }
