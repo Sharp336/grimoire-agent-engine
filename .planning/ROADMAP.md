@@ -26,11 +26,12 @@ Decimal phases appear between their surrounding integers in numeric order.
   2. Old tool call/result pairs are absent from the active conversation window; only lightweight omission markers remain in their place, indicating what was excluded and how to recover it
   3. Every turn's debug log shows a per-message inclusion/exclusion decision with reason (cap, tool-transcript) and before/after token counts — the operator can trace exactly why each message was included or excluded
   4. Configuration uses only recentMessageCap + relevanceFloor; the legacy hotWindowTurns and 4 budget knobs are gone; startup rejects any config that would activate both legacy compaction and assembler simultaneously
-**Plans**: TBD
+**Plans**: 3 plans in 2 waves
 
 Plans:
-- [ ] 01-01: TBD
-- [ ] 01-02: TBD
+- [ ] 01-01-PLAN.md — Config cutover (5 assembler knobs) and dual-mode guard (CONF-01, CONF-02)
+- [ ] 01-02-PLAN.md — Observability wiring (enriched types, snapshot logging) (OBSV-01, OBSV-02)
+- [ ] 01-03-PLAN.md — Bounding logic (tool exclusion, markers, plateau) (BOUND-01, BOUND-02, BOUND-03)
 
 ### Phase 2: Relevance-Gated Hydration
 **Goal**: High-value older context survives bounding while low-value context stays excluded — the model retains critical decisions and referenced context without the user re-briefing, and anything omitted is recoverable on demand through existing tools
@@ -65,5 +66,5 @@ Phases execute in numeric order: 1 → 2
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. Bounded Context Window | 0/2 | Not started | - |
+| 1. Bounded Context Window | 0/3 | Planned | - |
 | 2. Relevance-Gated Hydration | 0/1 | Not started | - |
