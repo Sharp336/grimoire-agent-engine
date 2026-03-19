@@ -50,6 +50,7 @@ describe("isRetriableConnectionError", () => {
 		"HTTP 404: Not Found",
 		"HTTP 502: Bad Gateway",
 		"HTTP 503: Service Unavailable",
+		"Transport closed",
 	];
 
 	for (const msg of retriable) {

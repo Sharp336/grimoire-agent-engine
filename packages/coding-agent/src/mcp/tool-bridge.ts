@@ -51,6 +51,7 @@ const RETRIABLE_PATTERNS = [
 	"EHOSTUNREACH",
 	"fetch failed",
 	"Transport not connected",
+	"Transport closed",
 	"network error",
 ];
 
@@ -220,7 +221,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	}
 
 	constructor(
-		private readonly connection: MCPServerConnection,
+		private connection: MCPServerConnection,
 		private readonly tool: MCPToolDefinition,
 		private readonly reconnect?: MCPReconnect,
 	) {
@@ -260,6 +261,8 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 			if (this.reconnect && isRetriableConnectionError(error)) {
 				const newConn = await withAbort(this.reconnect(), signal).catch(() => null);
 				if (newConn) {
+					// Rebind so subsequent calls on this instance use the fresh connection
+					this.connection = newConn;
 					try {
 						const result = await callTool(newConn, this.tool.name, args, { signal });
 						return buildResult(
