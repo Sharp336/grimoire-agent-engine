@@ -81,9 +81,34 @@ Assemble past context in this order:
 
 1. **Mandatory anchors**
    - Explicit live session state that should not be forgotten while applicable.
-   - Initial anchor classes:
-     - current aim/plan state,
-     - unresolved user constraints/decisions.
+   - Anchor model:
+     - one `goalState` entry for current aim/plan state;
+     - zero or more `constraintDecision` entries for independent unresolved user constraints or decisions.
+   - Source of truth:
+     1. if a structured session artifact exists, derive the baseline `goalState` from its latest aim/plan content;
+     2. otherwise, synthesize `goalState` from the latest explicit user-authored task statement still in force;
+     3. newer explicit user-authored constraints or decisions create or update `constraintDecision` entries;
+     4. when a newer explicit user-authored statement contradicts the baseline, record it as a `constraintDecision` override and recompute the effective `goalState` before prompt emission.
+   - Entry identity:
+     - `goalState` always uses `topicKey = global`;
+     - each `constraintDecision` entry carries a separate `topicKey` for the constrained subject plus a stable source reference;
+     - only entries with the same `class` and `topicKey` replace one another; different `topicKey`s coexist;
+     - if no stable `topicKey` can be derived confidently, do not create an anchored `constraintDecision` entry for that statement; leave it to the ordinary recent-conversation path instead of risking a duplicate or contradictory anchor.
+   - Entry fields in the emitted `AnchorSummary`:
+     - `goalState` is always present and carries the source reference used to derive it;
+     - `constraintDecision` entries carry `status = active` and optional `overrides`, which points at the superseded baseline subject such as `goalState/global`;
+     - the emitted `goalState.summaryText` is the effective merged state after applying all active overrides, so stale baseline text is never rendered in the prompt.
+   - Lifetime rules:
+     - a `constraintDecision` entry remains active until one of three events occurs: a newer entry with the same `topicKey` supersedes it, the user explicitly withdraws or resolves it, or the underlying artifact updates so the override is now reflected in `goalState`;
+     - there is no silent time-based expiry for active `constraintDecision` entries.
+   - Output format:
+     - the selector emits a single aggregated `AnchorSummary` message containing one mandatory `goalState` entry plus zero or more whole bounded `constraintDecision` entries;
+     - each entry is pre-summarized to a fixed max length before packing.
+   - Overflow rule:
+     - anchors have a target internal sub-budget inside the total assembly budget and reserve a minimum slice for `goalState`;
+     - `goalState` may be compacted to a one-line minimal form but is never evicted;
+     - active `constraintDecision` entries are also mandatory once created and may borrow budget from the recent-conversation window, older-conversation window, and recalled-evidence lane before any active constraint is dropped;
+     - if the full active anchor set still cannot fit inside the total assembly budget after that borrowing, emit only the minimal `AnchorSummary` plus the current turn, drop all optional history/evidence lanes for that turn, and emit `anchor_budget_exhausted` telemetry.
    - Anchors do not compete with ordinary relevance ranking.
 
 2. **Recent conversation window**
@@ -118,6 +143,19 @@ Prior tool usage must not behave like ordinary conversation.
 - Recent tool evidence may participate in passive hydration as a separate evidence lane.
 - Old raw tool transcript should not remain in the base conversation prompt merely because it happened.
 - Recent tool evidence can still help recall when it is tied to the active loop.
+- `ToolResultBridge` is the source of truth for selecting recent tool evidence for passive hydration.
+- The bridge emits compact `ToolEvidenceRef` records containing:
+  - a tool/result reference,
+  - summary text suitable for embedding,
+  - touched paths and symbols when available,
+  - `mutation` and `unresolvedFailure` flags,
+  - invalidation state.
+- Horizon mapping and bounds:
+  - each `ToolEvidenceRef` is attached to the assistant message that initiated its tool execution;
+  - candidate refs are only those whose parent assistant message survives inside the retained recent-conversation window;
+  - multiple tool executions under the same assistant message may each contribute one compact ref, but never more than one ref per execution;
+  - apply a fixed internal cap of 4 recent refs, prioritized by `unresolvedFailure`, then `mutation`, then newest remaining refs;
+  - allow one extra unresolved failure chain whose parent assistant message fell just outside the retained window if that chain is still active.
 
 Examples of evidence that may matter:
 
@@ -186,8 +224,12 @@ Do not let old raw tool transcript remain part of the base conversational contin
 
 - Search the recall store as today.
 - Rerank results as today.
-- Add an explicit relevance floor for recalled evidence.
-- Use a stricter bar for recalled evidence than for the base recent window.
+- Convert every conversational and recalled-evidence candidate to a canonical `normalizedRelevance` score on `[0, 1]`, where higher is more relevant.
+- For both older conversational candidates and vector-search recall results, compute `normalizedRelevance` from raw embedding distance as `1 / (1 + distance)` before floor checks and observability reporting.
+- Any additional lexical, path, or symbol heuristics may only break ties between candidates that already cleared the same floor; they do not alter `normalizedRelevance`.
+- Use bridge-produced `ToolEvidenceRef` records plus recent conversation to construct the recall query; old raw `tool_result` transcript must not re-enter as an independent base-window input.
+- Apply `assembler.relevanceFloor` to this canonical `normalizedRelevance` scale for older conversational candidates.
+- Add an explicit recalled-evidence floor on the same `[0, 1]` scale, derived from `assembler.relevanceFloor` by a fixed internal uplift.
 
 #### Injection
 
@@ -197,19 +239,22 @@ Do not let old raw tool transcript remain part of the base conversational contin
 
 ### 5. Configuration surface
 
-Expose only high-level knobs publicly:
+Public settings after cutover:
 
-- **recent message cap**
-- **minimum relevance floor**
+- Remove `assembler.hotWindowTurns`, `assembler.messageBudgetPercent`, `assembler.hydrationBudgetPercent`, `assembler.safetyMarginPercent`, and `assembler.turnBufferPercent` from the public schema.
+- Add `assembler.recentMessageCap` as the sole public recency knob for base conversation assembly.
+- Add `assembler.relevanceFloor` as a canonical `normalizedRelevance` threshold on `[0, 1]` for admitting older conversational history.
+- Old configs using removed keys should fail validation rather than silently aliasing to the new policy.
 
 Keep the following internal unless dogfooding proves they must be tunable:
 
-- evidence-specific thresholds,
-- exact budget share between recent conversation and recalled evidence,
-- anchor-class internals,
+- total assembly safety margin,
+- the internal budget split between base conversation and recalled evidence,
+- the anchor sub-budget,
+- the exact recalled-evidence uplift above `assembler.relevanceFloor`,
 - reranking details.
 
-This avoids a public settings explosion while still enabling meaningful control over prompt size and strictness.
+This makes the settings surface match the design: users control the size and strictness of retained history, while the assembler owns the internal packing policy.
 
 ### 6. Observability
 
@@ -286,10 +331,21 @@ Add or update tests to defend these contracts:
 5. **Budget contract**
    - Eligible older context is still dropped when the final budget is exhausted.
 
-6. **Observability contract**
-   - Exclusion reasons distinguish floor rejection from budget rejection.
+6. **Anchor identity and overflow contract**
+   - Distinct `constraintDecision.topicKey` entries coexist without overwriting one another.
+   - Only entries with the same `class` and `topicKey` replace one another.
+   - When anchor pressure exceeds the target anchor sub-budget, active anchors borrow budget from optional history/evidence lanes before anything else is dropped.
+   - If the active anchor set still cannot fit inside total assembly budget, the assembler emits only the minimal `AnchorSummary` plus the current turn for that request.
 
-Prefer targeted package-local tests in the existing assembler/recall test suites rather than new broad integration scaffolding.
+7. **Config cutover contract**
+   - Removed assembler keys are rejected by schema validation.
+   - `assembler.recentMessageCap` and `assembler.relevanceFloor` are accepted and flow through to assembly behavior.
+
+8. **Observability contract**
+   - Exclusion reasons distinguish floor rejection from budget rejection.
+   - Anchor exhaustion emits `anchor_budget_exhausted` telemetry.
+
+Prefer targeted package-local tests in the existing assembler/recall/config test suites rather than new broad integration scaffolding.
 
 ## Likely Implementation Surfaces
 
@@ -300,9 +356,19 @@ Primary files likely touched by the implementation:
 - `packages/coding-agent/src/context/bridge/bridge.ts`
 - `packages/coding-agent/src/context/recall/ingest.ts`
 - `packages/coding-agent/src/sdk.ts`
-- relevant settings schema and package-local tests
+- `packages/coding-agent/src/config/settings-schema.ts`
+- package-local assembler, recall, and config validation tests
 
 The implementation should prefer consolidating the current overlapping recency decisions into a single canonical policy rather than layering new heuristics on top of the existing ones.
+
+## Dogfood Success Signals
+
+Use these signals to validate the design before broader cutover:
+
+- the number of transformed messages in the base conversation window plateaus around `assembler.recentMessageCap` instead of growing with session length,
+- the number of old raw `tool_result` messages in the base conversation window outside the recent horizon is zero,
+- recalled evidence injections become rarer and more selective, with below-floor candidates visibly rejected,
+- across at least 3 dogfood sessions of 50+ turns, there is no increase in explicit user re-briefing or repeated rediscovery of already-resolved decisions.
 
 ## Acceptance Criteria
 
