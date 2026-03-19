@@ -1394,16 +1394,18 @@ export class MCPCommandController {
 		try {
 			const connection = await this.ctx.mcpManager.reconnectServer(name);
 			if (connection) {
+				// refreshMCPTools re-registers tools and preserves the user's prior
+				// MCP tool selection. No need to call activateDiscoveredMCPTools —
+				// that would broaden the selection to all server tools.
 				await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
-				// Explicitly re-select the reconnected server's tools. refreshMCPTools
-				// adds them to the registry but won't select them if a persisted
-				// selection exists and the tools were pruned during the outage.
 				const serverTools = this.ctx.mcpManager.getTools().filter(t => t.mcpServerName === name);
-				const activated = await this.ctx.session.activateDiscoveredMCPTools(serverTools.map(t => t.name));
 				this.#showMessage(
-					["", theme.fg("success", `\u2713 Reconnected to "${name}"`), `  Tools: ${activated.length}`, ""].join(
+					[
 						"\n",
-					),
+						theme.fg("success", `\u2713 Reconnected to "${name}"`),
+						`  Tools: ${serverTools.length}`,
+						"\n",
+					].join("\n"),
 				);
 			} else {
 				this.ctx.showError(`Failed to reconnect to "${name}". Check server status and logs.`);

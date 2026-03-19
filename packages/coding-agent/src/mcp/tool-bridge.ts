@@ -258,7 +258,7 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		} catch (error) {
 			rethrowIfAborted(error, signal);
 			if (this.reconnect && isRetriableConnectionError(error)) {
-				const newConn = await this.reconnect().catch(() => null);
+				const newConn = await withAbort(this.reconnect(), signal).catch(() => null);
 				if (newConn) {
 					try {
 						const result = await callTool(newConn, this.tool.name, args, { signal });
@@ -358,7 +358,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 			} catch (callError) {
 				rethrowIfAborted(callError, signal);
 				if (this.reconnect && isRetriableConnectionError(callError)) {
-					const newConn = await this.reconnect().catch(() => null);
+					const newConn = await withAbort(this.reconnect(), signal).catch(() => null);
 					if (newConn) {
 						try {
 							const result = await callTool(newConn, this.tool.name, args, { signal });
@@ -383,7 +383,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 			// error ("MCP server not connected") isn't a network error from callTool.
 			rethrowIfAborted(connError, signal);
 			if (this.reconnect) {
-				const newConn = await this.reconnect().catch(() => null);
+				const newConn = await withAbort(this.reconnect(), signal).catch(() => null);
 				if (newConn) {
 					try {
 						const result = await callTool(newConn, this.tool.name, args, { signal });
