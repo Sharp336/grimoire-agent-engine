@@ -30320,7 +30320,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 400000,
+			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"preferWebsockets": true,
 			"priority": 1,
@@ -30347,7 +30347,7 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 400000,
+			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"preferWebsockets": true,
 			"priority": 2,
