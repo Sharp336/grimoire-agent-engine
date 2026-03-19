@@ -52,21 +52,21 @@ Deferred to future milestone. Tracked but not in current roadmap.
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BOUND-01 | -- | Pending |
-| BOUND-02 | -- | Pending |
-| BOUND-03 | -- | Pending |
-| RELV-01 | -- | Pending |
-| RELV-02 | -- | Pending |
-| OBSV-01 | -- | Pending |
-| OBSV-02 | -- | Pending |
-| CONF-01 | -- | Pending |
-| CONF-02 | -- | Pending |
+| BOUND-01 | Phase 1 | Pending |
+| BOUND-02 | Phase 1 | Pending |
+| BOUND-03 | Phase 1 | Pending |
+| RELV-01 | Phase 2 | Pending |
+| RELV-02 | Phase 2 | Pending |
+| OBSV-01 | Phase 1 | Pending |
+| OBSV-02 | Phase 1 | Pending |
+| CONF-01 | Phase 1 | Pending |
+| CONF-02 | Phase 1 | Pending |
 
 **Coverage:**
 - v1 requirements: 9 total
-- Mapped to phases: 0
-- Unmapped: 9
+- Mapped to phases: 9
+- Unmapped: 0
 
 ---
 *Requirements defined: 2026-03-19*
-*Last updated: 2026-03-19 after initial definition*
+*Last updated: 2026-03-19 after roadmap creation*
