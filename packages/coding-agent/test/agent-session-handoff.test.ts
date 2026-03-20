@@ -23,7 +23,7 @@ describe("AgentSession handoff", () => {
 		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		modelRegistry = new ModelRegistry(authStorage);
-		sessionManager = SessionManager.create(tempDir.path());
+		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
 		events = [];
 
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
@@ -79,6 +79,7 @@ describe("AgentSession handoff", () => {
 		if (session) {
 			await session.dispose();
 		}
+		authStorage.close();
 		try {
 			await tempDir.remove();
 		} catch {}

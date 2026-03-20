@@ -26,6 +26,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("AgentSession branching", () =>
 	let session: AgentSession;
 	let tempDir: string;
 	let sessionManager: SessionManager;
+	let authStorage: AuthStorage | undefined;
 
 	beforeEach(() => {
 		// Create temp directory for session files
@@ -35,8 +36,10 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("AgentSession branching", () =>
 
 	afterEach(async () => {
 		if (session) {
-			session.dispose();
+			await session.dispose();
 		}
+		authStorage?.close();
+		authStorage = undefined;
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true });
 		}
@@ -62,9 +65,9 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("AgentSession branching", () =>
 			},
 		});
 
-		sessionManager = noSession ? SessionManager.inMemory() : SessionManager.create(tempDir);
+		sessionManager = noSession ? SessionManager.inMemory() : SessionManager.create(tempDir, tempDir);
 		const settings = Settings.isolated();
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 
 		session = new AgentSession({

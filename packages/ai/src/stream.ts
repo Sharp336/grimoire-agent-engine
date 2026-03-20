@@ -135,6 +135,7 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	nanogpt: "NANO_GPT_API_KEY",
 	"lm-studio": "LM_STUDIO_API_KEY",
 	ollama: "OLLAMA_API_KEY",
+	"llama.cpp": "LLAMA_CPP_API_KEY",
 	qianfan: "QIANFAN_API_KEY",
 	"qwen-portal": () => $pickenv("QWEN_OAUTH_TOKEN", "QWEN_PORTAL_API_KEY"),
 	together: "TOGETHER_API_KEY",
@@ -417,6 +418,7 @@ function mapOptionsForApi<TApi extends Api>(
 		apiKey: apiKey || options?.apiKey,
 		cacheRetention: options?.cacheRetention,
 		headers: options?.headers,
+		initiatorOverride: options?.initiatorOverride,
 		maxRetryDelayMs: options?.maxRetryDelayMs,
 		metadata: options?.metadata,
 		sessionId: options?.sessionId,
@@ -500,6 +502,10 @@ function mapOptionsForApi<TApi extends Api>(
 				thinkingBudgets: options?.thinkingBudgets,
 				toolChoice: mapAnthropicToolChoice(options?.toolChoice),
 			};
+			// Adaptive mode sends effort directly, no budget_tokens — skip budget inflation.
+			if (model.thinking?.mode === "anthropic-adaptive") {
+				return castApi<"bedrock-converse-stream">(bedrockBase);
+			}
 			const budgetInfo = resolveBedrockThinkingBudget(model as Model<"bedrock-converse-stream">, options);
 			if (!budgetInfo) return bedrockBase as OptionsForApi<TApi>;
 			let maxTokens = bedrockBase.maxTokens ?? model.maxTokens;

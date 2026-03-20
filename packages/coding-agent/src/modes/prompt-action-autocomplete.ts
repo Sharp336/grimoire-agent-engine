@@ -12,12 +12,12 @@ interface PromptActionDefinition {
 	label: string;
 	description: string;
 	keywords: string[];
-	execute: () => void;
+	execute: (prefix: string) => void;
 }
 
 interface PromptActionAutocompleteItem extends AutocompleteItem {
 	actionId: string;
-	execute: () => void;
+	execute: (prefix: string) => void;
 }
 
 interface PromptActionAutocompleteOptions {
@@ -26,6 +26,9 @@ interface PromptActionAutocompleteOptions {
 	keybindings: KeybindingsManager;
 	copyCurrentLine: () => void;
 	copyPrompt: () => void;
+	undo: (prefix: string) => void;
+	moveCursorToMessageEnd: () => void;
+	moveCursorToMessageStart: () => void;
 	moveCursorToLineStart: () => void;
 	moveCursorToLineEnd: () => void;
 }
@@ -68,9 +71,7 @@ function fuzzyScore(query: string, target: string): number {
 }
 
 function isPromptActionItem(item: AutocompleteItem): item is PromptActionAutocompleteItem {
-	return (
-		"actionId" in item && "execute" in item && typeof (item as PromptActionAutocompleteItem).execute === "function"
-	);
+	return "actionId" in item && "execute" in item && typeof item.execute === "function";
 }
 
 function getPromptActionPrefix(textBeforeCursor: string): string | null {
@@ -141,6 +142,14 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 		onApplied?: () => void;
 	} {
 		if (prefix.startsWith("#") && isPromptActionItem(item)) {
+			if (item.actionId === "undo") {
+				return {
+					lines,
+					cursorLine,
+					cursorCol,
+					onApplied: () => item.execute(prefix),
+				};
+			}
 			const currentLine = lines[cursorLine] || "";
 			const beforePrefix = currentLine.slice(0, cursorCol - prefix.length);
 			const afterCursor = currentLine.slice(cursorCol);
@@ -150,7 +159,7 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 				lines: newLines,
 				cursorLine,
 				cursorCol: beforePrefix.length,
-				onApplied: item.execute,
+				onApplied: () => item.execute(prefix),
 			};
 		}
 
@@ -180,6 +189,27 @@ export function createPromptActionAutocompleteProvider(
 			description: formatKeyHints(options.keybindings.getKeys("copyPrompt")),
 			keywords: ["copy", "prompt", "clipboard", "message"],
 			execute: options.copyPrompt,
+		},
+		{
+			id: "undo",
+			label: "Undo",
+			description: formatKeyHints(editorKeybindings.getKeys("undo")),
+			keywords: ["undo", "revert", "edit", "history"],
+			execute: options.undo,
+		},
+		{
+			id: "cursor-message-end",
+			label: "Move cursor to end of message",
+			description: "Current message",
+			keywords: ["move", "cursor", "message", "end", "prompt", "last", "bottom"],
+			execute: options.moveCursorToMessageEnd,
+		},
+		{
+			id: "cursor-message-start",
+			label: "Move cursor to beginning of message",
+			description: "Current message",
+			keywords: ["move", "cursor", "message", "start", "beginning", "prompt", "first", "top"],
+			execute: options.moveCursorToMessageStart,
 		},
 		{
 			id: "cursor-line-start",

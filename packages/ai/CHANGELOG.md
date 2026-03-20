@@ -2,6 +2,82 @@
 
 ## [Unreleased]
 
+## [13.14.0] - 2026-03-20
+
+### Fixed
+
+- Fixed resumed OpenAI Responses sessions to avoid replaying stale same-provider native history on the first follow-up after process restart ([#488](https://github.com/can1357/oh-my-pi/issues/488))
+
+### Added
+
+- Added bundled GPT-5.4 mini model metadata for OpenAI, OpenAI Codex, and GitHub Copilot, including low-to-xhigh thinking support and GitHub Copilot premium multiplier metadata
+- Added bundled GPT-5.4 nano model metadata for OpenAI and OpenAI Codex, including low-to-xhigh thinking support
+
+
+## [13.13.2] - 2026-03-18
+### Changed
+
+- Modified tool result handling for aborted assistant messages to preserve existing tool results when already recorded, instead of always replacing them with synthetic 'aborted' results
+
+## [13.13.0] - 2026-03-18
+### Changed
+
+- Changed tool argument validation to always normalize optional null values before type coercion, ensuring consistent handling of LLM-generated 'null' strings
+
+### Fixed
+
+- Fixed tool argument validation to properly handle string 'null' values from LLMs on optional fields by stripping them during normalization
+- Improved type safety of `validateToolCall` and `validateToolArguments` functions by returning properly typed `ToolCall["arguments"]` instead of `any`
+
+## [13.12.9] - 2026-03-17
+### Changed
+
+- Extracted OpenAI compatibility detection and resolution logic into dedicated `openai-completions-compat` module for improved maintainability and reusability
+
+### Fixed
+
+- Fixed `openai-responses` manual history replay to strip replay-only item IDs and preserve normalized tool `call_id` values for GitHub Copilot follow-up turns ([#457](https://github.com/can1357/oh-my-pi/issues/457))
+
+## [13.12.0] - 2026-03-14
+
+### Added
+
+- Added support for `qwen-chat-template` thinking format to enable reasoning via `chat_template_kwargs.enable_thinking`
+- Added `reasoningEffortMap` option to `OpenAICompat` for mapping pi-ai reasoning levels to provider-specific `reasoning_effort` values
+- Added `extraBody` to `OpenAICompat` to support provider-specific request body routing fields in OpenAI-completions requests
+- Added support for reading token usage from choice-level `usage` field as fallback when root-level usage is unavailable
+- Added new models: DeepSeek-V3.2 (Bedrock), Llama 3.1 405B Instruct, Magistral Small 1.2, Ministral 3 3B, Mistral Large 3, Pixtral Large (25.02), NVIDIA Nemotron Nano 3 30B, and Qwen3-5-9b
+- Added `close()` method to `AuthStorage` for properly closing the underlying credential store
+- Added `initiatorOverride` option in OpenAI and Anthropic providers to customize message attribution
+
+### Changed
+
+- Changed assistant message content serialization to always use plain string format instead of text block arrays to prevent recursive nesting in OpenAI-compatible backends
+- Changed Bedrock Opus 4.6 context window from 1M to 1M and added max tokens limit of 128K
+- Changed OpenCode Zen/Go Sonnet 4.0/4.5 context window from 1M to 200K
+- Changed GitHub Copilot context windows from 200K to 128K for both gpt-4o and gpt-4o-mini
+- Changed Claude 3.5 Sonnet (Anthropic API) pricing: input from $0.5 to $0.25, output from $3 to $1.5, cache read from $0.05 to $0.025, cache write from $0 to $1
+- Changed Devstral 2 model name from '135B' to '123B'
+- Changed ByteDance Seed 2.0-Lite to support reasoning with effort-based thinking mode and image inputs
+- Changed Qwen3-32b (Groq) reasoning effort mapping to normalize all levels to 'default'
+- Changed finish_reason 'end' to map to 'stop' for improved compatibility with additional providers
+- Changed Anthropic reference model merging to prioritize bundled metadata for known models while using models.dev for newly discovered IDs
+
+### Fixed
+
+- Fixed reasoning_effort parameter handling to use provider-specific mappings instead of raw effort values
+- Fixed assistant content serialization for GitHub Copilot and other OpenAI-compatible backends that mirror array payloads
+- Fixed token usage calculation to properly extract cached tokens from both root and nested `prompt_tokens_details` fields
+- Fixed stop reason mapping to handle string values and unknown finish reasons gracefully
+- Fixed resource cleanup in `AuthCredentialStore.close()` to properly finalize all prepared statements before closing the database
+
+## [13.11.1] - 2026-03-13
+
+### Fixed
+
+- Added `llama.cpp` as local provider
+- Fixed auth schema V0-to-V1 migration crash when the V0 table lacks a `disabled` column
+
 ## [13.11.0] - 2026-03-12
 ### Added
 

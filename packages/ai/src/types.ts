@@ -180,6 +180,10 @@ export interface StreamOptions {
 	 */
 	headers?: Record<string, string>;
 	/**
+	 * Optional explicit request attribution override for providers that support it.
+	 */
+	initiatorOverride?: MessageAttribution;
+	/**
 	 * Maximum delay in milliseconds to wait for a retry when the server requests a long wait.
 	 * If the server's requested delay exceeds this value, the request fails immediately
 	 * with an error containing the requested delay, allowing higher-level retry logic
@@ -426,6 +430,8 @@ export interface OpenAICompat {
 	supportsDeveloperRole?: boolean;
 	/** Whether the provider supports `reasoning_effort`. Default: auto-detected from URL. */
 	supportsReasoningEffort?: boolean;
+	/** Optional mapping from pi-ai reasoning levels to provider/model-specific `reasoning_effort` values. */
+	reasoningEffortMap?: Partial<Record<Effort, string>>;
 	/** Whether the provider supports `stream_options: { include_usage: true }` for token usage in streaming responses. Default: true. */
 	supportsUsageInStreaming?: boolean;
 	/** Which field to use for max tokens. Default: auto-detected from URL. */
@@ -438,9 +444,8 @@ export interface OpenAICompat {
 	requiresThinkingAsText?: boolean;
 	/** Whether tool call IDs must be normalized to Mistral format (exactly 9 alphanumeric chars). Default: auto-detected from URL. */
 	requiresMistralToolIds?: boolean;
-	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "zai" uses thinking: { type: "enabled" }. Default: "openai". */
-	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "zai" uses thinking: { type: "enabled" }, "qwen" uses enable_thinking: boolean. Default: "openai". */
-	thinkingFormat?: "openai" | "zai" | "qwen";
+	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "zai" uses thinking: { type: "enabled" }, "qwen" uses top-level enable_thinking, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Default: "openai". */
+	thinkingFormat?: "openai" | "zai" | "qwen" | "qwen-chat-template";
 	/** Which reasoning content field to emit on assistant messages. Default: auto-detected. */
 	reasoningContentField?: "reasoning_content" | "reasoning" | "reasoning_text";
 	/** Whether assistant tool-call messages must include reasoning content. Default: false. */
@@ -453,6 +458,8 @@ export interface OpenAICompat {
 	openRouterRouting?: OpenRouterRouting;
 	/** Vercel AI Gateway routing preferences. Only used when baseUrl points to Vercel AI Gateway. */
 	vercelGatewayRouting?: VercelGatewayRouting;
+	/** Extra fields to include in request body (e.g. gateway routing hints for OpenClaw-style proxies). */
+	extraBody?: Record<string, unknown>;
 	/** Whether the provider supports the `strict` field in tool definitions. Default: auto-detected per provider/baseUrl (conservative for unknown providers). */
 	supportsStrictMode?: boolean;
 }

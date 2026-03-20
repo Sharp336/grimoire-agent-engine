@@ -181,6 +181,9 @@ describe("getCopilotPremiumMultiplier", () => {
 			0,
 		);
 		expect(
+			getCopilotPremiumMultiplier(getBundledModel("github-copilot", "gpt-5.4-mini").premiumMultiplier, "paid"),
+		).toBe(0.33);
+		expect(
 			getCopilotPremiumMultiplier(getBundledModel("github-copilot", "grok-code-fast-1").premiumMultiplier, "paid"),
 		).toBe(0.25);
 	});
@@ -249,7 +252,13 @@ describe("buildCopilotDynamicHeaders", () => {
 
 	it("preserves explicit initiator override over inferred value and sets 0 premium requests for agent", () => {
 		const { headers, premiumRequests } = buildCopilotDynamicHeaders({
-			messages: [{ role: "user", content: "what time is it?" }],
+			messages: [
+				{
+					role: "user",
+					content:
+						"<conversation>\nuser: summarize the discarded history\nassistant: keep the latest turn\n</conversation>\n\nProvide a compaction summary.",
+				},
+			],
 			hasImages: false,
 			premiumMultiplier: 3,
 			initiatorOverride: "agent",

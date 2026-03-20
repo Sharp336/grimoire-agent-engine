@@ -74,6 +74,9 @@ providers:
             only: [anthropic]
           vercelGatewayRouting:
             order: [anthropic, openai]
+          extraBody:
+            gateway: m1-01
+            controller: mlx
 ```
 
 ### Allowed provider/model `api` values
@@ -136,7 +139,7 @@ Provider defaults vs per-model overrides:
 - Provider `headers` are baseline.
 - Model `headers` override provider header keys.
 - `modelOverrides` can override model metadata (`name`, `reasoning`, `input`, `cost`, `contextWindow`, `maxTokens`, `headers`, `compat`, `contextPromotionTarget`).
-- `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`).
+- `compat` is deep-merged for nested routing blocks (`openRouterRouting`, `vercelGatewayRouting`, `extraBody`).
 
 ## Runtime discovery integration
 
@@ -150,6 +153,18 @@ If `ollama` is not explicitly configured, registry adds an implicit discoverable
 - auth mode: keyless (`auth: none` behavior)
 
 Runtime discovery calls `GET /api/tags` on Ollama and synthesizes model entries with local defaults.
+
+### Implicit llama.cpp discovery
+
+If `llama.cpp` is not explicitly configured, registry adds an implicit discoverable provider:
+Note: it's using the newer antropic messages api instead of the openai-competions.
+
+- provider: `llama.cpp`
+- api: `openai-responses`
+- base URL: `LLAMA_CPP_BASE_URL` or `http://127.0.0.1:8080`
+- auth mode: keyless (`auth: none` behavior)
+
+Runtime discovery calls `GET models` on llama.cpp and synthesizes model entries with local defaults.
 
 ### Implicit LM Studio discovery
 
@@ -174,6 +189,13 @@ providers:
     auth: none
     discovery:
       type: ollama
+      
+  llama.cpp:
+    baseUrl: http://127.0.0.1:8080
+    api: openai-responses
+    auth: none
+    discovery:
+      type: llama.cpp
 ```
 
 ### Extension provider registration

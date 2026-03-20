@@ -23,6 +23,8 @@ export interface MCPServer {
 	args?: string[];
 	/** Environment variables */
 	env?: Record<string, string>;
+	/** Working directory for stdio transport */
+	cwd?: string;
 	/** URL (for HTTP/SSE transport) */
 	url?: string;
 	/** HTTP headers (for HTTP transport) */
@@ -31,11 +33,17 @@ export interface MCPServer {
 	auth?: {
 		type: "oauth" | "apikey";
 		credentialId?: string;
+		tokenUrl?: string;
+		clientId?: string;
+		clientSecret?: string;
 	};
-	/** OAuth configuration (clientId, callbackPort) for servers requiring explicit client credentials */
+	/** OAuth configuration (clientId, clientSecret, redirectUri, callbackPort, callbackPath) for servers requiring explicit client credentials */
 	oauth?: {
 		clientId?: string;
+		clientSecret?: string;
+		redirectUri?: string;
 		callbackPort?: number;
+		callbackPath?: string;
 	};
 	/** Transport type */
 	transport?: "stdio" | "sse" | "http";
@@ -48,6 +56,7 @@ export const mcpCapability = defineCapability<MCPServer>({
 	displayName: "MCP Servers",
 	description: "Model Context Protocol server configurations for external tool integrations",
 	key: server => server.name,
+	toExtensionId: server => `mcp:${server.name}`,
 	validate: server => {
 		if (!server.name) return "Missing server name";
 		if (!server.command && !server.url) return "Must have command or url";

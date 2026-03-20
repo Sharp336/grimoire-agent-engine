@@ -66,7 +66,7 @@ export interface TestSessionContext {
 	session: AgentSession;
 	sessionManager: SessionManager;
 	tempDir: string;
-	cleanup: () => void;
+	cleanup: () => Promise<void>;
 }
 
 /**
@@ -96,7 +96,7 @@ export async function createTestSession(options: TestSessionOptions = {}): Promi
 		},
 	});
 
-	const sessionManager = options.inMemory ? SessionManager.inMemory() : SessionManager.create(tempDir);
+	const sessionManager = options.inMemory ? SessionManager.inMemory() : SessionManager.create(tempDir, tempDir);
 	const settings = Settings.isolated(options.settingsOverrides);
 
 	const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
@@ -111,8 +111,9 @@ export async function createTestSession(options: TestSessionOptions = {}): Promi
 	// Must subscribe to enable session persistence
 	session.subscribe(() => {});
 
-	const cleanup = () => {
-		session.dispose();
+	const cleanup = async () => {
+		await session.dispose();
+		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true });
 		}

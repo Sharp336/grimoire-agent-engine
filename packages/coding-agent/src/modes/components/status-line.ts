@@ -361,6 +361,8 @@ export class StatusLineComponent implements Component {
 		const contextWindow = state.model?.contextWindow || 0;
 		const contextPercent = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
 
+		const autoCompactEnabled = this.session.settings.get("compaction.enabled") ?? false;
+
 		return {
 			session: this.session,
 			width,
@@ -370,6 +372,7 @@ export class StatusLineComponent implements Component {
 			contextPercent,
 			contextWindow,
 			subagentCount: this.#subagentCount,
+			autoCompactEnabled,
 			sessionStartTime: this.#sessionStartTime,
 			git: {
 				branch: this.#getCurrentBranch(),

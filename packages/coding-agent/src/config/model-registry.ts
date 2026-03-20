@@ -37,7 +37,7 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 	return Boolean(apiKey) && apiKey !== kNoAuth;
 }
 
-export type ModelRole = "default" | "smol" | "slow" | "vision" | "plan" | "commit";
+export type ModelRole = "default" | "smol" | "slow" | "vision" | "plan" | "commit" | "task";
 
 export interface ModelRoleInfo {
 	tag?: string;
@@ -52,9 +52,10 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	vision: { tag: "VISION", name: "Vision", color: "error" },
 	plan: { tag: "PLAN", name: "Architect", color: "muted" },
 	commit: { tag: "COMMIT", name: "Commit", color: "dim" },
+	task: { tag: "TASK", name: "Subtask", color: "muted" },
 };
 
-export const MODEL_ROLE_IDS: ModelRole[] = ["default", "smol", "slow", "vision", "plan", "commit"];
+export const MODEL_ROLE_IDS: ModelRole[] = ["default", "smol", "slow", "vision", "plan", "commit", "task"];
 
 const OpenRouterRoutingSchema = Type.Object({
 	only: Type.Optional(Type.Array(Type.String())),
@@ -68,13 +69,36 @@ const VercelGatewayRoutingSchema = Type.Object({
 });
 
 // Schema for OpenAI compatibility settings
+const ReasoningEffortMapSchema = Type.Object({
+	minimal: Type.Optional(Type.String()),
+	low: Type.Optional(Type.String()),
+	medium: Type.Optional(Type.String()),
+	high: Type.Optional(Type.String()),
+	xhigh: Type.Optional(Type.String()),
+});
+
 const OpenAICompatSchema = Type.Object({
 	supportsStore: Type.Optional(Type.Boolean()),
 	supportsDeveloperRole: Type.Optional(Type.Boolean()),
 	supportsReasoningEffort: Type.Optional(Type.Boolean()),
+	reasoningEffortMap: Type.Optional(ReasoningEffortMapSchema),
 	maxTokensField: Type.Optional(Type.Union([Type.Literal("max_completion_tokens"), Type.Literal("max_tokens")])),
+	supportsUsageInStreaming: Type.Optional(Type.Boolean()),
+	requiresToolResultName: Type.Optional(Type.Boolean()),
+	requiresAssistantAfterToolResult: Type.Optional(Type.Boolean()),
+	requiresThinkingAsText: Type.Optional(Type.Boolean()),
+	thinkingFormat: Type.Optional(
+		Type.Union([
+			Type.Literal("openai"),
+			Type.Literal("zai"),
+			Type.Literal("qwen"),
+			Type.Literal("qwen-chat-template"),
+		]),
+	),
 	openRouterRouting: Type.Optional(OpenRouterRoutingSchema),
 	vercelGatewayRouting: Type.Optional(VercelGatewayRoutingSchema),
+	extraBody: Type.Optional(Type.Record(Type.String(), Type.Unknown())),
+	supportsStrictMode: Type.Optional(Type.Boolean()),
 });
 
 const EffortSchema = Type.Union([
@@ -160,7 +184,7 @@ const ModelOverrideSchema = Type.Object({
 type ModelOverride = Static<typeof ModelOverrideSchema>;
 
 const ProviderDiscoverySchema = Type.Object({
-	type: Type.Union([Type.Literal("ollama"), Type.Literal("lm-studio")]),
+	type: Type.Union([Type.Literal("ollama"), Type.Literal("llama.cpp"), Type.Literal("lm-studio")]),
 });
 
 const ProviderAuthSchema = Type.Union([Type.Literal("apiKey"), Type.Literal("none")]);
@@ -180,6 +204,7 @@ const ProviderConfigSchema = Type.Object({
 		]),
 	),
 	headers: Type.Optional(Type.Record(Type.String(), Type.String())),
+	compat: Type.Optional(OpenAICompatSchema),
 	authHeader: Type.Optional(Type.Boolean()),
 	auth: Type.Optional(ProviderAuthSchema),
 	discovery: Type.Optional(ProviderDiscoverySchema),
@@ -212,6 +237,7 @@ interface ProviderValidationConfig {
 	auth?: ProviderAuthMode;
 	oauthConfigured?: boolean;
 	discovery?: ProviderDiscovery;
+	compat?: Model<Api>["compat"];
 	modelOverrides?: Record<string, unknown>;
 	models: ProviderValidationModel[];
 }
@@ -227,9 +253,9 @@ function validateProviderConfiguration(
 	if (models.length === 0) {
 		if (mode === "models-config") {
 			const hasModelOverrides = config.modelOverrides && Object.keys(config.modelOverrides).length > 0;
-			if (!config.baseUrl && !hasModelOverrides && !config.discovery) {
+			if (!config.baseUrl && !config.compat && !hasModelOverrides && !config.discovery) {
 				throw new Error(
-					`Provider ${providerName}: must specify "baseUrl", "modelOverrides", "discovery", or "models".`,
+					`Provider ${providerName}: must specify "baseUrl", "compat", "modelOverrides", "discovery", or "models"`,
 				);
 			}
 		}
@@ -288,6 +314,7 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", ModelsCon
 					api: providerConfig.api as Api | undefined,
 					auth: (providerConfig.auth ?? "apiKey") as ProviderAuthMode,
 					discovery: providerConfig.discovery as ProviderDiscovery | undefined,
+					compat: providerConfig.compat,
 					modelOverrides: providerConfig.modelOverrides,
 					models: (providerConfig.models ?? []) as ProviderValidationModel[],
 				},
@@ -297,11 +324,12 @@ export const ModelsConfigFile = new ConfigFile<ModelsConfig>("models", ModelsCon
 	},
 );
 
-/** Provider override config (baseUrl, headers, apiKey) without custom models */
+/** Provider override config (baseUrl, headers, apiKey, compat) without custom models */
 interface ProviderOverride {
 	baseUrl?: string;
 	headers?: Record<string, string>;
 	apiKey?: string;
+	compat?: Model<Api>["compat"];
 }
 
 interface DiscoveryProviderConfig {
@@ -309,6 +337,7 @@ interface DiscoveryProviderConfig {
 	api: Api;
 	baseUrl?: string;
 	headers?: Record<string, string>;
+	compat?: Model<Api>["compat"];
 	discovery: ProviderDiscovery;
 	optional?: boolean;
 }
@@ -337,6 +366,17 @@ interface CustomModelsResult {
 	found: boolean;
 }
 
+type OllamaDiscoveredModelMetadata = {
+	reasoning: boolean;
+	input: ("text" | "image")[];
+	contextWindow?: number;
+};
+
+type LlamaCppDiscoveredServerMetadata = {
+	contextWindow?: number;
+	input?: ("text" | "image")[];
+};
+
 /**
  * Resolve an API key config value to an actual key.
  * Checks environment variable first, then treats as literal.
@@ -345,6 +385,59 @@ function resolveApiKeyConfig(keyConfig: string): string | undefined {
 	const envValue = Bun.env[keyConfig];
 	if (envValue) return envValue;
 	return keyConfig;
+}
+
+function toPositiveNumberOrUndefined(value: unknown): number | undefined {
+	if (typeof value === "number" && Number.isFinite(value) && value > 0) {
+		return value;
+	}
+	if (typeof value === "string" && value.trim()) {
+		const parsed = Number(value);
+		if (Number.isFinite(parsed) && parsed > 0) {
+			return parsed;
+		}
+	}
+	return undefined;
+}
+
+function extractOllamaContextWindow(payload: Record<string, unknown>): number | undefined {
+	const modelInfo = payload.model_info;
+	if (isRecord(modelInfo)) {
+		for (const [key, value] of Object.entries(modelInfo)) {
+			if (key === "context_length" || key.endsWith(".context_length")) {
+				const contextWindow = toPositiveNumberOrUndefined(value);
+				if (contextWindow !== undefined) {
+					return contextWindow;
+				}
+			}
+		}
+	}
+
+	const parameters = payload.parameters;
+	if (typeof parameters !== "string") {
+		return undefined;
+	}
+	const match = parameters.match(/(?:^|\n)\s*num_ctx\s+(\d+)\s*(?:$|\n)/m);
+	return match ? toPositiveNumberOrUndefined(match[1]) : undefined;
+}
+
+function extractLlamaCppContextWindow(payload: Record<string, unknown>): number | undefined {
+	const generationSettings = payload.default_generation_settings;
+	if (isRecord(generationSettings)) {
+		const contextWindow = toPositiveNumberOrUndefined(generationSettings.n_ctx);
+		if (contextWindow !== undefined) {
+			return contextWindow;
+		}
+	}
+	return toPositiveNumberOrUndefined(payload.n_ctx);
+}
+
+function extractLlamaCppInputCapabilities(payload: Record<string, unknown>): ("text" | "image")[] | undefined {
+	const modalities = payload.modalities;
+	if (!isRecord(modalities)) {
+		return undefined;
+	}
+	return modalities.vision === true ? ["text", "image"] : ["text"];
 }
 
 function extractGoogleOAuthToken(value: string | undefined): string | undefined {
@@ -397,11 +490,17 @@ function mergeCompat(
 	const base = baseCompat ?? {};
 	const override = overrideCompat;
 	const merged: NonNullable<Model<Api>["compat"]> = { ...base, ...override };
+	if (baseCompat?.reasoningEffortMap || overrideCompat.reasoningEffortMap) {
+		merged.reasoningEffortMap = { ...baseCompat?.reasoningEffortMap, ...overrideCompat.reasoningEffortMap };
+	}
 	if (baseCompat?.openRouterRouting || overrideCompat.openRouterRouting) {
 		merged.openRouterRouting = { ...baseCompat?.openRouterRouting, ...overrideCompat.openRouterRouting };
 	}
 	if (baseCompat?.vercelGatewayRouting || overrideCompat.vercelGatewayRouting) {
 		merged.vercelGatewayRouting = { ...baseCompat?.vercelGatewayRouting, ...overrideCompat.vercelGatewayRouting };
+	}
+	if (baseCompat?.extraBody || overrideCompat.extraBody) {
+		merged.extraBody = { ...baseCompat?.extraBody, ...overrideCompat.extraBody };
 	}
 	return merged;
 }
@@ -475,6 +574,7 @@ function buildCustomModel(
 	providerHeaders: Record<string, string> | undefined,
 	providerApiKey: string | undefined,
 	authHeader: boolean | undefined,
+	providerCompat: Model<Api>["compat"] | undefined,
 	modelDef: CustomModelDefinitionLike,
 	options: CustomModelBuildOptions,
 ): Model<Api> | undefined {
@@ -496,7 +596,7 @@ function buildCustomModel(
 		contextWindow: modelDef.contextWindow ?? (withDefaults ? 128000 : undefined),
 		maxTokens: modelDef.maxTokens ?? (withDefaults ? 16384 : undefined),
 		headers: mergeCustomModelHeaders(providerHeaders, modelDef.headers, authHeader, providerApiKey),
-		compat: modelDef.compat,
+		compat: mergeCompat(providerCompat, modelDef.compat),
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		premiumMultiplier: modelDef.premiumMultiplier,
 	} as Model<Api>);
@@ -630,6 +730,7 @@ export class ModelRegistry {
 						...model,
 						baseUrl: providerOverride.baseUrl ?? model.baseUrl,
 						headers: providerOverride.headers ? { ...model.headers, ...providerOverride.headers } : model.headers,
+						compat: mergeCompat(model.compat, providerOverride.compat),
 					};
 				}
 				const modelOverride = perModelOverrides?.get(m.id);
@@ -669,7 +770,10 @@ export class ModelRegistry {
 				});
 				continue;
 			}
-			const models = this.#applyProviderModelOverrides(providerConfig.provider, cache.models);
+			const models = this.#applyProviderModelOverrides(
+				providerConfig.provider,
+				this.#applyProviderCompat(providerConfig.compat, cache.models),
+			);
 			cachedModels.push(...models);
 			this.#providerDiscoveryStates.set(providerConfig.provider, {
 				provider: providerConfig.provider,
@@ -683,6 +787,11 @@ export class ModelRegistry {
 		return cachedModels;
 	}
 
+	#applyProviderCompat(compat: Model<Api>["compat"] | undefined, models: Model<Api>[]): Model<Api>[] {
+		if (!compat) return models;
+		return models.map(model => ({ ...model, compat: mergeCompat(model.compat, compat) }));
+	}
+
 	#addImplicitDiscoverableProviders(configuredProviders: Set<string>): void {
 		if (!configuredProviders.has("ollama")) {
 			this.#discoverableProviders.push({
@@ -693,6 +802,19 @@ export class ModelRegistry {
 				optional: true,
 			});
 			this.#keylessProviders.add("ollama");
+		}
+		if (!configuredProviders.has("llama.cpp")) {
+			this.#discoverableProviders.push({
+				provider: "llama.cpp",
+				api: "openai-responses",
+				baseUrl: Bun.env.LLAMA_CPP_BASE_URL || "http://127.0.0.1:8080",
+				discovery: { type: "llama.cpp" },
+				optional: true,
+			});
+			// Only mark as keyless if no API key is configured
+			if (!this.authStorage.hasAuth("llama.cpp")) {
+				this.#keylessProviders.add("llama.cpp");
+			}
 		}
 		if (!configuredProviders.has("lm-studio")) {
 			this.#discoverableProviders.push({
@@ -739,12 +861,13 @@ export class ModelRegistry {
 		const configuredProviders = new Set(Object.keys(value.providers));
 
 		for (const [providerName, providerConfig] of Object.entries(value.providers)) {
-			// Always set overrides when baseUrl/headers present
-			if (providerConfig.baseUrl || providerConfig.headers || providerConfig.apiKey) {
+			// Always set overrides when baseUrl/headers/apiKey/compat are present
+			if (providerConfig.baseUrl || providerConfig.headers || providerConfig.apiKey || providerConfig.compat) {
 				overrides.set(providerName, {
 					baseUrl: providerConfig.baseUrl,
 					headers: providerConfig.headers,
 					apiKey: providerConfig.apiKey,
+					compat: providerConfig.compat,
 				});
 			}
 
@@ -759,6 +882,7 @@ export class ModelRegistry {
 					api: providerConfig.api as Api,
 					baseUrl: providerConfig.baseUrl,
 					headers: providerConfig.headers,
+					compat: providerConfig.compat,
 					discovery: providerConfig.discovery,
 					optional: false,
 				});
@@ -851,30 +975,28 @@ export class ModelRegistry {
 			}
 		}
 
-		let fetchError: string | undefined;
+		const providerId = providerConfig.provider;
+		let discoveryError: string | undefined;
 		const fetchDynamicModels = async (): Promise<readonly Model<Api>[] | null> => {
 			try {
-				const models =
-					providerConfig.discovery.type === "ollama"
-						? await this.#discoverOllamaModels(providerConfig)
-						: await this.#discoverLmStudioModels(providerConfig);
-				this.#lastDiscoveryWarnings.delete(providerConfig.provider);
+				const models = await this.#discoverModelsByProviderType(providerConfig);
+				this.#lastDiscoveryWarnings.delete(providerId);
 				return models;
 			} catch (error) {
-				fetchError = error instanceof Error ? error.message : String(error);
+				discoveryError = error instanceof Error ? error.message : String(error);
 				return null;
 			}
 		};
 
 		const manager = createModelManager<Api>({
-			providerId: providerConfig.provider,
+			providerId,
 			staticModels: [],
 			cacheDbPath: this.#cacheDbPath,
 			cacheTtlMs: 24 * 60 * 60 * 1000,
 			fetchDynamicModels,
 		});
 		const result = await manager.refresh(strategy);
-		const status = fetchError
+		const status = discoveryError
 			? result.models.length > 0
 				? "cached"
 				: "unavailable"
@@ -883,19 +1005,33 @@ export class ModelRegistry {
 				: cached
 					? "cached"
 					: "idle";
-		this.#providerDiscoveryStates.set(providerConfig.provider, {
-			provider: providerConfig.provider,
+		this.#providerDiscoveryStates.set(providerId, {
+			provider: providerId,
 			status,
 			optional: providerConfig.optional ?? false,
 			stale: result.stale || status === "cached",
-			fetchedAt: fetchError ? cached?.updatedAt : Date.now(),
+			fetchedAt: discoveryError ? cached?.updatedAt : Date.now(),
 			models: result.models.map(model => model.id),
-			error: fetchError,
+			error: discoveryError,
 		});
-		if (fetchError) {
-			this.#warnProviderDiscoveryFailure(providerConfig, fetchError);
+		if (discoveryError) {
+			this.#warnProviderDiscoveryFailure(providerConfig, discoveryError);
 		}
-		return this.#applyProviderModelOverrides(providerConfig.provider, result.models);
+		return this.#applyProviderModelOverrides(
+			providerId,
+			this.#applyProviderCompat(providerConfig.compat, result.models),
+		);
+	}
+
+	#discoverModelsByProviderType(providerConfig: DiscoveryProviderConfig): Promise<Model<Api>[]> {
+		switch (providerConfig.discovery.type) {
+			case "ollama":
+				return this.#discoverOllamaModels(providerConfig);
+			case "llama.cpp":
+				return this.#discoverLlamaCppModels(providerConfig);
+			case "lm-studio":
+				return this.#discoverLmStudioModels(providerConfig);
+		}
 	}
 
 	#warnProviderDiscoveryFailure(providerConfig: DiscoveryProviderConfig, error: string): void {
@@ -1024,7 +1160,7 @@ export class ModelRegistry {
 		endpoint: string,
 		modelId: string,
 		headers: Record<string, string> | undefined,
-	): Promise<{ reasoning: boolean; input: ("text" | "image")[] } | null> {
+	): Promise<OllamaDiscoveredModelMetadata | null> {
 		const showUrl = `${endpoint}/api/show`;
 		try {
 			const response = await fetch(showUrl, {
@@ -1040,6 +1176,7 @@ export class ModelRegistry {
 			if (!isRecord(payload)) {
 				return null;
 			}
+			const contextWindow = extractOllamaContextWindow(payload);
 			const capabilities = payload.capabilities;
 			if (Array.isArray(capabilities)) {
 				const normalized = new Set(
@@ -1049,15 +1186,21 @@ export class ModelRegistry {
 				return {
 					reasoning: normalized.has("thinking"),
 					input: supportsVision ? ["text", "image"] : ["text"],
+					contextWindow,
 				};
 			}
 			if (!isRecord(capabilities)) {
-				return null;
+				return {
+					reasoning: false,
+					input: ["text"],
+					contextWindow,
+				};
 			}
 			const supportsVision = capabilities.vision === true || capabilities.image === true;
 			return {
 				reasoning: capabilities.thinking === true,
 				input: supportsVision ? ["text", "image"] : ["text"],
+				contextWindow,
 			};
 		} catch {
 			return null;
@@ -1098,11 +1241,87 @@ export class ModelRegistry {
 				reasoning: metadata?.reasoning ?? false,
 				input: metadata?.input ?? ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				contextWindow: 128000,
-				maxTokens: 8192,
+				contextWindow: metadata?.contextWindow ?? 128000,
+				maxTokens: Math.min(metadata?.contextWindow ?? Number.POSITIVE_INFINITY, 8192),
 				headers: providerConfig.headers,
 			});
 		});
+		return this.#applyProviderModelOverrides(providerConfig.provider, discovered);
+	}
+
+	async #discoverLlamaCppServerMetadata(
+		baseUrl: string,
+		headers: Record<string, string> | undefined,
+	): Promise<LlamaCppDiscoveredServerMetadata | null> {
+		const propsUrl = `${this.#toLlamaCppNativeBaseUrl(baseUrl)}/props`;
+		try {
+			const response = await fetch(propsUrl, {
+				headers,
+				signal: AbortSignal.timeout(150),
+			});
+			if (!response.ok) {
+				return null;
+			}
+			const payload = (await response.json()) as unknown;
+			if (!isRecord(payload)) {
+				return null;
+			}
+			return {
+				contextWindow: extractLlamaCppContextWindow(payload),
+				input: extractLlamaCppInputCapabilities(payload),
+			};
+		} catch {
+			return null;
+		}
+	}
+
+	async #discoverLlamaCppModels(providerConfig: DiscoveryProviderConfig): Promise<Model<Api>[]> {
+		const baseUrl = this.#normalizeLlamaCppBaseUrl(providerConfig.baseUrl);
+		const modelsUrl = `${baseUrl}/models`;
+
+		const headers: Record<string, string> = { ...(providerConfig.headers ?? {}) };
+		const apiKey = await this.authStorage.getApiKey(providerConfig.provider);
+		if (apiKey && apiKey !== DEFAULT_LOCAL_TOKEN && apiKey !== kNoAuth) {
+			headers.Authorization = `Bearer ${apiKey}`;
+		}
+
+		const [response, serverMetadata] = await Promise.all([
+			fetch(modelsUrl, {
+				headers,
+				signal: AbortSignal.timeout(250),
+			}),
+			this.#discoverLlamaCppServerMetadata(baseUrl, headers),
+		]);
+		if (!response.ok) {
+			throw new Error(`HTTP ${response.status} from ${modelsUrl}`);
+		}
+		const payload = (await response.json()) as { data?: Array<{ id: string }> };
+		const models = payload.data ?? [];
+		const discovered: Model<Api>[] = [];
+		for (const item of models) {
+			const id = item.id;
+			if (!id) continue;
+			discovered.push(
+				enrichModelThinking({
+					id,
+					name: id,
+					api: providerConfig.api,
+					provider: providerConfig.provider,
+					baseUrl,
+					reasoning: false,
+					input: serverMetadata?.input ?? ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: serverMetadata?.contextWindow ?? 128000,
+					maxTokens: Math.min(serverMetadata?.contextWindow ?? Number.POSITIVE_INFINITY, 8192),
+					headers,
+					compat: {
+						supportsStore: false,
+						supportsDeveloperRole: false,
+						supportsReasoningEffort: false,
+					},
+				}),
+			);
+		}
 		return this.#applyProviderModelOverrides(providerConfig.provider, discovered);
 	}
 
@@ -1153,6 +1372,30 @@ export class ModelRegistry {
 		return this.#applyProviderModelOverrides(providerConfig.provider, discovered);
 	}
 
+	#normalizeLlamaCppBaseUrl(baseUrl?: string): string {
+		const defaultBaseUrl = "http://127.0.0.1:8080";
+		const raw = baseUrl || defaultBaseUrl;
+		try {
+			const parsed = new URL(raw);
+			const trimmedPath = parsed.pathname.replace(/\/+$/g, "");
+			return `${parsed.protocol}//${parsed.host}${trimmedPath}`;
+		} catch {
+			return raw;
+		}
+	}
+
+	#toLlamaCppNativeBaseUrl(baseUrl: string): string {
+		try {
+			const parsed = new URL(baseUrl);
+			const trimmedPath = parsed.pathname.replace(/\/+$/g, "");
+			parsed.pathname = trimmedPath.endsWith("/v1") ? trimmedPath.slice(0, -3) || "/" : trimmedPath || "/";
+			const normalized = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
+			return normalized.endsWith("/") ? normalized.slice(0, -1) : normalized;
+		} catch {
+			return baseUrl.endsWith("/v1") ? baseUrl.slice(0, -3) : baseUrl;
+		}
+	}
+
 	#normalizeLmStudioBaseUrl(baseUrl?: string): string {
 		const defaultBaseUrl = "http://127.0.0.1:1234/v1";
 		const raw = baseUrl || defaultBaseUrl;
@@ -1197,10 +1440,17 @@ export class ModelRegistry {
 	}
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
 		return models.map(model => {
-			if (model.id === "gpt-5.4" && model.provider !== "github-copilot") {
-				return { ...model, contextWindow: 1_000_000 };
+			if (model.id !== "gpt-5.4" || model.provider === "github-copilot") {
+				return model;
 			}
-			return model;
+			const overrides = this.#modelOverrides.get(model.provider)?.get(model.id);
+			if (!overrides) {
+				return applyModelOverride(model, { contextWindow: 1_000_000 });
+			}
+			return applyModelOverride(model, {
+				contextWindow: overrides.contextWindow ?? 1_000_000,
+				...overrides,
+			});
 		});
 	}
 
@@ -1221,6 +1471,7 @@ export class ModelRegistry {
 					providerConfig.headers,
 					providerConfig.apiKey,
 					providerConfig.authHeader,
+					providerConfig.compat,
 					modelDef as CustomModelDefinitionLike,
 					{ useDefaults: true },
 				);
@@ -1382,6 +1633,7 @@ export class ModelRegistry {
 					config.headers,
 					config.apiKey,
 					config.authHeader,
+					config.compat,
 					modelDef as CustomModelDefinitionLike,
 					{ useDefaults: false },
 				);
@@ -1425,6 +1677,7 @@ export interface ProviderConfigInput {
 	api?: Api;
 	streamSimple?: (model: Model<Api>, context: Context, options?: SimpleStreamOptions) => AssistantMessageEventStream;
 	headers?: Record<string, string>;
+	compat?: Model<Api>["compat"];
 	authHeader?: boolean;
 	oauth?: {
 		name: string;

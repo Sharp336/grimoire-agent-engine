@@ -245,6 +245,17 @@ describe("Editor component", () => {
 			expect(editor.getCursor()).toEqual({ line: 0, col: 2 });
 		});
 
+		it("moves cursor to message boundaries", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("first line\nsecond line\nthird");
+
+			editor.moveToMessageStart();
+			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+
+			editor.moveToMessageEnd();
+			expect(editor.getCursor()).toEqual({ line: 2, col: 5 });
+		});
+
 		it("returns lines as a defensive copy", () => {
 			const editor = new Editor(defaultEditorTheme);
 			editor.setText("a\nb");
@@ -1323,6 +1334,41 @@ describe("Editor component", () => {
 			expect(editor.getCursor()).toEqual({ line: 0, col: 8 });
 		});
 
+		it("undoes the last paste when a transient #undo trigger is executed", () => {
+			const editor = new Editor(defaultEditorTheme);
+
+			editor.handleInput("\x1b[200~pasted text\x1b[201~");
+			expect(editor.getText()).toBe("pasted text");
+
+			editor.handleInput("#");
+			editor.handleInput("u");
+			editor.handleInput("n");
+			editor.handleInput("d");
+			editor.handleInput("o");
+			expect(editor.getText()).toBe("pasted text#undo");
+
+			editor.undoPastTransientText("#undo");
+
+			expect(editor.getText()).toBe("");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+		});
+
+		it("removes a transient undo trigger even when there is no earlier edit to restore", () => {
+			const editor = new Editor(defaultEditorTheme);
+
+			editor.handleInput("#");
+			editor.handleInput("u");
+			editor.handleInput("n");
+			editor.handleInput("d");
+			editor.handleInput("o");
+			expect(editor.getText()).toBe("#undo");
+
+			editor.undoPastTransientText("#undo");
+
+			expect(editor.getText()).toBe("");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+		});
+
 		it("handles multiple consecutive up/down movements", () => {
 			const editor = new Editor(defaultEditorTheme);
 
@@ -1494,6 +1540,53 @@ describe("Editor component", () => {
 			// Move down - preferredVisualCol was kept at 15
 			editor.handleInput("\x1b[B"); // Down to line 1
 			expect(editor.getCursor()).toEqual({ line: 1, col: 15 });
+		});
+		it("expands large pasted content literally in getExpandedText", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const pastedText = [
+				"line 1",
+				"line 2",
+				"line 3",
+				"line 4",
+				"line 5",
+				"line 6",
+				"line 7",
+				"line 8",
+				"line 9",
+				"line 10",
+				"tokens $1 $2 $& $$ $` $' end",
+			].join("\n");
+
+			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+
+			expect(editor.getText()).toMatch(/\[paste #\d+ \+\d+ lines\]/);
+			expect(editor.getExpandedText()).toBe(pastedText);
+		});
+
+		it("submits large pasted content literally", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const pastedText = [
+				"line 1",
+				"line 2",
+				"line 3",
+				"line 4",
+				"line 5",
+				"line 6",
+				"line 7",
+				"line 8",
+				"line 9",
+				"line 10",
+				"tokens $1 $2 $& $$ $` $' end",
+			].join("\n");
+			let submitted = "";
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+
+			editor.handleInput(`\x1b[200~${pastedText}\x1b[201~`);
+			editor.handleInput("\r");
+
+			expect(submitted).toBe(pastedText);
 		});
 	});
 });

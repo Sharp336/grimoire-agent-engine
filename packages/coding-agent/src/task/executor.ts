@@ -1085,7 +1085,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						maxRetries: MAX_SUBMIT_RESULT_RETRIES,
 					});
 
-					await session.prompt(reminder, reminderToolChoice ? { toolChoice: reminderToolChoice } : undefined);
+					await session.prompt(reminder, {
+						attribution: "agent",
+						...(reminderToolChoice ? { toolChoice: reminderToolChoice } : {}),
+					});
 					await session.waitForIdle();
 				} catch (err) {
 					logger.error("Subagent prompt failed", {
@@ -1236,7 +1239,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		exitCode,
 		output: truncatedOutput,
 		stderr,
-		truncated,
+		truncated: Boolean(truncated),
 		durationMs: Date.now() - startTime,
 		tokens: progress.tokens,
 		modelOverride,

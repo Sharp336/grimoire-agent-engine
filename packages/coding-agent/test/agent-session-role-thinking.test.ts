@@ -13,6 +13,7 @@ describe("AgentSession role model thinking behavior", () => {
 	let tempDir: TempDir;
 	let session: AgentSession;
 	let sessionSettings: Settings;
+	const authStorages: AuthStorage[] = [];
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-role-thinking-");
@@ -21,6 +22,9 @@ describe("AgentSession role model thinking behavior", () => {
 	afterEach(async () => {
 		if (session) {
 			await session.dispose();
+		}
+		for (const authStorage of authStorages.splice(0)) {
+			authStorage.close();
 		}
 		tempDir.removeSync();
 	});
@@ -47,6 +51,7 @@ describe("AgentSession role model thinking behavior", () => {
 			},
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
+		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 
@@ -181,6 +186,7 @@ describe("AgentSession role model thinking behavior", () => {
 			},
 		});
 		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth-non-xhigh.db"));
+		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-non-xhigh.yml"));
 
@@ -195,5 +201,36 @@ describe("AgentSession role model thinking behavior", () => {
 		session.setThinkingLevel(Effort.XHigh);
 		expect(session.thinkingLevel).toBe(Effort.High);
 		expect(session.getAvailableThinkingLevels()).not.toContain("xhigh");
+	});
+
+	it("cycles through off before returning to effort levels", async () => {
+		const model = getAnthropicModelOrThrow("claude-sonnet-4-5");
+
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: "Test",
+				tools: [],
+				messages: [],
+				thinkingLevel: Effort.High,
+			},
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth-cycle-thinking.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-cycle-thinking.yml"));
+
+		sessionSettings = Settings.isolated();
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: sessionSettings,
+			modelRegistry,
+		});
+
+		expect(session.cycleThinkingLevel()).toBe("off");
+		expect(session.thinkingLevel).toBe("off");
+		expect(session.cycleThinkingLevel()).toBe(Effort.Minimal);
+		expect(session.thinkingLevel).toBe(Effort.Minimal);
 	});
 });

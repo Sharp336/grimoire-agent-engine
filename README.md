@@ -238,6 +238,8 @@ Full Model Context Protocol support with external tool integration:
 - Stdio and HTTP transports for connecting to MCP servers
 - **OAuth support**: Explicit `clientId` and `callbackPort` in MCP server config, manual OAuth callbacks via slash commands
 - **Browser server filtering**: Automatically filters browser-type MCP servers to prevent conflicts with built-in browser tool
+- **Automatic Exa filtering**: Extracts Exa API keys and prefers the native Exa integration
+- **Config schema + setup guide**: [`docs/mcp-config.md`](./docs/mcp-config.md) and [`packages/coding-agent/src/config/mcp-schema.json`](./packages/coding-agent/src/config/mcp-schema.json)
 - Plugin CLI (`omp plugin install/enable/configure/doctor`)
 - Hot-loadable plugins from `~/.oh-omp/plugins/` with npm/bun integration
 - Automatic Exa MCP server filtering with API key extraction
@@ -434,7 +436,7 @@ return config
 **Option 1: Environment variables** (common examples)
 
 | Provider                                        | Environment Variable                         |
-| ----------------------------------------------- | -------------------------------------------- |
+|-------------------------------------------------| -------------------------------------------- |
 | Anthropic                                       | `ANTHROPIC_API_KEY`                          |
 | OpenAI                                          | `OPENAI_API_KEY`                             |
 | Google                                          | `GEMINI_API_KEY`                             |
@@ -449,6 +451,7 @@ return config
 | Ollama (`ollama`)                               | `OLLAMA_API_KEY` _(optional)_                |
 | LiteLLM (`litellm`)                             | `LITELLM_API_KEY`                            |
 | LM Studio (`lm-studio`)                         | `LM_STUDIO_API_KEY` _(optional)_             |
+| llama.cpp (`llama.cpp`)                         | `LLAMA_CPP_API_KEY` _(optional)_             |
 | Xiaomi MiMo (`xiaomi`)                          | `XIAOMI_API_KEY`                             |
 | Moonshot (`moonshot`)                           | `MOONSHOT_API_KEY`                           |
 | Venice (`venice`)                               | `VENICE_API_KEY`                             |
@@ -487,6 +490,7 @@ Use `/login` with supported providers:
 - Qianfan (`qianfan`)
 - Ollama (local / self-hosted, `ollama`)
 - LM Studio (local / self-hosted, `lm-studio`)
+- llama.cpp (local / self-hosted, `llama.cpp`)
 - vLLM (local OpenAI-compatible, `vllm`)
 - Z.AI (GLM Coding Plan)
 - Synthetic
@@ -500,6 +504,7 @@ Use `/login` with supported providers:
 - Cloudflare AI Gateway (`cloudflare-ai-gateway`)
 
 For `ollama`, API key is optional. Leave it unset for local no-auth instances, or set `OLLAMA_API_KEY` for authenticated hosts.
+For `llama.cpp`, API key is optional. Leave it unset for local no-auth instances, or set `LLAMA_CPP_API_KEY` for authenticated hosts.
 For `lm-studio`, API key is optional. Leave it unset for local no-auth instances, or set `LM_STUDIO_API_KEY` for authenticated hosts.
 For `vllm`, paste your key in `/login` (or use `VLLM_API_KEY`). For local no-auth servers, any placeholder value works (for example `vllm-local`).
 For `nanogpt`, `/login nanogpt` opens `https://nano-gpt.com/api` and prompts for your `sk-...` key (or set `NANO_GPT_API_KEY`). Login validates the key via NanoGPT's models endpoint (not a fixed model entitlement).
@@ -812,6 +817,13 @@ providers:
           cacheWrite: 0
         contextWindow: 128000
         maxTokens: 32000
+
+  llama.cpp:
+    baseUrl: http://127.0.0.1:8080
+    api: openai-responses
+    auth: none
+    discovery:
+      type: llama.cpp
 ```
 
 **Supported APIs:** `openai-completions`, `openai-responses`, `openai-codex-responses`, `azure-openai-responses`, `anthropic-messages`, `google-generative-ai`, `google-vertex`
@@ -987,19 +999,13 @@ Hook locations:
 import type { HookAPI } from "@oh-my-pi/pi-coding-agent/hooks";
 
 export default function (omp: HookAPI) {
-  omp.on("tool_call", async (event, ctx) => {
-    if (
-      event.toolName === "bash" &&
-      /sudo/.test(event.input.command as string)
-    ) {
-      const ok = await ctx.ui.confirm(
-        "Allow sudo?",
-        event.input.command as string,
-      );
-      if (!ok) return { block: true, reason: "Blocked by user" };
-    }
-    return undefined;
-  });
+	omp.on("tool_call", async (event, ctx) => {
+		if (event.toolName === "bash" && /sudo/.test(event.input.command as string)) {
+			const ok = await ctx.ui.confirm("Allow sudo?", event.input.command as string);
+			if (!ok) return { block: true, reason: "Blocked by user" };
+		}
+		return undefined;
+	});
 }
 ```
 
@@ -1024,16 +1030,16 @@ Auto-discovered locations:
 import { Type } from "@sinclair/typebox";
 import type { CustomToolFactory } from "@oh-my-pi/pi-coding-agent";
 const factory: CustomToolFactory = () => ({
-  name: "greet",
-  label: "Greeting",
-  description: "Generate a greeting",
-  parameters: Type.Object({
-    name: Type.String({ description: "Name to greet" }),
-  }),
-  async execute(_toolCallId, params) {
-    const { name } = params as { name: string };
-    return { content: [{ type: "text", text: `Hello, ${name}!` }] };
-  },
+	name: "greet",
+	label: "Greeting",
+	description: "Generate a greeting",
+	parameters: Type.Object({
+		name: Type.String({ description: "Name to greet" }),
+	}),
+	async execute(_toolCallId, params) {
+		const { name } = params as { name: string };
+		return { content: [{ type: "text", text: `Hello, ${name}!` }] };
+	},
 });
 export default factory;
 ```
@@ -1203,27 +1209,19 @@ For adding new tools, see [Custom Tools](#custom-tools).
 For embedding omp in Node.js/TypeScript applications, use the SDK:
 
 ```typescript
-import {
-  ModelRegistry,
-  SessionManager,
-  createAgentSession,
-  discoverAuthStorage,
-} from "@oh-my-pi/pi-coding-agent";
+import { ModelRegistry, SessionManager, createAgentSession, discoverAuthStorage } from "@oh-my-pi/pi-coding-agent";
 const authStorage = await discoverAuthStorage();
 const modelRegistry = new ModelRegistry(authStorage);
 await modelRegistry.refresh();
 const { session } = await createAgentSession({
-  sessionManager: SessionManager.inMemory(),
-  authStorage,
-  modelRegistry,
+	sessionManager: SessionManager.inMemory(),
+	authStorage,
+	modelRegistry,
 });
 session.subscribe((event) => {
-  if (
-    event.type === "message_update" &&
-    event.assistantMessageEvent.type === "text_delta"
-  ) {
-    process.stdout.write(event.assistantMessageEvent.delta);
-  }
+	if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+		process.stdout.write(event.assistantMessageEvent.delta);
+	}
 });
 await session.prompt("What files are in the current directory?");
 ```

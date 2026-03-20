@@ -20,6 +20,8 @@ export interface RuleFrontmatter {
 	condition?: string | string[];
 	/** New key for TTSR stream scope. */
 	scope?: string | string[];
+	/** Per-rule TTSR interrupt mode override. */
+	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
 	[key: string]: unknown;
 }
 
@@ -43,6 +45,8 @@ export interface Rule {
 	condition?: string[];
 	/** Optional stream scope tokens (for example: text, thinking, tool:edit(*.ts)). */
 	scope?: string[];
+	/** Per-rule TTSR interrupt mode override (falls back to global ttsr.interruptMode). */
+	interruptMode?: "never" | "prose-only" | "tool-only" | "always";
 	/** Source metadata */
 	_source: SourceMeta;
 }
@@ -210,6 +214,7 @@ export const ruleCapability = defineCapability<Rule>({
 	displayName: "Rules",
 	description: "Project-specific rules and constraints (Cursor MDC, Windsurf, Cline formats)",
 	key: rule => rule.name,
+	toExtensionId: rule => `rule:${rule.name}`,
 	validate: rule => {
 		if (!rule.name) return "Missing rule name";
 		if (!rule.path) return "Missing rule path";

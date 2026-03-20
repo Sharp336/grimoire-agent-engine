@@ -107,19 +107,7 @@ export class EventController {
 					this.ctx.retryLoader = undefined;
 					this.ctx.statusContainer.clear();
 				}
-				if (this.ctx.loadingAnimation) {
-					this.ctx.loadingAnimation.stop();
-				}
-				this.ctx.statusContainer.clear();
-				this.ctx.loadingAnimation = new Loader(
-					this.ctx.ui,
-					spinner => theme.fg("accent", spinner),
-					text => theme.fg("muted", text),
-					`Working… (esc to interrupt)`,
-					getSymbolTheme().spinnerFrames,
-				);
-				this.ctx.statusContainer.addChild(this.ctx.loadingAnimation);
-				this.ctx.applyPendingWorkingMessage();
+				this.ctx.ensureLoadingAnimation();
 				this.ctx.ui.requestRender();
 				break;
 
@@ -134,18 +122,19 @@ export class EventController {
 					this.ctx.addMessageToChat(event.message);
 					this.ctx.ui.requestRender();
 				} else if (event.message.role === "user") {
-					this.#resetReadGroup();
-					const text = this.ctx.getUserMessageText(event.message);
+					const textContent = this.ctx.getUserMessageText(event.message);
 					const imageCount =
 						typeof event.message.content === "string"
 							? 0
-							: event.message.content.filter(b => b.type !== "text").length;
-					const sig = `${text}\u0000${imageCount}`;
-					if (this.ctx.optimisticUserMessageSignature === sig) {
-						this.ctx.optimisticUserMessageSignature = undefined;
-					} else {
+							: event.message.content.filter(content => content.type === "image").length;
+					const signature = `${textContent}\u0000${imageCount}`;
+
+					this.#resetReadGroup();
+					if (this.ctx.optimisticUserMessageSignature !== signature) {
 						this.ctx.addMessageToChat(event.message);
 					}
+					this.ctx.optimisticUserMessageSignature = undefined;
+
 					if (!event.message.synthetic) {
 						this.ctx.editor.setText("");
 						this.ctx.updatePendingMessagesDisplay();
@@ -268,6 +257,7 @@ export class EventController {
 						}
 					}
 					this.#lastAssistantComponent = this.ctx.streamingComponent;
+					this.#lastAssistantComponent.setUsageInfo(event.message.usage);
 					this.ctx.streamingComponent = undefined;
 					this.ctx.streamingMessage = undefined;
 					this.ctx.statusLine.invalidate();
@@ -397,24 +387,18 @@ export class EventController {
 						this.ctx.ui.requestRender();
 					}
 				}
-				// Update todo display when todo/todo_write tool completes.
+				// Update todo display when todo_write tool completes
 				if (event.toolName === "todo_write" && !event.isError) {
 					const details = event.result.details as { phases?: TodoPhase[] } | undefined;
 					if (details?.phases) {
 						this.ctx.setTodos(details.phases);
 					}
-				} else if (event.toolName === "todo" && !event.isError) {
-					// New tool syncs phases via session.setTodoPhases() — read them back.
-					const phases = this.ctx.session.getTodoPhases?.();
-					if (phases?.length) {
-						this.ctx.setTodos(phases);
-					}
-				} else if ((event.toolName === "todo_write" || event.toolName === "todo") && event.isError) {
+				} else if (event.toolName === "todo_write" && event.isError) {
 					const textContent = event.result.content.find(
 						(content: { type: string; text?: string }) => content.type === "text",
 					)?.text;
 					this.ctx.showWarning(
-						`Todo update failed${textContent ? `: ${textContent}` : ". Progress may be stale until next update."}`,
+						`Todo update failed${textContent ? `: ${textContent}` : ". Progress may be stale until todo_write succeeds."}`,
 					);
 				}
 				if (event.toolName === "exit_plan_mode" && !event.isError) {
@@ -452,6 +436,66 @@ export class EventController {
 				this.ctx.ui.requestRender();
 				this.sendCompletionNotification();
 				break;
+
+			case "auto_compaction_start": {
+				this.ctx.autoCompactionEscapeHandler = this.ctx.editor.onEscape;
+				this.ctx.editor.onEscape = () => {
+					this.ctx.session.abortCompaction();
+				};
+				this.ctx.statusContainer.clear();
+				const reasonText = event.reason === "overflow" ? "Context overflow detected, " : "";
+				const actionLabel = event.action === "handoff" ? "Auto-handoff" : "Auto context-full maintenance";
+				this.ctx.autoCompactionLoader = new Loader(
+					this.ctx.ui,
+					spinner => theme.fg("accent", spinner),
+					text => theme.fg("muted", text),
+					`${reasonText}${actionLabel}… (esc to cancel)`,
+					getSymbolTheme().spinnerFrames,
+				);
+				this.ctx.statusContainer.addChild(this.ctx.autoCompactionLoader);
+				this.ctx.ui.requestRender();
+				break;
+			}
+
+			case "auto_compaction_end": {
+				if (this.ctx.autoCompactionEscapeHandler) {
+					this.ctx.editor.onEscape = this.ctx.autoCompactionEscapeHandler;
+					this.ctx.autoCompactionEscapeHandler = undefined;
+				}
+				if (this.ctx.autoCompactionLoader) {
+					this.ctx.autoCompactionLoader.stop();
+					this.ctx.autoCompactionLoader = undefined;
+					this.ctx.statusContainer.clear();
+				}
+				const isHandoffAction = event.action === "handoff";
+				if (event.aborted) {
+					this.ctx.showStatus(
+						isHandoffAction ? "Auto-handoff cancelled" : "Auto context-full maintenance cancelled",
+					);
+				} else if (event.result) {
+					this.ctx.rebuildChatFromMessages();
+					this.ctx.statusLine.invalidate();
+					this.ctx.updateEditorTopBorder();
+				} else if (event.errorMessage) {
+					this.ctx.showWarning(event.errorMessage);
+				} else if (isHandoffAction) {
+					this.ctx.chatContainer.clear();
+					this.ctx.rebuildChatFromMessages();
+					this.ctx.statusLine.invalidate();
+					this.ctx.updateEditorTopBorder();
+					await this.ctx.reloadTodos();
+					this.ctx.showStatus("Auto-handoff completed");
+				} else if (event.skipped) {
+					// Benign skip: no model selected, no candidate models available, or nothing
+					// to compact yet. Not a failure — suppress the warning.
+				} else {
+					this.ctx.showWarning("Auto context-full maintenance failed; continuing without maintenance");
+				}
+				await this.ctx.flushCompactionQueue({ willRetry: event.willRetry });
+				this.ctx.ui.requestRender();
+				break;
+			}
+
 			case "auto_retry_start": {
 				this.ctx.retryEscapeHandler = this.ctx.editor.onEscape;
 				this.ctx.editor.onEscape = () => {
@@ -504,6 +548,10 @@ export class EventController {
 				this.ctx.ui.requestRender();
 				break;
 			}
+
+			case "todo_auto_clear":
+				await this.ctx.reloadTodos();
+				break;
 		}
 	}
 

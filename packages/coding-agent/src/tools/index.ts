@@ -9,6 +9,7 @@ import type { InternalUrlRouter } from "../internal-urls";
 import { getPreludeDocs, warmPythonEnvironment } from "../ipy/executor";
 import { checkPythonKernelAvailability } from "../ipy/kernel";
 import { LspTool } from "../lsp";
+import type { DiscoverableMCPSearchIndex, DiscoverableMCPTool } from "../mcp/discoverable-tool-metadata";
 import { EditTool } from "../patch";
 import type { PlanModeState } from "../plan-mode/state";
 import { TaskTool } from "../task";
@@ -38,6 +39,7 @@ import { RecallTool } from "./recall";
 import { RenderMermaidTool } from "./render-mermaid";
 import { ResolveTool } from "./resolve";
 import { reportFindingTool } from "./review";
+import { SearchToolBm25Tool } from "./search-tool-bm25";
 import { loadSshTool } from "./ssh";
 import { SubmitResultTool } from "./submit-result";
 import { createTodoTool } from "./todo";
@@ -78,6 +80,7 @@ export * from "./recall";
 export * from "./render-mermaid";
 export * from "./resolve";
 export * from "./review";
+export * from "./search-tool-bm25";
 export * from "./ssh";
 export * from "./submit-result";
 export * from "./todo";
@@ -93,6 +96,8 @@ export type ContextFileEntry = {
 	content: string;
 	depth?: number;
 };
+
+export type { DiscoverableMCPTool } from "../mcp/discoverable-tool-metadata";
 
 /** Session context for tool factories */
 export interface ToolSession {
@@ -156,6 +161,16 @@ export interface ToolSession {
 	getTodoPhases?: () => TodoPhase[];
 	/** Replace cached todo phases for this session. */
 	setTodoPhases?: (phases: TodoPhase[]) => void;
+	/** Whether MCP tool discovery is active for this session. */
+	isMCPDiscoveryEnabled?: () => boolean;
+	/** Get hidden-but-discoverable MCP tools for search_tool_bm25 prompts and fallbacks. */
+	getDiscoverableMCPTools?: () => DiscoverableMCPTool[];
+	/** Get the cached discoverable MCP search index for search_tool_bm25 execution. */
+	getDiscoverableMCPSearchIndex?: () => DiscoverableMCPSearchIndex;
+	/** Get MCP tools activated by prior search_tool_bm25 calls. */
+	getSelectedMCPToolNames?: () => string[];
+	/** Merge MCP tool selections into the active session tool set. */
+	activateDiscoveredMCPTools?: (toolNames: string[]) => Promise<string[]>;
 	/** Pending action store for preview/apply workflows */
 	pendingActionStore?: import("./pending-action").PendingActionStore;
 	/** Get active checkpoint state if any. */
@@ -201,6 +216,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	todos: createTodosReadTool,
 	fetch: s => new FetchTool(s),
 	web_search: s => new SearchTool(s),
+	search_tool_bm25: SearchToolBm25Tool.createIf,
 	write: s => new WriteTool(s),
 	recall: RecallTool.createIf,
 };
@@ -340,6 +356,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
 		if (name === "fetch") return session.settings.get("fetch.enabled");
 		if (name === "web_search") return session.settings.get("web_search.enabled");
+		if (name === "search_tool_bm25") return session.settings.get("mcp.discoveryMode");
 		if (name === "lsp") return session.settings.get("lsp.enabled");
 		if (name === "calc") return session.settings.get("calc.enabled");
 		if (name === "browser") return session.settings.get("browser.enabled");

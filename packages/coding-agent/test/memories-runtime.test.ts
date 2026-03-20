@@ -5,7 +5,11 @@ import * as path from "node:path";
 import type { Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { buildMemoryToolDeveloperInstructions, startMemoryStartupTask } from "@oh-my-pi/pi-coding-agent/memories";
+import {
+	buildMemoryToolDeveloperInstructions,
+	getMemoryRoot,
+	startMemoryStartupTask,
+} from "@oh-my-pi/pi-coding-agent/memories";
 import * as memoryStorage from "@oh-my-pi/pi-coding-agent/memories/storage";
 import { getAgentDbPath, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -79,14 +83,6 @@ async function createFixture(overrides?: Partial<Record<string, unknown>>): Prom
 	return { agentDir, sessionDir, sessionFile, settings, session, modelRegistry, model };
 }
 
-function encodeProjectPath(cwd: string): string {
-	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
-}
-
-function getMemoryRoot(agentDir: string, cwd: string): string {
-	return path.join(agentDir, "memories", encodeProjectPath(cwd));
-}
-
 async function waitFor(assertion: () => Promise<void> | void, timeoutMs = 3000): Promise<void> {
 	const start = Date.now();
 	let lastError: unknown;
@@ -103,13 +99,23 @@ async function waitFor(assertion: () => Promise<void> | void, timeoutMs = 3000):
 }
 
 describe("memories runtime", () => {
+	let savedXdgData: string | undefined;
+	let savedXdgState: string | undefined;
+
 	beforeEach(() => {
 		vi.clearAllMocks();
 		vi.restoreAllMocks();
+		// Prevent getXdgDataPath/getXdgStatePath from resolving to real user data
+		savedXdgData = process.env.XDG_DATA_HOME;
+		savedXdgState = process.env.XDG_STATE_HOME;
+		process.env.XDG_DATA_HOME = "/nonexistent-xdg-data";
+		process.env.XDG_STATE_HOME = "/nonexistent-xdg-state";
 	});
 
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		process.env.XDG_DATA_HOME = savedXdgData;
+		process.env.XDG_STATE_HOME = savedXdgState;
 		for (const dir of createdDirs) {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
@@ -162,7 +168,7 @@ describe("memories runtime", () => {
 		const fx = await createFixture();
 		const rolloutPath = path.join(fx.sessionDir, "thread-a.jsonl");
 		const rolloutRows = [
-			{ type: "session", id: "thread-a", cwd: "/workspace/repo" },
+			{ type: "session", id: "thread-a", cwd: fx.agentDir },
 			{ type: "message", message: { role: "user", content: "summarize this rollout" } },
 		];
 		await fs.writeFile(rolloutPath, `${rolloutRows.map(row => JSON.stringify(row)).join("\n")}\n`);
@@ -240,8 +246,20 @@ describe("memories runtime", () => {
 
 		const db = memoryStorage.openMemoryDb(getAgentDbPath(fx.agentDir));
 		memoryStorage.upsertThreads(db, [
-			{ id: "thread-a", updatedAt: 100, rolloutPath: "/tmp/a.jsonl", cwd: "/repo/a", sourceKind: "cli" },
-			{ id: "thread-b", updatedAt: 200, rolloutPath: "/tmp/b.jsonl", cwd: "/repo/b", sourceKind: "cli" },
+			{
+				id: "thread-a",
+				updatedAt: 100,
+				rolloutPath: "/tmp/a.jsonl",
+				cwd: fx.session.sessionManager.getCwd(),
+				sourceKind: "cli",
+			},
+			{
+				id: "thread-b",
+				updatedAt: 200,
+				rolloutPath: "/tmp/b.jsonl",
+				cwd: fx.session.sessionManager.getCwd(),
+				sourceKind: "cli",
+			},
 		]);
 		db.prepare(
 			"INSERT INTO stage1_outputs (thread_id, source_updated_at, raw_memory, rollout_summary, rollout_slug, generated_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -249,7 +267,9 @@ describe("memories runtime", () => {
 		db.prepare(
 			"INSERT INTO stage1_outputs (thread_id, source_updated_at, raw_memory, rollout_summary, rollout_slug, generated_at) VALUES (?, ?, ?, ?, ?, ?)",
 		).run("thread-b", 200, "raw-b", "summary-b", "beta", 200);
-		memoryStorage.enqueueGlobalWatermark(db, 200, { forceDirtyWhenNotAdvanced: true });
+		memoryStorage.enqueueGlobalWatermark(db, 200, fx.session.sessionManager.getCwd(), {
+			forceDirtyWhenNotAdvanced: true,
+		});
 		memoryStorage.closeMemoryDb(db);
 
 		const memoryRoot = getMemoryRoot(fx.agentDir, fx.session.sessionManager.getCwd());
@@ -282,7 +302,9 @@ describe("memories runtime", () => {
 		await fs.writeFile(path.join(memoryRoot, "skills", "legacy", "SKILL.md"), "legacy skill");
 
 		const db = memoryStorage.openMemoryDb(getAgentDbPath(fx.agentDir));
-		memoryStorage.enqueueGlobalWatermark(db, 300, { forceDirtyWhenNotAdvanced: true });
+		memoryStorage.enqueueGlobalWatermark(db, 300, fx.session.sessionManager.getCwd(), {
+			forceDirtyWhenNotAdvanced: true,
+		});
 		memoryStorage.closeMemoryDb(db);
 
 		startMemoryStartupTask({
@@ -305,8 +327,20 @@ describe("memories runtime", () => {
 });
 
 describe("buildMemoryToolDeveloperInstructions", () => {
+	let savedXdgData: string | undefined;
+	let savedXdgState: string | undefined;
+
+	beforeEach(() => {
+		savedXdgData = process.env.XDG_DATA_HOME;
+		savedXdgState = process.env.XDG_STATE_HOME;
+		process.env.XDG_DATA_HOME = "/nonexistent-xdg-data";
+		process.env.XDG_STATE_HOME = "/nonexistent-xdg-state";
+	});
+
 	afterEach(async () => {
 		vi.restoreAllMocks();
+		process.env.XDG_DATA_HOME = savedXdgData;
+		process.env.XDG_STATE_HOME = savedXdgState;
 		for (const dir of createdDirs) {
 			await fs.rm(dir, { recursive: true, force: true });
 		}

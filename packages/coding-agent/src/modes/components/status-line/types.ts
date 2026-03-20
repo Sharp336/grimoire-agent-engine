@@ -43,6 +43,7 @@ export interface SegmentContext {
 		status: { staged: number; unstaged: number; untracked: number } | null;
 		pr: { number: number; url: string } | null;
 	};
+	autoCompactEnabled: boolean;
 }
 
 export interface RenderedSegment {

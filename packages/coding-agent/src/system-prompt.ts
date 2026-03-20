@@ -5,6 +5,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { $env, getGpuCachePath, getProjectDir, hasFsCode, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { contextFileCapability } from "./capability/context-file";
@@ -259,6 +260,18 @@ export interface LoadContextFilesOptions {
 	cwd?: string;
 }
 
+function dedupeExactContextFiles(
+	contextFiles: Array<{ path: string; content: string; depth?: number }>,
+): Array<{ path: string; content: string; depth?: number }> {
+	const lastIndexByContent = new Map<string, number>();
+	for (const [index, file] of contextFiles.entries()) {
+		// Keep the closest matching context entry when content is byte-for-byte identical.
+		lastIndexByContent.set(file.content, index);
+	}
+
+	return contextFiles.filter((file, index) => lastIndexByContent.get(file.content) === index);
+}
+
 /**
  * Load all project context files using the capability API.
  * Returns {path, content, depth} entries for all discovered context files.
@@ -289,12 +302,12 @@ export async function loadProjectContextFiles(
 		return depthB - depthA;
 	});
 
-	return files;
+	return dedupeExactContextFiles(files);
 }
 
 /**
- * Load system prompt customization files (SYSTEM.md).
- * Returns combined content from all discovered SYSTEM.md files.
+ * Load the effective system prompt customization from SYSTEM.md.
+ * Project-level SYSTEM.md overrides user-level SYSTEM.md.
  */
 export async function loadSystemPromptFiles(options: LoadContextFilesOptions = {}): Promise<string | null> {
 	const resolvedCwd = options.cwd ?? getProjectDir();
@@ -303,23 +316,45 @@ export async function loadSystemPromptFiles(options: LoadContextFilesOptions = {
 
 	if (result.items.length === 0) return null;
 
-	// Combine all SYSTEM.md contents (user-level first, then project-level)
-	const userLevel = result.items.filter(item => item.level === "user");
-	const projectLevel = result.items.filter(item => item.level === "project");
-
-	const parts: string[] = [];
-	for (const item of [...userLevel, ...projectLevel]) {
-		parts.push(item.content);
+	const projectLevel = result.items.find(item => item.level === "project");
+	if (projectLevel) {
+		return projectLevel.content;
 	}
 
-	return parts.join("\n\n");
+	const userLevel = result.items.find(item => item.level === "user");
+	return userLevel?.content ?? null;
+}
+
+export interface SystemPromptToolMetadata {
+	label: string;
+	description: string;
+}
+
+export function buildSystemPromptToolMetadata(
+	tools: Map<string, AgentTool>,
+	overrides: Partial<Record<string, Partial<SystemPromptToolMetadata>>> = {},
+): Map<string, SystemPromptToolMetadata> {
+	return new Map(
+		Array.from(tools.entries(), ([name, tool]) => {
+			const toolRecord = tool as AgentTool & { label?: string; description?: string };
+			const override = overrides[name];
+			return [
+				name,
+				{
+					label: override?.label ?? (typeof toolRecord.label === "string" ? toolRecord.label : ""),
+					description:
+						override?.description ?? (typeof toolRecord.description === "string" ? toolRecord.description : ""),
+				},
+			] as const;
+		}),
+	);
 }
 
 export interface BuildSystemPromptOptions {
 	/** Custom system prompt (replaces default). */
 	customPrompt?: string;
 	/** Tools to include in prompt. */
-	tools?: Map<string, { description: string; label: string }>;
+	tools?: Map<string, SystemPromptToolMetadata>;
 	/** Tool names to include in prompt. */
 	toolNames?: string[];
 	/** Text to append to system prompt. */
@@ -338,6 +373,10 @@ export interface BuildSystemPromptOptions {
 	rules?: Array<{ name: string; description?: string; path: string; globs?: string[] }>;
 	/** Intent field name injected into every tool schema. If set, explains the field in the prompt. */
 	intentField?: string;
+	/** Whether MCP tool discovery is active for this prompt build. */
+	mcpDiscoveryMode?: boolean;
+	/** Discoverable MCP server summaries to advertise when discovery mode is active. */
+	mcpDiscoveryServerSummaries?: string[];
 	/** Encourage the agent to delegate via tasks unless changes are trivial. */
 	eagerTasks?: boolean;
 }
@@ -360,6 +399,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		skills: providedSkills,
 		rules,
 		intentField,
+		mcpDiscoveryMode = false,
+		mcpDiscoveryServerSummaries = [],
 		eagerTasks = false,
 	} = options;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -415,7 +456,9 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	let resolvedCustomPrompt: string | undefined;
 	let resolvedAppendPrompt: string | undefined;
 	let systemPromptCustomization: string | null = null;
-	let contextFiles: Array<{ path: string; content: string; depth?: number }> = providedContextFiles ?? [];
+	let contextFiles: Array<{ path: string; content: string; depth?: number }> = dedupeExactContextFiles(
+		providedContextFiles ?? [],
+	);
 	let agentsMdSearch: AgentsMdSearch = {
 		scopePath: ".",
 		limit: AGENTS_MD_LIMIT,
@@ -442,27 +485,14 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		resolvedCustomPrompt = prepResult.value.resolvedCustomPrompt;
 		resolvedAppendPrompt = prepResult.value.resolvedAppendPrompt;
 		systemPromptCustomization = prepResult.value.systemPromptCustomization;
-		contextFiles = prepResult.value.contextFiles;
+		contextFiles = dedupeExactContextFiles(prepResult.value.contextFiles);
 		agentsMdSearch = prepResult.value.agentsMdSearch;
 		skills = prepResult.value.skills;
 	}
 
-	const now = new Date();
-	const date = now.toLocaleDateString("en-CA", {
-		year: "numeric",
-		month: "2-digit",
-		day: "2-digit",
-	});
-	const dateTime = now.toLocaleString("en-US", {
-		weekday: "long",
-		year: "numeric",
-		month: "long",
-		day: "numeric",
-		hour: "2-digit",
-		minute: "2-digit",
-		second: "2-digit",
-		timeZoneName: "short",
-	});
+	const date = new Date().toISOString().slice(0, 10);
+	const dateTime = date;
+	const promptCwd = resolvedCwd.replace(/\\/g, "/");
 
 	// Build tool metadata for system prompt rendering
 	// Priority: explicit list > tools map > defaults
@@ -491,7 +521,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	const environment = await logger.timeAsync("getEnvironmentInfo", getEnvironmentInfo);
 	const data = {
-		systemPromptCustomization: systemPromptCustomization ?? "",
+		// Explicit custom prompts replace discovered SYSTEM.md content rather than layering it twice.
+		systemPromptCustomization: resolvedCustomPrompt ? "" : (systemPromptCustomization ?? ""),
 		customPrompt: resolvedCustomPrompt,
 		appendPrompt: resolvedAppendPrompt ?? "",
 		tools: toolNames,
@@ -504,9 +535,12 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		rules: rules ?? [],
 		date,
 		dateTime,
-		cwd: resolvedCwd,
+		cwd: promptCwd,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
+		mcpDiscoveryMode,
+		hasMCPDiscoveryServers: mcpDiscoveryServerSummaries.length > 0,
+		mcpDiscoveryServerSummaries,
 		eagerTasks,
 	};
 	return renderPromptTemplate(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);

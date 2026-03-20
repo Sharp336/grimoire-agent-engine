@@ -24,13 +24,15 @@ import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { PythonExecutionComponent } from "../../modes/components/python-execution";
 import { getMarkdownTheme, getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
+import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
 import { outputMeta } from "../../tools/output-meta";
-import { resolveToCwd } from "../../tools/path-utils";
+import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs } from "../../tools/render-utils";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog";
 import { openPath } from "../../utils/open";
+import { setSessionTerminalTitle } from "../../utils/title-generator";
 
 export class CommandController {
 	constructor(private readonly ctx: InteractiveModeContext) {}
@@ -504,57 +506,7 @@ export class CommandController {
 	}
 
 	handleHotkeysCommand(): void {
-		const expandToolsKey = this.ctx.keybindings.getDisplayString("expandTools") || "Ctrl+O";
-		const planModeKey = this.ctx.keybindings.getDisplayString("togglePlanMode") || "Alt+Shift+P";
-		const sttKey = this.ctx.keybindings.getDisplayString("toggleSTT") || "Alt+H";
-		const copyLineKey = this.ctx.keybindings.getDisplayString("copyLine") || "Alt+Shift+L";
-		const copyPromptKey = this.ctx.keybindings.getDisplayString("copyPrompt") || "Alt+Shift+C";
-		const hotkeys = `
-		**Navigation**
-		| Key | Action |
-		|-----|--------|
-		| \`Arrow keys\` | Move cursor / browse history (Up when empty) |
-		| \`Option+Left/Right\` | Move by word |
-		| \`Ctrl+A\` / \`Home\` / \`Cmd+Left\` | Start of line |
-		| \`Ctrl+E\` / \`End\` / \`Cmd+Right\` | End of line |
-		
-		**Editing**
-		| Key | Action |
-		|-----|--------|
-		| \`Enter\` | Send message |
-		| \`Shift+Enter\` / \`Alt+Enter\` | New line |
-		| \`Ctrl+W\` / \`Option+Backspace\` | Delete word backwards |
-		| \`Ctrl+U\` | Delete to start of line |
-		| \`Ctrl+K\` | Delete to end of line |
-		| \`${copyLineKey}\` | Copy current line |
-		| \`${copyPromptKey}\` | Copy whole prompt |
-		
-		**Other**
-		| Key | Action |
-		|-----|--------|
-		| \`Tab\` | Path completion / accept autocomplete |
-		| \`Escape\` | Cancel autocomplete / abort streaming |
-		| \`Ctrl+C\` | Clear editor (first) / exit (second) |
-		| \`Ctrl+D\` | Exit (when editor is empty) |
-		| \`Ctrl+Z\` | Suspend to background |
-		| \`Shift+Tab\` | Cycle thinking level |
-		| \`Ctrl+P\` | Cycle role models (slow/default/smol) |
-		| \`Shift+Ctrl+P\` | Cycle role models (temporary) |
-		| \`Alt+P\` | Select model (temporary) |
-		| \`Ctrl+L\` | Select model (set roles) |
-		| \`${planModeKey}\` | Toggle plan mode |
-		| \`Ctrl+R\` | Search prompt history |
-		| \`${expandToolsKey}\` | Toggle tool output expansion |
-		| \`Ctrl+T\` | Toggle todo list expansion |
-		| \`Ctrl+G\` | Edit message in external editor |
-		| \`${sttKey}\` | Toggle speech-to-text recording |
-		| \`#\` | Open prompt actions |
-		| \`/\` | Slash commands |
-		| \`!\` | Run bash command |
-		| \`!!\` | Run bash command (excluded from context) |
-		| \`$\` | Run Python in shared kernel |
-		| \`$$\` | Run Python (excluded from context) |
-		`;
+		const hotkeys = buildHotkeysMarkdown({ keybindings: this.ctx.keybindings });
 		this.ctx.chatContainer.addChild(new Spacer(1));
 		this.ctx.chatContainer.addChild(new DynamicBorder());
 		this.ctx.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Keyboard Shortcuts")), 1, 0));
@@ -598,7 +550,7 @@ export class CommandController {
 
 		if (action === "enqueue" || action === "rebuild") {
 			try {
-				enqueueMemoryConsolidation(agentDir);
+				enqueueMemoryConsolidation(agentDir, this.ctx.sessionManager.getCwd());
 				this.ctx.showStatus("Memory consolidation enqueued.");
 			} catch (error) {
 				this.ctx.showError(`Memory enqueue failed: ${error instanceof Error ? error.message : String(error)}`);
@@ -623,9 +575,12 @@ export class CommandController {
 			}
 		}
 		await this.ctx.session.newSession();
+		setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
 		this.ctx.statusLine.invalidate();
+		this.ctx.statusLine.setSessionStartTime(Date.now());
 		this.ctx.updateEditorTopBorder();
+		this.ctx.ui.requestRender();
 
 		this.ctx.chatContainer.clear();
 		this.ctx.pendingMessagesContainer.clear();
@@ -677,8 +632,14 @@ export class CommandController {
 			return;
 		}
 
+		const unquoted = stripOuterDoubleQuotes(targetPath);
+		if (!unquoted) {
+			this.ctx.showError("Usage: /move <path>");
+			return;
+		}
+
 		const cwd = this.ctx.sessionManager.getCwd();
-		const resolvedPath = resolveToCwd(targetPath, cwd);
+		const resolvedPath = resolveToCwd(unquoted, cwd);
 
 		try {
 			const stat = await fs.stat(resolvedPath);

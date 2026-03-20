@@ -25,7 +25,6 @@ export type AppAction =
 	| "togglePlanMode"
 	| "expandTools"
 	| "toggleThinking"
-	| "toggleSessionNamedFilter"
 	| "externalEditor"
 	| "historySearch"
 	| "followUp"
@@ -67,7 +66,6 @@ export const DEFAULT_APP_KEYBINDINGS: Record<AppAction, KeyId | KeyId[]> = {
 	historySearch: "ctrl+r",
 	expandTools: "ctrl+o",
 	toggleThinking: "ctrl+t",
-	toggleSessionNamedFilter: "ctrl+n",
 	externalEditor: "ctrl+g",
 	followUp: "ctrl+enter",
 	dequeue: "alt+up",
@@ -80,7 +78,6 @@ export const DEFAULT_APP_KEYBINDINGS: Record<AppAction, KeyId | KeyId[]> = {
 	resume: [],
 	toggleSTT: "alt+h",
 };
-
 /**
  * All default keybindings (app + editor).
  */
@@ -103,7 +100,6 @@ const APP_ACTIONS: AppAction[] = [
 	"historySearch",
 	"expandTools",
 	"toggleThinking",
-	"toggleSessionNamedFilter",
 	"externalEditor",
 	"followUp",
 	"dequeue",
@@ -264,10 +260,7 @@ export class KeybindingsManager {
 	 * Get display string for an action.
 	 */
 	getDisplayString(action: AppAction): string {
-		const keys = this.getKeys(action);
-		if (keys.length === 0) return "";
-		if (keys.length === 1) return keys[0]!;
-		return keys.join("/");
+		return formatKeyHints(this.getKeys(action));
 	}
 
 	/**

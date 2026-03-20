@@ -31,9 +31,11 @@ import type {
 	Effort,
 	ImageContent,
 	Message,
+	MessageAttribution,
 	Model,
 	ProviderSessionState,
 	ServiceTier,
+	SimpleStreamOptions,
 	TextContent,
 	ToolCall,
 	ToolChoice,
@@ -50,8 +52,8 @@ import {
 import { abortableSleep, getAgentDbPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
-import type { ModelRegistry, ModelRole } from "../config/model-registry";
-import { extractExplicitThinkingSelector, resolveModelRoleValue } from "../config/model-resolver";
+import { MODEL_ROLE_IDS, type ModelRegistry, type ModelRole } from "../config/model-registry";
+import { extractExplicitThinkingSelector, parseModelString, resolveModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate, renderPromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
 import type { ToolResultBridge } from "../context/bridge";
@@ -87,6 +89,14 @@ import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { executePython as executePythonCommand, type PythonResult } from "../ipy/executor";
+import {
+	buildDiscoverableMCPSearchIndex,
+	collectDiscoverableMCPTools,
+	type DiscoverableMCPSearchIndex,
+	type DiscoverableMCPTool,
+	isMCPToolName,
+	selectDiscoverableMCPToolNamesByServer,
+} from "../mcp/discoverable-tool-metadata";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../patch";
 import type { PlanModeState } from "../plan-mode/state";
@@ -106,6 +116,7 @@ import { outputMeta } from "../tools/output-meta";
 import { resolveToCwd } from "../tools/path-utils";
 import type { PendingActionStore } from "../tools/pending-action";
 import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo-write";
+import { clampTimeout } from "../tools/tool-timeouts";
 import { parseCommandArgs } from "../utils/command-args";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
@@ -119,28 +130,49 @@ import {
 	estimateTokens,
 	generateBranchSummary,
 	prepareCompaction,
+	shouldCompact,
 } from "./compaction";
+import { DEFAULT_PRUNE_CONFIG, pruneToolOutputs } from "./compaction/pruning";
 import {
 	type BashExecutionMessage,
 	type BranchSummaryMessage,
 	bashExecutionToText,
 	type CompactionSummaryMessage,
 	type CustomMessage,
+	convertToLlm,
 	type FileMentionMessage,
 	type HookMessage,
 	type PythonExecutionMessage,
 	pythonExecutionToText,
 } from "./messages";
-import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions, SessionManager } from "./session-manager";
+import type {
+	BranchSummaryEntry,
+	CompactionEntry,
+	NewSessionOptions,
+	SessionContext,
+	SessionManager,
+} from "./session-manager";
 import { getLatestCompactionEntry } from "./session-manager";
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
 	| AgentEvent
+	| { type: "auto_compaction_start"; reason: "threshold" | "overflow"; action: "context-full" | "handoff" }
+	| {
+			type: "auto_compaction_end";
+			action: "context-full" | "handoff";
+			result: CompactionResult | undefined;
+			aborted: boolean;
+			willRetry: boolean;
+			errorMessage?: string;
+			/** True when compaction was skipped for a benign reason (no model, no candidates, nothing to compact). */
+			skipped?: boolean;
+	  }
 	| { type: "auto_retry_start"; attempt: number; maxAttempts: number; delayMs: number; errorMessage: string }
 	| { type: "auto_retry_end"; success: boolean; attempt: number; finalError?: string }
 	| { type: "ttsr_triggered"; rules: Rule[] }
-	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number };
+	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
+	| { type: "todo_auto_clear" };
 
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -177,25 +209,37 @@ export interface AgentSessionConfig {
 	skillWarnings?: SkillWarning[];
 	/** Custom commands (TypeScript slash commands) */
 	customCommands?: LoadedCustomCommand[];
-	skillsSettings?: Required<SkillsSettings>;
+	skillsSettings?: SkillsSettings;
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
 	/** Tool registry for LSP and settings */
 	toolRegistry?: Map<string, AgentTool>;
+	/** Current session pre-LLM message transform pipeline */
+	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
+	/** Provider payload hook used by the active session request path */
+	onPayload?: SimpleStreamOptions["onPayload"];
+	/** Current session message-to-LLM conversion pipeline */
+	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability */
 	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<string>;
+	/** Enable hidden-by-default MCP tool discovery for this session. */
+	mcpDiscoveryEnabled?: boolean;
+	/** MCP tool names to activate for the current session when discovery mode is enabled. */
+	initialSelectedMCPToolNames?: string[];
+	/** MCP server names whose tools should seed discovery-mode sessions whenever those servers are connected. */
+	defaultSelectedMCPServerNames?: string[];
+	/** MCP tool names that should seed brand-new sessions created from this AgentSession. */
+	defaultSelectedMCPToolNames?: string[];
 	/** TTSR manager for time-traveling stream rules */
 	ttsrManager?: TtsrManager;
-	/** Force X-Initiator: agent for GitHub Copilot model selections in this session. */
-	forceCopilotAgentInitiator?: boolean;
 	/** Secret obfuscator for deobfuscating streaming edit content */
 	obfuscator?: SecretObfuscator;
 	/** Pending action store for preview/apply workflows */
 	pendingActionStore?: PendingActionStore;
-	/** Assembler bridge for introspection (shadow/assembler modes) */
+	/** Fork-specific: assembler bridge for tool result interception */
 	assemblerBridge?: ToolResultBridge;
-	/** Getter for the most recent effective-prompt snapshot (captured per turn by transformContext). */
-	getLastPromptSnapshot?: () => EffectivePromptSnapshot | null;
+	/** Fork-specific: returns the last effective prompt snapshot */
+	getLastPromptSnapshotFn?: () => EffectivePromptSnapshot | null;
 }
 
 /** Options for AgentSession.prompt() */
@@ -210,6 +254,10 @@ export interface PromptOptions {
 	toolChoice?: ToolChoice;
 	/** Send as developer/system message instead of user. Providers that support it use the developer role; others fall back to user. */
 	synthetic?: boolean;
+	/** Explicit billing/initiator attribution for the prompt. Defaults to user prompts as `user` and synthetic prompts as `agent`. */
+	attribution?: MessageAttribution;
+	/** Skip pre-send compaction checks for this prompt (internal use for maintenance flows). */
+	skipCompactionCheck?: boolean;
 }
 
 /** Result from cycleModel() */
@@ -254,8 +302,8 @@ export interface HandoffResult {
 }
 
 interface HandoffOptions {
+	autoTriggered?: boolean;
 	signal?: AbortSignal;
-	skipPostPromptRecoveryWait?: boolean;
 }
 
 /** Internal marker for hook messages queued through the agent loop */
@@ -265,7 +313,7 @@ interface HandoffOptions {
 
 /** Standard thinking levels */
 
-const _AUTO_HANDOFF_THRESHOLD_FOCUS = renderPromptTemplate(autoHandoffThresholdFocusPrompt);
+const AUTO_HANDOFF_THRESHOLD_FOCUS = renderPromptTemplate(autoHandoffThresholdFocusPrompt);
 
 const noOpUIContext: ExtensionUIContext = {
 	select: async (_title, _options, _dialogOptions) => undefined,
@@ -303,8 +351,6 @@ export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
-	#assemblerBridge: ToolResultBridge | undefined;
-	#getLastPromptSnapshot: (() => EffectivePromptSnapshot | null) | undefined;
 
 	#asyncJobManager: AsyncJobManager | undefined = undefined;
 	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
@@ -329,6 +375,7 @@ export class AgentSession {
 
 	// Compaction state
 	#compactionAbortController: AbortController | undefined = undefined;
+	#autoCompactionAbortController: AbortController | undefined = undefined;
 
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
@@ -346,6 +393,7 @@ export class AgentSession {
 	// Todo completion reminder state
 	#todoReminderCount = 0;
 	#todoPhases: TodoPhase[] = [];
+	#todoClearTimers = new Map<string, Timer>();
 	#nextToolChoiceOverride: ToolChoice | undefined = undefined;
 
 	// Bash execution state
@@ -368,16 +416,29 @@ export class AgentSession {
 	/** MCP prompt commands (updated dynamically when prompts are loaded) */
 	#mcpPromptCommands: LoadedCustomCommand[] = [];
 
-	#skillsSettings: Required<SkillsSettings> | undefined;
+	#skillsSettings: SkillsSettings | undefined;
 
 	// Model registry for API key resolution
 	#modelRegistry: ModelRegistry;
 
 	// Tool registry and prompt builder for extensions
 	#toolRegistry: Map<string, AgentTool>;
+	#transformContext: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
+	#onPayload: SimpleStreamOptions["onPayload"] | undefined;
+	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#rebuildSystemPrompt: ((toolNames: string[], tools: Map<string, AgentTool>) => Promise<string>) | undefined;
+
+	// Fork-specific: assembler introspection
+	#assemblerBridge: ToolResultBridge | undefined;
+	#getLastPromptSnapshot: (() => EffectivePromptSnapshot | null) | undefined;
 	#baseSystemPrompt: string;
-	#forceCopilotAgentInitiator = false;
+	#mcpDiscoveryEnabled = false;
+	#discoverableMCPTools = new Map<string, DiscoverableMCPTool>();
+	#discoverableMCPSearchIndex: DiscoverableMCPSearchIndex | null = null;
+	#selectedMCPToolNames = new Set<string>();
+	#defaultSelectedMCPServerNames = new Set<string>();
+	#defaultSelectedMCPToolNames = new Set<string>();
+	#sessionDefaultSelectedMCPToolNames = new Map<string, string[]>();
 
 	// TTSR manager for time-traveling stream rules
 	#ttsrManager: TtsrManager | undefined = undefined;
@@ -419,15 +480,35 @@ export class AgentSession {
 		this.#skillsSettings = config.skillsSettings;
 		this.#modelRegistry = config.modelRegistry;
 		this.#toolRegistry = config.toolRegistry ?? new Map();
+		this.#transformContext = config.transformContext ?? (messages => messages);
+		this.#onPayload = config.onPayload;
+		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
+		this.#mcpDiscoveryEnabled = config.mcpDiscoveryEnabled ?? false;
+		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
+		this.#selectedMCPToolNames = new Set(config.initialSelectedMCPToolNames ?? []);
+		this.#defaultSelectedMCPServerNames = new Set(config.defaultSelectedMCPServerNames ?? []);
+		this.#defaultSelectedMCPToolNames = new Set(config.defaultSelectedMCPToolNames ?? []);
+		this.#pruneSelectedMCPToolNames();
+		const persistedSelectedMCPToolNames = this.sessionManager.buildSessionContext().selectedMCPToolNames;
+		const currentSelectedMCPToolNames = this.getSelectedMCPToolNames();
+		if (
+			this.#mcpDiscoveryEnabled &&
+			!this.#selectedMCPToolNamesMatch(persistedSelectedMCPToolNames, currentSelectedMCPToolNames)
+		) {
+			this.sessionManager.appendMCPToolSelection(currentSelectedMCPToolNames);
+		}
+		this.#rememberSessionDefaultSelectedMCPToolNames(
+			this.sessionManager.getSessionFile(),
+			this.#getConfiguredDefaultSelectedMCPToolNames(),
+		);
 		this.#ttsrManager = config.ttsrManager;
-		this.#forceCopilotAgentInitiator = config.forceCopilotAgentInitiator ?? false;
 		this.#obfuscator = config.obfuscator;
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#pendingActionStore = config.pendingActionStore;
 		this.#assemblerBridge = config.assemblerBridge;
-		this.#getLastPromptSnapshot = config.getLastPromptSnapshot;
+		this.#getLastPromptSnapshot = config.getLastPromptSnapshotFn;
 		this.#unsubscribePendingActionPush = this.#pendingActionStore?.subscribePush(action => {
 			const reminderText = [
 				"<system-reminder>",
@@ -447,23 +528,13 @@ export class AgentSession {
 		this.#syncTodoPhasesFromBranch();
 
 		// Always subscribe to agent events for internal handling
-		// (session persistence, hooks, retry logic)
+		// (session persistence, hooks, auto-compaction, retry logic)
 		this.#unsubscribeAgent = this.agent.subscribe(this.#handleAgentEvent);
 	}
 
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this.#modelRegistry;
-	}
-
-	/** Assembler bridge for introspection (shadow/assembler modes). */
-	get assemblerBridge(): ToolResultBridge | undefined {
-		return this.#assemblerBridge;
-	}
-
-	/** Most recent effective-prompt snapshot captured during composition. */
-	get lastPromptSnapshot(): EffectivePromptSnapshot | null {
-		return this.#getLastPromptSnapshot?.() ?? null;
 	}
 
 	consumeNextToolChoiceOverride(): ToolChoice | undefined {
@@ -524,6 +595,9 @@ export class AgentSession {
 		this.#emit(event);
 	}
 
+	// Track last assistant message for auto-compaction check
+	#lastAssistantMessage: AssistantMessage | undefined = undefined;
+
 	/** Internal handler for agent events - shared by subscribe and reconnect */
 	#handleAgentEvent = async (event: AgentEvent): Promise<void> => {
 		// When a user message starts, check if it's from either queue and remove it BEFORE emitting
@@ -583,7 +657,7 @@ export class AgentSession {
 
 					this.#addPendingTtsrInjections(matches);
 
-					if (this.#shouldInterruptForTtsrMatch(matchContext)) {
+					if (this.#shouldInterruptForTtsrMatch(matches, matchContext)) {
 						// Abort the stream immediately — do not gate on extension callbacks
 						this.#ttsrAbortPending = true;
 						this.#ensureTtsrResumePromise();
@@ -693,7 +767,9 @@ export class AgentSession {
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
+			// Track assistant message for auto-compaction (checked on agent_end)
 			if (event.message.role === "assistant") {
+				this.#lastAssistantMessage = event.message;
 				const assistantMsg = event.message as AssistantMessage;
 				// Resolve TTSR resume gate before checking for new deferred injections.
 				// Gate on #ttsrAbortPending, not stopReason: a non-TTSR abort (e.g. streaming
@@ -774,12 +850,13 @@ export class AgentSession {
 			}
 		}
 
-		// Check auto-retry after agent completes
+		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
 			const fallbackAssistant = [...event.messages]
 				.reverse()
 				.find((message): message is AssistantMessage => message.role === "assistant");
-			const msg = fallbackAssistant;
+			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
+			this.#lastAssistantMessage = undefined;
 			if (!msg) return;
 
 			if (this.#skipPostTurnMaintenanceAssistantTimestamp === msg.timestamp) {
@@ -790,13 +867,16 @@ export class AgentSession {
 			// Check for retryable errors first (overloaded, rate limit, server errors)
 			if (this.#isRetryableError(msg)) {
 				const didRetry = await this.#handleRetryableError(msg);
-				if (didRetry) return;
+				if (didRetry) return; // Retry was initiated, don't proceed to compaction
 			}
 
 			if (msg.stopReason === "aborted" && this.#checkpointState) {
 				this.#checkpointState = undefined;
 				this.#pendingRewindReport = undefined;
 			}
+			const compactionTask = this.#checkCompaction(msg);
+			this.#trackPostPromptTask(compactionTask);
+			await compactionTask;
 			// Check for incomplete todos only after a final assistant stop, not intermediate tool-use turns.
 			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
 			if (hasToolCalls) {
@@ -1011,18 +1091,17 @@ export class AgentSession {
 		return -1;
 	}
 
-	#shouldInterruptForTtsrMatch(matchContext: TtsrMatchContext): boolean {
-		const mode = this.#ttsrManager?.getSettings().interruptMode ?? "always";
-		if (mode === "never") {
-			return false;
+	#shouldInterruptForTtsrMatch(matches: Rule[], matchContext: TtsrMatchContext): boolean {
+		const globalMode = this.#ttsrManager?.getSettings().interruptMode ?? "always";
+		for (const rule of matches) {
+			const mode = rule.interruptMode ?? globalMode;
+			if (mode === "never") continue;
+			if (mode === "prose-only" && (matchContext.source === "text" || matchContext.source === "thinking"))
+				return true;
+			if (mode === "tool-only" && matchContext.source === "tool") return true;
+			if (mode === "always") return true;
 		}
-		if (mode === "prose-only") {
-			return matchContext.source === "text" || matchContext.source === "thinking";
-		}
-		if (mode === "tool-only") {
-			return matchContext.source === "tool";
-		}
-		return true;
+		return false;
 	}
 
 	#queueDeferredTtsrInjectionIfNeeded(assistantMsg: AssistantMessage): void {
@@ -1425,6 +1504,22 @@ export class AgentSession {
 				isError: event.isError ?? false,
 			};
 			await this.#extensionRunner.emit(extensionEvent);
+		} else if (event.type === "auto_compaction_start") {
+			await this.#extensionRunner.emit({
+				type: "auto_compaction_start",
+				reason: event.reason,
+				action: event.action,
+			});
+		} else if (event.type === "auto_compaction_end") {
+			await this.#extensionRunner.emit({
+				type: "auto_compaction_end",
+				action: event.action,
+				result: event.result,
+				aborted: event.aborted,
+				willRetry: event.willRetry,
+				errorMessage: event.errorMessage,
+				skipped: event.skipped,
+			});
 		} else if (event.type === "auto_retry_start") {
 			await this.#extensionRunner.emit({
 				type: "auto_retry_start",
@@ -1503,12 +1598,13 @@ export class AgentSession {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
 		this.#cancelPostPromptTasks();
+		this.#clearTodoClearTimers();
 		const drained = await this.#asyncJobManager?.dispose({ timeoutMs: 3_000 });
 		const deliveryState = this.#asyncJobManager?.getDeliveryState();
 		if (drained === false && deliveryState) {
 			logger.warn("Async job completion deliveries still pending during dispose", { ...deliveryState });
 		}
-		await this.sessionManager.flush();
+		await this.sessionManager.close();
 		for (const state of this.#providerSessionState.values()) {
 			state.close();
 		}
@@ -1531,19 +1627,6 @@ export class AgentSession {
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model | undefined {
 		return this.agent.state.model;
-	}
-
-	#applySessionModelOverrides(model: Model): Model {
-		if (!this.#forceCopilotAgentInitiator || model.provider !== "github-copilot") {
-			return model;
-		}
-		return {
-			...model,
-			headers: {
-				...model.headers,
-				"X-Initiator": "agent",
-			},
-		};
 	}
 
 	/** Current thinking level */
@@ -1580,6 +1663,66 @@ export class AgentSession {
 		return this.#retryAttempt;
 	}
 
+	#collectDiscoverableMCPToolsFromRegistry(): Map<string, DiscoverableMCPTool> {
+		return new Map(collectDiscoverableMCPTools(this.#toolRegistry.values()).map(tool => [tool.name, tool] as const));
+	}
+
+	#setDiscoverableMCPTools(discoverableMCPTools: Map<string, DiscoverableMCPTool>): void {
+		this.#discoverableMCPTools = discoverableMCPTools;
+		this.#discoverableMCPSearchIndex = null;
+	}
+
+	#filterSelectableMCPToolNames(toolNames: Iterable<string>): string[] {
+		return Array.from(toolNames).filter(name => this.#discoverableMCPTools.has(name) && this.#toolRegistry.has(name));
+	}
+
+	#getConfiguredDefaultSelectedMCPToolNames(): string[] {
+		return this.#filterSelectableMCPToolNames([
+			...this.#defaultSelectedMCPToolNames,
+			...selectDiscoverableMCPToolNamesByServer(
+				this.#discoverableMCPTools.values(),
+				this.#defaultSelectedMCPServerNames,
+			),
+		]);
+	}
+
+	#pruneSelectedMCPToolNames(): void {
+		this.#selectedMCPToolNames = new Set(this.#filterSelectableMCPToolNames(this.#selectedMCPToolNames));
+	}
+
+	#selectedMCPToolNamesMatch(left: string[], right: string[]): boolean {
+		return left.length === right.length && left.every((name, index) => name === right[index]);
+	}
+
+	#rememberSessionDefaultSelectedMCPToolNames(
+		sessionFile: string | null | undefined,
+		toolNames: Iterable<string>,
+	): void {
+		if (!sessionFile) return;
+		this.#sessionDefaultSelectedMCPToolNames.set(
+			path.resolve(sessionFile),
+			this.#filterSelectableMCPToolNames(toolNames),
+		);
+	}
+
+	#getSessionDefaultSelectedMCPToolNames(sessionFile: string | null | undefined): string[] {
+		if (!sessionFile) return [];
+		return this.#sessionDefaultSelectedMCPToolNames.get(path.resolve(sessionFile)) ?? [];
+	}
+
+	#persistSelectedMCPToolNamesIfChanged(previousSelectedMCPToolNames: string[]): void {
+		if (!this.#mcpDiscoveryEnabled) return;
+		const nextSelectedMCPToolNames = this.getSelectedMCPToolNames();
+		if (this.#selectedMCPToolNamesMatch(previousSelectedMCPToolNames, nextSelectedMCPToolNames)) {
+			return;
+		}
+		this.sessionManager.appendMCPToolSelection(nextSelectedMCPToolNames);
+	}
+
+	#getActiveNonMCPToolNames(): string[] {
+		return this.getActiveToolNames().filter(name => !isMCPToolName(name) && this.#toolRegistry.has(name));
+	}
+
 	/**
 	 * Get the names of currently active tools.
 	 * Returns the names of tools currently set on the agent.
@@ -1607,13 +1750,54 @@ export class AgentSession {
 		return Array.from(this.#toolRegistry.keys());
 	}
 
-	/**
-	 * Set active tools by name.
-	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
-	 * Also rebuilds the system prompt to reflect the new tool set.
-	 * Changes take effect on the next agent turn.
-	 */
-	async setActiveToolsByName(toolNames: string[]): Promise<void> {
+	isMCPDiscoveryEnabled(): boolean {
+		return this.#mcpDiscoveryEnabled;
+	}
+
+	getDiscoverableMCPTools(): DiscoverableMCPTool[] {
+		return Array.from(this.#discoverableMCPTools.values());
+	}
+
+	getDiscoverableMCPSearchIndex(): DiscoverableMCPSearchIndex {
+		if (!this.#discoverableMCPSearchIndex) {
+			this.#discoverableMCPSearchIndex = buildDiscoverableMCPSearchIndex(this.#discoverableMCPTools.values());
+		}
+		return this.#discoverableMCPSearchIndex;
+	}
+
+	getSelectedMCPToolNames(): string[] {
+		if (!this.#mcpDiscoveryEnabled) {
+			return this.getActiveToolNames().filter(name => isMCPToolName(name) && this.#toolRegistry.has(name));
+		}
+		return this.#filterSelectableMCPToolNames(this.#selectedMCPToolNames);
+	}
+
+	async activateDiscoveredMCPTools(toolNames: string[]): Promise<string[]> {
+		const nextSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
+		const activated: string[] = [];
+		for (const name of toolNames) {
+			if (!isMCPToolName(name) || !this.#discoverableMCPTools.has(name) || !this.#toolRegistry.has(name)) {
+				continue;
+			}
+			nextSelectedMCPToolNames.add(name);
+			activated.push(name);
+		}
+		if (activated.length === 0) {
+			return [];
+		}
+		const nextActive = [
+			...this.#getActiveNonMCPToolNames(),
+			...this.#filterSelectableMCPToolNames(nextSelectedMCPToolNames),
+		];
+		await this.setActiveToolsByName(nextActive);
+		return [...new Set(activated)];
+	}
+
+	async #applyActiveToolsByName(
+		toolNames: string[],
+		options?: { persistMCPSelection?: boolean; previousSelectedMCPToolNames?: string[] },
+	): Promise<void> {
+		const previousSelectedMCPToolNames = options?.previousSelectedMCPToolNames ?? this.getSelectedMCPToolNames();
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
 		for (const name of toolNames) {
@@ -1623,6 +1807,13 @@ export class AgentSession {
 				validToolNames.push(name);
 			}
 		}
+		if (this.#mcpDiscoveryEnabled) {
+			this.#selectedMCPToolNames = new Set(
+				validToolNames.filter(
+					name => isMCPToolName(name) && this.#discoverableMCPTools.has(name) && this.#toolRegistry.has(name),
+				),
+			);
+		}
 		this.agent.setTools(tools);
 
 		// Rebuild base system prompt with new tool set
@@ -1630,8 +1821,40 @@ export class AgentSession {
 			this.#baseSystemPrompt = await this.#rebuildSystemPrompt(validToolNames, this.#toolRegistry);
 			this.agent.setSystemPrompt(this.#baseSystemPrompt);
 		}
+		if (options?.persistMCPSelection !== false) {
+			this.#persistSelectedMCPToolNamesIfChanged(previousSelectedMCPToolNames);
+		}
 	}
 
+	/**
+	 * Set active tools by name.
+	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
+	 * Also rebuilds the system prompt to reflect the new tool set.
+	 * Changes take effect before the next model call.
+	 */
+	async setActiveToolsByName(toolNames: string[]): Promise<void> {
+		await this.#applyActiveToolsByName(toolNames);
+	}
+
+	async #restoreMCPSelectionsForSessionContext(
+		sessionContext: SessionContext,
+		options?: { fallbackSelectedMCPToolNames?: Iterable<string> },
+	): Promise<void> {
+		if (!this.#mcpDiscoveryEnabled) return;
+		const nextActiveNonMCPToolNames = this.#getActiveNonMCPToolNames();
+		const fallbackSelectedMCPToolNames =
+			options?.fallbackSelectedMCPToolNames ?? this.#getConfiguredDefaultSelectedMCPToolNames();
+		const restoredMCPToolNames = sessionContext.hasPersistedMCPToolSelection
+			? this.#filterSelectableMCPToolNames(sessionContext.selectedMCPToolNames)
+			: this.#filterSelectableMCPToolNames(fallbackSelectedMCPToolNames);
+		this.#rememberSessionDefaultSelectedMCPToolNames(
+			this.sessionFile,
+			this.#getConfiguredDefaultSelectedMCPToolNames(),
+		);
+		await this.#applyActiveToolsByName([...nextActiveNonMCPToolNames, ...restoredMCPToolNames], {
+			persistMCPSelection: false,
+		});
+	}
 	/** Rebuild the base system prompt using the current active tool set. */
 	async refreshBaseSystemPrompt(): Promise<void> {
 		if (!this.#rebuildSystemPrompt) return;
@@ -1641,14 +1864,14 @@ export class AgentSession {
 	}
 
 	/**
-	 * Replace MCP tools in the registry and activate the latest MCP tool set immediately.
+	 * Replace MCP tools in the registry and recompute the visible MCP tool set immediately.
 	 * This allows /mcp add/remove/reauth to take effect without restarting the session.
 	 */
 	async refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
-		const prefix = "mcp_";
+		const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
 		const existingNames = Array.from(this.#toolRegistry.keys());
 		for (const name of existingNames) {
-			if (name.startsWith(prefix)) {
+			if (isMCPToolName(name)) {
 				this.#toolRegistry.delete(name);
 			}
 		}
@@ -1672,28 +1895,70 @@ export class AgentSession {
 			this.#toolRegistry.set(finalTool.name, finalTool);
 		}
 
-		const currentActive = this.getActiveToolNames().filter(
-			name => !name.startsWith(prefix) && this.#toolRegistry.has(name),
-		);
-		const mcpToolNames = Array.from(this.#toolRegistry.keys()).filter(name => name.startsWith(prefix));
-		const nextActive = [...currentActive];
-		for (const name of mcpToolNames) {
-			if (!nextActive.includes(name)) {
-				nextActive.push(name);
-			}
+		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
+		this.#pruneSelectedMCPToolNames();
+		if (!this.sessionManager.buildSessionContext().hasPersistedMCPToolSelection) {
+			this.#selectedMCPToolNames = new Set([
+				...this.#selectedMCPToolNames,
+				...this.#getConfiguredDefaultSelectedMCPToolNames(),
+			]);
 		}
+		this.#rememberSessionDefaultSelectedMCPToolNames(
+			this.sessionFile,
+			this.#getConfiguredDefaultSelectedMCPToolNames(),
+		);
 
-		await this.setActiveToolsByName(nextActive);
+		const nextActive = [...this.#getActiveNonMCPToolNames(), ...this.getSelectedMCPToolNames()];
+		await this.#applyActiveToolsByName(nextActive, { previousSelectedMCPToolNames });
 	}
 
-	/** Whether compaction is currently running */
+	/** Whether auto-compaction is currently running */
 	get isCompacting(): boolean {
-		return this.#compactionAbortController !== undefined;
+		return this.#autoCompactionAbortController !== undefined || this.#compactionAbortController !== undefined;
 	}
 
 	/** All messages including custom types like BashExecutionMessage */
 	get messages(): AgentMessage[] {
 		return this.agent.state.messages;
+	}
+
+	/** Fork-specific: assembler bridge for tool result interception */
+	get assemblerBridge(): ToolResultBridge | undefined {
+		return this.#assemblerBridge;
+	}
+
+	set assemblerBridge(bridge: ToolResultBridge | undefined) {
+		this.#assemblerBridge = bridge;
+	}
+
+	/** Fork-specific: returns the last effective prompt snapshot from the assembler */
+	getLastPromptSnapshot(): EffectivePromptSnapshot | null {
+		return this.#getLastPromptSnapshot?.() ?? null;
+	}
+
+	/** Convert session messages using the same pre-LLM pipeline as the active session. */
+	async convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]> {
+		const transformedMessages = await this.#transformContext(messages, signal);
+		return await this.#convertToLlm(transformedMessages);
+	}
+
+	/** Apply session-level stream hooks to a direct side request. */
+	prepareSimpleStreamOptions(options: SimpleStreamOptions): SimpleStreamOptions {
+		if (!this.#onPayload) return options;
+		if (!options.onPayload) {
+			return { ...options, onPayload: this.#onPayload };
+		}
+		const sessionOnPayload = this.#onPayload;
+		const requestOnPayload = options.onPayload;
+		return {
+			...options,
+			onPayload: async (payload, model) => {
+				const sessionPayload = await sessionOnPayload(payload, model);
+				const sessionResolvedPayload = sessionPayload ?? payload;
+				const requestPayload = await requestOnPayload(sessionResolvedPayload, model);
+				return requestPayload ?? sessionResolvedPayload;
+			},
+		};
 	}
 
 	/** Current steering mode */
@@ -1948,9 +2213,10 @@ export class AgentSession {
 			userContent.push(...options.images);
 		}
 
+		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
 		const message = options?.synthetic
-			? { role: "developer" as const, content: userContent, attribution: "agent" as const, timestamp: Date.now() }
-			: { role: "user" as const, content: userContent, attribution: "user" as const, timestamp: Date.now() };
+			? { role: "developer" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() }
+			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() };
 
 		if (eagerTodoPrelude) {
 			this.#nextToolChoiceOverride = eagerTodoPrelude.toolChoice;
@@ -2007,7 +2273,7 @@ export class AgentSession {
 	async #promptWithMessage(
 		message: AgentMessage,
 		expandedText: string,
-		options?: Pick<PromptOptions, "toolChoice" | "images"> & {
+		options?: Pick<PromptOptions, "toolChoice" | "images" | "skipCompactionCheck"> & {
 			prependMessages?: AgentMessage[];
 			skipPostPromptRecoveryWait?: boolean;
 		},
@@ -2040,7 +2306,13 @@ export class AgentSession {
 				);
 			}
 
-			// Build messages array (custom messages if any, then user message)
+			// Check if we need to compact before sending (catches aborted responses)
+			const lastAssistant = this.#findLastAssistantMessage();
+			if (lastAssistant && !options?.skipCompactionCheck) {
+				await this.#checkCompaction(lastAssistant, false);
+			}
+
+			// Build messages array (session context, eager todo prelude, then active prompt message)
 			const messages: AgentMessage[] = [];
 			const planReferenceMessage = await this.#buildPlanReferenceMessage?.();
 			if (planReferenceMessage) {
@@ -2469,7 +2741,7 @@ export class AgentSession {
 		return undefined;
 	}
 
-	get skillsSettings(): Required<SkillsSettings> | undefined {
+	get skillsSettings(): SkillsSettings | undefined {
 		return this.#skillsSettings;
 	}
 
@@ -2489,10 +2761,17 @@ export class AgentSession {
 
 	setTodoPhases(phases: TodoPhase[]): void {
 		this.#todoPhases = this.#cloneTodoPhases(phases);
+		this.#scheduleTodoAutoClear(phases);
 	}
 
 	#syncTodoPhasesFromBranch(): void {
-		this.setTodoPhases(getLatestTodoPhasesFromEntries(this.sessionManager.getBranch()));
+		const phases = getLatestTodoPhasesFromEntries(this.sessionManager.getBranch());
+		// Strip completed/abandoned tasks — they were done in a previous run,
+		// so the auto-clear grace period has already elapsed.
+		for (const phase of phases) {
+			phase.tasks = phase.tasks.filter(t => t.status !== "completed" && t.status !== "abandoned");
+		}
+		this.setTodoPhases(phases.filter(p => p.tasks.length > 0));
 	}
 
 	#cloneTodoPhases(phases: TodoPhase[]): TodoPhase[] {
@@ -2506,6 +2785,68 @@ export class AgentSession {
 				notes: task.notes,
 			})),
 		}));
+	}
+
+	/** Schedule auto-removal of completed/abandoned tasks after a delay. */
+	#scheduleTodoAutoClear(phases: TodoPhase[]): void {
+		const delaySec = this.settings.get("tasks.todoClearDelay") ?? 60;
+		if (delaySec < 0) return; // "Never" — no auto-clear
+		const delayMs = delaySec * 1000;
+		const doneTaskIds = new Set<string>();
+		for (const phase of phases) {
+			for (const task of phase.tasks) {
+				if (task.status === "completed" || task.status === "abandoned") {
+					doneTaskIds.add(task.id);
+				}
+			}
+		}
+
+		// Cancel timers for tasks that are no longer done (e.g. status was reverted)
+		for (const [id, timer] of this.#todoClearTimers) {
+			if (!doneTaskIds.has(id)) {
+				clearTimeout(timer);
+				this.#todoClearTimers.delete(id);
+			}
+		}
+
+		// Schedule new timers for newly-done tasks
+		for (const id of doneTaskIds) {
+			if (this.#todoClearTimers.has(id)) continue;
+			if (delayMs === 0) {
+				// Instant — run synchronously on next microtask to batch removals
+				const timer = setTimeout(() => this.#runTodoAutoClear(id), 0);
+				this.#todoClearTimers.set(id, timer);
+			} else {
+				const timer = setTimeout(() => this.#runTodoAutoClear(id), delayMs);
+				this.#todoClearTimers.set(id, timer);
+			}
+		}
+	}
+
+	/** Remove a single completed task and notify the UI. */
+	#runTodoAutoClear(taskId: string): void {
+		this.#todoClearTimers.delete(taskId);
+		let removed = false;
+		for (const phase of this.#todoPhases) {
+			const idx = phase.tasks.findIndex(t => t.id === taskId);
+			if (idx !== -1 && (phase.tasks[idx].status === "completed" || phase.tasks[idx].status === "abandoned")) {
+				phase.tasks.splice(idx, 1);
+				removed = true;
+				break;
+			}
+		}
+		if (!removed) return;
+
+		// Remove empty phases
+		this.#todoPhases = this.#todoPhases.filter(p => p.tasks.length > 0);
+		this.#emit({ type: "todo_auto_clear" });
+	}
+
+	#clearTodoClearTimers(): void {
+		for (const timer of this.#todoClearTimers.values()) {
+			clearTimeout(timer);
+		}
+		this.#todoClearTimers.clear();
 	}
 
 	/**
@@ -2533,6 +2874,12 @@ export class AgentSession {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		const previousSessionFile = this.sessionFile;
+		const nextDiscoverySessionToolNames = this.#mcpDiscoveryEnabled
+			? [
+					...this.#getActiveNonMCPToolNames(),
+					...this.#filterSelectableMCPToolNames(this.#defaultSelectedMCPToolNames),
+				]
+			: undefined;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
@@ -2560,6 +2907,16 @@ export class AgentSession {
 
 		this.sessionManager.appendThinkingLevelChange(this.thinkingLevel);
 		this.sessionManager.appendServiceTierChange(this.serviceTier ?? null);
+		if (nextDiscoverySessionToolNames) {
+			await this.#applyActiveToolsByName(nextDiscoverySessionToolNames, { persistMCPSelection: false });
+			if (this.getSelectedMCPToolNames().length > 0) {
+				this.sessionManager.appendMCPToolSelection(this.getSelectedMCPToolNames());
+			}
+		}
+		this.#rememberSessionDefaultSelectedMCPToolNames(
+			this.sessionFile,
+			this.#getConfiguredDefaultSelectedMCPToolNames(),
+		);
 
 		this.#todoReminderCount = 0;
 		this.#planReferenceSent = false;
@@ -2881,14 +3238,12 @@ export class AgentSession {
 	 * Cycle to next thinking level.
 	 * @returns New level, or undefined if model doesn't support thinking
 	 */
-	cycleThinkingLevel(): Effort | undefined {
+	cycleThinkingLevel(): ThinkingLevel | undefined {
 		if (!this.model?.reasoning) return undefined;
 
-		const levels = this.getAvailableThinkingLevels();
-		const currentIndex =
-			this.thinkingLevel && this.thinkingLevel !== ThinkingLevel.Off && this.thinkingLevel !== ThinkingLevel.Inherit
-				? levels.indexOf(this.thinkingLevel)
-				: -1;
+		const levels = [ThinkingLevel.Off, ...this.getAvailableThinkingLevels()];
+		const currentLevel = this.thinkingLevel === ThinkingLevel.Inherit ? ThinkingLevel.Off : this.thinkingLevel;
+		const currentIndex = currentLevel ? levels.indexOf(currentLevel) : -1;
 		const nextIndex = (currentIndex + 1) % levels.length;
 		const nextLevel = levels[nextIndex];
 		if (!nextLevel) return undefined;
@@ -2954,6 +3309,25 @@ export class AgentSession {
 	setInterruptMode(mode: "immediate" | "wait"): void {
 		this.agent.setInterruptMode(mode);
 		this.settings.set("interruptMode", mode);
+	}
+
+	// =========================================================================
+	// Compaction
+	// =========================================================================
+
+	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+		const branchEntries = this.sessionManager.getBranch();
+		const result = pruneToolOutputs(branchEntries, DEFAULT_PRUNE_CONFIG);
+		if (result.prunedCount === 0) {
+			return undefined;
+		}
+
+		await this.sessionManager.rewriteEntries();
+		const sessionContext = this.sessionManager.buildSessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#syncTodoPhasesFromBranch();
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+		return result;
 	}
 
 	/**
@@ -3114,10 +3488,11 @@ export class AgentSession {
 	}
 
 	/**
-	 * Cancel in-progress context maintenance (manual compaction or auto-handoff).
+	 * Cancel in-progress context maintenance (manual compaction, auto-compaction, or auto-handoff).
 	 */
 	abortCompaction(): void {
 		this.#compactionAbortController?.abort();
+		this.#autoCompactionAbortController?.abort();
 		this.#handoffAbortController?.abort();
 	}
 
@@ -3230,10 +3605,20 @@ export class AgentSession {
 			if (handoffSignal.aborted) {
 				throw new Error("Handoff cancelled");
 			}
-			await this.prompt(handoffPrompt, {
-				expandPromptTemplates: false,
-				synthetic: true,
-			});
+			this.#promptInFlightCount++;
+			try {
+				this.agent.setSystemPrompt(this.#baseSystemPrompt);
+				await this.#promptAgentWithIdleRetry([
+					{
+						role: "developer",
+						content: [{ type: "text", text: handoffPrompt }],
+						attribution: "agent",
+						timestamp: Date.now(),
+					},
+				]);
+			} finally {
+				this.#promptInFlightCount = Math.max(0, this.#promptInFlightCount - 1);
+			}
 			await completionPromise;
 
 			if (handoffCancelled || handoffSignal.aborted) {
@@ -3257,7 +3642,25 @@ export class AgentSession {
 			// Inject the handoff document as a custom message
 			const handoffContent = `<handoff-context>\n${handoffText}\n</handoff-context>\n\nThe above is a handoff document from a previous session. Use this context to continue the work seamlessly.`;
 			this.sessionManager.appendCustomMessageEntry("handoff", handoffContent, true, undefined, "agent");
-			const savedPath: string | undefined = undefined;
+			let savedPath: string | undefined;
+			if (options?.autoTriggered && this.settings.get("compaction.handoffSaveToDisk")) {
+				const artifactsDir = this.sessionManager.getArtifactsDir();
+				if (artifactsDir) {
+					const fileTimestamp = new Date().toISOString().replace(/[:.]/g, "-");
+					const handoffFilePath = path.join(artifactsDir, `handoff-${fileTimestamp}.md`);
+					try {
+						await Bun.write(handoffFilePath, `${handoffText}\n`);
+						savedPath = handoffFilePath;
+					} catch (error) {
+						logger.warn("Failed to save handoff document to disk", {
+							path: handoffFilePath,
+							error: error instanceof Error ? error.message : String(error),
+						});
+					}
+				} else {
+					logger.debug("Skipping handoff document save because session is not persisted");
+				}
+			}
 
 			// Rebuild agent messages from session
 			const sessionContext = this.sessionManager.buildSessionContext();
@@ -3274,6 +3677,78 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Check if context maintenance or promotion is needed and run it.
+	 * Called after agent_end and before prompt submission.
+	 *
+	 * Three cases (in order):
+	 * 1. Overflow + promotion: promote to larger model, retry without maintenance
+	 * 2. Overflow + no promotion target: run context maintenance, auto-retry on same model
+	 * 3. Threshold: Context over threshold, run context maintenance (no auto-retry)
+	 *
+	 * @param assistantMessage The assistant message to check
+	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
+	 */
+	async #checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<void> {
+		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
+		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return;
+		const contextWindow = this.model?.contextWindow ?? 0;
+		const generation = this.#promptGeneration;
+		// Skip overflow check if the message came from a different model.
+		// This handles the case where user switched from a smaller-context model (e.g. opus)
+		// to a larger-context model (e.g. codex) - the overflow error from the old model
+		// shouldn't trigger compaction for the new model.
+		const sameModel =
+			this.model && assistantMessage.provider === this.model.provider && assistantMessage.model === this.model.id;
+		// This handles the case where an error was kept after compaction (in the "kept" region).
+		// The error shouldn't trigger another compaction since we already compacted.
+		// Example: opus fails -> switch to codex -> compact -> switch back to opus -> opus error
+		// is still in context but shouldn't trigger compaction again.
+		const compactionEntry = getLatestCompactionEntry(this.sessionManager.getBranch());
+		const errorIsFromBeforeCompaction =
+			compactionEntry !== null && assistantMessage.timestamp < new Date(compactionEntry.timestamp).getTime();
+		if (sameModel && !errorIsFromBeforeCompaction && isContextOverflow(assistantMessage, contextWindow)) {
+			// Remove the error message from agent state (it IS saved to session for history,
+			// but we don't want it in context for the retry)
+			const messages = this.agent.state.messages;
+			if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+				this.agent.replaceMessages(messages.slice(0, -1));
+			}
+
+			// Try context promotion first - switch to a larger model and retry without compacting
+			const promoted = await this.#tryContextPromotion(assistantMessage);
+			if (promoted) {
+				// Retry on the promoted (larger) model without compacting
+				this.#scheduleAgentContinue({ delayMs: 100, generation });
+				return;
+			}
+
+			// No promotion target available fall through to compaction
+			const compactionSettings = this.settings.getGroup("compaction");
+			if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
+				await this.#runAutoCompaction("overflow", true);
+			}
+			return;
+		}
+		const compactionSettings = this.settings.getGroup("compaction");
+		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
+
+		// Case 2: Threshold - turn succeeded but context is getting large
+		// Skip if this was an error (non-overflow errors don't have usage data)
+		if (assistantMessage.stopReason === "error") return;
+		const pruneResult = await this.#pruneToolOutputs();
+		let contextTokens = calculateContextTokens(assistantMessage.usage);
+		if (pruneResult) {
+			contextTokens = Math.max(0, contextTokens - pruneResult.tokensSaved);
+		}
+		if (shouldCompact(contextTokens, contextWindow, compactionSettings)) {
+			// Try promotion first — if a larger model is available, switch instead of compacting
+			const promoted = await this.#tryContextPromotion(assistantMessage);
+			if (!promoted) {
+				await this.#runAutoCompaction("threshold", false);
+			}
+		}
+	}
 	#enforceRewindBeforeYield(): boolean {
 		if (!this.#checkpointState || this.#pendingRewindReport) {
 			return false;
@@ -3342,33 +3817,24 @@ export class AgentSession {
 		if (calledRequiredTool) {
 			return;
 		}
-
-		const askTool = this.#toolRegistry.get("ask");
-		const exitPlanModeTool = this.#toolRegistry.get("exit_plan_mode");
-		if (!askTool || !exitPlanModeTool) {
+		const hasRequiredTools = this.#toolRegistry.has("ask") && this.#toolRegistry.has("exit_plan_mode");
+		if (!hasRequiredTools) {
 			logger.warn("Plan mode enforcement skipped because ask/exit tools are unavailable", {
 				activeToolNames: this.agent.state.tools.map(tool => tool.name),
 			});
 			return;
 		}
-		const forcedTools = [askTool, exitPlanModeTool];
 
 		const reminder = renderPromptTemplate(planModeToolDecisionReminderPrompt, {
 			askToolName: "ask",
 			exitToolName: "exit_plan_mode",
 		});
 
-		const previousTools = this.agent.state.tools;
-		this.agent.setTools(forcedTools);
-		try {
-			await this.prompt(reminder, {
-				synthetic: true,
-				expandPromptTemplates: false,
-				toolChoice: "required",
-			});
-		} finally {
-			this.agent.setTools(previousTools);
-		}
+		await this.prompt(reminder, {
+			synthetic: true,
+			expandPromptTemplates: false,
+			toolChoice: "required",
+		});
 	}
 
 	#createEagerTodoPrelude(): { message: AgentMessage; toolChoice: ToolChoice } | undefined {
@@ -3490,12 +3956,58 @@ export class AgentSession {
 		this.#scheduleAgentContinue({ generation: this.#promptGeneration });
 	}
 
+	/**
+	 * Attempt context promotion to a larger model.
+	 * Returns true if promotion succeeded (caller should retry without compacting).
+	 */
+	async #tryContextPromotion(assistantMessage: AssistantMessage): Promise<boolean> {
+		const promotionSettings = this.settings.getGroup("contextPromotion");
+		if (!promotionSettings.enabled) return false;
+		const currentModel = this.model;
+		if (!currentModel) return false;
+		if (assistantMessage.provider !== currentModel.provider || assistantMessage.model !== currentModel.id)
+			return false;
+		const contextWindow = currentModel.contextWindow ?? 0;
+		if (contextWindow <= 0) return false;
+		const targetModel = await this.#resolveContextPromotionTarget(currentModel, contextWindow);
+		if (!targetModel) return false;
+
+		try {
+			await this.setModelTemporary(targetModel);
+			logger.debug("Context promotion switched model on overflow", {
+				from: `${currentModel.provider}/${currentModel.id}`,
+				to: `${targetModel.provider}/${targetModel.id}`,
+			});
+			return true;
+		} catch (error) {
+			logger.warn("Context promotion failed", {
+				from: `${currentModel.provider}/${currentModel.id}`,
+				to: `${targetModel.provider}/${targetModel.id}`,
+				error: String(error),
+			});
+			return false;
+		}
+	}
+
+	async #resolveContextPromotionTarget(currentModel: Model, contextWindow: number): Promise<Model | undefined> {
+		const availableModels = this.#modelRegistry.getAvailable();
+		if (availableModels.length === 0) return undefined;
+
+		const candidate = this.#resolveContextPromotionConfiguredTarget(currentModel, availableModels);
+		if (!candidate) return undefined;
+		if (modelsAreEqual(candidate, currentModel)) return undefined;
+		if (candidate.contextWindow <= contextWindow) return undefined;
+		const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+		if (!apiKey) return undefined;
+		return candidate;
+	}
+
 	#setModelWithProviderSessionReset(model: Model): void {
 		const currentModel = this.model;
 		if (currentModel) {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 		}
-		this.agent.setModel(this.#applySessionModelOverrides(model));
+		this.agent.setModel(model);
 	}
 
 	#closeCodexProviderSessionsForHistoryRewrite(): void {
@@ -3523,6 +4035,10 @@ export class AgentSession {
 		this.#providerSessionState.delete(providerKey);
 	}
 
+	#getModelKey(model: Model): string {
+		return `${model.provider}/${model.id}`;
+	}
+
 	#formatRoleModelValue(role: ModelRole, model: Model): string {
 		const modelKey = `${model.provider}/${model.id}`;
 		const existingRoleValue = this.settings.getModelRole(role);
@@ -3531,6 +4047,18 @@ export class AgentSession {
 		const thinkingLevel = extractExplicitThinkingSelector(existingRoleValue, this.settings);
 		if (thinkingLevel === undefined) return modelKey;
 		return `${modelKey}:${thinkingLevel}`;
+	}
+	#resolveContextPromotionConfiguredTarget(currentModel: Model, availableModels: Model[]): Model | undefined {
+		const configuredTarget = currentModel.contextPromotionTarget?.trim();
+		if (!configuredTarget) return undefined;
+
+		const parsed = parseModelString(configuredTarget);
+		if (parsed) {
+			const explicitModel = availableModels.find(m => m.provider === parsed.provider && m.id === parsed.id);
+			if (explicitModel) return explicitModel;
+		}
+
+		return availableModels.find(m => m.provider === currentModel.provider && m.id === configuredTarget);
 	}
 
 	#resolveRoleModel(role: ModelRole, availableModels: Model[], currentModel: Model | undefined): Model | undefined {
@@ -3548,18 +4076,439 @@ export class AgentSession {
 		}).model;
 	}
 
+	#getCompactionModelCandidates(availableModels: Model[]): Model[] {
+		const candidates: Model[] = [];
+		const seen = new Set<string>();
+
+		const addCandidate = (model: Model | undefined): void => {
+			if (!model) return;
+			const key = this.#getModelKey(model);
+			if (seen.has(key)) return;
+			seen.add(key);
+			candidates.push(model);
+		};
+
+		const currentModel = this.model;
+		for (const role of MODEL_ROLE_IDS) {
+			addCandidate(this.#resolveRoleModel(role, availableModels, currentModel));
+		}
+
+		const sortedByContext = [...availableModels].sort((a, b) => b.contextWindow - a.contextWindow);
+		for (const model of sortedByContext) {
+			if (!seen.has(this.#getModelKey(model))) {
+				addCandidate(model);
+				break;
+			}
+		}
+
+		return candidates;
+	}
+
+	/**
+	 * Internal: Run auto-compaction with events.
+	 */
+	async #runAutoCompaction(reason: "overflow" | "threshold", willRetry: boolean, deferred = false): Promise<void> {
+		const compactionSettings = this.settings.getGroup("compaction");
+		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
+		const generation = this.#promptGeneration;
+		if (!deferred && reason !== "overflow" && compactionSettings.strategy === "handoff") {
+			this.#schedulePostPromptTask(
+				async signal => {
+					await Promise.resolve();
+					if (signal.aborted) return;
+					await this.#runAutoCompaction(reason, willRetry, true);
+				},
+				{ generation },
+			);
+			return;
+		}
+
+		let action: "context-full" | "handoff" =
+			compactionSettings.strategy === "handoff" && reason !== "overflow" ? "handoff" : "context-full";
+		await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
+		// Abort any older auto-compaction before installing this run's controller.
+		this.#autoCompactionAbortController?.abort();
+		const autoCompactionAbortController = new AbortController();
+		this.#autoCompactionAbortController = autoCompactionAbortController;
+		const autoCompactionSignal = autoCompactionAbortController.signal;
+
+		try {
+			if (compactionSettings.strategy === "handoff" && reason !== "overflow") {
+				const handoffFocus = AUTO_HANDOFF_THRESHOLD_FOCUS;
+				const handoffResult = await this.handoff(handoffFocus, {
+					autoTriggered: true,
+					signal: this.#autoCompactionAbortController.signal,
+				});
+				if (!handoffResult) {
+					const aborted = autoCompactionSignal.aborted;
+					if (aborted) {
+						await this.#emitSessionEvent({
+							type: "auto_compaction_end",
+							action,
+							result: undefined,
+							aborted: true,
+							willRetry: false,
+						});
+						return;
+					}
+					logger.warn("Auto-handoff returned no document; falling back to context-full maintenance", {
+						reason,
+					});
+					action = "context-full";
+				}
+				if (handoffResult) {
+					await this.#emitSessionEvent({
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: false,
+						willRetry: false,
+					});
+					return;
+				}
+			}
+
+			if (!this.model) {
+				await this.#emitSessionEvent({
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					skipped: true,
+				});
+				return;
+			}
+
+			const availableModels = this.#modelRegistry.getAvailable();
+			if (availableModels.length === 0) {
+				await this.#emitSessionEvent({
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					skipped: true,
+				});
+				return;
+			}
+
+			const pathEntries = this.sessionManager.getBranch();
+
+			const preparation = prepareCompaction(pathEntries, compactionSettings);
+			if (!preparation) {
+				await this.#emitSessionEvent({
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: false,
+					willRetry: false,
+					skipped: true,
+				});
+				if (!willRetry && this.agent.hasQueuedMessages()) {
+					this.#scheduleAgentContinue({
+						delayMs: 100,
+						generation,
+						shouldContinue: () => this.agent.hasQueuedMessages(),
+					});
+				}
+				return;
+			}
+
+			let hookCompaction: CompactionResult | undefined;
+			let fromExtension = false;
+			let hookContext: string[] | undefined;
+			let hookPrompt: string | undefined;
+			let preserveData: Record<string, unknown> | undefined;
+
+			if (this.#extensionRunner?.hasHandlers("session_before_compact")) {
+				const hookResult = (await this.#extensionRunner.emit({
+					type: "session_before_compact",
+					preparation,
+					branchEntries: pathEntries,
+					customInstructions: undefined,
+					signal: autoCompactionSignal,
+				})) as SessionBeforeCompactResult | undefined;
+
+				if (hookResult?.cancel) {
+					await this.#emitSessionEvent({
+						type: "auto_compaction_end",
+						action,
+						result: undefined,
+						aborted: true,
+						willRetry: false,
+					});
+					return;
+				}
+
+				if (hookResult?.compaction) {
+					hookCompaction = hookResult.compaction;
+					fromExtension = true;
+				}
+			}
+
+			if (!hookCompaction && this.#extensionRunner?.hasHandlers("session.compacting")) {
+				const compactMessages = preparation.messagesToSummarize.concat(preparation.turnPrefixMessages);
+				const result = (await this.#extensionRunner.emit({
+					type: "session.compacting",
+					sessionId: this.sessionId,
+					messages: compactMessages,
+				})) as { context?: string[]; prompt?: string; preserveData?: Record<string, unknown> } | undefined;
+
+				hookContext = result?.context;
+				hookPrompt = result?.prompt;
+				preserveData = result?.preserveData;
+			}
+
+			let summary: string;
+			let shortSummary: string | undefined;
+			let firstKeptEntryId: string;
+			let tokensBefore: number;
+			let details: unknown;
+
+			if (hookCompaction) {
+				// Extension provided compaction content
+				summary = hookCompaction.summary;
+				shortSummary = hookCompaction.shortSummary;
+				firstKeptEntryId = hookCompaction.firstKeptEntryId;
+				tokensBefore = hookCompaction.tokensBefore;
+				details = hookCompaction.details;
+				preserveData ??= hookCompaction.preserveData;
+			} else {
+				const candidates = this.#getCompactionModelCandidates(availableModels);
+				const retrySettings = this.settings.getGroup("retry");
+				let compactResult: CompactionResult | undefined;
+				let lastError: unknown;
+
+				for (const candidate of candidates) {
+					const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+					if (!apiKey) continue;
+
+					let attempt = 0;
+					while (true) {
+						try {
+							compactResult = await compact(preparation, candidate, apiKey, undefined, autoCompactionSignal, {
+								promptOverride: hookPrompt,
+								extraContext: hookContext,
+								remoteInstructions: this.#baseSystemPrompt,
+								initiatorOverride: "agent",
+							});
+							break;
+						} catch (error) {
+							if (autoCompactionSignal.aborted) {
+								throw error;
+							}
+
+							const message = error instanceof Error ? error.message : String(error);
+							const retryAfterMs = this.#parseRetryAfterMsFromError(message);
+							const shouldRetry =
+								retrySettings.enabled &&
+								attempt < retrySettings.maxRetries &&
+								(retryAfterMs !== undefined || this.#isRetryableErrorMessage(message));
+							if (!shouldRetry) {
+								lastError = error;
+								break;
+							}
+
+							const baseDelayMs = retrySettings.baseDelayMs * 2 ** attempt;
+							const delayMs = retryAfterMs !== undefined ? Math.max(baseDelayMs, retryAfterMs) : baseDelayMs;
+
+							// If retry delay is too long (>30s), try next candidate instead of waiting
+							const maxAcceptableDelayMs = 30_000;
+							if (delayMs > maxAcceptableDelayMs) {
+								const hasMoreCandidates = candidates.indexOf(candidate) < candidates.length - 1;
+								if (hasMoreCandidates) {
+									logger.warn("Auto-compaction retry delay too long, trying next model", {
+										delayMs,
+										retryAfterMs,
+										error: message,
+										model: `${candidate.provider}/${candidate.id}`,
+									});
+									lastError = error;
+									break; // Exit retry loop, continue to next candidate
+								}
+								// No more candidates - we have to wait
+							}
+
+							attempt++;
+							logger.warn("Auto-compaction failed, retrying", {
+								attempt,
+								maxRetries: retrySettings.maxRetries,
+								delayMs,
+								retryAfterMs,
+								error: message,
+								model: `${candidate.provider}/${candidate.id}`,
+							});
+							await abortableSleep(delayMs, autoCompactionSignal);
+						}
+					}
+
+					if (compactResult) {
+						break;
+					}
+				}
+
+				if (!compactResult) {
+					if (lastError) {
+						throw lastError;
+					}
+					throw new Error("Compaction failed: no available model");
+				}
+
+				summary = compactResult.summary;
+				shortSummary = compactResult.shortSummary;
+				firstKeptEntryId = compactResult.firstKeptEntryId;
+				tokensBefore = compactResult.tokensBefore;
+				details = compactResult.details;
+				preserveData = { ...(preserveData ?? {}), ...(compactResult.preserveData ?? {}) };
+			}
+
+			if (autoCompactionSignal.aborted) {
+				await this.#emitSessionEvent({
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: true,
+					willRetry: false,
+				});
+				return;
+			}
+
+			this.sessionManager.appendCompaction(
+				summary,
+				shortSummary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				fromExtension,
+				preserveData,
+			);
+			const newEntries = this.sessionManager.getEntries();
+			const sessionContext = this.sessionManager.buildSessionContext();
+			this.agent.replaceMessages(sessionContext.messages);
+			this.#syncTodoPhasesFromBranch();
+			this.#closeCodexProviderSessionsForHistoryRewrite();
+
+			// Get the saved compaction entry for the hook
+			const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.summary === summary) as
+				| CompactionEntry
+				| undefined;
+
+			if (this.#extensionRunner && savedCompactionEntry) {
+				await this.#extensionRunner.emit({
+					type: "session_compact",
+					compactionEntry: savedCompactionEntry,
+					fromExtension,
+				});
+			}
+
+			const result: CompactionResult = {
+				summary,
+				shortSummary,
+				firstKeptEntryId,
+				tokensBefore,
+				details,
+				preserveData,
+			};
+			await this.#emitSessionEvent({ type: "auto_compaction_end", action, result, aborted: false, willRetry });
+
+			if (!willRetry && compactionSettings.autoContinue !== false) {
+				const continuePrompt = async () => {
+					await this.#promptWithMessage(
+						{
+							role: "developer",
+							content: [{ type: "text", text: "Continue if you have next steps." }],
+							attribution: "agent",
+							timestamp: Date.now(),
+						},
+						"Continue if you have next steps.",
+						{ skipPostPromptRecoveryWait: true },
+					);
+				};
+				this.#schedulePostPromptTask(
+					async signal => {
+						await Promise.resolve();
+						if (signal.aborted) return;
+						await continuePrompt();
+					},
+					{ generation },
+				);
+			}
+
+			if (willRetry) {
+				const messages = this.agent.state.messages;
+				const lastMsg = messages[messages.length - 1];
+				if (lastMsg?.role === "assistant" && (lastMsg as AssistantMessage).stopReason === "error") {
+					this.agent.replaceMessages(messages.slice(0, -1));
+				}
+
+				this.#scheduleAgentContinue({ delayMs: 100, generation });
+			} else if (this.agent.hasQueuedMessages()) {
+				// Auto-compaction can complete while follow-up/steering/custom messages are waiting.
+				// Kick the loop so queued messages are actually delivered.
+				this.#scheduleAgentContinue({
+					delayMs: 100,
+					generation,
+					shouldContinue: () => this.agent.hasQueuedMessages(),
+				});
+			}
+		} catch (error) {
+			if (autoCompactionSignal.aborted) {
+				await this.#emitSessionEvent({
+					type: "auto_compaction_end",
+					action,
+					result: undefined,
+					aborted: true,
+					willRetry: false,
+				});
+				return;
+			}
+			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			await this.#emitSessionEvent({
+				type: "auto_compaction_end",
+				action,
+				result: undefined,
+				aborted: false,
+				willRetry: false,
+				errorMessage:
+					reason === "overflow"
+						? `Context overflow recovery failed: ${errorMessage}`
+						: `Auto-compaction failed: ${errorMessage}`,
+			});
+		} finally {
+			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
+				this.#autoCompactionAbortController = undefined;
+			}
+		}
+	}
+
+	/**
+	 * Toggle auto-compaction setting.
+	 */
+	setAutoCompactionEnabled(enabled: boolean): void {
+		this.settings.set("compaction.enabled", enabled);
+		if (enabled && this.settings.get("compaction.strategy") === "off") {
+			this.settings.set("compaction.strategy", "context-full");
+		}
+	}
+
+	/** Whether auto-compaction is enabled */
+	get autoCompactionEnabled(): boolean {
+		return this.settings.get("compaction.enabled") && this.settings.get("compaction.strategy") !== "off";
+	}
+
 	// =========================================================================
 	// Auto-Retry
 	// =========================================================================
 
 	/**
 	 * Check if an error is retryable (overloaded, rate limit, server errors).
-	 * Context overflow errors are NOT retryable.
+	 * Context overflow errors are NOT retryable (handled by compaction instead).
 	 */
 	#isRetryableError(message: AssistantMessage): boolean {
 		if (message.stopReason !== "error" || !message.errorMessage) return false;
 
-		// Context overflow is not retryable
+		// Context overflow is handled by compaction, not retry
 		const contextWindow = this.model?.contextWindow ?? 0;
 		if (isContextOverflow(message, contextWindow)) return false;
 
@@ -3568,8 +4517,8 @@ export class AgentSession {
 	}
 
 	#isRetryableErrorMessage(errorMessage: string): boolean {
-		// Match: overloaded_error, rate limit, usage limit, 429, 500, 502, 503, 504, service unavailable, connection error, fetch failed, retry delay exceeded
-		return /overloaded|rate.?limit|usage.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|unable to connect|fetch failed|retry delay/i.test(
+		// Match: overloaded_error, rate limit, usage limit, 429, 500, 502, 503, 504, service unavailable, connection error, fetch failed, retry delay exceeded, stream stall
+		return /overloaded|rate.?limit|usage.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|unable to connect|fetch failed|retry delay|stream stall/i.test(
 			errorMessage,
 		);
 	}
@@ -3806,6 +4755,7 @@ export class AgentSession {
 				onChunk,
 				signal: this.#bashAbortController.signal,
 				sessionKey: this.sessionId,
+				timeout: clampTimeout("bash") * 1000,
 			});
 
 			this.recordBashResult(command, result, options);
@@ -4046,6 +4996,8 @@ export class AgentSession {
 
 		// Reload messages
 		const sessionContext = this.sessionManager.buildSessionContext();
+		const fallbackSelectedMCPToolNames = this.#getSessionDefaultSelectedMCPToolNames(sessionPath);
+		await this.#restoreMCPSelectionsForSessionContext(sessionContext, { fallbackSelectedMCPToolNames });
 
 		// Emit session_switch event to hooks
 		if (this.#extensionRunner) {
@@ -4148,6 +5100,8 @@ export class AgentSession {
 
 		// Reload messages from entries (works for both file and in-memory mode)
 		const sessionContext = this.sessionManager.buildSessionContext();
+
+		await this.#restoreMCPSelectionsForSessionContext(sessionContext);
 
 		// Emit session_branch event to hooks (after branch completes)
 		if (this.#extensionRunner) {
@@ -4312,6 +5266,7 @@ export class AgentSession {
 
 		// Update agent state
 		const sessionContext = this.sessionManager.buildSessionContext();
+		await this.#restoreMCPSelectionsForSessionContext(sessionContext);
 		this.agent.replaceMessages(sessionContext.messages);
 		this.#syncTodoPhasesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
@@ -4609,7 +5564,7 @@ export class AgentSession {
 		const model = this.agent.state.model;
 		const thinkingLevel = this.#thinkingLevel;
 		lines.push("## Configuration\n");
-		lines.push(`Model: ${model.provider}/${model.id}`);
+		lines.push(`Model: ${model ? `${model.provider}/${model.id}` : "(not selected)"}`);
 		lines.push(`Thinking Level: ${thinkingLevel}`);
 		lines.push("\n");
 

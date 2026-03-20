@@ -30,6 +30,7 @@ const HAS_ANTHROPIC_AUTH = !!e2eApiKey("ANTHROPIC_API_KEY");
 describe.skipIf(!HAS_ANTIGRAVITY_AUTH)("Compaction with thinking models (Antigravity)", () => {
 	let session: AgentSession;
 	let tempDir: string;
+	let authStorage: AuthStorage | undefined;
 
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-thinking-compaction-test-${Snowflake.next()}`);
@@ -38,8 +39,10 @@ describe.skipIf(!HAS_ANTIGRAVITY_AUTH)("Compaction with thinking models (Antigra
 
 	afterEach(async () => {
 		if (session) {
-			session.dispose();
+			await session.dispose();
 		}
+		authStorage?.close();
+		authStorage = undefined;
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true });
 		}
@@ -76,7 +79,7 @@ describe.skipIf(!HAS_ANTIGRAVITY_AUTH)("Compaction with thinking models (Antigra
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
 
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		session = new AgentSession({
@@ -92,7 +95,7 @@ describe.skipIf(!HAS_ANTIGRAVITY_AUTH)("Compaction with thinking models (Antigra
 	}
 
 	it("should compact successfully with claude-opus-4-5-thinking and thinking level high", async () => {
-		createSession("claude-opus-4-5-thinking", Effort.High);
+		await createSession("claude-opus-4-5-thinking", Effort.High);
 
 		// Send a simple prompt
 		await session.prompt("Write down the first 10 prime numbers.");
@@ -119,7 +122,7 @@ describe.skipIf(!HAS_ANTIGRAVITY_AUTH)("Compaction with thinking models (Antigra
 	}, 180000);
 
 	it("should compact successfully with claude-sonnet-4-5 (non-thinking) for comparison", async () => {
-		createSession("claude-sonnet-4-5");
+		await createSession("claude-sonnet-4-5");
 
 		await session.prompt("Write down the first 10 prime numbers.");
 		await session.agent.waitForIdle();
@@ -141,6 +144,7 @@ describe.skipIf(!HAS_ANTIGRAVITY_AUTH)("Compaction with thinking models (Antigra
 describe.skipIf(!HAS_ANTHROPIC_AUTH)("Compaction with thinking models (Anthropic)", () => {
 	let session: AgentSession;
 	let tempDir: string;
+	let authStorage: AuthStorage | undefined;
 
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-thinking-compaction-anthropic-test-${Snowflake.next()}`);
@@ -149,8 +153,10 @@ describe.skipIf(!HAS_ANTHROPIC_AUTH)("Compaction with thinking models (Anthropic
 
 	afterEach(async () => {
 		if (session) {
-			session.dispose();
+			await session.dispose();
 		}
+		authStorage?.close();
+		authStorage = undefined;
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true });
 		}
@@ -179,7 +185,7 @@ describe.skipIf(!HAS_ANTHROPIC_AUTH)("Compaction with thinking models (Anthropic
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated();
 
-		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
+		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);
 
 		session = new AgentSession({
@@ -196,7 +202,7 @@ describe.skipIf(!HAS_ANTHROPIC_AUTH)("Compaction with thinking models (Anthropic
 
 	it("should compact successfully with claude-3-7-sonnet and thinking level high", async () => {
 		const model = getBundledModel("anthropic", "claude-3-7-sonnet-latest")!;
-		createSession(model, Effort.High);
+		await createSession(model, Effort.High);
 
 		// Send a simple prompt
 		await session.prompt("Write down the first 10 prime numbers.");

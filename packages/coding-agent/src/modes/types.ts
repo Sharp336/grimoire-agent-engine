@@ -56,6 +56,7 @@ export interface InteractiveModeContext {
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
 	todoContainer: Container;
+	btwContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
 	statusLine: StatusLineComponent;
@@ -92,6 +93,8 @@ export interface InteractiveModeContext {
 	loadingAnimation: Loader | undefined;
 	retryLoader: Loader | undefined;
 	retryEscapeHandler?: () => void;
+	autoCompactionEscapeHandler?: () => void;
+	autoCompactionLoader?: Loader | undefined;
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
 	optimisticUserMessageSignature: string | undefined;
@@ -193,6 +196,7 @@ export interface InteractiveModeContext {
 	showTreeSelector(): void;
 	showSessionSelector(): void;
 	handleResumeSession(sessionPath: string): Promise<void>;
+	handleSessionDeleteCommand(): Promise<void>;
 	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void>;
 	showHookConfirm(title: string, message: string): Promise<boolean>;
 	showDebugSelector(): void;
@@ -204,6 +208,9 @@ export interface InteractiveModeContext {
 	handleDequeue(): void;
 	handleBackgroundCommand(): void;
 	handleImagePaste(): Promise<boolean>;
+	handleBtwCommand(question: string): Promise<void>;
+	hasActiveBtw(): boolean;
+	handleBtwEscape(): boolean;
 	cycleThinkingLevel(): void;
 	cycleRoleModel(options?: { temporary?: boolean }): Promise<void>;
 	toggleToolOutputExpansion(): void;

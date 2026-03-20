@@ -2,8 +2,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { FileType, glob } from "@oh-my-pi/pi-natives";
-import { CONFIG_DIR_NAME, getConfigAgentDirName, getConfigDirName, tryParseJson } from "@oh-my-pi/pi-utils";
-import { readFile } from "../capability/fs";
+import { CONFIG_DIR_NAME, getConfigDirName, tryParseJson } from "@oh-my-pi/pi-utils";
+import { readDirEntries, readFile } from "../capability/fs";
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
@@ -19,7 +19,7 @@ export const SOURCE_PATHS = {
 			return getConfigDirName();
 		},
 		get userAgent() {
-			return getConfigAgentDirName();
+			return `${getConfigDirName()}/agent`;
 		},
 		projectDir: CONFIG_DIR_NAME,
 	},
@@ -163,6 +163,11 @@ export function buildRuleFromMarkdown(
 	}
 
 	const resolvedName = options?.ruleName ?? name.replace(options?.stripNamePattern ?? /\.(md|mdc)$/, "");
+	const rawMode = frontmatter.interruptMode;
+	const interruptMode: Rule["interruptMode"] =
+		rawMode === "never" || rawMode === "prose-only" || rawMode === "tool-only" || rawMode === "always"
+			? rawMode
+			: undefined;
 	return {
 		name: resolvedName,
 		path: filePath,
@@ -172,6 +177,7 @@ export function buildRuleFromMarkdown(
 		description: typeof frontmatter.description === "string" ? frontmatter.description : undefined,
 		condition,
 		scope,
+		interruptMode,
 		_source: source,
 	};
 }
@@ -304,6 +310,9 @@ export async function scanSkillsFromDir(
 			const content = await readFile(skillPath);
 			if (!content) return;
 			const { frontmatter, body } = parseFrontmatter(content, { source: skillPath });
+			if (frontmatter.enabled === false) {
+				return;
+			}
 			if (requireDescription && !frontmatter.description) {
 				return;
 			}
@@ -520,7 +529,14 @@ export async function discoverExtensionModulePaths(_ctx: LoadContext, dir: strin
 		subdirsWithDeclaredExtensions.add(subdir);
 		const subdirPath = path.join(dir, subdir);
 		for (const extPath of declaredExtensions) {
-			const resolvedExtPath = path.resolve(subdirPath, extPath);
+			let resolvedExtPath = path.resolve(subdirPath, extPath);
+			const entries = await readDirEntries(resolvedExtPath);
+			if (entries.length !== 0) {
+				const pluginFilePath = entries.find(
+					e => e.isFile() && (e.name === "index.ts" || e.name === "index.js"),
+				)?.name;
+				resolvedExtPath = pluginFilePath ? path.join(resolvedExtPath, pluginFilePath) : resolvedExtPath;
+			}
 			const content = await readFile(resolvedExtPath);
 			if (content !== null) {
 				discovered.add(resolvedExtPath);

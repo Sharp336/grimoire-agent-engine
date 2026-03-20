@@ -3,7 +3,9 @@
  *
  * Handles connection initialization, tool listing, and tool calling.
  */
-import { logger, withTimeout } from "@oh-my-pi/pi-utils";
+import * as path from "node:path";
+import * as url from "node:url";
+import { getProjectDir, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { createHttpTransport } from "./transports/http";
 import { createStdioTransport } from "./transports/stdio";
 import type {
@@ -47,6 +49,27 @@ const CLIENT_INFO = {
 };
 
 /**
+ * Default handler for standard MCP server-to-client requests.
+ * Handles `ping` and `roots/list`; rejects unknown methods with -32601.
+ * Reads getProjectDir() at call time so the root stays stable even if
+ * the process cwd changes during tool execution.
+ */
+async function defaultRequestHandler(method: string, _params: unknown): Promise<unknown> {
+	switch (method) {
+		case "ping":
+			return {};
+		case "roots/list": {
+			const cwd = getProjectDir();
+			return {
+				roots: [{ uri: url.pathToFileURL(cwd).href, name: path.basename(cwd) }],
+			};
+		}
+		default:
+			throw Object.assign(new Error(`Unsupported server request: ${method}`), { code: -32601 });
+	}
+}
+
+/**
  * Create a transport for the given server config.
  */
 async function createTransport(config: MCPServerConfig): Promise<MCPTransport> {
@@ -68,7 +91,11 @@ async function createTransport(config: MCPServerConfig): Promise<MCPTransport> {
  */
 async function initializeConnection(
 	transport: MCPTransport,
-	options?: { signal?: AbortSignal },
+	options?: {
+		signal?: AbortSignal;
+		/** Called after the initialize response (which sets the session ID) but before notifications/initialized. */
+		onInitialized?: () => void | Promise<void>;
+	},
 ): Promise<MCPInitializeResult> {
 	const params: MCPInitializeParams = {
 		protocolVersion: PROTOCOL_VERSION,
@@ -81,12 +108,17 @@ async function initializeConnection(
 	const result = await transport.request<MCPInitializeResult>(
 		"initialize",
 		params as unknown as Record<string, unknown>,
-		options,
+		{ signal: options?.signal },
 	);
 
 	if (options?.signal?.aborted) {
 		throw options.signal.reason instanceof Error ? options.signal.reason : new Error("Aborted");
 	}
+
+	// Hook point: the transport now has the session ID from the initialize response.
+	// For HTTP, this is the moment to open the SSE stream so server-to-client requests
+	// triggered by notifications/initialized (e.g. roots/list) can be delivered.
+	await options?.onInitialized?.();
 
 	// Send initialized notification
 	await transport.notify("notifications/initialized");
@@ -101,23 +133,37 @@ async function initializeConnection(
 export async function connectToServer(
 	name: string,
 	config: MCPServerConfig,
-	options?: { signal?: AbortSignal; onNotification?: (method: string, params: unknown) => void },
+	options?: {
+		signal?: AbortSignal;
+		onNotification?: (method: string, params: unknown) => void;
+		onRequest?: (method: string, params: unknown) => Promise<unknown>;
+	},
 ): Promise<MCPServerConnection> {
 	const timeoutMs = config.timeout ?? CONNECTION_TIMEOUT_MS;
+	let transport: MCPTransport | undefined;
 
 	const connect = async (): Promise<MCPServerConnection> => {
-		const transport = await createTransport(config);
+		transport = await createTransport(config);
 		if (options?.onNotification) {
 			transport.onNotification = options.onNotification;
 		}
 
-		try {
-			const initResult = await initializeConnection(transport, options);
+		// Always handle standard MCP server-to-client requests (ping, roots/list).
+		// The initialize request declares roots capability, so we must respond to
+		// roots/list — even for short-lived test connections.
+		transport.onRequest = options?.onRequest ?? defaultRequestHandler;
 
-			// Start SSE background listener for HTTP transports
-			if ("startSSEListener" in transport && typeof transport.startSSEListener === "function") {
-				void (transport as { startSSEListener(): Promise<void> }).startSSEListener();
-			}
+		try {
+			const initResult = await initializeConnection(transport, {
+				signal: options?.signal,
+				async onInitialized() {
+					// Open the SSE stream before sending initialized, so server-to-client
+					// requests triggered by on_initialized (e.g. roots/list) are delivered.
+					if ("startSSEListener" in transport! && typeof transport!.startSSEListener === "function") {
+						await (transport as { startSSEListener(): Promise<void> }).startSSEListener();
+					}
+				},
+			});
 
 			return {
 				name,
@@ -133,12 +179,21 @@ export async function connectToServer(
 		}
 	};
 
-	return withTimeout(
-		connect(),
-		timeoutMs,
-		`Connection to MCP server "${name}" timed out after ${timeoutMs}ms`,
-		options?.signal,
-	);
+	try {
+		return await withTimeout(
+			connect(),
+			timeoutMs,
+			`Connection to MCP server "${name}" timed out after ${timeoutMs}ms`,
+			options?.signal,
+		);
+	} catch (error) {
+		// If withTimeout rejected (timeout/abort) while connect() was still pending,
+		// the transport may be alive with an open SSE listener. Close it.
+		if (transport) {
+			void transport.close().catch(() => {});
+		}
+		throw error;
+	}
 }
 
 /**

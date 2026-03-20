@@ -25,6 +25,7 @@ describe("ModelRegistry", () => {
 	});
 
 	afterEach(() => {
+		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true });
 		}
@@ -183,6 +184,89 @@ describe("ModelRegistry", () => {
 			await registry.refresh("offline");
 
 			expect(getModelsForProvider(registry, "anthropic")[0].baseUrl).toBe("https://second-proxy.example.com/v1");
+		});
+	});
+
+	describe("provider compat overrides", () => {
+		test("provider-level compat applies to built-in models", () => {
+			writeRawModelsJson({
+				openrouter: {
+					compat: {
+						supportsUsageInStreaming: false,
+						supportsStrictMode: false,
+					},
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const models = getModelsForProvider(registry, "openrouter");
+			expect(models.length).toBeGreaterThan(0);
+			for (const model of models) {
+				expect(model.compat?.supportsUsageInStreaming).toBe(false);
+				expect(model.compat?.supportsStrictMode).toBe(false);
+			}
+		});
+
+		test("provider-level compat applies to custom models", () => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					compat: {
+						supportsUsageInStreaming: false,
+						maxTokensField: "max_tokens",
+					},
+					models: [
+						{
+							id: "demo-model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 1000,
+							maxTokens: 100,
+						},
+					],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("demo", "demo-model");
+			expect(model?.compat?.supportsUsageInStreaming).toBe(false);
+			expect(model?.compat?.maxTokensField).toBe("max_tokens");
+		});
+
+		test("model-level compat overrides provider-level compat for custom models", () => {
+			writeRawModelsJson({
+				demo: {
+					baseUrl: "https://example.com/v1",
+					apiKey: "DEMO_KEY",
+					api: "openai-completions",
+					compat: {
+						supportsUsageInStreaming: false,
+						maxTokensField: "max_tokens",
+					},
+					models: [
+						{
+							id: "demo-model",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 1000,
+							maxTokens: 100,
+							compat: {
+								supportsUsageInStreaming: true,
+								maxTokensField: "max_completion_tokens",
+							},
+						},
+					],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("demo", "demo-model");
+			expect(model?.compat?.supportsUsageInStreaming).toBe(true);
+			expect(model?.compat?.maxTokensField).toBe("max_completion_tokens");
 		});
 	});
 
@@ -471,6 +555,35 @@ describe("ModelRegistry", () => {
 
 			const compat = sonnet?.compat as OpenAICompat | undefined;
 			expect(compat?.openRouterRouting).toEqual({ order: ["anthropic", "together"] });
+		});
+
+		test("model override merges compat.extraBody across provider+model", () => {
+			writeRawModelsJson({
+				openrouter: {
+					compat: {
+						extraBody: {
+							gateway: "default-gateway",
+							controller: "provider-controller",
+						},
+					},
+					modelOverrides: {
+						"anthropic/claude-sonnet-4": {
+							compat: {
+								extraBody: {
+									controller: "model-controller",
+								},
+							},
+						},
+					},
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const models = getModelsForProvider(registry, "openrouter");
+			const sonnet = models.find(m => m.id === "anthropic/claude-sonnet-4");
+
+			const compat = sonnet?.compat as OpenAICompat | undefined;
+			expect(compat?.extraBody).toEqual({ gateway: "default-gateway", controller: "model-controller" });
 		});
 
 		test("multiple model overrides on same provider", () => {
@@ -796,6 +909,44 @@ describe("ModelRegistry", () => {
 			expect(llama?.reasoning).toBe(false);
 		});
 
+		test("discovers ollama context window from show model_info", async () => {
+			using _hook = hookFetch((input, init) => {
+				const url = String(input);
+				if (url === "http://127.0.0.1:11434/api/tags") {
+					return new Response(JSON.stringify({ models: [{ name: "gemma3:4b" }] }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				if (url === "http://127.0.0.1:11434/api/show") {
+					const body = JSON.parse(String(init?.body ?? "{}")) as { model?: string };
+					if (body.model === "gemma3:4b") {
+						return new Response(
+							JSON.stringify({
+								model_info: {
+									"gemma3.context_length": 131072,
+								},
+							}),
+							{
+								status: 200,
+								headers: { "Content-Type": "application/json" },
+							},
+						);
+					}
+				}
+				throw new Error(`Unexpected request: ${url}`);
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await registry.refresh();
+
+			const gemma = registry.find("ollama", "gemma3:4b");
+			expect(gemma?.contextWindow).toBe(131072);
+			expect(gemma?.maxTokens).toBe(8192);
+			expect(gemma?.input).toEqual(["text"]);
+			expect(gemma?.reasoning).toBe(false);
+		});
+
 		test("discovery failure does not fail model registry refresh", async () => {
 			writeRawModelsJson({
 				ollama: {
@@ -904,6 +1055,127 @@ describe("ModelRegistry", () => {
 			const state = cachedRegistry.getProviderDiscoveryState("custom-local");
 			expect(state?.status).toBe("unauthenticated");
 			expect(state?.models).toContain("local-coder");
+		});
+		test("llama.cpp discovery honors configured API key", async () => {
+			authStorage.setRuntimeApiKey("llama.cpp", "test-llama-key");
+			using _hook = hookFetch((input, init) => {
+				const url = String(input);
+				if (url === "http://127.0.0.1:8080/models") {
+					const headers = init?.headers as Headers | Record<string, string> | undefined;
+					let authHeader: string | null = null;
+					if (headers instanceof Headers) {
+						authHeader = headers.get("Authorization");
+					} else if (typeof headers === "object") {
+						authHeader = headers.Authorization;
+					}
+					expect(String(authHeader ?? "")).toBe("Bearer test-llama-key");
+					return new Response(JSON.stringify({ data: [{ id: "llama-3.2:3b" }, { id: "mistral:7b" }] }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				if (url === "http://127.0.0.1:8080/props") {
+					const headers = init?.headers as Headers | Record<string, string> | undefined;
+					let authHeader: string | null = null;
+					if (headers instanceof Headers) {
+						authHeader = headers.get("Authorization");
+					} else if (typeof headers === "object") {
+						authHeader = headers.Authorization;
+					}
+					expect(String(authHeader ?? "")).toBe("Bearer test-llama-key");
+					return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 262144 } }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await registry.refresh();
+			const llamaModels = getModelsForProvider(registry, "llama.cpp");
+			expect(llamaModels.some(m => m.id === "llama-3.2:3b")).toBe(true);
+			const apiKey = await registry.getApiKey(llamaModels[0]);
+			expect(apiKey).toBe("test-llama-key");
+			expect(apiKey).not.toBe(kNoAuth);
+		});
+		test("llama.cpp discovery without API key is treated as keyless", async () => {
+			using _hook = hookFetch((input, init) => {
+				const url = String(input);
+				if (url === "http://127.0.0.1:8080/models") {
+					const headers = init?.headers as Headers | Record<string, string> | undefined;
+					let authHeader: string | null = null;
+					if (headers instanceof Headers) {
+						authHeader = headers.get("Authorization");
+					} else if (typeof headers === "object") {
+						authHeader = headers.Authorization;
+					}
+					// When no API key, headers should be empty object or undefined
+					expect(authHeader).toBeUndefined();
+					return new Response(JSON.stringify({ data: [{ id: "llama-3.2:3b" }] }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				if (url === "http://127.0.0.1:8080/props") {
+					const headers = init?.headers as Headers | Record<string, string> | undefined;
+					let authHeader: string | null = null;
+					if (headers instanceof Headers) {
+						authHeader = headers.get("Authorization");
+					} else if (typeof headers === "object") {
+						authHeader = headers.Authorization;
+					}
+					expect(authHeader).toBeUndefined();
+					return new Response(JSON.stringify({ default_generation_settings: { n_ctx: 262144 } }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await registry.refresh();
+			const state = registry.getProviderDiscoveryState("llama.cpp");
+			if (state?.status !== "ok") {
+				throw new Error(`Discovery failed with status ${state?.status}: ${state?.error}`);
+			}
+			const llamaModels = getModelsForProvider(registry, "llama.cpp");
+			const apiKey = await registry.getApiKey(llamaModels[0]);
+			expect(apiKey).toBe(kNoAuth);
+		});
+		test("llama.cpp discovery reads context window from props n_ctx", async () => {
+			using _hook = hookFetch(input => {
+				const url = String(input);
+				if (url === "http://127.0.0.1:8080/models") {
+					return new Response(JSON.stringify({ data: [{ id: "qwen35-35b-a3b" }] }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				if (url === "http://127.0.0.1:8080/props") {
+					return new Response(
+						JSON.stringify({
+							default_generation_settings: {
+								n_ctx: 262144,
+							},
+							modalities: {
+								vision: true,
+								audio: false,
+							},
+						}),
+						{
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						},
+					);
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await registry.refresh();
+			const llama = registry.find("llama.cpp", "qwen35-35b-a3b");
+			expect(llama?.contextWindow).toBe(262144);
+			expect(llama?.maxTokens).toBe(8192);
+			expect(llama?.input).toEqual(["text", "image"]);
 		});
 	});
 });

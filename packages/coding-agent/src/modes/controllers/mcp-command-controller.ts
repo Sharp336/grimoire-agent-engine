@@ -32,7 +32,7 @@ import {
 	searchSmitheryRegistry,
 	toConfigName,
 } from "../../mcp/smithery-registry";
-import type { MCPServerConfig, MCPServerConnection } from "../../mcp/types";
+import type { MCPAuthConfig, MCPServerConfig, MCPServerConnection } from "../../mcp/types";
 import type { OAuthCredential } from "../../session/auth-storage";
 import { shortenPath } from "../../tools/render-utils";
 import { openPath } from "../../utils/open";
@@ -127,6 +127,9 @@ export class MCPCommandController {
 			case "smithery-logout":
 				await this.#handleSmitheryLogout();
 				break;
+			case "reconnect":
+				await this.#handleReconnect(parts[2]);
+				break;
 			case "reload":
 				await this.#handleReload();
 				break;
@@ -159,6 +162,7 @@ export class MCPCommandController {
 			"                        Search Smithery registry and deploy from picker",
 			"  /mcp smithery-login   Login to Smithery and cache API key",
 			"  /mcp smithery-logout  Remove cached Smithery API key",
+			"  /mcp reconnect <name> Reconnect to a specific MCP server",
 			"  /mcp reload           Force reload and rediscover MCP runtime tools",
 			"  /mcp resources        List available resources from connected servers",
 			"  /mcp prompts          List available prompts from connected servers",
@@ -400,13 +404,16 @@ export class MCPCommandController {
 						}
 
 						try {
+							const oauthClientSecret = finalConfig.oauth?.clientSecret ?? "";
 							const credentialId = await this.#handleOAuthFlow(
 								oauth.authorizationUrl,
 								oauth.tokenUrl,
 								oauth.clientId ?? finalConfig.oauth?.clientId ?? "",
-								"",
+								oauthClientSecret,
 								oauth.scopes ?? "",
 								finalConfig.oauth?.callbackPort,
+								finalConfig.oauth?.callbackPath,
+								finalConfig.oauth?.redirectUri,
 							);
 							finalConfig = {
 								...finalConfig,
@@ -415,7 +422,7 @@ export class MCPCommandController {
 									credentialId,
 									tokenUrl: oauth.tokenUrl,
 									clientId: oauth.clientId ?? finalConfig.oauth?.clientId,
-									clientSecret: undefined,
+									clientSecret: finalConfig.oauth?.clientSecret,
 								},
 							};
 						} catch (oauthError) {
@@ -478,6 +485,8 @@ export class MCPCommandController {
 		clientSecret: string,
 		scopes: string,
 		callbackPort?: number,
+		callbackPath?: string,
+		redirectUri?: string,
 	): Promise<string> {
 		const authStorage = this.ctx.session.modelRegistry.authStorage;
 		let parsedAuthUrl: URL;
@@ -493,6 +502,7 @@ export class MCPCommandController {
 		}
 
 		const resolvedClientId = clientId.trim() || parsedAuthUrl.searchParams.get("client_id") || undefined;
+		const resolvedClientSecret = clientSecret.trim() || undefined;
 
 		try {
 			// Create OAuth flow
@@ -501,9 +511,11 @@ export class MCPCommandController {
 					authorizationUrl: authUrl,
 					tokenUrl: tokenUrl,
 					clientId: resolvedClientId,
-					clientSecret: clientSecret || undefined,
+					clientSecret: resolvedClientSecret,
 					scopes: scopes || undefined,
+					redirectUri,
 					callbackPort,
+					callbackPath,
 				},
 				{
 					onAuth: (info: { url: string; instructions?: string }) => {
@@ -653,7 +665,7 @@ export class MCPCommandController {
 	}
 
 	#stripOAuthAuth(config: MCPServerConfig): MCPServerConfig {
-		const next = { ...config } as MCPServerConfig & { auth?: { type: "oauth" | "apikey"; credentialId?: string } };
+		const next = { ...config } as MCPServerConfig & { auth?: MCPAuthConfig };
 		delete next.auth;
 		return next;
 	}
@@ -1261,9 +1273,7 @@ export class MCPCommandController {
 				return;
 			}
 
-			const currentAuth = (
-				found.config as MCPServerConfig & { auth?: { type: "oauth" | "apikey"; credentialId?: string } }
-			).auth;
+			const currentAuth = (found.config as MCPServerConfig & { auth?: MCPAuthConfig }).auth;
 			if (currentAuth?.type === "oauth") {
 				await this.#removeManagedOAuthCredential(currentAuth.credentialId);
 			}
@@ -1298,17 +1308,14 @@ export class MCPCommandController {
 				return;
 			}
 
-			const currentAuth = (
-				found.config as MCPServerConfig & {
-					auth?: { type: "oauth" | "apikey"; credentialId?: string; clientSecret?: string };
-				}
-			).auth;
+			const currentAuth = (found.config as MCPServerConfig & { auth?: MCPAuthConfig }).auth;
 			if (currentAuth?.type === "oauth") {
 				await this.#removeManagedOAuthCredential(currentAuth.credentialId);
 			}
 
 			const baseConfig = this.#stripOAuthAuth(found.config);
 			const oauth = await this.#resolveOAuthEndpointsFromServer(baseConfig);
+			const oauthClientSecret = found.config.oauth?.clientSecret ?? currentAuth?.clientSecret ?? "";
 
 			this.#showMessage(["", theme.fg("muted", `Reauthorizing "${name}"...`), ""].join("\n"));
 
@@ -1316,9 +1323,11 @@ export class MCPCommandController {
 				oauth.authorizationUrl,
 				oauth.tokenUrl,
 				oauth.clientId ?? found.config.oauth?.clientId ?? "",
-				"",
+				oauthClientSecret,
 				oauth.scopes ?? "",
 				found.config.oauth?.callbackPort,
+				found.config.oauth?.callbackPath,
+				found.config.oauth?.redirectUri,
 			);
 
 			const updated: MCPServerConfig = {
@@ -1328,7 +1337,7 @@ export class MCPCommandController {
 					credentialId,
 					tokenUrl: oauth.tokenUrl,
 					clientId: oauth.clientId ?? found.config.oauth?.clientId,
-					clientSecret: currentAuth?.clientSecret,
+					clientSecret: oauthClientSecret || undefined,
 				},
 			};
 			await updateMCPServer(found.filePath, name, updated);
@@ -1364,6 +1373,47 @@ export class MCPCommandController {
 			);
 		} catch (error) {
 			this.ctx.showError(`Failed to reload MCP: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	/**
+	 * Handle /mcp reconnect <name> - Reconnect to a specific server.
+	 */
+	async #handleReconnect(name: string | undefined): Promise<void> {
+		if (!name) {
+			this.ctx.showError("Server name required. Usage: /mcp reconnect <name>");
+			return;
+		}
+		if (!this.ctx.mcpManager) {
+			this.ctx.showError("MCP manager not available.");
+			return;
+		}
+
+		this.#showMessage(["", theme.fg("muted", `Reconnecting to "${name}"...`), ""].join("\n"));
+
+		try {
+			const connection = await this.ctx.mcpManager.reconnectServer(name);
+			if (connection) {
+				// refreshMCPTools re-registers tools and preserves the user's prior
+				// MCP tool selection. No need to call activateDiscoveredMCPTools —
+				// that would broaden the selection to all server tools.
+				await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());
+				const serverTools = this.ctx.mcpManager.getTools().filter(t => t.mcpServerName === name);
+				this.#showMessage(
+					[
+						"\n",
+						theme.fg("success", `\u2713 Reconnected to "${name}"`),
+						`  Tools: ${serverTools.length}`,
+						"\n",
+					].join("\n"),
+				);
+			} else {
+				this.ctx.showError(`Failed to reconnect to "${name}". Check server status and logs.`);
+			}
+		} catch (error) {
+			this.ctx.showError(
+				`Failed to reconnect to "${name}": ${error instanceof Error ? error.message : String(error)}`,
+			);
 		}
 	}
 

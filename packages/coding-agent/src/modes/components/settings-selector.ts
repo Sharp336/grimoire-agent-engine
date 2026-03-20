@@ -122,8 +122,8 @@ function getSettingsTabs(): Tab[] {
 	return [
 		...SETTING_TABS.map(id => {
 			const meta = TAB_METADATA[id];
-			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			return { id, label: `${icon} ${meta.label}` };
+			const icon = meta ? theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]) : "?";
+			return { id, label: `${icon} ${meta?.label ?? id}` };
 		}),
 		{ id: "plugins", label: `${theme.icon.package} Plugins` },
 	];

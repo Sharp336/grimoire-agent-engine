@@ -6,8 +6,9 @@ import {
 	findMostRecentSession,
 	loadEntriesFromFile,
 	resolveResumableSession,
+	SessionManager,
 } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, getSessionsDir, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
 
 describe("loadEntriesFromFile", () => {
 	let tempDir: string;
@@ -197,5 +198,97 @@ describe("resolveResumableSession", () => {
 
 		expect(match?.scope).toBe("local");
 		expect(match?.session.path).toBe(path.join(sessionDir, "2025-01-01_moved.jsonl"));
+	});
+});
+
+describe("SessionManager temp cwd session dirs", () => {
+	let testAgentDir: string;
+	const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+	const fallbackAgentDir = path.join(getConfigRootDir(), "agent");
+
+	function expectedTempSessionDirName(tempCwd: string): string {
+		return `-tmp-${path.relative(os.tmpdir(), path.resolve(tempCwd)).replace(/[/\\:]/g, "-")}`;
+	}
+
+	function toLegacyAbsoluteSessionDirName(cwd: string): string {
+		return `--${path
+			.resolve(cwd)
+			.replace(/^[/\\]/, "")
+			.replace(/[/\\:]/g, "-")}--`;
+	}
+
+	beforeEach(() => {
+		testAgentDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-session-dir-test-"));
+		setAgentDir(testAgentDir);
+	});
+
+	afterEach(() => {
+		if (originalAgentDir) {
+			setAgentDir(originalAgentDir);
+		} else {
+			setAgentDir(fallbackAgentDir);
+			delete process.env.PI_CODING_AGENT_DIR;
+		}
+		fs.rmSync(testAgentDir, { recursive: true, force: true });
+	});
+
+	it("stores symlink-equivalent home cwd sessions under home-relative directories", () => {
+		if (process.platform === "win32") return;
+
+		const projectsRoot = path.join(os.homedir(), "Projects");
+		fs.mkdirSync(projectsRoot, { recursive: true });
+		const realProjectDir = fs.mkdtempSync(path.join(projectsRoot, "omp-session-home-"));
+		const nestedDir = path.join(realProjectDir, "nested");
+		const aliasRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-session-home-alias-"));
+		const homeAlias = path.join(aliasRoot, "home-link");
+
+		try {
+			fs.mkdirSync(nestedDir, { recursive: true });
+			fs.symlinkSync(os.homedir(), homeAlias, "dir");
+
+			const aliasedCwd = path.join(homeAlias, "Projects", path.basename(realProjectDir), "nested");
+			const session = SessionManager.create(aliasedCwd);
+			const sessionFile = session.getSessionFile();
+			if (!sessionFile) throw new Error("Expected session file path");
+
+			const expectedDir = path.join(
+				getSessionsDir(),
+				`-${path.relative(os.homedir(), fs.realpathSync(aliasedCwd)).replace(/[/\\:]/g, "-")}`,
+			);
+			expect(path.dirname(sessionFile)).toBe(expectedDir);
+		} finally {
+			fs.rmSync(aliasRoot, { recursive: true, force: true });
+			fs.rmSync(realProjectDir, { recursive: true, force: true });
+		}
+	});
+
+	it("stores temp-root cwd sessions under -tmp-prefixed directories", () => {
+		const tempCwd = path.join(testAgentDir, `temp-cwd-${Snowflake.next()}`);
+		fs.mkdirSync(tempCwd, { recursive: true });
+
+		const session = SessionManager.create(tempCwd);
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file path");
+
+		expect(path.dirname(sessionFile)).toBe(path.join(getSessionsDir(), expectedTempSessionDirName(tempCwd)));
+	});
+
+	it("migrates legacy temp-root absolute session dirs to -tmp prefixes", () => {
+		const tempCwd = path.join(testAgentDir, `legacy-cwd-${Snowflake.next()}`);
+		fs.mkdirSync(tempCwd, { recursive: true });
+
+		const legacyDir = path.join(getSessionsDir(), toLegacyAbsoluteSessionDirName(tempCwd));
+		const markerFile = path.join(legacyDir, "carried.jsonl");
+		fs.mkdirSync(legacyDir, { recursive: true });
+		fs.writeFileSync(markerFile, "marker\n");
+
+		const session = SessionManager.create(tempCwd);
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected session file path");
+
+		const expectedDir = path.join(getSessionsDir(), expectedTempSessionDirName(tempCwd));
+		expect(fs.existsSync(legacyDir)).toBe(false);
+		expect(path.dirname(sessionFile)).toBe(expectedDir);
+		expect(fs.existsSync(path.join(expectedDir, "carried.jsonl"))).toBe(true);
 	});
 });

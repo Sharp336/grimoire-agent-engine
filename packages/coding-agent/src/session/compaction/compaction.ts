@@ -5,7 +5,14 @@
  * and after compaction the session is reloaded.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type AssistantMessage, completeSimple, Effort, type Model, type Usage } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessage,
+	completeSimple,
+	Effort,
+	type MessageAttribution,
+	type Model,
+	type Usage,
+} from "@oh-my-pi/pi-ai";
 import {
 	CODEX_BASE_URL,
 	getCodexAccountId,
@@ -126,15 +133,25 @@ export interface CompactionResult<T = unknown> {
 // ============================================================================
 
 export interface CompactionSettings {
+	enabled: boolean;
+	strategy?: "context-full" | "handoff" | "off";
+	thresholdPercent?: number;
+	thresholdTokens?: number;
 	reserveTokens: number;
 	keepRecentTokens: number;
+	autoContinue?: boolean;
 	remoteEnabled?: boolean;
 	remoteEndpoint?: string;
 }
 
 export const DEFAULT_COMPACTION_SETTINGS: CompactionSettings = {
+	enabled: true,
+	strategy: "context-full",
+	thresholdPercent: -1,
+	thresholdTokens: -1,
 	reserveTokens: 16384,
 	keepRecentTokens: 20000,
+	autoContinue: true,
 	remoteEnabled: true,
 };
 
@@ -184,6 +201,39 @@ export function getLastAssistantUsage(entries: SessionEntry[]): Usage | undefine
 		}
 	}
 	return undefined;
+}
+
+/**
+ * Effective reserve: at least 15% of context window or the configured floor, whichever is larger.
+ */
+export function effectiveReserveTokens(contextWindow: number, settings: CompactionSettings): number {
+	return Math.max(Math.floor(contextWindow * 0.15), settings.reserveTokens);
+}
+
+/**
+ * Check if compaction should trigger based on context usage.
+ */
+export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
+	if (!settings.enabled || settings.strategy === "off" || contextWindow <= 0) return false;
+	const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
+	return contextTokens > thresholdTokens;
+}
+
+function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
+	// Fixed token limit takes priority over percentage
+	const thresholdTokens = settings.thresholdTokens;
+	if (typeof thresholdTokens === "number" && Number.isFinite(thresholdTokens) && thresholdTokens > 0) {
+		// Clamp to [1, contextWindow - 1] so there's always room
+		return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
+	}
+
+	// Percentage-based threshold
+	const thresholdPercent = settings.thresholdPercent;
+	if (typeof thresholdPercent !== "number" || !Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
+		return contextWindow - effectiveReserveTokens(contextWindow, settings);
+	}
+	const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
+	return Math.floor(contextWindow * (clampedThresholdPercent / 100));
 }
 
 // ============================================================================
@@ -725,7 +775,7 @@ function buildOpenAiNativeHistory(
 					continue;
 				}
 
-				if (block.type === "toolCall" && assistant.stopReason !== "error") {
+				if (block.type === "toolCall") {
 					const normalized = normalizeResponsesToolCallId(block.id);
 					let itemId: string | undefined = normalized.itemId;
 					if (isDifferentModel && (itemId?.startsWith("fc_") || itemId?.startsWith("fcr_"))) {
@@ -902,6 +952,7 @@ export interface SummaryOptions {
 	extraContext?: string[];
 	remoteEndpoint?: string;
 	remoteInstructions?: string;
+	initiatorOverride?: MessageAttribution;
 }
 
 export async function generateSummary(
@@ -957,7 +1008,7 @@ export async function generateSummary(
 	const response = await completeSimple(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ maxTokens, signal, apiKey, reasoning: Effort.High },
+		{ maxTokens, signal, apiKey, reasoning: Effort.High, initiatorOverride: options?.initiatorOverride },
 	);
 
 	if (response.stopReason === "error") {
@@ -1006,7 +1057,7 @@ async function generateShortSummary(
 			systemPrompt: SUMMARIZATION_SYSTEM_PROMPT,
 			messages: [{ role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() }],
 		},
-		{ maxTokens, signal, apiKey, reasoning: Effort.High },
+		{ maxTokens, signal, apiKey, reasoning: Effort.High, initiatorOverride: options?.initiatorOverride },
 	);
 
 	if (response.stopReason === "error") {
@@ -1185,6 +1236,7 @@ export async function compact(
 		extraContext: options?.extraContext,
 		remoteEndpoint: settings.remoteEnabled === false ? undefined : settings.remoteEndpoint,
 		remoteInstructions: options?.remoteInstructions,
+		initiatorOverride: options?.initiatorOverride,
 	};
 
 	let preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined);
@@ -1233,7 +1285,14 @@ export async function compact(
 						summaryOptions,
 					)
 				: Promise.resolve("No prior history."),
-			generateTurnPrefixSummary(turnPrefixMessages, model, settings.reserveTokens, apiKey, signal),
+			generateTurnPrefixSummary(
+				turnPrefixMessages,
+				model,
+				settings.reserveTokens,
+				apiKey,
+				signal,
+				summaryOptions.initiatorOverride,
+			),
 		]);
 		// Merge into single summary
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
@@ -1264,7 +1323,11 @@ export async function compact(
 		settings.reserveTokens,
 		apiKey,
 		signal,
-		{ extraContext: options?.extraContext, remoteEndpoint: summaryOptions.remoteEndpoint },
+		{
+			extraContext: options?.extraContext,
+			remoteEndpoint: summaryOptions.remoteEndpoint,
+			initiatorOverride: summaryOptions.initiatorOverride,
+		},
 	);
 
 	// Compute file lists and append to summary
@@ -1294,6 +1357,7 @@ async function generateTurnPrefixSummary(
 	reserveTokens: number,
 	apiKey: string,
 	signal?: AbortSignal,
+	initiatorOverride?: MessageAttribution,
 ): Promise<string> {
 	const maxTokens = Math.floor(0.5 * reserveTokens); // Smaller budget for turn prefix
 
@@ -1311,7 +1375,7 @@ async function generateTurnPrefixSummary(
 	const response = await completeSimple(
 		model,
 		{ systemPrompt: SUMMARIZATION_SYSTEM_PROMPT, messages: summarizationMessages },
-		{ maxTokens, signal, apiKey, reasoning: Effort.High },
+		{ maxTokens, signal, apiKey, reasoning: Effort.High, initiatorOverride },
 	);
 
 	if (response.stopReason === "error") {

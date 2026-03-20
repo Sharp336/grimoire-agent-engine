@@ -664,12 +664,12 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			// =================================================================
 
 			case "get_prompt_snapshot": {
-				const overview = buildPromptSnapshotOverview(session.lastPromptSnapshot);
+				const overview = buildPromptSnapshotOverview(session.getLastPromptSnapshot());
 				return success(id, "get_prompt_snapshot", overview);
 			}
 
 			case "inspect_prompt_section": {
-				const detail = buildPromptSectionDetail(session.lastPromptSnapshot, command.section);
+				const detail = buildPromptSectionDetail(session.getLastPromptSnapshot(), command.section);
 				if (!detail) {
 					return error(
 						id,
@@ -681,7 +681,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			}
 
 			case "inspect_prompt_decisions": {
-				const report = buildPromptDecisionReport(session.lastPromptSnapshot, command.filter);
+				const report = buildPromptDecisionReport(session.getLastPromptSnapshot(), command.filter);
 				return success(id, "inspect_prompt_decisions", report);
 			}
 

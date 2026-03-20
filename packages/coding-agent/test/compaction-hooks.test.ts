@@ -39,7 +39,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Compaction hooks", () => {
 
 	afterEach(async () => {
 		if (session) {
-			session.dispose();
+			await session.dispose();
 		}
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true });
@@ -102,7 +102,7 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("Compaction hooks", () => {
 			},
 		});
 
-		const sessionManager = SessionManager.create(tempDir);
+		const sessionManager = SessionManager.create(tempDir, tempDir);
 		const settings = Settings.isolated();
 		const authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
 		const modelRegistry = new ModelRegistry(authStorage);

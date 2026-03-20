@@ -44,6 +44,9 @@ import { resolvePromptInput } from "./system-prompt";
 import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog";
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
+	if (!settings.get("startup.checkUpdate")) {
+		return;
+	}
 	try {
 		const response = await fetch(`https://registry.npmjs.org/${RELEASE_PACKAGE}/latest`);
 		if (!response.ok) return undefined;
@@ -119,6 +122,9 @@ async function runInteractiveMode(
 
 	versionCheckPromise
 		.then(newVersion => {
+			if (!settings.get("startup.checkUpdate")) {
+				return;
+			}
 			if (newVersion) {
 				mode.showNewVersionNotification(newVersion);
 			}

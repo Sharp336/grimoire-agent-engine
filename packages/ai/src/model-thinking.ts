@@ -1,3 +1,4 @@
+import { resolveOpenAICompat } from "./providers/openai-completions-compat";
 import type { Api, Model as ApiModel, ThinkingConfig } from "./types";
 
 /** User-facing thinking levels, ordered least to most intensive. */
@@ -282,30 +283,24 @@ function applyAnthropicCatalogPolicy(model: ApiModel<Api>, parsedModel: Anthropi
 		model.cost.cacheWrite = 6.25;
 	}
 
-	// Bedrock Opus 4.6: upstream cache pricing is incorrect.
+	// Bedrock Opus 4.6: upstream metadata is stale for cache pricing and context.
 	if (model.provider === "amazon-bedrock" && parsedModel.kind === "opus" && semverEqual(parsedModel.version, "4.6")) {
 		model.cost.cacheRead = 0.5;
 		model.cost.cacheWrite = 6.25;
-	}
-
-	// Opus 4.6 / Sonnet 4.6: 1M context is beta; clamp to 200K.
-	if (semverEqual(parsedModel.version, "4.6")) {
-		model.contextWindow = 200000;
-	}
-
-	// OpenCode variants: Claude Sonnet 4/4.5 listed with 1M context, actual limit is 200K.
-	if (
-		(model.provider === "opencode-zen" || model.provider === "opencode-go") &&
-		parsedModel.kind === "sonnet" &&
-		(semverEqual(parsedModel.version, "4.0") || semverEqual(parsedModel.version, "4.5"))
-	) {
-		model.contextWindow = 200000;
+		model.contextWindow = 1000000;
+		model.maxTokens = 128000;
 	}
 }
 
 function applyOpenAICatalogPolicy(model: ApiModel<Api>, parsedModel: OpenAIModel): void {
 	// Codex models: 400K figure includes output budget; input window is 272K.
 	if (parsedModel.variant.startsWith("codex") && parsedModel.variant !== "codex-spark") {
+		model.contextWindow = 272000;
+		return;
+	}
+	// GPT-5.4 mini/nano use plain OpenAI IDs on the Codex transport, but Codex still
+	// enforces the lower prompt budget for these variants.
+	if (model.api === "openai-codex-responses" && (model.id === "gpt-5.4-mini" || model.id === "gpt-5.4-nano")) {
 		model.contextWindow = 272000;
 	}
 }
@@ -385,7 +380,10 @@ function inferAnthropicSupportedEfforts<TApi extends Api>(
 	parsedModel: AnthropicModel,
 	model: ApiModel<TApi>,
 ): readonly Effort[] {
-	if (model.api === "anthropic-messages" && semverGte(parsedModel.version, "4.6")) {
+	if (
+		(model.api === "anthropic-messages" || model.api === "bedrock-converse-stream") &&
+		semverGte(parsedModel.version, "4.6")
+	) {
 		return parsedModel.kind === "opus" ? DEFAULT_REASONING_EFFORTS_WITH_XHIGH : DEFAULT_REASONING_EFFORTS;
 	}
 	return inferFallbackEfforts(model);
@@ -397,6 +395,17 @@ function inferFallbackEfforts<TApi extends Api>(model: ApiModel<TApi>): readonly
 	}
 	if (model.api === "bedrock-converse-stream") {
 		return DEFAULT_REASONING_EFFORTS;
+	}
+	if (model.api === "openai-completions") {
+		const compat = resolveOpenAICompat(model as ApiModel<"openai-completions">);
+		if (compat.thinkingFormat === "openai" && compat.supportsReasoningEffort) {
+			return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
+		}
+		return DEFAULT_REASONING_EFFORTS;
+	}
+	// OpenAI Responses APIs encode discrete effort levels, including xhigh.
+	if (model.api === "openai-responses" || model.api === "openai-codex-responses") {
+		return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
 	}
 	return DEFAULT_REASONING_EFFORTS;
 }
@@ -427,6 +436,14 @@ function inferThinkingControlMode<TApi extends Api>(
 			return "budget";
 
 		case "bedrock-converse-stream":
+			if (parsedModel.family === "anthropic") {
+				if (semverGte(parsedModel.version, "4.6") && parsedModel.kind === "opus") {
+					return "anthropic-adaptive";
+				}
+				if (semverGte(parsedModel.version, "4.5")) {
+					return "anthropic-budget-effort";
+				}
+			}
 			return "budget";
 
 		default:
@@ -460,7 +477,7 @@ function parseGeminiModel(modelId: string): GeminiModel | null {
 }
 
 function parseAnthropicModel(modelId: string): AnthropicModel | null {
-	const match = /claude-(opus|sonnet)-(\d+(?:[.-]\d+){0,2})\b/.exec(modelId);
+	const match = /claude-(opus|sonnet)-(\d{1,2}(?:[.-]\d{1,2}){0,2})\b/.exec(modelId);
 	if (!match) {
 		return null;
 	}

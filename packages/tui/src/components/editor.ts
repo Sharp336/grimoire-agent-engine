@@ -1121,17 +1121,21 @@ export class Editor implements Component, Focusable {
 		return this.#state.lines.join("\n");
 	}
 
+	#expandPasteMarkers(text: string): string {
+		let result = text;
+		for (const [pasteId, pasteContent] of this.#pastes) {
+			const markerRegex = new RegExp(`\\[paste #${pasteId}( (\\+\\d+ lines|\\d+ chars))?\\]`, "g");
+			result = result.replace(markerRegex, () => pasteContent);
+		}
+		return result;
+	}
+
 	/**
 	 * Get text with paste markers expanded to their actual content.
 	 * Use this when you need the full content (e.g., for external editor).
 	 */
 	getExpandedText(): string {
-		let result = this.#state.lines.join("\n");
-		for (const [pasteId, pasteContent] of this.#pastes) {
-			const markerRegex = new RegExp(`\\[paste #${pasteId}( (\\+\\d+ lines|\\d+ chars))?\\]`, "g");
-			result = result.replace(markerRegex, pasteContent);
-		}
-		return result;
+		return this.#expandPasteMarkers(this.#state.lines.join("\n"));
 	}
 
 	getLines(): string[] {
@@ -1148,6 +1152,66 @@ export class Editor implements Component, Focusable {
 
 	moveToLineEnd(): void {
 		this.#moveToLineEnd();
+	}
+
+	moveToMessageStart(): void {
+		this.#moveToMessageStart();
+	}
+
+	moveToMessageEnd(): void {
+		this.#moveToMessageEnd();
+	}
+
+	/**
+	 * Undo the last meaningful edit while ignoring transient text that is still present at the cursor.
+	 * Used for command-like autocomplete actions whose typed trigger should not count as the edit being undone.
+	 */
+	undoPastTransientText(transientText: string): void {
+		if (transientText.length === 0) {
+			this.#applyUndo();
+			return;
+		}
+
+		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
+		const transientStartCol = this.#state.cursorCol - transientText.length;
+		if (transientStartCol < 0 || currentLine.slice(transientStartCol, this.#state.cursorCol) !== transientText) {
+			this.#applyUndo();
+			return;
+		}
+
+		const beforeTransient = currentLine.slice(0, transientStartCol);
+		const afterTransient = currentLine.slice(this.#state.cursorCol);
+		this.#historyIndex = -1;
+		this.#resetKillSequence();
+		this.#preferredVisualCol = null;
+		this.#state.lines[this.#state.cursorLine] = beforeTransient + afterTransient;
+		this.#setCursorCol(transientStartCol);
+
+		while (true) {
+			const snapshot = this.#undoStack.at(-1);
+			if (
+				!snapshot ||
+				!this.#matchesTransientUndoSnapshot(
+					snapshot,
+					transientText,
+					transientStartCol,
+					beforeTransient,
+					afterTransient,
+				)
+			) {
+				break;
+			}
+			this.#undoStack.pop();
+		}
+
+		if (this.#undoStack.length === 0) {
+			if (this.onChange) {
+				this.onChange(this.getText());
+			}
+			return;
+		}
+
+		this.#applyUndo();
 	}
 
 	setText(text: string): void {
@@ -1343,11 +1407,7 @@ export class Editor implements Component, Focusable {
 	#submitValue(): void {
 		this.#resetKillSequence();
 
-		let result = this.#state.lines.join("\n").trim();
-		for (const [pasteId, pasteContent] of this.#pastes) {
-			const markerRegex = new RegExp(`\\[paste #${pasteId}( (\\+\\d+ lines|\\d+ chars))?\\]`, "g");
-			result = result.replace(markerRegex, pasteContent);
-		}
+		const result = this.#expandPasteMarkers(this.#state.lines.join("\n")).trim();
 
 		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0 };
 		this.#pastes.clear();
@@ -1510,6 +1570,19 @@ export class Editor implements Component, Focusable {
 		this.#setCursorCol(currentLine.length);
 	}
 
+	#moveToMessageStart(): void {
+		this.#resetKillSequence();
+		this.#state.cursorLine = 0;
+		this.#setCursorCol(0);
+	}
+
+	#moveToMessageEnd(): void {
+		this.#resetKillSequence();
+		this.#state.cursorLine = this.#state.lines.length - 1;
+		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
+		this.#setCursorCol(currentLine.length);
+	}
+
 	#resetKillSequence(): void {
 		this.#lastAction = null;
 	}
@@ -1555,6 +1628,30 @@ export class Editor implements Component, Focusable {
 				this.#tryTriggerAutocomplete();
 			}
 		}
+	}
+
+	#matchesTransientUndoSnapshot(
+		snapshot: EditorState,
+		transientText: string,
+		transientStartCol: number,
+		beforeTransient: string,
+		afterTransient: string,
+	): boolean {
+		if (snapshot.cursorLine !== this.#state.cursorLine) return false;
+		if (snapshot.lines.length !== this.#state.lines.length) return false;
+
+		const transientLength = snapshot.cursorCol - transientStartCol;
+		if (transientLength < 0 || transientLength >= transientText.length) return false;
+
+		for (let i = 0; i < snapshot.lines.length; i++) {
+			if (i === this.#state.cursorLine) continue;
+			if (snapshot.lines[i] !== this.#state.lines[i]) return false;
+		}
+
+		return (
+			snapshot.lines[snapshot.cursorLine] ===
+			beforeTransient + transientText.slice(0, transientLength) + afterTransient
+		);
 	}
 
 	#recordKill(text: string, direction: "forward" | "backward", accumulate = this.#lastAction === "kill"): void {

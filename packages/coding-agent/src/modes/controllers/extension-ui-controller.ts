@@ -16,7 +16,7 @@ import { HookInputComponent } from "../../modes/components/hook-input";
 import { HookSelectorComponent } from "../../modes/components/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
-import { setTerminalTitle } from "../../utils/title-generator";
+import { setSessionTerminalTitle, setTerminalTitle } from "../../utils/title-generator";
 
 export class ExtensionUiController {
 	#extensionTerminalInputUnsubscribers = new Set<() => void>();
@@ -154,11 +154,18 @@ export class ExtensionUiController {
 				if (!success) {
 					return { cancelled: true };
 				}
+				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 
 				// Call setup callback if provided
 				if (options?.setup) {
 					await options.setup(this.ctx.sessionManager);
 				}
+
+				// Reset and update status line
+				this.ctx.statusLine.invalidate();
+				this.ctx.statusLine.setSessionStartTime(Date.now());
+				this.ctx.updateEditorTopBorder();
+				this.ctx.ui.requestRender();
 
 				// Clear UI state
 				this.ctx.chatContainer.clear();
@@ -224,6 +231,7 @@ export class ExtensionUiController {
 				if (!result) {
 					return { cancelled: true };
 				}
+				setSessionTerminalTitle(this.ctx.sessionManager.getSessionName(), this.ctx.sessionManager.getCwd());
 				this.ctx.chatContainer.clear();
 				this.ctx.renderInitialMessages();
 				await this.ctx.reloadTodos();

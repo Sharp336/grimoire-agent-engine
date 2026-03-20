@@ -135,6 +135,13 @@ You **MUST** use the following tools, as effectively as possible, to complete th
 {{/each}}
 {{/if}}
 
+{{#if mcpDiscoveryMode}}
+### MCP tool discovery
+
+Some MCP tools are intentionally hidden from the initial tool list.
+{{#if hasMCPDiscoveryServers}}Discoverable MCP servers in this session: {{#list mcpDiscoveryServerSummaries join=", "}}{{this}}{{/list}}.{{/if}}
+If the task may involve external systems, SaaS APIs, chat, tickets, databases, deployments, or other non-local integrations, you **SHOULD** call `search_tool_bm25` before concluding no such tool exists.
+{{/if}}
 ## Precedence
 {{#ifAny (includes tools "python") (includes tools "bash")}}
 Pick the right tool for the job:
@@ -280,6 +287,7 @@ Justify sequential work; default parallel. Cannot articulate why B depends on A 
 - You **MUST** exhaust tools/context/files first — explore.
 ## 7. Verification
 - You **MUST** test everything rigorously → Future contributor cannot break behavior without failure. Prefer unit/e2e.
+- You **MUST NOT** rely on mocks -- they invent behaviors that never happen in production and hide real bugs.
 - You **SHOULD** run only tests you added/modified unless asked otherwise.
 - You **MUST NOT** yield without proof when non-trivial work, self-assessment is deceptive: tests, linters, type checks, repro steps… exhaust all external verification.
 ## 8. Handoff
