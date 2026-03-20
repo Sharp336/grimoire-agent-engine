@@ -17,6 +17,7 @@ import {
 	createLspWritethrough,
 	type FileDiagnosticsResult,
 	flushLspWritethroughBatch,
+	getDocumentSymbols,
 	type WritethroughCallback,
 	writethroughNoop,
 } from "../lsp";
@@ -38,9 +39,11 @@ import {
 	type Anchor,
 	applyHashlineEdits,
 	buildCompactHashlineDiffPreview,
+	checkBoundariesForEdits,
 	computeLineHash,
 	type HashlineEdit,
 	parseTag,
+	verifyTags,
 } from "./hashline";
 import { detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "./normalize";
 import { type EditToolDetails, getLspBatchRequest } from "./shared";
@@ -514,6 +517,12 @@ export class EditTool implements AgentTool<TInput> {
 			let normalizedText = originalNormalized;
 
 			// Apply anchor-based edits first (replace, append, prepend)
+			// Pre-flight: verify tags are still fresh before mutation
+			const tagCheck = verifyTags(normalizedText, anchorEdits);
+			if (!tagCheck.valid && tagCheck.error) throw tagCheck.error;
+
+			const symbols = await getDocumentSymbols(this.session.cwd, absolutePath);
+			checkBoundariesForEdits(anchorEdits, symbols);
 			const anchorResult = applyHashlineEdits(normalizedText, anchorEdits);
 			normalizedText = anchorResult.lines;
 

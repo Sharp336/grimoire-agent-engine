@@ -843,3 +843,160 @@ export function buildCompactHashlineDiffPreview(
 
 	return { preview: out.join("\n"), addedLines, removedLines };
 }
+
+// ─── AST boundary detection ────────────────────────────────────────────────
+
+/**
+ * Thrown when a replace operation targets a structural boundary line —
+ * i.e. a line that is simultaneously the end of one AST construct and the
+ * start of its sibling (e.g. `} else {`, `} catch (err) {`, `},`).
+ *
+ * To fix: expand the range to include the full construct on one side,
+ * or target only body-owned lines inside the construct.
+ */
+export class SharedBoundaryError extends Error {
+	readonly editIndex: number;
+	readonly line: number;
+	readonly role: "start" | "end";
+	readonly construct: string;
+
+	constructor(editIndex: number, line: number, role: "start" | "end", construct: string) {
+		const boundary = role === "end" ? "closing" : "opening";
+		super(
+			`edit[${editIndex}] targets a shared boundary (line ${line + 1}): ` +
+				`the ${boundary} line of ${construct} is also the boundary of its sibling. ` +
+				`Include the full ${construct} in the range, or target only body-owned lines inside it.`,
+		);
+		this.name = "SharedBoundaryError";
+		this.editIndex = editIndex;
+		this.line = line;
+		this.role = role;
+		this.construct = construct;
+	}
+}
+
+/**
+ * Shared boundary detection.
+ *
+ * A line L is a shared boundary when it is simultaneously the end of one
+ * symbol's range and the start of an adjacent symbol's range — e.g. `} else {`,
+ * `} catch (err) {`, `},`. Targeting such a line with a replace operation
+ * is ambiguous and typically produces duplicate or missing lines.
+ *
+ * Throws `SharedBoundaryError` on the first violation found.
+ * Pass `null` for `symbols` to skip the check.
+ */
+export function checkBoundariesForEdits(edits: HashlineEdit[], symbols: DocSymbol[] | null): void {
+	if (!symbols?.length) return;
+
+	// Only replace ops with both pos and end can straddle a boundary
+	const replaceOps = edits.flatMap((edit, i) =>
+		edit.op === "replace" && edit.pos && edit.end
+			? [{ editIndex: i, posLine: edit.pos.line, endLine: edit.end.line }]
+			: [],
+	);
+	if (replaceOps.length === 0) return;
+
+	// Flatten the symbol tree
+	const flat: DocSymbol[] = [];
+	const flatten = (nodes: DocSymbol[]): void => {
+		for (const n of nodes) {
+			flat.push(n);
+			if (n.children) flatten(n.children);
+		}
+	};
+	flatten(symbols);
+
+	// For each targeted line, check if it is shared between adjacent symbols.
+	for (const { editIndex, posLine, endLine } of replaceOps) {
+		for (const [line, role] of [[posLine, "start"] as const, [endLine, "end"] as const]) {
+			const endsHere = flat.filter(n => n.range.end.line === line);
+			const startsHere = flat.filter(n => n.range.start.line === line);
+			if (endsHere.length > 0 && startsHere.length > 0) {
+				const construct = endsHere[0].name ? `"${endsHere[0].name}"` : "the enclosing block";
+				throw new SharedBoundaryError(editIndex, line, role, construct);
+			}
+		}
+	}
+}
+
+/** Symbol shape returned by `textDocument/documentSymbol`. */
+export type DocSymbol = {
+	name: string;
+	kind: number;
+	range: { start: { line: number }; end: { line: number } };
+	children?: DocSymbol[];
+};
+
+// --- Pre-flight tag verification -------------------------------------------
+
+export interface VerifyTagsResult {
+	valid: boolean;
+	/** Present when valid is false. Contains remaps for the full edit range. */
+	error?: HashlineMismatchError;
+}
+
+/**
+ * Validate that every tag referenced by `edits` still matches the current
+ * file content. Returns `{ valid: true }` when all tags are fresh, or
+ * `{ valid: false, error }` with a `HashlineMismatchError` whose `remaps`
+ * covers the full `pos..end` range of every failing edit — enough for the
+ * caller to rebuild the edit without re-reading the file.
+ *
+ * This is the same validation that `applyHashlineEdits` runs internally,
+ * extracted so callers can check before attempting mutation.
+ */
+export function verifyTags(text: string, edits: HashlineEdit[]): VerifyTagsResult {
+	const fileLines = text.split("\n");
+	const mismatches: HashMismatch[] = [];
+
+	function validateRef(ref: { line: number; hash: string }): boolean {
+		if (ref.line < 1 || ref.line > fileLines.length) return false;
+		const actualHash = computeLineHash(ref.line, fileLines[ref.line - 1]);
+		if (actualHash === ref.hash) return true;
+		mismatches.push({ line: ref.line, expected: ref.hash, actual: actualHash });
+		return false;
+	}
+
+	for (const edit of edits) {
+		switch (edit.op) {
+			case "replace": {
+				validateRef(edit.pos);
+				if (edit.end) validateRef(edit.end);
+				break;
+			}
+			case "append":
+			case "prepend": {
+				if (edit.pos) validateRef(edit.pos);
+				break;
+			}
+		}
+	}
+
+	if (mismatches.length === 0) return { valid: true };
+
+	// Build enriched remaps: include ALL lines in each edit's pos..end range,
+	// not just the mismatched ones, so the caller can rebuild without re-reading.
+	const enrichedRemaps = new Map<string, string>();
+	for (const m of mismatches) {
+		const actual = computeLineHash(m.line, fileLines[m.line - 1]);
+		enrichedRemaps.set(`${m.line}#${m.expected}`, `${m.line}#${actual}`);
+	}
+	for (const edit of edits) {
+		const startLine = edit.pos?.line ?? 1;
+		const endLine = edit.op === "replace" && edit.end ? edit.end.line : startLine;
+		for (let i = startLine; i <= endLine && i <= fileLines.length; i++) {
+			const hash = computeLineHash(i, fileLines[i - 1]);
+			const key = `${i}#${hash}`;
+			// Only add if not already in remaps (mismatched lines keep their old->new mapping)
+			if (!enrichedRemaps.has(key)) {
+				enrichedRemaps.set(key, key); // identity: this tag is still valid
+			}
+		}
+	}
+
+	const error = new HashlineMismatchError(mismatches, fileLines);
+	// Override remaps with enriched version
+	(error as { remaps: ReadonlyMap<string, string> }).remaps = enrichedRemaps;
+	return { valid: false, error };
+}
