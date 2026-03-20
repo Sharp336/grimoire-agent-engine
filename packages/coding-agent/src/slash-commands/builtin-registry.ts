@@ -290,8 +290,25 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 	{
 		name: "prompt",
 		aliases: ["inspector"],
-		description: "Open Prompt Composition Inspector",
-		handle: (_command, runtime) => {
+		description: "Inspect or print the current effective prompt",
+		subcommands: [{ name: "print", description: "Print the current effective system prompt" }],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (arg === "print") {
+				const prompt = runtime.ctx.session.systemPrompt;
+				await runtime.ctx.session.sendCustomMessage(
+					{
+						customType: "effective-prompt",
+						content: prompt,
+						display: true,
+						attribution: "agent",
+					},
+					{ deliverAs: "followUp" },
+				);
+				runtime.ctx.editor.setText("");
+				return;
+			}
 			runtime.ctx.showPromptInspector();
 			runtime.ctx.editor.setText("");
 		},

@@ -89,6 +89,7 @@ import {
 import { disposeAllKernelSessions } from "./ipy/executor";
 import { discoverAndLoadMCPTools, type MCPManager, type MCPToolsLoadResult } from "./mcp";
 import { getMemoryRoot } from "./memories/index.js";
+import { compileSystemPrompt } from "./prompts/composer/compile";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { collectEnvSecrets, loadSecrets, obfuscateMessages, SecretObfuscator } from "./secrets";
 import { AgentSession } from "./session/agent-session";
@@ -1286,6 +1287,75 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			eagerTasks,
 			intentField,
 		});
+
+		// If composer is enabled, compile the system prompt with an LLM
+		if (settings.get("composer.enabled")) {
+			try {
+				// Build MCP server instructions for inventory
+				const mcpInstructions: Array<{ name: string; instructions: string }> = [];
+				if (serverInstructions) {
+					for (const [name, instructions] of serverInstructions) {
+						mcpInstructions.push({ name, instructions });
+					}
+				}
+
+				// Build tool info for inventory — use toolNames + basic info
+				const toolInfo = toolNames.map(name => ({
+					name,
+					label: name,
+					description: "",
+				}));
+				const activeComposerModel = agent?.state.model ?? model;
+				if (!activeComposerModel) {
+					throw new Error("composer: no active session model available");
+				}
+				if (options.hasUI && !agent) {
+					process.stderr.write(
+						`${chalk.gray(`Building session prompt with ${activeComposerModel.provider}/${activeComposerModel.id}…`)}\n`,
+					);
+				}
+
+				const composerApiKey = await modelRegistry.getApiKey(activeComposerModel, sessionId);
+				if (!composerApiKey) {
+					throw new Error(
+						`composer: no session auth available for ${activeComposerModel.provider}/${activeComposerModel.id}`,
+					);
+				}
+
+				const result = await compileSystemPrompt({
+					model: activeComposerModel,
+					apiKey: composerApiKey,
+					inventory: {
+						tools: toolInfo,
+						editMode: String(settings.get("edit.mode") ?? "hashline"),
+						mcpServerInstructions: mcpInstructions,
+						skills: skills.map(s => ({ name: s.name, description: (s as any).frontmatter?.description ?? "" })),
+						environment: [
+							{ label: "OS", value: `${process.platform} ${process.arch}` },
+							{ label: "CWD", value: cwd },
+						],
+						cwd,
+					},
+					contextFiles: contextFiles.map(f => `## ${f.path}\n${f.content}`).join("\n\n"),
+					invariants: defaultPrompt, // The full static prompt serves as the invariant reference
+					tokenBudget: Number(settings.get("composer.tokenBudget") ?? 24000),
+				});
+
+				logger.debug("composer: using compiled system prompt", {
+					model: result.modelId,
+					durationMs: result.durationMs,
+					cacheHit: result.cacheHit,
+					length: result.systemPrompt.length,
+				});
+
+				return result.systemPrompt;
+			} catch (err) {
+				logger.warn("composer: falling back to static template", {
+					error: err instanceof Error ? err.message : String(err),
+					stack: err instanceof Error ? err.stack : undefined,
+				});
+			}
+		}
 
 		if (options.systemPrompt === undefined) {
 			return defaultPrompt;

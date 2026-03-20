@@ -857,6 +857,37 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// ─────────────────────────────────────────────────────────────────────────
+	// Composer settings (LLM-compiled system prompt)
+	// ─────────────────────────────────────────────────────────────────────────
+	"composer.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Enable Composer",
+			description: "Compile the system prompt with an LLM at session start instead of using the static template",
+		},
+	},
+	"composer.model": {
+		type: "string",
+		default: "sonnet",
+		ui: {
+			tab: "tools",
+			label: "Composer model",
+			description: "Model to use for system prompt compilation (e.g. sonnet, haiku, gpt-4o)",
+		},
+	},
+	"composer.tokenBudget": {
+		type: "number",
+		default: 24000,
+		ui: {
+			tab: "tools",
+			label: "Composer token budget",
+			description: "Target size for the compiled system prompt in tokens",
+		},
+	},
+
+	// ─────────────────────────────────────────────────────────────────────────
 	// Provider settings
 	// ─────────────────────────────────────────────────────────────────────────
 	"providers.webSearch": {
