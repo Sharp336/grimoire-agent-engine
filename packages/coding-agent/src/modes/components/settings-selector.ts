@@ -307,13 +307,7 @@ export class SettingsSelectorComponent extends Container {
 	): Container {
 		let options = def.options;
 
-		// Special case: inject runtime options for thinking level
-		if (def.path === "defaultThinkingLevel") {
-			options = this.context.availableThinkingLevels.map(level => {
-				const baseOpt = options.find(o => o.value === level);
-				return baseOpt || { value: level, label: level };
-			});
-		} else if (def.path === "theme.dark" || def.path === "theme.light") {
+		if (def.path === "theme.dark" || def.path === "theme.light") {
 			options = this.context.availableThemes.map(t => ({ value: t, label: t }));
 		}
 

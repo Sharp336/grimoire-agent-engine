@@ -346,7 +346,7 @@ export const SETTINGS_SCHEMA = {
 	// Reasoning and prompts
 	defaultThinkingLevel: {
 		type: "enum",
-		values: THINKING_EFFORTS,
+		values: ["inherit", "off", ...THINKING_EFFORTS],
 		default: "high",
 		ui: {
 			tab: "model",

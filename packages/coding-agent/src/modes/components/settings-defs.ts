@@ -7,6 +7,7 @@
  * 2. That's it - it appears in the UI automatically
  */
 
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import {
@@ -318,7 +319,7 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "on", label: "On", description: "Force websockets for OpenAI Codex models" },
 	],
 	// Default thinking level
-	defaultThinkingLevel: [...THINKING_EFFORTS.map(getThinkingLevelMetadata)],
+	defaultThinkingLevel: [ThinkingLevel.Inherit, ThinkingLevel.Off, ...THINKING_EFFORTS].map(getThinkingLevelMetadata),
 	// Temperature
 	temperature: [
 		{ value: "-1", label: "Default", description: "Use provider default" },
