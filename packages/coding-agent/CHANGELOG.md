@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-03-20
+
+### Fixed
+
+- Shared boundary detection false positives: single-line declarations (e.g. `const FOO = 1`) were incorrectly flagged because the same symbol's start and end on the same line matched the boundary check. Now requires two different symbols overlapping at the line.
+
 ## [0.5.0] - 2026-03-20
 
 ### Added
