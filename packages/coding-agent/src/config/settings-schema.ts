@@ -1683,11 +1683,34 @@ export function getUi(path: SettingPath): UiMetadata | undefined {
 	return "ui" in def ? (def.ui as UiMetadata) : undefined;
 }
 
+/** Map setting path to the correct fork tab */
+export function getMappedTab(path: SettingPath): SettingTab | undefined {
+	const ui = getUi(path);
+	if (!ui) return undefined;
+
+	let mappedTab: string = ui.tab;
+	if (path.startsWith("ttsr.")) mappedTab = "ttsr";
+	else if (path.startsWith("bashInterceptor.") || path.startsWith("bash.")) mappedTab = "bash";
+	else if (path.startsWith("lsp.")) mappedTab = "lsp";
+	else {
+		const map: Record<string, string> = {
+			appearance: "display",
+			model: "agent",
+			interaction: "input",
+			context: "config",
+			editing: "tools",
+			tasks: "agent",
+			providers: "services",
+		};
+		mappedTab = map[ui.tab] ?? ui.tab;
+	}
+	return mappedTab as SettingTab;
+}
+
 /** Get all paths for a specific tab */
 export function getPathsForTab(tab: SettingTab): SettingPath[] {
 	return (Object.keys(SETTINGS_SCHEMA) as SettingPath[]).filter(path => {
-		const ui = getUi(path);
-		return ui?.tab === tab;
+		return getMappedTab(path as SettingPath) === tab;
 	});
 }
 

@@ -12,6 +12,7 @@ import { TERMINAL } from "@oh-my-pi/pi-tui";
 import {
 	getDefault,
 	getEnumValues,
+	getMappedTab,
 	getPathsForTab,
 	getType,
 	getUi,
@@ -348,7 +349,9 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 	if (!ui) return null;
 
 	const schemaType = getType(path);
-	const base = { path, label: ui.label, description: ui.description, tab: ui.tab };
+	const mappedTab = getMappedTab(path);
+	if (!mappedTab) return null;
+	const base = { path, label: ui.label, description: ui.description, tab: mappedTab };
 
 	// Check for condition
 	const condition = ui.condition ? CONDITIONS[ui.condition] : undefined;

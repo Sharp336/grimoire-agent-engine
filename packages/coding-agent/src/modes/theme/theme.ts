@@ -184,7 +184,16 @@ export type SymbolKey =
 	| "tab.editing"
 	| "tab.tools"
 	| "tab.tasks"
-	| "tab.providers";
+	| "tab.providers"
+	| "tab.display"
+	| "tab.agent"
+	| "tab.input"
+	| "tab.config"
+	| "tab.services"
+	| "tab.bash"
+	| "tab.lsp"
+	| "tab.ttsr"
+	| "tab.status";
 
 type SymbolMap = Record<SymbolKey, string>;
 
@@ -344,6 +353,15 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"tab.tools": "🔧",
 	"tab.tasks": "📦",
 	"tab.providers": "🌐",
+	"tab.display": "🎨",
+	"tab.agent": "🤖",
+	"tab.input": "⌨",
+	"tab.config": "⚙",
+	"tab.services": "🌐",
+	"tab.bash": "💻",
+	"tab.lsp": "📝",
+	"tab.ttsr": "⏱",
+	"tab.status": "📊",
 };
 
 const NERD_SYMBOLS: SymbolMap = {
@@ -595,6 +613,15 @@ const NERD_SYMBOLS: SymbolMap = {
 	"tab.tools": "󰠭",
 	"tab.tasks": "󰐱",
 	"tab.providers": "󰖟",
+	"tab.display": "󰃣",
+	"tab.agent": "󰚩",
+	"tab.input": "󰌌",
+	"tab.config": "󰒓",
+	"tab.services": "󰖟",
+	"tab.bash": "",
+	"tab.lsp": "󰌌",
+	"tab.ttsr": "󱎫",
+	"tab.status": "󰄪",
 };
 
 const ASCII_SYMBOLS: SymbolMap = {
@@ -752,6 +779,15 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"tab.tools": "[T]",
 	"tab.tasks": "[K]",
 	"tab.providers": "[P]",
+	"tab.display": "[D]",
+	"tab.agent": "[A]",
+	"tab.input": "[I]",
+	"tab.config": "[C]",
+	"tab.services": "[S]",
+	"tab.bash": "[B]",
+	"tab.lsp": "[L]",
+	"tab.ttsr": "[R]",
+	"tab.status": "[=]",
 };
 
 const SYMBOL_PRESETS: Record<SymbolPreset, SymbolMap> = {
