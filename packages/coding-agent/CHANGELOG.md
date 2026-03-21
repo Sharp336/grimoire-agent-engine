@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.5.2] - 2026-03-21
+
+### Fixed
+
+- Repaired broken `settings` command after upstream merge. Restored fork-specific UI icons and implemented proper routing of upstream setting definitions to the fork's preserved TUI tabs.
+
 ## [0.5.1] - 2026-03-20
 
 ### Fixed
