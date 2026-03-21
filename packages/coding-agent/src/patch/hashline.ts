@@ -1016,8 +1016,11 @@ export function checkBoundariesForEdits(edits: HashlineEdit[], symbols: DocSymbo
 		for (const [line, role] of [[posLine, "start"] as const, [endLine, "end"] as const]) {
 			const endsHere = flat.filter(n => n.range.end.line === line);
 			const startsHere = flat.filter(n => n.range.start.line === line);
-			if (endsHere.length > 0 && startsHere.length > 0) {
-				const construct = endsHere[0].name ? `"${endsHere[0].name}"` : "the enclosing block";
+			// A shared boundary requires two DIFFERENT symbols overlapping at this line.
+			// A single-line declaration (start === end === line) is not a shared boundary.
+			const sharedPair = endsHere.find(e => startsHere.some(s => s !== e));
+			if (sharedPair) {
+				const construct = sharedPair.name ? `"${sharedPair.name}"` : "the enclosing block";
 				throw new SharedBoundaryError(editIndex, line, role, construct);
 			}
 		}
