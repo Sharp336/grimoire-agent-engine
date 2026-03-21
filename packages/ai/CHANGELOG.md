@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added MiniMax M2.7 and M2.7-highspeed model metadata across all providers (minimax, minimax-cn, minimax-code, minimax-code-cn)
+
+
 ## [13.14.0] - 2026-03-20
 
 ### Fixed
