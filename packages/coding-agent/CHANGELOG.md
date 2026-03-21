@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-03-20
+
+### Added
+
+- System prompt composer: LLM-compiled system prompts from meta-prompt + guidance library, cached on environment hash ([#14](https://github.com/open-horizon-labs/oh-omp/issues/14))
+- AST boundary detection for hashline edits: uses LSP `textDocument/documentSymbol` to detect when a replace operation targets a shared structural boundary (e.g. `} else {`), rejects with clear message before mutation
+- Pre-flight tag verification for hashline edits: `verifyTags()` validates tags against current file content before mutation, returns enriched remaps covering the full edit range for retry without re-reading
+- `getDocumentSymbols()` exported from LSP module: fetches symbol tree for a file, returns null gracefully when LSP is unavailable
+
+### Changed
+
+- Synced with upstream to v13.14.0 (130 commits: GitLab Duo OAuth, MCP reconnect, model additions, parallel web search, Codestral provider, prompt caching improvements)
 ## [0.3.3] - 2026-03-12
 
 ### Fixed
