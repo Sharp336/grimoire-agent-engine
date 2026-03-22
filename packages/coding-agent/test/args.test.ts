@@ -162,6 +162,13 @@ describe("parseArgs", () => {
 		});
 	});
 
+	describe("--worktree/-w flag", () => {
+		test("parses long and short forms", () => {
+			expect(parseArgs(["--worktree"]).worktree).toBe(true);
+			expect(parseArgs(["-w"]).worktree).toBe(true);
+		});
+	});
+
 	describe("--hook flag", () => {
 		test("parses single --hook", () => {
 			const result = parseArgs(["--hook", "./my-hook.ts"]);

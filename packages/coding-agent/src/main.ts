@@ -5,8 +5,7 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { realpathSync } from "node:fs";
-import * as fs from "node:fs/promises";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
@@ -18,6 +17,11 @@ import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { listModels } from "./cli/list-models";
 import { selectSession } from "./cli/session-picker";
+import {
+	type MainWorktreeIsolation,
+	prepareMainWorktreeIsolation,
+	validateMainWorktreeIsolationArgs,
+} from "./cli/worktree-isolation";
 import { findConfigFile } from "./config";
 import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
 import { resolveCliModel, resolveModelRoleValue, resolveModelScope, type ScopedModel } from "./config/model-resolver";
@@ -166,7 +170,7 @@ function normalizePathForComparison(value: string): string {
 	const resolved = path.resolve(value);
 	let realPath = resolved;
 	try {
-		realPath = realpathSync(resolved);
+		realPath = fs.realpathSync(resolved);
 	} catch {}
 	return process.platform === "win32" ? realPath.toLowerCase() : realPath;
 }
@@ -274,7 +278,7 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 	}
 
 	const normalizePath = (value: string) => {
-		const resolved = realpathSync(path.resolve(value));
+		const resolved = fs.realpathSync(path.resolve(value));
 		return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 	};
 
@@ -286,7 +290,7 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 
 	const isDirectory = async (p: string) => {
 		try {
-			const s = await fs.stat(p);
+			const s = await fs.promises.stat(p);
 			return s.isDirectory();
 		} catch {
 			return false;
@@ -552,214 +556,226 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 		process.exit(1);
 	}
 
-	const cwd = getProjectDir();
+	let cwd = getProjectDir();
+	let mainWorktreeIsolation: MainWorktreeIsolation | undefined;
+	if (parsedArgs.worktree) {
+		validateMainWorktreeIsolationArgs(parsedArgs);
+		const isolation = await logger.timeAsync("prepareMainWorktreeIsolation", () => prepareMainWorktreeIsolation(cwd));
+		const isolatedCwd = isolation.isolatedCwd;
+		setProjectDir(isolatedCwd);
+		cwd = isolatedCwd;
+		mainWorktreeIsolation = isolation;
+	}
 	await logger.timeAsync("settings:init", () => Settings.init({ cwd }));
 	if (parsedArgs.noPty) {
 		Bun.env.PI_NO_PTY = "1";
 	}
-	const { pipedInput, fileText, fileImages } = await logger.timeAsync("prepareInitialMessage", async () => {
-		const pipedInput = await readPipedInput();
-		if (parsedArgs.fileArgs.length === 0) {
-			return { pipedInput };
-		}
-
-		const { text, images } = await processFileArguments(parsedArgs.fileArgs, {
-			autoResizeImages: settings.get("images.autoResize"),
+	let isInteractive = false;
+	let mode = parsedArgs.mode || "text";
+	try {
+		const { pipedInput, fileText, fileImages } = await logger.timeAsync("prepareInitialMessage", async () => {
+			const pipedInput = await readPipedInput();
+			if (parsedArgs.fileArgs.length === 0) {
+				return { pipedInput };
+			}
+			const { text, images } = await processFileArguments(parsedArgs.fileArgs, {
+				autoResizeImages: settings.get("images.autoResize"),
+			});
+			return {
+				pipedInput,
+				fileText: text,
+				fileImages: images,
+			};
 		});
-		return {
-			pipedInput,
-			fileText: text,
-			fileImages: images,
+		const { initialMessage, initialImages } = buildInitialMessage({
+			parsed: parsedArgs,
+			fileText,
+			fileImages,
+			stdinContent: pipedInput,
+		});
+		const autoPrint = pipedInput !== undefined && !parsedArgs.print && parsedArgs.mode === undefined;
+		isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
+		mode = parsedArgs.mode || "text";
+		if (mainWorktreeIsolation) {
+			const { notice } = mainWorktreeIsolation;
+			notifs.push({ kind: "info", message: notice });
+			if (!isInteractive && mode !== "json") {
+				process.stderr.write(`${chalk.dim(notice)}\n`);
+			}
+		}
+		logger.time("initializeWithSettings", () => initializeWithSettings(settings));
+		modelRegistry.refreshInBackground();
+		const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;
+		const slowModel = parsedArgs.slow ?? $env.PI_SLOW_MODEL;
+		const planModel = parsedArgs.plan ?? $env.PI_PLAN_MODEL;
+		if (smolModel || slowModel || planModel) {
+			settings.overrideModelRoles({
+				smol: smolModel,
+				slow: slowModel,
+				plan: planModel,
+			});
+		}
+		await logger.timeAsync("initTheme:final", () =>
+			initTheme(
+				isInteractive,
+				settings.get("symbolPreset"),
+				settings.get("colorBlindMode"),
+				settings.get("theme.dark"),
+				settings.get("theme.light"),
+			),
+		);
+		let scopedModels: ScopedModel[] = [];
+		const modelPatterns = parsedArgs.models ?? settings.get("enabledModels");
+		const modelMatchPreferences = {
+			usageOrder: settings.getStorage()?.getModelUsageOrder(),
 		};
-	});
-	const { initialMessage, initialImages } = buildInitialMessage({
-		parsed: parsedArgs,
-		fileText,
-		fileImages,
-		stdinContent: pipedInput,
-	});
-	const autoPrint = pipedInput !== undefined && !parsedArgs.print && parsedArgs.mode === undefined;
-	const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
-	const mode = parsedArgs.mode || "text";
-
-	// Initialize discovery system with settings for provider persistence
-	logger.time("initializeWithSettings", () => initializeWithSettings(settings));
-	modelRegistry.refreshInBackground();
-
-	// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
-	const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;
-	const slowModel = parsedArgs.slow ?? $env.PI_SLOW_MODEL;
-	const planModel = parsedArgs.plan ?? $env.PI_PLAN_MODEL;
-	if (smolModel || slowModel || planModel) {
-		settings.overrideModelRoles({
-			smol: smolModel,
-			slow: slowModel,
-			plan: planModel,
-		});
-	}
-
-	await logger.timeAsync("initTheme:final", () =>
-		initTheme(
-			isInteractive,
-			settings.get("symbolPreset"),
-			settings.get("colorBlindMode"),
-			settings.get("theme.dark"),
-			settings.get("theme.light"),
-		),
-	);
-
-	let scopedModels: ScopedModel[] = [];
-	const modelPatterns = parsedArgs.models ?? settings.get("enabledModels");
-	const modelMatchPreferences = {
-		usageOrder: settings.getStorage()?.getModelUsageOrder(),
-	};
-	if (modelPatterns && modelPatterns.length > 0) {
-		scopedModels = await logger.timeAsync("resolveModelScope", () =>
-			resolveModelScope(modelPatterns, modelRegistry, modelMatchPreferences),
-		);
-	}
-
-	// Create session manager based on CLI flags
-	let sessionManager = await logger.timeAsync("createSessionManager", () => createSessionManager(parsedArgs, cwd));
-
-	// Handle --resume (no value): show session picker
-	if (parsedArgs.resume === true && !parsedArgs.fork) {
-		const sessions = await logger.timeAsync("SessionManager.list", () =>
-			SessionManager.list(cwd, parsedArgs.sessionDir),
-		);
-		if (sessions.length === 0) {
-			process.stdout.write(`${chalk.dim("No sessions found")}\n`);
-			return;
-		}
-		const selectedPath = await logger.timeAsync("selectSession", () => selectSession(sessions));
-		if (!selectedPath) {
-			process.stdout.write(`${chalk.dim("No session selected")}\n`);
-			return;
-		}
-		sessionManager = await SessionManager.open(selectedPath);
-	}
-
-	const { options: sessionOptions } = await logger.timeAsync("buildSessionOptions", () =>
-		buildSessionOptions(parsedArgs, scopedModels, sessionManager, modelRegistry),
-	);
-	sessionOptions.authStorage = authStorage;
-	sessionOptions.modelRegistry = modelRegistry;
-	sessionOptions.hasUI = isInteractive;
-
-	// Handle CLI --api-key as runtime override (not persisted)
-	if (parsedArgs.apiKey) {
-		if (!sessionOptions.model && !sessionOptions.modelPattern) {
-			process.stderr.write(
-				`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
+		if (modelPatterns && modelPatterns.length > 0) {
+			scopedModels = await logger.timeAsync("resolveModelScope", () =>
+				resolveModelScope(modelPatterns, modelRegistry, modelMatchPreferences),
 			);
-			process.exit(1);
 		}
-		if (sessionOptions.model) {
-			authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsedArgs.apiKey);
+		let sessionManager = await logger.timeAsync("createSessionManager", () => createSessionManager(parsedArgs, cwd));
+		if (parsedArgs.resume === true && !parsedArgs.fork) {
+			const sessions = await logger.timeAsync("SessionManager.list", () =>
+				SessionManager.list(cwd, parsedArgs.sessionDir),
+			);
+			if (sessions.length === 0) {
+				process.stdout.write(`${chalk.dim("No sessions found")}\n`);
+				return;
+			}
+			const selectedPath = await logger.timeAsync("selectSession", () => selectSession(sessions));
+			if (!selectedPath) {
+				process.stdout.write(`${chalk.dim("No session selected")}\n`);
+				return;
+			}
+			sessionManager = await SessionManager.open(selectedPath);
 		}
-	}
-
-	const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await logger.timeAsync(
-		"createAgentSession",
-		() => createAgentSession(sessionOptions),
-	);
-	if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
-		authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
-	}
-
-	if (modelFallbackMessage) {
-		notifs.push({ kind: "warn", message: modelFallbackMessage });
-	}
-
-	const modelRegistryError = modelRegistry.getError();
-	if (modelRegistryError) {
-		notifs.push({ kind: "error", message: modelRegistryError.message });
-	}
-
-	// Re-parse CLI args with extension flags and apply values
-	if (session.extensionRunner) {
-		const extFlags = session.extensionRunner.getFlags();
-		if (extFlags.size > 0) {
-			for (let i = 0; i < rawArgs.length; i++) {
-				const arg = rawArgs[i];
-				if (!arg.startsWith("--")) {
-					continue;
-				}
-				const flagName = arg.slice(2);
-				const extFlag = extFlags.get(flagName);
-				if (!extFlag) {
-					continue;
-				}
-				if (extFlag.type === "boolean") {
-					session.extensionRunner.setFlagValue(flagName, true);
-					continue;
-				}
-				if (i + 1 < rawArgs.length) {
-					session.extensionRunner.setFlagValue(flagName, rawArgs[++i]);
+		const { options: sessionOptions } = await logger.timeAsync("buildSessionOptions", () =>
+			buildSessionOptions(parsedArgs, scopedModels, sessionManager, modelRegistry),
+		);
+		sessionOptions.authStorage = authStorage;
+		sessionOptions.modelRegistry = modelRegistry;
+		sessionOptions.hasUI = isInteractive;
+		if (parsedArgs.apiKey) {
+			if (!sessionOptions.model && !sessionOptions.modelPattern) {
+				process.stderr.write(
+					`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
+				);
+				process.exit(1);
+			}
+			if (sessionOptions.model) {
+				authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsedArgs.apiKey);
+			}
+		}
+		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await logger.timeAsync(
+			"createAgentSession",
+			() => createAgentSession(sessionOptions),
+		);
+		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
+			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
+		}
+		if (modelFallbackMessage) {
+			notifs.push({ kind: "warn", message: modelFallbackMessage });
+		}
+		const modelRegistryError = modelRegistry.getError();
+		if (modelRegistryError) {
+			notifs.push({ kind: "error", message: modelRegistryError.message });
+		}
+		if (session.extensionRunner) {
+			const extFlags = session.extensionRunner.getFlags();
+			if (extFlags.size > 0) {
+				for (let i = 0; i < rawArgs.length; i++) {
+					const arg = rawArgs[i];
+					if (!arg.startsWith("--")) {
+						continue;
+					}
+					const flagName = arg.slice(2);
+					const extFlag = extFlags.get(flagName);
+					if (!extFlag) {
+						continue;
+					}
+					if (extFlag.type === "boolean") {
+						session.extensionRunner.setFlagValue(flagName, true);
+						continue;
+					}
+					if (i + 1 < rawArgs.length) {
+						session.extensionRunner.setFlagValue(flagName, rawArgs[++i]);
+					}
 				}
 			}
 		}
-	}
-
-	if (!isInteractive && !session.model) {
-		if (modelFallbackMessage) {
-			process.stderr.write(`${chalk.red(modelFallbackMessage)}\n`);
+		if (!isInteractive && !session.model) {
+			if (modelFallbackMessage) {
+				process.stderr.write(`${chalk.red(modelFallbackMessage)}\n`);
+			} else {
+				process.stderr.write(`${chalk.red("No models available.")}\n`);
+			}
+			process.stderr.write(`${chalk.yellow("\nSet an API key environment variable:")}\n`);
+			process.stderr.write("  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.\n");
+			process.stderr.write(`${chalk.yellow(`\nOr create ${ModelsConfigFile.path()}`)}\n`);
+			process.exit(1);
+		}
+		if (mode === "rpc") {
+			await runRpcMode(session);
+		} else if (mode === "acp") {
+			await runAcpMode(session);
+		} else if (isInteractive) {
+			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
+			const changelogMarkdown = await getChangelogForDisplay(parsedArgs);
+			const scopedModelsForDisplay = sessionOptions.scopedModels ?? scopedModels;
+			if (scopedModelsForDisplay.length > 0) {
+				const modelList = scopedModelsForDisplay
+					.map(scopedModel => {
+						const thinkingStr = !scopedModel.thinkingLevel ? `:${scopedModel.thinkingLevel}` : "";
+						return `${scopedModel.model.id}${thinkingStr}`;
+					})
+					.join(", ");
+				process.stdout.write(`${chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Ctrl+P to cycle)")}`)}\n`);
+			}
+			if ($env.PI_TIMING === "1") {
+				logger.printTimings();
+			}
+			logger.endTiming();
+			await runInteractiveMode(
+				session,
+				VERSION,
+				changelogMarkdown,
+				notifs,
+				versionCheckPromise,
+				parsedArgs.messages,
+				setToolUIContext,
+				lspServers,
+				mcpManager,
+				initialMessage,
+				initialImages,
+			);
 		} else {
-			process.stderr.write(`${chalk.red("No models available.")}\n`);
+			await runPrintMode(session, {
+				mode,
+				messages: parsedArgs.messages,
+				initialMessage,
+				initialImages,
+			});
+			await session.dispose();
+			stopThemeWatcher();
+			await postmortem.quit(0);
 		}
-		process.stderr.write(`${chalk.yellow("\nSet an API key environment variable:")}\n`);
-		process.stderr.write("  ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, etc.\n");
-		process.stderr.write(`${chalk.yellow(`\nOr create ${ModelsConfigFile.path()}`)}\n`);
-		process.exit(1);
-	}
-
-	if (mode === "rpc") {
-		await runRpcMode(session);
-	} else if (mode === "acp") {
-		await runAcpMode(session);
-	} else if (isInteractive) {
-		const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
-		const changelogMarkdown = await getChangelogForDisplay(parsedArgs);
-
-		const scopedModelsForDisplay = sessionOptions.scopedModels ?? scopedModels;
-		if (scopedModelsForDisplay.length > 0) {
-			const modelList = scopedModelsForDisplay
-				.map(scopedModel => {
-					const thinkingStr = !scopedModel.thinkingLevel ? `:${scopedModel.thinkingLevel}` : "";
-					return `${scopedModel.model.id}${thinkingStr}`;
-				})
-				.join(", ");
-			process.stdout.write(`${chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Ctrl+P to cycle)")}`)}\n`);
+	} finally {
+		if (mainWorktreeIsolation) {
+			try {
+				const cleaned = await mainWorktreeIsolation.cleanupIfClean();
+				if (!cleaned && mode !== "json") {
+					process.stderr.write(
+						`${chalk.dim(`Retained worktree with changes: ${mainWorktreeIsolation.worktreeRoot}`)}\n`,
+					);
+				}
+			} catch (error: unknown) {
+				logger.warn("Failed to cleanup temporary main worktree", {
+					worktree: mainWorktreeIsolation.worktreeRoot,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
 		}
-
-		if ($env.PI_TIMING === "1") {
-			logger.printTimings();
-		}
-
-		logger.endTiming();
-		await runInteractiveMode(
-			session,
-			VERSION,
-			changelogMarkdown,
-			notifs,
-			versionCheckPromise,
-			parsedArgs.messages,
-			setToolUIContext,
-			lspServers,
-			mcpManager,
-			initialMessage,
-			initialImages,
-		);
-	} else {
-		await runPrintMode(session, {
-			mode,
-			messages: parsedArgs.messages,
-			initialMessage,
-			initialImages,
-		});
-		await session.dispose();
-		stopThemeWatcher();
-		await postmortem.quit(0);
 	}
 }
 

@@ -27,6 +27,7 @@ export interface Args {
 	version?: boolean;
 	mode?: Mode;
 	noSession?: boolean;
+	worktree?: boolean;
 	sessionDir?: string;
 	providerSessionId?: string;
 	fork?: string;
@@ -103,6 +104,8 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 			result.providerSessionId = args[++i];
 		} else if (arg === "--no-session") {
 			result.noSession = true;
+		} else if (arg === "--worktree" || arg === "-w") {
+			result.worktree = true;
 		} else if (arg === "--session-dir" && i + 1 < args.length) {
 			result.sessionDir = args[++i];
 		} else if (arg === "--models" && i + 1 < args.length) {

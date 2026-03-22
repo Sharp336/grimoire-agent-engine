@@ -41,6 +41,7 @@
 - Added support for Agent Client Protocol SDK integration with session management, MCP server configuration, and streaming communication
 - Added `ensureOnDisk()` method to SessionManager to persist sessions immediately for ACP discovery
 
+- Added `--worktree` to start top-level sessions in a temporary git worktree, preserving the repo-relative cwd and auto-cleaning it when left unchanged ([#452](https://github.com/can1357/oh-my-pi/issues/452))
 ### Changed
 
 - Changed autoresearch startup to create or reuse a dedicated `autoresearch/...` git branch before enabling the experiment loop

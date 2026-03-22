@@ -70,6 +70,10 @@ export default class Index extends Command {
 		"no-session": Flags.boolean({
 			description: "Don't save session (ephemeral)",
 		}),
+		worktree: Flags.boolean({
+			char: "w",
+			description: "Run the main session inside a temporary git worktree",
+		}),
 		models: Flags.string({
 			description: "Comma-separated model patterns for Ctrl+P cycling",
 		}),
@@ -126,6 +130,7 @@ export default class Index extends Command {
 		`# Interactive mode with initial prompt\n  ${APP_NAME} "List all .ts files in src/"`,
 		`# Include files in initial message\n  ${APP_NAME} @prompt.md @image.png "What color is the sky?"`,
 		`# Non-interactive mode (process and exit)\n  ${APP_NAME} -p "List all .ts files in src/"`,
+		`# Run in a temporary worktree\n  ${APP_NAME} --worktree "Refactor the status line"`,
 		`# Continue previous session\n  ${APP_NAME} --continue "What did we discuss?"`,
 		`# Use different model (fuzzy matching)\n  ${APP_NAME} --model opus "Help me refactor this code"`,
 		`# Limit model cycling to specific models\n  ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o`,
