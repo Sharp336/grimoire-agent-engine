@@ -28,6 +28,7 @@ import type { ModelRole } from "../config/model-registry";
 import { loadCapability } from "../discovery";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
 import { type EditMode, normalizeEditMode } from "../patch";
+import { mergeBashInterceptorRules } from "./bash-interceptor-rules";
 import { AgentStorage } from "../session/agent-storage";
 import { withFileLock } from "./file-lock";
 import {
@@ -341,10 +342,13 @@ export class Settings {
 	 * Get bash interceptor rules (typed accessor for complex array config).
 	 */
 	getBashInterceptorRules(): BashInterceptorRule[] {
+		const enabled = this.get("bashInterceptor.enabled");
 		const patterns = (this.#merged.bashInterceptor as { patterns?: unknown[] })?.patterns;
-		if (!Array.isArray(patterns)) return [];
+		const custom = Array.isArray(patterns)
+			? patterns.filter((p): p is BashInterceptorRule => typeof p === "object" && p !== null && "pattern" in p)
+			: [];
 
-		return patterns.filter((p): p is BashInterceptorRule => typeof p === "object" && p !== null && "pattern" in p);
+		return mergeBashInterceptorRules(enabled, custom);
 	}
 
 	/**
