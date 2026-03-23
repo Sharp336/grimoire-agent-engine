@@ -19,6 +19,8 @@ export interface PluginFeature {
 	hooks?: string[];
 	/** Additional command files provided by this feature */
 	commands?: string[];
+	/** Additional skill directories provided by this feature */
+	skills?: string[];
 }
 
 /**
@@ -40,6 +42,8 @@ export interface PluginManifest {
 	extensions?: string[];
 	/** Command files (relative paths from package root) */
 	commands?: string[];
+	/** Skill directories (relative paths from package root) */
+	skills?: string[];
 
 	/** Feature definitions for selective installation */
 	features?: Record<string, PluginFeature>;

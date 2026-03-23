@@ -122,10 +122,10 @@ export async function getEnabledPlugins(cwd: string): Promise<InstalledPlugin[]>
 // =============================================================================
 
 /**
- * Generic path resolver for plugin manifest entries (tools, hooks, commands, extensions).
+ * Generic path resolver for plugin manifest entries (tools, hooks, commands, extensions, skills).
  * Handles both single-string and string[] base entries, plus feature-specific entries.
  */
-function resolvePluginPaths(plugin: InstalledPlugin, key: "tools" | "hooks" | "commands" | "extensions"): string[] {
+function resolvePluginPaths(plugin: InstalledPlugin, key: "tools" | "hooks" | "commands" | "extensions" | "skills"): string[] {
 	const paths: string[] = [];
 	const manifest = plugin.manifest;
 
@@ -192,6 +192,10 @@ export function resolvePluginExtensionPaths(plugin: InstalledPlugin): string[] {
 	return resolvePluginPaths(plugin, "extensions");
 }
 
+export function resolvePluginSkillPaths(plugin: InstalledPlugin): string[] {
+	return resolvePluginPaths(plugin, "skills");
+}
+
 // =============================================================================
 // Aggregated Discovery
 // =============================================================================
@@ -247,6 +251,20 @@ export async function getAllPluginExtensionPaths(cwd: string): Promise<string[]>
 
 	for (const plugin of plugins) {
 		paths.push(...resolvePluginExtensionPaths(plugin));
+	}
+
+	return paths;
+}
+
+/**
+ * Get all skill paths from all enabled plugins.
+ */
+export async function getAllPluginSkillPaths(cwd: string): Promise<string[]> {
+	const plugins = await getEnabledPlugins(cwd);
+	const paths: string[] = [];
+
+	for (const plugin of plugins) {
+		paths.push(...resolvePluginSkillPaths(plugin));
 	}
 
 	return paths;
