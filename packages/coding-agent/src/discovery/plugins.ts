@@ -6,12 +6,12 @@ import path from "node:path";
 import { type Skill, skillCapability } from "../capability/skill";
 import { registerProvider, type LoadContext, type LoadResult } from "../capability";
 import { getAllPluginSkillPaths } from "../extensibility/plugins/loader";
-import { scanSkillsFromDir } from "../util/filesystem/skill-scanner";
+import { scanSkillsFromDir } from "./helpers";
 
 const PROVIDER_ID = "plugins";
 const DISPLAY_NAME = "Plugins";
 const DESCRIPTION = "Skills from installed omp plugins";
-const PRIORITY = 500; // Load after built-in but before project-specific
+const PRIORITY = 75; // After built-in (100), before most agent-specific providers (70)
 
 /**
  * Load skills from all enabled plugins.
