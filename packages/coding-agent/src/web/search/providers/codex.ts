@@ -22,7 +22,8 @@ const DEFAULT_INSTRUCTIONS =
 	"You are a helpful assistant with web search capabilities. Search the web to answer the user's question accurately and cite your sources.";
 
 function getModel(): string {
-	return $env.PI_CODEX_WEB_SEARCH_MODEL ?? DEFAULT_MODEL;
+	const configuredModel = $env.PI_CODEX_WEB_SEARCH_MODEL?.trim();
+	return configuredModel ? configuredModel : DEFAULT_MODEL;
 }
 
 export interface CodexSearchParams {

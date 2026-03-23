@@ -97,6 +97,18 @@ describe("searchCodex model selection", () => {
 		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
 	});
 
+	it("falls back to the default model when PI_CODEX_WEB_SEARCH_MODEL is blank", async () => {
+		process.env.PI_CODEX_WEB_SEARCH_MODEL = "   ";
+		using _hook = mockCodexFetch("gpt-5-codex-mini");
+
+		const result = await searchCodex({ query: "blank codex model" });
+
+		expect(capturedRequest).not.toBeNull();
+		expect(capturedRequest?.body?.model).toBe("gpt-5-codex-mini");
+		expect(result.model).toBe("gpt-5-codex-mini");
+	});
+
+
 	it("uses PI_CODEX_WEB_SEARCH_MODEL when provided", async () => {
 		process.env.PI_CODEX_WEB_SEARCH_MODEL = "gpt-5.4-mini";
 		using _hook = mockCodexFetch("gpt-5.4-mini");
