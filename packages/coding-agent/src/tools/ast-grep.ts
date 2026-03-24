@@ -31,8 +31,9 @@ import {
 	PARSE_ERRORS_LIMIT,
 	PREVIEW_LIMITS,
 } from "./render-utils";
-import { ToolError } from "./tool-errors";
+import { ToolError, ToolTimeoutError } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import { clampTimeout } from "./tool-timeouts";
 
 const astGrepSchema = Type.Object({
 	pat: Type.Array(Type.String(), { minItems: 1, description: "AST patterns to match" }),
@@ -43,6 +44,7 @@ const astGrepSchema = Type.Object({
 	limit: Type.Optional(Type.Number({ description: "Max matches (default: 50)" })),
 	offset: Type.Optional(Type.Number({ description: "Skip first N matches (default: 0)" })),
 	context: Type.Optional(Type.Number({ description: "Context lines around each match" })),
+	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 20)" })),
 });
 
 export interface AstGrepToolDetails {
@@ -138,18 +140,37 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 				throw new ToolError(`Path not found: ${scopePath}`);
 			}
 
-			const result = await astGrep({
-				patterns,
-				lang: params.lang?.trim(),
-				path: resolvedSearchPath,
-				glob: globFilter,
-				selector: params.sel?.trim(),
-				limit,
-				offset,
-				context,
-				includeMeta: true,
-				signal,
-			});
+			const timeoutSeconds = clampTimeout("ast_grep", params.timeout);
+			const timeoutMs = timeoutSeconds * 1000;
+			const timeoutSignal = AbortSignal.timeout(timeoutMs);
+			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+
+			const result = await (async () => {
+				try {
+					return await astGrep({
+						patterns,
+						lang: params.lang?.trim(),
+						path: resolvedSearchPath,
+						glob: globFilter,
+						selector: params.sel?.trim(),
+						limit,
+						offset,
+						context,
+						includeMeta: true,
+						signal: combinedSignal,
+						timeoutMs,
+					});
+				} catch (error) {
+					if (timeoutSignal.aborted && !signal?.aborted) {
+						throw new ToolTimeoutError(`ast_grep timed out after ${timeoutSeconds} seconds`, {
+							durationSeconds: timeoutSeconds,
+							durationMs: timeoutMs,
+							toolName: this.name,
+						});
+					}
+					throw error;
+				}
+			})();
 
 			const normalizedParseErrors = (result.parseErrors ?? []).map(error => {
 				const parseError = error.match(/^.+: (.+: parse error \(syntax tree contains error nodes\))$/);

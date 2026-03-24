@@ -26,20 +26,20 @@ import { applyListLimit } from "./list-limit";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import { normalizePathLikeInput, parseFindPattern, resolveMultiFindPattern, resolveToCwd } from "./path-utils";
 import { formatCount, formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
-import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
+import { ToolAbortError, ToolError, ToolTimeoutError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import { clampTimeout } from "./tool-timeouts";
 
 const findSchema = Type.Object({
 	pattern: Type.String({ description: "Glob pattern, e.g. '*.ts', 'src/**/*.json', 'lib/*.tsx'" }),
 	hidden: Type.Optional(Type.Boolean({ description: "Include hidden files and directories (default: true)" })),
 	limit: Type.Optional(Type.Number({ description: "Max results (default: 1000)" })),
+	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 20)" })),
 });
 
 export type FindToolInput = Static<typeof findSchema>;
 
 const DEFAULT_LIMIT = 1000;
-const GLOB_TIMEOUT_MS = 5000;
-
 export interface FindToolDetails {
 	truncation?: TruncationResult;
 	resultLimitReached?: number;
@@ -64,7 +64,11 @@ export interface FindOperations {
 		absolutePath: string,
 	) => Promise<{ isFile(): boolean; isDirectory(): boolean }> | { isFile(): boolean; isDirectory(): boolean };
 	/** Find files matching glob pattern. Returns relative paths. */
-	glob: (pattern: string, cwd: string, options: { ignore: string[]; limit: number }) => Promise<string[]> | string[];
+	glob: (
+		pattern: string,
+		cwd: string,
+		options: { ignore: string[]; limit: number; signal?: AbortSignal; timeoutMs?: number },
+	) => Promise<string[]> | string[];
 }
 
 export interface FindToolOptions {
@@ -96,8 +100,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		onUpdate?: AgentToolUpdateCallback<FindToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<FindToolDetails>> {
-		const { pattern, limit, hidden } = params;
-
+		const { pattern, limit, hidden, timeout } = params;
 		return untilAborted(signal, async () => {
 			const formatScopePath = (targetPath: string): string => {
 				const relative = path.relative(this.session.cwd, targetPath).replace(/\\/g, "/");
@@ -125,7 +128,31 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				throw new ToolError("Limit must be a positive number");
 			}
 			const includeHidden = hidden ?? true;
-
+			const timeoutSec = clampTimeout("find", timeout);
+			const timeoutMs = timeoutSec * 1000;
+			const timeoutSignal = AbortSignal.timeout(timeoutMs);
+			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+			const throwTimeoutOrAbort = (error: unknown): never => {
+				if (error instanceof ToolAbortError) {
+					if (timeoutSignal.aborted && !signal?.aborted) {
+						throw new ToolTimeoutError(`find timed out after ${timeoutSec} seconds`, {
+							toolName: "find",
+							durationSeconds: timeoutSec,
+						});
+					}
+					throw error;
+				}
+				if (error instanceof Error && error.name === "AbortError") {
+					if (timeoutSignal.aborted && !signal?.aborted) {
+						throw new ToolTimeoutError(`find timed out after ${timeoutSec} seconds`, {
+							toolName: "find",
+							durationSeconds: timeoutSec,
+						});
+					}
+					throw new ToolAbortError();
+				}
+				throw error;
+			};
 			// If custom operations provided with glob, use that instead of fd
 			if (this.#customOps?.glob) {
 				if (!(await this.#customOps.exists(searchPath))) {
@@ -146,10 +173,17 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 					}
 				}
 
-				const results = await this.#customOps.glob(globPattern, searchPath, {
-					ignore: ["**/node_modules/**", "**/.git/**"],
-					limit: effectiveLimit,
-				});
+				let results: string[] = [];
+				try {
+					results = await this.#customOps.glob(globPattern, searchPath, {
+						ignore: ["**/node_modules/**", "**/.git/**"],
+						limit: effectiveLimit,
+						signal: combinedSignal,
+						timeoutMs,
+					});
+				} catch (error) {
+					throwTimeoutOrAbort(error);
+				}
 
 				if (results.length === 0) {
 					const details: FindToolDetails = { scopePath, fileCount: 0, files: [], truncated: false };
@@ -213,7 +247,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				throw new ToolError(`Path is not a directory: ${searchPath}`);
 			}
 
-			let matches: GlobMatch[];
+			let matches: GlobMatch[] = [];
 			const onUpdateMatches: string[] = [];
 			const updateIntervalMs = 200;
 			let lastUpdate = 0;
@@ -235,7 +269,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			};
 			const onMatch = onUpdate
 				? (match: GlobMatch | null) => {
-						if (signal?.aborted || !match) return;
+						if (combinedSignal.aborted || !match) return;
 						let relativePath = match.path;
 						if (!relativePath) return;
 						if (match.fileType === FileType.Dir && !relativePath.endsWith("/")) {
@@ -245,8 +279,6 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 						emitUpdate();
 					}
 				: undefined;
-			const timeoutSignal = AbortSignal.timeout(GLOB_TIMEOUT_MS);
-			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
 			const doGlob = async (useGitignore: boolean) =>
 				untilAborted(combinedSignal, () =>
@@ -259,6 +291,8 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 							maxResults: effectiveLimit,
 							sortByMtime: true,
 							gitignore: useGitignore,
+							signal: combinedSignal,
+							timeoutMs,
 						},
 						onMatch,
 					),
@@ -272,14 +306,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 				}
 				matches = result.matches;
 			} catch (error) {
-				if (error instanceof Error && error.name === "AbortError") {
-					if (timeoutSignal.aborted && !signal?.aborted) {
-						const timeoutSeconds = Math.max(1, Math.round(GLOB_TIMEOUT_MS / 1000));
-						throw new ToolError(`find timed out after ${timeoutSeconds}s`);
-					}
-					throw new ToolAbortError();
-				}
-				throw error;
+				throwTimeoutOrAbort(error);
 			}
 
 			if (matches.length === 0) {

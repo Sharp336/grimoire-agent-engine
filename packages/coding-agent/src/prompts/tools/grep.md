@@ -5,6 +5,7 @@ Searches files using powerful regex matching built on ripgrep.
 - `path` may be a file, directory, glob path, or comma/space-separated path list; pair it with `glob` when you need an additional relative file filter
 - Filter files with `glob` (e.g., `*.js`, `**/*.tsx`) or `type` (e.g., `js`, `py`, `rust`)
 - Respects `.gitignore` by default; set `gitignore: false` to include ignored files
+- `timeout` sets a per-call deadline in seconds (default: 20)
 - For cross-line patterns like `struct \\{[\\s\\S]*?field`, set `multiline: true` if needed
 - If the pattern contains a literal `\n`, multiline defaults to true
 </instruction>

@@ -4,6 +4,7 @@ Performs structural AST-aware rewrites via native ast-grep.
 - Use for codemods and structural rewrites where plain text replace is unsafe
 - Narrow scope with `path` before replacing (`path` accepts files, directories, glob patterns, or comma/space-separated path lists; use `glob` for an additional filter relative to `path`)
 - Default to language-scoped rewrites in mixed repositories: set `lang` and keep `path`/`glob` narrow
+- `timeout` sets the per-call deadline in seconds; defaults to 30 and is clamped to the tool's allowed range
 - Treat parse issues as a scoping or pattern-shape signal: tighten `path`/`lang`, or rewrite the pattern into valid syntax before retrying
 - Metavariables captured in each rewrite pattern (`$A`, `$$$ARGS`) are substituted into that entry's rewrite template
 - For variadic captures (arguments, fields, statement lists), use `$$$NAME` (not `$$NAME`)
@@ -38,6 +39,8 @@ Performs structural AST-aware rewrites via native ast-grep.
   `{"ops":[{"pat":"class $_ { async execute($INPUT: $_) { $$$BEFORE; const $PARSED = $_.parse($INPUT); $$$AFTER } }","out":"class $_ { async execute($INPUT: $_) { $$$BEFORE; const $PARSED = $SCHEMA.parse($INPUT); $$$AFTER } }"}],"sel":"method_definition","lang":"typescript","path":"src/tools/todo.ts"}`
 - Convert Python print calls to logging:
   `{"ops":[{"pat":"print($$$ARGS)","out":"logger.info($$$ARGS)"}],"lang":"python","path":"src/"}`
+- Preview a rewrite but cap it at 10 seconds:
+  `{"ops":[{"pat":"print($$$ARGS)","out":"logger.info($$$ARGS)"}],"lang":"python","path":"src/","timeout":10}`
 </examples>
 
 <critical>

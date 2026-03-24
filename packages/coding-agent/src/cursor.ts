@@ -9,6 +9,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import type { CursorMcpCall, CursorExecHandlers as ICursorExecHandlers, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resolveToCwd } from "./tools/path-utils";
+import { toolErrorToResult } from "./tools/tool-errors";
 
 interface CursorExecBridgeOptions {
 	cwd: string;
@@ -35,10 +36,7 @@ function createToolResultMessage(
 }
 
 function buildToolErrorResult(message: string): AgentToolResult<unknown> {
-	return {
-		content: [{ type: "text", text: message }],
-		details: {},
-	};
+	return toolErrorToResult(new Error(message));
 }
 
 async function executeTool(
@@ -79,8 +77,7 @@ async function executeTool(
 			options.getToolContext?.(),
 		);
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		result = buildToolErrorResult(message);
+		result = toolErrorToResult(error);
 		isError = true;
 	}
 
@@ -114,8 +111,7 @@ async function executeDelete(options: CursorExecBridgeOptions, pathArg: string, 
 		const message = `Deleted ${pathArg}${sizeText}`;
 		result = { content: [{ type: "text", text: message }], details: {} };
 	} catch (error) {
-		const message = error instanceof Error ? error.message : String(error);
-		result = buildToolErrorResult(message);
+		result = toolErrorToResult(error);
 		isError = true;
 	}
 
@@ -225,7 +221,7 @@ export class CursorExecHandlers implements ICursorExecHandlers {
 				toolCallId,
 				toolName,
 				content: [{ type: "text", text: message }],
-				details: {},
+				details: { error: message },
 				isError: true,
 				timestamp: Date.now(),
 			};

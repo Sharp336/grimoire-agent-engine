@@ -3,6 +3,7 @@ Reads files from local filesystem or internal URLs.
 <instruction>
 - Reads up to {{DEFAULT_LIMIT}} lines default
 - Use `offset` and `limit` for large files; max {{DEFAULT_MAX_LINES}} lines per call
+- `timeout` sets the read deadline in seconds (default: 20)
 {{#if IS_HASHLINE_MODE}}
 - Filesystem output is CID prefixed: `LINE#ID:content`
 {{else}}

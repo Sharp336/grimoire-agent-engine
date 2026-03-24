@@ -5,6 +5,7 @@ Performs structural code search using AST matching via native ast-grep.
 - Prefer a precise `path` scope to keep results targeted and deterministic (`path` accepts files, directories, glob patterns, or comma/space-separated path lists; use `glob` for an additional filter relative to `path`)
 - Default to language-scoped search in mixed repositories: pair `path` + `glob` + explicit `lang` to avoid parse-noise from non-source files
 - `pat` is required and must include at least one non-empty AST pattern; `lang` is optional (`lang` is inferred per file extension when omitted)
+- `timeout` sets the per-call deadline in seconds; defaults to 20 and is clamped to the tool's allowed range
 - Multiple patterns run in one native pass; results are merged and then `offset`/`limit` are applied to the combined match set
 - Use `sel` only for contextual pattern mode; otherwise provide direct patterns
 - In contextual pattern mode, results are returned for the selected node (`sel`), not the outer wrapper used to make the pattern parse
@@ -43,6 +44,8 @@ Performs structural code search using AST matching via native ast-grep.
   `{"pat":["class $_ { async execute($INPUT: $_) { $$$BEFORE; const $PARSED = $_.parse($INPUT); $$$AFTER } }"],"sel":"method_definition","lang":"typescript","path":"src/tools/todo.ts"}`
 - Loosest existence check for a symbol in one file:
   `{"pat":["processItems"],"sel":"identifier","lang":"typescript","path":"src/worker.ts"}`
+- Limit a broad search to 5 seconds:
+  `{"pat":["processItems"],"sel":"identifier","lang":"typescript","path":"src/worker.ts","timeout":5}`
 </examples>
 
 <critical>

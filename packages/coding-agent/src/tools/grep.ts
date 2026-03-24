@@ -25,8 +25,9 @@ import {
 	resolveToCwd,
 } from "./path-utils";
 import { formatCount, formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
-import { ToolError } from "./tool-errors";
+import { ToolAbortError, ToolError, ToolTimeoutError } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import { clampTimeout } from "./tool-timeouts";
 
 const grepSchema = Type.Object({
 	pattern: Type.String({ description: "Regex pattern to search for" }),
@@ -40,6 +41,7 @@ const grepSchema = Type.Object({
 	gitignore: Type.Optional(Type.Boolean({ description: "Respect .gitignore files during search (default: true)" })),
 	limit: Type.Optional(Type.Number({ description: "Limit output to first N matches (default: 20)" })),
 	offset: Type.Optional(Type.Number({ description: "Skip first N entries before applying limit (default: 0)" })),
+	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 20)" })),
 });
 
 export type GrepToolInput = Static<typeof grepSchema>;
@@ -85,7 +87,20 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 		_onUpdate?: AgentToolUpdateCallback<GrepToolDetails>,
 		_toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<GrepToolDetails>> {
-		const { pattern, path: searchDir, glob, type, i, gitignore, pre, post, multiline, limit, offset } = params;
+		const {
+			pattern,
+			path: searchDir,
+			glob,
+			type,
+			i,
+			gitignore,
+			pre,
+			post,
+			multiline,
+			limit,
+			offset,
+			timeout,
+		} = params;
 
 		return untilAborted(signal, async () => {
 			const normalizedPattern = pattern.trim();
@@ -103,6 +118,10 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 				throw new ToolError("Limit must be a non-negative number");
 			}
 			const normalizedLimit = rawLimit !== undefined && rawLimit > 0 ? rawLimit : undefined;
+			const timeoutSec = clampTimeout("grep", timeout);
+			const timeoutMs = timeoutSec * 1000;
+			const timeoutSignal = AbortSignal.timeout(timeoutMs);
+			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 
 			const defaultContextBefore = this.session.settings.get("grep.contextBefore");
 			const defaultContextAfter = this.session.settings.get("grep.contextAfter");
@@ -185,10 +204,21 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 					contextAfter: normalizedContextAfter,
 					maxColumns: DEFAULT_MAX_COLUMN,
 					mode: effectiveOutputMode,
+					signal: combinedSignal,
+					timeoutMs,
 				});
 			} catch (err) {
 				if (err instanceof Error && err.message.startsWith("regex parse error")) {
 					throw new ToolError(err.message);
+				}
+				if (err instanceof Error && err.name === "AbortError") {
+					if (timeoutSignal.aborted && !signal?.aborted) {
+						throw new ToolTimeoutError(`grep timed out after ${timeoutSec} seconds`, {
+							toolName: "grep",
+							durationSeconds: timeoutSec,
+						});
+					}
+					throw new ToolAbortError();
 				}
 				throw err;
 			}

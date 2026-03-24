@@ -17,7 +17,6 @@ import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";
 import { type OutputSummary, type TruncationResult, truncateTail } from "../session/streaming-output";
 import { formatBytes, wrapBrackets } from "./render-utils";
-import { renderError } from "./tool-errors";
 
 /**
  * Truncation metadata for the output notice.
@@ -539,25 +538,20 @@ async function wrappedExecute(
 ): Promise<AgentToolResult> {
 	const originalExecute = this[kUnwrappedExecute];
 
-	try {
-		let result = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
+	let result = await originalExecute.call(this, toolCallId, params, signal, onUpdate, context);
 
-		// Spill large results to artifact, truncate to tail
-		result = await spillLargeResultToArtifact(result, this.name, context);
+	// Spill large results to artifact, truncate to tail
+	result = await spillLargeResultToArtifact(result, this.name, context);
 
-		// Append notices from meta
-		const meta: OutputMeta | undefined = result.details?.meta;
-		if (meta) {
-			return {
-				...result,
-				content: appendOutputNotice(result.content, meta),
-			};
-		}
-		return result;
-	} catch (e) {
-		// Re-throw with formatted message so agent-loop sets isError flag
-		throw new Error(renderError(e));
+	// Append notices from meta
+	const meta: OutputMeta | undefined = result.details?.meta;
+	if (meta) {
+		return {
+			...result,
+			content: appendOutputNotice(result.content, meta),
+		};
 	}
+	return result;
 }
 
 /**

@@ -1,9 +1,24 @@
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+
 /**
  * Standardized error types for tool execution.
  *
  * Tools should throw these instead of returning error text.
  * The agent loop catches and renders them appropriately.
  */
+
+export interface ToolTimeoutMeta {
+	durationSeconds: number;
+	durationMs: number;
+	toolName?: string;
+}
+
+export interface ToolErrorDetails {
+	error: string;
+	errorType?: "tool" | "abort" | "timeout";
+	timeout?: ToolTimeoutMeta;
+	[key: string]: unknown;
+}
 
 /**
  * Base error for tool execution failures.
@@ -13,6 +28,7 @@ export class ToolError extends Error {
 	constructor(
 		message: string,
 		readonly context?: Record<string, unknown>,
+		readonly details?: Record<string, unknown>,
 	) {
 		super(message);
 		this.name = "ToolError";
@@ -21,6 +37,22 @@ export class ToolError extends Error {
 	/** Render error for LLM consumption. Override for custom formatting. */
 	render(): string {
 		return this.message;
+	}
+}
+
+/**
+ * Error thrown when a tool operation exceeds its timeout.
+ */
+export class ToolTimeoutError extends ToolError {
+	constructor(message: string, timeout: Omit<ToolTimeoutMeta, "durationMs"> & { durationMs?: number }) {
+		super(message, undefined, {
+			errorType: "timeout",
+			timeout: {
+				...timeout,
+				durationMs: timeout.durationMs ?? timeout.durationSeconds * 1000,
+			},
+		});
+		this.name = "ToolTimeoutError";
 	}
 }
 
@@ -59,4 +91,27 @@ export function renderError(e: unknown): string {
 		return e.message;
 	}
 	return String(e);
+}
+
+function buildToolErrorDetails(error: unknown, message: string): ToolErrorDetails {
+	if (error instanceof ToolError) {
+		const details: ToolErrorDetails = { ...(error.details ?? {}), error: message };
+		details.errorType ??= "tool";
+		return details;
+	}
+	if (error instanceof ToolAbortError) {
+		return {
+			error: message,
+			errorType: "abort",
+		};
+	}
+	return { error: message };
+}
+
+export function toolErrorToResult(error: unknown): AgentToolResult<ToolErrorDetails> {
+	const message = renderError(error);
+	return {
+		content: [{ type: "text", text: message }],
+		details: buildToolErrorDetails(error, message),
+	};
 }

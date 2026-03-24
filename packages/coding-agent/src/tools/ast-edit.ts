@@ -31,8 +31,9 @@ import {
 	PARSE_ERRORS_LIMIT,
 	PREVIEW_LIMITS,
 } from "./render-utils";
-import { ToolError } from "./tool-errors";
+import { ToolError, ToolTimeoutError } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import { clampTimeout } from "./tool-timeouts";
 
 const astEditOpSchema = Type.Object({
 	pat: Type.String({ description: "AST pattern to match" }),
@@ -48,6 +49,7 @@ const astEditSchema = Type.Object({
 	glob: Type.Optional(Type.String({ description: "Optional glob filter relative to path" })),
 	sel: Type.Optional(Type.String({ description: "Optional selector for contextual pattern mode" })),
 	limit: Type.Optional(Type.Number({ description: "Max total replacements" })),
+	timeout: Type.Optional(Type.Number({ description: "Timeout in seconds (default: 30)" })),
 });
 
 export interface AstEditToolDetails {
@@ -149,18 +151,38 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				throw new ToolError(`Path not found: ${scopePath}`);
 			}
 
-			const result = await astEdit({
-				rewrites: normalizedRewrites,
-				lang: params.lang?.trim(),
-				path: resolvedSearchPath,
-				glob: globFilter,
-				selector: params.sel?.trim(),
-				dryRun: true,
-				maxReplacements,
-				maxFiles,
-				failOnParseError: false,
-				signal,
-			});
+			const timeoutSeconds = clampTimeout("ast_edit", params.timeout);
+			const timeoutMs = timeoutSeconds * 1000;
+			const runAstEdit = async (dryRun: boolean, runSignal?: AbortSignal) => {
+				const timeoutSignal = AbortSignal.timeout(timeoutMs);
+				const combinedSignal = runSignal ? AbortSignal.any([runSignal, timeoutSignal]) : timeoutSignal;
+				try {
+					return await astEdit({
+						rewrites: normalizedRewrites,
+						lang: params.lang?.trim(),
+						path: resolvedSearchPath,
+						glob: globFilter,
+						selector: params.sel?.trim(),
+						dryRun,
+						maxReplacements,
+						maxFiles,
+						failOnParseError: false,
+						signal: combinedSignal,
+						timeoutMs,
+					});
+				} catch (error) {
+					if (timeoutSignal.aborted && !runSignal?.aborted) {
+						throw new ToolTimeoutError(`ast_edit timed out after ${timeoutSeconds} seconds`, {
+							durationSeconds: timeoutSeconds,
+							durationMs: timeoutMs,
+							toolName: this.name,
+						});
+					}
+					throw error;
+				}
+			};
+
+			const result = await runAstEdit(true, signal);
 
 			const dedupedParseErrors = dedupeParseErrors(result.parseErrors);
 			const formatPath = (filePath: string): string => {
@@ -293,17 +315,7 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					label: `AST Edit: ${result.totalReplacements} replacement${previewReplacementPlural} in ${result.filesTouched} file${previewFilePlural}`,
 					sourceToolName: this.name,
 					apply: async (_reason: string) => {
-						const applyResult = await astEdit({
-							rewrites: normalizedRewrites,
-							lang: params.lang?.trim(),
-							path: resolvedSearchPath,
-							glob: globFilter,
-							selector: params.sel?.trim(),
-							dryRun: false,
-							maxReplacements,
-							maxFiles,
-							failOnParseError: false,
-						});
+						const applyResult = await runAstEdit(false);
 						const dedupedApplyParseErrors = dedupeParseErrors(applyResult.parseErrors);
 						const appliedDetails: AstEditToolDetails = {
 							totalReplacements: applyResult.totalReplacements,

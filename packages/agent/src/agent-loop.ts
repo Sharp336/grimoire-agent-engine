@@ -584,10 +584,7 @@ async function executeToolCalls(
 				toolContext,
 			);
 		} catch (e) {
-			result = {
-				content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-				details: {},
-			};
+			result = createErrorToolResult(e);
 			isError = true;
 		}
 
@@ -635,6 +632,52 @@ async function executeToolCalls(
  * Create a tool result for a tool call that was aborted or errored before execution.
  * Maintains the tool_use/tool_result pairing required by the API.
  */
+interface ToolExecutionErrorDetails {
+	error: string;
+	errorType?: "abort" | "timeout";
+	timeout?: Record<string, unknown>;
+	[key: string]: unknown;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function renderToolExecutionError(error: unknown): string {
+	if (isRecord(error) && typeof error.render === "function") {
+		const rendered = error.render();
+		return typeof rendered === "string" ? rendered : String(rendered);
+	}
+	if (error instanceof Error) {
+		return error.message;
+	}
+	return String(error);
+}
+
+function createErrorToolResult(error: unknown): AgentToolResult<ToolExecutionErrorDetails> {
+	const message = renderToolExecutionError(error);
+	const errorDetails = isRecord(error) && isRecord(error.details) ? error.details : undefined;
+	const errorName = isRecord(error) && typeof error.name === "string" ? error.name : undefined;
+	let errorType: ToolExecutionErrorDetails["errorType"] | undefined;
+	if (errorName === "ToolAbortError") {
+		errorType = "abort";
+	} else if (errorName === "ToolTimeoutError") {
+		errorType = "timeout";
+	}
+	return {
+		content: [{ type: "text", text: message }],
+		details: {
+			...(errorDetails ?? {}),
+			...(errorType ? { errorType } : {}),
+			error: message,
+		},
+	};
+}
+
+/**
+ * Create a tool result for a tool call that was aborted or errored before execution.
+ * Maintains the tool_use/tool_result pairing required by the API.
+ */
 function createAbortedToolResult(
 	toolCall: Extract<AssistantMessage["content"][number], { type: "toolCall" }>,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
@@ -642,10 +685,10 @@ function createAbortedToolResult(
 	errorMessage?: string,
 ): ToolResultMessage {
 	const message = reason === "aborted" ? "Tool execution was aborted" : "Tool execution failed due to an error";
-	const result: AgentToolResult<any> = {
-		content: [{ type: "text", text: errorMessage ? `${message}: ${errorMessage}` : `${message}.` }],
-		details: {},
-	};
+	const result = createErrorToolResult({
+		name: reason === "aborted" ? "ToolAbortError" : "Error",
+		render: () => (errorMessage ? `${message}: ${errorMessage}` : `${message}.`),
+	});
 
 	stream.push({
 		type: "tool_execution_start",
@@ -667,7 +710,7 @@ function createAbortedToolResult(
 		toolCallId: toolCall.id,
 		toolName: toolCall.name,
 		content: result.content,
-		details: {},
+		details: result.details,
 		isError: true,
 		timestamp: Date.now(),
 	};
@@ -678,9 +721,9 @@ function createAbortedToolResult(
 	return toolResultMessage;
 }
 
-function createSkippedToolResult(): AgentToolResult<any> {
+function createSkippedToolResult(): AgentToolResult<ToolExecutionErrorDetails> {
 	return {
 		content: [{ type: "text", text: "Skipped due to queued user message." }],
-		details: {},
+		details: { error: "Skipped due to queued user message." },
 	};
 }

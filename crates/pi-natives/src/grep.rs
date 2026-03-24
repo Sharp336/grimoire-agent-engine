@@ -605,9 +605,11 @@ fn collect_files(
 	scanned_entries: &[fs_cache::GlobMatch],
 	glob_set: Option<&GlobSet>,
 	type_filter: Option<&TypeFilter>,
-) -> Vec<FileEntry> {
+	ct: &task::CancelToken,
+) -> Result<Vec<FileEntry>> {
 	let mut entries = Vec::new();
 	for entry in scanned_entries {
+		ct.heartbeat()?;
 		if entry.file_type != fs_cache::FileType::File {
 			continue;
 		}
@@ -624,7 +626,7 @@ fn collect_files(
 		}
 		entries.push(FileEntry { path, relative_path: entry.path.clone() });
 	}
-	entries
+	Ok(entries)
 }
 
 /// Check if `bytes[start]` (which must be `b'{'`) begins a valid repetition
@@ -792,32 +794,43 @@ fn run_parallel_search(
 	context_after: u32,
 	max_columns: Option<u32>,
 	mode: OutputMode,
-) -> Vec<FileSearchResult> {
+	ct: &task::CancelToken,
+) -> Result<Vec<FileSearchResult>> {
 	let params =
 		SearchParams { context_before, context_after, max_columns, mode, max_count: None, offset: 0 };
 	let mut results: Vec<FileSearchResult> = entries
 		.par_iter()
-		.filter_map(|entry| {
-			let file = File::open(&entry.path).ok()?;
+		.map(|entry| -> Result<Option<FileSearchResult>> {
+			ct.heartbeat()?;
+			let Ok(file) = File::open(&entry.path) else {
+				return Ok(None);
+			};
 			let reader = file.take(MAX_FILE_BYTES);
-			let search = run_search_reader(matcher, reader, params).ok()?;
-			Some(FileSearchResult {
+			let Ok(search) = run_search_reader(matcher, reader, params) else {
+				return Ok(None);
+			};
+			ct.heartbeat()?;
+			Ok(Some(FileSearchResult {
 				relative_path: entry.relative_path.clone(),
 				matches:       search.matches,
 				match_count:   search.match_count,
-			})
+			}))
 		})
+		.collect::<Result<Vec<_>>>()?
+		.into_iter()
+		.flatten()
 		.collect();
 
 	results.sort_by(|a, b| a.relative_path.cmp(&b.relative_path));
-	results
+	Ok(results)
 }
 
 fn run_sequential_search(
 	entries: &[FileEntry],
 	matcher: &grep_regex::RegexMatcher,
 	params: SearchParams,
-) -> (Vec<GrepMatch>, u64, u32, u32, bool) {
+	ct: &task::CancelToken,
+) -> Result<(Vec<GrepMatch>, u64, u32, u32, bool)> {
 	let SearchParams { mode, max_count, offset, .. } = params;
 	let mut matches = Vec::new();
 	let mut total_matches = 0u64;
@@ -827,6 +840,7 @@ fn run_sequential_search(
 	let mut limit_reached = false;
 
 	for entry in entries {
+		ct.heartbeat()?;
 		if limit_reached {
 			break;
 		}
@@ -851,6 +865,7 @@ fn run_sequential_search(
 		let Ok(search) = run_search_reader(matcher, reader, file_params) else {
 			continue;
 		};
+		ct.heartbeat()?;
 
 		if search.match_count == 0 {
 			continue;
@@ -863,6 +878,7 @@ fn run_sequential_search(
 		match mode {
 			OutputMode::Content => {
 				for matched in search.matches {
+					ct.heartbeat()?;
 					matches.push(to_grep_match(&entry.relative_path, matched));
 				}
 			},
@@ -884,7 +900,7 @@ fn run_sequential_search(
 		}
 	}
 
-	(matches, total_matches, files_with_matches, files_searched, limit_reached)
+	Ok((matches, total_matches, files_with_matches, files_searched, limit_reached))
 }
 
 fn search_sync(content: &[u8], options: SearchOptions) -> SearchResult {
@@ -1026,17 +1042,28 @@ fn grep_sync(
 
 	let entries = if use_cache {
 		let scan = fs_cache::get_or_scan(&search_path, include_hidden, use_gitignore, &ct)?;
-		let mut entries =
-			collect_files(&search_path, &scan.entries, glob_set.as_ref(), type_filter.as_ref());
+		let mut entries = collect_files(
+			&search_path,
+			&scan.entries,
+			glob_set.as_ref(),
+			type_filter.as_ref(),
+			&ct,
+		)?;
 		if entries.is_empty() && scan.cache_age_ms >= fs_cache::empty_recheck_ms() {
 			let fresh =
 				fs_cache::force_rescan(&search_path, include_hidden, use_gitignore, true, &ct)?;
-			entries = collect_files(&search_path, &fresh, glob_set.as_ref(), type_filter.as_ref());
+			entries = collect_files(
+				&search_path,
+				&fresh,
+				glob_set.as_ref(),
+				type_filter.as_ref(),
+				&ct,
+			)?;
 		}
 		entries
 	} else {
 		let fresh = fs_cache::force_rescan(&search_path, include_hidden, use_gitignore, false, &ct)?;
-		collect_files(&search_path, &fresh, glob_set.as_ref(), type_filter.as_ref())
+		collect_files(&search_path, &fresh, glob_set.as_ref(), type_filter.as_ref(), &ct)?
 	};
 	// Check cancellation before heavy work
 	ct.heartbeat()?;
@@ -1059,13 +1086,15 @@ fn grep_sync(
 			context_after,
 			max_columns,
 			output_mode,
-		);
+			&ct,
+		)?;
 		let mut matches = Vec::new();
 		let mut total_matches = 0u64;
 		let mut files_with_matches = 0u32;
 		let files_searched = crate::utils::clamp_u32(results.len() as u64);
 
 		for result in results {
+			ct.heartbeat()?;
 			if result.match_count == 0 {
 				continue;
 			}
@@ -1075,6 +1104,7 @@ fn grep_sync(
 			match output_mode {
 				OutputMode::Content => {
 					for matched in result.matches {
+						ct.heartbeat()?;
 						let grep_match = to_grep_match(&result.relative_path, matched);
 						if let Some(callback) = on_match {
 							callback.call(Ok(grep_match.clone()), ThreadsafeFunctionCallMode::NonBlocking);
@@ -1110,14 +1140,19 @@ fn grep_sync(
 	}
 
 	let (matches, total_matches, files_with_matches, files_searched, limit_reached) =
-		run_sequential_search(&entries, &matcher, SearchParams {
-			context_before,
-			context_after,
-			max_columns,
-			mode: output_mode,
-			max_count,
-			offset,
-		});
+		run_sequential_search(
+			&entries,
+			&matcher,
+			SearchParams {
+				context_before,
+				context_after,
+				max_columns,
+				mode: output_mode,
+				max_count,
+				offset,
+			},
+			&ct,
+		)?;
 
 	// Fire callbacks for sequential search results
 	if let Some(callback) = on_match {
