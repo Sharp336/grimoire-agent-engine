@@ -420,18 +420,28 @@ function normalizeBaseUrl(baseUrl: string | undefined): string | undefined {
 	return trimmed ? trimmed.replace(/\/+$/, "") : undefined;
 }
 
+function normalizeAnthropicRequestBaseUrl(baseUrl: string | undefined): string | undefined {
+	const normalized = normalizeBaseUrl(baseUrl);
+	if (!normalized) return undefined;
+	return normalized.toLowerCase().endsWith("/v1") ? normalized.slice(0, -3) : normalized;
+}
+
 function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">, apiKey?: string): string | undefined {
 	if (model.provider === "github-copilot") {
 		return normalizeBaseUrl(resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl);
 	}
 	if (model.provider === "anthropic" && isFoundryEnabled()) {
-		const foundryBaseUrl = normalizeBaseUrl($env.FOUNDRY_BASE_URL);
+		const foundryBaseUrl = normalizeAnthropicRequestBaseUrl($env.FOUNDRY_BASE_URL);
 		if (foundryBaseUrl) {
 			return foundryBaseUrl;
 		}
 	}
 	if (model.provider === "anthropic") {
-		return normalizeBaseUrl(model.baseUrl) ?? "https://api.anthropic.com";
+		const envBaseUrl = normalizeAnthropicRequestBaseUrl($env.ANTHROPIC_BASE_URL);
+		if (envBaseUrl) {
+			return envBaseUrl;
+		}
+		return normalizeAnthropicRequestBaseUrl(model.baseUrl) ?? "https://api.anthropic.com";
 	}
 	return normalizeBaseUrl(model.baseUrl);
 }
@@ -989,10 +999,12 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		modelHeaders: mergeHeaders(model.headers, foundryCustomHeaders, headers, dynamicHeaders),
 	});
 
+	const usesBearerAuth = oauthToken || !isAnthropicApiBaseUrl(baseUrl);
+
 	return {
 		isOAuthToken: oauthToken,
-		apiKey: oauthToken ? null : apiKey,
-		authToken: oauthToken ? apiKey : undefined,
+		apiKey: usesBearerAuth ? null : apiKey,
+		authToken: usesBearerAuth ? apiKey : undefined,
 		baseURL: baseUrl,
 		maxRetries: 5,
 		dangerouslyAllowBrowser: true,

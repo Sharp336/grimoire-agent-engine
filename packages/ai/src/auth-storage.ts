@@ -10,7 +10,7 @@
 import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
+import { $env, getAgentDbPath, logger } from "@oh-my-pi/pi-utils";
 import { getEnvApiKey } from "./stream";
 import type { Provider } from "./types";
 import type {
@@ -218,6 +218,23 @@ const DEFAULT_RANKING_STRATEGIES = new Map<Provider, CredentialRankingStrategy>(
 
 function resolveDefaultRankingStrategy(provider: Provider): CredentialRankingStrategy | undefined {
 	return DEFAULT_RANKING_STRATEGIES.get(provider);
+}
+
+function normalizeAnthropicProxyBaseUrl(baseUrl: string | undefined): string | undefined {
+	const trimmed = baseUrl?.trim().replace(/\/+$/, "");
+	if (!trimmed) return undefined;
+	return trimmed.toLowerCase().endsWith("/v1") ? trimmed.slice(0, -3) : trimmed;
+}
+
+function isExplicitAnthropicProxyMode(baseUrl: string | undefined): boolean {
+	const normalized = normalizeAnthropicProxyBaseUrl(baseUrl);
+	if (!normalized) return false;
+	try {
+		const url = new URL(normalized);
+		return !(url.protocol.toLowerCase() === "https:" && url.hostname.toLowerCase() === "api.anthropic.com");
+	} catch {
+		return false;
+	}
 }
 
 function parseUsageCacheEntry<T>(raw: string): UsageCacheEntry<T> | undefined {
@@ -1915,6 +1932,16 @@ export class AuthStorage {
 		const runtimeKey = this.#runtimeOverrides.get(provider);
 		if (runtimeKey) {
 			return runtimeKey;
+		}
+
+		const explicitAnthropicProxyBaseUrl =
+			normalizeAnthropicProxyBaseUrl($env.ANTHROPIC_BASE_URL) ?? options?.baseUrl;
+		const explicitAnthropicProxyKey =
+			provider === "anthropic" && isExplicitAnthropicProxyMode(explicitAnthropicProxyBaseUrl)
+				? $env.ANTHROPIC_API_KEY?.trim() || undefined
+				: undefined;
+		if (explicitAnthropicProxyKey) {
+			return explicitAnthropicProxyKey;
 		}
 
 		const apiKeySelection = this.#selectCredentialByType(provider, "api_key", sessionId);
