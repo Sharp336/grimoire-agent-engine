@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as tls from "node:tls";
+import { Type } from "@sinclair/typebox";
 import {
 	applyClaudeToolPrefix,
 	buildAnthropicClientOptions,
@@ -166,15 +167,18 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 	});
 
-	it("uses Bearer auth for non-Anthropic API bases with api-key credentials", () => {
+	it("uses Claude-compatible x-api-key auth for non-Anthropic API bases with api-key credentials", () => {
 		const headers = buildAnthropicHeaders({
-			apiKey: "sk-ant-api-test",
-			baseUrl: "https://proxy.example.com",
+			apiKey: "btr-proxy-test",
+			baseUrl: "http://127.0.0.1:8080",
 			stream: true,
 		});
 
-		expect(headers.Authorization).toBe("Bearer sk-ant-api-test");
-		expect(headers["X-Api-Key"]).toBeUndefined();
+		expect(headers.Authorization).toBeUndefined();
+		expect(headers["X-Api-Key"]).toBe("btr-proxy-test");
+		expect(headers["User-Agent"]).toBe(`claude-cli/${claudeCodeVersion} (external, cli)`);
+		expect(headers["X-Stainless-Os"]).toBe(mapStainlessOs(process.platform));
+		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 	});
 
 	it("forwards only prefix-matching Claude Code User-Agent values", () => {
@@ -259,6 +263,64 @@ describe("Anthropic request fingerprint alignment", () => {
 		)) as { metadata?: { user_id?: string } };
 		expect(payload.metadata).toBeUndefined();
 	});
+
+	it("uses Claude-compatible payload shaping for proxy api-key Anthropic bases", async () => {
+		await withEnv(
+			{ ANTHROPIC_BASE_URL: "http://127.0.0.1:8080", CLAUDE_CODE_USE_FOUNDRY: undefined },
+			async () => {
+				const payload = (await captureAnthropicPayload(
+					{ ...ANTHROPIC_MODEL, id: "claude-opus-4-6", name: "Claude Opus 4.6" },
+					{
+						systemPrompt: "Stay concise.",
+						messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+						tools: [
+							{
+								name: "Read",
+								description: "Read a file",
+								parameters: Type.Object({ path: Type.String() }),
+							},
+						],
+					},
+					{ isOAuth: false },
+				)) as {
+					metadata?: { user_id?: string };
+					system?: Array<{ type: string; text?: string }>;
+					tools?: Array<{ name: string }>;
+				};
+
+				expect(isClaudeCloakingUserId(payload.metadata?.user_id ?? "")).toBe(true);
+				expect(payload.system?.some(block => block.text === claudeCodeSystemInstruction)).toBe(true);
+				expect(payload.tools?.[0]?.name).toBe("proxy_Read");
+			},
+		);
+	});
+
+	it("keeps vanilla payload shaping for direct Anthropic api-key requests", async () => {
+		const payload = (await captureAnthropicPayload(
+			ANTHROPIC_MODEL,
+			{
+				systemPrompt: "Stay concise.",
+				messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+				tools: [
+					{
+						name: "Read",
+						description: "Read a file",
+						parameters: Type.Object({ path: Type.String() }),
+					},
+				],
+			},
+			{ isOAuth: false },
+		)) as {
+			metadata?: { user_id?: string };
+			system?: Array<{ type: string; text?: string }>;
+			tools?: Array<{ name: string }>;
+		};
+
+		expect(payload.metadata).toBeUndefined();
+		expect(payload.system?.some(block => block.text === claudeCodeSystemInstruction)).toBe(false);
+		expect(payload.tools?.[0]?.name).toBe("Read");
+	});
+
 
 	it("preserves valid caller metadata.user_id for OAuth requests", async () => {
 		const userId = generateClaudeCloakingUserId();
@@ -347,6 +409,7 @@ describe("Anthropic request fingerprint alignment", () => {
 				});
 
 				expect(options.baseURL).toBe("https://foundry.example.com/anthropic");
+				expect(options.useClaudeCompatibleShape).toBe(false);
 				expect(options.defaultHeaders.Authorization).toBe("Bearer foundry-token");
 				expect(options.defaultHeaders["X-Api-Key"]).toBeUndefined();
 				expect(options.defaultHeaders["user-id"]).toBe("alice");

@@ -77,10 +77,10 @@ describe("Anthropic proxy auth behavior", () => {
 				});
 
 				expect(options.baseURL).toBe("http://127.0.0.1:8080");
-				expect(options.apiKey).toBeNull();
-				expect(options.authToken).toBe("btr-proxy-key");
-				expect(options.defaultHeaders.Authorization).toBe("Bearer btr-proxy-key");
-				expect(options.defaultHeaders["X-Api-Key"]).toBeUndefined();
+				expect(options.apiKey).toBe("btr-proxy-key");
+				expect(options.authToken).toBeUndefined();
+				expect(options.defaultHeaders.Authorization).toBeUndefined();
+				expect(options.defaultHeaders["X-Api-Key"]).toBe("btr-proxy-key");
 			},
 		);
 	});

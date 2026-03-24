@@ -45,6 +45,8 @@ export type AnthropicHeaderOptions = {
 	apiKey: string;
 	baseUrl?: string;
 	isOAuth?: boolean;
+	useClaudeCompatibleShape?: boolean;
+	useBearerAuth?: boolean;
 	extraBetas?: string[];
 	stream?: boolean;
 	modelHeaders?: Record<string, string>;
@@ -95,6 +97,17 @@ function isAnthropicApiBaseUrl(baseUrl?: string): boolean {
 	}
 }
 
+function shouldUseClaudeCompatibleAnthropicShape(
+	model: Model<"anthropic-messages"> | undefined,
+	baseUrl: string | undefined,
+	isOAuthToken: boolean,
+): boolean {
+	if (isOAuthToken) return true;
+	if (model?.provider !== "anthropic") return false;
+	if (isFoundryEnabled()) return false;
+	return !isAnthropicApiBaseUrl(baseUrl);
+}
+
 const sharedHeaders = {
 	"Accept-Encoding": "gzip, deflate, br, zstd",
 	Connection: "keep-alive",
@@ -106,6 +119,9 @@ const sharedHeaders = {
 
 export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<string, string> {
 	const oauthToken = options.isOAuth ?? isAnthropicOAuthToken(options.apiKey);
+	const useClaudeCompatibleShape =
+		options.useClaudeCompatibleShape ?? (oauthToken || !isAnthropicApiBaseUrl(options.baseUrl));
+	const useBearerAuth = options.useBearerAuth ?? oauthToken;
 	const extraBetas = options.extraBetas ?? [];
 	const stream = options.stream ?? false;
 	const betaHeader = buildBetaHeader(claudeCodeBetaDefaults, extraBetas);
@@ -114,7 +130,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 		Object.entries(options.modelHeaders ?? {}).filter(([key]) => !enforcedHeaderKeys.has(key.toLowerCase())),
 	);
 
-	if (oauthToken) {
+	if (useClaudeCompatibleShape) {
 		const incomingUserAgent = getHeaderCaseInsensitive(options.modelHeaders, "User-Agent");
 		const userAgent = isClaudeCodeClientUserAgent(incomingUserAgent)
 			? incomingUserAgent
@@ -123,12 +139,14 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			...modelHeaders,
 			...claudeCodeHeaders,
 			Accept: acceptHeader,
-			Authorization: `Bearer ${options.apiKey}`,
+			...(useBearerAuth ? { Authorization: `Bearer ${options.apiKey}` } : { "X-Api-Key": options.apiKey }),
 			...sharedHeaders,
 			"Anthropic-Beta": betaHeader,
 			"User-Agent": userAgent,
 		};
-	} else if (!isAnthropicApiBaseUrl(options.baseUrl)) {
+	}
+
+	if (useBearerAuth) {
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
@@ -136,15 +154,15 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			...sharedHeaders,
 			"Anthropic-Beta": betaHeader,
 		};
-	} else {
-		return {
-			...modelHeaders,
-			Accept: acceptHeader,
-			...sharedHeaders,
-			"Anthropic-Beta": betaHeader,
-			"X-Api-Key": options.apiKey,
-		};
 	}
+
+	return {
+		...modelHeaders,
+		Accept: acceptHeader,
+		...sharedHeaders,
+		"Anthropic-Beta": betaHeader,
+		"X-Api-Key": options.apiKey,
+	};
 }
 
 type AnthropicCacheControl = { type: "ephemeral"; ttl?: "1h" | "5m" };
@@ -261,14 +279,14 @@ export function generateClaudeCloakingUserId(): string {
 	return `user_${userHash}_account_${accountId}_session_${sessionId}`;
 }
 
-function resolveAnthropicMetadataUserId(userId: unknown, isOAuthToken: boolean): string | undefined {
+function resolveAnthropicMetadataUserId(userId: unknown, useClaudeCompatibleShape: boolean): string | undefined {
 	if (typeof userId === "string") {
-		if (!isOAuthToken || isClaudeCloakingUserId(userId)) {
+		if (!useClaudeCompatibleShape || isClaudeCloakingUserId(userId)) {
 			return userId;
 		}
 	}
 
-	if (!isOAuthToken) return undefined;
+	if (!useClaudeCompatibleShape) return undefined;
 	return generateClaudeCloakingUserId();
 }
 const ANTHROPIC_BUILTIN_TOOL_NAMES = new Set(["web_search", "code_execution", "text_editor", "computer"]);
@@ -391,6 +409,7 @@ export type AnthropicClientOptionsArgs = {
 
 export type AnthropicClientOptionsResult = {
 	isOAuthToken: boolean;
+	useClaudeCompatibleShape: boolean;
 	apiKey: string | null;
 	authToken?: string;
 	baseURL?: string;
@@ -624,7 +643,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
 			const baseUrl = resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
 
-			const { client, isOAuthToken } = createClient(model, {
+			const { client, isOAuthToken, useClaudeCompatibleShape } = createClient(model, {
 				model,
 				apiKey,
 				extraBetas: normalizeExtraBetas(options?.betas),
@@ -634,7 +653,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				dynamicHeaders: copilotDynamicHeaders?.headers,
 				isOAuth: options?.isOAuth,
 			});
-			let params = buildParams(model, baseUrl, context, isOAuthToken, options);
+			let params = buildParams(model, baseUrl, context, useClaudeCompatibleShape, options);
 			const replacementPayload = await options?.onPayload?.(params, model);
 			if (replacementPayload !== undefined) {
 				params = replacementPayload as typeof params;
@@ -715,7 +734,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 								const block: Block = {
 									type: "toolCall",
 									id: event.content_block.id,
-									name: isOAuthToken
+									name: useClaudeCompatibleShape
 										? stripClaudeToolPrefix(event.content_block.name)
 										: event.content_block.name,
 									arguments: (event.content_block.input as Record<string, unknown>) ?? {},
@@ -954,6 +973,12 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	} = args;
 	const oauthToken = isOAuth ?? isAnthropicOAuthToken(apiKey);
 	const baseUrl = resolveAnthropicBaseUrl(model, apiKey);
+	const useClaudeCompatibleShape = shouldUseClaudeCompatibleAnthropicShape(
+		model,
+		baseUrl,
+		oauthToken,
+	);
+	const useBearerAuth = oauthToken || (model.provider === "anthropic" && isFoundryEnabled());
 	const foundryCustomHeaders = resolveAnthropicCustomHeaders(model);
 	const tlsFetchOptions = buildClaudeCodeTlsFetchOptions(model, baseUrl);
 	if (model.provider === "github-copilot") {
@@ -975,6 +1000,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 
 		return {
 			isOAuthToken: false,
+			useClaudeCompatibleShape: false,
 			apiKey: null,
 			authToken: apiKey,
 			baseURL: baseUrl,
@@ -994,17 +1020,18 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		apiKey,
 		baseUrl,
 		isOAuth: oauthToken,
+		useClaudeCompatibleShape,
+		useBearerAuth,
 		extraBetas: betaFeatures,
 		stream,
 		modelHeaders: mergeHeaders(model.headers, foundryCustomHeaders, headers, dynamicHeaders),
 	});
 
-	const usesBearerAuth = oauthToken || !isAnthropicApiBaseUrl(baseUrl);
-
 	return {
 		isOAuthToken: oauthToken,
-		apiKey: usesBearerAuth ? null : apiKey,
-		authToken: usesBearerAuth ? apiKey : undefined,
+		useClaudeCompatibleShape,
+		apiKey: useBearerAuth ? null : apiKey,
+		authToken: useBearerAuth ? apiKey : undefined,
 		baseURL: baseUrl,
 		maxRetries: 5,
 		dangerouslyAllowBrowser: true,
@@ -1016,10 +1043,10 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 function createClient(
 	model: Model<"anthropic-messages">,
 	args: AnthropicClientOptionsArgs,
-): { client: Anthropic; isOAuthToken: boolean } {
-	const { isOAuthToken: oauthToken, ...clientOptions } = buildAnthropicClientOptions({ ...args, model });
+): { client: Anthropic; isOAuthToken: boolean; useClaudeCompatibleShape: boolean } {
+	const { isOAuthToken: oauthToken, useClaudeCompatibleShape, ...clientOptions } = buildAnthropicClientOptions({ ...args, model });
 	const client = new Anthropic(clientOptions);
-	return { client, isOAuthToken: oauthToken };
+	return { client, isOAuthToken: oauthToken, useClaudeCompatibleShape };
 }
 
 function disableThinkingIfToolChoiceForced(params: MessageCreateParamsStreaming): void {
@@ -1280,13 +1307,13 @@ function buildParams(
 	model: Model<"anthropic-messages">,
 	baseUrl: string,
 	context: Context,
-	isOAuthToken: boolean,
+	useClaudeCompatibleShape: boolean,
 	options?: AnthropicOptions,
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(baseUrl, options?.cacheRetention);
 	const params: AnthropicSamplingParams = {
 		model: model.id,
-		messages: convertAnthropicMessages(context.messages, model, isOAuthToken),
+		messages: convertAnthropicMessages(context.messages, model, useClaudeCompatibleShape),
 		max_tokens: options?.maxTokens || (model.maxTokens / 3) | 0,
 		stream: true,
 	};
@@ -1302,7 +1329,7 @@ function buildParams(
 	}
 
 	if (context.tools) {
-		params.tools = convertTools(context.tools, isOAuthToken);
+		params.tools = convertTools(context.tools, useClaudeCompatibleShape);
 	}
 
 	if (options?.thinkingEnabled && model.reasoning) {
@@ -1327,7 +1354,7 @@ function buildParams(
 		}
 	}
 
-	const metadataUserId = resolveAnthropicMetadataUserId(options?.metadata?.user_id, isOAuthToken);
+	const metadataUserId = resolveAnthropicMetadataUserId(options?.metadata?.user_id, useClaudeCompatibleShape);
 	if (metadataUserId) {
 		params.metadata = { user_id: metadataUserId };
 	}
@@ -1335,14 +1362,14 @@ function buildParams(
 	if (options?.toolChoice) {
 		if (typeof options.toolChoice === "string") {
 			params.tool_choice = { type: options.toolChoice };
-		} else if (isOAuthToken && options.toolChoice.name) {
+		} else if (useClaudeCompatibleShape && options.toolChoice.name) {
 			params.tool_choice = { ...options.toolChoice, name: applyClaudeToolPrefix(options.toolChoice.name) };
 		} else {
 			params.tool_choice = options.toolChoice;
 		}
 	}
 
-	const shouldInjectClaudeCodeInstruction = isOAuthToken && !model.id.startsWith("claude-3-5-haiku");
+	const shouldInjectClaudeCodeInstruction = useClaudeCompatibleShape && !model.id.startsWith("claude-3-5-haiku");
 	const billingPayload = shouldInjectClaudeCodeInstruction
 		? {
 				...params,
@@ -1368,7 +1395,7 @@ function buildParams(
 export function convertAnthropicMessages(
 	messages: Message[],
 	model: Model<"anthropic-messages">,
-	isOAuthToken: boolean,
+	useClaudeCompatibleShape: boolean,
 ): MessageParam[] {
 	const params: MessageParam[] = [];
 
@@ -1471,7 +1498,7 @@ export function convertAnthropicMessages(
 					blocks.push({
 						type: "tool_use",
 						id: block.id,
-						name: isOAuthToken ? applyClaudeToolPrefix(block.name) : block.name,
+						name: useClaudeCompatibleShape ? applyClaudeToolPrefix(block.name) : block.name,
 						input: block.arguments ?? {},
 					});
 				}
@@ -1524,14 +1551,14 @@ export function convertAnthropicMessages(
 	return params;
 }
 
-function convertTools(tools: Tool[], isOAuthToken: boolean): Anthropic.Messages.Tool[] {
+function convertTools(tools: Tool[], useClaudeCompatibleShape: boolean): Anthropic.Messages.Tool[] {
 	if (!tools) return [];
 
 	return tools.map(tool => {
 		const jsonSchema = tool.parameters as any; // TypeBox already generates JSON Schema
 
 		return {
-			name: isOAuthToken ? applyClaudeToolPrefix(tool.name) : tool.name,
+			name: useClaudeCompatibleShape ? applyClaudeToolPrefix(tool.name) : tool.name,
 			description: tool.description || "",
 			input_schema: {
 				type: "object" as const,
