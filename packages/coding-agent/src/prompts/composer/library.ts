@@ -6,6 +6,7 @@
  * from the filesystem at runtime; packaged/runtime paths are not stable.
  */
 
+import selfImprovementImperative from "../system/self-improvement.md" with { type: "text" };
 import systemPromptTemplate from "../system/system-prompt.md" with { type: "text" };
 import askDescription from "../tools/ask.md" with { type: "text" };
 import astEditDescription from "../tools/ast-edit.md" with { type: "text" };
@@ -95,6 +96,6 @@ export async function collectGuidanceLibrary(): Promise<GuidanceLibrary> {
 
 	return {
 		toolDocs,
-		systemPromptTemplate,
+		systemPromptTemplate: `${systemPromptTemplate}\n\n${selfImprovementImperative}`,
 	};
 }
