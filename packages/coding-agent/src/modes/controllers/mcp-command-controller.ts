@@ -947,24 +947,25 @@ export class MCPCommandController {
 
 			// Show discovered servers (from .claude.json, .cursor/mcp.json, .vscode/mcp.json, etc.)
 			if (discoveredServers.length > 0) {
-				// Group by source display name + path
-				const bySource = new Map<string, typeof discoveredServers>();
+				// Group by provider ID so all servers from the same provider share one header
+				const byProvider = new Map<string, typeof discoveredServers>();
 				for (const entry of discoveredServers) {
-					const key = `${entry.source.providerName}|${entry.source.path}`;
-					let group = bySource.get(key);
+					const key = entry.source.provider;
+					let group = byProvider.get(key);
 					if (!group) {
 						group = [];
-						bySource.set(key, group);
+						byProvider.set(key, group);
 					}
 					group.push(entry);
 				}
 
-				for (const [key, entries] of bySource) {
-					const sepIdx = key.indexOf("|");
-					const providerName = key.slice(0, sepIdx);
-					const sourcePath = key.slice(sepIdx + 1);
-					const shortPath = shortenPath(sourcePath);
-					lines.push(theme.fg("accent", providerName) + theme.fg("muted", ` (${shortPath}):`));
+				for (const [, entries] of byProvider) {
+					const providerName = entries[0].source.providerName;
+					// Collect unique source paths for the parenthetical hint
+					const uniquePaths = [...new Set(entries.map(e => e.source.path))];
+					const pathHint =
+						uniquePaths.length === 1 ? shortenPath(uniquePaths[0]) : `${uniquePaths.length} sources`;
+					lines.push(theme.fg("accent", providerName) + theme.fg("muted", ` (${pathHint}):`));
 					for (const { name } of entries) {
 						const state = this.ctx.mcpManager!.getConnectionStatus(name);
 						const status =
