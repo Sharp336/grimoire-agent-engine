@@ -688,9 +688,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Check if session has existing data to restore
 	const existingSession = logger.time("loadSession", () => sessionManager.buildSessionContext());
-	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
-	const hasServiceTierEntry = sessionManager.getBranch().some(entry => entry.type === "service_tier_change");
+	const existingBranch = sessionManager.getBranch();
+	const hasExistingSession = existingBranch.length > 0;
+	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
+	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
 
 	const hasExplicitModel = options.model !== undefined || options.modelPattern !== undefined;
 	const modelMatchPreferences = {

@@ -5099,9 +5099,10 @@ export class AgentSession {
 		const hasServiceTierEntry = this.sessionManager.getBranch().some(entry => entry.type === "service_tier_change");
 		const defaultThinkingLevel = this.settings.get("defaultThinkingLevel");
 		const configuredServiceTier = this.settings.get("serviceTier");
-		const nextThinkingLevel = hasThinkingEntry
-			? (sessionContext.thinkingLevel as ThinkingLevel | undefined)
-			: resolveThinkingLevelForModel(this.model, defaultThinkingLevel);
+		const nextThinkingLevel = resolveThinkingLevelForModel(
+			this.model,
+			hasThinkingEntry ? (sessionContext.thinkingLevel as ThinkingLevel | undefined) : defaultThinkingLevel,
+		);
 		this.#thinkingLevel = nextThinkingLevel;
 		this.agent.setThinkingLevel(toReasoningEffort(nextThinkingLevel));
 		this.agent.serviceTier = hasServiceTierEntry

@@ -194,11 +194,14 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		await firstSession.activateDiscoveredMCPTools(["mcp_slack_post_message"]);
 		firstSession.sessionManager.appendThinkingLevelChange(ThinkingLevel.Off);
 		firstSession.sessionManager.appendServiceTierChange("priority");
+		expect(firstSession.sessionManager.buildSessionContext().thinkingLevel).toBe(ThinkingLevel.Off);
 		expect(firstSession.getSelectedMCPToolNames()).toEqual(["mcp_slack_post_message"]);
 		const sessionFile = firstSession.sessionFile;
 		expect(sessionFile).toBeDefined();
 		await firstSession.sessionManager.rewriteEntries();
 		const persistedBeforeResume = fs.readFileSync(sessionFile!, "utf8");
+		const persistedMtimeBeforeResume = fs.statSync(sessionFile!).mtimeMs;
+		await Bun.sleep(20);
 		await firstSession.dispose();
 		const resumedManager = await SessionManager.open(sessionFile!, tempDir);
 		const { session: resumedSession } = await createAgentSession({
@@ -207,7 +210,7 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 			sessionManager: resumedManager,
 			settings: Settings.isolated({
 				"mcp.discoveryMode": true,
-				defaultThinkingLevel: "off",
+				defaultThinkingLevel: "high",
 				serviceTier: "none",
 			}),
 			model: createReasoningModel(),
@@ -233,6 +236,7 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 			);
 			expect(resumedSession.systemPrompt).toContain("mcp_slack_post_message");
 			expect(fs.readFileSync(sessionFile!, "utf8")).toBe(persistedBeforeResume);
+			expect(fs.statSync(sessionFile!).mtimeMs).toBe(persistedMtimeBeforeResume);
 		} finally {
 			await resumedSession.dispose();
 		}
@@ -249,6 +253,8 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		expect(sessionFile).toBeDefined();
 		await sessionManager.rewriteEntries();
 		const persistedBeforeResume = fs.readFileSync(sessionFile!, "utf8");
+		const persistedMtimeBeforeResume = fs.statSync(sessionFile!).mtimeMs;
+		await Bun.sleep(20);
 		const resumedManager = await SessionManager.open(sessionFile!, tempDir);
 		const { session } = await createAgentSession({
 			cwd: tempDir,
@@ -283,6 +289,7 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 			);
 			expect(session.sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(false);
 			expect(fs.readFileSync(sessionFile!, "utf8")).toBe(persistedBeforeResume);
+			expect(fs.statSync(sessionFile!).mtimeMs).toBe(persistedMtimeBeforeResume);
 		} finally {
 			await session.dispose();
 		}

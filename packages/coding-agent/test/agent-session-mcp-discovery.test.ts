@@ -619,6 +619,7 @@ describe("AgentSession MCP discovery", () => {
 		expect(olderSessionFile).toBeString();
 		await olderSessionManager.rewriteEntries();
 		const olderSessionBeforeSwitch = fs.readFileSync(olderSessionFile!, "utf8");
+		const olderSessionMtimeBeforeSwitch = fs.statSync(olderSessionFile!).mtimeMs;
 
 		const sessionManager = SessionManager.create(tempDir, tempDir);
 		const originalSessionFile = sessionManager.getSessionFile();
@@ -628,7 +629,7 @@ describe("AgentSession MCP discovery", () => {
 		const reasoningModel: Model<"openai-responses"> = {
 			...createModel(),
 			reasoning: true,
-			thinking: { mode: "effort", minLevel: Effort.Medium, maxLevel: Effort.High },
+			thinking: { mode: "effort", minLevel: Effort.Medium, maxLevel: Effort.Medium },
 		};
 
 		const agent = new Agent({
@@ -657,22 +658,37 @@ describe("AgentSession MCP discovery", () => {
 		sessions.push(session);
 
 		expect(session.getSelectedMCPToolNames()).toEqual(["mcp_docs_search"]);
+		sessionManager.appendThinkingLevelChange(ThinkingLevel.High);
+		sessionManager.appendServiceTierChange("flex");
+		sessionManager.appendMCPToolSelection(["mcp_docs_search"]);
+		expect(sessionManager.buildSessionContext().thinkingLevel).toBe(ThinkingLevel.High);
+		expect(sessionManager.buildSessionContext().serviceTier).toBe("flex");
+		expect(sessionManager.buildSessionContext().selectedMCPToolNames).toEqual(["mcp_docs_search"]);
 		expect(sessionManager.buildSessionContext().hasPersistedMCPToolSelection).toBe(true);
+		await sessionManager.rewriteEntries();
+		const originalSessionBeforeSwitch = fs.readFileSync(originalSessionFile!, "utf8");
+		const originalSessionMtimeBeforeSwitch = fs.statSync(originalSessionFile!).mtimeMs;
+		await Bun.sleep(20);
 
 		await session.switchSession(olderSessionFile!);
-		expect(session.thinkingLevel).toBe(ThinkingLevel.High);
+		expect(session.sessionFile).toBe(olderSessionFile);
+		expect(session.thinkingLevel).toBe(ThinkingLevel.Medium);
 		expect(session.serviceTier).toBe("priority");
 		expect(session.getSelectedMCPToolNames()).toEqual([]);
 		expect(session.getActiveToolNames()).toEqual(["read"]);
 		expect(session.systemPrompt).toBe("tools:read");
 		expect(fs.readFileSync(olderSessionFile!, "utf8")).toBe(olderSessionBeforeSwitch);
+		expect(fs.statSync(olderSessionFile!).mtimeMs).toBe(olderSessionMtimeBeforeSwitch);
 
 		await session.switchSession(originalSessionFile!);
-		expect(session.thinkingLevel).toBe(ThinkingLevel.High);
-		expect(session.serviceTier).toBe("priority");
+		expect(session.sessionFile).toBe(originalSessionFile);
+		expect(session.thinkingLevel).toBe(ThinkingLevel.Medium);
+		expect(session.serviceTier).toBe("flex");
 		expect(session.getSelectedMCPToolNames()).toEqual(["mcp_docs_search"]);
 		expect(session.getActiveToolNames()).toEqual(["read", "mcp_docs_search"]);
 		expect(session.systemPrompt).toBe("tools:read,mcp_docs_search");
+		expect(fs.readFileSync(originalSessionFile!, "utf8")).toBe(originalSessionBeforeSwitch);
+		expect(fs.statSync(originalSessionFile!).mtimeMs).toBe(originalSessionMtimeBeforeSwitch);
 	});
 
 	it("restores explicit MCP defaults after startup outage once tools recover in a new session", async () => {
