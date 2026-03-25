@@ -83,9 +83,24 @@ export function throwIfAborted(signal?: AbortSignal): void {
  * Render an error for LLM consumption.
  * Handles ToolError.render() and falls back to message/string.
  */
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+function getNamedToolErrorType(errorName: string | undefined): ToolErrorDetails["errorType"] | undefined {
+	if (errorName === "ToolAbortError") return "abort";
+	if (errorName === "ToolTimeoutError") return "timeout";
+	if (errorName === "ToolError") return "tool";
+	return undefined;
+}
+
 export function renderError(e: unknown): string {
 	if (e instanceof ToolError) {
 		return e.render();
+	}
+	if (isRecord(e) && typeof e.render === "function") {
+		const rendered = e.render();
+		return typeof rendered === "string" ? rendered : String(rendered);
 	}
 	if (e instanceof Error) {
 		return e.message;
@@ -94,6 +109,9 @@ export function renderError(e: unknown): string {
 }
 
 function buildToolErrorDetails(error: unknown, message: string): ToolErrorDetails {
+	const errorDetails = isRecord(error) && isRecord(error.details) ? error.details : undefined;
+	const errorName = isRecord(error) && typeof error.name === "string" ? error.name : undefined;
+	const namedErrorType = getNamedToolErrorType(errorName);
 	if (error instanceof ToolError) {
 		const details: ToolErrorDetails = { ...(error.details ?? {}), error: message };
 		details.errorType ??= "tool";
@@ -101,9 +119,15 @@ function buildToolErrorDetails(error: unknown, message: string): ToolErrorDetail
 	}
 	if (error instanceof ToolAbortError) {
 		return {
+			...(errorDetails ?? {}),
 			error: message,
 			errorType: "abort",
 		};
+	}
+	if (errorDetails || namedErrorType) {
+		const details: ToolErrorDetails = { ...(errorDetails ?? {}), error: message };
+		if (namedErrorType) details.errorType ??= namedErrorType;
+		return details;
 	}
 	return { error: message };
 }

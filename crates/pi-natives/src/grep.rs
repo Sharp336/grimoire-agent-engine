@@ -493,6 +493,45 @@ struct SearchParams {
 	offset:         u64,
 }
 
+fn cancel_to_io_error(err: Error) -> io::Error {
+	io::Error::new(io::ErrorKind::Interrupted, err.to_string())
+}
+
+struct HeartbeatReader<'a, R> {
+	inner: R,
+	ct:    &'a task::CancelToken,
+}
+
+impl<'a, R: Read> HeartbeatReader<'a, R> {
+	fn new(inner: R, ct: &'a task::CancelToken) -> Self {
+		Self { inner, ct }
+	}
+
+	fn heartbeat(&self) -> io::Result<()> {
+		self.ct.heartbeat().map_err(cancel_to_io_error)
+	}
+}
+
+impl<R: Read> Read for HeartbeatReader<'_, R> {
+	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+		self.heartbeat()?;
+		let read = self.inner.read(buf)?;
+		if read == 0 {
+			self.heartbeat()?;
+		}
+		Ok(read)
+	}
+}
+
+fn run_file_search_reader<R: Read>(
+	matcher: &grep_regex::RegexMatcher,
+	reader: R,
+	params: SearchParams,
+	ct: &task::CancelToken,
+	) -> io::Result<SearchResultInternal> {
+	run_search_reader(matcher, HeartbeatReader::new(reader, ct), params)
+}
+
 fn run_search(
 	matcher: &grep_regex::RegexMatcher,
 	content: &[u8],
@@ -747,7 +786,45 @@ fn sanitize_braces(pattern: &str) -> Cow<'_, str> {
 
 #[cfg(test)]
 mod tests {
-	use super::sanitize_braces;
+	use std::{
+		io::{self, Read},
+		path::PathBuf,
+		 sync::{
+			atomic::{AtomicUsize, Ordering},
+			Arc,
+		},
+	};
+
+	use super::{
+ 		build_matcher, run_file_search_reader, run_sequential_search, sanitize_braces, FileEntry,
+ 		OutputMode, SearchParams,
+ 	};
+	use crate::task::{self, AbortReason};
+
+	struct ChunkReader {
+		chunks:          Vec<&'static [u8]>,
+		index:           usize,
+		read_calls:      Arc<AtomicUsize>,
+		abort_after_read: Option<task::AbortToken>,
+	}
+
+	impl Read for ChunkReader {
+		fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+			self.read_calls.fetch_add(1, Ordering::SeqCst);
+			let Some(chunk) = self.chunks.get(self.index) else {
+				return Ok(0);
+			};
+			let len = chunk.len().min(buf.len());
+			buf[..len].copy_from_slice(&chunk[..len]);
+			self.index += 1;
+			if self.index == 1
+				&& let Some(abort_token) = &self.abort_after_read
+			{
+				abort_token.abort(AbortReason::Timeout);
+			}
+			Ok(len)
+		}
+	}
 
 	#[test]
 	fn preserves_unicode_property_escapes() {
@@ -772,6 +849,62 @@ mod tests {
 	#[test]
 	fn preserves_valid_quantifiers() {
 		assert_eq!(sanitize_braces("a{2,4}").as_ref(), "a{2,4}");
+	}
+
+	#[test]
+	fn run_sequential_search_stops_before_heartbeat_when_limit_is_already_reached() {
+		let matcher = build_matcher("needle", false, false).expect("matcher should compile");
+		let mut ct = task::CancelToken::default();
+		ct.emplace_abort_token().abort(AbortReason::Timeout);
+
+		let result = run_sequential_search(
+			&[FileEntry { path: PathBuf::from("ignored.txt"), relative_path: "ignored.txt".into() }],
+			&matcher,
+			SearchParams {
+				context_before: 0,
+				context_after: 0,
+				max_columns: None,
+				mode: OutputMode::Count,
+				max_count: Some(0),
+				offset: 0,
+			},
+			&ct,
+		)
+		.expect("completed limit should win over cancellation");
+
+		assert!(result.0.is_empty());
+		assert_eq!(result.1, 0);
+		assert_eq!(result.2, 0);
+		assert_eq!(result.3, 0);
+		assert!(result.4);
+	}
+
+	#[test]
+	fn run_file_search_reader_checks_cancellation_between_reads() {
+		let matcher = build_matcher("line", false, false).expect("matcher should compile");
+		let params = SearchParams {
+			context_before: 0,
+			context_after: 0,
+			max_columns: None,
+			mode: OutputMode::Content,
+			max_count: None,
+			offset: 0,
+		};
+		let mut ct = task::CancelToken::default();
+		let abort = ct.emplace_abort_token();
+		let read_calls = Arc::new(AtomicUsize::new(0));
+		let reader = ChunkReader {
+			chunks: vec![b"first line\n", b"second line\n"],
+			index: 0,
+			read_calls: Arc::clone(&read_calls),
+			abort_after_read: Some(abort),
+		};
+
+		let err = run_file_search_reader(&matcher, reader, params, &ct)
+			.expect_err("search should stop once cancellation is observed during reads");
+
+		assert!(err.to_string().contains("Aborted: Timeout"));
+		assert_eq!(read_calls.load(Ordering::SeqCst), 1);
 	}
 }
 fn build_matcher(
@@ -806,8 +939,10 @@ fn run_parallel_search(
 				return Ok(None);
 			};
 			let reader = file.take(MAX_FILE_BYTES);
-			let Ok(search) = run_search_reader(matcher, reader, params) else {
-				return Ok(None);
+			let search = match run_file_search_reader(matcher, reader, params, ct) {
+				Ok(search) => search,
+				Err(err) if ct.aborted() => return Err(Error::from_reason(err.to_string())),
+				Err(_) => return Ok(None),
 			};
 			ct.heartbeat()?;
 			Ok(Some(FileSearchResult {
@@ -840,19 +975,16 @@ fn run_sequential_search(
 	let mut limit_reached = false;
 
 	for entry in entries {
-		ct.heartbeat()?;
-		if limit_reached {
+		if limit_reached || max_count.is_some_and(|max| collected >= max) {
+			limit_reached = true;
 			break;
 		}
+		ct.heartbeat()?;
 
 		// Calculate offset for this file (skip matches we've already seen)
 		let file_offset = offset.saturating_sub(total_matches);
 		// Calculate remaining based on collected count, not total matches
 		let remaining = max_count.map(|max| max.saturating_sub(collected));
-		if remaining == Some(0) {
-			limit_reached = true;
-			break;
-		}
 
 		// Open file and search directly - no intermediate buffer, no precheck scan
 		let Ok(file) = File::open(&entry.path) else {
@@ -862,8 +994,10 @@ fn run_sequential_search(
 		let reader = file.take(MAX_FILE_BYTES);
 
 		let file_params = SearchParams { max_count: remaining, offset: file_offset, ..params };
-		let Ok(search) = run_search_reader(matcher, reader, file_params) else {
-			continue;
+		let search = match run_file_search_reader(matcher, reader, file_params, ct) {
+			Ok(search) => search,
+			Err(err) if ct.aborted() => return Err(Error::from_reason(err.to_string())),
+			Err(_) => continue,
 		};
 		ct.heartbeat()?;
 
@@ -994,8 +1128,13 @@ fn grep_sync(
 			max_count,
 			offset,
 		};
-		let search = run_search_reader(&matcher, reader, params)
-			.map_err(|err| Error::from_reason(format!("Search failed: {err}")))?;
+		let search = run_file_search_reader(&matcher, reader, params, &ct).map_err(|err| {
+			if ct.aborted() {
+				Error::from_reason(err.to_string())
+			} else {
+				Error::from_reason(format!("Search failed: {err}"))
+			}
+		})?;
 
 		if search.match_count == 0 {
 			return Ok(GrepResult {

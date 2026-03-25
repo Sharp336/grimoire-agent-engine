@@ -5,7 +5,7 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { glob } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { getRemoteDir, ptree } from "@oh-my-pi/pi-utils";
+import { getRemoteDir, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -415,7 +415,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// Handle internal URLs (agent://, artifact://, memory://, skill://, rule://, local://, mcp://)
 			const internalRouter = this.session.internalRouter;
 			if (internalRouter?.canHandle(readPath)) {
-				return this.#handleInternalUrl(readPath, offset, limit);
+				return await this.#handleInternalUrl(readPath, offset, limit, effectiveSignal);
 			}
 
 			let absolutePath = resolveReadPath(readPath, this.session.cwd);
@@ -709,7 +709,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	 * Handle internal URLs (agent://, artifact://, memory://, skill://, rule://, local://, mcp://).
 	 * Supports pagination via offset/limit but rejects them when query extraction is used.
 	 */
-	async #handleInternalUrl(url: string, offset?: number, limit?: number): Promise<AgentToolResult<ReadToolDetails>> {
+	async #handleInternalUrl(
+		url: string,
+		offset?: number,
+		limit?: number,
+		signal?: AbortSignal,
+	): Promise<AgentToolResult<ReadToolDetails>> {
 		const internalRouter = this.session.internalRouter!;
 
 		// Check if URL has query extraction (agent:// only)
@@ -731,7 +736,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 
 		// Resolve the internal URL
-		const resource = await internalRouter.resolve(url);
+		const resource = signal
+			? await untilAborted(signal, () => internalRouter.resolve(url))
+			: await internalRouter.resolve(url);
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath };
 
 		// If extraction was used, return directly (no pagination)

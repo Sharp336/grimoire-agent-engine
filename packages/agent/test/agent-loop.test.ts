@@ -473,6 +473,96 @@ describe("agentLoop with AgentMessage", () => {
 		});
 	});
 
+	it("classifies named tool errors as tool failures on emitted tool results", async () => {
+		class NamedToolError extends Error {
+			constructor(
+				message: string,
+				readonly details: { marker: string },
+			) {
+				super(message);
+				this.name = "ToolError";
+			}
+
+			render(): string {
+				return this.message;
+			}
+		}
+
+		const toolSchema = Type.Object({ value: Type.String() });
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute() {
+				throw new NamedToolError("read failed", { marker: "preserved" });
+			},
+		};
+
+		const context: AgentContext = {
+			systemPrompt: "",
+			messages: [],
+			tools: [tool],
+		};
+		const userPrompt: AgentMessage = createUserMessage("trigger tool error");
+		const config: AgentLoopConfig = {
+			model: createModel(),
+			convertToLlm: identityConverter,
+		};
+
+		let callIndex = 0;
+		const streamFn = () => {
+			const stream = new MockAssistantStream();
+			queueMicrotask(() => {
+				if (callIndex === 0) {
+					const message = createAssistantMessage(
+						[{ type: "toolCall", id: "tool-error", name: "echo", arguments: { value: "hello" } }],
+						"toolUse",
+					);
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					stream.push({
+						type: "done",
+						reason: "stop",
+						message: createAssistantMessage([{ type: "text", text: "done" }]),
+					});
+				}
+				callIndex++;
+			});
+			return stream;
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([userPrompt], context, config, undefined, streamFn);
+		for await (const event of stream) {
+			events.push(event);
+		}
+		const messages = await stream.result();
+
+		const toolEnd = events.find(
+			(event): event is Extract<AgentEvent, { type: "tool_execution_end" }> => event.type === "tool_execution_end",
+		);
+		expect(toolEnd).toBeDefined();
+		if (!toolEnd) return;
+		expect(toolEnd.isError).toBe(true);
+		expect(toolEnd.result.details).toEqual({
+			error: "read failed",
+			errorType: "tool",
+			marker: "preserved",
+		});
+
+		const toolResult = messages.find((message): message is ToolResultMessage => message.role === "toolResult");
+		expect(toolResult).toBeDefined();
+		if (!toolResult) return;
+		expect(toolResult.toolCallId).toBe("tool-error");
+		expect(toolResult.isError).toBe(true);
+		expect(toolResult.content[0]).toEqual({ type: "text", text: "read failed" });
+		expect(toolResult.details).toEqual({
+			error: "read failed",
+			errorType: "tool",
+			marker: "preserved",
+		});
+	});
 	it("injects and strips intent when intent tracing is enabled", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		const executedParams: Record<string, unknown>[] = [];

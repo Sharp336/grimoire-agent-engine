@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { type AstReplaceChange, astEdit } from "@oh-my-pi/pi-natives";
+import { type AstReplaceChange, type AstReplaceResult, astEdit } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { untilAborted } from "@oh-my-pi/pi-utils";
@@ -31,7 +31,7 @@ import {
 	PARSE_ERRORS_LIMIT,
 	PREVIEW_LIMITS,
 } from "./render-utils";
-import { ToolError, ToolTimeoutError } from "./tool-errors";
+import { ToolAbortError, ToolError, ToolTimeoutError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -106,11 +106,42 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				throw new ToolError("limit must be a positive number");
 			}
 			const maxFiles = parseInt(process.env.PI_MAX_AST_FILES ?? "", 10) || 1000;
+			const timeoutSeconds = clampTimeout("ast_edit", params.timeout);
+			const timeoutMs = timeoutSeconds * 1000;
+			const throwTimeoutOrAbort = (
+				error: unknown,
+				timeoutSignal: AbortSignal,
+				activeSignal?: AbortSignal,
+			): never => {
+				if (error instanceof ToolAbortError) {
+					if (timeoutSignal.aborted && !activeSignal?.aborted) {
+						throw new ToolTimeoutError(`ast_edit timed out after ${timeoutSeconds} seconds`, {
+							durationSeconds: timeoutSeconds,
+							durationMs: timeoutMs,
+							toolName: this.name,
+						});
+					}
+					throw error;
+				}
+				if (error instanceof Error && error.name === "AbortError") {
+					if (timeoutSignal.aborted && !activeSignal?.aborted) {
+						throw new ToolTimeoutError(`ast_edit timed out after ${timeoutSeconds} seconds`, {
+							durationSeconds: timeoutSeconds,
+							durationMs: timeoutMs,
+							toolName: this.name,
+						});
+					}
+					throw new ToolAbortError();
+				}
+				throw error;
+			};
 
 			const formatScopePath = (targetPath: string): string => {
 				const relative = path.relative(this.session.cwd, targetPath).replace(/\\/g, "/");
 				return relative.length === 0 ? "." : relative;
 			};
+			const timeoutSignal = AbortSignal.timeout(timeoutMs);
+			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 			let searchPath: string | undefined;
 			let scopePath: string | undefined;
 			let globFilter = params.glob ? normalizePathLikeInput(params.glob) || undefined : undefined;
@@ -121,7 +152,13 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 					if (hasGlobPathChars(rawPath)) {
 						throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
 					}
-					const resource = await internalRouter.resolve(rawPath);
+					const resource = await (async () => {
+						try {
+							return await untilAborted(combinedSignal, () => internalRouter.resolve(rawPath));
+						} catch (error) {
+							return throwTimeoutOrAbort(error, timeoutSignal, signal);
+						}
+					})();
 					if (!resource.sourcePath) {
 						throw new ToolError(`Cannot rewrite internal URL without backing file: ${rawPath}`);
 					}
@@ -150,12 +187,15 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			} catch {
 				throw new ToolError(`Path not found: ${scopePath}`);
 			}
-
-			const timeoutSeconds = clampTimeout("ast_edit", params.timeout);
-			const timeoutMs = timeoutSeconds * 1000;
-			const runAstEdit = async (dryRun: boolean, runSignal?: AbortSignal) => {
-				const timeoutSignal = AbortSignal.timeout(timeoutMs);
-				const combinedSignal = runSignal ? AbortSignal.any([runSignal, timeoutSignal]) : timeoutSignal;
+			const runAstEdit = async (
+				dryRun: boolean,
+				runSignal?: AbortSignal,
+				runTimeoutSignal?: AbortSignal,
+			): Promise<AstReplaceResult> => {
+				const effectiveTimeoutSignal = runTimeoutSignal ?? AbortSignal.timeout(timeoutMs);
+				const effectiveSignal = runSignal
+					? AbortSignal.any([runSignal, effectiveTimeoutSignal])
+					: effectiveTimeoutSignal;
 				try {
 					return await astEdit({
 						rewrites: normalizedRewrites,
@@ -167,22 +207,15 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 						maxReplacements,
 						maxFiles,
 						failOnParseError: false,
-						signal: combinedSignal,
+						signal: effectiveSignal,
 						timeoutMs,
 					});
 				} catch (error) {
-					if (timeoutSignal.aborted && !runSignal?.aborted) {
-						throw new ToolTimeoutError(`ast_edit timed out after ${timeoutSeconds} seconds`, {
-							durationSeconds: timeoutSeconds,
-							durationMs: timeoutMs,
-							toolName: this.name,
-						});
-					}
-					throw error;
+					return throwTimeoutOrAbort(error, effectiveTimeoutSignal, runSignal);
 				}
 			};
 
-			const result = await runAstEdit(true, signal);
+			const result = await runAstEdit(true, signal, timeoutSignal);
 
 			const dedupedParseErrors = dedupeParseErrors(result.parseErrors);
 			const formatPath = (filePath: string): string => {

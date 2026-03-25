@@ -140,6 +140,28 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 			let searchPath: string;
 			let scopePath: string;
 			let globFilter = glob ? normalizePathLikeInput(glob) || undefined : undefined;
+			const throwTimeoutOrAbort = (error: unknown): never => {
+				if (error instanceof ToolAbortError) {
+					if (timeoutSignal.aborted && !signal?.aborted) {
+						throw new ToolTimeoutError(`grep timed out after ${timeoutSec} seconds`, {
+							toolName: "grep",
+							durationSeconds: timeoutSec,
+						});
+					}
+					throw error;
+				}
+				if (error instanceof Error && error.name === "AbortError") {
+					if (timeoutSignal.aborted && !signal?.aborted) {
+						throw new ToolTimeoutError(`grep timed out after ${timeoutSec} seconds`, {
+							toolName: "grep",
+							durationSeconds: timeoutSec,
+						});
+					}
+					throw new ToolAbortError();
+				}
+				throw error;
+			};
+
 			const internalRouter = this.session.internalRouter;
 			if (searchDir?.trim()) {
 				const rawPath = normalizePathLikeInput(searchDir);
@@ -147,7 +169,13 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 					if (hasGlobPathChars(rawPath)) {
 						throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
 					}
-					const resource = await internalRouter.resolve(rawPath);
+					const resource = await (async () => {
+						try {
+							return await untilAborted(combinedSignal, () => internalRouter.resolve(rawPath));
+						} catch (error) {
+							return throwTimeoutOrAbort(error);
+						}
+					})();
 					if (!resource.sourcePath) {
 						throw new ToolError(`Cannot grep internal URL without a backing file: ${rawPath}`);
 					}
@@ -186,42 +214,34 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 			const internalLimit = Math.min(effectiveLimit * 5, 2000);
 
 			// Run grep
-			let result: GrepResult;
-			try {
-				result = await grep({
-					pattern: normalizedPattern,
-					path: searchPath,
-					glob: globFilter,
-					type: type?.trim() || undefined,
-					ignoreCase,
-					multiline: effectiveMultiline,
-					hidden: true,
-					gitignore: useGitignore,
-					cache: false,
-					maxCount: internalLimit,
-					offset: normalizedOffset > 0 ? normalizedOffset : undefined,
-					contextBefore: normalizedContextBefore,
-					contextAfter: normalizedContextAfter,
-					maxColumns: DEFAULT_MAX_COLUMN,
-					mode: effectiveOutputMode,
-					signal: combinedSignal,
-					timeoutMs,
-				});
-			} catch (err) {
-				if (err instanceof Error && err.message.startsWith("regex parse error")) {
-					throw new ToolError(err.message);
-				}
-				if (err instanceof Error && err.name === "AbortError") {
-					if (timeoutSignal.aborted && !signal?.aborted) {
-						throw new ToolTimeoutError(`grep timed out after ${timeoutSec} seconds`, {
-							toolName: "grep",
-							durationSeconds: timeoutSec,
-						});
+			const result: GrepResult = await (async () => {
+				try {
+					return await grep({
+						pattern: normalizedPattern,
+						path: searchPath,
+						glob: globFilter,
+						type: type?.trim() || undefined,
+						ignoreCase,
+						multiline: effectiveMultiline,
+						hidden: true,
+						gitignore: useGitignore,
+						cache: false,
+						maxCount: internalLimit,
+						offset: normalizedOffset > 0 ? normalizedOffset : undefined,
+						contextBefore: normalizedContextBefore,
+						contextAfter: normalizedContextAfter,
+						maxColumns: DEFAULT_MAX_COLUMN,
+						mode: effectiveOutputMode,
+						signal: combinedSignal,
+						timeoutMs,
+					});
+				} catch (err) {
+					if (err instanceof Error && err.message.startsWith("regex parse error")) {
+						throw new ToolError(err.message);
 					}
-					throw new ToolAbortError();
+					return throwTimeoutOrAbort(err);
 				}
-				throw err;
-			}
+			})();
 
 			const formatPath = (filePath: string): string => {
 				// returns paths starting with / (the virtual root)

@@ -1,6 +1,6 @@
 import * as path from "node:path";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { type AstFindMatch, astGrep } from "@oh-my-pi/pi-natives";
+import { type AstFindMatch, type AstFindResult, astGrep } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { untilAborted } from "@oh-my-pi/pi-utils";
@@ -31,7 +31,7 @@ import {
 	PARSE_ERRORS_LIMIT,
 	PREVIEW_LIMITS,
 } from "./render-utils";
-import { ToolError, ToolTimeoutError } from "./tool-errors";
+import { ToolAbortError, ToolError, ToolTimeoutError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -94,6 +94,33 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			if (context !== undefined && (!Number.isFinite(context) || context < 0)) {
 				throw new ToolError("Context must be a non-negative number");
 			}
+			const timeoutSeconds = clampTimeout("ast_grep", params.timeout);
+			const timeoutMs = timeoutSeconds * 1000;
+			const timeoutSignal = AbortSignal.timeout(timeoutMs);
+			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+			const throwTimeoutOrAbort = (error: unknown): never => {
+				if (error instanceof ToolAbortError) {
+					if (timeoutSignal.aborted && !signal?.aborted) {
+						throw new ToolTimeoutError(`ast_grep timed out after ${timeoutSeconds} seconds`, {
+							durationSeconds: timeoutSeconds,
+							durationMs: timeoutMs,
+							toolName: this.name,
+						});
+					}
+					throw error;
+				}
+				if (error instanceof Error && error.name === "AbortError") {
+					if (timeoutSignal.aborted && !signal?.aborted) {
+						throw new ToolTimeoutError(`ast_grep timed out after ${timeoutSeconds} seconds`, {
+							durationSeconds: timeoutSeconds,
+							durationMs: timeoutMs,
+							toolName: this.name,
+						});
+					}
+					throw new ToolAbortError();
+				}
+				throw error;
+			};
 
 			const formatScopePath = (targetPath: string): string => {
 				const relative = path.relative(this.session.cwd, targetPath).replace(/\\/g, "/");
@@ -109,7 +136,13 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 					if (hasGlobPathChars(rawPath)) {
 						throw new ToolError(`Glob patterns are not supported for internal URLs: ${rawPath}`);
 					}
-					const resource = await internalRouter.resolve(rawPath);
+					const resource = await (async () => {
+						try {
+							return await untilAborted(combinedSignal, () => internalRouter.resolve(rawPath));
+						} catch (error) {
+							return throwTimeoutOrAbort(error);
+						}
+					})();
 					if (!resource.sourcePath) {
 						throw new ToolError(`Cannot search internal URL without backing file: ${rawPath}`);
 					}
@@ -140,12 +173,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 				throw new ToolError(`Path not found: ${scopePath}`);
 			}
 
-			const timeoutSeconds = clampTimeout("ast_grep", params.timeout);
-			const timeoutMs = timeoutSeconds * 1000;
-			const timeoutSignal = AbortSignal.timeout(timeoutMs);
-			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
-
-			const result = await (async () => {
+			const result: AstFindResult = await (async () => {
 				try {
 					return await astGrep({
 						patterns,
@@ -161,14 +189,7 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 						timeoutMs,
 					});
 				} catch (error) {
-					if (timeoutSignal.aborted && !signal?.aborted) {
-						throw new ToolTimeoutError(`ast_grep timed out after ${timeoutSeconds} seconds`, {
-							durationSeconds: timeoutSeconds,
-							durationMs: timeoutMs,
-							toolName: this.name,
-						});
-					}
-					throw error;
+					return throwTimeoutOrAbort(error);
 				}
 			})();
 

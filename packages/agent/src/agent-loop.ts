@@ -634,7 +634,7 @@ async function executeToolCalls(
  */
 interface ToolExecutionErrorDetails {
 	error: string;
-	errorType?: "abort" | "timeout";
+	errorType?: "tool" | "abort" | "timeout";
 	timeout?: Record<string, unknown>;
 	[key: string]: unknown;
 }
@@ -654,23 +654,23 @@ function renderToolExecutionError(error: unknown): string {
 	return String(error);
 }
 
+function getToolExecutionErrorType(errorName: string | undefined): ToolExecutionErrorDetails["errorType"] | undefined {
+	if (errorName === "ToolAbortError") return "abort";
+	if (errorName === "ToolTimeoutError") return "timeout";
+	if (errorName === "ToolError") return "tool";
+	return undefined;
+}
+
 function createErrorToolResult(error: unknown): AgentToolResult<ToolExecutionErrorDetails> {
 	const message = renderToolExecutionError(error);
 	const errorDetails = isRecord(error) && isRecord(error.details) ? error.details : undefined;
 	const errorName = isRecord(error) && typeof error.name === "string" ? error.name : undefined;
-	let errorType: ToolExecutionErrorDetails["errorType"] | undefined;
-	if (errorName === "ToolAbortError") {
-		errorType = "abort";
-	} else if (errorName === "ToolTimeoutError") {
-		errorType = "timeout";
-	}
+	const errorType = getToolExecutionErrorType(errorName);
+	const details: ToolExecutionErrorDetails = { ...(errorDetails ?? {}), error: message };
+	if (errorType) details.errorType ??= errorType;
 	return {
 		content: [{ type: "text", text: message }],
-		details: {
-			...(errorDetails ?? {}),
-			...(errorType ? { errorType } : {}),
-			error: message,
-		},
+		details,
 	};
 }
 

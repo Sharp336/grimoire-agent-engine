@@ -5,6 +5,7 @@ import * as path from "node:path";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 const astEditMock = vi.fn();
+const astGrepMock = vi.fn();
 const globMock = vi.fn();
 const grepMock = vi.fn();
 
@@ -12,7 +13,7 @@ mock.module("@oh-my-pi/pi-natives", () => ({
 	embeddedAddon: null,
 	native: {},
 	astEdit: astEditMock,
-	astGrep: vi.fn(),
+	astGrep: astGrepMock,
 	copyToClipboard: vi.fn(),
 	detectMacOSAppearance: vi.fn(() => "dark"),
 	encodeSixel: vi.fn(),
@@ -60,6 +61,7 @@ mock.module("@oh-my-pi/pi-natives", () => ({
 
 const { Settings } = await import("@oh-my-pi/pi-coding-agent/config/settings");
 const { AstEditTool } = await import("@oh-my-pi/pi-coding-agent/tools/ast-edit");
+const { AstGrepTool } = await import("@oh-my-pi/pi-coding-agent/tools/ast-grep");
 const { FindTool } = await import("@oh-my-pi/pi-coding-agent/tools/find");
 const { GrepTool } = await import("@oh-my-pi/pi-coding-agent/tools/grep");
 const { PendingActionStore } = await import("@oh-my-pi/pi-coding-agent/tools/pending-action");
@@ -93,6 +95,7 @@ function waitForAbort(signal?: AbortSignal): Promise<never> {
 afterEach(() => {
 	vi.restoreAllMocks();
 	astEditMock.mockReset();
+	astGrepMock.mockReset();
 	globMock.mockReset();
 	grepMock.mockReset();
 });
@@ -139,6 +142,68 @@ describe("built-in tool timeouts", () => {
 					durationMs: 1000,
 				},
 			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("surfaces find preflight timeouts before custom glob runs", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "find-preflight-timeout-"));
+		try {
+			const timeoutMsSeen: number[] = [];
+			const globCalls: number[] = [];
+			const tool = new FindTool(createSession(tempDir), {
+				operations: {
+					exists: async (_path: string, options?: { signal?: AbortSignal; timeoutMs?: number }) => {
+						timeoutMsSeen.push(options?.timeoutMs ?? 0);
+						await waitForAbort(options?.signal);
+						return false;
+					},
+					glob: async () => {
+						globCalls.push(Date.now());
+						return [];
+					},
+				},
+			});
+
+			const error = await tool
+				.execute("find-preflight-timeout", { pattern: "**/*.ts", timeout: 1 })
+				.catch(error => error);
+
+			expect(error).toBeInstanceOf(ToolTimeoutError);
+			expect((error as Error).message).toContain("find timed out after 1 seconds");
+			expect(timeoutMsSeen).toEqual([1000]);
+			expect(globCalls).toHaveLength(0);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("aborts read internal URL resolution when the direct signal is cancelled", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-internal-abort-"));
+		try {
+			let resolveCalls = 0;
+			const tool = new ReadTool(
+				createSession(tempDir, {
+					internalRouter: {
+						canHandle: (input: string) => input === "artifact://slow",
+						resolve: async () => {
+							resolveCalls += 1;
+							await new Promise(() => {});
+							throw new Error("unreachable");
+						},
+					} as unknown as ToolSession["internalRouter"],
+				}),
+			);
+			const controller = new AbortController();
+			const execution = tool
+				.execute("read-internal-abort", { path: "artifact://slow", timeout: 10 }, controller.signal)
+				.catch(error => error);
+			controller.abort();
+
+			const error = await execution;
+			expect(error).toBeInstanceOf(ToolAbortError);
+			expect(resolveCalls).toBe(1);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
@@ -204,6 +269,40 @@ describe("built-in tool timeouts", () => {
 				errorType: "timeout",
 				timeout: {
 					toolName: "grep",
+					durationSeconds: 1,
+					durationMs: 1000,
+				},
+			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("surfaces ast_grep internal URL resolution timeouts with timeout metadata", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "ast-grep-timeout-"));
+		try {
+			const tool = new AstGrepTool(
+				createSession(tempDir, {
+					internalRouter: {
+						canHandle: (input: string) => input === "artifact://slow",
+						resolve: async () => {
+							await new Promise(() => {});
+							throw new Error("unreachable");
+						},
+					} as unknown as ToolSession["internalRouter"],
+				}),
+			);
+
+			const error = await tool
+				.execute("ast-grep-timeout", { pat: ["needle"], path: "artifact://slow", timeout: 1 })
+				.catch(error => error);
+
+			expect(error).toBeInstanceOf(ToolTimeoutError);
+			expect((error as Error).message).toContain("ast_grep timed out after 1 seconds");
+			expect((error as InstanceType<typeof ToolTimeoutError>).details).toMatchObject({
+				errorType: "timeout",
+				timeout: {
+					toolName: "ast_grep",
 					durationSeconds: 1,
 					durationMs: 1000,
 				},

@@ -56,12 +56,18 @@ export interface FindToolDetails {
  * Pluggable operations for the find tool.
  * Override these to delegate file search to remote systems (e.g., SSH).
  */
+export interface FindOperationOptions {
+	signal?: AbortSignal;
+	timeoutMs?: number;
+}
+
 export interface FindOperations {
 	/** Check if path exists */
-	exists: (absolutePath: string) => Promise<boolean> | boolean;
+	exists: (absolutePath: string, options?: FindOperationOptions) => Promise<boolean> | boolean;
 	/** Optional stat for distinguishing files vs directories. */
 	stat?: (
 		absolutePath: string,
+		options?: FindOperationOptions,
 	) => Promise<{ isFile(): boolean; isDirectory(): boolean }> | { isFile(): boolean; isDirectory(): boolean };
 	/** Find files matching glob pattern. Returns relative paths. */
 	glob: (
@@ -155,12 +161,18 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			};
 			// If custom operations provided with glob, use that instead of fd
 			if (this.#customOps?.glob) {
-				if (!(await this.#customOps.exists(searchPath))) {
+				const preflightOptions: FindOperationOptions = { signal: combinedSignal, timeoutMs };
+				const pathExists = await untilAborted(combinedSignal, async () => {
+					return await this.#customOps!.exists(searchPath, preflightOptions);
+				}).catch(error => throwTimeoutOrAbort(error));
+				if (!pathExists) {
 					throw new ToolError(`Path not found: ${scopePath}`);
 				}
 
 				if (!hasGlob && this.#customOps.stat) {
-					const stat = await this.#customOps.stat(searchPath);
+					const stat = await untilAborted(combinedSignal, async () => {
+						return await this.#customOps!.stat!(searchPath, preflightOptions);
+					}).catch(error => throwTimeoutOrAbort(error));
 					if (stat.isFile()) {
 						const files = [scopePath];
 						const details: FindToolDetails = {
@@ -190,7 +202,6 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 					return toolResult(details).text("No files found matching pattern").done();
 				}
 
-				// Relativize paths
 				const relativized = results.map(p => {
 					if (p.startsWith(searchPath)) {
 						return p.slice(searchPath.length + 1);
