@@ -5,13 +5,24 @@
  * Priority: 70 (below claude.ts at 80, so user overrides in .claude/ take precedence)
  */
 import * as path from "node:path";
+import { tryParseJson } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
+import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
+import { type MCPServer, mcpCapability } from "../capability/mcp";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { type ClaudePluginRoot, listClaudePluginRoots, loadFilesFromDir, scanSkillsFromDir } from "./helpers";
+import {
+	type ClaudePluginRoot,
+	createSourceMeta,
+	expandEnvVarsDeep,
+	listClaudePluginRoots,
+	loadFilesFromDir,
+	readClaudeEnabledPlugins,
+	scanSkillsFromDir,
+} from "./helpers";
 
 const PROVIDER_ID = "claude-plugins";
 const DISPLAY_NAME = "Claude Code Marketplace";
@@ -170,6 +181,79 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 }
 
 // =============================================================================
+// MCP Servers
+// =============================================================================
+
+async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
+	const items: MCPServer[] = [];
+	const warnings: string[] = [];
+
+	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home);
+	warnings.push(...rootWarnings);
+
+	if (roots.length === 0) return { items, warnings };
+
+	// Read enabledPlugins to gate which plugins contribute MCP servers.
+	// If no enabledPlugins map exists, all installed plugins are considered enabled.
+	const enabledPlugins = await readClaudeEnabledPlugins(ctx.home);
+
+	const serverResults = await Promise.all(
+		roots.map(async root => {
+			// Check if plugin is enabled
+			if (enabledPlugins !== null && !enabledPlugins.has(root.id)) {
+				return [];
+			}
+
+			const mcpJsonPath = path.join(root.path, ".mcp.json");
+			const content = await readFile(mcpJsonPath);
+			if (!content) return [];
+
+			const json = tryParseJson<Record<string, unknown>>(content);
+			if (!json) {
+				warnings.push(`Failed to parse ${mcpJsonPath}`);
+				return [];
+			}
+
+			// Standard format: { mcpServers: { name: config } }
+			const mcpServers = json.mcpServers as Record<string, unknown> | undefined;
+			const serverEntries = mcpServers
+				? Object.entries(expandEnvVarsDeep(mcpServers))
+				: // Flat format fallback: { name: { command, args } } (no mcpServers wrapper)
+					Object.entries(expandEnvVarsDeep(json));
+
+			const servers: MCPServer[] = [];
+			for (const [name, config] of serverEntries) {
+				if (name.startsWith("$") || typeof config !== "object" || config === null) continue;
+				const serverConfig = config as Record<string, unknown>;
+				// Skip non-server entries (e.g., $schema)
+				if (!serverConfig.command && !serverConfig.url && !serverConfig.type) continue;
+
+				servers.push({
+					name,
+					timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
+					command: serverConfig.command as string | undefined,
+					args: serverConfig.args as string[] | undefined,
+					env: serverConfig.env as Record<string, string> | undefined,
+					url: serverConfig.url as string | undefined,
+					headers: serverConfig.headers as Record<string, string> | undefined,
+					transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
+					oauth: serverConfig.oauth as MCPServer["oauth"],
+					auth: serverConfig.auth as MCPServer["auth"],
+					_source: createSourceMeta(PROVIDER_ID, mcpJsonPath, root.scope),
+				});
+			}
+			return servers;
+		}),
+	);
+
+	for (const servers of serverResults) {
+		items.push(...servers);
+	}
+
+	return { items, warnings };
+}
+
+// =============================================================================
 // Provider Registration
 // =============================================================================
 
@@ -203,4 +287,12 @@ registerProvider<CustomTool>(toolCapability.id, {
 	description: "Load custom tools from Claude Code marketplace plugins",
 	priority: PRIORITY,
 	load: loadTools,
+});
+
+registerProvider<MCPServer>(mcpCapability.id, {
+	id: PROVIDER_ID,
+	displayName: DISPLAY_NAME,
+	description: "Load MCP servers from Claude Code marketplace plugin .mcp.json files",
+	priority: PRIORITY,
+	load: loadMCPServers,
 });
