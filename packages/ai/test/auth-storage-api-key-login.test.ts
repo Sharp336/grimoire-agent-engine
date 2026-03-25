@@ -3,20 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-
-vi.mock("../src/utils/oauth/kagi", () => ({
-	loginKagi: vi.fn(),
-}));
-
 import { AuthCredentialStore, AuthStorage } from "../src/auth-storage";
-import { loginKagi } from "../src/utils/oauth/kagi";
-
-type MockedApiKeyLogin = {
-	mockReset(): void;
-	mockResolvedValueOnce(value: string): MockedApiKeyLogin;
-};
-
-const mockedLoginKagi = loginKagi as typeof loginKagi & MockedApiKeyLogin;
+import * as kagiOauth from "../src/utils/oauth/kagi";
 
 function countCredentialRows(dbPath: string, provider: string): number {
 	const db = new Database(dbPath, { readonly: true });
@@ -41,7 +29,6 @@ describe("AuthStorage api-key login replacement", () => {
 		dbPath = path.join(tempDir, "agent.db");
 		store = await AuthCredentialStore.open(dbPath);
 		authStorage = new AuthStorage(store);
-		mockedLoginKagi.mockReset();
 	});
 
 	afterEach(async () => {
@@ -59,7 +46,8 @@ describe("AuthStorage api-key login replacement", () => {
 	it("reuses the stored api-key row when re-login returns the same key", async () => {
 		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
 
-		mockedLoginKagi.mockResolvedValueOnce("same-kagi-key").mockResolvedValueOnce("same-kagi-key");
+		const loginKagiSpy = vi.spyOn(kagiOauth, "loginKagi");
+		loginKagiSpy.mockResolvedValueOnce("same-kagi-key").mockResolvedValueOnce("same-kagi-key");
 
 		const controller = {
 			onAuth: () => {},
@@ -80,5 +68,20 @@ describe("AuthStorage api-key login replacement", () => {
 		expect(stored.credential.key).toBe("same-kagi-key");
 		expect(store.getApiKey("kagi")).toBe("same-kagi-key");
 		expect(await authStorage.getApiKey("kagi", "session-kagi-relogin")).toBe("same-kagi-key");
+	});
+
+	it("restores the real Kagi login helper between tests", async () => {
+		expect(Object.hasOwn(kagiOauth.loginKagi, "mock")).toBe(false);
+
+		let authUrl: string | undefined;
+		const apiKey = await kagiOauth.loginKagi({
+			onAuth: info => {
+				authUrl = info.url;
+			},
+			onPrompt: async () => "  KG_test_key  ",
+		});
+
+		expect(authUrl).toBe("https://kagi.com/settings/api");
+		expect(apiKey).toBe("KG_test_key");
 	});
 });
