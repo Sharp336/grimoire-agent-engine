@@ -12,6 +12,7 @@ import type {
 } from "openai/resources/responses/responses";
 import packageJson from "../../package.json" with { type: "json" };
 import { calculateCost } from "../models";
+import { isUsageLimitError } from "../rate-limit-utils";
 import { getEnvApiKey } from "../stream";
 import {
 	type Api,
@@ -810,7 +811,7 @@ function handleCodexStreamEvent(args: {
 		return handleResponseCreated(runtime, rawEvent);
 	}
 
-	if (eventType === "response.completed" || eventType === "response.done") {
+	if (eventType === "response.completed" || eventType === "response.done" || eventType === "response.incomplete") {
 		handleResponseCompleted(model, output, runtime, rawEvent);
 		return firstTokenTime;
 	}
@@ -1044,6 +1045,9 @@ function handleResponseCompleted(
 			totalTokens: response.usage.total_tokens || 0,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
+	}
+	if (typeof response?.id === "string" && response.id.length > 0) {
+		output.responseId = response.id;
 	}
 
 	const state = runtime.websocketState;
@@ -1763,6 +1767,7 @@ class CodexWebSocketConnection {
 				if (
 					eventType === "response.completed" ||
 					eventType === "response.done" ||
+					eventType === "response.incomplete" ||
 					eventType === "response.failed" ||
 					eventType === "error"
 				) {
@@ -1994,6 +1999,12 @@ async function fetchWithRetry(url: string, init: RequestInit, signal?: AbortSign
 			}
 			if (signal?.aborted) return response;
 			const errorBody = await response.clone().text();
+			// Usage-limit errors are persistent (account allocation exhausted) — retrying with the
+			// same credential is futile. Bail out immediately so the error propagates to the agent
+			// session layer where credential switching happens.
+			if (response.status === 429 && isUsageLimitError(errorBody)) {
+				return response;
+			}
 			const { delay, serverProvided } = getRetryDelayMs(response, attempt, errorBody);
 			if (response.status === 429 && serverProvided) {
 				if (rateLimitTimeSpent + delay > CODEX_RATE_LIMIT_BUDGET_MS) {

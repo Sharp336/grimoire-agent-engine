@@ -1934,8 +1934,7 @@ export class AuthStorage {
 			return runtimeKey;
 		}
 
-		const explicitAnthropicProxyBaseUrl =
-			normalizeAnthropicProxyBaseUrl($env.ANTHROPIC_BASE_URL) ?? options?.baseUrl;
+		const explicitAnthropicProxyBaseUrl = normalizeAnthropicProxyBaseUrl($env.ANTHROPIC_BASE_URL) ?? options?.baseUrl;
 		const explicitAnthropicProxyKey =
 			provider === "anthropic" && isExplicitAnthropicProxyMode(explicitAnthropicProxyBaseUrl)
 				? $env.ANTHROPIC_API_KEY?.trim() || undefined

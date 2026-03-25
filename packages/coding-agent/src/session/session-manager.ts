@@ -1303,21 +1303,19 @@ async function collectSessionsFromFiles(files: string[], storage: SessionStorage
 					}
 				}
 
-				if (messageCount) {
-					const stats = storage.statSync(file);
-					sessions.push({
-						path: file,
-						id: header.id,
-						cwd: typeof header.cwd === "string" ? header.cwd : "",
-						title: header.title ?? shortSummary,
-						parentSessionPath: (header as SessionHeader).parentSession,
-						created: new Date(header.timestamp),
-						modified: stats.mtime,
-						messageCount,
-						firstMessage: firstMessage || "(no messages)",
-						allMessagesText: allMessages.join(" "),
-					});
-				}
+				const stats = storage.statSync(file);
+				sessions.push({
+					path: file,
+					id: header.id,
+					cwd: typeof header.cwd === "string" ? header.cwd : "",
+					title: header.title ?? shortSummary,
+					parentSessionPath: (header as SessionHeader).parentSession,
+					created: new Date(header.timestamp),
+					modified: stats.mtime,
+					messageCount,
+					firstMessage: firstMessage || "(no messages)",
+					allMessagesText: allMessages.join(" "),
+				});
 			} catch {}
 		}),
 	);
@@ -1382,6 +1380,7 @@ export class SessionManager {
 	#sessionName: string | undefined;
 	#sessionFile: string | undefined;
 	#flushed: boolean = false;
+	#needsFullRewriteOnNextPersist: boolean = false;
 	#fileEntries: FileEntry[] = [];
 	#byId: Map<string, SessionEntry> = new Map();
 	#labelsById: Map<string, string> = new Map();
@@ -1444,9 +1443,7 @@ export class SessionManager {
 			this.#sessionId = header?.id ?? Snowflake.next();
 			this.#sessionName = header?.title;
 
-			if (migrateToCurrentVersion(this.#fileEntries)) {
-				await this.#rewriteFile();
-			}
+			this.#needsFullRewriteOnNextPersist = migrateToCurrentVersion(this.#fileEntries);
 
 			await resolveBlobRefsInEntries(this.#fileEntries, this.#blobStore);
 
@@ -1633,6 +1630,7 @@ export class SessionManager {
 		this.#labelsById.clear();
 		this.#leafId = null;
 		this.#flushed = false;
+		this.#needsFullRewriteOnNextPersist = false;
 		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 };
 
 		if (this.persist) {
@@ -1775,12 +1773,23 @@ export class SessionManager {
 				this.#fileEntries.map(entry => prepareEntryForPersistence(entry, this.#blobStore)),
 			);
 			await this.#writeEntriesAtomically(entries);
+			this.#needsFullRewriteOnNextPersist = false;
 			this.#flushed = true;
 		});
 	}
 
 	isPersisted(): boolean {
 		return this.persist;
+	}
+
+	/**
+	 * Force-persist all current entries to disk, even when no assistant message exists yet.
+	 * Used by ACP mode where session/new must create a discoverable session immediately.
+	 */
+	async ensureOnDisk(): Promise<void> {
+		if (!this.persist || !this.#sessionFile) return;
+		if (this.#flushed && !this.#needsFullRewriteOnNextPersist) return;
+		await this.#rewriteFile();
 	}
 
 	/** Flush pending writes to disk. Call before switching sessions or on shutdown. */
@@ -1912,23 +1921,15 @@ export class SessionManager {
 
 		const hasAssistant = this.#fileEntries.some(e => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
-			// Mark as not flushed so when assistant arrives, all entries get written
+			// Mark as not flushed so when assistant arrives, all entries get written.
 			this.#flushed = false;
 			return;
 		}
 
-		if (!this.#flushed) {
-			this.#flushed = true;
-			void this.#queuePersistTask(async () => {
-				const writer = this.#ensurePersistWriter();
-				if (!writer) return;
-				const entries = await Promise.all(
-					this.#fileEntries.map(e => prepareEntryForPersistence(e, this.#blobStore)),
-				);
-				for (const persistedEntry of entries) {
-					await writer.write(persistedEntry);
-				}
-			});
+		if (this.#needsFullRewriteOnNextPersist || !this.#flushed) {
+			// Full flush: rewrite the entire file atomically to avoid
+			// duplicating entries if the file already exists (e.g. from ensureOnDisk).
+			void this.#rewriteFile();
 		} else {
 			void this.#queuePersistTask(async () => {
 				const writer = this.#ensurePersistWriter();

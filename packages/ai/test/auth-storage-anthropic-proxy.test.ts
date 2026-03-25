@@ -147,7 +147,6 @@ describe("Anthropic proxy auth behavior", () => {
 		);
 	});
 
-
 	it("keeps stored OAuth precedence when no custom Anthropic proxy base URL is configured", async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ai-anthropic-direct-"));
 		store = await AuthCredentialStore.open(path.join(tempDir, "agent.db"));

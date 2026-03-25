@@ -24,6 +24,7 @@ import {
 import chalk from "chalk";
 import type { Args } from "./cli/args";
 import { processFileArguments } from "./cli/file-processor";
+import { buildInitialMessage } from "./cli/initial-message";
 import { listModels } from "./cli/list-models";
 import { selectSession } from "./cli/session-picker";
 import { findConfigFile } from "./config";
@@ -33,7 +34,8 @@ import { Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import { exportFromFile } from "./export/html";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
-import { InteractiveMode, runPrintMode, runRpcMode } from "./modes";
+import type { MCPManager } from "./mcp";
+import { InteractiveMode, runAcpMode, runPrintMode, runRpcMode } from "./modes";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import { RELEASE_PACKAGE } from "./release-metadata";
@@ -112,7 +114,7 @@ async function runInteractiveMode(
 	initialMessages: string[],
 	setExtensionUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	lspServers: Array<{ name: string; status: "ready" | "error"; fileTypes: string[]; error?: string }> | undefined,
-	mcpManager: import("./mcp").MCPManager | undefined,
+	mcpManager: MCPManager | undefined,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 ): Promise<void> {
@@ -146,7 +148,7 @@ async function runInteractiveMode(
 		}
 	}
 
-	if (initialMessage) {
+	if (initialMessage !== undefined) {
 		try {
 			await session.prompt(initialMessage, { images: initialImages });
 		} catch (error: unknown) {
@@ -168,33 +170,6 @@ async function runInteractiveMode(
 		const input = await mode.getUserInput();
 		await submitInteractiveInput(mode, session, input);
 	}
-}
-
-async function prepareInitialMessage(
-	parsed: Args,
-	autoResizeImages: boolean,
-): Promise<{
-	initialMessage?: string;
-	initialImages?: ImageContent[];
-}> {
-	if (parsed.fileArgs.length === 0) {
-		return {};
-	}
-
-	const { text, images } = await processFileArguments(parsed.fileArgs, { autoResizeImages });
-
-	let initialMessage: string;
-	if (parsed.messages.length > 0) {
-		initialMessage = text + parsed.messages[0];
-		parsed.messages.shift();
-	} else {
-		initialMessage = text;
-	}
-
-	return {
-		initialMessage,
-		initialImages: images.length > 0 ? images : undefined,
-	};
 }
 
 function normalizePathForComparison(value: string): string {
@@ -246,6 +221,21 @@ async function getChangelogForDisplay(parsed: Args): Promise<string | undefined>
 }
 
 async function createSessionManager(parsed: Args, cwd: string): Promise<SessionManager | undefined> {
+	if (parsed.fork) {
+		if (parsed.noSession) {
+			throw new Error("--fork requires session persistence");
+		}
+		const forkSource = parsed.fork;
+		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
+			return await SessionManager.forkFrom(forkSource, cwd, parsed.sessionDir);
+		}
+		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
+		if (!match) {
+			throw new Error(`Session "${forkSource}" not found.`);
+		}
+		return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
+	}
+
 	if (parsed.noSession) {
 		return SessionManager.inMemory();
 	}
@@ -382,6 +372,9 @@ async function buildSessionOptions(
 
 	if (sessionManager) {
 		options.sessionManager = sessionManager;
+	}
+	if (parsed.providerSessionId) {
+		options.providerSessionId = parsed.providerSessionId;
 	}
 
 	// Model from CLI
@@ -574,22 +567,27 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 	if (parsedArgs.noPty) {
 		Bun.env.PI_NO_PTY = "1";
 	}
-	const {
-		pipedInput,
-		initialMessage: initMsg,
-		initialImages,
-	} = await logger.timeAsync("prepareInitialMessage", async () => {
+	const { pipedInput, fileText, fileImages } = await logger.timeAsync("prepareInitialMessage", async () => {
 		const pipedInput = await readPipedInput();
-		let { initialMessage, initialImages } = await prepareInitialMessage(
-			parsedArgs,
-			settings.get("images.autoResize"),
-		);
-		if (pipedInput) {
-			initialMessage = initialMessage ? `${initialMessage}\n${pipedInput}` : pipedInput;
+		if (parsedArgs.fileArgs.length === 0) {
+			return { pipedInput };
 		}
-		return { pipedInput, initialMessage, initialImages };
+
+		const { text, images } = await processFileArguments(parsedArgs.fileArgs, {
+			autoResizeImages: settings.get("images.autoResize"),
+		});
+		return {
+			pipedInput,
+			fileText: text,
+			fileImages: images,
+		};
 	});
-	const initialMessage = initMsg;
+	const { initialMessage, initialImages } = buildInitialMessage({
+		parsed: parsedArgs,
+		fileText,
+		fileImages,
+		stdinContent: pipedInput,
+	});
 	const autoPrint = pipedInput !== undefined && !parsedArgs.print && parsedArgs.mode === undefined;
 	const isInteractive = !parsedArgs.print && !autoPrint && parsedArgs.mode === undefined;
 	const mode = parsedArgs.mode || "text";
@@ -635,7 +633,7 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 	let sessionManager = await logger.timeAsync("createSessionManager", () => createSessionManager(parsedArgs, cwd));
 
 	// Handle --resume (no value): show session picker
-	if (parsedArgs.resume === true) {
+	if (parsedArgs.resume === true && !parsedArgs.fork) {
 		const sessions = await logger.timeAsync("SessionManager.list", () =>
 			SessionManager.list(cwd, parsedArgs.sessionDir),
 		);
@@ -727,6 +725,8 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 
 	if (mode === "rpc") {
 		await runRpcMode(session);
+	} else if (mode === "acp") {
+		await runAcpMode(session);
 	} else if (isInteractive) {
 		const versionCheckPromise = RELEASE_VERSION ? checkForNewVersion(VERSION).catch(() => undefined) : undefined;
 		const changelogMarkdown = await getChangelogForDisplay(parsedArgs);

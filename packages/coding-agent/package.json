@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "13.14.0",
+	"version": "13.15.0",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"homepage": "https://github.com/open-horizon-labs/oh-omp",
 	"author": "Can Boluk",
@@ -40,6 +40,7 @@
 		"test": "bun test"
 	},
 	"dependencies": {
+		"@agentclientprotocol/sdk": "0.16.1",
 		"@lancedb/lancedb": "0.26.2",
 		"@mozilla/readability": "^0.6",
 		"@oh-my-pi/omp-stats": "workspace:*",
@@ -55,7 +56,8 @@
 		"diff": "^8.0",
 		"handlebars": "^4.7",
 		"linkedom": "^0.18",
-		"puppeteer": "^24.37"
+		"puppeteer": "^24.37",
+		"zod": "4.3.6"
 	},
 	"devDependencies": {
 		"@types/bun": "^1.3"

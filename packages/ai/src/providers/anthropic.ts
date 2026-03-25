@@ -394,6 +394,12 @@ export interface AnthropicOptions extends StreamOptions {
 	betas?: string[] | string;
 	/** Force OAuth bearer auth mode for proxy tokens that don't match Anthropic token prefixes. */
 	isOAuth?: boolean;
+	/**
+	 * Pre-built Anthropic client instance. When provided, skips internal client
+	 * construction entirely. Use this to inject alternative SDK clients such as
+	 * `AnthropicVertex` that shares the same messaging API.
+	 */
+	client?: Anthropic;
 }
 
 export type AnthropicClientOptionsArgs = {
@@ -640,19 +646,24 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 		let rawRequestDump: RawHttpRequestDump | undefined;
 
 		try {
+			let client: Anthropic;
 			const apiKey = options?.apiKey ?? getEnvApiKey(model.provider) ?? "";
-			const baseUrl = resolveAnthropicBaseUrl(model, apiKey) ?? "https://api.anthropic.com";
-
-			const { client, isOAuthToken, useClaudeCompatibleShape } = createClient(model, {
+			const clientArgs: AnthropicClientOptionsArgs = {
 				model,
 				apiKey,
-				extraBetas: normalizeExtraBetas(options?.betas),
-				stream: true,
-				interleavedThinking: options?.interleavedThinking ?? true,
+				extraBetas: Array.isArray(options?.betas) ? options.betas : options?.betas ? [options.betas] : [],
+				interleavedThinking: options?.interleavedThinking,
 				headers: options?.headers,
 				dynamicHeaders: copilotDynamicHeaders?.headers,
 				isOAuth: options?.isOAuth,
+			};
+			const { baseURL: resolvedBaseUrl, useClaudeCompatibleShape } = buildAnthropicClientOptions({
+				...clientArgs,
+				model,
 			});
+
+			client = options?.client ?? createClient(model, clientArgs).client;
+			const baseUrl = resolvedBaseUrl ?? "https://api.anthropic.com";
 			let params = buildParams(model, baseUrl, context, useClaudeCompatibleShape, options);
 			const replacementPayload = await options?.onPayload?.(params, model);
 			if (replacementPayload !== undefined) {
@@ -690,6 +701,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					for await (const event of anthropicStream) {
 						started = true;
 						if (event.type === "message_start") {
+							output.responseId = event.message.id;
 							// Capture initial token usage from message_start event
 							// This ensures we have input token counts even if the stream is aborted early
 							output.usage.input = event.message.usage.input_tokens || 0;
@@ -973,11 +985,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	} = args;
 	const oauthToken = isOAuth ?? isAnthropicOAuthToken(apiKey);
 	const baseUrl = resolveAnthropicBaseUrl(model, apiKey);
-	const useClaudeCompatibleShape = shouldUseClaudeCompatibleAnthropicShape(
-		model,
-		baseUrl,
-		oauthToken,
-	);
+	const useClaudeCompatibleShape = shouldUseClaudeCompatibleAnthropicShape(model, baseUrl, oauthToken);
 	const useBearerAuth = oauthToken || (model.provider === "anthropic" && isFoundryEnabled());
 	const foundryCustomHeaders = resolveAnthropicCustomHeaders(model);
 	const tlsFetchOptions = buildClaudeCodeTlsFetchOptions(model, baseUrl);
@@ -1044,7 +1052,11 @@ function createClient(
 	model: Model<"anthropic-messages">,
 	args: AnthropicClientOptionsArgs,
 ): { client: Anthropic; isOAuthToken: boolean; useClaudeCompatibleShape: boolean } {
-	const { isOAuthToken: oauthToken, useClaudeCompatibleShape, ...clientOptions } = buildAnthropicClientOptions({ ...args, model });
+	const {
+		isOAuthToken: oauthToken,
+		useClaudeCompatibleShape,
+		...clientOptions
+	} = buildAnthropicClientOptions({ ...args, model });
 	const client = new Anthropic(clientOptions);
 	return { client, isOAuthToken: oauthToken, useClaudeCompatibleShape };
 }

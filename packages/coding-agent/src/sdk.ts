@@ -13,6 +13,7 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { $env, getAgentDbPath, getAgentDir, getProjectDir, logger, postmortem } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { AsyncJobManager } from "./async";
+import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability } from "./capability/rule";
 import { ModelRegistry } from "./config/model-registry";
@@ -168,6 +169,9 @@ export interface CreateAgentSessionOptions {
 
 	/** System prompt. String replaces default, function receives default and returns final. */
 	systemPrompt?: string | ((defaultPrompt: string) => string);
+	/** Optional provider-facing session identifier for prompt caches and sticky auth selection.
+	 * Keeps persisted session files isolated while reusing provider-side caches. */
+	providerSessionId?: string;
 
 	/** Custom tools to register (in addition to built-in tools). Accepts both CustomTool and ToolDefinition. */
 	customTools?: (CustomTool | ToolDefinition)[];
@@ -676,6 +680,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		logger.time("sessionManager", () =>
 			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
 		);
+	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	const sessionId = sessionManager.getSessionId();
 	const modelApiKeyAvailability = new Map<string, boolean>();
 	const getModelAvailabilityKey = (candidate: Model): string =>
@@ -687,15 +692,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return cached;
 		}
 
-		const hasKey = !!(await modelRegistry.getApiKey(candidate, sessionId));
+		const hasKey = !!(await modelRegistry.getApiKey(candidate, providerSessionId));
 		modelApiKeyAvailability.set(availabilityKey, hasKey);
 		return hasKey;
 	};
 
 	// Check if session has existing data to restore
 	const existingSession = logger.time("loadSession", () => sessionManager.buildSessionContext());
-	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
+	const existingBranch = sessionManager.getBranch();
+	const hasExistingSession = existingBranch.length > 0;
+	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
+	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
 
 	const hasExplicitModel = options.model !== undefined || options.modelPattern !== undefined;
 	const modelMatchPreferences = {
@@ -1072,6 +1079,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	const inlineExtensions: ExtensionFactory[] = options.extensions ? [...options.extensions] : [];
+	inlineExtensions.push(createAutoresearchExtension);
 	if (customTools.length > 0) {
 		inlineExtensions.push(createCustomToolsExtension(customTools));
 	}
@@ -1342,7 +1350,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					);
 				}
 
-				const composerApiKey = await modelRegistry.getApiKey(activeComposerModel, sessionId);
+				const composerApiKey = await modelRegistry.getApiKey(activeComposerModel, providerSessionId);
 				if (!composerApiKey) {
 					throw new Error(
 						`composer: no session auth available for ${activeComposerModel.provider}/${activeComposerModel.id}`,
@@ -1413,9 +1421,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
 	const includeExitPlanMode = requestedToolNames.includes("exit_plan_mode");
 	const mcpDiscoveryEnabled = settings.get("mcp.discoveryMode") ?? false;
+	const defaultInactiveToolNames = new Set(
+		registeredTools.filter(tool => tool.definition.defaultInactive).map(tool => tool.definition.name),
+	);
 	const requestedActiveToolNames = includeExitPlanMode
 		? normalizedRequested
 		: normalizedRequested.filter(name => name !== "exit_plan_mode");
+	const initialRequestedActiveToolNames = options.toolNames
+		? requestedActiveToolNames
+		: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
 	const explicitlyRequestedMCPToolNames = options.toolNames
 		? requestedActiveToolNames.filter(name => name.startsWith("mcp_"))
 		: [];
@@ -1430,7 +1444,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		: [];
 	let initialSelectedMCPToolNames: string[] = [];
 	let defaultSelectedMCPToolNames: string[] = [];
-	let initialToolNames = [...requestedActiveToolNames];
+	let initialToolNames = [...initialRequestedActiveToolNames];
 	if (mcpDiscoveryEnabled) {
 		const restoredSelectedMCPToolNames = existingSession.selectedMCPToolNames.filter(name => toolRegistry.has(name));
 		defaultSelectedMCPToolNames = [
@@ -1441,7 +1455,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			: [...new Set([...restoredSelectedMCPToolNames, ...defaultSelectedMCPToolNames])];
 		initialToolNames = [
 			...new Set([
-				...requestedActiveToolNames.filter(name => !name.startsWith("mcp_")),
+				...initialRequestedActiveToolNames.filter(name => !name.startsWith("mcp_")),
 				...initialSelectedMCPToolNames,
 			]),
 		];
@@ -1450,7 +1464,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Custom tools and extension-registered tools are always included regardless of toolNames filter
 	const alwaysInclude: string[] = [
 		...(options.customTools?.map(t => (isCustomTool(t) ? t.name : t.name)) ?? []),
-		...registeredTools.map(t => t.definition.name),
+		...registeredTools.filter(t => !t.definition.defaultInactive).map(t => t.definition.name),
 	];
 	for (const name of alwaysInclude) {
 		if (mcpDiscoveryEnabled && name.startsWith("mcp_")) {
@@ -1749,6 +1763,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			return innerTransform(messages);
 		};
 	})();
+	const initialServiceTier = hasServiceTierEntry
+		? existingSession.serviceTier
+		: serviceTierSetting === "none"
+			? undefined
+			: serviceTierSetting;
 
 	agent = new Agent({
 		initialState: {
@@ -1759,7 +1778,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		convertToLlm: convertToLlmFinal,
 		onPayload,
-		sessionId: sessionManager.getSessionId(),
+		sessionId: providerSessionId,
 		transformContext,
 		steeringMode: settings.get("steeringMode") ?? "one-at-a-time",
 		followUpMode: settings.get("followUpMode") ?? "one-at-a-time",
@@ -1771,14 +1790,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		minP: settings.get("minP") >= 0 ? settings.get("minP") : undefined,
 		presencePenalty: settings.get("presencePenalty") >= 0 ? settings.get("presencePenalty") : undefined,
 		repetitionPenalty: settings.get("repetitionPenalty") >= 0 ? settings.get("repetitionPenalty") : undefined,
-		serviceTier: serviceTierSetting === "none" ? undefined : serviceTierSetting,
+		serviceTier: initialServiceTier,
 		kimiApiFormat: settings.get("providers.kimiApiFormat") ?? "anthropic",
 		preferWebsockets: preferOpenAICodexWebsockets,
 		getToolContext: tc => toolContextStore.getContext(tc),
 		getApiKey: async provider => {
-			// Use the provider argument from the in-flight request;
-			// agent.state.model may already be switched mid-turn.
-			const key = await modelRegistry.getApiKeyForProvider(provider, sessionId);
+			// Use the provider-facing session id for sticky credential selection so cache keys
+			// and provider auth affinity stay aligned across fresh benchmark sessions.
+			const key = await modelRegistry.getApiKeyForProvider(provider, providerSessionId);
 			if (!key) {
 				throw new Error(`No API key found for provider "${provider}"`);
 			}
@@ -1809,9 +1828,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Restore messages if session has existing data
 	if (hasExistingSession) {
 		agent.replaceMessages(existingSession.messages);
-		if (!hasThinkingEntry) {
-			sessionManager.appendThinkingLevelChange(thinkingLevel);
-		}
 	} else {
 		// Save initial model and thinking level for new sessions so they can be restored on resume
 		if (model) {
@@ -1842,6 +1858,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		mcpDiscoveryEnabled,
 		initialSelectedMCPToolNames,
 		defaultSelectedMCPToolNames,
+		persistInitialMCPToolSelection: !hasExistingSession,
 		defaultSelectedMCPServerNames: [...discoveryDefaultServers],
 		ttsrManager,
 		obfuscator,
@@ -1854,8 +1871,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (model?.api === "openai-codex-responses") {
 		try {
 			await logger.timeAsync("prewarmCodexWebsocket", prewarmOpenAICodexResponses, model, {
-				apiKey: await modelRegistry.getApiKey(model, sessionId),
-				sessionId,
+				apiKey: await modelRegistry.getApiKey(model, providerSessionId),
+				sessionId: providerSessionId,
 				preferWebsockets: preferOpenAICodexWebsockets,
 				providerSessionState: session.providerSessionState,
 			});

@@ -3,7 +3,6 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as tls from "node:tls";
-import { Type } from "@sinclair/typebox";
 import {
 	applyClaudeToolPrefix,
 	buildAnthropicClientOptions,
@@ -21,6 +20,7 @@ import {
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import { Type } from "@sinclair/typebox";
 
 const ANTHROPIC_MODEL: Model<"anthropic-messages"> = {
 	id: "claude-sonnet-4-5",
@@ -265,34 +265,31 @@ describe("Anthropic request fingerprint alignment", () => {
 	});
 
 	it("uses Claude-compatible payload shaping for proxy api-key Anthropic bases", async () => {
-		await withEnv(
-			{ ANTHROPIC_BASE_URL: "http://127.0.0.1:8080", CLAUDE_CODE_USE_FOUNDRY: undefined },
-			async () => {
-				const payload = (await captureAnthropicPayload(
-					{ ...ANTHROPIC_MODEL, id: "claude-opus-4-6", name: "Claude Opus 4.6" },
-					{
-						systemPrompt: "Stay concise.",
-						messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
-						tools: [
-							{
-								name: "Read",
-								description: "Read a file",
-								parameters: Type.Object({ path: Type.String() }),
-							},
-						],
-					},
-					{ isOAuth: false },
-				)) as {
-					metadata?: { user_id?: string };
-					system?: Array<{ type: string; text?: string }>;
-					tools?: Array<{ name: string }>;
-				};
+		await withEnv({ ANTHROPIC_BASE_URL: "http://127.0.0.1:8080", CLAUDE_CODE_USE_FOUNDRY: undefined }, async () => {
+			const payload = (await captureAnthropicPayload(
+				{ ...ANTHROPIC_MODEL, id: "claude-opus-4-6", name: "Claude Opus 4.6" },
+				{
+					systemPrompt: "Stay concise.",
+					messages: [{ role: "user", content: "Hi", timestamp: Date.now() }],
+					tools: [
+						{
+							name: "Read",
+							description: "Read a file",
+							parameters: Type.Object({ path: Type.String() }),
+						},
+					],
+				},
+				{ isOAuth: false },
+			)) as {
+				metadata?: { user_id?: string };
+				system?: Array<{ type: string; text?: string }>;
+				tools?: Array<{ name: string }>;
+			};
 
-				expect(isClaudeCloakingUserId(payload.metadata?.user_id ?? "")).toBe(true);
-				expect(payload.system?.some(block => block.text === claudeCodeSystemInstruction)).toBe(true);
-				expect(payload.tools?.[0]?.name).toBe("proxy_Read");
-			},
-		);
+			expect(isClaudeCloakingUserId(payload.metadata?.user_id ?? "")).toBe(true);
+			expect(payload.system?.some(block => block.text === claudeCodeSystemInstruction)).toBe(true);
+			expect(payload.tools?.[0]?.name).toBe("proxy_Read");
+		});
 	});
 
 	it("keeps vanilla payload shaping for direct Anthropic api-key requests", async () => {
@@ -320,7 +317,6 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(payload.system?.some(block => block.text === claudeCodeSystemInstruction)).toBe(false);
 		expect(payload.tools?.[0]?.name).toBe("Read");
 	});
-
 
 	it("preserves valid caller metadata.user_id for OAuth requests", async () => {
 		const userId = generateClaudeCloakingUserId();

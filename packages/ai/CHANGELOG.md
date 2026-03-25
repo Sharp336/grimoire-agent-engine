@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+## [13.15.0] - 2026-03-23
+
+### Added
+
+- Added `isUsageLimitError()` to `rate-limit-utils` as a single source of truth for detecting usage/quota limit errors across all providers
+
+### Fixed
+
+- Fixed lazy stream forwarding to properly handle final results from source streams with `result()` methods
+- Fixed lazy stream error handling to convert iterator failures into terminal error results instead of silently failing
+- Fixed `parseRateLimitReason` to recognize "usage limit" in error messages and correctly classify them as `QUOTA_EXHAUSTED`
+- Fixed Codex `fetchWithRetry` retrying 429 responses for `usage_limit_reached` errors for up to 5 minutes instead of returning immediately for credential switching
+- Removed `usage.?limit` from `TRANSIENT_MESSAGE_PATTERN` in retry utils since usage limits are not transient and require credential rotation
+- Fixed `parseRateLimitReason` not recognizing "usage limit" in Codex error messages, causing incorrect fallback to `UNKNOWN` classification instead of `QUOTA_EXHAUSTED`
+
+## [13.14.2] - 2026-03-21
+### Changed
+
+- Updated thinking configuration format from `levels` array to `minLevel` and `maxLevel` properties for improved clarity
+- Corrected context window from 400000 to 272000 tokens for GPT-5.4 mini and nano variants on Codex transport
+- Normalized GPT-5.4 variant priority handling to use parsed variant instead of special-casing raw model IDs
+- Added support for `mini` variant in OpenAI model parsing regex
+
+### Fixed
+
+- Fixed inconsistent thinking level configuration across multiple model definitions
+
 ## [13.14.0] - 2026-03-20
 
 ### Fixed

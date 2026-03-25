@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+## [13.15.0] - 2026-03-23
+
+### Added
+
+- Added `renderInlineMarkdown()` function to render inline markdown (bold, italic, code, links, strikethrough) to styled strings
+
+### Fixed
+
+- Fixed editor consuming user-rebound copy keys, preventing custom keybindings from working in the editor
+
+## [13.14.1] - 2026-03-21
+### Added
+
+- Added Ctrl+_ as an additional default shortcut for undo
+
+### Fixed
+
+- Ensured undo functionality respects user-configured keybindings
+
 ## [13.12.0] - 2026-03-14
 
 ### Added
