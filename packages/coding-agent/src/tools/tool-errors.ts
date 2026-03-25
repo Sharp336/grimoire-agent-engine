@@ -68,6 +68,10 @@ export class ToolAbortError extends Error {
 	}
 }
 
+const NATIVE_ABORT_PATTERN = /^Aborted(?:\s*:\s*(.+))?$/;
+
+export type AbortClassification = "abort" | "timeout";
+
 /**
  * Throw ToolAbortError if the signal is aborted.
  * Use this instead of signal?.throwIfAborted() to get consistent error types.
@@ -77,6 +81,16 @@ export function throwIfAborted(signal?: AbortSignal): void {
 		const reason = signal.reason instanceof Error ? signal.reason : undefined;
 		throw reason instanceof ToolAbortError ? reason : new ToolAbortError();
 	}
+}
+
+export function classifyAbortError(error: unknown): AbortClassification | undefined {
+	if (error instanceof ToolAbortError) return "abort";
+	if (!(error instanceof Error)) return undefined;
+	if (error.name === "AbortError") return "abort";
+
+	const nativeAbortMatch = error.message.match(NATIVE_ABORT_PATTERN);
+	if (!nativeAbortMatch) return undefined;
+	return nativeAbortMatch[1]?.trim().toLowerCase() === "timeout" ? "timeout" : "abort";
 }
 
 /**

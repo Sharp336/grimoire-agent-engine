@@ -36,7 +36,7 @@ import { applyListLimit } from "./list-limit";
 import { formatFullOutputReference, formatStyledTruncationWarning, type OutputMeta } from "./output-meta";
 import { resolveReadPath } from "./path-utils";
 import { formatAge, formatBytes, shortenPath, wrapBrackets } from "./render-utils";
-import { ToolAbortError, ToolError, ToolTimeoutError, throwIfAborted } from "./tool-errors";
+import { classifyAbortError, ToolAbortError, ToolError, ToolTimeoutError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -694,11 +694,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			}
 			return resultBuilder.done();
 		} catch (error) {
-			if (timeoutSignal.aborted) {
+			const abortClassification = classifyAbortError(error);
+			if (abortClassification === "timeout" || timeoutSignal.aborted) {
 				throw createReadTimeoutError(timeoutSeconds);
 			}
 			if (error instanceof ToolAbortError) throw error;
-			if (error instanceof Error && error.name === "AbortError") {
+			if (abortClassification) {
 				throw new ToolAbortError();
 			}
 			throw error;

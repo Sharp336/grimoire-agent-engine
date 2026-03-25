@@ -248,7 +248,7 @@ describe("built-in tool timeouts", () => {
 			grepMock.mockImplementation(async (input: { signal?: AbortSignal; timeoutMs?: number }) => {
 				timeoutMsSeen.push(input.timeoutMs ?? 0);
 				await new Promise((_, reject) => {
-					const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+					const onAbort = () => reject(new Error("Aborted: Timeout"));
 					if (input.signal?.aborted) {
 						onAbort();
 						return;
@@ -273,6 +273,27 @@ describe("built-in tool timeouts", () => {
 					durationMs: 1000,
 				},
 			});
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps grep native abort classification distinct from timeout", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "grep-abort-"));
+		try {
+			const filePath = path.join(tempDir, "haystack.txt");
+			await Bun.write(filePath, "needle\n");
+			const tool = new GrepTool(createSession(tempDir));
+
+			grepMock.mockImplementation(async () => {
+				throw new Error("Aborted: Signal");
+			});
+
+			const error = await tool
+				.execute("grep-abort", { pattern: "needle", path: filePath, timeout: 10 })
+				.catch(error => error);
+			expect(error).toBeInstanceOf(ToolAbortError);
+			expect(error).not.toBeInstanceOf(ToolTimeoutError);
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

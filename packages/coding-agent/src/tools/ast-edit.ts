@@ -31,7 +31,7 @@ import {
 	PARSE_ERRORS_LIMIT,
 	PREVIEW_LIMITS,
 } from "./render-utils";
-import { ToolAbortError, ToolError, ToolTimeoutError } from "./tool-errors";
+import { classifyAbortError, ToolAbortError, ToolError, ToolTimeoutError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -113,24 +113,21 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				timeoutSignal: AbortSignal,
 				activeSignal?: AbortSignal,
 			): never => {
+				const abortClassification = classifyAbortError(error);
+				if (
+					abortClassification === "timeout" ||
+					(abortClassification && timeoutSignal.aborted && !activeSignal?.aborted)
+				) {
+					throw new ToolTimeoutError(`ast_edit timed out after ${timeoutSeconds} seconds`, {
+						durationSeconds: timeoutSeconds,
+						durationMs: timeoutMs,
+						toolName: this.name,
+					});
+				}
 				if (error instanceof ToolAbortError) {
-					if (timeoutSignal.aborted && !activeSignal?.aborted) {
-						throw new ToolTimeoutError(`ast_edit timed out after ${timeoutSeconds} seconds`, {
-							durationSeconds: timeoutSeconds,
-							durationMs: timeoutMs,
-							toolName: this.name,
-						});
-					}
 					throw error;
 				}
-				if (error instanceof Error && error.name === "AbortError") {
-					if (timeoutSignal.aborted && !activeSignal?.aborted) {
-						throw new ToolTimeoutError(`ast_edit timed out after ${timeoutSeconds} seconds`, {
-							durationSeconds: timeoutSeconds,
-							durationMs: timeoutMs,
-							toolName: this.name,
-						});
-					}
+				if (abortClassification) {
 					throw new ToolAbortError();
 				}
 				throw error;

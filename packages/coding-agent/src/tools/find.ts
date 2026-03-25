@@ -26,7 +26,7 @@ import { applyListLimit } from "./list-limit";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import { normalizePathLikeInput, parseFindPattern, resolveMultiFindPattern, resolveToCwd } from "./path-utils";
 import { formatCount, formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
-import { ToolAbortError, ToolError, ToolTimeoutError, throwIfAborted } from "./tool-errors";
+import { classifyAbortError, ToolAbortError, ToolError, ToolTimeoutError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -139,22 +139,20 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			const timeoutSignal = AbortSignal.timeout(timeoutMs);
 			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 			const throwTimeoutOrAbort = (error: unknown): never => {
+				const abortClassification = classifyAbortError(error);
+				if (
+					abortClassification === "timeout" ||
+					(abortClassification && timeoutSignal.aborted && !signal?.aborted)
+				) {
+					throw new ToolTimeoutError(`find timed out after ${timeoutSec} seconds`, {
+						toolName: "find",
+						durationSeconds: timeoutSec,
+					});
+				}
 				if (error instanceof ToolAbortError) {
-					if (timeoutSignal.aborted && !signal?.aborted) {
-						throw new ToolTimeoutError(`find timed out after ${timeoutSec} seconds`, {
-							toolName: "find",
-							durationSeconds: timeoutSec,
-						});
-					}
 					throw error;
 				}
-				if (error instanceof Error && error.name === "AbortError") {
-					if (timeoutSignal.aborted && !signal?.aborted) {
-						throw new ToolTimeoutError(`find timed out after ${timeoutSec} seconds`, {
-							toolName: "find",
-							durationSeconds: timeoutSec,
-						});
-					}
+				if (abortClassification) {
 					throw new ToolAbortError();
 				}
 				throw error;

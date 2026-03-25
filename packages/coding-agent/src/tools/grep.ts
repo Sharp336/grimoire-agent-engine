@@ -25,7 +25,7 @@ import {
 	resolveToCwd,
 } from "./path-utils";
 import { formatCount, formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
-import { ToolAbortError, ToolError, ToolTimeoutError } from "./tool-errors";
+import { classifyAbortError, ToolAbortError, ToolError, ToolTimeoutError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -141,22 +141,20 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 			let scopePath: string;
 			let globFilter = glob ? normalizePathLikeInput(glob) || undefined : undefined;
 			const throwTimeoutOrAbort = (error: unknown): never => {
+				const abortClassification = classifyAbortError(error);
+				if (
+					abortClassification === "timeout" ||
+					(abortClassification && timeoutSignal.aborted && !signal?.aborted)
+				) {
+					throw new ToolTimeoutError(`grep timed out after ${timeoutSec} seconds`, {
+						toolName: "grep",
+						durationSeconds: timeoutSec,
+					});
+				}
 				if (error instanceof ToolAbortError) {
-					if (timeoutSignal.aborted && !signal?.aborted) {
-						throw new ToolTimeoutError(`grep timed out after ${timeoutSec} seconds`, {
-							toolName: "grep",
-							durationSeconds: timeoutSec,
-						});
-					}
 					throw error;
 				}
-				if (error instanceof Error && error.name === "AbortError") {
-					if (timeoutSignal.aborted && !signal?.aborted) {
-						throw new ToolTimeoutError(`grep timed out after ${timeoutSec} seconds`, {
-							toolName: "grep",
-							durationSeconds: timeoutSec,
-						});
-					}
+				if (abortClassification) {
 					throw new ToolAbortError();
 				}
 				throw error;

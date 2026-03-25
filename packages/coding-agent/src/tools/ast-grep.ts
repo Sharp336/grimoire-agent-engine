@@ -31,7 +31,7 @@ import {
 	PARSE_ERRORS_LIMIT,
 	PREVIEW_LIMITS,
 } from "./render-utils";
-import { ToolAbortError, ToolError, ToolTimeoutError } from "./tool-errors";
+import { classifyAbortError, ToolAbortError, ToolError, ToolTimeoutError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -99,24 +99,21 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			const timeoutSignal = AbortSignal.timeout(timeoutMs);
 			const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
 			const throwTimeoutOrAbort = (error: unknown): never => {
+				const abortClassification = classifyAbortError(error);
+				if (
+					abortClassification === "timeout" ||
+					(abortClassification && timeoutSignal.aborted && !signal?.aborted)
+				) {
+					throw new ToolTimeoutError(`ast_grep timed out after ${timeoutSeconds} seconds`, {
+						durationSeconds: timeoutSeconds,
+						durationMs: timeoutMs,
+						toolName: this.name,
+					});
+				}
 				if (error instanceof ToolAbortError) {
-					if (timeoutSignal.aborted && !signal?.aborted) {
-						throw new ToolTimeoutError(`ast_grep timed out after ${timeoutSeconds} seconds`, {
-							durationSeconds: timeoutSeconds,
-							durationMs: timeoutMs,
-							toolName: this.name,
-						});
-					}
 					throw error;
 				}
-				if (error instanceof Error && error.name === "AbortError") {
-					if (timeoutSignal.aborted && !signal?.aborted) {
-						throw new ToolTimeoutError(`ast_grep timed out after ${timeoutSeconds} seconds`, {
-							durationSeconds: timeoutSeconds,
-							durationMs: timeoutMs,
-							toolName: this.name,
-						});
-					}
+				if (abortClassification) {
 					throw new ToolAbortError();
 				}
 				throw error;
