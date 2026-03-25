@@ -53,6 +53,7 @@ import { loginNvidia } from "./utils/oauth/nvidia";
 import { loginOllama } from "./utils/oauth/ollama";
 import { loginOpenAICodex } from "./utils/oauth/openai-codex";
 import { loginOpenCode } from "./utils/oauth/opencode";
+import { loginOpenRouter } from "./utils/oauth/openrouter";
 import { loginParallel } from "./utils/oauth/parallel";
 import { loginPerplexity } from "./utils/oauth/perplexity";
 import { loginQianfan } from "./utils/oauth/qianfan";
@@ -821,6 +822,11 @@ export class AuthStorage {
 				if (!apiKey) {
 					return;
 				}
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
+			case "openrouter": {
+				const apiKey = await loginOpenRouter(ctrl);
 				await saveApiKeyCredential(apiKey);
 				return;
 			}

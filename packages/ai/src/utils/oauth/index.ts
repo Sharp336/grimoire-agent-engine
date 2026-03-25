@@ -96,6 +96,8 @@ export type { OpenAICodexLoginOptions } from "./openai-codex";
 export { loginOpenAICodex, refreshOpenAICodexToken } from "./openai-codex";
 // OpenCode Zen / OpenCode Go (API key)
 export { loginOpenCode } from "./opencode";
+// OpenRouter (API key)
+export { loginOpenRouter } from "./openrouter";
 // Parallel (API key)
 export { loginParallel } from "./parallel";
 // Perplexity
@@ -196,6 +198,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 	{
 		id: "ollama",
 		name: "Ollama (Local OpenAI-compatible)",
+		available: true,
+	},
+	{
+		id: "openrouter",
+		name: "OpenRouter",
 		available: true,
 	},
 	{

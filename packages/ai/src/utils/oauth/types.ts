@@ -31,6 +31,7 @@ export type OAuthProvider =
 	| "nanogpt"
 	| "ollama"
 	| "openai-codex"
+	| "openrouter"
 	| "opencode-go"
 	| "opencode-zen"
 	| "parallel"
