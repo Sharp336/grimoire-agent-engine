@@ -713,3 +713,23 @@ export async function listClaudePluginRoots(home: string): Promise<{ roots: Clau
 export function clearClaudePluginRootsCache(): void {
 	pluginRootsCache.clear();
 }
+
+/**
+ * Read the enabledPlugins map from ~/.claude/settings.json.
+ * Returns a Set of enabled plugin IDs (e.g., "slack@claude-plugins-official").
+ * Returns null if settings.json doesn't exist or has no enabledPlugins.
+ */
+export async function readClaudeEnabledPlugins(home: string): Promise<Set<string> | null> {
+	const settingsPath = path.join(home, ".claude", "settings.json");
+	const content = await readFile(settingsPath);
+	if (!content) return null;
+
+	const json = tryParseJson<{ enabledPlugins?: Record<string, boolean> }>(content);
+	if (!json?.enabledPlugins) return null;
+
+	const enabled = new Set<string>();
+	for (const [id, isEnabled] of Object.entries(json.enabledPlugins)) {
+		if (isEnabled) enabled.add(id);
+	}
+	return enabled;
+}
