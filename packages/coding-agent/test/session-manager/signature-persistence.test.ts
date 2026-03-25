@@ -62,12 +62,30 @@ describe("SessionManager signature persistence", () => {
 		expect(assistant.content[2]).toMatchObject({ type: "toolCall", id: "tool_1", thoughtSignature: "" });
 	});
 
-	it("externalizes provider image data URLs and restores them across reload", async () => {
+	it("externalizes provider image data URLs and restores preserved history payloads across reload", async () => {
 		using tempDir = TempDir.createSync("@pi-session-provider-image-persistence-");
 		const session = SessionManager.create(tempDir.path(), tempDir.path());
 		const largeImageUrl = `data:image/png;base64,${"a".repeat(600_000)}`;
 
-		session.appendMessage({ role: "user", content: "continue", timestamp: 1 });
+		session.appendMessage({
+			role: "user",
+			content: "look at this",
+			providerPayload: {
+				type: "openaiResponsesHistory",
+				provider: "openai-codex",
+				items: [
+					{
+						type: "message",
+						role: "user",
+						content: [
+							{ type: "input_text", text: "look at this" },
+							{ type: "input_image", detail: "auto", image_url: largeImageUrl },
+						],
+					},
+				],
+			},
+			timestamp: 1,
+		});
 		session.appendMessage({
 			role: "assistant",
 			content: [{ type: "text", text: "done" }],
@@ -83,22 +101,8 @@ describe("SessionManager signature persistence", () => {
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 			},
 			stopReason: "stop",
-			providerPayload: {
-				type: "openaiResponsesHistory",
-				provider: "openai-codex",
-				items: [
-					{
-						type: "message",
-						role: "user",
-						content: [
-							{ type: "input_text", text: "look at this" },
-							{ type: "input_image", detail: "auto", image_url: largeImageUrl },
-						],
-					},
-				],
-			},
 			timestamp: 2,
-		} satisfies AssistantMessage);
+		});
 		await session.flush();
 
 		const expectedBlobHash = new Bun.CryptoHasher("sha256").update(Buffer.from(largeImageUrl, "utf8")).digest("hex");
@@ -106,9 +110,14 @@ describe("SessionManager signature persistence", () => {
 		expect(persistedBlob).toBe(largeImageUrl);
 
 		const reloaded = await SessionManager.open(session.getSessionFile()!);
-		const assistant = getAssistantMessage(reloaded);
+		const reloadedUserEntry = reloaded
+			.getEntries()
+			.find(entry => entry.type === "message" && entry.message.role === "user");
+		if (!reloadedUserEntry || reloadedUserEntry.type !== "message" || reloadedUserEntry.message.role !== "user") {
+			throw new Error("Expected user message");
+		}
 
-		expect(assistant.providerPayload).toEqual({
+		expect(reloadedUserEntry.message.providerPayload).toEqual({
 			type: "openaiResponsesHistory",
 			provider: "openai-codex",
 			items: [
