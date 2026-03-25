@@ -96,18 +96,18 @@ describe("claude-plugins MCP server discovery", () => {
 	});
 
 	test("loads MCP servers from plugin .mcp.json files (standard format)", async () => {
-		const installPath = path.join(tempDir, "plugins", "notion");
+		const installPath = path.join(tempDir, "plugins", "alpha");
 		await setupPluginRegistry(tempDir, {
 			plugins: {
-				"notion@official": [{ installPath }],
+				"alpha@test-marketplace": [{ installPath }],
 			},
-			enabledPlugins: { "notion@official": true },
+			enabledPlugins: { "alpha@test-marketplace": true },
 			mcpJsons: {
 				[installPath]: {
 					mcpServers: {
-						notion: {
+						alpha: {
 							type: "http",
-							url: "https://mcp.notion.so/mcp",
+							url: "https://mcp.example.com/alpha",
 						},
 					},
 				},
@@ -116,25 +116,25 @@ describe("claude-plugins MCP server discovery", () => {
 
 		const servers = await loadPluginMcpServers(tempDir);
 		expect(servers).toHaveLength(1);
-		expect(servers[0].name).toBe("notion");
-		expect(servers[0].url).toBe("https://mcp.notion.so/mcp");
+		expect(servers[0].name).toBe("alpha");
+		expect(servers[0].url).toBe("https://mcp.example.com/alpha");
 		expect(servers[0].transport).toBe("http");
 		expect(servers[0]._source.provider).toBe("claude-plugins");
 	});
 
 	test("skips disabled plugins", async () => {
-		const installPath = path.join(tempDir, "plugins", "notion");
+		const installPath = path.join(tempDir, "plugins", "alpha");
 		await setupPluginRegistry(tempDir, {
 			plugins: {
-				"notion@official": [{ installPath }],
+				"alpha@test-marketplace": [{ installPath }],
 			},
-			enabledPlugins: { "notion@official": false },
+			enabledPlugins: { "alpha@test-marketplace": false },
 			mcpJsons: {
 				[installPath]: {
 					mcpServers: {
-						notion: {
+						alpha: {
 							type: "http",
-							url: "https://mcp.notion.so/mcp",
+							url: "https://mcp.example.com/alpha",
 						},
 					},
 				},
@@ -146,18 +146,18 @@ describe("claude-plugins MCP server discovery", () => {
 	});
 
 	test("loads all plugins when no enabledPlugins map exists", async () => {
-		const installPath = path.join(tempDir, "plugins", "slack");
+		const installPath = path.join(tempDir, "plugins", "beta");
 		await setupPluginRegistry(tempDir, {
 			plugins: {
-				"slack@official": [{ installPath }],
+				"beta@test-marketplace": [{ installPath }],
 			},
 			// No enabledPlugins — all plugins should be considered enabled
 			mcpJsons: {
 				[installPath]: {
 					mcpServers: {
-						slack: {
+						beta: {
 							type: "http",
-							url: "https://mcp.slack.com/mcp",
+							url: "https://mcp.example.com/beta",
 						},
 					},
 				},
@@ -166,25 +166,25 @@ describe("claude-plugins MCP server discovery", () => {
 
 		const servers = await loadPluginMcpServers(tempDir);
 		expect(servers).toHaveLength(1);
-		expect(servers[0].name).toBe("slack");
+		expect(servers[0].name).toBe("beta");
 	});
 
 	test("preserves oauth config from plugin .mcp.json", async () => {
-		const installPath = path.join(tempDir, "plugins", "slack");
+		const installPath = path.join(tempDir, "plugins", "gamma");
 		await setupPluginRegistry(tempDir, {
 			plugins: {
-				"slack@official": [{ installPath }],
+				"gamma@test-marketplace": [{ installPath }],
 			},
-			enabledPlugins: { "slack@official": true },
+			enabledPlugins: { "gamma@test-marketplace": true },
 			mcpJsons: {
 				[installPath]: {
 					mcpServers: {
-						slack: {
+						gamma: {
 							type: "http",
-							url: "https://mcp.slack.com/mcp",
+							url: "https://mcp.example.com/gamma",
 							oauth: {
-								clientId: "slack-client-id",
-								callbackPort: 3118,
+								clientId: "test-client-id",
+								callbackPort: 9999,
 							},
 						},
 					},
@@ -194,9 +194,9 @@ describe("claude-plugins MCP server discovery", () => {
 
 		const servers = await loadPluginMcpServers(tempDir);
 		expect(servers).toHaveLength(1);
-		const slack = servers[0];
-		expect(slack.oauth?.clientId).toBe("slack-client-id");
-		expect(slack.oauth?.callbackPort).toBe(3118);
+		const gamma = servers[0];
+		expect(gamma.oauth?.clientId).toBe("test-client-id");
+		expect(gamma.oauth?.callbackPort).toBe(9999);
 	});
 
 	test("handles plugin with no .mcp.json gracefully", async () => {
@@ -205,9 +205,9 @@ describe("claude-plugins MCP server discovery", () => {
 		await fs.mkdir(installPath, { recursive: true });
 		await setupPluginRegistry(tempDir, {
 			plugins: {
-				"empty@official": [{ installPath }],
+				"empty@test-marketplace": [{ installPath }],
 			},
-			enabledPlugins: { "empty@official": true },
+			enabledPlugins: { "empty@test-marketplace": true },
 		});
 
 		const servers = await loadPluginMcpServers(tempDir);
@@ -215,17 +215,17 @@ describe("claude-plugins MCP server discovery", () => {
 	});
 
 	test("handles flat format without mcpServers wrapper", async () => {
-		const installPath = path.join(tempDir, "plugins", "context7");
+		const installPath = path.join(tempDir, "plugins", "delta");
 		await setupPluginRegistry(tempDir, {
 			plugins: {
-				"context7@official": [{ installPath }],
+				"delta@test-marketplace": [{ installPath }],
 			},
-			enabledPlugins: { "context7@official": true },
+			enabledPlugins: { "delta@test-marketplace": true },
 			mcpJsons: {
 				[installPath]: {
-					context7: {
+					delta: {
 						command: "npx",
-						args: ["-y", "@context7/mcp-server"],
+						args: ["-y", "@test/delta-mcp"],
 					},
 				},
 			},
@@ -233,9 +233,9 @@ describe("claude-plugins MCP server discovery", () => {
 
 		const servers = await loadPluginMcpServers(tempDir);
 		expect(servers).toHaveLength(1);
-		expect(servers[0].name).toBe("context7");
+		expect(servers[0].name).toBe("delta");
 		expect(servers[0].command).toBe("npx");
-		expect(servers[0].args).toEqual(["-y", "@context7/mcp-server"]);
+		expect(servers[0].args).toEqual(["-y", "@test/delta-mcp"]);
 		expect(servers[0].transport).toBeUndefined();
 	});
 });

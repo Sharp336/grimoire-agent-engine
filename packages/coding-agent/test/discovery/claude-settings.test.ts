@@ -44,16 +44,16 @@ describe("claude settings.json MCP discovery", () => {
 			path.join(claudeDir, "settings.json"),
 			JSON.stringify({
 				mcpServers: {
-					statsig: { type: "http", url: "https://api.statsig.com/v1/mcp" },
+					"test-server": { type: "http", url: "https://mcp.example.com/test" },
 				},
 			}),
 		);
 
 		const servers = await loadClaudeMcpServers(tempDir);
-		expect(servers.some(s => s.name === "statsig")).toBe(true);
-		const statsig = servers.find(s => s.name === "statsig")!;
-		expect(statsig.url).toBe("https://api.statsig.com/v1/mcp");
-		expect(statsig.transport).toBe("http");
+		expect(servers.some(s => s.name === "test-server")).toBe(true);
+		const server = servers.find(s => s.name === "test-server")!;
+		expect(server.url).toBe("https://mcp.example.com/test");
+		expect(server.transport).toBe("http");
 	});
 
 	test("mcp.json takes precedence over settings.json", async () => {
@@ -61,7 +61,7 @@ describe("claude settings.json MCP discovery", () => {
 			path.join(claudeDir, "mcp.json"),
 			JSON.stringify({
 				mcpServers: {
-					fromMcpJson: { type: "http", url: "https://from-mcp.example.com" },
+					fromMcpJson: { type: "http", url: "https://mcp.example.com/from-mcp-json" },
 				},
 			}),
 		);
@@ -69,7 +69,7 @@ describe("claude settings.json MCP discovery", () => {
 			path.join(claudeDir, "settings.json"),
 			JSON.stringify({
 				mcpServers: {
-					fromSettings: { type: "http", url: "https://from-settings.example.com" },
+					fromSettings: { type: "http", url: "https://mcp.example.com/from-settings" },
 				},
 			}),
 		);
@@ -84,18 +84,18 @@ describe("claude settings.json MCP discovery", () => {
 			path.join(claudeDir, "settings.json"),
 			JSON.stringify({
 				mcpServers: {
-					slack: {
+					"test-oauth": {
 						type: "http",
-						url: "https://mcp.slack.com/mcp",
-						oauth: { clientId: "abc", callbackPort: 3118 },
+						url: "https://mcp.example.com/oauth-test",
+						oauth: { clientId: "test-client-id", callbackPort: 9999 },
 					},
 				},
 			}),
 		);
 
 		const servers = await loadClaudeMcpServers(tempDir);
-		const slack = servers.find(s => s.name === "slack")!;
-		expect(slack.oauth?.clientId).toBe("abc");
-		expect(slack.oauth?.callbackPort).toBe(3118);
+		const server = servers.find(s => s.name === "test-oauth")!;
+		expect(server.oauth?.clientId).toBe("test-client-id");
+		expect(server.oauth?.callbackPort).toBe(9999);
 	});
 });

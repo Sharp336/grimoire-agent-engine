@@ -91,9 +91,11 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			const serverConfig = config as Record<string, unknown>;
 			return {
 				name,
+				enabled: typeof serverConfig.enabled === "boolean" ? serverConfig.enabled : undefined,
 				timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 				command: serverConfig.command as string | undefined,
 				args: serverConfig.args as string[] | undefined,
+				cwd: serverConfig.cwd as string | undefined,
 				env: serverConfig.env as Record<string, string> | undefined,
 				url: serverConfig.url as string | undefined,
 				headers: serverConfig.headers as Record<string, string> | undefined,

@@ -185,33 +185,26 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 // =============================================================================
 
 async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> {
-	const items: MCPServer[] = [];
-	const warnings: string[] = [];
-
 	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home);
-	warnings.push(...rootWarnings);
 
-	if (roots.length === 0) return { items, warnings };
+	if (roots.length === 0) return { items: [], warnings: rootWarnings };
 
-	// Read enabledPlugins to gate which plugins contribute MCP servers.
 	// If no enabledPlugins map exists, all installed plugins are considered enabled.
 	const enabledPlugins = await readClaudeEnabledPlugins(ctx.home);
 
-	const serverResults = await Promise.all(
-		roots.map(async root => {
-			// Check if plugin is enabled
+	const results = await Promise.all(
+		roots.map(async (root): Promise<{ servers: MCPServer[]; warnings: string[] }> => {
 			if (enabledPlugins !== null && !enabledPlugins.has(root.id)) {
-				return [];
+				return { servers: [], warnings: [] };
 			}
 
 			const mcpJsonPath = path.join(root.path, ".mcp.json");
 			const content = await readFile(mcpJsonPath);
-			if (!content) return [];
+			if (!content) return { servers: [], warnings: [] };
 
 			const json = tryParseJson<Record<string, unknown>>(content);
 			if (!json) {
-				warnings.push(`Failed to parse ${mcpJsonPath}`);
-				return [];
+				return { servers: [], warnings: [`Failed to parse ${mcpJsonPath}`] };
 			}
 
 			// Standard format: { mcpServers: { name: config } }
@@ -225,14 +218,15 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 			for (const [name, config] of serverEntries) {
 				if (name.startsWith("$") || typeof config !== "object" || config === null) continue;
 				const serverConfig = config as Record<string, unknown>;
-				// Skip non-server entries (e.g., $schema)
 				if (!serverConfig.command && !serverConfig.url && !serverConfig.type) continue;
 
 				servers.push({
 					name,
+					enabled: typeof serverConfig.enabled === "boolean" ? serverConfig.enabled : undefined,
 					timeout: typeof serverConfig.timeout === "number" ? serverConfig.timeout : undefined,
 					command: serverConfig.command as string | undefined,
 					args: serverConfig.args as string[] | undefined,
+					cwd: serverConfig.cwd as string | undefined,
 					env: serverConfig.env as Record<string, string> | undefined,
 					url: serverConfig.url as string | undefined,
 					headers: serverConfig.headers as Record<string, string> | undefined,
@@ -242,12 +236,15 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 					_source: createSourceMeta(PROVIDER_ID, mcpJsonPath, root.scope),
 				});
 			}
-			return servers;
+			return { servers, warnings: [] };
 		}),
 	);
 
-	for (const servers of serverResults) {
+	const items: MCPServer[] = [];
+	const warnings = [...rootWarnings];
+	for (const { servers, warnings: w } of results) {
 		items.push(...servers);
+		warnings.push(...w);
 	}
 
 	return { items, warnings };
