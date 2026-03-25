@@ -183,13 +183,16 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 					}
 				}
 
+				const customGlob = this.#customOps.glob;
 				let results: string[] = [];
 				try {
-					results = await this.#customOps.glob(globPattern, searchPath, {
-						ignore: ["**/node_modules/**", "**/.git/**"],
-						limit: effectiveLimit,
-						signal: combinedSignal,
-						timeoutMs,
+					results = await untilAborted(combinedSignal, async () => {
+						return await customGlob(globPattern, searchPath, {
+							ignore: ["**/node_modules/**", "**/.git/**"],
+							limit: effectiveLimit,
+							signal: combinedSignal,
+							timeoutMs,
+						});
 					});
 				} catch (error) {
 					throwTimeoutOrAbort(error);

@@ -179,6 +179,34 @@ describe("built-in tool timeouts", () => {
 		}
 	});
 
+	it("surfaces find timeouts when custom glob ignores signal handling", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "find-custom-glob-timeout-"));
+		try {
+			const timeoutMsSeen: number[] = [];
+			const tool = new FindTool(createSession(tempDir), {
+				operations: {
+					exists: () => true,
+					stat: () => ({ isFile: () => false, isDirectory: () => true }),
+					glob: async (_pattern: string, _cwd: string, options: { signal?: AbortSignal; timeoutMs?: number }) => {
+						timeoutMsSeen.push(options.timeoutMs ?? 0);
+						await new Promise(() => {});
+						return [];
+					},
+				},
+			});
+
+			const error = await tool
+				.execute("find-custom-glob-timeout", { pattern: "**/*.ts", timeout: 1 })
+				.catch(error => error);
+
+			expect(error).toBeInstanceOf(ToolTimeoutError);
+			expect((error as Error).message).toContain("find timed out after 1 seconds");
+			expect(timeoutMsSeen).toEqual([1000]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("aborts read internal URL resolution when the direct signal is cancelled", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "read-internal-abort-"));
 		try {
