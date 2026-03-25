@@ -398,6 +398,7 @@ export async function refreshOAuthToken(
 		case "litellm":
 		case "lm-studio":
 		case "ollama":
+		case "openrouter":
 		case "xiaomi":
 		case "zai":
 		case "qianfan":
