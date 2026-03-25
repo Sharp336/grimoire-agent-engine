@@ -62,6 +62,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	const userBase = getUserClaude(ctx);
 	const userClaudeJson = path.join(ctx.home, ".claude.json");
 	const userMcpJson = path.join(userBase, "mcp.json");
+	const userSettingsJson = path.join(userBase, "settings.json");
 
 	const projectBase = path.join(ctx.cwd, CONFIG_DIR);
 	const projectMcpJson = path.join(projectBase, ".mcp.json");
@@ -70,6 +71,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	const userPaths = [
 		{ path: userClaudeJson, level: "user" as const },
 		{ path: userMcpJson, level: "user" as const },
+		{ path: userSettingsJson, level: "user" as const },
 	];
 	const projectPaths = [
 		{ path: projectMcpJson, level: "project" as const },
@@ -96,6 +98,8 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 				url: serverConfig.url as string | undefined,
 				headers: serverConfig.headers as Record<string, string> | undefined,
 				transport: serverConfig.type as "stdio" | "sse" | "http" | undefined,
+				oauth: serverConfig.oauth as MCPServer["oauth"],
+				auth: serverConfig.auth as MCPServer["auth"],
 				_source: createSourceMeta(PROVIDER_ID, path, level),
 			};
 		});
