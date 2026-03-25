@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Load MCP servers from `~/.claude/settings.json` (where `claude mcp add` stores configs)
+- Load MCP servers from Claude Code marketplace plugin `.mcp.json` files (Notion, Figma, Slack, etc.)
+- Respect `enabledPlugins` gate from `settings.json` when loading plugin MCP servers
+
+### Fixed
+
+- Fix `oauth` and `auth` fields not being extracted from Claude Code MCP server configs
+
 ## [13.15.0] - 2026-03-23
 ### Breaking Changes
 
