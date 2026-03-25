@@ -1594,14 +1594,27 @@ export class AgentSession {
 			logger.warn("Async job completion deliveries still pending during dispose", { ...deliveryState });
 		}
 		await this.sessionManager.close();
-		for (const state of this.#providerSessionState.values()) {
-			state.close();
-		}
-		this.#providerSessionState.clear();
+		this.#closeAllProviderSessions("dispose");
 		this.#unsubscribePendingActionPush?.();
 		this.#unsubscribePendingActionPush = undefined;
 		this.#disconnectFromAgent();
 		this.#eventListeners = [];
+	}
+
+	#closeAllProviderSessions(reason: string): void {
+		for (const [providerKey, state] of this.#providerSessionState) {
+			try {
+				state.close();
+			} catch (error) {
+				logger.warn("Failed to close provider session state", {
+					providerKey,
+					reason,
+					error: String(error),
+				});
+			}
+		}
+
+		this.#providerSessionState.clear();
 	}
 
 	// =========================================================================
@@ -2871,6 +2884,7 @@ export class AgentSession {
 		this.#disconnectFromAgent();
 		await this.abort();
 		this.#asyncJobManager?.cancelAll();
+		this.#closeAllProviderSessions("new session");
 		this.agent.reset();
 		await this.sessionManager.flush();
 		await this.sessionManager.newSession(options);
@@ -3992,22 +4006,32 @@ export class AgentSession {
 	}
 
 	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model): void {
-		if (currentModel.api !== "openai-codex-responses" && nextModel.api !== "openai-codex-responses") return;
-
-		const providerKey = "openai-codex-responses";
-		const state = this.#providerSessionState.get(providerKey);
-		if (!state) return;
-
-		try {
-			state.close();
-		} catch (error) {
-			logger.warn("Failed to close provider session state during model switch", {
-				providerKey,
-				error: String(error),
-			});
+		const providerKeys = new Set<string>();
+		if (currentModel.api === "openai-codex-responses" || nextModel.api === "openai-codex-responses") {
+			providerKeys.add("openai-codex-responses");
+		}
+		if (currentModel.api === "openai-responses") {
+			providerKeys.add(`openai-responses:${currentModel.provider}`);
+		}
+		if (nextModel.api === "openai-responses") {
+			providerKeys.add(`openai-responses:${nextModel.provider}`);
 		}
 
-		this.#providerSessionState.delete(providerKey);
+		for (const providerKey of providerKeys) {
+			const state = this.#providerSessionState.get(providerKey);
+			if (!state) continue;
+
+			try {
+				state.close();
+			} catch (error) {
+				logger.warn("Failed to close provider session state during model switch", {
+					providerKey,
+					error: String(error),
+				});
+			}
+
+			this.#providerSessionState.delete(providerKey);
+		}
 	}
 
 	#getModelKey(model: Model): string {
@@ -4940,7 +4964,9 @@ export class AgentSession {
 	 */
 	async switchSession(sessionPath: string): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
-
+		const switchingToDifferentSession = previousSessionFile
+			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
+			: true;
 		// Emit session_before_switch event (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
 			const result = (await this.#extensionRunner.emit({
@@ -4962,6 +4988,9 @@ export class AgentSession {
 
 		// Flush pending writes before switching
 		await this.sessionManager.flush();
+		if (switchingToDifferentSession) {
+			this.#closeAllProviderSessions("session switch");
+		}
 
 		// Set new session
 		await this.sessionManager.setSessionFile(sessionPath);
@@ -4994,7 +5023,18 @@ export class AgentSession {
 				const availableModels = this.#modelRegistry.getAvailable();
 				const match = availableModels.find(m => m.provider === provider && m.id === modelId);
 				if (match) {
-					this.#setModelWithProviderSessionReset(match);
+					const currentModel = this.model;
+					const shouldResetProviderState =
+						switchingToDifferentSession ||
+						(currentModel !== undefined &&
+							(currentModel.provider !== match.provider ||
+								currentModel.id !== match.id ||
+								currentModel.api !== match.api));
+					if (shouldResetProviderState) {
+						this.#setModelWithProviderSessionReset(match);
+					} else {
+						this.agent.setModel(match);
+					}
 				}
 			}
 		}

@@ -46,6 +46,7 @@ import {
 	type FileMentionMessage,
 	type HookMessage,
 	type PythonExecutionMessage,
+	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 } from "./messages";
 import type { SessionStorage, SessionStorageWriter } from "./session-storage";
 import { FileSessionStorage, MemorySessionStorage } from "./session-storage";
@@ -1446,8 +1447,12 @@ export class SessionManager {
 			}
 
 			await resolveBlobRefsInEntries(this.#fileEntries, this.#blobStore);
+			const didSanitizeReplayMetadata = this.sanitizeLoadedOpenAIResponsesReplayMetadata();
 
 			this.#buildIndex();
+			if (didSanitizeReplayMetadata) {
+				await this.#rewriteFile();
+			}
 			this.#flushed = true;
 		} else {
 			const explicitPath = this.#sessionFile;
@@ -2299,6 +2304,26 @@ export class SessionManager {
 		return buildSessionContext(this.getEntries(), this.#leafId, this.#byId);
 	}
 
+	/** Strip stale OpenAI Responses assistant replay metadata from loaded in-memory entries. */
+	sanitizeLoadedOpenAIResponsesReplayMetadata(): boolean {
+		let didSanitize = false;
+		for (const entry of this.#fileEntries) {
+			if (entry.type !== "message" || entry.message.role !== "assistant") {
+				continue;
+			}
+
+			const sanitizedMessage = sanitizeRehydratedOpenAIResponsesAssistantMessage(entry.message);
+			if (sanitizedMessage === entry.message) {
+				continue;
+			}
+
+			entry.message = sanitizedMessage;
+			didSanitize = true;
+		}
+
+		return didSanitize;
+	}
+
 	/**
 	 * Get session header.
 	 */
@@ -2547,6 +2572,7 @@ export class SessionManager {
 		newHeader.title = sourceHeader?.title;
 		manager.#fileEntries = [newHeader, ...historyEntries];
 		manager.#sessionName = newHeader.title;
+		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
 		manager.#buildIndex();
 		await manager.#rewriteFile();
 		return manager;

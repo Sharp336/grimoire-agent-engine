@@ -12,6 +12,10 @@
 - Changed session collection to include sessions with zero messages, enabling ACP mode to create discoverable sessions immediately
 - Changed session persistence logic to use atomic file rewrite when flushing unflushed sessions to prevent duplication
 
+
+### Fixed
+
+- Fixed resumed and session-switched GitHub Copilot/OpenAI Responses conversations replaying stale assistant native history from older saved sessions by sanitizing persisted assistant replay metadata on rehydration and resetting provider session state across live session boundaries ([#505](https://github.com/can1357/oh-my-pi/issues/505))
 ## [13.14.0] - 2026-03-20
 
 ### Added

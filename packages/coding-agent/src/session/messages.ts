@@ -6,6 +6,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type {
+	AssistantMessage,
 	ImageContent,
 	Message,
 	MessageAttribution,
@@ -211,6 +212,24 @@ export function createCompactionSummaryMessage(
 		providerPayload,
 		timestamp: new Date(timestamp).getTime(),
 	};
+}
+
+export function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: AssistantMessage): AssistantMessage {
+	if (message.providerPayload?.type !== "openaiResponsesHistory") {
+		return message;
+	}
+
+	const sanitizedContent = message.content.map(block => {
+		if (block.type !== "thinking") {
+			return block;
+		}
+
+		return { ...block, thinkingSignature: undefined };
+	});
+
+	const sanitizedMessage: AssistantMessage = { ...message, content: sanitizedContent };
+	delete sanitizedMessage.providerPayload;
+	return sanitizedMessage;
 }
 
 /** Convert CustomMessageEntry to AgentMessage format */
