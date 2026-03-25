@@ -1375,6 +1375,15 @@ export async function resolveResumableSession(
 
 	return { session: globalMatch, scope: "global" };
 }
+interface SessionManagerStateSnapshot {
+	sessionId: string;
+	sessionName: string | undefined;
+	sessionFile: string | undefined;
+	flushed: boolean;
+	needsFullRewriteOnNextPersist: boolean;
+	fileEntries: FileEntry[];
+}
+
 export class SessionManager {
 	#sessionId: string = "";
 	#sessionName: string | undefined;
@@ -1418,6 +1427,37 @@ export class SessionManager {
 	/** Puts a binary blob into the blob store and returns the blob reference */
 	async putBlob(data: Buffer): Promise<BlobPutResult> {
 		return this.#blobStore.put(data);
+	}
+
+	captureState(): SessionManagerStateSnapshot {
+		return {
+			sessionId: this.#sessionId,
+			sessionName: this.#sessionName,
+			sessionFile: this.#sessionFile,
+			flushed: this.#flushed,
+			needsFullRewriteOnNextPersist: this.#needsFullRewriteOnNextPersist,
+			fileEntries: structuredClone(this.#fileEntries),
+		};
+	}
+
+	restoreState(snapshot: SessionManagerStateSnapshot): void {
+		this.#sessionId = snapshot.sessionId;
+		this.#sessionName = snapshot.sessionName;
+		this.#sessionFile = snapshot.sessionFile;
+		this.#flushed = snapshot.flushed;
+		this.#needsFullRewriteOnNextPersist = snapshot.needsFullRewriteOnNextPersist;
+		this.#fileEntries = structuredClone(snapshot.fileEntries);
+		this.#persistWriter = undefined;
+		this.#persistWriterPath = undefined;
+		this.#persistChain = Promise.resolve();
+		this.#persistError = undefined;
+		this.#persistErrorReported = false;
+		this.#artifactManager = null;
+		this.#artifactManagerSessionFile = null;
+		this.#buildIndex();
+		if (this.#sessionFile) {
+			writeTerminalBreadcrumb(this.cwd, this.#sessionFile);
+		}
 	}
 
 	/** Initialize with a specific session file (used by factory methods) */

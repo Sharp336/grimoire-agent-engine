@@ -400,6 +400,104 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expectAssistantReplayMetadataStripped(persistedAssistant);
 	});
 
+	it("keeps provider session state when same-file reload only changes message metadata", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-issue-505-reload-metadata-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const assistantText = "Reloaded metadata-only response";
+
+		const { sessionFile } = await createPersistedSession(tempDir, sessionManager => {
+			sessionManager.appendModelChange("openai-codex/gpt-5.2-codex");
+			sessionManager.appendMessage(
+				createStaleAssistantMessage(assistantText, {
+					api: "openai-codex-responses",
+					provider: "openai-codex",
+					model: "gpt-5.2-codex",
+				}),
+			);
+		});
+
+		const reloadedSessionManager = await SessionManager.open(sessionFile, tempDir);
+		const { session, authStorage } = await createSessionHarness(tempDir, reloadedSessionManager, {
+			provider: "openai-codex",
+			modelId: "gpt-5.2-codex",
+		});
+		sessions.push(session);
+		authStorages.push(authStorage);
+
+		const closeSpy = vi.fn();
+		session.providerSessionState.set("openai-codex-responses", { close: closeSpy } satisfies ProviderSessionState);
+
+		const rewrittenLines = fs
+			.readFileSync(sessionFile, "utf8")
+			.trimEnd()
+			.split("\n")
+			.map(line => {
+				const entry = JSON.parse(line) as { type?: string; message?: { role?: string; timestamp?: number } };
+				if (entry.type === "message" && entry.message?.role === "assistant") {
+					entry.message.timestamp = (entry.message.timestamp ?? 0) + 10_000;
+				}
+				return JSON.stringify(entry);
+			});
+		fs.writeFileSync(sessionFile, `${rewrittenLines.join("\n")}\n`, "utf8");
+
+		await session.reload();
+
+		expect(closeSpy).not.toHaveBeenCalled();
+		expect(session.providerSessionState.size).toBe(1);
+		expect(session.model?.provider).toBe("openai-codex");
+		expect(session.model?.id).toBe("gpt-5.2-codex");
+		expectAssistantReplayMetadataStripped(findRuntimeAssistant(session, assistantText));
+	});
+
+	it("resets provider session state when same-file reload restores different messages under the same model", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-issue-505-reload-content-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const assistantText = "Reloaded content change response";
+
+		const { sessionFile } = await createPersistedSession(tempDir, sessionManager => {
+			sessionManager.appendModelChange("openai-codex/gpt-5.2-codex");
+			sessionManager.appendMessage(
+				createStaleAssistantMessage(assistantText, {
+					api: "openai-codex-responses",
+					provider: "openai-codex",
+					model: "gpt-5.2-codex",
+				}),
+			);
+		});
+
+		const reloadedSessionManager = await SessionManager.open(sessionFile, tempDir);
+		const { session, authStorage } = await createSessionHarness(tempDir, reloadedSessionManager, {
+			provider: "openai-codex",
+			modelId: "gpt-5.2-codex",
+		});
+		sessions.push(session);
+		authStorages.push(authStorage);
+
+		const closeSpy = vi.fn();
+		session.providerSessionState.set("openai-codex-responses", { close: closeSpy } satisfies ProviderSessionState);
+
+		const mutatedSessionManager = await SessionManager.open(sessionFile, tempDir);
+		mutatedSessionManager.appendMessage({
+			role: "user",
+			content: "Externally appended follow-up",
+			timestamp: Date.now() + 1,
+		});
+		await mutatedSessionManager.flush();
+		await mutatedSessionManager.close();
+
+		await session.reload();
+
+		expect(closeSpy).toHaveBeenCalledTimes(1);
+		expect(session.providerSessionState.size).toBe(0);
+		expect(session.model?.provider).toBe("openai-codex");
+		expect(session.model?.id).toBe("gpt-5.2-codex");
+		expect(
+			session.messages.some(
+				message => message.role === "user" && getTextContent(message) === "Externally appended follow-up",
+			),
+		).toBe(true);
+	});
+
 	it("resets provider session state when same-file reload restores a different saved model", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-issue-505-reload-model-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
@@ -473,6 +571,39 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(closeSpy).toHaveBeenCalledTimes(1);
 		expect(session.providerSessionState.size).toBe(0);
 		expectAssistantReplayMetadataStripped(findRuntimeAssistant(session, assistantText));
+	});
+
+	it("preserves provider session state when switching sessions fails before load completes", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-issue-505-switch-fail-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const currentSessionManager = SessionManager.create(tempDir, tempDir);
+		const { session, authStorage } = await createSessionHarness(tempDir, currentSessionManager);
+		sessions.push(session);
+		authStorages.push(authStorage);
+
+		const originalSessionFile = session.sessionFile;
+		expect(originalSessionFile).toBeDefined();
+		const { sessionFile } = await createPersistedSession(tempDir, sessionManager => {
+			sessionManager.appendMessage(createStaleAssistantMessage("Unreadable assistant snapshot"));
+		});
+		const sessionDir = path.dirname(sessionFile);
+		const originalMode = fs.statSync(sessionDir).mode & 0o777;
+		fs.chmodSync(sessionDir, 0o555);
+
+		const closeSpy = vi.fn();
+		session.providerSessionState.set("openai-responses:openai", { close: closeSpy } satisfies ProviderSessionState);
+
+		try {
+			await expect(session.switchSession(sessionFile)).rejects.toThrow();
+		} finally {
+			fs.chmodSync(sessionDir, originalMode);
+		}
+
+		expect(closeSpy).not.toHaveBeenCalled();
+		expect(session.providerSessionState.get("openai-responses:openai")).toBeDefined();
+		expect(session.providerSessionState.size).toBe(1);
+		expect(session.sessionManager).toBe(currentSessionManager);
+		expect(session.sessionFile).toBe(originalSessionFile);
 	});
 
 	it("clears provider session state and sanitizes loaded assistant metadata when switching sessions", async () => {
