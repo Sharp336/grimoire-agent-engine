@@ -7,15 +7,40 @@
 import * as path from "node:path";
 import { registerProvider } from "../capability";
 import { type Hook, hookCapability } from "../capability/hook";
+import { type Rule, ruleCapability } from "../capability/rule";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
 import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
-import { type ClaudePluginRoot, listClaudePluginRoots, loadFilesFromDir, scanSkillsFromDir } from "./helpers";
+import {
+	buildRuleFromMarkdown,
+	type ClaudePluginRoot,
+	listClaudePluginRoots,
+	loadFilesFromDir,
+	scanSkillsFromDir,
+} from "./helpers";
 
 const PROVIDER_ID = "claude-plugins";
 const DISPLAY_NAME = "Claude Code Marketplace";
 const PRIORITY = 70; // Below claude.ts (80) so user .claude/ overrides win
+
+function sortClaudePluginRoots(roots: ClaudePluginRoot[]): ClaudePluginRoot[] {
+	return [...roots].sort((a, b) => {
+		if (a.scope === b.scope) return 0;
+		return a.scope === "project" ? -1 : 1;
+	});
+}
+
+async function getClaudePluginRoots(
+	ctx: LoadContext,
+	options?: { projectFirst?: boolean },
+): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
+	const { roots, warnings } = await listClaudePluginRoots(ctx.home);
+	return {
+		roots: options?.projectFirst ? sortClaudePluginRoots(roots) : [...roots],
+		warnings,
+	};
+}
 
 // =============================================================================
 // Skills
@@ -25,7 +50,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const items: Skill[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home);
+	const { roots, warnings: rootWarnings } = await getClaudePluginRoots(ctx);
 	warnings.push(...rootWarnings);
 
 	const results = await Promise.all(
@@ -55,7 +80,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	const items: SlashCommand[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home);
+	const { roots, warnings: rootWarnings } = await getClaudePluginRoots(ctx);
 	warnings.push(...rootWarnings);
 
 	const results = await Promise.all(
@@ -86,6 +111,36 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 }
 
 // =============================================================================
+// Rules
+// =============================================================================
+
+async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
+	const items: Rule[] = [];
+	const warnings: string[] = [];
+
+	const { roots, warnings: rootWarnings } = await getClaudePluginRoots(ctx, { projectFirst: true });
+	warnings.push(...rootWarnings);
+
+	const results = await Promise.all(
+		roots.map(async root => {
+			const rulesDir = path.join(root.path, "rules");
+			return loadFilesFromDir<Rule>(ctx, rulesDir, PROVIDER_ID, root.scope, {
+				extensions: ["md", "mdc"],
+				transform: (name, content, filePath, source) =>
+					buildRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
+			});
+		}),
+	);
+
+	for (const result of results) {
+		items.push(...result.items);
+		if (result.warnings) warnings.push(...result.warnings);
+	}
+
+	return { items, warnings };
+}
+
+// =============================================================================
 // Hooks
 // =============================================================================
 
@@ -93,7 +148,7 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 	const items: Hook[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home);
+	const { roots, warnings: rootWarnings } = await getClaudePluginRoots(ctx);
 	warnings.push(...rootWarnings);
 
 	const hookTypes = ["pre", "post"] as const;
@@ -140,7 +195,7 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 	const items: CustomTool[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home);
+	const { roots, warnings: rootWarnings } = await getClaudePluginRoots(ctx);
 	warnings.push(...rootWarnings);
 
 	const results = await Promise.all(
@@ -187,6 +242,14 @@ registerProvider<SlashCommand>(slashCommandCapability.id, {
 	description: "Load slash commands from Claude Code marketplace plugins",
 	priority: PRIORITY,
 	load: loadSlashCommands,
+});
+
+registerProvider<Rule>(ruleCapability.id, {
+	id: PROVIDER_ID,
+	displayName: DISPLAY_NAME,
+	description: "Load rules from Claude Code marketplace plugins",
+	priority: PRIORITY,
+	load: loadRules,
 });
 
 registerProvider<Hook>(hookCapability.id, {

@@ -1,8 +1,11 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import { ruleCapability } from "@oh-my-pi/pi-coding-agent/capability/rule";
+import { getCapability, loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 import {
 	clearClaudePluginRootsCache,
 	listClaudePluginRoots,
@@ -299,6 +302,233 @@ describe("listClaudePluginRoots", () => {
 		const result = await listClaudePluginRoots(tempDir);
 		expect(result.roots).toHaveLength(1);
 		expect(result.roots[0].scope).toBe("user");
+	});
+});
+
+describe("claude plugin rule discovery", () => {
+	let tempDir = "";
+	let tempHomeDir = "";
+	let originalHome: string | undefined;
+
+	type PluginRegistryEntry = {
+		id: string;
+		scope: "project" | "user";
+		installPath: string;
+		version: string;
+	};
+
+	async function writeInstalledPlugins(entries: PluginRegistryEntry[]): Promise<void> {
+		const pluginsDir = path.join(tempHomeDir, ".claude", "plugins");
+		const plugins: Record<
+			string,
+			Array<{
+				scope: "project" | "user";
+				installPath: string;
+				version: string;
+				installedAt: string;
+				lastUpdated: string;
+			}>
+		> = {};
+
+		for (const entry of entries) {
+			const pluginEntries = plugins[entry.id] ?? [];
+			pluginEntries.push({
+				scope: entry.scope,
+				installPath: entry.installPath,
+				version: entry.version,
+				installedAt: "2025-01-01T00:00:00Z",
+				lastUpdated: "2025-01-01T00:00:00Z",
+			});
+			plugins[entry.id] = pluginEntries;
+		}
+
+		await fs.mkdir(pluginsDir, { recursive: true });
+		await fs.writeFile(path.join(pluginsDir, "installed_plugins.json"), JSON.stringify({ version: 2, plugins }));
+	}
+
+	async function writePluginRule(pluginPath: string, fileName: string, content: string): Promise<string> {
+		const filePath = path.join(pluginPath, "rules", fileName);
+		await fs.mkdir(path.dirname(filePath), { recursive: true });
+		await fs.writeFile(filePath, content);
+		return filePath;
+	}
+
+	beforeEach(async () => {
+		clearClaudePluginRootsCache();
+		clearFsCache();
+		originalHome = process.env.HOME;
+		tempHomeDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-rules-home-"));
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-rules-"));
+	});
+
+	afterEach(async () => {
+		clearClaudePluginRootsCache();
+		clearFsCache();
+		vi.restoreAllMocks();
+		if (originalHome === undefined) {
+			delete process.env.HOME;
+		} else {
+			process.env.HOME = originalHome;
+		}
+		await fs.rm(tempHomeDir, { recursive: true, force: true });
+		await fs.rm(tempDir, { recursive: true, force: true });
+	});
+
+	test("loads markdown and mdc plugin rules as canonical rules", async () => {
+		const pluginPath = path.join(tempDir, "plugins", "catalog");
+		const markdownRulePath = await writePluginRule(
+			pluginPath,
+			"style-guide.md",
+			"---\ndescription: Prefer readable names\n---\nName things so maintainers can follow them.\n",
+		);
+		const mdcRulePath = await writePluginRule(
+			pluginPath,
+			"typed-api.mdc",
+			"---\ndescription: Prefer explicit return types\n---\nReturn types should stay obvious.\n",
+		);
+		await writeInstalledPlugins([
+			{
+				id: "rules-plugin@market",
+				scope: "user",
+				installPath: pluginPath,
+				version: "1.0.0",
+			},
+		]);
+
+		const capability = getCapability<Rule>(ruleCapability.id);
+		expect(capability).toBeDefined();
+		const provider = capability?.providers.find(candidate => candidate.id === "claude-plugins");
+		expect(provider).toBeDefined();
+
+		const result = await provider!.load({ cwd: tempDir, home: tempHomeDir, repoRoot: null });
+		expect(result.warnings).toEqual([]);
+		expect(result.items).toHaveLength(2);
+
+		const markdownRule = result.items.find(rule => rule.name === "style-guide");
+		expect(markdownRule).toMatchObject({
+			name: "style-guide",
+			description: "Prefer readable names",
+			path: markdownRulePath,
+			_source: {
+				provider: "claude-plugins",
+				path: markdownRulePath,
+				level: "user",
+			},
+		});
+		expect(markdownRule?.content.trim()).toBe("Name things so maintainers can follow them.");
+
+		const mdcRule = result.items.find(rule => rule.name === "typed-api");
+		expect(mdcRule).toMatchObject({
+			name: "typed-api",
+			description: "Prefer explicit return types",
+			path: mdcRulePath,
+			_source: {
+				provider: "claude-plugins",
+				path: mdcRulePath,
+				level: "user",
+			},
+		});
+		expect(mdcRule?.content.trim()).toBe("Return types should stay obvious.");
+	});
+
+	test("prefers project-scoped plugin rules over user-scoped plugin rules when registry order is inverted", async () => {
+		const ruleName = "shared-guidance";
+		const userPluginPath = path.join(tempDir, "plugins", "user");
+		const projectPluginPath = path.join(tempDir, "plugins", "project");
+		const userRulePath = await writePluginRule(
+			userPluginPath,
+			`${ruleName}.md`,
+			"---\ndescription: User plugin rule\n---\nUser scope loses.\n",
+		);
+		const projectRulePath = await writePluginRule(
+			projectPluginPath,
+			`${ruleName}.mdc`,
+			"---\ndescription: Project plugin rule\n---\nProject scope wins.\n",
+		);
+		await writeInstalledPlugins([
+			{
+				id: "shared-plugin@market",
+				scope: "user",
+				installPath: userPluginPath,
+				version: "1.0.0",
+			},
+			{
+				id: "shared-plugin@market",
+				scope: "project",
+				installPath: projectPluginPath,
+				version: "1.0.1",
+			},
+		]);
+
+		process.env.HOME = tempHomeDir;
+		vi.spyOn(os, "homedir").mockReturnValue(tempHomeDir);
+
+		const result = await loadCapability<Rule>(ruleCapability.id, { cwd: tempDir });
+		const resolvedRule = result.items.find(rule => rule.name === ruleName);
+		expect(resolvedRule).toMatchObject({
+			name: ruleName,
+			description: "Project plugin rule",
+			path: projectRulePath,
+			_source: {
+				provider: "claude-plugins",
+				path: projectRulePath,
+				level: "project",
+			},
+		});
+		expect(resolvedRule?.content.trim()).toBe("Project scope wins.");
+
+		const projectPluginRule = result.all.find(rule => rule.path === projectRulePath);
+		expect(projectPluginRule).toMatchObject({
+			_source: { provider: "claude-plugins", level: "project" },
+		});
+
+		const userPluginRule = result.all.find(rule => rule.path === userRulePath);
+		expect(userPluginRule).toMatchObject({
+			_source: { provider: "claude-plugins", level: "user" },
+			_shadowed: true,
+		});
+	});
+
+	test("prefers native .omp rules over plugin rules with the same name", async () => {
+		const ruleName = "shared-guidance";
+		const pluginPath = path.join(tempDir, "plugins", "project");
+		const pluginRulePath = await writePluginRule(
+			pluginPath,
+			`${ruleName}.md`,
+			"---\ndescription: Plugin rule\n---\nPlugin guidance.\n",
+		);
+		const nativeRulePath = path.join(tempDir, ".omp", "rules", `${ruleName}.md`);
+		await fs.mkdir(path.dirname(nativeRulePath), { recursive: true });
+		await fs.writeFile(nativeRulePath, "---\ndescription: Native rule\n---\nNative guidance.\n");
+		await writeInstalledPlugins([
+			{
+				id: "shared-plugin@market",
+				scope: "project",
+				installPath: pluginPath,
+				version: "1.0.0",
+			},
+		]);
+
+		process.env.HOME = tempHomeDir;
+		vi.spyOn(os, "homedir").mockReturnValue(tempHomeDir);
+
+		const result = await loadCapability<Rule>(ruleCapability.id, { cwd: tempDir });
+		const resolvedRule = result.items.find(rule => rule.name === ruleName);
+		expect(resolvedRule).toMatchObject({
+			name: ruleName,
+			description: "Native rule",
+			path: nativeRulePath,
+			_source: {
+				provider: "native",
+				path: nativeRulePath,
+				level: "project",
+			},
+		});
+		expect(resolvedRule?.content.trim()).toBe("Native guidance.");
+
+		const pluginRule = result.all.find(rule => rule.path === pluginRulePath);
+		expect(pluginRule?._source.provider).toBe("claude-plugins");
+		expect(pluginRule?._shadowed).toBe(true);
 	});
 });
 

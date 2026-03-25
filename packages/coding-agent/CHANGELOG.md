@@ -6,6 +6,7 @@
 - Added ACP (Agent Client Protocol) mode for headless agent operation via `--mode acp`
 - Added support for Agent Client Protocol SDK integration with session management, MCP server configuration, and streaming communication
 - Added `ensureOnDisk()` method to SessionManager to persist sessions immediately for ACP discovery
+- Added discovery of Claude Code marketplace plugin `rules/` directories so plugin-installed rules load alongside other marketplace capabilities ([#519](https://github.com/can1357/oh-my-pi/issues/519))
 
 ### Changed
 
