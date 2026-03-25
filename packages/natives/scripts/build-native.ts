@@ -2,6 +2,7 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
+import { getCargoTarget, isCargoCrossCompile, parseRustHostTarget } from "./build-target";
 
 const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");
@@ -11,9 +12,13 @@ const isDev = process.argv.includes("--dev");
 const crossTarget = Bun.env.CROSS_TARGET;
 const targetPlatform = Bun.env.TARGET_PLATFORM || process.platform;
 const targetArch = Bun.env.TARGET_ARCH || process.arch;
+const rustHostTarget = parseRustHostTarget(runCommand("rustc", ["-vV"]) ?? "");
+const cargoTarget = getCargoTarget({ targetPlatform, targetArch, crossTarget, rustHostTarget });
 const configuredVariantRaw = Bun.env.TARGET_VARIANT;
-const isCrossCompile = Boolean(crossTarget) || targetPlatform !== process.platform || targetArch !== process.arch;
-
+const isCrossCompile =
+	isCargoCrossCompile(cargoTarget, rustHostTarget) ||
+	(rustHostTarget === null &&
+		(Boolean(crossTarget) || targetPlatform !== process.platform || targetArch !== process.arch));
 type X64Variant = "modern" | "baseline";
 
 let configuredVariant: X64Variant | undefined;
@@ -138,7 +143,7 @@ async function installBinary(src: string, dest: string): Promise<void> {
 
 const cargoArgs = ["build"];
 if (!isDev) cargoArgs.push("--release");
-if (crossTarget) cargoArgs.push("--target", crossTarget);
+cargoArgs.push("--target", cargoTarget);
 
 console.log(`Building pi-natives for ${targetPlatform}-${targetArch}${variantSuffix}${isDev ? " (debug)" : ""}…`);
 const buildResult = await $`cargo ${cargoArgs}`.cwd(rustDir).nothrow();
@@ -154,12 +159,7 @@ const targetRoots = [
 	path.join(rustDir, "target"),
 ].filter((v): v is string => Boolean(v));
 
-const profileDirs = targetRoots.flatMap(root => {
-	if (crossTarget) {
-		return [path.join(root, crossTarget, profile), path.join(root, profile)];
-	}
-	return [path.join(root, profile)];
-});
+const profileDirs = targetRoots.flatMap(root => [path.join(root, cargoTarget, profile), path.join(root, profile)]);
 
 const libraryNames = ["libpi_natives.so", "libpi_natives.dylib", "pi_natives.dll", "libpi_natives.dll"];
 
