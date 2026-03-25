@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added OpenRouter to CLI provider login list for interactive API key setup
+
 ## [13.15.0] - 2026-03-23
 
 ### Added
@@ -18,6 +22,7 @@
 - Fixed `parseRateLimitReason` not recognizing "usage limit" in Codex error messages, causing incorrect fallback to `UNKNOWN` classification instead of `QUOTA_EXHAUSTED`
 
 ## [13.14.2] - 2026-03-21
+
 ### Changed
 
 - Updated thinking configuration format from `levels` array to `minLevel` and `maxLevel` properties for improved clarity
@@ -40,13 +45,14 @@
 - Added bundled GPT-5.4 mini model metadata for OpenAI, OpenAI Codex, and GitHub Copilot, including low-to-xhigh thinking support and GitHub Copilot premium multiplier metadata
 - Added bundled GPT-5.4 nano model metadata for OpenAI and OpenAI Codex, including low-to-xhigh thinking support
 
-
 ## [13.13.2] - 2026-03-18
+
 ### Changed
 
 - Modified tool result handling for aborted assistant messages to preserve existing tool results when already recorded, instead of always replacing them with synthetic 'aborted' results
 
 ## [13.13.0] - 2026-03-18
+
 ### Changed
 
 - Changed tool argument validation to always normalize optional null values before type coercion, ensuring consistent handling of LLM-generated 'null' strings
@@ -57,6 +63,7 @@
 - Improved type safety of `validateToolCall` and `validateToolArguments` functions by returning properly typed `ToolCall["arguments"]` instead of `any`
 
 ## [13.12.9] - 2026-03-17
+
 ### Changed
 
 - Extracted OpenAI compatibility detection and resolution logic into dedicated `openai-completions-compat` module for improved maintainability and reusability
@@ -106,6 +113,7 @@
 - Fixed auth schema V0-to-V1 migration crash when the V0 table lacks a `disabled` column
 
 ## [13.11.0] - 2026-03-12
+
 ### Added
 
 - Added support for Parallel AI provider with API key authentication
@@ -121,6 +129,7 @@
 - Improved retry logic to handle HTTP/2 stream errors and internal_error responses from Anthropic API
 
 ## [13.9.16] - 2026-03-10
+
 ### Added
 
 - Support for `onPayload` callback to replace provider request payloads before sending, enabling request interception and modification
@@ -143,11 +152,13 @@
 - Fixed handling of malformed JSON messages in websocket streams to trigger immediate fallback to SSE without retry attempts
 
 ## [13.9.13] - 2026-03-10
+
 ### Added
 
 - Added `isSpecialServiceTier` utility function to validate OpenAI service tier values
 
 ## [13.9.12] - 2026-03-09
+
 ### Added
 
 - Added Tavily web search provider support with API key authentication
@@ -180,11 +191,13 @@
 - Fixed auth storage to preserve newer recorded schema versions when opened by older binaries
 
 ## [13.9.8] - 2026-03-08
+
 ### Fixed
 
 - Fixed WebSocket stream fallback logic to safely replay buffered output over SSE when WebSocket fails after partial content has been streamed
 
 ## [13.9.4] - 2026-03-07
+
 ### Changed
 
 - Simplified API key credential storage to always replace existing credentials on re-login instead of accumulating multiple keys
@@ -197,6 +210,7 @@
 - Fixed Cerebras model compatibility by preventing `stream_options` usage requests in chat completions
 
 ## [13.9.3] - 2026-03-07
+
 ### Breaking Changes
 
 - Changed `reasoning` parameter from `ThinkingLevel | undefined` to `Effort | undefined` in `SimpleStreamOptions`; 'off' is no longer valid (omit the field instead)
