@@ -2,10 +2,6 @@
 
 ## [Unreleased]
 
-### Fixed
-
-- Fixed local Apple Silicon builds to compile the native addon for the requested platform/architecture instead of silently using the Rust host default
-
 ## [13.12.0] - 2026-03-14
 ### Breaking Changes
 
