@@ -1380,6 +1380,7 @@ export class SessionManager {
 	#sessionName: string | undefined;
 	#sessionFile: string | undefined;
 	#flushed: boolean = false;
+	#needsFullRewriteOnNextPersist: boolean = false;
 	#fileEntries: FileEntry[] = [];
 	#byId: Map<string, SessionEntry> = new Map();
 	#labelsById: Map<string, string> = new Map();
@@ -1442,9 +1443,7 @@ export class SessionManager {
 			this.#sessionId = header?.id ?? Snowflake.next();
 			this.#sessionName = header?.title;
 
-			if (migrateToCurrentVersion(this.#fileEntries)) {
-				await this.#rewriteFile();
-			}
+			this.#needsFullRewriteOnNextPersist = migrateToCurrentVersion(this.#fileEntries);
 
 			await resolveBlobRefsInEntries(this.#fileEntries, this.#blobStore);
 			const didSanitizeReplayMetadata = this.sanitizeLoadedOpenAIResponsesReplayMetadata();
@@ -1635,6 +1634,7 @@ export class SessionManager {
 		this.#labelsById.clear();
 		this.#leafId = null;
 		this.#flushed = false;
+		this.#needsFullRewriteOnNextPersist = false;
 		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 };
 
 		if (this.persist) {
@@ -1777,6 +1777,7 @@ export class SessionManager {
 				this.#fileEntries.map(entry => prepareEntryForPersistence(entry, this.#blobStore)),
 			);
 			await this.#writeEntriesAtomically(entries);
+			this.#needsFullRewriteOnNextPersist = false;
 			this.#flushed = true;
 		});
 	}
@@ -1791,7 +1792,7 @@ export class SessionManager {
 	 */
 	async ensureOnDisk(): Promise<void> {
 		if (!this.persist || !this.#sessionFile) return;
-		if (this.#flushed) return;
+		if (this.#flushed && !this.#needsFullRewriteOnNextPersist) return;
 		await this.#rewriteFile();
 	}
 
@@ -1924,12 +1925,12 @@ export class SessionManager {
 
 		const hasAssistant = this.#fileEntries.some(e => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
-			// Mark as not flushed so when assistant arrives, all entries get written
+			// Mark as not flushed so when assistant arrives, all entries get written.
 			this.#flushed = false;
 			return;
 		}
 
-		if (!this.#flushed) {
+		if (this.#needsFullRewriteOnNextPersist || !this.#flushed) {
 			// Full flush: rewrite the entire file atomically to avoid
 			// duplicating entries if the file already exists (e.g. from ensureOnDisk).
 			void this.#rewriteFile();
