@@ -449,6 +449,53 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expectAssistantReplayMetadataStripped(findRuntimeAssistant(session, assistantText));
 	});
 
+	it("captures session-manager state when custom message details are proxy-backed", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-issue-505-capture-proxy-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const sessionManager = SessionManager.create(tempDir, tempDir);
+		const proxyDetails = new Proxy({ ok: true, nested: { value: "preserved" } }, {});
+
+		sessionManager.appendCustomMessageEntry("proxy-details", "Proxy metadata", true, proxyDetails);
+
+		const snapshot = sessionManager.captureState();
+		const customEntry = snapshot.fileEntries.find(
+			entry => entry.type === "custom_message" && entry.customType === "proxy-details",
+		);
+		if (!customEntry || customEntry.type !== "custom_message") {
+			throw new Error("Expected captured custom message entry");
+		}
+		expect(customEntry.details).toEqual({ ok: true, nested: { value: "preserved" } });
+		await sessionManager.close();
+	});
+
+	it("reloads when current session contains proxy-backed custom message details", async () => {
+		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-issue-505-reload-proxy-${Snowflake.next()}-`));
+		tempDirs.push(tempDir);
+		const sessionManager = SessionManager.create(tempDir, tempDir);
+		const { session, authStorage } = await createSessionHarness(tempDir, sessionManager);
+		sessions.push(session);
+		authStorages.push(authStorage);
+		const proxyDetails = new Proxy({ ok: true, nested: { value: "preserved" } }, {});
+
+		await session.sendCustomMessage(
+			{
+				customType: "proxy-details",
+				content: "Proxy metadata",
+				display: true,
+				details: proxyDetails,
+			},
+			{ triggerTurn: false },
+		);
+
+		const originalSessionFile = session.sessionFile;
+		expect(originalSessionFile).toBeDefined();
+
+		await session.reload();
+
+		expect(() => session.sessionManager.captureState()).not.toThrow();
+		expect(session.sessionFile).toBe(originalSessionFile);
+	});
+
 	it("resets provider session state when same-file reload restores different messages under the same model", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-issue-505-reload-content-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);

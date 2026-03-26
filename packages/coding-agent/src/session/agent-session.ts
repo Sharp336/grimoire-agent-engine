@@ -5224,10 +5224,13 @@ export class AgentSession {
 		await this.sessionManager.flush();
 		const previousSessionState = this.sessionManager.captureState();
 		const previousSessionContext = this.sessionManager.buildSessionContext();
-		const previousAgentMessages = structuredClone(this.agent.state.messages);
+		// switchSession replaces these arrays wholesale during load/rollback, so retaining
+		// the existing message objects is sufficient and avoids structured-clone failures for
+		// extension/custom metadata that is valid to persist but not cloneable.
+		const previousAgentMessages = [...this.agent.state.messages];
 		const previousSteeringMessages = [...this.#steeringMessages];
 		const previousFollowUpMessages = [...this.#followUpMessages];
-		const previousPendingNextTurnMessages = structuredClone(this.#pendingNextTurnMessages);
+		const previousPendingNextTurnMessages = [...this.#pendingNextTurnMessages];
 		const previousScheduledHiddenNextTurnGeneration = this.#scheduledHiddenNextTurnGeneration;
 		const previousModel = this.model;
 		const previousThinkingLevel = this.#thinkingLevel;

@@ -1436,7 +1436,9 @@ export class SessionManager {
 			sessionFile: this.#sessionFile,
 			flushed: this.#flushed,
 			needsFullRewriteOnNextPersist: this.#needsFullRewriteOnNextPersist,
-			fileEntries: structuredClone(this.#fileEntries),
+			// Snapshot entry objects by reference: switch/reload replaces the active entry array,
+			// so rollback does not need structured cloning of extension/custom details.
+			fileEntries: [...this.#fileEntries],
 		};
 	}
 
@@ -1446,7 +1448,7 @@ export class SessionManager {
 		this.#sessionFile = snapshot.sessionFile;
 		this.#flushed = snapshot.flushed;
 		this.#needsFullRewriteOnNextPersist = snapshot.needsFullRewriteOnNextPersist;
-		this.#fileEntries = structuredClone(snapshot.fileEntries);
+		this.#fileEntries = [...snapshot.fileEntries];
 		this.#persistWriter = undefined;
 		this.#persistWriterPath = undefined;
 		this.#persistChain = Promise.resolve();
