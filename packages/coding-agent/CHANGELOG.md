@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [0.5.5] - 2026-03-26
+
+### Changed
+
+- Freeze context prefix across inner tool rounds for Anthropic prompt cache stability. `transformContext` runs once per user turn; system prompt and tools are session-static.
+
 ## [0.5.4] - 2026-03-26
 
 ### Changed
