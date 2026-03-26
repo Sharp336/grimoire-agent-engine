@@ -896,6 +896,7 @@ modelRoles:
 defaultThinkingLevel: high
 
 retry:
+  enabled: true
   # Number of retries before giving up on rate limits/server errors
   maxRetries: 3
   # Wait this long as a base (exponentially backed off) unless the API provides a retry-after-ms
@@ -929,10 +930,6 @@ compaction:
 skills:
   enabled: true
 
-retry:
-  enabled: true
-  maxRetries: 3
-  baseDelayMs: 2000
 
 terminal:
   showImages: true

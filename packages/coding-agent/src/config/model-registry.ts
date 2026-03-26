@@ -28,6 +28,7 @@ import {
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { type ConfigError, ConfigFile } from "../config";
+import { parseModelString } from "../config/model-resolver";
 import type { ThemeColor } from "../modes/theme/theme";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 
@@ -606,12 +607,9 @@ function buildCustomModel(
 function normalizeSuppressedSelector(selector: string): string {
 	const trimmed = selector.trim();
 	if (!trimmed) return trimmed;
-	const lastSlash = trimmed.lastIndexOf("/");
-	const lastColon = trimmed.lastIndexOf(":");
-	if (lastColon > lastSlash) {
-		return trimmed.slice(0, lastColon);
-	}
-	return trimmed;
+	const parsed = parseModelString(trimmed);
+	if (!parsed) return trimmed;
+	return `${parsed.provider}/${parsed.id}`;
 }
 
 /**
@@ -682,7 +680,11 @@ export class ModelRegistry {
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
 		this.#reloadStaticModels();
-		this.#suppressedSelectors.clear();
+		for (const selector of this.#suppressedSelectors.keys()) {
+			if (selector.startsWith(`${providerId}/`)) {
+				this.#suppressedSelectors.delete(selector);
+			}
+		}
 		await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
 	}
 

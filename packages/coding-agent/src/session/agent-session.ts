@@ -4861,12 +4861,12 @@ export class AgentSession {
 		if (!apiKey) return;
 
 		const currentThinkingLevel = this.thinkingLevel;
+		const thinkingToApply =
+			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;
 		this.#setModelWithProviderSessionReset(primaryModel);
 		this.sessionManager.appendModelChange(`${primaryModel.provider}/${primaryModel.id}`, "temporary");
 		this.settings.getStorage()?.recordModelUsage(`${primaryModel.provider}/${primaryModel.id}`);
-		if (currentThinkingLevel === lastAppliedFallbackThinkingLevel) {
-			this.setThinkingLevel(originalThinkingLevel);
-		}
+		this.setThinkingLevel(thinkingToApply);
 		this.#clearActiveRetryFallback();
 	}
 
