@@ -315,6 +315,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.addChild(welcome);
 			this.ui.addChild(new Spacer(1));
 
+			for (const warning of this.session.configWarnings) {
+				this.ui.addChild(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0));
+				this.ui.addChild(new Spacer(1));
+			}
+
 			// Add changelog if provided
 			if (this.#changelogMarkdown) {
 				this.ui.addChild(new DynamicBorder());

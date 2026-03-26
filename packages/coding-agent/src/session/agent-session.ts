@@ -393,6 +393,7 @@ export class AgentSession {
 	readonly agent: Agent;
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
+	readonly configWarnings: string[] = [];
 
 	#asyncJobManager: AsyncJobManager | undefined = undefined;
 	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
@@ -4657,6 +4658,27 @@ export class AgentSession {
 		const configuredChains = this.settings.get("retry.fallbackChains");
 		if (!configuredChains || typeof configuredChains !== "object") return {};
 		return configuredChains as RetryFallbackChains;
+	}
+
+	#validateRetryFallbackChains(): void {
+		for (const [role, chain] of Object.entries(this.#getRetryFallbackChains())) {
+			if (!Array.isArray(chain)) continue;
+			for (const selectorStr of chain) {
+				const parsed = parseRetryFallbackSelector(selectorStr);
+				if (!parsed) {
+					const msg = `Invalid fallback selector format in role '${role}': ${selectorStr}`;
+					logger.warn(msg);
+					this.configWarnings.push(msg);
+					continue;
+				}
+				const exists = this.#modelRegistry.find(parsed.provider, parsed.id);
+				if (!exists) {
+					const msg = `Fallback chain for role '${role}' references unknown model: ${selectorStr}`;
+					logger.warn(msg);
+					this.configWarnings.push(msg);
+				}
+			}
+		}
 	}
 
 	#getRetryFallbackRevertPolicy(): RetryFallbackRevertPolicy {
