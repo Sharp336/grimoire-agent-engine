@@ -141,7 +141,7 @@ describe("runSubprocess submit_result reminders", () => {
 		const result = await runSubprocess(baseOptions);
 		expect(prompts.length).toBe(2);
 		expect(promptOptions).toHaveLength(2);
-		expect(promptOptions[0]?.attribution).toBe("agent");
+		expect(promptOptions[0]?.attribution).toBeUndefined();
 		expect(promptOptions[1]?.attribution).toBe("agent");
 		expect(prompts[1]).toContain("You stopped without calling submit_result");
 		expect(result.output).toContain('"done": true');
@@ -290,6 +290,74 @@ describe("runSubprocess submit_result reminders", () => {
 		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.thinkingLevel).toBe(cases[0].expectedThinkingLevel);
 		expect(createAgentSessionSpy.mock.calls[1]?.[0]?.thinkingLevel).toBe(cases[1].expectedThinkingLevel);
 	});
+	it("reuses inherited base prompts for subagent sessions and disables child composer", async () => {
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-inherited-prompt",
+				toolName: "submit_result",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+
+		const createAgentSessionSpy = mockCreateAgentSession(session);
+
+		await runSubprocess({
+			...baseOptions,
+			id: "subagent-inherited-prompt",
+			settings: Settings.isolated({ "composer.enabled": true }),
+			inheritedBaseSystemPrompt: "PARENT BASE PROMPT",
+		});
+
+		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
+		const childOptions = createAgentSessionSpy.mock.calls[0]?.[0];
+		expect(childOptions).toBeDefined();
+		if (!childOptions) throw new Error("Expected child session options");
+		if (!childOptions.settings) throw new Error("Expected child settings");
+		expect(childOptions.settings.get("composer.enabled")).toBe(false);
+		expect(typeof childOptions.systemPrompt).toBe("function");
+		if (typeof childOptions.systemPrompt !== "function") throw new Error("Expected prompt wrapper");
+		expect(childOptions.systemPrompt("CHILD DEFAULT PROMPT")).toContain("PARENT BASE PROMPT");
+		expect(childOptions.systemPrompt("CHILD DEFAULT PROMPT")).not.toContain("CHILD DEFAULT PROMPT");
+	});
+
+	it("keeps child composer settings untouched when no inherited base prompt is provided", async () => {
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "tool-default-prompt",
+				toolName: "submit_result",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+
+		const createAgentSessionSpy = mockCreateAgentSession(session);
+
+		await runSubprocess({
+			...baseOptions,
+			id: "subagent-default-prompt",
+			settings: Settings.isolated({ "composer.enabled": true }),
+		});
+
+		expect(createAgentSessionSpy).toHaveBeenCalledTimes(1);
+		const childOptions = createAgentSessionSpy.mock.calls[0]?.[0];
+		expect(childOptions).toBeDefined();
+		if (!childOptions) throw new Error("Expected child session options");
+		if (!childOptions.settings) throw new Error("Expected child settings");
+		expect(childOptions.settings.get("composer.enabled")).toBe(true);
+		expect(typeof childOptions.systemPrompt).toBe("function");
+		if (typeof childOptions.systemPrompt !== "function") throw new Error("Expected prompt wrapper");
+		expect(childOptions.systemPrompt("CHILD DEFAULT PROMPT")).toContain("CHILD DEFAULT PROMPT");
+	});
+
 	it("aborts after 3 reminders when submit_result is never called", async () => {
 		const prompts: string[] = [];
 		const session = createMockSession(({ text, promptIndex, emit, state }) => {

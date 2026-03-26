@@ -148,6 +148,7 @@ export interface ExecutorOptions {
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
+	inheritedBaseSystemPrompt?: string;
 }
 
 function parseStringifiedJson(value: unknown): unknown {
@@ -427,11 +428,12 @@ function createMCPProxyTools(mcpManager: MCPManager): CustomTool<TSchema>[] {
 	});
 }
 
-function createSubagentSettings(baseSettings: Settings): Settings {
+function createSubagentSettings(baseSettings: Settings, inheritedBaseSystemPrompt?: string): Settings {
 	const snapshot: Partial<Record<SettingPath, unknown>> = {};
 	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		snapshot[key] = baseSettings.get(key);
 	}
+	if (inheritedBaseSystemPrompt) snapshot["composer.enabled"] = false;
 	return Settings.isolated({ ...snapshot, "async.enabled": false });
 }
 
@@ -453,6 +455,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		enableLsp,
 		signal,
 		onProgress,
+		inheritedBaseSystemPrompt,
 	} = options;
 	const startTime = Date.now();
 
@@ -505,7 +508,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
-	const subagentSettings = createSubagentSettings(settings);
+	const subagentSettings = createSubagentSettings(settings, inheritedBaseSystemPrompt);
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
@@ -961,7 +964,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				promptTemplates: options.promptTemplates,
 				systemPrompt: defaultPrompt =>
 					renderPromptTemplate(subagentSystemPromptTemplate, {
-						base: defaultPrompt,
+						base: inheritedBaseSystemPrompt ?? defaultPrompt,
 						agent: agent.systemPrompt,
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,

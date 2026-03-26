@@ -157,6 +157,8 @@ export interface ToolSession {
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Get compact conversation context for subagents (excludes tool results, system prompts) */
 	getCompactContext?: () => string;
+	/** Get the stable base system prompt for subagent inheritance. */
+	getBaseSystemPrompt?: () => string;
 	/** Get cached todo phases for this session. */
 	getTodoPhases?: () => TodoPhase[];
 	/** Replace cached todo phases for this session. */

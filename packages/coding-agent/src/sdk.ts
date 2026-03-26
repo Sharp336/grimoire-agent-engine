@@ -943,6 +943,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		},
 		getPlanModeState: () => session.getPlanModeState(),
 		getCompactContext: () => session.formatCompactContext(),
+		getBaseSystemPrompt: () => session.baseSystemPrompt,
 		getTodoPhases: () => session.getTodoPhases(),
 		setTodoPhases: phases => session.setTodoPhases(phases),
 		isMCPDiscoveryEnabled: () => session.isMCPDiscoveryEnabled(),
