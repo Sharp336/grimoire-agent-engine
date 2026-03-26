@@ -2,9 +2,11 @@
 
 ## [Unreleased]
 
+## [0.5.4] - 2026-03-26
+
 ### Changed
 
-- Synced fork baseline with upstream/main commit `c05cf897` (upstream `v13.15.0`).
+- Freeze context prefix across inner tool rounds for Anthropic prompt cache stability. `transformContext` runs once per user turn; system prompt and tools are session-static. ([`7ef9258`](https://github.com/open-horizon-labs/oh-omp/commit/7ef9258))
 
 ## [0.5.3] - 2026-03-25
 
