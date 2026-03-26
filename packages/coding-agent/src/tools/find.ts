@@ -7,10 +7,8 @@ import { Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Static } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
-import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
-import findDescription from "../prompts/tools/find.md" with { type: "text" };
 import { type TruncationResult, truncateHead } from "../session/streaming-output";
 import {
 	Ellipsis,
@@ -28,6 +26,41 @@ import { normalizePathLikeInput, parseFindPattern, resolveMultiFindPattern, reso
 import { formatCount, formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
+
+// RNA experiment: try RNA file discovery for non-glob patterns
+async function tryRnaFileFind(pattern: string, cwd: string): Promise<string[] | null> {
+	try {
+		const proc = Bun.spawn(
+			[
+				"repo-native-alignment",
+				"search",
+				"--file",
+				pattern,
+				"--compact",
+				"--search-mode",
+				"keyword",
+				"--limit",
+				"100",
+				"--repo",
+				cwd,
+			],
+			{ cwd, stdout: "pipe", stderr: "pipe" },
+		);
+		const stdout = await new Response(proc.stdout).text();
+		const exitCode = await proc.exited;
+		if (exitCode !== 0 || !stdout.trim()) return null;
+		// Extract unique file paths from RNA compact output
+		// Format: "- **kind** `name` `file/path.ts`:L1-L2 ..."
+		const files = new Set<string>();
+		for (const line of stdout.split("\n")) {
+			const match = line.match(/`([^`]+\.\w+)`:\d+/);
+			if (match?.[1]) files.add(match[1]);
+		}
+		return files.size > 0 ? [...files].sort() : null;
+	} catch {
+		return null;
+	}
+}
 
 const findSchema = Type.Object({
 	pattern: Type.String({ description: "Glob pattern, e.g. '*.ts', 'src/**/*.json', 'lib/*.tsx'" }),
@@ -86,7 +119,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 		options?: FindToolOptions,
 	) {
 		this.#customOps = options?.operations;
-		this.description = renderPromptTemplate(findDescription);
+		this.description = ""; // RNA experiment: tool descriptions compiled into system prompt, not sent per-turn;
 	}
 
 	async execute(
@@ -115,6 +148,22 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 			const searchPath = resolveToCwd(multiPattern?.basePath ?? parsedPattern?.basePath ?? ".", this.session.cwd);
 			const scopePath = multiPattern?.scopePath ?? formatScopePath(searchPath);
 
+			// RNA experiment: try RNA file discovery for non-glob patterns
+			if (!hasGlob && this.session.settings.get("rna.enabled")) {
+				const rnaFiles = await tryRnaFileFind(normalizedPattern, this.session.cwd);
+				if (rnaFiles) {
+					const details: FindToolDetails = {
+						scopePath,
+						fileCount: rnaFiles.length,
+						files: rnaFiles,
+						truncated: false,
+					};
+					return toolResult(details)
+						.text(`[RNA file discovery]\n${rnaFiles.join("\n")}`)
+						.done();
+				}
+				// RNA returned nothing, fall through to native find
+			}
 			if (searchPath === "/") {
 				throw new ToolError("Searching from root directory '/' is not allowed");
 			}

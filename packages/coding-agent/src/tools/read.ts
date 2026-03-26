@@ -7,11 +7,9 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { getRemoteDir, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
-import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
 import { computeLineHash } from "../patch/hashline";
-import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import {
 	DEFAULT_MAX_BYTES,
@@ -36,6 +34,7 @@ import { applyListLimit } from "./list-limit";
 import { formatFullOutputReference, formatStyledTruncationWarning, type OutputMeta } from "./output-meta";
 import { resolveReadPath } from "./path-utils";
 import { formatAge, formatBytes, shortenPath, wrapBrackets } from "./render-utils";
+import { compressRnaOutput } from "./rna-format";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -47,6 +46,36 @@ const REMOTE_MOUNT_PREFIX = getRemoteDir() + path.sep;
 
 function isRemoteMountPath(absolutePath: string): boolean {
 	return absolutePath.startsWith(REMOTE_MOUNT_PREFIX);
+}
+
+// RNA experiment: return structural file map from RNA (all symbols in a file)
+async function tryRnaFileMap(filePath: string, cwd: string): Promise<string | null> {
+	try {
+		const relPath = path.relative(cwd, filePath);
+		const proc = Bun.spawn(
+			[
+				"repo-native-alignment",
+				"search",
+				"--file",
+				relPath,
+				"--compact",
+				"--search-mode",
+				"keyword",
+				"--limit",
+				"100",
+				"--repo",
+				cwd,
+			],
+			{ cwd, stdout: "pipe", stderr: "pipe" },
+		);
+		const stdout = await new Response(proc.stdout).text();
+		const exitCode = await proc.exited;
+		if (exitCode !== 0 || !stdout.trim()) return null;
+		const result = compressRnaOutput(stdout);
+		return result;
+	} catch {
+		return null; // RNA not available, fall through to regular read
+	}
 }
 
 function prependLineNumbers(text: string, startNum: number): string {
@@ -375,19 +404,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly #inspectImageEnabled: boolean;
 
 	constructor(private readonly session: ToolSession) {
-		const displayMode = resolveFileDisplayMode(session);
+		const _displayMode = resolveFileDisplayMode(session);
 		this.#autoResizeImages = session.settings.get("images.autoResize");
 		this.#defaultLimit = Math.max(
 			1,
 			Math.min(session.settings.get("read.defaultLimit") ?? DEFAULT_MAX_LINES, DEFAULT_MAX_LINES),
 		);
 		this.#inspectImageEnabled = session.settings.get("inspect_image.enabled");
-		this.description = renderPromptTemplate(readDescription, {
-			DEFAULT_LIMIT: String(this.#defaultLimit),
-			DEFAULT_MAX_LINES: String(DEFAULT_MAX_LINES),
-			IS_HASHLINE_MODE: displayMode.hashLines,
-			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
-		});
+		this.description = ""; // RNA experiment: tool descriptions compiled into system prompt, not sent per-turn;
 	}
 
 	async execute(
@@ -453,6 +477,47 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const mimeType = await detectSupportedImageMimeTypeFromFile(absolutePath);
 		const ext = path.extname(absolutePath).toLowerCase();
+
+		// RNA experiment: whole-file reads of code files go through RNA structural search
+		const CODE_EXTENSIONS = new Set([
+			".ts",
+			".tsx",
+			".js",
+			".jsx",
+			".mjs",
+			".cjs",
+			".py",
+			".rb",
+			".rs",
+			".go",
+			".java",
+			".kt",
+			".scala",
+			".c",
+			".cpp",
+			".cc",
+			".h",
+			".hpp",
+			".cs",
+			".swift",
+			".zig",
+			".lua",
+			".php",
+			".vue",
+			".svelte",
+			".astro",
+			".gd",
+			".gdscript",
+		]);
+		if (!offset && CODE_EXTENSIONS.has(ext) && this.session.settings.get("rna.enabled")) {
+			const rnaResult = await tryRnaFileMap(absolutePath, this.session.cwd);
+			if (rnaResult) {
+				return toolResult({})
+					.text(`[RNA structural view of ${shortenPath(readPath)}]\n${rnaResult}`)
+					.done();
+			}
+			// RNA returned nothing — fall through to regular read
+		}
 
 		// Read the file based on type
 		let content: (TextContent | ImageContent)[];

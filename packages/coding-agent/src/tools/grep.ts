@@ -6,11 +6,9 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
-import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import { computeLineHash } from "../patch/hashline";
-import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead } from "../session/streaming-output";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -25,8 +23,35 @@ import {
 	resolveToCwd,
 } from "./path-utils";
 import { formatCount, formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
+import { compressRnaOutput } from "./rna-format";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
+
+// RNA experiment: identifier pattern heuristic — no regex metacharacters
+const REGEX_META = /[\\.*+?^${}()|[\]]/;
+const looksLikeIdentifier = (pattern: string): boolean => !REGEX_META.test(pattern) && /^[\w.#:/<>@-]+$/.test(pattern);
+
+// RNA experiment: call RNA CLI for structural search, return raw stdout or null
+async function tryRnaSearch(pattern: string, cwd: string, fileFilter?: string): Promise<string | null> {
+	try {
+		const args = ["search", pattern, "--compact", "--search-mode", "keyword", "--limit", "20", "--repo", cwd];
+		if (fileFilter) {
+			args.push("--file", fileFilter);
+		}
+		const proc = Bun.spawn(["repo-native-alignment", ...args], {
+			cwd,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const stdout = await new Response(proc.stdout).text();
+		const exitCode = await proc.exited;
+		if (exitCode !== 0 || !stdout.trim()) return null;
+		const result = compressRnaOutput(stdout, { stripMarkdown: true });
+		return result;
+	} catch {
+		return null; // RNA not available, fall through to ripgrep
+	}
+}
 
 const grepSchema = Type.Object({
 	pattern: Type.String({ description: "Regex pattern to search for" }),
@@ -71,11 +96,8 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 	readonly strict = true;
 
 	constructor(private readonly session: ToolSession) {
-		const displayMode = resolveFileDisplayMode(session);
-		this.description = renderPromptTemplate(grepDescription, {
-			IS_HASHLINE_MODE: displayMode.hashLines,
-			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
-		});
+		const _displayMode = resolveFileDisplayMode(session);
+		this.description = ""; // RNA experiment: tool descriptions compiled into system prompt, not sent per-turn;
 	}
 
 	async execute(
@@ -165,6 +187,21 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 			const effectiveOutputMode = "content";
 			const effectiveLimit = normalizedLimit ?? DEFAULT_MATCH_LIMIT;
 			const internalLimit = Math.min(effectiveLimit * 5, 2000);
+
+			// RNA experiment: try structural search first for identifier-like patterns
+			if (this.session.settings.get("rna.enabled") && looksLikeIdentifier(normalizedPattern)) {
+				const rnaResult = await tryRnaSearch(normalizedPattern, this.session.cwd, searchDir?.trim() || undefined);
+				if (rnaResult) {
+					const details: GrepToolDetails = {
+						scopePath,
+						matchCount: rnaResult.split("\n").filter(l => l.trim()).length,
+						fileCount: 0,
+						files: [],
+						truncated: false,
+					};
+					return toolResult(details).text(`[RNA structural search]\n${rnaResult}`).done();
+				}
+			}
 
 			// Run grep
 			let result: GrepResult;

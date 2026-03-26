@@ -3,11 +3,10 @@ import path from "node:path";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { logger, once, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
-import { renderPromptTemplate } from "../config/prompt-templates";
 import { type Theme, theme } from "../modes/theme/theme";
-import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
+import { compressRnaOutput } from "../tools/rna-format";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
 import {
@@ -71,6 +70,52 @@ import {
 export type { LspServerStatus } from "./client";
 export type { LspToolDetails } from "./types";
 
+// RNA experiment: try RNA CLI for LSP-like navigation queries
+async function tryRnaForLsp(
+	action: string,
+	symbol: string,
+	file: string | undefined,
+	cwd: string,
+): Promise<string | null> {
+	try {
+		const args = ["search", symbol, "--search-mode", "keyword", "--limit", "20", "--repo", cwd];
+
+		// Tailor RNA query based on LSP action
+		switch (action) {
+			case "hover":
+				// Full mode (not compact) to get complete type info
+				break;
+			case "references":
+				// Not a direct RNA equivalent — we'd need the node ID first.
+				// For now, search for the symbol and return what RNA knows.
+				args.push("--compact");
+				break;
+			default:
+				// definition, type_definition, implementation
+				args.push("--compact");
+				break;
+		}
+
+		if (file) {
+			const relPath = path.relative(cwd, path.resolve(cwd, file));
+			args.push("--file", relPath);
+		}
+
+		const proc = Bun.spawn(["repo-native-alignment", ...args], {
+			cwd,
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const stdout = await new Response(proc.stdout).text();
+		const exitCode = await proc.exited;
+		if (exitCode !== 0 || !stdout.trim()) return null;
+
+		const result = compressRnaOutput(stdout, { stripMarkdown: true });
+		return result ? `[RNA ${action}]\n${result}` : null;
+	} catch {
+		return null; // RNA not available, fall through to LSP
+	}
+}
 /** Result from warming up LSP servers */
 export interface LspWarmupResult {
 	servers: Array<{
@@ -955,7 +1000,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 	readonly inline = true;
 
 	constructor(private readonly session: ToolSession) {
-		this.description = renderPromptTemplate(lspDescription);
+		this.description = ""; // RNA experiment: tool descriptions compiled into system prompt, not sent per-turn;
 	}
 
 	static createIf(session: ToolSession): LspTool | null {
@@ -1270,6 +1315,18 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 			let output: string;
 
+			// RNA experiment: try RNA structural search for navigation actions
+			const RNA_ACTIONS = new Set(["definition", "type_definition", "implementation", "hover"]);
+			if (this.session.settings.get("rna.enabled") && symbol && RNA_ACTIONS.has(action)) {
+				const rnaResult = await tryRnaForLsp(action, symbol, file, this.session.cwd);
+				if (rnaResult) {
+					return {
+						content: [{ type: "text", text: rnaResult }],
+						details: { serverName: "rna", action, success: true, request: params },
+					};
+				}
+				// RNA returned nothing, fall through to LSP
+			}
 			switch (action) {
 				// =====================================================================
 				// Standard LSP Operations

@@ -161,17 +161,35 @@ You **MUST NOT** use Python or Bash when a specialized tool exists.
 **Edit tool**: **MUST** use for surgical text changes. Batch transformations: consider alternatives. `sg > sd > python`.
 {{/has}}
 
-{{#has tools "lsp"}}
-### LSP knows; grep guesses
+### RNA-backed code understanding
 
-Semantic questions **MUST** be answered with semantic tools.
-- Where is this thing defined? → `lsp definition`
-- What type does this thing resolve to? → `lsp type_definition`
-- What concrete implementations exist? → `lsp implementation`
-- What uses this thing I'm about to change? → `lsp references`
-- What is this thing? → `lsp hover`
-- Can the server propose fixes/imports/refactors? → `lsp code_actions` (list first, then apply with `apply: true` + `query`)
-{{/has}}
+Your code tools are backed by RNA, a structural code intelligence layer that indexes the entire codebase into a semantic graph with signatures, line ranges, complexity scores, and call edges.
+
+**Tools work transparently — use them normally:**
+- `read("file.ts")` — returns RNA structural view: signatures, types, line ranges, node IDs
+- `read("file.ts", offset=50, limit=100)` — returns actual source with edit anchors
+- `grep("symbolName")` — returns RNA structural results for identifier patterns
+- `grep("log.*Error")` — falls through to text search for regex patterns
+- `lsp(action="definition", symbol="X")` — tries RNA first, falls through to LSP
+- `lsp(action="diagnostics")` — goes straight to LSP (RNA can't do this)
+
+**Use `mcp_rna_server_search` directly for operations the existing tools can't express:**
+
+|Operation|Query|
+|---|---|
+|Call graph: who calls X?|`mcp_rna_server_search(node="<id>", mode="neighbors", direction="incoming", compact=true)`|
+|Dependencies: what does X call?|`mcp_rna_server_search(node="<id>", mode="neighbors", direction="outgoing", compact=true)`|
+|Function body|`mcp_rna_server_search(node="<id>", include_body=true, minify_body=true)`|
+|Impact analysis|`mcp_rna_server_search(node="<id>", mode="impact", hops=3)`|
+|Codebase overview|`mcp_rna_server_repo_map`|
+
+**Node IDs** appear in RNA results (e.g., `packages/foo/bar.ts:fnName:function`). Copy them for follow-up queries.
+
+**Key parameters for direct RNA queries:**
+- `include_markdown=false` — always set for code queries (planning docs flood results otherwise)
+- `compact=true` — signatures only, ~10x fewer tokens
+- `include_body=true` + `minify_body=true` — function body with stripped comments and shortened locals
+- `kind="function"` — filter by symbol kind. Also: `trait`, `type_alias`, `struct`, `enum`, `module`
 
 {{#ifAny (includes tools "ast_grep") (includes tools "ast_edit")}}
 ### AST tools for structural code work
@@ -179,7 +197,7 @@ Semantic questions **MUST** be answered with semantic tools.
 When AST tools are available, syntax-aware operations take priority over text hacks.
 {{#has tools "ast_grep"}}- Use `ast_grep` for structural discovery (call shapes, declarations, syntax patterns) before text grep when code structure matters{{/has}}
 {{#has tools "ast_edit"}}- Use `ast_edit` for structural codemods/replacements; do not use bash `sed`/`perl`/`awk` for syntax-level rewrites{{/has}}
-- Use `grep` for plain text/regex lookup only when AST shape is irrelevant
+- For text patterns in non-code files, use `read` + manual inspection
 
 #### Pattern syntax
 
@@ -216,13 +234,17 @@ Commands **MUST** match the host shell. linux/bash, macos/zsh: Unix. windows/cmd
 Remote filesystems: `~/.oh-omp/remote/<hostname>/`. Windows paths need colons: `C:/Users/…`
 {{/has}}
 
-{{#ifAny (includes tools "grep") (includes tools "find")}}
-### Search before you read
+{{#ifAny (includes tools "read") (includes tools "find")}}
+### Structure before source
 
 You **MUST NOT** open a file hoping. Hope is not a strategy.
-{{#has tools "find"}}- Unknown territory → `find` to map it{{/has}}
-{{#has tools "grep"}}- Known territory → `grep` to locate target{{/has}}
-{{#has tools "read"}}- Known location → `read` with offset/limit, not whole file{{/has}}
+- Codebase overview → `mcp_rna_server_repo_map`
+- What's in a file → `read("file.ts")` (returns RNA structural view)
+- Find a symbol → `grep("symbolName")` (returns RNA structural results)
+- Call graph / dependencies → `mcp_rna_server_search` with `mode: "neighbors"`
+- Function body → `mcp_rna_server_search` with `node: "<id>", include_body: true, minify_body: true`
+{{#has tools "find"}}- File discovery by glob → `find` to map it{{/has}}
+- Pre-edit source → `read("file.ts", offset=<start>, limit=<count>)` — only the lines you need to edit
 {{/ifAny}}
 
 {{SECTION_SEPERATOR "Rules"}}
