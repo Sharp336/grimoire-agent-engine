@@ -20,11 +20,15 @@ const hasDisplay = process.platform !== "linux" || Boolean(process.env.DISPLAY |
 const PREFERRED_WAYLAND_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"] as const;
 
 function runWaylandClipboardCommand(args: string[]): Uint8Array | null {
-	const result = Bun.spawnSync(["wl-paste", ...args], { stdout: "pipe", stderr: "pipe" });
-	if (result.exitCode !== 0 || result.stdout.length === 0) {
+	try {
+		const result = Bun.spawnSync(["wl-paste", ...args], { stdout: "pipe", stderr: "pipe" });
+		if (result.exitCode !== 0 || result.stdout.length === 0) {
+			return null;
+		}
+		return result.stdout;
+	} catch {
 		return null;
 	}
-	return result.stdout;
 }
 
 async function tryReadWaylandClipboardImage(): Promise<ClipboardImage | null> {
