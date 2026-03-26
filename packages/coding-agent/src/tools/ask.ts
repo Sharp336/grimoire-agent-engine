@@ -738,7 +738,8 @@ export const askToolRenderer = {
 			return new Text(fallback, 0, 0);
 		}
 
-		const hasSelection = details.customInput !== undefined || (details.selectedOptions && details.selectedOptions.length > 0);
+		const hasSelection =
+			details.customInput !== undefined || (details.selectedOptions && details.selectedOptions.length > 0);
 		const header = renderStatusLine({ icon: hasSelection ? "success" : "warning", title: "Ask" }, uiTheme);
 		const container = new Container();
 		container.addChild(new Text(header, 0, 0));
