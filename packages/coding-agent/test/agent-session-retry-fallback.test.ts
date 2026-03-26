@@ -361,7 +361,7 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
-		expect(session.thinkingLevel).toBe(Effort.High);
+		expect(session.thinkingLevel).toBeUndefined();
 
 		session.setThinkingLevel(Effort.Low);
 		await Bun.sleep(240);

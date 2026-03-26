@@ -4725,7 +4725,7 @@ export class AgentSession {
 		let cooldownMs = retryAfterMs;
 		if (!cooldownMs || cooldownMs <= 0) {
 			const reason = parseRateLimitReason(errorMessage);
-			cooldownMs = reason ? calculateRateLimitBackoffMs(reason) : 5 * 60 * 1000;
+			cooldownMs = reason === "UNKNOWN" ? 5 * 60 * 1000 : calculateRateLimitBackoffMs(reason);
 		}
 		this.#modelRegistry.suppressSelector(currentSelector, Date.now() + cooldownMs);
 	}
@@ -4791,9 +4791,7 @@ export class AgentSession {
 		this.#setModelWithProviderSessionReset(candidate);
 		this.sessionManager.appendModelChange(`${candidate.provider}/${candidate.id}`, "temporary");
 		this.settings.getStorage()?.recordModelUsage(`${candidate.provider}/${candidate.id}`);
-		if (selector.thinkingLevel !== undefined) {
-			this.setThinkingLevel(selector.thinkingLevel);
-		}
+		this.setThinkingLevel(nextThinkingLevel);
 		if (!this.#activeRetryFallback) {
 			this.#activeRetryFallback = {
 				role,
