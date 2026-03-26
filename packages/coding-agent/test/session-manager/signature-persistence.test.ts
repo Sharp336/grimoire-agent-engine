@@ -132,4 +132,66 @@ describe("SessionManager signature persistence", () => {
 			],
 		});
 	});
+
+	it("rehydrates assistant replay metadata in memory without rewriting the session file", async () => {
+		using tempDir = TempDir.createSync("@pi-session-rehydrate-persistence-");
+		const session = SessionManager.create(tempDir.path(), tempDir.path());
+		const providerPayload = {
+			type: "openaiResponsesHistory" as const,
+			provider: "openai",
+			items: [
+				{ type: "reasoning", encrypted_content: "enc_stale" },
+				{
+					type: "message",
+					role: "assistant",
+					status: "completed",
+					id: "msg_stale_snapshot",
+					content: [{ type: "output_text", text: "done" }],
+				},
+			],
+		};
+
+		session.appendMessage({ role: "user", content: "continue", timestamp: 1 });
+		session.appendMessage({
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "reasoning", thinkingSignature: JSON.stringify(providerPayload.items[0]) },
+				{ type: "text", text: "done" },
+			],
+			api: "openai-responses",
+			provider: "openai",
+			model: "gpt-5-mini",
+			usage: {
+				input: 1,
+				output: 1,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 2,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			providerPayload,
+			timestamp: 2,
+		} satisfies AssistantMessage);
+		await session.flush();
+
+		const sessionFile = session.getSessionFile();
+		if (!sessionFile) throw new Error("Expected persisted session file");
+		const persistedBefore = await fs.readFile(sessionFile, "utf8");
+		const initialMtimeMs = (await fs.stat(sessionFile)).mtimeMs;
+		await session.close();
+
+		const reloaded = await SessionManager.open(sessionFile);
+		const assistant = getAssistantMessage(reloaded);
+
+		expect(assistant.providerPayload).toEqual(providerPayload);
+		expect(assistant.content[0]).toMatchObject({
+			type: "thinking",
+			thinking: "reasoning",
+			thinkingSignature: undefined,
+		});
+		expect(await fs.readFile(sessionFile, "utf8")).toBe(persistedBefore);
+		expect((await fs.stat(sessionFile)).mtimeMs).toBe(initialMtimeMs);
+		await reloaded.close();
+	});
 });

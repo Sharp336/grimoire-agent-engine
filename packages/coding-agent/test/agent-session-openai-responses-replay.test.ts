@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, mock, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, mock, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -157,8 +157,8 @@ function findRuntimeAssistant(session: AgentSession, text: string): AssistantMes
 	return message;
 }
 
-function expectAssistantReplayMetadataStripped(message: AssistantMessage): void {
-	expect(message.providerPayload).toBeUndefined();
+function expectAssistantReplayMetadataSanitized(message: AssistantMessage): void {
+	expect(message.providerPayload).toEqual(createStaleAssistantHistoryPayload(message.provider));
 
 	const thinkingBlock = message.content.find(block => block.type === "thinking");
 	if (!thinkingBlock || thinkingBlock.type !== "thinking") {
@@ -237,6 +237,10 @@ async function createSessionHarness(
 	return { session, authStorage };
 }
 
+afterAll(() => {
+	mock.restore();
+});
+
 describe("AgentSession OpenAI Responses replay boundaries", () => {
 	const sessions: AgentSession[] = [];
 	const authStorages: AuthStorage[] = [];
@@ -289,10 +293,10 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		if (persistedAssistant.role !== "assistant") {
 			throw new Error("Expected persisted assistant message");
 		}
-		expectAssistantReplayMetadataStripped(persistedAssistant);
+		expectAssistantReplayMetadataSanitized(persistedAssistant);
 
 		const runtimeAssistant = findRuntimeAssistant(session, assistantText);
-		expectAssistantReplayMetadataStripped(runtimeAssistant);
+		expectAssistantReplayMetadataSanitized(runtimeAssistant);
 		const runtimeUser = session.messages.find(
 			message => message.role === "user" && getTextContent(message) === "Preserved summary",
 		);
@@ -322,7 +326,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		if (persistedAssistant.role !== "assistant") {
 			throw new Error("Expected persisted codex assistant message");
 		}
-		expectAssistantReplayMetadataStripped(persistedAssistant);
+		expectAssistantReplayMetadataSanitized(persistedAssistant);
 		await openedSessionManager.close();
 	});
 
@@ -348,7 +352,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		if (forkedAssistant.role !== "assistant") {
 			throw new Error("Expected forked assistant message");
 		}
-		expectAssistantReplayMetadataStripped(forkedAssistant);
+		expectAssistantReplayMetadataSanitized(forkedAssistant);
 
 		const forkedUser = findPersistedMessageEntry(forkedSessionManager, "user", "Fork summary").message;
 		if (forkedUser.role !== "user") {
@@ -391,13 +395,13 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 
 		expect(closeSpy).not.toHaveBeenCalled();
 		expect(session.providerSessionState.size).toBe(1);
-		expectAssistantReplayMetadataStripped(findRuntimeAssistant(session, assistantText));
+		expectAssistantReplayMetadataSanitized(findRuntimeAssistant(session, assistantText));
 
 		const persistedAssistant = findPersistedMessageEntry(session.sessionManager, "assistant", assistantText).message;
 		if (persistedAssistant.role !== "assistant") {
 			throw new Error("Expected reloaded assistant message");
 		}
-		expectAssistantReplayMetadataStripped(persistedAssistant);
+		expectAssistantReplayMetadataSanitized(persistedAssistant);
 	});
 
 	it("keeps provider session state when same-file reload only changes message metadata", async () => {
@@ -446,7 +450,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(session.providerSessionState.size).toBe(1);
 		expect(session.model?.provider).toBe("openai-codex");
 		expect(session.model?.id).toBe("gpt-5.2-codex");
-		expectAssistantReplayMetadataStripped(findRuntimeAssistant(session, assistantText));
+		expectAssistantReplayMetadataSanitized(findRuntimeAssistant(session, assistantText));
 	});
 
 	it("captures session-manager state when custom message details are proxy-backed", async () => {
@@ -584,7 +588,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(session.model?.id).toBe("gpt-5-mini");
 		expect(closeSpy).toHaveBeenCalledTimes(1);
 		expect(session.providerSessionState.size).toBe(0);
-		expectAssistantReplayMetadataStripped(findRuntimeAssistant(session, assistantText));
+		expectAssistantReplayMetadataSanitized(findRuntimeAssistant(session, assistantText));
 	});
 
 	it("resets plain openai-responses provider state when same-file reload restores a different saved model", async () => {
@@ -617,10 +621,10 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(session.model?.id).toBe("gpt-5.4-mini");
 		expect(closeSpy).toHaveBeenCalledTimes(1);
 		expect(session.providerSessionState.size).toBe(0);
-		expectAssistantReplayMetadataStripped(findRuntimeAssistant(session, assistantText));
+		expectAssistantReplayMetadataSanitized(findRuntimeAssistant(session, assistantText));
 	});
 
-	it("preserves provider session state when switching sessions fails before load completes", async () => {
+	it("switches sessions without requiring write access during load-time sanitization", async () => {
 		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-issue-505-switch-fail-${Snowflake.next()}-`));
 		tempDirs.push(tempDir);
 		const currentSessionManager = SessionManager.create(tempDir, tempDir);
@@ -628,8 +632,6 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		sessions.push(session);
 		authStorages.push(authStorage);
 
-		const originalSessionFile = session.sessionFile;
-		expect(originalSessionFile).toBeDefined();
 		const { sessionFile } = await createPersistedSession(tempDir, sessionManager => {
 			sessionManager.appendMessage(createStaleAssistantMessage("Unreadable assistant snapshot"));
 		});
@@ -641,16 +643,16 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		session.providerSessionState.set("openai-responses:openai", { close: closeSpy } satisfies ProviderSessionState);
 
 		try {
-			await expect(session.switchSession(sessionFile)).rejects.toThrow();
+			await expect(session.switchSession(sessionFile)).resolves.toBe(true);
 		} finally {
 			fs.chmodSync(sessionDir, originalMode);
 		}
 
-		expect(closeSpy).not.toHaveBeenCalled();
-		expect(session.providerSessionState.get("openai-responses:openai")).toBeDefined();
-		expect(session.providerSessionState.size).toBe(1);
+		expect(closeSpy).toHaveBeenCalledTimes(1);
+		expect(session.providerSessionState.size).toBe(0);
 		expect(session.sessionManager).toBe(currentSessionManager);
-		expect(session.sessionFile).toBe(originalSessionFile);
+		expect(session.sessionFile).toBe(sessionFile);
+		expectAssistantReplayMetadataSanitized(findRuntimeAssistant(session, "Unreadable assistant snapshot"));
 	});
 
 	it("clears provider session state and sanitizes loaded assistant metadata when switching sessions", async () => {
@@ -687,13 +689,13 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		if (persistedAssistant.role !== "assistant") {
 			throw new Error("Expected persisted assistant message after switch");
 		}
-		expectAssistantReplayMetadataStripped(persistedAssistant);
+		expectAssistantReplayMetadataSanitized(persistedAssistant);
 		const persistedUser = findPersistedMessageEntry(session.sessionManager, "user", "Older summary").message;
 		if (persistedUser.role !== "user") {
 			throw new Error("Expected switched user message");
 		}
 		expect(persistedUser.providerPayload).toEqual(preservedUserPayload);
-		expectAssistantReplayMetadataStripped(findRuntimeAssistant(session, assistantText));
+		expectAssistantReplayMetadataSanitized(findRuntimeAssistant(session, assistantText));
 	});
 
 	it("does not reintroduce stale assistant replay metadata when navigating to another branch after load sanitization", async () => {
@@ -732,7 +734,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 
 		const navigation = await session.navigateTree(treeTargetId, { summarize: false });
 		expect(navigation.cancelled).toBe(false);
-		expectAssistantReplayMetadataStripped(findRuntimeAssistant(session, branchAssistantText));
+		expectAssistantReplayMetadataSanitized(findRuntimeAssistant(session, branchAssistantText));
 
 		const persistedAssistant = findPersistedMessageEntry(
 			session.sessionManager,
@@ -742,7 +744,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		if (persistedAssistant.role !== "assistant") {
 			throw new Error("Expected archived branch assistant entry");
 		}
-		expectAssistantReplayMetadataStripped(persistedAssistant);
+		expectAssistantReplayMetadataSanitized(persistedAssistant);
 	});
 
 	it("resets provider session state when starting a brand-new session", async () => {

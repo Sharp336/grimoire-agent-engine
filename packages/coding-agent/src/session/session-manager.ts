@@ -1488,12 +1488,9 @@ export class SessionManager {
 			this.#needsFullRewriteOnNextPersist = migrateToCurrentVersion(this.#fileEntries);
 
 			await resolveBlobRefsInEntries(this.#fileEntries, this.#blobStore);
-			const didSanitizeReplayMetadata = this.sanitizeLoadedOpenAIResponsesReplayMetadata();
+			this.sanitizeLoadedOpenAIResponsesReplayMetadata();
 
 			this.#buildIndex();
-			if (didSanitizeReplayMetadata) {
-				await this.#rewriteFile();
-			}
 			this.#flushed = true;
 		} else {
 			const explicitPath = this.#sessionFile;

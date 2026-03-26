@@ -219,17 +219,21 @@ export function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: Assis
 		return message;
 	}
 
+	let didSanitize = false;
 	const sanitizedContent = message.content.map(block => {
-		if (block.type !== "thinking") {
+		if (block.type !== "thinking" || block.thinkingSignature === undefined) {
 			return block;
 		}
 
+		didSanitize = true;
 		return { ...block, thinkingSignature: undefined };
 	});
 
-	const sanitizedMessage: AssistantMessage = { ...message, content: sanitizedContent };
-	delete sanitizedMessage.providerPayload;
-	return sanitizedMessage;
+	if (!didSanitize) {
+		return message;
+	}
+
+	return { ...message, content: sanitizedContent };
 }
 
 /** Convert CustomMessageEntry to AgentMessage format */
