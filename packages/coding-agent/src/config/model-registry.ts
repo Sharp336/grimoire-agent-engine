@@ -617,6 +617,7 @@ export class ModelRegistry {
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
+	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
 
@@ -1666,6 +1667,26 @@ export class ModelRegistry {
 				};
 			});
 		}
+	}
+
+	/**
+	 * Suppress a specific model selector (e.g., "provider/id") until a specific timestamp.
+	 */
+	suppressSelector(selector: string, untilMs: number): void {
+		this.#suppressedSelectors.set(selector, untilMs);
+	}
+
+	/**
+	 * Check if a model selector is currently suppressed due to rate limits.
+	 */
+	isSelectorSuppressed(selector: string): boolean {
+		const suppressedUntil = this.#suppressedSelectors.get(selector);
+		if (!suppressedUntil) return false;
+		if (suppressedUntil <= Date.now()) {
+			this.#suppressedSelectors.delete(selector);
+			return false;
+		}
+		return true;
 	}
 }
 

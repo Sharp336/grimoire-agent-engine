@@ -503,6 +503,12 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	"retry.baseDelayMs": { type: "number", default: 2000 },
+	"retry.fallbackChains": { type: "record", default: {} as Record<string, string[]> },
+	"retry.fallbackRevertPolicy": {
+		type: "enum",
+		values: ["cooldown-expiry", "never"] as const,
+		default: "cooldown-expiry",
+	},
 
 	// ────────────────────────────────────────────────────────────────────────
 	// Interaction
