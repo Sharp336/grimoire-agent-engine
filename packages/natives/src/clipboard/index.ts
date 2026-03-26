@@ -7,6 +7,7 @@
 
 import { execSync } from "node:child_process";
 
+import { ImageFormat, PhotonImage } from "../image";
 import { native } from "../native";
 
 import type { ClipboardImage } from "./types";
@@ -15,6 +16,51 @@ export type { ClipboardImage } from "./types";
 
 /** Whether a display server is available on Linux. */
 const hasDisplay = process.platform !== "linux" || Boolean(process.env.DISPLAY || process.env.WAYLAND_DISPLAY);
+
+const PREFERRED_WAYLAND_IMAGE_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif", "image/bmp"] as const;
+
+function runWaylandClipboardCommand(args: string[]): Uint8Array | null {
+	const result = Bun.spawnSync(["wl-paste", ...args], { stdout: "pipe", stderr: "pipe" });
+	if (result.exitCode !== 0 || result.stdout.length === 0) {
+		return null;
+	}
+	return result.stdout;
+}
+
+async function tryReadWaylandClipboardImage(): Promise<ClipboardImage | null> {
+	if (process.platform !== "linux" || !process.env.WAYLAND_DISPLAY) {
+		return null;
+	}
+
+	const typeBytes = runWaylandClipboardCommand(["--list-types"]);
+	if (!typeBytes) {
+		return null;
+	}
+
+	const types = Buffer.from(typeBytes)
+		.toString("utf-8")
+		.split(/\r?\n/)
+		.map(type => type.trim())
+		.filter(Boolean);
+	const imageType =
+		PREFERRED_WAYLAND_IMAGE_TYPES.find(type => types.includes(type)) ?? types.find(type => type.startsWith("image/"));
+	if (!imageType) {
+		return null;
+	}
+
+	const imageBytes = runWaylandClipboardCommand(["--type", imageType, "--no-newline"]);
+	if (!imageBytes) {
+		return null;
+	}
+
+	try {
+		const image = await PhotonImage.parse(imageBytes);
+		const pngBytes = await image.encode(ImageFormat.PNG, 100);
+		return { data: pngBytes, mimeType: "image/png" };
+	} catch {
+		return null;
+	}
+}
 
 /**
  * Copy text to the system clipboard.
@@ -88,5 +134,9 @@ export async function readImageFromClipboard(): Promise<ClipboardImage | null> {
 		return null;
 	}
 
-	return native.readImageFromClipboard();
+	const nativeImage = await native.readImageFromClipboard();
+	if (nativeImage) {
+		return nativeImage;
+	}
+	return tryReadWaylandClipboardImage();
 }
