@@ -196,6 +196,14 @@ async function runLoop(
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
 		let hasMoreToolCalls = true;
+		// Hydrate/assemble context ONCE per user turn.
+		// The transformed prefix is frozen for all inner rounds so the byte
+		// prefix stays identical across tool-followup model calls, enabling
+		// Anthropic's prompt cache to hit on every round after the first.
+		const transformedPrefix = config.transformContext
+			? await config.transformContext(currentContext.messages, signal)
+			: [...currentContext.messages];
+		const snapshotLength = currentContext.messages.length;
 
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
@@ -221,8 +229,20 @@ async function runLoop(
 				await config.syncContextBeforeModelCall(currentContext);
 			}
 
+			// Build the model's view: frozen transformed prefix + tail messages
+			// appended since the transform ran (tool results, steering messages).
+			const tail = currentContext.messages.slice(snapshotLength);
+			const preTransformed = tail.length > 0 ? [...transformedPrefix, ...tail] : transformedPrefix;
+
 			// Stream assistant response
-			const message = await streamAssistantResponse(currentContext, config, signal, stream, streamFn);
+			const message = await streamAssistantResponse(
+				currentContext,
+				config,
+				signal,
+				stream,
+				streamFn,
+				preTransformed,
+			);
 			newMessages.push(message);
 			let steeringMessagesFromExecution: AgentMessage[] | undefined;
 
@@ -295,6 +315,10 @@ async function runLoop(
 /**
  * Stream an assistant response from the LLM.
  * This is where AgentMessage[] gets transformed to Message[] for the LLM.
+ *
+ * When `preTransformed` is supplied the expensive `transformContext` step is
+ * skipped — the caller has already run it once for this turn and is passing the
+ * frozen prefix plus any tail messages appended since.
  */
 async function streamAssistantResponse(
 	context: AgentContext,
@@ -302,12 +326,13 @@ async function streamAssistantResponse(
 	signal: AbortSignal | undefined,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	streamFn?: StreamFn,
+	preTransformed?: AgentMessage[],
 ): Promise<AssistantMessage> {
-	// Apply context transform if configured (AgentMessage[] → AgentMessage[])
-	let messages = context.messages;
-	if (config.transformContext) {
-		messages = await config.transformContext(messages, signal);
-	}
+	// Use pre-transformed messages when available (once-per-turn freeze),
+	// otherwise apply context transform (backward-compat / first round).
+	const messages =
+		preTransformed ??
+		(config.transformContext ? await config.transformContext(context.messages, signal) : context.messages);
 
 	// Convert to LLM-compatible messages (AgentMessage[] → Message[])
 	const llmMessages = await config.convertToLlm(messages);

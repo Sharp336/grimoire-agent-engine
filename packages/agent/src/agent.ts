@@ -751,12 +751,14 @@ export class Agent {
 			onPayload: this.#onPayload,
 			getApiKey: this.getApiKey,
 			getToolContext: this.#getToolContext,
-			syncContextBeforeModelCall: async context => {
+			// Yield to the event loop so pending UI events flush between inner rounds.
+			// System prompt and tools are session-static — no per-round re-assignment.
+			// Removing the prompt/tool overwrite keeps the byte prefix stable for
+			// Anthropic's prompt cache across tool-followup rounds within a turn.
+			syncContextBeforeModelCall: async () => {
 				if (this.#listeners.size > 0) {
 					await Bun.sleep(0);
 				}
-				context.systemPrompt = this.#state.systemPrompt;
-				context.tools = this.#state.tools;
 			},
 			cursorExecHandlers: this.#cursorExecHandlers,
 			cursorOnToolResult,
