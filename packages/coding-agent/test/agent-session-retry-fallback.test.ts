@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { type AssistantMessage, getBundledModel, type Model } from "@oh-my-pi/pi-ai";
+import { Effort, type AssistantMessage, getBundledModel, type Model } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -290,5 +290,100 @@ describe("AgentSession retry fallback", () => {
 		]);
 		expect(session.model?.provider).toBe(primaryModel.provider);
 		expect(session.model?.id).toBe(primaryModel.id);
+	});
+
+	it("preserves thinking on bare fallback selectors and does not overwrite user thinking on restore", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		let primaryAttempts = 0;
+
+		const agent = new Agent({
+			getApiKey: provider => `${provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: "Test",
+				tools: [],
+				messages: [],
+			},
+			streamFn: model => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (model.provider === primaryModel.provider && model.id === primaryModel.id && primaryAttempts === 0) {
+						primaryAttempts += 1;
+						const message = createAssistantMessage(model, {
+							stopReason: "error",
+							errorMessage: "rate limit exceeded retry-after-ms=200",
+						});
+						stream.push({ type: "start", partial: message });
+						stream.push({ type: "error", reason: "error", error: message });
+						return;
+					}
+					const message = createAssistantMessage(model, {
+						text: `ok:${model.provider}/${model.id}`,
+						stopReason: "stop",
+					});
+					stream.push({ type: "start", partial: createAssistantMessage(model, { text: "", stopReason: "stop" }) });
+					stream.push({ type: "done", reason: "stop", message });
+				});
+				return stream;
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}:high`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+			thinkingLevel: Effort.High,
+		});
+
+		await session.prompt("First prompt triggers bare-selector fallback");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+		expect(session.thinkingLevel).toBe(Effort.High);
+
+		session.setThinkingLevel(Effort.Low);
+		await Bun.sleep(240);
+		await session.prompt("Second prompt should restore model but preserve user thinking change");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+			`${primaryModel.provider}/${primaryModel.id}`,
+		]);
+		expect(session.model?.provider).toBe(primaryModel.provider);
+		expect(session.model?.id).toBe(primaryModel.id);
+		expect(session.thinkingLevel).toBeUndefined();
+	});
+
+	it("normalizes suppression by base selector and clears it on model refresh", async () => {
+		const future = Date.now() + 60_000;
+		modelRegistry.suppressSelector("openai/gpt-4o:high", future);
+		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o")).toBe(true);
+		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o:low")).toBe(true);
+
+		await modelRegistry.refresh("offline");
+		expect(modelRegistry.isSelectorSuppressed("openai/gpt-4o")).toBe(false);
 	});
 });

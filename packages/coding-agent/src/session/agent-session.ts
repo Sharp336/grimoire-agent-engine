@@ -333,6 +333,8 @@ interface RetryFallbackSelector {
 interface ActiveRetryFallbackState {
 	role: string;
 	originalSelector: string;
+	originalThinkingLevel: ThinkingLevel | undefined;
+	lastAppliedFallbackThinkingLevel: ThinkingLevel | undefined;
 }
 
 function parseRetryFallbackSelector(selector: string): RetryFallbackSelector | undefined {
@@ -519,6 +521,7 @@ export class AgentSession {
 		this.#customCommands = config.customCommands ?? [];
 		this.#skillsSettings = config.skillsSettings;
 		this.#modelRegistry = config.modelRegistry;
+		this.#validateRetryFallbackChains();
 		this.#toolRegistry = config.toolRegistry ?? new Map();
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#onPayload = config.onPayload;
@@ -4661,9 +4664,29 @@ export class AgentSession {
 	}
 
 	#validateRetryFallbackChains(): void {
-		for (const [role, chain] of Object.entries(this.#getRetryFallbackChains())) {
-			if (!Array.isArray(chain)) continue;
+		const configuredChains = this.settings.get("retry.fallbackChains");
+		if (configuredChains === undefined) return;
+		if (!configuredChains || typeof configuredChains !== "object" || Array.isArray(configuredChains)) {
+			const msg = "retry.fallbackChains must be a mapping of role names to selector arrays.";
+			logger.warn(msg);
+			this.configWarnings.push(msg);
+			return;
+		}
+
+		for (const [role, chain] of Object.entries(configuredChains)) {
+			if (!Array.isArray(chain)) {
+				const msg = `Fallback chain for role '${role}' must be an array of selector strings.`;
+				logger.warn(msg);
+				this.configWarnings.push(msg);
+				continue;
+			}
 			for (const selectorStr of chain) {
+				if (typeof selectorStr !== "string") {
+					const msg = `Fallback chain for role '${role}' contains a non-string selector.`;
+					logger.warn(msg);
+					this.configWarnings.push(msg);
+					continue;
+				}
 				const parsed = parseRetryFallbackSelector(selectorStr);
 				if (!parsed) {
 					const msg = `Invalid fallback selector format in role '${role}': ${selectorStr}`;
@@ -4762,11 +4785,25 @@ export class AgentSession {
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
 		}
 
+		const currentThinkingLevel = this.thinkingLevel;
+		const nextThinkingLevel = selector.thinkingLevel ?? currentThinkingLevel;
+
 		this.#setModelWithProviderSessionReset(candidate);
 		this.sessionManager.appendModelChange(`${candidate.provider}/${candidate.id}`, "temporary");
 		this.settings.getStorage()?.recordModelUsage(`${candidate.provider}/${candidate.id}`);
-		this.setThinkingLevel(selector.thinkingLevel);
-		this.#activeRetryFallback ??= { role, originalSelector: currentSelector };
+		if (selector.thinkingLevel !== undefined) {
+			this.setThinkingLevel(selector.thinkingLevel);
+		}
+		if (!this.#activeRetryFallback) {
+			this.#activeRetryFallback = {
+				role,
+				originalSelector: currentSelector,
+				originalThinkingLevel: currentThinkingLevel,
+				lastAppliedFallbackThinkingLevel: nextThinkingLevel,
+			};
+		} else {
+			this.#activeRetryFallback.lastAppliedFallbackThinkingLevel = nextThinkingLevel;
+		}
 		await this.#emitSessionEvent({
 			type: "retry_fallback_applied",
 			from: currentSelector,
@@ -4796,7 +4833,12 @@ export class AgentSession {
 		if (!this.#activeRetryFallback) return;
 		if (this.#getRetryFallbackRevertPolicy() !== "cooldown-expiry") return;
 
-		const originalSelector = parseRetryFallbackSelector(this.#activeRetryFallback.originalSelector);
+		const {
+			originalSelector: originalSelectorRaw,
+			originalThinkingLevel,
+			lastAppliedFallbackThinkingLevel,
+		} = this.#activeRetryFallback;
+		const originalSelector = parseRetryFallbackSelector(originalSelectorRaw);
 		if (!originalSelector) {
 			this.#clearActiveRetryFallback();
 			return;
@@ -4818,10 +4860,13 @@ export class AgentSession {
 		const apiKey = await this.#modelRegistry.getApiKey(primaryModel, this.sessionId);
 		if (!apiKey) return;
 
+		const currentThinkingLevel = this.thinkingLevel;
 		this.#setModelWithProviderSessionReset(primaryModel);
 		this.sessionManager.appendModelChange(`${primaryModel.provider}/${primaryModel.id}`, "temporary");
 		this.settings.getStorage()?.recordModelUsage(`${primaryModel.provider}/${primaryModel.id}`);
-		this.setThinkingLevel(originalSelector.thinkingLevel);
+		if (currentThinkingLevel === lastAppliedFallbackThinkingLevel) {
+			this.setThinkingLevel(originalThinkingLevel);
+		}
 		this.#clearActiveRetryFallback();
 	}
 

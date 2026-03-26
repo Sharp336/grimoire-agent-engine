@@ -508,6 +508,12 @@ export const SETTINGS_SCHEMA = {
 		type: "enum",
 		values: ["cooldown-expiry", "never"] as const,
 		default: "cooldown-expiry",
+		ui: {
+			tab: "model",
+			label: "Fallback Revert Policy",
+			description: "When to return to the primary model after a fallback",
+			submenu: true,
+		},
 	},
 
 	// ────────────────────────────────────────────────────────────────────────

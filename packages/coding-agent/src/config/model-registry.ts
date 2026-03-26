@@ -603,6 +603,17 @@ function buildCustomModel(
 	} as Model<Api>);
 }
 
+function normalizeSuppressedSelector(selector: string): string {
+	const trimmed = selector.trim();
+	if (!trimmed) return trimmed;
+	const lastSlash = trimmed.lastIndexOf("/");
+	const lastColon = trimmed.lastIndexOf(":");
+	if (lastColon > lastSlash) {
+		return trimmed.slice(0, lastColon);
+	}
+	return trimmed;
+}
+
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
@@ -647,6 +658,7 @@ export class ModelRegistry {
 	 */
 	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
 		this.#reloadStaticModels();
+		this.#suppressedSelectors.clear();
 		await this.#refreshRuntimeDiscoveries(strategy);
 	}
 
@@ -670,6 +682,7 @@ export class ModelRegistry {
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
 		this.#reloadStaticModels();
+		this.#suppressedSelectors.clear();
 		await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
 	}
 
@@ -1673,17 +1686,18 @@ export class ModelRegistry {
 	 * Suppress a specific model selector (e.g., "provider/id") until a specific timestamp.
 	 */
 	suppressSelector(selector: string, untilMs: number): void {
-		this.#suppressedSelectors.set(selector, untilMs);
+		this.#suppressedSelectors.set(normalizeSuppressedSelector(selector), untilMs);
 	}
 
 	/**
 	 * Check if a model selector is currently suppressed due to rate limits.
 	 */
 	isSelectorSuppressed(selector: string): boolean {
-		const suppressedUntil = this.#suppressedSelectors.get(selector);
+		const normalizedSelector = normalizeSuppressedSelector(selector);
+		const suppressedUntil = this.#suppressedSelectors.get(normalizedSelector);
 		if (!suppressedUntil) return false;
 		if (suppressedUntil <= Date.now()) {
-			this.#suppressedSelectors.delete(selector);
+			this.#suppressedSelectors.delete(normalizedSelector);
 			return false;
 		}
 		return true;
