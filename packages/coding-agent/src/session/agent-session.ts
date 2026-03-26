@@ -225,6 +225,8 @@ export interface AgentSessionConfig {
 	mcpDiscoveryEnabled?: boolean;
 	/** MCP tool names to activate for the current session when discovery mode is enabled. */
 	initialSelectedMCPToolNames?: string[];
+	/** Whether constructor-provided MCP defaults should be persisted immediately. */
+	persistInitialMCPToolSelection?: boolean;
 	/** MCP server names whose tools should seed discovery-mode sessions whenever those servers are connected. */
 	defaultSelectedMCPServerNames?: string[];
 	/** MCP tool names that should seed brand-new sessions created from this AgentSession. */
@@ -364,6 +366,7 @@ export class AgentSession {
 	#followUpMessages: string[] = [];
 	/** Messages queued to be included with the next user prompt as context ("asides"). */
 	#pendingNextTurnMessages: CustomMessage[] = [];
+	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#planModeState: PlanModeState | undefined;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
@@ -484,8 +487,11 @@ export class AgentSession {
 		this.#pruneSelectedMCPToolNames();
 		const persistedSelectedMCPToolNames = this.sessionManager.buildSessionContext().selectedMCPToolNames;
 		const currentSelectedMCPToolNames = this.getSelectedMCPToolNames();
+		const persistInitialMCPToolSelection =
+			config.persistInitialMCPToolSelection ?? this.sessionManager.getBranch().length === 0;
 		if (
 			this.#mcpDiscoveryEnabled &&
+			persistInitialMCPToolSelection &&
 			!this.#selectedMCPToolNamesMatch(persistedSelectedMCPToolNames, currentSelectedMCPToolNames)
 		) {
 			this.sessionManager.appendMCPToolSelection(currentSelectedMCPToolNames);
@@ -782,7 +788,6 @@ export class AgentSession {
 						attempt: this.#retryAttempt,
 					});
 					this.#retryAttempt = 0;
-					this.#resolveRetry();
 				}
 			}
 
@@ -858,6 +863,7 @@ export class AgentSession {
 				const didRetry = await this.#handleRetryableError(msg);
 				if (didRetry) return; // Retry was initiated, don't proceed to compaction
 			}
+			this.#resolveRetry();
 
 			if (msg.stopReason === "aborted" && this.#checkpointState) {
 				this.#checkpointState = undefined;
@@ -1594,14 +1600,27 @@ export class AgentSession {
 			logger.warn("Async job completion deliveries still pending during dispose", { ...deliveryState });
 		}
 		await this.sessionManager.close();
-		for (const state of this.#providerSessionState.values()) {
-			state.close();
-		}
-		this.#providerSessionState.clear();
+		this.#closeAllProviderSessions("dispose");
 		this.#unsubscribePendingActionPush?.();
 		this.#unsubscribePendingActionPush = undefined;
 		this.#disconnectFromAgent();
 		this.#eventListeners = [];
+	}
+
+	#closeAllProviderSessions(reason: string): void {
+		for (const [providerKey, state] of this.#providerSessionState) {
+			try {
+				state.close();
+			} catch (error) {
+				logger.warn("Failed to close provider session state", {
+					providerKey,
+					reason,
+					error: String(error),
+				});
+			}
+		}
+
+		this.#providerSessionState.clear();
 	}
 
 	// =========================================================================
@@ -2567,6 +2586,74 @@ export class AgentSession {
 		});
 	}
 
+	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
+		this.#pendingNextTurnMessages.push(message);
+		if (!triggerTurn) return;
+		const generation = this.#promptGeneration;
+		if (this.#scheduledHiddenNextTurnGeneration === generation) {
+			return;
+		}
+		this.#scheduledHiddenNextTurnGeneration = generation;
+		this.#schedulePostPromptTask(
+			async () => {
+				if (this.#scheduledHiddenNextTurnGeneration === generation) {
+					this.#scheduledHiddenNextTurnGeneration = undefined;
+				}
+				if (this.#pendingNextTurnMessages.length === 0) {
+					return;
+				}
+				try {
+					await this.#promptQueuedHiddenNextTurnMessages();
+				} catch {
+					// Leave the hidden next-turn messages queued for the next explicit prompt.
+				}
+			},
+			{
+				generation,
+				onSkip: () => {
+					if (this.#scheduledHiddenNextTurnGeneration === generation) {
+						this.#scheduledHiddenNextTurnGeneration = undefined;
+					}
+				},
+			},
+		);
+	}
+
+	async #promptQueuedHiddenNextTurnMessages(): Promise<void> {
+		if (this.#pendingNextTurnMessages.length === 0) {
+			return;
+		}
+
+		const queuedMessages = [...this.#pendingNextTurnMessages];
+		this.#pendingNextTurnMessages = [];
+		const message = queuedMessages[queuedMessages.length - 1];
+		if (!message) {
+			return;
+		}
+
+		const prependMessages = queuedMessages.slice(0, -1);
+		const textContent = this.#getCustomMessageTextContent(message);
+		try {
+			await this.#promptWithMessage(message, textContent, {
+				prependMessages,
+				skipPostPromptRecoveryWait: true,
+			});
+		} catch (error) {
+			this.#pendingNextTurnMessages = [...queuedMessages, ...this.#pendingNextTurnMessages];
+			throw error;
+		}
+	}
+
+	#getCustomMessageTextContent(message: Pick<CustomMessage, "content">): string {
+		if (typeof message.content === "string") {
+			return message.content;
+		}
+		return message.content
+			.filter((content): content is TextContent => content.type === "text")
+			.map(content => content.text)
+			.join("");
+	}
+
 	/**
 	 * Throw an error if the text is an extension command.
 	 */
@@ -2607,7 +2694,7 @@ export class AgentSession {
 		};
 		if (this.isStreaming) {
 			if (options?.deliverAs === "nextTurn") {
-				this.#pendingNextTurnMessages.push(appMessage);
+				this.#queueHiddenNextTurnMessage(appMessage, options?.triggerTurn ?? false);
 				return;
 			}
 
@@ -2616,6 +2703,22 @@ export class AgentSession {
 			} else {
 				this.agent.steer(appMessage);
 			}
+			return;
+		}
+
+		if (options?.deliverAs === "nextTurn") {
+			if (options?.triggerTurn) {
+				await this.agent.prompt(appMessage);
+				return;
+			}
+			this.agent.appendMessage(appMessage);
+			this.sessionManager.appendCustomMessageEntry(
+				message.customType,
+				message.content,
+				message.display,
+				message.details,
+				message.attribution ?? "agent",
+			);
 			return;
 		}
 
@@ -2686,9 +2789,9 @@ export class AgentSession {
 		return { steering, followUp };
 	}
 
-	/** Number of pending messages (includes both steering and follow-up) */
+	/** Number of pending messages (includes steering, follow-up, and next-turn messages) */
 	get queuedMessageCount(): number {
-		return this.#steeringMessages.length + this.#followUpMessages.length;
+		return this.#steeringMessages.length + this.#followUpMessages.length + this.#pendingNextTurnMessages.length;
 	}
 
 	/** Get pending messages (read-only) */
@@ -2830,6 +2933,7 @@ export class AgentSession {
 	async abort(): Promise<void> {
 		this.abortRetry();
 		this.#promptGeneration++;
+		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.#resolveTtsrResume();
 		this.#cancelPostPromptTasks();
 		this.agent.abort();
@@ -2871,6 +2975,7 @@ export class AgentSession {
 		this.#disconnectFromAgent();
 		await this.abort();
 		this.#asyncJobManager?.cancelAll();
+		this.#closeAllProviderSessions("new session");
 		this.agent.reset();
 		await this.sessionManager.flush();
 		await this.sessionManager.newSession(options);
@@ -2879,6 +2984,7 @@ export class AgentSession {
 		this.#steeringMessages = [];
 		this.#followUpMessages = [];
 		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		this.sessionManager.appendThinkingLevelChange(this.thinkingLevel);
 		this.sessionManager.appendServiceTierChange(this.serviceTier ?? null);
@@ -3612,6 +3718,7 @@ export class AgentSession {
 			this.#steeringMessages = [];
 			this.#followUpMessages = [];
 			this.#pendingNextTurnMessages = [];
+			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#todoReminderCount = 0;
 
 			// Inject the handoff document as a custom message
@@ -3992,22 +4099,174 @@ export class AgentSession {
 	}
 
 	#closeProviderSessionsForModelSwitch(currentModel: Model, nextModel: Model): void {
-		if (currentModel.api !== "openai-codex-responses" && nextModel.api !== "openai-codex-responses") return;
-
-		const providerKey = "openai-codex-responses";
-		const state = this.#providerSessionState.get(providerKey);
-		if (!state) return;
-
-		try {
-			state.close();
-		} catch (error) {
-			logger.warn("Failed to close provider session state during model switch", {
-				providerKey,
-				error: String(error),
-			});
+		const providerKeys = new Set<string>();
+		if (currentModel.api === "openai-codex-responses" || nextModel.api === "openai-codex-responses") {
+			providerKeys.add("openai-codex-responses");
+		}
+		if (currentModel.api === "openai-responses") {
+			providerKeys.add(`openai-responses:${currentModel.provider}`);
+		}
+		if (nextModel.api === "openai-responses") {
+			providerKeys.add(`openai-responses:${nextModel.provider}`);
 		}
 
-		this.#providerSessionState.delete(providerKey);
+		for (const providerKey of providerKeys) {
+			const state = this.#providerSessionState.get(providerKey);
+			if (!state) continue;
+
+			try {
+				state.close();
+			} catch (error) {
+				logger.warn("Failed to close provider session state during model switch", {
+					providerKey,
+					error: String(error),
+				});
+			}
+
+			this.#providerSessionState.delete(providerKey);
+		}
+	}
+
+	#normalizeProviderReplayValue(value: unknown): unknown {
+		if (Array.isArray(value)) {
+			return value.map(item => this.#normalizeProviderReplayValue(item));
+		}
+		if (value && typeof value === "object") {
+			return Object.fromEntries(
+				Object.entries(value).map(([key, entryValue]) => [key, this.#normalizeProviderReplayValue(entryValue)]),
+			);
+		}
+		return value;
+	}
+
+	#normalizeSessionMessageForProviderReplay(message: AgentMessage): unknown {
+		switch (message.role) {
+			case "user":
+			case "developer":
+				return {
+					role: message.role,
+					content: this.#normalizeProviderReplayValue(message.content),
+					providerPayload: message.providerPayload,
+				};
+			case "assistant": {
+				const isResponsesFamilyMessage =
+					message.api === "openai-responses" || message.api === "openai-codex-responses";
+				return {
+					role: message.role,
+					content:
+						isResponsesFamilyMessage && Array.isArray(message.content)
+							? message.content.flatMap(block => {
+									if (block.type === "thinking") {
+										return [];
+									}
+									if (block.type === "toolCall") {
+										return [
+											{
+												type: block.type,
+												id: block.id,
+												name: block.name,
+												arguments: block.arguments,
+											},
+										];
+									}
+									if (block.type === "text") {
+										return [{ type: block.type, text: block.text, textSignature: block.textSignature }];
+									}
+									return [this.#normalizeProviderReplayValue(block)];
+								})
+							: this.#normalizeProviderReplayValue(message.content),
+					api: message.api,
+					provider: message.provider,
+					model: message.model,
+					stopReason: message.stopReason,
+					errorMessage: message.errorMessage,
+					providerPayload: isResponsesFamilyMessage ? undefined : message.providerPayload,
+				};
+			}
+			case "toolResult":
+				return {
+					role: message.role,
+					toolName: message.toolName,
+					toolCallId: message.toolCallId,
+					isError: message.isError,
+					content: this.#normalizeProviderReplayValue(message.content),
+				};
+			case "bashExecution":
+				return {
+					role: message.role,
+					command: message.command,
+					output: message.output,
+					exitCode: message.exitCode,
+					cancelled: message.cancelled,
+					meta: message.meta
+						? {
+								truncation: this.#normalizeProviderReplayValue(message.meta.truncation),
+								limits: this.#normalizeProviderReplayValue(message.meta.limits),
+								diagnostics: message.meta.diagnostics
+									? this.#normalizeProviderReplayValue({
+											summary: message.meta.diagnostics.summary,
+											messages: message.meta.diagnostics.messages,
+										})
+									: undefined,
+							}
+						: undefined,
+					excludeFromContext: message.excludeFromContext,
+				};
+			case "pythonExecution":
+				return {
+					role: message.role,
+					code: message.code,
+					output: message.output,
+					exitCode: message.exitCode,
+					cancelled: message.cancelled,
+					meta: message.meta
+						? {
+								truncation: this.#normalizeProviderReplayValue(message.meta.truncation),
+								limits: this.#normalizeProviderReplayValue(message.meta.limits),
+								diagnostics: message.meta.diagnostics
+									? this.#normalizeProviderReplayValue({
+											summary: message.meta.diagnostics.summary,
+											messages: message.meta.diagnostics.messages,
+										})
+									: undefined,
+							}
+						: undefined,
+					excludeFromContext: message.excludeFromContext,
+				};
+			case "custom":
+			case "hookMessage":
+				return {
+					role: message.role,
+					customType: message.customType,
+					content: this.#normalizeProviderReplayValue(message.content),
+				};
+			case "branchSummary":
+				return { role: message.role, summary: message.summary };
+			case "compactionSummary":
+				return {
+					role: message.role,
+					summary: message.summary,
+					providerPayload: message.providerPayload,
+				};
+			case "fileMention":
+				return {
+					role: message.role,
+					files: message.files.map(file => ({
+						path: file.path,
+						content: file.content,
+						image: file.image,
+					})),
+				};
+			default:
+				return this.#normalizeProviderReplayValue(message);
+		}
+	}
+
+	#didSessionMessagesChange(previousMessages: AgentMessage[], nextMessages: AgentMessage[]): boolean {
+		return (
+			JSON.stringify(previousMessages.map(message => this.#normalizeSessionMessageForProviderReplay(message))) !==
+			JSON.stringify(nextMessages.map(message => this.#normalizeSessionMessageForProviderReplay(message)))
+		);
 	}
 
 	#getModelKey(model: Model): string {
@@ -4495,7 +4754,9 @@ export class AgentSession {
 	}
 
 	#isTransientErrorMessage(errorMessage: string): boolean {
-		return /overloaded|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server error|internal error|connection.?error|unable to connect|fetch failed|retry delay|stream stall/i.test(
+		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504,
+		// service unavailable, network/connection errors, fetch failed, terminated, retry delay exceeded
+		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall/i.test(
 			errorMessage,
 		);
 	}
@@ -4940,7 +5201,9 @@ export class AgentSession {
 	 */
 	async switchSession(sessionPath: string): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
-
+		const switchingToDifferentSession = previousSessionFile
+			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
+			: true;
 		// Emit session_before_switch event (can be cancelled)
 		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
 			const result = (await this.#extensionRunner.emit({
@@ -4956,70 +5219,149 @@ export class AgentSession {
 
 		this.#disconnectFromAgent();
 		await this.abort();
+
+		// Flush pending writes before switching so restore snapshots reflect committed state.
+		await this.sessionManager.flush();
+		const previousSessionState = this.sessionManager.captureState();
+		const previousSessionContext = this.sessionManager.buildSessionContext();
+		// switchSession replaces these arrays wholesale during load/rollback, so retaining
+		// the existing message objects is sufficient and avoids structured-clone failures for
+		// extension/custom metadata that is valid to persist but not cloneable.
+		const previousAgentMessages = [...this.agent.state.messages];
+		const previousSteeringMessages = [...this.#steeringMessages];
+		const previousFollowUpMessages = [...this.#followUpMessages];
+		const previousPendingNextTurnMessages = [...this.#pendingNextTurnMessages];
+		const previousScheduledHiddenNextTurnGeneration = this.#scheduledHiddenNextTurnGeneration;
+		const previousModel = this.model;
+		const previousThinkingLevel = this.#thinkingLevel;
+		const previousServiceTier = this.agent.serviceTier;
+		const previousSelectedMCPToolNames = new Set(this.#selectedMCPToolNames);
+		const previousTools = [...this.agent.state.tools];
+		const previousBaseSystemPrompt = this.#baseSystemPrompt;
+		const previousSystemPrompt = this.agent.state.systemPrompt;
+		const previousFallbackSelectedMCPToolNames = previousSessionFile
+			? this.#getSessionDefaultSelectedMCPToolNames(previousSessionFile)
+			: undefined;
+
 		this.#steeringMessages = [];
 		this.#followUpMessages = [];
 		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
 
-		// Flush pending writes before switching
-		await this.sessionManager.flush();
+		try {
+			await this.sessionManager.setSessionFile(sessionPath);
+			this.agent.sessionId = this.sessionManager.getSessionId();
 
-		// Set new session
-		await this.sessionManager.setSessionFile(sessionPath);
-		this.agent.sessionId = this.sessionManager.getSessionId();
+			const sessionContext = this.sessionManager.buildSessionContext();
+			const didReloadConversationChange =
+				!switchingToDifferentSession &&
+				this.#didSessionMessagesChange(previousSessionContext.messages, sessionContext.messages);
+			const fallbackSelectedMCPToolNames = this.#getSessionDefaultSelectedMCPToolNames(sessionPath);
+			await this.#restoreMCPSelectionsForSessionContext(sessionContext, { fallbackSelectedMCPToolNames });
 
-		// Reload messages
-		const sessionContext = this.sessionManager.buildSessionContext();
-		const fallbackSelectedMCPToolNames = this.#getSessionDefaultSelectedMCPToolNames(sessionPath);
-		await this.#restoreMCPSelectionsForSessionContext(sessionContext, { fallbackSelectedMCPToolNames });
+			// Emit session_switch event to hooks
+			if (this.#extensionRunner) {
+				await this.#extensionRunner.emit({
+					type: "session_switch",
+					reason: "resume",
+					previousSessionFile,
+				});
+			}
 
-		// Emit session_switch event to hooks
-		if (this.#extensionRunner) {
-			await this.#extensionRunner.emit({
-				type: "session_switch",
-				reason: "resume",
-				previousSessionFile,
-			});
-		}
+			this.agent.replaceMessages(sessionContext.messages);
+			this.#syncTodoPhasesFromBranch();
+			if (switchingToDifferentSession) {
+				this.#closeAllProviderSessions("session switch");
+			} else if (didReloadConversationChange) {
+				this.#closeAllProviderSessions("session reload");
+			}
 
-		this.agent.replaceMessages(sessionContext.messages);
-		this.#syncTodoPhasesFromBranch();
-
-		// Restore model if saved
-		const defaultModelStr = sessionContext.models.default;
-		if (defaultModelStr) {
-			const slashIdx = defaultModelStr.indexOf("/");
-			if (slashIdx > 0) {
-				const provider = defaultModelStr.slice(0, slashIdx);
-				const modelId = defaultModelStr.slice(slashIdx + 1);
-				const availableModels = this.#modelRegistry.getAvailable();
-				const match = availableModels.find(m => m.provider === provider && m.id === modelId);
-				if (match) {
-					this.#setModelWithProviderSessionReset(match);
+			// Restore model if saved
+			const defaultModelStr = sessionContext.models.default;
+			if (defaultModelStr) {
+				const slashIdx = defaultModelStr.indexOf("/");
+				if (slashIdx > 0) {
+					const provider = defaultModelStr.slice(0, slashIdx);
+					const modelId = defaultModelStr.slice(slashIdx + 1);
+					const availableModels = this.#modelRegistry.getAvailable();
+					const match = availableModels.find(m => m.provider === provider && m.id === modelId);
+					if (match) {
+						const currentModel = this.model;
+						const shouldResetProviderState =
+							switchingToDifferentSession ||
+							(currentModel !== undefined &&
+								(currentModel.provider !== match.provider ||
+									currentModel.id !== match.id ||
+									currentModel.api !== match.api));
+						if (shouldResetProviderState) {
+							this.#setModelWithProviderSessionReset(match);
+						} else {
+							this.agent.setModel(match);
+						}
+					}
 				}
 			}
+
+			const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
+			const hasServiceTierEntry = this.sessionManager
+				.getBranch()
+				.some(entry => entry.type === "service_tier_change");
+			const defaultThinkingLevel = this.settings.get("defaultThinkingLevel");
+			const configuredServiceTier = this.settings.get("serviceTier");
+			const nextThinkingLevel = resolveThinkingLevelForModel(
+				this.model,
+				hasThinkingEntry ? (sessionContext.thinkingLevel as ThinkingLevel | undefined) : defaultThinkingLevel,
+			);
+			this.#thinkingLevel = nextThinkingLevel;
+			this.agent.setThinkingLevel(toReasoningEffort(nextThinkingLevel));
+			this.agent.serviceTier = hasServiceTierEntry
+				? sessionContext.serviceTier
+				: configuredServiceTier === "none"
+					? undefined
+					: configuredServiceTier;
+
+			this.#reconnectToAgent();
+			return true;
+		} catch (error) {
+			this.sessionManager.restoreState(previousSessionState);
+			this.agent.sessionId = previousSessionState.sessionId;
+			let restoreMcpError: unknown;
+			try {
+				await this.#restoreMCPSelectionsForSessionContext(previousSessionContext, {
+					fallbackSelectedMCPToolNames: previousFallbackSelectedMCPToolNames,
+				});
+			} catch (mcpError) {
+				restoreMcpError = mcpError;
+				logger.warn("Failed to restore MCP selections after switch error", {
+					previousSessionFile,
+					targetSessionFile: sessionPath,
+					error: String(mcpError),
+				});
+				this.#selectedMCPToolNames = new Set(previousSelectedMCPToolNames);
+				this.agent.setTools(previousTools);
+				this.#baseSystemPrompt = previousBaseSystemPrompt;
+				this.agent.setSystemPrompt(previousSystemPrompt);
+			}
+			this.#baseSystemPrompt = previousBaseSystemPrompt;
+			this.agent.setSystemPrompt(previousSystemPrompt);
+			this.agent.replaceMessages(previousAgentMessages);
+			this.#steeringMessages = previousSteeringMessages;
+			this.#followUpMessages = previousFollowUpMessages;
+			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
+			this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
+			if (previousModel) {
+				this.agent.setModel(previousModel);
+			}
+			this.#thinkingLevel = previousThinkingLevel;
+			this.agent.setThinkingLevel(toReasoningEffort(previousThinkingLevel));
+			this.agent.serviceTier = previousServiceTier;
+			this.#syncTodoPhasesFromBranch();
+			this.#reconnectToAgent();
+			if (restoreMcpError) {
+				throw restoreMcpError;
+			}
+			throw error;
 		}
-
-		const hasThinkingEntry = this.sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
-		const hasServiceTierEntry = this.sessionManager.getBranch().some(entry => entry.type === "service_tier_change");
-		const defaultThinkingLevel = this.settings.get("defaultThinkingLevel");
-
-		if (hasThinkingEntry) {
-			this.setThinkingLevel(sessionContext.thinkingLevel as ThinkingLevel | undefined);
-		} else {
-			const effectiveDefaultThinkingLevel = resolveThinkingLevelForModel(this.model, defaultThinkingLevel);
-			this.#thinkingLevel = effectiveDefaultThinkingLevel;
-			this.agent.setThinkingLevel(toReasoningEffort(effectiveDefaultThinkingLevel));
-			this.sessionManager.appendThinkingLevelChange(effectiveDefaultThinkingLevel);
-		}
-
-		if (hasServiceTierEntry) {
-			this.agent.serviceTier = sessionContext.serviceTier;
-		} else {
-			this.sessionManager.appendServiceTierChange(this.serviceTier ?? null);
-		}
-
-		this.#reconnectToAgent();
-		return true;
 	}
 
 	/**
@@ -5031,7 +5373,10 @@ export class AgentSession {
 	 *   - selectedText: The text of the selected user message (for editor pre-fill)
 	 *   - cancelled: True if a hook cancelled the branch
 	 */
-	async branch(entryId: string): Promise<{ selectedText: string; cancelled: boolean }> {
+	async branch(entryId: string): Promise<{
+		selectedText: string;
+		cancelled: boolean;
+	}> {
 		const previousSessionFile = this.sessionFile;
 		const selectedEntry = this.sessionManager.getEntry(entryId);
 
@@ -5058,6 +5403,7 @@ export class AgentSession {
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		// Flush pending writes before branching
 		await this.sessionManager.flush();
@@ -5108,7 +5454,12 @@ export class AgentSession {
 	async navigateTree(
 		targetId: string,
 		options: { summarize?: boolean; customInstructions?: string } = {},
-	): Promise<{ editorText?: string; cancelled: boolean; aborted?: boolean; summaryEntry?: BranchSummaryEntry }> {
+	): Promise<{
+		editorText?: string;
+		cancelled: boolean;
+		aborted?: boolean;
+		summaryEntry?: BranchSummaryEntry;
+	}> {
 		const oldLeafId = this.sessionManager.getLeafId();
 
 		// No-op if already at target

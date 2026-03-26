@@ -46,6 +46,7 @@ import {
 	type FileMentionMessage,
 	type HookMessage,
 	type PythonExecutionMessage,
+	sanitizeRehydratedOpenAIResponsesAssistantMessage,
 } from "./messages";
 import type { SessionStorage, SessionStorageWriter } from "./session-storage";
 import { FileSessionStorage, MemorySessionStorage } from "./session-storage";
@@ -1374,11 +1375,21 @@ export async function resolveResumableSession(
 
 	return { session: globalMatch, scope: "global" };
 }
+interface SessionManagerStateSnapshot {
+	sessionId: string;
+	sessionName: string | undefined;
+	sessionFile: string | undefined;
+	flushed: boolean;
+	needsFullRewriteOnNextPersist: boolean;
+	fileEntries: FileEntry[];
+}
+
 export class SessionManager {
 	#sessionId: string = "";
 	#sessionName: string | undefined;
 	#sessionFile: string | undefined;
 	#flushed: boolean = false;
+	#needsFullRewriteOnNextPersist: boolean = false;
 	#fileEntries: FileEntry[] = [];
 	#byId: Map<string, SessionEntry> = new Map();
 	#labelsById: Map<string, string> = new Map();
@@ -1418,6 +1429,39 @@ export class SessionManager {
 		return this.#blobStore.put(data);
 	}
 
+	captureState(): SessionManagerStateSnapshot {
+		return {
+			sessionId: this.#sessionId,
+			sessionName: this.#sessionName,
+			sessionFile: this.#sessionFile,
+			flushed: this.#flushed,
+			needsFullRewriteOnNextPersist: this.#needsFullRewriteOnNextPersist,
+			// Snapshot entry objects by reference: switch/reload replaces the active entry array,
+			// so rollback does not need structured cloning of extension/custom details.
+			fileEntries: [...this.#fileEntries],
+		};
+	}
+
+	restoreState(snapshot: SessionManagerStateSnapshot): void {
+		this.#sessionId = snapshot.sessionId;
+		this.#sessionName = snapshot.sessionName;
+		this.#sessionFile = snapshot.sessionFile;
+		this.#flushed = snapshot.flushed;
+		this.#needsFullRewriteOnNextPersist = snapshot.needsFullRewriteOnNextPersist;
+		this.#fileEntries = [...snapshot.fileEntries];
+		this.#persistWriter = undefined;
+		this.#persistWriterPath = undefined;
+		this.#persistChain = Promise.resolve();
+		this.#persistError = undefined;
+		this.#persistErrorReported = false;
+		this.#artifactManager = null;
+		this.#artifactManagerSessionFile = null;
+		this.#buildIndex();
+		if (this.#sessionFile) {
+			writeTerminalBreadcrumb(this.cwd, this.#sessionFile);
+		}
+	}
+
 	/** Initialize with a specific session file (used by factory methods) */
 	async #initSessionFile(sessionFile: string): Promise<void> {
 		await this.setSessionFile(sessionFile);
@@ -1441,11 +1485,10 @@ export class SessionManager {
 			this.#sessionId = header?.id ?? Snowflake.next();
 			this.#sessionName = header?.title;
 
-			if (migrateToCurrentVersion(this.#fileEntries)) {
-				await this.#rewriteFile();
-			}
+			this.#needsFullRewriteOnNextPersist = migrateToCurrentVersion(this.#fileEntries);
 
 			await resolveBlobRefsInEntries(this.#fileEntries, this.#blobStore);
+			this.sanitizeLoadedOpenAIResponsesReplayMetadata();
 
 			this.#buildIndex();
 			this.#flushed = true;
@@ -1630,6 +1673,7 @@ export class SessionManager {
 		this.#labelsById.clear();
 		this.#leafId = null;
 		this.#flushed = false;
+		this.#needsFullRewriteOnNextPersist = false;
 		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 };
 
 		if (this.persist) {
@@ -1772,6 +1816,7 @@ export class SessionManager {
 				this.#fileEntries.map(entry => prepareEntryForPersistence(entry, this.#blobStore)),
 			);
 			await this.#writeEntriesAtomically(entries);
+			this.#needsFullRewriteOnNextPersist = false;
 			this.#flushed = true;
 		});
 	}
@@ -1786,7 +1831,7 @@ export class SessionManager {
 	 */
 	async ensureOnDisk(): Promise<void> {
 		if (!this.persist || !this.#sessionFile) return;
-		if (this.#flushed) return;
+		if (this.#flushed && !this.#needsFullRewriteOnNextPersist) return;
 		await this.#rewriteFile();
 	}
 
@@ -1919,12 +1964,12 @@ export class SessionManager {
 
 		const hasAssistant = this.#fileEntries.some(e => e.type === "message" && e.message.role === "assistant");
 		if (!hasAssistant) {
-			// Mark as not flushed so when assistant arrives, all entries get written
+			// Mark as not flushed so when assistant arrives, all entries get written.
 			this.#flushed = false;
 			return;
 		}
 
-		if (!this.#flushed) {
+		if (this.#needsFullRewriteOnNextPersist || !this.#flushed) {
 			// Full flush: rewrite the entire file atomically to avoid
 			// duplicating entries if the file already exists (e.g. from ensureOnDisk).
 			void this.#rewriteFile();
@@ -2299,6 +2344,26 @@ export class SessionManager {
 		return buildSessionContext(this.getEntries(), this.#leafId, this.#byId);
 	}
 
+	/** Strip stale OpenAI Responses assistant replay metadata from loaded in-memory entries. */
+	sanitizeLoadedOpenAIResponsesReplayMetadata(): boolean {
+		let didSanitize = false;
+		for (const entry of this.#fileEntries) {
+			if (entry.type !== "message" || entry.message.role !== "assistant") {
+				continue;
+			}
+
+			const sanitizedMessage = sanitizeRehydratedOpenAIResponsesAssistantMessage(entry.message);
+			if (sanitizedMessage === entry.message) {
+				continue;
+			}
+
+			entry.message = sanitizedMessage;
+			didSanitize = true;
+		}
+
+		return didSanitize;
+	}
+
 	/**
 	 * Get session header.
 	 */
@@ -2547,6 +2612,7 @@ export class SessionManager {
 		newHeader.title = sourceHeader?.title;
 		manager.#fileEntries = [newHeader, ...historyEntries];
 		manager.#sessionName = newHeader.title;
+		manager.sanitizeLoadedOpenAIResponsesReplayMetadata();
 		manager.#buildIndex();
 		await manager.#rewriteFile();
 		return manager;

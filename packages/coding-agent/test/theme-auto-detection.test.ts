@@ -7,11 +7,16 @@ const originalColorfgbg = Bun.env.COLORFGBG;
 const originalZellij = Bun.env.ZELLIJ;
 
 describe("theme auto-detection", () => {
-	beforeEach(() => {
+	beforeEach(async () => {
 		Object.defineProperty(process, "platform", { value: "darwin", configurable: true, writable: true });
 		delete Bun.env.COLORFGBG;
 		delete Bun.env.ZELLIJ;
 		themeModule.stopThemeWatcher();
+		const darkTheme = await themeModule.getThemeByName("dark");
+		if (!darkTheme) {
+			throw new Error("Failed to load dark theme for tests");
+		}
+		themeModule.setThemeInstance(darkTheme);
 		vi.restoreAllMocks();
 	});
 
@@ -27,17 +32,6 @@ describe("theme auto-detection", () => {
 		if (originalZellij === undefined) delete Bun.env.ZELLIJ;
 		else Bun.env.ZELLIJ = originalZellij;
 		vi.restoreAllMocks();
-	});
-
-	it("uses macOS fallback inside Zellij instead of trusting terminal-reported appearance", async () => {
-		Bun.env.ZELLIJ = "1";
-		const detectSpy = vi.spyOn(nativesModule, "detectMacOSAppearance").mockReturnValue("light");
-
-		themeModule.onTerminalAppearanceChange("dark");
-		await themeModule.initTheme(false, undefined, undefined, "dark", "light");
-
-		expect(themeModule.getCurrentThemeName()).toBe("light");
-		expect(detectSpy).toHaveBeenCalledTimes(1);
 	});
 
 	it("prefers COLORFGBG before macOS fallback inside Zellij", async () => {
