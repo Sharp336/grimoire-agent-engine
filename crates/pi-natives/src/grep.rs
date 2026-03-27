@@ -10,7 +10,7 @@
 use std::{
 	borrow::Cow,
 	fs::File,
-	io,
+	io::{self, Read},
 	ops::Range,
 	path::{Path, PathBuf},
 };
@@ -639,6 +639,17 @@ fn run_file_search_reader<R: Read>(
 	ct: &task::CancelToken,
 ) -> io::Result<SearchResultInternal> {
 	run_search_reader(matcher, HeartbeatReader::new(reader, ct), params)
+}
+
+fn run_search_reader<R: Read>(
+	matcher: &grep_regex::RegexMatcher,
+	mut reader: R,
+	params: SearchParams,
+) -> io::Result<SearchResultInternal> {
+	let mut content = Vec::new();
+	reader.take(MAX_FILE_BYTES).read_to_end(&mut content)?;
+	let searcher = build_searcher(params.multiline);
+	run_search(&searcher, matcher, &content, params)
 }
 
 fn run_search(
