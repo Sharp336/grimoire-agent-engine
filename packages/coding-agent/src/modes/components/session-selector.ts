@@ -294,34 +294,40 @@ export class SessionSelectorComponent extends Container {
 		this.#messageContainer.addChild(new Spacer(1));
 	}
 
+	#closeDeleteConfirmation(): void {
+		if (!this.#confirmationDialog) {
+			return;
+		}
+		this.removeChild(this.#confirmationDialog);
+		this.#confirmationDialog = null;
+	}
+
 	#showDeleteConfirmation(session: SessionInfo): void {
 		const displayName = session.title || session.firstMessage.slice(0, 40) || session.id;
 		this.#confirmationDialog = new HookSelectorComponent(
 			`Delete session?\n${displayName}`,
 			["Yes", "No"],
 			async (option: string) => {
-				if (option === "Yes" && this.#onDelete) {
-					this.#clearError();
-					try {
-						const deleted = await this.#onDelete(session);
-						if (deleted) {
-							this.#sessionList.removeSession(session.path);
-						}
-					} catch (err) {
-						this.#showError(err instanceof Error ? err.message : String(err));
-					}
+				if (option !== "Yes" || !this.#onDelete) {
+					this.#closeDeleteConfirmation();
+					this.#onRequestRender?.();
+					return;
 				}
-				// Close confirmation dialog
-				this.removeChild(this.#confirmationDialog!);
-				this.#confirmationDialog = null;
-				// Request rerender
+
+				this.#closeDeleteConfirmation();
+				this.#clearError();
+				try {
+					const deleted = await this.#onDelete(session);
+					if (deleted) {
+						this.#sessionList.removeSession(session.path);
+					}
+				} catch (err) {
+					this.#showError(err instanceof Error ? err.message : String(err));
+				}
 				this.#onRequestRender?.();
 			},
 			() => {
-				// Cancel - close confirmation dialog
-				this.removeChild(this.#confirmationDialog!);
-				this.#confirmationDialog = null;
-				// Request rerender
+				this.#closeDeleteConfirmation();
 				this.#onRequestRender?.();
 			},
 		);
