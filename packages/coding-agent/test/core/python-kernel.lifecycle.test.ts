@@ -248,6 +248,76 @@ describe("PythonKernel gateway lifecycle", () => {
 		expect(FakeWebSocket.instances.at(-1)?.readyState).toBe(FakeWebSocket.CLOSED);
 	});
 
+	it("preserves timeout classification when startup environment initialization is cancelled", async () => {
+		vi.spyOn(gatewayCoordinator, "acquireSharedGateway").mockResolvedValue({
+			url: "http://127.0.0.1:9999",
+			isShared: true,
+		});
+
+		vi.spyOn(PythonKernel.prototype, "execute").mockResolvedValue({
+			status: "ok",
+			cancelled: true,
+			timedOut: true,
+			stdinRequested: false,
+		});
+
+		using _hook = hookFetch((input, init) => {
+			const url = String(input);
+			env.fetchCalls.push({ url, init });
+			if (url.endsWith("/api/kernels") && init?.method === "POST") {
+				return createResponse({ ok: true, json: { id: "kernel-init-timeout" } }) as unknown as Response;
+			}
+			return createResponse({ ok: true }) as unknown as Response;
+		});
+
+		await expect(PythonKernel.start({ cwd: tempDir.path() })).rejects.toMatchObject({
+			name: "TimeoutError",
+			message: "Failed to initialize Python kernel environment",
+		});
+		expect(
+			env.fetchCalls.some(
+				call => call.url.endsWith("/api/kernels/kernel-init-timeout") && call.init?.method === "DELETE",
+			),
+		).toBe(true);
+		expect(FakeWebSocket.instances.at(-1)?.readyState).toBe(FakeWebSocket.CLOSED);
+	});
+
+	it("preserves timeout classification when startup prelude execution is cancelled", async () => {
+		vi.spyOn(gatewayCoordinator, "acquireSharedGateway").mockResolvedValue({
+			url: "http://127.0.0.1:9999",
+			isShared: true,
+		});
+
+		let executeCallCount = 0;
+		vi.spyOn(PythonKernel.prototype, "execute").mockImplementation(async () => {
+			executeCallCount += 1;
+			if (executeCallCount === 1) {
+				return { status: "ok", cancelled: false, timedOut: false, stdinRequested: false };
+			}
+			return { status: "ok", cancelled: true, timedOut: true, stdinRequested: false };
+		});
+
+		using _hook = hookFetch((input, init) => {
+			const url = String(input);
+			env.fetchCalls.push({ url, init });
+			if (url.endsWith("/api/kernels") && init?.method === "POST") {
+				return createResponse({ ok: true, json: { id: "kernel-prelude-timeout" } }) as unknown as Response;
+			}
+			return createResponse({ ok: true }) as unknown as Response;
+		});
+
+		await expect(PythonKernel.start({ cwd: tempDir.path() })).rejects.toMatchObject({
+			name: "TimeoutError",
+			message: "Failed to initialize Python kernel prelude",
+		});
+		expect(
+			env.fetchCalls.some(
+				call => call.url.endsWith("/api/kernels/kernel-prelude-timeout") && call.init?.method === "DELETE",
+			),
+		).toBe(true);
+		expect(FakeWebSocket.instances.at(-1)?.readyState).toBe(FakeWebSocket.CLOSED);
+	});
+
 	it("throws when shared gateway kernel creation never succeeds", async () => {
 		using _runtime = stubKernelRuntime();
 		vi.spyOn(gatewayCoordinator, "acquireSharedGateway").mockResolvedValue({

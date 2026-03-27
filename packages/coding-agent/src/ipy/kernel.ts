@@ -2,6 +2,7 @@ import { $env, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { Settings } from "../config/settings";
 import { htmlToBasicMarkdown } from "../web/scrapers/types";
+import { createCancellationError, getAbortReason, getExecutionCancellationError } from "./cancellation";
 import { acquireSharedGateway, releaseSharedGateway, shutdownSharedGateway } from "./gateway-coordinator";
 import { loadPythonModules } from "./modules";
 import { PYTHON_PRELUDE } from "./prelude";
@@ -53,19 +54,17 @@ function getRemainingTimeMs(deadlineMs?: number): number | undefined {
 	return Math.max(0, deadlineMs - Date.now());
 }
 
-function getAbortReason(signal: AbortSignal | undefined, fallbackReason: string): Error {
-	if (signal?.reason instanceof Error) return signal.reason;
-	if (typeof signal?.reason === "string" && signal.reason.length > 0) {
-		return new Error(signal.reason);
+function throwIfStartupExecutionFailed(
+	result: Pick<KernelExecuteResult, "cancelled" | "status" | "timedOut">,
+	signal: AbortSignal | undefined,
+	failureMessage: string,
+): void {
+	if (result.cancelled) {
+		throw getExecutionCancellationError(result, signal, failureMessage);
 	}
-
-	return new Error(fallbackReason);
-}
-
-function createCancellationError(name: "AbortError" | "TimeoutError", message: string): Error {
-	const error = new Error(message);
-	error.name = name;
-	return error;
+	if (result.status === "error") {
+		throw new Error(failureMessage);
+	}
 }
 
 function createAbortedSignal(reason: Error): AbortSignal {
@@ -512,14 +511,17 @@ export class PythonKernel {
 		try {
 			await kernel.#connectWebSocket(startup);
 			await kernel.#initializeKernelEnvironment(cwd, env, startup);
+			const preludeOptions = getStartupExecuteOptions(startup);
 			const preludeResult = await kernel.execute(PYTHON_PRELUDE, {
-				...getStartupExecuteOptions(startup),
+				...preludeOptions,
 				silent: true,
 				storeHistory: false,
 			});
-			if (preludeResult.cancelled || preludeResult.status === "error") {
-				throw new Error("Failed to initialize Python kernel prelude");
-			}
+			throwIfStartupExecutionFailed(
+				preludeResult,
+				preludeOptions.signal,
+				"Failed to initialize Python kernel prelude",
+			);
 			await loadPythonModules(kernel, { cwd, signal: startup.signal, deadlineMs: startup.deadlineMs });
 			return kernel;
 		} catch (err: unknown) {
@@ -568,16 +570,19 @@ export class PythonKernel {
 			await logger.timeAsync("startWithSharedGateway:initEnv", () =>
 				kernel.#initializeKernelEnvironment(cwd, env, startup),
 			);
+			const preludeOptions = getStartupExecuteOptions(startup);
 			const preludeResult = await logger.timeAsync("startWithSharedGateway:prelude", () =>
 				kernel.execute(PYTHON_PRELUDE, {
-					...getStartupExecuteOptions(startup),
+					...preludeOptions,
 					silent: true,
 					storeHistory: false,
 				}),
 			);
-			if (preludeResult.cancelled || preludeResult.status === "error") {
-				throw new Error("Failed to initialize Python kernel prelude");
-			}
+			throwIfStartupExecutionFailed(
+				preludeResult,
+				preludeOptions.signal,
+				"Failed to initialize Python kernel prelude",
+			);
 			await logger.timeAsync("startWithSharedGateway:loadModules", () =>
 				loadPythonModules(kernel, { cwd, signal: startup.signal, deadlineMs: startup.deadlineMs }),
 			);
@@ -703,14 +708,13 @@ export class PythonKernel {
 			"for __omp_key, __omp_val in __omp_env.items():\n    os.environ[__omp_key] = __omp_val",
 			"if __omp_cwd not in sys.path:\n    sys.path.insert(0, __omp_cwd)",
 		].join("\n");
+		const executeOptions = getStartupExecuteOptions(options);
 		const result = await this.execute(initScript, {
-			...getStartupExecuteOptions(options),
+			...executeOptions,
 			silent: true,
 			storeHistory: false,
 		});
-		if (result.cancelled || result.status === "error") {
-			throw new Error("Failed to initialize Python kernel environment");
-		}
+		throwIfStartupExecutionFailed(result, executeOptions.signal, "Failed to initialize Python kernel environment");
 	}
 
 	#abortPendingExecutions(reason: string): void {

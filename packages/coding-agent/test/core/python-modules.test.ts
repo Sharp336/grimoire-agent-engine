@@ -111,6 +111,23 @@ describe("python modules", () => {
 		});
 	});
 
+	it("preserves timeout classification when module execution is cancelled", async () => {
+		tempRoot = TempDir.createSync("@omp-python-modules-");
+		const agentDir = path.join(tempRoot.path(), "agent");
+		const cwd = path.join(tempRoot.path(), "project");
+
+		await writeModule(getProjectModulesDir(cwd), "alpha.py", "project-omp");
+
+		const execute = vi.fn(async () => ({ status: "ok" as const, cancelled: true, timedOut: true }));
+		const executor: PythonModuleExecutor = { execute };
+
+		await expect(loadPythonModules(executor, { cwd, agentDir })).rejects.toMatchObject({
+			name: "TimeoutError",
+			message: expect.stringContaining("Failed to load Python module"),
+		});
+		expect(execute).toHaveBeenCalledTimes(1);
+	});
+
 	it("fails fast when a module fails to execute", async () => {
 		tempRoot = TempDir.createSync("@omp-python-modules-");
 		const agentDir = path.join(tempRoot.path(), "agent");

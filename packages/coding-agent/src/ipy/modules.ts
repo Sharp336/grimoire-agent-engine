@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentModulesDir, getProjectDir, getProjectModulesDir } from "@oh-my-pi/pi-utils";
+import { getExecutionCancellationError } from "./cancellation";
 
 export type PythonModuleSource = "user" | "project";
 
@@ -13,6 +14,7 @@ export interface PythonModuleEntry {
 export interface PythonModuleExecuteResult {
 	status: "ok" | "error";
 	cancelled: boolean;
+	timedOut?: boolean;
 	error?: { name: string; value: string; traceback: string[] };
 }
 
@@ -130,7 +132,10 @@ export async function loadPythonModules(
 			silent: true,
 			storeHistory: false,
 		});
-		if (result.cancelled || result.status === "error") {
+		if (result.cancelled) {
+			throw getExecutionCancellationError(result, options.signal, `Failed to load Python module ${module.path}`);
+		}
+		if (result.status === "error") {
 			const details = result.error ? `${result.error.name}: ${result.error.value}` : "unknown error";
 			throw new Error(`Failed to load Python module ${module.path}: ${details}`);
 		}
