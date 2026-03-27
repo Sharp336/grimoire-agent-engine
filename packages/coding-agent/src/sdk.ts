@@ -35,6 +35,7 @@ import {
 	type TransformMetadata,
 	transformMessages,
 } from "./context/assembler";
+import { dedupCodec, readCodec, warmCodec } from "./context/assembler/codecs";
 import { formatAssemblySummary } from "./context/assembly-summary";
 import { ToolResultBridge } from "./context/bridge";
 import { captureEffectivePromptSnapshot, type EffectivePromptSnapshot } from "./context/effective-prompt-snapshot";
@@ -1601,6 +1602,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const resolveToolResultStub = (message: { toolName?: string; toolCallId?: string }) =>
 			assemblerBridge.getToolResultStubPointer(message.toolName, message.toolCallId);
 
+		const codecs = [dedupCodec, readCodec, warmCodec]; // Order matters: dedup → read → warm (catch-all)
+
 		const assemblerTransform = async (messages: AgentMessage[]): Promise<AgentMessage[]> => {
 			// Derive budget from current model context window and measured costs.
 			// agent.state is read each turn to reflect model/tool changes mid-session.
@@ -1611,7 +1614,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// Step 1: Apply message transform (hot window + content replacement).
 			// This strips tool_result content from older turns before budget derivation
 			// so the budget reflects actual post-transform message costs.
-			const firstPass = transformMessages(messages, { hotWindowTurns, resolveToolResultStub });
+			const firstPass = transformMessages(messages, {
+				hotWindowTurns,
+				resolveToolResultStub,
+				codecs,
+			});
 			const transformedMessages = firstPass.messages;
 
 			const budget = currentModel
@@ -1690,6 +1697,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					maxTokens: maxMessageTokens,
 					hotWindowTurns,
 					resolveToolResultStub,
+					codecs,
 				});
 				boundedMessages = boundedPass.messages;
 				finalTransformMetadata = boundedPass.metadata;
