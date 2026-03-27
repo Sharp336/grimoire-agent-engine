@@ -7,10 +7,12 @@
 //! The filesystem search matches the previous JS wrapper behavior, including
 //! global offsets, optional match limits, and per-file match summaries.
 
+#[cfg(test)]
+use std::io::Read;
 use std::{
 	borrow::Cow,
 	fs::File,
-	io::{self, Read},
+	io,
 	ops::Range,
 	path::{Path, PathBuf},
 };
@@ -602,17 +604,20 @@ struct SearchParams {
 	multiline:      bool,
 }
 
+#[cfg(test)]
 fn cancel_to_io_error(err: Error) -> io::Error {
 	io::Error::new(io::ErrorKind::Interrupted, err.to_string())
 }
 
+#[cfg(test)]
 struct HeartbeatReader<'a, R> {
 	inner: R,
 	ct:    &'a task::CancelToken,
 }
 
+#[cfg(test)]
 impl<'a, R: Read> HeartbeatReader<'a, R> {
-	fn new(inner: R, ct: &'a task::CancelToken) -> Self {
+	const fn new(inner: R, ct: &'a task::CancelToken) -> Self {
 		Self { inner, ct }
 	}
 
@@ -621,6 +626,7 @@ impl<'a, R: Read> HeartbeatReader<'a, R> {
 	}
 }
 
+#[cfg(test)]
 impl<R: Read> Read for HeartbeatReader<'_, R> {
 	fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
 		self.heartbeat()?;
@@ -632,6 +638,7 @@ impl<R: Read> Read for HeartbeatReader<'_, R> {
 	}
 }
 
+#[cfg(test)]
 fn run_file_search_reader<R: Read>(
 	matcher: &grep_regex::RegexMatcher,
 	reader: R,
@@ -641,9 +648,10 @@ fn run_file_search_reader<R: Read>(
 	run_search_reader(matcher, HeartbeatReader::new(reader, ct), params)
 }
 
+#[cfg(test)]
 fn run_search_reader<R: Read>(
 	matcher: &grep_regex::RegexMatcher,
-	mut reader: R,
+	reader: R,
 	params: SearchParams,
 ) -> io::Result<SearchResultInternal> {
 	let mut content = Vec::new();
@@ -1178,9 +1186,8 @@ fn run_parallel_search(
 					return Ok(None);
 				};
 				ct.heartbeat()?;
-				let search = match run_search(searcher, matcher, bytes.as_slice(), file_params) {
-					Ok(search) => search,
-					Err(_) => return Ok(None),
+				let Ok(search) = run_search(searcher, matcher, bytes.as_slice(), file_params) else {
+					return Ok(None);
 				};
 				ct.heartbeat()?;
 				Ok(Some(FileSearchResult {
