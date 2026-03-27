@@ -19,7 +19,7 @@ export interface PythonModuleExecuteResult {
 export interface PythonModuleExecutor {
 	execute: (
 		code: string,
-		options?: { silent?: boolean; storeHistory?: boolean },
+		options?: { signal?: AbortSignal; timeoutMs?: number; silent?: boolean; storeHistory?: boolean },
 	) => Promise<PythonModuleExecuteResult>;
 }
 
@@ -28,6 +28,12 @@ export interface DiscoverPythonModulesOptions {
 	cwd?: string;
 	/** Agent directory for user-level modules. Default: from getAgentDir() */
 	agentDir?: string;
+}
+
+export interface LoadPythonModulesOptions extends DiscoverPythonModulesOptions {
+	signal?: AbortSignal;
+	timeoutMs?: number;
+	deadlineMs?: number;
 }
 
 interface ModuleCandidate {
@@ -59,6 +65,13 @@ async function readModuleContent(candidate: ModuleCandidate): Promise<PythonModu
 		const message = err instanceof Error ? err.message : String(err);
 		throw new Error(`Failed to read Python module ${candidate.path}: ${message}`);
 	}
+}
+
+function getModuleExecutionTimeoutMs(options: LoadPythonModulesOptions): number | undefined {
+	if (options.deadlineMs !== undefined) {
+		return Math.max(0, options.deadlineMs - Date.now());
+	}
+	return options.timeoutMs;
 }
 
 /**
@@ -95,11 +108,16 @@ export async function discoverPythonModules(options: DiscoverPythonModulesOption
  */
 export async function loadPythonModules(
 	executor: PythonModuleExecutor,
-	options: DiscoverPythonModulesOptions = {},
+	options: LoadPythonModulesOptions = {},
 ): Promise<PythonModuleEntry[]> {
 	const modules = await discoverPythonModules(options);
 	for (const module of modules) {
-		const result = await executor.execute(module.content, { silent: true, storeHistory: false });
+		const result = await executor.execute(module.content, {
+			signal: options.signal,
+			timeoutMs: getModuleExecutionTimeoutMs(options),
+			silent: true,
+			storeHistory: false,
+		});
 		if (result.cancelled || result.status === "error") {
 			const details = result.error ? `${result.error.name}: ${result.error.value}` : "unknown error";
 			throw new Error(`Failed to load Python module ${module.path}: ${details}`);
