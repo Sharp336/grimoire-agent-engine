@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added bundled GLM-5.1 model metadata for Z.ai using the Anthropic-compatible API base URL
+
 ## [13.15.0] - 2026-03-23
 
 ### Added
