@@ -464,6 +464,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 			if (isDirectory) {
 				const dirResult = await this.#readDirectory(absolutePath, limit, effectiveSignal);
+				throwIfAborted(effectiveSignal);
 				if (suffixResolution) {
 					dirResult.details ??= {};
 					dirResult.details.suffixResolution = suffixResolution;

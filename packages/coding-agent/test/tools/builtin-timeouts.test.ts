@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, mock, vi } from "bun:test";
+import { afterAll, afterEach, describe, expect, it, mock, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -100,6 +100,10 @@ function waitForAbort(signal?: AbortSignal): Promise<never> {
 		signal?.addEventListener("abort", onAbort, { once: true });
 	});
 }
+
+afterAll(() => {
+	mock.restore();
+});
 
 afterEach(() => {
 	vi.restoreAllMocks();
