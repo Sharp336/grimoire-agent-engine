@@ -282,6 +282,7 @@ export type ReadonlySessionManager = Pick<
 	| "getTree"
 	| "getUsageStatistics"
 	| "putBlob"
+	| "buildSessionContext"
 >;
 
 /** Generate a unique short ID (8 hex chars, collision-checked) */

@@ -1014,7 +1014,7 @@ export class TUI extends Container {
 		// Consume force flag
 		const forceRepaint = this.#forceFullRepaint;
 		this.#forceFullRepaint = false;
-		const hasPriorFrame = this.#terminalStateTrusted && this.#previousLines.length > 0;
+		const hasPriorFrame = this.#terminalStateTrusted;
 
 		// Common bookkeeping after any full-repaint path
 		const finishFullRepaint = (): void => {
@@ -1057,10 +1057,11 @@ export class TUI extends Container {
 		const repaintViewport = (): void => {
 			let buffer = "\x1b[?2026h"; // Begin synchronized output
 			// Compute how many rows the viewport shifted since the last render.
-			// These rows were at the top of the old viewport and now belong in scrollback.
+			// Only scroll rows into scrollback if the previous frame actually showed content.
 			const oldVpTop = Math.max(0, this.#previousLines.length - this.#previousHeight);
 			const newVpTop = Math.max(0, newLines.length - height);
-			const scrollDelta = Math.max(0, newVpTop - oldVpTop);
+			const previousVisibleRows = Math.min(this.#previousLines.length, this.#previousHeight);
+			const scrollDelta = previousVisibleRows > 0 ? Math.max(0, newVpTop - oldVpTop) : 0;
 			if (scrollDelta > 0) {
 				// Move cursor to bottom of visible area and emit newlines to scroll
 				const curScreenRow = hardwareCursorRow - prevViewportTop;
@@ -1106,10 +1107,12 @@ export class TUI extends Container {
 		const repaintAfterHeightIncrease = (): void => {
 			logRedraw(`height increase (${this.#previousHeight} -> ${height})`);
 			let buffer = "\x1b[?2026h"; // Begin synchronized output
-			// Scroll current visible content into scrollback
-			const curScreenRow = hardwareCursorRow - prevViewportTop;
-			const screenRows = Math.min(height, this.#maxLinesRendered);
+			// Scroll current visible content into scrollback. Empty trusted frames
+			// are already at home, so they have nothing to scroll off-screen.
+			const previousVisibleRows = Math.min(this.#previousLines.length, this.#previousHeight);
+			const screenRows = previousVisibleRows;
 			if (screenRows > 0) {
+				const curScreenRow = hardwareCursorRow - prevViewportTop;
 				const toBottom = screenRows - 1 - curScreenRow;
 				if (toBottom > 0) buffer += `\x1b[${toBottom}B`;
 				buffer += "\r\n".repeat(screenRows);

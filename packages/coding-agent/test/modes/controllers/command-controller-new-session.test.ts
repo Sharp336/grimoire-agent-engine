@@ -270,6 +270,104 @@ describe("CommandController /new command", () => {
 		]);
 	});
 
+	it("clearCommand handles post-approval cancellation when newSession returns false", async () => {
+		setSessionTerminalTitleMock.mockReset();
+		const { ctx, calls } = createContext({ canStartNewSessionResult: true, newSessionResult: false });
+		const controller = new CommandController(ctx);
+
+		const result = await controller.handleClearCommand();
+		expect(result).toBe(false);
+
+		expect(ctx.session.canStartNewSession).toHaveBeenCalledTimes(1);
+		expect(ctx.session.newSession).toHaveBeenCalledTimes(1);
+		expect(ctx.session.newSession).toHaveBeenCalledWith(undefined, { skipBeforeSwitchCheck: true });
+		expect(setSessionTerminalTitleMock).not.toHaveBeenCalled();
+		expect(ctx.statusLine.invalidate).not.toHaveBeenCalled();
+		expect(ctx.loadingAnimation).toBeUndefined();
+		expect(ctx.statusContainer.clear).toHaveBeenCalledTimes(1);
+		const statusClearIdx = calls.indexOf("statusContainer.clear");
+		const newSessionIdx = calls.indexOf("session.newSession");
+		expect(statusClearIdx).toBeGreaterThan(-1);
+		expect(newSessionIdx).toBeGreaterThan(-1);
+		expect(statusClearIdx).toBeLessThan(newSessionIdx);
+		const lastChild = ctx.chatContainer.children[ctx.chatContainer.children.length - 1];
+		if (!(lastChild instanceof Text)) {
+			throw new Error("Expected error message");
+		}
+		expect(lastChild.render(120).join("\n")).toContain("New session cancelled");
+	});
+
+	it("clearCommand calls beforeSwitch after approval before newSession", async () => {
+		setSessionTerminalTitleMock.mockReset();
+		const { ctx, calls } = createContext();
+		const controller = new CommandController(ctx);
+		const beforeSwitch = vi.fn(() => {
+			calls.push("beforeSwitch");
+		});
+		const beforeSwitchCheck = vi.fn(() => {
+			calls.push("beforeSwitchCheck");
+			return undefined;
+		});
+
+		await controller.handleClearCommand({ beforeSwitchCheck, beforeSwitch });
+
+		expect(beforeSwitchCheck).toHaveBeenCalledTimes(1);
+		expect(beforeSwitch).toHaveBeenCalledTimes(1);
+		expect(ctx.session.newSession).toHaveBeenCalledWith(undefined, { skipBeforeSwitchCheck: true });
+		const switchCheckIdx = calls.indexOf("beforeSwitchCheck");
+		const switchIdx = calls.indexOf("beforeSwitch");
+		const newSessionIdx = calls.indexOf("session.newSession");
+		expect(switchCheckIdx).toBeLessThan(switchIdx);
+		expect(switchIdx).toBeLessThan(newSessionIdx);
+	});
+
+	it("clearCommand lets hooks see transient mode override via buildSessionContext during approval check", async () => {
+		const { ctx } = createContext({ canStartNewSessionResult: false, initialSessionMode: "plan" });
+		const controller = new CommandController(ctx);
+
+		const modesDuringCheck: string[] = [];
+		const modesAfterRollback: string[] = [];
+		let mockMode = "plan" as "plan" | "none";
+
+		ctx.sessionManager.buildSessionContext = vi.fn(() => ({ mode: mockMode }) as SessionContext);
+		ctx.session.canStartNewSession = vi.fn(async () => {
+			modesDuringCheck.push(ctx.sessionManager.buildSessionContext().mode);
+			return false;
+		});
+
+		const result = await controller.handleClearCommand({
+			beforeSwitchCheck: () => {
+				mockMode = "none";
+				return () => {
+					mockMode = "plan";
+					modesAfterRollback.push(ctx.sessionManager.buildSessionContext().mode);
+				};
+			},
+		});
+
+		expect(result).toBe(false);
+		expect(ctx.sessionManager.buildSessionContext).toHaveBeenCalledTimes(2);
+		expect(modesDuringCheck).toEqual(["none"]);
+		expect(modesAfterRollback).toEqual(["plan"]);
+	});
+
+	it("clearCommand discards rollback after successful approval", async () => {
+		const { ctx } = createContext();
+		const controller = new CommandController(ctx);
+		const rollback = vi.fn();
+		const beforeSwitch = vi.fn();
+
+		await controller.handleClearCommand({
+			beforeSwitchCheck: () => rollback,
+			beforeSwitch,
+		});
+
+		expect(ctx.session.canStartNewSession).toHaveBeenCalledTimes(1);
+		expect(beforeSwitch).toHaveBeenCalledTimes(1);
+		expect(ctx.session.newSession).toHaveBeenCalledTimes(1);
+		expect(rollback).not.toHaveBeenCalled();
+	});
+
 	it("clearCommand rolls back temporary pre-switch teardown when new session approval is denied", async () => {
 		const { ctx, calls } = createContext({ canStartNewSessionResult: false, initialSessionMode: "plan" });
 		const hookState = { mode: "plan" as "plan" | "none" };

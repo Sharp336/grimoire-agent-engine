@@ -89,19 +89,23 @@ describe("TUI overlays", () => {
 		tui.addChild(new LineComponent("base-", 5));
 
 		tui.start();
-		await Bun.sleep(0);
-		await term.flush();
+		try {
+			await Bun.sleep(0);
+			await term.flush();
 
-		// Simulate a large historical working area (max lines ever rendered) without actually
-		// rendering that many lines in the current view.
-		(tui as unknown as { maxLinesRendered: number }).maxLinesRendered = 1500;
+			// Simulate a large historical working area (max lines ever rendered) without actually
+			// rendering that many lines in the current view.
+			(tui as unknown as { maxLinesRendered: number }).maxLinesRendered = 1500;
 
-		tui.showOverlay(new LineComponent("overlay-", 3), { anchor: "center" });
-		await Bun.sleep(0);
-		await term.flush();
+			tui.showOverlay(new LineComponent("overlay-", 3), { anchor: "center" });
+			await Bun.sleep(0);
+			await term.flush();
 
-		// The scroll buffer should stay small; we should not have printed hundreds/thousands of blank lines.
-		expect(term.getScrollBuffer().length).toBeLessThan(200);
+			// The scroll buffer should stay small; we should not have printed hundreds/thousands of blank lines.
+			expect(term.getScrollBuffer().length).toBeLessThan(200);
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("preserves preexisting terminal scrollback across startup full redraw", async () => {
@@ -114,19 +118,21 @@ describe("TUI overlays", () => {
 		tui.addChild(component);
 
 		tui.start();
-		await Bun.sleep(0);
-		await term.flush();
-		term.resize(39, 4);
-		await Bun.sleep(0);
-		await term.flush();
+		try {
+			await Bun.sleep(0);
+			await term.flush();
+			term.resize(39, 4);
+			await Bun.sleep(0);
+			await term.flush();
 
-		const viewport = term.getViewport().join("\n");
-		expect(viewport.includes("shell-")).toBeFalsy();
-		const scrollback = term.getScrollBuffer().join("\n");
-		expect(scrollback.includes("shell-0")).toBeTruthy();
-		expect(scrollback.includes("shell-4")).toBeTruthy();
-
-		tui.stop();
+			const viewport = term.getViewport().join("\n");
+			expect(viewport.includes("shell-")).toBeFalsy();
+			const scrollback = term.getScrollBuffer().join("\n");
+			expect(scrollback.includes("shell-0")).toBeTruthy();
+			expect(scrollback.includes("shell-4")).toBeTruthy();
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("preserves rendered scrollback on forced redraw after startup", async () => {
@@ -136,20 +142,22 @@ describe("TUI overlays", () => {
 		tui.addChild(component);
 
 		tui.start();
-		await Bun.sleep(0);
-		await term.flush();
+		try {
+			await Bun.sleep(0);
+			await term.flush();
 
-		const before = term.getScrollBuffer().join("\n");
-		expect(before.includes("row-0")).toBeTruthy();
+			const before = term.getScrollBuffer().join("\n");
+			expect(before.includes("row-0")).toBeTruthy();
 
-		tui.requestRender(true);
-		await Bun.sleep(0);
-		await term.flush();
+			tui.requestRender(true);
+			await Bun.sleep(0);
+			await term.flush();
 
-		const after = term.getScrollBuffer().join("\n");
-		expect(after.includes("row-0")).toBeTruthy();
-
-		tui.stop();
+			const after = term.getScrollBuffer().join("\n");
+			expect(after.includes("row-0")).toBeTruthy();
+		} finally {
+			tui.stop();
+		}
 	});
 	it("preserves shell output written while stopped across restart forced redraw", async () => {
 		const term = new VirtualTerminal(40, 4);
@@ -157,29 +165,31 @@ describe("TUI overlays", () => {
 		tui.addChild(new MutableContentComponent(["ui-0", "ui-1", "ui-2", "ui-3", "ui-4", "ui-5"]));
 
 		tui.start();
-		await Bun.sleep(0);
-		await term.flush();
+		try {
+			await Bun.sleep(0);
+			await term.flush();
 
-		tui.stop();
-		await term.flush();
-		term.write("shell-a\r\nshell-b\r\n");
-		await term.flush();
-		expect(term.getViewport().join("\n").includes("shell-")).toBeTruthy();
+			tui.stop();
+			await term.flush();
+			term.write("shell-a\r\nshell-b\r\n");
+			await term.flush();
+			expect(term.getViewport().join("\n").includes("shell-")).toBeTruthy();
 
-		tui.start();
-		await Bun.sleep(0);
-		await term.flush();
+			tui.start();
+			await Bun.sleep(0);
+			await term.flush();
 
-		const viewport = term.getViewport().join("\n");
-		expect(viewport.includes("ui-2")).toBeTruthy();
-		expect(viewport.includes("ui-5")).toBeTruthy();
-		expect(viewport.includes("shell-")).toBeFalsy();
+			const viewport = term.getViewport().join("\n");
+			expect(viewport.includes("ui-2")).toBeTruthy();
+			expect(viewport.includes("ui-5")).toBeTruthy();
+			expect(viewport.includes("shell-")).toBeFalsy();
 
-		const scrollback = term.getScrollBuffer().join("\n");
-		expect(scrollback.includes("shell-a")).toBeTruthy();
-		expect(scrollback.includes("shell-b")).toBeTruthy();
-
-		tui.stop();
+			const scrollback = term.getScrollBuffer().join("\n");
+			expect(scrollback.includes("shell-a")).toBeTruthy();
+			expect(scrollback.includes("shell-b")).toBeTruthy();
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("fully redraws on height increase without wiping shell scrollback", async () => {
@@ -192,20 +202,22 @@ describe("TUI overlays", () => {
 		tui.addChild(component);
 
 		tui.start();
-		await Bun.sleep(0);
-		await term.flush();
+		try {
+			await Bun.sleep(0);
+			await term.flush();
 
-		term.resize(40, 8);
-		await Bun.sleep(0);
-		await term.flush();
+			term.resize(40, 8);
+			await Bun.sleep(0);
+			await term.flush();
 
-		const viewport = term.getViewport().join("\n");
-		expect(viewport.includes("shell-")).toBeFalsy();
-		const scrollback = term.getScrollBuffer().join("\n");
-		expect(scrollback.includes("shell-0")).toBeTruthy();
-		expect(scrollback.includes("shell-4")).toBeTruthy();
-
-		tui.stop();
+			const viewport = term.getViewport().join("\n");
+			expect(viewport.includes("shell-")).toBeFalsy();
+			const scrollback = term.getScrollBuffer().join("\n");
+			expect(scrollback.includes("shell-0")).toBeTruthy();
+			expect(scrollback.includes("shell-4")).toBeTruthy();
+		} finally {
+			tui.stop();
+		}
 	});
 	it("fully redraws on height increase when content changes in the same tick", async () => {
 		const term = new VirtualTerminal(40, 4);
@@ -217,22 +229,24 @@ describe("TUI overlays", () => {
 		tui.addChild(component);
 
 		tui.start();
-		await Bun.sleep(0);
-		await term.flush();
+		try {
+			await Bun.sleep(0);
+			await term.flush();
 
-		component.setLines(["ui-0", "ui-1", "ui-2", "ui-3*"]);
-		term.resize(40, 8);
-		await Bun.sleep(0);
-		await term.flush();
+			component.setLines(["ui-0", "ui-1", "ui-2", "ui-3*"]);
+			term.resize(40, 8);
+			await Bun.sleep(0);
+			await term.flush();
 
-		const viewport = term.getViewport().join("\n");
-		expect(viewport.includes("shell-")).toBeFalsy();
-		expect(viewport.includes("ui-3*")).toBeTruthy();
-		const scrollback = term.getScrollBuffer().join("\n");
-		expect(scrollback.includes("shell-0")).toBeTruthy();
-		expect(scrollback.includes("shell-5")).toBeTruthy();
-
-		tui.stop();
+			const viewport = term.getViewport().join("\n");
+			expect(viewport.includes("shell-")).toBeFalsy();
+			expect(viewport.includes("ui-3*")).toBeTruthy();
+			const scrollback = term.getScrollBuffer().join("\n");
+			expect(scrollback.includes("shell-0")).toBeTruthy();
+			expect(scrollback.includes("shell-5")).toBeTruthy();
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("renders viewport-only on resize when content size is stable", async () => {
@@ -539,19 +553,23 @@ describe("TUI overlays", () => {
 		tui.addChild(component);
 
 		tui.start();
-		await Bun.sleep(0);
-		await term.flush();
+		try {
+			await Bun.sleep(0);
+			await term.flush();
 
-		tui.stop();
-		await term.flush();
+			tui.stop();
+			await term.flush();
 
-		const scrollback = term.getScrollBuffer();
-		// Shell history should survive
-		expect(scrollback.join("\n").includes("shell-0")).toBeTruthy();
-		// No large blank gap from exit — viewport should still have content
-		const viewport = term.getViewport().map(l => l.trimEnd());
-		const contentLines = viewport.filter(l => l.trim().length > 0);
-		expect(contentLines.length).toBeGreaterThanOrEqual(4);
+			const scrollback = term.getScrollBuffer();
+			// Shell history should survive
+			expect(scrollback.join("\n").includes("shell-0")).toBeTruthy();
+			// No large blank gap from exit — viewport should still have content
+			const viewport = term.getViewport().map(l => l.trimEnd());
+			const contentLines = viewport.filter(l => l.trim().length > 0);
+			expect(contentLines.length).toBeGreaterThanOrEqual(4);
+		} finally {
+			tui.stop();
+		}
 	});
 
 	it("shrink after preexisting shell history does not flood viewport with blanks", async () => {

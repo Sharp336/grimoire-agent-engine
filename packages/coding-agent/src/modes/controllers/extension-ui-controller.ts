@@ -24,7 +24,8 @@ import { setSessionTerminalTitle, setTerminalTitle } from "../../utils/title-gen
 const MAX_WIDGET_LINES = 10;
 
 export class ExtensionUiController {
-	#extensionTerminalInputUnsubscribers = new Set<() => void>();
+	#extensionTerminalInputHandlers = new Map<TerminalInputHandler, () => void>();
+	#suspendedExtensionTerminalInputHandlers: Set<TerminalInputHandler> | null = null;
 	#hookWidgetsAbove = new Map<string, ExtensionUiComponent>();
 	#hookWidgetsBelow = new Map<string, ExtensionUiComponent>();
 	constructor(private ctx: InteractiveModeContext) {}
@@ -918,14 +919,57 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * Show an extension error in the UI.
+	 * Register an extension terminal input listener and track it for teardown.
 	 */
 	addExtensionTerminalInputListener(handler: TerminalInputHandler): () => void {
+		this.#suspendedExtensionTerminalInputHandlers?.delete(handler);
+		this.#extensionTerminalInputHandlers.get(handler)?.();
 		const unsubscribe = this.ctx.ui.addInputListener(handler);
-		this.#extensionTerminalInputUnsubscribers.add(unsubscribe);
+		this.#extensionTerminalInputHandlers.set(handler, unsubscribe);
 		return () => {
+			this.#suspendedExtensionTerminalInputHandlers?.delete(handler);
+			const activeUnsubscribe = this.#extensionTerminalInputHandlers.get(handler);
+			if (!activeUnsubscribe) {
+				unsubscribe();
+				return;
+			}
+			activeUnsubscribe();
+			if (this.#extensionTerminalInputHandlers.get(handler) === activeUnsubscribe) {
+				this.#extensionTerminalInputHandlers.delete(handler);
+			}
+		};
+	}
+
+	/**
+	 * Temporarily detach extension terminal input listeners without discarding them.
+	 * Returns a restore function that re-attaches the suspended handlers once.
+	 */
+	suspendExtensionTerminalInputListeners(): () => void {
+		if (this.#suspendedExtensionTerminalInputHandlers) {
+			return () => {};
+		}
+		const handlers = new Set<TerminalInputHandler>();
+		for (const [handler, unsubscribe] of this.#extensionTerminalInputHandlers) {
+			handlers.add(handler);
 			unsubscribe();
-			this.#extensionTerminalInputUnsubscribers.delete(unsubscribe);
+		}
+		this.#extensionTerminalInputHandlers.clear();
+		this.#suspendedExtensionTerminalInputHandlers = handlers;
+
+		let restored = false;
+		return () => {
+			if (restored) {
+				return;
+			}
+			restored = true;
+			if (this.#suspendedExtensionTerminalInputHandlers !== handlers) {
+				return;
+			}
+			this.#suspendedExtensionTerminalInputHandlers = null;
+			for (const handler of handlers) {
+				const unsubscribe = this.ctx.ui.addInputListener(handler);
+				this.#extensionTerminalInputHandlers.set(handler, unsubscribe);
+			}
 		};
 	}
 
@@ -942,10 +986,12 @@ export class ExtensionUiController {
 	}
 
 	clearExtensionTerminalInputListeners(): void {
-		for (const unsubscribe of this.#extensionTerminalInputUnsubscribers) {
+		for (const unsubscribe of this.#extensionTerminalInputHandlers.values()) {
 			unsubscribe();
 		}
-		this.#extensionTerminalInputUnsubscribers.clear();
+		this.#extensionTerminalInputHandlers.clear();
+		this.#suspendedExtensionTerminalInputHandlers?.clear();
+		this.#suspendedExtensionTerminalInputHandlers = null;
 	}
 
 	showExtensionError(extensionPath: string, error: string): void {

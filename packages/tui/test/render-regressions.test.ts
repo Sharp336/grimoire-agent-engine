@@ -860,6 +860,37 @@ describe("TUI terminal-state regressions", () => {
 				tui.stop();
 			}
 		});
+		it("repeated forced repaints from empty trusted frame do not accumulate blank scrollback", async () => {
+			const term = new VirtualTerminal(40, 10);
+			const tui = new TUI(term);
+			const component = new MutableLinesComponent([]);
+			tui.addChild(component);
+
+			try {
+				tui.start();
+				await settle(term);
+
+				const baseScrollback = term.getScrollBuffer().length;
+
+				for (let i = 0; i < 10; i++) {
+					tui.requestRender(true);
+					await settle(term);
+				}
+
+				const growth = term.getScrollBuffer().length - baseScrollback;
+				expect(growth).toBeLessThan(3);
+
+				component.setLines(rows("line-", 5));
+				tui.requestRender();
+				await settle(term);
+
+				const viewport = visible(term);
+				expect(viewport[0]?.trim()).toBe("line-0");
+				expect(viewport[4]?.trim()).toBe("line-4");
+			} finally {
+				tui.stop();
+			}
+		});
 	});
 
 	describe("overlay compositing", () => {
@@ -945,6 +976,9 @@ describe("TUI terminal-state regressions", () => {
 			const contentLines = viewport.filter(l => l.trim().length > 0);
 			expect(contentLines.length).toBeGreaterThanOrEqual(8);
 			expect(trailingBlanks(viewport)).toBeLessThanOrEqual(2);
+			for (const line of contentLines) {
+				expect(line.trim()).toMatch(/^line-\d+$/);
+			}
 		});
 
 		it("stop after overflowing content with shell history does not add blank rows", async () => {
@@ -967,7 +1001,12 @@ describe("TUI terminal-state regressions", () => {
 			expect(scrollback.join("\n").includes("shell-0")).toBeTruthy();
 			// After stop, the viewport should have content, not a big blank gap
 			const viewport = visible(term);
+			const contentLines = viewport.filter(l => l.trim().length > 0);
+			expect(contentLines.length).toBeGreaterThanOrEqual(6);
 			expect(trailingBlanks(viewport)).toBeLessThanOrEqual(2);
+			for (const line of contentLines) {
+				expect(line.trim()).toMatch(/^line-\d+$/);
+			}
 		});
 
 		it("stop after shrink does not push content off screen", async () => {
@@ -1053,6 +1092,33 @@ describe("TUI terminal-state regressions", () => {
 				const scrollback = term.getScrollBuffer();
 				// No giant blank run from accumulated drift
 				expect(longestBlankRun(scrollback)).toBeLessThan(15);
+			} finally {
+				tui.stop();
+			}
+		});
+		it("forced repaint after shrink preserves the new content", async () => {
+			const term = new VirtualTerminal(40, 10);
+			const tui = new TUI(term);
+			const component = new MutableLinesComponent(rows("line-", 50));
+			tui.addChild(component);
+
+			try {
+				tui.start();
+				await settle(term);
+
+				component.setLines(["fresh-start", "prompt>"]);
+				tui.requestRender(true);
+				await settle(term);
+
+				tui.requestRender(true);
+				await settle(term);
+
+				const viewport = visible(term);
+				expect(viewport[0]?.trim()).toBe("fresh-start");
+				expect(viewport[1]?.trim()).toBe("prompt>");
+				for (let i = 2; i < 10; i++) {
+					expect(viewport[i]?.trim()).toBe("");
+				}
 			} finally {
 				tui.stop();
 			}
@@ -1170,8 +1236,12 @@ describe("TUI terminal-state regressions", () => {
 
 			// After stop, viewport should still have content
 			const viewport = visible(term);
+			const contentLines = viewport.filter(l => l.trim().length > 0);
+			expect(contentLines.length).toBeGreaterThanOrEqual(8);
 			expect(trailingBlanks(viewport)).toBeLessThanOrEqual(2);
-			expect(viewport.filter(l => l.trim().length > 0).length).toBeGreaterThanOrEqual(8);
+			for (const line of contentLines) {
+				expect(line.trim()).toMatch(/^base-\d+$/);
+			}
 		});
 	});
 });

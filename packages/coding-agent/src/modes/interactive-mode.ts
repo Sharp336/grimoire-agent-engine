@@ -758,8 +758,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const didCreateFreshSession = await this.handleClearCommand({
 			beforeSwitchCheck: () => {
 				this.sessionManager.setTransientModeOverride("none");
+				const restoreListeners = this.#extensionUiController.suspendExtensionTerminalInputListeners();
 				return () => {
 					this.sessionManager.clearTransientModeOverride();
+					restoreListeners();
 				};
 			},
 			beforeSwitch: async () => {
