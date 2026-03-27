@@ -85,6 +85,32 @@ describe("python modules", () => {
 		});
 	});
 
+	it("fails fast when the module deadline expires before the next execution starts", async () => {
+		tempRoot = TempDir.createSync("@omp-python-modules-");
+		const agentDir = path.join(tempRoot.path(), "agent");
+		const cwd = path.join(tempRoot.path(), "project");
+		const signal = new AbortController().signal;
+
+		await writeModule(getProjectModulesDir(cwd), "alpha.py", "project-omp");
+		await writeModule(getProjectModulesDir(cwd), "beta.py", "project-omp");
+
+		const execute = vi.fn(async () => ({ status: "ok" as const, cancelled: false }));
+		const executor: PythonModuleExecutor = { execute };
+		vi.spyOn(Date, "now").mockReturnValueOnce(10_000).mockReturnValueOnce(10_300);
+
+		await expect(loadPythonModules(executor, { cwd, agentDir, signal, deadlineMs: 10_250 })).rejects.toMatchObject({
+			name: "TimeoutError",
+			message: "Python module loading timed out",
+		});
+		expect(execute).toHaveBeenCalledTimes(1);
+		expect(execute).toHaveBeenCalledWith(expect.any(String), {
+			signal,
+			timeoutMs: 250,
+			silent: true,
+			storeHistory: false,
+		});
+	});
+
 	it("fails fast when a module fails to execute", async () => {
 		tempRoot = TempDir.createSync("@omp-python-modules-");
 		const agentDir = path.join(tempRoot.path(), "agent");

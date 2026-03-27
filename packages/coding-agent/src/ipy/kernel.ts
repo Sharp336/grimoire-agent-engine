@@ -62,6 +62,12 @@ function getAbortReason(signal: AbortSignal | undefined, fallbackReason: string)
 	return new Error(fallbackReason);
 }
 
+function createCancellationError(name: "AbortError" | "TimeoutError", message: string): Error {
+	const error = new Error(message);
+	error.name = name;
+	return error;
+}
+
 function createAbortedSignal(reason: Error): AbortSignal {
 	const controller = new AbortController();
 	controller.abort(reason);
@@ -73,6 +79,10 @@ function combineAbortSignal(
 	timeoutCapMs?: number,
 	fallbackReason = "Operation aborted",
 ): AbortSignal | undefined {
+	if (options.signal?.aborted) {
+		return options.signal;
+	}
+
 	const signals: AbortSignal[] = [];
 	if (options.signal) {
 		signals.push(options.signal);
@@ -88,7 +98,7 @@ function combineAbortSignal(
 
 	if (timeoutMs !== undefined) {
 		if (timeoutMs <= 0) {
-			return createAbortedSignal(new Error(fallbackReason));
+			return createAbortedSignal(createCancellationError("TimeoutError", fallbackReason));
 		}
 		signals.push(AbortSignal.timeout(timeoutMs));
 	}

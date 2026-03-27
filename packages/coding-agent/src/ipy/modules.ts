@@ -67,11 +67,23 @@ async function readModuleContent(candidate: ModuleCandidate): Promise<PythonModu
 	}
 }
 
-function getModuleExecutionTimeoutMs(options: LoadPythonModulesOptions): number | undefined {
-	if (options.deadlineMs !== undefined) {
-		return Math.max(0, options.deadlineMs - Date.now());
+function createTimeoutError(message: string): Error {
+	const error = new Error(message);
+	error.name = "TimeoutError";
+	return error;
+}
+
+function requireModuleExecutionTimeoutMs(options: LoadPythonModulesOptions): number | undefined {
+	if (options.deadlineMs === undefined) {
+		return options.timeoutMs;
 	}
-	return options.timeoutMs;
+
+	const remainingMs = options.deadlineMs - Date.now();
+	if (remainingMs <= 0) {
+		throw createTimeoutError("Python module loading timed out");
+	}
+
+	return remainingMs;
 }
 
 /**
@@ -114,7 +126,7 @@ export async function loadPythonModules(
 	for (const module of modules) {
 		const result = await executor.execute(module.content, {
 			signal: options.signal,
-			timeoutMs: getModuleExecutionTimeoutMs(options),
+			timeoutMs: requireModuleExecutionTimeoutMs(options),
 			silent: true,
 			storeHistory: false,
 		});

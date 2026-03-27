@@ -11,6 +11,8 @@ interface KernelStub {
 
 type KernelStartOptions = Parameters<typeof PythonKernel.start>[0];
 
+const originalDateNow = Date.now;
+
 const originalStart = PythonKernel.start;
 
 function createCancellationError(name: "AbortError" | "TimeoutError", message: string): Error {
@@ -49,6 +51,7 @@ function rejectOnStartupCancellation(options: KernelStartOptions): Promise<never
 describe("executePython (per-call)", () => {
 	afterEach(() => {
 		PythonKernel.start = originalStart;
+		Date.now = originalDateNow;
 	});
 
 	it("returns a cancelled timeout result when kernel startup exceeds the deadline", async () => {
@@ -60,6 +63,27 @@ describe("executePython (per-call)", () => {
 		const result = await executePython("sleep(10)", {
 			kernelMode: "per-call",
 			timeoutMs: 25,
+			cwd: tempDir.path(),
+		});
+
+		expect(result.cancelled).toBe(true);
+		expect(result.exitCode).toBeUndefined();
+		expect(result.output).toContain("Command timed out");
+	});
+
+	it("returns a cancelled timeout result when the startup budget expires before kernel creation", async () => {
+		Bun.env.PI_PYTHON_SKIP_CHECK = "1";
+		using tempDir = TempDir.createSync("@omp-python-executor-per-call-");
+
+		let nowCalls = 0;
+		Date.now = () => {
+			nowCalls += 1;
+			return nowCalls <= 2 ? 1_000 : 2_000;
+		};
+
+		const result = await executePython("sleep(10)", {
+			kernelMode: "per-call",
+			timeoutMs: 10,
 			cwd: tempDir.path(),
 		});
 
