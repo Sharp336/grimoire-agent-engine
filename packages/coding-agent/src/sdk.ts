@@ -9,8 +9,17 @@ import {
 import type { Message, Model } from "@oh-my-pi/pi-ai";
 
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { SearchDb } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { $env, getAgentDbPath, getAgentDir, getProjectDir, logger, postmortem } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	getAgentDbPath,
+	getAgentDir,
+	getProjectDir,
+	getSearchDbDir,
+	logger,
+	postmortem,
+} from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { AsyncJobManager } from "./async";
 import { createAutoresearchExtension } from "./autoresearch";
@@ -131,6 +140,8 @@ export interface CreateAgentSessionOptions {
 	authStorage?: AuthStorage;
 	/** Model registry. Default: discoverModels(authStorage, agentDir) */
 	modelRegistry?: ModelRegistry;
+	/** Shared native search DB for grep/glob/fuzzyFind-backed workflows. */
+	searchDb?: SearchDb;
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
@@ -381,6 +392,7 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 		sessionManager: ctx.sessionManager,
 		modelRegistry: ctx.modelRegistry,
 		model: ctx.model,
+		searchDb: ctx.searchDb,
 		isIdle: ctx.isIdle,
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,
@@ -688,8 +700,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Check if session has existing data to restore
 	const existingSession = logger.time("loadSession", () => sessionManager.buildSessionContext());
-	const hasExistingSession = existingSession.messages.length > 0;
-	const hasThinkingEntry = sessionManager.getBranch().some(entry => entry.type === "thinking_level_change");
+	const existingBranch = sessionManager.getBranch();
+	const hasExistingSession = existingBranch.length > 0;
+	const hasThinkingEntry = existingBranch.some(entry => entry.type === "thinking_level_change");
+	const hasServiceTierEntry = existingBranch.some(entry => entry.type === "service_tier_change");
 
 	const hasExplicitModel = options.model !== undefined || options.modelPattern !== undefined;
 	const modelMatchPreferences = {
@@ -794,6 +808,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}),
 	);
 
+	// collect alwaysApply rules — full content injected into system prompt
+	const alwaysApplyRules = rulesResult.items.filter((rule: Rule) => {
+		if (registeredTtsrRuleNames.has(rule.name)) return false;
+		return rule.alwaysApply === true;
+	});
+
 	const contextFiles = await logger.timeAsync(
 		"discoverContextFiles",
 		async () => options.contextFiles ?? (await discoverContextFiles(cwd, agentDir)),
@@ -854,6 +874,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			})
 		: undefined;
 
+	const searchDb = options.searchDb ?? new SearchDb(getSearchDbDir(agentDir));
 	const pendingActionStore = new PendingActionStore();
 	const toolSession: ToolSession = {
 		cwd,
@@ -903,6 +924,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		modelRegistry,
 		asyncJobManager,
 		pendingActionStore,
+		searchDb,
 	};
 
 	// Initialize internal URL router for internal protocols (agent://, artifact://, memory://, skill://, rule://, mcp://, local://)
@@ -928,7 +950,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	);
 	internalRouter.register(
 		new RuleProtocolHandler({
-			getRules: () => rulebookRules,
+			getRules: () => [...rulebookRules, ...alwaysApplyRules],
 		}),
 	);
 	internalRouter.register(new PiProtocolHandler());
@@ -1165,6 +1187,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			sessionManager,
 			modelRegistry,
 			model: agent?.state.model,
+			searchDb,
 			isIdle: () => !session?.isStreaming,
 			hasQueuedMessages: () => (session?.queuedMessageCount ?? 0) > 0,
 			abort: () => session?.abort(),
@@ -1250,6 +1273,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: promptTools,
 			toolNames,
 			rules: rulebookRules,
+			alwaysApplyRules,
 			skillsSettings: settings.getGroup("skills"),
 			appendSystemPrompt: appendPrompt,
 			repeatToolDescriptions,
@@ -1270,6 +1294,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				tools: promptTools,
 				toolNames,
 				rules: rulebookRules,
+				alwaysApplyRules,
 				skillsSettings: settings.getGroup("skills"),
 				customPrompt: options.systemPrompt,
 				appendSystemPrompt: appendPrompt,
@@ -1428,6 +1453,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
 	const serviceTierSetting = settings.get("serviceTier");
 
+	const initialServiceTier = hasServiceTierEntry
+		? existingSession.serviceTier
+		: serviceTierSetting === "none"
+			? undefined
+			: serviceTierSetting;
+
 	agent = new Agent({
 		initialState: {
 			systemPrompt,
@@ -1449,7 +1480,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		minP: settings.get("minP") >= 0 ? settings.get("minP") : undefined,
 		presencePenalty: settings.get("presencePenalty") >= 0 ? settings.get("presencePenalty") : undefined,
 		repetitionPenalty: settings.get("repetitionPenalty") >= 0 ? settings.get("repetitionPenalty") : undefined,
-		serviceTier: serviceTierSetting === "none" ? undefined : serviceTierSetting,
+		serviceTier: initialServiceTier,
 		kimiApiFormat: settings.get("providers.kimiApiFormat") ?? "anthropic",
 		preferWebsockets: preferOpenAICodexWebsockets,
 		getToolContext: tc => toolContextStore.getContext(tc),
@@ -1487,9 +1518,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Restore messages if session has existing data
 	if (hasExistingSession) {
 		agent.replaceMessages(existingSession.messages);
-		if (!hasThinkingEntry) {
-			sessionManager.appendThinkingLevelChange(thinkingLevel);
-		}
 	} else {
 		// Save initial model and thinking level for new sessions so they can be restored on resume
 		if (model) {
@@ -1520,11 +1548,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		mcpDiscoveryEnabled,
 		initialSelectedMCPToolNames,
 		defaultSelectedMCPToolNames,
+		persistInitialMCPToolSelection: !hasExistingSession,
 		defaultSelectedMCPServerNames: [...discoveryDefaultServers],
 		ttsrManager,
 		obfuscator,
 		asyncJobManager,
 		pendingActionStore,
+		searchDb,
 	});
 
 	if (model?.api === "openai-codex-responses") {

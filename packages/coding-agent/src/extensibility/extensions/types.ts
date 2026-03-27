@@ -22,6 +22,7 @@ import type {
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import type * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
+import type { SearchDb } from "@oh-my-pi/pi-natives";
 import type { AutocompleteItem, Component, EditorComponent, EditorTheme, KeyId, TUI } from "@oh-my-pi/pi-tui";
 import type { Static, TSchema } from "@sinclair/typebox";
 import type { Rule } from "../../capability/rule";
@@ -161,7 +162,12 @@ export interface ExtensionUIContext {
 	getEditorText(): string;
 
 	/** Show a multi-line editor for text editing. */
-	editor(title: string, prefill?: string): Promise<string | undefined>;
+	editor(
+		title: string,
+		prefill?: string,
+		dialogOptions?: ExtensionUIDialogOptions,
+		editorOptions?: { promptStyle?: boolean },
+	): Promise<string | undefined>;
 
 	/** Set a custom editor component via factory function, or undefined to restore the default editor. */
 	setEditorComponent(
@@ -224,6 +230,8 @@ export interface ExtensionContext {
 	modelRegistry: ModelRegistry;
 	/** Current model (may be undefined) */
 	model: Model | undefined;
+	/** Shared native search DB for grep/glob/fuzzyFind-backed workflows. */
+	searchDb?: SearchDb;
 	/** Whether the agent is idle (not streaming) */
 	isIdle(): boolean;
 	/** Abort the current agent operation */
@@ -1290,6 +1298,7 @@ export interface ExtensionActions {
 /** Actions for ExtensionContext (ctx.* in event handlers). */
 export interface ExtensionContextActions {
 	getModel: () => Model | undefined;
+	getSearchDb?: () => SearchDb | undefined;
 	isIdle: () => boolean;
 	abort: () => void;
 	hasPendingMessages: () => boolean;

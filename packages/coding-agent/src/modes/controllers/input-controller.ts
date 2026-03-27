@@ -11,6 +11,7 @@ import type { AgentSessionEvent } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, type SkillPromptDetails } from "../../session/messages";
 import { executeBuiltinSlashCommand } from "../../slash-commands/builtin-registry";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
+import { ensureSupportedImageInput } from "../../utils/image-input";
 import { resizeImage } from "../../utils/image-resize";
 import { generateSessionTitle, setSessionTerminalTitle } from "../../utils/title-generator";
 
@@ -95,7 +96,11 @@ export class InputController {
 		this.ctx.editor.onCycleModelForward = () => this.cycleRoleModel();
 		this.ctx.editor.setActionKeys("app.model.cycleBackward", this.ctx.keybindings.getKeys("app.model.cycleBackward"));
 		this.ctx.editor.onCycleModelBackward = () => this.cycleRoleModel({ temporary: true });
-		this.ctx.editor.onQuickSelectModel = () => this.ctx.showModelSelector({ temporaryOnly: true });
+		this.ctx.editor.setActionKeys(
+			"app.model.selectTemporary",
+			this.ctx.keybindings.getKeys("app.model.selectTemporary"),
+		);
+		this.ctx.editor.onSelectModelTemporary = () => this.ctx.showModelSelector({ temporaryOnly: true });
 
 		// Global debug handler on TUI (works regardless of focus)
 		this.ctx.ui.onDebug = () => this.ctx.showDebugSelector();
@@ -498,17 +503,25 @@ export class InputController {
 			const image = await readImageFromClipboard();
 			if (image) {
 				const base64Data = image.data.toBase64();
-				let imageData = { data: base64Data, mimeType: image.mimeType };
+				let imageData = await ensureSupportedImageInput({
+					type: "image",
+					data: base64Data,
+					mimeType: image.mimeType,
+				});
+				if (!imageData) {
+					this.ctx.showStatus(`Unsupported clipboard image format: ${image.mimeType}`);
+					return false;
+				}
 				if (settings.get("images.autoResize")) {
 					try {
 						const resized = await resizeImage({
 							type: "image",
-							data: base64Data,
-							mimeType: image.mimeType,
+							data: imageData.data,
+							mimeType: imageData.mimeType,
 						});
-						imageData = { data: resized.data, mimeType: resized.mimeType };
+						imageData = { type: "image", data: resized.data, mimeType: resized.mimeType };
 					} catch {
-						imageData = { data: base64Data, mimeType: image.mimeType };
+						// Keep the normalized image when resize fails.
 					}
 				}
 
@@ -537,6 +550,7 @@ export class InputController {
 		return createPromptActionAutocompleteProvider({
 			commands,
 			basePath,
+			searchDb: this.ctx.session.searchDb,
 			keybindings: this.ctx.keybindings,
 			copyCurrentLine: () => this.handleCopyCurrentLine(),
 			copyPrompt: () => this.handleCopyPrompt(),
@@ -595,8 +609,8 @@ export class InputController {
 
 	async cycleRoleModel(options?: { temporary?: boolean }): Promise<void> {
 		try {
-			const roleOrder = ["smol", "default", "slow"] as const;
-			const result = await this.ctx.session.cycleRoleModels(roleOrder, options);
+			const cycleOrder = settings.get("cycleOrder");
+			const result = await this.ctx.session.cycleRoleModels(cycleOrder, options);
 			if (!result) {
 				this.ctx.showStatus("Only one role model available");
 				return;
@@ -612,7 +626,7 @@ export class InputController {
 					: "";
 			const tempLabel = options?.temporary ? " (temporary)" : "";
 			const cycleSeparator = theme.fg("dim", " > ");
-			const cycleLabel = roleOrder
+			const cycleLabel = cycleOrder
 				.map(role => {
 					if (role === result.role) {
 						return theme.bold(theme.fg("accent", role));

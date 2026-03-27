@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Readability } from "@mozilla/readability";
@@ -18,9 +19,10 @@ import type {
 import { renderPromptTemplate } from "../config/prompt-templates";
 import browserDescription from "../prompts/tools/browser.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
-import { formatDimensionNote, resizeImage } from "../utils/image-resize";
+import { resizeImage } from "../utils/image-resize";
 import { htmlToBasicMarkdown } from "../web/scrapers/types";
 import type { OutputMeta } from "./output-meta";
+import { expandPath, resolveToCwd } from "./path-utils";
 import stealthTamperingScript from "./puppeteer/00_stealth_tampering.txt" with { type: "text" };
 import stealthActivityScript from "./puppeteer/01_stealth_activity.txt" with { type: "text" };
 import stealthHairlineScript from "./puppeteer/02_stealth_hairline.txt" with { type: "text" };
@@ -35,6 +37,7 @@ import stealthPluginsScript from "./puppeteer/10_stealth_plugins.txt" with { typ
 import stealthHardwareScript from "./puppeteer/11_stealth_hardware.txt" with { type: "text" };
 import stealthCodecsScript from "./puppeteer/12_stealth_codecs.txt" with { type: "text" };
 import stealthWorkerScript from "./puppeteer/13_stealth_worker.txt" with { type: "text" };
+import { formatScreenshot } from "./render-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -564,7 +567,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		if (this.#page && !this.#page.isClosed()) {
 			return this.#page;
 		}
-		if (!this.#browser || !this.#browser.isConnected()) {
+		if (!this.#browser?.isConnected()) {
 			return this.#resetBrowser(params);
 		}
 		this.#page = await this.#browser.newPage();
@@ -1364,23 +1367,38 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 						{ type: "image", data: buffer.toBase64(), mimeType: "image/png" },
 						{ maxBytes: 0.75 * 1024 * 1024 },
 					);
-					const dimensionNote = formatDimensionNote(resized);
-					const tempFile = path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.png`);
-					await Bun.write(tempFile, resized.buffer);
-					details.screenshotPath = tempFile;
-					details.mimeType = resized.mimeType;
-					details.bytes = resized.buffer.length;
-
-					// Show both raw bytes (saved to disk) and compressed bytes (sent to model).
-					const lines = [
-						"Screenshot captured",
-						`Format: ${resized.mimeType} (${(resized.buffer.length / 1024).toFixed(2)} KB)`,
-						`Dimensions: ${resized.width}x${resized.height}`,
-					];
-					if (dimensionNote) {
-						lines.push(dimensionNote);
+					// Resolve destination: user-defined path > screenshotDir (auto-named) > temp file.
+					const screenshotDir = (() => {
+						const v = this.session.settings.get("browser.screenshotDir") as string | undefined;
+						return v ? expandPath(v) : undefined;
+					})();
+					const paramPath = params.path ? resolveToCwd(params.path as string, this.session.cwd) : undefined;
+					let dest: string;
+					if (paramPath) {
+						dest = paramPath;
+					} else if (screenshotDir) {
+						const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1);
+						dest = path.join(screenshotDir, `screenshot-${ts}.png`);
+					} else {
+						dest = path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.png`);
 					}
+					await fs.mkdir(path.dirname(dest), { recursive: true });
+					// Full-res buffer when saving to a user-defined location; resized (API copy) for temp-only.
+					const saveFullRes = !!(paramPath || screenshotDir);
+					const savedBuffer = saveFullRes ? buffer : resized.buffer;
+					const savedMimeType = saveFullRes ? "image/png" : resized.mimeType;
+					await Bun.write(dest, savedBuffer);
+					details.screenshotPath = dest;
+					details.mimeType = savedMimeType;
+					details.bytes = savedBuffer.length;
 
+					const lines = formatScreenshot({
+						saveFullRes,
+						savedMimeType,
+						savedByteLength: savedBuffer.length,
+						dest,
+						resized,
+					});
 					return toolResult(details)
 						.content([
 							{ type: "text", text: lines.join("\n") },

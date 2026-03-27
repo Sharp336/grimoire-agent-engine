@@ -307,6 +307,7 @@ export class FindTool implements AgentTool<typeof findSchema, FindToolDetails> {
 							timeoutMs,
 						},
 						onMatch,
+						this.session.searchDb,
 					),
 				);
 

@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [13.16.1] - 2026-03-27
+
+### Added
+
+- Added `searchDb` parameter to `PromptActionAutocompleteProvider` constructor for native search database integration in autocomplete workflows
+- Added `searchDb` parameter to enable native search database integration for grep and find operations
+- Exported `SearchDb` type from tools module for type-safe search database usage
+
+### Changed
+
+- Updated grep tool to accept and utilize `searchDb` parameter for improved search performance
+- Updated find tool to pass `searchDb` parameter to underlying search operations
+- Updated grep tool description to remove ripgrep-specific implementation detail
+
+## [13.16.0] - 2026-03-27
+### Added
+
+- Implemented root path alias: bare `/` in tool inputs now resolves to the session working directory instead of the filesystem root
+- Added `browser.screenshotDir` setting to configure screenshot save directory with path expansion
+
+### Changed
+
+- Improved hashline tool documentation with clearer guidance on block boundary handling and closing delimiter duplication prevention
+- Updated screenshot path resolution to use `resolveToCwd` for consistent workspace-relative path handling
+- Updated hook editor hint text to include `ctrl+g external editor` option when using prompt style
+- Refactored question result formatting to consistently include question ID in output
+
+## [13.15.3] - 2026-03-26
+
+### Added
+
+- Added configurable `app.model.selectTemporary` keybinding for temporary model selection.
+
 ## [13.15.0] - 2026-03-23
 ### Breaking Changes
 
@@ -15,6 +48,8 @@
 
 ### Added
 
+- Added custom model roles/tags via config YAML
+- Added ability to reorder model role/tag cycling via config YAML
 - Added prompt for tradeoff metrics during autoresearch setup to collect secondary metrics alongside primary metric
 - Added validation of contract path specifications to reject absolute paths and parent directory references
 - Added stricter benchmark command validation in `isAutoresearchShCommand()` to reject chained commands, pipes, and redirects
@@ -68,22 +103,10 @@
 - Added ACP (Agent Client Protocol) mode for headless agent operation via `--mode acp`
 - Added support for Agent Client Protocol SDK integration with session management, MCP server configuration, and streaming communication
 - Added `ensureOnDisk()` method to SessionManager to persist sessions immediately for ACP discovery
+- Added multiline custom input for `ask` custom answers, using the prompt-style editor without inactivity timeout while composing ([#506](https://github.com/can1357/oh-my-pi/issues/506))
 
 ### Changed
 
-- Changed `isAutoresearchShCommand()` to use proper command-line argument parsing instead of regex, improving accuracy for complex shell invocations
-- Changed autoresearch initialization prompt to display collected tradeoff metrics in the setup summary
-- Changed `command-initialize.md` template to include guidance on preflight requirements, comparability invariants, and marking measurement-critical files as off-limits
-- Changed `command-initialize.md` to instruct users to write or update `autoresearch.program.md` with durable heuristics and repo-specific strategy
-- Changed autoresearch resume guidance to emphasize continuing on the current protected branch rather than switching branches
-- Changed autoresearch prompt to clarify that `autoresearch.md` holds durable conclusions while `autoresearch.ideas.md` is the scratch backlog
-- Changed autoresearch prompt guidance to require stable measurement harness and fixed benchmark inputs unless intentionally starting a new segment
-- Changed autoresearch prompt to recommend keeping equal or near-equal results when they materially simplify implementation
-- Changed `init_experiment` to reset pending run state (checks, duration, ASI, artifact directory) when initializing a new segment
-- Changed `log_experiment` to set `autoResumeArmed` flag after successfully logging a run to enable auto-resume on next agent turn
-- Changed `run_experiment` to set `autoResumeArmed` flag and update dashboard after completing a run
-- Changed auto-resume logic to only prompt when a new pending run exists or when `autoResumeArmed` is explicitly set, preventing duplicate prompts
-- Changed path normalization in contract validation to use `path.posix.normalize()` for consistent path handling
 - Changed autoresearch initialization to collect and validate benchmark command, metric definition, scope paths, off-limits list, and constraints before `init_experiment`
 - Changed `init_experiment` to require exact benchmark command, metric definition, scope, off-limits, and constraints matching collected contract
 - Changed `log_experiment` to record run number, benchmark command, scope paths, off-limits list, constraints, and segment fingerprint with each result
@@ -133,15 +156,16 @@
 
 ### Fixed
 
-- Fixed boundary duplication warnings to always display when replacement lines match the next surviving line, even when auto-correction is disabled
-- Fixed secondary metrics validation to properly reject missing configured metrics and new metrics without force flag
-- Fixed ASI data cloning to prevent prototype pollution attacks by filtering reserved property names
 - Fixed autoresearch resume to detect and recover pending run artifacts that were left unlogged from previous sessions
 - Fixed dashboard overlay to display when running experiment even with zero completed results
 - Fixed tab character rendering in dashboard command display and tool output summaries
 - Fixed autoresearch logging to require durable ASI metadata (hypothesis, rollback_reason, next_action_hint) for every run including rollback context for discarded, crashed, and checks-failed experiments
 - Fixed autoresearch logging to require durable ASI metadata for every run, including rollback context for discarded, crashed, and checks-failed experiments
 
+
+### Fixed
+
+- Fixed resumed and session-switched GitHub Copilot/OpenAI Responses conversations replaying stale assistant native history from older saved sessions by sanitizing persisted assistant replay metadata on rehydration and resetting provider session state across live session boundaries ([#505](https://github.com/can1357/oh-my-pi/issues/505))
 ## [13.14.0] - 2026-03-20
 
 ### Added
