@@ -606,7 +606,7 @@ struct SearchParams {
 
 #[cfg(test)]
 fn cancel_to_io_error(err: Error) -> io::Error {
-	io::Error::new(io::ErrorKind::Interrupted, err.to_string())
+	io::Error::other(err.to_string())
 }
 
 #[cfg(test)]
@@ -951,7 +951,7 @@ fn find_braced_escape_end(bytes: &[u8], start: usize) -> Option<usize> {
 /// Escape `{` and `}` that don't form valid repetition quantifiers.
 ///
 /// Patterns like `${platform}` or `a{b}` contain braces the regex engine
-/// rejects as malformed repetitions.  Since such braces can never be valid
+/// rejects as malformed repetitions. Since such braces can never be valid
 /// regex syntax, turning them into `\{` / `\}` is semantics-preserving
 /// and avoids confusing error messages for callers who pass literal text
 /// fragments (e.g. JS template strings).
@@ -1025,6 +1025,66 @@ fn sanitize_braces(pattern: &str) -> Cow<'_, str> {
 	}
 }
 
+/// Escape unescaped parentheses after a group-syntax regex error.
+///
+/// Search patterns like `fetchAnthropicProvider(` are common literal snippets,
+/// but the regex engine parses the trailing `(` as the start of a capture
+/// group. When the parser already reported invalid group syntax, escaping any
+/// remaining literal parentheses preserves useful search behavior without
+/// changing valid regexes.
+fn escape_unescaped_parentheses(pattern: &str) -> Cow<'_, str> {
+	let bytes = pattern.as_bytes();
+	if !bytes.contains(&b'(') && !bytes.contains(&b')') {
+		return Cow::Borrowed(pattern);
+	}
+
+	let mut result = String::with_capacity(pattern.len() + 4);
+	let mut modified = false;
+	let mut i = 0;
+
+	while i < bytes.len() {
+		if bytes[i] == b'\\' && i + 1 < bytes.len() {
+			result.push('\\');
+			i += 1;
+			let ch = pattern[i..]
+				.chars()
+				.next()
+				.expect("non-empty slice has a char");
+			result.push(ch);
+			i += ch.len_utf8();
+			continue;
+		}
+
+		let ch = pattern[i..]
+			.chars()
+			.next()
+			.expect("non-empty slice has a char");
+		if matches!(ch, '(' | ')') {
+			result.push('\\');
+			modified = true;
+		}
+		result.push(ch);
+		i += ch.len_utf8();
+	}
+
+	if modified {
+		Cow::Owned(result)
+	} else {
+		Cow::Borrowed(pattern)
+	}
+}
+
+fn build_regex_matcher(
+	pattern: &str,
+	ignore_case: bool,
+	multiline: bool,
+) -> std::result::Result<grep_regex::RegexMatcher, grep_regex::Error> {
+	RegexMatcherBuilder::new()
+		.case_insensitive(ignore_case)
+		.multi_line(multiline)
+		.build(pattern)
+}
+
 #[cfg(test)]
 mod tests {
 	use std::{
@@ -1037,8 +1097,8 @@ mod tests {
 	};
 
 	use super::{
-		FileEntry, OutputMode, SearchParams, build_matcher, run_file_search_reader,
-		run_sequential_search, sanitize_braces,
+		FileEntry, OutputMode, SearchParams, build_matcher, escape_unescaped_parentheses,
+		run_file_search_reader, run_sequential_search, sanitize_braces,
 	};
 	use crate::task::{self, AbortReason};
 
@@ -1100,8 +1160,9 @@ mod tests {
 
 		let result = run_sequential_search(
 			&[FileEntry {
-				path:          PathBuf::from("ignored.txt"),
-				relative_path: "ignored.txt".into(),
+				path:                  PathBuf::from("ignored.txt"),
+				relative_path:         "ignored.txt".into(),
+				prefer_text_fast_path: false,
 			}],
 			&matcher,
 			SearchParams {
@@ -1111,6 +1172,7 @@ mod tests {
 				mode:           OutputMode::Count,
 				max_count:      Some(0),
 				offset:         0,
+				multiline:      false,
 			},
 			&ct,
 		)
@@ -1133,6 +1195,7 @@ mod tests {
 			mode:           OutputMode::Content,
 			max_count:      None,
 			offset:         0,
+			multiline:      false,
 		};
 		let mut ct = task::CancelToken::default();
 		let abort = ct.emplace_abort_token();
@@ -1144,11 +1207,29 @@ mod tests {
 			abort_after_read: Some(abort),
 		};
 
-		let err = run_file_search_reader(&matcher, reader, params, &ct)
-			.expect_err("search should stop once cancellation is observed during reads");
+		let Err(err) = run_file_search_reader(&matcher, reader, params, &ct) else {
+			panic!("search should stop once cancellation is observed during reads");
+		};
 
 		assert!(err.to_string().contains("Aborted: Timeout"));
 		assert_eq!(read_calls.load(Ordering::SeqCst), 1);
+	}
+
+	#[test]
+	fn preserves_escaped_parentheses() {
+		assert_eq!(escape_unescaped_parentheses(r"foo\(bar\)").as_ref(), r"foo\(bar\)");
+	}
+
+	#[test]
+	fn escapes_literal_parentheses() {
+		assert_eq!(
+			escape_unescaped_parentheses("fetchAnthropicProvider(").as_ref(),
+			r"fetchAnthropicProvider\("
+		);
+		assert_eq!(
+			escape_unescaped_parentheses("fetchAnthropicProvider()").as_ref(),
+			r"fetchAnthropicProvider\(\)"
+		);
 	}
 }
 
@@ -1158,11 +1239,20 @@ fn build_matcher(
 	multiline: bool,
 ) -> Result<grep_regex::RegexMatcher> {
 	let sanitized = sanitize_braces(pattern);
-	RegexMatcherBuilder::new()
-		.case_insensitive(ignore_case)
-		.multi_line(multiline)
-		.build(&sanitized)
-		.map_err(|err| Error::from_reason(format!("Regex error: {err}")))
+	match build_regex_matcher(sanitized.as_ref(), ignore_case, multiline) {
+		Ok(matcher) => Ok(matcher),
+		Err(err) => {
+			let message = err.to_string();
+			if message.contains("unclosed group") || message.contains("unopened group") {
+				let escaped = escape_unescaped_parentheses(sanitized.as_ref());
+				if escaped.as_ref() != sanitized.as_ref() {
+					return build_regex_matcher(escaped.as_ref(), ignore_case, multiline)
+						.map_err(|retry_err| Error::from_reason(format!("Regex error: {retry_err}")));
+				}
+			}
+			Err(Error::from_reason(format!("Regex error: {message}")))
+		},
+	}
 }
 
 // ---------------------------------------------------------------------------

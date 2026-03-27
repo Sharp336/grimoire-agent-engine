@@ -36,7 +36,12 @@ mock.module("@oh-my-pi/pi-natives", () => ({
 	invalidateFsScanCache: vi.fn(),
 	killTree: vi.fn(),
 	listDescendants: vi.fn(() => []),
-	matchesKey: vi.fn(() => false),
+	matchesKey: vi.fn((data: string, keyId: string) => {
+		if (keyId === "delete") return data === "\x1b[3~";
+		if (keyId === "enter" || keyId === "return") return data === "\n" || data === "\r";
+		if (keyId === "ctrl+c") return data === "\x03";
+		return false;
+	}),
 	matchesKittySequence: vi.fn(() => false),
 	matchesLegacySequence: vi.fn(() => false),
 	parseKey: vi.fn(() => null),
@@ -50,8 +55,12 @@ mock.module("@oh-my-pi/pi-natives", () => ({
 	sanitizeText: vi.fn((text: string) => text),
 	SamplingFilter: { Nearest: "nearest" },
 	searchContent: vi.fn(() => ({ matches: [] })),
+	SearchDb: class {},
 	Shell: class {},
-	sliceWithWidth: vi.fn((text: string) => text),
+	sliceWithWidth: vi.fn((text: string, _startCol = 0, length?: number) => ({
+		text: length === undefined ? text : text.slice(0, Math.max(0, length)),
+		width: length === undefined ? text.length : Math.max(0, length),
+	})),
 	startMacAppearanceObserver: vi.fn(() => ({ stop() {} })),
 	supportsLanguage: vi.fn(() => true),
 	truncateToWidth: vi.fn((text: string) => text),

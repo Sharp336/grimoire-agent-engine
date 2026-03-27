@@ -300,7 +300,11 @@ async function findUniqueSuffixMatch(
 		});
 		matches = result.matches.map(m => m.path);
 	} catch (error) {
-		if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) {
+		const abortClassification = classifyAbortError(error);
+		if (abortClassification === "timeout") {
+			throw createReadTimeoutError(timeoutMs / 1000);
+		}
+		if (signal?.aborted || abortClassification === "abort" || error instanceof ToolAbortError) {
 			throw new ToolAbortError();
 		}
 		return null;
