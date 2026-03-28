@@ -17,7 +17,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 
 const BINARY_NAME = "repo-native-alignment";
 const GITHUB_REPO = "open-horizon-labs/repo-native-alignment";
-const PINNED_VERSION = "v0.2.0";
+const PINNED_VERSION = "v0.2.2";
 const CACHE_DIR = path.join(os.homedir(), ".oh-omp", "bin");
 
 /** Resolved binary path, cached after first successful resolution. */
