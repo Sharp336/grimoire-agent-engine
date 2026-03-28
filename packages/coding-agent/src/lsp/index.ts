@@ -6,6 +6,7 @@ import type { BunFile } from "bun";
 import { type Theme, theme } from "../modes/theme/theme";
 import type { ToolSession } from "../tools";
 import { resolveToCwd } from "../tools/path-utils";
+import { resolveRnaBinary } from "../tools/rna-binary";
 import { compressRnaOutput } from "../tools/rna-format";
 import { ToolAbortError, throwIfAborted } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
@@ -101,7 +102,10 @@ async function tryRnaForLsp(
 			args.push("--file", relPath);
 		}
 
-		const proc = Bun.spawn(["repo-native-alignment", ...args], {
+		const rnaBin = await resolveRnaBinary();
+		if (!rnaBin) return null;
+
+		const proc = Bun.spawn([rnaBin, ...args], {
 			cwd,
 			stdout: "pipe",
 			stderr: "pipe",

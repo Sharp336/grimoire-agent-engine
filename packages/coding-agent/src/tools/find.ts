@@ -24,15 +24,18 @@ import { applyListLimit } from "./list-limit";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import { normalizePathLikeInput, parseFindPattern, resolveMultiFindPattern, resolveToCwd } from "./path-utils";
 import { formatCount, formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
+import { resolveRnaBinary } from "./rna-binary";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
 // RNA experiment: try RNA file discovery for non-glob patterns
 async function tryRnaFileFind(pattern: string, cwd: string): Promise<string[] | null> {
 	try {
+		const rnaBin = await resolveRnaBinary();
+		if (!rnaBin) return null;
 		const proc = Bun.spawn(
 			[
-				"repo-native-alignment",
+				rnaBin,
 				"search",
 				"--file",
 				pattern,

@@ -34,6 +34,7 @@ import { applyListLimit } from "./list-limit";
 import { formatFullOutputReference, formatStyledTruncationWarning, type OutputMeta } from "./output-meta";
 import { resolveReadPath } from "./path-utils";
 import { formatAge, formatBytes, shortenPath, wrapBrackets } from "./render-utils";
+import { resolveRnaBinary } from "./rna-binary";
 import { compressRnaOutput } from "./rna-format";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -52,9 +53,11 @@ function isRemoteMountPath(absolutePath: string): boolean {
 async function tryRnaFileMap(filePath: string, cwd: string): Promise<string | null> {
 	try {
 		const relPath = path.relative(cwd, filePath);
+		const rnaBin = await resolveRnaBinary();
+		if (!rnaBin) return null;
 		const proc = Bun.spawn(
 			[
-				"repo-native-alignment",
+				rnaBin,
 				"search",
 				"--file",
 				relPath,

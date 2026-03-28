@@ -23,6 +23,7 @@ import {
 	resolveToCwd,
 } from "./path-utils";
 import { formatCount, formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
+import { resolveRnaBinary } from "./rna-binary";
 import { compressRnaOutput } from "./rna-format";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
@@ -34,11 +35,13 @@ const looksLikeIdentifier = (pattern: string): boolean => !REGEX_META.test(patte
 // RNA experiment: call RNA CLI for structural search, return raw stdout or null
 async function tryRnaSearch(pattern: string, cwd: string, fileFilter?: string): Promise<string | null> {
 	try {
+		const rnaBin = await resolveRnaBinary();
+		if (!rnaBin) return null;
 		const args = ["search", pattern, "--compact", "--search-mode", "keyword", "--limit", "20", "--repo", cwd];
 		if (fileFilter) {
 			args.push("--file", fileFilter);
 		}
-		const proc = Bun.spawn(["repo-native-alignment", ...args], {
+		const proc = Bun.spawn([rnaBin, ...args], {
 			cwd,
 			stdout: "pipe",
 			stderr: "pipe",
