@@ -49,6 +49,9 @@ export class RecallStore {
 			};
 			table = await db.createTable(TABLE_NAME, [seedRow]);
 			await table.delete("timestamp = 0 AND tool_name = '__seed__'");
+			// Create scalar indices for turn-based lookups
+			await table.createIndex("turn").catch(() => {});
+			await table.createIndex("session_id").catch(() => {});
 		}
 
 		logger.debug("RecallStore initialized", { path: dbPath });
@@ -68,6 +71,12 @@ export class RecallStore {
 		}
 		const results = await query.toArray();
 		return results as RecallSearchResult[];
+	}
+
+	async filterByTurn(turn: number, sessionId: string): Promise<RecallRow[]> {
+		const filter = `turn = ${turn} AND session_id = '${sessionId.replace(/'/g, "''")}'`;
+		const results = await this.#table.query().where(filter).limit(20).toArray();
+		return results as RecallRow[];
 	}
 
 	close(): void {

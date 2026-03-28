@@ -12,9 +12,12 @@ import type { ToolSession } from ".";
 import { shortenPath } from "./render-utils";
 
 const recallSchema = Type.Object({
-	query: Type.String({
-		description: "What you're trying to recall -- describe the content, file, decision, or event",
-	}),
+	query: Type.Optional(
+		Type.String({
+			description:
+				"What you're trying to recall -- describe the content, file, decision, or event. Not needed when using turn expansion.",
+		}),
+	),
 	limit: Type.Optional(Type.Number({ description: "Maximum number of results to return (default: 5, max: 20)" })),
 	role: Type.Optional(
 		Type.Union([Type.Literal("user"), Type.Literal("assistant"), Type.Literal("tool_result")], {
@@ -30,6 +33,12 @@ const recallSchema = Type.Object({
 		Type.Union([Type.Literal("semantic"), Type.Literal("keyword")], {
 			description:
 				"Search mode: 'semantic' (default, vector search) or 'keyword' (exact text match over tool results)",
+		}),
+	),
+	turn: Type.Optional(
+		Type.Number({
+			description:
+				"Expand a specific turn by number. Returns the full original content of all messages at that turn. Use this to retrieve the uncompressed content behind a [warm:...] or [ref:...] stub.",
 		}),
 	),
 });
@@ -69,8 +78,21 @@ export class RecallTool implements AgentTool<typeof recallSchema> {
 	}
 
 	async execute(_toolCallId: string, params: RecallParams, _signal?: AbortSignal): Promise<AgentToolResult> {
+		if (params.turn !== undefined) {
+			return this.#expandTurn(params);
+		}
+		if (!params.query) {
+			return {
+				content: [
+					{
+						type: "text",
+						text: "A query is required for semantic and keyword search. Use turn parameter for turn expansion.",
+					},
+				],
+			};
+		}
 		if (params.mode === "keyword") {
-			return this.#keywordSearch(params);
+			return this.#keywordSearch(params as RecallParams & { query: string });
 		}
 		const limit = Math.min(Math.max(params.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
 		const overfetchLimit = limit * OVERFETCH_FACTOR;
@@ -144,7 +166,44 @@ export class RecallTool implements AgentTool<typeof recallSchema> {
 		};
 	}
 
-	#keywordSearch(params: RecallParams): AgentToolResult {
+	async #expandTurn(params: RecallParams): Promise<AgentToolResult> {
+		const turn = params.turn!;
+		try {
+			const rows = await this.#store.filterByTurn(turn, this.#sessionId);
+			if (rows.length === 0) {
+				return {
+					content: [{ type: "text", text: `No messages found at turn ${turn} in this session.` }],
+				};
+			}
+			const formatted = rows
+				.map(r => {
+					let header = `Turn ${r.turn} [${r.role}`;
+					if (r.tool_name) header += `: ${r.tool_name}`;
+					header += "]";
+					if (r.paths) {
+						try {
+							const pathsList = JSON.parse(r.paths) as string[];
+							if (pathsList.length > 0) header += ` paths: ${pathsList.join(", ")}`;
+						} catch {}
+					}
+					return `${header}\n${r.text}`;
+				})
+				.join("\n\n---\n\n");
+			logger.debug("Recall: expanded turn", { turn, results: rows.length });
+			return {
+				content: [{ type: "text", text: formatted }],
+			};
+		} catch (err) {
+			logger.warn("Recall: turn expansion failed", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return {
+				content: [{ type: "text", text: "Failed to expand turn. Recall is temporarily unavailable." }],
+			};
+		}
+	}
+
+	#keywordSearch(params: RecallParams & { query: string }): AgentToolResult {
 		if (!this.#toolResultStore) {
 			return {
 				content: [{ type: "text", text: "Keyword search not available. ToolResultStore not initialized." }],
