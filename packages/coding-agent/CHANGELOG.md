@@ -2,6 +2,26 @@
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-03-28
+
+### Added
+
+- **RNA-backed code intelligence**: grep, read, LSP, and find route through RNA CLI when available, with graceful fallback to native tools. Gated behind `rna.enabled` setting.
+- **RNA binary provisioner**: auto-downloads pre-built RNA binary from GitHub releases on first use. Cached in `~/.oh-omp/bin/`. No Rust toolchain required.
+- **Codec pipeline**: signal-preserving context compression replacing bare `[ref:tool]` stubs. Three codecs: dedup (unchanged file detection), read (structural view passthrough + skeleton extraction), warm (head/tail peek for all tool results).
+- **Turn-indexed message expansion**: `recall({ turn: N })` expands compressed/stubbed messages to full original content. Query parameter now optional for turn expansion.
+- **Assembly stats**: TUI status line shows compression breakdown (`◫ ↔ ⊞ ✕`).
+
+### Fixed
+
+- Token estimation ratio corrected from `chars/4` to `chars/3.2` — prevents context budget overflow on long sessions with many compressed turns.
+- Scalar indices on LanceDB recall tables created for both new and existing databases — fixes stall on turn expansion queries.
+- `filterByTurn` query timeout (5s) prevents agent hang on slow recall lookups.
+
+### Changed
+
+- Synced with upstream to `v13.16.3`.
+
 ## [0.5.5] - 2026-03-26
 
 ### Changed
