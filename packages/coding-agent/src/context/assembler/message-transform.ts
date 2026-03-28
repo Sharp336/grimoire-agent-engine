@@ -49,7 +49,9 @@ function extractSourceTags(messages: AgentMessage[]): string[] {
 }
 
 function estimateTokensFromCharCount(chars: number): number {
-	return Math.ceil(chars / 4);
+	// Empirical: warm codec stubs ~2.5 chars/tok, prose ~3.0, code ~3.3.
+	// Use 3.2 as a conservative estimate for mixed content.
+	return Math.ceil(chars / 3.2);
 }
 
 export function estimateMessageTokens(messages: unknown[]): number {
