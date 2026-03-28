@@ -209,23 +209,27 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 			// Run grep
 			let result: GrepResult;
 			try {
-				result = await grep({
-					pattern: normalizedPattern,
-					path: searchPath,
-					glob: globFilter,
-					type: type?.trim() || undefined,
-					ignoreCase,
-					multiline: effectiveMultiline,
-					hidden: true,
-					gitignore: useGitignore,
-					cache: false,
-					maxCount: internalLimit,
-					offset: normalizedOffset > 0 ? normalizedOffset : undefined,
-					contextBefore: normalizedContextBefore,
-					contextAfter: normalizedContextAfter,
-					maxColumns: DEFAULT_MAX_COLUMN,
-					mode: effectiveOutputMode,
-				});
+				result = await grep(
+					{
+						pattern: normalizedPattern,
+						path: searchPath,
+						glob: globFilter,
+						type: type?.trim() || undefined,
+						ignoreCase,
+						multiline: effectiveMultiline,
+						hidden: true,
+						gitignore: useGitignore,
+						cache: false,
+						maxCount: internalLimit,
+						offset: normalizedOffset > 0 ? normalizedOffset : undefined,
+						contextBefore: normalizedContextBefore,
+						contextAfter: normalizedContextAfter,
+						maxColumns: DEFAULT_MAX_COLUMN,
+						mode: effectiveOutputMode,
+					},
+					undefined,
+					this.session.searchDb,
+				);
 			} catch (err) {
 				if (err instanceof Error && err.message.startsWith("regex parse error")) {
 					throw new ToolError(err.message);
@@ -497,6 +501,7 @@ export const grepToolRenderer = {
 							items: lines,
 							expanded,
 							maxCollapsed: COLLAPSED_TEXT_LIMIT,
+							maxCollapsedLines: COLLAPSED_TEXT_LIMIT,
 							itemType: "item",
 							renderItem: line => uiTheme.fg("toolOutput", line),
 						},
@@ -562,19 +567,6 @@ export const grepToolRenderer = {
 			}
 		}
 
-		const getCollapsedMatchLimit = (groups: string[][], maxLines: number): number => {
-			if (groups.length === 0) return 0;
-			let usedLines = 0;
-			let count = 0;
-			for (const group of groups) {
-				if (count > 0 && usedLines + group.length > maxLines) break;
-				usedLines += group.length;
-				count += 1;
-				if (usedLines >= maxLines) break;
-			}
-			return count;
-		};
-
 		const truncationReasons: string[] = [];
 		if (limits?.matchLimit) truncationReasons.push(`limit ${limits.matchLimit.reached} matches`);
 		if (limits?.resultLimit) truncationReasons.push(`limit ${limits.resultLimit.reached} results`);
@@ -591,14 +583,13 @@ export const grepToolRenderer = {
 				const { expanded } = options;
 				const key = new Hasher().bool(expanded).u32(width).digest();
 				if (cached?.key === key) return cached.lines;
-				const maxCollapsed = expanded
-					? matchGroups.length
-					: getCollapsedMatchLimit(matchGroups, COLLAPSED_TEXT_LIMIT);
+				const collapsedMatchLineBudget = Math.max(COLLAPSED_TEXT_LIMIT - extraLines.length, 0);
 				const matchLines = renderTreeList(
 					{
 						items: matchGroups,
 						expanded,
-						maxCollapsed,
+						maxCollapsed: matchGroups.length,
+						maxCollapsedLines: collapsedMatchLineBudget,
 						itemType: "match",
 						renderItem: group =>
 							group.map(line => {

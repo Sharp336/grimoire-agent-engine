@@ -331,6 +331,11 @@ export function getModelDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "models.db", "data");
 }
 
+/** Get the directory path for the shared search DB state (~/.oh-omp/agent/search-db). */
+export function getSearchDbDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, "search-db", "data");
+}
+
 /** Get the sessions directory (~/.oh-omp/agent/sessions). */
 export function getSessionsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "sessions", "data");

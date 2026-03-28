@@ -9,8 +9,17 @@ import {
 import type { Message, Model } from "@oh-my-pi/pi-ai";
 
 import { prewarmOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { SearchDb } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { $env, getAgentDbPath, getAgentDir, getProjectDir, logger, postmortem } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	getAgentDbPath,
+	getAgentDir,
+	getProjectDir,
+	getSearchDbDir,
+	logger,
+	postmortem,
+} from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { AsyncJobManager } from "./async";
 import { createAutoresearchExtension } from "./autoresearch";
@@ -157,6 +166,8 @@ export interface CreateAgentSessionOptions {
 	authStorage?: AuthStorage;
 	/** Model registry. Default: discoverModels(authStorage, agentDir) */
 	modelRegistry?: ModelRegistry;
+	/** Shared native search DB for grep/glob/fuzzyFind-backed workflows. */
+	searchDb?: SearchDb;
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
@@ -408,6 +419,7 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 		sessionManager: ctx.sessionManager,
 		modelRegistry: ctx.modelRegistry,
 		model: ctx.model,
+		searchDb: ctx.searchDb,
 		isIdle: ctx.isIdle,
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,
@@ -808,6 +820,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}),
 	);
 
+	// collect alwaysApply rules — full content injected into system prompt
+	const alwaysApplyRules = rulesResult.items.filter((rule: Rule) => {
+		if (registeredTtsrRuleNames.has(rule.name)) return false;
+		return rule.alwaysApply === true;
+	});
+
 	const contextFiles = await logger.timeAsync(
 		"discoverContextFiles",
 		async () => options.contextFiles ?? (await discoverContextFiles(cwd, agentDir)),
@@ -868,6 +886,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			})
 		: undefined;
 
+	const searchDb = options.searchDb ?? new SearchDb(getSearchDbDir(agentDir));
 	const pendingActionStore = new PendingActionStore();
 	// Initialize recall store early so the recall tool can be created during tool setup.
 	// Both the recall tool and ingest pipeline share the same store instance.
@@ -970,6 +989,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		taskStore,
 		toolResultStore,
 		memexLicense,
+		searchDb,
 	};
 
 	// Initialize internal URL router for internal protocols (agent://, artifact://, memory://, skill://, rule://, mcp://, local://)
@@ -995,7 +1015,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	);
 	internalRouter.register(
 		new RuleProtocolHandler({
-			getRules: () => rulebookRules,
+			getRules: () => [...rulebookRules, ...alwaysApplyRules],
 		}),
 	);
 	internalRouter.register(new PiProtocolHandler());
@@ -1232,6 +1252,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			sessionManager,
 			modelRegistry,
 			model: agent?.state.model,
+			searchDb,
 			isIdle: () => !session?.isStreaming,
 			hasQueuedMessages: () => (session?.queuedMessageCount ?? 0) > 0,
 			abort: () => session?.abort(),
@@ -1316,6 +1337,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: promptTools,
 			toolNames,
 			rules: rulebookRules,
+			alwaysApplyRules,
 			skillsSettings: settings.getGroup("skills"),
 			appendSystemPrompt: appendPrompt,
 			repeatToolDescriptions,
@@ -1405,6 +1427,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				tools: promptTools,
 				toolNames,
 				rules: rulebookRules,
+				alwaysApplyRules,
 				skillsSettings: settings.getGroup("skills"),
 				customPrompt: options.systemPrompt,
 				appendSystemPrompt: appendPrompt,
@@ -1875,6 +1898,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		pendingActionStore,
 		assemblerBridge,
 		getLastPromptSnapshotFn: () => lastPromptSnapshot,
+		searchDb,
 	});
 
 	if (model?.api === "openai-codex-responses") {

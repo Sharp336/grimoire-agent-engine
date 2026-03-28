@@ -1,3 +1,4 @@
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Readability } from "@mozilla/readability";
@@ -16,9 +17,10 @@ import type {
 	SerializedAXNode,
 } from "puppeteer";
 import type { ToolSession } from "../sdk";
-import { formatDimensionNote, resizeImage } from "../utils/image-resize";
+import { resizeImage } from "../utils/image-resize";
 import { htmlToBasicMarkdown } from "../web/scrapers/types";
 import type { OutputMeta } from "./output-meta";
+import { expandPath, resolveToCwd } from "./path-utils";
 import stealthTamperingScript from "./puppeteer/00_stealth_tampering.txt" with { type: "text" };
 import stealthActivityScript from "./puppeteer/01_stealth_activity.txt" with { type: "text" };
 import stealthHairlineScript from "./puppeteer/02_stealth_hairline.txt" with { type: "text" };
@@ -33,6 +35,7 @@ import stealthPluginsScript from "./puppeteer/10_stealth_plugins.txt" with { typ
 import stealthHardwareScript from "./puppeteer/11_stealth_hardware.txt" with { type: "text" };
 import stealthCodecsScript from "./puppeteer/12_stealth_codecs.txt" with { type: "text" };
 import stealthWorkerScript from "./puppeteer/13_stealth_worker.txt" with { type: "text" };
+import { formatScreenshot } from "./render-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -54,6 +57,54 @@ async function loadPuppeteer(): Promise<typeof Puppeteer> {
 	} finally {
 		process.chdir(prev);
 	}
+}
+
+/**
+ * On NixOS, Puppeteer's bundled Chromium is a dynamically-linked FHS binary and
+ * cannot run as-is. Detect the platform and resolve a system-installed Chromium
+ * so `puppeteer.launch()` can use it instead of the bundled one.
+ *
+ * Detection order:
+ *   1. `chromium` on PATH
+ *   2. `chromium-browser` on PATH
+ *   3. ~/.nix-profile/bin/chromium  (user profile)
+ *   4. /run/current-system/sw/bin/chromium  (system profile)
+ *
+ * Returns `undefined` on non-NixOS systems or when no binary is found, which
+ * causes Puppeteer to fall back to its default resolution.
+ */
+let _resolvedChromium: string | null | undefined; // undefined = unchecked; null = not found
+function resolveSystemChromium(): string | undefined {
+	if (_resolvedChromium !== undefined) return _resolvedChromium ?? undefined;
+	try {
+		if (!fs.existsSync("/etc/NIXOS")) {
+			_resolvedChromium = null;
+			return undefined;
+		}
+	} catch {
+		_resolvedChromium = null;
+		return undefined;
+	}
+	const candidates = [
+		Bun.which("chromium"),
+		Bun.which("chromium-browser"),
+		path.join(os.homedir(), ".nix-profile/bin/chromium"),
+		"/run/current-system/sw/bin/chromium",
+	];
+	for (const candidate of candidates) {
+		if (candidate) {
+			try {
+				if (fs.existsSync(candidate)) {
+					_resolvedChromium = candidate;
+					logger.debug("NixOS: using system Chromium", { path: candidate });
+					return candidate;
+				}
+			} catch {}
+		}
+	}
+	_resolvedChromium = null;
+	logger.debug("NixOS detected but no Chromium binary found; Puppeteer may fail to launch");
+	return undefined;
 }
 
 const DEFAULT_VIEWPORT = { width: 1365, height: 768, deviceScaleFactor: 1.25 };
@@ -543,6 +594,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		this.#browser = await puppeteer.launch({
 			headless: this.#currentHeadless,
 			defaultViewport: this.#currentHeadless ? initialViewport : null,
+			executablePath: resolveSystemChromium(),
 			args: launchArgs,
 			ignoreDefaultArgs: [...STEALTH_IGNORE_DEFAULT_ARGS],
 		});
@@ -562,7 +614,7 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		if (this.#page && !this.#page.isClosed()) {
 			return this.#page;
 		}
-		if (!this.#browser || !this.#browser.isConnected()) {
+		if (!this.#browser?.isConnected()) {
 			return this.#resetBrowser(params);
 		}
 		this.#page = await this.#browser.newPage();
@@ -1362,23 +1414,38 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 						{ type: "image", data: buffer.toBase64(), mimeType: "image/png" },
 						{ maxBytes: 0.75 * 1024 * 1024 },
 					);
-					const dimensionNote = formatDimensionNote(resized);
-					const tempFile = path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.png`);
-					await Bun.write(tempFile, resized.buffer);
-					details.screenshotPath = tempFile;
-					details.mimeType = resized.mimeType;
-					details.bytes = resized.buffer.length;
-
-					// Show both raw bytes (saved to disk) and compressed bytes (sent to model).
-					const lines = [
-						"Screenshot captured",
-						`Format: ${resized.mimeType} (${(resized.buffer.length / 1024).toFixed(2)} KB)`,
-						`Dimensions: ${resized.width}x${resized.height}`,
-					];
-					if (dimensionNote) {
-						lines.push(dimensionNote);
+					// Resolve destination: user-defined path > screenshotDir (auto-named) > temp file.
+					const screenshotDir = (() => {
+						const v = this.session.settings.get("browser.screenshotDir") as string | undefined;
+						return v ? expandPath(v) : undefined;
+					})();
+					const paramPath = params.path ? resolveToCwd(params.path as string, this.session.cwd) : undefined;
+					let dest: string;
+					if (paramPath) {
+						dest = paramPath;
+					} else if (screenshotDir) {
+						const ts = new Date().toISOString().replace(/[:.]/g, "-").slice(0, -1);
+						dest = path.join(screenshotDir, `screenshot-${ts}.png`);
+					} else {
+						dest = path.join(os.tmpdir(), `omp-sshots-${Snowflake.next()}.png`);
 					}
+					await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+					// Full-res buffer when saving to a user-defined location; resized (API copy) for temp-only.
+					const saveFullRes = !!(paramPath || screenshotDir);
+					const savedBuffer = saveFullRes ? buffer : resized.buffer;
+					const savedMimeType = saveFullRes ? "image/png" : resized.mimeType;
+					await Bun.write(dest, savedBuffer);
+					details.screenshotPath = dest;
+					details.mimeType = savedMimeType;
+					details.bytes = savedBuffer.length;
 
+					const lines = formatScreenshot({
+						saveFullRes,
+						savedMimeType,
+						savedByteLength: savedBuffer.length,
+						dest,
+						resized,
+					});
 					return toolResult(details)
 						.content([
 							{ type: "text", text: lines.join("\n") },

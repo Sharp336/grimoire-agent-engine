@@ -149,10 +149,21 @@ type SettingDef =
 // Schema Definition
 // ═══════════════════════════════════════════════════════════════════════════
 
+export interface ModelTagDef {
+	name: string;
+	color?: string;
+}
+
+export interface ModelTagsSettings {
+	[key: string]: ModelTagDef;
+}
+
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
 const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
+const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
+const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
 		pattern: "^\\s*(cat|head|tail|less|more)\\s+",
@@ -208,6 +219,10 @@ export const SETTINGS_SCHEMA = {
 	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
+
+	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
+
+	cycleOrder: { type: "array", default: DEFAULT_CYCLE_ORDER },
 
 	// ────────────────────────────────────────────────────────────────────────
 	// Appearance
@@ -430,6 +445,13 @@ export const SETTINGS_SCHEMA = {
 		type: "boolean",
 		default: false,
 		ui: { tab: "appearance", label: "Block Images", description: "Prevent images from being sent to LLM providers" },
+	},
+
+	"tui.maxInlineImageColumns": {
+		type: "number",
+		default: 100,
+		description:
+			"Maximum width in terminal columns for inline images (default 100). Set to 0 for unlimited (bounded only by terminal width).",
 	},
 
 	// Display rendering
@@ -1288,6 +1310,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Launch browser in headless mode (disable to show browser UI)",
 		},
 	},
+	"browser.screenshotDir": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tools",
+			label: "Screenshot directory",
+			description:
+				"Directory to save screenshots. If unset, screenshots go to a temp file. Supports ~. Examples: ~/Downloads, ~/Desktop, /sdcard/Download (Android)",
+		},
+	},
 
 	// Tool execution
 	"tools.intentTracing": {
@@ -1931,6 +1963,8 @@ export interface GroupTypeMap {
 	modelRoles: Record<string, string>;
 	contextManager: ContextManagerSettings;
 	assembler: AssemblerSettings;
+	modelTags: ModelTagsSettings;
+	cycleOrder: string[];
 }
 
 export type ContextManagerMode = SettingValue<"contextManager.mode">;

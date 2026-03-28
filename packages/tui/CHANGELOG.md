@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [13.16.1] - 2026-03-27
+
+### Added
+
+- Support for optional SearchDb parameter in CombinedAutocompleteProvider constructor for improved fuzzy search performance
+- Fuzzy matching filter for autocomplete suggestions to improve relevance of results
+
+### Changed
+
+- Fuzzy discovery now applies fuzzy matching filter to results for improved relevance of autocomplete suggestions
+- Autocomplete fuzzy discovery now accepts optional SearchDb instance for faster searches
+
+## [13.16.0] - 2026-03-27
+### Changed
+
+- Updated tab replacement in editor text sanitization to respect configured tab width setting
+
 ## [13.15.0] - 2026-03-23
 
 ### Added
