@@ -366,16 +366,16 @@ describe("transformMessages — budget bounding", () => {
 	});
 
 	test("drops oldest turns when over budget", () => {
-		// Each message ~250 tokens (1000 chars / 4)
+		// Each message ~313 tokens (1000 chars / 3.2)
 		const messages: AgentMessage[] = [
-			makeUser("a".repeat(1000)), // ~250 tokens
-			makeUser("b".repeat(1000)), // ~250 tokens
-			makeUser("c".repeat(1000)), // ~250 tokens
+			makeUser("a".repeat(1000)), // ~313 tokens
+			makeUser("b".repeat(1000)), // ~313 tokens
+			makeUser("c".repeat(1000)), // ~313 tokens
 		];
 
-		// Budget of 600 tokens with hotWindowTurns=1 → only last turn protected
-		// Drops oldest until fits: drops 'a' (250), total 500 ≤ 600
-		const { messages: result } = transformMessages(messages, { maxTokens: 600, hotWindowTurns: 1 });
+		// Budget of 700 tokens with hotWindowTurns=1 → only last turn protected
+		// Drops oldest until fits: drops 'a' (313), total 626 ≤ 700
+		const { messages: result } = transformMessages(messages, { maxTokens: 700, hotWindowTurns: 1 });
 		expect(result).toHaveLength(2);
 		// First message dropped
 		expect((result[0] as UserMessage).content).toBe("b".repeat(1000));
@@ -383,9 +383,9 @@ describe("transformMessages — budget bounding", () => {
 
 	test("hot window is never dropped even if over budget", () => {
 		const messages: AgentMessage[] = [
-			makeUser("a".repeat(1000)), // ~250 tokens
-			makeUser("b".repeat(1000)), // ~250 tokens
-			makeUser("c".repeat(1000)), // ~250 tokens
+			makeUser("a".repeat(1000)), // ~313 tokens
+			makeUser("b".repeat(1000)), // ~313 tokens
+			makeUser("c".repeat(1000)), // ~313 tokens
 		];
 
 		// Budget of 100 tokens but hot window = 3 → all messages kept
@@ -646,15 +646,15 @@ describe("transformMessages — decision metadata", () => {
 	});
 
 	test("dropped turns report action=dropped, reason=budget-exceeded", () => {
-		// Each user message ~250 tokens
+		// Each user message ~313 tokens
 		const messages: AgentMessage[] = [
-			makeUser("a".repeat(1000)), // ~250 tokens
-			makeUser("b".repeat(1000)), // ~250 tokens
-			makeUser("c".repeat(1000)), // ~250 tokens
+			makeUser("a".repeat(1000)), // ~313 tokens
+			makeUser("b".repeat(1000)), // ~313 tokens
+			makeUser("c".repeat(1000)), // ~313 tokens
 		];
 
-		// Budget of 600, hot window = 1 → drop first turn
-		const { metadata } = transformMessages(messages, { maxTokens: 600, hotWindowTurns: 1 });
+		// Budget of 700, hot window = 1 → drop first turn
+		const { metadata } = transformMessages(messages, { maxTokens: 700, hotWindowTurns: 1 });
 
 		expect(metadata.totalTurns).toBe(3);
 		expect(metadata.droppedCount).toBe(1);
@@ -1090,6 +1090,7 @@ describe("deriveBudget", () => {
 		safetyMarginPercent: 5,
 		messageBudgetPercent: 50,
 		hydrationBudgetPercent: 50,
+		turnBufferPercent: 0,
 	};
 
 	test("allocatable equals contextWindow minus fixed costs and safety reserve", () => {

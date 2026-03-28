@@ -12,6 +12,7 @@ describe("deriveBudget — core math", () => {
 			systemPromptTokens: 5_000,
 			toolDefinitionTokens: 10_000,
 			currentTurnTokens: 1_000,
+			turnBufferPercent: 0,
 		});
 
 		// safetyReserve = floor(200_000 * 5 / 100) = 10_000
@@ -30,6 +31,7 @@ describe("deriveBudget — core math", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 10,
+			turnBufferPercent: 0,
 		});
 
 		// safetyReserve = floor(100_000 * 10 / 100) = 10_000
@@ -44,6 +46,7 @@ describe("deriveBudget — core math", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 0,
+			turnBufferPercent: 0,
 			messageBudgetPercent: 70,
 			hydrationBudgetPercent: 30,
 		});
@@ -61,6 +64,7 @@ describe("deriveBudget — core math", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 0,
+			turnBufferPercent: 0,
 			messageBudgetPercent: 60,
 			hydrationBudgetPercent: 60,
 		});
@@ -78,6 +82,7 @@ describe("deriveBudget — core math", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 0,
+			turnBufferPercent: 0,
 			messageBudgetPercent: 30,
 			hydrationBudgetPercent: 30,
 		});
@@ -147,6 +152,7 @@ describe("deriveBudget — settings overrides", () => {
 			systemPromptTokens: 0,
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
+			turnBufferPercent: 0,
 		});
 
 		// safetyReserve = floor(200_000 * 5 / 100) = 10_000
@@ -160,6 +166,7 @@ describe("deriveBudget — settings overrides", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 0,
+			turnBufferPercent: 0,
 		});
 
 		expect(budget.messageBudgetMin).toBe(50_000);
@@ -173,6 +180,7 @@ describe("deriveBudget — settings overrides", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 0,
+			turnBufferPercent: 0,
 		});
 
 		expect(budget.maxTokens).toBe(100_000);
@@ -185,6 +193,7 @@ describe("deriveBudget — settings overrides", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 20,
+			turnBufferPercent: 0,
 		});
 
 		// safetyReserve = floor(100_000 * 20 / 100) = 20_000
@@ -204,6 +213,7 @@ describe("elastic budget — message expansion", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 0,
+			turnBufferPercent: 0,
 			messageBudgetPercent: 50,
 			hydrationBudgetPercent: 50,
 		});
@@ -222,6 +232,7 @@ describe("elastic budget — message expansion", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 0,
+			turnBufferPercent: 0,
 			messageBudgetPercent: 50,
 			hydrationBudgetPercent: 50,
 		});
@@ -240,6 +251,7 @@ describe("elastic budget — message expansion", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 0,
+			turnBufferPercent: 0,
 			messageBudgetPercent: 50,
 			hydrationBudgetPercent: 50,
 		});
@@ -257,6 +269,7 @@ describe("elastic budget — message expansion", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 0,
+			turnBufferPercent: 0,
 			messageBudgetPercent: 50,
 			hydrationBudgetPercent: 50,
 		});
@@ -275,6 +288,7 @@ describe("elastic budget — message expansion", () => {
 			toolDefinitionTokens: 0,
 			currentTurnTokens: 0,
 			safetyMarginPercent: 0,
+			turnBufferPercent: 0,
 			messageBudgetPercent: 70,
 			hydrationBudgetPercent: 30,
 		});
@@ -422,13 +436,13 @@ describe("deriveBudget — maxLatencyMs", () => {
 describe("estimateMessageTokens — token estimation", () => {
 	test("estimates tokens from string content", () => {
 		const tokens = estimateMessageTokens([{ role: "user", content: "a".repeat(400) }]);
-		// 400 chars / 4 = 100 tokens
-		expect(tokens).toBe(100);
+		// 400 chars / 3.2 = 125 tokens
+		expect(tokens).toBe(125);
 	});
 
 	test("estimates tokens from text block content", () => {
 		const tokens = estimateMessageTokens([{ role: "developer", content: [{ type: "text", text: "x".repeat(800) }] }]);
-		// 800 chars / 4 = 200 tokens
-		expect(tokens).toBe(200);
+		// 800 chars / 3.2 = 250 tokens
+		expect(tokens).toBe(250);
 	});
 });
