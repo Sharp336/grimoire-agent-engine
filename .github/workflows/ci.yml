@@ -24,6 +24,9 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Clippy

@@ -31,6 +31,10 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: 0.15.2
+
       - run: bun install
 
       - run: bun check
