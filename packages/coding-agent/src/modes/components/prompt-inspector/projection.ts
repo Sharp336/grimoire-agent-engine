@@ -45,10 +45,16 @@ export function renderStatusBadge(status: ContentStatus): string {
 }
 
 /** Render compact status counts (e.g., "12 included, 3 stubbed, 2 dropped"). */
-export function renderStatusCounts(counts: { included: number; stubbed: number; dropped: number }): string {
+export function renderStatusCounts(counts: {
+	included: number;
+	stubbed: number;
+	compressed: number;
+	dropped: number;
+}): string {
 	const parts: string[] = [];
 	if (counts.included > 0) parts.push(theme.fg("success", `${counts.included} included`));
 	if (counts.stubbed > 0) parts.push(theme.fg("warning", `${counts.stubbed} stubbed`));
+	if (counts.compressed > 0) parts.push(theme.fg("accent", `${counts.compressed} compressed`));
 	if (counts.dropped > 0) parts.push(theme.fg("error", `${counts.dropped} dropped`));
 	return parts.join(theme.fg("dim", ", "));
 }
@@ -329,6 +335,7 @@ function projectAssembledContextSection(snapshot: EffectivePromptSnapshot): Insp
 		statusCounts: {
 			included: fragmentCount,
 			stubbed: 0,
+			compressed: 0,
 			dropped: droppedCount,
 		},
 		renderDetail(width: number): string[] {

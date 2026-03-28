@@ -209,21 +209,21 @@ describe("renderStatusBadge", () => {
 
 describe("renderStatusCounts", () => {
 	test("renders all three when non-zero", () => {
-		const result = renderStatusCounts({ included: 5, stubbed: 2, dropped: 1 });
+		const result = renderStatusCounts({ included: 5, stubbed: 2, compressed: 0, dropped: 1 });
 		expect(result).toContain("5 included");
 		expect(result).toContain("2 stubbed");
 		expect(result).toContain("1 dropped");
 	});
 
 	test("omits zero counts", () => {
-		const result = renderStatusCounts({ included: 3, stubbed: 0, dropped: 0 });
+		const result = renderStatusCounts({ included: 3, stubbed: 0, compressed: 0, dropped: 0 });
 		expect(result).toContain("3 included");
 		expect(result).not.toContain("stubbed");
 		expect(result).not.toContain("dropped");
 	});
 
 	test("returns empty string when all zero", () => {
-		const result = renderStatusCounts({ included: 0, stubbed: 0, dropped: 0 });
+		const result = renderStatusCounts({ included: 0, stubbed: 0, compressed: 0, dropped: 0 });
 		expect(result).toBe("");
 	});
 });
@@ -366,6 +366,7 @@ describe("projectSnapshot", () => {
 		expect(msgsSection.statusCounts).toEqual({
 			included: 3,
 			stubbed: 2,
+			compressed: 0,
 			dropped: 1,
 		});
 	});

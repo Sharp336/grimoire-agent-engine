@@ -44,6 +44,7 @@ export interface InspectorSection {
 	statusCounts?: {
 		included: number;
 		stubbed: number;
+		compressed: number;
 		dropped: number;
 	};
 	/** Returns rendered detail lines for drill-down. Width-aware. */
