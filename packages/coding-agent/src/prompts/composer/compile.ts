@@ -1,6 +1,7 @@
 /**
  * Compiles a system prompt by calling an LLM with the meta-prompt,
- * environment inventory, and guidance library. Caches results on input hash.
+ * environment inventory, and session-scoped guidance library. Caches
+ * results on input hash.
  */
 
 import * as fs from "node:fs";
@@ -41,11 +42,11 @@ export interface CompileResult {
 }
 
 const CACHE_DIR = path.join(getAgentDir(), "cache", "composer");
+const COMPILED_PROMPT_TAG = "compiled-system-prompt";
 
 export async function compileSystemPrompt(options: CompileOptions): Promise<CompileResult> {
 	const { model, apiKey, inventory, contextFiles, invariants, tokenBudget, noCache } = options;
 
-	// Build the inputs
 	const inventoryText = buildInventory(inventory);
 	logger.debug("composer: inventory built", {
 		inventoryLength: inventoryText.length,
@@ -54,16 +55,23 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 		skillCount: inventory.skills.length,
 		editMode: inventory.editMode,
 	});
-	const library = await collectGuidanceLibrary();
+
+	const library = collectGuidanceLibrary({
+		activeToolNames: inventory.tools.map(tool => tool.name),
+		editMode: inventory.editMode,
+	});
 	logger.debug("composer: guidance library collected", {
 		toolDocsLength: library.toolDocs.length,
-		systemPromptTemplateLength: library.systemPromptTemplate.length,
+		editModeGuidanceLength: library.editModeGuidance.length,
+		additionalGuidanceLength: library.additionalGuidance.length,
 	});
-	// Compute cache key from all inputs
+
 	const cacheInput = [
+		metaPromptContent,
 		inventoryText,
 		library.toolDocs,
-		library.systemPromptTemplate,
+		library.editModeGuidance,
+		library.additionalGuidance,
 		contextFiles,
 		invariants,
 		String(tokenBudget),
@@ -73,11 +81,11 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 	const cacheKey = Bun.hash(cacheInput).toString(36);
 	const cachePath = path.join(CACHE_DIR, `${cacheKey}.txt`);
 
-	// Check cache
 	logger.debug("composer: checking cache", { cachePath, noCache: !!noCache });
 	if (!noCache) {
 		try {
 			const cached = await Bun.file(cachePath).text();
+			validateCompiledPrompt(cached, invariants);
 			logger.debug("composer: cache hit", { cacheKey, outputLength: cached.length });
 			return {
 				systemPrompt: cached,
@@ -85,16 +93,19 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 				durationMs: 0,
 				cacheHit: true,
 			};
-		} catch {
-			logger.debug("composer: cache miss", { cacheKey });
+		} catch (err) {
+			logger.debug("composer: cache miss or invalid", {
+				cacheKey,
+				error: err instanceof Error ? err.message : String(err),
+			});
 		}
 	}
 
-	// Build the compilation prompt
 	const userMessage = buildCompilationMessage({
 		inventoryText,
 		toolDocs: library.toolDocs,
-		systemPromptTemplate: library.systemPromptTemplate,
+		editModeGuidance: library.editModeGuidance,
+		additionalGuidance: library.additionalGuidance,
 		contextFiles,
 		invariants,
 		tokenBudget,
@@ -106,7 +117,6 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 		tokenBudget,
 	});
 
-	// Call the LLM
 	const start = performance.now();
 	logger.debug("composer: compiling system prompt", {
 		model: `${model.provider}/${model.id}`,
@@ -134,18 +144,18 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 	}
 
 	const durationMs = Math.round(performance.now() - start);
-
-	// Extract text from response
 	logger.debug("composer: response received", {
 		contentBlockCount: response.content.length,
 	});
-	const systemPrompt = extractText(response);
+
+	const systemPrompt = extractCompiledPrompt(response);
 	if (!systemPrompt) {
 		logger.error("composer: response text extraction failed", {
 			contentBlockCount: response.content.length,
 		});
 		throw new Error("composer: compilation produced empty output");
 	}
+	validateCompiledPrompt(systemPrompt, invariants);
 
 	logger.debug("composer: compiled", {
 		durationMs,
@@ -153,7 +163,6 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 		cacheKey,
 	});
 
-	// Cache the result
 	logger.debug("composer: writing cache", { cachePath, outputLength: systemPrompt.length });
 	try {
 		await fs.promises.mkdir(CACHE_DIR, { recursive: true });
@@ -177,23 +186,27 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 function buildCompilationMessage(input: {
 	inventoryText: string;
 	toolDocs: string;
-	systemPromptTemplate: string;
+	editModeGuidance: string;
+	additionalGuidance: string;
 	contextFiles: string;
 	invariants: string;
 	tokenBudget: number;
 }): string {
-	const sections = [
-		"Compile a system prompt for a coding agent session.\n",
-		"## Environment Inventory\n",
-		input.inventoryText,
-		"\n## Guidance Library — Tool Documentation\n",
-		input.toolDocs,
-		"\n## Guidance Library — Current System Prompt Template\n",
-		"This is the existing system prompt template for reference. Use it as source material, not as a template to fill in.\n",
-		input.systemPromptTemplate,
-		"\n## Invariants (MUST include verbatim)\n",
-		input.invariants,
-	];
+	const sections = ["Compile a system prompt for a coding agent session.\n", "## Environment Inventory\n", input.inventoryText];
+
+	if (input.toolDocs) {
+		sections.push("\n## Guidance Library — Active Tool Documentation\n", input.toolDocs);
+	}
+
+	if (input.editModeGuidance) {
+		sections.push("\n## Guidance Library — Active Edit Mode\n", input.editModeGuidance);
+	}
+
+	if (input.additionalGuidance) {
+		sections.push("\n## Guidance Library — Additional Imperatives\n", input.additionalGuidance);
+	}
+
+	sections.push("\n## Invariants (MUST include verbatim)\n", input.invariants);
 
 	if (input.contextFiles) {
 		sections.push(
@@ -210,6 +223,19 @@ function buildCompilationMessage(input: {
 	return sections.join("\n");
 }
 
+function extractCompiledPrompt(message: { content: Array<{ type: string; text?: string }> }): string {
+	const text = extractText(message);
+	if (!text) return "";
+
+	const match = text.match(
+		new RegExp(`<${COMPILED_PROMPT_TAG}>\\s*([\\s\\S]*?)\\s*</${COMPILED_PROMPT_TAG}>`, "i"),
+	);
+	if (!match?.[1]) {
+		throw new Error(`composer: compilation response missing <${COMPILED_PROMPT_TAG}> wrapper`);
+	}
+	return match[1].trim();
+}
+
 function extractText(message: { content: Array<{ type: string; text?: string }> }): string {
 	const parts: string[] = [];
 	for (const block of message.content) {
@@ -218,4 +244,20 @@ function extractText(message: { content: Array<{ type: string; text?: string }> 
 		}
 	}
 	return parts.join("\n").trim();
+}
+
+function validateCompiledPrompt(systemPrompt: string, invariants: string): void {
+	const normalizedPrompt = normalizePromptText(systemPrompt);
+	if (!normalizedPrompt) {
+		throw new Error("composer: compilation produced empty output");
+	}
+
+	const normalizedInvariants = normalizePromptText(invariants);
+	if (normalizedInvariants && !normalizedPrompt.includes(normalizedInvariants)) {
+		throw new Error("composer: compiled prompt omitted invariants");
+	}
+}
+
+function normalizePromptText(text: string): string {
+	return text.replace(/\r\n/g, "\n").trim();
 }

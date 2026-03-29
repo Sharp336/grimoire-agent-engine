@@ -17,6 +17,8 @@ export interface InventoryInput {
 	environment: Array<{ label: string; value: string }>;
 	/** Current working directory */
 	cwd: string;
+	/** Required intent field name for tool calls, when enabled in this session */
+	intentField?: string;
 }
 
 export function buildInventory(input: InventoryInput): string {
@@ -31,13 +33,15 @@ export function buildInventory(input: InventoryInput): string {
 
 	// Edit mode
 	sections.push(`\n## Edit Mode\n\nActive: **${input.editMode}**`);
-
-	// Tools — grouped by type
-	const mcpToolNames = new Set<string>();
-	for (const { name } of input.mcpServerInstructions) {
-		mcpToolNames.add(name);
+	sections.push("\n## Tool Call Contract");
+	sections.push("- Every response that uses tools MUST emit an array of tool calls, even if the array contains a single call.");
+	if (input.intentField) {
+		sections.push(
+			`- Every tool call MUST include the \`${input.intentField}\` parameter with one concise present-participle sentence.`,
+		);
 	}
 
+	// Tools — grouped by type
 	const builtinTools: typeof input.tools = [];
 	const mcpTools: typeof input.tools = [];
 	for (const tool of input.tools) {
@@ -50,16 +54,14 @@ export function buildInventory(input: InventoryInput): string {
 	}
 
 	sections.push("\n## Built-in Tools");
-	for (const { name, label, description } of builtinTools) {
-		const desc = description ? ` — ${truncate(description, 120)}` : "";
-		sections.push(`- **${label || name}**${desc}`);
+	for (const tool of builtinTools) {
+		sections.push(formatToolEntry(tool));
 	}
 
 	if (mcpTools.length > 0) {
 		sections.push("\n## MCP Tools (from connected servers)");
-		for (const { name, label, description } of mcpTools) {
-			const desc = description ? ` — ${truncate(description, 120)}` : "";
-			sections.push(`- **${label || name}**${desc}`);
+		for (const tool of mcpTools) {
+			sections.push(formatToolEntry(tool));
 		}
 	}
 
@@ -89,4 +91,10 @@ export function buildInventory(input: InventoryInput): string {
 function truncate(text: string, maxLen: number): string {
 	if (text.length <= maxLen) return text;
 	return `${text.slice(0, maxLen - 3)}...`;
+}
+
+function formatToolEntry(tool: { name: string; label: string; description: string }): string {
+	const label = tool.label && tool.label !== tool.name ? `**${tool.label}** (\`${tool.name}\`)` : `**${tool.name}**`;
+	const desc = tool.description ? ` — ${truncate(tool.description, 120)}` : "";
+	return `- ${label}${desc}`;
 }

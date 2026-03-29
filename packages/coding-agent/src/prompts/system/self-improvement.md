@@ -7,9 +7,10 @@ When you encounter harness friction or note a pattern in how your human partner 
 **Observe:** What went wrong? What did you try? What did you do instead? How did the human correct you or prefer you act?
 
 **Capture the signal:**
-- **UX friction / Silent failure** — error messages are misleading, tooling is confusing, guidance is unclear → log as a metis candidate using `mcp_oh_mcp_oh_create_metis_candidate`
-- **Pattern / Human preference** — you work around the same friction across multiple sessions or learn a specific workflow preference → log as a metis or guardrail candidate
-- **Bug / Gap** — something is broken or missing → suggest creating a GitHub issue if appropriate, or log a decision
+
+- **UX friction / Silent failure** — error messages are misleading, tooling is confusing, guidance is unclear → use an active Open Horizons reflection or logging tool from the inventory to record the observation.
+- **Pattern / Human preference** — you work around the same friction across multiple sessions or learn a specific workflow preference → record it through an active metis, guardrail, or decision-logging capability.
+- **Bug / Gap** — something is broken or missing → suggest creating a GitHub issue if appropriate, or log a decision with an active reflection tool.
 
 **Write good observations:**
 "The error said X but the actual problem was Y" is noise.

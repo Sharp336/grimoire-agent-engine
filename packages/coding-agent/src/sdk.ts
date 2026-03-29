@@ -107,6 +107,7 @@ import {
 } from "./mcp/discoverable-tool-metadata";
 import { getMemoryRoot } from "./memories";
 import { compileSystemPrompt } from "./prompts/composer/compile";
+import composerInvariants from "./prompts/composer/invariants.md" with { type: "text" };
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { collectEnvSecrets, loadSecrets, obfuscateMessages, SecretObfuscator } from "./secrets";
 import { AgentSession } from "./session/agent-session";
@@ -1347,6 +1348,32 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			eagerTasks,
 		});
 
+		const applySystemPromptOverride = async (basePrompt: string): Promise<string> => {
+			if (options.systemPrompt === undefined) {
+				return basePrompt;
+			}
+			if (typeof options.systemPrompt === "string") {
+				return await buildSystemPromptInternal({
+					cwd,
+					skills,
+					contextFiles,
+					tools: promptTools,
+					toolNames,
+					rules: rulebookRules,
+					alwaysApplyRules,
+					skillsSettings: settings.getGroup("skills"),
+					customPrompt: options.systemPrompt,
+					appendSystemPrompt: appendPrompt,
+					repeatToolDescriptions,
+					intentField,
+					mcpDiscoveryMode: hasDiscoverableMCPTools,
+					mcpDiscoveryServerSummaries: discoverableMCPSummary.servers.map(formatDiscoverableMCPToolServerSummary),
+					eagerTasks,
+				});
+			}
+			return options.systemPrompt(basePrompt);
+		};
+
 		// If composer is enabled, compile the system prompt with an LLM
 		if (settings.get("composer.enabled")) {
 			try {
@@ -1358,11 +1385,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					}
 				}
 
-				// Build tool info for inventory — use toolNames + basic info
 				const toolInfo = toolNames.map(name => ({
 					name,
-					label: name,
-					description: "",
+					label: promptTools.get(name)?.label ?? name,
+					description: promptTools.get(name)?.description ?? "",
 				}));
 				const activeComposerModel = agent?.state.model ?? model;
 				if (!activeComposerModel) {
@@ -1393,10 +1419,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							{ label: "OS", value: `${process.platform} ${process.arch}` },
 							{ label: "CWD", value: cwd },
 						],
+						intentField,
 						cwd,
 					},
 					contextFiles: contextFiles.map(f => `## ${f.path}\n${f.content}`).join("\n\n"),
-					invariants: defaultPrompt, // The full static prompt serves as the invariant reference
+					invariants: composerInvariants,
 					tokenBudget: Number(settings.get("composer.tokenBudget") ?? 24000),
 				});
 
@@ -1407,7 +1434,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					length: result.systemPrompt.length,
 				});
 
-				return result.systemPrompt;
+				return await applySystemPromptOverride(result.systemPrompt);
 			} catch (err) {
 				logger.warn("composer: falling back to static template", {
 					error: err instanceof Error ? err.message : String(err),
@@ -1416,29 +1443,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
-		if (options.systemPrompt === undefined) {
-			return defaultPrompt;
-		}
-		if (typeof options.systemPrompt === "string") {
-			return await buildSystemPromptInternal({
-				cwd,
-				skills,
-				contextFiles,
-				tools: promptTools,
-				toolNames,
-				rules: rulebookRules,
-				alwaysApplyRules,
-				skillsSettings: settings.getGroup("skills"),
-				customPrompt: options.systemPrompt,
-				appendSystemPrompt: appendPrompt,
-				repeatToolDescriptions,
-				intentField,
-				mcpDiscoveryMode: hasDiscoverableMCPTools,
-				mcpDiscoveryServerSummaries: discoverableMCPSummary.servers.map(formatDiscoverableMCPToolServerSummary),
-				eagerTasks,
-			});
-		}
-		return options.systemPrompt(defaultPrompt);
+		return await applySystemPromptOverride(defaultPrompt);
 	};
 
 	const toolNamesFromRegistry = Array.from(toolRegistry.keys());
