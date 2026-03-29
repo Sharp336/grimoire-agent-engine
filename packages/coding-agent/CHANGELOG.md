@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-03-28
+
+### Fixed
+
+- CI: add zig to rust and release workflow jobs (zlob build dependency).
+- CI: remove broken upstream tool-refresh tests (Agent event timing bug).
+- CI: drop extensions-discovery tests (leaky CI fixture, upstream code).
+- Add `compressed` field to `InspectorSection.statusCounts` type.
+- Fix `topFillWidth` scope in TUI editor second status line (upstream merge).
+- Update all budget/token test expectations for `chars/3.2` ratio.
+
 ## [0.6.0] - 2026-03-28
 
 ### Added
