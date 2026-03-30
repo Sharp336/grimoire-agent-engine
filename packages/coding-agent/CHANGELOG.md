@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/clear` and `/reset` as aliases for `/new` slash command
+
 ## [12.0.0] - 2026-02-12
 
 ### Added

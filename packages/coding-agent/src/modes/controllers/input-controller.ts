@@ -290,7 +290,7 @@ export class InputController {
 				this.ctx.editor.setText("");
 				return;
 			}
-			if (text === "/new") {
+			if (text === "/new" || text === "/clear" || text === "/reset") {
 				this.ctx.editor.setText("");
 				await this.ctx.handleClearCommand();
 				return;

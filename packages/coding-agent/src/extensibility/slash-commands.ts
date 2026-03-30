@@ -140,6 +140,8 @@ const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = [
 		],
 	},
 	{ name: "new", description: "Start a new session" },
+	{ name: "clear", description: "Start a new session (alias for /new)" },
+	{ name: "reset", description: "Start a new session (alias for /new)" },
 	{ name: "compact", description: "Manually compact the session context", inlineHint: "[focus instructions]" },
 	{ name: "handoff", description: "Hand off session context to a new session", inlineHint: "[focus instructions]" },
 	{ name: "resume", description: "Resume a different session" },
