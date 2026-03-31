@@ -2065,25 +2065,47 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			}
 
-			// Ingest user and assistant messages into LanceDB
-			if (ingestPipeline && event.type === "message_end") {
+			// Ingest user and assistant messages into LanceDB + ToolResultStore
+			if (event.type === "message_end") {
 				const msg = event.message;
 				if (msg.role === "user") {
 					const text = extractUserText(msg.content);
-					ingestPipeline.ingest({
-						text,
-						role: "user",
-						turn: ingestTurn,
-						paths: extractPathsFromText(text),
-					});
+					if (ingestPipeline) {
+						ingestPipeline.ingest({
+							text,
+							role: "user",
+							turn: ingestTurn,
+							paths: extractPathsFromText(text),
+						});
+					}
+					if (toolResultStore && text) {
+						toolResultStore.index({
+							content: text,
+							toolName: "user",
+							sessionId,
+							turnNumber: ingestTurn,
+							paths: extractPathsFromText(text),
+						});
+					}
 				} else if (msg.role === "assistant") {
 					const text = extractAssistantText(msg.content);
-					ingestPipeline.ingest({
-						text,
-						role: "assistant",
-						turn: ingestTurn,
-						paths: extractPathsFromText(text),
-					});
+					if (ingestPipeline) {
+						ingestPipeline.ingest({
+							text,
+							role: "assistant",
+							turn: ingestTurn,
+							paths: extractPathsFromText(text),
+						});
+					}
+					if (toolResultStore && text) {
+						toolResultStore.index({
+							content: text,
+							toolName: "assistant",
+							sessionId,
+							turnNumber: ingestTurn,
+							paths: extractPathsFromText(text),
+						});
+					}
 				}
 			}
 
