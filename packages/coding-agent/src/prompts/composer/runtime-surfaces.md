@@ -33,4 +33,4 @@ Retrieval strategy:
 - Code structure and symbols → active semantic or structural tools from the inventory
 - Raw text patterns → active text-search tools
 
-Older tool results may appear as compact stubs or warm summaries. If you need the full original content, use the active history/recall tools before re-running a tool.
+Older messages may appear compressed: tool results as `[warm:…]`/`[ref:…]` stubs, conversation turns as `[... N lines compressed]` with head/tail preview. All compressed content is recoverable via the active recall/history tools. Prefer expanding over re-running tools unless the data may be stale.

@@ -7,7 +7,9 @@ Search the recall store for relevant past context. The recall store is global an
 - Default returns 5 results; increase `limit` for broader searches (max 20)
 - Results are diversity-ranked to avoid repetitive matches
 - Use `mode: "keyword"` to search tool results by exact text (BM25 ranking). Use for error codes, file paths, exact values. Default mode is `"semantic"` (vector search).
-- Use `turn: N` to expand a specific turn — retrieves the full original content of compressed/stubbed messages at that turn number. No query needed. Use this when a `[warm:…]` or `[ref:…]` stub doesn't have enough detail.
+- **Expand compressed content:** Two methods depending on the compression type:
+  - `[warm:…]` or `[ref:…]` stubs: use `turn: N` to retrieve the full original content at that turn number. No query needed.
+  - `[... N lines compressed — use recall(query=…) to expand]`: use `query` with text from the visible head/tail lines to find the full original message via semantic search.
 </instruction>
 
 <output>
