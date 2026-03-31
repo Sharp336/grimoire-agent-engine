@@ -20,7 +20,7 @@ import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { parseMCPToolName } from "../../mcp/tool-bridge";
 import type { MemoryAssemblyBudget } from "../memory-contract";
-import { buildPeek, contentHash, extractText, isReadTool } from "./codecs/shared";
+import { buildPeek, contentHash, extractText, isReadTool, VERBATIM_LINE_THRESHOLD } from "./codecs/shared";
 import type { BudgetDerivationInput, CodecContext, ContentCodec, FileReadEntry } from "./types";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -656,6 +656,19 @@ function shouldCompressConversationTurn(
 }
 
 /**
+ * If buildPeek actually truncated the content, replace the generic
+ * `[... N lines omitted]` marker with a tagged version that tells
+ * the LLM the content is recoverable via the recall tool.
+ */
+function tagCompressedPeek(peek: string, originalLineCount: number): string {
+	if (originalLineCount <= VERBATIM_LINE_THRESHOLD) return peek;
+	return peek.replace(
+		/\[\.\.\. (\d+) lines omitted\]/,
+		"[... $1 lines compressed — use recall(query=<text from above>) to expand]",
+	);
+}
+
+/**
  * Compress a non-tool turn's messages using head+tail peek.
  *
  * Replaces text content in each message with a truncated version.
@@ -669,7 +682,8 @@ function compressConversationTurn(turn: Turn): { turn: Turn; tokensAfter: number
 		if (typeof content === "string") {
 			const lines = content.split("\n");
 			const peek = buildPeek(lines, lines.length);
-			return { ...msg, content: peek } as AgentMessage;
+			const tagged = tagCompressedPeek(peek, lines.length);
+			return { ...msg, content: tagged } as AgentMessage;
 		}
 		if (Array.isArray(content)) {
 			const newContent = content.map((block: unknown) => {
@@ -677,7 +691,8 @@ function compressConversationTurn(turn: Turn): { turn: Turn; tokensAfter: number
 					const text = (block as { text: string }).text;
 					const lines = text.split("\n");
 					const peek = buildPeek(lines, lines.length);
-					return { ...block, text: peek };
+					const tagged = tagCompressedPeek(peek, lines.length);
+					return { ...block, text: tagged };
 				}
 				return block;
 			});
