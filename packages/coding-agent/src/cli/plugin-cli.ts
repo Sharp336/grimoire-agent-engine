@@ -46,6 +46,7 @@ export interface PluginCommandArgs {
 		enable?: string;
 		disable?: string;
 		set?: string;
+		scope?: "user" | "project";
 	};
 }
 
@@ -113,6 +114,18 @@ export function parsePluginArgs(args: string[]): PluginCommandArgs | undefined {
 			result.flags.disable = args[++i];
 		} else if (arg === "--set" && i + 1 < args.length) {
 			result.flags.set = args[++i];
+		} else if (arg === "--scope" && i + 1 < args.length) {
+			const s = args[++i];
+			if (s === "user" || s === "project") {
+				result.flags.scope = s;
+			} else {
+				console.error(chalk.red(`Invalid --scope value: "${s}". Must be "user" or "project".`));
+				process.exit(1);
+			}
+		} else if (arg === "--scope") {
+			// --scope with no value following
+			console.error(chalk.red(`--scope requires a value: "user" or "project".`));
+			process.exit(1);
 		} else if (!arg.startsWith("-")) {
 			result.args.push(arg);
 		}
@@ -316,7 +329,7 @@ async function handleUpgrade(args: string[], _flags: PluginCommandArgs["flags"])
 async function handleInstall(
 	manager: PluginManager,
 	packages: string[],
-	flags: { json?: boolean; force?: boolean; dryRun?: boolean },
+	flags: { json?: boolean; force?: boolean; dryRun?: boolean; scope?: "user" | "project" },
 ): Promise<void> {
 	if (packages.length === 0) {
 		console.error(chalk.red(`Usage: ${APP_NAME} plugin install <package[@version]>[features] ...`));
@@ -337,6 +350,7 @@ async function handleInstall(
 			try {
 				const entry = await mktMgr.installPlugin(target.name, target.marketplace, {
 					force: flags.force,
+					scope: flags.scope,
 				});
 				console.log(
 					chalk.green(
@@ -348,6 +362,15 @@ async function handleInstall(
 				process.exit(1);
 			}
 			continue;
+		}
+
+		// --scope only applies to marketplace installs; warn when it would be silently no-op'd for npm.
+		if (flags.scope) {
+			console.error(
+				chalk.yellow(
+					`Warning: --scope is only supported for marketplace installs (name@marketplace). Ignoring for ${spec}.`,
+				),
+			);
 		}
 
 		// npm path
@@ -859,11 +882,12 @@ ${chalk.bold("Config Subcommands:")}
   config validate                Validate all plugin settings
 
 ${chalk.bold("Options:")}
-  --json       Output as JSON
-  --fix        Attempt automatic fixes (doctor)
-  --force      Overwrite without prompting (install)
-  --dry-run    Preview changes without applying (install)
-  -l, --local  Use project-local overrides
+  --json           Output as JSON
+  --fix            Attempt automatic fixes (doctor)
+  --force          Overwrite without prompting (install)
+  --scope <scope>  Install scope: user (default) or project (install name@marketplace)
+  --dry-run        Preview changes without applying (install)
+  -l, --local      Use project-local overrides
 
 ${chalk.bold("Examples:")}
   ${APP_NAME} plugin install @oh-my-pi/exa[search]
@@ -871,5 +895,6 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} plugin features my-plugin --enable search,web
   ${APP_NAME} plugin config set my-plugin apiKey sk-xxx
   ${APP_NAME} plugin doctor --fix
+  ${APP_NAME} plugin install --scope project name@marketplace
 `);
 }

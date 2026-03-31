@@ -143,6 +143,20 @@ describe("MarketplaceManager", () => {
 		expect(installed[0].id).toBe("hello-plugin@test-marketplace");
 	});
 
+	it("installPlugin with scope:project → stores project scope", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+		const instEntry = await ctx.manager.installPlugin("hello-plugin", "test-marketplace", {
+			scope: "project",
+		});
+		expect(instEntry.scope).toBe("project");
+		expect(instEntry.version).toBe("1.0.0");
+		expect(fs.existsSync(instEntry.installPath)).toBe(true);
+
+		// Verify scope was persisted to the registry, not just returned in-memory.
+		const installed = await ctx.manager.listInstalledPlugins();
+		expect(installed[0].entries[0].scope).toBe("project");
+	});
+
 	it("installPlugin already installed → throws without force", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
@@ -358,6 +372,16 @@ describe("MarketplaceManager", () => {
 
 		it("upgradePlugin rejects invalid plugin ID", async () => {
 			await expect(ctx.manager.upgradePlugin("no-at-sign")).rejects.toThrow(/Invalid plugin ID/);
+		});
+
+		it("upgradePlugin preserves the scope of the existing install", async () => {
+			await ctx.manager.addMarketplace(FIXTURE_DIR);
+			await ctx.manager.installPlugin("hello-plugin", "test-marketplace", { scope: "project" });
+			await bumpCatalogVersion("2.0.0");
+
+			const entry = await ctx.manager.upgradePlugin("hello-plugin@test-marketplace");
+			expect(entry.scope).toBe("project");
+			expect(entry.version).toBe("2.0.0");
 		});
 
 		it("upgradeAllPlugins upgrades outdated plugins and returns results", async () => {

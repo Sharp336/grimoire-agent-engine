@@ -16,6 +16,7 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
 import type { InteractiveModeContext } from "../modes/types";
+import { parseMarketplaceInstallArgs } from "./marketplace-install-parser";
 
 function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
@@ -650,17 +651,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 						break;
 					}
 					case "install": {
-						// Parse: /marketplace install [--force] name@marketplace
-						const force = rest.startsWith("--force ");
-						const installSpec = force ? rest.slice("--force ".length).trim() : rest;
-						if (!installSpec?.includes("@")) {
-							runtime.ctx.showStatus("Usage: /marketplace install [--force] <name@marketplace>");
+						// Parse: /marketplace install [--force] [--scope user|project] name@marketplace
+						const parsed = parseMarketplaceInstallArgs(rest);
+						if ("error" in parsed) {
+							runtime.ctx.showStatus(parsed.error);
 							return;
 						}
-						const atIdx = installSpec.lastIndexOf("@");
-						const name = installSpec.slice(0, atIdx);
-						const marketplace = installSpec.slice(atIdx + 1);
-						await mgr.installPlugin(name, marketplace, { force });
+						const atIdx = parsed.installSpec.lastIndexOf("@");
+						const name = parsed.installSpec.slice(0, atIdx);
+						const marketplace = parsed.installSpec.slice(atIdx + 1);
+						await mgr.installPlugin(name, marketplace, { force: parsed.force, scope: parsed.scope });
 						runtime.ctx.showStatus(`Installed ${name} from ${marketplace}`);
 						break;
 					}

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `scope: "user" | "project"` support to marketplace plugin installs: `omp plugin install --scope project name@marketplace`, `/marketplace install --scope project name@marketplace` ([#581](https://github.com/can1357/oh-my-pi/issues/581))
+- `upgradePlugin()` now preserves the scope of the existing install rather than reverting to user scope
+
 ## [13.17.0] - 2026-03-30
 
 ### Added

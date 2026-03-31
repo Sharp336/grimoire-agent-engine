@@ -161,8 +161,7 @@ export interface InstalledPluginsRegistry {
 }
 
 export interface InstalledPluginEntry {
-	/** v1 is user-only — always "user". */
-	scope: "user";
+	scope: "user" | "project";
 	/** Absolute path to cached plugin directory. */
 	installPath: string;
 	version: string;

@@ -208,9 +208,10 @@ export class MarketplaceManager {
 	async installPlugin(
 		name: string,
 		marketplace: string,
-		options?: { force?: boolean },
+		options?: { force?: boolean; scope?: "user" | "project" },
 	): Promise<InstalledPluginEntry> {
 		const force = options?.force ?? false;
+		const scope = options?.scope ?? "user";
 
 		// 1. Find marketplace entry
 		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
@@ -296,7 +297,7 @@ export class MarketplaceManager {
 		// Carry over enabled flag from existing entry — a disabled plugin must stay disabled after upgrade
 		const wasDisabled = existing?.some(e => e.enabled === false);
 		const installedEntry: InstalledPluginEntry = {
-			scope: "user",
+			scope,
 			installPath: cachePath,
 			version,
 			installedAt: now,
@@ -468,7 +469,11 @@ export class MarketplaceManager {
 		if (!parsed) {
 			throw new Error(`Invalid plugin ID: "${pluginId}". Expected "name@marketplace".`);
 		}
-		return this.installPlugin(parsed.name, parsed.marketplace, { force: true });
+		// Preserve the scope of the existing install when upgrading.
+		const instReg = await readInstalledPluginsRegistry(this.#opts.installedRegistryPath);
+		const existing = getInstalledPlugin(instReg, pluginId);
+		const existingScope = existing?.[0]?.scope ?? "user";
+		return this.installPlugin(parsed.name, parsed.marketplace, { force: true, scope: existingScope });
 	}
 
 	// Upgrade every plugin that checkForUpdates reports as outdated.
