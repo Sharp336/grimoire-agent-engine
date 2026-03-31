@@ -352,6 +352,17 @@ export const SETTINGS_SCHEMA = {
 			condition: "isAssemblerMode",
 		},
 	},
+	"assembler.contextWindowCap": {
+		type: "number",
+		default: 200_000,
+		ui: {
+			tab: "agent",
+			label: "Context window cap",
+			description: "Hard upper limit on assembled context tokens regardless of model window (0 = no cap)",
+			submenu: true,
+			condition: "isAssemblerMode",
+		},
+	},
 
 	// ─────────────────────────────────────────────────────────────────────────
 	// Secrets settings
@@ -1944,6 +1955,7 @@ export interface AssemblerSettings {
 	hydrationBudgetPercent: number;
 	hotWindowTurns: number;
 	turnBufferPercent: number;
+	contextWindowCap: number;
 }
 
 /** Map group prefix -> typed settings interface */

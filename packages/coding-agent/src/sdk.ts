@@ -155,7 +155,6 @@ import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { PendingActionStore } from "./tools/pending-action";
 import { EventBus } from "./utils/event-bus";
 
-const ASSEMBLED_CONTEXT_WINDOW_CAP = 200_000;
 
 // Types
 export interface CreateAgentSessionOptions {
@@ -1629,6 +1628,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// for the session lifetime — no need to re-read per turn.
 		const assemblerSettings = settings.getGroup("assembler") as AssemblerSettings;
 		const hotWindowTurns = assemblerSettings.hotWindowTurns;
+		const contextWindowCap = assemblerSettings.contextWindowCap;
 
 		const resolveToolResultStub = (message: { toolName?: string; toolCallId?: string }) =>
 			assemblerBridge.getToolResultStubPointer(message.toolName, message.toolCallId);
@@ -1641,7 +1641,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const currentModel = agent?.state.model;
 			const currentSystemPrompt = agent?.state.systemPrompt ?? "";
 			const currentTools = agent?.state.tools ?? [];
-			const assembledContextWindow = Math.min(currentModel?.contextWindow ?? 0, ASSEMBLED_CONTEXT_WINDOW_CAP);
+			const modelWindow = currentModel?.contextWindow ?? 0;
+			const assembledContextWindow = contextWindowCap > 0 ? Math.min(modelWindow, contextWindowCap) : modelWindow;
 
 			// Step 1: Apply message transform (hot window + content replacement).
 			// This strips tool_result content from older turns before budget derivation
