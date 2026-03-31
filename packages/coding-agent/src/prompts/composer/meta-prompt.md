@@ -50,6 +50,11 @@ Produce a system prompt that:
 6. **Only describes capabilities that exist** — if a tool is not in the inventory, do not mention it.
 7. **Stays within the token budget** — prioritize invariants first, capability guidance second, examples last.
 8. **Writes for the working engineer** — short sentences, direct guidance, no filler.
+9. **Foregrounds context management** — the agent operates in long sessions where older messages are compressed to save budget. The compiled prompt must make clear:
+   - What compression markers look like (`[warm:…]`, `[ref:…]`, `[… N lines compressed]`)
+   - That all compressed content is recoverable — never silently lost
+   - How to recover each type: `recall(turn=N)` for tool stubs, `recall(query=…)` for conversation turns
+   - That recall/expansion is a primary workflow tool for fighting context decay, not a secondary search utility
 
 ## Output Contract
 
