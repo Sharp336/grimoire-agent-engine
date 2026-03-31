@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Vercel AI Gateway to `/login` providers for interactive API key setup
+
 ## [13.17.0] - 2026-03-30
 
 ### Changed
