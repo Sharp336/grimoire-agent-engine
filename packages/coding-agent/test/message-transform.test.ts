@@ -501,16 +501,19 @@ describe("transformMessages — edge cases", () => {
 		expect(tr.content).toEqual([{ type: "text", text: formatStubText(["tool:read"]) }]);
 	});
 
-	test("non-tool messages are never modified", () => {
+	test("developer messages with unique content are kept; duplicates are dropped", () => {
 		const user = makeUser("hello world");
-		const dev = makeDeveloper("system context");
+		const devA = makeDeveloper("system context");
 		const assistant = makeAssistant();
+		const devB = makeDeveloper("system context"); // same content as devA
+		const devC = makeDeveloper("unique handoff prompt"); // unique content
+		const user2 = makeUser("world");
 
-		const messages: AgentMessage[] = [user, dev, assistant];
+		const messages: AgentMessage[] = [user, devA, assistant, devB, devC, user2];
 		const { messages: result } = transformMessages(messages, { hotWindowTurns: 0 });
 
-		// All messages identical (no tool_results to modify)
-		expect(result).toEqual(messages);
+		// devA dropped (duplicate of devB which is newer); devB and devC kept (unique content)
+		expect(result).toEqual([user, assistant, devB, devC, user2]);
 	});
 
 	test("tool_result isError flag preserved after replacement", () => {
@@ -766,10 +769,13 @@ describe("transformMessages — decision metadata", () => {
 		const { metadata } = transformMessages(messages, { hotWindowTurns: 1 });
 
 		// Turns 0-2 are beyond hot window; none have tool results
+		// Turn 0: user beyond hot window — kept
 		expect(metadata.decisions[0].action).toBe("kept");
 		expect(metadata.decisions[0].reason).toBe("no-tool-results");
+		// Turn 1: developer beyond hot window — kept (it's the latest developer message)
 		expect(metadata.decisions[1].action).toBe("kept");
 		expect(metadata.decisions[1].reason).toBe("no-tool-results");
+		// Turn 2: standalone assistant beyond hot window — kept
 		expect(metadata.decisions[2].action).toBe("kept");
 		expect(metadata.decisions[2].reason).toBe("no-tool-results");
 

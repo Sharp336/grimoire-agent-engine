@@ -40,3 +40,21 @@ export function extractText(message: ToolResultMessage): string {
 export function contentHash(text: string): number {
 	return Bun.hash(text) as number;
 }
+
+
+/** Number of lines to keep from the start of output in peek compression. */
+export const HEAD_LINES = 3;
+/** Number of lines to keep from the end of output in peek compression. */
+export const TAIL_LINES = 2;
+/** Total peek lines — outputs at or below this size are kept verbatim. */
+export const VERBATIM_LINE_THRESHOLD = HEAD_LINES + TAIL_LINES;
+
+export function buildPeek(lines: string[], lineCount: number): string {
+	if (lineCount <= VERBATIM_LINE_THRESHOLD) {
+		return lines.join("\n");
+	}
+	const head = lines.slice(0, HEAD_LINES);
+	const tail = lines.slice(-TAIL_LINES);
+	const omitted = lineCount - HEAD_LINES - TAIL_LINES;
+	return [...head, `[... ${omitted} lines omitted]`, ...tail].join("\n");
+}

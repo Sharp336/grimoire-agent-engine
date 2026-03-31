@@ -41,6 +41,7 @@ import {
 	deriveBudget,
 	estimateMessageTokens,
 	estimateToolDefinitionTokens,
+	segmentIntoTurns,
 	type TransformMetadata,
 	transformMessages,
 } from "./context/assembler";
@@ -1709,6 +1710,93 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			}
 
+			// Step 3b: Compute semantic relevance scores for conversation compression.
+			// Uses the hot window embedding from hydration to search LanceDB for similar
+			// past content. Builds per-segmented-turn relevance scores so the transform
+			// can compress non-tool turns that are no longer semantically relevant.
+			let relevanceScores: Map<number, number> | undefined;
+			if (passiveHydrator && recallStore) {
+				const hotEmbedding = passiveHydrator.lastEmbedding;
+				logger.debug("assembler:relevance-gate", {
+					hasHydrator: !!passiveHydrator,
+					hasStore: !!recallStore,
+					hasEmbedding: !!hotEmbedding,
+					embeddingLength: hotEmbedding?.length ?? 0,
+				});
+				if (hotEmbedding) {
+					try {
+						const turns = segmentIntoTurns(messages);
+						const hotStart = Math.max(0, turns.length - hotWindowTurns);
+
+						// Identify candidate segmented turns (non-tool, non-hot-window)
+						const candidates: Array<{ turnIdx: number; text: string }> = [];
+						for (let i = 0; i < hotStart; i++) {
+							if (turns[i].hasToolResults) continue;
+							// Extract text using the same functions as IngestPipeline
+							// so that text matching against LanceDB results works.
+							const msg = turns[i].messages[0];
+							if (!msg) continue;
+							const content = (msg as { content?: unknown }).content;
+							let turnText: string;
+							if (msg.role === "user" || msg.role === "developer") {
+								turnText = extractUserText(content as Parameters<typeof extractUserText>[0]);
+							} else if (msg.role === "assistant") {
+								turnText = extractAssistantText(content as Parameters<typeof extractAssistantText>[0]);
+							} else {
+								continue;
+							}
+							if (turnText) candidates.push({ turnIdx: i, text: turnText });
+						}
+
+						if (candidates.length > 0) {
+							// Search LanceDB with hot window embedding for this session
+							const sessionFilter = `session_id = '${sessionId.replace(/'/g, "''")}'`;
+							const searchResults = await recallStore.search(
+								Array.from(hotEmbedding),
+								Math.min(candidates.length * 3, 500),
+								sessionFilter,
+							);
+
+						if (searchResults.length > 0) {
+							// Build text → similarity lookup from search results.
+							// LanceDB _distance is L2 distance; convert to similarity
+							// score (lower distance = higher similarity).
+							const textSimilarity = new Map<string, number>();
+							for (const result of searchResults) {
+								if (!textSimilarity.has(result.text)) {
+									const sim = 1 / (1 + result._distance);
+									textSimilarity.set(result.text, sim);
+								}
+							}
+
+								// Match candidate turns to search results by text content
+								relevanceScores = new Map();
+								for (const candidate of candidates) {
+									const sim = textSimilarity.get(candidate.text);
+									if (sim !== undefined) {
+										relevanceScores.set(candidate.turnIdx, sim);
+									}
+									// Missing = no embedding found = defaults to keep (handled in transformMessages)
+								}
+
+								logger.debug("assembler:relevance-scores", {
+									candidates: candidates.length,
+									searchResults: searchResults.length,
+									scored: relevanceScores.size,
+								});
+							}
+						}
+					} catch (err) {
+						logger.debug("assembler:relevance-scoring-failed", { error: String(err) });
+					}
+				}
+			} else {
+				logger.debug("assembler:relevance-gate-skip", {
+					hasHydrator: !!passiveHydrator,
+					hasStore: !!recallStore,
+				});
+			}
+
 			// Step 4: Compute elastic message budget.
 			// Messages get: allocatable - actual hydration, floored at messageBudgetMin.
 			// This means messages expand into unused hydration capacity.
@@ -1726,6 +1814,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					hotWindowTurns,
 					resolveToolResultStub,
 					codecs,
+					relevanceScores,
 				});
 				boundedMessages = boundedPass.messages;
 				finalTransformMetadata = boundedPass.metadata;

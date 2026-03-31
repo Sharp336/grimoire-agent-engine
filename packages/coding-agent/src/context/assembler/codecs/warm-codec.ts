@@ -18,14 +18,7 @@
 
 import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { CodecContext, ContentCodec } from "../types";
-import { extractText } from "./shared";
-
-/** Number of lines to keep from the start of the output. */
-const HEAD_LINES = 3;
-/** Number of lines to keep from the end of the output. */
-const TAIL_LINES = 2;
-/** Total peek lines — outputs at or below this size are kept verbatim. */
-const VERBATIM_THRESHOLD = HEAD_LINES + TAIL_LINES;
+import { buildPeek, extractText, HEAD_LINES, TAIL_LINES, VERBATIM_LINE_THRESHOLD as VERBATIM_THRESHOLD } from "./shared";
 
 /** Argument names worth preserving in the warm header. */
 const ARG_ALLOWLIST = new Set(["path", "pattern", "command", "action", "query", "url"]);
@@ -49,15 +42,6 @@ function buildArgSummary(args: Record<string, unknown>): string {
 	return parts.join(" ");
 }
 
-function buildPeek(lines: string[], lineCount: number): string {
-	if (lineCount <= VERBATIM_THRESHOLD) {
-		return lines.join("\n");
-	}
-	const head = lines.slice(0, HEAD_LINES);
-	const tail = lines.slice(-TAIL_LINES);
-	const omitted = lineCount - HEAD_LINES - TAIL_LINES;
-	return [...head, `[... ${omitted} lines omitted]`, ...tail].join("\n");
-}
 
 export const warmCodec: ContentCodec = {
 	name: "warm",

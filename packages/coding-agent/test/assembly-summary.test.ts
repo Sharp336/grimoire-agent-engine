@@ -69,12 +69,13 @@ describe("formatAssemblySummary", () => {
 			droppedCount: 2,
 			tokensBefore: 8000,
 			tokensAfter: 4600,
+			scoredCount: 0,
 		};
 		const result = formatAssemblySummary(makeSnapshot({ meta }));
 		expect(result).toContain("8 turns");
 		expect(result).toContain("3 kept");
 		expect(result).toContain("3 stubbed (turns 2-4)");
-		expect(result).toContain("2 dropped");
+		expect(result).toContain("2 budget-dropped");
 	});
 
 	test("includes budget usage and headroom", () => {
@@ -104,6 +105,7 @@ describe("formatAssemblySummary", () => {
 			droppedCount: 0,
 			tokensBefore: 1000,
 			tokensAfter: 1000,
+			scoredCount: 0,
 		};
 		const budget: EffectivePromptSnapshot["budget"] = {
 			contextWindow: 200_000,
@@ -131,6 +133,7 @@ describe("formatAssemblySummary", () => {
 			droppedCount: 0,
 			tokensBefore: 2000,
 			tokensAfter: 1200,
+			scoredCount: 0,
 		};
 		const result = formatAssemblySummary(makeSnapshot({ meta }))!;
 		expect(result).toContain("1 stubbed (turn 0)");
@@ -146,6 +149,7 @@ describe("formatAssemblySummary", () => {
 			droppedCount: 0,
 			tokensBefore: 2000,
 			tokensAfter: 2000,
+			scoredCount: 0,
 		};
 		const result = formatAssemblySummary(makeSnapshot({ meta }))!;
 		expect(result).not.toContain("stubbed");
@@ -161,6 +165,7 @@ describe("formatAssemblySummary", () => {
 			droppedCount: 0,
 			tokensBefore: 1000,
 			tokensAfter: 1000,
+			scoredCount: 0,
 		};
 		const result = formatAssemblySummary(makeSnapshot({ meta }))!;
 		expect(result).not.toContain("dropped");
@@ -214,6 +219,7 @@ describe("formatAssemblySummary", () => {
 			droppedCount: 1,
 			tokensBefore: 5000,
 			tokensAfter: 2400,
+			scoredCount: 0,
 		};
 		const result = formatAssemblySummary(makeSnapshot({ meta }))!;
 		expect(result).toContain("2 stubbed (turns 1-3)");

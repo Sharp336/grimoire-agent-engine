@@ -80,6 +80,22 @@ export class RecallStore {
 		return Promise.race([query as Promise<RecallRow[]>, timeout]);
 	}
 
+	async getEmbeddingsByTurns(turns: number[], sessionId: string): Promise<Map<number, Float32Array>> {
+		if (turns.length === 0) return new Map();
+		const escapedId = sessionId.replace(/'/g, "''");
+		const turnList = turns.join(", ");
+		const filter = `turn IN (${turnList}) AND session_id = '${escapedId}'`;
+		const timeout = Bun.sleep(5000).then(() => [] as RecallRow[]);
+		const results = await Promise.race([this.#table.query().where(filter).limit(turns.length * 3).toArray(), timeout]) as RecallRow[];
+		const map = new Map<number, Float32Array>();
+		for (const row of results) {
+			if (!map.has(row.turn) && row.vector) {
+				map.set(row.turn, new Float32Array(row.vector));
+			}
+		}
+		return map;
+	}
+
 	close(): void {
 		this.#table.close();
 		this.#db.close();

@@ -37,15 +37,35 @@ export function formatAssemblySummary(snapshot: EffectivePromptSnapshot): string
 	// Turn composition segment.
 	if (meta) {
 		const turnParts: string[] = [`${meta.totalTurns} turns`];
-		if (meta.keptCount > 0) turnParts.push(`${meta.keptCount} kept`);
+		if (meta.keptCount > 0) {
+			if (meta.scoredCount > 0 && meta.similarityRange) {
+				const min = meta.similarityRange.min.toFixed(2);
+				const max = meta.similarityRange.max.toFixed(2);
+				turnParts.push(`${meta.keptCount} kept (${meta.scoredCount} scored, sim ${min}-${max})`);
+			} else {
+				turnParts.push(`${meta.keptCount} kept`);
+			}
+		}
 		if (meta.stubbedCount > 0) {
 			const range = describeStubbedRange(meta.decisions);
 			turnParts.push(range ? `${meta.stubbedCount} stubbed (${range})` : `${meta.stubbedCount} stubbed`);
 		}
 		if (meta.compressedCount > 0) {
-			turnParts.push(`${meta.compressedCount} compressed`);
+			const conversationCompressed = meta.decisions.filter(d => d.reason === "conversation-compressed").length;
+			const codecCompressed = meta.compressedCount - conversationCompressed;
+			const compParts: string[] = [];
+			if (codecCompressed > 0) compParts.push(`${codecCompressed} codec-compressed`);
+			if (conversationCompressed > 0) compParts.push(`${conversationCompressed} conversation-compressed (recoverable via recall)`);
+			turnParts.push(compParts.length > 0 ? compParts.join(", ") : `${meta.compressedCount} compressed`);
 		}
-		if (meta.droppedCount > 0) turnParts.push(`${meta.droppedCount} dropped`);
+		if (meta.droppedCount > 0) {
+			const devDropped = meta.decisions.filter(d => d.reason === "developer-dropped").length;
+			const budgetDropped = meta.droppedCount - devDropped;
+			const dropParts: string[] = [];
+			if (budgetDropped > 0) dropParts.push(`${budgetDropped} budget-dropped`);
+			if (devDropped > 0) dropParts.push(`${devDropped} dev-dropped`);
+			turnParts.push(dropParts.length > 0 ? dropParts.join(", ") : `${meta.droppedCount} dropped`);
+		}
 		parts.push(turnParts.join(", "));
 	}
 

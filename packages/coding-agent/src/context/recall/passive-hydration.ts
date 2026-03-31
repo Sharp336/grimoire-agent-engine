@@ -137,6 +137,9 @@ export class CosineCache {
 	get misses(): number {
 		return this.#misses;
 	}
+	get lastEmbedding(): Float32Array | null {
+		return this.#lastEmbedding;
+	}
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -247,6 +250,10 @@ export class PassiveHydrator {
 			});
 			return { text: null, results: [], cacheHit: false, durationMs };
 		}
+	}
+
+	get lastEmbedding(): Float32Array | null {
+		return this.#cache.lastEmbedding;
 	}
 
 	get cacheHits(): number {

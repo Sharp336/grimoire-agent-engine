@@ -20,7 +20,7 @@ import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { parseMCPToolName } from "../../mcp/tool-bridge";
 import type { MemoryAssemblyBudget } from "../memory-contract";
-import { contentHash, extractText, isReadTool } from "./codecs/shared";
+import { buildPeek, contentHash, extractText, isReadTool } from "./codecs/shared";
 import type { BudgetDerivationInput, CodecContext, ContentCodec, FileReadEntry } from "./types";
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -177,6 +177,13 @@ export interface MessageTransformOptions {
 	 * the estimated token count fits. Omit to skip budget bounding.
 	 */
 	maxTokens?: number;
+
+	/**
+	 * Pre-computed semantic relevance scores for turns, keyed by turn index.
+	 * Values are cosine similarity (0–1) between the turn's embedding and the
+	 * hot-window embedding. Missing entries default to keep-verbatim.
+	 */
+	relevanceScores?: Map<number, number>;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -214,8 +221,10 @@ export interface TurnDecision {
 	 *   - `"beyond-hot-window"` — tool results replaced with stubs.
 	 *   - `"codec-compressed"`  — tool results replaced with codec warm representation.
 	 *   - `"budget-exceeded"`   — dropped to fit the token budget.
+	 *   - `"conversation-compressed"` — non-tool turn compressed via head+tail based on semantic relevance.
+	 *   - `"developer-dropped"` — developer message beyond hot window dropped (regenerated each turn).
 	 */
-	reason: "hot-window" | "no-tool-results" | "beyond-hot-window" | "codec-compressed" | "budget-exceeded";
+	reason: "hot-window" | "no-tool-results" | "beyond-hot-window" | "codec-compressed" | "budget-exceeded" | "conversation-compressed" | "developer-dropped";
 
 	/** Number of messages in this turn. */
 	messageCount: number;
@@ -263,6 +272,12 @@ export interface TransformMetadata {
 
 	/** Total estimated tokens after transformation. */
 	tokensAfter: number;
+
+	/** Number of non-tool turns that received a relevance score. */
+	scoredCount: number;
+
+	/** Min/max similarity scores observed (undefined if no scoring). */
+	similarityRange?: { min: number; max: number };
 }
 
 /**
@@ -381,6 +396,26 @@ function tryCodecEncode(msg: ToolResultMessage, codecs: ContentCodec[], ctx: Cod
 		}
 	}
 	return null;
+}
+
+/**
+ * Extract text content from a developer turn's messages.
+ */
+function extractDeveloperText(turn: Turn): string {
+	return turn.messages
+		.map(m => {
+			const c = (m as { content?: unknown }).content;
+			if (typeof c === "string") return c;
+			if (Array.isArray(c)) {
+				return c
+					.filter((b: unknown) => b && typeof b === "object" && "text" in (b as Record<string, unknown>))
+					.map((b: unknown) => (b as { text: string }).text)
+					.join("\n");
+			}
+			return "";
+		})
+		.join("\n")
+		.trim();
 }
 
 /**
@@ -571,6 +606,94 @@ function computeBudgetDropCount(tokenCounts: number[], maxTokens: number, hotWin
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Conversation compression (non-tool turns)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** Cosine similarity baseline. Turns with similarity above the effective threshold are kept verbatim. */
+const BASE_RELEVANCE_THRESHOLD = 0.3;
+
+/** How aggressively the threshold drops with age. 0.5 means the oldest turn's threshold is half the base. */
+const RELEVANCE_DECAY_FACTOR = 0.5;
+
+/** Estimated token count below which non-tool turns are kept verbatim regardless of relevance. */
+const CONVERSATION_VERBATIM_TOKEN_THRESHOLD = 50;
+
+/**
+ * Determine whether a non-tool turn should be compressed based on semantic relevance.
+ *
+ * Uses an age-decayed threshold: older turns need LESS similarity to survive,
+ * accounting for foundational context that may have seeded the current work stream.
+ *
+ * Returns `true` if the turn should be compressed.
+ */
+function shouldCompressConversationTurn(
+	turnIndex: number,
+	totalTurns: number,
+	turnTokens: number,
+	turn: Turn,
+	relevanceScores: Map<number, number> | undefined,
+): boolean {
+	// Developer messages beyond hot window are handled separately (dropped).
+	// This function only evaluates user/assistant conversation turns.
+	const role = turn.messages[0]?.role;
+	if (role === "developer") return false;
+
+	// Short messages: always keep verbatim (cheap to keep, risky to classify)
+	if (turnTokens <= CONVERSATION_VERBATIM_TOKEN_THRESHOLD) return false;
+
+	// No relevance data: keep verbatim (safe default)
+	if (!relevanceScores || relevanceScores.size === 0) return false;
+
+	// Look up pre-computed similarity. Missing = no embedding = keep.
+	const similarity = relevanceScores.get(turnIndex);
+	if (similarity === undefined) return false;
+
+	// Age-decayed threshold: older turns need less similarity to survive
+	const normalizedAge = totalTurns > 1 ? (totalTurns - 1 - turnIndex) / (totalTurns - 1) : 0;
+	const effectiveThreshold = BASE_RELEVANCE_THRESHOLD * (1 - RELEVANCE_DECAY_FACTOR * normalizedAge);
+
+	return similarity <= effectiveThreshold;
+}
+
+/**
+ * Compress a non-tool turn's messages using head+tail peek.
+ *
+ * Replaces text content in each message with a truncated version.
+ * The full content remains in LanceDB (stored by IngestPipeline) and
+ * can be recovered via the recall tool's semantic search.
+ * Returns a new Turn with compressed messages.
+ */
+function compressConversationTurn(turn: Turn): { turn: Turn; tokensAfter: number } {
+	const compressedMessages = turn.messages.map((msg): AgentMessage => {
+		const content = (msg as { content?: unknown }).content;
+		if (typeof content === "string") {
+			const lines = content.split("\n");
+			const peek = buildPeek(lines, lines.length);
+			return { ...msg, content: peek } as AgentMessage;
+		}
+		if (Array.isArray(content)) {
+			const newContent = content.map((block: unknown) => {
+				if (block && typeof block === "object" && "type" in block && (block as { type: string }).type === "text" && "text" in block) {
+					const text = (block as { text: string }).text;
+					const lines = text.split("\n");
+					const peek = buildPeek(lines, lines.length);
+					return { ...block, text: peek };
+				}
+				return block;
+			});
+			return { ...msg, content: newContent } as AgentMessage;
+		}
+		return msg;
+	});
+
+	const compressedTurn: Turn = {
+		...turn,
+		messages: compressedMessages,
+	};
+	return { turn: compressedTurn, tokensAfter: estimateTurnTokens(compressedTurn) };
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Main transform
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -604,6 +727,7 @@ export function transformMessages(messages: AgentMessage[], options: MessageTran
 				droppedCount: 0,
 				tokensBefore: 0,
 				tokensAfter: 0,
+				scoredCount: 0,
 			},
 		};
 	}
@@ -613,6 +737,35 @@ export function transformMessages(messages: AgentMessage[], options: MessageTran
 	// 1. Segment into turns
 	const originalTurns = segmentIntoTurns(messages);
 	const totalTurns = originalTurns.length;
+
+	// Developer message dedup, scanning newest → oldest.
+	// Two categories:
+	//   1. Regenerated per-turn (assembly summary, hydrated context): identified by
+	//      structural prefix. Keep only the latest of each type.
+	//   2. One-time injections (checkpoint reminders, synthetic prompts): identified
+	//      by content hash. Keep unique content, drop exact duplicates.
+	const REGENERATED_PREFIXES = ["[Assembly:", "<recalled-context>"];
+	const seenRegeneratedTypes = new Set<string>();
+	const seenDeveloperHashes = new Set<number>();
+	const developerTurnKeep = new Set<number>();
+	for (let i = totalTurns - 1; i >= 0; i--) {
+		if (originalTurns[i].hasToolResults) continue;
+		if (originalTurns[i].messages[0]?.role !== "developer") continue;
+		const text = extractDeveloperText(originalTurns[i]);
+		// Check if this is a regenerated type (prefix match)
+		const matchedPrefix = REGENERATED_PREFIXES.find(p => text.startsWith(p));
+		if (matchedPrefix) {
+			// Keep only the latest instance of each regenerated type
+			if (seenRegeneratedTypes.has(matchedPrefix)) continue;
+			seenRegeneratedTypes.add(matchedPrefix);
+		} else {
+			// One-time injection: keep if content is unique
+			const hash = contentHash(text);
+			if (seenDeveloperHashes.has(hash)) continue;
+			seenDeveloperHashes.add(hash);
+		}
+		developerTurnKeep.add(i);
+	}
 
 	// Pre-compute original token costs per turn
 	const originalTokens = originalTurns.map(estimateTurnTokens);
@@ -672,6 +825,9 @@ export function transformMessages(messages: AgentMessage[], options: MessageTran
 	let droppedCount = 0;
 	let totalTokensBefore = 0;
 	let totalTokensAfter = 0;
+	let scoredCount = 0;
+	let simMin = Infinity;
+	let simMax = -Infinity;
 
 	for (let i = 0; i < totalTurns; i++) {
 		const tokensBefore = originalTokens[i];
@@ -724,24 +880,96 @@ export function transformMessages(messages: AgentMessage[], options: MessageTran
 			if (wasCompressed) compressedCount++;
 			else stubbedCount++;
 		} else {
-			// Beyond hot window, no tool results: kept as-is
-			decisions.push({
-				turnIndex: i,
-				action: "kept",
-				reason: "no-tool-results",
-				messageCount: originalTurns[i].messages.length,
-				hasToolResults: false,
-				tokensBefore,
-				tokensAfter: tokensBefore,
-				sourceTags,
-			});
-			totalTokensAfter += tokensBefore;
-			keptCount++;
+			// Beyond hot window, no tool results.
+			const role = originalTurns[i].messages[0]?.role;
+
+			if (role === "developer") {
+				if (developerTurnKeep.has(i)) {
+					// Unique developer content (one-time injection): keep it
+					decisions.push({
+						turnIndex: i,
+						action: "kept",
+						reason: "no-tool-results",
+						messageCount: originalTurns[i].messages.length,
+						hasToolResults: false,
+						tokensBefore,
+						tokensAfter: tokensBefore,
+						sourceTags,
+					});
+					totalTokensAfter += tokensBefore;
+					keptCount++;
+				} else {
+					// Duplicate developer content (newer copy exists): drop
+					decisions.push({
+						turnIndex: i,
+						action: "dropped",
+						reason: "developer-dropped",
+						messageCount: originalTurns[i].messages.length,
+						hasToolResults: false,
+						tokensBefore,
+						tokensAfter: 0,
+						sourceTags,
+					});
+					droppedCount++;
+				}
+			} else {
+				// User/assistant conversation turn: check semantic relevance for compression
+				const compress = shouldCompressConversationTurn(
+					i,
+					totalTurns,
+					tokensBefore,
+					originalTurns[i],
+					options.relevanceScores,
+				);
+				// Track relevance scoring stats
+				const sim = options.relevanceScores?.get(i);
+				if (sim !== undefined) {
+					scoredCount++;
+					if (sim < simMin) simMin = sim;
+					if (sim > simMax) simMax = sim;
+				}
+				if (compress) {
+					const result = compressConversationTurn(transformedTurns[i]);
+					transformedTurns[i] = result.turn;
+					transformedTokens[i] = result.tokensAfter;
+					decisions.push({
+						turnIndex: i,
+						action: "compressed",
+						reason: "conversation-compressed",
+						messageCount: originalTurns[i].messages.length,
+						hasToolResults: false,
+						tokensBefore,
+						tokensAfter: result.tokensAfter,
+						sourceTags,
+					});
+					totalTokensAfter += result.tokensAfter;
+					compressedCount++;
+				} else {
+					decisions.push({
+						turnIndex: i,
+						action: "kept",
+						reason: "no-tool-results",
+						messageCount: originalTurns[i].messages.length,
+						hasToolResults: false,
+						tokensBefore,
+						tokensAfter: tokensBefore,
+						sourceTags,
+					});
+					totalTokensAfter += tokensBefore;
+					keptCount++;
+				}
+			}
 		}
 	}
 
-	// 5. Flatten surviving turns to message array
-	const survivingTurns = dropCount > 0 ? transformedTurns.slice(dropCount) : transformedTurns;
+	// 5. Flatten surviving turns to message array, excluding budget-dropped and developer-dropped turns
+	const survivingTurns: Turn[] = [];
+	for (let i = 0; i < transformedTurns.length; i++) {
+		if (i < dropCount) continue; // budget-dropped
+		const decision = decisions[i];
+		if (decision && decision.reason === "developer-dropped") continue;
+		survivingTurns.push(transformedTurns[i]);
+	}
 	const resultMessages = survivingTurns.flatMap(t => t.messages);
 
 	return {
@@ -755,6 +983,8 @@ export function transformMessages(messages: AgentMessage[], options: MessageTran
 			droppedCount,
 			tokensBefore: totalTokensBefore,
 			tokensAfter: totalTokensAfter,
+			scoredCount,
+			similarityRange: scoredCount > 0 ? { min: simMin, max: simMax } : undefined,
 		},
 	};
 }
