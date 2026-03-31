@@ -155,6 +155,8 @@ import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { PendingActionStore } from "./tools/pending-action";
 import { EventBus } from "./utils/event-bus";
 
+const ASSEMBLED_CONTEXT_WINDOW_CAP = 200_000;
+
 // Types
 export interface CreateAgentSessionOptions {
 	/** Working directory for project-local discovery. Default: getProjectDir() */
@@ -1639,6 +1641,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const currentModel = agent?.state.model;
 			const currentSystemPrompt = agent?.state.systemPrompt ?? "";
 			const currentTools = agent?.state.tools ?? [];
+			const assembledContextWindow = Math.min(currentModel?.contextWindow ?? 0, ASSEMBLED_CONTEXT_WINDOW_CAP);
 
 			// Step 1: Apply message transform (hot window + content replacement).
 			// This strips tool_result content from older turns before budget derivation
@@ -1652,7 +1655,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 			const budget = currentModel
 				? deriveBudget({
-						contextWindow: currentModel.contextWindow,
+						contextWindow: assembledContextWindow,
 						systemPromptTokens: Math.ceil(currentSystemPrompt.length / 4),
 						toolDefinitionTokens: estimateToolDefinitionTokens(currentTools),
 						currentTurnTokens: 0,
@@ -1826,7 +1829,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// Step 5: Budget debug logging — per-category allocation and actual usage.
 			if (budget) {
 				logger.debug("assembler:budget-derivation", {
-					contextWindow: currentModel?.contextWindow ?? 0,
+					contextWindow: assembledContextWindow,
 					allocatable: budget.maxTokens,
 					hydrationBudgetMax: budget.hydrationBudgetMax,
 					messageBudgetMin: budget.messageBudgetMin,
