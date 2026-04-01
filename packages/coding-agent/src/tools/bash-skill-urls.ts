@@ -112,20 +112,37 @@ export async function resolveSkillUrlToPath(url: string, skills: readonly Skill[
 	} catch (err) {
 		if (err instanceof ToolError) throw err;
 		if (!isEnoent(err)) throw err;
-		// Target absent. Check the parent directory to block symlink-ancestor escape:
-		// a plugin could ship PLUGIN_ROOT/evil/ -> /outside; the lexical path
-		// PLUGIN_ROOT/evil/new-file passes containment but the parent reveals the escape.
-		const parentDir = path.dirname(targetPath);
-		try {
-			const realParent = await fs.realpath(parentDir);
-			if (!realParent.startsWith(realSecurityRoot + path.sep) && realParent !== realSecurityRoot) {
-				throw new ToolError("Path traversal is not allowed in skill:// URLs");
+		// Target absent. Walk upward to the nearest existing ancestor that is still
+		// within the security root and realpath it.
+		// Checking only the immediate parent misses the case where the parent is also
+		// absent but a higher ancestor IS a symlink pointing outside pluginRoot:
+		//   PLUGIN_ROOT/evil -> /outside  (exists)
+		//   target: PLUGIN_ROOT/evil/new/sub/file.txt  (nothing below evil/ exists)
+		// realpath(evil/new/sub) throws ENOENT, but realpath(evil) returns /outside.
+		//
+		// Stop at the security root boundary: ancestors above it are its containers,
+		// not potential escape points, and they may well exist on the filesystem.
+		let ancestor = path.dirname(targetPath);
+		while (ancestor !== path.dirname(ancestor)) {
+			// Do not walk above the security root — those ancestors are safe containers.
+			if (!ancestor.startsWith(securityRoot + path.sep) && ancestor !== securityRoot) {
+				break;
 			}
-		} catch (parentErr) {
-			if (parentErr instanceof ToolError) throw parentErr;
-			if (!isEnoent(parentErr)) throw parentErr;
-			// Parent also absent — lexical check already confirmed containment.
+			try {
+				const realAncestor = await fs.realpath(ancestor);
+				// Found the nearest existing ancestor within the root — validate and stop.
+				if (!realAncestor.startsWith(realSecurityRoot + path.sep) && realAncestor !== realSecurityRoot) {
+					throw new ToolError("Path traversal is not allowed in skill:// URLs");
+				}
+				break;
+			} catch (ancestorErr) {
+				if (ancestorErr instanceof ToolError) throw ancestorErr;
+				if (!isEnoent(ancestorErr)) throw ancestorErr;
+				ancestor = path.dirname(ancestor);
+			}
 		}
+		// Walked past the security root without finding an existing ancestor inside it
+		// — nothing to follow, lexical check is sufficient.
 	}
 
 	return resolvedPath;

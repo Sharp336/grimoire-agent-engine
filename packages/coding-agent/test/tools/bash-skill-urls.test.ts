@@ -209,6 +209,16 @@ describe("plugin-root traversal (issue #585)", () => {
 
 			await expect(resolveSkillUrlToPath(url, [skill])).rejects.toThrow(ToolError);
 		});
+
+		it("blocks deep write-path injection where intermediate dirs do not exist", async () => {
+			const skill = createPluginSkill("p:greet", path.join(tmpDir, "skills", "greet"), tmpDir);
+			// evil/ -> outside, but evil/new/sub/ does not exist. The immediate-parent check
+			// would throw ENOENT on evil/new/sub and fall through; the ancestor walk must
+			// reach evil/ itself, realpath it to the outside target, and reject.
+			const url = "skill://p:greet/../../evil/new/sub/file.txt";
+
+			await expect(resolveSkillUrlToPath(url, [skill])).rejects.toThrow(ToolError);
+		});
 	});
 });
 
