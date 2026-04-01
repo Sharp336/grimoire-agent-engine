@@ -28,6 +28,9 @@ export class TaskStore {
 
 		if (names.includes(TABLE_NAME)) {
 			table = await db.openTable(TABLE_NAME);
+			// Fire-and-forget compaction — prunes accumulated version manifests.
+			const cutoff = new Date(Date.now() - 2 * 60_000);
+			table.optimize({ cleanupOlderThan: cutoff }).catch(() => {});
 		} else {
 			const seedRow: Task = {
 				id: "__seed__",

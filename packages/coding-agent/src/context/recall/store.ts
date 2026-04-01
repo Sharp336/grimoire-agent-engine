@@ -14,10 +14,14 @@ export interface RecallStoreOptions {
 }
 
 const TABLE_NAME = "recall";
+const OPTIMIZE_EVERY = 50;
+/** Keep versions younger than 2 min so a concurrent session can still read them. */
+const VERSION_TTL_MS = 2 * 60_000;
 
 export class RecallStore {
 	#db: Connection;
 	#table: Table;
+	#insertsSinceOptimize = 0;
 
 	constructor(db: Connection, table: Table) {
 		this.#db = db;
@@ -32,6 +36,9 @@ export class RecallStore {
 
 		if (names.includes(TABLE_NAME)) {
 			table = await db.openTable(TABLE_NAME);
+			// Fire-and-forget compaction — merges tiny fragments and prunes old
+			// version manifests that accumulate with every append.
+			RecallStore.#optimize(table);
 		} else {
 			// Seed row uses non-null strings for nullable fields so LanceDB
 			// can infer the schema. The seed is deleted immediately after creation.
@@ -49,11 +56,12 @@ export class RecallStore {
 			};
 			table = await db.createTable(TABLE_NAME, [seedRow]);
 			await table.delete("timestamp = 0 AND tool_name = '__seed__'");
+			// Build scalar indices once at table creation — not on every open,
+			// otherwise concurrent sessions hit CommitConflict on the shared lance dir.
+			await table.createIndex("turn").catch(() => {});
+			await table.createIndex("session_id").catch(() => {});
 		}
 
-		// Ensure scalar indices exist (idempotent — silently skips if already present)
-		await table.createIndex("turn").catch(() => {});
-		await table.createIndex("session_id").catch(() => {});
 		logger.debug("RecallStore initialized", { path: dbPath });
 		return new RecallStore(db, table);
 	}
@@ -61,6 +69,11 @@ export class RecallStore {
 	async insert(rows: RecallRow[]): Promise<void> {
 		if (rows.length === 0) return;
 		await this.#table.add(rows as unknown as LanceData);
+		this.#insertsSinceOptimize += rows.length;
+		if (this.#insertsSinceOptimize >= OPTIMIZE_EVERY) {
+			this.#insertsSinceOptimize = 0;
+			RecallStore.#optimize(this.#table);
+		}
 		logger.debug("RecallStore inserted rows", { count: rows.length });
 	}
 
@@ -94,6 +107,22 @@ export class RecallStore {
 			}
 		}
 		return map;
+	}
+
+	static #optimize(table: Table): void {
+		const cutoff = new Date(Date.now() - VERSION_TTL_MS);
+		table.optimize({ cleanupOlderThan: cutoff }).then(
+			stats => {
+				if (stats.compaction.filesAdded > 0 || stats.prune.bytesRemoved > 0) {
+					logger.debug("RecallStore optimized", {
+						fragmentsRemoved: stats.compaction.fragmentsRemoved,
+						filesAdded: stats.compaction.filesAdded,
+						bytesRemoved: stats.prune.bytesRemoved,
+					});
+				}
+			},
+			err => logger.debug("RecallStore optimize failed (non-fatal)", { err }),
+		);
 	}
 
 	close(): void {
