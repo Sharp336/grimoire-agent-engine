@@ -33,6 +33,11 @@ export interface Skill {
 	level: "user" | "project";
 	/** Source metadata */
 	_source: SourceMeta;
+	/**
+	 * For marketplace plugin skills: absolute path to the plugin root directory.
+	 * Allows skill:// URLs to resolve paths relative to plugin root (not just skill dir).
+	 */
+	pluginRoot?: string;
 }
 
 export const skillCapability = defineCapability<Skill>({

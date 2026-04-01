@@ -1,8 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { Skill } from "../../src/extensibility/skills";
 import { resolveLocalUrlToPath } from "../../src/internal-urls";
-import { expandInternalUrls, expandSkillUrls } from "../../src/tools/bash-skill-urls";
+import { expandInternalUrls, expandSkillUrls, resolveSkillUrlToPath } from "../../src/tools/bash-skill-urls";
 import { ToolError } from "../../src/tools/tool-errors";
 
 function shellEscape(p: string): string {
@@ -18,6 +20,10 @@ function createSkill(name: string, baseDir: string): Skill {
 		baseDir: resolvedBaseDir,
 		source: "test",
 	};
+}
+
+function createPluginSkill(name: string, baseDir: string, pluginRoot: string): Skill {
+	return { ...createSkill(name, baseDir), pluginRoot: path.resolve(pluginRoot) };
 }
 
 function createInternalRouter(resources: Record<string, { sourcePath?: string; error?: string }>): {
@@ -48,15 +54,15 @@ function createInternalRouter(resources: Record<string, { sourcePath?: string; e
 }
 
 describe("expandSkillUrls", () => {
-	it("expands a basic skill:// URI to an absolute path", () => {
+	it("expands a basic skill:// URI to an absolute path", async () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
 		const command = "python skill://valid-skill/scripts/init.py";
 		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
 
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
+		expect(await expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
 	});
 
-	it("expands multiple skill:// URIs in one command", () => {
+	it("expands multiple skill:// URIs in one command", async () => {
 		const skills = [
 			createSkill("first-skill", "/tmp/skills/first-skill"),
 			createSkill("second-skill", "/tmp/skills/second-skill"),
@@ -65,89 +71,144 @@ describe("expandSkillUrls", () => {
 		const firstPath = path.join(skills[0].baseDir, "a.txt");
 		const secondPath = path.join(skills[1].baseDir, "b.txt");
 
-		expect(expandSkillUrls(command, skills)).toBe(`cp ${shellEscape(firstPath)} ${shellEscape(secondPath)}`);
+		expect(await expandSkillUrls(command, skills)).toBe(`cp ${shellEscape(firstPath)} ${shellEscape(secondPath)}`);
 	});
 
-	it("throws ToolError for unknown skills with available names", () => {
+	it("throws ToolError for unknown skills with available names", async () => {
 		const skills = [
 			createSkill("first-skill", "/tmp/skills/first-skill"),
 			createSkill("second-skill", "/tmp/skills/second-skill"),
 		];
 
-		expect(() => expandSkillUrls("python skill://missing/run.py", skills)).toThrow(
+		await expect(expandSkillUrls("python skill://missing/run.py", skills)).rejects.toThrow(
 			"Unknown skill: missing. Available: first-skill, second-skill",
 		);
 	});
 
-	it("throws ToolError for path traversal attempts", () => {
+	it("throws ToolError for path traversal attempts", async () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
 
-		expect(() => expandSkillUrls("cat skill://valid-skill/../../../etc/passwd", skills)).toThrow(
+		await expect(expandSkillUrls("cat skill://valid-skill/../../../etc/passwd", skills)).rejects.toThrow(
 			"Path traversal (..) is not allowed in skill:// URLs",
 		);
 	});
 
-	it("returns command unchanged when there are no skill:// tokens", () => {
+	it("returns command unchanged when there are no skill:// tokens", async () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
 		const command = "git status";
 
-		expect(expandSkillUrls(command, skills)).toBe(command);
+		expect(await expandSkillUrls(command, skills)).toBe(command);
 	});
 
-	it("does not expand non-skill internal URIs", () => {
+	it("does not expand non-skill internal URIs", async () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
 		const command = "echo agent://1 artifact://abc rule://security";
 
-		expect(expandSkillUrls(command, skills)).toBe(command);
+		expect(await expandSkillUrls(command, skills)).toBe(command);
 	});
 
-	it("expands URI in double quotes", () => {
+	it("expands URI in double quotes", async () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
 		const command = 'python "skill://valid-skill/scripts/init.py"';
 		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
 
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
+		expect(await expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
 	});
 
-	it("expands URI in single quotes", () => {
+	it("expands URI in single quotes", async () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
 		const command = "python 'skill://valid-skill/scripts/init.py'";
 		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
 
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
+		expect(await expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
 	});
 
-	it("shell-escapes paths with spaces", () => {
+	it("shell-escapes paths with spaces", async () => {
 		const skills = [createSkill("space-skill", "/tmp/skills/with space")];
 		const command = "python skill://space-skill/scripts/my%20file.py";
 		const expectedPath = path.join(skills[0].baseDir, "scripts/my file.py");
 
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
+		expect(await expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
 	});
 
-	it("shell-escapes paths containing single quotes", () => {
+	it("shell-escapes paths containing single quotes", async () => {
 		const skills = [createSkill("quote-skill", "/tmp/skills/with'quote")];
 		const command = "python skill://quote-skill/scripts/init.py";
 		const expectedPath = path.join(skills[0].baseDir, "scripts/init.py");
 
-		expect(expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
+		expect(await expandSkillUrls(command, skills)).toBe(`python ${shellEscape(expectedPath)}`);
 	});
 
-	it("resolves skill://name with no relative path to SKILL.md", () => {
+	it("resolves skill://name with no relative path to SKILL.md", async () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
 		const command = "cat skill://valid-skill";
 
-		expect(expandSkillUrls(command, skills)).toBe(`cat ${shellEscape(skills[0].filePath)}`);
+		expect(await expandSkillUrls(command, skills)).toBe(`cat ${shellEscape(skills[0].filePath)}`);
 	});
 
-	it("returns command unchanged when no skills are loaded", () => {
+	it("returns command unchanged when no skills are loaded", async () => {
 		const command = "python skill://valid-skill/scripts/init.py";
-		expect(expandSkillUrls(command, [])).toBe(command);
+		expect(await expandSkillUrls(command, [])).toBe(command);
 	});
 
-	it("throws ToolError when traversal is attempted with encoded segments", () => {
+	it("throws ToolError when traversal is attempted with encoded segments", async () => {
 		const skills = [createSkill("valid-skill", "/tmp/skills/valid-skill")];
-		expect(() => expandSkillUrls("cat skill://valid-skill/%2E%2E/%2E%2E/etc/passwd", skills)).toThrow(ToolError);
+		await expect(expandSkillUrls("cat skill://valid-skill/%2E%2E/%2E%2E/etc/passwd", skills)).rejects.toThrow(
+			ToolError,
+		);
+	});
+});
+
+describe("plugin-root traversal (issue #585)", () => {
+	it("allows .. traversal within plugin root for plugin skills", async () => {
+		// PLUGIN_ROOT/skills/greet/ is the skill baseDir; ../commands/hello.md stays within PLUGIN_ROOT.
+		const pluginRoot = "/tmp/test-plugin-root";
+		const skill = createPluginSkill("hello-plugin:greet", `${pluginRoot}/skills/greet`, pluginRoot);
+		const url = "skill://hello-plugin:greet/../../commands/hello.md";
+		const expectedPath = path.resolve(`${pluginRoot}/commands/hello.md`);
+
+		expect(await resolveSkillUrlToPath(url, [skill])).toBe(expectedPath);
+	});
+
+	it("rejects .. that escapes plugin root", async () => {
+		const pluginRoot = "/tmp/test-plugin-root";
+		const skill = createPluginSkill("hello-plugin:greet", `${pluginRoot}/skills/greet`, pluginRoot);
+
+		await expect(resolveSkillUrlToPath("skill://hello-plugin:greet/../../../outside.md", [skill])).rejects.toThrow(
+			ToolError,
+		);
+	});
+
+	it("still rejects .. for non-plugin skills (no pluginRoot)", async () => {
+		const skill = createSkill("plain-skill", "/tmp/skills/plain-skill");
+
+		await expect(resolveSkillUrlToPath("skill://plain-skill/../sibling.md", [skill])).rejects.toThrow(
+			"Path traversal (..) is not allowed in skill:// URLs",
+		);
+	});
+
+	describe("symlink-ancestor escape prevention", () => {
+		let tmpDir: string;
+
+		beforeAll(async () => {
+			tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-test-"));
+			// Plugin structure: PLUGIN_ROOT/skills/greet/ (skill dir)
+			await fs.mkdir(path.join(tmpDir, "skills", "greet"), { recursive: true });
+			// Symlink inside plugin root pointing outside: PLUGIN_ROOT/evil -> os.tmpdir()
+			await fs.symlink(os.tmpdir(), path.join(tmpDir, "evil"));
+		});
+
+		afterAll(async () => {
+			await fs.rm(tmpDir, { recursive: true, force: true });
+		});
+
+		it("blocks write-path injection through a symlinked directory inside plugin root", async () => {
+			const skill = createPluginSkill("p:greet", path.join(tmpDir, "skills", "greet"), tmpDir);
+			// Lexically within plugin root, but evil/ is a symlink to outside.
+			const url = "skill://p:greet/../../evil/pwned.txt";
+
+			await expect(resolveSkillUrlToPath(url, [skill])).rejects.toThrow(ToolError);
+		});
 	});
 });
 

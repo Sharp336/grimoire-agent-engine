@@ -1,8 +1,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import type { Skill } from "../extensibility/skills";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
-import { validateRelativePath } from "../internal-urls/skill-protocol";
 import type { InternalResource } from "../internal-urls/types";
 import { normalizeLocalScheme } from "./path-utils";
 import { ToolError } from "./tool-errors";
@@ -32,9 +32,10 @@ export interface InternalUrlExpansionOptions {
 
 /**
  * Resolve a single skill:// URL to its absolute filesystem path.
- * Does NOT read file content or verify existence.
+ * Calls fs.realpath to block symlink escape for plugin skills; returns the
+ * lexical path for non-existent files (caller is responsible for existence checks).
  */
-export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): string {
+export async function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): Promise<string> {
 	const parsed = /^skill:\/\/([^/?#]+)(\/[^?#]*)?(?:[?#].*)?$/.exec(url);
 	if (!parsed) {
 		throw new ToolError(`Invalid skill:// URL: ${url}`);
@@ -75,18 +76,56 @@ export function resolveSkillUrlToPath(url: string, skills: readonly Skill[]): st
 	} catch {
 		throw new ToolError(`Invalid skill:// URL path encoding: ${url}`);
 	}
-	try {
-		validateRelativePath(relativePath);
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new ToolError(message);
+	if (path.isAbsolute(relativePath)) {
+		throw new ToolError("Absolute paths are not allowed in skill:// URLs");
+	}
+
+	// For skills without a pluginRoot, .. is not allowed — no safe boundary above the skill dir.
+	if (!skill.pluginRoot) {
+		const normalized = path.normalize(relativePath);
+		if (normalized.startsWith("..") || normalized.includes("/../") || normalized.includes("/..")) {
+			throw new ToolError("Path traversal (..) is not allowed in skill:// URLs");
+		}
 	}
 
 	const targetPath = path.join(skill.baseDir, relativePath);
 	const resolvedPath = path.resolve(targetPath);
-	const resolvedBaseDir = path.resolve(skill.baseDir);
-	if (!resolvedPath.startsWith(resolvedBaseDir + path.sep) && resolvedPath !== resolvedBaseDir) {
+	const securityRoot = path.resolve(skill.pluginRoot ?? skill.baseDir);
+	if (!resolvedPath.startsWith(securityRoot + path.sep) && resolvedPath !== securityRoot) {
 		throw new ToolError("Path traversal is not allowed in skill:// URLs");
+	}
+
+	// Realpath containment check — prevents symlink escape within pluginRoot.
+	// Only the lexical check guards non-plugin skills (no .. allowed there at all).
+	let realSecurityRoot: string;
+	try {
+		realSecurityRoot = await fs.realpath(securityRoot);
+	} catch {
+		realSecurityRoot = securityRoot;
+	}
+	try {
+		const realTargetPath = await fs.realpath(targetPath);
+		if (!realTargetPath.startsWith(realSecurityRoot + path.sep) && realTargetPath !== realSecurityRoot) {
+			throw new ToolError("Path traversal is not allowed in skill:// URLs");
+		}
+		return realTargetPath;
+	} catch (err) {
+		if (err instanceof ToolError) throw err;
+		if (!isEnoent(err)) throw err;
+		// Target absent. Check the parent directory to block symlink-ancestor escape:
+		// a plugin could ship PLUGIN_ROOT/evil/ -> /outside; the lexical path
+		// PLUGIN_ROOT/evil/new-file passes containment but the parent reveals the escape.
+		const parentDir = path.dirname(targetPath);
+		try {
+			const realParent = await fs.realpath(parentDir);
+			if (!realParent.startsWith(realSecurityRoot + path.sep) && realParent !== realSecurityRoot) {
+				throw new ToolError("Path traversal is not allowed in skill:// URLs");
+			}
+		} catch (parentErr) {
+			if (parentErr instanceof ToolError) throw parentErr;
+			if (!isEnoent(parentErr)) throw parentErr;
+			// Parent also absent — lexical check already confirmed containment.
+		}
 	}
 
 	return resolvedPath;
@@ -159,7 +198,7 @@ async function resolveInternalUrlToPath(
 	}
 
 	if (scheme === "skill") {
-		return resolveSkillUrlToPath(url, skills);
+		return await resolveSkillUrlToPath(url, skills);
 	}
 
 	if (scheme === "local") {
@@ -202,16 +241,26 @@ async function resolveInternalUrlToPath(
  * Returns the command with URIs replaced by shell-escaped absolute paths.
  * Throws ToolError if any URI cannot be resolved.
  */
-export function expandSkillUrls(command: string, skills: readonly Skill[]): string {
+export async function expandSkillUrls(command: string, skills: readonly Skill[]): Promise<string> {
 	if (skills.length === 0 || !command.includes("skill://")) {
 		return command;
 	}
 
-	return command.replace(SKILL_URL_PATTERN, token => {
+	const matches = Array.from(command.matchAll(SKILL_URL_PATTERN));
+	if (matches.length === 0) return command;
+
+	let expanded = command;
+	for (let i = matches.length - 1; i >= 0; i--) {
+		const match = matches[i];
+		const token = match[0];
+		const index = match.index;
+		if (index === undefined) continue;
+
 		const url = unquoteToken(token);
-		const resolvedPath = resolveSkillUrlToPath(url, skills);
-		return shellEscape(resolvedPath);
-	});
+		const resolvedPath = await resolveSkillUrlToPath(url, skills);
+		expanded = `${expanded.slice(0, index)}${shellEscape(resolvedPath)}${expanded.slice(index + token.length)}`;
+	}
+	return expanded;
 }
 
 /**

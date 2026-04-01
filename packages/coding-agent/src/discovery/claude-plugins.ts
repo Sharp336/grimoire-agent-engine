@@ -107,6 +107,8 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 		if (warning) warnings.push(warning);
 		for (const skill of result.items) {
 			if (root.plugin) skill.name = `${root.plugin}:${skill.name}`;
+			// Expose the plugin root so skill:// URL resolution can reach plugin-root-relative paths.
+			skill.pluginRoot = root.path;
 			items.push(skill);
 		}
 		if (result.warnings) warnings.push(...result.warnings);

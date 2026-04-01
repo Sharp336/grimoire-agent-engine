@@ -16,6 +16,11 @@ export interface Skill {
 	source: string;
 	/** Source metadata for display */
 	_source?: SourceMeta;
+	/**
+	 * For marketplace plugin skills: absolute path to the plugin root.
+	 * When set, skill:// URL resolution may traverse up to this boundary.
+	 */
+	pluginRoot?: string;
 }
 
 export interface SkillWarning {
@@ -171,6 +176,7 @@ export async function loadSkills(options: LoadSkillsOptions = {}): Promise<LoadS
 				baseDir: capSkill.path.replace(/[\\/]SKILL\.md$/, ""),
 				source: `${capSkill._source.provider}:${capSkill.level}`,
 				_source: capSkill._source,
+				...(capSkill.pluginRoot !== undefined && { pluginRoot: capSkill.pluginRoot }),
 			});
 			realPathSet.add(resolvedPath);
 		}
