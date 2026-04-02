@@ -832,6 +832,7 @@ export async function listClaudePluginRoots(
 	if (ompContent) {
 		const ompRegistry = parseClaudePluginsRegistry(ompContent);
 		if (ompRegistry) {
+			const seen = new Set<string>(); // dedup within this registry file
 			for (const [pluginId, entries] of Object.entries(ompRegistry.plugins)) {
 				if (!Array.isArray(entries) || entries.length === 0) continue;
 
@@ -849,10 +850,9 @@ export async function listClaudePluginRoots(
 						continue;
 					}
 					if (entry.enabled === false) continue;
-					// Deduplicate by installPath within same source — do not skip OMP entries
-					// just because a Claude entry with the same id+path already exists.
-					if (roots.some(r => r.registrySource === "omp" && r.id === pluginId && r.path === entry.installPath))
-						continue;
+					const key = `${pluginId}:${entry.installPath}`;
+					if (seen.has(key)) continue;
+					seen.add(key);
 
 					roots.push({
 						id: pluginId,
