@@ -745,6 +745,12 @@ export async function resolveOrDefaultProjectRegistryPath(cwd: string): Promise<
 	return path.join(cwd, getConfigDirName(), "plugins", "installed_plugins.json");
 }
 
+/**
+ * Registry sources served by the omp-plugins provider.
+ * Used to keep shadowing and deduplication logic within the OMP family.
+ */
+const OMP_FAMILY = new Set<ClaudePluginRoot["registrySource"]>(["omp", "project", "injected"]);
+
 const pluginRootsCache = new Map<
 	string,
 	{ roots: ClaudePluginRoot[]; claudeWarnings: string[]; ompWarnings: string[] }
@@ -905,12 +911,12 @@ export async function listClaudePluginRoots(
 	// Sources served by the omp-plugins provider. Project/injected shadowing
 	// only applies within this family — other providers' entries are preserved
 	// so their filtered accessors can serve them independently.
-	const ompFamily = new Set<ClaudePluginRoot["registrySource"]>(["omp", "project", "injected"]);
+	// OMP_FAMILY defined at module level; shadowing applies within that family only.
 
 	// Project entries shadow user entries for the same plugin ID (within the OMP family only).
 	if (projectRoots.length > 0) {
 		const projectIds = new Set(projectRoots.map(r => r.id));
-		const deduped = roots.filter(r => !ompFamily.has(r.registrySource) || !projectIds.has(r.id));
+		const deduped = roots.filter(r => !OMP_FAMILY.has(r.registrySource) || !projectIds.has(r.id));
 		roots.length = 0;
 		roots.push(...projectRoots, ...deduped);
 	}
@@ -918,7 +924,7 @@ export async function listClaudePluginRoots(
 	// Merge --plugin-dir roots (highest precedence, within the OMP family only).
 	if (injectedPluginDirRoots.length > 0) {
 		const injectedIds = new Set(injectedPluginDirRoots.map(r => r.id));
-		const filtered = roots.filter(r => !ompFamily.has(r.registrySource) || !injectedIds.has(r.id));
+		const filtered = roots.filter(r => !OMP_FAMILY.has(r.registrySource) || !injectedIds.has(r.id));
 		roots.length = 0;
 		roots.push(...injectedPluginDirRoots, ...filtered);
 	}
@@ -950,7 +956,7 @@ export function clearClaudePluginRootsCache(): void {
 function applyOmpOverClaude(roots: ClaudePluginRoot[]): ClaudePluginRoot[] {
 	const ompIds = new Set<string>();
 	for (const r of roots) {
-		if (r.registrySource === "omp") ompIds.add(r.id);
+		if (OMP_FAMILY.has(r.registrySource)) ompIds.add(r.id);
 	}
 	if (ompIds.size === 0) return roots;
 	return roots.filter(r => r.registrySource !== "claude" || !ompIds.has(r.id));
