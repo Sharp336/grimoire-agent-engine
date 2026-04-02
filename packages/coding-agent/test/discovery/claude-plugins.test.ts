@@ -6,7 +6,9 @@ import { loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import { clearCache as clearFsCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
 import {
 	clearClaudePluginRootsCache,
+	listClaudeOnlyPluginRoots,
 	listClaudePluginRoots,
+	listOmpOnlyPluginRoots,
 	parseClaudePluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/discovery/helpers";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
@@ -118,6 +120,7 @@ describe("listClaudePluginRoots", () => {
 			version: "1.0.0",
 			path: "/path/to/test-plugin",
 			scope: "user",
+			registrySource: "claude",
 		});
 	});
 
@@ -531,5 +534,103 @@ describe("discoverAgents plugin precedence", () => {
 		expect(found).toBeDefined();
 		expect(found?.source).toBe("project");
 		expect(found?.filePath).toContain(projectPluginPath);
+	});
+});
+
+describe("listClaudeOnlyPluginRoots / listOmpOnlyPluginRoots provider split", () => {
+	let tempDir: string;
+
+	beforeEach(async () => {
+		clearClaudePluginRootsCache();
+		clearFsCache();
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "plugin-split-test-"));
+	});
+
+	afterEach(async () => {
+		clearClaudePluginRootsCache();
+		await fs.rm(tempDir, { recursive: true, force: true });
+	});
+
+	const makeRegistry = (pluginId: string, installPath: string, scope: "user" | "project" = "user") => ({
+		version: 2,
+		plugins: {
+			[pluginId]: [{ scope, installPath, version: "1.0.0", installedAt: "", lastUpdated: "" }],
+		},
+	});
+
+	test("Claude registry entry appears only in listClaudeOnlyPluginRoots", async () => {
+		const claudeDir = path.join(tempDir, ".claude", "plugins");
+		await fs.mkdir(claudeDir, { recursive: true });
+		await fs.writeFile(
+			path.join(claudeDir, "installed_plugins.json"),
+			JSON.stringify(makeRegistry("plugin-a@market", "/install/a")),
+		);
+
+		const claudeOnly = await listClaudeOnlyPluginRoots(tempDir);
+		const ompOnly = await listOmpOnlyPluginRoots(tempDir);
+
+		expect(claudeOnly.roots).toHaveLength(1);
+		expect(claudeOnly.roots[0].id).toBe("plugin-a@market");
+		expect(claudeOnly.roots[0].registrySource).toBe("claude");
+		expect(ompOnly.roots).toHaveLength(0);
+	});
+
+	test("OMP registry entry appears only in listOmpOnlyPluginRoots", async () => {
+		const ompDir = path.join(tempDir, ".omp", "plugins");
+		await fs.mkdir(ompDir, { recursive: true });
+		await fs.writeFile(
+			path.join(ompDir, "installed_plugins.json"),
+			JSON.stringify(makeRegistry("plugin-b@omp", "/install/b")),
+		);
+
+		const claudeOnly = await listClaudeOnlyPluginRoots(tempDir);
+		const ompOnly = await listOmpOnlyPluginRoots(tempDir);
+
+		expect(ompOnly.roots).toHaveLength(1);
+		expect(ompOnly.roots[0].id).toBe("plugin-b@omp");
+		expect(ompOnly.roots[0].registrySource).toBe("omp");
+		expect(claudeOnly.roots).toHaveLength(0);
+	});
+
+	test("same plugin ID in both registries appears independently in each filter", async () => {
+		const claudeDir = path.join(tempDir, ".claude", "plugins");
+		const ompDir = path.join(tempDir, ".omp", "plugins");
+		await fs.mkdir(claudeDir, { recursive: true });
+		await fs.mkdir(ompDir, { recursive: true });
+		await fs.writeFile(
+			path.join(claudeDir, "installed_plugins.json"),
+			JSON.stringify(makeRegistry("shared@market", "/install/claude")),
+		);
+		await fs.writeFile(
+			path.join(ompDir, "installed_plugins.json"),
+			JSON.stringify(makeRegistry("shared@market", "/install/omp")),
+		);
+
+		const claudeOnly = await listClaudeOnlyPluginRoots(tempDir);
+		const ompOnly = await listOmpOnlyPluginRoots(tempDir);
+
+		// Both filters see their own version; neither scrubs the other.
+		expect(claudeOnly.roots).toHaveLength(1);
+		expect(claudeOnly.roots[0].registrySource).toBe("claude");
+		expect(ompOnly.roots).toHaveLength(1);
+		expect(ompOnly.roots[0].registrySource).toBe("omp");
+	});
+
+	test("OMP parse failure warning appears only in listOmpOnlyPluginRoots, not listClaudeOnlyPluginRoots", async () => {
+		const claudeDir = path.join(tempDir, ".claude", "plugins");
+		const ompDir = path.join(tempDir, ".omp", "plugins");
+		await fs.mkdir(claudeDir, { recursive: true });
+		await fs.mkdir(ompDir, { recursive: true });
+		await fs.writeFile(
+			path.join(claudeDir, "installed_plugins.json"),
+			JSON.stringify(makeRegistry("plugin-c@market", "/install/c")),
+		);
+		await fs.writeFile(path.join(ompDir, "installed_plugins.json"), "not valid json");
+
+		const claudeOnly = await listClaudeOnlyPluginRoots(tempDir);
+		const ompOnly = await listOmpOnlyPluginRoots(tempDir);
+
+		expect(claudeOnly.warnings).toHaveLength(0);
+		expect(ompOnly.warnings.some(w => w.includes("OMP plugin registry"))).toBe(true);
 	});
 });

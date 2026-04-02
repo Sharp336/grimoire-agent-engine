@@ -11,6 +11,7 @@ describe("buildPluginDirRoot", () => {
 			version: "local",
 			path: "/path/to/my-plugin",
 			scope: "user",
+			registrySource: "injected",
 		});
 	});
 

@@ -24,6 +24,7 @@ import "./agents-md";
 import "./builtin";
 import "./claude";
 import "./claude-plugins";
+import "./omp-plugins";
 import "./cline";
 import "./agents";
 import "./codex";

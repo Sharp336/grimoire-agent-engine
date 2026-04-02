@@ -655,6 +655,8 @@ export interface ClaudePluginRoot {
 	path: string;
 	/** Whether this is a user or project scope plugin */
 	scope: "user" | "project";
+	/** Which registry this root was sourced from */
+	registrySource: "claude" | "omp" | "project" | "injected";
 }
 
 /**
@@ -743,7 +745,10 @@ export async function resolveOrDefaultProjectRegistryPath(cwd: string): Promise<
 	return path.join(cwd, getConfigDirName(), "plugins", "installed_plugins.json");
 }
 
-const pluginRootsCache = new Map<string, { roots: ClaudePluginRoot[]; warnings: string[] }>();
+const pluginRootsCache = new Map<
+	string,
+	{ roots: ClaudePluginRoot[]; claudeWarnings: string[]; ompWarnings: string[] }
+>();
 
 /**
  * List all installed Claude Code plugin roots from the plugin cache.
@@ -759,10 +764,12 @@ export async function listClaudePluginRoots(
 	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd) : null;
 	const cacheKey = `${home}:${resolvedProjectPath ?? ""}`;
 	const cached = pluginRootsCache.get(cacheKey);
-	if (cached) return cached;
+	if (cached)
+		return { roots: applyOmpOverClaude(cached.roots), warnings: [...cached.claudeWarnings, ...cached.ompWarnings] };
 
 	const roots: ClaudePluginRoot[] = [];
-	const warnings: string[] = [];
+	const claudeWarnings: string[] = [];
+	const ompWarnings: string[] = [];
 	const projectRoots: ClaudePluginRoot[] = [];
 
 	// ── Claude Code registry ──────────────────────────────────────────────────
@@ -772,7 +779,7 @@ export async function listClaudePluginRoots(
 	if (content) {
 		const registry = parseClaudePluginsRegistry(content);
 		if (!registry) {
-			warnings.push(`Failed to parse Claude Code plugin registry: ${registryPath}`);
+			claudeWarnings.push(`Failed to parse Claude Code plugin registry: ${registryPath}`);
 		} else {
 			for (const [pluginId, entries] of Object.entries(registry.plugins)) {
 				if (!Array.isArray(entries) || entries.length === 0) continue;
@@ -780,7 +787,7 @@ export async function listClaudePluginRoots(
 				// Parse plugin ID format: "plugin-name@marketplace"
 				const atIndex = pluginId.lastIndexOf("@");
 				if (atIndex === -1) {
-					warnings.push(`Invalid plugin ID format (missing @marketplace): ${pluginId}`);
+					claudeWarnings.push(`Invalid plugin ID format (missing @marketplace): ${pluginId}`);
 					continue;
 				}
 
@@ -791,7 +798,7 @@ export async function listClaudePluginRoots(
 				// This handles plugins with multiple installs (different scopes/versions).
 				for (const entry of entries) {
 					if (!entry.installPath || typeof entry.installPath !== "string") {
-						warnings.push(`Plugin ${pluginId} entry has no installPath`);
+						claudeWarnings.push(`Plugin ${pluginId} entry has no installPath`);
 						continue;
 					}
 					if (entry.enabled === false) continue;
@@ -803,6 +810,7 @@ export async function listClaudePluginRoots(
 						version: entry.version || "unknown",
 						path: entry.installPath,
 						scope: entry.scope || "user",
+						registrySource: "claude",
 					});
 				}
 			}
@@ -810,10 +818,9 @@ export async function listClaudePluginRoots(
 	}
 
 	// ── OMP installed plugins registry ───────────────────────────────────────
-	// OMP registry is authoritative: its entries replace Claude's entries for the same plugin ID.
-	// In production `home` is `os.homedir()`, so `getPluginsDir(home)` resolves to the
-	// same XDG-aware path the marketplace writer uses (reads and writes always agree).
-	// Tests pass a temp dir, which short-circuits the resolver for deterministic isolation.
+	// OMP entries coexist with Claude entries for the same plugin ID.
+	// Priority is resolved at the capability layer (omp-plugins priority 75 > claude-plugins 70).
+	// Path derived from `home` (not os.homedir()) so test isolation works when home is overridden.
 	const ompRegistryPath = path.join(getPluginsDir(home), "installed_plugins.json");
 	const ompContent = await readFile(ompRegistryPath);
 	if (ompContent) {
@@ -824,20 +831,15 @@ export async function listClaudePluginRoots(
 
 				const atIndex = pluginId.lastIndexOf("@");
 				if (atIndex === -1) {
-					warnings.push(`Invalid plugin ID format (missing @marketplace): ${pluginId}`);
+					ompWarnings.push(`Invalid plugin ID format (missing @marketplace): ${pluginId}`);
 					continue;
 				}
 				const pluginName = pluginId.slice(0, atIndex);
 				const marketplace = pluginId.slice(atIndex + 1);
 
-				// OMP is authoritative: drop all Claude-sourced entries for this plugin ID
-				const filtered = roots.filter(r => r.id !== pluginId);
-				roots.length = 0;
-				roots.push(...filtered);
-
 				for (const entry of entries) {
 					if (!entry.installPath || typeof entry.installPath !== "string") {
-						warnings.push(`Plugin ${pluginId} entry has no installPath`);
+						ompWarnings.push(`Plugin ${pluginId} entry has no installPath`);
 						continue;
 					}
 					if (entry.enabled === false) continue;
@@ -851,11 +853,12 @@ export async function listClaudePluginRoots(
 						version: entry.version || "unknown",
 						path: entry.installPath,
 						scope: entry.scope || "user",
+						registrySource: "omp",
 					});
 				}
 			}
 		} else {
-			warnings.push(`Failed to parse OMP plugin registry: ${ompRegistryPath}`);
+			ompWarnings.push(`Failed to parse OMP plugin registry: ${ompRegistryPath}`);
 		}
 	}
 
@@ -871,14 +874,14 @@ export async function listClaudePluginRoots(
 					if (!Array.isArray(entries) || entries.length === 0) continue;
 					const atIndex = pluginId.lastIndexOf("@");
 					if (atIndex === -1) {
-						warnings.push(`Invalid plugin ID format (missing @marketplace): ${pluginId}`);
+						ompWarnings.push(`Invalid plugin ID format (missing @marketplace): ${pluginId}`);
 						continue;
 					}
 					const pluginName = pluginId.slice(0, atIndex);
 					const marketplace = pluginId.slice(atIndex + 1);
 					for (const entry of entries) {
 						if (!entry.installPath || typeof entry.installPath !== "string") {
-							warnings.push(`Plugin ${pluginId} entry has no installPath`);
+							ompWarnings.push(`Plugin ${pluginId} entry has no installPath`);
 							continue;
 						}
 						if (entry.enabled === false) continue;
@@ -889,11 +892,12 @@ export async function listClaudePluginRoots(
 							version: entry.version || "unknown",
 							path: entry.installPath,
 							scope: "project",
+							registrySource: "project",
 						});
 					}
 				}
 			} else {
-				warnings.push(`Failed to parse project plugin registry: ${resolvedProjectPath}`);
+				ompWarnings.push(`Failed to parse project plugin registry: ${resolvedProjectPath}`);
 			}
 		}
 	}
@@ -914,9 +918,9 @@ export async function listClaudePluginRoots(
 		roots.push(...injectedPluginDirRoots, ...filtered);
 	}
 
-	const result = { roots, warnings };
+	const result = { roots, claudeWarnings, ompWarnings };
 	pluginRootsCache.set(cacheKey, result);
-	return result;
+	return { roots: applyOmpOverClaude(roots), warnings: [...claudeWarnings, ...ompWarnings] };
 }
 
 /**
@@ -932,6 +936,56 @@ export function clearClaudePluginRootsCache(): void {
 }
 
 /**
+ * For the combined root list returned by listClaudePluginRoots: OMP entries shadow
+ * Claude entries with the same plugin ID. This preserves the authoritative-override
+ * behavior for consumers that bypass the capability layer (discoverAgents, LSP config)
+ * while keeping both sources in the cache so the split providers can serve them
+ * independently via listClaudeOnlyPluginRoots / listOmpOnlyPluginRoots.
+ */
+function applyOmpOverClaude(roots: ClaudePluginRoot[]): ClaudePluginRoot[] {
+	const ompIds = new Set<string>();
+	for (const r of roots) {
+		if (r.registrySource === "omp") ompIds.add(r.id);
+	}
+	if (ompIds.size === 0) return roots;
+	return roots.filter(r => r.registrySource !== "claude" || !ompIds.has(r.id));
+}
+
+/** Internal: ensure cache is warm and return the raw split entry. */
+async function loadRawPluginRoots(
+	home: string,
+	cwd?: string,
+): Promise<{ roots: ClaudePluginRoot[]; claudeWarnings: string[]; ompWarnings: string[] }> {
+	// Populates the cache as a side effect.
+	await listClaudePluginRoots(home, cwd);
+	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd) : null;
+	return pluginRootsCache.get(`${home}:${resolvedProjectPath ?? ""}`)!;
+}
+
+/**
+ * Returns only the roots that originated from Claude Code's installed_plugins registry.
+ * Use this in the claude-plugins provider. The mirror, listOmpOnlyPluginRoots, is used in omp-plugins.
+ */
+export async function listClaudeOnlyPluginRoots(
+	home: string,
+	cwd?: string,
+): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
+	const raw = await loadRawPluginRoots(home, cwd);
+	return { roots: raw.roots.filter(r => r.registrySource === "claude"), warnings: raw.claudeWarnings };
+}
+
+/**
+ * Returns only the roots that originated from OMP's installed_plugins registry,
+ * the project-scoped OMP registry, or --plugin-dir injection.
+ * Use this in the omp-plugins provider so it's independently toggleable.
+ */
+export async function listOmpOnlyPluginRoots(
+	home: string,
+	cwd?: string,
+): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
+	const raw = await loadRawPluginRoots(home, cwd);
+	return { roots: raw.roots.filter(r => r.registrySource !== "claude"), warnings: raw.ompWarnings };
+
  * Invalidate fs caches for installed-plugin registry files and reset the
  * in-memory plugin roots cache. Used by MarketplaceManager clients after
  * installing/uninstalling/enabling/disabling plugins.

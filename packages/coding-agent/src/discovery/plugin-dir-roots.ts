@@ -8,6 +8,8 @@ export interface PluginDirRoot {
 	version: string;
 	path: string;
 	scope: "user" | "project";
+	/** Always 'injected' for --plugin-dir roots. */
+	registrySource: "injected";
 }
 
 /**
@@ -24,5 +26,6 @@ export function buildPluginDirRoot(resolvedPath: string, manifestName?: string):
 		version: "local",
 		path: resolvedPath,
 		scope: "user",
+		registrySource: "injected",
 	};
 }

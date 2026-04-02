@@ -1396,6 +1396,7 @@
 - Fixed web search source rendering to truncate long title, metadata, and URL lines before they overflow the UI.
 - Fixed PR checkout tool to resolve symlinks in worktree paths, ensuring consistent path references in results and metadata
 - Fixed `read` output for file-backed internal URLs like `local://...` to include hashline prefixes in hashline edit mode, preserving usable line refs for follow-up edits
+- Fixed OMP marketplace capabilities being disabled when the Claude Code Marketplace provider is disabled; OMP marketplace plugins now use a separate `omp-plugins` provider that can be toggled independently ([#582](https://github.com/can1357/oh-my-pi/issues/582))
 - Fixed the plan review selector to support the external editor shortcut for opening and updating the current plan from the approval screen
 - Fixed status line dropping git branch name when path is long by shrinking the path segment before dropping other segments
 

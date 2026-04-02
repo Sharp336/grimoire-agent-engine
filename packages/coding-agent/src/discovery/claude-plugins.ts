@@ -1,26 +1,13 @@
 /**
  * Claude Code Marketplace Plugin Provider
  *
- * Loads configuration from ~/.claude/plugins/cache/ based on installed_plugins.json registry.
+ * Loads configuration from ~/.claude/plugins/installed_plugins.json.
+ * Only covers plugins from the Claude Code registry — OMP marketplace plugins
+ * are handled by the separate omp-plugins provider.
  * Priority: 70 (below claude.ts at 80, so user overrides in .claude/ take precedence)
  */
-import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
-import { registerProvider } from "../capability";
-import { readFile } from "../capability/fs";
-import { type Hook, hookCapability } from "../capability/hook";
-import { type MCPServer, mcpCapability } from "../capability/mcp";
-import { type Skill, skillCapability } from "../capability/skill";
-import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
-import { type CustomTool, toolCapability } from "../capability/tool";
-import type { LoadContext, LoadResult } from "../capability/types";
-import {
-	type ClaudePluginRoot,
-	createSourceMeta,
-	listClaudePluginRoots,
-	loadFilesFromDir,
-	scanSkillsFromDir,
-} from "./helpers";
+import { listClaudeOnlyPluginRoots } from "./helpers";
+import { registerPluginProvider } from "./plugin-provider";
 
 import { substitutePluginRoot } from "./substitute-plugin-root";
 
@@ -88,7 +75,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 	const items: Skill[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings: rootWarnings } = await listClaudeOnlyPluginRoots(ctx.home, ctx.cwd);
 	warnings.push(...rootWarnings);
 
 	const results = await Promise.all(
@@ -123,7 +110,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	const items: SlashCommand[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings: rootWarnings } = await listClaudeOnlyPluginRoots(ctx.home, ctx.cwd);
 	warnings.push(...rootWarnings);
 
 	const results = await Promise.all(
@@ -163,7 +150,7 @@ async function loadHooks(ctx: LoadContext): Promise<LoadResult<Hook>> {
 	const items: Hook[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings: rootWarnings } = await listClaudeOnlyPluginRoots(ctx.home, ctx.cwd);
 	warnings.push(...rootWarnings);
 
 	const hookTypes = ["pre", "post"] as const;
@@ -210,7 +197,7 @@ async function loadTools(ctx: LoadContext): Promise<LoadResult<CustomTool>> {
 	const items: CustomTool[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings: rootWarnings } = await listClaudeOnlyPluginRoots(ctx.home, ctx.cwd);
 	warnings.push(...rootWarnings);
 
 	const results = await Promise.all(
@@ -247,7 +234,7 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	const items: MCPServer[] = [];
 	const warnings: string[] = [];
 
-	const { roots, warnings: rootWarnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
+	const { roots, warnings: rootWarnings } = await listClaudeOnlyPluginRoots(ctx.home, ctx.cwd);
 	warnings.push(...rootWarnings);
 
 	for (const root of roots) {
