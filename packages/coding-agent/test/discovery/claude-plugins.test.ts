@@ -662,4 +662,55 @@ describe("listClaudeOnlyPluginRoots / listOmpOnlyPluginRoots provider split", ()
 		// OMP filter sees the project entry (it shadowed the user OMP entry for same ID)
 		expect(ompOnly.roots.some(r => r.registrySource === "project")).toBe(true);
 	});
+
+	test("combined listClaudePluginRoots drops Claude entry when project OMP root shares same ID", async () => {
+		// Verifies applyOmpOverClaude covers all OMP-family sources, not just registrySource==='omp'.
+		const claudeDir = path.join(tempDir, ".claude", "plugins");
+		await fs.mkdir(claudeDir, { recursive: true });
+		await fs.writeFile(
+			path.join(claudeDir, "installed_plugins.json"),
+			JSON.stringify(makeRegistry("shared@market", "/install/claude")),
+		);
+
+		const projectCwd = path.join(tempDir, "my-project");
+		const projectPluginsDir = path.join(projectCwd, ".omp", "plugins");
+		await fs.mkdir(projectPluginsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(projectPluginsDir, "installed_plugins.json"),
+			JSON.stringify(makeRegistry("shared@market", "/install/project", "project")),
+		);
+
+		const { roots } = await listClaudePluginRoots(tempDir, projectCwd);
+
+		// Combined list must contain only one entry for the ID: the higher-precedence project root.
+		const forId = roots.filter(r => r.id === "shared@market");
+		expect(forId).toHaveLength(1);
+		expect(forId[0].registrySource).toBe("project");
+	});
+
+	test("OMP entry is not dropped when Claude entry has same plugin ID and install path", async () => {
+		// Verifies per-registry dedup Set does not mistake Claude entries for OMP duplicates.
+		const sharedPath = "/shared/cache/plugin-d";
+		const claudeDir = path.join(tempDir, ".claude", "plugins");
+		const ompDir = path.join(tempDir, ".omp", "plugins");
+		await fs.mkdir(claudeDir, { recursive: true });
+		await fs.mkdir(ompDir, { recursive: true });
+		await fs.writeFile(
+			path.join(claudeDir, "installed_plugins.json"),
+			JSON.stringify(makeRegistry("plugin-d@market", sharedPath)),
+		);
+		await fs.writeFile(
+			path.join(ompDir, "installed_plugins.json"),
+			JSON.stringify(makeRegistry("plugin-d@market", sharedPath)),
+		);
+
+		const claudeOnly = await listClaudeOnlyPluginRoots(tempDir);
+		const ompOnly = await listOmpOnlyPluginRoots(tempDir);
+
+		// Both providers must see their entry despite the shared install path.
+		expect(claudeOnly.roots).toHaveLength(1);
+		expect(claudeOnly.roots[0].registrySource).toBe("claude");
+		expect(ompOnly.roots).toHaveLength(1);
+		expect(ompOnly.roots[0].registrySource).toBe("omp");
+	});
 });

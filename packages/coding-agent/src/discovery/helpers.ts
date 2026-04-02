@@ -998,7 +998,8 @@ export async function listOmpOnlyPluginRoots(
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
 	const raw = await loadRawPluginRoots(home, cwd);
 	return { roots: raw.roots.filter(r => r.registrySource !== "claude"), warnings: raw.ompWarnings };
-
+}
+/**
  * Invalidate fs caches for installed-plugin registry files and reset the
  * in-memory plugin roots cache. Used by MarketplaceManager clients after
  * installing/uninstalling/enabling/disabling plugins.
