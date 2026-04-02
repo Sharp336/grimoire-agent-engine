@@ -633,4 +633,33 @@ describe("listClaudeOnlyPluginRoots / listOmpOnlyPluginRoots provider split", ()
 		expect(claudeOnly.warnings).toHaveLength(0);
 		expect(ompOnly.warnings.some(w => w.includes("OMP plugin registry"))).toBe(true);
 	});
+
+	test("project-scoped OMP root does not shadow Claude entry with same plugin ID", async () => {
+		const claudeDir = path.join(tempDir, ".claude", "plugins");
+		await fs.mkdir(claudeDir, { recursive: true });
+		await fs.writeFile(
+			path.join(claudeDir, "installed_plugins.json"),
+			JSON.stringify(makeRegistry("shared@market", "/install/claude")),
+		);
+
+		// Separate project dir so the project registry doesn't overlap with the OMP user registry
+		const projectCwd = path.join(tempDir, "my-project");
+		const projectPluginsDir = path.join(projectCwd, ".omp", "plugins");
+		await fs.mkdir(projectPluginsDir, { recursive: true });
+		await fs.writeFile(
+			path.join(projectPluginsDir, "installed_plugins.json"),
+			JSON.stringify(makeRegistry("shared@market", "/install/project", "project")),
+		);
+
+		// Project root shares the ID — but Claude entry must survive in the Claude filter
+		const claudeOnly = await listClaudeOnlyPluginRoots(tempDir, projectCwd);
+		const ompOnly = await listOmpOnlyPluginRoots(tempDir, projectCwd);
+
+		expect(claudeOnly.roots).toHaveLength(1);
+		expect(claudeOnly.roots[0].registrySource).toBe("claude");
+		expect(claudeOnly.roots[0].path).toBe("/install/claude");
+
+		// OMP filter sees the project entry (it shadowed the user OMP entry for same ID)
+		expect(ompOnly.roots.some(r => r.registrySource === "project")).toBe(true);
+	});
 });

@@ -902,18 +902,23 @@ export async function listClaudePluginRoots(
 		}
 	}
 
-	// Project entries shadow user entries for the same plugin ID.
+	// Sources served by the omp-plugins provider. Project/injected shadowing
+	// only applies within this family — other providers' entries are preserved
+	// so their filtered accessors can serve them independently.
+	const ompFamily = new Set<ClaudePluginRoot["registrySource"]>(["omp", "project", "injected"]);
+
+	// Project entries shadow user entries for the same plugin ID (within the OMP family only).
 	if (projectRoots.length > 0) {
 		const projectIds = new Set(projectRoots.map(r => r.id));
-		const deduped = roots.filter(r => !projectIds.has(r.id));
+		const deduped = roots.filter(r => !ompFamily.has(r.registrySource) || !projectIds.has(r.id));
 		roots.length = 0;
 		roots.push(...projectRoots, ...deduped);
 	}
 
-	// Merge --plugin-dir roots (highest precedence) on every fresh load
+	// Merge --plugin-dir roots (highest precedence, within the OMP family only).
 	if (injectedPluginDirRoots.length > 0) {
 		const injectedIds = new Set(injectedPluginDirRoots.map(r => r.id));
-		const filtered = roots.filter(r => !injectedIds.has(r.id));
+		const filtered = roots.filter(r => !ompFamily.has(r.registrySource) || !injectedIds.has(r.id));
 		roots.length = 0;
 		roots.push(...injectedPluginDirRoots, ...filtered);
 	}
