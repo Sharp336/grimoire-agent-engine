@@ -15,6 +15,7 @@ import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
+import type { SlashCommand } from "../capability/slash-command";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { parseThinkingLevel } from "../thinking";
 
@@ -390,6 +391,27 @@ export function expandEnvVarsDeep<T>(obj: T, extraEnv?: Record<string, string>):
 		return result as T;
 	}
 	return obj;
+}
+
+/**
+ * Slash-command transform that parses YAML frontmatter from .md files.
+ * Shared by opencode and codex providers — both support frontmatter-based
+ * command names via the `name` field.
+ */
+export function createFrontmatterCommandTransform(
+	level: "user" | "project",
+): (name: string, content: string, path: string, source: SourceMeta) => SlashCommand {
+	return (name, content, filePath, source) => {
+		const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
+		const commandName = frontmatter.name || name.replace(/\.md$/, "");
+		return {
+			name: String(commandName),
+			path: filePath,
+			content: body,
+			level,
+			_source: source,
+		};
+	};
 }
 
 /**

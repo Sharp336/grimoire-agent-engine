@@ -31,6 +31,7 @@ import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 
 import {
 	buildExtensionModuleItems,
+	createFrontmatterCommandTransform,
 	createSourceMeta,
 	discoverExtensionModulePaths,
 	loadFilesFromDir,
@@ -265,27 +266,14 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	const codexDir = getProjectCodexDir(ctx);
 	const projectCommandsDir = path.join(codexDir, "commands");
 
-	const transformCommand =
-		(level: "user" | "project") => (name: string, content: string, path: string, source: SourceMeta) => {
-			const { frontmatter, body } = parseFrontmatter(content, { source: path });
-			const commandName = frontmatter.name || name.replace(/\.md$/, "");
-			return {
-				name: String(commandName),
-				path,
-				content: body,
-				level,
-				_source: source,
-			};
-		};
-
 	const results = await Promise.all([
 		loadFilesFromDir(ctx, userCommandsDir, PROVIDER_ID, "user", {
 			extensions: ["md"],
-			transform: transformCommand("user"),
+			transform: createFrontmatterCommandTransform("user"),
 		}),
 		loadFilesFromDir(ctx, projectCommandsDir, PROVIDER_ID, "project", {
 			extensions: ["md"],
-			transform: transformCommand("project"),
+			transform: createFrontmatterCommandTransform("project"),
 		}),
 	]);
 

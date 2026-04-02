@@ -16,7 +16,7 @@
  * Priority: 55 (tool-specific provider)
  */
 import * as path from "node:path";
-import { logger, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
+import { logger, tryParseJson } from "@oh-my-pi/pi-utils";
 import { registerProvider } from "../capability";
 import { type ContextFile, contextFileCapability } from "../capability/context-file";
 import { type ExtensionModule, extensionModuleCapability } from "../capability/extension-module";
@@ -25,11 +25,11 @@ import { type MCPServer, mcpCapability } from "../capability/mcp";
 import { type Settings, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
-import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
+import type { LoadContext, LoadResult } from "../capability/types";
 import { settings } from "../config/settings";
-
 import {
 	buildExtensionModuleItems,
+	createFrontmatterCommandTransform,
 	createSourceMeta,
 	discoverExtensionModulePaths,
 	expandEnvVarsDeep,
@@ -258,26 +258,13 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	const userCommandsDir = enableUser ? getUserPath(ctx, "opencode", "commands") : null;
 	const projectCommandsDir = enableProject ? getProjectPath(ctx, "opencode", "commands") : null;
 
-	const transformCommand =
-		(level: "user" | "project") => (name: string, content: string, filePath: string, source: SourceMeta) => {
-			const { frontmatter, body } = parseFrontmatter(content, { source: filePath });
-			const commandName = frontmatter.name || name.replace(/\.md$/, "");
-			return {
-				name: String(commandName),
-				path: filePath,
-				content: body,
-				level,
-				_source: source,
-			};
-		};
-
 	const promises: Promise<LoadResult<SlashCommand>>[] = [];
 
 	if (userCommandsDir) {
 		promises.push(
 			loadFilesFromDir(ctx, userCommandsDir, PROVIDER_ID, "user", {
 				extensions: ["md"],
-				transform: transformCommand("user"),
+				transform: createFrontmatterCommandTransform("user"),
 			}),
 		);
 	}
@@ -286,7 +273,7 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 		promises.push(
 			loadFilesFromDir(ctx, projectCommandsDir, PROVIDER_ID, "project", {
 				extensions: ["md"],
-				transform: transformCommand("project"),
+				transform: createFrontmatterCommandTransform("project"),
 			}),
 		);
 	}
