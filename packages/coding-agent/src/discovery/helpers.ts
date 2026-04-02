@@ -849,8 +849,10 @@ export async function listClaudePluginRoots(
 						continue;
 					}
 					if (entry.enabled === false) continue;
-					// Deduplicate by installPath within same ID
-					if (roots.some(r => r.id === pluginId && r.path === entry.installPath)) continue;
+					// Deduplicate by installPath within same source — do not skip OMP entries
+					// just because a Claude entry with the same id+path already exists.
+					if (roots.some(r => r.registrySource === "omp" && r.id === pluginId && r.path === entry.installPath))
+						continue;
 
 					roots.push({
 						id: pluginId,
