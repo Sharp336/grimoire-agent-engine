@@ -76,7 +76,10 @@ export class SkillProtocolHandler implements ProtocolHandler {
 
 		// Determine the file to read
 		let targetPath: string;
-		const urlPath = url.pathname;
+		// Use rawPathname (pre-normalization) so that .. segments intentionally used for
+		// plugin-root traversal are not stripped by new URL() when the skill name looks
+		// like a hostname:port pair (e.g. plugin:8080) and URL parsing succeeds.
+		const urlPath = url.rawPathname ?? url.pathname;
 		const hasRelativePath = urlPath && urlPath !== "/" && urlPath !== "";
 
 		if (hasRelativePath) {
