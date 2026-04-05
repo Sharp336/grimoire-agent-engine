@@ -92,6 +92,7 @@ import {
 } from "./secrets";
 import { AgentSession } from "./session/agent-session";
 import { AuthStorage } from "./session/auth-storage";
+import { thinToolOutputs } from "./session/compaction/context-thinning";
 import { convertToLlm } from "./session/messages";
 import { SessionManager } from "./session/session-manager";
 import { closeAllConnections } from "./ssh/connection-manager";
@@ -1438,11 +1439,23 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (!obfuscator?.hasSecrets()) return converted;
 		return obfuscateMessages(obfuscator, converted);
 	};
-	const transformContext = extensionRunner
+	const baseTransformContext = extensionRunner
 		? async (messages: AgentMessage[], _signal?: AbortSignal) => {
 				return await extensionRunner.emitContext(messages);
 			}
 		: undefined;
+	// Compose pre-send context thinning into the transform pipeline.
+	// Applied here (before Agent construction) so it runs on the main agent-loop
+	// path, not just the secondary AgentSession.convertMessagesToLlm path.
+	const transformContext = async (messages: AgentMessage[], signal?: AbortSignal) => {
+		const transformed = baseTransformContext ? await baseTransformContext(messages, signal) : messages;
+		const thinningSettings = settings.getGroup("thinning");
+		const { messages: thinned, thinnedCount, estimatedTokensSaved } = thinToolOutputs(transformed, thinningSettings);
+		if (thinnedCount > 0) {
+			logger.debug("Pre-send context thinning", { thinnedCount, estimatedTokensSaved });
+		}
+		return thinned;
+	};
 	const onPayload = extensionRunner
 		? async (payload: unknown, _model?: Model) => {
 				return await extensionRunner.emitBeforeProviderRequest(payload);

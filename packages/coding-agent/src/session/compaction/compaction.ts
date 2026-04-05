@@ -26,6 +26,7 @@ import {
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
 } from "@oh-my-pi/pi-ai/utils";
+import { getOverflowPatterns } from "@oh-my-pi/pi-ai/utils/overflow";
 import { logger } from "@oh-my-pi/pi-utils";
 import { renderPromptTemplate } from "../../config/prompt-templates";
 import compactionShortSummaryPrompt from "../../prompts/compaction/compaction-short-summary.md" with { type: "text" };
@@ -1203,6 +1204,163 @@ export function prepareCompaction(
 
 const TURN_PREFIX_SUMMARIZATION_PROMPT = renderPromptTemplate(compactionTurnPrefixPrompt);
 
+/** Maximum number of retry attempts when the summarization prompt exceeds the model context window. */
+const MAX_SUMMARIZATION_RETRIES = 2;
+
+// ============================================================================
+// User-turn grouping (used for summarization retry truncation)
+// ============================================================================
+
+/**
+ * Groups messages by user-turn boundaries.
+ *
+ * A new group starts on each user message. Any leading non-user messages (e.g.
+ * a system prompt or an orphan assistant message) form the first group.
+ *
+ * Each group represents a complete user→response cycle:
+ *   [user message + subsequent assistant/tool/developer messages until the next user]
+ *
+ * This preserves the invariant that dropping oldest groups removes complete
+ * user→response cycles — a user's prompt is never separated from its triggered
+ * response, and a response is never kept without the prompt that produced it.
+ *
+ * Limitation: a session with a single user prompt and many tool calls produces
+ * one group, which cannot be partially dropped. The retry wrapper will give up
+ * for such sessions rather than corrupt the narrative by severing a response
+ * from its prompt.
+ */
+export function groupByUserTurn(messages: AgentMessage[]): AgentMessage[][] {
+	const groups: AgentMessage[][] = [];
+	let current: AgentMessage[] = [];
+
+	for (const msg of messages) {
+		if (msg.role === "user" && current.length > 0) {
+			groups.push(current);
+			current = [msg];
+		} else {
+			current.push(msg);
+		}
+	}
+
+	if (current.length > 0) {
+		groups.push(current);
+	}
+
+	return groups;
+}
+
+/**
+ * Drops the oldest message groups to produce a smaller set for re-summarization.
+ * Returns `undefined` if:
+ * - fewer than 2 groups exist (nothing to drop), or
+ * - dropping would leave zero messages, or
+ * - the remainder would not start with a user message (invariant violation,
+ *   see below).
+ *
+ * With user-boundary grouping, every group after the first starts with a user
+ * message, so slicing off `dropCount >= 1` leading groups normally yields a
+ * user-first remainder. A non-user-first remainder can only arise from a
+ * malformed history or a future change to `groupByUserTurn`; in that case we
+ * give up on this retry rather than fabricate a synthetic user prompt that
+ * would lie to the summarizer about the conversation's true origin.
+ */
+export function dropOldestGroups(
+	messages: AgentMessage[],
+	dropFraction: number,
+	minDrop = 1,
+): AgentMessage[] | undefined {
+	const groups = groupByUserTurn(messages);
+	if (groups.length < 2) return undefined;
+
+	const dropCount = Math.max(minDrop, Math.floor(groups.length * dropFraction));
+	if (groups.length - dropCount < 1) return undefined;
+
+	const result = groups.slice(dropCount).flat();
+	if (result.length === 0) return undefined;
+
+	// Invariant check — see doc comment above. Normally unreachable.
+	if (result[0].role !== "user") return undefined;
+
+	return result;
+}
+
+/**
+ * Returns true when an error indicates the summarization prompt exceeded the
+ * model's context window.
+ */
+function isContextOverflowError(err: Error): boolean {
+	return getOverflowPatterns().some(p => p.test(err.message));
+}
+
+/**
+ * Wraps generateSummary with retry-on-context-overflow logic.
+ * On each failure caused by a context-size error, drops a growing fraction of
+ * the oldest message groups from the ORIGINAL set and retries. Gives up after
+ * MAX_SUMMARIZATION_RETRIES retries or when no further truncation is possible.
+ *
+ * The `generator` parameter exists for dependency injection in tests and should
+ * not be supplied by production callers — the default forwards to `generateSummary`.
+ */
+export async function generateSummaryWithRetry(
+	messages: AgentMessage[],
+	model: Model,
+	reserveTokens: number,
+	apiKey: string,
+	signal: AbortSignal | undefined,
+	customInstructions: string | undefined,
+	previousSummary: string | undefined,
+	options: SummaryOptions,
+	generator: typeof generateSummary = generateSummary,
+): Promise<string> {
+	let current = messages;
+	// Capture the MOST RECENT overflow error. On all-retries-fail we surface the
+	// error from the smallest input that still overflowed — more informative than
+	// the original ("your input was too big") which the user already knows.
+	let lastOverflowError: Error | undefined;
+
+	for (let attempt = 0; attempt <= MAX_SUMMARIZATION_RETRIES; attempt++) {
+		try {
+			return await generator(
+				current,
+				model,
+				reserveTokens,
+				apiKey,
+				signal,
+				customInstructions,
+				previousSummary,
+				options,
+			);
+		} catch (err) {
+			const error = err instanceof Error ? err : new Error(String(err));
+			if (!isContextOverflowError(error)) throw error;
+			lastOverflowError = error;
+
+			if (attempt >= MAX_SUMMARIZATION_RETRIES) break;
+
+			// Grow the drop fraction on each retry to guarantee progress.
+			// Always truncate from the ORIGINAL messages so the synthetic user
+			// marker from a prior retry doesn't consume the drop budget.
+			// The `>=` guard catches the case where increasing the fraction rounds
+			// to the same dropCount (common for small group counts), preventing a
+			// wasted API call with identical input.
+			const dropFraction = 0.2 * (attempt + 1);
+			const truncated = dropOldestGroups(messages, dropFraction);
+			if (!truncated || truncated.length >= current.length) break;
+
+			logger.warn("Summarization prompt too large, retrying with fewer messages", {
+				attempt: attempt + 1,
+				maxRetries: MAX_SUMMARIZATION_RETRIES,
+				originalMessageCount: messages.length,
+				truncatedMessageCount: truncated.length,
+				dropFraction,
+			});
+			current = truncated;
+		}
+	}
+
+	throw lastOverflowError ?? new Error("Summarization failed after retries");
+}
+
 /**
  * Generate summaries for compaction using prepared data.
  * Returns CompactionResult - SessionManager adds id/parentId when saving.
@@ -1274,7 +1432,7 @@ export async function compact(
 		// Generate both summaries in parallel
 		const [historyResult, turnPrefixResult] = await Promise.all([
 			messagesToSummarize.length > 0
-				? generateSummary(
+				? generateSummaryWithRetry(
 						messagesToSummarize,
 						model,
 						settings.reserveTokens,
@@ -1298,7 +1456,7 @@ export async function compact(
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
 	} else if (messagesToSummarize.length > 0) {
 		// Generate history summary from messages to summarize
-		summary = await generateSummary(
+		summary = await generateSummaryWithRetry(
 			messagesToSummarize,
 			model,
 			settings.reserveTokens,

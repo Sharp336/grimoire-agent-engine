@@ -323,6 +323,8 @@ interface HandoffOptions {
 
 const AUTO_HANDOFF_THRESHOLD_FOCUS = renderPromptTemplate(autoHandoffThresholdFocusPrompt);
 
+const MAX_CONSECUTIVE_COMPACTION_FAILURES = 3;
+
 type RetryFallbackChains = Record<string, string[]>;
 
 type RetryFallbackRevertPolicy = "never" | "cooldown-expiry";
@@ -427,6 +429,7 @@ export class AgentSession {
 	// Compaction state
 	#compactionAbortController: AbortController | undefined = undefined;
 	#autoCompactionAbortController: AbortController | undefined = undefined;
+	#compactionFailureCount = 0;
 
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
@@ -3495,7 +3498,8 @@ export class AgentSession {
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
 		const branchEntries = this.sessionManager.getBranch();
-		const result = pruneToolOutputs(branchEntries, DEFAULT_PRUNE_CONFIG);
+		const contextWindow = this.model?.contextWindow ?? 0;
+		const result = pruneToolOutputs(branchEntries, contextWindow, DEFAULT_PRUNE_CONFIG);
 		if (result.prunedCount === 0) {
 			return undefined;
 		}
@@ -3626,6 +3630,7 @@ export class AgentSession {
 				fromExtension,
 				preserveData,
 			);
+			this.#compactionFailureCount = 0;
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
@@ -4474,6 +4479,20 @@ export class AgentSession {
 		let action: "context-full" | "handoff" =
 			compactionSettings.strategy === "handoff" && reason !== "overflow" ? "handoff" : "context-full";
 		await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
+		if (reason !== "overflow" && this.#compactionFailureCount >= MAX_CONSECUTIVE_COMPACTION_FAILURES) {
+			logger.warn("Auto-compaction circuit breaker tripped", {
+				consecutiveFailures: this.#compactionFailureCount,
+			});
+			await this.#emitSessionEvent({
+				type: "auto_compaction_end",
+				action,
+				result: undefined,
+				aborted: false,
+				willRetry: false,
+				errorMessage: `Auto-compaction disabled after ${this.#compactionFailureCount} consecutive failures. Use /compact to retry manually.`,
+			});
+			return;
+		}
 		// Abort any older auto-compaction before installing this run's controller.
 		this.#autoCompactionAbortController?.abort();
 		const autoCompactionAbortController = new AbortController();
@@ -4505,6 +4524,7 @@ export class AgentSession {
 					action = "context-full";
 				}
 				if (handoffResult) {
+					this.#compactionFailureCount = 0;
 					await this.#emitSessionEvent({
 						type: "auto_compaction_end",
 						action,
@@ -4733,6 +4753,7 @@ export class AgentSession {
 				fromExtension,
 				preserveData,
 			);
+			this.#compactionFailureCount = 0;
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
@@ -4814,6 +4835,13 @@ export class AgentSession {
 				return;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
+			// Only count non-overflow failures toward the circuit breaker.
+			// Overflow failures are exempt from the breaker check, but if they
+			// still incremented the counter they'd disable threshold-triggered
+			// compaction after overflow incidents.
+			if (reason !== "overflow") {
+				this.#compactionFailureCount++;
+			}
 			await this.#emitSessionEvent({
 				type: "auto_compaction_end",
 				action,

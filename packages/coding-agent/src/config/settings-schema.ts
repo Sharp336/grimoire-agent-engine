@@ -188,6 +188,65 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	},
 ];
 
+/**
+ * Default allowlist of tool names whose results may be thinned from context before LLM calls.
+ *
+ * Criterion for inclusion: the tool's result content is **reproducible and consumed-then-forgotten**.
+ * The model reads the output, acts on it, carries the understanding forward in its own messages,
+ * and if it ever needs the raw data again it can re-invoke the tool at negligible additional cost.
+ *
+ * Excluded from this list (always preserved) — and why:
+ * - `ask`: user decisions are ground truth the agent cannot reconstruct.
+ * - `checkpoint` / `rewind`: state transitions that alter session history.
+ * - `submit_result` / `exit_plan_mode`: terminal actions whose outcome drives control flow.
+ * - `generate_image`: non-reproducible creative output.
+ * - `todo_write`: between turns, the agent's only view of its own task list is the last
+ *   `todo_write` result in history. Losing it breaks task tracking (the todo-completion
+ *   reminder only re-injects state when the agent stops with incomplete items, not during
+ *   active work).
+ * - `task`: subagent outputs are expensive to recompute and typically stochastic — rerunning
+ *   the same task can produce materially different analysis.
+ * - `await`: async job results are delivery-acknowledged on first read (see `await-tool.ts`
+ *   `acknowledgeDeliveries`). Once the agent has seen them, they cannot be fetched again.
+ * - `resolve`: the content may carry error text from the underlying preview's `apply()`
+ *   operation. Losing that silences a signal the agent needs to tell success from failure.
+ * - Any unknown MCP/extension tools (safe default for third-party output).
+ *
+ * This is the single source of truth for the thinning allowlist. Both the `thinning.thinnableTools`
+ * setting default and the runtime `DEFAULT_THINNING_CONFIG` derive from it.
+ */
+export const DEFAULT_THINNABLE_TOOLS: readonly string[] = [
+	"read",
+	"bash",
+	"python",
+	"edit",
+	"write",
+	"grep",
+	"find",
+	"ast_grep",
+	"ast_edit",
+	"web_search",
+	"browser",
+	"inspect_image",
+	"notebook",
+	"lsp",
+	"ssh",
+	"calc",
+	"render_mermaid",
+	"cancel_job",
+	"search_tool_bm25",
+	"report_finding",
+	"gh_repo_view",
+	"gh_issue_view",
+	"gh_pr_view",
+	"gh_pr_diff",
+	"gh_pr_checkout",
+	"gh_pr_push",
+	"gh_run_watch",
+	"gh_search_issues",
+	"gh_search_prs",
+];
+
 export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	// General settings (no UI)
@@ -838,6 +897,34 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
+
+	// Pre-send tool output thinning
+	"thinning.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			label: "Context Thinning",
+			description: "Clear old tool outputs before each LLM call to reduce context pressure",
+		},
+	},
+
+	"thinning.keepRecent": {
+		type: "number",
+		default: 10,
+		ui: {
+			tab: "context",
+			label: "Keep Recent Results",
+			description: "Number of recent tool results to keep intact",
+			submenu: "Context Thinning",
+		},
+	},
+
+	"thinning.thinnableTools": {
+		type: "array",
+		default: [...DEFAULT_THINNABLE_TOOLS],
+	},
+
 	// Branch summaries
 	"branchSummary.enabled": {
 		type: "boolean",
@@ -1855,6 +1942,12 @@ export interface BashInterceptorRule {
 	allowSubcommands?: string[];
 }
 
+export interface ThinningSettings {
+	enabled: boolean;
+	keepRecent: number;
+	thinnableTools: string[];
+}
+
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
@@ -1872,6 +1965,7 @@ export interface GroupTypeMap {
 	modelRoles: Record<string, string>;
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
+	thinning: ThinningSettings;
 }
 
 export type GroupPrefix = keyof GroupTypeMap;

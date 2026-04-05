@@ -4,6 +4,9 @@
 ### Added
 
 - Added idle auto-compaction settings and scheduling so sessions can compact after inactive turns without auto-continuing.
+- Added pre-send context thinning: clears old tool outputs before each LLM call to reduce context pressure and delay compaction
+- Added compaction circuit breaker: stops auto-compaction retries after 3 consecutive failures to prevent wasted API calls in pathological sessions
+- Added summarization retry with head truncation: when compaction itself exceeds the context window, drops oldest message groups and retries
 - Added `onExternalEditor` callback to extension UI dialog options for handling external editor shortcut in select dialogs
 - Added external editor shortcut support in plan review selector, allowing users to open and edit the plan in their configured editor
 - Added `matchesAppExternalEditor` keybinding matcher to detect external editor shortcut (Ctrl+G or configured binding)
