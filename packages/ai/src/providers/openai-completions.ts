@@ -226,7 +226,8 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			if (copilotPremiumRequests !== undefined) output.usage.premiumRequests = copilotPremiumRequests;
 			stream.push({ type: "start", partial: output });
 
-			const parseMiniMaxThinkTags = model.provider === "minimax-code";
+			// Only parse MiniMax thinking tags if reasoning is enabled (not "off")
+			const parseMiniMaxThinkTags = model.provider === "minimax-code" && !!options?.reasoning;
 			type OpenAIStreamBlock = TextContent | ThinkingContent | (ToolCall & { partialArgs: string });
 			let currentBlock: OpenAIStreamBlock | undefined;
 			const blockIndex = (block: OpenAIStreamBlock | undefined): number => {
