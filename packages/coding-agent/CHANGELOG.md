@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Fork base is currently synced through upstream `v13.19.0`.
+
+## [0.6.2] - 2026-04-06
+
+### Fixed
+
+- Spillover-aware turn buffering: models with context headroom above the assembler cap now spend that headroom before reserving turn buffer, improving usable conversation budget.
+- Prompt inspector budget visibility now shows both full model-window occupancy and usable post-reserve assembler budget, clarifying when assembler budget — not model context — is the bottleneck.
+
+### Changed
+
+- Synced with upstream to `v13.19.0` and preserved fork-specific assembler/context assembly behavior, standalone `fetch`, and subagent assignment flow across the merge.
+
 ## [0.6.1] - 2026-03-28
 
 ### Fixed
