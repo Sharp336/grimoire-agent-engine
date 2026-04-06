@@ -1561,7 +1561,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 	};
 
-
 	// Final convertToLlm: chain block-images filter with secret obfuscation
 	const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
 		const converted = convertToLlmWithBlockImages(messages);
