@@ -65,7 +65,7 @@ describe("dynamic composer system prompt", () => {
 
 	it("collects only active guidance docs and gates self-improvement on OH MCP availability", () => {
 		const guidance = collectGuidanceLibrary({
-			activeToolNames: ["read", "code_search", "mcp_oh_mcp_oh_create_metis_candidate", "read"],
+			activeToolNames: ["read", "search_tool_bm25", "mcp_oh_mcp_oh_create_metis_candidate", "read"],
 			editMode: "hashline",
 		});
 		const guidanceWithoutOh = collectGuidanceLibrary({
@@ -74,7 +74,7 @@ describe("dynamic composer system prompt", () => {
 		});
 
 		expect(guidance.toolDocs).toContain("### Tool: read");
-		expect(guidance.toolDocs).toContain("### Tool: code_search");
+		expect(guidance.toolDocs).toContain("### Tool: search_tool_bm25");
 		expect(guidance.toolDocs).not.toContain("### Tool: grep");
 		expect(guidance.editModeGuidance).toContain("### Edit Mode: hashline");
 		expect(guidance.additionalGuidance).toContain("You are the harness's most consistent observer");
@@ -109,7 +109,7 @@ describe("dynamic composer system prompt", () => {
 			inventory: {
 				tools: [
 					{ name: "read", label: "Read", description: "Reads files" },
-					{ name: "code_search", label: "Code Search", description: "Search code snippets" },
+					{ name: "search_tool_bm25", label: "SearchToolBm25", description: "Discovers MCP tools" },
 				],
 				editMode: "hashline",
 				mcpServerInstructions: [],
@@ -129,7 +129,7 @@ describe("dynamic composer system prompt", () => {
 		const userMessage = request?.messages[0]?.content ?? "";
 
 		expect(userMessage).toContain("### Tool: read");
-		expect(userMessage).toContain("### Tool: code_search");
+		expect(userMessage).toContain("### Tool: search_tool_bm25");
 		expect(userMessage).not.toContain("### Tool: grep");
 		expect(userMessage).toContain("## Guidance Library — Active Edit Mode");
 		expect(userMessage).not.toContain("Current System Prompt Template");

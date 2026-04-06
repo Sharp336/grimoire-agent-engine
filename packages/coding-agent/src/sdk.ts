@@ -399,6 +399,7 @@ export interface BuildSystemPromptOptions {
 	cwd?: string;
 	appendPrompt?: string;
 	repeatToolDescriptions?: boolean;
+	secretsEnabled?: boolean;
 }
 
 /**
@@ -411,6 +412,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles: options.contextFiles,
 		appendSystemPrompt: options.appendPrompt,
 		repeatToolDescriptions: options.repeatToolDescriptions,
+		secretsEnabled: options.secretsEnabled,
 	});
 }
 
@@ -1298,6 +1300,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const repeatToolDescriptions = settings.get("repeatToolDescriptions");
 	const eagerTasks = settings.get("task.eager");
 	const intentField = settings.get("tools.intentTracing") || $env.PI_INTENT_TRACING === "1" ? INTENT_FIELD : undefined;
+	let obfuscator: SecretObfuscator | undefined;
 	const rebuildSystemPrompt = async (toolNames: string[], tools: Map<string, AgentTool>): Promise<string> => {
 		toolContextStore.setToolNames(toolNames);
 		const discoverableMCPTools = mcpDiscoveryEnabled ? collectDiscoverableMCPTools(tools.values()) : [];
@@ -1342,6 +1345,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			mcpDiscoveryMode: hasDiscoverableMCPTools,
 			mcpDiscoveryServerSummaries: discoverableMCPSummary.servers.map(formatDiscoverableMCPToolServerSummary),
 			eagerTasks,
+			secretsEnabled: obfuscator?.hasSecrets() ?? false,
 		});
 
 		const applySystemPromptOverride = async (basePrompt: string): Promise<string> => {
@@ -1365,6 +1369,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					mcpDiscoveryMode: hasDiscoverableMCPTools,
 					mcpDiscoveryServerSummaries: discoverableMCPSummary.servers.map(formatDiscoverableMCPToolServerSummary),
 					eagerTasks,
+					secretsEnabled: obfuscator?.hasSecrets() ?? false,
 				});
 			}
 			return options.systemPrompt(basePrompt);
@@ -1501,6 +1506,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 	}
 
+	if (settings.get("secrets.enabled")) {
+		const fileEntries = await logger.timeAsync("loadSecrets", loadSecrets, cwd, agentDir);
+		const envEntries = collectEnvSecrets();
+		const allEntries = [...envEntries, ...fileEntries];
+		if (allEntries.length > 0) {
+			obfuscator = new SecretObfuscator(allEntries);
+		}
+	}
+
+	// Build the system prompt after secret loading so redaction guidance matches the active obfuscator.
 	const systemPrompt = await logger.timeAsync(
 		"buildSystemPrompt",
 		rebuildSystemPrompt,
@@ -1546,16 +1561,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 	};
 
-	// Load and create secret obfuscator if secrets are enabled
-	let obfuscator: SecretObfuscator | undefined;
-	if (settings.get("secrets.enabled")) {
-		const fileEntries = await logger.timeAsync("loadSecrets", loadSecrets, cwd, agentDir);
-		const envEntries = collectEnvSecrets();
-		const allEntries = [...envEntries, ...fileEntries];
-		if (allEntries.length > 0) {
-			obfuscator = new SecretObfuscator(allEntries);
-		}
-	}
 
 	// Final convertToLlm: chain block-images filter with secret obfuscation
 	const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {

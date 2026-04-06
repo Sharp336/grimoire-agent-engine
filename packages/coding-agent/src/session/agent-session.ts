@@ -2022,7 +2022,8 @@ export class AgentSession {
 
 	/** All messages including custom types like BashExecutionMessage */
 	get messages(): AgentMessage[] {
-		return this.agent.state.messages;
+		if (!this.#obfuscator?.hasSecrets()) return this.agent.state.messages;
+		return this.#obfuscator.deobfuscateObject(this.agent.state.messages);
 	}
 
 	/** Fork-specific: assembler bridge for tool result interception */
