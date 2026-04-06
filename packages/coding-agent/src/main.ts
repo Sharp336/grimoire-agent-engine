@@ -48,6 +48,7 @@ import type { AgentSession } from "./session/agent-session";
 import { resolveResumableSession, type SessionInfo, SessionManager } from "./session/session-manager";
 import { resolvePromptInput } from "./system-prompt";
 import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog";
+import type { EventBus } from "./utils/event-bus";
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!settings.get("startup.checkUpdate")) {
@@ -119,10 +120,19 @@ async function runInteractiveMode(
 	setExtensionUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	lspServers: Array<{ name: string; status: "ready" | "error"; fileTypes: string[]; error?: string }> | undefined,
 	mcpManager: MCPManager | undefined,
+	eventBus?: EventBus,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 ): Promise<void> {
-	const mode = new InteractiveMode(session, version, changelogMarkdown, setExtensionUIContext, lspServers, mcpManager);
+	const mode = new InteractiveMode(
+		session,
+		version,
+		changelogMarkdown,
+		setExtensionUIContext,
+		lspServers,
+		mcpManager,
+		eventBus,
+	);
 
 	await mode.init();
 
@@ -272,6 +282,17 @@ async function createSessionManager(parsed: Args, cwd: string): Promise<SessionM
 	// If --session-dir provided without --continue/--resume, create new session there
 	if (parsed.sessionDir) {
 		return SessionManager.create(cwd, parsed.sessionDir);
+	}
+	// Auto-resume: behave like --continue if the setting is enabled and a prior
+	// session exists. When a prior session is resumed, mark parsed.continue so
+	// buildSessionOptions restores the session's model/thinking instead of
+	// overriding them with CLI defaults.
+	if (settings.get("autoResume")) {
+		const manager = await SessionManager.continueRecent(cwd, parsed.sessionDir);
+		if (manager.getEntries().length > 0) {
+			parsed.continue = true;
+		}
+		return manager;
 	}
 	// Default case (new session) returns undefined, SDK will create one
 	return undefined;
@@ -718,7 +739,7 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 		}
 	}
 
-	const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await logger.timeAsync(
+	const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager, eventBus } = await logger.timeAsync(
 		"createAgentSession",
 		() => createAgentSession(sessionOptions),
 	);
@@ -806,6 +827,7 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 			setToolUIContext,
 			lspServers,
 			mcpManager,
+			eventBus,
 			initialMessage,
 			initialImages,
 		);
