@@ -155,7 +155,7 @@ function makeInput(overrides?: Partial<CaptureSnapshotInput>): CaptureSnapshotIn
 		finalMessages: [makeUser("Hello"), makeAssistant("Hi there!")],
 		transformMetadata: null,
 		assemblerPacket: null,
-		assemblerBudget: null,
+		assemblerBudget: makePacket().budget,
 		...overrides,
 	};
 }
@@ -318,14 +318,26 @@ describe("projectSnapshot", () => {
 		expect(kinds).toContain("dropped-items");
 	});
 
-	test("budget section summary includes token usage", () => {
-		const snapshot = makeSnapshot();
+	test("budget section summary includes model and assembler usage", () => {
+		const snapshot = makeSnapshot({ assemblerPacket: makePacket() });
 		const sections = projectSnapshot(snapshot);
 		const budgetSection = sections.find(s => s.kind === "budget")!;
 
-		expect(budgetSection.summary).toContain("tok");
+		expect(budgetSection.summary).toContain("Model");
+		expect(budgetSection.summary).toContain("Assembler");
 		expect(budgetSection.summary).toContain("used");
-		expect(budgetSection.summary).toContain("free");
+		expect(budgetSection.summary).toContain("model free");
+	});
+
+	test("budget section omits assembler usage when allocatable budget is unavailable", () => {
+		const snapshot = makeSnapshot({ assemblerBudget: null, assemblerPacket: null });
+		const sections = projectSnapshot(snapshot);
+		const budgetSection = sections.find(s => s.kind === "budget")!;
+		const detail = budgetSection.renderDetail(80);
+
+		expect(budgetSection.summary).toContain("Model");
+		expect(budgetSection.summary).not.toContain("Assembler");
+		expect(detail.some(l => l.includes("Usable assembler budget"))).toBe(false);
 	});
 
 	test("system-prompt section shows fingerprint prefix", () => {
@@ -402,14 +414,16 @@ describe("projectSnapshot", () => {
 // ═══════════════════════════════════════════════════════════════════════════
 
 describe("section detail rendering", () => {
-	test("budget detail includes model info and bar", () => {
-		const snapshot = makeSnapshot();
+	test("budget detail includes model and usable assembler budget", () => {
+		const snapshot = makeSnapshot({ assemblerPacket: makePacket() });
 		const sections = projectSnapshot(snapshot);
 		const detail = sections.find(s => s.kind === "budget")!.renderDetail(80);
 
 		expect(detail.some(l => l.includes("anthropic"))).toBe(true);
 		expect(detail.some(l => l.includes("Context window"))).toBe(true);
-		expect(detail.some(l => l.includes("Headroom"))).toBe(true);
+		expect(detail.some(l => l.includes("Model occupancy"))).toBe(true);
+		expect(detail.some(l => l.includes("Usable assembler budget"))).toBe(true);
+		expect(detail.some(l => l.includes("Model headroom"))).toBe(true);
 	});
 
 	test("system-prompt detail includes fingerprint", () => {

@@ -199,6 +199,63 @@ describe("deriveBudget — settings overrides", () => {
 		// safetyReserve = floor(100_000 * 20 / 100) = 20_000
 		expect(budget.maxTokens).toBe(80_000);
 	});
+	test("spillover above the assembler cap fully eliminates turn buffer reserve", () => {
+		const budget = deriveBudget({
+			contextWindow: 200_000,
+			modelContextWindow: 1_000_000,
+			systemPromptTokens: 0,
+			toolDefinitionTokens: 0,
+			currentTurnTokens: 0,
+			safetyMarginPercent: 0,
+			turnBufferPercent: 20,
+		});
+
+		expect(budget.maxTokens).toBe(200_000);
+	});
+
+	test("spillover partially offsets turn buffer reserve", () => {
+		const budget = deriveBudget({
+			contextWindow: 200_000,
+			modelContextWindow: 220_000,
+			systemPromptTokens: 0,
+			toolDefinitionTokens: 0,
+			currentTurnTokens: 0,
+			safetyMarginPercent: 0,
+			turnBufferPercent: 20,
+		});
+
+		// configured turn buffer = 40_000, spillover headroom = 20_000, effective buffer = 20_000
+		expect(budget.maxTokens).toBe(180_000);
+	});
+
+	test("no spillover preserves the configured turn buffer reserve", () => {
+		const budget = deriveBudget({
+			contextWindow: 200_000,
+			modelContextWindow: 200_000,
+			systemPromptTokens: 0,
+			toolDefinitionTokens: 0,
+			currentTurnTokens: 0,
+			safetyMarginPercent: 0,
+			turnBufferPercent: 20,
+		});
+
+		expect(budget.maxTokens).toBe(160_000);
+	});
+
+	test("model windows smaller than the assembled cap do not create negative spillover", () => {
+		const budget = deriveBudget({
+			contextWindow: 200_000,
+			modelContextWindow: 128_000,
+			systemPromptTokens: 0,
+			toolDefinitionTokens: 0,
+			currentTurnTokens: 0,
+			safetyMarginPercent: 0,
+			turnBufferPercent: 20,
+		});
+
+		expect(budget.maxTokens).toBe(160_000);
+	});
+
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

@@ -34,9 +34,12 @@ export interface BudgetDerivationInput {
 	 * space for content injected outside the message array.
 	 *
 	 * For dynamic per-turn content, use turnBufferPercent instead (reserves a
-	 * percentage of context window for current turn).
+	 * percentage of the assembled context window). When modelContextWindow exceeds
+	 * contextWindow, spillover above the assembled cap offsets this reserve first.
 	 */
 	currentTurnTokens: number;
+	/** Actual model context window before any assembler cap is applied. */
+	modelContextWindow?: number;
 	turnBufferPercent?: number;
 	safetyMarginPercent?: number;
 	/** Guaranteed minimum percentage of allocatable budget for messages (0-100, default: 50). */

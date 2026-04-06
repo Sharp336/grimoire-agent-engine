@@ -111,10 +111,15 @@ function projectBudgetSection(snapshot: EffectivePromptSnapshot): InspectorSecti
 
 	const summaryParts: string[] = [];
 	if (budget) {
-		const used = budget.contextWindow - budget.headroom;
-		summaryParts.push(`${formatTokens(used)}/${formatTokens(budget.contextWindow)}`);
-		summaryParts.push(`${formatPercent(used, budget.contextWindow)} used`);
-		summaryParts.push(`${formatTokens(budget.headroom)} free`);
+		const modelUsed = budget.contextWindow - budget.headroom;
+		summaryParts.push(`Model ${formatTokens(modelUsed)}/${formatTokens(budget.contextWindow)}`);
+		summaryParts.push(`${formatPercent(modelUsed, budget.contextWindow)} used`);
+		summaryParts.push(`${formatTokens(budget.headroom)} model free`);
+
+		if (typeof budget.allocatableTokens === "number" && budget.allocatableTokens > 0) {
+			const assemblerUsed = budget.messageTokens + budget.assembledContextTokens;
+			summaryParts.push(`Assembler ${formatTokens(assemblerUsed)}/${formatTokens(budget.allocatableTokens)} usable`);
+		}
 	} else {
 		summaryParts.push("No budget data");
 	}
@@ -122,14 +127,13 @@ function projectBudgetSection(snapshot: EffectivePromptSnapshot): InspectorSecti
 	return {
 		kind: "budget",
 		label: "Budget Allocation",
-		summary: summaryParts.join(theme.fg("dim", " \u2502 ")),
+		summary: summaryParts.join(theme.fg("dim", " │ ")),
 		renderDetail(width: number): string[] {
 			const lines: string[] = [];
 
 			lines.push(theme.bold(theme.fg("accent", "Budget Allocation")));
 			lines.push("");
 
-			// Model info
 			lines.push(`  ${theme.fg("muted", "Model:")} ${model.provider}/${model.id}`);
 			lines.push(`  ${theme.fg("muted", "Context window:")} ${formatTokens(model.contextWindow)}`);
 			lines.push("");
@@ -139,18 +143,40 @@ function projectBudgetSection(snapshot: EffectivePromptSnapshot): InspectorSecti
 				return lines;
 			}
 
-			// Bar chart
-			const segments: BarSegment[] = [
+			const modelUsed = budget.contextWindow - budget.headroom;
+			const modelUsedPct = formatPercent(modelUsed, budget.contextWindow);
+			lines.push(`  ${theme.fg("muted", "Model occupancy:")} ${formatTokens(modelUsed)}/${formatTokens(budget.contextWindow)} (${modelUsedPct})`);
+			lines.push("");
+			lines.push(`  ${theme.fg("muted", "Model window occupancy:")}`);
+
+			const modelSegments: BarSegment[] = [
 				{ label: "System prompt", value: budget.systemPromptTokens, color: "accent" },
 				{ label: "Tool definitions", value: budget.toolDefinitionTokens, color: "warning" },
 				{ label: "Messages", value: budget.messageTokens, color: "success" },
 				{ label: "Assembled context", value: budget.assembledContextTokens, color: "muted" },
 			];
-
-			lines.push(...renderBudgetBar(segments, budget.contextWindow, width));
+			lines.push(...renderBudgetBar(modelSegments, budget.contextWindow, width));
 			lines.push("");
 
-			// Headroom
+			if (typeof budget.allocatableTokens === "number" && budget.allocatableTokens > 0) {
+				const assemblerUsed = budget.messageTokens + budget.assembledContextTokens;
+				const assemblerFree = Math.max(0, budget.allocatableTokens - assemblerUsed);
+				const assemblerUsedPct = formatPercent(assemblerUsed, budget.allocatableTokens);
+				lines.push(
+					`  ${theme.fg("muted", "Usable assembler budget:")} ${formatTokens(assemblerUsed)}/${formatTokens(budget.allocatableTokens)} (${assemblerUsedPct})`,
+				);
+				lines.push(`  ${theme.fg("muted", "Assembler free after reserves:")} ${formatTokens(assemblerFree)}`);
+				lines.push("");
+				lines.push(`  ${theme.fg("muted", "Assembler pool after fixed costs/reserves:")}`);
+
+				const assemblerSegments: BarSegment[] = [
+					{ label: "Messages", value: budget.messageTokens, color: "success" },
+					{ label: "Assembled context", value: budget.assembledContextTokens, color: "muted" },
+				];
+				lines.push(...renderBudgetBar(assemblerSegments, budget.allocatableTokens, width));
+				lines.push("");
+			}
+
 			const headroomPct = formatPercent(budget.headroom, budget.contextWindow);
 			const headroomColor =
 				budget.headroom < budget.contextWindow * 0.1
@@ -159,13 +185,13 @@ function projectBudgetSection(snapshot: EffectivePromptSnapshot): InspectorSecti
 						? "warning"
 						: "success";
 			lines.push(
-				`  ${theme.fg("dim", "\u2591")} ${theme.fg(headroomColor, `Headroom: ${formatTokens(budget.headroom)} (${headroomPct})`)}`,
+				`  ${theme.fg("dim", "░")} ${theme.fg(headroomColor, `Model headroom: ${formatTokens(budget.headroom)} (${headroomPct})`)}`,
 			);
 
 			return lines;
 		},
 	};
-}
+	}
 
 function projectSystemPromptSection(snapshot: EffectivePromptSnapshot): InspectorSection {
 	const sp = snapshot.systemPrompt;

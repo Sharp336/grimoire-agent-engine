@@ -297,13 +297,13 @@ describe("captureEffectivePromptSnapshot", () => {
 		const tools = [makeTool("tool1")];
 		const messages: AgentMessage[] = [makeUser("Hello")];
 		const packet = makePacket({ usage: { consumedTokens: 500, consumedLatencyMs: 50 } });
-
 		const input = makeInput({
 			model,
 			systemPrompt,
 			tools,
 			finalMessages: messages,
 			assemblerPacket: packet,
+			assemblerBudget: packet.budget,
 		});
 		const snapshot = captureEffectivePromptSnapshot(input);
 
@@ -311,6 +311,7 @@ describe("captureEffectivePromptSnapshot", () => {
 		expect(snapshot.budget!.contextWindow).toBe(200_000);
 		expect(snapshot.budget!.systemPromptTokens).toBe(Math.ceil(systemPrompt.length / 4));
 		expect(snapshot.budget!.assembledContextTokens).toBe(500);
+		expect(snapshot.budget!.allocatableTokens).toBe(packet.budget.maxTokens);
 		expect(snapshot.budget!.messageTokens).toBeGreaterThan(0);
 
 		// Headroom = contextWindow - sysPrompt - tools - messages - assembled

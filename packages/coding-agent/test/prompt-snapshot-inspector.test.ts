@@ -140,6 +140,7 @@ function makeSnapshot(overrides?: Partial<EffectivePromptSnapshot>): EffectivePr
 			toolDefinitionTokens: 1200,
 			messageTokens: 150,
 			assembledContextTokens: 0,
+			allocatableTokens: 40_000,
 			headroom: 198_150,
 			hydrationBudgetMax: 0,
 			messageBudgetMin: 0,
@@ -198,10 +199,12 @@ describe("buildPromptSnapshotOverview", () => {
 			hasTransformMetadata: false,
 		});
 
-		// Budget: just window + headroom
+		// Budget: compact model window + headroom + usable assembler budget
+
 		expect(overview.sections.budget).toEqual({
 			contextWindow: 200_000,
 			headroom: 198_150,
+			allocatableTokens: 40_000,
 		});
 	});
 
@@ -294,6 +297,7 @@ describe("buildPromptSectionDetail", () => {
 				toolDefinitionTokens: 1200,
 				messageTokens: 150,
 				assembledContextTokens: 0,
+				allocatableTokens: 40_000,
 				headroom: 198_150,
 				hydrationBudgetMax: 0,
 				messageBudgetMin: 0,

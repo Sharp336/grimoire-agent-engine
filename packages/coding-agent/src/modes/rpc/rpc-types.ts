@@ -281,7 +281,7 @@ export interface RpcPromptSnapshotOverview {
 		tools: { count: number; totalDefinitionTokenEstimate: number } | null;
 		messages: { count: number; tokenEstimate: number; hasTransformMetadata: boolean } | null;
 		assemblerContext: { fragmentCount: number; droppedCount: number; consumedTokens: number } | null;
-		budget: { contextWindow: number; headroom: number } | null;
+		budget: { contextWindow: number; headroom: number; allocatableTokens?: number | null } | null;
 	};
 }
 
@@ -301,6 +301,7 @@ export interface RpcPromptSnapshotBudget {
 	toolDefinitionTokens: number;
 	messageTokens: number;
 	assembledContextTokens: number;
+	allocatableTokens?: number | null;
 	headroom: number;
 	hydrationBudgetMax: number;
 	messageBudgetMin: number;

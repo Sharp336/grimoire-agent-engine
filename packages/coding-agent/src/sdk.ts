@@ -1657,6 +1657,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const budget = currentModel
 				? deriveBudget({
 						contextWindow: assembledContextWindow,
+						modelContextWindow: modelWindow,
 						systemPromptTokens: Math.ceil(currentSystemPrompt.length / 4),
 						toolDefinitionTokens: estimateToolDefinitionTokens(currentTools),
 						currentTurnTokens: 0,

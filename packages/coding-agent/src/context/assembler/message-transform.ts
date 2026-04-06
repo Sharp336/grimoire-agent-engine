@@ -102,7 +102,10 @@ export function deriveBudget(input: BudgetDerivationInput): MemoryAssemblyBudget
 	const messagePercent = input.messageBudgetPercent ?? DEFAULT_MESSAGE_BUDGET_PERCENT;
 	const turnBufferPercent = input.turnBufferPercent ?? DEFAULT_TURN_BUFFER_PERCENT;
 	const hydrationPercent = input.hydrationBudgetPercent ?? DEFAULT_HYDRATION_BUDGET_PERCENT;
-	const turnBuffer = Math.floor((input.contextWindow * turnBufferPercent) / 100);
+	const modelContextWindow = Math.max(input.contextWindow, input.modelContextWindow ?? input.contextWindow);
+	const configuredTurnBuffer = Math.floor((input.contextWindow * turnBufferPercent) / 100);
+	const spilloverHeadroom = Math.max(0, modelContextWindow - input.contextWindow);
+	const turnBuffer = Math.max(0, configuredTurnBuffer - spilloverHeadroom);
 	const totalCosts = input.systemPromptTokens + input.toolDefinitionTokens + input.currentTurnTokens;
 	const safetyReserve = Math.floor((input.contextWindow * safetyPercent) / 100);
 	const allocatable = Math.max(0, input.contextWindow - totalCosts - safetyReserve - turnBuffer);
@@ -112,8 +115,11 @@ export function deriveBudget(input: BudgetDerivationInput): MemoryAssemblyBudget
 	if (input.contextWindow > 0 && allocatable < input.contextWindow * 0.1) {
 		logger.warn("Budget critically low: fixed costs dominate context window", {
 			contextWindow: input.contextWindow,
+			modelContextWindow,
 			totalCosts,
 			safetyReserve,
+			configuredTurnBuffer,
+			spilloverHeadroom,
 			turnBuffer,
 			allocatable,
 			usagePercent: Math.round((totalCosts / input.contextWindow) * 100),

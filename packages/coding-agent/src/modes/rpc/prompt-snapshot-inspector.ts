@@ -73,6 +73,7 @@ export function buildPromptSnapshotOverview(snapshot: EffectivePromptSnapshot | 
 				? {
 						contextWindow: snapshot.budget.contextWindow,
 						headroom: snapshot.budget.headroom,
+						allocatableTokens: snapshot.budget.allocatableTokens,
 					}
 				: null,
 		},

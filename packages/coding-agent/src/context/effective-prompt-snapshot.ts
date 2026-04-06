@@ -70,6 +70,11 @@ export interface PromptSnapshotBudget {
 	messageTokens: number;
 	/** Tokens consumed by assembled context fragments. */
 	assembledContextTokens: number;
+	/**
+	 * Tokens allocatable to messages + assembled context after fixed costs and
+	 * assembler reserves. Undefined when the assembler budget is unavailable.
+	 */
+	allocatableTokens?: number | null;
 	/** Remaining headroom in tokens. */
 	headroom: number;
 	/** Hard ceiling: maximum tokens allocatable to hydration. */
@@ -77,7 +82,6 @@ export interface PromptSnapshotBudget {
 	/** Guaranteed floor: minimum tokens reserved for messages. */
 	messageBudgetMin: number;
 }
-
 /**
  * Canonical runtime snapshot of the effective prompt composition for a turn.
  *
@@ -155,6 +159,7 @@ export function captureEffectivePromptSnapshot(input: CaptureSnapshotInput): Eff
 	const contextWindow = input.model?.contextWindow ?? 0;
 
 	const assembledContextTokens = input.assemblerPacket?.usage.consumedTokens ?? 0;
+	const allocatableTokens = input.assemblerBudget?.maxTokens ?? undefined;
 	const headroom = Math.max(
 		0,
 		contextWindow - systemPromptTokens - toolDefinitionTokens - messageTokens - assembledContextTokens,
@@ -189,6 +194,7 @@ export function captureEffectivePromptSnapshot(input: CaptureSnapshotInput): Eff
 					toolDefinitionTokens,
 					messageTokens,
 					assembledContextTokens,
+					allocatableTokens,
 					headroom,
 					hydrationBudgetMax: input.assemblerBudget?.hydrationBudgetMax ?? 0,
 					messageBudgetMin: input.assemblerBudget?.messageBudgetMin ?? 0,
