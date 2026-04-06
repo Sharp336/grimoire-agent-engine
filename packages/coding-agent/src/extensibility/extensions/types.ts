@@ -81,6 +81,8 @@ export interface ExtensionUIDialogOptions {
 	onLeft?: () => void;
 	/** Invoked when user presses right arrow in select dialogs */
 	onRight?: () => void;
+	/** Invoked when user presses the external editor shortcut in select dialogs */
+	onExternalEditor?: () => void;
 	/** Optional footer hint text rendered by interactive selector */
 	helpText?: string;
 }
@@ -566,7 +568,7 @@ export interface ToolExecutionEndEvent {
 /** Fired when auto-compaction starts */
 export interface AutoCompactionStartEvent {
 	type: "auto_compaction_start";
-	reason: "threshold" | "overflow";
+	reason: "threshold" | "overflow" | "idle";
 	action: "context-full" | "handoff";
 }
 

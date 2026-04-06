@@ -208,9 +208,30 @@ export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	lastChangelogVersion: { type: "string", default: undefined },
 
+	autoResume: {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			label: "Auto Resume",
+			description: "Automatically resume the most recent session in the current directory",
+		},
+	},
 	shellPath: { type: "string", default: undefined },
 
 	extensions: { type: "array", default: EMPTY_STRING_ARRAY },
+
+	"marketplace.autoUpdate": {
+		type: "enum",
+		values: ["off", "notify", "auto"] as const,
+		default: "notify",
+		ui: {
+			tab: "tools",
+			label: "Marketplace Auto-Update",
+			description: "Check for plugin updates on startup (off/notify/auto)",
+			submenu: true,
+		},
+	},
 
 	enabledModels: { type: "array", default: EMPTY_STRING_ARRAY },
 
@@ -465,6 +486,12 @@ export const SETTINGS_SCHEMA = {
 			"Maximum width in terminal columns for inline images (default 100). Set to 0 for unlimited (bounded only by terminal width).",
 	},
 
+	"tui.maxInlineImageRows": {
+		type: "number",
+		default: 20,
+		description:
+			"Maximum height in terminal rows for inline images (default 20). Set to 0 to use only the viewport-based limit (60% of terminal height).",
+	},
 	// Display rendering
 	"display.tabWidth": {
 		type: "number",
@@ -630,6 +657,18 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	"retry.baseDelayMs": { type: "number", default: 2000 },
+	"retry.fallbackChains": { type: "record", default: {} as Record<string, string[]> },
+	"retry.fallbackRevertPolicy": {
+		type: "enum",
+		values: ["cooldown-expiry", "never"] as const,
+		default: "cooldown-expiry",
+		ui: {
+			tab: "model",
+			label: "Fallback Revert Policy",
+			description: "When to return to the primary model after a fallback",
+			submenu: true,
+		},
+	},
 
 	// ────────────────────────────────────────────────────────────────────────
 	// Interaction
@@ -872,6 +911,38 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.remoteEndpoint": { type: "string", default: undefined },
 
+	// Idle compaction
+	"compaction.idleEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			label: "Idle Compaction",
+			description: "Compact context while idle when token count exceeds threshold",
+		},
+	},
+
+	"compaction.idleThresholdTokens": {
+		type: "number",
+		default: 200000,
+		ui: {
+			tab: "context",
+			label: "Idle Compaction Threshold",
+			description: "Token count above which idle compaction triggers",
+			submenu: true,
+		},
+	},
+
+	"compaction.idleTimeoutSeconds": {
+		type: "number",
+		default: 300,
+		ui: {
+			tab: "context",
+			label: "Idle Compaction Delay",
+			description: "Seconds to wait while idle before compacting",
+			submenu: true,
+		},
+	},
 	// Branch summaries
 	"branchSummary.enabled": {
 		type: "boolean",
@@ -1293,7 +1364,17 @@ export const SETTINGS_SCHEMA = {
 	"fetch.enabled": {
 		type: "boolean",
 		default: true,
-		ui: { tab: "tools", label: "Fetch", description: "Enable the fetch tool for URL fetching" },
+		ui: { tab: "tools", label: "Read URLs", description: "Allow the read tool to fetch and process URLs" },
+	},
+
+	"github.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "GitHub CLI",
+			description: "Enable read-only gh_* tools for GitHub repository, issue, pull request, diff, and search access",
+		},
 	},
 
 	"web_search.enabled": {
@@ -1616,19 +1697,6 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
-
-	"providers.codeSearch": {
-		type: "enum",
-		values: ["grep", "exa"] as const,
-		default: "grep",
-		ui: {
-			tab: "providers",
-			label: "Code Search Provider",
-			description: "Provider for code search tool",
-			submenu: true,
-		},
-	},
-
 	"providers.image": {
 		type: "enum",
 		values: ["auto", "gemini", "openrouter"] as const,
@@ -1672,6 +1740,54 @@ export const SETTINGS_SCHEMA = {
 			tab: "providers",
 			label: "Parallel Fetch",
 			description: "Use Parallel extract API for URL fetching when credentials are available",
+		},
+	},
+
+	"providers.embeddings": {
+		type: "enum",
+		values: ["disabled", "memex", "openai-compatible"] as const,
+		default: "disabled",
+		ui: {
+			tab: "providers",
+			label: "Embedding Provider",
+			description: "Provider for recall embeddings",
+			submenu: true,
+		},
+	},
+	"providers.embeddingUrl": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			label: "Embedding URL",
+			description: "OpenAI-compatible embedding endpoint URL",
+		},
+	},
+	"providers.embeddingModel": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "providers",
+			label: "Embedding Model",
+			description: "Model name for OpenAI-compatible embeddings",
+		},
+	},
+	"providers.embeddingDimension": {
+		type: "number",
+		default: 2560,
+		ui: {
+			tab: "providers",
+			label: "Embedding Dimension",
+			description: "Embedding vector dimension for recall storage",
+		},
+	},
+	"providers.embeddingApiKeyEnvVar": {
+		type: "string",
+		default: "EMBEDDINGS_API_KEY",
+		ui: {
+			tab: "providers",
+			label: "Embedding API Key Env Var",
+			description: "Environment variable containing the embedding API key",
 		},
 	},
 
@@ -1835,6 +1951,9 @@ export interface CompactionSettings {
 	autoContinue: boolean;
 	remoteEnabled: boolean;
 	remoteEndpoint: string | undefined;
+	idleEnabled: boolean;
+	idleThresholdTokens: number;
+	idleTimeoutSeconds: number;
 }
 
 export interface ContextPromotionSettings {

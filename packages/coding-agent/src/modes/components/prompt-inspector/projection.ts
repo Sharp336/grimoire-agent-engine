@@ -145,7 +145,9 @@ function projectBudgetSection(snapshot: EffectivePromptSnapshot): InspectorSecti
 
 			const modelUsed = budget.contextWindow - budget.headroom;
 			const modelUsedPct = formatPercent(modelUsed, budget.contextWindow);
-			lines.push(`  ${theme.fg("muted", "Model occupancy:")} ${formatTokens(modelUsed)}/${formatTokens(budget.contextWindow)} (${modelUsedPct})`);
+			lines.push(
+				`  ${theme.fg("muted", "Model occupancy:")} ${formatTokens(modelUsed)}/${formatTokens(budget.contextWindow)} (${modelUsedPct})`,
+			);
 			lines.push("");
 			lines.push(`  ${theme.fg("muted", "Model window occupancy:")}`);
 
@@ -191,7 +193,7 @@ function projectBudgetSection(snapshot: EffectivePromptSnapshot): InspectorSecti
 			return lines;
 		},
 	};
-	}
+}
 
 function projectSystemPromptSection(snapshot: EffectivePromptSnapshot): InspectorSection {
 	const sp = snapshot.systemPrompt;

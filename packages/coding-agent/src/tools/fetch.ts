@@ -1,3 +1,4 @@
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
@@ -9,6 +10,7 @@ import { parseHTML } from "linkedom";
 import type { Settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { type Theme, theme } from "../modes/theme/theme";
+import type { ToolSession } from "../sdk";
 import { DEFAULT_MAX_BYTES, truncateHead } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
@@ -18,8 +20,7 @@ import { extractWithParallel, findParallelApiKey, getParallelExtractContent } fr
 import { specialHandlers } from "../web/scrapers";
 import type { RenderResult } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
-import { convertWithMarkitdown, fetchBinary } from "../web/scrapers/utils";
-import type { ToolSession } from ".";
+import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
 import { formatExpandHint, getDomain } from "./render-utils";
@@ -32,7 +33,7 @@ import { clampTimeout } from "./tool-timeouts";
 // =============================================================================
 
 const FETCH_DEFAULT_MAX_LINES = 300;
-// Convertible document types (markitdown supported)
+// Convertible document types handled by markit.
 const CONVERTIBLE_MIMES = new Set([
 	"application/pdf",
 	"application/msword",
@@ -43,6 +44,7 @@ const CONVERTIBLE_MIMES = new Set([
 	"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
 	"application/rtf",
 	"application/epub+zip",
+	"application/x-ipynb+json",
 	"application/zip",
 	"image/png",
 	"image/jpeg",
@@ -63,6 +65,7 @@ const CONVERTIBLE_EXTENSIONS = new Set([
 	".xlsx",
 	".rtf",
 	".epub",
+	".ipynb",
 	".png",
 	".jpg",
 	".jpeg",
@@ -131,6 +134,10 @@ function normalizeUrl(url: string): string {
 	return url;
 }
 
+export function isReadableUrlPath(value: string): boolean {
+	return /^https?:\/\//i.test(value) || /^www\./i.test(value);
+}
+
 /**
  * Normalize MIME type (lowercase, strip charset/params)
  */
@@ -162,7 +169,7 @@ function getExtensionHint(url: string, contentDisposition?: string): string {
 }
 
 /**
- * Check if content type is convertible via markitdown
+ * Check if content type is convertible via markit.
  */
 function isConvertible(mime: string, extensionHint: string): boolean {
 	if (CONVERTIBLE_MIMES.has(mime)) return true;
@@ -709,18 +716,18 @@ async function renderUrl(
 				notes.push("Fetched image binary");
 				const conversionExtension = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
 				let convertedText: string | null = null;
-				const converted = await convertWithMarkitdown(binary.buffer, conversionExtension, timeout, signal);
+				const converted = await convertWithMarkit(binary.buffer, conversionExtension, timeout, signal);
 				if (converted.ok) {
 					if (converted.content.trim().length > 50) {
-						notes.push("Converted with markitdown");
+						notes.push("Converted with markit");
 						convertedText = converted.content;
 					} else {
-						notes.push("markitdown conversion produced no usable output");
+						notes.push("markit conversion produced no usable output");
 					}
 				} else if (converted.error) {
-					notes.push(`markitdown conversion failed: ${converted.error}`);
+					notes.push(`markit conversion failed: ${converted.error}`);
 				} else {
-					notes.push("markitdown conversion failed");
+					notes.push("markit conversion failed");
 				}
 
 				if (binary.buffer.byteLength > MAX_INLINE_IMAGE_SOURCE_BYTES) {
@@ -734,7 +741,7 @@ async function renderUrl(
 						url,
 						finalUrl,
 						contentType: imageMimeType,
-						method: convertedText ? "markitdown" : "image-too-large",
+						method: convertedText ? "markit" : "image-too-large",
 						content: output.content,
 						fetchedAt,
 						truncated: output.truncated,
@@ -759,7 +766,7 @@ async function renderUrl(
 						url,
 						finalUrl,
 						contentType: imageMimeType,
-						method: convertedText ? "markitdown" : "image-invalid",
+						method: convertedText ? "markit" : "image-invalid",
 						content: output.content,
 						fetchedAt,
 						truncated: output.truncated,
@@ -777,7 +784,7 @@ async function renderUrl(
 						url,
 						finalUrl,
 						contentType: imageMimeType,
-						method: convertedText ? "markitdown" : "image-too-large",
+						method: convertedText ? "markit" : "image-too-large",
 						content: output.content,
 						fetchedAt,
 						truncated: output.truncated,
@@ -817,27 +824,27 @@ async function renderUrl(
 		const binary = await fetchBinary(finalUrl, timeout, signal);
 		if (binary.ok) {
 			const ext = getExtensionHint(finalUrl, binary.contentDisposition) || extHint;
-			const converted = await convertWithMarkitdown(binary.buffer, ext, timeout, signal);
+			const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
 			if (converted.ok) {
 				if (converted.content.trim().length > 50) {
-					notes.push("Converted with markitdown");
+					notes.push("Converted with markit");
 					const output = finalizeOutput(converted.content);
 					return {
 						url,
 						finalUrl,
 						contentType: mime,
-						method: "markitdown",
+						method: "markit",
 						content: output.content,
 						fetchedAt,
 						truncated: output.truncated,
 						notes,
 					};
 				}
-				notes.push("markitdown conversion produced no usable output");
+				notes.push("markit conversion produced no usable output");
 			} else if (converted.error) {
-				notes.push(`markitdown conversion failed: ${converted.error}`);
+				notes.push(`markit conversion failed: ${converted.error}`);
 			} else {
-				notes.push("markitdown conversion failed");
+				notes.push("markit conversion failed");
 			}
 		} else if (binary.error) {
 			notes.push(`Binary fetch failed: ${binary.error}`);
@@ -1005,7 +1012,7 @@ async function renderUrl(
 				const binary = await fetchBinary(docUrl, timeout, signal);
 				if (binary.ok) {
 					const ext = getExtensionHint(docUrl, binary.contentDisposition);
-					const converted = await convertWithMarkitdown(binary.buffer, ext, timeout, signal);
+					const converted = await convertWithMarkit(binary.buffer, ext, timeout, signal);
 					if (converted.ok && converted.content.trim().length > htmlResult.content.length) {
 						notes.push(`Extracted and converted document: ${docUrl}`);
 						const output = finalizeOutput(converted.content);
@@ -1021,7 +1028,7 @@ async function renderUrl(
 						};
 					}
 					if (!converted.ok && converted.error) {
-						notes.push(`markitdown conversion failed: ${converted.error}`);
+						notes.push(`markit conversion failed: ${converted.error}`);
 					}
 				} else if (binary.error) {
 					notes.push(`Binary fetch failed: ${binary.error}`);
@@ -1114,7 +1121,6 @@ export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails
 	): Promise<AgentToolResult<FetchToolDetails>> {
 		const { url, timeout: rawTimeout = 20, raw = false } = params;
 
-		// Clamp to valid range (seconds)
 		const effectiveTimeout = clampTimeout("fetch", rawTimeout);
 
 		if (signal?.aborted) {
@@ -1129,18 +1135,7 @@ export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails
 		const needsArtifact = truncation.truncated;
 		let artifactId: string | undefined;
 
-		const buildOutput = (content: string): string => {
-			let output = "";
-			output += `URL: ${result.finalUrl}\n`;
-			output += `Content-Type: ${result.contentType}\n`;
-			output += `Method: ${result.method}\n`;
-			if (result.notes.length > 0) {
-				output += `Notes: ${result.notes.join("; ")}\n`;
-			}
-			output += `\n---\n\n`;
-			output += content;
-			return output;
-		};
+		const buildOutput = (content: string): string => buildUrlReadOutput(result, content);
 
 		if (needsArtifact) {
 			const { path: artifactPath, id } = (await this.session.allocateOutputArtifact?.("fetch")) ?? {};
@@ -1186,6 +1181,193 @@ export class FetchTool implements AgentTool<typeof fetchSchema, FetchToolDetails
 	}
 }
 
+export interface ReadUrlToolDetails {
+	kind: "url";
+	url: string;
+	finalUrl: string;
+	contentType: string;
+	method: string;
+	truncated: boolean;
+	notes: string[];
+	meta?: OutputMeta;
+}
+
+interface ReadUrlCacheEntry {
+	artifactId?: string;
+	details: ReadUrlToolDetails;
+	image?: FetchImagePayload;
+	output: string;
+}
+
+const readUrlCache = new Map<string, ReadUrlCacheEntry>();
+
+function getReadUrlCacheKey(session: ToolSession, requestedUrl: string, raw: boolean): string {
+	const scope = session.getSessionFile() ?? session.cwd;
+	return `${scope}::${raw ? "raw" : "rendered"}::${normalizeUrl(requestedUrl)}`;
+}
+
+async function readArtifactOutput(session: ToolSession, artifactId: string): Promise<string | null> {
+	const artifactsDir = session.getArtifactsDir?.();
+	if (!artifactsDir) return null;
+
+	try {
+		const files = await fs.readdir(artifactsDir);
+		const match = files.find(file => file.startsWith(`${artifactId}.`));
+		if (!match) return null;
+		return await Bun.file(path.join(artifactsDir, match)).text();
+	} catch {
+		return null;
+	}
+}
+
+async function materializeReadUrlCacheEntry(
+	session: ToolSession,
+	entry: ReadUrlCacheEntry,
+): Promise<ReadUrlCacheEntry | null> {
+	if (entry.artifactId) {
+		const artifactOutput = await readArtifactOutput(session, entry.artifactId);
+		if (artifactOutput !== null) {
+			return { ...entry, output: artifactOutput };
+		}
+	}
+
+	return entry.output.length > 0 ? entry : null;
+}
+
+async function persistReadUrlArtifact(session: ToolSession, output: string): Promise<string | undefined> {
+	const { path: artifactPath, id } = (await session.allocateOutputArtifact?.("read")) ?? {};
+	if (!artifactPath) return undefined;
+	await Bun.write(artifactPath, output);
+	return id;
+}
+
+async function ensureReadUrlCacheArtifact(session: ToolSession, entry: ReadUrlCacheEntry): Promise<ReadUrlCacheEntry> {
+	if (entry.artifactId) return entry;
+	const artifactId = await persistReadUrlArtifact(session, entry.output);
+	return artifactId ? { ...entry, artifactId } : entry;
+}
+
+function cacheReadUrlEntry(session: ToolSession, requestedUrl: string, raw: boolean, entry: ReadUrlCacheEntry): void {
+	readUrlCache.set(getReadUrlCacheKey(session, requestedUrl, raw), entry);
+	readUrlCache.set(getReadUrlCacheKey(session, entry.details.finalUrl, raw), entry);
+}
+
+async function buildReadUrlCacheEntry(
+	session: ToolSession,
+	params: { path: string; timeout?: number; raw?: boolean },
+	signal?: AbortSignal,
+	options?: { ensureArtifact?: boolean },
+): Promise<ReadUrlCacheEntry> {
+	const { path: url, timeout: rawTimeout = 20, raw = false } = params;
+
+	const effectiveTimeout = clampTimeout("fetch", rawTimeout);
+
+	if (signal?.aborted) {
+		throw new ToolAbortError();
+	}
+
+	const result = await renderUrl(url, effectiveTimeout, raw, session.settings, signal);
+	const output = buildUrlReadOutput(result, result.content);
+	const artifactId = options?.ensureArtifact ? await persistReadUrlArtifact(session, output) : undefined;
+
+	return {
+		artifactId,
+		details: {
+			kind: "url",
+			url: result.url,
+			finalUrl: result.finalUrl,
+			contentType: result.contentType,
+			method: result.method,
+			truncated: Boolean(result.truncated),
+			notes: result.notes,
+		},
+		image: result.image,
+		output,
+	};
+}
+
+export async function loadReadUrlCacheEntry(
+	session: ToolSession,
+	params: { path: string; timeout?: number; raw?: boolean },
+	signal?: AbortSignal,
+	options?: { ensureArtifact?: boolean; preferCached?: boolean },
+): Promise<ReadUrlCacheEntry> {
+	const raw = params.raw ?? false;
+	const cached = readUrlCache.get(getReadUrlCacheKey(session, params.path, raw));
+	if (options?.preferCached && cached) {
+		const prepared = options.ensureArtifact ? await ensureReadUrlCacheArtifact(session, cached) : cached;
+		const materialized = await materializeReadUrlCacheEntry(session, prepared);
+		if (materialized) {
+			cacheReadUrlEntry(session, params.path, raw, materialized);
+			return materialized;
+		}
+	}
+
+	const fresh = await buildReadUrlCacheEntry(session, params, signal, {
+		ensureArtifact: options?.ensureArtifact,
+	});
+	cacheReadUrlEntry(session, params.path, raw, fresh);
+	return fresh;
+}
+
+function buildUrlReadOutput(result: FetchRenderResult, content: string): string {
+	let output = "";
+	output += `URL: ${result.finalUrl}\n`;
+	output += `Content-Type: ${result.contentType}\n`;
+	output += `Method: ${result.method}\n`;
+	if (result.notes.length > 0) {
+		output += `Notes: ${result.notes.join("; ")}\n`;
+	}
+	output += `\n---\n\n`;
+	output += content;
+	return output;
+}
+
+export async function executeReadUrl(
+	session: ToolSession,
+	params: { path: string; timeout?: number; raw?: boolean },
+	signal?: AbortSignal,
+): Promise<AgentToolResult<ReadUrlToolDetails>> {
+	let cacheEntry = await loadReadUrlCacheEntry(session, params, signal, { preferCached: true });
+	const truncation = truncateHead(cacheEntry.output, {
+		maxBytes: DEFAULT_MAX_BYTES,
+		maxLines: FETCH_DEFAULT_MAX_LINES,
+	});
+	const needsArtifact = truncation.truncated;
+	if (needsArtifact && !cacheEntry.artifactId) {
+		cacheEntry = await ensureReadUrlCacheArtifact(session, cacheEntry);
+		cacheReadUrlEntry(session, params.path, params.raw ?? false, cacheEntry);
+	}
+	const output = needsArtifact ? truncation.content : cacheEntry.output;
+	const details: ReadUrlToolDetails = {
+		...cacheEntry.details,
+		truncated: Boolean(cacheEntry.details.truncated || needsArtifact),
+	};
+
+	const contentBlocks: Array<TextContent | ImageContent> = [{ type: "text", text: output }];
+	if (cacheEntry.image) {
+		contentBlocks.push({ type: "image", data: cacheEntry.image.data, mimeType: cacheEntry.image.mimeType });
+	}
+
+	const resultBuilder = toolResult(details).content(contentBlocks).sourceUrl(details.finalUrl);
+	if (needsArtifact) {
+		resultBuilder.truncation(truncation, { direction: "head", artifactId: cacheEntry.artifactId });
+	} else if (cacheEntry.details.truncated) {
+		const outputLines = cacheEntry.output.split("\n").length;
+		const outputBytes = Buffer.byteLength(cacheEntry.output, "utf-8");
+		const totalBytes = Math.max(outputBytes + 1, MAX_OUTPUT_CHARS + 1);
+		const totalLines = outputLines + 1;
+		resultBuilder.truncationFromText(cacheEntry.output, {
+			direction: "tail",
+			totalLines,
+			totalBytes,
+			maxBytes: MAX_OUTPUT_CHARS,
+		});
+	}
+
+	return resultBuilder.done();
+}
+
 // =============================================================================
 // TUI Rendering
 // =============================================================================
@@ -1195,7 +1377,124 @@ function countNonEmptyLines(text: string): number {
 	return text.split("\n").filter(l => l.trim()).length;
 }
 
-/** Render fetch call (URL preview) */
+/** Render URL read call (URL preview) */
+export function renderReadUrlCall(
+	args: { path?: string; url?: string; timeout?: number; raw?: boolean },
+	_options: RenderResultOptions,
+	uiTheme: Theme = theme,
+): Component {
+	const url = args.path ?? args.url ?? "";
+	const domain = getDomain(url);
+	const path = truncate(url.replace(/^https?:\/\/[^/]+/, ""), 50, "\u2026");
+	const description = `${domain}${path ? ` ${path}` : ""}`.trim();
+	const meta: string[] = [];
+	if (args.raw) meta.push("raw");
+	if (args.timeout !== undefined) meta.push(`timeout:${args.timeout}s`);
+	const text = renderStatusLine({ icon: "pending", title: "Read", description, meta }, uiTheme);
+	return new Text(text, 0, 0);
+}
+
+/** Render URL read result with tree-based layout */
+export function renderReadUrlResult(
+	result: { content: Array<{ type: string; text?: string }>; details?: ReadUrlToolDetails },
+	options: RenderResultOptions,
+	uiTheme: Theme = theme,
+): Component {
+	const details = result.details;
+
+	if (!details) {
+		return new Text(uiTheme.fg("error", "No response data"), 0, 0);
+	}
+
+	const domain = getDomain(details.finalUrl);
+	const path = truncate(details.finalUrl.replace(/^https?:\/\/[^/]+/, ""), 50, "…");
+	const hasRedirect = details.url !== details.finalUrl;
+	const hasNotes = details.notes.length > 0;
+	const truncation = details.meta?.truncation;
+	const truncated = Boolean(details.truncated || truncation);
+
+	const header = renderStatusLine(
+		{
+			icon: truncated ? "warning" : "success",
+			title: "Read",
+			description: `${domain}${path ? ` ${path}` : ""}`,
+		},
+		uiTheme,
+	);
+
+	const contentText = result.content[0]?.text ?? "";
+	const contentBody = contentText.includes("---\n\n")
+		? contentText.split("---\n\n").slice(1).join("---\n\n")
+		: contentText;
+	const lineCount = countNonEmptyLines(contentBody);
+	const charCount = contentBody.trim().length;
+	const contentLines = contentBody.split("\n").filter(l => l.trim());
+
+	const metadataLines: string[] = [
+		`${uiTheme.fg("muted", "Content-Type:")} ${details.contentType || "unknown"}`,
+		`${uiTheme.fg("muted", "Method:")} ${details.method}`,
+	];
+	if (hasRedirect) {
+		metadataLines.push(`${uiTheme.fg("muted", "Final URL:")} ${uiTheme.fg("mdLinkUrl", details.finalUrl)}`);
+	}
+	const lineLabel = `${lineCount} line${lineCount === 1 ? "" : "s"}`;
+	metadataLines.push(`${uiTheme.fg("muted", "Lines:")} ${lineLabel}`);
+	metadataLines.push(`${uiTheme.fg("muted", "Chars:")} ${charCount}`);
+	if (truncated) {
+		metadataLines.push(uiTheme.fg("warning", `${uiTheme.status.warning} Output truncated`));
+		if (truncation?.artifactId) metadataLines.push(formatStyledArtifactReference(truncation.artifactId, uiTheme));
+	}
+	if (hasNotes) {
+		metadataLines.push(`${uiTheme.fg("muted", "Notes:")} ${details.notes.join("; ")}`);
+	}
+
+	const outputBlock = new CachedOutputBlock();
+	let lastExpanded: boolean | undefined;
+	let contentPreviewLines: string[] | undefined;
+
+	return {
+		render: (width: number) => {
+			const { expanded } = options;
+
+			if (contentPreviewLines === undefined || lastExpanded !== expanded) {
+				const previewLimit = expanded ? 12 : 3;
+				const previewList = applyListLimit(contentLines, { headLimit: previewLimit });
+				const previewLines = previewList.items.map(line => line.trimEnd());
+				const remaining = Math.max(0, contentLines.length - previewList.items.length);
+				contentPreviewLines =
+					previewLines.length > 0
+						? previewLines.map(line => uiTheme.fg("dim", line))
+						: [uiTheme.fg("dim", "(no content)")];
+				if (remaining > 0) {
+					const hint = formatExpandHint(uiTheme, expanded, true);
+					contentPreviewLines.push(uiTheme.fg("muted", `… ${remaining} more lines${hint ? ` ${hint}` : ""}`));
+				}
+				lastExpanded = expanded;
+				outputBlock.invalidate();
+			}
+
+			return outputBlock.render(
+				{
+					header,
+					state: truncated ? "warning" : "success",
+					sections: [
+						{ label: uiTheme.fg("toolTitle", "Metadata"), lines: metadataLines },
+						{ label: uiTheme.fg("toolTitle", "Content Preview"), lines: contentPreviewLines },
+					],
+					width,
+					applyBg: false,
+				},
+				uiTheme,
+			);
+		},
+		invalidate: () => {
+			outputBlock.invalidate();
+			contentPreviewLines = undefined;
+			lastExpanded = undefined;
+		},
+	};
+}
+
 export function renderFetchCall(
 	args: { url?: string; timeout?: number; raw?: boolean },
 	_options: RenderResultOptions,
@@ -1212,7 +1511,6 @@ export function renderFetchCall(
 	return new Text(text, 0, 0);
 }
 
-/** Render fetch result with tree-based layout */
 export function renderFetchResult(
 	result: { content: Array<{ type: string; text?: string }>; details?: FetchToolDetails },
 	options: RenderResultOptions,

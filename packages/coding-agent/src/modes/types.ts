@@ -175,6 +175,7 @@ export interface InteractiveModeContext {
 	handleUsageCommand(reports?: UsageReport[] | null): Promise<void>;
 	handleChangelogCommand(showFull?: boolean): Promise<void>;
 	handleHotkeysCommand(): void;
+	handleToolsCommand(): void;
 	handleDumpCommand(): void;
 	handleDebugTranscriptCommand(): Promise<void>;
 	handleClearCommand(): Promise<void>;
@@ -199,6 +200,7 @@ export interface InteractiveModeContext {
 	showAgentsDashboard(): void;
 	showPromptInspector(): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
+	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;
 	showTreeSelector(): void;
 	showSessionSelector(): void;
@@ -207,6 +209,8 @@ export interface InteractiveModeContext {
 	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void>;
 	showHookConfirm(title: string, message: string): Promise<boolean>;
 	showDebugSelector(): void;
+	showSessionObserver(): void;
+	resetObserverRegistry(): void;
 
 	// Input handling
 	handleCtrlC(): void;

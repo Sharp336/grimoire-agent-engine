@@ -111,6 +111,7 @@ function makeTransformMetadata(overrides?: Partial<TransformMetadata>): Transfor
 		droppedCount: 0,
 		tokensBefore: 50,
 		tokensAfter: 50,
+		scoredCount: 0,
 		...overrides,
 	};
 }

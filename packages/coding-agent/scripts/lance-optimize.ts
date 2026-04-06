@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+import * as os from "node:os";
 /**
  * One-off LanceDB compaction + version pruning.
  *
@@ -10,7 +11,6 @@
  * recent versions that concurrent readers may reference.
  */
 import * as path from "node:path";
-import * as os from "node:os";
 import { connect } from "@lancedb/lancedb";
 
 const agentDir = path.join(os.homedir(), ".oh-omp", "agent");
@@ -51,7 +51,9 @@ for (const entry of dbs) {
 	const elapsed = ((performance.now() - t0) / 1000).toFixed(1);
 
 	console.log(`  done in ${elapsed}s`);
-	console.log(`  compaction: ${stats.compaction.fragmentsRemoved} fragments removed, ${stats.compaction.filesAdded} files added`);
+	console.log(
+		`  compaction: ${stats.compaction.fragmentsRemoved} fragments removed, ${stats.compaction.filesAdded} files added`,
+	);
 	console.log(`  prune: ${stats.prune.bytesRemoved} bytes removed, ${stats.prune.oldVersions} old versions pruned`);
 
 	table.close();

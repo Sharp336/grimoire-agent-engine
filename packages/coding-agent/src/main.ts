@@ -13,6 +13,7 @@ import { createInterface } from "node:readline/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	$env,
+	getConfigDirName,
 	getProjectDir,
 	logger,
 	postmortem,
@@ -22,6 +23,7 @@ import {
 	WORKSPACE_VERSION,
 } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { invalidate as invalidateFsCache } from "./capability/fs";
 import type { Args } from "./cli/args";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
@@ -32,8 +34,21 @@ import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
 import { resolveCliModel, resolveModelRoleValue, resolveModelScope, type ScopedModel } from "./config/model-resolver";
 import { Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
+import {
+	clearClaudePluginRootsCache,
+	injectPluginDirRoots,
+	preloadPluginRoots,
+	resolveActiveProjectRegistryPath,
+} from "./discovery/helpers";
 import { exportFromFile } from "./export/html";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
+import {
+	getInstalledPluginsRegistryPath,
+	getMarketplacesCacheDir,
+	getMarketplacesRegistryPath,
+	getPluginsCacheDir,
+	MarketplaceManager,
+} from "./extensibility/plugins/marketplace";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode, runAcpMode, runPrintMode, runRpcMode } from "./modes";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
@@ -44,6 +59,7 @@ import type { AgentSession } from "./session/agent-session";
 import { resolveResumableSession, type SessionInfo, SessionManager } from "./session/session-manager";
 import { resolvePromptInput } from "./system-prompt";
 import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog";
+import type { EventBus } from "./utils/event-bus";
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!settings.get("startup.checkUpdate")) {
@@ -115,10 +131,19 @@ async function runInteractiveMode(
 	setExtensionUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
 	lspServers: Array<{ name: string; status: "ready" | "error"; fileTypes: string[]; error?: string }> | undefined,
 	mcpManager: MCPManager | undefined,
+	eventBus?: EventBus,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
 ): Promise<void> {
-	const mode = new InteractiveMode(session, version, changelogMarkdown, setExtensionUIContext, lspServers, mcpManager);
+	const mode = new InteractiveMode(
+		session,
+		version,
+		changelogMarkdown,
+		setExtensionUIContext,
+		lspServers,
+		mcpManager,
+		eventBus,
+	);
 
 	await mode.init();
 
@@ -268,6 +293,17 @@ async function createSessionManager(parsed: Args, cwd: string): Promise<SessionM
 	// If --session-dir provided without --continue/--resume, create new session there
 	if (parsed.sessionDir) {
 		return SessionManager.create(cwd, parsed.sessionDir);
+	}
+	// Auto-resume: behave like --continue if the setting is enabled and a prior
+	// session exists. When a prior session is resumed, mark parsed.continue so
+	// buildSessionOptions restores the session's model/thinking instead of
+	// overriding them with CLI defaults.
+	if (settings.get("autoResume")) {
+		const manager = await SessionManager.continueRecent(cwd, parsed.sessionDir);
+		if (manager.getEntries().length > 0) {
+			parsed.continue = true;
+		}
+		return manager;
 	}
 	// Default case (new session) returns undefined, SDK will create one
 	return undefined;
@@ -537,6 +573,7 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 	}
 
 	if (parsedArgs.listModels !== undefined) {
+		await logger.timeAsync("settings:init:list-models", () => Settings.init({ cwd: getProjectDir() }));
 		await modelRegistry.refresh("online");
 		const searchPattern = typeof parsedArgs.listModels === "string" ? parsedArgs.listModels : undefined;
 		await listModels(modelRegistry, searchPattern);
@@ -649,6 +686,50 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 		sessionManager = await SessionManager.open(selectedPath);
 	}
 
+	// Wire --plugin-dir and preload plugin roots for sync consumers (LSP config)
+	const home = os.homedir();
+	if (parsedArgs.pluginDirs && parsedArgs.pluginDirs.length > 0) {
+		await logger.timeAsync("injectPluginDirRoots", () =>
+			injectPluginDirRoots(home, parsedArgs.pluginDirs!, getProjectDir()),
+		);
+	} else {
+		await logger.timeAsync("preloadPluginRoots", () => preloadPluginRoots(home, getProjectDir()));
+	}
+
+	// Background marketplace auto-update — never blocks startup.
+	const autoUpdate = settings.get("marketplace.autoUpdate");
+	if (autoUpdate !== "off") {
+		void (async () => {
+			try {
+				const mgr = new MarketplaceManager({
+					marketplacesRegistryPath: getMarketplacesRegistryPath(),
+					installedRegistryPath: getInstalledPluginsRegistryPath(),
+					projectInstalledRegistryPath: (await resolveActiveProjectRegistryPath(getProjectDir())) ?? undefined,
+					marketplacesCacheDir: getMarketplacesCacheDir(),
+					pluginsCacheDir: getPluginsCacheDir(),
+					clearPluginRootsCache: (extraPaths?: readonly string[]) => {
+						const h = os.homedir();
+						invalidateFsCache(path.join(h, ".claude", "plugins", "installed_plugins.json"));
+						invalidateFsCache(path.join(h, getConfigDirName(), "plugins", "installed_plugins.json"));
+						for (const p of extraPaths ?? []) invalidateFsCache(p);
+						clearClaudePluginRootsCache();
+					},
+				});
+				await mgr.refreshStaleMarketplaces();
+				const updates = await mgr.checkForUpdates();
+				if (updates.length === 0) return;
+				if (autoUpdate === "auto") {
+					await mgr.upgradeAllPlugins();
+					logger.debug(`Auto-upgraded ${updates.length} marketplace plugin(s)`);
+				} else {
+					logger.debug(`${updates.length} marketplace plugin update(s) available \u2014 /marketplace upgrade`);
+				}
+			} catch {
+				// Silently ignore — network failure, corrupt data, offline.
+			}
+		})();
+	}
+
 	const { options: sessionOptions } = await logger.timeAsync("buildSessionOptions", () =>
 		buildSessionOptions(parsedArgs, scopedModels, sessionManager, modelRegistry),
 	);
@@ -669,7 +750,7 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 		}
 	}
 
-	const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await logger.timeAsync(
+	const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager, eventBus } = await logger.timeAsync(
 		"createAgentSession",
 		() => createAgentSession(sessionOptions),
 	);
@@ -757,6 +838,7 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 			setToolUIContext,
 			lspServers,
 			mcpManager,
+			eventBus,
 			initialMessage,
 			initialImages,
 		);

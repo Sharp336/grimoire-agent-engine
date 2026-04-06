@@ -2,9 +2,17 @@
  * Interactive mode for the coding agent.
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type Agent, type AgentMessage, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message, Model, UsageReport } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessage,
+	type ImageContent,
+	type Message,
+	type Model,
+	modelsAreEqual,
+	type UsageReport,
+} from "@oh-my-pi/pi-ai";
 import type { Component, SlashCommand } from "@oh-my-pi/pi-tui";
 import { Container, Loader, Markdown, ProcessTerminal, Spacer, Text, TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getProjectDir, hsvToRgb, isEnoent, logger, postmortem } from "@oh-my-pi/pi-utils";
@@ -29,6 +37,8 @@ import type { SessionContext, SessionManager } from "../session/session-manager"
 import { getRecentSessions } from "../session/session-manager";
 import { STTController, type SttState } from "../stt";
 import type { ExitPlanModeDetails } from "../tools";
+import type { EventBus } from "../utils/event-bus";
+import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
@@ -50,6 +60,7 @@ import { MCPCommandController } from "./controllers/mcp-command-controller";
 import { SelectorController } from "./controllers/selector-controller";
 import { SSHCommandController } from "./controllers/ssh-command-controller";
 import { OAuthManualInputManager } from "./oauth-manual-input";
+import { SessionObserverRegistry } from "./session-observer-registry";
 import { setMermaidRenderCallback } from "./theme/mermaid-cache";
 import type { Theme } from "./theme/theme";
 import {
@@ -149,9 +160,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	readonly #version: string;
 	readonly #changelogMarkdown: string | undefined;
 	#planModePreviousTools: string[] | undefined;
-	#planModePreviousModel: Model | undefined;
-	#pendingModelSwitch: Model | undefined;
+	#planModePreviousModelState: { model: Model; thinkingLevel?: ThinkingLevel } | undefined;
+	#pendingModelSwitch: { model: Model; thinkingLevel?: ThinkingLevel } | undefined;
 	#planModeHasEntered = false;
+	#planReviewContainer: Container | undefined;
 	readonly lspServers:
 		| Array<{ name: string; status: "ready" | "error"; fileTypes: string[]; error?: string }>
 		| undefined = undefined;
@@ -171,6 +183,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#voicePreviousShowHardwareCursor: boolean | null = null;
 	#voicePreviousUseTerminalCursor: boolean | null = null;
 	#resizeHandler?: () => void;
+	#observerRegistry: SessionObserverRegistry;
+	#eventBus?: EventBus;
 
 	constructor(
 		session: AgentSession,
@@ -181,6 +195,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			| Array<{ name: string; status: "ready" | "error"; fileTypes: string[]; error?: string }>
 			| undefined = undefined,
 		mcpManager?: import("../mcp").MCPManager,
+		eventBus?: EventBus,
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
@@ -192,6 +207,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#toolUiContextSetter = setToolUIContext;
 		this.lspServers = lspServers;
 		this.mcpManager = mcpManager;
+		this.#eventBus = eventBus;
 
 		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
 		this.ui.setClearOnShrink(settings.get("clearOnShrink"));
@@ -265,6 +281,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController = new CommandController(this);
 		this.#selectorController = new SelectorController(this);
 		this.#inputController = new InputController(this);
+		this.#observerRegistry = new SessionObserverRegistry();
 	}
 
 	async init(): Promise<void> {
@@ -302,6 +319,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			})) ?? [];
 
 		const startupQuiet = settings.get("startup.quiet");
+
+		for (const warning of this.session.configWarnings) {
+			this.ui.addChild(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0));
+			this.ui.addChild(new Spacer(1));
+		}
 
 		if (!startupQuiet) {
 			// Add welcome header
@@ -343,6 +365,16 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.#inputController.setupKeyHandlers();
 		this.#inputController.setupEditorSubmitHandler();
+
+		// Wire observer registry to EventBus
+		if (this.#eventBus) {
+			this.#observerRegistry.subscribeToEventBus(this.#eventBus);
+		}
+		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
+		this.#observerRegistry.onChange(() => {
+			this.statusLine.setSubagentCount(this.#observerRegistry.getActiveSubagentCount());
+			this.ui.requestRender();
+		});
 
 		// Load initial todos
 		await this.#loadTodoList();
@@ -504,7 +536,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	rebuildChatFromMessages(): void {
 		this.chatContainer.clear();
-		const context = this.sessionManager.buildSessionContext();
+		const context = this.session.buildDisplaySessionContext();
 		this.renderSessionContext(context);
 	}
 
@@ -606,33 +638,41 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #applyPlanModeModel(): Promise<void> {
-		const planModel = this.session.resolveRoleModel("plan");
-		if (!planModel) return;
+		const resolved = this.session.resolveRoleModelWithThinking("plan");
+		if (!resolved.model) return;
+
 		const currentModel = this.session.model;
-		if (currentModel && currentModel.provider === planModel.provider && currentModel.id === planModel.id) {
-			return;
-		}
-		this.#planModePreviousModel = currentModel;
-		if (this.session.isStreaming) {
-			this.#pendingModelSwitch = planModel;
-			return;
-		}
-		try {
-			await this.session.setModelTemporary(planModel);
-		} catch (error) {
-			this.showWarning(
-				`Failed to switch to plan model for plan mode: ${error instanceof Error ? error.message : String(error)}`,
-			);
+		const sameModel = modelsAreEqual(currentModel, resolved.model);
+		const planThinkingLevel = resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined;
+
+		this.#planModePreviousModelState = currentModel
+			? { model: currentModel, thinkingLevel: this.session.thinkingLevel }
+			: undefined;
+
+		if (!sameModel) {
+			if (this.session.isStreaming) {
+				this.#pendingModelSwitch = { model: resolved.model, thinkingLevel: planThinkingLevel };
+				return;
+			}
+			try {
+				await this.session.setModelTemporary(resolved.model, planThinkingLevel);
+			} catch (error) {
+				this.showWarning(
+					`Failed to switch to plan model for plan mode: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		} else if (planThinkingLevel) {
+			this.session.setThinkingLevel(planThinkingLevel);
 		}
 	}
 
 	/** Apply any deferred model switch after the current stream ends. */
 	async flushPendingModelSwitch(): Promise<void> {
-		const model = this.#pendingModelSwitch;
-		if (!model) return;
+		const pending = this.#pendingModelSwitch;
+		if (!pending) return;
 		this.#pendingModelSwitch = undefined;
 		try {
-			await this.session.setModelTemporary(model);
+			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
 		} catch (error) {
 			this.showWarning(
 				`Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
@@ -696,20 +736,25 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (previousTools && previousTools.length > 0) {
 			await this.session.setActiveToolsByName(previousTools);
 		}
-		if (this.#planModePreviousModel) {
-			if (this.session.isStreaming) {
-				this.#pendingModelSwitch = this.#planModePreviousModel;
+		if (this.#planModePreviousModelState) {
+			const prev = this.#planModePreviousModelState;
+			if (modelsAreEqual(this.session.model, prev.model)) {
+				// Same model — only thinking level may differ. Avoid setModelTemporary()
+				// which would reset provider-side sessions (openai-responses/Codex) and
+				// break conversation continuity.
+				this.session.setThinkingLevel(prev.thinkingLevel);
+			} else if (this.session.isStreaming) {
+				this.#pendingModelSwitch = { model: prev.model, thinkingLevel: prev.thinkingLevel };
 			} else {
-				await this.session.setModelTemporary(this.#planModePreviousModel);
+				await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
 			}
 		}
-
 		this.session.setPlanModeState(undefined);
 		this.planModeEnabled = false;
 		this.planModePaused = options?.paused ?? false;
 		this.planModePlanFilePath = undefined;
 		this.#planModePreviousTools = undefined;
-		this.#planModePreviousModel = undefined;
+		this.#planModePreviousModelState = undefined;
 		this.#updatePlanModeStatus();
 		const paused = options?.paused ?? false;
 		this.sessionManager.appendModeChange(paused ? "plan_paused" : "none");
@@ -731,13 +776,95 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#renderPlanPreview(planContent: string): void {
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new DynamicBorder());
-		this.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Plan Review")), 1, 1));
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Markdown(planContent, 1, 1, getMarkdownTheme()));
-		this.chatContainer.addChild(new DynamicBorder());
+		if (!this.#planReviewContainer) {
+			this.#planReviewContainer = new Container();
+			this.chatContainer.addChild(this.#planReviewContainer);
+		}
+		this.#planReviewContainer.clear();
+		this.#planReviewContainer.addChild(new Spacer(1));
+		this.#planReviewContainer.addChild(new DynamicBorder());
+		this.#planReviewContainer.addChild(new Text(theme.bold(theme.fg("accent", "Plan Review")), 1, 1));
+		this.#planReviewContainer.addChild(new Spacer(1));
+		this.#planReviewContainer.addChild(new Markdown(planContent, 1, 1, getMarkdownTheme()));
+		this.#planReviewContainer.addChild(new DynamicBorder());
 		this.ui.requestRender();
+	}
+
+	#getEditorTerminalPath(): string | null {
+		if (process.platform === "win32") {
+			return null;
+		}
+		return "/dev/tty";
+	}
+
+	async #openEditorTerminalHandle(): Promise<fs.FileHandle | null> {
+		const terminalPath = this.#getEditorTerminalPath();
+		if (!terminalPath) {
+			return null;
+		}
+		try {
+			return await fs.open(terminalPath, "r+");
+		} catch {
+			return null;
+		}
+	}
+
+	#getPlanReviewHelpText(): string {
+		const externalEditorKey = this.keybindings.getDisplayString("app.editor.external");
+		if (!externalEditorKey) {
+			return "up/down navigate  enter select  esc cancel";
+		}
+		return `up/down navigate  enter select  ${externalEditorKey.toLowerCase()} open in editor  esc cancel`;
+	}
+
+	async #openPlanInExternalEditor(planFilePath: string): Promise<void> {
+		const editorCmd = getEditorCommand();
+		if (!editorCmd) {
+			this.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
+			return;
+		}
+
+		const resolvedPath = this.#resolvePlanFilePath(planFilePath);
+		let currentText: string;
+		try {
+			currentText = await Bun.file(resolvedPath).text();
+		} catch (error) {
+			if (isEnoent(error)) {
+				this.showError(`Plan file not found at ${planFilePath}`);
+				return;
+			}
+			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
+			return;
+		}
+
+		let ttyHandle: fs.FileHandle | null = null;
+		try {
+			ttyHandle = await this.#openEditorTerminalHandle();
+			this.ui.stop();
+
+			const stdio: [number | "inherit", number | "inherit", number | "inherit"] = ttyHandle
+				? [ttyHandle.fd, ttyHandle.fd, ttyHandle.fd]
+				: ["inherit", "inherit", "inherit"];
+
+			const result = await openInEditor(editorCmd, currentText, {
+				extension: path.extname(resolvedPath) || ".md",
+				stdio,
+				trimTrailingNewline: false,
+			});
+			if (result !== null) {
+				await Bun.write(resolvedPath, result);
+				this.#renderPlanPreview(result);
+				this.showStatus("Plan updated in external editor.");
+			}
+		} catch (error) {
+			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			if (ttyHandle) {
+				await ttyHandle.close();
+			}
+			this.ui.start();
+			this.ui.requestRender(true);
+		}
 	}
 
 	async #approvePlan(
@@ -809,16 +936,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		this.#renderPlanPreview(planContent);
-		const choice = await this.showHookSelector("Plan mode - next step", [
-			"Approve and execute",
-			"Refine plan",
-			"Stay in plan mode",
-		]);
+		const choice = await this.showHookSelector(
+			"Plan mode - next step",
+			["Approve and execute", "Refine plan", "Stay in plan mode"],
+			{
+				helpText: this.#getPlanReviewHelpText(),
+				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
+			},
+		);
 
 		if (choice === "Approve and execute") {
 			const finalPlanFilePath = details.finalPlanFilePath || planFilePath;
 			try {
-				await this.#approvePlan(planContent, { planFilePath, finalPlanFilePath });
+				const latestPlanContent = await this.#readPlanFile(planFilePath);
+				if (!latestPlanContent) {
+					this.showError(`Plan file not found at ${planFilePath}`);
+					return;
+				}
+				await this.#approvePlan(latestPlanContent, { planFilePath, finalPlanFilePath });
 			} catch (error) {
 				this.showError(
 					`Failed to finalize approved plan: ${error instanceof Error ? error.message : String(error)}`,
@@ -827,9 +962,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (choice === "Refine plan") {
-			const refinement = await this.showHookInput("What should be refined?");
+			const refinement = (await this.showHookInput("What should be refined?"))?.trim();
 			if (refinement) {
-				this.editor.setText(refinement);
+				if (this.onInputCallback) {
+					this.onInputCallback(this.startPendingSubmission({ text: refinement }));
+				} else {
+					this.editor.setText(refinement);
+				}
 			}
 		}
 	}
@@ -846,6 +985,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.#extensionUiController.clearHookWidgets();
+		this.#observerRegistry.dispose();
+		this.#eventController.dispose();
 		this.statusLine.dispose();
 		if (this.#resizeHandler) {
 			process.stdout.removeListener("resize", this.#resizeHandler);
@@ -1081,9 +1222,14 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#commandController.handleHotkeysCommand();
 	}
 
+	handleToolsCommand(): void {
+		this.#commandController.handleToolsCommand();
+	}
+
 	handleClearCommand(): Promise<void> {
 		this.#btwController.dispose();
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
+		this.#planReviewContainer = undefined;
 		return this.#commandController.handleClearCommand();
 	}
 
@@ -1180,6 +1326,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showDebugSelector();
 	}
 
+	showSessionObserver(): void {
+		const sessions = this.#observerRegistry.getSessions();
+		if (sessions.length <= 1) {
+			this.showStatus("No active subagent sessions");
+			return;
+		}
+		this.#selectorController.showSessionObserver(this.#observerRegistry);
+	}
+
+	resetObserverRegistry(): void {
+		this.#observerRegistry.resetSessions();
+		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);
+	}
+
 	handleBashCommand(command: string, excludeFromContext?: boolean): Promise<void> {
 		return this.#commandController.handleBashCommand(command, excludeFromContext);
 	}
@@ -1239,6 +1399,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showModelSelector(options);
 	}
 
+	showPluginSelector(mode?: "install" | "uninstall"): void {
+		void this.#selectorController.showPluginSelector(mode);
+	}
+
 	showUserMessageSelector(): void {
 		this.#selectorController.showUserMessageSelector();
 	}
@@ -1253,6 +1417,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleResumeSession(sessionPath: string): Promise<void> {
 		this.#btwController.dispose();
+		this.resetObserverRegistry();
 		return this.#selectorController.handleResumeSession(sessionPath);
 	}
 

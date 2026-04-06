@@ -109,6 +109,228 @@
 - Safety margin reduced from 10% to 5% of context window (configurable via `assembler.safetyMarginPercent`) ([#63](https://github.com/open-horizon-labs/oh-omp/issues/63))
 - Hydration gains a hard cap at 50% of allocatable budget (configurable via `assembler.hydrationBudgetPercent`), replacing the previous uncapped model ([#63](https://github.com/open-horizon-labs/oh-omp/issues/63))
 - Messages gain a guaranteed minimum floor of 50% of allocatable budget (configurable via `assembler.messageBudgetPercent`), expanding into unused hydration capacity ([#63](https://github.com/open-horizon-labs/oh-omp/issues/63))
+## [13.19.0] - 2026-04-05
+### Added
+
+- Added idle auto-compaction settings and scheduling so sessions can compact after inactive turns without auto-continuing.
+- Added `onExternalEditor` callback to extension UI dialog options for handling external editor shortcut in select dialogs
+- Added external editor shortcut support in plan review selector, allowing users to open and edit the plan in their configured editor
+- Added `matchesAppExternalEditor` keybinding matcher to detect external editor shortcut (Ctrl+G or configured binding)
+- Added `trimTrailingNewline` option to `openInEditor` function to preserve trailing newlines when editing files
+- Added GitHub CLI utilities to git module (`utils/git.github`) with `available()`, `run()`, `json()`, and `text()` methods for GitHub CLI operations
+- Exported git utilities from main package entry point for use by extensions
+- Added comprehensive git utility module (`utils/git`) with organized namespaces for common git operations (branch, commit, diff, log, patch, ref, stage, status, head, repository)
+
+### Changed
+
+- Changed idle compaction settings (`compaction.idleThresholdTokens` and `compaction.idleTimeoutSeconds`) from enum to numeric type for flexible configuration
+- Modified secret obfuscation to deobfuscate restored session messages for local display while keeping outbound LLM messages obfuscated
+- Updated stash pop operation to preserve staged changes with `--index` flag when restoring after task branch merges
+- Changed secret placeholders to deterministic hash-style redaction tokens and deobfuscated assistant output for local display.
+- Updated hook editor and hook selector components to use `matchesAppExternalEditor` matcher for consistent external editor keybinding detection
+- Modified plan review flow to read the latest plan content from disk before approval, allowing changes made in external editor to be reflected
+- Enhanced plan review help text to dynamically display the configured external editor keybinding
+- Refactored git operations to use centralized utility module instead of `ControlledGit` class throughout codebase
+- Replaced `ControlledGit` dependency injection pattern with direct `cwd` parameter in commit agent tools
+- Migrated git HEAD resolution in footer and status-line components to use new synchronous and asynchronous utilities
+- Updated git status summary calculation in status-line component to use new git utility API
+- Simplified git branch operations in task execution and cleanup to use new utility functions
+- Refactored patch application logic in task worktree to use new git patch utilities
+
+### Removed
+
+- Removed `gh-cli.ts` module; GitHub CLI functionality now available via `utils/git.github`
+- Removed `ControlledGit` class and associated git wrapper infrastructure from `commit/git` module
+- Removed `mergeStdoutStderr` helper function from autoresearch git utilities
+- Removed `findGitHeadPathAsync` and `findGitHeadPathSync` from modes/shared module (replaced by git utilities)
+- Removed `./commit/git` export from package.json (internal diff parsing still available via `./commit/git/*`)
+
+### Fixed
+
+- Fixed idle compaction timer to properly cancel when event controller is disposed, preventing memory leaks
+- Fixed session resumption to preserve the last non-empty session when starting a fresh session
+- Fixed stash detection to use git ref resolution instead of output parsing for reliable stash state tracking
+- Fixed isolated task merge-back to preserve task outputs on merge failure and stash dirty worktrees before cherry-pick.
+- Fixed web search source rendering to truncate long title, metadata, and URL lines before they overflow the UI.
+- Fixed PR checkout tool to resolve symlinks in worktree paths, ensuring consistent path references in results and metadata
+- Fixed `read` output for file-backed internal URLs like `local://...` to include hashline prefixes in hashline edit mode, preserving usable line refs for follow-up edits
+- Fixed the plan review selector to support the external editor shortcut for opening and updating the current plan from the approval screen
+
+## [13.18.0] - 2026-04-02
+### Breaking Changes
+
+- Removed standalone `fetch` tool; URL fetching is now integrated into the `read` tool
+
+### Added
+
+- Added URL reading capability to `read` tool with support for web pages, GitHub issues, Stack Overflow, Wikipedia, Reddit, NPM, arXiv, technical blogs, RSS/Atom feeds, and JSON endpoints
+- Added `offset` and `limit` parameter support for paginating cached URL fetch results
+- Added URL caching mechanism to avoid redundant network requests when reading the same URL multiple times
+
+### Changed
+
+- Renamed `fetch.enabled` setting to `Read URLs` with updated description to reflect integration with read tool
+- Updated `read` tool to accept `timeout` and `raw` parameters for URL handling
+- Updated `read` tool to support `file://` URLs for local file paths
+- Removed `fetch` tool from agent tool lists (explore, librarian, oracle, plan, reviewer agents)
+
+### Fixed
+
+- Fixed `read` tool to properly handle `file://` URL scheme by converting to filesystem paths
+
+## [13.17.5] - 2026-04-01
+### Added
+
+- Added support for writing to ZIP archives using fflate library for cross-platform compatibility
+
+### Changed
+
+- Modified archive writing to detect and handle ZIP files separately from Bun archives
+
+### Removed
+
+- Removed GhPrPushTool test case
+
+## [13.17.4] - 2026-04-01
+### Added
+
+- Support for writing to archive entries in `.tar`, `.tar.gz`, `.tgz`, and `.zip` files using `archive.ext:path/inside/archive` syntax
+- Ability to create new archives when writing to archive subpaths that don't yet exist
+
+## [13.17.3] - 2026-04-01
+
+### Added
+
+- Added support for converting Jupyter notebooks (`.ipynb`) to markdown via markit
+- Added `markit-ai` npm package for native document and notebook conversion
+- Added support for reading files from `.tar`, `.tar.gz`, `.tgz`, and `.zip` archives using virtual subpaths like `archive.ext:path/to/file`
+- Added ability to list archive contents and navigate subdirectories within supported archive formats
+- Added archive-aware `read` support for `.tar`, `.tar.gz`, `.tgz`, and `.zip`, including virtual subpaths like `archive.ext:path/to/file`
+- Added `/tools` slash command to show the tools currently visible to the agent in the interactive session
+
+### Changed
+
+- Replaced Python-based markitdown CLI tool with native `markit-ai` library for document conversion
+- Updated document conversion to use markit library instead of external markitdown command
+- Removed markitdown from Python tools manager (no longer needed as external dependency)
+- Updated `read` tool documentation to reflect archive support and usage patterns
+
+## [13.17.2] - 2026-04-01
+### Added
+
+- Added `/marketplace help` command to display usage guide for all marketplace operations
+- Added dedicated `gh-renderer.ts` module for rich terminal rendering of GitHub Actions workflow runs with live status snapshots and job details
+- Added `gh_pr_checkout` tool to check out GitHub pull requests into dedicated git worktrees with contributor push metadata
+- Added `gh_pr_push` tool to push checked-out pull request branches back to their source branches
+- Added `gh_repo_view` tool to read GitHub repository metadata using the local GitHub CLI
+- Added `gh_issue_view` tool to read GitHub issues with optional comment context
+- Added `gh_pr_view` tool to read GitHub pull requests with optional comment context
+- Added `gh_pr_diff` tool to read GitHub pull request diffs with optional file filtering
+- Added `gh_search_issues` tool to search GitHub issues with repository scoping
+- Added `gh_search_prs` tool to search GitHub pull requests with repository scoping
+- Added `gh_run_watch` tool to watch GitHub Actions workflow runs, fast-fail on job failures, and stream tailed logs for failed jobs
+- Added `github.enabled` setting to enable read-only `gh_*` GitHub CLI tools for repository, issue, pull request, diff, and search workflows
+- Added bundled `/green` command to generate iterative CI fix prompts with optional tag instructions when HEAD is tagged
+- Added `github.enabled` setting to enable read-only `gh_*` GitHub CLI tools for repository, issue, pull request, diff, and search workflows
+- Added `gh_repo_view` tool to read GitHub repository metadata using the local GitHub CLI
+- Added `gh_issue_view` tool to read GitHub issues with optional comment context
+- Added `gh_pr_view` tool to read GitHub pull requests with optional comment context
+- Added `gh_pr_diff` tool to read GitHub pull request diffs with optional file filtering
+- Added `gh_search_issues` tool to search GitHub issues with repository scoping
+- Added `gh_search_prs` tool to search GitHub pull requests with repository scoping
+- Added `gh_run_watch` tool to watch GitHub Actions workflow runs, fast-fail on job failures, and stream tailed logs for failed jobs
+- Added bundled `/green` command to generate iterative CI fix prompts with optional tag instructions when HEAD is tagged
+- Project-scoped marketplace plugin installs: `omp plugin install --scope project name@marketplace` and `/marketplace install --scope project name@marketplace` install plugins into the nearest `.omp/` or `.git`-rooted project directory instead of the user directory ([#581](https://github.com/can1357/oh-my-pi/issues/581))
+- `--scope user|project` flag added to `/marketplace uninstall`, `/marketplace upgrade`, `/plugins enable`, and `/plugins disable` to disambiguate when a plugin is installed in both scopes
+- `omp plugin upgrade --scope project` with no plugin ID warns that `--scope` is ignored for bulk upgrades
+- Added opt-in `gh_*` GitHub CLI tools behind the `github.enabled` setting for repository, issue, pull request, diff, and search workflows
+- Added opt-in `gh_run_watch` to fast-fail GitHub Actions runs, stream job status snapshots, and return tailed logs for failed jobs
+- Added bundled `/green` command to generate the iterative “fix CI until green” prompt, with final tag instructions included only when `HEAD` already has a tag
+
+### Changed
+
+- Improved marketplace catalog parsing to skip invalid plugin entries with warnings instead of failing the entire catalog load
+- Enhanced `/marketplace discover` command to suggest adding the official marketplace when no plugins are available
+- Improved `/marketplace` command messaging with clearer guidance for first-time setup and available commands
+- Enhanced `gh_run_watch` tool call rendering to display animated spinner status and target description (run ID, branch, or current HEAD) with improved visual hierarchy
+- Enhanced `gh_pr_view` tool to include inline review comments alongside pull request reviews for improved discussion context
+- Improved `gh_run_watch` tool output rendering with dedicated visual component for streaming run snapshots and job status updates
+
+### Fixed
+
+- Fixed marketplace error messages to display error details instead of object stringification
+- Fixed artifact storage for non-persistent sessions to use in-memory fallback instead of returning undefined, enabling proper spill truncation for all session types
+- Fixed prompt file formatting to include trailing newlines at EOF for consistency across all prompt markdown files
+- Fixed `gh_pr_diff` to preserve raw patch content instead of normalizing tabs and whitespace
+- Fixed `gh_pr_view` to include inline review comments alongside pull request reviews and issue-style comments for discussion context
+- Fixed `gh_run_watch` to resolve explicit branch watches against the selected branch head instead of local `HEAD`
+- Fixed `gh_run_watch` to hide repo and polling internals from the tool schema and save full failed-job logs as session artifacts alongside the inline tailed output
+- Fixed `gh_*` tool outputs to spill full large results to artifacts instead of pre-truncating the head with unusable `offset=` guidance
+- Fixed bundled `/green` to watch the workflow runs for the current `HEAD` commit instead of whichever branch run was newest
+- Fixed OpenAI Responses session rehydration to strip stale assistant replay payloads before resumed requests ([#594](https://github.com/can1357/oh-my-pi/pull/594) by [@daandden](https://github.com/daandden))
+- Fixed inline image rendering to cap image height and preserve multiplexer scrollback during terminal resizes ([#587](https://github.com/can1357/oh-my-pi/pull/587) by [@smileynet](https://github.com/smileynet))
+
+## [13.17.1] - 2026-04-01
+### Removed
+
+- Removed `code_search` tool for code snippet and documentation search
+
+### Fixed
+
+- Fixed edit tool diff rendering to wrap long diff lines with continuation gutters instead of truncating them at terminal width ([#578](https://github.com/can1357/oh-my-pi/issues/578))
+- Fixed `--list-models` and `/model` provider filtering to hide models from disabled providers ([#588](https://github.com/can1357/oh-my-pi/issues/588))
+- Fixed edit tool diffstats to use diff-specific add/remove theme colors instead of success/error status colors ([#589](https://github.com/can1357/oh-my-pi/issues/589))
+## [13.17.0] - 2026-03-30
+
+### Added
+
+- Added `marketplace.autoUpdate` setting (`off`/`notify`/`auto`, default `notify`) for automatic plugin update checking on startup
+- Added background marketplace catalog refresh on startup when catalogs are stale (>24h)
+- Added `/marketplace upgrade [name@marketplace]` slash command to upgrade outdated plugins
+- Added `omp plugin upgrade [name@marketplace]` CLI command for plugin upgrades
+- Added `checkForUpdates()`, `upgradePlugin()`, `upgradeAllPlugins()`, and `refreshStaleMarketplaces()` to MarketplaceManager
+- Added marketplace plugin system: registry types, ID helpers, atomic read/write for `marketplaces.json` and `installed_plugins.json` (Claude Code-compatible format)
+- Added `MarketplaceManager` orchestrator for marketplace and plugin lifecycle (add/remove/update marketplaces, install/uninstall/enable plugins)
+- Added marketplace fetcher with source classification (GitHub, git, URL, local) and catalog validation
+- Added plugin source resolver with `pathIsWithin` containment checks and versioned cache manager
+- Added CLI commands: `omp plugin marketplace add|remove|update|list`, `omp plugin discover [marketplace]`
+- Added `classifyInstallTarget()` to distinguish `name@marketplace` from npm install targets
+- Extended `listClaudePluginRoots()` to read OMP's installed plugins registry alongside Claude Code's, with OMP as authoritative for duplicate plugin IDs
+- Added `--plugin-dir <path>` repeatable CLI flag for loading plugins from local directories
+- Added `/reload-plugins` slash command that invalidates fs content cache and plugin roots cache
+- Added `printPluginHelp()` entries for marketplace and discover commands
+- Added MCP server loading from marketplace plugin `.mcp.json` files with `${CLAUDE_PLUGIN_ROOT}` variable substitution
+- Added skill and command namespacing for marketplace plugins (`plugin-name:skill-name`)
+- Added LSP config loading from marketplace plugin roots via `getPreloadedPluginRoots()`
+- Wired `--plugin-dir` runtime injection into plugin roots at session startup with highest precedence
+- Added git (GitHub, SSH, HTTPS) and HTTP URL marketplace source fetching
+- Added `/marketplace` TUI slash command with subcommands: add, remove, update, list, discover, install, uninstall, installed
+- Added `/plugins` TUI slash command to view all installed plugins (npm + marketplace) and enable/disable marketplace plugins
+
+### Changed
+
+- Changed marketplace clone promotion to occur after duplicate and drift checks, improving safety of concurrent marketplace operations
+
+### Removed
+
+- Removed grep.app code search provider support; code search now uses Exa exclusively
+- Removed `providers.codeSearch` setting and related configuration options
+
+### Fixed
+
+- Fixed git-subdir plugin source resolution to properly clean up temporary clone directories on path validation errors
+- Fixed LSP config loading to use correct filenames variable when scanning plugin roots
+- Fixed plugin selector UI to request render on cancel, preventing stale display state
+- Fixed marketplace install command error handling to display user-friendly error messages instead of crashing
+- Fixed MCP tools from newly added servers not being activated after `/mcp add` — `refreshMCPTools` preserves prior MCP tool selections, so brand-new servers had their tools registered in the registry but never passed to the agent; tools are now explicitly activated on successful connection
+- Fixed `skill://` URI resolver to handle namespaced skills via longest-prefix matching against registered skill names
+
+## [13.16.5] - 2026-03-29
+
+### Fixed
+
+- Fixed `--model provider/id` resolving to wrong provider when model ID exists in multiple catalogs ([#560](https://github.com/can1357/oh-my-pi/issues/560))
+
 ## [13.16.4] - 2026-03-28
 ### Changed
 
@@ -286,6 +508,9 @@
 
 - Fixed resumed and session-switched GitHub Copilot/OpenAI Responses conversations replaying stale assistant native history from older saved sessions by sanitizing persisted assistant replay metadata on rehydration and resetting provider session state across live session boundaries ([#505](https://github.com/can1357/oh-my-pi/issues/505))
 
+### Added
+
+- Session observer overlay (`Ctrl+S`): view running subagent sessions with a picker and read-only transcript showing thinking, text, tool calls, and results
 ## [13.14.0] - 2026-03-20
 
 ### Added

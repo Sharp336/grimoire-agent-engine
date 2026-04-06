@@ -7,6 +7,7 @@
 import * as os from "node:os";
 import { type Ellipsis, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { getIndentation, pluralize } from "@oh-my-pi/pi-utils";
+import { settings } from "../config/settings";
 import type { Theme } from "../modes/theme/theme";
 import { formatDimensionNote, type ResizedImage } from "../utils/image-resize";
 
@@ -18,6 +19,25 @@ export function replaceTabs(text: string, file?: string): string {
 // =============================================================================
 // Standardized Display Constants
 // =============================================================================
+
+/** Resolve inline image dimension caps from settings and viewport. */
+export function resolveImageOptions(): { maxWidthCells: number; maxHeightCells?: number } {
+	const maxWidthCells = settings.get("tui.maxInlineImageColumns");
+	const rowSetting = Math.max(0, settings.get("tui.maxInlineImageRows"));
+	const viewportRows = process.stdout.rows;
+	const viewportFraction = viewportRows ? Math.floor(viewportRows * 0.6) : 0;
+	let maxHeightCells: number | undefined;
+	if (rowSetting === 0) {
+		// No explicit cap — use viewport fraction as safety bound
+		maxHeightCells = viewportFraction || undefined;
+	} else if (viewportFraction > 0) {
+		maxHeightCells = Math.min(rowSetting, viewportFraction);
+	} else {
+		// Viewport size unknown (transitional state) — honor explicit setting
+		maxHeightCells = rowSetting;
+	}
+	return { maxWidthCells, maxHeightCells };
+}
 
 /** Preview limits for collapsed/expanded views */
 export const PREVIEW_LIMITS = {
@@ -382,8 +402,8 @@ export function getDiffStats(diffText: string): DiffStats {
 
 export function formatDiffStats(added: number, removed: number, hunks: number, theme: Theme): string {
 	const parts: string[] = [];
-	if (added > 0) parts.push(theme.fg("success", `+${added}`));
-	if (removed > 0) parts.push(theme.fg("error", `-${removed}`));
+	if (added > 0) parts.push(theme.fg("toolDiffAdded", `+${added}`));
+	if (removed > 0) parts.push(theme.fg("toolDiffRemoved", `-${removed}`));
 	if (hunks > 0) parts.push(theme.fg("dim", `${hunks} hunk${hunks !== 1 ? "s" : ""}`));
 	return parts.join(theme.fg("dim", " / "));
 }

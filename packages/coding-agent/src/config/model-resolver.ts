@@ -588,6 +588,27 @@ export function resolveModelOverride(
 }
 
 /**
+ * Resolve a list of role patterns to the first matching model.
+ */
+export function resolveRoleSelection(
+	roles: readonly string[],
+	settings: Settings,
+	availableModels: Model<Api>[],
+): { model: Model<Api>; thinkingLevel?: ThinkingLevel } | undefined {
+	const matchPreferences = { usageOrder: settings.getStorage()?.getModelUsageOrder() };
+	for (const role of roles) {
+		const resolved = resolveModelRoleValue(settings.getModelRole(role), availableModels, {
+			settings,
+			matchPreferences,
+		});
+		if (resolved.model) {
+			return { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
+		}
+	}
+	return undefined;
+}
+
+/**
  * Resolve model patterns to actual Model objects with optional thinking levels
  * Format: "pattern:level" where :level is optional
  * For each pattern, finds all matching models and picks the best version:
@@ -730,9 +751,24 @@ export function resolveCliModel(options: {
 
 	if (!provider) {
 		const lower = cliModel.toLowerCase();
-		const exact = availableModels.find(
-			model => model.id.toLowerCase() === lower || `${model.provider}/${model.id}`.toLowerCase() === lower,
-		);
+		// When input has provider/id format (e.g. "zai/glm-5"), prefer decomposed
+		// provider+id match over flat id match. Without this, a model with id
+		// "zai/glm-5" on provider "vercel-ai-gateway" wins over provider "zai"
+		// with id "glm-5", because Array.find returns the first catalog hit.
+		const slashIdx = lower.indexOf("/");
+		let exact: (typeof availableModels)[number] | undefined;
+		if (slashIdx !== -1) {
+			const prefix = lower.substring(0, slashIdx);
+			const suffix = lower.substring(slashIdx + 1);
+			exact = availableModels.find(
+				model => model.provider.toLowerCase() === prefix && model.id.toLowerCase() === suffix,
+			);
+		}
+		if (!exact) {
+			exact = availableModels.find(
+				model => model.id.toLowerCase() === lower || `${model.provider}/${model.id}`.toLowerCase() === lower,
+			);
+		}
 		if (exact) {
 			return { model: exact, warning: undefined, thinkingLevel: undefined, error: undefined };
 		}

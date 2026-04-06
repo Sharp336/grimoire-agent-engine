@@ -314,7 +314,7 @@ Create images directly from the agent:
 
 Modern terminal interface with smart session management:
 
-- **Auto session titles**: Sessions automatically titled based on first message using smol model
+- **Auto session titles**: Sessions automatically titled based on first message using commit model, fallback to smol
 - **Welcome screen**: Logo, tips, recent sessions with selection
 - **Powerline footer**: Model, cwd, git branch/status, token usage, context %
 - **LSP status**: Shows which language servers are active and ready
@@ -466,6 +466,7 @@ return config
 | Qwen Portal (`qwen-portal`)                     | `QWEN_OAUTH_TOKEN` or `QWEN_PORTAL_API_KEY`  |
 | vLLM (`vllm`)                                   | `VLLM_API_KEY`                               |
 | Cloudflare AI Gateway (`cloudflare-ai-gateway`) | `CLOUDFLARE_AI_GATEWAY_API_KEY`              |
+| Vercel AI Gateway (`vercel-ai-gateway`)         | `AI_GATEWAY_API_KEY`                         |
 | Qianfan (`qianfan`)                             | `QIANFAN_API_KEY`                            |
 
 See [Environment Variables](docs/environment-variables.md) for the full list.
@@ -503,6 +504,7 @@ Use `/login` with supported providers:
 - MiniMax Coding Plan (International / China)
 - Qwen Portal (`qwen-portal`)
 - Cloudflare AI Gateway (`cloudflare-ai-gateway`)
+- Vercel AI Gateway (`vercel-ai-gateway`)
 
 For `ollama`, API key is optional. Leave it unset for local no-auth instances, or set `OLLAMA_API_KEY` for authenticated hosts.
 For `llama.cpp`, API key is optional. Leave it unset for local no-auth instances, or set `LLAMA_CPP_API_KEY` for authenticated hosts.
@@ -844,16 +846,33 @@ theme:
   dark: titanium
   light: light
 
+enabledModels:
+  - "anthropic/*"
+  - "*gpt*"
+  - "gemini-2.5-pro:high"
+
 modelRoles:
   default: anthropic/claude-sonnet-4-20250514
   plan: anthropic/claude-opus-4-1:high
   smol: anthropic/claude-sonnet-4-20250514
 defaultThinkingLevel: high
-enabledModels:
-  - anthropic/*
-  - "*gpt*"
-  - gemini-2.5-pro:high
 
+retry:
+  enabled: true
+  # Number of retries before giving up on rate limits/server errors
+  maxRetries: 3
+  # Wait this long as a base (exponentially backed off) unless the API provides a retry-after-ms
+  baseDelayMs: 2000
+  # Configure role-specific model fallback chains
+  fallbackChains:
+    default:
+      - "openai/gpt-4o-mini"
+      - "openai/gpt-4o"
+    plan:
+      - "anthropic/claude-sonnet-4-6:high"
+      - "openai/o3:high"
+  # Whether to revert to the primary model when a fallback's cooldown expires
+  fallbackRevertPolicy: cooldown-expiry
 steeringMode: one-at-a-time
 followUpMode: one-at-a-time
 interruptMode: immediate
@@ -873,10 +892,6 @@ compaction:
 skills:
   enabled: true
 
-retry:
-  enabled: true
-  maxRetries: 3
-  baseDelayMs: 2000
 
 terminal:
   showImages: true
@@ -1184,8 +1199,6 @@ Use `--tools <list>` to restrict available built-in tools.
 | `todo_write`     | Phased task tracking with progress management                  |
 | `fetch`          | Fetch and extract URL content                                  |
 | `web_search`     | Multi-provider web search                                      |
-| `deep_search`    | AI-powered deep research with synthesized results (Exa)        |
-| `code_search`    | Search code snippets and technical documentation (Exa)         |
 | `write`          | Create/overwrite files                                         |
 | `generate_image` | Generate or edit images using Gemini image models              |
 

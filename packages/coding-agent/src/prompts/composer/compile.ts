@@ -192,7 +192,11 @@ function buildCompilationMessage(input: {
 	invariants: string;
 	tokenBudget: number;
 }): string {
-	const sections = ["Compile a system prompt for a coding agent session.\n", "## Environment Inventory\n", input.inventoryText];
+	const sections = [
+		"Compile a system prompt for a coding agent session.\n",
+		"## Environment Inventory\n",
+		input.inventoryText,
+	];
 
 	if (input.toolDocs) {
 		sections.push("\n## Guidance Library — Active Tool Documentation\n", input.toolDocs);
@@ -227,9 +231,7 @@ function extractCompiledPrompt(message: { content: Array<{ type: string; text?: 
 	const text = extractText(message);
 	if (!text) return "";
 
-	const match = text.match(
-		new RegExp(`<${COMPILED_PROMPT_TAG}>\\s*([\\s\\S]*?)\\s*</${COMPILED_PROMPT_TAG}>`, "i"),
-	);
+	const match = text.match(new RegExp(`<${COMPILED_PROMPT_TAG}>\\s*([\\s\\S]*?)\\s*</${COMPILED_PROMPT_TAG}>`, "i"));
 	if (!match?.[1]) {
 		throw new Error(`composer: compilation response missing <${COMPILED_PROMPT_TAG}> wrapper`);
 	}

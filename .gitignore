@@ -25,6 +25,7 @@ target/
 *~
 
 # OS
+*.tmp
 .DS_Store
 
 # Logs & profiling
@@ -38,7 +39,8 @@ coverage/
 packages/ai/test/.temp-images/
 
 # Project specific
-.omp/
+!.omp/
+.omp/plugins/
 .mcp.json
 .oh/.cache/
 .fastembed_cache/

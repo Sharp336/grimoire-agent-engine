@@ -99,7 +99,14 @@ export class RecallStore {
 		const turnList = turns.join(", ");
 		const filter = `turn IN (${turnList}) AND session_id = '${escapedId}'`;
 		const timeout = Bun.sleep(5000).then(() => [] as RecallRow[]);
-		const results = await Promise.race([this.#table.query().where(filter).limit(turns.length * 3).toArray(), timeout]) as RecallRow[];
+		const results = (await Promise.race([
+			this.#table
+				.query()
+				.where(filter)
+				.limit(turns.length * 3)
+				.toArray(),
+			timeout,
+		])) as RecallRow[];
 		const map = new Map<number, Float32Array>();
 		for (const row of results) {
 			if (!map.has(row.turn) && row.vector) {

@@ -1,7 +1,9 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import * as url from "node:url";
+import * as zlib from "node:zlib";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { DEFAULT_BASH_INTERCEPTOR_RULES, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EditTool } from "@oh-my-pi/pi-coding-agent/patch";
@@ -13,7 +15,9 @@ import { GrepTool } from "@oh-my-pi/pi-coding-agent/tools/grep";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
+import * as markitUtils from "@oh-my-pi/pi-coding-agent/utils/markit";
 import { Snowflake } from "@oh-my-pi/pi-utils";
+import { unzipSync } from "fflate";
 
 // Helper to extract text from content blocks
 function getTextOutput(result: any): string {
@@ -23,6 +27,147 @@ function getTextOutput(result: any): string {
 			.map((c: any) => c.text)
 			.join("\n") || ""
 	);
+}
+
+function createFifoOrSkip(fifoPath: string): boolean {
+	if (process.platform === "win32") {
+		return false;
+	}
+
+	const mkfifoPath = Bun.which("mkfifo");
+	if (!mkfifoPath) {
+		return false;
+	}
+
+	const result = Bun.spawnSync([mkfifoPath, fifoPath], { stdout: "ignore", stderr: "pipe" });
+	if (result.exitCode !== 0) {
+		const errorText = result.stderr.toString("utf-8").trim();
+		throw new Error(`mkfifo failed${errorText ? `: ${errorText}` : ""}`);
+	}
+
+	return true;
+}
+
+interface ArchiveFixtureEntry {
+	path: string;
+	content: string;
+}
+
+function writeTarString(buffer: Buffer, offset: number, length: number, value: string): void {
+	const valueBuffer = Buffer.from(value, "utf-8");
+	valueBuffer.copy(buffer, offset, 0, Math.min(valueBuffer.length, length));
+}
+
+function writeTarOctal(buffer: Buffer, offset: number, length: number, value: number): void {
+	const octal = value.toString(8).padStart(length - 1, "0");
+	buffer.write(octal, offset, length - 1, "ascii");
+	buffer[offset + length - 1] = 0;
+}
+
+function createTarArchive(entries: ArchiveFixtureEntry[]): Buffer {
+	const parts: Buffer[] = [];
+
+	for (const entry of entries) {
+		const header = Buffer.alloc(512, 0);
+		const content = Buffer.from(entry.content, "utf-8");
+
+		writeTarString(header, 0, 100, entry.path);
+		writeTarOctal(header, 100, 8, 0o644);
+		writeTarOctal(header, 108, 8, 0);
+		writeTarOctal(header, 116, 8, 0);
+		writeTarOctal(header, 124, 12, content.length);
+		writeTarOctal(header, 136, 12, Math.floor(Date.now() / 1000));
+		header.fill(0x20, 148, 156);
+		header[156] = "0".charCodeAt(0);
+		writeTarString(header, 257, 6, "ustar");
+		writeTarString(header, 263, 2, "00");
+
+		let checksum = 0;
+		for (const byte of header) checksum += byte;
+		const checksumText = checksum.toString(8).padStart(6, "0");
+		header.write(checksumText, 148, 6, "ascii");
+		header[154] = 0;
+		header[155] = 0x20;
+
+		parts.push(header, content);
+		const remainder = content.length % 512;
+		if (remainder !== 0) {
+			parts.push(Buffer.alloc(512 - remainder, 0));
+		}
+	}
+
+	parts.push(Buffer.alloc(1024, 0));
+	return Buffer.concat(parts);
+}
+
+const CRC32_TABLE = (() => {
+	const table = new Uint32Array(256);
+	for (let index = 0; index < 256; index++) {
+		let value = index;
+		for (let bit = 0; bit < 8; bit++) {
+			value = (value & 1) !== 0 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+		}
+		table[index] = value >>> 0;
+	}
+	return table;
+})();
+
+function crc32(bytes: Uint8Array): number {
+	let value = 0xffffffff;
+	for (const byte of bytes) {
+		value = CRC32_TABLE[(value ^ byte) & 0xff]! ^ (value >>> 8);
+	}
+	return (value ^ 0xffffffff) >>> 0;
+}
+
+function createZipArchive(entries: ArchiveFixtureEntry[]): Buffer {
+	const localParts: Buffer[] = [];
+	const centralParts: Buffer[] = [];
+	let localOffset = 0;
+
+	for (const entry of entries) {
+		const pathBuffer = Buffer.from(entry.path.replace(/\\/g, "/"), "utf-8");
+		const content = Buffer.from(entry.content, "utf-8");
+		const compressed = zlib.deflateRawSync(content);
+		const checksum = crc32(content);
+
+		const localHeader = Buffer.alloc(30, 0);
+		localHeader.writeUInt32LE(0x04034b50, 0);
+		localHeader.writeUInt16LE(20, 4);
+		localHeader.writeUInt16LE(0x0800, 6);
+		localHeader.writeUInt16LE(8, 8);
+		localHeader.writeUInt32LE(checksum, 14);
+		localHeader.writeUInt32LE(compressed.length, 18);
+		localHeader.writeUInt32LE(content.length, 22);
+		localHeader.writeUInt16LE(pathBuffer.length, 26);
+
+		localParts.push(localHeader, pathBuffer, compressed);
+
+		const centralHeader = Buffer.alloc(46, 0);
+		centralHeader.writeUInt32LE(0x02014b50, 0);
+		centralHeader.writeUInt16LE(20, 4);
+		centralHeader.writeUInt16LE(20, 6);
+		centralHeader.writeUInt16LE(0x0800, 8);
+		centralHeader.writeUInt16LE(8, 10);
+		centralHeader.writeUInt32LE(checksum, 16);
+		centralHeader.writeUInt32LE(compressed.length, 20);
+		centralHeader.writeUInt32LE(content.length, 24);
+		centralHeader.writeUInt16LE(pathBuffer.length, 28);
+		centralHeader.writeUInt32LE(localOffset, 42);
+
+		centralParts.push(centralHeader, pathBuffer);
+		localOffset += localHeader.length + pathBuffer.length + compressed.length;
+	}
+
+	const centralDirectory = Buffer.concat(centralParts);
+	const endOfCentralDirectory = Buffer.alloc(22, 0);
+	endOfCentralDirectory.writeUInt32LE(0x06054b50, 0);
+	endOfCentralDirectory.writeUInt16LE(entries.length, 8);
+	endOfCentralDirectory.writeUInt16LE(entries.length, 10);
+	endOfCentralDirectory.writeUInt32LE(centralDirectory.length, 12);
+	endOfCentralDirectory.writeUInt32LE(localOffset, 16);
+
+	return Buffer.concat([...localParts, centralDirectory, endOfCentralDirectory]);
 }
 
 let artifactCounter = 0;
@@ -91,6 +236,8 @@ describe("Coding Agent Tools", () => {
 	});
 
 	afterEach(() => {
+		vi.restoreAllMocks();
+
 		// Clean up test directory
 		fs.rmSync(testDir, { recursive: true, force: true });
 
@@ -119,10 +266,50 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.truncation).toBeUndefined();
 		});
 
+		it("should convert ipynb files through markit before rendering", async () => {
+			const notebookPath = path.join(testDir, "notebook.ipynb");
+			const notebook = {
+				cells: [
+					{
+						cell_type: "markdown",
+						metadata: {},
+						source: ["# Notebook Title\n", "\n", "Notebook body\n"],
+					},
+				],
+				metadata: {},
+				nbformat: 4,
+				nbformat_minor: 5,
+			};
+			fs.writeFileSync(notebookPath, JSON.stringify(notebook));
+
+			const convertSpy = vi.spyOn(markitUtils, "convertFileWithMarkit").mockResolvedValue({
+				ok: true,
+				content: "# Notebook Title\n\nNotebook body\n",
+			});
+
+			const result = await readTool.execute("test-call-ipynb", { path: notebookPath });
+			const output = getTextOutput(result);
+
+			expect(convertSpy).toHaveBeenCalledTimes(1);
+			expect(output).toContain("# Notebook Title");
+			expect(output).toContain("Notebook body");
+			expect(output).not.toContain('"cell_type"');
+		});
+
 		it("should handle non-existent files", async () => {
 			const testFile = path.join(testDir, "nonexistent.txt");
 
 			await expect(readTool.execute("test-call-2", { path: testFile })).rejects.toThrow(/ENOENT|not found/i);
+		});
+
+		it("should read local files passed as file:// URLs", async () => {
+			const testFile = path.join(testDir, "file-url.txt");
+			fs.writeFileSync(testFile, "Hello from file URL");
+
+			const result = await readTool.execute("test-call-file-url", { path: url.pathToFileURL(testFile).href });
+			const output = getTextOutput(result);
+
+			expect(output).toContain("Hello from file URL");
 		});
 
 		it("should truncate files exceeding line limit", async () => {
@@ -233,6 +420,89 @@ describe("Coding Agent Tools", () => {
 			expect(result.details?.truncation?.outputLines).toBe(defaultLimit);
 		});
 
+		it("should treat .tar archives like directories", async () => {
+			const archivePath = path.join(testDir, "fixture.tar");
+			fs.writeFileSync(
+				archivePath,
+				createTarArchive([
+					{ path: "pkg/README.md", content: "# Tar README\nLine 2\n" },
+					{ path: "pkg/src/index.ts", content: "export const tarValue = 1;\n" },
+					{ path: "top.txt", content: "top level\n" },
+				]),
+			);
+
+			const result = await readTool.execute("test-call-tar-root", { path: archivePath });
+			const output = getTextOutput(result);
+
+			expect(output).toContain("pkg/");
+			expect(output).toContain("top.txt");
+			expect(result.details?.isDirectory).toBe(true);
+		});
+
+		it("should list archive subdirectories", async () => {
+			const archivePath = path.join(testDir, "fixture.zip");
+			fs.writeFileSync(
+				archivePath,
+				createZipArchive([
+					{ path: "pkg/README.md", content: "# Zip README\n" },
+					{ path: "pkg/src/index.ts", content: "export const zipValue = 2;\n" },
+					{ path: "pkg/src/util.ts", content: "export const utilValue = 3;\n" },
+				]),
+			);
+
+			const result = await readTool.execute("test-call-zip-dir", { path: `${archivePath}:pkg/src` });
+			const output = getTextOutput(result);
+
+			expect(output).toContain("index.ts");
+			expect(output).toContain("util.ts");
+			expect(result.details?.isDirectory).toBe(true);
+		});
+
+		for (const archiveCase of [
+			{
+				label: ".tar",
+				path: "fixture-subpath.tar",
+				create: (entries: ArchiveFixtureEntry[]) => createTarArchive(entries),
+			},
+			{
+				label: ".tar.gz",
+				path: "fixture-subpath.tar.gz",
+				create: (entries: ArchiveFixtureEntry[]) => zlib.gzipSync(createTarArchive(entries)),
+			},
+			{
+				label: ".tgz",
+				path: "fixture-subpath.tgz",
+				create: (entries: ArchiveFixtureEntry[]) => zlib.gzipSync(createTarArchive(entries)),
+			},
+			{
+				label: ".zip",
+				path: "fixture-subpath.zip",
+				create: (entries: ArchiveFixtureEntry[]) => createZipArchive(entries),
+			},
+		]) {
+			it(`should read ${archiveCase.label} subpaths`, async () => {
+				const archivePath = path.join(testDir, archiveCase.path);
+				fs.writeFileSync(
+					archivePath,
+					archiveCase.create([
+						{ path: "pkg/README.md", content: "# Archive README\nLine 2\nLine 3\n" },
+						{ path: "pkg/src/index.ts", content: "export const archiveValue = 4;\n" },
+					]),
+				);
+
+				const result = await readTool.execute("test-call-archive-subpath", {
+					path: `${archivePath}:pkg/README.md`,
+					limit: 2,
+				});
+				const output = getTextOutput(result);
+
+				expect(output).toContain("# Archive README");
+				expect(output).toContain("Line 2");
+				expect(output).not.toContain("Line 3");
+				expect(output).toContain("Use offset=3");
+			});
+		}
+
 		it("should detect image MIME type from file magic (not extension)", async () => {
 			const png1x1Base64 =
 				"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+X2Z0AAAAASUVORK5CYII=";
@@ -323,6 +593,63 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result)).toContain(`Successfully wrote ${content.length} bytes to ${localPath}`);
 			expect(fs.existsSync(expectedPath)).toBe(true);
 			expect(fs.readFileSync(expectedPath, "utf-8")).toBe(content);
+		});
+
+		it("should write to an existing archive entry", async () => {
+			const archivePath = path.join(testDir, "write-existing.zip");
+			fs.writeFileSync(
+				archivePath,
+				createZipArchive([
+					{ path: "pkg/README.md", content: "# Original\n" },
+					{ path: "pkg/src/index.ts", content: "export const archiveValue = 1;\n" },
+				]),
+			);
+
+			const content = "# Updated\nLine 2\n";
+			const result = await writeTool.execute("test-call-archive-write-existing", {
+				path: `${archivePath}:pkg/README.md`,
+				content,
+			});
+
+			expect(getTextOutput(result)).toContain(
+				`Successfully wrote ${content.length} bytes to ${archivePath}:pkg/README.md`,
+			);
+
+			const unzipped = unzipSync(new Uint8Array(fs.readFileSync(archivePath)));
+			expect(new TextDecoder().decode(unzipped["pkg/README.md"])).toBe(content);
+			expect(new TextDecoder().decode(unzipped["pkg/src/index.ts"])).toBe("export const archiveValue = 1;\n");
+		});
+
+		it("should create a new archive when writing to an archive subpath", async () => {
+			const archivePath = path.join(testDir, "nested", "created.tar.gz");
+			const content = "created inside archive\n";
+
+			const result = await writeTool.execute("test-call-archive-write-create", {
+				path: `${archivePath}:pkg/new.txt`,
+				content,
+			});
+
+			expect(getTextOutput(result)).toContain(
+				`Successfully wrote ${content.length} bytes to ${archivePath}:pkg/new.txt`,
+			);
+			expect(fs.existsSync(archivePath)).toBe(true);
+
+			const archive = new Bun.Archive(await Bun.file(archivePath).bytes());
+			const files = await archive.files();
+			expect(await files.get("pkg/new.txt")?.text()).toBe(content);
+		});
+
+		it("should treat a plain archive filename as a regular file write", async () => {
+			const archivePath = path.join(testDir, "literal.zip");
+			const content = "plain file contents\n";
+
+			const result = await writeTool.execute("test-call-archive-plain-file", {
+				path: archivePath,
+				content,
+			});
+
+			expect(getTextOutput(result)).toContain(`Successfully wrote ${content.length} bytes to ${archivePath}`);
+			expect(fs.readFileSync(archivePath, "utf-8")).toBe(content);
 		});
 	});
 
@@ -847,6 +1174,31 @@ function b() {
 
 			const output = getTextOutput(result);
 			expect(output).toContain("ignored.txt");
+			expect(result.details?.fileCount).toBe(1);
+			expect(result.details?.matchCount).toBe(1);
+		});
+
+		it("should ignore FIFOs when searching a directory with gitignore disabled", async () => {
+			const scenarioDir = path.join(testDir, "grep-fifo-dir");
+			fs.mkdirSync(scenarioDir, { recursive: true });
+			fs.writeFileSync(path.join(scenarioDir, "match.txt"), "needle kept\n");
+			const fifoPath = path.join(scenarioDir, "blocked.fifo");
+
+			if (!createFifoOrSkip(fifoPath)) {
+				return;
+			}
+
+			const result = await grepTool.execute("test-call-16-fifo-dir", {
+				pattern: "needle",
+				path: scenarioDir,
+				gitignore: false,
+			});
+
+			const output = getTextOutput(result);
+			expect(output).toContain("match.txt");
+			expect(output).toContain("needle kept");
+			expect(output).not.toContain("blocked.fifo");
+			expect(output).not.toContain("## └─ blocked.fifo");
 			expect(result.details?.fileCount).toBe(1);
 			expect(result.details?.matchCount).toBe(1);
 		});

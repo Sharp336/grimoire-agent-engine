@@ -134,14 +134,12 @@ import {
 	GrepTool,
 	getSearchTools,
 	HIDDEN_TOOLS,
-	isCodeSearchProviderId,
 	isSearchProviderPreference,
 	loadSshTool,
 	PythonTool,
 	ReadTool,
 	ResolveTool,
 	renderSearchToolBm25Description,
-	setPreferredCodeSearchProvider,
 	setPreferredImageProvider,
 	setPreferredSearchProvider,
 	type Tool,
@@ -154,7 +152,6 @@ import { getGeminiImageTools } from "./tools/gemini-image";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { PendingActionStore } from "./tools/pending-action";
 import { EventBus } from "./utils/event-bus";
-
 
 // Types
 export interface CreateAgentSessionOptions {
@@ -260,6 +257,8 @@ export interface CreateAgentSessionResult {
 	modelFallbackMessage?: string;
 	/** LSP servers that were warmed up at startup */
 	lspServers?: Array<{ name: string; status: "ready" | "error"; fileTypes: string[]; error?: string }>;
+	/** Shared event bus for interactive session observer wiring. */
+	eventBus?: EventBus;
 }
 
 // Re-exports
@@ -679,11 +678,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const webSearchProvider = settings.get("providers.webSearch");
 	if (typeof webSearchProvider === "string" && isSearchProviderPreference(webSearchProvider)) {
 		setPreferredSearchProvider(webSearchProvider);
-	}
-
-	const codeSearchProvider = settings.get("providers.codeSearch");
-	if (typeof codeSearchProvider === "string" && isCodeSearchProviderId(codeSearchProvider)) {
-		setPreferredCodeSearchProvider(codeSearchProvider);
 	}
 
 	const imageProvider = settings.get("providers.image");
@@ -1762,17 +1756,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 								sessionFilter,
 							);
 
-						if (searchResults.length > 0) {
-							// Build text → similarity lookup from search results.
-							// LanceDB _distance is L2 distance; convert to similarity
-							// score (lower distance = higher similarity).
-							const textSimilarity = new Map<string, number>();
-							for (const result of searchResults) {
-								if (!textSimilarity.has(result.text)) {
-									const sim = 1 / (1 + result._distance);
-									textSimilarity.set(result.text, sim);
+							if (searchResults.length > 0) {
+								// Build text → similarity lookup from search results.
+								// LanceDB _distance is L2 distance; convert to similarity
+								// score (lower distance = higher similarity).
+								const textSimilarity = new Map<string, number>();
+								for (const result of searchResults) {
+									if (!textSimilarity.has(result.text)) {
+										const sim = 1 / (1 + result._distance);
+										textSimilarity.set(result.text, sim);
+									}
 								}
-							}
 
 								// Match candidate turns to search results by text content
 								relevanceScores = new Map();
@@ -2166,5 +2160,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		mcpManager,
 		modelFallbackMessage,
 		lspServers,
+		eventBus,
 	};
 }

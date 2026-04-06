@@ -30,6 +30,17 @@ import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
 import { ExitPlanModeTool } from "./exit-plan-mode";
 import { FetchTool } from "./fetch";
 import { FindTool } from "./find";
+import {
+	GhIssueViewTool,
+	GhPrCheckoutTool,
+	GhPrDiffTool,
+	GhPrPushTool,
+	GhPrViewTool,
+	GhRepoViewTool,
+	GhRunWatchTool,
+	GhSearchIssuesTool,
+	GhSearchPrsTool,
+} from "./gh";
 import { GrepTool } from "./grep";
 import { InspectImageTool } from "./inspect-image";
 import { NotebookTool } from "./notebook";
@@ -68,9 +79,9 @@ export * from "./calculator";
 export * from "./cancel-job";
 export * from "./checkpoint";
 export * from "./exit-plan-mode";
-export * from "./fetch";
 export * from "./find";
 export * from "./gemini-image";
+export * from "./gh";
 export * from "./grep";
 export * from "./inspect-image";
 export * from "./notebook";
@@ -204,6 +215,15 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	calc: s => new CalculatorTool(s),
 	ssh: loadSshTool,
 	edit: s => new EditTool(s),
+	gh_repo_view: GhRepoViewTool.createIf,
+	gh_issue_view: GhIssueViewTool.createIf,
+	gh_pr_view: GhPrViewTool.createIf,
+	gh_pr_diff: GhPrDiffTool.createIf,
+	gh_pr_checkout: GhPrCheckoutTool.createIf,
+	gh_pr_push: GhPrPushTool.createIf,
+	gh_run_watch: GhRunWatchTool.createIf,
+	gh_search_issues: GhSearchIssuesTool.createIf,
+	gh_search_prs: GhSearchPrsTool.createIf,
 	find: s => new FindTool(s),
 	grep: s => new GrepTool(s),
 	lsp: LspTool.createIf,
@@ -354,12 +374,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "todo" || name === "todos") return session.settings.get("todo.enabled");
 		if (name === "find") return session.settings.get("find.enabled");
 		if (name === "grep") return session.settings.get("grep.enabled"); // RNA experiment: grep wired through RNA first, ripgrep fallthrough
+		if (name.startsWith("gh_")) return session.settings.get("github.enabled");
 		if (name === "ast_grep") return session.settings.get("astGrep.enabled");
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
 		if (name === "render_mermaid") return session.settings.get("renderMermaid.enabled");
 		if (name === "notebook") return session.settings.get("notebook.enabled");
 		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
-		if (name === "fetch") return session.settings.get("fetch.enabled");
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "search_tool_bm25") return session.settings.get("mcp.discoveryMode");
 		if (name === "lsp") return session.settings.get("lsp.enabled"); // RNA experiment: duplicate guard (upstream has two checks)

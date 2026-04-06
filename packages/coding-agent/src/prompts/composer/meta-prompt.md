@@ -61,7 +61,7 @@ Produce a system prompt that:
 Return only the compiled prompt wrapped exactly as:
 
 <compiled-system-prompt>
-...compiled prompt here...
+…compiled prompt here…
 </compiled-system-prompt>
 
 Do not add commentary before or after the wrapper.

@@ -1,14 +1,16 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { FileType, glob } from "@oh-my-pi/pi-natives";
-import { CONFIG_DIR_NAME, getConfigDirName, tryParseJson } from "@oh-my-pi/pi-utils";
+import { CONFIG_DIR_NAME, getConfigDirName, getProjectDir, tryParseJson } from "@oh-my-pi/pi-utils";
 import { readDirEntries, readFile } from "../capability/fs";
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
 import type { Skill, SkillFrontmatter } from "../capability/skill";
 import type { LoadContext, LoadResult, SourceMeta } from "../capability/types";
 import { parseThinkingLevel } from "../thinking";
 import { parseFrontmatter } from "../utils/frontmatter";
+import { buildPluginDirRoot } from "./plugin-dir-roots";
 
 /**
  * Standard paths for each config source.
@@ -593,6 +595,7 @@ export interface ClaudePluginEntry {
 	installedAt: string;
 	lastUpdated: string;
 	gitCommitSha?: string;
+	enabled?: boolean;
 }
 
 /**
@@ -638,72 +641,246 @@ export function parseClaudePluginsRegistry(content: string): ClaudePluginsRegist
 }
 
 /**
- * List all installed Claude Code plugin roots from the plugin cache.
- * Reads ~/.claude/plugins/installed_plugins.json and resolves plugin paths.
+ * Resolve the active project registry path by walking up from `cwd`.
  *
- * Results are cached per home directory to avoid repeated parsing.
+ * Walk order:
+ * 1. Walk up from `cwd` looking for the nearest directory containing `.omp/`.
+ *    The first match returns `<dir>/.omp/plugins/installed_plugins.json`.
+ * 2. If no `.omp/` is found, rescan from `cwd` upward looking for `.git`.
+ *    The git root is used as an anchor: `<gitRoot>/.omp/plugins/installed_plugins.json`.
+ * 3. If neither is found, return `null` — no project context is active.
+ *
+ * This is the single source of truth for "active project root" used by install,
+ * uninstall, list, upgrade, discovery, and doctor. Deterministic for a given `cwd`.
  */
+export async function resolveActiveProjectRegistryPath(cwd: string): Promise<string | null> {
+	// Pass 1: walk up looking for an existing .omp/ directory (nearest wins).
+	// Stop before os.homedir() — ~/.omp/ is the user-level config dir, not a project root.
+	const homeDir = os.homedir();
+	let dir = path.resolve(cwd);
+	while (dir !== homeDir) {
+		try {
+			const stat = await fs.promises.stat(path.join(dir, getConfigDirName()));
+			if (stat.isDirectory()) {
+				return path.join(dir, getConfigDirName(), "plugins", "installed_plugins.json");
+			}
+		} catch {
+			// not found at this level — continue up
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) break; // filesystem root
+		dir = parent;
+	}
+
+	// Pass 2: walk up looking for .git as a fallback anchor.
+	dir = path.resolve(cwd);
+	while (dir !== homeDir) {
+		try {
+			await fs.promises.stat(path.join(dir, ".git"));
+			return path.join(dir, getConfigDirName(), "plugins", "installed_plugins.json");
+		} catch {
+			// not found at this level — continue up
+		}
+		const parent = path.dirname(dir);
+		if (parent === dir) break; // filesystem root
+		dir = parent;
+	}
+
+	return null; // not inside any project
+}
+
+/**
+ * Like resolveActiveProjectRegistryPath, but falls back to `<cwd>/.omp/plugins/installed_plugins.json`
+ * when no project anchor (.omp/ or .git/) is found.
+ *
+ * Use this when the caller accepts an explicit --scope project so that installing into a freshly
+ * bootstrapped directory (no .omp/ or .git/ yet) works: writeInstalledPluginsRegistry auto-creates
+ * the directory tree on first write.
+ *
+ * Returns undefined when cwd is os.homedir() — that path is already the user registry and must
+ * never alias as the project registry.
+ */
+export async function resolveOrDefaultProjectRegistryPath(cwd: string): Promise<string | undefined> {
+	const resolved = await resolveActiveProjectRegistryPath(cwd);
+	if (resolved) return resolved;
+	// Home directory must not be treated as a project root: the fallback path would alias
+	// getInstalledPluginsRegistryPath(), causing MarketplaceManager to load the same file
+	// as both user and project registry and producing duplicates / disambiguation errors.
+	if (path.resolve(cwd) === os.homedir()) return undefined;
+	return path.join(cwd, getConfigDirName(), "plugins", "installed_plugins.json");
+}
+
 const pluginRootsCache = new Map<string, { roots: ClaudePluginRoot[]; warnings: string[] }>();
 
-export async function listClaudePluginRoots(home: string): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
-	const cached = pluginRootsCache.get(home);
+/**
+ * List all installed Claude Code plugin roots from the plugin cache.
+ * Reads ~/.claude/plugins/installed_plugins.json and ~/.omp/plugins/installed_plugins.json,
+ * and optionally the nearest project-scoped registry resolved from `cwd`.
+ *
+ * Results are cached per `home:resolvedProjectPath` key to avoid repeated parsing.
+ */
+export async function listClaudePluginRoots(
+	home: string,
+	cwd?: string,
+): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
+	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd) : null;
+	const cacheKey = `${home}:${resolvedProjectPath ?? ""}`;
+	const cached = pluginRootsCache.get(cacheKey);
 	if (cached) return cached;
 
 	const roots: ClaudePluginRoot[] = [];
 	const warnings: string[] = [];
+	const projectRoots: ClaudePluginRoot[] = [];
 
+	// ── Claude Code registry ──────────────────────────────────────────────────
 	const registryPath = path.join(home, ".claude", "plugins", "installed_plugins.json");
 	const content = await readFile(registryPath);
 
-	if (!content) {
-		// No registry file - not an error, just no plugins
-		const result = { roots, warnings };
-		pluginRootsCache.set(home, result);
-		return result;
-	}
+	if (content) {
+		const registry = parseClaudePluginsRegistry(content);
+		if (!registry) {
+			warnings.push(`Failed to parse Claude Code plugin registry: ${registryPath}`);
+		} else {
+			for (const [pluginId, entries] of Object.entries(registry.plugins)) {
+				if (!Array.isArray(entries) || entries.length === 0) continue;
 
-	const registry = parseClaudePluginsRegistry(content);
-	if (!registry) {
-		warnings.push(`Failed to parse Claude Code plugin registry: ${registryPath}`);
-		const result = { roots, warnings };
-		pluginRootsCache.set(home, result);
-		return result;
-	}
+				// Parse plugin ID format: "plugin-name@marketplace"
+				const atIndex = pluginId.lastIndexOf("@");
+				if (atIndex === -1) {
+					warnings.push(`Invalid plugin ID format (missing @marketplace): ${pluginId}`);
+					continue;
+				}
 
-	for (const [pluginId, entries] of Object.entries(registry.plugins)) {
-		if (!Array.isArray(entries) || entries.length === 0) continue;
+				const pluginName = pluginId.slice(0, atIndex);
+				const marketplace = pluginId.slice(atIndex + 1);
 
-		// Parse plugin ID format: "plugin-name@marketplace"
-		const atIndex = pluginId.lastIndexOf("@");
-		if (atIndex === -1) {
-			warnings.push(`Invalid plugin ID format (missing @marketplace): ${pluginId}`);
-			continue;
-		}
+				// Process all valid entries, not just the first one.
+				// This handles plugins with multiple installs (different scopes/versions).
+				for (const entry of entries) {
+					if (!entry.installPath || typeof entry.installPath !== "string") {
+						warnings.push(`Plugin ${pluginId} entry has no installPath`);
+						continue;
+					}
+					if (entry.enabled === false) continue;
 
-		const pluginName = pluginId.slice(0, atIndex);
-		const marketplace = pluginId.slice(atIndex + 1);
-
-		// Process all valid entries, not just the first one.
-		// This handles plugins with multiple installs (different scopes/versions).
-		for (const entry of entries) {
-			if (!entry.installPath || typeof entry.installPath !== "string") {
-				warnings.push(`Plugin ${pluginId} entry has no installPath`);
-				continue;
+					roots.push({
+						id: pluginId,
+						marketplace,
+						plugin: pluginName,
+						version: entry.version || "unknown",
+						path: entry.installPath,
+						scope: entry.scope || "user",
+					});
+				}
 			}
-
-			roots.push({
-				id: pluginId,
-				marketplace,
-				plugin: pluginName,
-				version: entry.version || "unknown",
-				path: entry.installPath,
-				scope: entry.scope || "user",
-			});
 		}
+	}
+
+	// ── OMP installed plugins registry ───────────────────────────────────────
+	// OMP registry is authoritative: its entries replace Claude's entries for the same plugin ID.
+	// Path derived from `home` (not os.homedir()) so test isolation works when home is overridden.
+	const ompRegistryPath = path.join(home, getConfigDirName(), "plugins", "installed_plugins.json");
+	const ompContent = await readFile(ompRegistryPath);
+	if (ompContent) {
+		const ompRegistry = parseClaudePluginsRegistry(ompContent);
+		if (ompRegistry) {
+			for (const [pluginId, entries] of Object.entries(ompRegistry.plugins)) {
+				if (!Array.isArray(entries) || entries.length === 0) continue;
+
+				const atIndex = pluginId.lastIndexOf("@");
+				if (atIndex === -1) {
+					warnings.push(`Invalid plugin ID format (missing @marketplace): ${pluginId}`);
+					continue;
+				}
+				const pluginName = pluginId.slice(0, atIndex);
+				const marketplace = pluginId.slice(atIndex + 1);
+
+				// OMP is authoritative: drop all Claude-sourced entries for this plugin ID
+				const filtered = roots.filter(r => r.id !== pluginId);
+				roots.length = 0;
+				roots.push(...filtered);
+
+				for (const entry of entries) {
+					if (!entry.installPath || typeof entry.installPath !== "string") {
+						warnings.push(`Plugin ${pluginId} entry has no installPath`);
+						continue;
+					}
+					if (entry.enabled === false) continue;
+					// Deduplicate by installPath within same ID
+					if (roots.some(r => r.id === pluginId && r.path === entry.installPath)) continue;
+
+					roots.push({
+						id: pluginId,
+						marketplace,
+						plugin: pluginName,
+						version: entry.version || "unknown",
+						path: entry.installPath,
+						scope: entry.scope || "user",
+					});
+				}
+			}
+		} else {
+			warnings.push(`Failed to parse OMP plugin registry: ${ompRegistryPath}`);
+		}
+	}
+
+	// ── Project-scoped OMP registry ────────────────────────────────────────
+	// Loaded from the nearest .omp/plugins/installed_plugins.json relative to cwd.
+	// Project entries take precedence over user entries for the same plugin ID.
+	if (resolvedProjectPath) {
+		const projectContent = await readFile(resolvedProjectPath);
+		if (projectContent) {
+			const projectRegistry = parseClaudePluginsRegistry(projectContent);
+			if (projectRegistry) {
+				for (const [pluginId, entries] of Object.entries(projectRegistry.plugins)) {
+					if (!Array.isArray(entries) || entries.length === 0) continue;
+					const atIndex = pluginId.lastIndexOf("@");
+					if (atIndex === -1) {
+						warnings.push(`Invalid plugin ID format (missing @marketplace): ${pluginId}`);
+						continue;
+					}
+					const pluginName = pluginId.slice(0, atIndex);
+					const marketplace = pluginId.slice(atIndex + 1);
+					for (const entry of entries) {
+						if (!entry.installPath || typeof entry.installPath !== "string") {
+							warnings.push(`Plugin ${pluginId} entry has no installPath`);
+							continue;
+						}
+						if (entry.enabled === false) continue;
+						projectRoots.push({
+							id: pluginId,
+							marketplace,
+							plugin: pluginName,
+							version: entry.version || "unknown",
+							path: entry.installPath,
+							scope: "project",
+						});
+					}
+				}
+			} else {
+				warnings.push(`Failed to parse project plugin registry: ${resolvedProjectPath}`);
+			}
+		}
+	}
+
+	// Project entries shadow user entries for the same plugin ID.
+	if (projectRoots.length > 0) {
+		const projectIds = new Set(projectRoots.map(r => r.id));
+		const deduped = roots.filter(r => !projectIds.has(r.id));
+		roots.length = 0;
+		roots.push(...projectRoots, ...deduped);
+	}
+
+	// Merge --plugin-dir roots (highest precedence) on every fresh load
+	if (injectedPluginDirRoots.length > 0) {
+		const injectedIds = new Set(injectedPluginDirRoots.map(r => r.id));
+		const filtered = roots.filter(r => !injectedIds.has(r.id));
+		roots.length = 0;
+		roots.push(...injectedPluginDirRoots, ...filtered);
 	}
 
 	const result = { roots, warnings };
-	pluginRootsCache.set(home, result);
+	pluginRootsCache.set(cacheKey, result);
 	return result;
 }
 
@@ -712,4 +889,74 @@ export async function listClaudePluginRoots(home: string): Promise<{ roots: Clau
  */
 export function clearClaudePluginRootsCache(): void {
 	pluginRootsCache.clear();
+	preloadedPluginRoots = [...injectedPluginDirRoots];
+	// Re-warm preloaded roots asynchronously so sync LSP config reads stay valid
+	if (lastPreloadHome) {
+		void preloadPluginRoots(lastPreloadHome, getProjectDir());
+	}
+}
+
+// ── Preloaded plugin roots (for sync consumers like LSP config) ─────────────
+// Populated at startup by preloadPluginRoots(). Read synchronously by
+// getPreloadedPluginRoots(). Safe degradation: empty array if not warmed.
+
+let preloadedPluginRoots: ClaudePluginRoot[] = [];
+let injectedPluginDirRoots: ClaudePluginRoot[] = [];
+let lastPreloadHome: string | undefined;
+
+/**
+ * Populate the module-level plugin roots cache for sync consumers.
+ * Call during session initialization, after dir resolution completes
+ * but before any LSP config is read.
+ */
+export async function preloadPluginRoots(home: string, cwd?: string): Promise<void> {
+	lastPreloadHome = home;
+	const { roots } = await listClaudePluginRoots(home, cwd);
+	preloadedPluginRoots = roots;
+}
+
+/**
+ * Get pre-loaded plugin roots synchronously.
+ * Returns empty array if preloadPluginRoots() hasn't been called.
+ */
+export function getPreloadedPluginRoots(): readonly ClaudePluginRoot[] {
+	return preloadedPluginRoots;
+}
+
+// ── --plugin-dir injection ──────────────────────────────────────────────────
+
+/**
+ * Inject synthetic plugin roots from --plugin-dir paths.
+ * These are prepended to the cache with highest precedence (before OMP/Claude entries).
+ * Must be called before any listClaudePluginRoots() access.
+ */
+export async function injectPluginDirRoots(home: string, dirs: string[], cwd?: string): Promise<void> {
+	const injected: ClaudePluginRoot[] = [];
+	for (const dir of dirs) {
+		const resolved = path.resolve(dir);
+		// Read plugin name from manifest
+		let pluginName = path.basename(resolved);
+		try {
+			const manifestPath = path.join(resolved, ".claude-plugin", "plugin.json");
+			const content = await Bun.file(manifestPath).text();
+			const manifest = JSON.parse(content);
+			if (typeof manifest.name === "string" && manifest.name) {
+				pluginName = manifest.name;
+			}
+		} catch {
+			// No manifest or invalid — use directory name
+		}
+
+		injected.push(buildPluginDirRoot(resolved, pluginName));
+	}
+
+	// Set injected roots BEFORE populating cache so listClaudePluginRoots merges them.
+	injectedPluginDirRoots = injected;
+	lastPreloadHome = home; // ensure cache-clear re-warm fires even when injectPluginDirRoots was the startup path
+	// Clear any stale cache entries (populated before injected roots were set).
+	pluginRootsCache.clear();
+	// Rebuild — cache miss triggers fresh load that includes both user+project registries
+	// and prepends injectedPluginDirRoots at highest precedence.
+	const { roots } = await listClaudePluginRoots(home, cwd);
+	preloadedPluginRoots = roots;
 }

@@ -38,6 +38,7 @@ export interface Args {
 	hooks?: string[];
 	extensions?: string[];
 	noExtensions?: boolean;
+	pluginDirs?: string[];
 	print?: boolean;
 	export?: string;
 	noSkills?: boolean;
@@ -151,6 +152,9 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 		} else if ((arg === "--extension" || arg === "-e") && i + 1 < args.length) {
 			result.extensions = result.extensions ?? [];
 			result.extensions.push(args[++i]);
+		} else if (arg === "--plugin-dir" && i + 1 < args.length) {
+			result.pluginDirs = result.pluginDirs ?? [];
+			result.pluginDirs.push(args[++i]);
 		} else if (arg === "--no-extensions") {
 			result.noExtensions = true;
 		} else if (arg === "--no-skills") {
@@ -258,9 +262,11 @@ ${chalk.bold("Available Tools (default-enabled unless noted):")}
   browser       - Browser automation (Puppeteer)
   task          - Launch sub-agents for parallel tasks
   todo_write    - Manage todo/task lists
-  fetch         - Fetch and process URLs
   web_search    - Search the web
   ask           - Ask user questions (interactive mode only)
+
+${chalk.bold("Plugin Options:")}
+  --plugin-dir <path>        Load plugin from directory (repeatable)
 
 ${chalk.bold("Useful Commands:")}
   oh-omp agents unpack        - Export bundled subagents to ~/.oh-omp/agent/agents (default)

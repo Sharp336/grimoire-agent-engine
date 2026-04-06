@@ -34,7 +34,9 @@ export function buildInventory(input: InventoryInput): string {
 	// Edit mode
 	sections.push(`\n## Edit Mode\n\nActive: **${input.editMode}**`);
 	sections.push("\n## Tool Call Contract");
-	sections.push("- Every response that uses tools MUST emit an array of tool calls, even if the array contains a single call.");
+	sections.push(
+		"- Every response that uses tools MUST emit an array of tool calls, even if the array contains a single call.",
+	);
 	if (input.intentField) {
 		sections.push(
 			`- Every tool call MUST include the \`${input.intentField}\` parameter with one concise present-participle sentence.`,

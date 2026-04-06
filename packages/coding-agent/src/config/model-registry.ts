@@ -28,9 +28,10 @@ import {
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { type ConfigError, ConfigFile } from "../config";
+import { parseModelString } from "../config/model-resolver";
 import { isValidThemeColor, type ThemeColor } from "../modes/theme/theme";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
-import type { Settings } from "./settings";
+import { type Settings, settings } from "./settings";
 
 export const kNoAuth = "N/A";
 
@@ -721,6 +722,22 @@ function buildCustomModel(
 	return finalizeCustomModel(model, options);
 }
 
+function normalizeSuppressedSelector(selector: string): string {
+	const trimmed = selector.trim();
+	if (!trimmed) return trimmed;
+	const parsed = parseModelString(trimmed);
+	if (!parsed) return trimmed;
+	return `${parsed.provider}/${parsed.id}`;
+}
+
+function getDisabledProviderIdsFromSettings(): Set<string> {
+	try {
+		return new Set(settings.get("disabledProviders"));
+	} catch {
+		return new Set();
+	}
+}
+
 /**
  * Model registry - loads and manages models, resolves API keys via AuthStorage.
  */
@@ -737,6 +754,7 @@ export class ModelRegistry {
 	#registeredProviderSources: Set<string> = new Set();
 	#providerDiscoveryStates: Map<string, ProviderDiscoveryState> = new Map();
 	#cacheDbPath?: string;
+	#suppressedSelectors: Map<string, number> = new Map();
 	#backgroundRefresh?: Promise<void>;
 	#lastDiscoveryWarnings: Map<string, string> = new Map();
 
@@ -766,6 +784,7 @@ export class ModelRegistry {
 	 */
 	async refresh(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
 		this.#reloadStaticModels();
+		this.#suppressedSelectors.clear();
 		await this.#refreshRuntimeDiscoveries(strategy);
 	}
 
@@ -789,6 +808,11 @@ export class ModelRegistry {
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
 		this.#reloadStaticModels();
+		for (const selector of this.#suppressedSelectors.keys()) {
+			if (selector.startsWith(`${providerId}/`)) {
+				this.#suppressedSelectors.delete(selector);
+			}
+		}
 		await this.#refreshRuntimeDiscoveries(strategy, new Set([providerId]));
 	}
 
@@ -1654,11 +1678,19 @@ export class ModelRegistry {
 	 * This is a fast check that doesn't refresh OAuth tokens.
 	 */
 	getAvailable(): Model<Api>[] {
-		return this.#models.filter(m => this.#keylessProviders.has(m.provider) || this.authStorage.hasAuth(m.provider));
+		const disabledProviders = getDisabledProviderIdsFromSettings();
+		return this.#models.filter(
+			m =>
+				!disabledProviders.has(m.provider) &&
+				(this.#keylessProviders.has(m.provider) || this.authStorage.hasAuth(m.provider)),
+		);
 	}
 
 	getDiscoverableProviders(): string[] {
-		return this.#discoverableProviders.map(provider => provider.provider);
+		const disabledProviders = getDisabledProviderIdsFromSettings();
+		return this.#discoverableProviders
+			.filter(provider => !disabledProviders.has(provider.provider))
+			.map(provider => provider.provider);
 	}
 
 	getProviderDiscoveryState(provider: string): ProviderDiscoveryState | undefined {
@@ -1824,6 +1856,27 @@ export class ModelRegistry {
 				};
 			});
 		}
+	}
+
+	/**
+	 * Suppress a specific model selector (e.g., "provider/id") until a specific timestamp.
+	 */
+	suppressSelector(selector: string, untilMs: number): void {
+		this.#suppressedSelectors.set(normalizeSuppressedSelector(selector), untilMs);
+	}
+
+	/**
+	 * Check if a model selector is currently suppressed due to rate limits.
+	 */
+	isSelectorSuppressed(selector: string): boolean {
+		const normalizedSelector = normalizeSuppressedSelector(selector);
+		const suppressedUntil = this.#suppressedSelectors.get(normalizedSelector);
+		if (!suppressedUntil) return false;
+		if (suppressedUntil <= Date.now()) {
+			this.#suppressedSelectors.delete(normalizedSelector);
+			return false;
+		}
+		return true;
 	}
 }
 

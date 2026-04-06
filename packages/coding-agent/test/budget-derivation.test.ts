@@ -255,7 +255,6 @@ describe("deriveBudget — settings overrides", () => {
 
 		expect(budget.maxTokens).toBe(160_000);
 	});
-
 });
 
 // ═══════════════════════════════════════════════════════════════════════════

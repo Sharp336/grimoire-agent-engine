@@ -18,7 +18,7 @@
 
 import type { TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { CodecContext, ContentCodec } from "../types";
-import { buildPeek, extractText, HEAD_LINES, TAIL_LINES, VERBATIM_LINE_THRESHOLD as VERBATIM_THRESHOLD } from "./shared";
+import { buildPeek, extractText } from "./shared";
 
 /** Argument names worth preserving in the warm header. */
 const ARG_ALLOWLIST = new Set(["path", "pattern", "command", "action", "query", "url"]);
@@ -41,7 +41,6 @@ function buildArgSummary(args: Record<string, unknown>): string {
 	}
 	return parts.join(" ");
 }
-
 
 export const warmCodec: ContentCodec = {
 	name: "warm",

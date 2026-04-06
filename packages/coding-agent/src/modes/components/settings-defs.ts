@@ -80,6 +80,25 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "shadow", label: "Shadow", description: "Legacy stays active while assembler observes" },
 		{ value: "assembler", label: "Assembler", description: "Assembler-managed context with legacy paths disabled" },
 	],
+	"compaction.idleThresholdTokens": [
+		{ value: "100000", label: "100K tokens" },
+		{ value: "200000", label: "200K tokens" },
+		{ value: "300000", label: "300K tokens" },
+		{ value: "400000", label: "400K tokens" },
+		{ value: "500000", label: "500K tokens" },
+		{ value: "600000", label: "600K tokens" },
+		{ value: "700000", label: "700K tokens" },
+		{ value: "800000", label: "800K tokens" },
+		{ value: "900000", label: "900K tokens" },
+	],
+	"compaction.idleTimeoutSeconds": [
+		{ value: "60", label: "1 minute" },
+		{ value: "120", label: "2 minutes" },
+		{ value: "300", label: "5 minutes" },
+		{ value: "600", label: "10 minutes" },
+		{ value: "1800", label: "30 minutes" },
+		{ value: "3600", label: "1 hour" },
+	],
 	// Retry max retries
 	"retry.maxRetries": [
 		{ value: "1", label: "1 retry" },
@@ -87,6 +106,15 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "3", label: "3 retries" },
 		{ value: "5", label: "5 retries" },
 		{ value: "10", label: "10 retries" },
+	],
+	// Retry fallback revert policy
+	"retry.fallbackRevertPolicy": [
+		{
+			value: "cooldown-expiry",
+			label: "Cooldown expiry",
+			description: "Return to the primary model after its suppression window ends",
+		},
+		{ value: "never", label: "Never", description: "Stay on the fallback model until manually changed" },
 	],
 	// Task max concurrency
 	"task.maxConcurrency": [

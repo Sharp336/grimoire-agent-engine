@@ -41,7 +41,6 @@ export function contentHash(text: string): number {
 	return Bun.hash(text) as number;
 }
 
-
 /** Number of lines to keep from the start of output in peek compression. */
 export const HEAD_LINES = 3;
 /** Number of lines to keep from the end of output in peek compression. */

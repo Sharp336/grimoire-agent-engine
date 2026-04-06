@@ -1,11 +1,14 @@
-Retrieves content from a URL and returns it in a clean, readable format.
+Fetches URL content.
 
 <instruction>
-- Extract information from web pages, GitHub issues/PRs, Stack Overflow, Wikipedia, Reddit, NPM, arXiv, technical blogs, RSS/Atom feeds, JSON endpoints
-- Read PDF or DOCX files hosted at a URL
-- Use `raw: true` for untouched HTML or debugging
+- Use for web content retrieval when the standalone `fetch` tool is active.
+- Supports transformed reading of web pages, feeds, JSON endpoints, and binary-backed document conversions.
+- Use `raw: true` to inspect untouched HTML.
+- Use `timeout` to bound slow network calls.
 </instruction>
 
-<output>
-Returns processed, readable content. HTML transformed to remove boilerplate. PDF/DOCX converted to text. JSON returned formatted. With `raw: true`, returns untransformed HTML.
-</output>
+<critical>
+- Prefer `fetch` over bash/curl/wget for URL retrieval when this tool is available.
+- Returned content may be truncated; follow artifact references when present.
+- Image and document responses may include transformed textual content plus metadata.
+</critical>

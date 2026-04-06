@@ -7,9 +7,7 @@
  * from the filesystem at runtime; packaged/runtime paths are not stable.
  */
 
-import coreContractGuidance from "./core-contract.md" with { type: "text" };
 import selfImprovementImperative from "../system/self-improvement.md" with { type: "text" };
-import runtimeSurfacesGuidance from "./runtime-surfaces.md" with { type: "text" };
 import askDescription from "../tools/ask.md" with { type: "text" };
 import astEditDescription from "../tools/ast-edit.md" with { type: "text" };
 import astGrepDescription from "../tools/ast-grep.md" with { type: "text" };
@@ -19,11 +17,10 @@ import browserDescription from "../tools/browser.md" with { type: "text" };
 import calculatorDescription from "../tools/calculator.md" with { type: "text" };
 import cancelJobDescription from "../tools/cancel-job.md" with { type: "text" };
 import checkpointDescription from "../tools/checkpoint.md" with { type: "text" };
-import codeSearchDescription from "../tools/code-search.md" with { type: "text" };
 import exitPlanModeDescription from "../tools/exit-plan-mode.md" with { type: "text" };
 import fetchDescription from "../tools/fetch.md" with { type: "text" };
-import geminiImageDescription from "../tools/gemini-image.md" with { type: "text" };
 import findDescription from "../tools/find.md" with { type: "text" };
+import geminiImageDescription from "../tools/gemini-image.md" with { type: "text" };
 import grepDescription from "../tools/grep.md" with { type: "text" };
 import hashlineDescription from "../tools/hashline.md" with { type: "text" };
 import inspectImageDescription from "../tools/inspect-image.md" with { type: "text" };
@@ -44,6 +41,8 @@ import todoWriteDescription from "../tools/todo-write.md" with { type: "text" };
 import todosDescription from "../tools/todos.md" with { type: "text" };
 import webSearchDescription from "../tools/web-search.md" with { type: "text" };
 import writeDescription from "../tools/write.md" with { type: "text" };
+import coreContractGuidance from "./core-contract.md" with { type: "text" };
+import runtimeSurfacesGuidance from "./runtime-surfaces.md" with { type: "text" };
 
 export interface GuidanceLibrary {
 	/** Concatenated documentation for tools active in this session. */
@@ -69,7 +68,6 @@ const TOOL_DOCS = new Map<string, string>([
 	["calc", calculatorDescription],
 	["cancel_job", cancelJobDescription],
 	["checkpoint", checkpointDescription],
-	["code_search", codeSearchDescription],
 	["exit_plan_mode", exitPlanModeDescription],
 	["generate_image", geminiImageDescription],
 	["fetch", fetchDescription],

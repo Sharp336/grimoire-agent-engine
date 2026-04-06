@@ -230,7 +230,14 @@ export interface TurnDecision {
 	 *   - `"conversation-compressed"` — non-tool turn compressed via head+tail based on semantic relevance.
 	 *   - `"developer-dropped"` — developer message beyond hot window dropped (regenerated each turn).
 	 */
-	reason: "hot-window" | "no-tool-results" | "beyond-hot-window" | "codec-compressed" | "budget-exceeded" | "conversation-compressed" | "developer-dropped";
+	reason:
+		| "hot-window"
+		| "no-tool-results"
+		| "beyond-hot-window"
+		| "codec-compressed"
+		| "budget-exceeded"
+		| "conversation-compressed"
+		| "developer-dropped";
 
 	/** Number of messages in this turn. */
 	messageCount: number;
@@ -693,7 +700,13 @@ function compressConversationTurn(turn: Turn): { turn: Turn; tokensAfter: number
 		}
 		if (Array.isArray(content)) {
 			const newContent = content.map((block: unknown) => {
-				if (block && typeof block === "object" && "type" in block && (block as { type: string }).type === "text" && "text" in block) {
+				if (
+					block &&
+					typeof block === "object" &&
+					"type" in block &&
+					(block as { type: string }).type === "text" &&
+					"text" in block
+				) {
 					const text = (block as { text: string }).text;
 					const lines = text.split("\n");
 					const peek = buildPeek(lines, lines.length);

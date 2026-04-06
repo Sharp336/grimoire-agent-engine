@@ -20,8 +20,6 @@ export type SearchProviderId =
 	| "kagi"
 	| "synthetic";
 
-export type CodeSearchProviderId = "grep" | "exa";
-
 export function isSearchProviderId(value: string): value is SearchProviderId {
 	return [
 		"exa",
@@ -42,10 +40,6 @@ export function isSearchProviderId(value: string): value is SearchProviderId {
 
 export function isSearchProviderPreference(value: string): value is SearchProviderId | "auto" {
 	return value === "auto" || isSearchProviderId(value);
-}
-
-export function isCodeSearchProviderId(value: string): value is CodeSearchProviderId {
-	return value === "grep" || value === "exa";
 }
 
 /** Source returned by search (all providers) */

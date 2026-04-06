@@ -49,11 +49,13 @@ export async function resolveEmbeddingProvider(settings: Settings): Promise<Embe
 
 	const model = settings.get("providers.embeddingModel")?.trim();
 	if (!model) {
-		throw new Error("Embedding provider requires providers.embeddingModel when providers.embeddings=openai-compatible");
+		throw new Error(
+			"Embedding provider requires providers.embeddingModel when providers.embeddings=openai-compatible",
+		);
 	}
 
 	const dimension = Number(settings.get("providers.embeddingDimension") ?? EMBEDDING_DIM);
-		if (!Number.isInteger(dimension) || dimension <= 0) {
+	if (!Number.isInteger(dimension) || dimension <= 0) {
 		throw new Error(`Embedding provider dimension must be a positive integer, got ${dimension}`);
 	}
 
@@ -89,7 +91,13 @@ export function createOpenAICompatibleEmbeddingProvider(
 		model,
 		dimension: options.dimension,
 		fingerprint,
-		embed: texts => embedWithOpenAICompatibleServer(texts, { endpoint, model, dimension: options.dimension, apiKey: options.apiKey }),
+		embed: texts =>
+			embedWithOpenAICompatibleServer(texts, {
+				endpoint,
+				model,
+				dimension: options.dimension,
+				apiKey: options.apiKey,
+			}),
 	};
 }
 
@@ -124,9 +132,7 @@ async function embedWithOpenAICompatibleServer(
 
 	return json.data.map((item, index) => {
 		if (item.embedding.length !== options.dimension) {
-			throw new Error(
-				`Embedding ${index} has dimension ${item.embedding.length}, expected ${options.dimension}`,
-			);
+			throw new Error(`Embedding ${index} has dimension ${item.embedding.length}, expected ${options.dimension}`);
 		}
 		return new Float32Array(item.embedding);
 	});

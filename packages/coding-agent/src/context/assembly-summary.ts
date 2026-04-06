@@ -55,7 +55,8 @@ export function formatAssemblySummary(snapshot: EffectivePromptSnapshot): string
 			const codecCompressed = meta.compressedCount - conversationCompressed;
 			const compParts: string[] = [];
 			if (codecCompressed > 0) compParts.push(`${codecCompressed} codec-compressed`);
-			if (conversationCompressed > 0) compParts.push(`${conversationCompressed} conversation-compressed (recoverable via recall)`);
+			if (conversationCompressed > 0)
+				compParts.push(`${conversationCompressed} conversation-compressed (recoverable via recall)`);
 			turnParts.push(compParts.length > 0 ? compParts.join(", ") : `${meta.compressedCount} compressed`);
 		}
 		if (meta.droppedCount > 0) {
