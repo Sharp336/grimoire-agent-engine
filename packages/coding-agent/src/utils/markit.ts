@@ -1,7 +1,7 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
-import type { StreamInfo } from "markit-ai";
-import { Markit } from "markit-ai";
 import { ToolAbortError } from "../tools/tool-errors";
+
+declare const PI_COMPILED: boolean;
 
 export interface MarkitConversionResult {
 	content: string;
@@ -9,7 +9,42 @@ export interface MarkitConversionResult {
 	error?: string;
 }
 
-const markit = new Markit();
+interface MarkitStreamInfo {
+	extension: string;
+	filename: string;
+}
+
+interface MarkitResultPayload {
+	markdown?: string;
+}
+
+interface MarkitClient {
+	convertFile(filePath: string): Promise<MarkitResultPayload>;
+	convert(buffer: Buffer, streamInfo: MarkitStreamInfo): Promise<MarkitResultPayload>;
+}
+
+interface MarkitModule {
+	Markit: new () => MarkitClient;
+}
+
+const MARKIT_MODULE_NAME = "markit-ai";
+const COMPILED_MARKIT_ERROR = "markit unavailable in compiled builds";
+
+let markitPromise: Promise<MarkitClient> | undefined;
+
+function isCompiledBuild(): boolean {
+	return (typeof PI_COMPILED !== "undefined" && PI_COMPILED) || process.env.PI_COMPILED === "true";
+}
+
+async function loadMarkitModule(): Promise<MarkitModule> {
+	return (await import(MARKIT_MODULE_NAME)) as MarkitModule;
+}
+
+async function getMarkit(): Promise<MarkitClient> {
+	if (isCompiledBuild()) throw new Error(COMPILED_MARKIT_ERROR);
+	markitPromise ??= loadMarkitModule().then(module => new module.Markit());
+	return await markitPromise;
+}
 
 function normalizeExtension(extension: string): string {
 	const trimmed = extension.trim().toLowerCase();
@@ -48,6 +83,7 @@ function finalizeConversion(markdown?: string): MarkitConversionResult {
 
 export async function convertFileWithMarkit(filePath: string, signal?: AbortSignal): Promise<MarkitConversionResult> {
 	try {
+		const markit = await getMarkit();
 		const result = await runMarkitConversion(() => markit.convertFile(filePath), signal);
 		return finalizeConversion(result.markdown);
 	} catch (error) {
@@ -64,12 +100,13 @@ export async function convertBufferWithMarkit(
 	signal?: AbortSignal,
 ): Promise<MarkitConversionResult> {
 	const normalizedExtension = normalizeExtension(extension);
-	const streamInfo: StreamInfo = {
+	const streamInfo: MarkitStreamInfo = {
 		extension: normalizedExtension,
 		filename: `input${normalizedExtension}`,
 	};
 
 	try {
+		const markit = await getMarkit();
 		const result = await runMarkitConversion(() => markit.convert(Buffer.from(buffer), streamInfo), signal);
 		return finalizeConversion(result.markdown);
 	} catch (error) {
