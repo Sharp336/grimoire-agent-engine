@@ -27,6 +27,7 @@ static GLOBAL: MiMalloc = MiMalloc;
 
 pub mod appearance;
 pub mod ast;
+pub mod chunk;
 pub mod clipboard;
 pub mod fff;
 pub mod fs_cache;
@@ -36,8 +37,12 @@ pub mod grep;
 pub mod highlight;
 pub mod html;
 pub mod image;
+pub mod indent;
 pub mod keys;
 pub mod language;
+
+pub mod power;
+
 pub mod prof;
 pub mod projfs_overlay;
 pub mod ps;

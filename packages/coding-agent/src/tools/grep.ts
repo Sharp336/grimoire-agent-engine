@@ -1,20 +1,22 @@
 import * as path from "node:path";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 
-import { type GrepMatch, type GrepResult, grep } from "@oh-my-pi/pi-natives";
+import { type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { renderPromptTemplate } from "../config/prompt-templates";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import type { Theme } from "../modes/theme/theme";
+import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
 import { computeLineHash } from "../patch/hashline";
 import grepDescription from "../prompts/tools/grep.md" with { type: "text" };
 import { DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead } from "../session/streaming-output";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
+import { resolveEditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
+import { formatChunkedGrepLine } from "./chunk-tree";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import {
 	combineSearchGlobs,
@@ -75,6 +77,7 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 		this.description = renderPromptTemplate(grepDescription, {
 			IS_HASHLINE_MODE: displayMode.hashLines,
 			IS_LINE_NUMBER_MODE: !displayMode.hashLines && displayMode.lineNumbers,
+			IS_CHUNK_MODE: displayMode.chunked,
 		});
 	}
 
@@ -89,6 +92,7 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 
 		return untilAborted(signal, async () => {
 			const normalizedPattern = pattern.trim();
+			const chunkMode = resolveEditMode(this.session) === "chunk";
 			if (!normalizedPattern) {
 				throw new ToolError("Pattern must not be empty");
 			}
@@ -162,7 +166,7 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 				throw new ToolError(`Path not found: ${scopePath}`);
 			}
 
-			const effectiveOutputMode = "content";
+			const effectiveOutputMode = GrepOutputMode.Content;
 			const effectiveLimit = normalizedLimit ?? DEFAULT_MATCH_LIMIT;
 			const internalLimit = Math.min(effectiveLimit * 5, 2000);
 
@@ -270,6 +274,50 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 				}
 				matchesByFile.get(relativePath)!.push(match);
 			}
+			if (chunkMode) {
+				const annotatedLines = await Promise.all(
+					selectedMatches.map(match => {
+						const relativePath = match.path.startsWith("/") ? match.path.slice(1) : match.path;
+						const absoluteFilePath = isDirectory ? path.join(searchPath, relativePath) : searchPath;
+						const displayPath = formatPath(match.path);
+						fileMatchCounts.set(displayPath, (fileMatchCounts.get(displayPath) ?? 0) + 1);
+						return formatChunkedGrepLine({
+							filePath: absoluteFilePath,
+							lineNumber: match.lineNumber,
+							line: match.line,
+							cwd: this.session.cwd,
+							language: getLanguageFromPath(absoluteFilePath),
+						});
+					}),
+				);
+				const rawOutput = annotatedLines.join("\n");
+				const truncation = truncateHead(rawOutput, { maxLines: Number.MAX_SAFE_INTEGER });
+				const truncated = Boolean(matchLimitReached || result.limitReached || truncation.truncated);
+				const details: GrepToolDetails = {
+					scopePath,
+					matchCount: selectedMatches.length,
+					fileCount: fileList.length,
+					files: fileList,
+					fileMatches: fileList.map(path => ({
+						path,
+						count: fileMatchCounts.get(path) ?? 0,
+					})),
+					truncated,
+					matchLimitReached: matchLimitReached ? effectiveLimit : undefined,
+					resultLimitReached: result.limitReached ? internalLimit : undefined,
+				};
+				if (truncation.truncated) details.truncation = truncation;
+				const resultBuilder = toolResult(details)
+					.text(truncation.content)
+					.limits({
+						matchLimit: matchLimitReached ? effectiveLimit : undefined,
+						resultLimit: result.limitReached ? internalLimit : undefined,
+					});
+				if (truncation.truncated) {
+					resultBuilder.truncation(truncation, { direction: "head" });
+				}
+				return resultBuilder.done();
+			}
 			const renderMatchesForFile = (relativePath: string) => {
 				const fileMatches = matchesByFile.get(relativePath) ?? [];
 				for (const match of fileMatches) {
@@ -286,12 +334,13 @@ export class GrepTool implements AgentTool<typeof grepSchema, GrepToolDetails> {
 					}
 					const lineWidth = Math.max(...lineNumbers.map(value => value.toString().length));
 					const formatLine = (lineNumber: number, line: string, isMatch: boolean): string => {
+						const separator = isMatch ? ":" : "-";
 						if (useHashLines) {
 							const ref = `${lineNumber}#${computeLineHash(lineNumber, line)}`;
-							return isMatch ? `>>${ref}:${line}` : `  ${ref}:${line}`;
+							return `${ref}${separator}${line}`;
 						}
 						const padded = lineNumber.toString().padStart(lineWidth, " ");
-						return isMatch ? `>>${padded}:${line}` : `  ${padded}:${line}`;
+						return `${padded}${separator}${line}`;
 					};
 					if (match.contextBefore) {
 						for (const ctx of match.contextBefore) {

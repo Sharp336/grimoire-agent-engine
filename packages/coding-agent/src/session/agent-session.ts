@@ -23,7 +23,6 @@ import {
 	type AgentMessage,
 	type AgentState,
 	type AgentTool,
-	INTENT_FIELD,
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import type {
@@ -50,7 +49,7 @@ import {
 	modelsAreEqual,
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai";
-import type { SearchDb } from "@oh-my-pi/pi-natives";
+import { MacOSPowerAssertion, type SearchDb } from "@oh-my-pi/pi-natives";
 import { abortableSleep, getAgentDbPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
@@ -141,16 +140,13 @@ import {
 import { DEFAULT_PRUNE_CONFIG, pruneToolOutputs } from "./compaction/pruning";
 import {
 	type BashExecutionMessage,
-	type BranchSummaryMessage,
-	bashExecutionToText,
 	type CompactionSummaryMessage,
 	type CustomMessage,
 	convertToLlm,
 	type FileMentionMessage,
-	type HookMessage,
 	type PythonExecutionMessage,
-	pythonExecutionToText,
 } from "./messages";
+import { formatSessionDumpText } from "./session-dump-format";
 import type {
 	BranchSummaryEntry,
 	CompactionEntry,
@@ -400,6 +396,9 @@ export class AgentSession {
 	readonly sessionManager: SessionManager;
 	readonly settings: Settings;
 	readonly searchDb: SearchDb | undefined;
+
+	#powerAssertion: MacOSPowerAssertion | undefined;
+
 	readonly configWarnings: string[] = [];
 
 	#asyncJobManager: AsyncJobManager | undefined = undefined;
@@ -511,11 +510,36 @@ export class AgentSession {
 	#promptGeneration = 0;
 	#providerSessionState = new Map<string, ProviderSessionState>();
 
+	#startPowerAssertion(): void {
+		if (process.platform !== "darwin") {
+			return;
+		}
+		try {
+			this.#powerAssertion = MacOSPowerAssertion.start({ reason: "Oh My Pi agent session" });
+		} catch (error) {
+			logger.warn("Failed to acquire macOS power assertion", { error: String(error) });
+		}
+	}
+
+	#stopPowerAssertion(): void {
+		const assertion = this.#powerAssertion;
+		this.#powerAssertion = undefined;
+		if (!assertion) {
+			return;
+		}
+		try {
+			assertion.stop();
+		} catch (error) {
+			logger.warn("Failed to release macOS power assertion", { error: String(error) });
+		}
+	}
+
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.searchDb = config.searchDb;
+		this.#startPowerAssertion();
 		this.#asyncJobManager = config.asyncJobManager;
 		this.#scopedModels = config.scopedModels ?? [];
 		this.#thinkingLevel = config.thinkingLevel;
@@ -1677,6 +1701,7 @@ export class AgentSession {
 		if (drained === false && deliveryState) {
 			logger.warn("Async job completion deliveries still pending during dispose", { ...deliveryState });
 		}
+		this.#stopPowerAssertion();
 		await this.sessionManager.close();
 		this.#closeAllProviderSessions("dispose");
 		this.#unsubscribePendingActionPush?.();
@@ -6201,176 +6226,13 @@ export class AgentSession {
 	 * Includes user messages, assistant text, thinking blocks, tool calls, and tool results.
 	 */
 	formatSessionAsText(): string {
-		const lines: string[] = [];
-
-		/** Serialize an object as XML parameter elements, one per key. */
-		function formatArgsAsXml(args: Record<string, unknown>, indent = "\t"): string {
-			const parts: string[] = [];
-			for (const [key, value] of Object.entries(args)) {
-				if (key === INTENT_FIELD) continue;
-				const text = typeof value === "string" ? value : JSON.stringify(value);
-				parts.push(`${indent}<parameter name="${key}">${text}</parameter>`);
-			}
-			return parts.join("\n");
-		}
-
-		// Include system prompt at the beginning
-		const systemPrompt = this.agent.state.systemPrompt;
-		if (systemPrompt) {
-			lines.push("## System Prompt\n");
-			lines.push(systemPrompt);
-			lines.push("\n");
-		}
-
-		// Include model and thinking level
-		const model = this.agent.state.model;
-		const thinkingLevel = this.#thinkingLevel;
-		lines.push("## Configuration\n");
-		lines.push(`Model: ${model ? `${model.provider}/${model.id}` : "(not selected)"}`);
-		lines.push(`Thinking Level: ${thinkingLevel}`);
-		lines.push("\n");
-
-		// Include available tools
-		const tools = this.agent.state.tools;
-
-		// Recursively strip all fields starting with 'TypeBox.' from an object
-		function stripTypeBoxFields(obj: any): any {
-			if (Array.isArray(obj)) {
-				return obj.map(stripTypeBoxFields);
-			}
-			if (obj && typeof obj === "object") {
-				const result: Record<string, any> = {};
-				for (const [k, v] of Object.entries(obj)) {
-					if (!k.startsWith("TypeBox.")) {
-						result[k] = stripTypeBoxFields(v);
-					}
-				}
-				return result;
-			}
-			return obj;
-		}
-
-		if (tools.length > 0) {
-			lines.push("## Available Tools\n");
-			for (const tool of tools) {
-				lines.push(`<tool name="${tool.name}">`);
-				lines.push(tool.description);
-				const parametersClean = stripTypeBoxFields(tool.parameters);
-				lines.push(`\nParameters:\n${formatArgsAsXml(parametersClean as Record<string, unknown>)}`);
-				lines.push("<" + "/tool>\n");
-			}
-			lines.push("\n");
-		}
-
-		for (const msg of this.messages) {
-			if (msg.role === "user" || msg.role === "developer") {
-				lines.push(msg.role === "developer" ? "## Developer\n" : "## User\n");
-				if (typeof msg.content === "string") {
-					lines.push(msg.content);
-				} else {
-					for (const c of msg.content) {
-						if (c.type === "text") {
-							lines.push(c.text);
-						} else if (c.type === "image") {
-							lines.push("[Image]");
-						}
-					}
-				}
-				lines.push("\n");
-			} else if (msg.role === "assistant") {
-				const assistantMsg = msg as AssistantMessage;
-				lines.push("## Assistant\n");
-
-				for (const c of assistantMsg.content) {
-					if (c.type === "text") {
-						lines.push(c.text);
-					} else if (c.type === "thinking") {
-						lines.push("<thinking>");
-						lines.push(c.thinking);
-						lines.push("</thinking>\n");
-					} else if (c.type === "toolCall") {
-						lines.push(`<invoke name="${c.name}">`);
-						if (c.arguments && typeof c.arguments === "object") {
-							lines.push(formatArgsAsXml(c.arguments as Record<string, unknown>));
-						}
-						lines.push("<" + "/invoke>\n");
-					}
-				}
-				lines.push("");
-			} else if (msg.role === "toolResult") {
-				lines.push(`### Tool Result: ${msg.toolName}`);
-				if (msg.isError) {
-					lines.push("(error)");
-				}
-				for (const c of msg.content) {
-					if (c.type === "text") {
-						lines.push("```");
-						lines.push(c.text);
-						lines.push("```");
-					} else if (c.type === "image") {
-						lines.push("[Image output]");
-					}
-				}
-				lines.push("");
-			} else if (msg.role === "bashExecution") {
-				const bashMsg = msg as BashExecutionMessage;
-				if (!bashMsg.excludeFromContext) {
-					lines.push("## Bash Execution\n");
-					lines.push(bashExecutionToText(bashMsg));
-					lines.push("\n");
-				}
-			} else if (msg.role === "pythonExecution") {
-				const pythonMsg = msg as PythonExecutionMessage;
-				if (!pythonMsg.excludeFromContext) {
-					lines.push("## Python Execution\n");
-					lines.push(pythonExecutionToText(pythonMsg));
-					lines.push("\n");
-				}
-			} else if (msg.role === "custom" || msg.role === "hookMessage") {
-				const customMsg = msg as CustomMessage | HookMessage;
-				lines.push(`## ${customMsg.customType}\n`);
-				if (typeof customMsg.content === "string") {
-					lines.push(customMsg.content);
-				} else {
-					for (const c of customMsg.content) {
-						if (c.type === "text") {
-							lines.push(c.text);
-						} else if (c.type === "image") {
-							lines.push("[Image]");
-						}
-					}
-				}
-				lines.push("\n");
-			} else if (msg.role === "branchSummary") {
-				const branchMsg = msg as BranchSummaryMessage;
-				lines.push("## Branch Summary\n");
-				lines.push(`(from branch: ${branchMsg.fromId})\n`);
-				lines.push(branchMsg.summary);
-				lines.push("\n");
-			} else if (msg.role === "compactionSummary") {
-				const compactMsg = msg as CompactionSummaryMessage;
-				lines.push("## Compaction Summary\n");
-				lines.push(`(${compactMsg.tokensBefore} tokens before compaction)\n`);
-				lines.push(compactMsg.summary);
-				lines.push("\n");
-			} else if (msg.role === "fileMention") {
-				const fileMsg = msg as FileMentionMessage;
-				lines.push("## File Mention\n");
-				for (const file of fileMsg.files) {
-					lines.push(`<file path="${file.path}">`);
-					if (file.content) {
-						lines.push(file.content);
-					}
-					if (file.image) {
-						lines.push("[Image attached]");
-					}
-					lines.push("</file>\n");
-				}
-				lines.push("\n");
-			}
-		}
-
-		return lines.join("\n").trim();
+		return formatSessionDumpText({
+			messages: this.messages,
+			systemPrompt: this.agent.state.systemPrompt,
+			model: this.agent.state.model,
+			thinkingLevel: this.#thinkingLevel,
+			tools: this.agent.state.tools,
+		});
 	}
 
 	/**

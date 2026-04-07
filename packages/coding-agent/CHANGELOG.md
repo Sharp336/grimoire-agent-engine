@@ -1,8 +1,46 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Chunk read formatting: `anchorStyle` (full / kind / bare), `read.anchorstyle` setting, and `chunked` flag on file display mode
+- `read.prosechunks` and `read.explorechunks` settings for prose chunk trees and checksum-free explore trees
+- Handlebars helpers `anchor` and `sel` (with template `anchorStyle` context) for chunk examples in prompts
+- Chunk-mode grep lines as `path:selector>LINE|content`; unified grep tool template behind `IS_CHUNK_MODE`
+- `lru-cache` for chunk tree caching
+- Chunk-mode `read` output: recursive rendering with `$XXXX` checksum suffixes, inline large-chunk previews, and normalized `#path$XXXX` selectors between read and edit
+- Autoresearch: `init_experiment` options `new_segment`, `from_autoresearch_md`, `abandon_unlogged_runs`; `log_experiment` options `skip_restore` and broader `force`; `run_experiment` `force` (with warnings); pre-run dirty-path tracking; `abandonUnloggedAutoresearchRuns` and `abandonedAt` on runs
+- LSP: diagnostic versioning (`versionSupport`, stored document version per diagnostic set), and `waitForDiagnostics` / `getDiagnosticsForFile` options (`expectedDocumentVersion`, `allowUnversioned`)
+
+### Changed
+
+- Chunk edit schema and tool contract: explicit `op` (`replace`, `delete`, `append`, `prepend`, `after`, `before`); sibling inserts use `anchor` instead of separate after/before target fields; `replace` supports optional `line` / `end_line` for line-scoped edits (former splice-style behavior); insert ops omit CRC where appropriate, mutations require checksum on target
+- Chunk path handling: parse selector and CRC separately, sanitize selectors (strip filename prefixes, uppercase checksums), accept embedded `#CRC` on targets, auto-accept stale CRC for later ops in the same batch on the same chunk
+- Chunk UX: streaming and final edit previews show chunk edits next to hashline edits with op-specific labels; prompt docs shortened with rules table, `…` in examples, and helper-based path/anchor samples
+- `log_experiment` only reverts files modified by the run; prompts and errors document that pre-existing dirty files are preserved; richer pending-run error context; `init_experiment` no-ops when the contract matches unless `new_segment`; secondary metrics informational only (no `force` for drift)
+- Autoresearch: `log_experiment` reloads benchmark/scope/constraints from `autoresearch.md` after resolving a pending run; `/autoresearch` without `autoresearch.md` follows `/plan`-style toggle and message flow; setup moved into autoresearch system prompt (removed `command-initialize.md`)
+- Native/shell alignment: `GrepOutputMode` from pi-natives; shell and `getDiagnosticsForFile` callbacks use error-first `(err, chunk)`; `getDiagnosticsForFile` takes an options object
+- Clipboard: `copyToClipboard` / `readImageFromClipboard` live in `utils/clipboard.ts` (OSC 52 and Termux)
+- macOS: session-wide power assertion while the agent runs; `MacAppearanceObserver.start()` with error-first callback; `detectMacOSAppearance()` returns enum values
+
+### Removed
+
+- `grep-chunk.md` (folded into unified grep template)
+- `startMacAppearanceObserver` export (use `MacAppearanceObserver.start()`)
+- `copyToClipboard` export from pi-natives
+- `PI_CHUNK_SPLICES` env and `chunkSplicesEnabled()`
+- Autoresearch `segmentFingerprint` and related config hashing
+
+### Fixed
+
+- `log_experiment` validates and reverts run-scoped file changes without clobbering unrelated dirty worktree state
+- Chunk edit targets that embed CRC in the selector (e.g. `fn_foo#ABCD`) parse correctly
+- Shell paths check errors before consuming chunk output (bash executor, config resolution)
+- `/autoresearch` toggles like `/plan` when empty; slash completion no longer suggests `off`/`clear` on an empty prefix after the command
+- Chunk-mode read/edit edge cases (zero-width gap replaces, stale batch diagnostics, grouped Go receivers, line-count headers, parse error locations)
 
 ## [13.19.0] - 2026-04-05
+
 ### Added
 
 - Added idle auto-compaction settings and scheduling so sessions can compact after inactive turns without auto-continuing.
@@ -50,6 +88,7 @@
 - Fixed the plan review selector to support the external editor shortcut for opening and updating the current plan from the approval screen
 
 ## [13.18.0] - 2026-04-02
+
 ### Breaking Changes
 
 - Removed standalone `fetch` tool; URL fetching is now integrated into the `read` tool
@@ -72,6 +111,7 @@
 - Fixed `read` tool to properly handle `file://` URL scheme by converting to filesystem paths
 
 ## [13.17.5] - 2026-04-01
+
 ### Added
 
 - Added support for writing to ZIP archives using fflate library for cross-platform compatibility
@@ -85,6 +125,7 @@
 - Removed GhPrPushTool test case
 
 ## [13.17.4] - 2026-04-01
+
 ### Added
 
 - Support for writing to archive entries in `.tar`, `.tar.gz`, `.tgz`, and `.zip` files using `archive.ext:path/inside/archive` syntax
@@ -109,6 +150,7 @@
 - Updated `read` tool documentation to reflect archive support and usage patterns
 
 ## [13.17.2] - 2026-04-01
+
 ### Added
 
 - Added `/marketplace help` command to display usage guide for all marketplace operations
@@ -164,6 +206,7 @@
 - Fixed inline image rendering to cap image height and preserve multiplexer scrollback during terminal resizes ([#587](https://github.com/can1357/oh-my-pi/pull/587) by [@smileynet](https://github.com/smileynet))
 
 ## [13.17.1] - 2026-04-01
+
 ### Removed
 
 - Removed `code_search` tool for code snippet and documentation search
@@ -173,6 +216,7 @@
 - Fixed edit tool diff rendering to wrap long diff lines with continuation gutters instead of truncating them at terminal width ([#578](https://github.com/can1357/oh-my-pi/issues/578))
 - Fixed `--list-models` and `/model` provider filtering to hide models from disabled providers ([#588](https://github.com/can1357/oh-my-pi/issues/588))
 - Fixed edit tool diffstats to use diff-specific add/remove theme colors instead of success/error status colors ([#589](https://github.com/can1357/oh-my-pi/issues/589))
+
 ## [13.17.0] - 2026-03-30
 
 ### Added
@@ -225,6 +269,7 @@
 - Fixed `--model provider/id` resolving to wrong provider when model ID exists in multiple catalogs ([#560](https://github.com/can1357/oh-my-pi/issues/560))
 
 ## [13.16.4] - 2026-03-28
+
 ### Changed
 
 - Renamed hashline helper functions from `hlineref`/`hlinefull` to `href`/`hline` for brevity
@@ -404,6 +449,7 @@
 ### Added
 
 - Session observer overlay (`Ctrl+S`): view running subagent sessions with a picker and read-only transcript showing thinking, text, tool calls, and results
+
 ## [13.14.0] - 2026-03-20
 
 ### Added

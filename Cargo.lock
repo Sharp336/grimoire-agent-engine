@@ -465,6 +465,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
 
 [[package]]
+name = "bytes-utils"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7dafe3a8757b027e2be6e4e5601ed563c55989fcf1546e933c66c8eb3a058d35"
+dependencies = [
+ "bytes",
+ "either",
+]
+
+[[package]]
 name = "cached"
 version = "0.56.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2524,6 +2534,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "path-clean"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "17359afc20d7ab31fdb42bb844c8b3bb1dabd7dcf7e68428492da7f16966fcef"
+
+[[package]]
 name = "pathdiff"
 version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2686,6 +2702,9 @@ dependencies = [
  "ast-grep-core",
  "brush-builtins",
  "brush-core",
+ "bytes",
+ "bytes-utils",
+ "cc",
  "clap",
  "dashmap",
  "fff-grep",
@@ -2706,9 +2725,13 @@ dependencies = [
  "napi-derive",
  "os_pipe",
  "parking_lot",
+ "path-clean",
+ "pathdiff",
  "phf 0.13.1",
  "portable-pty",
  "rayon",
+ "regex",
+ "similar",
  "smallvec",
  "syntect",
  "tokio",
@@ -2722,6 +2745,7 @@ dependencies = [
  "tree-sitter-css",
  "tree-sitter-diff",
  "tree-sitter-elixir",
+ "tree-sitter-glimmer",
  "tree-sitter-go",
  "tree-sitter-haskell",
  "tree-sitter-hcl",
@@ -2746,6 +2770,7 @@ dependencies = [
  "tree-sitter-solidity",
  "tree-sitter-starlark",
  "tree-sitter-swift",
+ "tree-sitter-tlaplus",
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "tree-sitter-verilog",
@@ -2756,6 +2781,7 @@ dependencies = [
  "unicode-width",
  "windows-sys 0.61.2",
  "winreg 0.55.0",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -3311,6 +3337,15 @@ name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "703d5c7ef118737c72f1af64ad2f6f8c5e1921f818cdcb97b8fe6fc69bf66214"
+
+[[package]]
+name = "similar"
+version = "3.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "26d0b06eba54f0ca0770f970a3e89823e766ca638dd940f8469fa0fa50c75396"
+dependencies = [
+ "bstr",
+]
 
 [[package]]
 name = "siphasher"
@@ -3883,6 +3918,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "tree-sitter-glimmer"
+version = "0.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "295346943475457f55688342f14675e2a54ba3e8f3d224f11d10477d99e70330"
+dependencies = [
+ "cc",
+ "tree-sitter",
+]
+
+[[package]]
 name = "tree-sitter-go"
 version = "0.25.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4123,6 +4168,16 @@ name = "tree-sitter-swift"
 version = "0.7.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4ef216011c3e3df4fa864736f347cb8d509b1066cf0c8549fb1fd81ac9832e59"
+dependencies = [
+ "cc",
+ "tree-sitter-language",
+]
+
+[[package]]
+name = "tree-sitter-tlaplus"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ddaacc0337bfee38f233a91a704dc36b887a0c385348163f65344d64b73f79e1"
 dependencies = [
  "cc",
  "tree-sitter-language",
@@ -5038,6 +5093,12 @@ name = "x11rb-protocol"
 version = "0.13.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ea6fc2961e4ef194dcbfe56bb845534d0dc8098940c7e5c012a258bfec6701bd"
+
+[[package]]
+name = "xxhash-rust"
+version = "0.8.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fdd20c5420375476fbd4394763288da7eb0cc0b8c11deed431a91562af7335d3"
 
 [[package]]
 name = "yoke"

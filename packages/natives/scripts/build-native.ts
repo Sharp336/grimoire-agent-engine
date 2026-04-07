@@ -6,6 +6,7 @@ import { $ } from "bun";
 const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");
 const nativeDir = path.join(import.meta.dir, "../native");
+const packageJsonPath = path.join(import.meta.dir, "../package.json");
 
 const isDev = process.argv.includes("--dev");
 const crossTarget = Bun.env.CROSS_TARGET;
@@ -136,61 +137,73 @@ async function installBinary(src: string, dest: string): Promise<void> {
 	}
 }
 
-const cargoArgs = ["build"];
-if (!isDev) cargoArgs.push("--release");
-if (crossTarget) cargoArgs.push("--target", crossTarget);
+const isCI = Boolean(Bun.env.CI);
+const useLocalProfile = !isDev && !isCI && !isCrossCompile;
 
-console.log(`Building pi-natives for ${targetPlatform}-${targetArch}${variantSuffix}${isDev ? " (debug)" : ""}…`);
-const buildResult = await $`cargo ${cargoArgs}`.cwd(rustDir).nothrow();
-if (buildResult.exitCode !== 0) {
-	const stderr = buildResult.stderr?.toString("utf-8") ?? "";
-	throw new Error(`cargo build --release failed${stderr ? `:\n${stderr}` : ""}`);
+// Build napi args
+const napiArgs = [
+	"build",
+	"--manifest-path",
+	path.join(rustDir, "Cargo.toml"),
+	"--package-json-path",
+	packageJsonPath,
+	"--platform",
+	"--no-js",
+	"--dts",
+	"index.d.ts",
+	"-o",
+	nativeDir,
+];
+
+if (isDev) {
+	// napi build defaults to debug, no flag needed
+} else if (useLocalProfile) {
+	napiArgs.push("--profile", "local");
+} else {
+	napiArgs.push("--release");
 }
 
-const profile = isDev ? "debug" : "release";
-const targetRoots = [
-	Bun.env.CARGO_TARGET_DIR ? path.resolve(Bun.env.CARGO_TARGET_DIR) : undefined,
-	path.join(repoRoot, "target"),
-	path.join(rustDir, "target"),
-].filter((v): v is string => Boolean(v));
+if (crossTarget) napiArgs.push("--target", crossTarget);
 
-const profileDirs = targetRoots.flatMap(root => {
-	if (crossTarget) {
-		return [path.join(root, crossTarget, profile), path.join(root, profile)];
-	}
-	return [path.join(root, profile)];
-});
-
-const libraryNames = ["libpi_natives.so", "libpi_natives.dylib", "pi_natives.dll", "libpi_natives.dll"];
-
-let sourcePath: string | null = null;
-for (const dir of profileDirs) {
-	for (const name of libraryNames) {
-		const fullPath = path.join(dir, name);
-		try {
-			await fs.stat(fullPath);
-			sourcePath = fullPath;
-			break;
-		} catch (err) {
-			if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-		}
-	}
-	if (sourcePath) break;
-}
+const profileLabel = isDev ? " (debug)" : useLocalProfile ? " (local)" : "";
+console.log(`Building pi-natives for ${targetPlatform}-${targetArch}${variantSuffix}${profileLabel}…`);
 
 await fs.mkdir(nativeDir, { recursive: true });
 await cleanupStaleTemps(nativeDir);
 
-if (!sourcePath) {
-	const checked = profileDirs.map(d => `  - ${d}`).join("\n");
-	throw new Error(`Built library not found. Checked:\n${checked}`);
+// Resolve napi bin directly: `bunx @napi-rs/cli` can pick up the wrong bin on
+// systems where `cli` exists on PATH (e.g. Mono's /usr/bin/cli on Ubuntu).
+const napiBin = Bun.which("napi", {
+	PATH: `${path.join(import.meta.dir, "..", "node_modules", ".bin")}:${path.join(repoRoot, "node_modules", ".bin")}:${process.env.PATH ?? ""}`,
+});
+if (!napiBin) {
+	throw new Error("Could not locate @napi-rs/cli `napi` binary in node_modules/.bin");
+}
+const buildResult = await $`${napiBin} ${napiArgs}`.nothrow();
+if (buildResult.exitCode !== 0) {
+	const stderr = buildResult.stderr?.toString("utf-8") ?? "";
+	throw new Error(`napi build failed${stderr ? `:\n${stderr}` : ""}`);
 }
 
-console.log(`Found: ${sourcePath}`);
-const taggedPath = isDev
-	? path.join(nativeDir, "pi_natives.dev.node")
-	: path.join(nativeDir, `pi_natives.${targetPlatform}-${targetArch}${variantSuffix}.node`);
-console.log(`Installing: ${taggedPath}`);
-await installBinary(sourcePath, taggedPath);
+// napi build produces pi_natives.<platform>-<arch>.node — rename with variant suffix if needed
+if (variantSuffix) {
+	const napiFilename = `pi_natives.${targetPlatform}-${targetArch}.node`;
+	const taggedFilename = `pi_natives.${targetPlatform}-${targetArch}${variantSuffix}.node`;
+	const napiPath = path.join(nativeDir, napiFilename);
+	const taggedPath = path.join(nativeDir, taggedFilename);
+
+	try {
+		await fs.stat(napiPath);
+		console.log(`Renaming: ${napiFilename} → ${taggedFilename}`);
+		await installBinary(napiPath, taggedPath);
+		await fs.unlink(napiPath).catch(() => {});
+	} catch (err) {
+		if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
+		// Already named correctly or handled by napi
+	}
+}
+
+// Generate runtime enum exports from const enums in index.d.ts
+await $`bun ${path.join(import.meta.dir, "gen-enums.ts")}`;
 
 console.log("Build complete.");

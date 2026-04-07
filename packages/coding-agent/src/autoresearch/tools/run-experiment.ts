@@ -8,7 +8,8 @@ import type { ToolDefinition } from "../../extensibility/extensions";
 import type { Theme } from "../../modes/theme/theme";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, truncateTail } from "../../session/streaming-output";
 import { replaceTabs, shortenPath, truncateToWidth } from "../../tools/render-utils";
-import { getAutoresearchFingerprintMismatchError } from "../contract";
+import * as git from "../../utils/git";
+import { parseWorkDirDirtyPaths } from "../git";
 import {
 	EXPERIMENT_MAX_BYTES,
 	EXPERIMENT_MAX_LINES,
@@ -16,6 +17,7 @@ import {
 	formatNum,
 	getAutoresearchRunDirectory,
 	getNextAutoresearchRunNumber,
+	isAutoresearchLocalStatePath,
 	isAutoresearchShCommand,
 	killTree,
 	parseAsiLines,
@@ -38,6 +40,12 @@ const runExperimentSchema = Type.Object({
 	checks_timeout_seconds: Type.Optional(
 		Type.Number({
 			description: "Timeout in seconds for autoresearch.checks.sh. Defaults to 300.",
+		}),
+	),
+	force: Type.Optional(
+		Type.Boolean({
+			description:
+				"When true, allow a command that differs from the segment benchmark command and skip the rule that autoresearch.sh must be invoked directly when that script exists.",
 		}),
 	),
 });
@@ -87,14 +95,9 @@ export function createRunExperimentTool(
 			const workDir = resolveWorkDir(ctx.cwd);
 			const checksPath = path.join(workDir, "autoresearch.checks.sh");
 			const autoresearchScriptPath = path.join(workDir, "autoresearch.sh");
-			const fingerprintError = getAutoresearchFingerprintMismatchError(state.segmentFingerprint, workDir);
-			if (fingerprintError) {
-				return {
-					content: [{ type: "text", text: `Error: ${fingerprintError}` }],
-				};
-			}
 
-			if (state.benchmarkCommand && params.command.trim() !== state.benchmarkCommand) {
+			const forceCommand = params.force === true;
+			if (!forceCommand && state.benchmarkCommand && params.command.trim() !== state.benchmarkCommand) {
 				return {
 					content: [
 						{
@@ -107,7 +110,7 @@ export function createRunExperimentTool(
 				};
 			}
 
-			if (fs.existsSync(autoresearchScriptPath) && !isAutoresearchShCommand(params.command)) {
+			if (!forceCommand && fs.existsSync(autoresearchScriptPath) && !isAutoresearchShCommand(params.command)) {
 				return {
 					content: [
 						{
@@ -156,6 +159,17 @@ export function createRunExperimentTool(
 			const checksLogPath = path.join(runDirectory, "checks.log");
 			const runJsonPath = path.join(runDirectory, "run.json");
 			await fs.promises.mkdir(runDirectory, { recursive: true });
+
+			const preRunStatus = await git.status(workDir, {
+				porcelainV1: true,
+				untrackedFiles: "all",
+				z: true,
+			});
+			const workDirPrefix = await git.show.prefix(workDir);
+			const preRunDirtyPaths = parseWorkDirDirtyPaths(preRunStatus, workDirPrefix).filter(
+				p => !isAutoresearchLocalStatePath(p),
+			);
+
 			runtime.lastRunChecks = null;
 			runtime.lastRunDuration = null;
 			runtime.lastRunAsi = null;
@@ -171,6 +185,7 @@ export function createRunExperimentTool(
 						benchmarkLogPath,
 						checksLogPath,
 						command: params.command,
+						preRunDirtyPaths,
 						startedAt: new Date().toISOString(),
 					},
 					null,
@@ -287,6 +302,7 @@ export function createRunExperimentTool(
 				parsedAsi,
 				metricName: state.metricName,
 				metricUnit: state.metricUnit,
+				preRunDirtyPaths,
 				truncation: llmTruncation.truncated ? llmTruncation : undefined,
 				fullOutputPath: execution.logPath,
 			};
@@ -300,6 +316,7 @@ export function createRunExperimentTool(
 				parsedMetrics,
 				parsedPrimary,
 				passed: resultDetails.passed,
+				preRunDirtyPaths,
 				runDirectory,
 				runNumber,
 			};
@@ -329,6 +346,7 @@ export function createRunExperimentTool(
 						parsedMetrics,
 						parsedPrimary,
 						parsedAsi,
+						preRunDirtyPaths,
 						truncation: resultDetails.truncation,
 						fullOutputPath: resultDetails.fullOutputPath,
 					},
@@ -337,8 +355,28 @@ export function createRunExperimentTool(
 				),
 			);
 
+			const commandWarnings: string[] = [];
+			if (forceCommand) {
+				if (state.benchmarkCommand && params.command.trim() !== state.benchmarkCommand) {
+					commandWarnings.push(
+						`Warning: command override (force=true). Segment benchmark is ${state.benchmarkCommand}; ran ${params.command}.`,
+					);
+				}
+				if (fs.existsSync(autoresearchScriptPath) && !isAutoresearchShCommand(params.command)) {
+					commandWarnings.push(
+						"Warning: autoresearch.sh exists but the command was not a direct autoresearch.sh invocation (force=true).",
+					);
+				}
+			}
+			const warningPrefix = commandWarnings.length > 0 ? `${commandWarnings.join("\n")}\n\n` : "";
+
 			return {
-				content: [{ type: "text", text: buildRunText(resultDetails, llmTruncation.content, state.bestMetric) }],
+				content: [
+					{
+						type: "text",
+						text: warningPrefix + buildRunText(resultDetails, llmTruncation.content, state.bestMetric),
+					},
+				],
 				details: resultDetails,
 			};
 		},

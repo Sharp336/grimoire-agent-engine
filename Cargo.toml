@@ -20,6 +20,13 @@ codegen-units = 1
 strip = true
 panic = "abort"
 
+[profile.local]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true
+strip = false
+
 [profile.dev]
 codegen-units = 256
 incremental = true
@@ -84,3 +91,4 @@ missing_panics_doc = "allow"
 
 # Complexity
 too_many_lines = "allow"
+too_many_arguments = "allow"
