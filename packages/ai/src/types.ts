@@ -361,6 +361,15 @@ export interface ToolResultMessage<TDetails = any> {
 	attribution?: MessageAttribution;
 	/** Timestamp when output was pruned (ms since epoch). Undefined if unpruned. */
 	prunedAt?: number;
+	/**
+	 * Cold-text sidecar: describes text content blocks whose full payload has been
+	 * externalized to a blob store to reduce in-memory footprint. Each entry points
+	 * `content[blockIndex]` at a content-addressed blob (`ref`) holding `byteLen`
+	 * UTF-8 bytes; the inline `text` field for that block holds only a short preview
+	 * until the message is materialized back on the LLM path. Absent/undefined means
+	 * the message is fully inline (no cold text).
+	 */
+	coldRefs?: Array<{ blockIndex: number; ref: string; byteLen: number }>;
 	timestamp: number; // Unix timestamp in milliseconds
 }
 
