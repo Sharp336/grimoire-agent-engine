@@ -87,16 +87,14 @@ describe("ensureTool yt-dlp auto-install", () => {
 				}
 				return originalExistsSync(candidate);
 			});
-			vi.spyOn(fs.promises, "mkdir").mockImplementation(
-				(async (...args: Parameters<typeof fs.promises.mkdir>) => {
-					const [dir, options] = args;
-					const resolvedDir = path.resolve(String(dir));
-					if (resolvedDir !== expectedToolsDir) {
-						throw new Error(`unexpected mkdir outside test tools dir: ${resolvedDir}`);
-					}
-					return await originalMkdir(dir, options);
-				}) as typeof fs.promises.mkdir,
-			);
+			vi.spyOn(fs.promises, "mkdir").mockImplementation((async (...args: Parameters<typeof fs.promises.mkdir>) => {
+				const [dir, options] = args;
+				const resolvedDir = path.resolve(String(dir));
+				if (resolvedDir !== expectedToolsDir) {
+					throw new Error(`unexpected mkdir outside test tools dir: ${resolvedDir}`);
+				}
+				return await originalMkdir(dir, options);
+			}) as typeof fs.promises.mkdir);
 
 			using _hook = hookFetch(async input => {
 				const url = String(input);
