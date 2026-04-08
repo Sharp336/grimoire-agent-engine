@@ -1,3 +1,4 @@
+import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -34,6 +35,16 @@ import type {
 	ThinkingBudgets,
 	ToolChoice,
 } from "./types";
+
+function getOpencodeHeaders(sessionId?: string) {
+	return {
+		"User-Agent": "opencode/latest/1.3.15/cli",
+		"x-opencode-client": "cli",
+		"x-opencode-project": process.cwd(),
+		"x-opencode-session": sessionId ?? "",
+		"x-opencode-request": crypto.randomUUID(),
+	};
+}
 
 let cachedVertexAdcCredentialsExists: boolean | null = null;
 
@@ -524,13 +535,17 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"bedrock-converse-stream">({ ...bedrockBase, maxTokens, thinkingBudgets });
 		}
 
-		case "openai-completions":
+		case "openai-completions": {
+			const isOpencode =
+				model.provider === "opencode" || model.provider === "opencode-go" || model.provider === "opencode-zen";
 			return castApi<"openai-completions">({
 				...base,
+				headers: isOpencode ? { ...base.headers, ...getOpencodeHeaders(options?.sessionId) } : base.headers,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
 				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
 				serviceTier: options?.serviceTier,
 			});
+		}
 
 		case "openai-responses":
 			return castApi<"openai-responses">({
