@@ -485,6 +485,7 @@
 - Chunk edit error messages now consistently report checksum mismatches with the format `did not match checksum "XXXX"` instead of variable phrasing
 - Chunk selector validation for edits now rejects non-canonical selectors (suffix-only like `fn_run` or prefix-stripped like `run`), requiring fully-qualified paths to prevent ambiguity
 - Plan review previews now re-append at the chat tail on refresh, keeping them adjacent to the active selector instead of updating off-screen
+- Fixed yt-dlp auto-download hangs during YouTube reads by streaming direct-binary installs into the current agent tools directory ([#644](https://github.com/can1357/oh-my-pi/issues/644))
 - `log_experiment` validates and reverts run-scoped file changes without clobbering unrelated dirty worktree state
 - Chunk edit targets that embed CRC in the selector (e.g. `fn_foo#ABCD`) parse correctly
 - Shell paths check errors before consuming chunk output (bash executor, config resolution)
