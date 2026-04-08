@@ -1,11 +1,25 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { $which, APP_NAME, getToolsDir, logger, ptree, TempDir } from "@oh-my-pi/pi-utils";
+import { pipeline } from "node:stream/promises";
+import { $which, APP_NAME, getToolsDir, isEnoent, logger, ptree, TempDir } from "@oh-my-pi/pi-utils";
 
-const TOOLS_DIR = getToolsDir();
 const TOOL_DOWNLOAD_TIMEOUT_MS = 120_000;
 const TOOL_METADATA_TIMEOUT_MS = 5000;
+
+function resolveToolsDir(): string {
+	// Resolve at call time so runtime/test agent-dir changes are respected.
+	return getToolsDir();
+}
+
+async function waitForWriteStreamOpen(stream: fs.WriteStream): Promise<void> {
+	if (!stream.pending) return;
+
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	stream.once("open", () => resolve());
+	stream.once("error", reject);
+	await promise;
+}
 
 interface ToolConfig {
 	name: string;
@@ -103,7 +117,8 @@ export function getToolPath(tool: ToolName): string | null {
 	if (!config) return null;
 
 	// Check our tools directory first
-	const localPath = path.join(TOOLS_DIR, config.binaryName + (os.platform() === "win32" ? ".exe" : ""));
+	const toolsDir = resolveToolsDir();
+	const localPath = path.join(toolsDir, config.binaryName + (os.platform() === "win32" ? ".exe" : ""));
 	if (fs.existsSync(localPath)) {
 		return localPath;
 	}
@@ -137,6 +152,8 @@ async function getLatestVersion(repo: string, signal?: AbortSignal): Promise<str
 
 // Download a file from URL
 async function downloadFile(url: string, dest: string, signal?: AbortSignal): Promise<void> {
+	const tempPath = `${dest}.download-${process.pid}-${Date.now()}`;
+	const backupPath = `${dest}.bak`;
 	let response: Response;
 	try {
 		response = await fetch(url, {
@@ -149,11 +166,51 @@ async function downloadFile(url: string, dest: string, signal?: AbortSignal): Pr
 		throw err;
 	}
 	if (!response.ok) {
-		throw new Error(`Failed to download: ${response.status}`);
-	} else if (!response.body) {
-		throw new Error("No response body");
+		throw new Error(`Failed to download: ${response.status} ${response.statusText}`.trim());
 	}
-	await Bun.write(dest, response);
+	if (!response.body) {
+		throw new Error(`No response body for: ${url}`);
+	}
+
+	await fs.promises.mkdir(path.dirname(dest), { recursive: true });
+
+	try {
+		const fileStream = fs.createWriteStream(tempPath);
+		await waitForWriteStreamOpen(fileStream);
+		await pipeline(response.body, fileStream);
+
+		await fs.promises.rm(backupPath, { force: true });
+
+		let replacedExistingFile = false;
+		try {
+			await fs.promises.rename(dest, backupPath);
+			replacedExistingFile = true;
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+		}
+
+		try {
+			await fs.promises.rename(tempPath, dest);
+		} catch (err) {
+			if (replacedExistingFile) {
+				try {
+					await fs.promises.rename(backupPath, dest);
+				} catch (restoreErr) {
+					throw new Error(
+						`Failed to replace ${dest}: ${err instanceof Error ? err.message : String(err)}; rollback failed: ${restoreErr instanceof Error ? restoreErr.message : String(restoreErr)}`,
+					);
+				}
+			}
+			throw err;
+		}
+
+		if (replacedExistingFile) {
+			await fs.promises.rm(backupPath, { force: true });
+		}
+	} catch (err) {
+		await fs.promises.rm(tempPath, { force: true });
+		throw err;
+	}
 }
 
 // Download and install a tool
@@ -173,12 +230,14 @@ async function downloadTool(tool: ToolName, signal?: AbortSignal): Promise<strin
 		throw new Error(`Unsupported platform: ${plat}/${architecture}`);
 	}
 
+	const toolsDir = resolveToolsDir();
+
 	// Create tools directory
-	await fs.promises.mkdir(TOOLS_DIR, { recursive: true });
+	await fs.promises.mkdir(toolsDir, { recursive: true });
 
 	const downloadUrl = `https://github.com/${config.repo}/releases/download/${config.tagPrefix}${version}/${assetName}`;
 	const binaryExt = plat === "win32" ? ".exe" : "";
-	const binaryPath = path.join(TOOLS_DIR, config.binaryName + binaryExt);
+	const binaryPath = path.join(toolsDir, config.binaryName + binaryExt);
 
 	// Handle direct binary downloads (no archive extraction needed)
 	if (config.isDirectBinary) {
@@ -190,7 +249,7 @@ async function downloadTool(tool: ToolName, signal?: AbortSignal): Promise<strin
 	}
 
 	// Download archive
-	const archivePath = path.join(TOOLS_DIR, assetName);
+	const archivePath = path.join(toolsDir, assetName);
 	await downloadFile(downloadUrl, archivePath, signal);
 
 	// Extract
