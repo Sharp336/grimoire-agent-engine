@@ -143,4 +143,3 @@ windows-sys = { version = "0.61", features = [
 ] }
 [build-dependencies]
 napi-build = "2"
-cc = "1"

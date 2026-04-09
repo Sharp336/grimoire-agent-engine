@@ -1,0 +1,17 @@
+[package]
+name = "tree-sitter-glimmer"
+description = "Glimmer grammar for tree-sitter (vendored with scanner fix)"
+version = "0.0.1"
+license = "MIT"
+edition = "2021"
+build = "build.rs"
+include = ["build.rs", "src/*"]
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tree-sitter = ">=0.22.6"
+
+[build-dependencies]
+cc = "1"

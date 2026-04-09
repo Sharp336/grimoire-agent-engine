@@ -148,6 +148,10 @@ static inline bool set_contains(TSCharacterRange *ranges, uint32_t len, int32_t 
   return (lookahead >= range->start && lookahead <= range->end);
 }
 
+/*
+ *  Lexer Macros
+ */
+
 #ifdef _MSC_VER
 #define UNUSED __pragma(warning(suppress : 4101))
 #else
@@ -198,6 +202,10 @@ static inline bool set_contains(TSCharacterRange *ranges, uint32_t len, int32_t 
 
 #define END_STATE() return result;
 
+/*
+ *  Parse Table Macros
+ */
+
 #define SMALL_STATE(id) ((id) - LARGE_STATE_COUNT)
 
 #define STATE(id) id
@@ -212,8 +220,46 @@ static inline bool set_contains(TSCharacterRange *ranges, uint32_t len, int32_t 
     }                                 \
   }}
 
+#define SHIFT_REPEAT(state_value)     \
+  {{                                  \
+    .shift = {                        \
+      .type = TSParseActionTypeShift, \
+      .state = (state_value),         \
+      .repetition = true              \
+    }                                 \
+  }}
+
+#define SHIFT_EXTRA()                 \
+  {{                                  \
+    .shift = {                        \
+      .type = TSParseActionTypeShift, \
+      .extra = true                   \
+    }                                 \
+  }}
+
+#define REDUCE(symbol_name, children, precedence, prod_id) \
+  {{                                                       \
+    .reduce = {                                            \
+      .type = TSParseActionTypeReduce,                     \
+      .symbol = symbol_name,                               \
+      .child_count = children,                             \
+      .dynamic_precedence = precedence,                    \
+      .production_id = prod_id                             \
+    },                                                     \
+  }}
+
+#define RECOVER()                    \
+  {{                                 \
+    .type = TSParseActionTypeRecover \
+  }}
+
+#define ACCEPT_INPUT()              \
+  {{                                \
+    .type = TSParseActionTypeAccept \
+  }}
+
 #ifdef __cplusplus
 }
 #endif
 
-#endif
+#endif  // TREE_SITTER_PARSER_H_
