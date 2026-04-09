@@ -127,8 +127,68 @@ function mergeServers(
 	return merged;
 }
 
-function applyRuntimeDefaults(servers: Record<string, ServerConfig>): Record<string, ServerConfig> {
+function getWorkspaceBoundary(cwd: string): string {
+	const boundaryMarkers = [".git", "bun.lock", "bun.lockb", "package-lock.json", "pnpm-workspace.yaml", "yarn.lock"];
+	let packageBoundary: string | null = null;
+	let currentDir = cwd;
+	while (true) {
+		if (packageBoundary === null && fs.existsSync(path.join(currentDir, "package.json"))) {
+			packageBoundary = currentDir;
+		}
+		if (boundaryMarkers.some(marker => fs.existsSync(path.join(currentDir, marker)))) {
+			return currentDir;
+		}
+		const parentDir = path.dirname(currentDir);
+		if (parentDir === currentDir) {
+			return packageBoundary ?? cwd;
+		}
+		currentDir = parentDir;
+	}
+}
+
+function getWorkspaceTsserverPath(cwd: string): string | null {
+	const boundaryDir = getWorkspaceBoundary(cwd);
+	let currentDir = cwd;
+	while (true) {
+		const candidates = [
+			path.join(currentDir, "node_modules/typescript/lib/tsserver.js"),
+			path.join(currentDir, "node_modules/typescript/lib"),
+		];
+		for (const candidate of candidates) {
+			if (fs.existsSync(candidate)) {
+				return candidate;
+			}
+		}
+		if (currentDir === boundaryDir) {
+			return null;
+		}
+		currentDir = path.dirname(currentDir);
+	}
+}
+
+function applyRuntimeDefaults(cwd: string, servers: Record<string, ServerConfig>): Record<string, ServerConfig> {
 	const updated: Record<string, ServerConfig> = { ...servers };
+
+	const typescriptServer = updated["typescript-language-server"];
+	if (typescriptServer) {
+		const tsserverPath = getWorkspaceTsserverPath(cwd);
+		if (tsserverPath) {
+			const initOptions = isRecord(typescriptServer.initOptions) ? { ...typescriptServer.initOptions } : {};
+			const tsserver = isRecord(initOptions.tsserver) ? { ...initOptions.tsserver } : {};
+			if (typeof tsserver.path !== "string" || tsserver.path.length === 0) {
+				updated["typescript-language-server"] = {
+					...typescriptServer,
+					initOptions: {
+						...initOptions,
+						tsserver: {
+							...tsserver,
+							path: tsserverPath,
+						},
+					},
+				};
+			}
+		}
+	}
 
 	if (updated.biome) {
 		updated.biome = { ...updated.biome, createClient: BiomeClient.create };
@@ -183,9 +243,13 @@ export function hasRootMarkers(cwd: string, markers: string[]): boolean {
  * Local bin directories to check before $PATH, ordered by priority.
  * Each entry maps a root marker to the bin directory to check.
  */
-const LOCAL_BIN_PATHS: Array<{ markers: string[]; binDir: string }> = [
-	// Node.js - check node_modules/.bin/
-	{ markers: ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"], binDir: "node_modules/.bin" },
+const LOCAL_BIN_PATHS: Array<{ markers: string[]; binDir: string; searchUpToWorkspaceBoundary?: boolean }> = [
+	// Node.js - check node_modules/.bin/ in the current package, then walk up to the workspace root for hoisted binaries.
+	{
+		markers: ["package.json", "package-lock.json", "yarn.lock", "pnpm-lock.yaml"],
+		binDir: "node_modules/.bin",
+		searchUpToWorkspaceBoundary: true,
+	},
 	// Python - check virtual environment bin directories
 	{ markers: ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"], binDir: ".venv/bin" },
 	{ markers: ["pyproject.toml", "requirements.txt", "setup.py", "Pipfile"], binDir: "venv/bin" },
@@ -198,6 +262,22 @@ const LOCAL_BIN_PATHS: Array<{ markers: string[]; binDir: string }> = [
 ];
 
 const WINDOWS_LOCAL_EXECUTABLE_EXTENSIONS = [".exe", ".cmd", ".bat"] as const;
+
+function getLocalBinSearchDirs(cwd: string, searchUpToWorkspaceBoundary: boolean): string[] {
+	if (!searchUpToWorkspaceBoundary) {
+		return [cwd];
+	}
+	const boundaryDir = getWorkspaceBoundary(cwd);
+	const dirs: string[] = [];
+	let currentDir = cwd;
+	while (true) {
+		dirs.push(currentDir);
+		if (currentDir === boundaryDir) {
+			return dirs;
+		}
+		currentDir = path.dirname(currentDir);
+	}
+}
 
 function resolveLocalCommand(basePath: string): string | null {
 	if (fs.existsSync(basePath)) return basePath;
@@ -222,12 +302,14 @@ function resolveLocalCommand(basePath: string): string | null {
  */
 export function resolveCommand(command: string, cwd: string): string | null {
 	// Check local bin directories based on project markers
-	for (const { markers, binDir } of LOCAL_BIN_PATHS) {
+	for (const { markers, binDir, searchUpToWorkspaceBoundary = false } of LOCAL_BIN_PATHS) {
 		if (hasRootMarkers(cwd, markers)) {
-			const localPath = path.join(cwd, binDir, command);
-			const resolvedLocalPath = resolveLocalCommand(localPath);
-			if (resolvedLocalPath) {
-				return resolvedLocalPath;
+			for (const searchDir of getLocalBinSearchDirs(cwd, searchUpToWorkspaceBoundary)) {
+				const localPath = path.join(searchDir, binDir, command);
+				const resolvedLocalPath = resolveLocalCommand(localPath);
+				if (resolvedLocalPath) {
+					return resolvedLocalPath;
+				}
 			}
 		}
 	}
@@ -335,7 +417,7 @@ export function loadConfig(cwd: string): LspConfig {
 	if (!hasOverrides) {
 		// Auto-detect: find servers based on project markers AND available binaries
 		const detected: Record<string, ServerConfig> = {};
-		const defaultsWithRuntime = applyRuntimeDefaults(mergedServers);
+		const defaultsWithRuntime = applyRuntimeDefaults(cwd, mergedServers);
 
 		for (const [name, config] of Object.entries(defaultsWithRuntime)) {
 			// Check if project has root markers for this language
@@ -352,7 +434,7 @@ export function loadConfig(cwd: string): LspConfig {
 	}
 
 	// Merge overrides with defaults and filter to available servers
-	const mergedWithRuntime = applyRuntimeDefaults(mergedServers);
+	const mergedWithRuntime = applyRuntimeDefaults(cwd, mergedServers);
 	const available: Record<string, ServerConfig> = {};
 
 	for (const [name, config] of Object.entries(mergedWithRuntime)) {

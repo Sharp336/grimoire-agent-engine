@@ -253,6 +253,121 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("preserves an explicit tsserver path override for TypeScript LSP", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-typescript-override-");
+		const workspacePath = tempDir.path();
+		const workspaceTsserverPath = path.join(workspacePath, "node_modules/typescript/lib/tsserver.js");
+		const configuredTsserverPath = path.join(workspacePath, "custom/typescript/lib/tsserver.js");
+		const languageServerPath = path.join(workspacePath, "node_modules/.bin/typescript-language-server");
+
+		try {
+			await Bun.write(path.join(workspacePath, "package.json"), '{"name":"fixture"}\n');
+			await Bun.write(languageServerPath, "");
+			await Bun.write(workspaceTsserverPath, "");
+			await Bun.write(
+				path.join(workspacePath, "lsp.json"),
+				JSON.stringify({
+					servers: {
+						"typescript-language-server": {
+							initOptions: { tsserver: { path: configuredTsserverPath } },
+						},
+					},
+				}),
+			);
+
+			const config = loadConfig(workspacePath);
+			const server = config.servers["typescript-language-server"];
+
+			expect(server).toBeDefined();
+			expect(server?.initOptions).toMatchObject({
+				tsserver: { path: configuredTsserverPath },
+			});
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("finds a hoisted workspace tsserver path from ancestor directories", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-typescript-hoisted-");
+		const repoRoot = tempDir.path();
+		const packagePath = path.join(repoRoot, "packages/coding-agent");
+		const hoistedTsserverPath = path.join(repoRoot, "node_modules/typescript/lib/tsserver.js");
+		const languageServerPath = path.join(repoRoot, "node_modules/.bin/typescript-language-server");
+
+		const whichSpy = vi.spyOn(piUtils, "$which").mockReturnValue(null);
+
+		try {
+			await Bun.write(path.join(repoRoot, ".git"), "gitdir: ./.git/worktrees/test\n");
+			await Bun.write(path.join(repoRoot, "package.json"), '{"name":"fixture-root"}\n');
+			await Bun.write(path.join(packagePath, "package.json"), '{"name":"fixture-package"}\n');
+			await Bun.write(languageServerPath, "");
+			await Bun.write(hoistedTsserverPath, "");
+
+			const config = loadConfig(packagePath);
+			const server = config.servers["typescript-language-server"];
+
+			expect(server).toBeDefined();
+			expect(server?.resolvedCommand).toBe(languageServerPath);
+			expect(server?.initOptions).toMatchObject({
+				tsserver: { path: hoistedTsserverPath },
+			});
+			expect(whichSpy).not.toHaveBeenCalledWith("typescript-language-server");
+		} finally {
+			vi.restoreAllMocks();
+			tempDir.removeSync();
+		}
+	});
+
+	it("does not resolve tsserver paths above the workspace boundary", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-typescript-boundary-");
+		const outerRoot = path.join(tempDir.path(), "outer");
+		const repoRoot = path.join(outerRoot, "repo");
+		const packagePath = path.join(repoRoot, "packages/coding-agent");
+		const outsideTsserverPath = path.join(outerRoot, "node_modules/typescript/lib/tsserver.js");
+		const languageServerPath = path.join(packagePath, "node_modules/.bin/typescript-language-server");
+
+		try {
+			await Bun.write(path.join(repoRoot, ".git"), "gitdir: ./.git/worktrees/test\n");
+			await Bun.write(path.join(repoRoot, "package.json"), '{"name":"fixture-root"}\n');
+			await Bun.write(path.join(packagePath, "package.json"), '{"name":"fixture-package"}\n');
+			await Bun.write(languageServerPath, "");
+			await Bun.write(outsideTsserverPath, "");
+
+			const config = loadConfig(packagePath);
+			const server = config.servers["typescript-language-server"];
+
+			expect(server).toBeDefined();
+			expect(server?.initOptions).not.toMatchObject({
+				tsserver: { path: outsideTsserverPath },
+			});
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
+	it("prefers a workspace-local tsserver path for TypeScript LSP", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-typescript-");
+		const workspacePath = tempDir.path();
+		const tsserverPath = path.join(workspacePath, "node_modules/typescript/lib/tsserver.js");
+		const languageServerPath = path.join(workspacePath, "node_modules/.bin/typescript-language-server");
+
+		try {
+			await Bun.write(path.join(workspacePath, "package.json"), '{"name":"fixture"}\n');
+			await Bun.write(languageServerPath, "");
+			await Bun.write(tsserverPath, "");
+
+			const config = loadConfig(workspacePath);
+			const server = config.servers["typescript-language-server"];
+
+			expect(server).toBeDefined();
+			expect(server?.initOptions).toMatchObject({
+				tsserver: { path: tsserverPath },
+			});
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
 	it("detects tlaplus files for LSP startup and language ids", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-tlaplus-");
 		const specPath = path.join(tempDir.path(), "Spec.tla");
