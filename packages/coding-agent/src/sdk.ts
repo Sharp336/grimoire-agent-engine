@@ -22,6 +22,7 @@ import {
 	logger,
 	postmortem,
 	prompt,
+	Snowflake,
 } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { AsyncJobManager } from "./async";
@@ -887,6 +888,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			})
 		: undefined;
 
+	const pythonKernelOwnerId = `agent-session:${Snowflake.next()}`;
+
 	const searchDb = options.searchDb ?? new SearchDb(getSearchDbDir(agentDir));
 	const toolSession: ToolSession = {
 		cwd,
@@ -903,6 +906,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		requireSubmitResultTool: options.requireSubmitResultTool,
 		taskDepth: options.taskDepth ?? 0,
 		getSessionFile: () => sessionManager.getSessionFile() ?? null,
+		getPythonKernelOwnerId: () => pythonKernelOwnerId,
 		getSessionId: () => sessionManager.getSessionId?.() ?? null,
 		getSessionSpawns: () => options.spawns ?? "*",
 		getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
@@ -1539,6 +1543,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		thinkingLevel,
 		sessionManager,
 		settings,
+		pythonKernelOwnerId,
 		scopedModels: options.scopedModels,
 		promptTemplates,
 		slashCommands,

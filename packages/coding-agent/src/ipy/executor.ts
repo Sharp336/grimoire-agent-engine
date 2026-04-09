@@ -32,6 +32,8 @@ export interface PythonExecutorOptions {
 	signal?: AbortSignal;
 	/** Session identifier for kernel reuse */
 	sessionId?: string;
+	/** Logical owner identifier for retained kernel cleanup */
+	kernelOwnerId?: string;
 	/** Kernel mode (session reuse vs per-call) */
 	kernelMode?: PythonKernelMode;
 	/** Restart the kernel before executing */
@@ -81,6 +83,7 @@ interface KernelSession {
 	restartCount: number;
 	dead: boolean;
 	lastUsedAt: number;
+	ownerIds: Set<string>;
 	heartbeatTimer?: NodeJS.Timeout;
 }
 
@@ -93,6 +96,7 @@ interface KernelSessionExecutionOptions {
 	sessionFile?: string;
 	signal?: AbortSignal;
 	deadlineMs?: number;
+	kernelOwnerId?: string;
 }
 
 class PythonExecutionCancelledError extends Error {
@@ -395,6 +399,20 @@ export async function disposeAllKernelSessions(): Promise<void> {
 	await Promise.allSettled(sessions.map(session => disposeKernelSession(session)));
 }
 
+export async function disposeKernelSessionsByOwner(ownerId: string): Promise<void> {
+	const sessionsToDispose: KernelSession[] = [];
+	for (const session of kernelSessions.values()) {
+		if (!session.ownerIds.delete(ownerId)) continue;
+		if (session.ownerIds.size === 0) {
+			sessionsToDispose.push(session);
+		}
+	}
+	await Promise.allSettled(sessionsToDispose.map(session => disposeKernelSession(session)));
+	if (kernelSessions.size === 0) {
+		stopCleanupTimer();
+	}
+}
+
 async function ensureKernelAvailable(cwd: string): Promise<void> {
 	const availability = await checkPythonKernelAvailability(cwd);
 	if (!availability.ok) {
@@ -407,6 +425,7 @@ export async function warmPythonEnvironment(
 	sessionId?: string,
 	useSharedGateway?: boolean,
 	sessionFile?: string,
+	kernelOwnerId?: string,
 ): Promise<{ ok: boolean; reason?: string; docs: PreludeHelper[] }> {
 	let cacheState: PreludeCacheState | null = null;
 	try {
@@ -443,6 +462,7 @@ export async function warmPythonEnvironment(
 			{
 				useSharedGateway,
 				sessionFile,
+				kernelOwnerId,
 			},
 		);
 		return { ok: true, docs };
@@ -518,6 +538,7 @@ async function createKernelSession(
 		restartCount: 0,
 		dead: false,
 		lastUsedAt: Date.now(),
+		ownerIds: options.kernelOwnerId ? new Set([options.kernelOwnerId]) : new Set(),
 	};
 
 	session.heartbeatTimer = setInterval(() => {
@@ -585,6 +606,9 @@ async function withKernelSession<T>(
 		session = await logger.time("kernel:createKernelSession", createKernelSession, sessionId, cwd, options);
 		kernelSessions.set(sessionId, session);
 		startCleanupTimer();
+	}
+	if (options.kernelOwnerId) {
+		session.ownerIds.add(options.kernelOwnerId);
 	}
 
 	const run = async (): Promise<T> => {

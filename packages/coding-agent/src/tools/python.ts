@@ -256,6 +256,7 @@ export class PythonTool implements AgentTool<typeof pythonSchema> {
 			};
 
 			const sessionFile = this.session.getSessionFile?.() ?? undefined;
+			const kernelOwnerId = this.session.getPythonKernelOwnerId?.() ?? undefined;
 			const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("python")) ?? {};
 			outputSink = new OutputSink({
 				artifactPath,
@@ -273,13 +274,14 @@ export class PythonTool implements AgentTool<typeof pythonSchema> {
 					sessionId,
 					this.session.settings.get("python.sharedGateway"),
 					sessionFile ?? undefined,
+					kernelOwnerId,
 				);
 				if (!warmup.ok) {
 					throw new ToolError(warmup.reason ?? "Python prelude helpers unavailable");
 				}
 			}
 
-			const baseExecutorOptions: Omit<PythonExecutorOptions, "reset"> = {
+			const baseExecutorOptions = {
 				cwd: commandCwd,
 				deadlineMs,
 				signal: combinedSignal,
@@ -287,6 +289,7 @@ export class PythonTool implements AgentTool<typeof pythonSchema> {
 				kernelMode: this.session.settings.get("python.kernelMode"),
 				useSharedGateway: this.session.settings.get("python.sharedGateway"),
 				sessionFile: sessionFile ?? undefined,
+				kernelOwnerId,
 			};
 
 			for (let i = 0; i < cells.length; i++) {

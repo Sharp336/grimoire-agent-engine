@@ -50,7 +50,15 @@ import {
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai";
 import { killTree, MacOSPowerAssertion, type SearchDb } from "@oh-my-pi/pi-natives";
-import { abortableSleep, getAgentDbPath, isEnoent, logger, prompt, setNativeKillTree } from "@oh-my-pi/pi-utils";
+import {
+	abortableSleep,
+	getAgentDbPath,
+	isEnoent,
+	logger,
+	prompt,
+	Snowflake,
+	setNativeKillTree,
+} from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import { MODEL_ROLE_IDS, type ModelRegistry } from "../config/model-registry";
@@ -94,7 +102,11 @@ import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
 import { resolveLocalUrlToPath } from "../internal-urls";
-import { executePython as executePythonCommand, type PythonResult } from "../ipy/executor";
+import {
+	disposeKernelSessionsByOwner,
+	executePython as executePythonCommand,
+	type PythonResult,
+} from "../ipy/executor";
 import {
 	buildDiscoverableMCPSearchIndex,
 	collectDiscoverableMCPTools,
@@ -245,6 +257,8 @@ export interface AgentSessionConfig {
 	obfuscator?: SecretObfuscator;
 	/** Shared native search DB for grep/glob/fuzzyFind-backed workflows. */
 	searchDb?: SearchDb;
+	/** Logical owner for retained Python kernels created by this session. */
+	pythonKernelOwnerId?: string;
 }
 
 /** Options for AgentSession.prompt() */
@@ -452,6 +466,7 @@ export class AgentSession {
 
 	// Python execution state
 	#pythonAbortController: AbortController | undefined = undefined;
+	#pythonKernelOwnerId: string;
 	#pendingPythonMessages: PythonExecutionMessage[] = [];
 
 	// Extension system
@@ -546,6 +561,7 @@ export class AgentSession {
 		this.searchDb = config.searchDb;
 		this.#startPowerAssertion();
 		this.#asyncJobManager = config.asyncJobManager;
+		this.#pythonKernelOwnerId = config.pythonKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
 		this.#scopedModels = config.scopedModels ?? [];
 		this.#thinkingLevel = config.thinkingLevel;
 		this.#promptTemplates = config.promptTemplates ?? [];
@@ -1801,6 +1817,7 @@ export class AgentSession {
 		if (drained === false && deliveryState) {
 			logger.warn("Async job completion deliveries still pending during dispose", { ...deliveryState });
 		}
+		await disposeKernelSessionsByOwner(this.#pythonKernelOwnerId);
 		this.#stopPowerAssertion();
 		await this.sessionManager.close();
 		this.#closeAllProviderSessions("dispose");
@@ -5658,6 +5675,7 @@ export class AgentSession {
 			const result = await executePythonCommand(code, {
 				cwd,
 				sessionId,
+				kernelOwnerId: this.#pythonKernelOwnerId,
 				kernelMode: this.settings.get("python.kernelMode"),
 				useSharedGateway: this.settings.get("python.sharedGateway"),
 				onChunk,

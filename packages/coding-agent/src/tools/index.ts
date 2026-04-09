@@ -136,6 +136,8 @@ export interface ToolSession {
 	taskDepth?: number;
 	/** Get session file */
 	getSessionFile: () => string | null;
+	/** Get Python kernel owner ID for session-scoped retained-kernel cleanup */
+	getPythonKernelOwnerId?: () => string | null;
 	/** Get session ID */
 	getSessionId?: () => string | null;
 	/** Get artifacts directory for artifact:// URLs */
@@ -308,6 +310,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			});
 		} else if (!skipPythonWarm && getPreludeDocs().length === 0) {
 			const sessionFile = session.getSessionFile?.() ?? undefined;
+			const kernelOwnerId = session.getPythonKernelOwnerId?.() ?? undefined;
 			const warmSessionId = sessionFile ? `session:${sessionFile}:cwd:${session.cwd}` : `cwd:${session.cwd}`;
 			try {
 				await logger.time(
@@ -317,6 +320,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 					warmSessionId,
 					session.settings.get("python.sharedGateway"),
 					sessionFile,
+					kernelOwnerId,
 				);
 			} catch (err) {
 				logger.warn("Failed to warm Python environment", {
