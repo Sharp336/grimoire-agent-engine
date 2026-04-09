@@ -8,6 +8,7 @@ import type { AssistantMessage, Model, ProviderPayload, Usage } from "@oh-my-pi/
 import { hookFetch } from "@oh-my-pi/pi-utils";
 
 import {
+	type CompactionPreparation,
 	type CompactionSettings,
 	calculateContextTokens,
 	compact,
@@ -17,6 +18,7 @@ import {
 	prepareCompaction,
 	shouldCompact,
 } from "../src/session/compaction/compaction";
+import { createFileOps } from "../src/session/compaction/utils";
 import {
 	buildSessionContext,
 	type CompactionEntry,
@@ -898,6 +900,84 @@ describe("buildSessionContext", () => {
 		// model_change is later overwritten by assistant message's model info
 		expect(loaded.models.default).toBe("anthropic/claude-sonnet-4-5");
 		expect(loaded.thinkingLevel).toBe("high");
+	});
+});
+
+// ============================================================================
+// Hollow tool-result compaction regression
+// ============================================================================
+
+describe("compact", () => {
+	it("materializes hollow tool-result content before building the summary prompt", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const previewText = "PREVIEW";
+		const fullText = "FULL TOOL OUTPUT";
+		const toolResult: AgentMessage = {
+			role: "toolResult",
+			toolCallId: "tool-call-1",
+			toolName: "read",
+			content: [{ type: "text", text: previewText }],
+			coldRefs: [{ blockIndex: 0, ref: "blob:sha256:deadbeef", byteLen: fullText.length }],
+			isError: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		const prompts: string[] = [];
+		const response: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "text", text: "summary" }],
+			usage: createMockUsage(10, 10),
+			stopReason: "stop",
+			timestamp: Date.now(),
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+		};
+
+		vi.spyOn(ai, "completeSimple").mockImplementation(async (_model, request) => {
+			const message = request.messages[0];
+			const content = Array.isArray(message.content)
+				? message.content
+						.filter((block): block is { type: "text"; text: string } => block.type === "text")
+						.map(block => block.text)
+						.join("\n")
+				: message.content;
+			prompts.push(content);
+			return response;
+		});
+
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "keep-1",
+			messagesToSummarize: [toolResult],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 42,
+			previousSummary: undefined,
+			previousPreserveData: undefined,
+			fileOps: createFileOps(),
+			settings: {
+				...DEFAULT_COMPACTION_SETTINGS,
+				remoteEnabled: false,
+			},
+		};
+
+		const result = await compact(preparation, model, "test-api-key", undefined, undefined, {
+			materializeMessages: async messages =>
+				messages.map(message =>
+					message.role === "toolResult"
+						? {
+								...message,
+								content: [{ type: "text", text: fullText }],
+							}
+						: message,
+				),
+		});
+
+		expect(result.summary).toBe("summary");
+		expect(prompts.length).toBeGreaterThan(0);
+		expect(prompts[0]).toContain(fullText);
+		expect(prompts[0]).not.toContain(previewText);
 	});
 });
 

@@ -75,6 +75,8 @@ export interface GenerateBranchSummaryOptions {
 	customInstructions?: string;
 	/** Tokens reserved for prompt + LLM response (default 16384) */
 	reserveTokens?: number;
+	/** Optional hook to materialize any hollowed messages before serialization. */
+	materializeMessages?: (messages: AgentMessage[]) => Promise<AgentMessage[]>;
 }
 
 // ============================================================================
@@ -258,7 +260,7 @@ export async function generateBranchSummary(
 	entries: SessionEntry[],
 	options: GenerateBranchSummaryOptions,
 ): Promise<BranchSummaryResult> {
-	const { model, apiKey, signal, customInstructions, reserveTokens = 16384 } = options;
+	const { model, apiKey, signal, customInstructions, reserveTokens = 16384, materializeMessages } = options;
 
 	// Token budget = context window minus reserved space for prompt + response
 	const contextWindow = model.contextWindow || 128000;
@@ -272,7 +274,8 @@ export async function generateBranchSummary(
 
 	// Transform to LLM-compatible messages, then serialize to text
 	// Serialization prevents the model from treating it as a conversation to continue
-	const llmMessages = convertToLlm(messages);
+	const warmMessages = materializeMessages ? await materializeMessages(messages) : messages;
+	const llmMessages = convertToLlm(warmMessages);
 	const conversationText = serializeConversation(llmMessages);
 
 	// Build prompt

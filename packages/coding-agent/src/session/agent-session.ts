@@ -140,6 +140,7 @@ import {
 	shouldCompact,
 } from "./compaction";
 import { DEFAULT_PRUNE_CONFIG, pruneToolOutputs } from "./compaction/pruning";
+import { materializeMessages } from "./content-store";
 import {
 	type BashExecutionMessage,
 	type CompactionSummaryMessage,
@@ -3793,7 +3794,12 @@ export class AgentSession {
 					apiKey,
 					customInstructions,
 					this.#compactionAbortController.signal,
-					{ promptOverride: hookPrompt, extraContext: hookContext, remoteInstructions: this.#baseSystemPrompt },
+					{
+						promptOverride: hookPrompt,
+						extraContext: hookContext,
+						remoteInstructions: this.#baseSystemPrompt,
+						materializeMessages: messages => materializeMessages(messages, this.sessionManager.contentStore),
+					},
 				);
 				summary = result.summary;
 				shortSummary = result.shortSummary;
@@ -4842,6 +4848,8 @@ export class AgentSession {
 								extraContext: hookContext,
 								remoteInstructions: this.#baseSystemPrompt,
 								initiatorOverride: "agent",
+								materializeMessages: messages =>
+									materializeMessages(messages, this.sessionManager.contentStore),
 							});
 							break;
 						} catch (error) {
@@ -6083,6 +6091,7 @@ export class AgentSession {
 				signal: this.#branchSummaryAbortController.signal,
 				customInstructions: options.customInstructions,
 				reserveTokens: branchSummarySettings.reserveTokens,
+				materializeMessages: messages => materializeMessages(messages, this.sessionManager.contentStore),
 			});
 			this.#branchSummaryAbortController = undefined;
 			if (result.aborted) {

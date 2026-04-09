@@ -952,6 +952,7 @@ export interface SummaryOptions {
 	remoteEndpoint?: string;
 	remoteInstructions?: string;
 	initiatorOverride?: MessageAttribution;
+	materializeMessages?: (messages: AgentMessage[]) => Promise<AgentMessage[]>;
 }
 
 export async function generateSummary(
@@ -1022,6 +1023,14 @@ export async function generateSummary(
 	return textContent;
 }
 
+async function materializeSummaryMessages(
+	messages: AgentMessage[],
+	materializeMessages?: (messages: AgentMessage[]) => Promise<AgentMessage[]>,
+): Promise<AgentMessage[]> {
+	if (!materializeMessages) return messages;
+	return await materializeMessages(messages);
+}
+
 async function generateShortSummary(
 	recentMessages: AgentMessage[],
 	historySummary: string | undefined,
@@ -1032,7 +1041,8 @@ async function generateShortSummary(
 	options?: SummaryOptions,
 ): Promise<string> {
 	const maxTokens = Math.min(512, Math.floor(0.2 * reserveTokens));
-	const llmMessages = convertToLlm(recentMessages);
+	const warmRecentMessages = await materializeSummaryMessages(recentMessages, options?.materializeMessages);
+	const llmMessages = convertToLlm(warmRecentMessages);
 	const conversationText = serializeConversation(llmMessages);
 
 	let promptText = `<conversation>\n${conversationText}\n</conversation>\n\n`;
@@ -1236,12 +1246,16 @@ export async function compact(
 		remoteEndpoint: settings.remoteEnabled === false ? undefined : settings.remoteEndpoint,
 		remoteInstructions: options?.remoteInstructions,
 		initiatorOverride: options?.initiatorOverride,
+		materializeMessages: options?.materializeMessages,
 	};
+	const warmMessagesToSummarize = await materializeSummaryMessages(messagesToSummarize, options?.materializeMessages);
+	const warmTurnPrefixMessages = await materializeSummaryMessages(turnPrefixMessages, options?.materializeMessages);
+	const warmRecentMessages = await materializeSummaryMessages(recentMessages, options?.materializeMessages);
 
 	let preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined);
 	if (settings.remoteEnabled !== false && shouldUseOpenAiRemoteCompaction(model)) {
 		const previousRemoteCompaction = getPreservedOpenAiRemoteCompactionData(previousPreserveData);
-		const remoteMessages = [...messagesToSummarize, ...turnPrefixMessages, ...recentMessages];
+		const remoteMessages = [...warmMessagesToSummarize, ...warmTurnPrefixMessages, ...warmRecentMessages];
 		const previousReplacementHistory =
 			previousRemoteCompaction?.provider === model.provider
 				? previousRemoteCompaction.replacementHistory
@@ -1269,12 +1283,12 @@ export async function compact(
 	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
 
-	if (isSplitTurn && turnPrefixMessages.length > 0) {
+	if (isSplitTurn && warmTurnPrefixMessages.length > 0) {
 		// Generate both summaries in parallel
 		const [historyResult, turnPrefixResult] = await Promise.all([
-			messagesToSummarize.length > 0
+			warmMessagesToSummarize.length > 0
 				? generateSummary(
-						messagesToSummarize,
+						warmMessagesToSummarize,
 						model,
 						settings.reserveTokens,
 						apiKey,
@@ -1285,7 +1299,7 @@ export async function compact(
 					)
 				: Promise.resolve("No prior history."),
 			generateTurnPrefixSummary(
-				turnPrefixMessages,
+				warmTurnPrefixMessages,
 				model,
 				settings.reserveTokens,
 				apiKey,
@@ -1295,10 +1309,10 @@ export async function compact(
 		]);
 		// Merge into single summary
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
-	} else if (messagesToSummarize.length > 0) {
+	} else if (warmMessagesToSummarize.length > 0) {
 		// Generate history summary from messages to summarize
 		summary = await generateSummary(
-			messagesToSummarize,
+			warmMessagesToSummarize,
 			model,
 			settings.reserveTokens,
 			apiKey,
@@ -1316,7 +1330,7 @@ export async function compact(
 	}
 
 	const shortSummary = await generateShortSummary(
-		recentMessages,
+		warmRecentMessages,
 		summary,
 		model,
 		settings.reserveTokens,
