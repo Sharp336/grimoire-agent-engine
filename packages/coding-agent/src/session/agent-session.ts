@@ -468,6 +468,7 @@ export class AgentSession {
 	#pythonAbortController: AbortController | undefined = undefined;
 	#pythonKernelOwnerId: string;
 	#pendingPythonMessages: PythonExecutionMessage[] = [];
+	#activePythonExecutions = new Set<Promise<PythonResult>>();
 
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
@@ -1817,7 +1818,10 @@ export class AgentSession {
 		if (drained === false && deliveryState) {
 			logger.warn("Async job completion deliveries still pending during dispose", { ...deliveryState });
 		}
-		await disposeKernelSessionsByOwner(this.#pythonKernelOwnerId);
+		const pythonExecutionsSettled = await this.#preparePythonExecutionsForDispose();
+		if (pythonExecutionsSettled) {
+			await disposeKernelSessionsByOwner(this.#pythonKernelOwnerId);
+		}
 		this.#stopPowerAssertion();
 		await this.sessionManager.close();
 		this.#closeAllProviderSessions("dispose");
@@ -5665,27 +5669,37 @@ export class AgentSession {
 			}
 		}
 
-		this.#pythonAbortController = new AbortController();
+		const abortController = new AbortController();
+		this.#pythonAbortController = abortController;
+		const execution = (async (): Promise<PythonResult> => {
+			try {
+				// Use the same session ID as the Python tool for kernel sharing
+				const sessionFile = this.sessionManager.getSessionFile();
+				const sessionId = sessionFile ? `session:${sessionFile}:cwd:${cwd}` : `cwd:${cwd}`;
 
+				const result = await executePythonCommand(code, {
+					cwd,
+					sessionId,
+					kernelOwnerId: this.#pythonKernelOwnerId,
+					kernelMode: this.settings.get("python.kernelMode"),
+					useSharedGateway: this.settings.get("python.sharedGateway"),
+					onChunk,
+					signal: abortController.signal,
+				});
+
+				this.recordPythonResult(code, result, options);
+				return result;
+			} finally {
+				if (this.#pythonAbortController === abortController) {
+					this.#pythonAbortController = undefined;
+				}
+			}
+		})();
+		this.#activePythonExecutions.add(execution);
 		try {
-			// Use the same session ID as the Python tool for kernel sharing
-			const sessionFile = this.sessionManager.getSessionFile();
-			const sessionId = sessionFile ? `session:${sessionFile}:cwd:${cwd}` : `cwd:${cwd}`;
-
-			const result = await executePythonCommand(code, {
-				cwd,
-				sessionId,
-				kernelOwnerId: this.#pythonKernelOwnerId,
-				kernelMode: this.settings.get("python.kernelMode"),
-				useSharedGateway: this.settings.get("python.sharedGateway"),
-				onChunk,
-				signal: this.#pythonAbortController.signal,
-			});
-
-			this.recordPythonResult(code, result, options);
-			return result;
+			return await execution;
 		} finally {
-			this.#pythonAbortController = undefined;
+			this.#activePythonExecutions.delete(execution);
 		}
 	}
 
@@ -5720,6 +5734,38 @@ export class AgentSession {
 	 */
 	abortPython(): void {
 		this.#pythonAbortController?.abort();
+	}
+
+	async #waitForPythonExecutionsToSettle(timeoutMs: number): Promise<boolean> {
+		const deadline = Date.now() + timeoutMs;
+		while (this.#activePythonExecutions.size > 0) {
+			const remainingMs = deadline - Date.now();
+			if (remainingMs <= 0) {
+				return false;
+			}
+			const settled = await Promise.race([
+				Promise.allSettled(Array.from(this.#activePythonExecutions)).then(() => true),
+				Bun.sleep(remainingMs).then(() => false),
+			]);
+			if (!settled && this.#activePythonExecutions.size > 0) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	async #preparePythonExecutionsForDispose(): Promise<boolean> {
+		if (!(await this.#waitForPythonExecutionsToSettle(3_000))) {
+			logger.warn("Aborting active Python execution during dispose before retained kernel cleanup");
+			this.abortPython();
+			if (!(await this.#waitForPythonExecutionsToSettle(1_000))) {
+				logger.warn(
+					"Skipping retained Python kernel cleanup during dispose because Python execution is still active",
+				);
+				return false;
+			}
+		}
+		return true;
 	}
 
 	/** Whether a Python execution is currently running */

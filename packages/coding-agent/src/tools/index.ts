@@ -116,6 +116,8 @@ export interface ToolSession {
 	hasUI: boolean;
 	/** Skip Python kernel availability check and warmup */
 	skipPythonPreflight?: boolean;
+	/** Force Python prelude warmup even when test env would normally skip it */
+	forcePythonWarmup?: boolean;
 	/** Pre-loaded context files (AGENTS.md, etc) */
 	contextFiles?: ContextFileEntry[];
 	/** Pre-loaded skills */
@@ -300,7 +302,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		pythonMode !== "bash-only" &&
 		(requestedTools === undefined || requestedTools.includes("python"));
 	const isTestEnv = Bun.env.BUN_ENV === "test" || Bun.env.NODE_ENV === "test";
-	const skipPythonWarm = isTestEnv || $env.PI_PYTHON_SKIP_CHECK === "1";
+	const forcePythonWarmup = session.forcePythonWarmup === true;
+	const skipPythonWarm = !forcePythonWarmup && (isTestEnv || $env.PI_PYTHON_SKIP_CHECK === "1");
 	if (shouldCheckPython) {
 		const availability = await logger.time("createTools:pythonCheck", checkPythonKernelAvailability, session.cwd);
 		pythonAvailable = availability.ok;

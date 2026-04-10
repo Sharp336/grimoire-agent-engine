@@ -8,29 +8,58 @@ import type {
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const require = createRequire(import.meta.url);
-const nativeBindings = require("../../../natives/native/index.js") as Record<string, unknown> & {
-	ChunkState?: { parse: (source: string, language?: string) => unknown };
-	formatAnchor?: (name: string, checksum?: string, style?: string) => string;
-	getDefaultTabWidth?: () => number;
-	getIndentation?: (file?: string | null, projectDir?: string | null) => number;
-	setDefaultTabWidth?: (width: number) => void;
-	MacOSPowerAssertion?: { start: (options: { reason: string }) => { stop: () => void } };
-};
-
-vi.mock("@oh-my-pi/pi-natives", () => ({
-	...nativeBindings,
-	ChunkState: nativeBindings.ChunkState ?? {
+const mockNativeBindings = {
+	ChunkAnchorStyle: { Full: "full", Minimal: "minimal", None: "none" },
+	ChunkEditOp: { Replace: "replace", Before: "before", After: "after", Prepend: "prepend", Append: "append" },
+	ChunkReadStatus: { Ok: "ok", Missing: "missing", Binary: "binary", Error: "error" },
+	ChunkState: {
 		parse() {
 			throw new Error("ChunkState.parse unavailable in test");
 		},
 	},
-	formatAnchor:
-		nativeBindings.formatAnchor ?? ((name: string, checksum?: string) => (checksum ? `${name}#${checksum}` : name)),
-	getDefaultTabWidth: nativeBindings.getDefaultTabWidth ?? (() => 4),
-	getIndentation: nativeBindings.getIndentation ?? (() => 4),
-	setDefaultTabWidth: nativeBindings.setDefaultTabWidth ?? (() => {}),
-	MacOSPowerAssertion: nativeBindings.MacOSPowerAssertion ?? { start: () => ({ stop: () => {} }) },
-}));
+	Ellipsis: { Omit: "omit", ThreeDots: "threeDots" },
+	FileType: { File: 1, Dir: 2, Symlink: 3, Other: 4 },
+	GrepOutputMode: { Paths: "paths", FilesWithMatches: "files_with_matches", Count: "count", Content: "content" },
+	ImageFormat: { Png: "png", Jpeg: "jpeg", Webp: "webp" },
+	MacAppearanceObserver: class {},
+	MacOSPowerAssertion: { start: () => ({ stop: () => {} }) },
+	PhotonImage: class {},
+	PtySession: class {},
+	SamplingFilter: { Nearest: "nearest", Triangle: "triangle" },
+	SearchDb: class {},
+	Shell: class {},
+	astEdit: async () => ({ replacements: [] }),
+	astGrep: async () => ({ matches: [] }),
+	detectMacOSAppearance: () => "light",
+	encodeSixel: async () => "",
+	executeShell: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+	extractSegments: (text: string) => [text],
+	formatAnchor: (name: string, checksum?: string) => (checksum ? `${name}#${checksum}` : name),
+	fuzzyFind: async () => ({ matches: [] }),
+	getDefaultTabWidth: () => 4,
+	getIndentation: () => 4,
+	getWorkProfile: () => null,
+	glob: async () => [],
+	grep: async () => ({ matches: [] }),
+	highlightCode: (code: string) => code,
+	htmlToMarkdown: (html: string) => html,
+	invalidateFsScanCache: () => {},
+	killTree: async () => {},
+	matchesKey: () => false,
+	parseKey: () => null,
+	parseKittySequence: () => null,
+	projfsOverlayProbe: async () => ({ available: false }),
+	projfsOverlayStart: async () => ({ mountId: "mock" }),
+	projfsOverlayStop: async () => {},
+	sanitizeText: (text: string) => text,
+	setDefaultTabWidth: () => {},
+	sliceWithWidth: (text: string) => text,
+	supportsLanguage: () => false,
+	truncateToWidth: (text: string) => text,
+	wrapTextWithAnsi: (text: string) => text,
+};
+
+vi.mock("@oh-my-pi/pi-natives", () => mockNativeBindings);
 
 const executor = require("../../src/ipy/executor") as typeof import("../../src/ipy/executor");
 const pythonKernel = require("../../src/ipy/kernel") as typeof import("../../src/ipy/kernel");
@@ -157,7 +186,46 @@ describe("python executor owner cleanup", () => {
 		expect(unrelatedKernel.execute).toHaveBeenCalledTimes(2);
 	});
 
-	it("attaches warmup-created retained kernels to the provided owner", async () => {
+	it("does not reattach a kernel after owner disposal has already claimed it", async () => {
+		const disposingKernel = new FakeKernel();
+		const replacementKernel = new FakeKernel();
+		const shutdownDeferred = Promise.withResolvers<void>();
+		disposingKernel.shutdown = vi.fn(() => shutdownDeferred.promise);
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = vi
+			.spyOn(PythonKernel, "start")
+			.mockResolvedValueOnce(disposingKernel as unknown as PythonKernelInstance)
+			.mockResolvedValueOnce(replacementKernel as unknown as PythonKernelInstance);
+
+		await executePython("1 + 1", {
+			cwd: "/tmp/disposal-race-kernel",
+			sessionId: "race-session",
+			kernelMode: "session",
+			kernelOwnerId: "owner-a",
+		});
+
+		const disposal = disposeKernelSessionsByOwner("owner-a");
+		await executePython("2 + 2", {
+			cwd: "/tmp/disposal-race-kernel",
+			sessionId: "race-session",
+			kernelMode: "session",
+			kernelOwnerId: "owner-b",
+		});
+
+		expect(startSpy).toHaveBeenCalledTimes(2);
+		expect(disposingKernel.execute).toHaveBeenCalledTimes(1);
+		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
+		expect(disposingKernel.shutdown).toHaveBeenCalledTimes(1);
+		expect(replacementKernel.shutdown).not.toHaveBeenCalled();
+
+		shutdownDeferred.resolve();
+		await disposal;
+
+		await disposeKernelSessionsByOwner("owner-b");
+		expect(replacementKernel.shutdown).toHaveBeenCalledTimes(1);
+	});
+
+	it("attaches cached warmup sessions to newly provided owners", async () => {
 		using tempDir = TempDir.createSync("@python-owner-warmup-");
 		const docs: PreludeHelper[] = [
 			{
@@ -177,22 +245,29 @@ describe("python executor owner cleanup", () => {
 		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 		const startSpy = vi.spyOn(PythonKernel, "start").mockResolvedValue(kernel as unknown as PythonKernelInstance);
 
-		const warmup = await warmPythonEnvironment(tempDir.path(), "warm-session", true, undefined, "owner-warm");
-		expect(warmup.ok).toBe(true);
+		const firstWarmup = await warmPythonEnvironment(tempDir.path(), "warm-session", true, undefined, "owner-a");
+		expect(firstWarmup.ok).toBe(true);
 		expect(kernel.introspectPrelude).toHaveBeenCalledTimes(1);
+
+		const cachedWarmup = await warmPythonEnvironment(tempDir.path(), "warm-session", true, undefined, "owner-b");
+		expect(cachedWarmup.ok).toBe(true);
+		expect(kernel.introspectPrelude).toHaveBeenCalledTimes(1);
+		expect(startSpy).toHaveBeenCalledTimes(1);
+
+		await disposeKernelSessionsByOwner("owner-a");
+		expect(kernel.shutdown).not.toHaveBeenCalled();
 
 		await executePython("1 + 1", {
 			cwd: tempDir.path(),
 			sessionId: "warm-session",
 			kernelMode: "session",
-			kernelOwnerId: "owner-warm",
+			kernelOwnerId: "owner-b",
 		});
 
 		expect(startSpy).toHaveBeenCalledTimes(1);
 		expect(kernel.execute).toHaveBeenCalledTimes(1);
 
-		await disposeKernelSessionsByOwner("owner-warm");
-
+		await disposeKernelSessionsByOwner("owner-b");
 		expect(kernel.shutdown).toHaveBeenCalledTimes(1);
 	});
 

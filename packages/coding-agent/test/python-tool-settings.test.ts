@@ -1,36 +1,63 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { SettingPath } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 
-const require = createRequire(import.meta.url);
-const nativeBindings = require("../../natives/native/index.js") as Record<string, unknown> & {
-	ChunkState?: { parse: (source: string, language?: string) => unknown };
-	formatAnchor?: (name: string, checksum?: string, style?: string) => string;
-	getDefaultTabWidth?: () => number;
-	getIndentation?: (file?: string | null, projectDir?: string | null) => number;
-	setDefaultTabWidth?: (width: number) => void;
-	MacOSPowerAssertion?: { start: (options: { reason: string }) => { stop: () => void } };
-};
-
-vi.mock("@oh-my-pi/pi-natives", () => ({
-	...nativeBindings,
-	ChunkState: nativeBindings.ChunkState ?? {
+const mockNativeBindings = {
+	ChunkAnchorStyle: { Full: "full", Minimal: "minimal", None: "none" },
+	ChunkEditOp: { Replace: "replace", Before: "before", After: "after", Prepend: "prepend", Append: "append" },
+	ChunkReadStatus: { Ok: "ok", Missing: "missing", Binary: "binary", Error: "error" },
+	ChunkState: {
 		parse() {
 			throw new Error("ChunkState.parse unavailable in test");
 		},
 	},
-	formatAnchor:
-		nativeBindings.formatAnchor ?? ((name: string, checksum?: string) => (checksum ? `${name}#${checksum}` : name)),
-	getDefaultTabWidth: nativeBindings.getDefaultTabWidth ?? (() => 4),
-	getIndentation: nativeBindings.getIndentation ?? (() => 4),
-	setDefaultTabWidth: nativeBindings.setDefaultTabWidth ?? (() => {}),
-	MacOSPowerAssertion: nativeBindings.MacOSPowerAssertion ?? { start: () => ({ stop: () => {} }) },
-}));
+	FileType: { File: 1, Dir: 2, Symlink: 3, Other: 4 },
+	GrepOutputMode: { Paths: "paths", FilesWithMatches: "files_with_matches", Count: "count", Content: "content" },
+	ImageFormat: { Png: "png", Jpeg: "jpeg", Webp: "webp" },
+	MacAppearanceObserver: class {},
+	MacOSPowerAssertion: { start: () => ({ stop: () => {} }) },
+	PhotonImage: class {},
+	PtySession: class {},
+	SamplingFilter: { Nearest: "nearest", Triangle: "triangle" },
+	SearchDb: class {},
+	Shell: class {},
+	astEdit: async () => ({ replacements: [] }),
+	astGrep: async () => ({ matches: [] }),
+	fuzzyFind: async () => ({ matches: [] }),
+	detectMacOSAppearance: () => "light",
+	encodeSixel: async () => "",
+	Ellipsis: { Omit: "omit", ThreeDots: "threeDots" },
+	extractSegments: (text: string) => [text],
+	executeShell: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+	formatAnchor: (name: string, checksum?: string) => (checksum ? `${name}#${checksum}` : name),
+	getDefaultTabWidth: () => 4,
+	getIndentation: () => 4,
+	getWorkProfile: () => null,
+	glob: async () => [],
+	grep: async () => ({ matches: [] }),
+	highlightCode: (code: string) => code,
+	htmlToMarkdown: (html: string) => html,
+	invalidateFsScanCache: () => {},
+	killTree: async () => {},
+	projfsOverlayProbe: async () => ({ available: false }),
+	projfsOverlayStart: async () => ({ mountId: "mock" }),
+	projfsOverlayStop: async () => {},
+	sanitizeText: (text: string) => text,
+	matchesKey: () => false,
+	parseKey: () => null,
+	parseKittySequence: () => null,
+	sliceWithWidth: (text: string) => text,
+	setDefaultTabWidth: () => {},
+	supportsLanguage: () => false,
+	truncateToWidth: (text: string) => text,
+	wrapTextWithAnsi: (text: string) => text,
+};
+
+vi.mock("@oh-my-pi/pi-natives", () => mockNativeBindings);
 
 const { Settings } = require("../src/config/settings") as typeof import("../src/config/settings");
 const pythonExecutor = require("../src/ipy/executor") as typeof import("../src/ipy/executor");
@@ -49,6 +76,7 @@ function createSession(
 		getSessionFile: () => sessionFile,
 		getSessionSpawns: () => null,
 		getPythonKernelOwnerId: () => kernelOwnerId ?? null,
+		forcePythonWarmup: true,
 		settings: Settings.isolated({ "python.toolMode": "ipy-only", ...overrides }),
 	};
 }
@@ -66,6 +94,7 @@ describe("python tool settings", () => {
 	});
 
 	afterEach(() => {
+		pythonExecutor.resetPreludeDocsCache();
 		vi.restoreAllMocks();
 		fs.rmSync(testDir, { recursive: true, force: true });
 	});
@@ -92,6 +121,7 @@ describe("python tool settings", () => {
 	});
 
 	it("passes kernel owner and kernel mode from settings to executor", async () => {
+		vi.spyOn(pythonExecutor, "getPreludeDocs").mockReturnValue([]);
 		const warmupSpy = vi.spyOn(pythonExecutor, "warmPythonEnvironment").mockResolvedValue({ ok: true, docs: [] });
 		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "ok",
@@ -131,46 +161,21 @@ describe("python tool settings", () => {
 	});
 
 	it("passes kernel owner into createTools warmup without changing session ids", async () => {
-		const previousBunEnv = Bun.env.BUN_ENV;
-		const previousNodeEnv = Bun.env.NODE_ENV;
-		const previousSkipCheck = Bun.env.PI_PYTHON_SKIP_CHECK;
-		Bun.env.BUN_ENV = "development";
-		Bun.env.NODE_ENV = "development";
-		delete Bun.env.PI_PYTHON_SKIP_CHECK;
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(pythonExecutor, "getPreludeDocs").mockReturnValue([]);
+		const warmupSpy = vi.spyOn(pythonExecutor, "warmPythonEnvironment").mockResolvedValue({ ok: true, docs: [] });
 
-		try {
-			vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
-			vi.spyOn(pythonExecutor, "getPreludeDocs").mockReturnValue([]);
-			const warmupSpy = vi.spyOn(pythonExecutor, "warmPythonEnvironment").mockResolvedValue({ ok: true, docs: [] });
+		const sessionFile = path.join(testDir, "session-create-tools.jsonl");
+		const kernelOwnerId = "owner-create-tools";
+		const createTools = await loadCreateTools();
+		await createTools(createSession(testDir, sessionFile, undefined, kernelOwnerId), ["python"]);
 
-			const sessionFile = path.join(testDir, "session-create-tools.jsonl");
-			const kernelOwnerId = "owner-create-tools";
-			const createTools = await loadCreateTools();
-			await createTools(createSession(testDir, sessionFile, undefined, kernelOwnerId), ["python"]);
-
-			expect(warmupSpy).toHaveBeenCalledWith(
-				testDir,
-				`session:${sessionFile}:cwd:${testDir}`,
-				true,
-				sessionFile,
-				kernelOwnerId,
-			);
-		} finally {
-			if (previousBunEnv === undefined) {
-				delete Bun.env.BUN_ENV;
-			} else {
-				Bun.env.BUN_ENV = previousBunEnv;
-			}
-			if (previousNodeEnv === undefined) {
-				delete Bun.env.NODE_ENV;
-			} else {
-				Bun.env.NODE_ENV = previousNodeEnv;
-			}
-			if (previousSkipCheck === undefined) {
-				delete Bun.env.PI_PYTHON_SKIP_CHECK;
-			} else {
-				Bun.env.PI_PYTHON_SKIP_CHECK = previousSkipCheck;
-			}
-		}
+		expect(warmupSpy).toHaveBeenCalledWith(
+			testDir,
+			`session:${sessionFile}:cwd:${testDir}`,
+			true,
+			sessionFile,
+			kernelOwnerId,
+		);
 	});
 });

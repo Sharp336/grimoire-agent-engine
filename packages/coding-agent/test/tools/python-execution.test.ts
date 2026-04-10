@@ -1,32 +1,59 @@
-import { describe, expect, it, vi } from "bun:test";
-import { createRequire } from "node:module";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-const require = createRequire(import.meta.url);
-const nativeBindings = require("../../../natives/native/index.js") as Record<string, unknown> & {
-	ChunkState?: { parse: (source: string, language?: string) => unknown };
-	formatAnchor?: (name: string, checksum?: string, style?: string) => string;
-	getDefaultTabWidth?: () => number;
-	getIndentation?: (file?: string | null, projectDir?: string | null) => number;
-	setDefaultTabWidth?: (width: number) => void;
-	MacOSPowerAssertion?: { start: (options: { reason: string }) => { stop: () => void } };
-};
-
-vi.mock("@oh-my-pi/pi-natives", () => ({
-	...nativeBindings,
-	ChunkState: nativeBindings.ChunkState ?? {
+const mockNativeBindings = {
+	ChunkAnchorStyle: { Full: "full", Minimal: "minimal", None: "none" },
+	ChunkEditOp: { Replace: "replace", Before: "before", After: "after", Prepend: "prepend", Append: "append" },
+	ChunkReadStatus: { Ok: "ok", Missing: "missing", Binary: "binary", Error: "error" },
+	ChunkState: {
 		parse() {
 			throw new Error("ChunkState.parse unavailable in test");
 		},
 	},
-	formatAnchor:
-		nativeBindings.formatAnchor ?? ((name: string, checksum?: string) => (checksum ? `${name}#${checksum}` : name)),
-	getDefaultTabWidth: nativeBindings.getDefaultTabWidth ?? (() => 4),
-	getIndentation: nativeBindings.getIndentation ?? (() => 4),
-	setDefaultTabWidth: nativeBindings.setDefaultTabWidth ?? (() => {}),
-	MacOSPowerAssertion: nativeBindings.MacOSPowerAssertion ?? { start: () => ({ stop: () => {} }) },
-}));
+	FileType: { File: 1, Dir: 2, Symlink: 3, Other: 4 },
+	GrepOutputMode: { Paths: "paths", FilesWithMatches: "files_with_matches", Count: "count", Content: "content" },
+	ImageFormat: { Png: "png", Jpeg: "jpeg", Webp: "webp" },
+	MacAppearanceObserver: class {},
+	MacOSPowerAssertion: { start: () => ({ stop: () => {} }) },
+	PhotonImage: class {},
+	PtySession: class {},
+	SamplingFilter: { Nearest: "nearest", Triangle: "triangle" },
+	SearchDb: class {},
+	Shell: class {},
+	astEdit: async () => ({ replacements: [] }),
+	astGrep: async () => ({ matches: [] }),
+	fuzzyFind: async () => ({ matches: [] }),
+	detectMacOSAppearance: () => "light",
+	encodeSixel: async () => "",
+	Ellipsis: { Omit: "omit", ThreeDots: "threeDots" },
+	extractSegments: (text: string) => [text],
+	executeShell: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
+	formatAnchor: (name: string, checksum?: string) => (checksum ? `${name}#${checksum}` : name),
+	getDefaultTabWidth: () => 4,
+	getIndentation: () => 4,
+	getWorkProfile: () => null,
+	glob: async () => [],
+	grep: async () => ({ matches: [] }),
+	highlightCode: (code: string) => code,
+	htmlToMarkdown: (html: string) => html,
+	invalidateFsScanCache: () => {},
+	killTree: async () => {},
+	projfsOverlayProbe: async () => ({ available: false }),
+	projfsOverlayStart: async () => ({ mountId: "mock" }),
+	projfsOverlayStop: async () => {},
+	sanitizeText: (text: string) => text,
+	matchesKey: () => false,
+	parseKey: () => null,
+	parseKittySequence: () => null,
+	sliceWithWidth: (text: string) => text,
+	setDefaultTabWidth: () => {},
+	supportsLanguage: () => false,
+	truncateToWidth: (text: string) => text,
+	wrapTextWithAnsi: (text: string) => text,
+};
+
+vi.mock("@oh-my-pi/pi-natives", () => mockNativeBindings);
 
 const { Settings } = require("../../src/config/settings") as typeof import("../../src/config/settings");
 const pythonExecutor = require("../../src/ipy/executor") as typeof import("../../src/ipy/executor");
@@ -49,8 +76,14 @@ function createSession(cwd: string, kernelOwnerId?: string): ToolSession {
 }
 
 describe("python tool execution", () => {
+	afterEach(() => {
+		pythonExecutor.resetPreludeDocsCache();
+		vi.restoreAllMocks();
+	});
+
 	it("passes kernel owner and kernel options from settings and args", async () => {
 		const tempDir = TempDir.createSync("@python-tool-");
+		vi.spyOn(pythonExecutor, "getPreludeDocs").mockReturnValue([]);
 		const warmupSpy = vi.spyOn(pythonExecutor, "warmPythonEnvironment").mockResolvedValue({ ok: true, docs: [] });
 		const executeSpy = vi.spyOn(pythonExecutor, "executePython").mockResolvedValue({
 			output: "ok",
@@ -99,7 +132,6 @@ describe("python tool execution", () => {
 		const text = result.content.find(item => item.type === "text")?.text;
 		expect(text).toBe("ok");
 
-		executeSpy.mockRestore();
 		tempDir.removeSync();
 	});
 });
