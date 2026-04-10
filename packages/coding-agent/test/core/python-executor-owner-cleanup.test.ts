@@ -6,6 +6,7 @@ import {
 	resetPreludeDocsCache,
 	warmPythonEnvironment,
 } from "@oh-my-pi/pi-coding-agent/ipy/executor";
+import * as gatewayCoordinator from "@oh-my-pi/pi-coding-agent/ipy/gateway-coordinator";
 import type {
 	KernelExecuteResult,
 	PreludeHelper,
@@ -213,6 +214,67 @@ describe("python executor owner cleanup", () => {
 		await globalDisposal;
 		await disposeAllKernelSessions();
 		expect(replacementKernel.shutdown).toHaveBeenCalledTimes(1);
+	});
+
+	it("clears stuck tracked disposals during resource-exhaustion recovery", async () => {
+		vi.useFakeTimers();
+		try {
+			const staleKernels = [new FakeKernel(), new FakeKernel(), new FakeKernel()];
+			const recoveredKernel = new FakeKernel();
+			const laterKernel = new FakeKernel();
+			const staleShutdownDeferreds = staleKernels.map(() => Promise.withResolvers<void>());
+			for (const [index, kernel] of staleKernels.entries()) {
+				kernel.shutdown = vi.fn(() => staleShutdownDeferreds[index]!.promise);
+			}
+			const shutdownSharedGatewaySpy = vi.spyOn(gatewayCoordinator, "shutdownSharedGateway").mockResolvedValue();
+			vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+			const startSpy = vi.spyOn(PythonKernel, "start");
+			for (const kernel of staleKernels) {
+				startSpy.mockResolvedValueOnce(kernel as unknown as PythonKernelInstance);
+			}
+			startSpy
+				.mockRejectedValueOnce(new Error("EMFILE: too many open files"))
+				.mockResolvedValueOnce(recoveredKernel as unknown as PythonKernelInstance)
+				.mockResolvedValueOnce(laterKernel as unknown as PythonKernelInstance);
+
+			for (const [index] of staleKernels.entries()) {
+				await executePython(`print(${index})`, {
+					cwd: `/tmp/recovery-stale-${index}`,
+					sessionId: `recovery-stale-session-${index}`,
+					kernelMode: "session",
+					kernelOwnerId: "owner-a",
+				});
+			}
+
+			const ownerCleanup = disposeKernelSessionsByOwner("owner-a");
+			await Promise.resolve();
+			for (const kernel of staleKernels) {
+				expect(kernel.shutdown).toHaveBeenCalledWith({ timeoutMs: 2_000 });
+			}
+			vi.advanceTimersByTime(2_000);
+			await ownerCleanup;
+
+			await executePython("print('recovered')", {
+				cwd: "/tmp/recovery-after-emfile",
+				sessionId: "recovery-session",
+				kernelMode: "session",
+			});
+			expect(shutdownSharedGatewaySpy).toHaveBeenCalledTimes(1);
+			expect(startSpy).toHaveBeenCalledTimes(5);
+			expect(recoveredKernel.execute).toHaveBeenCalledTimes(1);
+
+			await executePython("print('later')", {
+				cwd: "/tmp/recovery-after-emfile-later",
+				sessionId: "recovery-session-later",
+				kernelMode: "session",
+				deadlineMs: Date.now() + 50,
+			});
+			expect(startSpy).toHaveBeenCalledTimes(6);
+			expect(recoveredKernel.shutdown).not.toHaveBeenCalled();
+			expect(laterKernel.execute).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
 	});
 
 	it("times out retained kernel shutdown during owner cleanup and detaches the retained session", async () => {

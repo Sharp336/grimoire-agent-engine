@@ -575,16 +575,27 @@ function isResourceExhaustionError(error: unknown): boolean {
 	);
 }
 
+function clearRetainedKernelSessionTracking(): void {
+	for (const session of kernelSessions.values()) {
+		if (session.heartbeatTimer) {
+			clearInterval(session.heartbeatTimer);
+			session.heartbeatTimer = undefined;
+		}
+	}
+	for (const session of disposingKernelSessions.values()) {
+		if (session.heartbeatTimer) {
+			clearInterval(session.heartbeatTimer);
+			session.heartbeatTimer = undefined;
+		}
+	}
+	kernelSessions.clear();
+	disposingKernelSessions.clear();
+}
+
 async function recoverFromResourceExhaustion(): Promise<void> {
 	logger.warn("Resource exhaustion detected, recovering by restarting shared gateway");
 	stopCleanupTimer();
-	const sessions = Array.from(kernelSessions.values());
-	for (const session of sessions) {
-		if (session.heartbeatTimer) {
-			clearInterval(session.heartbeatTimer);
-		}
-		kernelSessions.delete(session.id);
-	}
+	clearRetainedKernelSessionTracking();
 	await shutdownSharedGateway();
 }
 
