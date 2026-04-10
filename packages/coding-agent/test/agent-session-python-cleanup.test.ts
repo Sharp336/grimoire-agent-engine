@@ -1,63 +1,36 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-ai";
 import type { PythonKernel as PythonKernelInstance } from "@oh-my-pi/pi-coding-agent/ipy/kernel";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 
-const mockNativeBindings = {
-	ChunkAnchorStyle: { Full: "full", Minimal: "minimal", None: "none" },
-	ChunkEditOp: { Replace: "replace", Before: "before", After: "after", Prepend: "prepend", Append: "append" },
-	ChunkReadStatus: { Ok: "ok", Missing: "missing", Binary: "binary", Error: "error" },
-	ChunkState: {
+const require = createRequire(import.meta.url);
+const nativeBindings = require("../../natives/native/index.js") as Record<string, unknown> & {
+	ChunkState?: { parse: (source: string, language?: string) => unknown };
+	formatAnchor?: (name: string, checksum?: string, style?: string) => string;
+	getDefaultTabWidth?: () => number;
+	getIndentation?: (file?: string | null, projectDir?: string | null) => number;
+	setDefaultTabWidth?: (width: number) => void;
+	MacOSPowerAssertion?: { start: (options: { reason: string }) => { stop: () => void } };
+};
+
+vi.mock("@oh-my-pi/pi-natives", () => ({
+	...nativeBindings,
+	ChunkState: nativeBindings.ChunkState ?? {
 		parse() {
 			throw new Error("ChunkState.parse unavailable in test");
 		},
 	},
-	Ellipsis: { Omit: "omit", ThreeDots: "threeDots" },
-	FileType: { File: 1, Dir: 2, Symlink: 3, Other: 4 },
-	GrepOutputMode: { Paths: "paths", FilesWithMatches: "files_with_matches", Count: "count", Content: "content" },
-	ImageFormat: { Png: "png", Jpeg: "jpeg", Webp: "webp" },
-	MacAppearanceObserver: class {},
-	MacOSPowerAssertion: { start: () => ({ stop: () => {} }) },
-	PhotonImage: class {},
-	PtySession: class {},
-	SamplingFilter: { Nearest: "nearest", Triangle: "triangle" },
-	SearchDb: class {},
-	Shell: class {},
-	astEdit: async () => ({ replacements: [] }),
-	astGrep: async () => ({ matches: [] }),
-	detectMacOSAppearance: () => "light",
-	encodeSixel: async () => "",
-	executeShell: async () => ({ stdout: "", stderr: "", exitCode: 0 }),
-	extractSegments: (text: string) => [text],
-	formatAnchor: (name: string, checksum?: string) => (checksum ? `${name}#${checksum}` : name),
-	fuzzyFind: async () => ({ matches: [] }),
-	getDefaultTabWidth: () => 4,
-	getIndentation: () => 4,
-	getWorkProfile: () => null,
-	glob: async () => [],
-	grep: async () => ({ matches: [] }),
-	highlightCode: (code: string) => code,
-	htmlToMarkdown: (html: string) => html,
-	invalidateFsScanCache: () => {},
-	killTree: async () => {},
-	matchesKey: () => false,
-	parseKey: () => null,
-	parseKittySequence: () => null,
-	projfsOverlayProbe: async () => ({ available: false }),
-	projfsOverlayStart: async () => ({ mountId: "mock" }),
-	projfsOverlayStop: async () => {},
-	sanitizeText: (text: string) => text,
-	setDefaultTabWidth: () => {},
-	sliceWithWidth: (text: string) => text,
-	supportsLanguage: () => false,
-	truncateToWidth: (text: string) => text,
-	wrapTextWithAnsi: (text: string) => text,
-};
-
-vi.mock("@oh-my-pi/pi-natives", () => mockNativeBindings);
+	formatAnchor:
+		nativeBindings.formatAnchor ?? ((name: string, checksum?: string) => (checksum ? `${name}#${checksum}` : name)),
+	getDefaultTabWidth: nativeBindings.getDefaultTabWidth ?? (() => 4),
+	getIndentation: nativeBindings.getIndentation ?? (() => 4),
+	setDefaultTabWidth: nativeBindings.setDefaultTabWidth ?? (() => {}),
+	MacOSPowerAssertion: nativeBindings.MacOSPowerAssertion ?? { start: () => ({ stop: () => {} }) },
+}));
 
 const { Settings } = require("../src/config/settings") as typeof import("../src/config/settings");
 const pythonExecutor = require("../src/ipy/executor") as typeof import("../src/ipy/executor");
