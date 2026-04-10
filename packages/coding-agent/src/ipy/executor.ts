@@ -16,6 +16,7 @@ import { PYTHON_PRELUDE } from "./prelude";
 const IDLE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
 const MAX_KERNEL_SESSIONS = 4;
 const CLEANUP_INTERVAL_MS = 30 * 1000; // 30 seconds
+const OWNER_CLEANUP_KERNEL_SHUTDOWN_TIMEOUT_MS = 2_000;
 
 export type PythonKernelMode = "session" | "per-call";
 
@@ -430,7 +431,9 @@ export async function disposeKernelSessionsByOwner(ownerId: string): Promise<voi
 			sessionsToDispose.push(session);
 		}
 	}
-	await Promise.allSettled(sessionsToDispose.map(session => disposeKernelSession(session)));
+	await Promise.allSettled(
+		sessionsToDispose.map(session => disposeKernelSession(session, OWNER_CLEANUP_KERNEL_SHUTDOWN_TIMEOUT_MS)),
+	);
 	if (kernelSessions.size === 0) {
 		stopCleanupTimer();
 	}
@@ -603,17 +606,59 @@ async function restartKernelSession(
 	session.lastUsedAt = Date.now();
 }
 
-async function disposeKernelSession(session: KernelSession): Promise<void> {
+async function shutdownKernelForSessionDisposal(session: KernelSession, timeoutMs?: number): Promise<void> {
+	const shutdown = Promise.resolve().then(() =>
+		session.kernel.shutdown(timeoutMs === undefined ? undefined : { timeoutMs }),
+	);
+	if (timeoutMs === undefined) {
+		try {
+			await shutdown;
+		} catch (err) {
+			logger.warn("Failed to shutdown kernel", { error: err instanceof Error ? err.message : String(err) });
+		}
+		return;
+	}
+
+	let timeoutId: NodeJS.Timeout | undefined;
+	const timedShutdown = shutdown
+		.then(() => ({ status: "completed" as const }))
+		.catch((err: unknown) => ({ status: "failed" as const, err }));
+
+	const result = await Promise.race([
+		timedShutdown,
+		new Promise<{ status: "timedOut" }>(resolve => {
+			timeoutId = setTimeout(() => resolve({ status: "timedOut" }), timeoutMs);
+			timeoutId.unref();
+		}),
+	]);
+
+	if (timeoutId) {
+		clearTimeout(timeoutId);
+	}
+
+	if (result.status === "timedOut") {
+		logger.warn("Timed out shutting down retained kernel during owner cleanup", {
+			sessionId: session.id,
+			timeoutMs,
+		});
+		return;
+	}
+
+	if (result.status === "failed") {
+		logger.warn("Failed to shutdown retained kernel during owner cleanup", {
+			sessionId: session.id,
+			error: result.err instanceof Error ? result.err.message : String(result.err),
+		});
+	}
+}
+
+async function disposeKernelSession(session: KernelSession, shutdownTimeoutMs?: number): Promise<void> {
 	if (session.disposePromise) {
 		return session.disposePromise;
 	}
 	session.disposePromise = (async () => {
 		if (!beginDisposingKernelSession(session)) return;
-		try {
-			await session.kernel.shutdown();
-		} catch (err) {
-			logger.warn("Failed to shutdown kernel", { error: err instanceof Error ? err.message : String(err) });
-		}
+		await shutdownKernelForSessionDisposal(session, shutdownTimeoutMs);
 	})();
 	return session.disposePromise;
 }

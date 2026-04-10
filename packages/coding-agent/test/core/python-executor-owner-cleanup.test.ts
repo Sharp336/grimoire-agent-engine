@@ -167,6 +167,62 @@ describe("python executor owner cleanup", () => {
 		expect(replacementKernel.shutdown).toHaveBeenCalledTimes(1);
 	});
 
+	it("times out retained kernel shutdown during owner cleanup and detaches the retained session", async () => {
+		vi.useFakeTimers();
+		try {
+			const stuckKernel = new FakeKernel();
+			const replacementKernel = new FakeKernel();
+			const shutdownDeferred = Promise.withResolvers<void>();
+			stuckKernel.shutdown = vi.fn(() => shutdownDeferred.promise);
+			vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+			const startSpy = vi
+				.spyOn(PythonKernel, "start")
+				.mockResolvedValueOnce(stuckKernel as unknown as PythonKernelInstance)
+				.mockResolvedValueOnce(replacementKernel as unknown as PythonKernelInstance);
+
+			await executePython("1 + 1", {
+				cwd: "/tmp/owner-timeout-kernel",
+				sessionId: "timeout-session",
+				kernelMode: "session",
+				kernelOwnerId: "owner-a",
+			});
+
+			let ownerCleanupResolved = false;
+			const ownerCleanup = disposeKernelSessionsByOwner("owner-a").then(() => {
+				ownerCleanupResolved = true;
+			});
+			await Promise.resolve();
+
+			expect(stuckKernel.shutdown).toHaveBeenCalledWith({ timeoutMs: 2_000 });
+			expect(ownerCleanupResolved).toBe(false);
+
+			vi.advanceTimersByTime(1_999);
+			await Promise.resolve();
+			expect(ownerCleanupResolved).toBe(false);
+
+			vi.advanceTimersByTime(1);
+			await ownerCleanup;
+			expect(ownerCleanupResolved).toBe(true);
+
+			await expect(disposeAllKernelSessions()).resolves.toBeUndefined();
+
+			await executePython("2 + 2", {
+				cwd: "/tmp/owner-timeout-kernel",
+				sessionId: "timeout-session",
+				kernelMode: "session",
+				kernelOwnerId: "owner-b",
+			});
+			expect(startSpy).toHaveBeenCalledTimes(2);
+			expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
+
+			shutdownDeferred.resolve();
+			await disposeKernelSessionsByOwner("owner-b");
+			expect(replacementKernel.shutdown).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
 	it("does not let stuck retained executions block owner or global cleanup", async () => {
 		const ownerKernel = new FakeKernel();
 		const globalKernel = new FakeKernel();
