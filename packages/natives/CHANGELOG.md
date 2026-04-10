@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Restored native loader export validation and made compiled builds prefer bundled addons over stale extracted caches, preventing `setDefaultTabWidth` startup crashes in compiled binaries ([#670](https://github.com/can1357/oh-my-pi/issues/670))
+
 ## [14.0.2] - 2026-04-09
 
 ### Added

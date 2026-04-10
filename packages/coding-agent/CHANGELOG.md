@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed compiled release builds to rebuild and embed matching native addons before packaging, preventing startup crashes from stale native binaries ([#670](https://github.com/can1357/oh-my-pi/issues/670))
+
 ## [14.0.3] - 2026-04-09
 
 ### Fixed

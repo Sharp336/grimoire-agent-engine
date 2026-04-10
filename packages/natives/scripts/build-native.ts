@@ -2,6 +2,7 @@ import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
+import { patchNativeLoader } from "./patch-loader";
 
 const repoRoot = path.join(import.meta.dir, "../../..");
 const rustDir = path.join(repoRoot, "crates/pi-natives");
@@ -137,29 +138,9 @@ async function installBinary(src: string, dest: string): Promise<void> {
 }
 async function patchGeneratedIndexLoader(): Promise<void> {
 	const indexPath = path.join(nativeDir, "index.js");
-	let content = await Bun.file(indexPath).text();
-	const embeddedLoadPatch = "let embeddedAddon = null;\n";
-	if (!content.includes(embeddedLoadPatch)) {
-		content = content.replace(/const \{ embeddedAddon \} = require\("\.\/embedded-addon"\);\n/, embeddedLoadPatch);
-	}
-	const lazyLoadPatch = [
-		"if (isCompiledBinary) {",
-		"\ttry {",
-		'\t\t({ embeddedAddon } = require("./embedded-addon"));',
-		"\t} catch {",
-		"\t\tembeddedAddon = null;",
-		"\t}",
-		"}",
-		"",
-	].join("\n");
-	if (!content.includes(lazyLoadPatch)) {
-		content = content.replace(
-			/(const isCompiledBinary =[\s\S]*?__filename\.includes\("%7EBUN"\);\n)/,
-			`$1\n${lazyLoadPatch}`,
-		);
-	}
-	await Bun.write(indexPath, content);
+	await patchNativeLoader(indexPath);
 }
+
 
 async function resolveBuiltAddonPath(canonicalFilename: string): Promise<string> {
 	// Variant-tagged files produced by previous invocations of this script that

@@ -1,8 +1,10 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { patchNativeLoader } from "./patch-loader";
 
 const reset = process.argv.includes("--reset");
 const outputPath = path.join(import.meta.dir, "../native/embedded-addon.js");
+const indexPath = path.join(import.meta.dir, "../native/index.js");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
 const nativeDir = path.join(import.meta.dir, "../native");
 
@@ -29,6 +31,8 @@ const stubContent = `
 /** @type {EmbeddedAddon|null} */
 export const embeddedAddon = null;
 `;
+await patchNativeLoader(indexPath);
+
 if (reset) {
 	await Bun.write(outputPath, stubContent);
 	process.exit(0);
@@ -119,3 +123,4 @@ ${files}
 `;
 
 await Bun.write(outputPath, content);
+await patchNativeLoader(indexPath);
