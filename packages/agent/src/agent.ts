@@ -949,19 +949,35 @@ export class Agent {
 			}
 		}
 
-		// If no text or split point is 0 or at/past end, don't split
-		if (fullText.length === 0 || splitPoint <= 0 || splitPoint >= fullText.length) {
-			// Emit assistant message first, then tool results (original behavior but with buffered results)
+		// If no text or split point is at/past end, don't split
+		if (fullText.length === 0 || splitPoint >= fullText.length) {
+			// Emit assistant message first, then tool results
 			this.#state.streamMessage = null;
 			this.appendMessage(assistantMessage);
 			this.#emit({ type: "message_end", message: assistantMessage });
 
-			// Emit buffered tool results
 			for (const { toolResult } of buffer) {
 				this.#emit({ type: "message_start", message: toolResult });
 				this.appendMessage(toolResult);
 				this.#emit({ type: "message_end", message: toolResult });
 			}
+			return;
+		}
+
+		// splitPoint === 0 means tools executed before any assistant text arrived.
+		// This is the typical Cursor flow: tool runs first, then the model composes
+		// its response referencing the tool output.  Emit tool results first.
+		if (splitPoint <= 0) {
+			this.#state.streamMessage = null;
+
+			for (const { toolResult } of buffer) {
+				this.#emit({ type: "message_start", message: toolResult });
+				this.appendMessage(toolResult);
+				this.#emit({ type: "message_end", message: toolResult });
+			}
+
+			this.appendMessage(assistantMessage);
+			this.#emit({ type: "message_end", message: assistantMessage });
 			return;
 		}
 
