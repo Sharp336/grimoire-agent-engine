@@ -21,16 +21,30 @@ class FakeKernel {
 	blockedExecution: Promise<typeof OK_EXECUTION> | undefined;
 	blockedExecutionStarted: (() => void) | undefined;
 	blockedExecutionReject: ((error: Error) => void) | undefined;
+	abortBlockedExecution = true;
 
 	isAlive(): boolean {
 		return this.alive;
 	}
 
-	async execute(code: string): Promise<typeof OK_EXECUTION> {
+	async execute(code: string, options?: { signal?: AbortSignal }): Promise<typeof OK_EXECUTION> {
 		this.executeCalls.push(code);
 		if (code === this.blockedCode && this.blockedExecution) {
 			this.blockedExecutionStarted?.();
-			return await this.blockedExecution;
+			if (!this.abortBlockedExecution || !options?.signal) {
+				return await this.blockedExecution;
+			}
+			return await Promise.race([
+				this.blockedExecution,
+				new Promise<typeof OK_EXECUTION>((_, reject) => {
+					const onAbort = () => reject(new DOMException("Aborted", "AbortError"));
+					if (options.signal?.aborted) {
+						onAbort();
+						return;
+					}
+					options.signal?.addEventListener("abort", onAbort, { once: true });
+				}),
+			]);
 		}
 		return OK_EXECUTION;
 	}
@@ -46,6 +60,39 @@ class FakeKernel {
 	}
 }
 
+const getModel = () => {
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected bundled model");
+	return model;
+};
+
+const createTempProject = () => {
+	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-agent-session-python-cleanup-${Snowflake.next()}-`));
+	const cwd = path.join(tempDir, "project");
+	fs.mkdirSync(cwd, { recursive: true });
+	return { tempDir, cwd };
+};
+
+const createSession = async (tempDir: string, cwd: string) =>
+	(
+		await createAgentSession({
+			cwd,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(cwd),
+			settings: Settings.isolated({ "python.kernelMode": "session" }),
+			model: getModel(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			forcePythonWarmup: true,
+			toolNames: ["python"],
+		})
+	).session;
+
 describe("AgentSession python cleanup", () => {
 	const tempDirs: string[] = [];
 
@@ -59,14 +106,8 @@ describe("AgentSession python cleanup", () => {
 	});
 
 	it("waits for active SDK session Python work before releasing a shared retained kernel", async () => {
-		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
-		if (!model) throw new Error("Expected bundled model");
-
-		const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-agent-session-python-cleanup-${Snowflake.next()}-`));
+		const { tempDir, cwd } = createTempProject();
 		tempDirs.push(tempDir);
-		const cwd = path.join(tempDir, "project");
-		fs.mkdirSync(cwd, { recursive: true });
-
 		pythonExecutor.resetPreludeDocsCache();
 
 		const kernel = new FakeKernel();
@@ -82,28 +123,8 @@ describe("AgentSession python cleanup", () => {
 			.spyOn(pythonKernel.PythonKernel, "start")
 			.mockResolvedValue(kernel as unknown as PythonKernelInstance);
 
-		const createSession = async () =>
-			(
-				await createAgentSession({
-					cwd,
-					agentDir: tempDir,
-					sessionManager: SessionManager.inMemory(cwd),
-					settings: Settings.isolated({ "python.kernelMode": "session" }),
-					model,
-					disableExtensionDiscovery: true,
-					skills: [],
-					contextFiles: [],
-					promptTemplates: [],
-					slashCommands: [],
-					enableMCP: false,
-					enableLsp: false,
-					forcePythonWarmup: true,
-					toolNames: ["python"],
-				})
-			).session;
-
-		const firstSession = await createSession();
-		const secondSession = await createSession();
+		const firstSession = await createSession(tempDir, cwd);
+		const secondSession = await createSession(tempDir, cwd);
 		expect(startSpy).toHaveBeenCalledTimes(1);
 		let firstDisposed = false;
 
@@ -141,6 +162,73 @@ describe("AgentSession python cleanup", () => {
 			await secondSession.dispose();
 		}
 
+		expect(kernel.shutdownCalls).toBe(1);
+	});
+
+	it("detaches retained kernel ownership even when dispose times out waiting for Python work", async () => {
+		const { tempDir, cwd } = createTempProject();
+		tempDirs.push(tempDir);
+		pythonExecutor.resetPreludeDocsCache();
+
+		const kernel = new FakeKernel();
+		const blockedExecution = Promise.withResolvers<typeof OK_EXECUTION>();
+		const blockedExecutionStarted = Promise.withResolvers<void>();
+		kernel.blockedCode = "print('blocked')";
+		kernel.blockedExecution = blockedExecution.promise;
+		kernel.blockedExecutionStarted = () => blockedExecutionStarted.resolve();
+		kernel.abortBlockedExecution = false;
+
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = vi
+			.spyOn(pythonKernel.PythonKernel, "start")
+			.mockResolvedValue(kernel as unknown as PythonKernelInstance);
+
+		const firstSession = await createSession(tempDir, cwd);
+		const secondSession = await createSession(tempDir, cwd);
+
+		await secondSession.executePython("print('owner-b warmup')");
+		const firstExecution = firstSession.executePython("print('blocked')");
+		await blockedExecutionStarted.promise;
+
+		await firstSession.dispose();
+		expect(kernel.shutdownCalls).toBe(0);
+		expect(startSpy).toHaveBeenCalledTimes(1);
+
+		blockedExecution.resolve(OK_EXECUTION);
+		await firstExecution;
+		await secondSession.dispose();
+
+		expect(kernel.shutdownCalls).toBe(1);
+	});
+
+	it("aborts every active Python execution owned by the session during dispose", async () => {
+		const { tempDir, cwd } = createTempProject();
+		tempDirs.push(tempDir);
+		pythonExecutor.resetPreludeDocsCache();
+
+		const kernel = new FakeKernel();
+		const blockedExecution = Promise.withResolvers<typeof OK_EXECUTION>();
+		const blockedExecutionStarted = Promise.withResolvers<void>();
+		kernel.blockedCode = "print('first')";
+		kernel.blockedExecution = blockedExecution.promise;
+		kernel.blockedExecutionStarted = () => blockedExecutionStarted.resolve();
+
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(pythonKernel.PythonKernel, "start").mockResolvedValue(kernel as unknown as PythonKernelInstance);
+
+		const session = await createSession(tempDir, cwd);
+
+		const firstExecution = session.executePython("print('first')");
+		await blockedExecutionStarted.promise;
+		const secondExecution = session.executePython("print('second')");
+		await Bun.sleep(0);
+
+		await session.dispose();
+		const [firstResult, secondResult] = await Promise.all([firstExecution, secondExecution]);
+
+		expect(firstResult.cancelled).toBe(true);
+		expect(secondResult.cancelled).toBe(true);
+		expect(kernel.executeCalls).toEqual(["print('first')"]);
 		expect(kernel.shutdownCalls).toBe(1);
 	});
 });

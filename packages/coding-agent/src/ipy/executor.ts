@@ -613,7 +613,6 @@ async function disposeKernelSession(session: KernelSession): Promise<void> {
 	}
 	session.disposePromise = (async () => {
 		if (!beginDisposingKernelSession(session)) return;
-		await session.queue.catch(() => undefined);
 		try {
 			await session.kernel.shutdown();
 		} catch (err) {

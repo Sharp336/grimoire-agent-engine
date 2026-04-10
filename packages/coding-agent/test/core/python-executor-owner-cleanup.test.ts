@@ -167,6 +167,55 @@ describe("python executor owner cleanup", () => {
 		expect(replacementKernel.shutdown).toHaveBeenCalledTimes(1);
 	});
 
+	it("does not let stuck retained executions block owner or global cleanup", async () => {
+		const ownerKernel = new FakeKernel();
+		const globalKernel = new FakeKernel();
+		const ownerExecutionStarted = Promise.withResolvers<void>();
+		const globalExecutionStarted = Promise.withResolvers<void>();
+		ownerKernel.execute = vi.fn(async () => {
+			ownerExecutionStarted.resolve();
+			return await new Promise<KernelExecuteResult>(() => {});
+		});
+		globalKernel.execute = vi.fn(async () => {
+			globalExecutionStarted.resolve();
+			return await new Promise<KernelExecuteResult>(() => {});
+		});
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		vi.spyOn(PythonKernel, "start")
+			.mockResolvedValueOnce(ownerKernel as unknown as PythonKernelInstance)
+			.mockResolvedValueOnce(globalKernel as unknown as PythonKernelInstance);
+
+		void executePython("print('owner hangs')", {
+			cwd: "/tmp/stuck-owner-cleanup",
+			sessionId: "stuck-owner-session",
+			kernelMode: "session",
+			kernelOwnerId: "owner-a",
+		});
+		await ownerExecutionStarted.promise;
+
+		void executePython("print('global hangs')", {
+			cwd: "/tmp/stuck-global-cleanup",
+			sessionId: "stuck-global-session",
+			kernelMode: "session",
+		});
+		await globalExecutionStarted.promise;
+
+		const ownerCleanup = Promise.race([
+			disposeKernelSessionsByOwner("owner-a").then(() => "disposed-owner" as const),
+			new Promise<"timeout">(resolve => setTimeout(() => resolve("timeout"), 50)),
+		]);
+		await expect(ownerCleanup).resolves.toBe("disposed-owner");
+		expect(ownerKernel.shutdown).toHaveBeenCalledTimes(1);
+		expect(globalKernel.shutdown).not.toHaveBeenCalled();
+
+		const globalCleanup = Promise.race([
+			disposeAllKernelSessions().then(() => "disposed-all" as const),
+			new Promise<"timeout">(resolve => setTimeout(() => resolve("timeout"), 50)),
+		]);
+		await expect(globalCleanup).resolves.toBe("disposed-all");
+		expect(globalKernel.shutdown).toHaveBeenCalledTimes(1);
+	});
+
 	it("attaches cached warmup sessions to newly provided owners", async () => {
 		using tempDir = TempDir.createSync("@python-owner-warmup-");
 		const docs: PreludeHelper[] = [

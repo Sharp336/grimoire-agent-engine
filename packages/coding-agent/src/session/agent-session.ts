@@ -465,7 +465,7 @@ export class AgentSession {
 	#pendingBashMessages: BashExecutionMessage[] = [];
 
 	// Python execution state
-	#pythonAbortController: AbortController | undefined = undefined;
+	#pythonAbortControllers = new Set<AbortController>();
 	#pythonKernelOwnerId: string;
 	#pendingPythonMessages: PythonExecutionMessage[] = [];
 	#activePythonExecutions = new Set<Promise<PythonResult>>();
@@ -1819,9 +1819,12 @@ export class AgentSession {
 			logger.warn("Async job completion deliveries still pending during dispose", { ...deliveryState });
 		}
 		const pythonExecutionsSettled = await this.#preparePythonExecutionsForDispose();
-		if (pythonExecutionsSettled) {
-			await disposeKernelSessionsByOwner(this.#pythonKernelOwnerId);
+		if (!pythonExecutionsSettled) {
+			logger.warn(
+				"Detaching retained Python kernel ownership during dispose while Python execution is still active",
+			);
 		}
+		await disposeKernelSessionsByOwner(this.#pythonKernelOwnerId);
 		this.#stopPowerAssertion();
 		await this.sessionManager.close();
 		this.#closeAllProviderSessions("dispose");
@@ -5670,7 +5673,7 @@ export class AgentSession {
 		}
 
 		const abortController = new AbortController();
-		this.#pythonAbortController = abortController;
+		this.#pythonAbortControllers.add(abortController);
 		const execution = (async (): Promise<PythonResult> => {
 			try {
 				// Use the same session ID as the Python tool for kernel sharing
@@ -5690,9 +5693,7 @@ export class AgentSession {
 				this.recordPythonResult(code, result, options);
 				return result;
 			} finally {
-				if (this.#pythonAbortController === abortController) {
-					this.#pythonAbortController = undefined;
-				}
+				this.#pythonAbortControllers.delete(abortController);
 			}
 		})();
 		this.#activePythonExecutions.add(execution);
@@ -5733,7 +5734,9 @@ export class AgentSession {
 	 * Cancel running Python execution.
 	 */
 	abortPython(): void {
-		this.#pythonAbortController?.abort();
+		for (const abortController of this.#pythonAbortControllers) {
+			abortController.abort();
+		}
 	}
 
 	async #waitForPythonExecutionsToSettle(timeoutMs: number): Promise<boolean> {
@@ -5760,7 +5763,7 @@ export class AgentSession {
 			this.abortPython();
 			if (!(await this.#waitForPythonExecutionsToSettle(1_000))) {
 				logger.warn(
-					"Skipping retained Python kernel cleanup during dispose because Python execution is still active",
+					"Python execution is still active after dispose aborted all active runs; retained kernel ownership will still be detached",
 				);
 				return false;
 			}
@@ -5770,7 +5773,7 @@ export class AgentSession {
 
 	/** Whether a Python execution is currently running */
 	get isPythonRunning(): boolean {
-		return this.#pythonAbortController !== undefined;
+		return this.#pythonAbortControllers.size > 0;
 	}
 
 	/** Whether there are pending Python messages waiting to be flushed */
