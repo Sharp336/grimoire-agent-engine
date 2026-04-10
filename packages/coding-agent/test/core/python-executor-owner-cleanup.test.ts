@@ -167,6 +167,54 @@ describe("python executor owner cleanup", () => {
 		expect(replacementKernel.shutdown).toHaveBeenCalledTimes(1);
 	});
 
+	it("keeps tracked disposals counted against retained kernel capacity until shutdown settles", async () => {
+		const retainedKernels = [new FakeKernel(), new FakeKernel(), new FakeKernel(), new FakeKernel()];
+		const replacementKernel = new FakeKernel();
+		const shutdownDeferreds = retainedKernels.map(() => Promise.withResolvers<void>());
+		for (const [index, kernel] of retainedKernels.entries()) {
+			kernel.shutdown = vi.fn(() => shutdownDeferreds[index]!.promise);
+		}
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = vi.spyOn(PythonKernel, "start");
+		for (const kernel of [...retainedKernels, replacementKernel]) {
+			startSpy.mockResolvedValueOnce(kernel as unknown as PythonKernelInstance);
+		}
+
+		for (const [index] of retainedKernels.entries()) {
+			await executePython(`print(${index})`, {
+				cwd: `/tmp/capacity-tracking-${index}`,
+				sessionId: `capacity-session-${index}`,
+				kernelMode: "session",
+			});
+		}
+		expect(startSpy).toHaveBeenCalledTimes(4);
+
+		const globalDisposal = disposeAllKernelSessions();
+		await Promise.resolve();
+
+		const fifthExecution = executePython("print('replacement')", {
+			cwd: "/tmp/capacity-tracking-replacement",
+			sessionId: "capacity-session-replacement",
+			kernelMode: "session",
+		});
+		await Promise.resolve();
+
+		expect(startSpy).toHaveBeenCalledTimes(4);
+		expect(replacementKernel.execute).not.toHaveBeenCalled();
+
+		shutdownDeferreds[0]!.resolve();
+		await fifthExecution;
+		expect(startSpy).toHaveBeenCalledTimes(5);
+		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
+
+		for (const deferred of shutdownDeferreds.slice(1)) {
+			deferred.resolve();
+		}
+		await globalDisposal;
+		await disposeAllKernelSessions();
+		expect(replacementKernel.shutdown).toHaveBeenCalledTimes(1);
+	});
+
 	it("times out retained kernel shutdown during owner cleanup and detaches the retained session", async () => {
 		vi.useFakeTimers();
 		try {
