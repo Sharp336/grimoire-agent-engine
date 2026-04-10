@@ -8,6 +8,7 @@ import { refreshGitLabDuoToken } from "./gitlab-duo";
 import { refreshAntigravityToken } from "./google-antigravity";
 import { refreshGoogleCloudToken } from "./google-gemini-cli";
 import { refreshKimiToken } from "./kimi";
+import { refreshQwenCodeToken } from "./qwen-code";
 import { refreshOpenAICodexToken } from "./openai-codex";
 import type {
 	OAuthCredentials,
@@ -27,6 +28,7 @@ import type {
  * - Google Cloud Code Assist (Gemini CLI)
  * - Antigravity (Gemini 3, Claude, GPT-OSS via Google Cloud)
  * - Kimi Code
+ * - Qwen Code (device OAuth flow)
  * - Kilo Gateway
  * - Kagi
  * - Cerebras
@@ -102,8 +104,11 @@ export { loginParallel } from "./parallel";
 export { loginPerplexity } from "./perplexity";
 // Qianfan (API key)
 export { loginQianfan } from "./qianfan";
+
 // Qwen Portal (OAuth token/API key)
 export { loginQwenPortal } from "./qwen-portal";
+// Qwen Code (device code OAuth flow)
+export { loginQwenCode, refreshQwenCodeToken } from "./qwen-code";
 // Synthetic (API key)
 export { loginSynthetic } from "./synthetic";
 // Tavily (API key)
@@ -277,7 +282,12 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 	},
 	{
 		id: "qwen-portal",
-		name: "Qwen Portal",
+		name: "Qwen Portal (manual token)",
+		available: true,
+	},
+	{
+		id: "qwen-code",
+		name: "Qwen Code (device OAuth)",
 		available: true,
 	},
 	{
@@ -385,6 +395,9 @@ export async function refreshOAuthToken(
 			break;
 		case "cursor":
 			newCredentials = await refreshCursorToken(credentials.refresh);
+			break;
+		case "qwen-code":
+			newCredentials = await refreshQwenCodeToken(credentials.refresh);
 			break;
 		case "perplexity":
 		case "huggingface":
