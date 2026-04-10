@@ -2262,9 +2262,6 @@ function buildGrpcRequest(
 		},
 	});
 
-	// Build conversation turns from prior messages (excluding the last user message)
-	const turns = buildConversationTurns(context.messages, blobStore);
-
 	// When a server checkpoint exists, use it as-is. The checkpoint contains
 	// server-generated blob references (turns, rootPromptMessagesJson) that must
 	// stay in sync with the server's state.  The server may inject additional
@@ -2273,22 +2270,30 @@ function buildGrpcRequest(
 	// incorrectly discard valid checkpoints.
 	// Only fall back to locally built state for the very first message in a
 	// new conversation (no checkpoint yet).
-	const conversationState = state.conversationState
-		? state.conversationState
-		: create(ConversationStateStructureSchema, {
-				rootPromptMessagesJson: [systemPromptId],
-				turns: turns.length > 0 ? turns : [],
-				todos: [],
-				pendingToolCalls: [],
-				previousWorkspaceUris: [],
-				fileStates: {},
-				fileStatesV2: {},
-				summaryArchives: [],
-				turnTimings: [],
-				subagentStates: {},
-				selfSummaryCount: 0,
-				readPaths: [],
-			});
+	//
+	// We also skip buildConversationTurns entirely when a checkpoint exists to
+	// avoid unnecessary blob store churn: each call generates fresh UUIDs for
+	// historical user messages, producing new hashes for identical content.
+	let conversationState: ConversationStateStructure;
+	if (state.conversationState) {
+		conversationState = state.conversationState;
+	} else {
+		const turns = buildConversationTurns(context.messages, blobStore);
+		conversationState = create(ConversationStateStructureSchema, {
+			rootPromptMessagesJson: [systemPromptId],
+			turns: turns.length > 0 ? turns : [],
+			todos: [],
+			pendingToolCalls: [],
+			previousWorkspaceUris: [],
+			fileStates: {},
+			fileStatesV2: {},
+			summaryArchives: [],
+			turnTimings: [],
+			subagentStates: {},
+			selfSummaryCount: 0,
+			readPaths: [],
+		});
+	}
 
 	const modelDetails = create(ModelDetailsSchema, {
 		modelId: model.id,
