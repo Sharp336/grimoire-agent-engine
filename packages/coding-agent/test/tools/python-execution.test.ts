@@ -1,36 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { createRequire } from "node:module";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as pythonExecutor from "@oh-my-pi/pi-coding-agent/ipy/executor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { PythonTool } from "@oh-my-pi/pi-coding-agent/tools/python";
 import { TempDir } from "@oh-my-pi/pi-utils";
-
-const require = createRequire(import.meta.url);
-const nativeBindings = require("../../../natives/native/index.js") as Record<string, unknown> & {
-	ChunkState?: { parse: (source: string, language?: string) => unknown };
-	formatAnchor?: (name: string, checksum?: string, style?: string) => string;
-	getDefaultTabWidth?: () => number;
-	getIndentation?: (file?: string | null, projectDir?: string | null) => number;
-	setDefaultTabWidth?: (width: number) => void;
-	MacOSPowerAssertion?: { start: (options: { reason: string }) => { stop: () => void } };
-};
-
-vi.mock("@oh-my-pi/pi-natives", () => ({
-	...nativeBindings,
-	ChunkState: nativeBindings.ChunkState ?? {
-		parse() {
-			throw new Error("ChunkState.parse unavailable in test");
-		},
-	},
-	formatAnchor:
-		nativeBindings.formatAnchor ?? ((name: string, checksum?: string) => (checksum ? `${name}#${checksum}` : name)),
-	getDefaultTabWidth: nativeBindings.getDefaultTabWidth ?? (() => 4),
-	getIndentation: nativeBindings.getIndentation ?? (() => 4),
-	setDefaultTabWidth: nativeBindings.setDefaultTabWidth ?? (() => {}),
-	MacOSPowerAssertion: nativeBindings.MacOSPowerAssertion ?? { start: () => ({ stop: () => {} }) },
-}));
-
-const { Settings } = require("../../src/config/settings") as typeof import("../../src/config/settings");
-const pythonExecutor = require("../../src/ipy/executor") as typeof import("../../src/ipy/executor");
-const { PythonTool } = require("../../src/tools/python") as typeof import("../../src/tools/python");
 
 function createSession(cwd: string, kernelOwnerId?: string): ToolSession {
 	return {

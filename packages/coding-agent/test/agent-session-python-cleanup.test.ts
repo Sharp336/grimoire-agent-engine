@@ -1,40 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
-import { createRequire } from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-ai";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as pythonExecutor from "@oh-my-pi/pi-coding-agent/ipy/executor";
 import type { PythonKernel as PythonKernelInstance } from "@oh-my-pi/pi-coding-agent/ipy/kernel";
+import * as pythonKernel from "@oh-my-pi/pi-coding-agent/ipy/kernel";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { Snowflake } from "@oh-my-pi/pi-utils";
-
-const require = createRequire(import.meta.url);
-const nativeBindings = require("../../natives/native/index.js") as Record<string, unknown> & {
-	ChunkState?: { parse: (source: string, language?: string) => unknown };
-	formatAnchor?: (name: string, checksum?: string, style?: string) => string;
-	getDefaultTabWidth?: () => number;
-	getIndentation?: (file?: string | null, projectDir?: string | null) => number;
-	setDefaultTabWidth?: (width: number) => void;
-	MacOSPowerAssertion?: { start: (options: { reason: string }) => { stop: () => void } };
-};
-
-vi.mock("@oh-my-pi/pi-natives", () => ({
-	...nativeBindings,
-	ChunkState: nativeBindings.ChunkState ?? {
-		parse() {
-			throw new Error("ChunkState.parse unavailable in test");
-		},
-	},
-	formatAnchor:
-		nativeBindings.formatAnchor ?? ((name: string, checksum?: string) => (checksum ? `${name}#${checksum}` : name)),
-	getDefaultTabWidth: nativeBindings.getDefaultTabWidth ?? (() => 4),
-	getIndentation: nativeBindings.getIndentation ?? (() => 4),
-	setDefaultTabWidth: nativeBindings.setDefaultTabWidth ?? (() => {}),
-	MacOSPowerAssertion: nativeBindings.MacOSPowerAssertion ?? { start: () => ({ stop: () => {} }) },
-}));
-
-const { Settings } = require("../src/config/settings") as typeof import("../src/config/settings");
-const pythonExecutor = require("../src/ipy/executor") as typeof import("../src/ipy/executor");
-const pythonKernel = require("../src/ipy/kernel") as typeof import("../src/ipy/kernel");
 
 const OK_EXECUTION = { status: "ok", cancelled: false, timedOut: false, stdinRequested: false } as const;
 
@@ -69,17 +44,6 @@ class FakeKernel {
 		this.alive = false;
 		this.blockedExecutionReject?.(new Error("Kernel shut down during execution"));
 	}
-}
-
-async function loadSdkModules(): Promise<{
-	createAgentSession: typeof import("../src/sdk").createAgentSession;
-	SessionManager: typeof import("../src/session/session-manager").SessionManager;
-}> {
-	const [{ createAgentSession }, { SessionManager }] = await Promise.all([
-		import("../src/sdk"),
-		import("../src/session/session-manager"),
-	]);
-	return { createAgentSession, SessionManager };
 }
 
 describe("AgentSession python cleanup", () => {
@@ -118,7 +82,6 @@ describe("AgentSession python cleanup", () => {
 			.spyOn(pythonKernel.PythonKernel, "start")
 			.mockResolvedValue(kernel as unknown as PythonKernelInstance);
 
-		const { createAgentSession, SessionManager } = await loadSdkModules();
 		const createSession = async () =>
 			(
 				await createAgentSession({
