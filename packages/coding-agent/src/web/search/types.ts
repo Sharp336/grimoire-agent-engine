@@ -92,6 +92,15 @@ export interface SearchResponse {
 	requestId?: string;
 	/** Authentication mode used by the provider (e.g. oauth, api-key) */
 	authMode?: string;
+	/** Provenance and trust labeling for remote search content */
+	provenance?: SearchProvenance;
+}
+
+export interface SearchProvenance {
+	contentType: "remote_reference";
+	trust: "untrusted";
+	warningLabel: string;
+	warningText: string;
 }
 
 /** Provider-specific error with optional HTTP status */

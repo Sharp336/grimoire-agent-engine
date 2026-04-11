@@ -121,7 +121,7 @@ export class CommandController {
 		}
 
 		try {
-			const customShare = await loadCustomShare();
+			const customShare = await loadCustomShare(this.ctx.sessionManager.getCwd());
 			if (customShare) {
 				const loader = new BorderedLoader(this.ctx.ui, theme, "Sharing...");
 				this.ctx.editorContainer.clear();

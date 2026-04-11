@@ -8,6 +8,8 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
+import { loadManagedPolicy } from "../../security/policy.js";
+import type { ManagedPolicyIntegrity } from "../../security/types.js";
 import { buildInventory, type InventoryInput } from "./inventory.js";
 import { collectGuidanceLibrary } from "./library.js";
 
@@ -43,6 +45,7 @@ export interface CompileResult {
 
 const CACHE_DIR = path.join(getAgentDir(), "cache", "composer");
 const COMPILED_PROMPT_TAG = "compiled-system-prompt";
+const MANAGED_INTEGRITY_CACHE_REASON = "managed-integrity-requires-fresh-compilation";
 
 export async function compileSystemPrompt(options: CompileOptions): Promise<CompileResult> {
 	const { model, apiKey, inventory, contextFiles, invariants, tokenBudget, noCache } = options;
@@ -51,7 +54,6 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 	logger.debug("composer: inventory built", {
 		inventoryLength: inventoryText.length,
 		toolCount: inventory.tools.length,
-		mcpServerCount: inventory.mcpServerInstructions.length,
 		skillCount: inventory.skills.length,
 		editMode: inventory.editMode,
 	});
@@ -80,9 +82,16 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 
 	const cacheKey = Bun.hash(cacheInput).toString(36);
 	const cachePath = path.join(CACHE_DIR, `${cacheKey}.txt`);
+	const managedPolicyResult = await loadManagedPolicy();
+	const cacheDisabledForIntegrity = shouldDisableCompiledPromptCache(managedPolicyResult.policy?.document.integrity);
+	const cacheEnabled = !noCache && !cacheDisabledForIntegrity;
 
-	logger.debug("composer: checking cache", { cachePath, noCache: !!noCache });
-	if (!noCache) {
+	logger.debug("composer: checking cache", {
+		cachePath,
+		noCache: !!noCache,
+		integrityCacheBypass: cacheDisabledForIntegrity,
+	});
+	if (cacheEnabled) {
 		try {
 			const cached = await Bun.file(cachePath).text();
 			validateCompiledPrompt(cached, invariants);
@@ -99,6 +108,11 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 				error: err instanceof Error ? err.message : String(err),
 			});
 		}
+	} else if (cacheDisabledForIntegrity) {
+		logger.debug("composer: cache bypassed", {
+			cacheKey,
+			reason: MANAGED_INTEGRITY_CACHE_REASON,
+		});
 	}
 
 	const userMessage = buildCompilationMessage({
@@ -163,16 +177,23 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 		cacheKey,
 	});
 
-	logger.debug("composer: writing cache", { cachePath, outputLength: systemPrompt.length });
-	try {
-		await fs.promises.mkdir(CACHE_DIR, { recursive: true });
-		await Bun.write(cachePath, systemPrompt);
-		logger.debug("composer: cache written", { cachePath });
-	} catch (err) {
-		logger.warn("composer: cache write failed", {
-			error: err instanceof Error ? err.message : String(err),
-			stack: err instanceof Error ? err.stack : undefined,
+	if (cacheDisabledForIntegrity) {
+		logger.debug("composer: skipping cache write", {
+			cachePath,
+			reason: MANAGED_INTEGRITY_CACHE_REASON,
 		});
+	} else {
+		logger.debug("composer: writing cache", { cachePath, outputLength: systemPrompt.length });
+		try {
+			await fs.promises.mkdir(CACHE_DIR, { recursive: true });
+			await Bun.write(cachePath, systemPrompt);
+			logger.debug("composer: cache written", { cachePath });
+		} catch (err) {
+			logger.warn("composer: cache write failed", {
+				error: err instanceof Error ? err.message : String(err),
+				stack: err instanceof Error ? err.stack : undefined,
+			});
+		}
 	}
 
 	return {
@@ -181,6 +202,11 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 		durationMs,
 		cacheHit: false,
 	};
+}
+
+function shouldDisableCompiledPromptCache(integrity: ManagedPolicyIntegrity | undefined): boolean {
+	if (!integrity) return false;
+	return integrity.requireSignedManagedPolicy === true || integrity.disableUnsignedUserCodeLoad === true;
 }
 
 function buildCompilationMessage(input: {

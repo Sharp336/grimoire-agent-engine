@@ -498,9 +498,6 @@ async function buildSessionOptions(
 		}));
 	}
 
-	// API key from CLI - set in authStorage
-	// (handled by caller before createAgentSession)
-
 	// System prompt
 	if (resolvedSystemPrompt && resolvedAppendPrompt) {
 		options.systemPrompt = `${resolvedSystemPrompt}\n\n${resolvedAppendPrompt}`;
@@ -737,26 +734,11 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive;
 
-	// Handle CLI --api-key as runtime override (not persisted)
-	if (parsedArgs.apiKey) {
-		if (!sessionOptions.model && !sessionOptions.modelPattern) {
-			process.stderr.write(
-				`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
-			);
-			process.exit(1);
-		}
-		if (sessionOptions.model) {
-			authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsedArgs.apiKey);
-		}
-	}
 
 	const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager, eventBus } = await logger.timeAsync(
 		"createAgentSession",
 		() => createAgentSession(sessionOptions),
 	);
-	if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
-		authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
-	}
 
 	if (modelFallbackMessage) {
 		notifs.push({ kind: "warn", message: modelFallbackMessage });

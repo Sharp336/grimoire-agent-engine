@@ -6,8 +6,10 @@ import * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as typebox from "@sinclair/typebox";
 import { hookCapability } from "../../capability/hook";
+import type { SourceMeta } from "../../capability/types";
 import type { Hook } from "../../discovery";
 import { loadCapability } from "../../discovery";
+import { assertCodeLoadAllowed } from "../../security/access";
 import type { HookMessage } from "../../session/messages";
 import type { SessionManager } from "../../session/session-manager";
 import { resolvePath } from "../utils";
@@ -156,11 +158,25 @@ function createHookAPI(
 /**
  * Load a single hook module using native Bun import.
  */
-async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHook | null; error: string | null }> {
+interface HookPathWithSource {
+	path: string;
+	sourceLevel?: SourceMeta["level"];
+}
+
+async function loadHook(
+	hookPath: string,
+	cwd: string,
+	sourceLevel?: SourceMeta["level"],
+): Promise<{ hook: LoadedHook | null; error: string | null }> {
 	const resolvedPath = resolvePath(hookPath, cwd);
 
 	try {
-		// Import the module using native Bun import
+		await assertCodeLoadAllowed({
+			cwd,
+			targetPath: resolvedPath,
+			action: `Loading hook module ${hookPath}`,
+			sourceLevel,
+		});
 		const module = await import(resolvedPath);
 		const factory = module.default as HookFactory;
 
@@ -168,14 +184,12 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
 			return { hook: null, error: "Hook must export a default function" };
 		}
 
-		// Create handlers map and API
 		const handlers = new Map<string, HandlerFn[]>();
 		const { api, messageRenderers, commands, setSendMessageHandler, setAppendEntryHandler } = createHookAPI(
 			handlers,
 			cwd,
 		);
 
-		// Call factory to register handlers
 		factory(api);
 
 		return {
@@ -201,12 +215,12 @@ async function loadHook(hookPath: string, cwd: string): Promise<{ hook: LoadedHo
  * @param paths - Array of hook file paths
  * @param cwd - Current working directory for resolving relative paths
  */
-export async function loadHooks(paths: string[], cwd: string): Promise<LoadHooksResult> {
+export async function loadHooks(paths: HookPathWithSource[], cwd: string): Promise<LoadHooksResult> {
 	const hooks: LoadedHook[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 
-	for (const hookPath of paths) {
-		const { hook, error } = await loadHook(hookPath, cwd);
+	for (const { path: hookPath, sourceLevel } of paths) {
+		const { hook, error } = await loadHook(hookPath, cwd, sourceLevel);
 
 		if (error) {
 			errors.push({ path: hookPath, error });
@@ -231,26 +245,26 @@ export async function loadHooks(paths: string[], cwd: string): Promise<LoadHooks
  * Plus any explicitly configured paths from settings.
  */
 export async function discoverAndLoadHooks(configuredPaths: string[], cwd: string): Promise<LoadHooksResult> {
-	const allPaths: string[] = [];
+	const allPaths: HookPathWithSource[] = [];
 	const seen = new Set<string>();
 
 	// Helper to add paths without duplicates
-	const addPaths = (paths: string[]) => {
-		for (const p of paths) {
-			const resolved = path.resolve(p);
+	const addPaths = (paths: HookPathWithSource[]) => {
+		for (const { path: hookPath, sourceLevel } of paths) {
+			const resolved = path.resolve(hookPath);
 			if (!seen.has(resolved)) {
 				seen.add(resolved);
-				allPaths.push(p);
+				allPaths.push({ path: hookPath, sourceLevel });
 			}
 		}
 	};
 
 	// 1. Discover hooks via capability API
 	const discovered = await loadCapability<Hook>(hookCapability.id, { cwd });
-	addPaths(discovered.items.map(hook => hook.path));
+	addPaths(discovered.items.map(hook => ({ path: hook.path, sourceLevel: hook._source.level })));
 
 	// 2. Explicitly configured paths (can override/add)
-	addPaths(configuredPaths.map(p => resolvePath(p, cwd)));
+	addPaths(configuredPaths.map(configuredPath => ({ path: resolvePath(configuredPath, cwd) })));
 
 	return loadHooks(allPaths, cwd);
 }

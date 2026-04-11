@@ -1,23 +1,17 @@
 /**
  * Perplexity login and token refresh.
  *
- * Login paths (in priority order):
- * 1. macOS native app: reads JWT from NSUserDefaults (`defaults read ai.perplexity.mac authToken`)
- * 2. HTTP email OTP: `GET /api/auth/csrf` → `POST /api/auth/signin-email` → `POST /api/auth/signin-otp`
+ * Login path: HTTP email OTP via
+ * `GET /api/auth/csrf` → `POST /api/auth/signin-email` → `POST /api/auth/signin-otp`.
  *
  * No browser or manual cookie paste required.
  * Refresh: Socket.IO `refreshJWT` RPC over authenticated WebSocket connection.
  *
  * Protocol: Engine.IO v4 + Socket.IO v4 over WebSocket (bypasses Cloudflare managed challenge).
- * Architecture reverse-engineered from Perplexity macOS app (ai.perplexity.mac).
  */
-import * as os from "node:os";
-import { $env } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
 import type { OAuthController, OAuthCredentials } from "./types";
 
 const API_VERSION = "2.18";
-const NATIVE_APP_BUNDLE = "ai.perplexity.mac";
 const APP_USER_AGENT = "Perplexity/641 CFNetwork/1568 Darwin/25.2.0";
 
 // ---------------------------------------------------------------------------
@@ -48,28 +42,6 @@ function jwtToCredentials(jwt: string, email?: string): OAuthCredentials {
 		expires: getJwtExpiry(jwt),
 		email,
 	};
-}
-
-// ---------------------------------------------------------------------------
-// Desktop app extraction
-// ---------------------------------------------------------------------------
-
-/**
- * Read the Perplexity JWT from the native macOS Catalyst app's UserDefaults.
- * Tokens are stored in NSUserDefaults (not Keychain), readable by any same-UID process.
- */
-async function extractFromNativeApp(): Promise<string | null> {
-	if (os.platform() !== "darwin") return null;
-
-	try {
-		const result = await $`defaults read ${NATIVE_APP_BUNDLE} authToken`.quiet().nothrow();
-		if (result.exitCode !== 0) return null;
-		const token = result.text().trim();
-		if (!token || token === "(null)") return null;
-		return token;
-	} catch {
-		return null;
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -174,27 +146,12 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 // ---------------------------------------------------------------------------
 
 /**
- * Login to Perplexity.
- *
- * Tries auto-extraction from the desktop app, then runs HTTP email OTP login.
- *
- * No browser/manual token paste fallback is used.
+ * Login to Perplexity through the explicit email OTP flow.
  */
 export async function loginPerplexity(ctrl: OAuthController): Promise<OAuthCredentials> {
 	if (!ctrl.onPrompt) {
 		throw new Error("Perplexity login requires onPrompt callback");
 	}
 
-	// Path 1: Native macOS app JWT (skip if PI_AUTH_NO_BORROW=1)
-	if (!$env.PI_AUTH_NO_BORROW) {
-		ctrl.onProgress?.("Checking for Perplexity desktop app...");
-		const nativeJwt = await extractFromNativeApp();
-		if (nativeJwt) {
-			ctrl.onProgress?.("Found Perplexity JWT from native app");
-			return jwtToCredentials(nativeJwt);
-		}
-	}
-
-	// Path 2: HTTP email OTP
 	return httpEmailLogin(ctrl);
 }

@@ -9,8 +9,6 @@ export interface InventoryInput {
 	tools: Array<{ name: string; label: string; description: string }>;
 	/** Active edit mode: hashline, patch, or replace */
 	editMode: string;
-	/** MCP server instructions (name + instruction text) */
-	mcpServerInstructions: Array<{ name: string; instructions: string }>;
 	/** Installed skills with names and descriptions */
 	skills: Array<{ name: string; description: string }>;
 	/** Workstation environment (OS, terminal, arch, etc.) */
@@ -64,17 +62,6 @@ export function buildInventory(input: InventoryInput): string {
 		sections.push("\n## MCP Tools (from connected servers)");
 		for (const tool of mcpTools) {
 			sections.push(formatToolEntry(tool));
-		}
-	}
-
-	// MCP servers
-	if (input.mcpServerInstructions.length > 0) {
-		sections.push("\n## Connected MCP Servers");
-		for (const { name, instructions } of input.mcpServerInstructions) {
-			sections.push(`\n### ${name}`);
-			if (instructions) {
-				sections.push(instructions.trim());
-			}
 		}
 	}
 

@@ -351,7 +351,6 @@ export class AuthStorage {
 
 	/**
 	 * Set a runtime API key override (not persisted to disk).
-	 * Used for CLI --api-key flag.
 	 */
 	setRuntimeApiKey(provider: string, apiKey: string): void {
 		this.#runtimeOverrides.set(provider, apiKey);
@@ -1931,7 +1930,7 @@ export class AuthStorage {
 	/**
 	 * Get API key for a provider.
 	 * Priority:
-	 * 1. Runtime override (CLI --api-key)
+	 * 1. Runtime override
 	 * 2. API key from storage
 	 * 3. OAuth token from storage (auto-refreshed)
 	 * 4. Environment variable

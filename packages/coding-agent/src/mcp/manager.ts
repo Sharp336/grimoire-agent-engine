@@ -10,6 +10,7 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
 import type { SourceMeta } from "../capability/types";
 import { resolveConfigValue } from "../config/resolve-config-value";
+import { assertWorkspaceCapabilityAllowed } from "../security/access";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { AuthStorage } from "../session/auth-storage";
 import {
@@ -141,6 +142,27 @@ export class MCPManager {
 		private cwd: string,
 		private toolCache: MCPToolCache | null = null,
 	) {}
+
+	async #assertProjectProcessSpawnAllowed(
+		name: string,
+		config: MCPServerConfig,
+		source: SourceMeta | undefined,
+	): Promise<void> {
+		if (!this.#requiresProjectProcessSpawnCapability(config, source)) return;
+
+		await assertWorkspaceCapabilityAllowed({
+			cwd: this.cwd,
+			capability: "project-process-spawn",
+			action: `spawn project MCP server "${name}"`,
+		});
+	}
+
+	#requiresProjectProcessSpawnCapability(
+		config: MCPServerConfig,
+		source: SourceMeta | undefined,
+	): boolean {
+		return source?.level === "project" && (config.type === undefined || config.type === "stdio");
+	}
 
 	/**
 	 * Set a callback to receive all server notifications.
@@ -304,6 +326,14 @@ export class MCPManager {
 			const validationErrors = validateServerConfig(name, config);
 			if (validationErrors.length > 0) {
 				errors.set(name, validationErrors.join("; "));
+				reportedErrors.add(name);
+				continue;
+			}
+
+			try {
+				await this.#assertProjectProcessSpawnAllowed(name, config, sources[name]);
+			} catch (error) {
+				errors.set(name, error instanceof Error ? error.message : String(error));
 				reportedErrors.add(name);
 				continue;
 			}
@@ -695,8 +725,17 @@ export class MCPManager {
 		const source = this.#sources.get(name) ?? oldConnection?._source;
 		if (!config) return null;
 
-		logger.debug("MCP reconnecting", { path: `mcp:${name}` });
+		try {
+			await this.#assertProjectProcessSpawnAllowed(name, config, source);
+		} catch (error) {
+			logger.warn("MCP reconnect blocked by security policy", {
+				path: `mcp:${name}`,
+				error: error instanceof Error ? error.message : String(error),
+			});
+			return null;
+		}
 
+		logger.debug("MCP reconnecting", { path: `mcp:${name}` });
 		// Close the old transport without removing tools or notifying consumers.
 		// Tools stay available (stale) while we establish the new connection.
 		// Fire-and-forget: don't await the close — HttpTransport.close() sends a

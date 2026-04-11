@@ -253,41 +253,17 @@ export async function startServer(port = 3847): Promise<{ port: number; stop: ()
 			const url = new URL(req.url);
 			const path = url.pathname;
 
-			// CORS headers for local development
-			const corsHeaders = {
-				"Access-Control-Allow-Origin": "*",
-				"Access-Control-Allow-Methods": "GET, POST, OPTIONS",
-				"Access-Control-Allow-Headers": "Content-Type",
-			};
-
-			if (req.method === "OPTIONS") {
-				return new Response(null, { headers: corsHeaders });
-			}
-
 			try {
-				let response: Response;
-
 				if (path.startsWith("/api/")) {
-					response = await handleApi(req);
-				} else {
-					response = await handleStatic(path);
+					return await handleApi(req);
 				}
 
-				// Add CORS headers to all responses
-				const headers = new Headers(response.headers);
-				for (const [key, value] of Object.entries(corsHeaders)) {
-					headers.set(key, value);
-				}
-
-				return new Response(response.body, {
-					status: response.status,
-					headers,
-				});
+				return await handleStatic(path);
 			} catch (error) {
 				console.error("Server error:", error);
 				return Response.json(
 					{ error: error instanceof Error ? error.message : "Unknown error" },
-					{ status: 500, headers: corsHeaders },
+					{ status: 500 },
 				);
 			}
 		},

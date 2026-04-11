@@ -6,6 +6,7 @@ import { ImageProtocol, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import { $env, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { Type } from "@sinclair/typebox";
 import { type BashResult, executeBash } from "../exec/bash-executor";
+import { formatCapabilityBlockMessage, resolveWorkspaceCapabilityDecision } from "../security/access";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import type { Theme } from "../modes/theme/theme";
@@ -334,10 +335,17 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			throw new ToolError(`Working directory is not a directory: ${commandCwd}`);
 		}
 
+		const capabilityDecision = await resolveWorkspaceCapabilityDecision({
+			cwd: commandCwd,
+			capability: "shell-exec",
+		});
+		if (capabilityDecision.decision !== "allow") {
+			throw new ToolError(formatCapabilityBlockMessage("Bash command execution", capabilityDecision));
+		}
+
 		// Clamp to reasonable range: 1s - 3600s (1 hour)
 		const timeoutSec = clampTimeout("bash", rawTimeout);
 		const timeoutMs = timeoutSec * 1000;
-
 		if (asyncRequested) {
 			const manager = this.session.asyncJobManager;
 			if (!manager) {

@@ -1311,25 +1311,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			search_tool_bm25: { description: renderSearchToolBm25Description(discoverableMCPTools) },
 		});
 
-		// Build combined append prompt: memory instructions + MCP server instructions
-		const serverInstructions = mcpManager?.getServerInstructions();
-		let appendPrompt: string | undefined;
-		if (serverInstructions && serverInstructions.size > 0) {
-			const MAX_INSTRUCTIONS_LENGTH = 4000;
-			const parts: string[] = [];
-			if (appendPrompt) parts.push(appendPrompt);
-			parts.push(
-				"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
-			);
-			for (const [srvName, srvInstructions] of serverInstructions) {
-				const truncated =
-					srvInstructions.length > MAX_INSTRUCTIONS_LENGTH
-						? `${srvInstructions.slice(0, MAX_INSTRUCTIONS_LENGTH)}\n[truncated]`
-						: srvInstructions;
-				parts.push(`### ${srvName}\n${truncated}`);
-			}
-			appendPrompt = parts.join("\n\n");
-		}
 		const defaultPrompt = await buildSystemPromptInternal({
 			cwd,
 			skills,
@@ -1339,7 +1320,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			rules: rulebookRules,
 			alwaysApplyRules,
 			skillsSettings: settings.getGroup("skills"),
-			appendSystemPrompt: appendPrompt,
 			repeatToolDescriptions,
 			intentField,
 			mcpDiscoveryMode: hasDiscoverableMCPTools,
@@ -1363,7 +1343,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					alwaysApplyRules,
 					skillsSettings: settings.getGroup("skills"),
 					customPrompt: options.systemPrompt,
-					appendSystemPrompt: appendPrompt,
 					repeatToolDescriptions,
 					intentField,
 					mcpDiscoveryMode: hasDiscoverableMCPTools,
@@ -1378,14 +1357,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// If composer is enabled, compile the system prompt with an LLM
 		if (settings.get("composer.enabled")) {
 			try {
-				// Build MCP server instructions for inventory
-				const mcpInstructions: Array<{ name: string; instructions: string }> = [];
-				if (serverInstructions) {
-					for (const [name, instructions] of serverInstructions) {
-						mcpInstructions.push({ name, instructions });
-					}
-				}
-
 				const toolInfo = toolNames.map(name => ({
 					name,
 					label: promptTools.get(name)?.label ?? name,
@@ -1414,7 +1385,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					inventory: {
 						tools: toolInfo,
 						editMode: String(settings.get("edit.mode") ?? "hashline"),
-						mcpServerInstructions: mcpInstructions,
 						skills: skills.map(s => ({ name: s.name, description: (s as any).frontmatter?.description ?? "" })),
 						environment: [
 							{ label: "OS", value: `${process.platform} ${process.arch}` },

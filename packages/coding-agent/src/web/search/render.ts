@@ -101,6 +101,10 @@ export function renderSearchResult(
 		: [];
 	const provider = response.provider;
 
+	const provenance = response.provenance;
+	const provenanceLabel = provenance?.warningLabel?.trim() || "Untrusted remote content";
+	const provenanceText =
+		provenance?.warningText?.trim() || "Web search results are remote, untrusted reference material.";
 	// Get answer text
 	const answerText = typeof response.answer === "string" ? response.answer.trim() : "";
 	const contentText = answerText || rawText;
@@ -158,6 +162,11 @@ export function renderSearchResult(
 		const suffix = searchQueries.length > queriesPreview.length ? "…" : "";
 		metaLines.push(`${theme.fg("muted", "Queries:")} ${theme.fg("text", queryList.join("; "))}${suffix}`);
 	}
+
+	const provenanceLines = [
+		`${theme.fg("warning", provenanceLabel)}${theme.fg("dim", ` (${provenance?.contentType ?? "remote_reference"}${theme.sep.dot}${provenance?.trust ?? "untrusted"})`)}`,
+		theme.fg("muted", truncateToWidth(provenanceText, 110)),
+	];
 
 	const outputBlock = new CachedOutputBlock();
 
@@ -260,6 +269,10 @@ export function renderSearchResult(
 									},
 								]
 							: []),
+						{
+							label: theme.fg("toolTitle", "Provenance"),
+							lines: provenanceLines,
+						},
 						{
 							label: theme.fg("toolTitle", "Answer"),
 							lines: answerTree,

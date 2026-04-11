@@ -12,11 +12,12 @@ import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
 import * as TypeBox from "@sinclair/typebox";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
-import { loadCapability } from "../../discovery";
+import { type SourceMeta, loadCapability } from "../../discovery";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { CustomMessage } from "../../session/messages";
+import { assertCodeLoadAllowed } from "../../security/access";
 import { EventBus } from "../../utils/event-bus";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 import { resolvePath } from "../utils";
@@ -245,15 +246,27 @@ function createExtension(extensionPath: string, resolvedPath: string): Extension
 	};
 }
 
+interface ExtensionPathWithSource {
+	path: string;
+	sourceLevel?: SourceMeta["level"];
+}
+
 async function loadExtension(
 	extensionPath: string,
 	cwd: string,
 	eventBus: EventBus,
 	runtime: IExtensionRuntime,
+	sourceLevel?: SourceMeta["level"],
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
 
 	try {
+		await assertCodeLoadAllowed({
+			cwd,
+			targetPath: resolvedPath,
+			action: `Loading extension module ${extensionPath}`,
+			sourceLevel,
+		});
 		const module = await import(resolvedPath);
 		const factory = (module.default ?? module) as ExtensionFactory;
 
@@ -294,14 +307,19 @@ export async function loadExtensionFromFactory(
 /**
  * Load extensions from paths.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+export async function loadExtensions(
+	paths: string[] | ExtensionPathWithSource[],
+	cwd: string,
+	eventBus?: EventBus,
+): Promise<LoadExtensionsResult> {
+	const normalizedPaths = paths.map(entry => (typeof entry === "string" ? { path: entry } : entry));
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? new EventBus();
 	const runtime = new ExtensionRuntime();
 
-	for (const extPath of paths) {
-		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);
+	for (const { path: extPath, sourceLevel } of normalizedPaths) {
+		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime, sourceLevel);
 
 		if (error) {
 			errors.push({ path: extPath, error });
@@ -453,24 +471,24 @@ export async function discoverAndLoadExtensions(
 	eventBus?: EventBus,
 	disabledExtensionIds: string[] = [],
 ): Promise<LoadExtensionsResult> {
-	const allPaths: string[] = [];
+	const allPaths: ExtensionPathWithSource[] = [];
 	const seen = new Set<string>();
 	const disabled = new Set(disabledExtensionIds);
 
 	const isDisabledName = (name: string): boolean => disabled.has(`extension-module:${name}`);
 
-	const addPath = (extPath: string): void => {
+	const addPath = (extPath: string, sourceLevel?: SourceMeta["level"]): void => {
 		const resolved = path.resolve(extPath);
 		if (!seen.has(resolved)) {
 			seen.add(resolved);
-			allPaths.push(extPath);
+			allPaths.push({ path: extPath, sourceLevel });
 		}
 	};
 
-	const addPaths = (paths: string[]) => {
-		for (const extPath of paths) {
+	const addPaths = (paths: ExtensionPathWithSource[]) => {
+		for (const { path: extPath, sourceLevel } of paths) {
 			if (isDisabledName(getExtensionNameFromPath(extPath))) continue;
-			addPath(extPath);
+			addPath(extPath, sourceLevel);
 		}
 	};
 
@@ -479,11 +497,11 @@ export async function discoverAndLoadExtensions(
 	for (const ext of discovered.items) {
 		if (ext._source.provider !== "native") continue;
 		if (isDisabledName(ext.name)) continue;
-		addPath(ext.path);
+		addPath(ext.path, ext._source.level);
 	}
 
 	// 2. Discover extension entry points from installed plugins
-	addPaths(await getAllPluginExtensionPaths(cwd));
+	addPaths((await getAllPluginExtensionPaths(cwd)).map(extPath => ({ path: extPath, sourceLevel: "user" })));
 
 	// 3. Explicitly configured paths
 	for (const configuredPath of configuredPaths) {
@@ -499,13 +517,13 @@ export async function discoverAndLoadExtensions(
 		if (stat?.isDirectory()) {
 			const entries = await resolveExtensionEntries(resolved);
 			if (entries) {
-				addPaths(entries);
+				addPaths(entries.map(entry => ({ path: entry })));
 				continue;
 			}
 
-			const discovered = await discoverExtensionsInDir(resolved);
-			if (discovered.length > 0) {
-				addPaths(discovered);
+			const discoveredEntries = await discoverExtensionsInDir(resolved);
+			if (discoveredEntries.length > 0) {
+				addPaths(discoveredEntries.map(entry => ({ path: entry })));
 			}
 			continue;
 		}

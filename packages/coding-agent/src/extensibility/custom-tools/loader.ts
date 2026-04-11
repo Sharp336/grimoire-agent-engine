@@ -9,11 +9,12 @@ import * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as typebox from "@sinclair/typebox";
 import { toolCapability } from "../../capability/tool";
-import { type CustomTool, loadCapability } from "../../discovery";
+import { type SourceMeta, type CustomTool, loadCapability } from "../../discovery";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
 import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
+import { assertCodeLoadAllowed } from "../../security/access";
 import type { PendingActionStore } from "../../tools/pending-action";
 import { createNoOpUIContext, resolvePath } from "../utils";
 import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
@@ -21,11 +22,13 @@ import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError 
 /**
  * Load a single tool module using native Bun import.
  */
+type CustomToolSourceLevel = Exclude<SourceMeta["level"], "native">;
+
 async function loadTool(
 	toolPath: string,
 	cwd: string,
 	sharedApi: CustomToolAPI,
-	source?: { provider: string; providerName: string; level: "user" | "project" },
+	source?: { provider: string; providerName: string; level: CustomToolSourceLevel },
 ): Promise<{ tools: LoadedCustomTool[] | null; error: ToolLoadError | null }> {
 	const resolvedPath = resolvePath(toolPath, cwd);
 
@@ -42,6 +45,12 @@ async function loadTool(
 	}
 
 	try {
+		await assertCodeLoadAllowed({
+			cwd,
+			targetPath: resolvedPath,
+			action: `Loading custom tool module ${toolPath}`,
+			sourceLevel: source?.level,
+		});
 		const module = await import(resolvedPath);
 		const factory = (module.default ?? module) as CustomToolFactory;
 
@@ -69,7 +78,7 @@ async function loadTool(
 /** Tool path with optional source metadata */
 interface ToolPathWithSource {
 	path: string;
-	source?: { provider: string; providerName: string; level: "user" | "project" };
+	source?: { provider: string; providerName: string; level: CustomToolSourceLevel };
 }
 
 /**
@@ -188,7 +197,7 @@ export async function discoverAndLoadCustomTools(
 	const seen = new Set<string>();
 
 	// Helper to add paths without duplicates
-	const addPath = (p: string, source?: { provider: string; providerName: string; level: "user" | "project" }) => {
+	const addPath = (p: string, source?: { provider: string; providerName: string; level: CustomToolSourceLevel }) => {
 		const resolved = path.resolve(p);
 		if (!seen.has(resolved)) {
 			seen.add(resolved);
@@ -199,10 +208,11 @@ export async function discoverAndLoadCustomTools(
 	// 1. Discover tools via capability system (user + project from all providers)
 	const discoveredTools = await loadCapability<CustomTool>(toolCapability.id, { cwd });
 	for (const tool of discoveredTools.items) {
+		if (tool._source.level === "native") continue;
 		addPath(tool.path, {
 			provider: tool._source.provider,
 			providerName: tool._source.providerName,
-			level: tool.level,
+			level: tool._source.level,
 		});
 	}
 
@@ -213,7 +223,7 @@ export async function discoverAndLoadCustomTools(
 
 	// 3. Explicitly configured paths (can override/add)
 	for (const configPath of configuredPaths) {
-		addPath(resolvePath(configPath, cwd), { provider: "config", providerName: "Config", level: "project" });
+		addPath(resolvePath(configPath, cwd));
 	}
 
 	return loadCustomTools(allPathsWithSources, cwd, builtInToolNames, pendingActionStore);

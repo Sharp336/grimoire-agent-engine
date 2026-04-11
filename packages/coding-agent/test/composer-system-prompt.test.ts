@@ -85,7 +85,6 @@ describe("dynamic composer system prompt", () => {
 		const inventory = buildInventory({
 			tools: [{ name: "web_search", label: "Web Search", description: "Search the web" }],
 			editMode: "hashline",
-			mcpServerInstructions: [],
 			skills: [],
 			environment: [{ label: "OS", value: "darwin arm64" }],
 			cwd: "/tmp/project",
@@ -112,7 +111,6 @@ describe("dynamic composer system prompt", () => {
 					{ name: "search_tool_bm25", label: "SearchToolBm25", description: "Discovers MCP tools" },
 				],
 				editMode: "hashline",
-				mcpServerInstructions: [],
 				skills: [],
 				environment: [{ label: "OS", value: "darwin arm64" }],
 				cwd: tempDir,
@@ -149,7 +147,6 @@ describe("dynamic composer system prompt", () => {
 				inventory: {
 					tools: [{ name: "read", label: "Read", description: "Reads files" }],
 					editMode: "hashline",
-					mcpServerInstructions: [],
 					skills: [],
 					environment: [{ label: "OS", value: "darwin arm64" }],
 					cwd: tempDir,
@@ -174,7 +171,6 @@ describe("dynamic composer system prompt", () => {
 				inventory: {
 					tools: [{ name: "read", label: "Read", description: "Reads files" }],
 					editMode: "hashline",
-					mcpServerInstructions: [],
 					skills: [],
 					environment: [{ label: "OS", value: "darwin arm64" }],
 					cwd: tempDir,
