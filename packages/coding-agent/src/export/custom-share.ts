@@ -7,7 +7,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "@oh-my-pi/pi-utils";
-import { assertCodeLoadAllowed } from "../security/access";
+import { requestCodeLoadAccess } from "../security/access";
 
 export interface CustomShareResult {
 	/** URL to display/open (optional - script may handle everything itself) */
@@ -44,18 +44,26 @@ export function getCustomSharePath(): string | null {
 /**
  * Load the custom share script if it exists.
  */
-export async function loadCustomShare(cwd: string): Promise<LoadedCustomShare | null> {
+export async function loadCustomShare(
+	cwd: string,
+	approvalUi?: {
+		readonly select: (title: string, options: string[]) => Promise<string | undefined>;
+		readonly confirm: (title: string, message: string) => Promise<boolean>;
+	},
+): Promise<LoadedCustomShare | null> {
 	const scriptPath = getCustomSharePath();
 	if (!scriptPath) {
 		return null;
 	}
 
 	try {
-		await assertCodeLoadAllowed({
+		await requestCodeLoadAccess({
 			cwd,
 			targetPath: scriptPath,
 			action: `Loading custom share script ${scriptPath}`,
 			sourceLevel: "user",
+			ui: approvalUi,
+			trustBehavior: "allow-once-or-trust",
 		});
 		const module = await import(scriptPath);
 		const fn = module.default;

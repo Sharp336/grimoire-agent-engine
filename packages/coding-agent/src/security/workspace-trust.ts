@@ -1,5 +1,5 @@
-import * as path from "node:path";
 import { mkdir } from "node:fs/promises";
+import * as path from "node:path";
 import { getAgentDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import type {
@@ -58,6 +58,7 @@ export class WorkspaceTrustStore {
 	async grant(identity: WorkspaceTrustIdentityInput, grant: WorkspaceTrustGrantInput): Promise<WorkspaceTrustRecord> {
 		const now = new Date().toISOString();
 		const result = await this.load();
+		assertWritableTrustState(result);
 		const records = [...result.records];
 		const workspaceKey = createWorkspaceTrustKey(identity);
 		const match = identity.match ?? "repo-root-hash";
@@ -87,8 +88,12 @@ export class WorkspaceTrustStore {
 		return record;
 	}
 
-	async revoke(identity: WorkspaceTrustIdentityInput, capability: SecurityCapability): Promise<WorkspaceTrustRecord | null> {
+	async revoke(
+		identity: WorkspaceTrustIdentityInput,
+		capability: SecurityCapability,
+	): Promise<WorkspaceTrustRecord | null> {
 		const result = await this.load();
+		assertWritableTrustState(result);
 		const records = [...result.records];
 		const workspaceKey = createWorkspaceTrustKey(identity);
 		const index = records.findIndex(record => record.workspaceKey === workspaceKey);
@@ -153,7 +158,9 @@ export async function loadWorkspaceTrustFile(filePath: string): Promise<Workspac
 			status: "error",
 			path: filePath,
 			records: [],
-			issues: [{ code: "read-error", message: `Failed to load workspace trust file: ${String(error)}`, path: filePath }],
+			issues: [
+				{ code: "read-error", message: `Failed to load workspace trust file: ${String(error)}`, path: filePath },
+			],
 		};
 	}
 }
@@ -163,7 +170,10 @@ async function writeWorkspaceTrustFile(filePath: string, document: WorkspaceTrus
 	await Bun.write(filePath, YAML.stringify(document));
 }
 
-function validateWorkspaceTrustDocument(value: unknown, filePath: string): {
+function validateWorkspaceTrustDocument(
+	value: unknown,
+	filePath: string,
+): {
 	readonly document: WorkspaceTrustStoreDocument | null;
 	readonly issues: readonly PolicyIssue[];
 } {
@@ -206,15 +216,27 @@ function parseWorkspaceTrustRecord(
 		return null;
 	}
 	if (typeof value.workspaceKey !== "string" || value.workspaceKey.length === 0) {
-		issues.push({ code: "invalid-field", message: `records[${index}].workspaceKey must be a non-empty string`, path: filePath });
+		issues.push({
+			code: "invalid-field",
+			message: `records[${index}].workspaceKey must be a non-empty string`,
+			path: filePath,
+		});
 		return null;
 	}
 	if (typeof value.workspacePath !== "string" || value.workspacePath.length === 0) {
-		issues.push({ code: "invalid-field", message: `records[${index}].workspacePath must be a non-empty string`, path: filePath });
+		issues.push({
+			code: "invalid-field",
+			message: `records[${index}].workspacePath must be a non-empty string`,
+			path: filePath,
+		});
 		return null;
 	}
 	if (value.match !== "repo-root-hash" && value.match !== "workspace-path") {
-		issues.push({ code: "invalid-field", message: `records[${index}].match must be repo-root-hash or workspace-path`, path: filePath });
+		issues.push({
+			code: "invalid-field",
+			message: `records[${index}].match must be repo-root-hash or workspace-path`,
+			path: filePath,
+		});
 		return null;
 	}
 	if (!Array.isArray(value.grants)) {
@@ -227,7 +249,11 @@ function parseWorkspaceTrustRecord(
 		if (grant) grants.push(grant);
 	}
 	if (typeof value.updatedAt !== "string" || value.updatedAt.length === 0) {
-		issues.push({ code: "invalid-field", message: `records[${index}].updatedAt must be a timestamp string`, path: filePath });
+		issues.push({
+			code: "invalid-field",
+			message: `records[${index}].updatedAt must be a timestamp string`,
+			path: filePath,
+		});
 		return null;
 	}
 	return {
@@ -248,19 +274,35 @@ function parseWorkspaceTrustGrant(
 	issues: PolicyIssue[],
 ): WorkspaceTrustGrant | null {
 	if (!isRecord(value)) {
-		issues.push({ code: "invalid-field", message: `records[${recordIndex}].grants[${grantIndex}] must be an object`, path: filePath });
+		issues.push({
+			code: "invalid-field",
+			message: `records[${recordIndex}].grants[${grantIndex}] must be an object`,
+			path: filePath,
+		});
 		return null;
 	}
 	if (!isSecurityCapability(value.capability)) {
-		issues.push({ code: "invalid-field", message: `records[${recordIndex}].grants[${grantIndex}].capability is invalid`, path: filePath });
+		issues.push({
+			code: "invalid-field",
+			message: `records[${recordIndex}].grants[${grantIndex}].capability is invalid`,
+			path: filePath,
+		});
 		return null;
 	}
 	if (value.decision !== "allow" && value.decision !== "confirm") {
-		issues.push({ code: "invalid-field", message: `records[${recordIndex}].grants[${grantIndex}].decision must be allow or confirm`, path: filePath });
+		issues.push({
+			code: "invalid-field",
+			message: `records[${recordIndex}].grants[${grantIndex}].decision must be allow or confirm`,
+			path: filePath,
+		});
 		return null;
 	}
 	if (typeof value.grantedAt !== "string" || value.grantedAt.length === 0) {
-		issues.push({ code: "invalid-field", message: `records[${recordIndex}].grants[${grantIndex}].grantedAt must be a timestamp string`, path: filePath });
+		issues.push({
+			code: "invalid-field",
+			message: `records[${recordIndex}].grants[${grantIndex}].grantedAt must be a timestamp string`,
+			path: filePath,
+		});
 		return null;
 	}
 	return {
@@ -282,4 +324,10 @@ function isSecurityCapability(value: unknown): value is SecurityCapability {
 function normalizeWorkspacePath(value: string): string {
 	const normalized = path.normalize(path.resolve(value));
 	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function assertWritableTrustState(result: WorkspaceTrustLoadResult): void {
+	if (result.status !== "error") return;
+	const detail = result.issues.map(issue => issue.message).join("; ") || "workspace trust file could not be loaded";
+	throw new Error(`Workspace trust store is not writable until it is fixed: ${detail}`);
 }

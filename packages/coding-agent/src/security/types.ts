@@ -1,4 +1,3 @@
-
 export const SECURITY_CAPABILITIES = [
 	"shell-exec",
 	"project-process-spawn",
@@ -68,10 +67,26 @@ export interface ManagedPolicyDocument {
 
 export type ManagedPolicyFileSource = "system" | "override" | "explicit";
 
+export type ManagedPolicyVerificationStatus =
+	| "verified"
+	| "not-required"
+	| "signature-missing"
+	| "signature-invalid"
+	| "public-key-missing"
+	| "public-key-invalid";
+
+export interface ManagedPolicyVerification {
+	readonly status: ManagedPolicyVerificationStatus;
+	readonly signaturePath: string;
+	readonly publicKeyPath: string;
+	readonly message?: string;
+}
+
 export interface ManagedPolicy {
 	readonly path: string;
 	readonly source: ManagedPolicyFileSource;
 	readonly document: ManagedPolicyDocument;
+	readonly verification: ManagedPolicyVerification;
 }
 
 export type PolicySource = "default" | "managed" | "workspace-trust";
@@ -83,7 +98,11 @@ export interface PolicyIssue {
 		| "invalid-field"
 		| "invalid-value"
 		| "parse-error"
-		| "read-error";
+		| "read-error"
+		| "signature-missing"
+		| "signature-invalid"
+		| "public-key-missing"
+		| "public-key-invalid";
 	readonly message: string;
 	readonly path?: string;
 }

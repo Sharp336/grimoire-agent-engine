@@ -1047,6 +1047,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	// Extension UI integration
 	setToolUIContext(uiContext: ExtensionUIContext, hasUI: boolean): void {
 		this.#toolUiContextSetter(uiContext, hasUI);
+		this.mcpManager?.setCapabilityApprovalUi(hasUI ? uiContext : undefined);
 	}
 
 	initializeHookRunner(uiContext: ExtensionUIContext, hasUI: boolean): void {

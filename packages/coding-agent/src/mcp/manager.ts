@@ -10,8 +10,12 @@ import { logger } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
 import type { SourceMeta } from "../capability/types";
 import { resolveConfigValue } from "../config/resolve-config-value";
-import { assertWorkspaceCapabilityAllowed } from "../security/access";
 import type { CustomTool } from "../extensibility/custom-tools/types";
+import {
+	assertWorkspaceCapabilityAllowed,
+	requestWorkspaceCapabilityAccess,
+	type SecurityApprovalUi,
+} from "../security/access";
 import type { AuthStorage } from "../session/auth-storage";
 import {
 	connectToServer,
@@ -137,6 +141,7 @@ export class MCPManager {
 	#serverConfigs = new Map<string, MCPServerConfig>();
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
+	#capabilityApprovalUi?: SecurityApprovalUi;
 
 	constructor(
 		private cwd: string,
@@ -150,6 +155,16 @@ export class MCPManager {
 	): Promise<void> {
 		if (!this.#requiresProjectProcessSpawnCapability(config, source)) return;
 
+		if (this.#capabilityApprovalUi) {
+			await requestWorkspaceCapabilityAccess({
+				cwd: this.cwd,
+				capability: "project-process-spawn",
+				action: `spawn project MCP server "${name}"`,
+				ui: this.#capabilityApprovalUi,
+				trustBehavior: "trust-only",
+			});
+			return;
+		}
 		await assertWorkspaceCapabilityAllowed({
 			cwd: this.cwd,
 			capability: "project-process-spawn",
@@ -157,11 +172,12 @@ export class MCPManager {
 		});
 	}
 
-	#requiresProjectProcessSpawnCapability(
-		config: MCPServerConfig,
-		source: SourceMeta | undefined,
-	): boolean {
+	#requiresProjectProcessSpawnCapability(config: MCPServerConfig, source: SourceMeta | undefined): boolean {
 		return source?.level === "project" && (config.type === undefined || config.type === "stdio");
+	}
+
+	setCapabilityApprovalUi(ui: SecurityApprovalUi | undefined): void {
+		this.#capabilityApprovalUi = ui;
 	}
 
 	/**

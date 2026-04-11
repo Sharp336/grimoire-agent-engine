@@ -6,10 +6,14 @@ import { ImageProtocol, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import { $env, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { Type } from "@sinclair/typebox";
 import { type BashResult, executeBash } from "../exec/bash-executor";
-import { formatCapabilityBlockMessage, resolveWorkspaceCapabilityDecision } from "../security/access";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import type { Theme } from "../modes/theme/theme";
+import {
+	formatCapabilityBlockMessage,
+	requestWorkspaceCapabilityAccess,
+	resolveWorkspaceCapabilityDecision,
+} from "../security/access";
 import { DEFAULT_MAX_BYTES, TailBuffer } from "../session/streaming-output";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
@@ -335,11 +339,22 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 			throw new ToolError(`Working directory is not a directory: ${commandCwd}`);
 		}
 
-		const capabilityDecision = await resolveWorkspaceCapabilityDecision({
-			cwd: commandCwd,
-			capability: "shell-exec",
-		});
-		if (capabilityDecision.decision !== "allow") {
+		const capabilityDecision = ctx?.ui
+			? await requestWorkspaceCapabilityAccess({
+					cwd: commandCwd,
+					capability: "shell-exec",
+					action: "Bash command execution",
+					ui: {
+						select: (title, options) => ctx.ui!.select(title, options),
+						confirm: (title, message) => ctx.ui!.confirm(title, message),
+					},
+					trustBehavior: "allow-once-or-trust",
+				})
+			: await resolveWorkspaceCapabilityDecision({
+					cwd: commandCwd,
+					capability: "shell-exec",
+				});
+		if (capabilityDecision.decision !== "allow" && !ctx?.ui) {
 			throw new ToolError(formatCapabilityBlockMessage("Bash command execution", capabilityDecision));
 		}
 

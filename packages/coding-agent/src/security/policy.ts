@@ -1,5 +1,7 @@
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { getManagedPolicyPathCandidates } from "./policy-paths";
+import { verifyManagedPolicySignature } from "./policy-signature";
 import {
 	BUILTIN_CAPABILITY_DEFAULTS,
 	type EffectiveCapabilityDecision,
@@ -7,16 +9,15 @@ import {
 	type ManagedPolicyDocument,
 	type ManagedPolicyFileSource,
 	type ManagedPolicyLoadResult,
-	type PolicyDecision,
-	type PolicyIssue,
-	type SecurityCapability,
-	type WorkspaceTrustRecord,
 	POLICY_DECISIONS,
 	POLICY_ENFORCEMENT_MODES,
+	type PolicyDecision,
+	type PolicyIssue,
 	SECURITY_CAPABILITIES,
+	type SecurityCapability,
 	WORKSPACE_TRUST_MATCH_MODES,
+	type WorkspaceTrustRecord,
 } from "./types";
-import { getManagedPolicyPathCandidates } from "./policy-paths";
 
 const POLICY_DECISION_RANK: Record<PolicyDecision, number> = {
 	deny: 0,
@@ -40,9 +41,21 @@ export async function loadManagedPolicy(): Promise<ManagedPolicyLoadResult> {
 	};
 }
 
-export async function loadManagedPolicyFile(filePath: string, source: ManagedPolicyFileSource = "explicit"): Promise<ManagedPolicyLoadResult> {
+export async function loadManagedPolicyFile(
+	filePath: string,
+	source: ManagedPolicyFileSource = "explicit",
+): Promise<ManagedPolicyLoadResult> {
 	try {
 		const text = await Bun.file(filePath).text();
+		const signatureResult = await verifyManagedPolicySignature({ filePath, source, text });
+		if (signatureResult.issues.length > 0) {
+			return {
+				status: "error",
+				path: filePath,
+				policy: null,
+				issues: signatureResult.issues,
+			};
+		}
 		const parsed = YAML.parse(text) as unknown;
 		const validation = validateManagedPolicyDocument(parsed, filePath);
 		if (validation.issues.length > 0 || validation.document === null) {
@@ -53,6 +66,27 @@ export async function loadManagedPolicyFile(filePath: string, source: ManagedPol
 				issues: validation.issues,
 			};
 		}
+		if (
+			validation.document.integrity?.requireSignedManagedPolicy === true &&
+			signatureResult.verification.status !== "verified"
+		) {
+			return {
+				status: "error",
+				path: filePath,
+				policy: null,
+				issues: [
+					createPolicyIssue(
+						signatureResult.verification.status === "public-key-missing" ||
+							signatureResult.verification.status === "public-key-invalid"
+							? signatureResult.verification.status
+							: "signature-missing",
+						signatureResult.verification.message ??
+							"Managed policy requires a verified detached signature before it can be loaded",
+						filePath,
+					),
+				],
+			};
+		}
 		return {
 			status: "loaded",
 			path: filePath,
@@ -60,6 +94,7 @@ export async function loadManagedPolicyFile(filePath: string, source: ManagedPol
 				path: filePath,
 				source,
 				document: validation.document,
+				verification: signatureResult.verification,
 			},
 			issues: [],
 		};
@@ -94,7 +129,7 @@ export function resolveCapabilityDecision(options: {
 	const workspaceTrustDecision = localTrustEnabled
 		? findWorkspaceTrustDecision(options.workspaceTrust, options.capability)
 		: null;
-		
+
 	if (managedDecision === "deny") {
 		return {
 			capability: options.capability,
@@ -109,7 +144,9 @@ export function resolveCapabilityDecision(options: {
 	}
 
 	if (workspaceTrustDecision !== null) {
-		const decision = managedDecision ? clampDecision(workspaceTrustDecision, managedDecision) : workspaceTrustDecision;
+		const decision = managedDecision
+			? clampDecision(workspaceTrustDecision, managedDecision)
+			: workspaceTrustDecision;
 		return {
 			capability: options.capability,
 			decision,
@@ -151,11 +188,17 @@ function clampDecision(requested: PolicyDecision, upperBound: PolicyDecision): P
 	return POLICY_DECISION_RANK[requested] <= POLICY_DECISION_RANK[upperBound] ? requested : upperBound;
 }
 
-function findWorkspaceTrustDecision(record: WorkspaceTrustRecord | null | undefined, capability: SecurityCapability): PolicyDecision | null {
+function findWorkspaceTrustDecision(
+	record: WorkspaceTrustRecord | null | undefined,
+	capability: SecurityCapability,
+): PolicyDecision | null {
 	return record?.grants.find(grant => grant.capability === capability)?.decision ?? null;
 }
 
-function validateManagedPolicyDocument(value: unknown, filePath: string): {
+function validateManagedPolicyDocument(
+	value: unknown,
+	filePath: string,
+): {
 	readonly document: ManagedPolicyDocument | null;
 	readonly issues: readonly PolicyIssue[];
 } {
@@ -175,18 +218,16 @@ function validateManagedPolicyDocument(value: unknown, filePath: string): {
 	const mode = coerceStringEnum(value.mode, POLICY_ENFORCEMENT_MODES, "mode", filePath, issues);
 	const capabilities = validateCapabilityMap(value.capabilities, filePath, issues);
 	const workspaceTrust = validateWorkspaceTrust(value.workspaceTrust, filePath, issues);
-	const integrity = validateBooleanRecord(
-		value.integrity,
-		filePath,
-		issues,
-		["requirePluginSha", "requireSignedManagedPolicy", "disableUnsignedUserCodeLoad"],
-	);
-	const removals = validateBooleanRecord(
-		value.removals,
-		filePath,
-		issues,
-		["implicitDesktopAuth", "cliApiKeyArg", "wildcardStatsCors"],
-	);
+	const integrity = validateBooleanRecord(value.integrity, filePath, issues, [
+		"requirePluginSha",
+		"requireSignedManagedPolicy",
+		"disableUnsignedUserCodeLoad",
+	]);
+	const removals = validateBooleanRecord(value.removals, filePath, issues, [
+		"implicitDesktopAuth",
+		"cliApiKeyArg",
+		"wildcardStatsCors",
+	]);
 
 	if (issues.length > 0) {
 		return { document: null, issues };
@@ -218,7 +259,7 @@ function validateCapabilityMap(
 	const result: Partial<Record<SecurityCapability, PolicyDecision>> = {};
 	for (const [key, decision] of Object.entries(value)) {
 		if (!isSecurityCapability(key)) {
-			issues.push(createPolicyIssue("invalid-field", `Unknown capability \"${key}\"`, filePath));
+			issues.push(createPolicyIssue("invalid-field", `Unknown capability "${key}"`, filePath));
 			continue;
 		}
 		const parsedDecision = coerceStringEnum(decision, POLICY_DECISIONS, `capabilities.${key}`, filePath, issues);
@@ -268,7 +309,7 @@ function validateBooleanRecord<T extends string>(
 	}
 	for (const key of Object.keys(value)) {
 		if (!keys.includes(key as T)) {
-			issues.push(createPolicyIssue("invalid-field", `Unknown field \"${key}\"`, filePath));
+			issues.push(createPolicyIssue("invalid-field", `Unknown field "${key}"`, filePath));
 		}
 	}
 	return result;
