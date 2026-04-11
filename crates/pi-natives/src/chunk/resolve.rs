@@ -14,29 +14,26 @@ pub struct ResolvedChunk<'a> {
 
 fn parse_region_name(value: &str) -> Option<ChunkRegion> {
 	match value.trim() {
-		"head" => Some(ChunkRegion::Head),
-		"body" => Some(ChunkRegion::Body),
-		"tail" => Some(ChunkRegion::Tail),
-		"decl" => Some(ChunkRegion::Decl),
+		"^" => Some(ChunkRegion::Head),
+		"~" => Some(ChunkRegion::Body),
 		_ => None,
 	}
 }
 
 fn is_known_region_name(value: &str) -> bool {
-	matches!(value.trim(), "head" | "body" | "tail" | "decl")
+	matches!(value.trim(), "^" | "~")
 }
 
-/// Split a trailing `@region` suffix from a selector. Returns the selector
-/// prefix, and `Some(region)` if a region was specified. The outer `Option`
-/// indicates whether an `@` was found.
 pub fn split_region_suffix(selector: &str) -> (&str, bool, Option<ChunkRegion>) {
-	let Some((prefix, suffix)) = selector.rsplit_once('@') else {
+	let Some(suffix) = selector.chars().last() else {
 		return (selector, false, None);
 	};
-	if !is_known_region_name(suffix.trim()) {
+	let suffix = suffix.to_string();
+	if !is_known_region_name(&suffix) {
 		return (selector, false, None);
 	}
-	(prefix.trim_end(), true, parse_region_name(suffix.trim()))
+	let prefix = &selector[..selector.len() - suffix.len()];
+	(prefix.trim_end(), true, parse_region_name(&suffix))
 }
 
 pub struct ParsedSelector {
@@ -67,8 +64,7 @@ pub fn split_selector_crc_and_region(
 			(prefix, parsed_region)
 		} else if let Some((_, suffix)) = raw.rsplit_once('@') {
 			return Err(format!(
-				"Unknown chunk region \"{}\". Valid regions: head, body, tail (or omit for the full \
-				 chunk).",
+				"Unknown chunk region \"{}\". Valid regions: ^, ~ (or omit for the full chunk).",
 				suffix.trim()
 			));
 		} else {
@@ -158,8 +154,134 @@ pub fn resolve_chunk_with_crc<'a>(
 		return Ok(ResolvedChunk { chunk, crc: Some(cleaned_crc) });
 	}
 
+	if let (Some(cleaned_selector), Some(cleaned_crc)) =
+		(cleaned_selector.as_deref(), cleaned_crc.as_deref())
+		&& state.chunk(cleaned_selector).is_none()
+		&& let Some(chunk) =
+			resolve_same_parent_crc_fallback(state, cleaned_selector, cleaned_crc, warnings)?
+	{
+		return Ok(ResolvedChunk { chunk, crc: Some(cleaned_crc.to_owned()) });
+	}
+
 	let chunk = resolve_chunk_selector_impl(state, cleaned_selector.as_deref(), None, warnings)?;
 	Ok(ResolvedChunk { chunk, crc: cleaned_crc })
+}
+
+fn resolve_same_parent_crc_fallback<'a>(
+	state: &'a ChunkStateInner,
+	selector: &str,
+	crc: &str,
+	warnings: &mut Vec<String>,
+) -> Result<Option<&'a ChunkNode>, String> {
+	let (parent_path, requested_leaf) = split_parent_selector(selector);
+	let child_paths = match parent_path {
+		Some(parent_path) => {
+			let Some(parent_chunk) = state.chunk(parent_path) else {
+				return Ok(None);
+			};
+			parent_chunk.children.as_slice()
+		},
+		None => state.tree().root_children.as_slice(),
+	};
+	let matches = collect_unique_matches(
+		child_paths
+			.iter()
+			.filter_map(|child_path| state.chunk(child_path))
+			.filter(|chunk| chunk.checksum == crc),
+	);
+	if matches.is_empty() {
+		return Ok(None);
+	}
+
+	let resolved = if matches.len() == 1 {
+		matches[0]
+	} else if let Some(candidate) = choose_named_crc_match(matches.as_slice(), requested_leaf) {
+		candidate
+	} else {
+		let scope = parent_path.unwrap_or("<root>");
+		return Err(format!(
+			"Ambiguous stale selector \"{selector}#{crc}\" under \"{scope}\" matches {} siblings: \
+			 {}. Re-read the file to get the current selector.",
+			matches.len(),
+			matches
+				.iter()
+				.map(|chunk| format_node_ref(chunk))
+				.collect::<Vec<_>>()
+				.join(", "),
+		));
+	};
+
+	warnings.push(format!(
+		"Auto-resolved stale selector \"{selector}#{crc}\" to sibling \"{}\". Use the fresh \
+		 selector from read output.",
+		format_node_ref(resolved)
+	));
+	Ok(Some(resolved))
+}
+
+fn split_parent_selector(selector: &str) -> (Option<&str>, &str) {
+	match selector.rsplit_once('.') {
+		Some((parent_path, leaf)) if !parent_path.is_empty() => (Some(parent_path), leaf),
+		_ => (None, selector),
+	}
+}
+
+fn choose_named_crc_match<'a>(
+	matches: &[&'a ChunkNode],
+	requested_leaf: &str,
+) -> Option<&'a ChunkNode> {
+	let mut best_match = None;
+	let mut best_score = 0;
+	let mut tied = false;
+
+	for candidate in matches {
+		let candidate_leaf = candidate
+			.path
+			.rsplit('.')
+			.next()
+			.unwrap_or(candidate.path.as_str());
+		let score = leaf_name_similarity(requested_leaf, candidate_leaf);
+		if score > best_score {
+			best_match = Some(*candidate);
+			best_score = score;
+			tied = false;
+		} else if score > 0 && score == best_score {
+			tied = true;
+		}
+	}
+
+	if tied || best_score == 0 {
+		None
+	} else {
+		best_match
+	}
+}
+
+fn leaf_name_similarity(requested_leaf: &str, candidate_leaf: &str) -> usize {
+	if candidate_leaf == requested_leaf {
+		return 4;
+	}
+	if normalize_leaf_name(candidate_leaf) == normalize_leaf_name(requested_leaf) {
+		return 3;
+	}
+	if candidate_leaf.contains(requested_leaf) || requested_leaf.contains(candidate_leaf) {
+		return 2;
+	}
+	if chunk_path_similarity(requested_leaf, candidate_leaf) > 0.5 {
+		return 1;
+	}
+	0
+}
+
+fn normalize_leaf_name(name: &str) -> &str {
+	match name.rsplit_once('_') {
+		Some((prefix, suffix))
+			if !prefix.is_empty() && suffix.chars().all(|ch| ch.is_ascii_digit()) =>
+		{
+			prefix
+		},
+		_ => name,
+	}
 }
 
 pub fn resolve_chunk_by_checksum<'a>(
@@ -204,13 +326,11 @@ pub fn chunk_region_range(chunk: &ChunkNode, region: ChunkRegion) -> (usize, usi
 	match region {
 		ChunkRegion::Head => (start, pro_end),
 		ChunkRegion::Body => (pro_end, epi_start),
-		ChunkRegion::Tail => (epi_start, end),
-		ChunkRegion::Decl => ((chunk.checksum_start_byte as usize).clamp(start, end), end),
 	}
 }
 
 pub fn format_region_ref(chunk: &ChunkNode, region: Option<ChunkRegion>) -> String {
-	let suffix = region.map_or(String::new(), |r| format!("@{}", r.as_str()));
+	let suffix = region.map_or(String::new(), |r| r.as_str().to_owned());
 	if chunk.path.is_empty() {
 		format!("<root>#{}{suffix}", chunk.checksum)
 	} else {
@@ -279,7 +399,8 @@ fn resolve_chunk_selector_impl<'a>(
 			}
 			let leaf = chunk.path.rsplit('.').next().unwrap_or(chunk.path.as_str());
 			let expected = chunk.kind.path_segment(Some(cleaned));
-			leaf == expected || leaf == cleaned
+			path_segment_matches_requested(leaf, &expected)
+				|| path_segment_matches_requested(leaf, cleaned)
 		}));
 		if !prefixed_matches.is_empty() {
 			return resolve_matches(
@@ -300,6 +421,17 @@ fn resolve_chunk_selector_impl<'a>(
 			.into_iter()
 			.filter(|candidate| kind_path_matches(candidate, &kind_segments)),
 	);
+	let full_path_candidates = if kind_candidates.is_empty() {
+		collect_unique_matches(
+			state
+				.tree
+				.chunks
+				.iter()
+				.filter(|candidate| kind_path_matches(candidate, &kind_segments)),
+		)
+	} else {
+		Vec::new()
+	};
 	if !kind_candidates.is_empty() {
 		return resolve_matches(
 			kind_candidates,
@@ -308,6 +440,16 @@ fn resolve_chunk_selector_impl<'a>(
 			warnings,
 			"kind selector",
 			"Auto-resolved kind selector",
+		);
+	}
+	if !full_path_candidates.is_empty() {
+		return resolve_matches(
+			full_path_candidates,
+			cleaned,
+			crc,
+			warnings,
+			"full-path selector",
+			"Auto-resolved full-path selector",
 		);
 	}
 
@@ -456,12 +598,41 @@ fn kind_path_matches(candidate: &ChunkNode, kind_segments: &[&str]) -> bool {
 		&& kind_segments
 			.iter()
 			.zip(path_segments)
-			.all(|(kind, segment)| {
-				segment == *kind
-					|| segment
-						.split_once('_')
-						.is_some_and(|(prefix, identifier)| prefix == *kind || identifier == *kind)
+			.all(|(requested, candidate_segment)| {
+				path_segment_matches_requested(candidate_segment, requested)
 			})
+}
+
+fn path_segment_matches_requested(candidate_segment: &str, requested_segment: &str) -> bool {
+	if candidate_segment == requested_segment {
+		return true;
+	}
+
+	let normalized_candidate = normalize_leaf_name(candidate_segment);
+	if normalized_candidate == requested_segment {
+		return true;
+	}
+
+	let (candidate_kind, candidate_identifier) = split_path_segment(normalized_candidate);
+	let (requested_kind, requested_identifier) = split_path_segment(requested_segment);
+	match (candidate_identifier, requested_identifier) {
+		(Some(candidate_identifier), Some(requested_identifier)) => {
+			candidate_kind == requested_kind && requested_identifier.starts_with(candidate_identifier)
+		},
+		(Some(candidate_identifier), None) => {
+			requested_segment == candidate_identifier
+				|| requested_segment.starts_with(candidate_identifier)
+		},
+		(None, Some(_)) => false,
+		(None, None) => false,
+	}
+}
+
+fn split_path_segment(segment: &str) -> (&str, Option<&str>) {
+	match segment.split_once('_') {
+		Some((kind, identifier)) if !identifier.is_empty() => (kind, Some(identifier)),
+		_ => (segment, None),
+	}
 }
 
 /// Format a `ChunkNode` as `path#CRC`.
@@ -802,5 +973,116 @@ mod tests {
 				.unwrap_or_else(|err| panic!("selector {selector} should resolve: {err}"));
 			assert_eq!(resolved.chunk.path, "fn_handleTerraform.try.if_2");
 		}
+	}
+
+	#[test]
+	fn resolves_stale_selector_by_same_parent_checksum() {
+		let state = ChunkStateInner::new(String::new(), "typescript".to_owned(), ChunkTree {
+			language:      "typescript".to_owned(),
+			checksum:      "ROOT".to_owned(),
+			line_count:    1,
+			parse_errors:  0,
+			fallback:      false,
+			root_path:     String::new(),
+			root_children: vec!["fn_run".to_owned()],
+			chunks:        vec![
+				chunk("", "ROOT", None, vec!["fn_run"]),
+				chunk("fn_run", "RUNN", Some(""), vec!["fn_run.var_effect_1", "fn_run.var_effect_2"]),
+				chunk("fn_run.var_effect_1", "AAAA", Some("fn_run"), vec![]),
+				chunk("fn_run.var_effect_2", "BBBB", Some("fn_run"), vec![]),
+			],
+		});
+		let mut warnings = Vec::new();
+		let resolved =
+			resolve_chunk_with_crc(&state, Some("fn_run.var_effect"), Some("BBBB"), &mut warnings)
+				.expect("stale selector should resolve to same-parent checksum match");
+		assert_eq!(resolved.chunk.path, "fn_run.var_effect_2");
+		assert!(
+			warnings
+				.iter()
+				.any(|warning| warning.contains("Auto-resolved stale selector"))
+		);
+	}
+
+	#[test]
+	fn stale_selector_prefers_best_leaf_name_when_crc_matches_multiple_siblings() {
+		let state = ChunkStateInner::new(String::new(), "typescript".to_owned(), ChunkTree {
+			language:      "typescript".to_owned(),
+			checksum:      "ROOT".to_owned(),
+			line_count:    1,
+			parse_errors:  0,
+			fallback:      false,
+			root_path:     String::new(),
+			root_children: vec!["fn_run".to_owned()],
+			chunks:        vec![
+				chunk("", "ROOT", None, vec!["fn_run"]),
+				chunk("fn_run", "RUNN", Some(""), vec!["fn_run.var_other", "fn_run.var_effect_1"]),
+				chunk("fn_run.var_other", "BBBB", Some("fn_run"), vec![]),
+				chunk("fn_run.var_effect_1", "BBBB", Some("fn_run"), vec![]),
+			],
+		});
+		let mut warnings = Vec::new();
+		let resolved =
+			resolve_chunk_with_crc(&state, Some("fn_run.var_effect"), Some("BBBB"), &mut warnings)
+				.expect("best name match should disambiguate same-parent checksum siblings");
+		assert_eq!(resolved.chunk.path, "fn_run.var_effect_1");
+	}
+
+	#[test]
+	fn stale_selector_fails_closed_when_same_parent_crc_matches_are_ambiguous() {
+		let state = ChunkStateInner::new(String::new(), "typescript".to_owned(), ChunkTree {
+			language:      "typescript".to_owned(),
+			checksum:      "ROOT".to_owned(),
+			line_count:    1,
+			parse_errors:  0,
+			fallback:      false,
+			root_path:     String::new(),
+			root_children: vec!["fn_run".to_owned()],
+			chunks:        vec![
+				chunk("", "ROOT", None, vec!["fn_run"]),
+				chunk("fn_run", "RUNN", Some(""), vec!["fn_run.var_effect_1", "fn_run.var_effect_2"]),
+				chunk("fn_run.var_effect_1", "BBBB", Some("fn_run"), vec![]),
+				chunk("fn_run.var_effect_2", "BBBB", Some("fn_run"), vec![]),
+			],
+		});
+		let mut warnings = Vec::new();
+		let Err(err) =
+			resolve_chunk_with_crc(&state, Some("fn_run.var_effect"), Some("BBBB"), &mut warnings)
+		else {
+			panic!("ambiguous stale selector should fail closed");
+		};
+		assert!(err.contains("Ambiguous stale selector"), "{err}");
+	}
+
+	#[test]
+	fn resolves_full_untruncated_identifier_paths() {
+		let state = ChunkStateInner::new(String::new(), "typescript".to_owned(), ChunkTree {
+			language:      "typescript".to_owned(),
+			checksum:      "ROOT".to_owned(),
+			line_count:    1,
+			parse_errors:  0,
+			fallback:      false,
+			root_path:     String::new(),
+			root_children: vec!["class_Server".to_owned()],
+			chunks:        vec![
+				chunk("", "ROOT", None, vec!["class_Server"]),
+				chunk("class_Server", "CLSS", Some(""), vec!["class_Server.fn_handle"]),
+				chunk("class_Server.fn_handle", "ABCD", Some("class_Server"), vec![]),
+			],
+		});
+		let mut warnings = Vec::new();
+		let resolved = resolve_chunk_with_crc(
+			&state,
+			Some("class_Server.fn_handleRequest"),
+			Some("ABCD"),
+			&mut warnings,
+		)
+		.expect("full untruncated selector should resolve to truncated chunk path");
+		assert_eq!(resolved.chunk.path, "class_Server.fn_handle");
+		assert!(
+			warnings
+				.iter()
+				.any(|warning| warning.contains("Auto-resolved"))
+		);
 	}
 }

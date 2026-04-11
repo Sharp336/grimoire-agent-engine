@@ -332,7 +332,7 @@ export const chunkToolEditSchema = Type.Object({
 	op: StringEnum(CHUNK_OP_VALUES),
 	sel: Type.String({
 		description:
-			"Chunk selector. Format: 'path@region' for insertions, 'path#CRC@region' for replace. Omit @region to target the full chunk. Valid regions: head, body, tail, decl.",
+			"Chunk selector. Use 'path~' or 'path^' for insertions, 'path#CRC~' or 'path#CRC^' for replace, or omit the suffix to target the full chunk.",
 	}),
 	content: Type.String({
 		description:
@@ -443,6 +443,12 @@ export async function executeChunkMode(
 	}
 	const normalizedOperations = normalizeChunkEditOperations(edits);
 
+	if (!sourceExists && normalizedOperations.some(op => op.sel)) {
+		throw new Error(
+			`File does not exist: ${path}. Cannot resolve chunk selectors on a non-existent file. Use the write tool to create a new file, or check the path for typos.`,
+		);
+	}
+
 	const chunkResult = applyChunkEdits({
 		source: rawContent,
 		language: chunkLanguage,
@@ -453,9 +459,8 @@ export async function executeChunkMode(
 	});
 
 	if (!chunkResult.changed) {
-		const responseText = `[No changes needed — content already matches.]\n\n${chunkResult.responseText}`;
 		return {
-			content: [{ type: "text", text: responseText }],
+			content: [{ type: "text", text: "[No changes needed \u2014 content already matches.]" }],
 			details: {
 				diff: "",
 				op: sourceExists ? "update" : "create",

@@ -69,15 +69,15 @@ describe("chunk mode regression coverage", () => {
 		const editTool = new EditTool(session);
 
 		const beforeRead = getText(
-			await readTool.execute("chunk-read-rust", { path: `${filePath}:impl_Greeter.fn_render` }),
+			await readTool.execute("chunk-read-rust", { path: `${filePath}:impl_Greete.fn_render` }),
 		);
-		const selector = extractSelector(beforeRead, "impl_Greeter.fn_render");
+		const selector = extractSelector(beforeRead, "impl_Greete.fn_render");
 
 		await editTool.execute("chunk-edit-rust-body", {
 			path: filePath,
 			edits: [
 				{
-					sel: `${selector}@body`,
+					sel: `${selector}~`,
 					op: "replace",
 					content: 'let greeting = format!("Hello, {name}");\nprintln!("{greeting}");\ngreeting\n',
 				},
@@ -98,7 +98,7 @@ describe("chunk mode regression coverage", () => {
 		const editTool = new EditTool(session);
 
 		const beforeRead = getText(await readTool.execute("chunk-read-markdown-after", { path: filePath }));
-		const selector = extractSelector(beforeRead, "section_Title.section_Alpha");
+		const selector = extractSelector(beforeRead, "sect_Title.sect_Alpha");
 
 		await editTool.execute("chunk-edit-markdown-after", {
 			path: filePath,
@@ -116,7 +116,7 @@ describe("chunk mode regression coverage", () => {
 		expect(updatedSource).not.toContain("## Inserted\n\ninserted body\n## Beta");
 	});
 
-	it("preserves the blank line before the next markdown section on @body.append", async () => {
+	it("preserves the blank line before the next markdown section on ~.append", async () => {
 		const filePath = path.join(tmpDir, "spacing-append.md");
 		await Bun.write(filePath, "# Title\n\n## Alpha\n\nalpha body\n\n## Beta\n\nbeta body\n");
 		const session = createSession(tmpDir);
@@ -124,13 +124,13 @@ describe("chunk mode regression coverage", () => {
 		const editTool = new EditTool(session);
 
 		const beforeRead = getText(await readTool.execute("chunk-read-markdown-append", { path: filePath }));
-		const selector = extractSelector(beforeRead, "section_Title.section_Alpha");
+		const selector = extractSelector(beforeRead, "sect_Title.sect_Alpha");
 
 		await editTool.execute("chunk-edit-markdown-append", {
 			path: filePath,
 			edits: [
 				{
-					sel: `${selector}@body`,
+					sel: `${selector}~`,
 					op: "append",
 					content: "\nextra paragraph\n",
 				},

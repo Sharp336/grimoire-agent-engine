@@ -31,7 +31,7 @@ import {
 } from "../types";
 import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
-import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
+import { finalizeErrorMessage, type RawHttpRequestDump, rewriteCopilotAuthError } from "../utils/http-inspector";
 import {
 	createFirstEventWatchdog,
 	getOpenAIStreamIdleTimeoutMs,
@@ -40,6 +40,7 @@ import {
 	markFirstStreamEvent,
 } from "../utils/idle-iterator";
 import { parseStreamingJson } from "../utils/json-parse";
+import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { getKimiCommonHeaders } from "../utils/oauth/kimi";
 import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
 import { mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
@@ -516,6 +517,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			// Some providers via OpenRouter include extra details here.
 			const rawMetadata = (error as { error?: { metadata?: { raw?: string } } })?.error?.metadata?.raw;
 			if (rawMetadata) output.errorMessage += `\n${rawMetadata}`;
+			output.errorMessage = rewriteCopilotAuthError(output.errorMessage, error, model.provider);
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			stream.push({ type: "error", reason: output.stopReason, error: output });
@@ -545,8 +547,12 @@ async function createClient(
 		}
 		apiKey = $env.OPENAI_API_KEY;
 	}
+	const rawApiKey = apiKey;
 
 	let headers = { ...(model.headers ?? {}), ...(extraHeaders ?? {}) };
+	if (model.provider === "openrouter") {
+		headers["X-Title"] = "Oh-My-Pi";
+	}
 	if (model.provider === "kimi-code") {
 		headers = { ...(await getKimiCommonHeaders()), ...headers };
 	}
@@ -554,6 +560,7 @@ async function createClient(
 
 	let baseUrl = model.baseUrl;
 	if (model.provider === "github-copilot") {
+		apiKey = parseGitHubCopilotApiKey(rawApiKey).accessToken;
 		const hasImages = hasCopilotVisionInput(context.messages);
 		const copilot = buildCopilotDynamicHeaders({
 			messages: context.messages,
@@ -564,7 +571,7 @@ async function createClient(
 		});
 		Object.assign(headers, copilot.headers);
 		copilotPremiumRequests = copilot.premiumRequests;
-		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl;
+		baseUrl = resolveGitHubCopilotBaseUrl(model.baseUrl, rawApiKey) ?? model.baseUrl;
 	}
 	return {
 		client: new OpenAI({
@@ -805,9 +812,7 @@ export function convertMessages(
 
 	const generateFallbackToolCallId = (seed: string): string => {
 		generatedToolCallIdCounter += 1;
-		const hash = Bun.hash
-			.xxHash64(`${model.provider}:${model.id}:${seed}:${generatedToolCallIdCounter}`)
-			.toString(36);
+		const hash = Bun.hash(`${model.provider}:${model.id}:${seed}:${generatedToolCallIdCounter}`).toString(36);
 		return `call_${hash}`;
 	};
 

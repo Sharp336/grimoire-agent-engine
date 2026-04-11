@@ -91,25 +91,17 @@ pub enum ChunkReadStatus {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[napi(string_enum)]
 pub enum ChunkRegion {
-	#[napi(value = "head")]
+	#[napi(value = "^")]
 	Head,
-	#[napi(value = "body")]
+	#[napi(value = "~")]
 	Body,
-	#[napi(value = "tail")]
-	Tail,
-	/// The semantic declaration without leading trivia (comments, attributes).
-	/// Spans from `checksum_start_byte` to `end_byte`.
-	#[napi(value = "decl")]
-	Decl,
 }
 
 impl ChunkRegion {
 	pub const fn as_str(self) -> &'static str {
 		match self {
-			Self::Head => "head",
-			Self::Body => "body",
-			Self::Tail => "tail",
-			Self::Decl => "decl",
+			Self::Head => "^",
+			Self::Body => "~",
 		}
 	}
 }
@@ -213,33 +205,62 @@ impl ChunkAnchorStyle {
 		}
 	}
 
-	fn render_i(&self, marker: (&str, &str), indent: &str, name: &str, crc: &str) -> String {
+	fn render_i(
+		&self,
+		marker: (&str, &str),
+		indent: &str,
+		name: &str,
+		crc: &str,
+		line_count_suffix: &str,
+	) -> String {
 		fn extract_kind(name: &str) -> &str {
 			name.find('_').map_or_else(|| name, |index| &name[..index])
 		}
 		let (open, close) = marker;
 		match self {
-			Self::Full => format!("{indent}{open}{name}#{crc}{close}"),
+			Self::Full => format!("{indent}{open}{name}#{crc}{close}{line_count_suffix}"),
 			Self::Kind => {
-				format!("{indent}{open}{kind}#{crc}{close}", kind = extract_kind(name))
+				format!(
+					"{indent}{open}{kind}#{crc}{close}{line_count_suffix}",
+					kind = extract_kind(name)
+				)
 			},
-			Self::Bare => format!("{indent}{open}#{crc}{close}"),
-			Self::FullOmit => format!("{indent}{open}{name}{close}"),
-			Self::KindOmit => format!("{indent}{open}{kind}{close}", kind = extract_kind(name)),
+			Self::Bare => format!("{indent}{open}#{crc}{close}{line_count_suffix}"),
+			Self::FullOmit => format!("{indent}{open}{name}{close}{line_count_suffix}"),
+			Self::KindOmit => {
+				format!("{indent}{open}{kind}{close}{line_count_suffix}", kind = extract_kind(name))
+			},
 			Self::None => String::new(),
 		}
 	}
 
-	/// Render an opening anchor tag: `[< name#crc ]`.
-	/// Returns empty string for `None` style.
-	pub fn render(&self, indent: &str, name: &str, crc: &str) -> String {
-		self.render_i(("[<", ">]"), indent, name, crc)
+	/// Render an opening anchor tag with head/body line counts:
+	/// `[< name#crc >] (H+B lns)` for containers, `[< name#crc >] (N lns)` for
+	/// leaves. Omitted when total lines <= 1. Returns empty string for `None`
+	/// style.
+	pub fn render(
+		&self,
+		indent: &str,
+		name: &str,
+		crc: &str,
+		head_lines: u32,
+		body_lines: u32,
+	) -> String {
+		let total = head_lines + body_lines;
+		let suffix = if total <= 1 {
+			String::new()
+		} else if body_lines == 0 {
+			format!(" ({total} lns)")
+		} else {
+			format!(" ({head_lines}+{body_lines} lns)")
+		};
+		self.render_i(("[<", ">]"), indent, name, crc, &suffix)
 	}
 
-	/// Render a closing anchor tag: `[</ name#crc ]`.
+	/// Render a closing anchor tag: `[</ name#crc >]`.
 	/// Returns empty string for `None` style.
 	pub fn render_close(&self, indent: &str, name: &str, crc: &str) -> String {
-		self.render_i(("[</", ">]"), indent, name, crc)
+		self.render_i(("[</", ">]"), indent, name, crc, "")
 	}
 }
 

@@ -79,6 +79,8 @@ const RPC_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"todo.eager",
 	"async.enabled",
 	"async.maxJobs",
+	"bash.autoBackground.enabled",
+	"bash.autoBackground.thresholdMs",
 	"task.isolation.mode",
 	"task.isolation.merge",
 	"task.isolation.commits",
@@ -453,7 +455,9 @@ async function buildSessionOptions(
 			}
 		} else if (resolved.model) {
 			options.model = resolved.model;
-			settings.overrideModelRoles({ default: `${resolved.model.provider}/${resolved.model.id}` });
+			settings.overrideModelRoles({
+				default: resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+			});
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
 			}
@@ -467,6 +471,7 @@ async function buildSessionOptions(
 				{
 					settings,
 					matchPreferences: modelMatchPreferences,
+					modelRegistry,
 				},
 			);
 			const rememberedResolvedModel = rememberedSpec.model;

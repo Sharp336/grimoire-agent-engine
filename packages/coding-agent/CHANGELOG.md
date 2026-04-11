@@ -6,6 +6,89 @@
 
 - Fixed retained Python kernel ownership so `AgentSession.dispose()` only shuts down kernels owned by that session, including warmup-created kernels
 
+## [14.1.0] - 2026-04-11
+### Added
+
+- Added richer tool rendering details in session export HTML, including metadata badges, argument formatting, and todo task tree styling for exported tool and workflow messages
+- Added a persistent `js` tool backed by `node:vm`, with cross-session `highway` KV/pubsub, tool calls from inside JS cells, and `$` / `$$` interactive JavaScript execution
+- Added SQLite database read support to the `read` tool for `.sqlite`, `.sqlite3`, `.db`, and `.db3` files with table listing, schema + sample output, row lookup, paginated query filtering, and read-only `q=SELECT` mode
+- Added SQLite mutation support to the `write` tool so `db.sqlite:table` inserts JSON5 rows and `db.sqlite:table:key` updates or deletes rows via row key
+- Added rendering of usage report entries for accounts with no usage limits, including account label and optional plan type with a `-- no limits` indicator
+- Updated account label resolution to fall back to email or accountId so unlabeled unlimited-plan accounts display a meaningful name
+- Added canonical model equivalence and provider coalescing across `models.yml`, `enabledModels`, `--models`, `/model`, and `--list-models`
+- Added `equivalence` overrides/exclusions to `models.yml` and `modelProviderOrder` to `config.yml` for global canonical-provider preference
+
+### Changed
+
+- Enabled `await` and `cancel_job` to be available when `bash.autoBackground.enabled` is set, so auto-backgrounded bash jobs can be awaited or cancelled without enabling `async.enabled`
+- Updated bash auto-background behavior so short commands returned inline output when they completed before the configured threshold, while longer runs moved to background jobs automatically
+- Replaced the LLM-callable Python execution path with JavaScript execution in the shared VM context, including updated renderers, prompts, session messages, and extension events
+- Updated interactive and CLI model listings/selectors to work with canonical model ids while resolving them to concrete provider variants for actual execution
+- Updated role assignment persistence so selected model settings now store the selector used by users, including thinking-level suffixes, while runtime continues to run against the resolved concrete provider model
+- Updated model scope resolution to expand exact canonical model ids into all matching provider variants when filtering supported model sets
+- Changed the agent to avoid giving time estimates or task-duration predictions in user responses, focusing on required work instead
+- Changed generated code guidance to avoid speculative abstractions and extra compatibility scaffolding, favoring direct implementations that match current needs
+- Changed model role resolution so roles can store either canonical model ids or explicit `provider/model` selectors while sessions continue to record the concrete model actually used
+- Updated bash execution to optionally auto-background long-running commands through the existing background-job pipeline, with dedicated settings for enabling the behavior and adjusting the delay
+
+### Fixed
+
+- Fixed session export rendering so JavaScript execution messages now use `jsExecution` labels and content instead of `pythonExecution`, matching current tool behavior
+- Fixed JavaScript cell execution to auto-display returned values once and preserve persistent VM bindings across calls until reset
+- Fixed `.db`/`.db3` reads to verify SQLite file headers and fall back to normal file reading when the extension matches but the content is not a SQLite database
+- Fixed SQLite selector parsing and resolution to correctly route requests to database operations at the file-extension boundary instead of misrouting through plain file/archive handlers
+- Fixed unsupported or unsafe selectors by rejecting missing tables, composite primary keys for row lookups, unknown query parameters, and row operations on non-existent tables
+- Fixed model resolution for commit message generation, title generation, memory consolidation, and image inspection when role strings use canonical ids instead of raw provider/model values
+- Fixed default-model updates so previously configured thinking levels were preserved when reassigning a role
+- Fixed model scope and selection handling in CLI/session startup paths that previously failed to resolve aliases consistently across features
+- Fixed short-lived git subprocesses to disable `core.fsmonitor` and `core.untrackedCache`, avoiding unnecessary repository watchers and cache work during agent git operations
+
+### Security
+
+- Blocked destructive SQL execution in read-mode SQLite access by using read-only connections and rejecting bound-parameter raw SQL
+
+## [14.0.5] - 2026-04-11
+### Added
+
+- Added `designer` model role for UI/UX design tasks with Gemini 3.1 Pro as default model
+- Added support for model role fallback lists — roles can now resolve to multiple model patterns with automatic fallback to next available model
+- Added `extractReadableFromHtml` utility function to extract readable content from HTML with Readability article extraction and CSS selector fallback
+- Added support for GFM (GitHub Flavored Markdown) features including tables, strikethrough, and task lists in HTML-to-markdown conversion
+- Added `resolveDiagnosticTargets` utility function to handle glob pattern resolution with fallback to literal file paths for bracket-style paths
+
+### Changed
+
+- Clarified fenced code block editing behavior in markdown — the tool now preserves literal indentation inside fenced blocks, with content written verbatim as supplied
+- Updated guidance for inserting content after markdown section headings to use `after` on the heading chunk rather than `before`/`prepend` on the section itself
+- Reduced default image resize limits to 1568px (from 2000px) and 500KB (from 4.5MB) to match Anthropic's internal downscaling threshold and reduce payload sizes in tool calls
+- Adjusted screenshot compression to use 1024px max dimensions and 150KB budget for more aggressive optimization of browser screenshots in LLM requests
+- Updated JPEG quality defaults from 80 to 75 and refined quality ladder steps (70, 60, 50, 40) for tighter byte budgets
+- Improved image resize fast-path to skip re-encoding when images are already within dimensions and at ≤25% of byte budget, avoiding unnecessary processing of small icons and diagrams
+- Clarified that chunk names are truncated and must be copied from `read` or `?` output rather than constructed from source identifiers
+- Enhanced guidance for editing fenced code blocks in markdown to preserve exact whitespace using `raw` reads, as the tool normalizes tabs to spaces which can damage indentation-sensitive content
+- Updated designer agent to use `pi/designer` role alias instead of explicit model list
+- Refactored model role resolution to support multiple fallback patterns per role, improving model availability handling
+- Replaced regex-based HTML-to-markdown conversion with Turndown library and GFM plugin for more accurate formatting of complex HTML structures
+- Simplified no-changes response to omit redundant response text when chunk content already matches
+- Clarified region suffix behavior on leaf and compound statement chunks — `~` and `^` now fall back to whole-chunk replacement with explicit guidance to supply complete structural content
+- Updated CRC refresh guidance to direct users to use CRCs from edit responses or run `read(path="file", sel="?")`
+- Added clarification that region suffixes fall back to whole-chunk replacement for prose and data formats (markdown, YAML, JSON, fenced code blocks, frontmatter)
+- Documented `L20` shorthand syntax for single-line reads extending to end-of-file, with `L20-L20` for one-line windows
+- Refactored diagnostic target resolution to use new `resolveDiagnosticTargets` function, consolidating glob pattern detection and file matching logic
+- Updated chunk selector syntax from `@region` format to `~` (body) and `^` (head) suffixes for more concise region targeting
+- Simplified chunk edit documentation to use new `~` and `^` region syntax instead of `@head`, `@body`, `@tail`, `@decl` keywords
+- Replaced internal `raceAbort` function with imported `raceWithAbort` utility from pi-utils
+- Refactored cleanup timer to use async iterator pattern with `timers.setInterval` instead of `setInterval`
+- Made `#cleanupIdleSessions` synchronous and moved async cleanup loop logic to new `#runCleanupLoop` method
+- Replaced regex-based `htmlToBasicMarkdown` with a Turndown + GFM plugin pipeline (tables, strikethrough, task lists, nested lists now convert correctly). Added direct `turndown` and `turndown-plugin-gfm` dependencies
+
+### Fixed
+
+- Fixed chunk edit tool to report file-not-found error distinctly when attempting to use chunk selectors on non-existent files, with guidance to use write tool or verify the path
+- Fixed stale child selector reuse to correctly match chunks by checksum when multiple sibling chunks with the same name exist under the same parent
+- Fixed stale diagnostics being reused after unrelated file publishes by clearing cached diagnostics before refreshing file state
+- Fixed Codex search to use streamed answer text when final answer is an image placeholder or empty
+
 ## [14.0.4] - 2026-04-10
 ### Added
 

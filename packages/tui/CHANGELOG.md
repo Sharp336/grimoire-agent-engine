@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+## [14.0.5] - 2026-04-11
+
+### Changed
+
+- Updated hash computation to use `Bun.hash()` instead of `Bun.hash.xxHash64()`, which may return `number` in addition to `bigint`
+- Simplified cache key computation in Box component by removing intermediate hash updates and consolidating hash operations
+- Wrapped native text utility functions (`sliceWithWidth`, `truncateToWidth`, `wrapTextWithAnsi`, `extractSegments`) to automatically pass the current default tab width, simplifying the API for consumers
+- Added `getIndentationNoescape` wrapper that uses `process.cwd()` as the project root for relative file paths
+- Re-export `getDefaultTabWidth`, `getIndentation`, and `setDefaultTabWidth` from `@oh-my-pi/pi-utils`; native text helpers still receive tab width via wrappers that read the JS default
+
 ## [13.16.1] - 2026-03-27
 
 ### Added

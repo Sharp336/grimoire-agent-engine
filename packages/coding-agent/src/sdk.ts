@@ -26,7 +26,7 @@ import {
 	Snowflake,
 } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
-import { AsyncJobManager } from "./async";
+import { AsyncJobManager, isBackgroundJobSupportEnabled } from "./async";
 import { createAutoresearchExtension } from "./autoresearch";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability } from "./capability/rule";
@@ -731,6 +731,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		resolveModelRoleValue(settings.getModelRole("default"), modelRegistry.getAvailable(), {
 			settings,
 			matchPreferences: modelMatchPreferences,
+			modelRegistry,
 		}),
 	);
 	let model = options.model;
@@ -840,7 +841,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let session: AgentSession;
 
 	const enableLsp = options.enableLsp ?? true;
-	const asyncEnabled = settings.get("async.enabled");
+	const backgroundJobsEnabled = isBackgroundJobSupportEnabled(settings);
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
 	const ASYNC_INLINE_RESULT_MAX_CHARS = 12_000;
 	const ASYNC_PREVIEW_MAX_CHARS = 4_000;
@@ -864,7 +865,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		return preview;
 	};
-	const asyncJobManager = asyncEnabled
+	const asyncJobManager = backgroundJobsEnabled
 		? new AsyncJobManager({
 				maxRunningJobs: asyncMaxJobs,
 				onJobComplete: async (jobId, result, job) => {
@@ -1139,7 +1140,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const matchPreferences = {
 			usageOrder: settings.getStorage()?.getModelUsageOrder(),
 		};
-		const { model: resolved } = parseModelPattern(options.modelPattern, availableModels, matchPreferences);
+		const { model: resolved } = parseModelPattern(options.modelPattern, availableModels, matchPreferences, {
+			modelRegistry,
+		});
 		if (resolved) {
 			model = resolved;
 			modelFallbackMessage = undefined;

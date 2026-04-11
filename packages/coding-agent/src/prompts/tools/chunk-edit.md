@@ -3,67 +3,66 @@ Edits files via syntax-aware chunks. Run `read(path="file.ts")` first. The edit 
 <rules>
 - **MUST** `read` first. Never invent chunk paths or CRCs. Copy them from the latest `read` output or edit response.
 - `sel` format:
-  - insertions: `chunk` or `chunk@region`
-  - replacements: `chunk#CRC` or `chunk#CRC@region`
-- Without a `@region` it defaults to the entire chunk including leading trivia. Valid regions: `head`, `body`, `tail`, `decl`.
+  - insertions: `chunk`, `chunk~`, or `chunk^`
+  - replacements: `chunk#CRC`, `chunk#CRC~`, or `chunk#CRC^`
+- Without a suffix it defaults to the entire chunk including leading trivia. `~` targets the body, `^` targets the head.
 - If the exact chunk path is unclear, run `read(path="file", sel="?")` and copy a selector from that listing.
 {{#if chunkAutoIndent}}
-- Use `\t` for indentation in `content`. Write content at indent-level 0 — the tool re-indents it to match the chunk's position in the file. For example, to replace `@body` of a method, write the body starting at column 0:
+- Use `\t` for indentation in `content`. Write content at indent-level 0 — the tool re-indents it to match the chunk's position in the file. For example, to replace `~` of a method, write the body starting at column 0:
   ```
   content: "if (x) {\n\treturn true;\n}"
   ```
   The tool adds the correct base indent automatically. Never manually pad with the chunk's own indentation.
 {{else}}
 - Match the file's literal tabs/spaces in `content`. Do not convert indentation to canonical `\t`.
-- Write content at indent-level 0 relative to the target region. For example, to replace `@body` of a method, write:
+- Write content at indent-level 0 relative to the target region. For example, to replace `~` of a method, write:
   ```
   content: "if (x) {\n  return true;\n}"
   ```
   The tool adds the correct base indent automatically, then preserves the tabs/spaces you used inside the snippet. Never manually pad with the chunk's own indentation.
 {{/if}}
-- `@region` only works on container chunks (classes, functions, impl blocks, sections). Do **not** use `@head`/`@body`/`@tail` on leaf chunks (enum variants, fields, single statements) — use the whole chunk instead.
+- Region suffixes only apply to container chunks (classes, functions, impl blocks, sections). On leaf chunks (enum variants, fields, single statements, and compound statements like `if`/`for`/`while`/`match`/`try`), `~` and `^` silently fall back to whole-chunk replacement — prefer the unsuffixed form and always supply the complete replacement (condition + body, not just the body) to avoid dropping structural parts.
 - `replace` requires the current CRC. Insertions do not.
-- **CRCs change after every edit.** Always use the selectors/CRCs from the most recent `read` or edit response. Never reuse a CRC from a previous edit.
+- **CRCs change after every edit.** The edit response always carries the new CRCs — use those for the next call or run `read(path="file", sel="?")` to refresh. Never reuse a CRC from before the latest edit.
 </rules>
 
 <critical>
 You **MUST** use the narrowest region that covers your change. Replacing without a region replaces the **entire chunk including leading comments, decorators, and attributes** — omitting them from `content` deletes them.
 
-**`replace` is total, not surgical.** The `content` you supply becomes the *complete* new content for the targeted region. Everything in the original region that you omit from `content` is deleted. Before replacing `@body` on any chunk, verify the chunk does not contain children you intend to keep. If a chunk spans hundreds of lines and your change touches only a few, target a specific child chunk — not the parent.
+**`replace` is total, not surgical.** The `content` you supply becomes the *complete* new content for the targeted region. Everything in the original region that you omit from `content` is deleted. Before replacing `~` on any chunk, verify the chunk does not contain children you intend to keep. If a chunk spans hundreds of lines and your change touches only a few, target a specific child chunk — not the parent.
 
-**Group chunks (`stmts_*`, `imports_*`, `decls_*`) are containers.** They hold many sibling items (test functions, import statements, declarations). Replacing `@body` on a group chunk replaces **all** of its children. To edit one item inside a group, target that item's own chunk path. If no child chunk exists, use the specific child's chunk selector from `read` output — do not replace the parent group.
+**Group chunks (`stmts_*`, `imports_*`, `decls_*`) are containers.** They hold many sibling items (test functions, import statements, declarations). Replacing `~` on a group chunk replaces **all** of its children. To edit one item inside a group, target that item's own chunk path. If no child chunk exists, use the specific child's chunk selector from `read` output — do not replace the parent group.
 </critical>
 
 <regions>
+Given a chunk like:
 ```
-  @head ··· ┊ /// doc comment
-          · ┊ #[attr]
-  @decl ··· ┊ fn foo(x: i32) {
-   @body ·· ┊     body();
-   @tail ·· ┊ }
+/// doc comment      <-- leading trivia
+#[attr]              <-- leading trivia
+fn foo(x: i32) {     <-- signature + opening delimiter
+    body();          <-- body
+}                    <-- closing delimiter
 ```
-- `@body` — the interior only. **Use for most edits.**
-- `@head` — leading trivia + signature + opening delimiter.
-- `@tail` — the closing delimiter.
-- `@decl` — everything except leading trivia (signature + body + closing delimiter).
-- *(no region)* — the entire chunk including leading trivia. Same as `@head` + `@body` + `@tail`.
 
-For leaf chunks (fields, variants, single-line items), `@body` falls back to the full chunk.
+Append `~` to target the body, `^` to target the head (trivia + signature), or nothing for the whole chunk:
+- `fn_foo#CRC~` — body only. **Use for most edits.** On leaf chunks, falls back to whole chunk.
+- `fn_foo#CRC^` — head (decorators, attributes, doc comments, signature, opening delimiter).
+- `fn_foo#CRC` — entire chunk including leading trivia.
+- `chunk~` + `append`/`prepend` inserts *inside* the container. `chunk` + `append`/`prepend` inserts *outside*.
 
-`append`/`prepend` without a `@region` inserts _outside_ the chunk. To add children _inside_ a class, struct, enum, or function body, use `@body`:
-- `class_Foo@body` + `append` → adds inside the class before `}`
-- `class_Foo@body` + `prepend` → adds inside the class after `{`
-- `class_Foo` + `append` → adds after the entire class (after `}`)
+**Note on leading trivia:** whether a decorator/doc comment belongs to `^` depends on the parser. In Rust and Python, attributes and decorators are attached to the function chunk, so `^` covers them. In TypeScript/JavaScript, a `@decorator` + `/** jsdoc */` block immediately above a method often surfaces as a **separate sibling chunk** (shown as `chunk#CRC` in the `?` listing) rather than as part of the function's `^`. If you need to rewrite a decorator, check the `?` listing for a sibling `chunk#CRC` directly above your target.
+
+**Note on non-code formats:** for prose and data formats (markdown, YAML, JSON, fenced code blocks, frontmatter), `^` and `~` fall back to the whole chunk. Always replace the entire chunk and include any delimiter syntax (fence backticks, `---` frontmatter markers, list markers) in your `content` — omitting them deletes them. For markdown sections (`sect_*`), always use unsuffixed whole-chunk replace — `^` and `~` on section containers also fall back to whole-chunk replace. When editing fenced code blocks in markdown, use the exact whitespace from the file (read with `raw` first) — the tool preserves literal indentation inside fenced blocks, but any content you supply is written verbatim. To insert content after a markdown section heading, use `after` on the heading chunk (`sect_*.chunk` or `sect_*.chunk_1`) — not `before`/`prepend` on the section itself, which lands physically before the heading and gets absorbed by the preceding section on reparse.
 </regions>
 
 <ops>
 |op|sel|effect|
 |---|---|---|
-|`replace`|`chunk#CRC(@region)?`|rewrite the addressed region|
-|`before`|`chunk(@region)?`|insert before the region span|
-|`after`|`chunk(@region)?`|insert after the region span|
-|`prepend`|`chunk(@region)?`|insert at the start inside the region|
-|`append`|`chunk(@region)?`|insert at the end inside the region|
+|`replace`|`chunk#CRC`, `chunk#CRC~`, or `chunk#CRC^`|rewrite the addressed region|
+|`before`|`chunk`, `chunk~`, or `chunk^`|insert before the region span|
+|`after`|`chunk`, `chunk~`, or `chunk^`|insert after the region span|
+|`prepend`|`chunk`, `chunk~`, or `chunk^`|insert at the start inside the region|
+|`append`|`chunk`, `chunk~`, or `chunk^`|insert at the end inside the region|
 </ops>
 
 <examples>
@@ -137,9 +136,9 @@ function makeCounter(start: number): Counter {
 }
 ```
 
-**Replace a method body** (`@body`):
+**Replace a method body** (`~`):
 ```
-{ "sel": "class_Counter.fn_increment#NQWY@body", "op": "replace", "content": "this.value += 1;\nconsole.log('incremented to', this.value);\n" }
+{ "sel": "class_Counter.fn_increment#NQWY~", "op": "replace", "content": "this.value += 1;\nconsole.log('incremented to', this.value);\n" }
 ```
 Result — only the body changes, signature and braces are kept:
 ```
@@ -149,9 +148,9 @@ Result — only the body changes, signature and braces are kept:
   }
 ```
 
-**Replace a function header** (`@head` — signature and doc comment):
+**Replace a function header** (`^` — signature and doc comment):
 ```
-{ "sel": "fn_createCounter#PQQY@head", "op": "replace", "content": "/** Creates a counter with the given start value. */\nfunction createCounter(initial: number, label?: string): Counter {\n" }
+{ "sel": "fn_createCounter#PQQY^", "op": "replace", "content": "/** Creates a counter with the given start value. */\nfunction createCounter(initial: number, label?: string): Counter {\n" }
 ```
 Result — adds a doc comment and updates the signature, body untouched:
 ```
@@ -197,9 +196,9 @@ function isActive(s: Status): boolean {
 function createCounter(initial: number): Counter {
 ```
 
-**Prepend inside a container** (`@body` + `prepend`):
+**Prepend inside a container** (`~` + `prepend`):
 ```
-{ "sel": "class_Counter@body", "op": "prepend", "content": "label: string = 'default';\n\n" }
+{ "sel": "class_Counter~", "op": "prepend", "content": "label: string = 'default';\n\n" }
 ```
 Result — a new field is added at the top of the class body, before existing members:
 ```
@@ -209,12 +208,12 @@ class Counter {
   value: number = 0;
 ```
 
-**Append inside a container** (`@body` + `append`):
+**Append inside a container** (`~` + `append`):
 ~~~json
 {{#if chunkAutoIndent}}
-{ "sel": "class_Counter@body", "op": "append", "content": "\nreset(): void {\n\tthis.value = 0;\n}\n" }
+{ "sel": "class_Counter~", "op": "append", "content": "\nreset(): void {\n\tthis.value = 0;\n}\n" }
 {{else}}
-{ "sel": "class_Counter@body", "op": "append", "content": "\nreset(): void {\n  this.value = 0;\n}\n" }
+{ "sel": "class_Counter~", "op": "append", "content": "\nreset(): void {\n  this.value = 0;\n}\n" }
 {{/if}}
 ~~~
 Result — a new method is added at the end of the class body, before the closing `}`:
@@ -241,8 +240,8 @@ Result — the method is removed from the class.
   - Match the file's real indentation characters in your snippet. The tool preserves your literal tabs/spaces after adding the target region's base indent.
 {{/if}}
   - Do NOT include the chunk's base indentation — only indent relative to the region's opening level.
-  - For `@body` of a function: write at column 0, e.g. `"return x;\n"`. The tool adds the correct base indent.
-  - For `@head`: write at the chunk's own depth. A class member's head uses `"/** doc */\nstart(): void {"`.
+  - For `~` of a function: write at column 0, and use `\t` for *relative* nesting. Flat body: `"return x;\n"`. Nested body: `"if (cond) {\n\treturn x;\n}\n"` — the `if` is at column 0, the `return` is one tab in, and the tool adds the method's base indent to both.
+  - For `^`: write at the chunk's own depth. A class member's head uses `"/** doc */\nstart(): void {"`.
 {{#if chunkAutoIndent}}
   - For a top-level item: start at zero indent. Write `"function foo() {\n\treturn 1;\n}\n"`.
 {{else}}
