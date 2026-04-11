@@ -469,7 +469,7 @@ export class AgentSession {
 	#pythonAbortControllers = new Set<AbortController>();
 	#pythonKernelOwnerId: string;
 	#pendingPythonMessages: PythonExecutionMessage[] = [];
-	#activePythonExecutions = new Set<Promise<PythonResult>>();
+	#activePythonExecutions = new Set<Promise<unknown>>();
 
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
@@ -5700,35 +5700,42 @@ export class AgentSession {
 		}
 
 		const abortController = new AbortController();
-		this.#pythonAbortControllers.add(abortController);
 		const execution = (async (): Promise<PythonResult> => {
-			try {
-				// Use the same session ID as the Python tool for kernel sharing
-				const sessionFile = this.sessionManager.getSessionFile();
-				const sessionId = sessionFile ? `session:${sessionFile}:cwd:${cwd}` : `cwd:${cwd}`;
-
-				const result = await executePythonCommand(code, {
-					cwd,
-					sessionId,
-					kernelOwnerId: this.#pythonKernelOwnerId,
-					kernelMode: this.settings.get("python.kernelMode"),
-					useSharedGateway: this.settings.get("python.sharedGateway"),
-					onChunk,
-					signal: abortController.signal,
-				});
-
-				this.recordPythonResult(code, result, options);
-				return result;
-			} finally {
-				this.#pythonAbortControllers.delete(abortController);
-			}
+			// Use the same session ID as the Python tool for kernel sharing
+			const sessionFile = this.sessionManager.getSessionFile();
+			const sessionId = sessionFile ? `session:${sessionFile}:cwd:${cwd}` : `cwd:${cwd}`;
+			const result = await executePythonCommand(code, {
+				cwd,
+				sessionId,
+				kernelOwnerId: this.#pythonKernelOwnerId,
+				kernelMode: this.settings.get("python.kernelMode"),
+				useSharedGateway: this.settings.get("python.sharedGateway"),
+				onChunk,
+				signal: abortController.signal,
+			});
+			this.recordPythonResult(code, result, options);
+			return result;
 		})();
+		return await this.trackPythonExecution(execution, abortController);
+	}
+
+	/**
+	 * Track Python work started outside AgentSession.executePython so dispose can await and abort it too.
+	 */
+	trackPythonExecution<T>(execution: Promise<T>, abortController: AbortController): Promise<T> {
+		this.#pythonAbortControllers.add(abortController);
 		this.#activePythonExecutions.add(execution);
-		try {
-			return await execution;
-		} finally {
-			this.#activePythonExecutions.delete(execution);
-		}
+		void execution.then(
+			() => {
+				this.#pythonAbortControllers.delete(abortController);
+				this.#activePythonExecutions.delete(execution);
+			},
+			() => {
+				this.#pythonAbortControllers.delete(abortController);
+				this.#activePythonExecutions.delete(execution);
+			},
+		);
+		return execution;
 	}
 
 	/**

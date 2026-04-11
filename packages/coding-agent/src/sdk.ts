@@ -912,6 +912,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		taskDepth: options.taskDepth ?? 0,
 		getSessionFile: () => sessionManager.getSessionFile() ?? null,
 		getPythonKernelOwnerId: () => pythonKernelOwnerId,
+		trackPythonExecution: (execution, abortController) => session.trackPythonExecution(execution, abortController),
 		getSessionId: () => sessionManager.getSessionId?.() ?? null,
 		getSessionSpawns: () => options.spawns ?? "*",
 		getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),

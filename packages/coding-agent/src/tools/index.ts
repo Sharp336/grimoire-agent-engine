@@ -140,6 +140,8 @@ export interface ToolSession {
 	getSessionFile: () => string | null;
 	/** Get Python kernel owner ID for session-scoped retained-kernel cleanup */
 	getPythonKernelOwnerId?: () => string | null;
+	/** Track tool-owned Python work so session disposal can await/abort it like direct session Python runs. */
+	trackPythonExecution?<T>(execution: Promise<T>, abortController: AbortController): Promise<T>;
 	/** Get session ID */
 	getSessionId?: () => string | null;
 	/** Get artifacts directory for artifact:// URLs */

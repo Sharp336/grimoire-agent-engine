@@ -24,9 +24,13 @@ const OK_RESULT: KernelExecuteResult = {
 	stdinRequested: false,
 };
 
+type FakeKernelShutdownOptions = { timeoutMs?: number };
+
 class FakeKernel {
 	execute = vi.fn(async () => OK_RESULT);
-	shutdown = vi.fn(async (): Promise<KernelShutdownResult> => ({ confirmed: true }));
+	shutdown = vi.fn(
+		async (_options?: FakeKernelShutdownOptions): Promise<KernelShutdownResult> => ({ confirmed: true }),
+	);
 	ping = vi.fn(async () => true);
 	alive = true;
 
@@ -217,6 +221,34 @@ describe("python executor owner cleanup", () => {
 		expect(replacementKernel.shutdown).toHaveBeenCalledTimes(1);
 	});
 
+
+	it("returns a cancelled result when a dead session restart shutdown times out", async () => {
+		const kernel = new FakeKernel();
+		kernel.alive = false;
+		kernel.shutdown = vi.fn(async (options?: FakeKernelShutdownOptions): Promise<KernelShutdownResult> => {
+			return await new Promise((_, reject) => {
+				const timer = setTimeout(
+					() => reject(new DOMException("Python kernel shutdown timed out", "TimeoutError")),
+					options?.timeoutMs ?? 0,
+				);
+				timer.unref?.();
+			});
+		});
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = vi.spyOn(PythonKernel, "start").mockResolvedValueOnce(kernel as unknown as PythonKernelInstance);
+
+		const result = await executePython("1 + 1", {
+			cwd: "/tmp/restart-timeout-session",
+			sessionId: "restart-timeout-session",
+			kernelMode: "session",
+			timeoutMs: 25,
+		});
+
+		expect(result.cancelled).toBe(true);
+		expect(result.exitCode).toBeUndefined();
+		expect(kernel.shutdown).toHaveBeenCalledWith(expect.objectContaining({ timeoutMs: expect.any(Number) }));
+		expect(startSpy).toHaveBeenCalledTimes(1);
+	});
 	it("clears stuck tracked disposals during resource-exhaustion recovery", async () => {
 		vi.useFakeTimers();
 		try {
@@ -344,6 +376,180 @@ describe("python executor owner cleanup", () => {
 		}
 	});
 
+	it("keeps owner-cleanup retries on the timer path without evicting unrelated live sessions", async () => {
+		vi.useFakeTimers();
+		try {
+			const ownerKernel = new FakeKernel();
+			const unrelatedKernels = [new FakeKernel(), new FakeKernel(), new FakeKernel()];
+			const replacementKernel = new FakeKernel();
+			const retryConfirmation = Promise.withResolvers<KernelShutdownResult>();
+			let shutdownCallCount = 0;
+			ownerKernel.shutdown = vi.fn(async (options?: FakeKernelShutdownOptions): Promise<KernelShutdownResult> => {
+				shutdownCallCount += 1;
+				if (shutdownCallCount === 1) {
+					expect(options).toEqual({ timeoutMs: 2_000 });
+					return { confirmed: false };
+				}
+				if (shutdownCallCount === 2) {
+					expect(options).toBeUndefined();
+					return { confirmed: false };
+				}
+				return await retryConfirmation.promise;
+			});
+			vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+			const startSpy = vi.spyOn(PythonKernel, "start");
+			for (const kernel of [ownerKernel, ...unrelatedKernels, replacementKernel]) {
+				startSpy.mockResolvedValueOnce(kernel as unknown as PythonKernelInstance);
+			}
+
+			await executePython("print('owner-a')", {
+				cwd: "/tmp/timer-retry-owner-a",
+				sessionId: "timer-retry-owner-a",
+				kernelMode: "session",
+				kernelOwnerId: "owner-a",
+			});
+			for (const [index, ownerId] of ["owner-b", "owner-c", "owner-d"].entries()) {
+				await executePython(`print(${index})`, {
+					cwd: `/tmp/timer-retry-${ownerId}`,
+					sessionId: `timer-retry-${ownerId}`,
+					kernelMode: "session",
+					kernelOwnerId: ownerId,
+				});
+			}
+
+			await disposeKernelSessionsByOwner("owner-a");
+			expect(ownerKernel.shutdown).toHaveBeenCalledTimes(2);
+			for (const kernel of unrelatedKernels) {
+				expect(kernel.shutdown).not.toHaveBeenCalled();
+			}
+
+			const blockedExecution = executePython("print('replacement')", {
+				cwd: "/tmp/timer-retry-replacement",
+				sessionId: "timer-retry-replacement",
+				kernelMode: "session",
+				kernelOwnerId: "owner-e",
+			});
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(startSpy).toHaveBeenCalledTimes(4);
+			expect(replacementKernel.execute).not.toHaveBeenCalled();
+			for (const kernel of unrelatedKernels) {
+				expect(kernel.shutdown).not.toHaveBeenCalled();
+			}
+
+			vi.advanceTimersByTime(29_999);
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(ownerKernel.shutdown).toHaveBeenCalledTimes(2);
+			expect(startSpy).toHaveBeenCalledTimes(4);
+			expect(replacementKernel.execute).not.toHaveBeenCalled();
+			for (const kernel of unrelatedKernels) {
+				expect(kernel.shutdown).not.toHaveBeenCalled();
+			}
+
+			vi.advanceTimersByTime(1);
+			await Promise.resolve();
+			await Promise.resolve();
+			expect(ownerKernel.shutdown).toHaveBeenCalledTimes(3);
+			expect(ownerKernel.shutdown).toHaveBeenNthCalledWith(3, undefined);
+			expect(startSpy).toHaveBeenCalledTimes(4);
+			expect(replacementKernel.execute).not.toHaveBeenCalled();
+			for (const kernel of unrelatedKernels) {
+				expect(kernel.shutdown).not.toHaveBeenCalled();
+			}
+
+			retryConfirmation.resolve({ confirmed: true });
+			await blockedExecution;
+			expect(startSpy).toHaveBeenCalledTimes(5);
+			expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
+			for (const kernel of unrelatedKernels) {
+				expect(kernel.shutdown).not.toHaveBeenCalled();
+			}
+
+			await disposeAllKernelSessions();
+			expect(replacementKernel.shutdown).toHaveBeenCalledTimes(1);
+		} finally {
+			vi.useRealTimers();
+		}
+	});
+
+	it("waits for confirmed disposal capacity before evicting unrelated retained sessions", async () => {
+		const ownerKernel = new FakeKernel();
+		const unrelatedKernels = [new FakeKernel(), new FakeKernel(), new FakeKernel()];
+		const replacementKernel = new FakeKernel();
+		const retryConfirmation = Promise.withResolvers<KernelShutdownResult>();
+		let shutdownCallCount = 0;
+		ownerKernel.shutdown = vi.fn(async (_options?: FakeKernelShutdownOptions): Promise<KernelShutdownResult> => {
+			shutdownCallCount += 1;
+			if (shutdownCallCount === 1) {
+				return { confirmed: false };
+			}
+			return await retryConfirmation.promise;
+		});
+		vi.spyOn(pythonKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
+		const startSpy = vi.spyOn(PythonKernel, "start");
+		for (const kernel of [ownerKernel, ...unrelatedKernels, replacementKernel]) {
+			startSpy.mockResolvedValueOnce(kernel as unknown as PythonKernelInstance);
+		}
+
+		await executePython("print('owner-a')", {
+			cwd: "/tmp/unconfirmed-owner-cleanup-a",
+			sessionId: "unconfirmed-owner-cleanup-a",
+			kernelMode: "session",
+			kernelOwnerId: "owner-a",
+		});
+		for (const [index, ownerId] of ["owner-b", "owner-c", "owner-d"].entries()) {
+			await executePython(`print(${index})`, {
+				cwd: `/tmp/unconfirmed-owner-cleanup-${ownerId}`,
+				sessionId: `unconfirmed-owner-cleanup-${ownerId}`,
+				kernelMode: "session",
+				kernelOwnerId: ownerId,
+			});
+		}
+
+		await disposeKernelSessionsByOwner("owner-a");
+		expect(ownerKernel.shutdown).toHaveBeenCalledTimes(2);
+		expect(ownerKernel.shutdown).toHaveBeenNthCalledWith(1, { timeoutMs: 2_000 });
+		expect(ownerKernel.shutdown).toHaveBeenNthCalledWith(2, undefined);
+		for (const kernel of unrelatedKernels) {
+			expect(kernel.shutdown).not.toHaveBeenCalled();
+		}
+
+		const blockedExecution = executePython("print('replacement')", {
+			cwd: "/tmp/unconfirmed-owner-cleanup-replacement",
+			sessionId: "unconfirmed-owner-cleanup-replacement",
+			kernelMode: "session",
+			kernelOwnerId: "owner-e",
+		});
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(startSpy).toHaveBeenCalledTimes(4);
+		expect(replacementKernel.execute).not.toHaveBeenCalled();
+		for (const [index, ownerId] of ["owner-b", "owner-c", "owner-d"].entries()) {
+			await executePython(`print('reuse-${ownerId}')`, {
+				cwd: `/tmp/unconfirmed-owner-cleanup-${ownerId}`,
+				sessionId: `unconfirmed-owner-cleanup-${ownerId}`,
+				kernelMode: "session",
+				kernelOwnerId: ownerId,
+			});
+			expect(unrelatedKernels[index]!.execute).toHaveBeenCalledTimes(2);
+			expect(unrelatedKernels[index]!.shutdown).not.toHaveBeenCalled();
+		}
+		expect(startSpy).toHaveBeenCalledTimes(4);
+		expect(replacementKernel.execute).not.toHaveBeenCalled();
+
+		retryConfirmation.resolve({ confirmed: true });
+		await blockedExecution;
+		expect(startSpy).toHaveBeenCalledTimes(5);
+		expect(replacementKernel.execute).toHaveBeenCalledTimes(1);
+		for (const kernel of unrelatedKernels) {
+			expect(kernel.shutdown).not.toHaveBeenCalled();
+		}
+
+		await disposeAllKernelSessions();
+		expect(replacementKernel.shutdown).toHaveBeenCalledTimes(1);
+	});
+
 	it("owner cleanup retries every shutdown in background and frees retained capacity one confirmation at a time", async () => {
 		const retainedKernels = [new FakeKernel(), new FakeKernel(), new FakeKernel(), new FakeKernel()];
 		const replacementKernel = new FakeKernel();
@@ -351,7 +557,7 @@ describe("python executor owner cleanup", () => {
 		const retryConfirmations = retainedKernels.map(() => Promise.withResolvers<KernelShutdownResult>());
 		for (const [index, kernel] of retainedKernels.entries()) {
 			let shutdownCallCount = 0;
-			kernel.shutdown = vi.fn(async (): Promise<KernelShutdownResult> => {
+			kernel.shutdown = vi.fn(async (_options?: FakeKernelShutdownOptions): Promise<KernelShutdownResult> => {
 				shutdownCallCount += 1;
 				if (shutdownCallCount === 1) {
 					return { confirmed: false };

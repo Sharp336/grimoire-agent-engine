@@ -60,6 +60,7 @@ describe("python tool execution", () => {
 			true,
 			`${tempDir.path()}/session-file.jsonl`,
 			kernelOwnerId,
+			expect.any(AbortSignal),
 		);
 		expect(executeSpy).toHaveBeenCalledWith(
 			"print('hi')",

@@ -89,6 +89,7 @@ describe("python tool settings", () => {
 			true,
 			sessionFile,
 			kernelOwnerId,
+			expect.any(AbortSignal),
 		);
 		expect(executeSpy).toHaveBeenCalledWith(
 			"print(1)",
