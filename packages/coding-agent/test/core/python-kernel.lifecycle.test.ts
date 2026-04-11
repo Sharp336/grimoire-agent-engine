@@ -360,6 +360,6 @@ describe("PythonKernel gateway lifecycle", () => {
 
 		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
 
-		await expect(kernel.shutdown()).resolves.toBeUndefined();
+		await expect(kernel.shutdown()).resolves.toEqual({ confirmed: false });
 	});
 });

@@ -53,11 +53,12 @@ class FakeKernel {
 		return this.alive;
 	}
 
-	async shutdown(): Promise<void> {
+	shutdown = vi.fn(async () => {
 		this.shutdownCalls += 1;
 		this.alive = false;
 		this.blockedExecutionReject?.(new Error("Kernel shut down during execution"));
-	}
+		return { confirmed: true };
+	});
 }
 
 const getModel = () => {

@@ -294,11 +294,43 @@ describe("PythonKernel (external gateway)", () => {
 		expect(chunks.join("")).toContain("result");
 		expect(displays).toEqual([{ type: "json", data: { answer: 42 } }]);
 
-		await kernel.shutdown();
+		const shutdown = await kernel.shutdown();
+		expect(shutdown).toEqual({ confirmed: true });
 		expect(fetchMock).toHaveBeenCalledWith("http://gateway.test/api/kernels/kernel-1", {
 			method: "DELETE",
 			headers: {},
 		});
+	});
+
+	it("returns an unconfirmed shutdown result when kernel deletion is not acknowledged", async () => {
+		const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
+			if (url.endsWith("/api/kernels") && init?.method === "POST") {
+				return new Response(JSON.stringify({ id: "kernel-delete-failure" }), { status: 201 });
+			}
+			if (url.includes("/api/kernels/") && init?.method === "DELETE") {
+				return new Response("delete failed", { status: 500, statusText: "Server Error" });
+			}
+			return new Response("", { status: 200 });
+		});
+		using _hook = hookFetch((input, init) => fetchMock(String(input), init));
+
+		const kernelPromise = PythonKernel.start({ cwd: "/" });
+		await Bun.sleep(10);
+		const ws = FakeWebSocket.lastInstance;
+		if (!ws) throw new Error("WebSocket not initialized");
+		ws.setSendHandler(data => {
+			const msg = typeof data === "string" ? (JSON.parse(data) as JupyterMessage) : decodeMessage(data);
+			sendOkExecution(ws, msg.header.msg_id);
+		});
+
+		const kernel = await kernelPromise;
+		expect(await kernel.shutdown()).toEqual({ confirmed: false });
+		expect(await kernel.shutdown()).toEqual({ confirmed: false });
+		expect(
+			fetchMock.mock.calls.filter(
+				([url, init]) => String(url).endsWith("/api/kernels/kernel-delete-failure") && init?.method === "DELETE",
+			),
+		).toHaveLength(1);
 	});
 
 	it("initializes the IPython prelude", async () => {

@@ -85,6 +85,8 @@ interface KernelSession {
 	dead: boolean;
 	disposing: boolean;
 	disposePromise?: Promise<void>;
+	disposeCapacityPromise?: Promise<void>;
+	resolveDisposeCapacity?: () => void;
 	disposeResultPromise?: Promise<KernelDisposalResult>;
 	lastUsedAt: number;
 	ownerIds: Set<string>;
@@ -399,6 +401,8 @@ function beginDisposingKernelSession(session: KernelSession): boolean {
 
 function finishDisposingKernelSession(session: KernelSession): void {
 	disposingKernelSessions.delete(session);
+	session.resolveDisposeCapacity?.();
+	session.resolveDisposeCapacity = undefined;
 	if (kernelSessions.size === 0 && disposingKernelSessions.size === 0) {
 		stopCleanupTimer();
 	}
@@ -407,7 +411,7 @@ function finishDisposingKernelSession(session: KernelSession): void {
 async function waitForDisposalCapacity(
 	options: Pick<KernelSessionExecutionOptions, "signal" | "deadlineMs">,
 ): Promise<void> {
-	const disposalPromises = Array.from(disposingKernelSessions, session => session.disposePromise).filter(
+	const disposalPromises = Array.from(disposingKernelSessions, session => session.disposeCapacityPromise).filter(
 		(promise): promise is Promise<void> => promise !== undefined,
 	);
 	if (disposalPromises.length === 0) return;
@@ -587,6 +591,8 @@ function clearRetainedKernelSessionTracking(): void {
 			clearInterval(session.heartbeatTimer);
 			session.heartbeatTimer = undefined;
 		}
+		session.resolveDisposeCapacity?.();
+		session.resolveDisposeCapacity = undefined;
 	}
 	kernelSessions.clear();
 	disposingKernelSessions.clear();
@@ -670,13 +676,13 @@ async function restartKernelSession(
 	session.lastUsedAt = Date.now();
 }
 
-type KernelDisposalResult = { status: "completed" } | { status: "failed"; err: unknown };
+type KernelDisposalResult = { status: "confirmed" } | { status: "unconfirmed" } | { status: "failed"; err: unknown };
 
 function createKernelDisposalResultPromise(session: KernelSession, timeoutMs?: number): Promise<KernelDisposalResult> {
 	return Promise.resolve()
 		.then(() => session.kernel.shutdown(timeoutMs === undefined ? undefined : { timeoutMs }))
 		.then(
-			() => ({ status: "completed" as const }),
+			result => (result.confirmed ? { status: "confirmed" as const } : { status: "unconfirmed" as const }),
 			(err: unknown) => ({ status: "failed" as const, err }),
 		);
 }
@@ -711,6 +717,13 @@ async function waitForKernelSessionDisposal(session: KernelSession, timeoutMs?: 
 		return;
 	}
 
+	if (result.status === "unconfirmed") {
+		logger.warn("Retained kernel shutdown was not confirmed during owner cleanup", {
+			sessionId: session.id,
+		});
+		return;
+	}
+
 	if (result.status === "failed") {
 		logger.warn("Failed to shutdown retained kernel during owner cleanup", {
 			sessionId: session.id,
@@ -722,18 +735,25 @@ async function waitForKernelSessionDisposal(session: KernelSession, timeoutMs?: 
 async function disposeKernelSession(session: KernelSession, shutdownTimeoutMs?: number): Promise<void> {
 	if (!session.disposePromise) {
 		if (!beginDisposingKernelSession(session)) return;
+		const releaseDisposalCapacity = Promise.withResolvers<void>();
+		session.disposeCapacityPromise = releaseDisposalCapacity.promise;
+		session.resolveDisposeCapacity = releaseDisposalCapacity.resolve;
 		session.disposeResultPromise = createKernelDisposalResultPromise(session, shutdownTimeoutMs);
-		session.disposePromise = session.disposeResultPromise
-			.then(result => {
-				if (result.status === "failed") {
-					logger.warn("Failed to shutdown kernel", {
-						error: result.err instanceof Error ? result.err.message : String(result.err),
-					});
-				}
-			})
-			.finally(() => {
+		session.disposePromise = session.disposeResultPromise.then(result => {
+			if (result.status === "confirmed") {
 				finishDisposingKernelSession(session);
+				return;
+			}
+			if (result.status === "unconfirmed") {
+				logger.warn("Kernel shutdown was not confirmed; retained capacity remains reserved", {
+					sessionId: session.id,
+				});
+				return;
+			}
+			logger.warn("Failed to shutdown kernel", {
+				error: result.err instanceof Error ? result.err.message : String(result.err),
 			});
+		});
 	}
 	await waitForKernelSessionDisposal(session, shutdownTimeoutMs);
 }

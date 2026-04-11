@@ -49,6 +49,10 @@ interface KernelShutdownOptions {
 	timeoutMs?: number;
 }
 
+export interface KernelShutdownResult {
+	confirmed: boolean;
+}
+
 function getRemainingTimeMs(deadlineMs?: number): number | undefined {
 	if (deadlineMs === undefined) return undefined;
 	return Math.max(0, deadlineMs - Date.now());
@@ -399,10 +403,10 @@ export class PythonKernel {
 	#ws: WebSocket | null = null;
 	#disposed = false;
 	#alive = true;
+	#shutdownConfirmed = false;
 	#messageHandlers = new Map<string, (msg: JupyterMessage) => void>();
 	#channelHandlers = new Map<string, Set<(msg: JupyterMessage) => void>>();
 	#pendingExecutions = new Map<string, (reason: string) => void>();
-
 	private constructor(
 		readonly id: string,
 		readonly kernelId: string,
@@ -1004,8 +1008,8 @@ export class PythonKernel {
 		}
 	}
 
-	async shutdown(options?: KernelShutdownOptions): Promise<void> {
-		if (this.#disposed) return;
+	async shutdown(options?: KernelShutdownOptions): Promise<KernelShutdownResult> {
+		if (this.#disposed) return { confirmed: this.#shutdownConfirmed };
 		this.#disposed = true;
 		this.#alive = false;
 		this.#abortPendingExecutions("Kernel shutdown");
@@ -1016,15 +1020,24 @@ export class PythonKernel {
 			"Python kernel shutdown timed out",
 		);
 
+		let confirmed = false;
 		try {
-			await fetch(`${this.gatewayUrl}/api/kernels/${this.kernelId}`, {
+			const response = await fetch(`${this.gatewayUrl}/api/kernels/${this.kernelId}`, {
 				method: "DELETE",
 				headers: this.#authHeaders(),
 				signal: shutdownSignal,
 			});
+			confirmed = response.ok;
+			if (!confirmed) {
+				logger.warn("Kernel delete request was not confirmed", {
+					status: response.status,
+					statusText: response.statusText,
+				});
+			}
 		} catch (err: unknown) {
 			logger.warn("Failed to delete kernel via API", { error: err instanceof Error ? err.message : String(err) });
 		}
+		this.#shutdownConfirmed = confirmed;
 
 		if (this.#ws) {
 			this.#ws.close();
@@ -1032,8 +1045,16 @@ export class PythonKernel {
 		}
 
 		if (this.isSharedGateway) {
-			await releaseSharedGateway();
+			try {
+				await releaseSharedGateway();
+			} catch (err: unknown) {
+				logger.warn("Failed to release shared gateway after kernel shutdown", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
 		}
+
+		return { confirmed };
 	}
 
 	#sendMessage(msg: JupyterMessage): void {

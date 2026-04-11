@@ -6,7 +6,9 @@ import { getProjectDir } from "@oh-my-pi/pi-utils";
 
 class FakeKernel {
 	execute = vi.fn(async () => this.result);
-	shutdown = vi.fn(async () => {});
+	shutdown = vi.fn(async () => {
+		return { confirmed: true };
+	});
 	ping = vi.fn(async () => true);
 	alive = true;
 
