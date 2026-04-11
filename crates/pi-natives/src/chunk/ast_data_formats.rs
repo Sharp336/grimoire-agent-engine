@@ -2,25 +2,194 @@
 
 use tree_sitter::Node;
 
-use super::{classify::LangClassifier, common::*};
+use super::{
+	classify::{
+		ClassifierTables, LangClassifier, NamingMode, RecurseMode, RuleStyle, StructuralOverrides,
+		semantic_rule,
+	},
+	common::*,
+	kind::ChunkKind,
+};
 
 pub struct DataFormatsClassifier;
 
+const DATA_FORMAT_STRUCTURAL_OVERRIDES: StructuralOverrides = StructuralOverrides {
+	extra_trivia:            &["bare_key", "quoted_key", "dotted_key"],
+	preserved_trivia:        &[],
+	extra_root_wrappers:     &[
+		"array",
+		"block_mapping",
+		"block_node",
+		"block_sequence",
+		"document",
+		"flow_mapping",
+		"flow_node",
+		"flow_sequence",
+		"object",
+		"stream",
+	],
+	preserved_root_wrappers: &[],
+	absorbable_attrs:        &[],
+};
+
+const DATA_FORMAT_ROOT_RULES: &[super::classify::SemanticRule] = &[
+	semantic_rule(
+		"inline_table",
+		ChunkKind::Table,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"object",
+		ChunkKind::Object,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"array",
+		ChunkKind::Array,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"block_mapping",
+		ChunkKind::Map,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"flow_mapping",
+		ChunkKind::Map,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"block_sequence",
+		ChunkKind::List,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"flow_sequence",
+		ChunkKind::List,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"attribute",
+		ChunkKind::Attr,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::ValueContainer,
+	),
+];
+
+const DATA_FORMAT_CLASS_RULES: &[super::classify::SemanticRule] = &[
+	semantic_rule(
+		"inline_table",
+		ChunkKind::Table,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"object",
+		ChunkKind::Object,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"array",
+		ChunkKind::Array,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"block_mapping",
+		ChunkKind::Map,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"flow_mapping",
+		ChunkKind::Map,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"block_sequence",
+		ChunkKind::List,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"flow_sequence",
+		ChunkKind::List,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::SelfNode(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"block_sequence_item",
+		ChunkKind::Item,
+		RuleStyle::Positional,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"attribute",
+		ChunkKind::Attr,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::ValueContainer,
+	),
+];
+
+const DATA_FORMAT_TABLES: ClassifierTables = ClassifierTables {
+	root:                 DATA_FORMAT_ROOT_RULES,
+	class:                DATA_FORMAT_CLASS_RULES,
+	function:             &[],
+	structural_overrides: DATA_FORMAT_STRUCTURAL_OVERRIDES,
+};
+
 impl LangClassifier for DataFormatsClassifier {
-	fn classify_root<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		classify_data_node(node, source, true)
+	fn tables(&self) -> &'static ClassifierTables {
+		&DATA_FORMAT_TABLES
 	}
 
-	fn classify_class<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		classify_data_node(node, source, false)
-	}
-
-	fn classify_function<'t>(
+	fn classify_override<'t>(
 		&self,
-		_node: Node<'t>,
-		_source: &str,
+		context: ChunkContext,
+		node: Node<'t>,
+		source: &str,
 	) -> Option<RawChunkCandidate<'t>> {
-		None
+		match context {
+			ChunkContext::Root => classify_data_node(node, source, true),
+			ChunkContext::ClassBody => classify_data_node(node, source, false),
+			ChunkContext::FunctionBody => None,
+		}
+	}
+
+	fn preserve_children(
+		&self,
+		parent: &RawChunkCandidate<'_>,
+		_children: &[RawChunkCandidate<'_>],
+	) -> bool {
+		// YAML keys with container values should always expose sub-chunks
+		// so that deeply nested keys are individually addressable.
+		parent.force_recurse && parent.kind == ChunkKind::Key
 	}
 }
 
@@ -33,65 +202,51 @@ fn classify_data_node<'t>(
 		// Key-value pairs (JSON pairs, YAML mappings)
 		"pair" => {
 			let name = extract_pair_key(node, source).unwrap_or_else(|| "anonymous".to_string());
-			Some(make_named_chunk(node, format!("key_{name}"), source, recurse_value_container(node)))
+			Some(make_kind_chunk(
+				node,
+				ChunkKind::Key,
+				Some(name),
+				source,
+				recurse_value_container(node),
+			))
 		},
 		"block_mapping_pair" | "flow_pair" => {
 			let name = extract_yaml_key(node, source).unwrap_or_else(|| "anonymous".to_string());
-			Some(make_named_chunk(node, format!("key_{name}"), source, recurse_value_container(node)))
+			let recurse = recurse_value_container(node);
+			let mut candidate = make_kind_chunk(node, ChunkKind::Key, Some(name), source, recurse);
+			// YAML structure is inherently hierarchical. Keys whose value is a
+			// container (mapping/sequence) should always produce sub-chunks so
+			// that deeply nested keys are individually addressable.
+			if candidate.recurse.is_some() {
+				candidate.force_recurse = true;
+			}
+			Some(candidate)
 		},
 		// TOML tables
-		"table" => Some(container_candidate(
+		"table" => {
+			let name = extract_toml_table_name(node, source);
+			Some(make_container_chunk(
+				node,
+				ChunkKind::Table,
+				name,
+				source,
+				Some(recurse_self(node, ChunkContext::ClassBody)),
+			))
+		},
+		// TOML array tables
+		"table_array_element" => Some(make_candidate(
 			node,
-			"table",
-			source,
+			ChunkKind::Table,
+			extract_toml_table_name(node, source).unwrap_or_else(|| "table_array".to_string()),
+			NameStyle::Named,
+			signature_for_node(node, source),
 			Some(recurse_self(node, ChunkContext::ClassBody)),
-		)),
-		// TOML array tables [[...]]
-		"table_array_element" => Some(container_candidate(
-			node,
-			"table_array",
 			source,
-			Some(recurse_self(node, ChunkContext::ClassBody)),
-		)),
-		// TOML inline tables
-		"inline_table" => Some(make_container_chunk(
-			node,
-			"table".to_string(),
-			source,
-			Some(recurse_self(node, ChunkContext::ClassBody)),
-		)),
-		// JSON objects
-		"object" => Some(make_container_chunk(
-			node,
-			"object".to_string(),
-			source,
-			Some(recurse_self(node, ChunkContext::ClassBody)),
-		)),
-		// JSON arrays
-		"array" => Some(make_container_chunk(
-			node,
-			"array".to_string(),
-			source,
-			Some(recurse_self(node, ChunkContext::ClassBody)),
-		)),
-		// YAML block/flow mappings
-		"block_mapping" | "flow_mapping" => Some(make_container_chunk(
-			node,
-			"map".to_string(),
-			source,
-			Some(recurse_self(node, ChunkContext::ClassBody)),
-		)),
-		// YAML block/flow sequences
-		"block_sequence" | "flow_sequence" => Some(make_container_chunk(
-			node,
-			"list".to_string(),
-			source,
-			Some(recurse_self(node, ChunkContext::ClassBody)),
 		)),
 		// YAML sequence items (only when nested, not at root level)
-		"block_sequence_item" if !is_root => Some(positional_candidate(node, "item", source)),
-		// Nix-style attributes that appear in data contexts
-		"attribute" => Some(named_candidate(node, "attr", source, recurse_value_container(node))),
+		"block_sequence_item" if !is_root => {
+			Some(positional_candidate(node, ChunkKind::Item, source))
+		},
 		_ => None,
 	}
 }
@@ -105,6 +260,11 @@ fn extract_pair_key(node: Node<'_>, source: &str) -> Option<String> {
 		.child_by_field_name("key")
 		.or_else(|| child_by_kind(node, &["bare_key", "quoted_key", "dotted_key"]))?;
 	sanitize_identifier(unquote_text(node_text(source, key.start_byte(), key.end_byte())).as_str())
+}
+
+fn extract_toml_table_name(node: Node<'_>, source: &str) -> Option<String> {
+	let key = child_by_kind(node, &["dotted_key", "bare_key", "quoted_key"])?;
+	sanitize_identifier(node_text(source, key.start_byte(), key.end_byte()))
 }
 
 /// Extract key from a YAML `block_mapping_pair` or `flow_pair` node.

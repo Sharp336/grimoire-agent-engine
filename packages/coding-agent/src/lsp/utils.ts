@@ -1,8 +1,10 @@
 export { truncate } from "@oh-my-pi/pi-utils";
 
+import * as fs from "node:fs/promises";
 import path from "node:path";
 import { isEnoent } from "@oh-my-pi/pi-utils";
 import { type Theme, theme } from "../modes/theme/theme";
+import { resolveToCwd } from "../tools/path-utils";
 import type {
 	CodeAction,
 	Command,
@@ -16,144 +18,7 @@ import type {
 	WorkspaceEdit,
 } from "./types";
 
-// =============================================================================
-// Language Detection
-// =============================================================================
-
-const LANGUAGE_MAP: Record<string, string> = {
-	// TypeScript/JavaScript
-	".ts": "typescript",
-	".tsx": "typescriptreact",
-	".js": "javascript",
-	".jsx": "javascriptreact",
-	".mjs": "javascript",
-	".cjs": "javascript",
-	".mts": "typescript",
-	".cts": "typescript",
-
-	// Systems languages
-	".rs": "rust",
-	".go": "go",
-	".c": "c",
-	".h": "c",
-	".cpp": "cpp",
-	".cc": "cpp",
-	".cxx": "cpp",
-	".hpp": "cpp",
-	".hxx": "cpp",
-	".zig": "zig",
-
-	// Scripting languages
-	".py": "python",
-	".rb": "ruby",
-	".lua": "lua",
-	".sh": "shellscript",
-	".bash": "shellscript",
-	".zsh": "shellscript",
-	".fish": "fish",
-	".pl": "perl",
-	".php": "php",
-
-	// JVM languages
-	".java": "java",
-	".kt": "kotlin",
-	".kts": "kotlin",
-	".scala": "scala",
-	".groovy": "groovy",
-	".clj": "clojure",
-
-	// .NET languages
-	".cs": "csharp",
-	".fs": "fsharp",
-	".vb": "vb",
-
-	// Web
-	".html": "html",
-	".htm": "html",
-	".css": "css",
-	".scss": "scss",
-	".sass": "sass",
-	".less": "less",
-	".vue": "vue",
-	".svelte": "svelte",
-
-	// Data formats
-	".json": "json",
-	".jsonc": "jsonc",
-	".yaml": "yaml",
-	".yml": "yaml",
-	".toml": "toml",
-	".xml": "xml",
-	".ini": "ini",
-
-	// Documentation
-	".md": "markdown",
-	".markdown": "markdown",
-	".rst": "restructuredtext",
-	".adoc": "asciidoc",
-	".tex": "latex",
-
-	// Other
-	".sql": "sql",
-	".graphql": "graphql",
-	".gql": "graphql",
-	".proto": "protobuf",
-	".dockerfile": "dockerfile",
-	".tf": "terraform",
-	".hcl": "hcl",
-	".nix": "nix",
-	".ex": "elixir",
-	".exs": "elixir",
-	".erl": "erlang",
-	".hrl": "erlang",
-	".hs": "haskell",
-	".ml": "ocaml",
-	".mli": "ocaml",
-	".swift": "swift",
-	".r": "r",
-	".R": "r",
-	".jl": "julia",
-	".dart": "dart",
-	".elm": "elm",
-	".v": "v",
-	".nim": "nim",
-	".cr": "crystal",
-	".d": "d",
-	".pas": "pascal",
-	".pp": "pascal",
-	".lisp": "lisp",
-	".lsp": "lisp",
-	".rkt": "racket",
-	".scm": "scheme",
-	".ps1": "powershell",
-	".psm1": "powershell",
-	".bat": "bat",
-	".cmd": "bat",
-	".tla": "tlaplus",
-	".tlaplus": "tlaplus",
-};
-
-/**
- * Detect language ID from file path.
- * Returns the LSP language identifier for the file type.
- */
-export function detectLanguageId(filePath: string): string {
-	const ext = path.extname(filePath).toLowerCase();
-	const basename = path.basename(filePath).toLowerCase();
-
-	// Handle special filenames
-	if (basename === "dockerfile" || basename.startsWith("dockerfile.")) {
-		return "dockerfile";
-	}
-	if (basename === "makefile" || basename === "gnumakefile") {
-		return "makefile";
-	}
-	if (basename === "cmakelists.txt" || ext === ".cmake") {
-		return "cmake";
-	}
-
-	return LANGUAGE_MAP[ext] ?? "plaintext";
-}
+export { detectLanguageId } from "../utils/lang-from-path";
 
 // =============================================================================
 // URI Handling (Cross-Platform)
@@ -686,6 +551,30 @@ export async function collectGlobMatches(
 		matches.push(match);
 	}
 	return { matches, truncated: false };
+}
+
+export async function resolveDiagnosticTargets(
+	file: string,
+	cwd: string,
+	maxMatches: number,
+): Promise<{ matches: string[]; truncated: boolean }> {
+	if (!hasGlobPattern(file)) {
+		return { matches: [file], truncated: false };
+	}
+
+	const resolved = resolveToCwd(file, cwd);
+	try {
+		const stat = await fs.stat(resolved);
+		if (stat.isFile()) {
+			return { matches: [file], truncated: false };
+		}
+	} catch (error) {
+		if (!isEnoent(error)) {
+			throw error;
+		}
+	}
+
+	return collectGlobMatches(file, cwd, maxMatches);
 }
 // =============================================================================
 // Hover Content Extraction

@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@oh-my-pi/swarm-extension",
-	"version": "13.19.0",
+	"version": "14.1.0",
 	"description": "Swarm orchestration extension for omp",
 	"homepage": "https://github.com/can1357/oh-my-pi",
 	"author": "Derek Rynd",
@@ -24,9 +24,15 @@
 		"omp-swarm": "src/cli.ts"
 	},
 	"scripts": {
-		"check": "tsgo -p tsconfig.json"
+		"check": "biome check . && bun run check:types",
+		"check:types": "tsgo -p tsconfig.json --noEmit",
+		"lint": "biome lint .",
+		"fix": "biome check --write --unsafe .",
+		"fmt": "biome format --write ."
 	},
-	"dependencies": {},
+	"dependencies": {
+		"@oh-my-pi/pi-utils": "workspace:*"
+	},
 	"devDependencies": {
 		"@types/bun": "^1.3"
 	},

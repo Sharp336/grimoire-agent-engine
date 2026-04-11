@@ -4,10 +4,10 @@
  * These provide rich visualization for tool calls and results in the TUI.
  */
 import type { Component } from "@oh-my-pi/pi-tui";
+import { editToolRenderer } from "../edit/renderer";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { lspToolRenderer } from "../lsp/render";
 import type { Theme } from "../modes/theme/theme";
-import { editToolRenderer } from "../patch";
 import { taskToolRenderer } from "../task/render";
 import { webSearchToolRenderer } from "../web/search/render";
 import { askToolRenderer } from "./ask";
@@ -15,6 +15,7 @@ import { astEditToolRenderer } from "./ast-edit";
 import { astGrepToolRenderer } from "./ast-grep";
 import { bashToolRenderer } from "./bash";
 import { calculatorToolRenderer } from "./calculator";
+import { debugToolRenderer } from "./debug";
 import { findToolRenderer } from "./find";
 import { ghRunWatchToolRenderer } from "./gh-renderer";
 import { grepToolRenderer } from "./grep";
@@ -46,6 +47,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	ast_grep: astGrepToolRenderer as ToolRenderer,
 	ast_edit: astEditToolRenderer as ToolRenderer,
 	bash: bashToolRenderer as ToolRenderer,
+	debug: debugToolRenderer as ToolRenderer,
 	python: pythonToolRenderer as ToolRenderer,
 	calc: calculatorToolRenderer as ToolRenderer,
 	edit: editToolRenderer as ToolRenderer,

@@ -2,133 +2,252 @@
 
 use tree_sitter::Node;
 
-use super::{classify::LangClassifier, common::*};
+use super::{
+	classify::{
+		ClassifierTables, LangClassifier, NamingMode, RecurseMode, RuleStyle, StructuralOverrides,
+		semantic_rule,
+	},
+	common::*,
+	kind::ChunkKind,
+};
 
 pub struct RubyLuaClassifier;
 
+const RUBY_LUA_ROOT_RULES: &[super::classify::SemanticRule] = &[
+	semantic_rule(
+		"function_definition",
+		ChunkKind::Function,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"method",
+		ChunkKind::Function,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"singleton_method",
+		ChunkKind::Function,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"class",
+		ChunkKind::Class,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::Auto(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"module",
+		ChunkKind::Module,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::Auto(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"if_statement",
+		ChunkKind::If,
+		RuleStyle::Positional,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"unless",
+		ChunkKind::If,
+		RuleStyle::Positional,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"while_statement",
+		ChunkKind::Loop,
+		RuleStyle::Positional,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"for_statement",
+		ChunkKind::Loop,
+		RuleStyle::Positional,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"assignment",
+		ChunkKind::Declarations,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"expression_statement",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"function_call",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+];
+
+const RUBY_LUA_CLASS_RULES: &[super::classify::SemanticRule] = &[
+	semantic_rule(
+		"class",
+		ChunkKind::Class,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::Auto(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"module",
+		ChunkKind::Module,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::Auto(ChunkContext::ClassBody),
+	),
+	semantic_rule(
+		"assignment",
+		ChunkKind::Fields,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"call",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"command",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"identifier",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+];
+
+const RUBY_LUA_FUNCTION_RULES: &[super::classify::SemanticRule] = &[
+	semantic_rule(
+		"if_statement",
+		ChunkKind::If,
+		RuleStyle::Positional,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"unless",
+		ChunkKind::If,
+		RuleStyle::Positional,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"case_statement",
+		ChunkKind::Switch,
+		RuleStyle::Positional,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"case_match",
+		ChunkKind::Switch,
+		RuleStyle::Positional,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"while_statement",
+		ChunkKind::Loop,
+		RuleStyle::Positional,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"for_statement",
+		ChunkKind::Loop,
+		RuleStyle::Positional,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"assignment",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+];
+
+const RUBY_LUA_TABLES: ClassifierTables = ClassifierTables {
+	root:                 RUBY_LUA_ROOT_RULES,
+	class:                RUBY_LUA_CLASS_RULES,
+	function:             RUBY_LUA_FUNCTION_RULES,
+	structural_overrides: StructuralOverrides {
+		extra_trivia:            &[],
+		preserved_trivia:        &[],
+		extra_root_wrappers:     &[],
+		preserved_root_wrappers: &["module"],
+		absorbable_attrs:        &[],
+	},
+};
+
 impl LangClassifier for RubyLuaClassifier {
-	fn preserve_root_wrapper(&self, kind: &str) -> bool {
-		kind == "module"
+	fn tables(&self) -> &'static ClassifierTables {
+		&RUBY_LUA_TABLES
 	}
 
-	fn classify_root<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		Some(match node.kind() {
-			// ── Imports ──
-			"command" | "call" => {
-				// Ruby `require`/`require_relative` appear as call/command nodes.
-				// Check if the target is an import keyword.
+	fn classify_override<'t>(
+		&self,
+		context: ChunkContext,
+		node: Node<'t>,
+		source: &str,
+	) -> Option<RawChunkCandidate<'t>> {
+		match (context, node.kind()) {
+			(ChunkContext::Root, "command" | "call") => {
 				let target = extract_identifier(node, source);
-				match target.as_deref() {
+				Some(match target.as_deref() {
 					Some("require" | "require_relative" | "load" | "autoload") => {
-						group_candidate(node, "imports", source)
+						group_candidate(node, ChunkKind::Imports, source)
 					},
-					_ => group_candidate(node, "stmts", source),
-				}
+					_ => group_candidate(node, ChunkKind::Statements, source),
+				})
 			},
-
-			// ── Functions ──
-			"function_definition" => {
-				named_candidate(node, "fn", source, recurse_body(node, ChunkContext::FunctionBody))
-			},
-			"method" | "singleton_method" => {
-				named_candidate(node, "fn", source, recurse_body(node, ChunkContext::FunctionBody))
-			},
-
-			// ── Containers ──
-			"class" => container_candidate(node, "class", source, recurse_class(node)),
-			"module" => container_candidate(node, "mod", source, recurse_class(node)),
-
-			// ── Control flow (top-level scripts) ──
-			"if_statement" | "unless" | "while_statement" | "for_statement" => {
-				return Some(
-					self
-						.classify_function(node, source)
-						.unwrap_or_else(|| group_candidate(node, "stmts", source)),
-				);
-			},
-
-			// ── Assignments ──
-			"assignment" => group_candidate(node, "decls", source),
-
-			// ── Statements ──
-			"expression_statement" | "function_call" => group_candidate(node, "stmts", source),
-
-			_ => return None,
-		})
-	}
-
-	fn classify_class<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		Some(match node.kind() {
-			// ── Methods ──
-			"method" | "singleton_method" => {
+			(ChunkContext::ClassBody, "method" | "singleton_method") => {
 				let name = extract_identifier(node, source).unwrap_or_else(|| "anonymous".to_string());
-				if name == "initialize" {
-					make_named_chunk(
-						node,
-						"constructor".to_string(),
-						source,
-						recurse_body(node, ChunkContext::FunctionBody),
-					)
+				let kind = if name == "initialize" {
+					ChunkKind::Constructor
 				} else {
-					make_named_chunk(
-						node,
-						format!("fn_{name}"),
-						source,
-						recurse_body(node, ChunkContext::FunctionBody),
-					)
-				}
+					ChunkKind::Function
+				};
+				let identifier = (kind != ChunkKind::Constructor).then_some(name);
+				Some(make_kind_chunk(
+					node,
+					kind,
+					identifier,
+					source,
+					resolve_recurse(node, ChunkContext::FunctionBody),
+				))
 			},
-
-			// ── Nested containers ──
-			"class" => container_candidate(node, "class", source, recurse_class(node)),
-			"module" => container_candidate(node, "mod", source, recurse_class(node)),
-
-			// ── Fields / constants ──
-			"assignment" => group_candidate(node, "fields", source),
-
-			// ── Calls (include, attr_reader, etc.) and bare identifiers (private) ──
-			"call" | "command" | "identifier" => group_candidate(node, "stmts", source),
-
-			_ => return None,
-		})
-	}
-
-	fn classify_function<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		let fn_recurse = || recurse_body(node, ChunkContext::FunctionBody);
-		Some(match node.kind() {
-			// ── Control flow ──
-			"if_statement" | "unless" => make_candidate(
-				node,
-				"if".to_string(),
-				NameStyle::Named,
-				None,
-				fn_recurse(),
-				false,
-				source,
-			),
-			"case_statement" | "case_match" => make_candidate(
-				node,
-				"switch".to_string(),
-				NameStyle::Named,
-				None,
-				fn_recurse(),
-				false,
-				source,
-			),
-			"while_statement" | "for_statement" => make_candidate(
-				node,
-				"loop".to_string(),
-				NameStyle::Named,
-				None,
-				fn_recurse(),
-				false,
-				source,
-			),
-
-			// ── Variables ──
-			"assignment" => group_candidate(node, "stmts", source),
-
-			_ => return None,
-		})
+			_ => None,
+		}
 	}
 }

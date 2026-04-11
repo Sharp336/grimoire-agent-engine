@@ -55,7 +55,15 @@ interface ParsedBuiltinSlashCommand {
 interface BuiltinSlashCommandSpec extends BuiltinSlashCommand {
 	aliases?: string[];
 	allowArgs?: boolean;
-	handle: (command: ParsedBuiltinSlashCommand, runtime: BuiltinSlashCommandRuntime) => Promise<void> | void;
+	/**
+	 * Handle the command. Return a string to pass remaining text through as prompt input.
+	 * Return void/undefined to consume the input entirely.
+	 */
+	handle: (
+		command: ParsedBuiltinSlashCommand,
+		runtime: BuiltinSlashCommandRuntime,
+		// biome-ignore lint/suspicious/noConfusingVoidType: void needed so handlers returning nothing are assignable
+	) => Promise<string | undefined> | string | void;
 }
 
 export interface BuiltinSlashCommandRuntime {
@@ -69,7 +77,11 @@ function parseBuiltinSlashCommand(text: string): ParsedBuiltinSlashCommand | nul
 	if (!body) return null;
 
 	const firstWhitespace = body.search(/\s/);
-	if (firstWhitespace === -1) {
+	const firstColon = body.indexOf(":");
+	const firstSeparator =
+		firstWhitespace === -1 ? firstColon : firstColon === -1 ? firstWhitespace : Math.min(firstWhitespace, firstColon);
+
+	if (firstSeparator === -1) {
 		return {
 			name: body,
 			args: "",
@@ -78,8 +90,8 @@ function parseBuiltinSlashCommand(text: string): ParsedBuiltinSlashCommand | nul
 	}
 
 	return {
-		name: body.slice(0, firstWhitespace),
-		args: body.slice(firstWhitespace).trim(),
+		name: body.slice(0, firstSeparator),
+		args: body.slice(firstSeparator + 1).trim(),
 		text,
 	};
 }
@@ -889,6 +901,37 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		},
 	},
 	{
+		name: "force",
+		description: "Force next turn to use a specific tool",
+		inlineHint: "<tool-name> [prompt]",
+		allowArgs: true,
+		handle: (command, runtime) => {
+			const spaceIdx = command.args.indexOf(" ");
+			const toolName = spaceIdx === -1 ? command.args : command.args.slice(0, spaceIdx);
+			const prompt = spaceIdx === -1 ? "" : command.args.slice(spaceIdx + 1).trim();
+
+			if (!toolName) {
+				runtime.ctx.showError("Usage: /force:<tool-name> [prompt]");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+
+			try {
+				runtime.ctx.session.setForcedToolChoice(toolName);
+				runtime.ctx.showStatus(`Next turn forced to use ${toolName}.`);
+			} catch (error) {
+				runtime.ctx.showError(error instanceof Error ? error.message : String(error));
+				runtime.ctx.editor.setText("");
+				return;
+			}
+
+			runtime.ctx.editor.setText("");
+
+			// If a prompt was provided, pass it through as input
+			if (prompt) return prompt;
+		},
+	},
+	{
 		name: "quit",
 		description: "Quit the application",
 		handle: shutdownHandler,
@@ -916,9 +959,14 @@ export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BU
 /**
  * Execute a builtin slash command when it matches known command syntax.
  *
- * Returns true when a builtin command consumed the input; false otherwise.
+ * Returns `false` when no builtin matched. Returns `true` when a command consumed
+ * the input entirely. Returns a `string` when the command was handled but remaining
+ * text should be sent as a prompt.
  */
-export async function executeBuiltinSlashCommand(text: string, runtime: BuiltinSlashCommandRuntime): Promise<boolean> {
+export async function executeBuiltinSlashCommand(
+	text: string,
+	runtime: BuiltinSlashCommandRuntime,
+): Promise<string | boolean> {
 	const parsed = parseBuiltinSlashCommand(text);
 	if (!parsed) return false;
 
@@ -928,6 +976,6 @@ export async function executeBuiltinSlashCommand(text: string, runtime: BuiltinS
 		return false;
 	}
 
-	await command.handle(parsed, runtime);
-	return true;
+	const remaining = await command.handle(parsed, runtime);
+	return remaining ?? true;
 }

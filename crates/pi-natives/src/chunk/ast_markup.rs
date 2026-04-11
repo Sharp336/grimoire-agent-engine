@@ -2,36 +2,43 @@
 
 use tree_sitter::Node;
 
-use super::{classify::LangClassifier, common::*};
+use super::{
+	classify::{ClassifierTables, LangClassifier},
+	common::*,
+	kind::ChunkKind,
+};
+use crate::language::SupportLang;
 
 pub struct MarkupClassifier;
 
 impl MarkupClassifier {
 	fn classify_section<'t>(node: Node<'t>, source: &str) -> RawChunkCandidate<'t> {
 		let name = extract_markdown_heading(node, source).unwrap_or_else(|| "anonymous".to_string());
-		make_container_chunk(
+		force_container(make_container_chunk(
 			node,
-			format!("section_{name}"),
+			ChunkKind::Section,
+			Some(name),
 			source,
 			Some(recurse_self(node, ChunkContext::ClassBody)),
-		)
+		))
 	}
 
 	fn classify_block_statement<'t>(node: Node<'t>, source: &str) -> RawChunkCandidate<'t> {
 		let name =
 			extract_glimmer_block_name(node, source).unwrap_or_else(|| "anonymous".to_string());
-		make_container_chunk(
+		force_container(make_container_chunk(
 			node,
-			format!("block_{name}"),
+			ChunkKind::Block,
+			Some(name),
 			source,
 			Some(recurse_self(node, ChunkContext::ClassBody)),
-		)
+		))
 	}
 
 	fn classify_mustache_statement<'t>(node: Node<'t>, source: &str) -> RawChunkCandidate<'t> {
 		let name =
 			extract_glimmer_mustache_name(node, source).unwrap_or_else(|| "anonymous".to_string());
-		make_named_chunk(node, format!("mustache_{name}"), source, None)
+		make_kind_chunk(node, ChunkKind::Mustache, Some(name), source, None)
 	}
 
 	/// Classify HTML-like element nodes that appear inside handlebars blocks.
@@ -40,51 +47,78 @@ impl MarkupClassifier {
 			"element" | "script_element" | "style_element" | "element_node" => {
 				let name =
 					extract_element_tag_name(node, source).unwrap_or_else(|| "anonymous".to_string());
-				Some(make_container_chunk(
+				Some(force_container(make_container_chunk(
 					node,
-					format!("tag_{name}"),
+					ChunkKind::Tag,
+					Some(name),
 					source,
 					Some(recurse_self(node, ChunkContext::ClassBody)),
-				))
+				)))
 			},
-			"text_node" => Some(group_candidate(node, "text", source)),
+			"text_node" => Some(group_candidate(node, ChunkKind::Text, source)),
 			_ => None,
 		}
 	}
 }
 
 impl LangClassifier for MarkupClassifier {
-	fn classify_root<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		match node.kind() {
-			"section" => Some(Self::classify_section(node, source)),
-			"block_statement" => Some(Self::classify_block_statement(node, source)),
-			"mustache_statement" => Some(Self::classify_mustache_statement(node, source)),
-			"element" | "script_element" | "style_element" | "element_node" | "text_node" => {
-				Self::classify_element(node, source)
-			},
-			_ => None,
-		}
+	fn tables(&self) -> &'static ClassifierTables {
+		static TABLES: ClassifierTables = ClassifierTables {
+			root:                 &[],
+			class:                &[],
+			function:             &[],
+			structural_overrides: super::classify::StructuralOverrides::EMPTY,
+		};
+		&TABLES
 	}
 
-	fn classify_class<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		match node.kind() {
-			"section" => Some(Self::classify_section(node, source)),
-			"block_statement" => Some(Self::classify_block_statement(node, source)),
-			"mustache_statement" => Some(Self::classify_mustache_statement(node, source)),
-			"element" | "script_element" | "style_element" | "element_node" | "text_node" => {
-				Self::classify_element(node, source)
-			},
-			_ => None,
-		}
-	}
-
-	fn classify_function<'t>(
+	fn classify_override<'t>(
 		&self,
-		_node: Node<'t>,
-		_source: &str,
+		context: ChunkContext,
+		node: Node<'t>,
+		source: &str,
 	) -> Option<RawChunkCandidate<'t>> {
-		None
+		if !matches!(context, ChunkContext::Root | ChunkContext::ClassBody) {
+			return None;
+		}
+		match node.kind() {
+			"section" => Some(Self::classify_section(node, source)),
+			"fenced_code_block" => Some(classify_fenced_code_block(node, source)),
+			"html_block" => Some(classify_html_block(node, source)),
+			"block_statement" => Some(Self::classify_block_statement(node, source)),
+			"mustache_statement" => Some(Self::classify_mustache_statement(node, source)),
+			"element" | "script_element" | "style_element" | "element_node" | "text_node" => {
+				Self::classify_element(node, source)
+			},
+			_ => None,
+		}
 	}
+}
+
+const fn force_container(mut candidate: RawChunkCandidate<'_>) -> RawChunkCandidate<'_> {
+	candidate.force_recurse = true;
+	candidate
+}
+
+fn classify_fenced_code_block<'t>(node: Node<'t>, source: &str) -> RawChunkCandidate<'t> {
+	let embedded_language = fenced_code_language(node, source);
+	let identifier = embedded_language
+		.map(embedded_selector_token)
+		.map(str::to_string);
+	let candidate =
+		with_region_node(make_kind_chunk(node, ChunkKind::Code, identifier, source, None), None);
+	match (child_by_kind(node, &["code_fence_content"]), embedded_language) {
+		(Some(content_node), Some(language)) => {
+			with_injected_subtree(candidate, language, content_node)
+		},
+		_ => candidate,
+	}
+}
+
+fn classify_html_block<'t>(node: Node<'t>, source: &str) -> RawChunkCandidate<'t> {
+	let candidate =
+		with_region_node(make_kind_chunk(node, ChunkKind::Html, None, source, None), None);
+	with_injected_subtree(candidate, SupportLang::Html, node)
 }
 
 /// Extract heading text from a Markdown `section` node's `atx_heading` or
@@ -109,6 +143,14 @@ fn extract_glimmer_block_name(node: Node<'_>, source: &str) -> Option<String> {
 				sanitize_identifier(node_text(source, name.start_byte(), name.end_byte()))
 			})
 	})
+}
+
+fn fenced_code_language(node: Node<'_>, source: &str) -> Option<SupportLang> {
+	child_by_kind(node, &["info_string"])
+		.and_then(|info| child_by_kind(info, &["language"]))
+		.and_then(|lang| {
+			SupportLang::from_alias(node_text(source, lang.start_byte(), lang.end_byte()))
+		})
 }
 
 /// Extract name from a Handlebars `mustache_statement`:

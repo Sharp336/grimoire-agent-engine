@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
@@ -5,14 +6,21 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { glob } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
-import { getRemoteDir, untilAborted } from "@oh-my-pi/pi-utils";
+import { getRemoteDir, prompt, readImageMetadata, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
-import { renderPromptTemplate } from "../config/prompt-templates";
+import { computeLineHash } from "../edit/line-hash";
+import {
+	type ChunkReadTarget,
+	formatChunkedRead,
+	parseChunkReadPath,
+	parseChunkSelector,
+	resolveAnchorStyle,
+	resolveChunkAutoIndent,
+} from "../edit/modes/chunk";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
 import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
-import { computeLineHash } from "../patch/hashline";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import readChunkDescription from "../prompts/tools/read-chunk.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -28,26 +36,14 @@ import { renderCodeCell, renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import { resolveEditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import {
-	ImageInputTooLargeError,
-	loadImageInput,
-	MAX_IMAGE_INPUT_BYTES,
-	readImageMetadata,
-} from "../utils/image-input";
+import { ImageInputTooLargeError, loadImageInput, MAX_IMAGE_INPUT_BYTES } from "../utils/image-loading";
 import { convertFileWithMarkit } from "../utils/markit";
-import { detectSupportedImageMimeTypeFromFile } from "../utils/mime";
 import { type ArchiveReader, openArchive, parseArchivePathCandidates } from "./archive-reader";
-import {
-	type ChunkReadTarget,
-	formatChunkedRead,
-	parseChunkReadPath,
-	parseChunkSelector,
-	resolveAnchorStyle,
-} from "./chunk-tree";
 import {
 	executeReadUrl,
 	isReadableUrlPath,
 	loadReadUrlCacheEntry,
+	parseReadUrlTarget,
 	type ReadUrlToolDetails,
 	renderReadUrlCall,
 	renderReadUrlResult,
@@ -56,6 +52,22 @@ import { applyListLimit } from "./list-limit";
 import { formatFullOutputReference, formatStyledTruncationWarning, type OutputMeta } from "./output-meta";
 import { expandPath, resolveReadPath } from "./path-utils";
 import { formatAge, formatBytes, shortenPath, wrapBrackets } from "./render-utils";
+import {
+	executeReadQuery,
+	getRowByKey,
+	getRowByRowId,
+	getTableSchema,
+	isSqliteFile,
+	listTables,
+	parseSqlitePathCandidates,
+	parseSqliteSelector,
+	queryRows,
+	renderRow,
+	renderSchema,
+	renderTable,
+	renderTableList,
+	resolveTableRowLookup,
+} from "./sqlite-reader";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 
@@ -66,18 +78,7 @@ function isProseLanguage(language: string | undefined): boolean {
 }
 
 // Document types converted to markdown via markit.
-const CONVERTIBLE_EXTENSIONS = new Set([
-	".pdf",
-	".doc",
-	".docx",
-	".ppt",
-	".pptx",
-	".xls",
-	".xlsx",
-	".rtf",
-	".epub",
-	".ipynb",
-]);
+const CONVERTIBLE_EXTENSIONS = new Set([".pdf", ".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx", ".rtf", ".epub"]);
 
 // Remote mount path prefix (sshfs mounts) - skip fuzzy matching to avoid hangs
 const REMOTE_MOUNT_PREFIX = getRemoteDir() + path.sep;
@@ -435,6 +436,29 @@ interface ResolvedArchiveReadPath {
 	suffixResolution?: { from: string; to: string };
 }
 
+interface ResolvedSqliteReadPath {
+	absolutePath: string;
+	sqliteSubPath: string;
+	queryString: string;
+	suffixResolution?: { from: string; to: string };
+}
+
+function parseSqliteSelectorInput(selector: string | undefined): { subPath: string; queryString: string } {
+	if (!selector) {
+		return { subPath: "", queryString: "" };
+	}
+
+	const queryIndex = selector.indexOf("?");
+	if (queryIndex === -1) {
+		return { subPath: selector.replace(/^:+/, ""), queryString: "" };
+	}
+
+	return {
+		subPath: selector.slice(0, queryIndex).replace(/^:+/, ""),
+		queryString: selector.slice(queryIndex + 1),
+	};
+}
+
 /**
  * Read tool implementation.
  *
@@ -463,10 +487,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		this.#inspectImageEnabled = session.settings.get("inspect_image.enabled");
 		this.description =
 			resolveEditMode(session) === "chunk"
-				? renderPromptTemplate(readChunkDescription, {
+				? prompt.render(readChunkDescription, {
 						anchorStyle: resolveAnchorStyle(session.settings),
+						chunkAutoIndent: resolveChunkAutoIndent(),
 					})
-				: renderPromptTemplate(readDescription, {
+				: prompt.render(readDescription, {
 						DEFAULT_LIMIT: String(this.#defaultLimit),
 						DEFAULT_MAX_LINES: String(DEFAULT_MAX_LINES),
 						IS_HASHLINE_MODE: displayMode.hashLines,
@@ -503,6 +528,53 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					return {
 						absolutePath,
 						archiveSubPath: candidate.archivePath === readPath ? "" : candidate.subPath,
+						suffixResolution,
+					};
+				} catch (retryError) {
+					if (!isNotFoundError(retryError)) {
+						throw retryError;
+					}
+				}
+			}
+		}
+
+		return null;
+	}
+
+	async #resolveSqliteReadPath(readPath: string, signal?: AbortSignal): Promise<ResolvedSqliteReadPath | null> {
+		const candidates = parseSqlitePathCandidates(readPath);
+		for (const candidate of candidates) {
+			let absolutePath = resolveReadPath(candidate.sqlitePath, this.session.cwd);
+			let suffixResolution: { from: string; to: string } | undefined;
+
+			try {
+				const stat = await Bun.file(absolutePath).stat();
+				if (stat.isDirectory()) continue;
+				if (!(await isSqliteFile(absolutePath))) continue;
+
+				return {
+					absolutePath,
+					sqliteSubPath: candidate.subPath,
+					queryString: candidate.queryString,
+					suffixResolution,
+				};
+			} catch (error) {
+				if (!isNotFoundError(error) || isRemoteMountPath(absolutePath)) continue;
+
+				const suffixMatch = await findUniqueSuffixMatch(candidate.sqlitePath, this.session.cwd, signal);
+				if (!suffixMatch) continue;
+
+				try {
+					const retryStat = await Bun.file(suffixMatch.absolutePath).stat();
+					if (retryStat.isDirectory()) continue;
+					if (!(await isSqliteFile(suffixMatch.absolutePath))) continue;
+
+					absolutePath = suffixMatch.absolutePath;
+					suffixResolution = { from: candidate.sqlitePath, to: suffixMatch.displayPath };
+					return {
+						absolutePath,
+						sqliteSubPath: candidate.subPath,
+						queryString: candidate.queryString,
 						suffixResolution,
 					};
 				} catch (retryError) {
@@ -723,6 +795,132 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		return result;
 	}
 
+	async #readSqlite(
+		sel: string | undefined,
+		resolvedSqlitePath: ResolvedSqliteReadPath,
+		signal?: AbortSignal,
+	): Promise<AgentToolResult<ReadToolDetails>> {
+		throwIfAborted(signal);
+
+		const selectorInput = sel
+			? parseSqliteSelectorInput(sel)
+			: { subPath: resolvedSqlitePath.sqliteSubPath, queryString: resolvedSqlitePath.queryString };
+		const selector = parseSqliteSelector(selectorInput.subPath, selectorInput.queryString);
+		const details: ReadToolDetails = {
+			resolvedPath: resolvedSqlitePath.absolutePath,
+			suffixResolution: resolvedSqlitePath.suffixResolution,
+		};
+
+		let db: Database | null = null;
+		try {
+			db = new Database(resolvedSqlitePath.absolutePath, { readonly: true, strict: true });
+			db.run("PRAGMA busy_timeout = 3000");
+			throwIfAborted(signal);
+
+			switch (selector.kind) {
+				case "list": {
+					const listLimit = applyListLimit(listTables(db), { limit: 500 });
+					const output = prependSuffixResolutionNotice(
+						renderTableList(listLimit.items),
+						resolvedSqlitePath.suffixResolution,
+					);
+					const truncation = truncateHead(output, { maxLines: Number.MAX_SAFE_INTEGER });
+					details.truncation = truncation.truncated ? truncation : undefined;
+					const resultBuilder = toolResult<ReadToolDetails>(details)
+						.text(truncation.content)
+						.sourcePath(resolvedSqlitePath.absolutePath)
+						.limits({ resultLimit: listLimit.meta.resultLimit?.reached });
+					if (truncation.truncated) {
+						resultBuilder.truncation(truncation, { direction: "head" });
+					}
+					return resultBuilder.done();
+				}
+				case "schema": {
+					const sampleRows = queryRows(db, selector.table, { limit: selector.sampleLimit, offset: 0 });
+					let output = renderSchema(getTableSchema(db, selector.table), {
+						columns: sampleRows.columns,
+						rows: sampleRows.rows,
+					});
+					if (sampleRows.rows.length < sampleRows.totalCount) {
+						const remaining = sampleRows.totalCount - sampleRows.rows.length;
+						output += `\n[${remaining} more rows; use sel="${selector.table}?limit=20&offset=${sampleRows.rows.length}" to continue]`;
+					}
+					return toolResult<ReadToolDetails>(details)
+						.text(prependSuffixResolutionNotice(output, resolvedSqlitePath.suffixResolution))
+						.sourcePath(resolvedSqlitePath.absolutePath)
+						.done();
+				}
+				case "row": {
+					const lookup = resolveTableRowLookup(db, selector.table);
+					const row =
+						lookup.kind === "pk"
+							? getRowByKey(db, selector.table, lookup, selector.key)
+							: getRowByRowId(db, selector.table, selector.key);
+					if (!row) {
+						return toolResult<ReadToolDetails>(details)
+							.text(
+								prependSuffixResolutionNotice(
+									`No row found in table '${selector.table}' for key '${selector.key}'.`,
+									resolvedSqlitePath.suffixResolution,
+								),
+							)
+							.sourcePath(resolvedSqlitePath.absolutePath)
+							.done();
+					}
+					return toolResult<ReadToolDetails>(details)
+						.text(prependSuffixResolutionNotice(renderRow(row), resolvedSqlitePath.suffixResolution))
+						.sourcePath(resolvedSqlitePath.absolutePath)
+						.done();
+				}
+				case "query": {
+					const page = queryRows(db, selector.table, selector);
+					return toolResult<ReadToolDetails>(details)
+						.text(
+							prependSuffixResolutionNotice(
+								renderTable(page.columns, page.rows, {
+									totalCount: page.totalCount,
+									offset: selector.offset,
+									limit: selector.limit,
+									table: selector.table,
+									dbPath: resolvedSqlitePath.absolutePath,
+								}),
+								resolvedSqlitePath.suffixResolution,
+							),
+						)
+						.sourcePath(resolvedSqlitePath.absolutePath)
+						.done();
+				}
+				case "raw": {
+					const result = executeReadQuery(db, selector.sql);
+					return toolResult<ReadToolDetails>(details)
+						.text(
+							prependSuffixResolutionNotice(
+								renderTable(result.columns, result.rows, {
+									totalCount: result.rows.length,
+									offset: 0,
+									limit: result.rows.length || DEFAULT_MAX_LINES,
+									table: "query",
+									dbPath: resolvedSqlitePath.absolutePath,
+								}),
+								resolvedSqlitePath.suffixResolution,
+							),
+						)
+						.sourcePath(resolvedSqlitePath.absolutePath)
+						.done();
+				}
+			}
+
+			throw new ToolError("Unsupported SQLite selector");
+		} catch (error) {
+			if (error instanceof ToolError) {
+				throw error;
+			}
+			throw new ToolError(error instanceof Error ? error.message : String(error));
+		} finally {
+			db?.close();
+		}
+	}
+
 	async execute(
 		_toolCallId: string,
 		params: ReadParams,
@@ -745,25 +943,28 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return this.#handleInternalUrl(readPath, offset, limit);
 		}
 
-		if (isReadableUrlPath(readPath)) {
-			const parsed = parseSel(sel);
+		const parsedUrlTarget = parseReadUrlTarget(readPath, sel);
+		if (parsedUrlTarget) {
 			if (!this.session.settings.get("fetch.enabled")) {
 				throw new ToolError("URL reads are disabled by settings.");
 			}
-			const raw = parsed.kind === "raw";
-			const { offset, limit } = selToOffsetLimit(parsed);
-			if (offset !== undefined || limit !== undefined) {
-				const cached = await loadReadUrlCacheEntry(this.session, { path: readPath, timeout, raw }, signal, {
-					ensureArtifact: true,
-					preferCached: true,
-				});
-				return this.#buildInMemoryTextResult(cached.output, offset, limit, {
+			if (parsedUrlTarget.offset !== undefined || parsedUrlTarget.limit !== undefined) {
+				const cached = await loadReadUrlCacheEntry(
+					this.session,
+					{ path: parsedUrlTarget.path, timeout, raw: parsedUrlTarget.raw },
+					signal,
+					{
+						ensureArtifact: true,
+						preferCached: true,
+					},
+				);
+				return this.#buildInMemoryTextResult(cached.output, parsedUrlTarget.offset, parsedUrlTarget.limit, {
 					details: { ...cached.details },
 					sourceUrl: cached.details.finalUrl,
 					entityLabel: "URL output",
 				});
 			}
-			return executeReadUrl(this.session, { path: readPath, timeout, raw }, signal);
+			return executeReadUrl(this.session, { path: parsedUrlTarget.path, timeout, raw: parsedUrlTarget.raw }, signal);
 		}
 
 		const parsedReadPath = chunkMode ? parseChunkReadPath(readPath) : { filePath: readPath };
@@ -778,6 +979,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		if (archivePath) {
 			const { offset, limit } = selToOffsetLimit(parsed);
 			return this.#readArchive(readPath, offset, limit, archivePath, signal);
+		}
+
+		const sqlitePath = await this.#resolveSqliteReadPath(readPath, signal);
+		if (sqlitePath) {
+			return this.#readSqlite(sel, sqlitePath, signal);
 		}
 
 		let absolutePath = resolveReadPath(localReadPath, this.session.cwd);
@@ -824,12 +1030,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			return dirResult;
 		}
 
-		const mimeType = await detectSupportedImageMimeTypeFromFile(absolutePath);
+		const imageMetadata = await readImageMetadata(absolutePath);
+		const mimeType = imageMetadata?.mimeType;
 		const ext = path.extname(absolutePath).toLowerCase();
 		const hasEditTool = this.session.hasEditTool ?? true;
 		const language = getLanguageFromPath(absolutePath);
 		const skipChunksForExplore = !hasEditTool && !this.session.settings.get("read.explorechunks");
 		const skipChunksForProse = isProseLanguage(language) && !this.session.settings.get("read.prosechunks");
+		const shouldConvertWithMarkit =
+			CONVERTIBLE_EXTENSIONS.has(ext) || (ext === ".ipynb" && (parsed.kind === "raw" || !chunkMode));
 
 		if (chunkMode && parsed.kind !== "raw" && !skipChunksForExplore && !skipChunksForProse) {
 			const absoluteLineRange =
@@ -873,7 +1082,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		}
 
 		// Read the file based on type
-		let content: (TextContent | ImageContent)[];
+		let content: Array<TextContent | ImageContent>;
 		let details: ReadToolDetails = {};
 		let sourcePath: string | undefined;
 		let truncationInfo:
@@ -882,14 +1091,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		if (mimeType) {
 			if (this.#inspectImageEnabled) {
-				const metadata = await readImageMetadata({
-					path: readPath,
-					cwd: this.session.cwd,
-					resolvedPath: absolutePath,
-					detectedMimeType: mimeType,
-				});
+				const metadata = imageMetadata;
 				const outputMime = metadata?.mimeType ?? mimeType;
-				const outputBytes = metadata?.bytes ?? fileSize;
+				const outputBytes = fileSize;
 				const metadataLines = [
 					"Image metadata:",
 					`- MIME: ${outputMime}`,
@@ -940,7 +1144,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					throw error;
 				}
 			}
-		} else if (CONVERTIBLE_EXTENSIONS.has(ext)) {
+		} else if (shouldConvertWithMarkit) {
 			// Convert document or notebook via markit.
 			const result = await convertFileWithMarkit(absolutePath, signal);
 			if (result.ok) {
@@ -987,11 +1191,13 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			// Raw text or line-range mode
 			const { offset, limit } = selToOffsetLimit(parsed);
 			const startLine = offset ? Math.max(0, offset - 1) : 0;
-			const startLineDisplay = startLine + 1; // For display (1-indexed)
+			const startLineDisplay = startLine + 1;
 
-			const effectiveLimit = limit ?? this.#defaultLimit;
+			const DEFAULT_LIMIT = this.#defaultLimit;
+			const effectiveLimit = limit ?? DEFAULT_LIMIT;
 			const maxLinesToCollect = Math.min(effectiveLimit, DEFAULT_MAX_LINES);
 			const selectedLineLimit = effectiveLimit;
+
 			const streamResult = await streamLinesFromFile(
 				absolutePath,
 				startLine,

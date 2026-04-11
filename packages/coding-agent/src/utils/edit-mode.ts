@@ -1,3 +1,5 @@
+import { $env, $flag } from "@oh-my-pi/pi-utils";
+
 export type EditMode = "replace" | "patch" | "hashline" | "chunk";
 
 export const DEFAULT_EDIT_MODE: EditMode = "hashline";
@@ -31,8 +33,16 @@ export function resolveEditMode(session: EditModeSessionLike): EditMode {
 	const modelVariant = session.settings.getEditVariantForModel?.(activeModel);
 	if (modelVariant) return modelVariant;
 
-	const envMode = normalizeEditMode(Bun.env.PI_EDIT_VARIANT);
+	const envMode = normalizeEditMode($env.PI_EDIT_VARIANT);
 	if (envMode) return envMode;
+
+	if (!$flag("PI_STRICT_EDIT_MODE")) {
+		if (activeModel?.includes("spark")) return "replace";
+		if (activeModel?.includes("nano")) return "replace";
+		if (activeModel?.includes("mini")) return "replace";
+		if (activeModel?.includes("haiku")) return "replace";
+		if (activeModel?.includes("flash")) return "replace";
+	}
 
 	const settingsMode = normalizeEditMode(String(session.settings.get("edit.mode") ?? ""));
 	return settingsMode ?? DEFAULT_EDIT_MODE;

@@ -2,25 +2,45 @@
 
 use napi_derive::napi;
 
-use crate::chunk::state::ChunkState;
+use crate::chunk::{kind::ChunkKind, state::ChunkState};
 
 #[derive(Clone)]
 pub struct ChunkNode {
-	pub path:        String,
-	pub name:        String,
-	pub leaf:        bool,
-	pub parent_path: Option<String>,
-	pub children:    Vec<String>,
-	pub signature:   Option<String>,
-	pub start_line:  u32,
-	pub end_line:    u32,
-	pub line_count:  u32,
-	pub start_byte:  u32,
-	pub end_byte:    u32,
+	pub path:                String,
+	pub identifier:          Option<String>,
+	pub kind:                ChunkKind,
+	pub leaf:                bool,
+	/// For virtual chunks (for example `theirs` branches in conflicts), content
+	/// that is rendered instead of slicing `source`.
+	pub virtual_content:     Option<String>,
+	pub parent_path:         Option<String>,
+	pub children:            Vec<String>,
+	pub signature:           Option<String>,
+	pub start_line:          u32,
+	pub end_line:            u32,
+	pub line_count:          u32,
+	pub start_byte:          u32,
+	pub end_byte:            u32,
+	/// Start byte of the semantic declaration used for checksums. This can be
+	/// later than `start_byte` when the chunk absorbs attached leading trivia
+	/// such as doc comments or attributes.
+	pub checksum_start_byte: u32,
+
+	/// End byte of the prologue region. `None` means the chunk does not expose
+	/// regions.
+	pub prologue_end_byte:   Option<u32>,
+	/// Start byte of the epilogue region. `None` means the chunk does not expose
+	/// regions.
+	pub epilogue_start_byte: Option<u32>,
+
 	pub checksum:    String,
 	pub error:       bool,
 	pub indent:      u32,
 	pub indent_char: String,
+	/// True for group-candidate chunks (e.g. `stmts`, `imports`, `decls`) that
+	/// represent an ordered list of similar items. Append/prepend is valid on
+	/// these even when they are leaf nodes.
+	pub group:       bool,
 }
 
 #[derive(Clone)]
@@ -41,15 +61,13 @@ pub struct ChunkTree {
 pub struct ChunkInfo {
 	/// Chunk selector path within the tree.
 	pub path:       String,
-	/// Short display name for the chunk (e.g. symbol or region label).
-	pub name:       String,
+	/// Bare chunk identifier (without kind prefix), if available.
+	pub identifier: Option<String>,
 	/// Stable checksum anchor for this chunk.
 	pub checksum:   String,
 	/// 1-based start line in the source file (inclusive).
-	#[napi(js_name = "startLine")]
 	pub start_line: u32,
 	/// 1-based end line in the source file (inclusive).
-	#[napi(js_name = "endLine")]
 	pub end_line:   u32,
 	/// Whether this node is a leaf (no child chunks).
 	pub leaf:       bool,
@@ -65,30 +83,51 @@ pub enum ChunkReadStatus {
 	/// No chunk matched the requested selector.
 	#[napi(value = "not_found")]
 	NotFound,
+	/// Chunk matched but does not support the requested region.
+	#[napi(value = "unsupported_region")]
+	UnsupportedRegion,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[napi(string_enum)]
+pub enum ChunkRegion {
+	#[napi(value = "^")]
+	Head,
+	#[napi(value = "~")]
+	Body,
+}
+
+impl ChunkRegion {
+	pub const fn as_str(self) -> &'static str {
+		match self {
+			Self::Head => "^",
+			Self::Body => "~",
+		}
+	}
 }
 
 /// Structural edit to apply relative to a chunk anchor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[napi(string_enum)]
 pub enum ChunkEditOp {
-	/// Replace the chunk body, or a line range when `line`/`endLine` are set.
+	/// Replace the targeted region, or a substring via `find`.
 	#[napi(value = "replace")]
 	Replace,
-	/// Remove the chunk's source range.
+	/// Remove the targeted region.
 	#[napi(value = "delete")]
 	Delete,
-	/// Insert `content` as the last child of the target chunk.
-	#[napi(value = "append_child")]
-	AppendChild,
-	/// Insert `content` as the first child of the target chunk.
-	#[napi(value = "prepend_child")]
-	PrependChild,
-	/// Insert `content` after the target chunk's source range.
-	#[napi(value = "append_sibling")]
-	AppendSibling,
-	/// Insert `content` before the target chunk's source range.
-	#[napi(value = "prepend_sibling")]
-	PrependSibling,
+	/// Insert `content` before the targeted region span.
+	#[napi(value = "before")]
+	Before,
+	/// Insert `content` after the targeted region span.
+	#[napi(value = "after")]
+	After,
+	/// Insert `content` at the start inside the targeted region.
+	#[napi(value = "prepend")]
+	Prepend,
+	/// Insert `content` at the end inside the targeted region.
+	#[napi(value = "append")]
+	Append,
 }
 
 impl ChunkEditOp {
@@ -96,10 +135,10 @@ impl ChunkEditOp {
 		match self {
 			Self::Replace => "replace",
 			Self::Delete => "delete",
-			Self::AppendChild => "append_child",
-			Self::PrependChild => "prepend_child",
-			Self::AppendSibling => "append_sibling",
-			Self::PrependSibling => "prepend_sibling",
+			Self::Before => "before",
+			Self::After => "after",
+			Self::Prepend => "prepend",
+			Self::Append => "append",
 		}
 	}
 }
@@ -120,10 +159,8 @@ pub struct ChunkReadTarget {
 #[napi(object)]
 pub struct VisibleLineRange {
 	/// First line to include.
-	#[napi(js_name = "startLine")]
 	pub start_line: u32,
 	/// Last line to include.
-	#[napi(js_name = "endLine")]
 	pub end_line:   u32,
 }
 
@@ -168,31 +205,87 @@ impl ChunkAnchorStyle {
 		}
 	}
 
-	fn render_i(&self, pre: &str, indent: &str, name: &str, crc: &str) -> String {
+	fn render_i(
+		&self,
+		marker: (&str, &str),
+		indent: &str,
+		name: &str,
+		crc: &str,
+		line_count_suffix: &str,
+	) -> String {
 		fn extract_kind(name: &str) -> &str {
 			name.find('_').map_or_else(|| name, |index| &name[..index])
 		}
+		let (open, close) = marker;
 		match self {
-			Self::Full => format!("{indent}[{pre}{name}#{crc}]"),
-			Self::Kind => format!("{indent}[{pre}{kind}#{crc}]", kind = extract_kind(name)),
-			Self::Bare => format!("{indent}[{pre}#{crc}]"),
-			Self::FullOmit => format!("{indent}[{pre}{name}]"),
-			Self::KindOmit => format!("{indent}[{pre}{kind}]", kind = extract_kind(name)),
+			Self::Full => format!("{indent}{open}{name}#{crc}{close}{line_count_suffix}"),
+			Self::Kind => {
+				format!(
+					"{indent}{open}{kind}#{crc}{close}{line_count_suffix}",
+					kind = extract_kind(name)
+				)
+			},
+			Self::Bare => format!("{indent}{open}#{crc}{close}{line_count_suffix}"),
+			Self::FullOmit => format!("{indent}{open}{name}{close}{line_count_suffix}"),
+			Self::KindOmit => {
+				format!("{indent}{open}{kind}{close}{line_count_suffix}", kind = extract_kind(name))
+			},
 			Self::None => String::new(),
 		}
 	}
 
-	/// Render an opening anchor tag: `[name#crc]`.
-	/// Returns empty string for `None` style.
-	pub fn render(&self, indent: &str, name: &str, crc: &str) -> String {
-		self.render_i("", indent, name, crc)
+	/// Render an opening anchor tag with head/body line counts:
+	/// `[< name#crc >] (H+B lns)` for containers, `[< name#crc >] (N lns)` for
+	/// leaves. Omitted when total lines <= 1. Returns empty string for `None`
+	/// style.
+	pub fn render(
+		&self,
+		indent: &str,
+		name: &str,
+		crc: &str,
+		head_lines: u32,
+		body_lines: u32,
+	) -> String {
+		let total = head_lines + body_lines;
+		let suffix = if total <= 1 {
+			String::new()
+		} else if body_lines == 0 {
+			format!(" ({total} lns)")
+		} else {
+			format!(" ({head_lines}+{body_lines} lns)")
+		};
+		self.render_i(("[<", ">]"), indent, name, crc, &suffix)
 	}
 
-	/// Render a closing anchor tag: `[/name#crc]`.
+	/// Render a closing anchor tag: `[</ name#crc >]`.
 	/// Returns empty string for `None` style.
 	pub fn render_close(&self, indent: &str, name: &str, crc: &str) -> String {
-		self.render_i("/", indent, name, crc)
+		self.render_i(("[</", ">]"), indent, name, crc, "")
 	}
+}
+
+/// How a chunk participates in a focus-scoped render pass.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[napi(string_enum)]
+pub enum ChunkFocusMode {
+	/// Emit full content and recurse normally.
+	#[napi(value = "expanded")]
+	Expanded,
+	/// Emit just the opening anchor; do not recurse or emit body.
+	#[napi(value = "collapsed")]
+	Collapsed,
+	/// Emit opening + closing anchors; recurse into focused children only.
+	/// Interior gap lines between children are suppressed.
+	#[napi(value = "container")]
+	Container,
+}
+
+/// Path + focus mode pair for the N-API boundary (`HashMap` doesn't cross FFI).
+#[derive(Clone, Debug)]
+#[napi(object)]
+pub struct FocusedPath {
+	pub path: String,
+	pub mode: ChunkFocusMode,
 }
 
 /// Options for `ChunkState.render`: which subtree to show and how anchors
@@ -201,31 +294,29 @@ impl ChunkAnchorStyle {
 #[napi(object)]
 pub struct RenderParams {
 	/// Path of the chunk to render; `None` uses the tree root.
-	#[napi(js_name = "chunkPath")]
 	pub chunk_path:           Option<String>,
 	/// Title line shown above the tree (often the file path).
 	pub title:                String,
 	/// Optional language label for the header block.
-	#[napi(js_name = "languageTag")]
 	pub language_tag:         Option<String>,
 	/// Restrict output to an inclusive line range of the file.
-	#[napi(js_name = "visibleRange")]
 	pub visible_range:        Option<VisibleLineRange>,
 	/// When true, list only direct children instead of a full subtree.
-	#[napi(js_name = "renderChildrenOnly")]
 	pub render_children_only: bool,
 	/// Hide checksums in anchors when true.
-	#[napi(js_name = "omitChecksum")]
 	pub omit_checksum:        bool,
 	/// Anchor formatting style for chunk headers.
-	#[napi(js_name = "anchorStyle")]
 	pub anchor_style:         Option<ChunkAnchorStyle>,
 	/// Include a one-line preview for leaf chunks.
-	#[napi(js_name = "showLeafPreview")]
 	pub show_leaf_preview:    bool,
 	/// Replace tab characters in displayed previews (e.g. two spaces).
-	#[napi(js_name = "tabReplacement")]
 	pub tab_replacement:      Option<String>,
+	/// When true, normalize displayed indentation to canonical tabs.
+	pub normalize_indent:     Option<bool>,
+
+	/// When set, restrict rendering to these chunks with their specified focus
+	/// modes. Everything not in this list is skipped.
+	pub focused_paths: Option<Vec<FocusedPath>>,
 }
 
 /// Options for `ChunkState.renderRead`: selector path, display path, and
@@ -234,26 +325,21 @@ pub struct RenderParams {
 #[napi(object)]
 pub struct ReadRenderParams {
 	/// Read selector (`sel=...` path, line range, or empty for whole tree).
-	#[napi(js_name = "readPath")]
 	pub read_path:           String,
 	/// Path shown in titles and error messages (often the file path).
-	#[napi(js_name = "displayPath")]
 	pub display_path:        String,
 	/// Optional language label for the rendered block.
-	#[napi(js_name = "languageTag")]
 	pub language_tag:        Option<String>,
 	/// Hide checksums in rendered anchors.
-	#[napi(js_name = "omitChecksum")]
 	pub omit_checksum:       bool,
 	/// Anchor formatting style.
-	#[napi(js_name = "anchorStyle")]
 	pub anchor_style:        Option<ChunkAnchorStyle>,
 	/// Optional absolute file line range to intersect with the resolved chunk.
-	#[napi(js_name = "absoluteLineRange")]
 	pub absolute_line_range: Option<VisibleLineRange>,
 	/// Replace tabs in embedded previews.
-	#[napi(js_name = "tabReplacement")]
 	pub tab_replacement:     Option<String>,
+	/// When true, normalize displayed indentation to canonical tabs.
+	pub normalize_indent:    Option<bool>,
 }
 
 /// Rendered chunk text plus optional resolution metadata for the read request.
@@ -272,42 +358,40 @@ pub struct ReadResult {
 #[napi(object)]
 pub struct EditOperation {
 	/// Edit kind (replace, delete, insert relative to anchor).
-	pub op:       ChunkEditOp,
+	pub op:      ChunkEditOp,
 	/// Chunk selector path; falls back to `EditParams.defaultSelector` when
 	/// omitted.
-	pub sel:      Option<String>,
+	pub sel:     Option<String>,
 	/// Optional checksum anchor; falls back to `EditParams.defaultCrc` when
 	/// omitted.
-	pub crc:      Option<String>,
+	pub crc:     Option<String>,
+	/// Region to target. When omitted, targets the full chunk.
+	pub region:  Option<ChunkRegion>,
 	/// Replacement or inserted text (meaning depends on `op`).
-	pub content:  Option<String>,
-	/// For line-scoped `replace`, 1-based start line inside the target chunk.
-	pub line:     Option<u32>,
-	/// For line-scoped `replace`, 1-based end line inside the chunk (defaults to
-	/// `line`).
-	#[napi(js_name = "endLine")]
-	pub end_line: Option<u32>,
+	pub content: Option<String>,
+	/// For scoped find/replace: literal substring to locate inside the target
+	/// chunk. Must match exactly once. Pairs with `content` as the replacement.
+	pub find:    Option<String>,
 }
 
 /// Arguments for applying a batch of chunk edits to a file.
 #[derive(Clone)]
 #[napi(object)]
 pub struct EditParams {
-	/// Edits to apply in order (scheduling may reorder line-scoped groups).
+	/// Edits to apply in order.
 	pub operations:       Vec<EditOperation>,
+	/// When true, normalize indentation for response rendering and inserted
+	/// content. When false, preserve literal tabs/spaces.
+	pub normalize_indent: Option<bool>,
 	/// Default chunk selector when an `EditOperation` omits `sel`.
-	#[napi(js_name = "defaultSelector")]
 	pub default_selector: Option<String>,
 	/// Default checksum when an `EditOperation` omits `crc`.
-	#[napi(js_name = "defaultCrc")]
 	pub default_crc:      Option<String>,
 	/// Anchor formatting for rendered response text.
-	#[napi(js_name = "anchorStyle")]
 	pub anchor_style:     Option<ChunkAnchorStyle>,
 	/// Working directory used to resolve `filePath` and display paths.
 	pub cwd:              String,
 	/// Path to the source file to edit (often relative to `cwd`).
-	#[napi(js_name = "filePath")]
 	pub file_path:        String,
 }
 
@@ -319,21 +403,16 @@ pub struct EditResult {
 	/// Chunk tree state after applying edits and re-parsing.
 	pub state:         ChunkState,
 	/// Full file text before edits.
-	#[napi(js_name = "diffBefore")]
 	pub diff_before:   String,
 	/// Full file text after edits.
-	#[napi(js_name = "diffAfter")]
 	pub diff_after:    String,
 	/// Rendered summary for tooling (hunks, anchors), driven by `anchorStyle`.
-	#[napi(js_name = "responseText")]
 	pub response_text: String,
 	/// Whether the on-disk source changed.
 	pub changed:       bool,
 	/// Whether the updated source re-parsed without fatal issues.
-	#[napi(js_name = "parseValid")]
 	pub parse_valid:   bool,
 	/// Absolute or normalized paths that were written or touched.
-	#[napi(js_name = "touchedPaths")]
 	pub touched_paths: Vec<String>,
 	/// Non-fatal issues (e.g. selector warnings) collected during apply.
 	pub warnings:      Vec<String>,

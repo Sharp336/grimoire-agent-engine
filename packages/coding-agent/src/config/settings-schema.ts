@@ -229,6 +229,8 @@ export const SETTINGS_SCHEMA = {
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
 
+	modelProviderOrder: { type: "array", default: EMPTY_STRING_ARRAY },
+
 	cycleOrder: { type: "array", default: DEFAULT_CYCLE_ORDER },
 
 	// ────────────────────────────────────────────────────────────────────────
@@ -1246,6 +1248,16 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"debug.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Debug",
+			description: "Enable the debug tool for DAP-based debugging",
+		},
+	},
+
 	"calc.enabled": {
 		type: "boolean",
 		default: false,
@@ -1369,6 +1381,27 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Max Async Jobs",
 			description: "Maximum concurrent background jobs (1-100)",
+			submenu: true,
+		},
+	},
+
+	"bash.autoBackground.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Bash Auto-Background",
+			description: "Automatically background long-running bash commands and deliver the result later",
+		},
+	},
+
+	"bash.autoBackground.thresholdMs": {
+		type: "number",
+		default: 60_000,
+		ui: {
+			tab: "tools",
+			label: "Bash Auto-Background Delay",
+			description: "Milliseconds to wait before a bash command is moved to the background (0 = immediately)",
 			submenu: true,
 		},
 	},
@@ -1673,6 +1706,16 @@ export const SETTINGS_SCHEMA = {
 	"commit.mapReduceMaxConcurrency": { type: "number", default: 5 },
 
 	"commit.changelogMaxDiffChars": { type: "number", default: 120000 },
+
+	"dev.autoqa": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Auto QA",
+			description: "Enable automated tool issue reporting (report_tool_issue) for all agents",
+		},
+	},
 
 	"thinkingBudgets.minimal": { type: "number", default: 1024 },
 

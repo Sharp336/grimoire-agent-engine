@@ -13,6 +13,7 @@ export type ResolvedOpenAICompat = Required<
 function detectStrictModeSupport(provider: string, baseUrl: string): boolean {
 	if (
 		provider === "openai" ||
+		provider === "openrouter" ||
 		provider === "cerebras" ||
 		provider === "together" ||
 		provider === "github-copilot" ||
@@ -28,6 +29,7 @@ function detectStrictModeSupport(provider: string, baseUrl: string): boolean {
 		normalizedBaseUrl.includes("models.inference.ai.azure.com") ||
 		normalizedBaseUrl.includes("api.cerebras.ai") ||
 		normalizedBaseUrl.includes("api.together.xyz") ||
+		normalizedBaseUrl.includes("openrouter.ai") ||
 		normalizedBaseUrl.includes("api.deepseek.com") ||
 		normalizedBaseUrl.includes("deepseek.com")
 	);
@@ -47,7 +49,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 
 	const isCerebras = provider === "cerebras" || baseUrl.includes("cerebras.ai");
 	const isZai = provider === "zai" || baseUrl.includes("api.z.ai");
-	const isKimiModel = model.id.includes("moonshotai/kimi");
+	const isKimiModel = model.id.includes("moonshotai/kimi") || /^kimi[-.]/i.test(model.id);
 	const isAlibaba = provider === "alibaba-coding-plan" || baseUrl.includes("dashscope");
 	const isQwen = model.id.toLowerCase().includes("qwen");
 

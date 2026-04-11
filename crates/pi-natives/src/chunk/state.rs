@@ -9,11 +9,15 @@ use regex::Regex;
 
 use super::{
 	build_chunk_tree,
-	resolve::{resolve_chunk_selector, resolve_chunk_with_crc, split_selector_and_crc},
+	indent::{detect_file_indent_char, detect_file_indent_step, normalize_to_tabs},
+	resolve::{
+		ParsedSelector, chunk_region_range, format_region_ref, format_selector_tree,
+		resolve_chunk_selector, resolve_chunk_with_crc, split_selector_crc_and_region,
+	},
 };
 use crate::chunk::types::{
-	ChunkInfo, ChunkNode, ChunkReadStatus, ChunkReadTarget, ChunkTree, EditParams, EditResult,
-	ReadRenderParams, ReadResult, RenderParams, VisibleLineRange,
+	ChunkInfo, ChunkNode, ChunkReadStatus, ChunkReadTarget, ChunkRegion, ChunkTree, EditParams,
+	EditResult, ReadRenderParams, ReadResult, RenderParams, VisibleLineRange,
 };
 
 const LINE_RANGE_SELECTOR_RE: &str = r"^L(\d+)(?:-L?(\d+))?$";
@@ -29,20 +33,63 @@ static TLAPLUS_END_TRANSLATION_REGEX: LazyLock<Regex> = LazyLock::new(|| {
 	Regex::new(TLAPLUS_END_TRANSLATION_RE).expect("tlaplus end regex must compile")
 });
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ConflictMeta {
+	pub theirs_content:  String,
+	pub ours_label:      String,
+	pub theirs_label:    String,
+	pub base_content:    Option<String>,
+	pub base_label:      Option<String>,
+	pub ours_start_byte: usize,
+	pub ours_end_byte:   usize,
+}
+
 #[derive(Clone)]
 pub struct ChunkStateInner {
-	pub(crate) source:   String,
-	pub(crate) language: String,
-	pub(crate) tree:     ChunkTree,
-	lookup:              HashMap<String, usize>,
-	checksum_lookup:     HashMap<String, Vec<usize>>,
-	leaf_lookup:         HashMap<String, Vec<usize>>,
-	suffix_lookup:       HashMap<String, Vec<usize>>,
+	pub(crate) source:        String,
+	pub(crate) language:      String,
+	pub(crate) tree:          ChunkTree,
+	pub(crate) notebook:      Option<crate::chunk::ast_ipynb::SharedNotebookContext>,
+	pub(crate) conflict_meta: HashMap<String, ConflictMeta>,
+	lookup:                   HashMap<String, usize>,
+	checksum_lookup:          HashMap<String, Vec<usize>>,
+	leaf_lookup:              HashMap<String, Vec<usize>>,
+	suffix_lookup:            HashMap<String, Vec<usize>>,
 }
 
 impl ChunkStateInner {
 	pub(crate) fn parse(source: String, language: String) -> Result<Self> {
 		let normalized_language = normalize_language(language.as_str());
+		if normalized_language == "ipynb" {
+			let parsed =
+				crate::chunk::ast_ipynb::parse_notebook(&source).map_err(napi::Error::from_reason)?;
+			let kernel_lang = parsed.context.kernel_language.clone();
+			let tree = crate::chunk::ast_ipynb::build_notebook_tree_from_virtual(
+				parsed.virtual_source.as_str(),
+				kernel_lang.as_str(),
+			)
+			.map_err(napi::Error::from_reason)?;
+			let ctx = std::sync::Arc::new(parsed.context);
+			let mut inner = Self::new(parsed.virtual_source, normalized_language, tree);
+			inner.notebook = Some(ctx);
+			return Ok(inner);
+		}
+		if crate::chunk::conflict::has_conflict_markers(source.as_str()) {
+			let conflicts = crate::chunk::conflict::detect_conflicts(source.as_str());
+			if !conflicts.is_empty() {
+				let clean_result = crate::chunk::conflict::accept_ours(source.as_str(), &conflicts);
+				let mut tree =
+					build_chunk_tree(clean_result.source.as_str(), normalized_language.as_str())?;
+				let conflict_meta = crate::chunk::conflict::inject_conflict_chunks(
+					&mut tree,
+					clean_result.source.as_str(),
+					&clean_result,
+				);
+				let mut inner = Self::new(clean_result.source, normalized_language, tree);
+				inner.conflict_meta = conflict_meta;
+				return Ok(inner);
+			}
+		}
 		let tree = build_chunk_tree(source.as_str(), normalized_language.as_str())?;
 		Ok(Self::new(source, normalized_language, tree))
 	}
@@ -75,7 +122,17 @@ impl ChunkStateInner {
 					.push(index);
 			}
 		}
-		Self { source, language, tree, lookup, checksum_lookup, leaf_lookup, suffix_lookup }
+		Self {
+			source,
+			language,
+			tree,
+			notebook: None,
+			conflict_meta: HashMap::new(),
+			lookup,
+			checksum_lookup,
+			leaf_lookup,
+			suffix_lookup,
+		}
 	}
 
 	pub(crate) const fn source(&self) -> &str {
@@ -179,7 +236,7 @@ impl ChunkState {
 impl ChunkState {
 	/// Build chunk state by parsing `source` with the given `language` id (e.g.
 	/// `typescript`).
-	#[napi(factory, js_name = "parse")]
+	#[napi(factory)]
 	pub fn parse(source: String, language: String) -> Result<Self> {
 		ChunkStateInner::parse(source, language).map(Self::from_inner)
 	}
@@ -203,13 +260,13 @@ impl ChunkState {
 	}
 
 	/// Line count of the source buffer.
-	#[napi(getter, js_name = "lineCount")]
+	#[napi(getter)]
 	pub fn line_count(&self) -> u32 {
 		self.inner.tree().line_count
 	}
 
 	/// Count of tree-sitter error nodes seen while building the tree.
-	#[napi(getter, js_name = "parseErrors")]
+	#[napi(getter)]
 	pub fn parse_errors(&self) -> u32 {
 		self.inner.tree().parse_errors
 	}
@@ -221,21 +278,33 @@ impl ChunkState {
 	}
 
 	/// Selector path string for the synthetic root (often empty).
-	#[napi(getter, js_name = "rootPath")]
+	#[napi(getter)]
 	pub fn root_path(&self) -> String {
 		self.inner.tree().root_path.clone()
 	}
 
 	/// Top-level child chunk paths under the root.
-	#[napi(getter, js_name = "rootChildren")]
+	#[napi(getter)]
 	pub fn root_children(&self) -> Vec<String> {
 		self.inner.tree().root_children.clone()
 	}
 
 	/// Total number of chunk nodes.
-	#[napi(getter, js_name = "chunkCount")]
+	#[napi(getter)]
 	pub fn chunk_count(&self) -> u32 {
 		self.inner.tree().chunks.len() as u32
+	}
+
+	/// True when the parsed file contains unresolved merge conflicts.
+	#[napi]
+	pub fn has_conflicts(&self) -> bool {
+		!self.inner.conflict_meta.is_empty()
+	}
+
+	/// Count of unresolved merge conflicts represented in the chunk tree.
+	#[napi]
+	pub fn conflict_count(&self) -> u32 {
+		self.inner.conflict_meta.len() as u32
 	}
 
 	/// Summary for the root chunk, if it exists.
@@ -245,8 +314,8 @@ impl ChunkState {
 	}
 
 	/// Look up [`ChunkInfo`] for a chunk selector path.
-	#[napi(js_name = "chunk")]
-	pub fn chunk_info_for_path(&self, chunk_path: String) -> Option<ChunkInfo> {
+	#[napi]
+	pub fn chunk(&self, chunk_path: String) -> Option<ChunkInfo> {
 		let mut warnings = Vec::new();
 		resolve_chunk_selector(self.inner(), Some(chunk_path.as_str()), &mut warnings)
 			.ok()
@@ -282,7 +351,7 @@ impl ChunkState {
 	}
 
 	/// Chunk selector path that contains 1-based source line `line`, if any.
-	#[napi(js_name = "lineToContainingChunkPath")]
+	#[napi]
 	pub fn line_to_containing_chunk_path(&self, line: u32) -> Option<String> {
 		self.inner.line_to_containing_chunk_path(line)
 	}
@@ -295,9 +364,21 @@ impl ChunkState {
 
 	/// Parse `readPath` (selector, line scope, etc.) and return rendered text or
 	/// errors.
-	#[napi(js_name = "renderRead")]
+	#[napi]
 	pub fn render_read(&self, params: ReadRenderParams) -> Result<ReadResult> {
-		let ParsedChunkReadPath { selector, crc } = parse_chunk_read_path(params.read_path.as_str());
+		let ParsedChunkReadPath { selector, crc, region } =
+			match parse_chunk_read_path(params.read_path.as_str()) {
+				Ok(parsed) => parsed,
+				Err(err) => {
+					return Ok(ReadResult {
+						text:  format!("{}\n\n{}", params.display_path, err),
+						chunk: Some(ChunkReadTarget {
+							status:   ChunkReadStatus::UnsupportedRegion,
+							selector: params.read_path.clone(),
+						}),
+					});
+				},
+			};
 		let visible_range = selector.as_deref().and_then(parse_visible_line_range);
 		let Some(root) = self.inner.root() else {
 			return Ok(ReadResult {
@@ -345,11 +426,13 @@ impl ChunkState {
 				anchor_style:         params.anchor_style,
 				show_leaf_preview:    true,
 				tab_replacement:      params.tab_replacement,
+				normalize_indent:     params.normalize_indent,
+				focused_paths:        None,
 			});
 			return Ok(ReadResult { text: format!("{notice}\n\n{text}"), chunk: None });
 		}
 
-		if selector.as_deref().is_none_or(str::is_empty) && crc.is_none() {
+		if selector.as_deref().is_none_or(str::is_empty) && crc.is_none() && region.is_none() {
 			return Ok(ReadResult {
 				text:  self.render(RenderParams {
 					chunk_path:           Some(root.path.clone()),
@@ -361,33 +444,56 @@ impl ChunkState {
 					anchor_style:         params.anchor_style,
 					show_leaf_preview:    true,
 					tab_replacement:      params.tab_replacement,
+					normalize_indent:     params.normalize_indent,
+					focused_paths:        None,
 				}),
 				chunk: None,
 			});
 		}
 
 		if selector.as_deref() == Some("?") {
-			let mut lines = vec![format!("{} chunks:", params.display_path)];
-			for chunk in self.inner.chunks().filter(|chunk| !chunk.path.is_empty()) {
-				lines.push(format!(
-					"  {}#{}  L{}-L{}",
-					chunk.path, chunk.checksum, chunk.start_line, chunk.end_line
-				));
-			}
+			let mut lines = vec![format!("{} chunks (dot-joined paths):", params.display_path)];
+			lines.extend(format_selector_tree(
+				self.inner.tree(),
+				&self.inner.tree().root_children,
+				false,
+			));
 			return Ok(ReadResult { text: lines.join("\n"), chunk: None });
 		}
 
 		let mut warnings = Vec::new();
-		let Ok(resolved) =
-			resolve_chunk_with_crc(self.inner(), selector.as_deref(), crc.as_deref(), &mut warnings)
-		else {
-			let sel = selector.unwrap_or_default();
-			return Ok(ReadResult {
-				text:  format!("{}:{}\n\n[Chunk not found]", params.display_path, sel),
-				chunk: Some(ChunkReadTarget { status: ChunkReadStatus::NotFound, selector: sel }),
-			});
+		let resolved = match resolve_chunk_with_crc(
+			self.inner(),
+			selector.as_deref(),
+			crc.as_deref(),
+			&mut warnings,
+		) {
+			Ok(resolved) => resolved,
+			Err(err) => {
+				let sel = selector.unwrap_or_default();
+				return Ok(ReadResult {
+					text:  format!("{}:{}\n\n{}", params.display_path, sel, err),
+					chunk: Some(ChunkReadTarget { status: ChunkReadStatus::NotFound, selector: sel }),
+				});
+			},
 		};
 		let chunk = resolved.chunk;
+		// Use the region from parse_chunk_read_path, NOT region,
+		// because resolve_chunk_with_crc re-parses the already-cleaned
+		// selector and loses the region suffix.
+		let selector_ref = format_region_ref(chunk, region);
+
+		// Fall back to whole-chunk read when the chunk has no real region
+		// boundaries (e.g. markdown fenced blocks, leaf chunks without
+		// prologue/epilogue). Without this, `^` on such chunks returns
+		// "[Empty @^ region]" instead of the whole chunk.
+		let region = if region.is_some()
+			&& (chunk.prologue_end_byte.is_none() || chunk.epilogue_start_byte.is_none())
+		{
+			None
+		} else {
+			region
+		};
 
 		if let Some(absolute_line_range) = params.absolute_line_range {
 			let req_start = absolute_line_range.start_line;
@@ -407,10 +513,49 @@ impl ChunkState {
 					),
 					chunk: Some(ChunkReadTarget {
 						status:   ChunkReadStatus::Ok,
-						selector: chunk.path.clone(),
+						selector: selector_ref,
 					}),
 				});
 			}
+		}
+
+		if let Some(target_region) = region {
+			let masked_source = mask_chunk_display_source(self.inner.source(), self.inner.language());
+			let (start, end) = chunk_region_range(chunk, target_region);
+			let tab_replacement = params.tab_replacement.as_deref().unwrap_or("    ");
+			let normalize_indent = params.normalize_indent.unwrap_or(false).then(|| {
+				(
+					detect_file_indent_char(self.inner.source(), self.inner.tree()),
+					detect_file_indent_step(self.inner.source(), self.inner.tree()) as usize,
+				)
+			});
+			// Extend the region start to the beginning of the line so that the
+			// leading indentation of the first line is included.  Without this,
+			// regions whose start_byte is mid-line (e.g. a decorator `@property`
+			// inside a class) would show the first line without indentation,
+			// making the normalization inconsistent with subsequent lines.
+			let display_start = masked_source[..start].rfind('\n').map_or(0, |nl| nl + 1);
+			let region_text = masked_source
+				.get(display_start..end)
+				.unwrap_or_default()
+				.split('\n')
+				.map(|line| match normalize_indent {
+					Some((indent_char, indent_step)) => {
+						normalize_to_tabs(line, indent_char, indent_step)
+					},
+					None => line.replace('\t', tab_replacement),
+				})
+				.collect::<Vec<_>>()
+				.join("\n");
+			let text = if region_text.is_empty() {
+				format!("{selector_ref}\n\n[Empty @{} region]", target_region.as_str())
+			} else {
+				format!("{selector_ref}\n\n{region_text}")
+			};
+			return Ok(ReadResult {
+				text,
+				chunk: Some(ChunkReadTarget { status: ChunkReadStatus::Ok, selector: selector_ref }),
+			});
 		}
 
 		Ok(ReadResult {
@@ -424,17 +569,16 @@ impl ChunkState {
 				anchor_style:         params.anchor_style,
 				show_leaf_preview:    true,
 				tab_replacement:      params.tab_replacement,
+				normalize_indent:     params.normalize_indent,
+				focused_paths:        None,
 			}),
-			chunk: Some(ChunkReadTarget {
-				status:   ChunkReadStatus::Ok,
-				selector: chunk.path.clone(),
-			}),
+			chunk: Some(ChunkReadTarget { status: ChunkReadStatus::Ok, selector: selector_ref }),
 		})
 	}
 
 	/// Prefix a grep line with `display_path` and the chunk path for
 	/// `line_number`, when known.
-	#[napi(js_name = "formatGrepLine")]
+	#[napi]
 	pub fn format_grep_line(&self, display_path: String, line_number: u32, line: String) -> String {
 		let chunk_path = self.inner.line_to_containing_chunk_path(line_number);
 		let location = chunk_path.map_or_else(
@@ -452,7 +596,7 @@ impl ChunkState {
 
 	/// Apply batch edits, re-parse, write files, and return updated state and
 	/// messaging.
-	#[napi(js_name = "applyEdits")]
+	#[napi]
 	pub fn apply_edits(&self, params: EditParams) -> Result<EditResult> {
 		crate::chunk::edit::apply_edits(self, &params).map_err(Error::from_reason)
 	}
@@ -462,6 +606,7 @@ impl ChunkState {
 struct ParsedChunkReadPath {
 	selector: Option<String>,
 	crc:      Option<String>,
+	region:   Option<ChunkRegion>,
 }
 
 fn normalize_language(language: &str) -> String {
@@ -471,7 +616,7 @@ fn normalize_language(language: &str) -> String {
 fn chunk_info(chunk: &ChunkNode) -> ChunkInfo {
 	ChunkInfo {
 		path:       chunk.path.clone(),
-		name:       chunk.name.clone(),
+		identifier: chunk.identifier.clone(),
 		checksum:   chunk.checksum.clone(),
 		start_line: chunk.start_line,
 		end_line:   chunk.end_line,
@@ -489,11 +634,12 @@ fn chunk_read_path_separator_index(read_path: &str) -> Option<usize> {
 	read_path.find(':')
 }
 
-fn parse_chunk_read_path(read_path: &str) -> ParsedChunkReadPath {
-	let (selector, crc) = chunk_read_path_separator_index(read_path)
-		.map(|index| split_selector_and_crc(Some(&read_path[(index + 1)..]), None))
-		.unwrap_or_default();
-	ParsedChunkReadPath { selector, crc }
+fn parse_chunk_read_path(read_path: &str) -> std::result::Result<ParsedChunkReadPath, String> {
+	let raw_selector =
+		chunk_read_path_separator_index(read_path).map(|index| &read_path[(index + 1)..]);
+	let ParsedSelector { selector, crc, region } =
+		split_selector_crc_and_region(raw_selector, None, None)?;
+	Ok(ParsedChunkReadPath { selector, crc, region })
 }
 
 fn parse_visible_line_range(selector: &str) -> Option<VisibleLineRange> {

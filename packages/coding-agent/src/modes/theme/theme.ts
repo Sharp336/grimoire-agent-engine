@@ -20,6 +20,8 @@ import { defaultThemes } from "./defaults";
 import lightThemeJson from "./light.json" with { type: "json" };
 import { getMermaidAscii } from "./mermaid-cache";
 
+export { getLanguageFromPath } from "../../utils/lang-from-path";
+
 // ============================================================================
 // Symbol Presets
 // ============================================================================
@@ -1148,9 +1150,14 @@ const langMap: Record<string, SymbolKey> = {
 	sh: "lang.shell",
 	zsh: "lang.shell",
 	fish: "lang.shell",
+	powershell: "lang.shell",
+	just: "lang.shell",
 	shell: "lang.shell",
 	html: "lang.html",
 	htm: "lang.html",
+	astro: "lang.html",
+	vue: "lang.html",
+	svelte: "lang.html",
 	css: "lang.css",
 	scss: "lang.css",
 	sass: "lang.css",
@@ -2298,153 +2305,6 @@ export function highlightCode(code: string, lang?: string): string[] {
 	} catch {
 		return code.split("\n");
 	}
-}
-
-/**
- * Get language identifier from file path extension.
- */
-export function getLanguageFromPath(filePath: string): string | undefined {
-	const baseName = path.basename(filePath).toLowerCase();
-	if (baseName === ".env" || baseName.startsWith(".env.")) return "env";
-	if (
-		baseName === ".gitignore" ||
-		baseName === ".gitattributes" ||
-		baseName === ".gitmodules" ||
-		baseName === ".editorconfig" ||
-		baseName === ".npmrc" ||
-		baseName === ".prettierrc" ||
-		baseName === ".eslintrc"
-	) {
-		return "conf";
-	}
-
-	const ext = filePath.split(".").pop()?.toLowerCase();
-	if (!ext) return undefined;
-
-	const extToLang: Record<string, string> = {
-		ts: "typescript",
-		cts: "typescript",
-		mts: "typescript",
-		tsx: "tsx",
-		js: "javascript",
-		jsx: "javascript",
-		mjs: "javascript",
-		cjs: "javascript",
-		py: "python",
-		pyi: "python",
-		rb: "ruby",
-		rbw: "ruby",
-		gemspec: "ruby",
-		rs: "rust",
-		go: "go",
-		java: "java",
-		kt: "kotlin",
-		ktm: "kotlin",
-		kts: "kotlin",
-		swift: "swift",
-		c: "c",
-		h: "c",
-		cpp: "cpp",
-		cc: "cpp",
-		cxx: "cpp",
-		hh: "cpp",
-		hpp: "cpp",
-		cu: "cpp",
-		ino: "cpp",
-		cs: "csharp",
-		clj: "clojure",
-		cljc: "clojure",
-		cljs: "clojure",
-		edn: "clojure",
-		php: "php",
-		sh: "bash",
-		bash: "bash",
-		zsh: "bash",
-		ksh: "bash",
-		bats: "bash",
-		tmux: "bash",
-		cgi: "bash",
-		fcgi: "bash",
-		command: "bash",
-		tool: "bash",
-		fish: "fish",
-		ps1: "powershell",
-		sql: "sql",
-		html: "html",
-		htm: "html",
-		xhtml: "html",
-		css: "css",
-		scss: "scss",
-		sass: "sass",
-		less: "less",
-		json: "json",
-		hbs: "handlebars",
-		hsb: "handlebars",
-		handlebars: "handlebars",
-		yaml: "yaml",
-		yml: "yaml",
-		toml: "toml",
-		xml: "xml",
-		xsl: "xml",
-		xslt: "xml",
-		svg: "xml",
-		plist: "xml",
-		md: "markdown",
-		markdown: "markdown",
-		mdx: "markdown",
-		diff: "diff",
-		patch: "diff",
-		dockerfile: "dockerfile",
-		makefile: "make",
-		mk: "make",
-		mak: "make",
-		cmake: "cmake",
-		lua: "lua",
-		jl: "julia",
-		perl: "perl",
-		r: "r",
-		scala: "scala",
-		sc: "scala",
-		sbt: "scala",
-		ex: "elixir",
-		exs: "elixir",
-		erl: "erlang",
-		hs: "haskell",
-		nix: "nix",
-		odin: "odin",
-		zig: "zig",
-		star: "starlark",
-		bzl: "starlark",
-		sol: "solidity",
-		v: "verilog",
-		sv: "verilog",
-		svh: "verilog",
-		vh: "verilog",
-		m: "objc",
-		mm: "objc",
-		ml: "ocaml",
-		vim: "vim",
-		graphql: "graphql",
-		proto: "protobuf",
-		tf: "hcl",
-		hcl: "hcl",
-		tfvars: "hcl",
-		txt: "text",
-		text: "text",
-		log: "log",
-		csv: "csv",
-		tsv: "tsv",
-		ini: "ini",
-		cfg: "conf",
-		conf: "conf",
-		config: "conf",
-		properties: "conf",
-		tla: "tlaplus",
-		tlaplus: "tlaplus",
-		env: "env",
-	};
-
-	return extToLang[ext];
 }
 
 export function getSymbolTheme(): SymbolTheme {

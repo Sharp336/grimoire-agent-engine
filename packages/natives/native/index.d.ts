@@ -28,6 +28,10 @@ export declare class ChunkState {
   get rootChildren(): Array<string>
   /** Total number of chunk nodes. */
   get chunkCount(): number
+  /** True when the parsed file contains unresolved merge conflicts. */
+  hasConflicts(): boolean
+  /** Count of unresolved merge conflicts represented in the chunk tree. */
+  conflictCount(): number
   /** Summary for the root chunk, if it exists. */
   root(): ChunkInfo | null
   /** Look up [`ChunkInfo`] for a chunk selector path. */
@@ -381,26 +385,39 @@ export declare enum ChunkAnchorStyle {
 
 /** Structural edit to apply relative to a chunk anchor. */
 export declare enum ChunkEditOp {
-  /** Replace the chunk body, or a line range when `line`/`endLine` are set. */
+  /** Replace the targeted region, or a substring via `find`. */
   Replace = 'replace',
-  /** Remove the chunk's source range. */
+  /** Remove the targeted region. */
   Delete = 'delete',
-  /** Insert `content` as the last child of the target chunk. */
-  AppendChild = 'append_child',
-  /** Insert `content` as the first child of the target chunk. */
-  PrependChild = 'prepend_child',
-  /** Insert `content` after the target chunk's source range. */
-  AppendSibling = 'append_sibling',
-  /** Insert `content` before the target chunk's source range. */
-  PrependSibling = 'prepend_sibling'
+  /** Insert `content` before the targeted region span. */
+  Before = 'before',
+  /** Insert `content` after the targeted region span. */
+  After = 'after',
+  /** Insert `content` at the start inside the targeted region. */
+  Prepend = 'prepend',
+  /** Insert `content` at the end inside the targeted region. */
+  Append = 'append'
+}
+
+/** How a chunk participates in a focus-scoped render pass. */
+export declare enum ChunkFocusMode {
+  /** Emit full content and recurse normally. */
+  Expanded = 'expanded',
+  /** Emit just the opening anchor; do not recurse or emit body. */
+  Collapsed = 'collapsed',
+  /**
+   * Emit opening + closing anchors; recurse into focused children only.
+   * Interior gap lines between children are suppressed.
+   */
+  Container = 'container'
 }
 
 /** Summary of a single chunk node for tool output and navigation. */
 export interface ChunkInfo {
   /** Chunk selector path within the tree. */
   path: string
-  /** Short display name for the chunk (e.g. symbol or region label). */
-  name: string
+  /** Bare chunk identifier (without kind prefix), if available. */
+  identifier?: string
   /** Stable checksum anchor for this chunk. */
   checksum: string
   /** 1-based start line in the source file (inclusive). */
@@ -416,7 +433,9 @@ export declare enum ChunkReadStatus {
   /** Selector matched a chunk and content was produced. */
   Ok = 'ok',
   /** No chunk matched the requested selector. */
-  NotFound = 'not_found'
+  NotFound = 'not_found',
+  /** Chunk matched but does not support the requested region. */
+  UnsupportedRegion = 'unsupported_region'
 }
 
 /** Outcome of resolving which chunk was read for a `renderRead`-style request. */
@@ -425,6 +444,11 @@ export interface ChunkReadTarget {
   status: ChunkReadStatus
   /** Sanitized selector string that was applied. */
   selector: string
+}
+
+export declare enum ChunkRegion {
+  Head = '^',
+  Body = '~'
 }
 
 /** Clipboard image payload encoded as PNG bytes. */
@@ -477,21 +501,26 @@ export interface EditOperation {
    * omitted.
    */
   crc?: string
+  /** Region to target. When omitted, targets the full chunk. */
+  region?: ChunkRegion
   /** Replacement or inserted text (meaning depends on `op`). */
   content?: string
-  /** For line-scoped `replace`, 1-based start line inside the target chunk. */
-  line?: number
   /**
-   * For line-scoped `replace`, 1-based end line inside the chunk (defaults to
-   * `line`).
+   * For scoped find/replace: literal substring to locate inside the target
+   * chunk. Must match exactly once. Pairs with `content` as the replacement.
    */
-  endLine?: number
+  find?: string
 }
 
 /** Arguments for applying a batch of chunk edits to a file. */
 export interface EditParams {
-  /** Edits to apply in order (scheduling may reorder line-scoped groups). */
+  /** Edits to apply in order. */
   operations: Array<EditOperation>
+  /**
+   * When true, normalize indentation for response rendering and inserted
+   * content. When false, preserve literal tabs/spaces.
+   */
+  normalizeIndent?: boolean
   /** Default chunk selector when an `EditOperation` omits `sel`. */
   defaultSelector?: string
   /** Default checksum when an `EditOperation` omits `crc`. */
@@ -563,7 +592,7 @@ export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((e
  * Preserves ANSI state so the `after` segment renders correctly after
  * truncation.
  */
-export declare function extractSegments(line: string, beforeEnd: number, afterStart: number, afterLen: number, strictAfter: boolean, tabWidth?: number | undefined | null): ExtractSegmentsResult
+export declare function extractSegments(line: string, beforeEnd: number, afterStart: number, afterLen: number, strictAfter: boolean, tabWidth: number): ExtractSegmentsResult
 
 /** Before/after UTF-16 segments around an overlay region, with measured widths. */
 export interface ExtractSegmentsResult {
@@ -585,6 +614,12 @@ export declare enum FileType {
   Dir = 2,
   /** Symbolic link. */
   Symlink = 3
+}
+
+/** Path + focus mode pair for the N-API boundary (`HashMap` doesn't cross FFI). */
+export interface FocusedPath {
+  path: string
+  mode: ChunkFocusMode
 }
 
 /**
@@ -641,12 +676,6 @@ export interface FuzzyFindResult {
   /** Total number of matches found (may exceed `matches.len()`). */
   totalMatches: number
 }
-
-/** Get the default tab width for the process. */
-export declare function getDefaultTabWidth(): number
-
-/** Get the indentation for a file. */
-export declare function getIndentation(file?: string | undefined | null, projectDir?: string | undefined | null): number
 
 /** Get list of supported languages. */
 export declare function getSupportedLanguages(): Array<string>
@@ -1112,6 +1141,8 @@ export interface ReadRenderParams {
   absoluteLineRange?: VisibleLineRange
   /** Replace tabs in embedded previews. */
   tabReplacement?: string
+  /** When true, normalize displayed indentation to canonical tabs. */
+  normalizeIndent?: boolean
 }
 
 /** Rendered chunk text plus optional resolution metadata for the read request. */
@@ -1145,6 +1176,13 @@ export interface RenderParams {
   showLeafPreview: boolean
   /** Replace tab characters in displayed previews (e.g. two spaces). */
   tabReplacement?: string
+  /** When true, normalize displayed indentation to canonical tabs. */
+  normalizeIndent?: boolean
+  /**
+   * When set, restrict rendering to these chunks with their specified focus
+   * modes. Everything not in this list is skipped.
+   */
+  focusedPaths?: Array<FocusedPath>
 }
 
 /** Sampling filter for resize operations. */
@@ -1215,9 +1253,6 @@ export interface SearchResult {
   /** Error message, if any. */
   error?: string
 }
-
-/** Set the default tab width for the process. */
-export declare function setDefaultTabWidth(width: number): void
 
 /** Options for executing a shell command via brush-core. */
 export interface ShellExecuteOptions {
@@ -1296,7 +1331,7 @@ export interface SliceResult {
  * Counts terminal cells, skipping ANSI escapes, and optionally enforces strict
  * width.
  */
-export declare function sliceWithWidth(line: string, startCol: number, length: number, strict?: boolean | undefined | null, tabWidth?: number | undefined | null): SliceResult
+export declare function sliceWithWidth(line: string, startCol: number, length: number, strict: boolean | undefined | null, tabWidth: number): SliceResult
 
 /**
  * Check if a language is supported for highlighting.
@@ -1310,7 +1345,7 @@ export declare function supportsLanguage(lang: string): boolean
  *
  * Pads with spaces when requested.
  */
-export declare function truncateToWidth(text: string, maxWidth: number, ellipsisKind?: Ellipsis | undefined | null, pad?: boolean | undefined | null, tabWidth?: number | undefined | null): string
+export declare function truncateToWidth(text: string, maxWidth: number, ellipsisKind: Ellipsis | undefined | null, pad: boolean | undefined | null, tabWidth: number): string
 
 /**
  * Inclusive 1-based line range within a source file (used for scoped chunk
@@ -1328,7 +1363,7 @@ export interface VisibleLineRange {
  *
  * Tabs count as a fixed-width cell.
  */
-export declare function visibleWidth(text: string, tabWidth?: number | undefined | null): number
+export declare function visibleWidth(text: string, tabWidth: number): number
 
 /** Profiling results returned to JavaScript. */
 export interface WorkProfile {
@@ -1350,4 +1385,4 @@ export interface WorkProfile {
  *
  * Returns UTF-16 lines with active SGR codes carried across line boundaries.
  */
-export declare function wrapTextWithAnsi(text: string, width: number, tabWidth?: number | undefined | null): Array<string>
+export declare function wrapTextWithAnsi(text: string, width: number, tabWidth: number): Array<string>

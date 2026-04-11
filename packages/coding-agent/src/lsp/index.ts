@@ -1,9 +1,8 @@
 import * as fs from "node:fs";
 import path from "node:path";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { logger, once, untilAborted } from "@oh-my-pi/pi-utils";
+import { logger, once, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
-import { renderPromptTemplate } from "../config/prompt-templates";
 import { type Theme, theme } from "../modes/theme/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -48,7 +47,6 @@ import {
 } from "./types";
 import {
 	applyCodeAction,
-	collectGlobMatches,
 	dedupeWorkspaceSymbols,
 	extractHoverText,
 	fileToUri,
@@ -61,8 +59,8 @@ import {
 	formatLocation,
 	formatSymbolInformation,
 	formatWorkspaceEdit,
-	hasGlobPattern,
 	readLocationContext,
+	resolveDiagnosticTargets,
 	resolveSymbolColumn,
 	sortDiagnostics,
 	symbolKindToIcon,
@@ -72,20 +70,31 @@ import {
 export type { LspServerStatus } from "./client";
 export type { LspToolDetails } from "./types";
 
+export interface LspStartupServerInfo {
+	name: string;
+	status: "connecting" | "ready" | "error";
+	fileTypes: string[];
+	error?: string;
+}
+
 /** Result from warming up LSP servers */
 export interface LspWarmupResult {
-	servers: Array<{
-		name: string;
-		status: "ready" | "error";
-		fileTypes: string[];
-		error?: string;
-	}>;
+	servers: Array<LspStartupServerInfo & { status: "ready" | "error" }>;
 }
 
 /** Options for warming up LSP servers */
 export interface LspWarmupOptions {
 	/** Called when starting to connect to servers */
 	onConnecting?: (serverNames: string[]) => void;
+}
+
+export function discoverStartupLspServers(cwd: string): LspStartupServerInfo[] {
+	const config = loadConfig(cwd);
+	return getLspServers(config).map(([name, serverConfig]) => ({
+		name,
+		status: "connecting",
+		fileTypes: serverConfig.fileTypes,
+	}));
 }
 
 /**
@@ -692,7 +701,24 @@ export interface WritethroughOptions {
 	enableFormat?: boolean;
 	/** Whether to get LSP diagnostics after writing */
 	enableDiagnostics?: boolean;
+	/** Called when diagnostics arrive after the main timeout. */
+	onDeferredDiagnostics?: (diagnostics: FileDiagnosticsResult) => void;
+	/** Signal to cancel a pending deferred diagnostics fetch. */
+	deferredSignal?: AbortSignal;
 }
+
+/** Internal resolved form of {@link WritethroughOptions} that the writethrough machinery operates on. */
+type ResolvedWritethroughOptions = {
+	enableFormat: boolean;
+	enableDiagnostics: boolean;
+};
+
+/** Per-file deferred LSP diagnostics wiring for {@link WritethroughCallback}. */
+export type WritethroughDeferredHandle = {
+	onDeferredDiagnostics: (diagnostics: FileDiagnosticsResult) => void;
+	signal: AbortSignal;
+	finalize: (diagnostics: FileDiagnosticsResult | undefined) => void;
+};
 
 /** Callback type for the LSP writethrough */
 export type WritethroughCallback = (
@@ -701,6 +727,7 @@ export type WritethroughCallback = (
 	signal?: AbortSignal,
 	file?: BunFile,
 	batch?: LspWritethroughBatchRequest,
+	getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 ) => Promise<FileDiagnosticsResult | undefined>;
 
 /** No-op writethrough callback */
@@ -709,6 +736,8 @@ export async function writethroughNoop(
 	content: string,
 	_signal?: AbortSignal,
 	file?: BunFile,
+	_batch?: LspWritethroughBatchRequest,
+	_getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 ): Promise<FileDiagnosticsResult | undefined> {
 	if (file) {
 		await file.write(content);
@@ -731,12 +760,12 @@ interface LspWritethroughBatchRequest {
 
 interface LspWritethroughBatchState {
 	entries: Map<string, PendingWritethrough>;
-	options: Required<WritethroughOptions>;
+	options: ResolvedWritethroughOptions;
 }
 
 const writethroughBatches = new Map<string, LspWritethroughBatchState>();
 
-function getOrCreateWritethroughBatch(id: string, options: Required<WritethroughOptions>): LspWritethroughBatchState {
+function getOrCreateWritethroughBatch(id: string, options: ResolvedWritethroughOptions): LspWritethroughBatchState {
 	const existing = writethroughBatches.get(id);
 	if (existing) {
 		existing.options.enableFormat ||= options.enableFormat;
@@ -787,7 +816,7 @@ function summarizeDiagnosticMessages(messages: string[]): { summary: string; err
 
 function mergeDiagnostics(
 	results: Array<FileDiagnosticsResult | undefined>,
-	options: Required<WritethroughOptions>,
+	options: ResolvedWritethroughOptions,
 ): FileDiagnosticsResult | undefined {
 	const messages: string[] = [];
 	const servers = new Set<string>();
@@ -841,13 +870,41 @@ function mergeDiagnostics(
 	};
 }
 
+async function scheduleDeferredDiagnosticsFetch(args: {
+	dst: string;
+	cwd: string;
+	servers: Array<[string, ServerConfig]>;
+	minVersions: ServerVersionMap | undefined;
+	expectedDocumentVersions: ServerVersionMap | undefined;
+	signal: AbortSignal;
+	callback: (diagnostics: FileDiagnosticsResult) => void;
+}): Promise<void> {
+	try {
+		const deferredTimeout = AbortSignal.timeout(25_000);
+		const combined = AbortSignal.any([args.signal, deferredTimeout]);
+		const diagnostics = await getDiagnosticsForFile(args.dst, args.cwd, args.servers, {
+			signal: combined,
+			minVersions: args.minVersions,
+			expectedDocumentVersions: args.expectedDocumentVersions,
+		});
+		if (args.signal.aborted || diagnostics === undefined) return;
+		args.callback(diagnostics);
+	} catch {
+		// Cancelled or LSP gave up; silently discard.
+	}
+}
+
 async function runLspWritethrough(
 	dst: string,
 	content: string,
 	cwd: string,
-	options: Required<WritethroughOptions>,
+	options: ResolvedWritethroughOptions,
 	signal?: AbortSignal,
 	file?: BunFile,
+	deferred?: {
+		onDeferredDiagnostics: (diagnostics: FileDiagnosticsResult) => void;
+		signal: AbortSignal;
+	},
 ): Promise<FileDiagnosticsResult | undefined> {
 	const { enableFormat, enableDiagnostics } = options;
 	const config = getConfig(cwd);
@@ -870,7 +927,7 @@ async function runLspWritethrough(
 	let diagnostics: FileDiagnosticsResult | undefined;
 	let timedOut = false;
 	try {
-		const timeoutSignal = AbortSignal.timeout(10_000);
+		const timeoutSignal = AbortSignal.timeout(5_000);
 		timeoutSignal.addEventListener(
 			"abort",
 			() => {
@@ -927,6 +984,18 @@ async function runLspWritethrough(
 		if (timedOut) {
 			formatter = undefined;
 			diagnostics = undefined;
+			// Schedule background diagnostic fetch if caller wants deferred results
+			if (deferred && !deferred.signal.aborted && enableDiagnostics) {
+				void scheduleDeferredDiagnosticsFetch({
+					dst,
+					cwd,
+					servers,
+					minVersions,
+					expectedDocumentVersions,
+					signal: deferred.signal,
+					callback: deferred.onDeferredDiagnostics,
+				});
+			}
 		}
 		await getWritePromise();
 	}
@@ -947,22 +1016,32 @@ async function runLspWritethrough(
 async function flushWritethroughBatch(
 	batch: PendingWritethrough[],
 	cwd: string,
-	options: Required<WritethroughOptions>,
+	options: ResolvedWritethroughOptions,
 	signal?: AbortSignal,
+	getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 ): Promise<FileDiagnosticsResult | undefined> {
 	if (batch.length === 0) {
 		return undefined;
 	}
 	const results: Array<FileDiagnosticsResult | undefined> = [];
 	for (const entry of batch) {
-		results.push(await runLspWritethrough(entry.dst, entry.content, cwd, options, signal, entry.file));
+		const bundle = getDeferred?.(entry.dst);
+		const deferredInner =
+			bundle &&
+			({
+				onDeferredDiagnostics: bundle.onDeferredDiagnostics,
+				signal: bundle.signal,
+			} as const);
+		const diag = await runLspWritethrough(entry.dst, entry.content, cwd, options, signal, entry.file, deferredInner);
+		bundle?.finalize(diag);
+		results.push(diag);
 	}
 	return mergeDiagnostics(results, options);
 }
 
 /** Create a writethrough callback for LSP aware write operations */
 export function createLspWritethrough(cwd: string, options?: WritethroughOptions): WritethroughCallback {
-	const resolvedOptions: Required<WritethroughOptions> = {
+	const resolvedOptions: ResolvedWritethroughOptions = {
 		enableFormat: options?.enableFormat ?? false,
 		enableDiagnostics: options?.enableDiagnostics ?? false,
 	};
@@ -975,9 +1054,19 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		signal?: AbortSignal,
 		file?: BunFile,
 		batch?: LspWritethroughBatchRequest,
+		getDeferred?: (dst: string) => WritethroughDeferredHandle | undefined,
 	) => {
 		if (!batch) {
-			return runLspWritethrough(dst, content, cwd, resolvedOptions, signal, file);
+			const bundle = getDeferred?.(dst);
+			const deferredInner =
+				bundle &&
+				({
+					onDeferredDiagnostics: bundle.onDeferredDiagnostics,
+					signal: bundle.signal,
+				} as const);
+			const diagnostics = await runLspWritethrough(dst, content, cwd, resolvedOptions, signal, file, deferredInner);
+			bundle?.finalize(diagnostics);
+			return diagnostics;
 		}
 
 		const state = getOrCreateWritethroughBatch(batch.id, resolvedOptions);
@@ -989,7 +1078,7 @@ export function createLspWritethrough(cwd: string, options?: WritethroughOptions
 		}
 
 		writethroughBatches.delete(batch.id);
-		return flushWritethroughBatch(Array.from(state.entries.values()), cwd, state.options, signal);
+		return flushWritethroughBatch(Array.from(state.entries.values()), cwd, state.options, signal, getDeferred);
 	};
 }
 
@@ -1008,7 +1097,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 	readonly inline = true;
 
 	constructor(private readonly session: ToolSession) {
-		this.description = renderPromptTemplate(lspDescription);
+		this.description = prompt.render(lspDescription);
 	}
 
 	static createIf(session: ToolSession): LspTool | null {
@@ -1054,8 +1143,8 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 
 		// Diagnostics can be batch or single-file - queries all applicable servers
 		if (action === "diagnostics") {
-			if (!file) {
-				// No file specified - run workspace diagnostics
+			if (file === "*") {
+				// `*` => run workspace diagnostics across all configured servers
 				const result = await runWorkspaceDiagnostics(this.session.cwd, signal);
 				return {
 					content: [
@@ -1068,15 +1157,23 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				};
 			}
 
+			if (!file) {
+				return {
+					content: [
+						{
+							type: "text",
+							text: "Error: file parameter required. Use `*` for workspace-wide diagnostics or a path/glob for specific files.",
+						},
+					],
+					details: { action, success: false, request: params },
+				};
+			}
+
 			let targets: string[];
 			let truncatedGlobTargets = false;
-			if (hasGlobPattern(file)) {
-				const globMatches = await collectGlobMatches(file, this.session.cwd, MAX_GLOB_DIAGNOSTIC_TARGETS);
-				targets = globMatches.matches;
-				truncatedGlobTargets = globMatches.truncated;
-			} else {
-				targets = [file];
-			}
+			const resolvedTargets = await resolveDiagnosticTargets(file, this.session.cwd, MAX_GLOB_DIAGNOSTIC_TARGETS);
+			targets = resolvedTargets.matches;
+			truncatedGlobTargets = resolvedTargets.truncated;
 
 			if (targets.length === 0) {
 				return {
@@ -1186,17 +1283,24 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 
-		const requiresFile = !file && action !== "symbols" && action !== "reload";
+		// `*` means workspace scope for symbols/reload; other actions need a concrete file.
+		const isWorkspace = file === "*";
+		const requiresFile = !file && action !== "reload";
 
 		if (requiresFile) {
 			return {
-				content: [{ type: "text", text: "Error: file parameter required for this action" }],
+				content: [
+					{
+						type: "text",
+						text: "Error: file parameter required. Use `*` for workspace scope where supported.",
+					},
+				],
 				details: { action, success: false },
 			};
 		}
 
-		const resolvedFile = file ? resolveToCwd(file, this.session.cwd) : null;
-		if (action === "symbols" && !resolvedFile) {
+		const resolvedFile = file && !isWorkspace ? resolveToCwd(file, this.session.cwd) : null;
+		if (action === "symbols" && (isWorkspace || !resolvedFile)) {
 			const normalizedQuery = query?.trim();
 			if (!normalizedQuery) {
 				return {
@@ -1268,7 +1372,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			};
 		}
 
-		if (action === "reload" && !resolvedFile) {
+		if (action === "reload" && (isWorkspace || !resolvedFile)) {
 			const servers = getLspServers(config);
 			if (servers.length === 0) {
 				return {

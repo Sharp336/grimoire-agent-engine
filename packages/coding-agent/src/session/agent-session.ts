@@ -49,20 +49,22 @@ import {
 	modelsAreEqual,
 	parseRateLimitReason,
 } from "@oh-my-pi/pi-ai";
-import { MacOSPowerAssertion, type SearchDb } from "@oh-my-pi/pi-natives";
-import { abortableSleep, getAgentDbPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { killTree, MacOSPowerAssertion, type SearchDb } from "@oh-my-pi/pi-natives";
+import { abortableSleep, getAgentDbPath, isEnoent, logger, prompt, setNativeKillTree } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async";
 import type { Rule } from "../capability/rule";
 import { MODEL_ROLE_IDS, type ModelRegistry } from "../config/model-registry";
 import {
 	extractExplicitThinkingSelector,
+	formatModelSelectorValue,
 	formatModelString,
 	parseModelString,
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
 } from "../config/model-resolver";
-import { expandPromptTemplate, type PromptTemplate, renderPromptTemplate } from "../config/prompt-templates";
+import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
+import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
 import { exportSessionToHtml } from "../export/html";
 import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
@@ -103,7 +105,6 @@ import {
 	selectDiscoverableMCPToolNamesByServer,
 } from "../mcp/discoverable-tool-metadata";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
-import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../patch";
 import type { PlanModeState } from "../plan-mode/state";
 import autoHandoffThresholdFocusPrompt from "../prompts/system/auto-handoff-threshold-focus.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
@@ -116,11 +117,13 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import { deobfuscateSessionContext, type SecretObfuscator } from "../secrets/obfuscator";
 import { resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
+import { assertEditableFile } from "../tools/auto-generated-guard";
 import type { CheckpointState } from "../tools/checkpoint";
 import { outputMeta } from "../tools/output-meta";
 import { resolveToCwd } from "../tools/path-utils";
-import type { PendingActionStore } from "../tools/pending-action";
+import { isAutoQaEnabled } from "../tools/report-tool-issue";
 import { getLatestTodoPhasesFromEntries, type TodoItem, type TodoPhase } from "../tools/todo-write";
+import { ToolError } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
 import { parseCommandArgs } from "../utils/command-args";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
@@ -155,6 +158,7 @@ import type {
 	SessionManager,
 } from "./session-manager";
 import { getLatestCompactionEntry } from "./session-manager";
+import { ToolChoiceQueue } from "./tool-choice-queue";
 
 /** Session-specific events that extend the core AgentEvent */
 export type AgentSessionEvent =
@@ -240,8 +244,6 @@ export interface AgentSessionConfig {
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for deobfuscating streaming edit content */
 	obfuscator?: SecretObfuscator;
-	/** Pending action store for preview/apply workflows */
-	pendingActionStore?: PendingActionStore;
 	/** Shared native search DB for grep/glob/fuzzyFind-backed workflows. */
 	searchDb?: SearchDb;
 }
@@ -317,7 +319,7 @@ interface HandoffOptions {
 
 /** Standard thinking levels */
 
-const AUTO_HANDOFF_THRESHOLD_FOCUS = renderPromptTemplate(autoHandoffThresholdFocusPrompt);
+const AUTO_HANDOFF_THRESHOLD_FOCUS = prompt.render(autoHandoffThresholdFocusPrompt);
 
 type RetryFallbackChains = Record<string, string[]>;
 
@@ -409,7 +411,6 @@ export class AgentSession {
 
 	// Event subscription state
 	#unsubscribeAgent?: () => void;
-	#unsubscribePendingActionPush?: () => void;
 	#eventListeners: AgentSessionEventListener[] = [];
 
 	/** Tracks pending steering messages for UI display. Removed when delivered. */
@@ -444,7 +445,7 @@ export class AgentSession {
 	#todoReminderCount = 0;
 	#todoPhases: TodoPhase[] = [];
 	#todoClearTimers = new Map<string, Timer>();
-	#nextToolChoiceOverride: ToolChoice | undefined = undefined;
+	#toolChoiceQueue = new ToolChoiceQueue();
 
 	// Bash execution state
 	#bashAbortController: AbortController | undefined = undefined;
@@ -482,6 +483,7 @@ export class AgentSession {
 	#discoverableMCPTools = new Map<string, DiscoverableMCPTool>();
 	#discoverableMCPSearchIndex: DiscoverableMCPSearchIndex | null = null;
 	#selectedMCPToolNames = new Set<string>();
+	#rpcHostToolNames = new Set<string>();
 	#defaultSelectedMCPServerNames = new Set<string>();
 	#defaultSelectedMCPToolNames = new Set<string>();
 	#sessionDefaultSelectedMCPToolNames = new Map<string, string[]>();
@@ -501,10 +503,12 @@ export class AgentSession {
 
 	#streamingEditAbortTriggered = false;
 	#streamingEditCheckedLineCounts = new Map<string, number>();
+
+	#streamingEditPrecheckedToolCallIds = new Set<string>();
+
 	#streamingEditFileCache = new Map<string, string>();
 	#promptInFlightCount = 0;
 	#obfuscator: SecretObfuscator | undefined;
-	#pendingActionStore: PendingActionStore | undefined;
 	#checkpointState: CheckpointState | undefined = undefined;
 	#pendingRewindReport: string | undefined = undefined;
 	#promptGeneration = 0;
@@ -535,6 +539,8 @@ export class AgentSession {
 	}
 
 	constructor(config: AgentSessionConfig) {
+		setNativeKillTree(killTree);
+
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
@@ -581,24 +587,16 @@ export class AgentSession {
 		);
 		this.#ttsrManager = config.ttsrManager;
 		this.#obfuscator = config.obfuscator;
-		this.agent.providerSessionState = this.#providerSessionState;
-		this.#pendingActionStore = config.pendingActionStore;
-		this.#unsubscribePendingActionPush = this.#pendingActionStore?.subscribePush(action => {
-			const reminderText = [
-				"<system-reminder>",
-				"This is a preview. Call the `resolve` tool to apply or discard these changes.",
-				"</system-reminder>",
-			].join("\n");
-			this.agent.steer({
-				role: "custom",
-				customType: "resolve-reminder",
-				content: reminderText,
-				display: false,
-				details: { toolName: action.sourceToolName },
-				attribution: "agent",
-				timestamp: Date.now(),
-			});
+		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
+			const event: AgentEvent = {
+				type: "message_update",
+				message,
+				assistantMessageEvent,
+			};
+			this.#preCacheStreamingEditFile(event);
+			this.#maybeAbortStreamingEdit(event);
 		});
+		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncTodoPhasesFromBranch();
 
 		// Always subscribe to agent events for internal handling
@@ -611,10 +609,40 @@ export class AgentSession {
 		return this.#modelRegistry;
 	}
 
-	consumeNextToolChoiceOverride(): ToolChoice | undefined {
-		const toolChoice = this.#nextToolChoiceOverride;
-		this.#nextToolChoiceOverride = undefined;
-		return toolChoice;
+	/** Advance the tool-choice queue and return the next directive for the upcoming LLM call. */
+	nextToolChoice(): ToolChoice | undefined {
+		return this.#toolChoiceQueue.nextToolChoice();
+	}
+
+	/**
+	 * Force the next model call to target a specific active tool, then terminate
+	 * the agent loop. Pushes a two-step sequence [forced, "none"] so the model
+	 * calls exactly the forced tool once and then cannot call another.
+	 */
+	setForcedToolChoice(toolName: string): void {
+		if (!this.getActiveToolNames().includes(toolName)) {
+			throw new Error(`Tool "${toolName}" is not currently active.`);
+		}
+
+		const forced = buildNamedToolChoice(toolName, this.model);
+		if (!forced || typeof forced === "string") {
+			throw new Error("Current model does not support forcing a specific tool.");
+		}
+
+		this.#toolChoiceQueue.pushSequence([forced, "none"], {
+			label: "user-force",
+			onRejected: () => "requeue",
+		});
+	}
+
+	/** The tool-choice queue: forces forthcoming tool invocations and carries handlers. */
+	get toolChoiceQueue(): ToolChoiceQueue {
+		return this.#toolChoiceQueue;
+	}
+
+	/** Peek the in-flight directive's invocation handler for use by the resolve tool. */
+	peekQueueInvoker(): ((input: unknown) => Promise<unknown> | unknown) | undefined {
+		return this.#toolChoiceQueue.peekInFlightInvoker();
 	}
 
 	/** Provider-scoped mutable state store for transport/session caches. */
@@ -720,6 +748,17 @@ export class AgentSession {
 		if (event.type === "turn_end" && this.#ttsrManager) {
 			this.#ttsrManager.incrementMessageCount();
 		}
+		// Finalize the tool-choice queue's in-flight yield after tools have executed.
+		// This must happen at turn_end (not message_end) because onInvoked handlers
+		// run during tool execution, which happens between message_end and turn_end.
+		if (event.type === "turn_end" && this.#toolChoiceQueue.hasInFlight) {
+			const msg = event.message as AssistantMessage;
+			if (msg.stopReason === "aborted" || msg.stopReason === "error") {
+				this.#toolChoiceQueue.reject(msg.stopReason === "error" ? "error" : "aborted");
+			} else {
+				this.#toolChoiceQueue.resolve();
+			}
+		}
 		if (event.type === "turn_end" && this.#pendingRewindReport) {
 			const report = this.#pendingRewindReport;
 			this.#pendingRewindReport = undefined;
@@ -818,8 +857,13 @@ export class AgentSession {
 			}
 		}
 
-		if (event.type === "message_update" && event.assistantMessageEvent.type === "toolcall_start") {
-			this.#preCacheStreamingEditFile(event);
+		if (
+			event.type === "message_update" &&
+			(event.assistantMessageEvent.type === "toolcall_start" ||
+				event.assistantMessageEvent.type === "toolcall_delta" ||
+				event.assistantMessageEvent.type === "toolcall_end")
+		) {
+			void this.#preCacheStreamingEditFile(event);
 		}
 
 		if (
@@ -953,6 +997,16 @@ export class AgentSession {
 			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
 			this.#lastAssistantMessage = undefined;
 			if (!msg) return;
+
+			// Invalidate GitHub Copilot credentials on auth failure so stale tokens
+			// aren't reused on the next request
+			if (
+				msg.stopReason === "error" &&
+				msg.provider === "github-copilot" &&
+				msg.errorMessage?.includes("GitHub Copilot authentication failed")
+			) {
+				await this.#modelRegistry.authStorage.remove("github-copilot");
+			}
 
 			if (this.#skipPostTurnMaintenanceAssistantTimestamp === msg.timestamp) {
 				this.#skipPostTurnMaintenanceAssistantTimestamp = undefined;
@@ -1137,7 +1191,7 @@ export class AgentSession {
 		if (this.#pendingTtsrInjections.length === 0) return undefined;
 		const rules = this.#pendingTtsrInjections;
 		const content = rules
-			.map(r => renderPromptTemplate(ttsrInterruptTemplate, { name: r.name, path: r.path, content: r.content }))
+			.map(r => prompt.render(ttsrInterruptTemplate, { name: r.name, path: r.path, content: r.content }))
 			.join("\n\n");
 		this.#pendingTtsrInjections = [];
 		return { content, rules };
@@ -1350,31 +1404,101 @@ export class AgentSession {
 	#resetStreamingEditState(): void {
 		this.#streamingEditAbortTriggered = false;
 		this.#streamingEditCheckedLineCounts.clear();
+		this.#streamingEditPrecheckedToolCallIds.clear();
 		this.#streamingEditFileCache.clear();
 	}
 
-	async #preCacheStreamingEditFile(event: AgentEvent): Promise<void> {
-		if (!this.settings.get("edit.streamingAbort")) return;
-		if (event.type !== "message_update") return;
-		const assistantEvent = event.assistantMessageEvent;
-		if (assistantEvent.type !== "toolcall_start") return;
-		if (event.message.role !== "assistant") return;
+	#getStreamingEditToolCall(event: AgentEvent):
+		| {
+				toolCall: ToolCall;
+				path: string;
+				resolvedPath: string;
+				diff?: string;
+				op?: string;
+				rename?: string;
+		  }
+		| undefined {
+		if (event.type !== "message_update") return undefined;
+		if (event.message.role !== "assistant") return undefined;
 
-		const contentIndex = assistantEvent.contentIndex;
+		const contentIndex = event.assistantMessageEvent.contentIndex ?? 0;
 		const messageContent = event.message.content;
-		if (!Array.isArray(messageContent) || contentIndex >= messageContent.length) return;
+		if (!Array.isArray(messageContent) || contentIndex < 0 || contentIndex >= messageContent.length) {
+			return undefined;
+		}
+
 		const toolCall = messageContent[contentIndex] as ToolCall;
-		if (toolCall.name !== "edit") return;
+		if (toolCall.name !== "edit") return undefined;
 
 		const args = toolCall.arguments;
-		if (!args || typeof args !== "object" || Array.isArray(args)) return;
-		if ("old_text" in args || "new_text" in args) return;
+		if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
+		if ("old_text" in args || "new_text" in args) return undefined;
 
 		const path = typeof args.path === "string" ? args.path : undefined;
-		if (!path) return;
+		if (!path) return undefined;
 
-		const resolvedPath = resolveToCwd(path, this.sessionManager.getCwd());
-		this.#ensureFileCache(resolvedPath);
+		return {
+			toolCall,
+			path,
+			resolvedPath: resolveToCwd(path, this.sessionManager.getCwd()),
+			diff: typeof args.diff === "string" ? args.diff : undefined,
+			op: typeof args.op === "string" ? args.op : undefined,
+			rename: typeof args.rename === "string" ? args.rename : undefined,
+		};
+	}
+
+	#lastStreamingEditToolCallId: string | undefined;
+	#abortStreamingEditForAutoGeneratedPath(toolCall: ToolCall, path: string, resolvedPath: string): void {
+		if (this.#lastStreamingEditToolCallId === toolCall.id) return;
+		this.#lastStreamingEditToolCallId = toolCall.id;
+		void assertEditableFile(resolvedPath, path).catch(err => {
+			// peekFile and other I/O can reject with ENOENT, etc. Only ToolError means
+			// auto-generated detection; other failures are left for the edit tool.
+			if (!(err instanceof ToolError)) return;
+			if (this.#lastStreamingEditToolCallId !== toolCall.id) return;
+
+			if (!this.#streamingEditAbortTriggered) {
+				this.#streamingEditAbortTriggered = true;
+				logger.warn("Streaming edit aborted due to auto-generated file guard", {
+					toolCallId: toolCall.id,
+					path,
+				});
+				this.agent.abort();
+			}
+		});
+	}
+
+	#preCacheStreamingEditFile(event: AgentEvent): void {
+		if (!this.settings.get("edit.streamingAbort")) return;
+		if (this.#streamingEditAbortTriggered) return;
+		if (event.type !== "message_update") return;
+
+		const assistantEvent = event.assistantMessageEvent;
+		if (
+			assistantEvent.type !== "toolcall_start" &&
+			assistantEvent.type !== "toolcall_delta" &&
+			assistantEvent.type !== "toolcall_end"
+		) {
+			return;
+		}
+
+		const streamingEdit = this.#getStreamingEditToolCall(event);
+		if (!streamingEdit) return;
+
+		const shouldCheckAutoGenerated =
+			!streamingEdit.toolCall.id || !this.#streamingEditPrecheckedToolCallIds.has(streamingEdit.toolCall.id);
+		if (shouldCheckAutoGenerated) {
+			if (streamingEdit.toolCall.id) {
+				this.#streamingEditPrecheckedToolCallIds.add(streamingEdit.toolCall.id);
+			}
+			this.#abortStreamingEditForAutoGeneratedPath(
+				streamingEdit.toolCall,
+				streamingEdit.path,
+				streamingEdit.resolvedPath,
+			);
+		}
+
+		this.#ensureFileCache(streamingEdit.resolvedPath);
 	}
 
 	#ensureFileCache(resolvedPath: string): void {
@@ -1399,24 +1523,15 @@ export class AgentSession {
 		if (!this.settings.get("edit.streamingAbort")) return;
 		if (this.#streamingEditAbortTriggered) return;
 		if (event.type !== "message_update") return;
+
 		const assistantEvent = event.assistantMessageEvent;
 		if (assistantEvent.type !== "toolcall_end" && assistantEvent.type !== "toolcall_delta") return;
-		if (event.message.role !== "assistant") return;
 
-		const contentIndex = assistantEvent.contentIndex;
-		const messageContent = event.message.content;
-		if (!Array.isArray(messageContent) || contentIndex >= messageContent.length) return;
-		const toolCall = messageContent[contentIndex] as ToolCall;
-		if (toolCall.name !== "edit" || !toolCall.id) return;
+		const streamingEdit = this.#getStreamingEditToolCall(event);
+		if (!streamingEdit?.toolCall.id) return;
 
-		const args = toolCall.arguments;
-		if (!args || typeof args !== "object" || Array.isArray(args)) return;
-		if ("old_text" in args || "new_text" in args) return;
-
-		const path = typeof args.path === "string" ? args.path : undefined;
-		const diff = typeof args.diff === "string" ? args.diff : undefined;
-		const op = typeof args.op === "string" ? args.op : undefined;
-		if (!path || !diff) return;
+		const { toolCall, path, resolvedPath, diff, op, rename } = streamingEdit;
+		if (!diff) return;
 		if (op && op !== "update") return;
 
 		if (!diff.includes("\n")) return;
@@ -1439,13 +1554,10 @@ export class AgentSession {
 		if (lastChecked !== undefined && lineCount <= lastChecked) return;
 		this.#streamingEditCheckedLineCounts.set(toolCall.id, lineCount);
 
-		const rename = typeof args.rename === "string" ? args.rename : undefined;
-
 		const removedLines = lines
 			.filter(line => line.startsWith("-") && !line.startsWith("--- "))
 			.map(line => line.slice(1));
 		if (removedLines.length > 0) {
-			const resolvedPath = resolveToCwd(path, this.sessionManager.getCwd());
 			let cachedContent = this.#streamingEditFileCache.get(resolvedPath);
 			if (cachedContent === undefined) {
 				this.#ensureFileCache(resolvedPath);
@@ -1535,7 +1647,6 @@ export class AgentSession {
 		if (!this.#extensionRunner) return;
 		if (event.type === "agent_start") {
 			this.#turnIndex = 0;
-			this.#nextToolChoiceOverride = undefined;
 			await this.#extensionRunner.emit({ type: "agent_start" });
 		} else if (event.type === "agent_end") {
 			await this.#extensionRunner.emit({ type: "agent_end", messages: event.messages });
@@ -1704,8 +1815,6 @@ export class AgentSession {
 		this.#stopPowerAssertion();
 		await this.sessionManager.close();
 		this.#closeAllProviderSessions("dispose");
-		this.#unsubscribePendingActionPush?.();
-		this.#unsubscribePendingActionPush = undefined;
 		this.#disconnectFromAgent();
 		this.#eventListeners = [];
 	}
@@ -1918,6 +2027,14 @@ export class AgentSession {
 				validToolNames.push(name);
 			}
 		}
+		// Auto-QA tool must survive any runtime tool-set mutation.
+		if (isAutoQaEnabled(this.settings) && !validToolNames.includes("report_tool_issue")) {
+			const qaTool = this.#toolRegistry.get("report_tool_issue");
+			if (qaTool) {
+				tools.push(qaTool);
+				validToolNames.push("report_tool_issue");
+			}
+		}
 		if (this.#mcpDiscoveryEnabled) {
 			this.#selectedMCPToolNames = new Set(
 				validToolNames.filter(
@@ -2022,6 +2139,49 @@ export class AgentSession {
 
 		const nextActive = [...this.#getActiveNonMCPToolNames(), ...this.getSelectedMCPToolNames()];
 		await this.#applyActiveToolsByName(nextActive, { previousSelectedMCPToolNames });
+	}
+
+	/**
+	 * Replace RPC host-owned tools and refresh the active tool set before the next model call.
+	 */
+	async refreshRpcHostTools(rpcTools: AgentTool[]): Promise<void> {
+		const nextToolNames = rpcTools.map(tool => tool.name);
+		const uniqueToolNames = new Set(nextToolNames);
+		if (uniqueToolNames.size !== nextToolNames.length) {
+			throw new Error("RPC host tool names must be unique");
+		}
+
+		for (const name of uniqueToolNames) {
+			if (this.#toolRegistry.has(name) && !this.#rpcHostToolNames.has(name)) {
+				throw new Error(`RPC host tool "${name}" conflicts with an existing tool`);
+			}
+		}
+
+		const previousRpcHostToolNames = new Set(this.#rpcHostToolNames);
+		const previousActiveToolNames = this.getActiveToolNames();
+		for (const name of previousRpcHostToolNames) {
+			this.#toolRegistry.delete(name);
+		}
+		this.#rpcHostToolNames.clear();
+
+		for (const tool of rpcTools) {
+			const finalTool = (
+				this.#extensionRunner ? new ExtensionToolWrapper(tool, this.#extensionRunner) : tool
+			) as AgentTool;
+			this.#toolRegistry.set(finalTool.name, finalTool);
+			this.#rpcHostToolNames.add(finalTool.name);
+		}
+
+		const activeNonRpcToolNames = previousActiveToolNames.filter(name => !previousRpcHostToolNames.has(name));
+		const preservedRpcToolNames = previousActiveToolNames.filter(
+			name => previousRpcHostToolNames.has(name) && this.#rpcHostToolNames.has(name),
+		);
+		const autoActivatedRpcToolNames = rpcTools
+			.filter(tool => !tool.hidden && !previousRpcHostToolNames.has(tool.name))
+			.map(tool => tool.name);
+		await this.#applyActiveToolsByName(
+			Array.from(new Set([...activeNonRpcToolNames, ...preservedRpcToolNames, ...autoActivatedRpcToolNames])),
+		);
 	}
 
 	/** Whether auto-compaction is currently running */
@@ -2208,7 +2368,7 @@ export class AgentSession {
 			throw error;
 		}
 
-		const content = renderPromptTemplate(planModeReferencePrompt, {
+		const content = prompt.render(planModeReferencePrompt, {
 			planFilePath,
 			planContent,
 		});
@@ -2245,7 +2405,7 @@ export class AgentSession {
 				: sessionPlanUrl;
 
 		const planExists = fs.existsSync(resolvedPlanPath);
-		const content = renderPromptTemplate(planModeActivePrompt, {
+		const content = prompt.render(planModeActivePrompt, {
 			planFilePath: displayPlanPath,
 			planExists,
 			askToolName: "ask",
@@ -2317,7 +2477,10 @@ export class AgentSession {
 			return;
 		}
 
-		const eagerTodoPrelude = !options?.synthetic ? this.#createEagerTodoPrelude() : undefined;
+		// Skip eager todo prelude when the user has already queued a directive
+		const hasPendingUserDirective = this.#toolChoiceQueue.inspect().includes("user-force");
+		const eagerTodoPrelude =
+			!options?.synthetic && !hasPendingUserDirective ? this.#createEagerTodoPrelude(expandedText) : undefined;
 
 		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
 		if (options?.images) {
@@ -2330,7 +2493,9 @@ export class AgentSession {
 			: { role: "user" as const, content: userContent, attribution: promptAttribution, timestamp: Date.now() };
 
 		if (eagerTodoPrelude) {
-			this.#nextToolChoiceOverride = eagerTodoPrelude.toolChoice;
+			this.#toolChoiceQueue.pushOnce(eagerTodoPrelude.toolChoice, {
+				label: "eager-todo",
+			});
 		}
 
 		try {
@@ -2339,9 +2504,9 @@ export class AgentSession {
 				prependMessages: eagerTodoPrelude ? [eagerTodoPrelude.message] : undefined,
 			});
 		} finally {
-			if (eagerTodoPrelude) {
-				this.#nextToolChoiceOverride = undefined;
-			}
+			// Clean up residual eager-todo directive if the prompt never consumed it
+			// (e.g., compaction aborted, validation failed).
+			this.#toolChoiceQueue.removeByLabel("eager-todo");
 		}
 		if (!options?.synthetic) {
 			await this.#enforcePlanModeToolDecision();
@@ -2705,6 +2870,10 @@ export class AgentSession {
 		});
 	}
 
+	queueDeferredMessage(message: CustomMessage): void {
+		this.#queueHiddenNextTurnMessage(message, true);
+	}
+
 	#queueHiddenNextTurnMessage(message: CustomMessage, triggerTurn: boolean): void {
 		this.#pendingNextTurnMessages.push(message);
 		if (!triggerTurn) return;
@@ -3061,6 +3230,13 @@ export class AgentSession {
 		// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
 		// a subsequent prompt() can incorrectly observe the session as busy after an abort.
 		this.#promptInFlightCount = 0;
+		// Safety net: if the agent loop aborted without producing an assistant
+		// message (e.g. failed before the first stream), the in-flight yield was
+		// never resolved or rejected by the normal message_end path. Reject it now
+		// so any requeue callback still fires and the queue stays consistent.
+		if (this.#toolChoiceQueue.hasInFlight) {
+			this.#toolChoiceQueue.reject("aborted");
+		}
 	}
 
 	/**
@@ -3215,7 +3391,11 @@ export class AgentSession {
 	 * Validates API key, saves to session and settings.
 	 * @throws Error if no API key available for the model
 	 */
-	async setModel(model: Model, role: string = "default"): Promise<void> {
+	async setModel(
+		model: Model,
+		role: string = "default",
+		options?: { selector?: string; thinkingLevel?: ThinkingLevel },
+	): Promise<void> {
 		const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 		if (!apiKey) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
@@ -3224,7 +3404,10 @@ export class AgentSession {
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(model);
 		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, role);
-		this.settings.setModelRole(role, this.#formatRoleModelValue(role, model));
+		this.settings.setModelRole(
+			role,
+			this.#formatRoleModelValue(role, model, options?.selector, options?.thinkingLevel),
+		);
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 
 		// Re-apply the current thinking level for the newly selected model
@@ -3297,6 +3480,7 @@ export class AgentSession {
 			const resolved = resolveModelRoleValue(roleModelStr, availableModels, {
 				settings: this.settings,
 				matchPreferences,
+				modelRegistry: this.#modelRegistry,
 			});
 			if (!resolved.model) continue;
 
@@ -3767,7 +3951,7 @@ export class AgentSession {
 		}
 
 		// Build the handoff prompt
-		const handoffPrompt = renderPromptTemplate(handoffDocumentPrompt, {
+		const handoffPrompt = prompt.render(handoffDocumentPrompt, {
 			additionalFocus: customInstructions,
 		});
 
@@ -4035,7 +4219,7 @@ export class AgentSession {
 			return;
 		}
 
-		const reminder = renderPromptTemplate(planModeToolDecisionReminderPrompt, {
+		const reminder = prompt.render(planModeToolDecisionReminderPrompt, {
 			askToolName: "ask",
 			exitToolName: "exit_plan_mode",
 		});
@@ -4047,7 +4231,7 @@ export class AgentSession {
 		});
 	}
 
-	#createEagerTodoPrelude(): { message: AgentMessage; toolChoice: ToolChoice } | undefined {
+	#createEagerTodoPrelude(promptText: string): { message: AgentMessage; toolChoice: ToolChoice } | undefined {
 		const eagerTodosEnabled = this.settings.get("todo.eager");
 		const todosEnabled = this.settings.get("todo.enabled");
 		if (!eagerTodosEnabled || !todosEnabled) {
@@ -4058,6 +4242,11 @@ export class AgentSession {
 			return undefined;
 		}
 		if (this.getTodoPhases().length > 0) {
+			return undefined;
+		}
+
+		const trimmedPromptText = promptText.trimEnd();
+		if (trimmedPromptText.endsWith("?") || trimmedPromptText.endsWith("!")) {
 			return undefined;
 		}
 
@@ -4077,7 +4266,7 @@ export class AgentSession {
 			return undefined;
 		}
 
-		const eagerTodoReminder = renderPromptTemplate(eagerTodoPrompt);
+		const eagerTodoReminder = prompt.render(eagerTodoPrompt);
 
 		return {
 			message: {
@@ -4095,6 +4284,13 @@ export class AgentSession {
 	 * Check if agent stopped with incomplete todos and prompt to continue.
 	 */
 	async #checkTodoCompletion(): Promise<void> {
+		// Skip todo reminders when the most recent turn was driven by an explicit user force —
+		// the user wanted exactly that tool, not a follow-up nag about incomplete todos.
+		const lastServedLabel = this.#toolChoiceQueue.consumeLastServedLabel();
+		if (lastServedLabel === "user-force") {
+			return;
+		}
+
 		const remindersEnabled = this.settings.get("todo.reminders");
 		const todosEnabled = this.settings.get("todo.enabled");
 		if (!remindersEnabled || !todosEnabled) {
@@ -4401,14 +4597,21 @@ export class AgentSession {
 		return `${model.provider}/${model.id}`;
 	}
 
-	#formatRoleModelValue(role: string, model: Model): string {
-		const modelKey = `${model.provider}/${model.id}`;
+	#formatRoleModelValue(
+		role: string,
+		model: Model,
+		selectorOverride?: string,
+		thinkingLevelOverride?: ThinkingLevel,
+	): string {
+		const modelKey = selectorOverride ?? `${model.provider}/${model.id}`;
+		if (thinkingLevelOverride !== undefined) {
+			return formatModelSelectorValue(modelKey, thinkingLevelOverride);
+		}
 		const existingRoleValue = this.settings.getModelRole(role);
 		if (!existingRoleValue) return modelKey;
 
 		const thinkingLevel = extractExplicitThinkingSelector(existingRoleValue, this.settings);
-		if (thinkingLevel === undefined) return modelKey;
-		return `${modelKey}:${thinkingLevel}`;
+		return formatModelSelectorValue(modelKey, thinkingLevel);
 	}
 	#resolveContextPromotionConfiguredTarget(currentModel: Model, availableModels: Model[]): Model | undefined {
 		const configuredTarget = currentModel.contextPromotionTarget?.trim();
@@ -4441,6 +4644,7 @@ export class AgentSession {
 		return resolveModelRoleValue(roleModelStr, availableModels, {
 			settings: this.settings,
 			matchPreferences: { usageOrder: this.settings.getStorage()?.getModelUsageOrder() },
+			modelRegistry: this.#modelRegistry,
 		});
 	}
 
@@ -4893,6 +5097,17 @@ export class AgentSession {
 	}
 
 	#isTransientErrorMessage(errorMessage: string): boolean {
+		return (
+			this.#isTransientEnvelopeErrorMessage(errorMessage) || this.#isTransientTransportErrorMessage(errorMessage)
+		);
+	}
+
+	#isTransientEnvelopeErrorMessage(errorMessage: string): boolean {
+		// Match Anthropic stream-envelope failures that indicate a broken stream before any content starts.
+		return /anthropic stream envelope error:/i.test(errorMessage) && /before message_start/i.test(errorMessage);
+	}
+
+	#isTransientTransportErrorMessage(errorMessage: string): boolean {
 		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504,
 		// service unavailable, network/connection errors, fetch failed, terminated, retry delay exceeded
 		return /overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall/i.test(

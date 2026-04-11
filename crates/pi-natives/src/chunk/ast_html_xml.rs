@@ -2,9 +2,31 @@
 
 use tree_sitter::Node;
 
-use super::{classify::LangClassifier, common::*};
+use super::{
+	classify::{
+		ClassifierTables, LangClassifier, NamingMode, RecurseMode, RuleStyle, semantic_rule,
+	},
+	common::*,
+	kind::ChunkKind,
+};
+use crate::language::SupportLang;
 
 pub struct HtmlXmlClassifier;
+
+const HTML_XML_SHARED_RULES: &[super::classify::SemanticRule] = &[semantic_rule(
+	"text_node",
+	ChunkKind::Text,
+	RuleStyle::Group,
+	NamingMode::None,
+	RecurseMode::None,
+)];
+
+const HTML_XML_TABLES: ClassifierTables = ClassifierTables {
+	root:                 HTML_XML_SHARED_RULES,
+	class:                HTML_XML_SHARED_RULES,
+	function:             &[],
+	structural_overrides: super::classify::StructuralOverrides::EMPTY,
+};
 
 /// Classify an element-like node as a container with tag semantics.
 ///
@@ -12,21 +34,49 @@ pub struct HtmlXmlClassifier;
 /// `extract_identifier` does not handle HTML/XML start-tag structures.
 fn classify_element<'t>(node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
 	match node.kind() {
-		"element" | "script_element" | "style_element" => {
+		"script_element" => Some(classify_script_element(node, source)),
+		"style_element" => Some(classify_style_element(node, source)),
+		"element" => {
 			let tag_name =
 				extract_markup_tag_name(node, source).unwrap_or_else(|| "anonymous".to_string());
 			// HTML: child elements are direct children of `element`.
 			// XML: child elements are inside a `content` wrapper node.
 			let recurse_target = child_by_kind(node, &["content"]).unwrap_or(node);
-			Some(make_container_chunk(
+			Some(force_container(make_container_chunk(
 				node,
-				format!("tag_{tag_name}"),
+				ChunkKind::Tag,
+				Some(tag_name),
 				source,
 				Some(recurse_self(recurse_target, ChunkContext::ClassBody)),
-			))
+			)))
 		},
-		"text_node" => Some(group_candidate(node, "text", source)),
+		"text_node" => Some(group_candidate(node, ChunkKind::Text, source)),
 		_ => None,
+	}
+}
+
+fn classify_script_element<'t>(node: Node<'t>, source: &str) -> RawChunkCandidate<'t> {
+	classify_injected_raw_text_block(node, ChunkKind::Script, source, SupportLang::JavaScript)
+}
+
+fn classify_style_element<'t>(node: Node<'t>, source: &str) -> RawChunkCandidate<'t> {
+	classify_injected_raw_text_block(node, ChunkKind::Style, source, SupportLang::Css)
+}
+
+fn classify_injected_raw_text_block<'t>(
+	node: Node<'t>,
+	kind: ChunkKind,
+	source: &str,
+	default_language: SupportLang,
+) -> RawChunkCandidate<'t> {
+	let Some(content_node) = child_by_kind(node, &["raw_text"]) else {
+		return positional_candidate(node, kind, source);
+	};
+
+	let candidate = with_region_node(positional_candidate(node, kind, source), Some(content_node));
+	match resolve_embedded_language(node, source, default_language) {
+		Some(language) => with_injected_subtree(candidate, language, content_node),
+		None => candidate,
 	}
 }
 
@@ -48,20 +98,66 @@ fn extract_markup_tag_name(node: Node<'_>, source: &str) -> Option<String> {
 	})
 }
 
+fn resolve_embedded_language(
+	node: Node<'_>,
+	source: &str,
+	default_language: SupportLang,
+) -> Option<SupportLang> {
+	if let Some(language) = attribute_value(node, "lang", source) {
+		return SupportLang::from_alias(language.as_str());
+	}
+	Some(default_language)
+}
+
+fn attribute_value(node: Node<'_>, name: &str, source: &str) -> Option<String> {
+	let start = start_like(node)?;
+	for child in named_children(start) {
+		if child.kind() != "attribute" {
+			continue;
+		}
+		if extract_attribute_name(child, source).as_deref() != Some(name) {
+			continue;
+		}
+		if let Some(value) = child_by_kind(child, &["attribute_value", "quoted_attribute_value"]) {
+			return sanitize_identifier(&unquote_text(node_text(
+				source,
+				value.start_byte(),
+				value.end_byte(),
+			)));
+		}
+		return Some(name.to_string());
+	}
+	None
+}
+
+fn extract_attribute_name(node: Node<'_>, source: &str) -> Option<String> {
+	child_by_kind(node, &["attribute_name"])
+		.and_then(|name| sanitize_identifier(node_text(source, name.start_byte(), name.end_byte())))
+}
+
+fn start_like(node: Node<'_>) -> Option<Node<'_>> {
+	child_by_kind(node, &["start_tag", "self_closing_tag"])
+}
+
+const fn force_container(mut candidate: RawChunkCandidate<'_>) -> RawChunkCandidate<'_> {
+	candidate.force_recurse = true;
+	candidate
+}
+
 impl LangClassifier for HtmlXmlClassifier {
-	fn classify_root<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		classify_element(node, source)
+	fn tables(&self) -> &'static ClassifierTables {
+		&HTML_XML_TABLES
 	}
 
-	fn classify_class<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		classify_element(node, source)
-	}
-
-	fn classify_function<'t>(
+	fn classify_override<'t>(
 		&self,
-		_node: Node<'t>,
-		_source: &str,
+		context: ChunkContext,
+		node: Node<'t>,
+		source: &str,
 	) -> Option<RawChunkCandidate<'t>> {
+		if matches!(context, ChunkContext::Root | ChunkContext::ClassBody) {
+			return classify_element(node, source);
+		}
 		None
 	}
 }

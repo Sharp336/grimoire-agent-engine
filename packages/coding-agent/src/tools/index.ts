@@ -1,17 +1,20 @@
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { ToolChoice } from "@oh-my-pi/pi-ai";
 import type { SearchDb } from "@oh-my-pi/pi-natives";
-import { $env, logger } from "@oh-my-pi/pi-utils";
+import { $env, $flag, isBunTestRuntime, logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async";
 import type { PromptTemplate } from "../config/prompt-templates";
 import type { Settings } from "../config/settings";
+import { EditTool } from "../edit";
 import type { Skill } from "../extensibility/skills";
 import type { InternalUrlRouter } from "../internal-urls";
 import { getPreludeDocs, warmPythonEnvironment } from "../ipy/executor";
 import { checkPythonKernelAvailability } from "../ipy/kernel";
 import { LspTool } from "../lsp";
 import type { DiscoverableMCPSearchIndex, DiscoverableMCPTool } from "../mcp/discoverable-tool-metadata";
-import { EditTool } from "../patch";
 import type { PlanModeState } from "../plan-mode/state";
+import type { CustomMessage } from "../session/messages";
+import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
 import type { EventBus } from "../utils/event-bus";
@@ -22,9 +25,11 @@ import { AstGrepTool } from "./ast-grep";
 import { AwaitTool } from "./await-tool";
 import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
+
 import { CalculatorTool } from "./calculator";
 import { CancelJobTool } from "./cancel-job";
 import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
+import { DebugTool } from "./debug";
 import { ExitPlanModeTool } from "./exit-plan-mode";
 import { FindTool } from "./find";
 import {
@@ -45,6 +50,7 @@ import { wrapToolWithMetaNotice } from "./output-meta";
 import { PythonTool } from "./python";
 import { ReadTool } from "./read";
 import { RenderMermaidTool } from "./render-mermaid";
+import { createReportToolIssueTool, isAutoQaEnabled } from "./report-tool-issue";
 import { ResolveTool } from "./resolve";
 import { reportFindingTool } from "./review";
 import { SearchToolBm25Tool } from "./search-tool-bm25";
@@ -55,10 +61,10 @@ import { WriteTool } from "./write";
 
 // Exa MCP tools (22 tools)
 
+export * from "../edit";
 export * from "../exa";
 export type * from "../exa/types";
 export * from "../lsp";
-export * from "../patch";
 export * from "../session/streaming-output";
 export * from "../task";
 export * from "../web/search";
@@ -71,6 +77,7 @@ export * from "./browser";
 export * from "./calculator";
 export * from "./cancel-job";
 export * from "./checkpoint";
+export * from "./debug";
 export * from "./exit-plan-mode";
 export * from "./find";
 export * from "./gemini-image";
@@ -78,10 +85,10 @@ export * from "./gh";
 export * from "./grep";
 export * from "./inspect-image";
 export * from "./notebook";
-export * from "./pending-action";
 export * from "./python";
 export * from "./read";
 export * from "./render-mermaid";
+export * from "./report-tool-issue";
 export * from "./resolve";
 export * from "./review";
 export * from "./search-tool-bm25";
@@ -175,12 +182,21 @@ export interface ToolSession {
 	getSelectedMCPToolNames?: () => string[];
 	/** Merge MCP tool selections into the active session tool set. */
 	activateDiscoveredMCPTools?: (toolNames: string[]) => Promise<string[]>;
-	/** Pending action store for preview/apply workflows */
-	pendingActionStore?: import("./pending-action").PendingActionStore;
+	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */
+	getToolChoiceQueue?(): ToolChoiceQueue;
+	/** Build a model-provider-specific ToolChoice that targets the named tool, or undefined if unsupported. */
+	buildToolChoice?(toolName: string): ToolChoice | undefined;
+	/** Steer a hidden custom message into the conversation (e.g. a preview reminder). */
+	steer?(message: { customType: string; content: string; details?: unknown }): void;
+	/** Peek the currently in-flight tool-choice queue directive's invocation handler. Used by the `resolve` tool to dispatch to the pending action. */
+	peekQueueInvoker?(): ((input: unknown) => Promise<unknown> | unknown) | undefined;
 	/** Get active checkpoint state if any. */
 	getCheckpointState?: () => CheckpointState | undefined;
 	/** Set or clear active checkpoint state. */
 	setCheckpointState?: (state: CheckpointState | null) => void;
+
+	/** Queue a hidden message to be injected at the next agent turn. */
+	queueDeferredMessage?(message: CustomMessage): void;
 }
 
 type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
@@ -191,6 +207,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	render_mermaid: s => new RenderMermaidTool(s),
 	ask: AskTool.createIf,
 	bash: s => new BashTool(s),
+	debug: DebugTool.createIf,
 	python: s => new PythonTool(s),
 	calc: s => new CalculatorTool(s),
 	ssh: loadSshTool,
@@ -225,6 +242,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 	submit_result: s => new SubmitResultTool(s),
 	report_finding: () => reportFindingTool,
+	report_tool_issue: s => createReportToolIssueTool(s),
 	exit_plan_mode: s => new ExitPlanModeTool(s),
 	resolve: s => new ResolveTool(s),
 };
@@ -279,14 +297,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		!skipPythonPreflight &&
 		pythonMode !== "bash-only" &&
 		(requestedTools === undefined || requestedTools.includes("python"));
-	const isTestEnv = Bun.env.BUN_ENV === "test" || Bun.env.NODE_ENV === "test";
-	const skipPythonWarm = isTestEnv || $env.PI_PYTHON_SKIP_CHECK === "1";
+	const skipPythonWarm = isBunTestRuntime() || $flag("PI_PYTHON_SKIP_CHECK");
 	if (shouldCheckPython) {
-		const availability = await logger.timeAsync(
-			"createTools:pythonCheck",
-			checkPythonKernelAvailability,
-			session.cwd,
-		);
+		const availability = await logger.time("createTools:pythonCheck", checkPythonKernelAvailability, session.cwd);
 		pythonAvailable = availability.ok;
 		if (!availability.ok) {
 			logger.warn("Python kernel unavailable, falling back to bash", {
@@ -296,12 +309,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			const sessionFile = session.getSessionFile?.() ?? undefined;
 			const warmSessionId = sessionFile ? `session:${sessionFile}:cwd:${session.cwd}` : `cwd:${session.cwd}`;
 			try {
-				await logger.timeAsync(
+				await logger.time(
 					"createTools:warmPython",
 					warmPythonEnvironment,
 					session.cwd,
 					warmSessionId,
 					session.settings.get("python.sharedGateway"),
+					sessionFile,
 				);
 			} catch (err) {
 				logger.warn("Failed to warm Python environment", {
@@ -343,9 +357,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	const isToolAllowed = (name: string) => {
-		if (name === "lsp") return enableLsp;
+		if (name === "lsp") return enableLsp && session.settings.get("lsp.enabled");
 		if (name === "bash") return allowBash;
 		if (name === "python") return allowPython;
+		if (name === "debug") return session.settings.get("debug.enabled");
 		if (name === "todo_write") return !includeSubmitResult && session.settings.get("todo.enabled");
 		if (name === "find") return session.settings.get("find.enabled");
 		if (name === "grep") return session.settings.get("grep.enabled");
@@ -357,7 +372,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		if (name === "search_tool_bm25") return session.settings.get("mcp.discoveryMode");
-		if (name === "lsp") return session.settings.get("lsp.enabled");
 		if (name === "calc") return session.settings.get("calc.enabled");
 		if (name === "browser") return session.settings.get("browser.enabled");
 		if (name === "checkpoint" || name === "rewind") return session.settings.get("checkpoint.enabled");
@@ -384,21 +398,28 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 
 	const baseResults = await Promise.all(
 		baseEntries.map(async ([name, factory]) => {
-			const tool = await logger.timeAsync(`createTools:${name}`, factory, session);
+			const tool = await logger.time(`createTools:${name}`, factory, session);
 			return tool ? wrapToolWithMetaNotice(tool) : null;
 		}),
 	);
 	const tools = baseResults.filter((r): r is Tool => r !== null);
 	const hasDeferrableTools = tools.some(tool => tool.deferrable === true);
-	if (!hasDeferrableTools) {
-		return tools;
+	if (hasDeferrableTools && !tools.some(tool => tool.name === "resolve")) {
+		const resolveTool = await logger.time("createTools:resolve", HIDDEN_TOOLS.resolve, session);
+		if (resolveTool) {
+			tools.push(wrapToolWithMetaNotice(resolveTool));
+		}
 	}
-	if (tools.some(tool => tool.name === "resolve")) {
-		return tools;
+
+	// Auto-inject report_tool_issue when autoqa is enabled (env or setting).
+	// Injected unconditionally into every agent, regardless of requested tool list.
+	const autoQA = isAutoQaEnabled(session.settings);
+	if (autoQA && !tools.some(t => t.name === "report_tool_issue")) {
+		const qaTool = await HIDDEN_TOOLS.report_tool_issue(session);
+		if (qaTool) {
+			tools.push(wrapToolWithMetaNotice(qaTool));
+		}
 	}
-	const resolveTool = await logger.timeAsync("createTools:resolve", HIDDEN_TOOLS.resolve, session);
-	if (resolveTool) {
-		tools.push(wrapToolWithMetaNotice(resolveTool));
-	}
+
 	return tools;
 }

@@ -10,8 +10,8 @@ import * as path from "node:path";
 import type { AgentMessage, ResolvedThinkingLevel, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 
-import { computeLineHash, formatSessionDumpText, RpcClient, renderPromptTemplate } from "@oh-my-pi/pi-coding-agent";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { computeLineHash, formatSessionDumpText, RpcClient } from "@oh-my-pi/pi-coding-agent";
+import { prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { diffLines } from "diff";
 import { formatDirectory } from "./formatter";
 import { discoverSharedInfra, InProcessClient, type SharedInfra } from "./in-process-client";
@@ -612,21 +612,21 @@ type BenchmarkPromptDelivery = {
 };
 
 function buildBenchmarkSystemPrompt(params: { multiFile: boolean; config: BenchmarkConfig }): string {
-	return renderPromptTemplate(benchmarkSystemPrompt, {
+	return prompt.render(benchmarkSystemPrompt, {
 		multiFile: params.multiFile,
 		instructions: buildInstructions(params.config),
 	});
 }
 
 function buildInitialBenchmarkPrompt(params: { taskPrompt: string; guidedContext?: string | null }): string {
-	return renderPromptTemplate(benchmarkTaskPrompt, {
+	return prompt.render(benchmarkTaskPrompt, {
 		task_prompt: params.taskPrompt,
 		guided_context: params.guidedContext ?? undefined,
 	});
 }
 
 function buildRetryBenchmarkPrompt(params: { retryContext: string; guidedContext?: string | null }): string {
-	return renderPromptTemplate(benchmarkRetryPrompt, {
+	return prompt.render(benchmarkRetryPrompt, {
 		retry_context: params.retryContext,
 		guided_context: params.guidedContext ?? undefined,
 	});
@@ -672,7 +672,7 @@ function buildBenchmarkProviderSessionId(params: {
 		`system:${buildBenchmarkSystemPrompt({ multiFile: params.multiFile, config: params.config })}`,
 		`initial:${buildInitialBenchmarkPrompt({ taskPrompt: params.task.prompt, guidedContext: params.initialGuidedContext })}`,
 	].join("\n");
-	return `reb_${Bun.hash.xxHash64(keyMaterial).toString(36)}`;
+	return `reb_${Bun.hash(keyMaterial).toString(36)}`;
 }
 
 async function prepareBenchmarkSessionSetup(params: {
@@ -707,6 +707,7 @@ function buildBenchmarkRpcArgs(config: BenchmarkConfig, multiFile: boolean, prov
 		"--no-skills",
 		"--no-title",
 		"--no-rules",
+		"--no-lsp",
 	];
 }
 
@@ -907,6 +908,15 @@ async function runSingleTask(
 			`{"type":"meta","task":"${task.id}","run":${runIndex},"workDir":"${cwd}","providerSessionId":${JSON.stringify(sessionSetup.providerSessionId)}}\n`,
 		);
 
+		if (config.editVariant !== undefined) process.env.PI_EDIT_VARIANT = config.editVariant;
+		if (config.editFuzzy !== undefined)
+			process.env.PI_EDIT_FUZZY = config.editFuzzy === "auto" ? "auto" : config.editFuzzy ? "1" : "0";
+		if (config.editFuzzyThreshold !== undefined)
+			process.env.PI_EDIT_FUZZY_THRESHOLD =
+				config.editFuzzyThreshold === "auto" ? "auto" : String(config.editFuzzyThreshold);
+		process.env.PI_STRICT_EDIT_MODE = "1";
+		process.env.PI_NO_TITLE = "1";
+
 		const useInProcess = config.inProcess !== false;
 		const client: BenchmarkClient = useInProcess
 			? new InProcessClient({
@@ -920,20 +930,13 @@ async function runSingleTask(
 					shared,
 				})
 			: (() => {
-					const env: Record<string, string> = { PI_NO_TITLE: "1" };
-					if (config.editVariant !== undefined) env.PI_EDIT_VARIANT = config.editVariant;
-					if (config.editFuzzy !== undefined)
-						env.PI_EDIT_FUZZY = config.editFuzzy === "auto" ? "auto" : config.editFuzzy ? "1" : "0";
-					if (config.editFuzzyThreshold !== undefined)
-						env.PI_EDIT_FUZZY_THRESHOLD =
-							config.editFuzzyThreshold === "auto" ? "auto" : String(config.editFuzzyThreshold);
 					const rpc = new RpcClient({
 						cliPath: CLI_PATH,
 						cwd,
 						provider: config.provider,
 						model: config.model,
 						args: sessionSetup.rpcArgs,
-						env,
+						env: { ...process.env } as Record<string, string>,
 					});
 					return Object.assign(rpc, {
 						dispose: async () => rpc[Symbol.dispose](),

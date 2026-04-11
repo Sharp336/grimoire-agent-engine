@@ -1,9 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
-import { Messages } from "@anthropic-ai/sdk/resources/messages/messages";
+import { afterEach, describe, expect, it } from "bun:test";
+import type Anthropic from "@anthropic-ai/sdk";
 import { streamAnthropic } from "../src/providers/anthropic";
 import type { Context, Model } from "../src/types";
-
-const originalFirstEventTimeout = Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
 
 const model: Model<"anthropic-messages"> = {
 	id: "claude-sonnet-4-5",
@@ -23,7 +21,9 @@ const context: Context = {
 };
 
 type MockAnthropicEvent = Record<string, unknown>;
-type MockAnthropicStream = AsyncIterable<MockAnthropicEvent> & {
+type MockAnthropicStream = AsyncIterable<MockAnthropicEvent>;
+
+type MockAnthropicRequest = {
 	withResponse(): Promise<{
 		data: MockAnthropicStream;
 		response: Response;
@@ -116,23 +116,13 @@ function createAnthropicMockStream({
 	signal: AbortSignal | undefined;
 	connectDelayMs?: number;
 	events?: MockAnthropicEvent[];
-}): MockAnthropicStream {
+}): MockAnthropicRequest {
 	const response = new Response(null, {
 		status: 200,
 		headers: { "request-id": "req_mock" },
 	});
 
 	const stream: MockAnthropicStream = {
-		async withResponse() {
-			if (connectDelayMs > 0) {
-				await waitForDelayOrAbort(connectDelayMs, signal);
-			}
-			return {
-				data: stream,
-				response,
-				request_id: response.headers.get("request-id"),
-			};
-		},
 		async *[Symbol.asyncIterator]() {
 			if (!events) {
 				await waitForAbortAndThrowAbortError(signal);
@@ -144,33 +134,40 @@ function createAnthropicMockStream({
 		},
 	};
 
-	return stream;
+	return {
+		async withResponse() {
+			if (connectDelayMs > 0) {
+				await waitForDelayOrAbort(connectDelayMs, signal);
+			}
+			return {
+				data: stream,
+				response,
+				request_id: response.headers.get("request-id"),
+			};
+		},
+	};
 }
 
 afterEach(() => {
-	vi.restoreAllMocks();
-	if (originalFirstEventTimeout === undefined) {
-		delete Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
-	} else {
-		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = originalFirstEventTimeout;
-	}
+	// No shared globals to restore; keep hook so the suite stays explicit.
 });
 
 describe("anthropic first-event timeout retries", () => {
 	it("retries when the provider never sends the first stream event", async () => {
-		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
 		let attempt = 0;
-
-		vi.spyOn(Messages.prototype, "stream").mockImplementation((_body, requestOptions) => {
+		const create = ((_body: unknown, requestOptions?: { signal?: AbortSignal }) => {
 			attempt += 1;
-			const signal = (requestOptions as { signal?: AbortSignal } | undefined)?.signal;
 			return createAnthropicMockStream({
-				signal,
+				signal: requestOptions?.signal,
 				events: attempt === 1 ? undefined : createSuccessfulAnthropicEvents("retry recovered"),
 			}) as never;
-		});
+		}) as unknown as Anthropic["messages"]["create"];
+		const client = { messages: { create } } as Anthropic;
 
-		const result = await streamAnthropic(model, context, { apiKey: "sk-ant-test" }).result();
+		const result = await streamAnthropic(model, context, {
+			client,
+			streamFirstEventTimeoutMs: 20,
+		}).result();
 
 		expect(attempt).toBe(2);
 		expect(result.stopReason).toBe("stop");
@@ -179,39 +176,39 @@ describe("anthropic first-event timeout retries", () => {
 	});
 
 	it("does not arm the Anthropic first-event watchdog before the stream connects", async () => {
-		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "20";
-
-		vi.spyOn(Messages.prototype, "stream").mockImplementation((_body, requestOptions) => {
-			const signal = (requestOptions as { signal?: AbortSignal } | undefined)?.signal;
+		const create = ((_body: unknown, requestOptions?: { signal?: AbortSignal }) => {
 			return createAnthropicMockStream({
-				signal,
+				signal: requestOptions?.signal,
 				connectDelayMs: 30,
 				events: createSuccessfulAnthropicEvents("delayed connect"),
 			}) as never;
-		});
+		}) as unknown as Anthropic["messages"]["create"];
+		const client = { messages: { create } } as Anthropic;
 
-		const result = await streamAnthropic(model, context, { apiKey: "sk-ant-test" }).result();
+		const result = await streamAnthropic(model, context, {
+			client,
+			streamFirstEventTimeoutMs: 20,
+		}).result();
 
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([{ type: "text", text: "delayed connect" }]);
 	});
 
 	it("keeps caller aborts as aborted instead of retrying them as first-event timeouts", async () => {
-		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "50";
 		let attempt = 0;
-
-		vi.spyOn(Messages.prototype, "stream").mockImplementation((_body, requestOptions) => {
+		const create = ((_body: unknown, requestOptions?: { signal?: AbortSignal }) => {
 			attempt += 1;
-			const signal = (requestOptions as { signal?: AbortSignal } | undefined)?.signal;
-			return createAnthropicMockStream({ signal }) as never;
-		});
+			return createAnthropicMockStream({ signal: requestOptions?.signal }) as never;
+		}) as unknown as Anthropic["messages"]["create"];
+		const client = { messages: { create } } as Anthropic;
 
 		const controller = new AbortController();
 		setTimeout(() => controller.abort(), 5);
 
 		const result = await streamAnthropic(model, context, {
-			apiKey: "sk-ant-test",
+			client,
 			signal: controller.signal,
+			streamFirstEventTimeoutMs: 50,
 		}).result();
 
 		expect(attempt).toBe(1);

@@ -1,8 +1,252 @@
 # Changelog
 
 ## [Unreleased]
+
+## [14.1.0] - 2026-04-11
 ### Added
 
+- Added richer tool rendering details in session export HTML, including metadata badges, argument formatting, and todo task tree styling for exported tool and workflow messages
+- Added a persistent `js` tool backed by `node:vm`, with cross-session `highway` KV/pubsub, tool calls from inside JS cells, and `$` / `$$` interactive JavaScript execution
+- Added SQLite database read support to the `read` tool for `.sqlite`, `.sqlite3`, `.db`, and `.db3` files with table listing, schema + sample output, row lookup, paginated query filtering, and read-only `q=SELECT` mode
+- Added SQLite mutation support to the `write` tool so `db.sqlite:table` inserts JSON5 rows and `db.sqlite:table:key` updates or deletes rows via row key
+- Added rendering of usage report entries for accounts with no usage limits, including account label and optional plan type with a `-- no limits` indicator
+- Updated account label resolution to fall back to email or accountId so unlabeled unlimited-plan accounts display a meaningful name
+- Added canonical model equivalence and provider coalescing across `models.yml`, `enabledModels`, `--models`, `/model`, and `--list-models`
+- Added `equivalence` overrides/exclusions to `models.yml` and `modelProviderOrder` to `config.yml` for global canonical-provider preference
+
+### Changed
+
+- Enabled `await` and `cancel_job` to be available when `bash.autoBackground.enabled` is set, so auto-backgrounded bash jobs can be awaited or cancelled without enabling `async.enabled`
+- Updated bash auto-background behavior so short commands returned inline output when they completed before the configured threshold, while longer runs moved to background jobs automatically
+- Replaced the LLM-callable Python execution path with JavaScript execution in the shared VM context, including updated renderers, prompts, session messages, and extension events
+- Updated interactive and CLI model listings/selectors to work with canonical model ids while resolving them to concrete provider variants for actual execution
+- Updated role assignment persistence so selected model settings now store the selector used by users, including thinking-level suffixes, while runtime continues to run against the resolved concrete provider model
+- Updated model scope resolution to expand exact canonical model ids into all matching provider variants when filtering supported model sets
+- Changed the agent to avoid giving time estimates or task-duration predictions in user responses, focusing on required work instead
+- Changed generated code guidance to avoid speculative abstractions and extra compatibility scaffolding, favoring direct implementations that match current needs
+- Changed model role resolution so roles can store either canonical model ids or explicit `provider/model` selectors while sessions continue to record the concrete model actually used
+- Updated bash execution to optionally auto-background long-running commands through the existing background-job pipeline, with dedicated settings for enabling the behavior and adjusting the delay
+
+### Fixed
+
+- Fixed session export rendering so JavaScript execution messages now use `jsExecution` labels and content instead of `pythonExecution`, matching current tool behavior
+- Fixed JavaScript cell execution to auto-display returned values once and preserve persistent VM bindings across calls until reset
+- Fixed `.db`/`.db3` reads to verify SQLite file headers and fall back to normal file reading when the extension matches but the content is not a SQLite database
+- Fixed SQLite selector parsing and resolution to correctly route requests to database operations at the file-extension boundary instead of misrouting through plain file/archive handlers
+- Fixed unsupported or unsafe selectors by rejecting missing tables, composite primary keys for row lookups, unknown query parameters, and row operations on non-existent tables
+- Fixed model resolution for commit message generation, title generation, memory consolidation, and image inspection when role strings use canonical ids instead of raw provider/model values
+- Fixed default-model updates so previously configured thinking levels were preserved when reassigning a role
+- Fixed model scope and selection handling in CLI/session startup paths that previously failed to resolve aliases consistently across features
+- Fixed short-lived git subprocesses to disable `core.fsmonitor` and `core.untrackedCache`, avoiding unnecessary repository watchers and cache work during agent git operations
+
+### Security
+
+- Blocked destructive SQL execution in read-mode SQLite access by using read-only connections and rejecting bound-parameter raw SQL
+
+## [14.0.5] - 2026-04-11
+### Added
+
+- Added `designer` model role for UI/UX design tasks with Gemini 3.1 Pro as default model
+- Added support for model role fallback lists — roles can now resolve to multiple model patterns with automatic fallback to next available model
+- Added `extractReadableFromHtml` utility function to extract readable content from HTML with Readability article extraction and CSS selector fallback
+- Added support for GFM (GitHub Flavored Markdown) features including tables, strikethrough, and task lists in HTML-to-markdown conversion
+- Added `resolveDiagnosticTargets` utility function to handle glob pattern resolution with fallback to literal file paths for bracket-style paths
+
+### Changed
+
+- Clarified fenced code block editing behavior in markdown — the tool now preserves literal indentation inside fenced blocks, with content written verbatim as supplied
+- Updated guidance for inserting content after markdown section headings to use `after` on the heading chunk rather than `before`/`prepend` on the section itself
+- Reduced default image resize limits to 1568px (from 2000px) and 500KB (from 4.5MB) to match Anthropic's internal downscaling threshold and reduce payload sizes in tool calls
+- Adjusted screenshot compression to use 1024px max dimensions and 150KB budget for more aggressive optimization of browser screenshots in LLM requests
+- Updated JPEG quality defaults from 80 to 75 and refined quality ladder steps (70, 60, 50, 40) for tighter byte budgets
+- Improved image resize fast-path to skip re-encoding when images are already within dimensions and at ≤25% of byte budget, avoiding unnecessary processing of small icons and diagrams
+- Clarified that chunk names are truncated and must be copied from `read` or `?` output rather than constructed from source identifiers
+- Enhanced guidance for editing fenced code blocks in markdown to preserve exact whitespace using `raw` reads, as the tool normalizes tabs to spaces which can damage indentation-sensitive content
+- Updated designer agent to use `pi/designer` role alias instead of explicit model list
+- Refactored model role resolution to support multiple fallback patterns per role, improving model availability handling
+- Replaced regex-based HTML-to-markdown conversion with Turndown library and GFM plugin for more accurate formatting of complex HTML structures
+- Simplified no-changes response to omit redundant response text when chunk content already matches
+- Clarified region suffix behavior on leaf and compound statement chunks — `~` and `^` now fall back to whole-chunk replacement with explicit guidance to supply complete structural content
+- Updated CRC refresh guidance to direct users to use CRCs from edit responses or run `read(path="file", sel="?")`
+- Added clarification that region suffixes fall back to whole-chunk replacement for prose and data formats (markdown, YAML, JSON, fenced code blocks, frontmatter)
+- Documented `L20` shorthand syntax for single-line reads extending to end-of-file, with `L20-L20` for one-line windows
+- Refactored diagnostic target resolution to use new `resolveDiagnosticTargets` function, consolidating glob pattern detection and file matching logic
+- Updated chunk selector syntax from `@region` format to `~` (body) and `^` (head) suffixes for more concise region targeting
+- Simplified chunk edit documentation to use new `~` and `^` region syntax instead of `@head`, `@body`, `@tail`, `@decl` keywords
+- Replaced internal `raceAbort` function with imported `raceWithAbort` utility from pi-utils
+- Refactored cleanup timer to use async iterator pattern with `timers.setInterval` instead of `setInterval`
+- Made `#cleanupIdleSessions` synchronous and moved async cleanup loop logic to new `#runCleanupLoop` method
+- Replaced regex-based `htmlToBasicMarkdown` with a Turndown + GFM plugin pipeline (tables, strikethrough, task lists, nested lists now convert correctly). Added direct `turndown` and `turndown-plugin-gfm` dependencies
+
+### Fixed
+
+- Fixed chunk edit tool to report file-not-found error distinctly when attempting to use chunk selectors on non-existent files, with guidance to use write tool or verify the path
+- Fixed stale child selector reuse to correctly match chunks by checksum when multiple sibling chunks with the same name exist under the same parent
+- Fixed stale diagnostics being reused after unrelated file publishes by clearing cached diagnostics before refreshing file state
+- Fixed Codex search to use streamed answer text when final answer is an image placeholder or empty
+
+## [14.0.4] - 2026-04-10
+### Added
+
+- Added `PI_CHUNK_AUTOINDENT` environment variable to control whether chunk read/edit tools normalize indentation to canonical tabs or preserve literal file whitespace
+- Added dynamic chunk tool prompts that automatically adjust guidance based on `PI_CHUNK_AUTOINDENT` setting without exposing a tool parameter
+- Added `<instruction-priority>`, `<output-contract>`, `<default-follow-through>`, `<tool-persistence>`, and `<completeness-contract>` sections to system prompt for improved long-horizon agent workflows
+
+### Changed
+
+- Updated chunk edit tool to apply `normalizeIndent` setting during edit operations, enabling literal whitespace preservation when `PI_CHUNK_AUTOINDENT=0`
+- Refactored environment variable parsing to use `$flag()` and `$envpos()` utilities from pi-utils for consistent boolean and integer handling across codebase
+- Updated system prompt communication guidelines to emphasize conciseness and information density, and added guidance on avoiding repetition of user requests
+- Enhanced system prompt with explicit rules for design integrity, verification before yielding, and handling of missing context via tool-based retrieval
+- Added `PI_CHUNK_AUTOINDENT` to control whether chunk read/edit tools normalize indentation, and updated chunk prompts to switch guidance automatically based on that setting
+- Refined the default system prompt with explicit instruction-priority, output-contract, tool-persistence, completeness, and verification rules for long-horizon GPT-5.4-style agent workflows
+
+### Fixed
+
+- Fixed typo in system prompt: 'backwards compatibiltity' → 'backwards compatibility'
+
+## [14.0.3] - 2026-04-09
+
+### Fixed
+
+- Fixed cached Ollama discovery rows so upgraded installs switch to the OpenAI Responses transport instead of staying on the old completions transport
+
+## [14.0.2] - 2026-04-09
+### Added
+
+- Added `/force` slash command to force the next agent turn to use a specific tool
+- Added `ToolChoiceQueue` for managing tool-choice directives with lifecycle callbacks and requeue semantics
+- Added `setForcedToolChoice()` method to AgentSession to programmatically force tool invocations
+- Added `toolChoiceQueue` property to AgentSession for direct queue access
+- Added `peekQueueInvoker()` method to AgentSession to retrieve in-flight tool invocation handlers
+- Added `queueResolveHandler()` function as the canonical entry point for preview/apply workflows
+- Added `buildToolChoice()` and `steer()` methods to ToolSession for tool-choice queue integration
+- Added `getToolChoiceQueue()` method to ToolSession for accessing the tool-choice queue
+- Added support for embedded URL selectors (`:raw` and `:L#-L#` line ranges) in read command paths
+- Added `parseReadUrlTarget` function to parse and validate URL read targets with line range support
+- Added `decl` region to chunk selector for targeting declarations without leading trivia
+- Exported `hooks` subpath for extensibility API access
+- Added `build` script for compiling binary artifacts
+
+### Changed
+
+- Refactored pending action handling from `PendingActionStore` to `ToolChoiceQueue` with generator-based directives
+- Changed tool-choice override mechanism from simple override to a queue-based system with callbacks
+- Updated `ResolveTool` to dispatch to in-flight queue invokers instead of popping from a pending action store
+- Updated custom tool loader to accept `pushPendingAction` callback instead of `PendingActionStore` instance
+- Updated `AstEditTool` to use `queueResolveHandler()` for preview/apply semantics
+- Changed eager-todo prelude to use the tool-choice queue instead of simple override
+- Updated todo reminder suppression to check for user-forced directives via `consumeLastServedLabel()`
+- Made model-specific edit mode defaults conditional on `PI_STRICT_EDIT_MODE` environment variable for greater flexibility in edit mode selection
+- Updated slash command handlers to support returning remaining text as prompt input instead of consuming input entirely
+- Enhanced slash command parser to recognize both whitespace and colon (`:`) as command argument separators
+- Updated indentation guidance for chunk edit content to use single leading spaces per indent level instead of tabs
+- Updated read CLI to delegate URL inputs through the read tool pipeline instead of treating them as local file paths
+- Updated chunk edit documentation to clarify region semantics and emphasize using the narrowest region for edits
+- Improved chunk selector guidance with visual diagram showing region boundaries
+- Renamed `build:binary` script to `build`
+- Refactored `check` script to include linting via Biome and type checking
+- Added `check:types`, `lint`, `fmt`, and `fix` scripts for improved developer workflow
+- Simplified TypeScript configuration by extending workspace-level config
+
+### Removed
+
+- Removed `PendingActionStore` class and related pending-action module
+- Removed `pendingActionStore` parameter from AgentSession config
+- Removed `pendingActionStore` from ToolSession interface
+- Removed `consumeNextToolChoiceOverride()` method from AgentSession (replaced by `nextToolChoice()`)
+
+### Fixed
+
+- Fixed tool-choice queue cleanup on agent loop abort to prevent orphaned in-flight directives
+- Fixed requeue semantics to preserve `onInvoked` and `onRejected` callbacks across multiple abort cycles
+
+## [14.0.1] - 2026-04-08
+
+### Changed
+
+- Improved auto-generated file detection to gracefully handle ENOENT errors when peeking file content, preventing unnecessary abort failures
+- Optimized context emission by skipping message cloning when no extensions have context handlers
+- Improved message cloning resilience by falling back to shallow array clone when structured cloning fails due to non-cloneable objects
+- Made `assertEditableFileContent` synchronous instead of async for improved performance in streaming edit checks
+- Enhanced streaming edit abort detection to check for auto-generated files as soon as the file path is available, rather than waiting for the full diff
+- Improved file prefix reading in session storage to use `peekFile` utility from @oh-my-pi/pi-utils for better efficiency
+- Moved image metadata detection to @oh-my-pi/pi-utils package for shared use across projects
+- Simplified image loading API by removing redundant metadata parameters and consolidating image utilities
+- Updated imports to use readImageMetadata and parseImageMetadata from @oh-my-pi/pi-utils instead of local implementations
+
+### Removed
+
+- Removed image-input.ts utility module; functionality consolidated into image-loading.ts
+- Removed mime.ts utility module; MIME detection moved to @oh-my-pi/pi-utils
+- Removed ImageMetadata interface and ReadImageMetadataOptions from local codebase
+
+### Fixed
+
+- Fixed streaming edit abort for auto-generated files by adding LRU caching and early path-based detection to prevent unnecessary edits
+
+## [14.0.0] - 2026-04-08
+
+### Breaking Changes
+
+- Simplified chunk edit operations: removed `append_child`, `prepend_child`, `append_sibling`, `prepend_sibling`, and `replace_body` ops in favor of unified `replace`, `before`, `after`, `prepend`, and `append` with region targeting (`@head`, `@body`, `@tail`)
+- Chunk edit `target` format changed: now accepts `selector#CRC@region` for mutations and `selector@region` for insertions; removed separate `crc` and `anchor` fields from edit operations
+- Removed checksum requirement from insert operations (`before`, `after`, `prepend`, `append`); only `replace` requires `#CRC` suffix
+
+### Added
+
+- Auto QA tool (`report_tool_issue`) for automated tracking of unexpected tool behavior; enabled via `PI_AUTO_QA=1` environment variable or `dev.autoqa` setting
+- `dev.autoqa` setting to enable automated tool issue reporting for all agents
+- System prompt guidance when `report_tool_issue` tool is available, encouraging agents to report tool behavior discrepancies
+- LSP server discovery at startup via `discoverStartupLspServers()` to detect configured language servers without blocking initialization
+- LSP startup event channel (`lsp:startup`) for asynchronous server warmup notifications with completion or failure status
+- `LspStartupServerInfo` type for tracking LSP server status including connecting, ready, and error states
+- LSP server status display in `/info` command showing connecting, ready, and error states with color-coded indicators
+- Multi-session support in ACP mode: agents can now manage multiple concurrent sessions with independent state, models, and configurations
+- Session forking in ACP mode: `unstable_forkSession` creates a new session from an existing one's history
+- Session resumption in ACP mode: `unstable_resumeSession` reloads a previously saved session
+- Session closure in ACP mode: `unstable_closeSession` cleanly shuts down a session and releases resources
+- Model state reporting in ACP mode: `SessionModelState` with available models and current selection in session responses
+- Direct model setting in ACP mode: `unstable_setSessionModel` RPC command for changing the active model
+- Turn-level usage tracking in ACP mode: prompt responses now include `usage` with input/output/cached token counts
+- Message ID tracking in ACP mode: stable message IDs for assistant chunks enabling client-side message correlation
+- Settings cloning: `Settings.cloneForCwd()` method to create isolated settings instances for different working directories
+- Extension flag value retrieval: `ExtensionRunner.getFlagValues()` to inspect current flag state
+- Exported autoresearch module and submodules via `./autoresearch` and `./autoresearch/*` package paths
+- Exported autoresearch tools via `./autoresearch/tools/*` package path
+- Exported CLI commands via `./cli/commands/*` package path
+- Exported DAP module and submodules via `./dap` and `./dap/*` package paths
+- Exported edit module and submodules via `./edit`, `./edit/*`, and `./edit/modes/*` package paths
+- Exported bundled ci-green custom command via `./extensibility/custom-commands/bundled/ci-green` package path
+- Exported extensibility plugins marketplace via `./extensibility/plugins/marketplace` and `./extensibility/plugins/marketplace/*` package paths
+- Exported ACP mode via `./modes/acp` and `./modes/acp/*` package paths
+- Exported web utilities via `./web/*` package path
+- Exported line-hash utilities from edit module via `./edit/line-hash`
+- Host-owned custom tools support: RPC clients can now register custom tools via `setCustomTools()` and the RPC server will invoke them over the transport with `host_tool_call` requests
+- RPC host tool framework: `RpcHostToolBridge` for managing host tool execution, `RpcHostToolDefinition` for tool metadata, and bidirectional `host_tool_call`, `host_tool_cancel`, `host_tool_update`, and `host_tool_result` frames
+- RPC client tool API: `defineRpcClientTool()` helper, `RpcClientCustomTool` interface, and `RpcClientToolContext` for implementing host-side tool execution with update streaming and abort support
+- `set_host_tools` RPC command to replace the active set of host-owned tools before the next model call
+- `refreshRpcHostTools()` method on `AgentSession` to integrate host tools into the active tool registry with conflict detection and auto-activation of non-hidden tools
+- Instruction breakpoints support: `set_instruction_breakpoint` and `remove_instruction_breakpoint` debug actions for setting breakpoints at specific instruction addresses
+- Data breakpoints support: `data_breakpoint_info`, `set_data_breakpoint`, and `remove_data_breakpoint` debug actions for monitoring variable/memory access
+- Memory introspection: `read_memory` and `write_memory` debug actions for inspecting and modifying debugger memory
+- Disassembly support: `disassemble` debug action for viewing assembly instructions with symbol resolution
+- Module and source introspection: `modules` and `loaded_sources` debug actions for querying loaded modules and source files
+- Custom DAP requests: `custom_request` debug action for sending arbitrary Debug Adapter Protocol commands
+- Reverse request handling in DAP client: `onReverseRequest()` method for responding to adapter-initiated requests like `runInTerminal` and `startDebugging`
+- DAP reverse request support: adapters can now request terminal spawning and child debug sessions via `runInTerminal` and `startDebugging` reverse requests
+- Instruction pointer reference in debug snapshots: `instructionPointerReference` field in session summaries for low-level debugging
+- Hit condition support for instruction and data breakpoints: `hit_condition` parameter for conditional breakpoint triggering
+- RPC `set_todos` command and `todoPhases` in `get_state`, allowing hosts to pre-seed and inspect session todo state over the protocol
+- Deferred diagnostics support in LSP writethrough: `onDeferredDiagnostics` callback and `deferredSignal` in `WritethroughOptions` allow callers to receive diagnostics that arrive after the main 5-second timeout
+- Language detection for `.pm` (Perl modules), `.astro` (Astro framework), and special filenames `containerfile` and `justfile`
+- Workspace-scoped diagnostics and reload actions via `*` file parameter; `diagnostics` action now supports `*` for workspace-wide diagnostics across all configured servers
+- Socket-mode DAP adapter support for debuggers like dlv that communicate via network sockets instead of stdio; Linux uses unix domain sockets, macOS/other platforms use TCP with client-addr dialing
+- Improved extensionless binary debugging: native debuggers (gdb, lldb-dap) and adapters with root markers are now preferred over unrelated adapters like debugpy
+- Debug tool with DAP (Debug Adapter Protocol) support for launching and attaching debuggers, setting breakpoints, stepping through execution, inspecting threads/stack/variables, and evaluating expressions
+- Debug adapter configuration for gdb, lldb-dap, debugpy, and dlv with language/file-type matching and root marker detection
+- Debug session management with support for source and function breakpoints, conditional breakpoints, stack trace inspection, scope/variable exploration, and program output capture
+- `debug.enabled` setting to control debug tool availability
 - Chunk read formatting: `anchorStyle` (full / kind / bare), `read.anchorstyle` setting, and `chunked` flag on file display mode
 - `read.prosechunks` and `read.explorechunks` settings for prose chunk trees and checksum-free explore trees
 - Handlebars helpers `anchor` and `sel` (with template `anchorStyle` context) for chunk examples in prompts
@@ -14,17 +258,42 @@
 
 ### Changed
 
-- Chunk edit schema and tool contract: explicit `op` (`replace`, `delete`, `append`, `prepend`, `after`, `before`); sibling inserts use `anchor` instead of separate after/before target fields; `replace` supports optional `line` / `end_line` for line-scoped edits (former splice-style behavior); insert ops omit CRC where appropriate, mutations require checksum on target
-- Chunk path handling: parse selector and CRC separately, sanitize selectors (strip filename prefixes, uppercase checksums), accept embedded `#CRC` on targets, auto-accept stale CRC for later ops in the same batch on the same chunk
-- Chunk UX: streaming and final edit previews show chunk edits next to hashline edits with op-specific labels; prompt docs shortened with rules table, `…` in examples, and helper-based path/anchor samples
-- `log_experiment` only reverts files modified by the run; prompts and errors document that pre-existing dirty files are preserved; richer pending-run error context; `init_experiment` no-ops when the contract matches unless `new_segment`; secondary metrics informational only (no `force` for drift)
-- Autoresearch: `log_experiment` reloads benchmark/scope/constraints from `autoresearch.md` after resolving a pending run; `/autoresearch` without `autoresearch.md` follows `/plan`-style toggle and message flow; setup moved into autoresearch system prompt (removed `command-initialize.md`)
-- Native/shell alignment: `GrepOutputMode` from pi-natives; shell and `getDiagnosticsForFile` callbacks use error-first `(err, chunk)`; `getDiagnosticsForFile` takes an options object
-- Clipboard: `copyToClipboard` / `readImageFromClipboard` live in `utils/clipboard.ts` (OSC 52 and Termux)
-- macOS: session-wide power assertion while the agent runs; `MacAppearanceObserver.start()` with error-first callback; `detectMacOSAppearance()` returns enum values
+- Extracted working directory formatting logic into `formatToolWorkingDirectory()` utility for consistent path display across tools
+- Bash command rendering now sanitizes tabs and shortens home directory paths in command previews
+- Chunk edit tool schema: renamed `target` parameter to `sel` for consistency with read tool terminology
+- Chunk edit tool: `op` parameter is now required (previously optional with `replace` default)
+- Chunk edit documentation: updated all region references from `@inner` to `@body` for clearer semantics
+- Chunk edit documentation: expanded with comprehensive real-world examples showing full read output, operation effects, and indentation rules
+- Chunk edit documentation: simplified indentation guidance to write content at indent-level 0 with automatic re-indentation by the tool
+- Chunk edit documentation: clarified that `@region` only works on container chunks, not leaf chunks
+- Chunk edit documentation: emphasized that CRCs change after every edit and must be refreshed from latest responses
+- Read chunk tool documentation: updated selector examples to use `@body` instead of `@inner`
+- Chunk edit region terminology updated: `@inner` renamed to `@body` for clearer semantics in container chunks
+- Chunk edit documentation restructured with comprehensive examples showing full read output, operation effects, and indentation rules
+- Chunk edit indentation guidance simplified: content should be written at indent-level 0 and the tool automatically applies correct base indentation
+- Chunk edit examples expanded with realistic TypeScript code samples demonstrating replace, insert, prepend, append, and delete operations
+- Python tool description now dynamically reflects prelude documentation availability instead of static text
+- Python tool now automatically warms the environment on first execution if prelude helpers are unavailable, ensuring documentation is loaded before use
+- Tool creation now auto-injects `report_tool_issue` when auto QA is enabled, regardless of requested tool list
+- Chunk edit region names standardized to `@head`, `@body`, and `@tail` for clearer semantics
+- Chunk edit documentation clarified: region defaults to full chunk when omitted; leaf chunks no longer support region targeting
+- Chunk read documentation updated: selector examples now use region-specific selectors based on `@head`, `@body`, and `@tail`
+- LSP server connecting status in welcome banner now uses muted pending symbol instead of warning symbol for clearer visual distinction
+- Codex websocket prewarm now runs asynchronously in the background instead of blocking session creation, allowing faster startup
+- Codex websocket status updates now display in interactive mode when prewarm completes or fails
+- LSP server warmup now runs asynchronously in the background instead of blocking session creation, allowing faster startup
+- LSP servers returned from `createAgentSession()` now include `connecting` status during initial warmup phase
+- Interactive mode now subscribes to LSP startup events and displays status updates and error messages to the user
+- LSP server status in `/info` command now distinguishes between connecting (yellow), ready (green), and error (red) states
+- ACP agent now manages multiple sessions instead of a single session; session lifecycle and configuration are now per-session
+- ACP session creation now uses a factory function to support creating new sessions for different working directories
+- ACP event mapping now accepts optional `getMessageId` callback for stable message ID assignment to assistant chunks
 
 ### Removed
 
+- Deleted `src/utils/prompt-format.ts` module; prompt formatting logic moved to `pi-utils`
+- Deleted `src/utils/frontmatter.ts` module; frontmatter parsing logic moved to `pi-utils`
+- Removed `waitForChildProcess` utility (child process termination now handled by native `killTree` from pi-natives)
 - `grep-chunk.md` (folded into unified grep template)
 - `startMacAppearanceObserver` export (use `MacAppearanceObserver.start()`)
 - `copyToClipboard` export from pi-natives
@@ -33,11 +302,74 @@
 
 ### Fixed
 
+- Chunk edit parameter validation: corrected detection of chunk edit operations to check for `sel` field instead of `target`
+- Chunk edit streaming previews: updated to reference `sel` parameter instead of `target`
+- Python prelude introspection now respects execution timeout and signal options, preventing hangs during environment warmup
+- Welcome banner LSP server status now updates in real-time when background startup warmup completes, eliminating stale connecting status displays
+- Welcome banner LSP startup rows now re-render when background warmup finishes, use the pending status symbol while servers are still connecting, and no longer add a redundant `LSP ready` status line on successful startup
+- ACP session initialization now registers connection cleanup handlers to dispose all sessions on disconnect
+- Reorganized package.json exports: moved `./edit` exports before `./plan-mode` for better logical grouping
+- Notebook conversion logic now checks for raw read mode or non-chunk mode before converting via markit, allowing chunk-mode reads of `.ipynb` files to use chunk parsing instead of conversion
+- Go receiver methods now render as top-level siblings instead of nested under their receiver type in chunk read output
+- Moved prompt formatting and rendering utilities from `coding-agent` to `pi-utils` package; `renderPromptTemplate()` and `formatPromptContent()` now accessed via `prompt.render()` and `prompt.format()` from `@oh-my-pi/pi-utils`
+- Moved `parseFrontmatter()` utility from `coding-agent` to `pi-utils` package; now imported from `@oh-my-pi/pi-utils` instead of local utils
+- Consolidated prompt template handling: `TemplateContext` type now available as `prompt.TemplateContext` from `@oh-my-pi/pi-utils`
+- DAP initialization now advertises support for `runInTerminal` and `startDebugging` reverse requests, and memory references
+- Debug tool schema expanded with new parameters for instruction/data breakpoints, memory operations, and custom requests
+- DAP session state now tracks instruction and data breakpoints separately from source breakpoints
+- Replaced `Bun.which()` with `$which()` from pi-utils for command resolution
+- Chunk edit tool documentation restructured: replaced operation-specific examples with region-based guidance and canonical indentation rules
+- Chunk read documentation updated: selectors now support region syntax (e.g., `class_Foo.fn_bar#ABCD@body`) and canonical target listings show supported regions per chunk
+- Chunk edit schema simplified: `target` description now documents region format; `op` and `content` descriptions clarified for region-aware operations
+- Chunk edit streaming previews updated: labels now reflect region-aware operations (e.g., `append` instead of `append child`, `insert after` without anchor reference)
+- Removed CRC parsing from `parseChunkSelector()` and `parseChunkReadPath()`: selectors no longer extract embedded checksums
+- Chunk edit normalization simplified: no longer requires async checksum resolution or context-dependent operation mapping
+- RPC mode now automatically disables session title generation by default; hosts can opt in with `PI_RPC_EMIT_TITLE=1` environment variable to receive title updates
+- RPC mode now resets workflow-altering `todo.*`, `task.*`, and `async.*` settings to built-in defaults instead of inheriting user overrides
+- RPC mode now disables automatic session title generation by default and suppresses `setTitle` extension UI requests unless hosts opt in with `PI_RPC_EMIT_TITLE=1`
+- Reorganized edit tool implementation from `patch/` to `edit/` directory structure with dedicated mode subdirectories (`edit/modes/chunk.ts`, `edit/modes/hashline.ts`, `edit/modes/patch.ts`, `edit/modes/replace.ts`)
+- Updated package.json exports to use `./edit` path instead of `./patch` for edit tool and related utilities
+- Chunk edit tool documentation simplified: removed line-based edit examples, clarified `target` format with full path and CRC suffix, added guidance for `replace_body` operation to preserve declarations
+- LSP diagnostics timeout reduced from 10 seconds to 5 seconds for faster feedback; slow diagnostics now fetch in background via deferred mechanism
+- Diagnostics action error messaging clarified: requires `file` parameter or `*` for workspace scope; improved guidance in error responses
+- Workspace symbols and reload actions now accept `*` to operate across all configured servers instead of requiring a file path
+- DAP session initialization now subscribes to stop events before launching/attaching to avoid missing stopOnEntry events
+- Stack frame fetching moved outside the event dispatch loop to prevent deadlocks and improve responsiveness
+- Evaluate requests now default to the top stopped frame when frameId is not explicitly provided
+- Eager todo enforcement now skips prompts ending with question marks or exclamation marks, treating them as queries or commands rather than statements requiring task planning
+- Chunk read output now displays fully-qualified anchor paths (e.g., `[class_Worker.fn_run#CRC]`) instead of bare names, making targets unambiguous for edits
+- Chunk edit tool documentation clarified: `target` must be the fully-qualified path with `#CRC` suffix; added guidance to run `read(path="file", sel="?")` for canonical target listings when anchor style is unclear
+- Chunk read tool documentation updated: `sel` parameter now documents the `?` selector for canonical target listings, and clarifies that default output shows full paths
+- Chunk edit schema and tool contract: explicit `op` (`replace`, `append`, `prepend`, `after`, `before`); use `replace` with empty `content` to remove a chunk (no separate `delete` op); sibling inserts use `anchor` instead of separate after/before target fields; insert ops omit CRC where appropriate, mutations require checksum on target
+- Chunk path handling: parse selector and CRC separately, sanitize selectors (strip filename prefixes, uppercase checksums), accept embedded `#CRC` on targets, auto-accept stale CRC for later ops in the same batch on the same chunk
+- Chunk UX: streaming and final edit previews show chunk edits next to hashline edits with op-specific labels; prompt docs shortened with rules table, `…` in examples, and helper-based path/anchor samples
+- `log_experiment` only reverts files modified by the run; prompts and errors document that pre-existing dirty files are preserved; richer pending-run error context; `init_experiment` no-ops when the contract matches unless `new_segment`; secondary metrics informational only (no `force` for drift)
+- Autoresearch: `log_experiment` reloads benchmark/scope/constraints from `autoresearch.md` after resolving a pending run; `/autoresearch` without `autoresearch.md` follows `/plan`-style toggle and message flow; setup moved into autoresearch system prompt (removed `command-initialize.md`)
+- Native/shell alignment: `GrepOutputMode` from pi-natives; shell and `getDiagnosticsForFile` callbacks use error-first `(err, chunk)`; `getDiagnosticsForFile` takes an options object
+- Clipboard: `copyToClipboard` / `readImageFromClipboard` live in `utils/clipboard.ts` (OSC 52 and Termux)
+- macOS: session-wide power assertion while the agent runs; `MacAppearanceObserver.start()` with error-first callback; `detectMacOSAppearance()` returns enum values
+- ACP session cleanup now properly cancels in-flight prompts and disposes resources when sessions are closed or connection aborts
+- Removed unused `_createErrorToolResult` helper function from RPC host-tools module
+- Fixed Go receiver method indentation in append operations to preserve relative indentation from the anchor chunk
+- Fixed Go type chunk line counts to report only the type body lines instead of including grouped receiver methods
+- Fixed enum variant insertion to avoid adding extra blank lines between variants
+- Chunk read output now correctly preserves embedded CRC in selectors (e.g., `class_Foo.fn_bar#ZZPM`) instead of stripping them during path parsing
+- Chunk edit error messages now consistently report checksum mismatches with format `Checksum mismatch` instead of variable phrasing
+- Chunk-mode read output now correctly displays scoped response trees showing only touched chunks and adjacent siblings, preventing unrelated distant chunks from appearing in responses
+- DAP stopped event handling no longer blocks the message reader, preventing potential deadlocks during rapid event sequences
+- Chunk-mode whole-chunk replaces now preserve attached leading comments and docblocks when replacement content starts at the declaration, preventing accidental comment loss during agent edits
+- Chunk edit error messages now consistently report checksum mismatches with the format `did not match checksum "XXXX"` instead of variable phrasing
+- Chunk selector validation for edits now rejects non-canonical selectors (suffix-only like `fn_run` or prefix-stripped like `run`), requiring fully-qualified paths to prevent ambiguity
+- Plan review previews now re-append at the chat tail on refresh, keeping them adjacent to the active selector instead of updating off-screen
 - `log_experiment` validates and reverts run-scoped file changes without clobbering unrelated dirty worktree state
 - Chunk edit targets that embed CRC in the selector (e.g. `fn_foo#ABCD`) parse correctly
 - Shell paths check errors before consuming chunk output (bash executor, config resolution)
 - `/autoresearch` toggles like `/plan` when empty; slash completion no longer suggests `off`/`clear` on an empty prefix after the command
 - Chunk-mode read/edit edge cases (zero-width gap replaces, stale batch diagnostics, grouped Go receivers, line-count headers, parse error locations)
+
+### Added
+
+- `/review` command now accepts inline args as custom instructions appended to the generated prompt for all structured review modes (PR-style, uncommitted, specific commit). When inline args are provided, option 4 (editor) is suppressed from the menu. The no-UI (Task tool) path forwards args as a focus hint.
 
 ## [13.19.0] - 2026-04-05
 
@@ -1726,7 +2058,7 @@
 
 - Changed custom UI hook cleanup to conditionally restore editor state only when not using overlay mode
 - Extracted environment variable configuration for non-interactive bash execution into reusable `NO_PAGER_ENV` constant
-- Replaced custom timing instrumentation with logger.timeAsync() and logger.time() from pi-utils for consistent startup profiling
+- Replaced custom timing instrumentation with logger.time() and logger.time() from pi-utils for consistent startup profiling
 - Removed PI_DEBUG_STARTUP environment variable in favor of logger.debug() for conditional debug output
 - Consolidated timing calls throughout initialization pipeline to use unified logger-based timing system
 

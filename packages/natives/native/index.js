@@ -7,11 +7,16 @@ const fs = require("node:fs");
 const { createRequire } = require("node:module");
 const os = require("node:os");
 const path = require("node:path");
-const { getNativesDir, logger } = require("@oh-my-pi/pi-utils");
-const packageJson = require("../package.json");
-const { embeddedAddon } = require("./embedded-addon");
 
-// NOTE: TypeScript types are omitted in JS version
+function getNativesDir() {
+	const xdgDataHome = process.env.XDG_DATA_HOME;
+	if (xdgDataHome && fs.existsSync(path.join(xdgDataHome, "omp"))) {
+		return path.join(xdgDataHome, "omp", "natives");
+	}
+	return path.join(os.homedir(), ".omp", "natives");
+}
+const packageJson = require("../package.json");
+let embeddedAddon = null;
 
 const require_ = createRequire(__filename);
 const platformTag = `${process.platform}-${process.arch}`;
@@ -28,6 +33,14 @@ const isCompiledBinary =
 	__filename.includes("$bunfs") ||
 	__filename.includes("~BUN") ||
 	__filename.includes("%7EBUN");
+
+if (isCompiledBinary) {
+	try {
+		({ embeddedAddon } = require("./embedded-addon"));
+	} catch {
+		embeddedAddon = null;
+	}
+}
 const SUPPORTED_PLATFORMS = ["linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64"];
 
 function getVariantOverride() {
@@ -76,7 +89,7 @@ function detectAvx2Support() {
 function resolveCpuVariant(override) {
 	if (process.arch !== "x64") return null;
 	if (override) return override;
-	return logger.time("native:detectAvx2Support", () => detectAvx2Support()) ? "modern" : "baseline";
+	return detectAvx2Support() ? "modern" : "baseline";
 }
 
 function getAddonFilenames(tag, variant) {
@@ -95,7 +108,6 @@ const selectedVariant = resolveCpuVariant(variantOverride);
 const addonFilenames = getAddonFilenames(platformTag, selectedVariant);
 const addonLabel = selectedVariant ? `${platformTag} (${selectedVariant})` : platformTag;
 
-const debugCandidates = [path.join(nativeDir, "pi_natives.dev.node"), path.join(execDir, "pi_natives.dev.node")];
 const baseReleaseCandidates = addonFilenames.flatMap(filename => [
 	path.join(nativeDir, filename),
 	path.join(execDir, filename),
@@ -105,22 +117,19 @@ const compiledCandidates = addonFilenames.flatMap(filename => [
 	path.join(userDataDir, filename),
 ]);
 const releaseCandidates = isCompiledBinary ? [...compiledCandidates, ...baseReleaseCandidates] : baseReleaseCandidates;
-const candidates = process.env.PI_DEV ? [...debugCandidates, ...releaseCandidates] : releaseCandidates;
-const dedupedCandidates = [...new Set(candidates)];
+const dedupedCandidates = [...new Set(releaseCandidates)];
 
 function runCommand(command, args) {
-	const cmdLine = `${command} '${args.join(" ")}'`;
-	return logger.time(`runCommand:${cmdLine}`, () => {
-		try {
-			const { spawnSync } = require("child_process");
-			const result = spawnSync(command, args, { encoding: "utf-8" });
-			if (result.error) return null;
-			if (result.status !== 0) return null;
-			return (result.stdout || "").trim();
-		} catch {
-			return null;
-		}
-	});
+	// removed logger.time
+	try {
+		const { spawnSync } = require("child_process");
+		const result = spawnSync(command, args, { encoding: "utf-8" });
+		if (result.error) return null;
+		if (result.status !== 0) return null;
+		return (result.stdout || "").trim();
+	} catch {
+		return null;
+	}
 }
 
 function selectEmbeddedAddonFile() {
@@ -170,14 +179,11 @@ function maybeExtractEmbeddedAddon(errors) {
 
 function loadNative() {
 	const errors = [];
-	const embeddedCandidate = logger.time("native:maybeExtractEmbeddedAddon", () => maybeExtractEmbeddedAddon(errors));
+	const embeddedCandidate = maybeExtractEmbeddedAddon(errors);
 	const runtimeCandidates = embeddedCandidate ? [embeddedCandidate, ...dedupedCandidates] : dedupedCandidates;
 	for (const candidate of runtimeCandidates) {
 		try {
-			const bindings = logger.time(`native:loadNative:require:${path.basename(candidate)}`, () =>
-				require_(candidate),
-			);
-			validateNative(bindings, candidate); 
+			const bindings = require_(candidate);
 			if (process.env.PI_DEV) {
 				console.log(`Loaded native addon from ${candidate}`);
 			}
@@ -215,76 +221,17 @@ function loadNative() {
 	} else {
 		helpMessage =
 			"If installed via npm/bun, try reinstalling: bun install @oh-my-pi/pi-natives\n" +
-			"If developing locally, build with: bun --cwd=packages/natives run build:native\n" +
-			"Optional x64 variants: TARGET_VARIANT=baseline|modern bun --cwd=packages/natives run build:native";
+			"If developing locally, build with: bun --cwd=packages/natives run build\n" +
+			"Optional x64 variants: TARGET_VARIANT=baseline|modern bun --cwd=packages/natives run build";
 	}
 
 	throw new Error(`Failed to load pi_natives native addon for ${addonLabel}.\n\nTried:\n${details}\n\n${helpMessage}`);
 }
 
-function validateNative(bindings, source) {
-	const missing = [];
-	const checkFn = name => {
-		if (typeof bindings[name] !== "function") {
-			missing.push(name);
-		}
-	};
-	checkFn("copyToClipboard");
-	checkFn("readImageFromClipboard");
-	checkFn("ChunkState");
-	checkFn("formatAnchor");
-	checkFn("glob");
-	checkFn("fuzzyFind");
-	checkFn("grep");
-	checkFn("search");
-	checkFn("hasMatch");
-	checkFn("htmlToMarkdown");
-	checkFn("highlightCode");
-	checkFn("supportsLanguage");
-	checkFn("getSupportedLanguages");
-	checkFn("truncateToWidth");
-	checkFn("sanitizeText");
-	checkFn("wrapTextWithAnsi");
-	checkFn("sliceWithWidth");
-	checkFn("extractSegments");
-	checkFn("matchesKittySequence");
-	checkFn("executeShell");
-	checkFn("PtySession");
-	checkFn("SearchDb");
-	checkFn("Shell");
-	checkFn("parseKey");
-	checkFn("matchesLegacySequence");
-	checkFn("parseKittySequence");
-	checkFn("matchesKey");
-	checkFn("visibleWidth");
-	checkFn("killTree");
-	checkFn("listDescendants");
-	checkFn("getWorkProfile");
-	checkFn("invalidateFsScanCache");
-	checkFn("astGrep");
-	checkFn("astEdit");
-	checkFn("detectMacOSAppearance");
-	checkFn("MacAppearanceObserver");
-	checkFn("MacOSPowerAssertion");
-	checkFn("projfsOverlayProbe");
-	checkFn("projfsOverlayStart");
-	checkFn("projfsOverlayStop");
-	if (missing.length) {
-		throw new Error(
-			`Native addon missing exports (${source}). Missing: ${missing.join(", ")}. ` +
-				"Rebuild with `bun --cwd=packages/natives run build:native`.",
-		);
-	}
-}
-
-module.exports = logger.time("native:loadNative", () => loadNative());
-
-// Side effect: register native killTree with pi-utils.
-const { setNativeKillTree } = require("@oh-my-pi/pi-utils");
-setNativeKillTree(module.exports.killTree);
+module.exports = loadNative();
 
 // --- generated const enum exports (do not edit) ---
-exports.AstMatchStrictness = {
+module.exports.AstMatchStrictness = {
   Cst: 'cst',
   Smart: 'smart',
   Ast: 'ast',
@@ -292,7 +239,7 @@ exports.AstMatchStrictness = {
   Signature: 'signature',
   Template: 'template',
 };
-exports.ChunkAnchorStyle = {
+module.exports.ChunkAnchorStyle = {
   Full: 'full',
   Kind: 'kind',
   Bare: 'bare',
@@ -300,49 +247,59 @@ exports.ChunkAnchorStyle = {
   KindOmit: 'kind-omit',
   None: 'none',
 };
-exports.ChunkEditOp = {
+module.exports.ChunkEditOp = {
   Replace: 'replace',
   Delete: 'delete',
-  AppendChild: 'append_child',
-  PrependChild: 'prepend_child',
-  AppendSibling: 'append_sibling',
-  PrependSibling: 'prepend_sibling',
+  Before: 'before',
+  After: 'after',
+  Prepend: 'prepend',
+  Append: 'append',
 };
-exports.ChunkReadStatus = {
+module.exports.ChunkFocusMode = {
+  Expanded: 'expanded',
+  Collapsed: 'collapsed',
+  Container: 'container',
+};
+module.exports.ChunkReadStatus = {
   Ok: 'ok',
   NotFound: 'not_found',
+  UnsupportedRegion: 'unsupported_region',
 };
-exports.Ellipsis = {
+module.exports.ChunkRegion = {
+  Head: '^',
+  Body: '~',
+};
+module.exports.Ellipsis = {
   Unicode: 0,
   Ascii: 1,
   Omit: 2,
 };
-exports.FileType = {
+module.exports.FileType = {
   File: 1,
   Dir: 2,
   Symlink: 3,
 };
-exports.GrepOutputMode = {
+module.exports.GrepOutputMode = {
   Content: 'content',
   Count: 'count',
   FilesWithMatches: 'filesWithMatches',
 };
-exports.ImageFormat = {
+module.exports.ImageFormat = {
   PNG: 0,
   JPEG: 1,
   WEBP: 2,
   GIF: 3,
 };
-exports.KeyEventType = {
+module.exports.KeyEventType = {
   Press: 1,
   Repeat: 2,
   Release: 3,
 };
-exports.MacOSAppearance = {
+module.exports.MacOSAppearance = {
   Dark: 'dark',
   Light: 'light',
 };
-exports.SamplingFilter = {
+module.exports.SamplingFilter = {
   Nearest: 1,
   Triangle: 2,
   CatmullRom: 3,

@@ -396,7 +396,8 @@ export class CommandController {
 		if (this.ctx.lspServers && this.ctx.lspServers.length > 0) {
 			info += `\n${theme.bold("LSP Servers")}\n`;
 			for (const server of this.ctx.lspServers) {
-				const statusColor = server.status === "ready" ? "success" : "error";
+				const statusColor =
+					server.status === "ready" ? "success" : server.status === "connecting" ? "warning" : "error";
 				const statusText =
 					server.status === "error" && server.error ? `${server.status}: ${server.error}` : server.status;
 				info += `${theme.fg("dim", `${server.name}:`)} ${theme.fg(statusColor, statusText)} ${theme.fg("dim", `(${server.fileTypes.join(", ")})`)}\n`;
@@ -1001,6 +1002,14 @@ function formatAccountLabel(limit: UsageLimit, report: UsageReport, index: numbe
 	return `account ${index + 1}`;
 }
 
+function formatUnlimitedReportLabel(report: UsageReport, index: number): string {
+	const email = report.metadata?.email as string | undefined;
+	if (email) return email;
+	const accountId = report.metadata?.accountId as string | undefined;
+	if (accountId) return accountId;
+	return `account ${index + 1}`;
+}
+
 function formatResetShort(limit: UsageLimit, nowMs: number): string | undefined {
 	if (limit.window?.resetsAt !== undefined) {
 		return formatDuration(limit.window.resetsAt - nowMs);
@@ -1187,6 +1196,16 @@ function renderUsageReports(reports: UsageReport[], uiTheme: typeof theme, nowMs
 			}
 		}
 
+		// Render accounts with no rate limits (e.g. business/enterprise plans).
+		const unlimitedReports = providerReports.filter(report => report.limits.length === 0);
+		for (const report of unlimitedReports) {
+			const label = formatUnlimitedReportLabel(report, 0);
+			const tier = report.metadata?.planType as string | undefined;
+			const tierSuffix = tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
+			lines.push(
+				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
+			);
+		}
 		// No per-provider footer; global header shows last check.
 	}
 

@@ -1,6 +1,7 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import { prompt } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
-import { renderPromptTemplate } from "../config/prompt-templates";
+import { isBackgroundJobSupportEnabled } from "../async";
 import awaitDescription from "../prompts/tools/await.md" with { type: "text" };
 import type { ToolSession } from "./index";
 
@@ -36,11 +37,11 @@ export class AwaitTool implements AgentTool<typeof awaitSchema, AwaitToolDetails
 	readonly strict = true;
 
 	constructor(private readonly session: ToolSession) {
-		this.description = renderPromptTemplate(awaitDescription);
+		this.description = prompt.render(awaitDescription);
 	}
 
 	static createIf(session: ToolSession): AwaitTool | null {
-		if (!session.settings.get("async.enabled")) return null;
+		if (!isBackgroundJobSupportEnabled(session.settings)) return null;
 		return new AwaitTool(session);
 	}
 

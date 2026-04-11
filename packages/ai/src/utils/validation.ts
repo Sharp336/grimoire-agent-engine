@@ -1,3 +1,4 @@
+import { structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 import type { Tool, ToolCall } from "../types";
@@ -128,10 +129,110 @@ function tryParseLeadingJsonContainer(value: string): unknown | undefined {
 		depth -= 1;
 		if (depth !== 0) continue;
 
+		const prefix = value.slice(0, index + 1);
 		try {
-			return JSON.parse(value.slice(0, index + 1)) as unknown;
+			return JSON.parse(prefix) as unknown;
 		} catch {
-			return undefined;
+			// LLMs sometimes emit literal `\n` or `\t` between JSON tokens
+			// (e.g. `[{...}\n]`). Convert these to real whitespace and retry.
+			const cleaned = cleanLiteralEscapes(prefix);
+			if (cleaned !== prefix) {
+				try {
+					return JSON.parse(cleaned) as unknown;
+				} catch {}
+			}
+			// Also try single-char healing on the extracted prefix.
+			return tryHealMalformedJson(prefix);
+		}
+	}
+
+	return undefined;
+}
+
+/**
+ * Replace literal `\n`, `\t`, `\r` sequences that appear OUTSIDE of JSON
+ * strings with actual whitespace.  LLMs sometimes produce these when they
+ * confuse the tool-call encoding with the content encoding.
+ */
+function cleanLiteralEscapes(value: string): string {
+	let result = "";
+	let inString = false;
+	let i = 0;
+	while (i < value.length) {
+		const ch = value[i];
+		if (inString) {
+			if (ch === "\\" && i + 1 < value.length) {
+				result += ch + value[i + 1];
+				i += 2;
+				continue;
+			}
+			if (ch === '"') inString = false;
+			result += ch;
+			i += 1;
+			continue;
+		}
+		if (ch === '"') {
+			inString = true;
+			result += ch;
+			i += 1;
+			continue;
+		}
+		// Outside a string: replace literal \n, \t, \r with whitespace
+		if (ch === "\\" && i + 1 < value.length) {
+			const next = value[i + 1];
+			if (next === "n" || next === "t" || next === "r") {
+				result += " ";
+				i += 2;
+				continue;
+			}
+		}
+		result += ch;
+		i += 1;
+	}
+	return result;
+}
+
+/** Maximum single-character edits to attempt when healing malformed JSON. */
+const MAX_HEAL_DISTANCE = 3;
+const BRACKET_CHARS = ["[", "]", "{", "}"] as const;
+
+/**
+ * Attempts to heal near-valid JSON by applying single-character edits near the
+ * end of the string. LLMs (especially smaller ones) sometimes produce JSON with
+ * a single misplaced, extra, or wrong bracket at the end — e.g. `"}]"` becomes
+ * `"]}"` or gets an extra `}` appended. This function tries:
+ *   1. Removing a single character from the last few positions
+ *   2. Replacing a single character in the last few positions with each bracket type
+ *
+ * Returns the parsed value on success, undefined on failure.
+ */
+function tryHealMalformedJson(value: string): unknown | undefined {
+	// Verify it actually fails to parse
+	try {
+		return JSON.parse(value) as unknown;
+	} catch {}
+
+	// Only attempt edits within the last few characters — the error is always
+	// a bracket issue at the tail for the class of LLM mistakes this targets.
+	const tailStart = Math.max(0, value.length - (MAX_HEAL_DISTANCE * 2 + 1));
+
+	// Strategy 1: remove a single character from the tail
+	for (let i = tailStart; i < value.length; i += 1) {
+		const candidate = value.slice(0, i) + value.slice(i + 1);
+		try {
+			return JSON.parse(candidate) as unknown;
+		} catch {}
+	}
+
+	// Strategy 2: replace a single character in the tail with each bracket type
+	for (let i = tailStart; i < value.length; i += 1) {
+		const original = value[i];
+		for (const replacement of BRACKET_CHARS) {
+			if (replacement === original) continue;
+			const candidate = value.slice(0, i) + replacement + value.slice(i + 1);
+			try {
+				return JSON.parse(candidate) as unknown;
+			} catch {}
 		}
 	}
 
@@ -185,9 +286,15 @@ function tryParseJsonForTypes(value: string, expectedTypes: string[]): { value: 
 		}
 	} catch {
 		if (looksJsonObject || looksJsonArray) {
-			const parsed = tryParseLeadingJsonContainer(trimmed);
-			if (parsed !== undefined && matchesExpectedType(parsed, expectedTypes)) {
-				return { value: parsed, changed: true };
+			// Try extracting a valid JSON prefix (handles trailing junk after balanced container)
+			const leading = tryParseLeadingJsonContainer(trimmed);
+			if (leading !== undefined && matchesExpectedType(leading, expectedTypes)) {
+				return { value: leading, changed: true };
+			}
+			// Try healing single-character bracket errors near the end of the string
+			const healed = tryHealMalformedJson(trimmed);
+			if (healed !== undefined && matchesExpectedType(healed, expectedTypes)) {
+				return { value: healed, changed: true };
 			}
 		}
 		return { value, changed: false };
@@ -276,17 +383,6 @@ function setValueAtPointer(root: unknown, pointer: string, value: unknown): unkn
 	if (typeof current !== "object" || current === null) return root;
 	(current as Record<string, unknown>)[lastSegment] = value;
 	return root;
-}
-
-/**
- * Deep clones a JSON-serializable value.
- * Uses structuredClone when available (faster), falls back to JSON round-trip.
- */
-function cloneJsonValue<T>(value: T): T {
-	if (typeof structuredClone === "function") {
-		return structuredClone(value);
-	}
-	return JSON.parse(JSON.stringify(value)) as T;
 }
 
 function normalizeOptionalNullsForSchema(schema: unknown, value: unknown): { value: unknown; changed: boolean } {
@@ -448,7 +544,7 @@ function coerceArgsFromErrors(
 
 		// Clone on first modification (copy-on-write)
 		if (!changed) {
-			nextArgs = cloneJsonValue(nextArgs);
+			nextArgs = structuredCloneJSON(nextArgs);
 			changed = true;
 		}
 		nextArgs = setValueAtPointer(nextArgs, instancePath, result.value);

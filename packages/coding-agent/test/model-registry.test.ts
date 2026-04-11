@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Effort, type OpenAICompat, type ThinkingConfig } from "@oh-my-pi/pi-ai";
+import { Effort, type Model, type OpenAICompat, type ThinkingConfig, writeModelCache } from "@oh-my-pi/pi-ai";
 import { kNoAuth, MODEL_ROLES, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { _resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -11,6 +11,7 @@ import { hookFetch, Snowflake } from "@oh-my-pi/pi-utils";
 describe("ModelRegistry", () => {
 	let tempDir: string;
 	let modelsJsonPath: string;
+	let cacheDbPath: string;
 	let authStorage: AuthStorage;
 
 	test("commit role includes a visible badge tag", () => {
@@ -23,6 +24,7 @@ describe("ModelRegistry", () => {
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
+		cacheDbPath = path.join(tempDir, "models.db");
 		authStorage = await AuthStorage.create(path.join(tempDir, "testauth.db"));
 	});
 
@@ -83,6 +85,10 @@ describe("ModelRegistry", () => {
 		fs.writeFileSync(modelsJsonPath, JSON.stringify({ providers }));
 	}
 
+	function writeCachedOllamaModels(models: Model<"openai-completions">[]) {
+		writeModelCache("ollama", Date.now(), models, true, cacheDbPath);
+	}
+
 	function getModelsForProvider(registry: ModelRegistry, provider: string) {
 		return registry.getAll().filter(m => m.provider === provider);
 	}
@@ -97,6 +103,10 @@ describe("ModelRegistry", () => {
 		fs.writeFileSync(modelsJsonPath, JSON.stringify({ providers }));
 	}
 
+	function writeRawModelsConfig(config: Record<string, unknown>) {
+		fs.writeFileSync(modelsJsonPath, JSON.stringify(config));
+	}
+
 	function mockOpenAiCompatibleModels(url: string, modelIds: string[]) {
 		return hookFetch(input => {
 			const requestUrl = String(input);
@@ -109,6 +119,222 @@ describe("ModelRegistry", () => {
 			throw new Error(`Unexpected URL: ${requestUrl}`);
 		});
 	}
+
+	describe("canonical equivalence", () => {
+		test("groups dotted provider variants under the bundled canonical id", () => {
+			writeRawModelsJson({
+				demo: providerConfig("https://demo.example.com/v1", [{ id: "anthropic/claude-sonnet-4.5" }]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const variants = registry.getCanonicalVariants("claude-sonnet-4-5");
+
+			expect(variants.some(variant => variant.selector === "anthropic/claude-sonnet-4-5")).toBe(true);
+			expect(variants.some(variant => variant.selector === "demo/anthropic/claude-sonnet-4.5")).toBe(true);
+		});
+
+		test("collapses wrapped, dated, and tuned anthropic variants under the base canonical id", () => {
+			writeRawModelsJson({
+				demo: providerConfig("https://demo.example.com/v1", [
+					{ id: "anthropic/claude-opus-4.5" },
+					{ id: "claude-opus-4-5-20251101" },
+					{ id: "claude-4.5-opus-high-thinking" },
+				]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const variants = registry.getCanonicalVariants("claude-opus-4-5");
+
+			expect(variants.some(variant => variant.selector === "demo/anthropic/claude-opus-4.5")).toBe(true);
+			expect(variants.some(variant => variant.selector === "demo/claude-opus-4-5-20251101")).toBe(true);
+			expect(variants.some(variant => variant.selector === "demo/claude-4.5-opus-high-thinking")).toBe(true);
+		});
+
+		test("collapses gitlab duo chat wrapper ids into the upstream canonical id", () => {
+			writeRawModelsJson({
+				"gitlab-duo": providerConfig("https://demo.example.com/v1", [{ id: "duo-chat-opus-4-6" }]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const variants = registry.getCanonicalVariants("claude-opus-4-6");
+
+			expect(variants.some(variant => variant.selector === "gitlab-duo/duo-chat-opus-4-6")).toBe(true);
+		});
+
+		test("collapses synthetic and vendor-prefixed glm wrappers into the upstream canonical id", () => {
+			writeRawModelsJson({
+				demo: providerConfig("https://demo.example.com/v1", [{ id: "hf:zai-org/GLM-4.7" }, { id: "zai-glm-4.7" }]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const variants = registry.getCanonicalVariants("glm-4.7");
+
+			expect(variants.some(variant => variant.selector === "demo/hf:zai-org/GLM-4.7")).toBe(true);
+			expect(variants.some(variant => variant.selector === "demo/zai-glm-4.7")).toBe(true);
+		});
+
+		test("collapses compact and reordered claude aliases into the upstream canonical id", () => {
+			writeRawModelsJson({
+				demo: providerConfig("https://demo.example.com/v1", [
+					{ id: "claude-opus-45" },
+					{ id: "claude-4.5-sonnet" },
+				]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const opusVariants = registry.getCanonicalVariants("claude-opus-4-5");
+			const sonnetVariants = registry.getCanonicalVariants("claude-sonnet-4-5");
+
+			expect(opusVariants.some(variant => variant.selector === "demo/claude-opus-45")).toBe(true);
+			expect(sonnetVariants.some(variant => variant.selector === "demo/claude-4.5-sonnet")).toBe(true);
+		});
+
+		test("collapses anthropic latest aliases into the best upstream claude family id", () => {
+			writeRawModelsJson({
+				demo: providerConfig("https://demo.example.com/v1", [
+					{ id: "anthropic/claude-opus-latest" },
+					{ id: "anthropic/claude-haiku-latest" },
+				]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const opusVariants = registry.getCanonicalVariants("claude-opus-4-6");
+			const haikuVariants = registry.getCanonicalVariants("claude-haiku-4-5");
+
+			expect(opusVariants.some(variant => variant.selector === "demo/anthropic/claude-opus-latest")).toBe(true);
+			expect(haikuVariants.some(variant => variant.selector === "demo/anthropic/claude-haiku-latest")).toBe(true);
+			expect(
+				registry
+					.getCanonicalVariants("claude-haiku-4-5-20251001-thinking")
+					.some(variant => variant.selector === "demo/anthropic/claude-haiku-latest"),
+			).toBe(false);
+		});
+
+		test("collapses wrapped gemini tool and tuning variants under the base preview id", () => {
+			writeRawModelsJson({
+				demo: providerConfig("https://demo.example.com/v1", [
+					{ id: "google/gemini-3.1-pro-preview" },
+					{ id: "google/gemini-3.1-pro-preview-customtools" },
+					{ id: "google/gemini-3.1-pro-preview-high" },
+				]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const variants = registry.getCanonicalVariants("gemini-3.1-pro-preview");
+
+			expect(variants.some(variant => variant.selector === "demo/google/gemini-3.1-pro-preview")).toBe(true);
+			expect(variants.some(variant => variant.selector === "demo/google/gemini-3.1-pro-preview-customtools")).toBe(
+				true,
+			);
+			expect(variants.some(variant => variant.selector === "demo/google/gemini-3.1-pro-preview-high")).toBe(true);
+		});
+
+		test("collapses compact version aliases and hardware suffixes into clean canonical ids", () => {
+			writeRawModelsJson({
+				demo: providerConfig("https://demo.example.com/v1", [
+					{ id: "hf:nvidia/Kimi-K2.5-NVFP4" },
+					{ id: "kimi-k2-5" },
+					{ id: "z-ai/glm4.7" },
+					{ id: "z-ai/glm5" },
+				]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const kimiVariants = registry.getCanonicalVariants("kimi-k2.5");
+			const glm47Variants = registry.getCanonicalVariants("glm-4.7");
+			const glm5Variants = registry.getCanonicalVariants("glm-5");
+
+			expect(kimiVariants.some(variant => variant.selector === "demo/hf:nvidia/Kimi-K2.5-NVFP4")).toBe(true);
+			expect(kimiVariants.some(variant => variant.selector === "demo/kimi-k2-5")).toBe(true);
+			expect(glm47Variants.some(variant => variant.selector === "demo/z-ai/glm4.7")).toBe(true);
+			expect(glm5Variants.some(variant => variant.selector === "demo/z-ai/glm5")).toBe(true);
+		});
+
+		test("prefers clean canonical ids over bundled wrapper ids when available", () => {
+			writeRawModelsJson({
+				demo: providerConfig("https://demo.example.com/v1", [
+					{ id: "zai/glm-4.6v-flash" },
+					{ id: "hf:deepseek-ai/DeepSeek-V3" },
+					{ id: "google/gemini-pro-latest" },
+				]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			expect(
+				registry
+					.getCanonicalVariants("glm-4.6v-flash")
+					.some(variant => variant.selector === "demo/zai/glm-4.6v-flash"),
+			).toBe(true);
+			expect(
+				registry
+					.getCanonicalVariants("deepseek-v3")
+					.some(variant => variant.selector === "demo/hf:deepseek-ai/DeepSeek-V3"),
+			).toBe(true);
+			expect(
+				registry
+					.getCanonicalVariants("gemini-pro")
+					.some(variant => variant.selector === "demo/google/gemini-pro-latest"),
+			).toBe(true);
+		});
+
+		test("applies explicit equivalence overrides from config", () => {
+			writeRawModelsConfig({
+				providers: {
+					"p-anthropic": providerConfig("https://demo.example.com/v1", [{ id: "corp-sonnet" }]),
+				},
+				equivalence: {
+					overrides: {
+						"p-anthropic/corp-sonnet": "claude-sonnet-4-5",
+					},
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const variants = registry.getCanonicalVariants("claude-sonnet-4-5");
+
+			expect(variants.some(variant => variant.selector === "p-anthropic/corp-sonnet")).toBe(true);
+		});
+
+		test("exclusions keep variants out of canonical grouping", () => {
+			writeRawModelsConfig({
+				providers: {
+					demo: providerConfig("https://demo.example.com/v1", [{ id: "anthropic/claude-sonnet-4.5" }]),
+				},
+				equivalence: {
+					exclude: ["demo/anthropic/claude-sonnet-4.5"],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const grouped = registry.getCanonicalVariants("claude-sonnet-4-5");
+			const fallback = registry.getCanonicalVariants("anthropic/claude-sonnet-4.5");
+
+			expect(grouped.some(variant => variant.selector === "demo/anthropic/claude-sonnet-4.5")).toBe(false);
+			expect(fallback.some(variant => variant.selector === "demo/anthropic/claude-sonnet-4.5")).toBe(true);
+		});
+
+		test("resolves canonical models using configured provider order", async () => {
+			await Settings.init({
+				inMemory: true,
+				overrides: {
+					modelProviderOrder: ["demo", "anthropic"],
+				},
+			});
+			writeRawModelsJson({
+				demo: providerConfig("https://demo.example.com/v1", [{ id: "anthropic/claude-sonnet-4.5" }]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const resolved = registry.resolveCanonicalModel("claude-sonnet-4-5", {
+				availableOnly: false,
+				candidates: registry.getAll(),
+			});
+
+			expect(resolved?.provider).toBe("demo");
+			expect(resolved?.id).toBe("anthropic/claude-sonnet-4.5");
+		});
+	});
 
 	describe("baseUrl override (no custom models)", () => {
 		test("overriding baseUrl keeps all built-in models", () => {
@@ -1012,15 +1238,16 @@ describe("ModelRegistry", () => {
 			await authStorage.set("github-copilot", [
 				{
 					type: "oauth",
-					access: "tid=1;proxy-ep=proxy.individual.githubcopilot.com;exp=9999999999",
-					refresh: "refresh-individual",
+					access: "ghu_individual_token_123",
+					refresh: "ghu_individual_token_123",
 					expires: Date.now() + 60_000,
 				},
 				{
 					type: "oauth",
-					access: "tid=2;proxy-ep=proxy.enterprise.githubcopilot.com;exp=9999999999",
-					refresh: "refresh-enterprise",
+					access: "ghu_enterprise_token_456",
+					refresh: "ghu_enterprise_token_456",
 					expires: Date.now() + 60_000,
+					enterpriseUrl: "ghe.example.com",
 				},
 			]);
 
@@ -1031,10 +1258,58 @@ describe("ModelRegistry", () => {
 
 			const initialBaseUrl = model.baseUrl;
 			const firstApiKey = await registry.getApiKey(model);
-			expect(firstApiKey).toContain("proxy.individual.githubcopilot.com");
+			expect(firstApiKey).toBeDefined();
+			const firstParsed = JSON.parse(firstApiKey!) as { token?: string; enterpriseUrl?: string };
+			expect(firstParsed.token).toBe("ghu_individual_token_123");
+			expect(firstParsed.enterpriseUrl).toBeUndefined();
 			const secondApiKey = await registry.getApiKey(model);
-			expect(secondApiKey).toContain("proxy.enterprise.githubcopilot.com");
+			expect(secondApiKey).toBeDefined();
+			const secondParsed = JSON.parse(secondApiKey!) as { token?: string; enterpriseUrl?: string };
+			expect(secondParsed.token).toBe("ghu_enterprise_token_456");
+			expect(secondParsed.enterpriseUrl).toBe("ghe.example.com");
 			expect(model.baseUrl).toBe(initialBaseUrl);
+		});
+
+		test("refreshProvider uses enterprise Copilot discovery host for peeked credentials", async () => {
+			await authStorage.set("github-copilot", [
+				{
+					type: "oauth",
+					access: "ghu_enterprise_token_456",
+					refresh: "ghu_enterprise_token_456",
+					expires: Date.now() + 60_000,
+					enterpriseUrl: "ghe.example.com",
+				},
+			]);
+
+			const requestedUrls: string[] = [];
+			using _hook = hookFetch((input: string | URL | Request, init?: RequestInit) => {
+				const url = input instanceof Request ? input.url : String(input);
+				requestedUrls.push(url);
+				if (url === "https://copilot-api.ghe.example.com/models") {
+					const authHeader =
+						input instanceof Request
+							? input.headers.get("Authorization")
+							: new Headers(init?.headers).get("Authorization");
+					expect(authHeader).toBe("Bearer ghu_enterprise_token_456");
+					return new Response(
+						JSON.stringify({
+							data: [
+								{
+									id: "gpt-5-mini",
+									name: "GPT-5 mini",
+								},
+							],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await registry.refreshProvider("github-copilot", "online");
+			expect(requestedUrls).toContain("https://copilot-api.ghe.example.com/models");
+			expect(requestedUrls).not.toContain("https://api.githubcopilot.com/models");
 		});
 	});
 
@@ -1051,8 +1326,8 @@ describe("ModelRegistry", () => {
 			await authStorage.set("github-copilot", [
 				{
 					type: "oauth",
-					access: "tid=1;proxy-ep=proxy.individual.githubcopilot.com;exp=9999999999",
-					refresh: "refresh-individual",
+					access: "ghu_test_token_for_disabled",
+					refresh: "ghu_test_token_for_disabled",
 					expires: Date.now() + 60_000,
 				},
 			]);
@@ -1135,6 +1410,38 @@ describe("ModelRegistry", () => {
 			const available = registry.getAvailable().filter(m => m.provider === "ollama");
 			expect(available.length).toBe(2);
 			expect(await registry.getApiKey(available[0])).toBe(kNoAuth);
+		});
+
+		test("normalizes cached ollama completions rows to responses on load", () => {
+			writeRawModelsJson({
+				ollama: {
+					baseUrl: "http://127.0.0.1:11434/v1",
+					api: "openai-responses",
+					auth: "none",
+					discovery: { type: "ollama" },
+				},
+			});
+			writeCachedOllamaModels([
+				{
+					id: "phi4-mini",
+					name: "phi4-mini",
+					api: "openai-completions",
+					provider: "ollama",
+					baseUrl: "http://127.0.0.1:11434/v1",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 8192,
+				},
+			]);
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const ollama = registry.find("ollama", "phi4-mini");
+
+			expect(ollama?.api).toBe("openai-responses");
+			expect(ollama?.baseUrl).toBe("http://127.0.0.1:11434/v1");
+			expect(registry.getProviderDiscoveryState("ollama")?.status).toBe("cached");
 		});
 
 		test("discovers ollama thinking capabilities from show metadata", async () => {

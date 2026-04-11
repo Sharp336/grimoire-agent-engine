@@ -169,10 +169,6 @@ export interface StreamOptions {
 	maxTokens?: number;
 	signal?: AbortSignal;
 	apiKey?: string;
-	/**
-	 * Prompt cache retention preference. Providers map this to their supported values.
-	 * Default: "short".
-	 */
 	cacheRetention?: CacheRetention;
 	/**
 	 * Additional headers to include in provider requests.
@@ -213,6 +209,11 @@ export interface StreamOptions {
 	 * Return undefined to keep the payload unchanged.
 	 */
 	onPayload?: (payload: unknown, model?: Model<Api>) => unknown | undefined | Promise<unknown | undefined>;
+	/**
+	 * Optional override for the first streamed event watchdog in milliseconds.
+	 * Set to 0 to disable the first-event watchdog for this request.
+	 */
+	streamFirstEventTimeoutMs?: number;
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;
 }
@@ -416,7 +417,7 @@ export interface Context {
 }
 
 export type AssistantMessageEvent =
-	| { type: "start"; partial: AssistantMessage }
+	| { type: "start"; contentIndex?: undefined; partial: AssistantMessage }
 	| { type: "text_start"; contentIndex: number; partial: AssistantMessage }
 	| { type: "text_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
 	| { type: "text_end"; contentIndex: number; content: string; partial: AssistantMessage }
@@ -426,8 +427,18 @@ export type AssistantMessageEvent =
 	| { type: "toolcall_start"; contentIndex: number; partial: AssistantMessage }
 	| { type: "toolcall_delta"; contentIndex: number; delta: string; partial: AssistantMessage }
 	| { type: "toolcall_end"; contentIndex: number; toolCall: ToolCall; partial: AssistantMessage }
-	| { type: "done"; reason: Extract<StopReason, "stop" | "length" | "toolUse">; message: AssistantMessage }
-	| { type: "error"; reason: Extract<StopReason, "aborted" | "error">; error: AssistantMessage };
+	| {
+			type: "done";
+			contentIndex?: undefined;
+			reason: Extract<StopReason, "stop" | "length" | "toolUse">;
+			message: AssistantMessage;
+	  }
+	| {
+			type: "error";
+			contentIndex?: undefined;
+			reason: Extract<StopReason, "aborted" | "error">;
+			error: AssistantMessage;
+	  };
 
 /**
  * Compatibility settings for openai-completions API.

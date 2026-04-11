@@ -1,6 +1,7 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import { prompt } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
-import { renderPromptTemplate } from "../config/prompt-templates";
+import { isBackgroundJobSupportEnabled } from "../async";
 import cancelJobDescription from "../prompts/tools/cancel-job.md" with { type: "text" };
 import type { ToolSession } from "./index";
 
@@ -23,11 +24,11 @@ export class CancelJobTool implements AgentTool<typeof cancelJobSchema, CancelJo
 	readonly strict = true;
 
 	constructor(private readonly session: ToolSession) {
-		this.description = renderPromptTemplate(cancelJobDescription);
+		this.description = prompt.render(cancelJobDescription);
 	}
 
 	static createIf(session: ToolSession): CancelJobTool | null {
-		if (!session.settings.get("async.enabled")) return null;
+		if (!isBackgroundJobSupportEnabled(session.settings)) return null;
 		return new CancelJobTool(session);
 	}
 

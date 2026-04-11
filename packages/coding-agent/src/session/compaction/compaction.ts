@@ -26,8 +26,7 @@ import {
 	getOpenAIResponsesHistoryPayload,
 	normalizeResponsesToolCallId,
 } from "@oh-my-pi/pi-ai/utils";
-import { logger } from "@oh-my-pi/pi-utils";
-import { renderPromptTemplate } from "../../config/prompt-templates";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import compactionShortSummaryPrompt from "../../prompts/compaction/compaction-short-summary.md" with { type: "text" };
 import compactionSummaryPrompt from "../../prompts/compaction/compaction-summary.md" with { type: "text" };
 import compactionTurnPrefixPrompt from "../../prompts/compaction/compaction-turn-prefix.md" with { type: "text" };
@@ -474,11 +473,11 @@ export function findCutPoint(
 // Summarization
 // ============================================================================
 
-const SUMMARIZATION_PROMPT = renderPromptTemplate(compactionSummaryPrompt);
+const SUMMARIZATION_PROMPT = prompt.render(compactionSummaryPrompt);
 
-const UPDATE_SUMMARIZATION_PROMPT = renderPromptTemplate(compactionUpdateSummaryPrompt);
+const UPDATE_SUMMARIZATION_PROMPT = prompt.render(compactionUpdateSummaryPrompt);
 
-const SHORT_SUMMARY_PROMPT = renderPromptTemplate(compactionShortSummaryPrompt);
+const SHORT_SUMMARY_PROMPT = prompt.render(compactionShortSummaryPrompt);
 
 function formatAdditionalContext(context: string[] | undefined): string {
 	if (!context || context.length === 0) return "";
@@ -762,7 +761,7 @@ function buildOpenAiNativeHistory(
 					if (!msgId) {
 						msgId = `msg_${msgIndex}`;
 					} else if (msgId.length > 64) {
-						msgId = `msg_${Bun.hash.xxHash64(msgId).toString(36)}`;
+						msgId = `msg_${Bun.hash(msgId).toString(36)}`;
 					}
 					input.push({
 						type: "message",
@@ -1201,7 +1200,7 @@ export function prepareCompaction(
 // Main compaction function
 // ============================================================================
 
-const TURN_PREFIX_SUMMARIZATION_PROMPT = renderPromptTemplate(compactionTurnPrefixPrompt);
+const TURN_PREFIX_SUMMARIZATION_PROMPT = prompt.render(compactionTurnPrefixPrompt);
 
 /**
  * Generate summaries for compaction using prepared data.

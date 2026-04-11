@@ -13,15 +13,22 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { setDefaultTabWidth } from "@oh-my-pi/pi-natives";
-import { getAgentDbPath, getAgentDir, getProjectDir, isEnoent, logger, procmgr } from "@oh-my-pi/pi-utils";
+import {
+	getAgentDbPath,
+	getAgentDir,
+	getProjectDir,
+	isEnoent,
+	logger,
+	procmgr,
+	setDefaultTabWidth,
+} from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 import { type Settings as SettingsCapabilityItem, settingsCapability } from "../capability/settings";
 import type { ModelRole } from "../config/model-registry";
 import { loadCapability } from "../discovery";
 import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset } from "../modes/theme/theme";
-import { type EditMode, normalizeEditMode } from "../patch";
 import { AgentStorage } from "../session/agent-storage";
+import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { withFileLock } from "./file-lock";
 import {
 	type BashInterceptorRule,
@@ -60,15 +67,6 @@ export interface SettingsOptions {
 // ═══════════════════════════════════════════════════════════════════════════
 // Path Utilities
 // ═══════════════════════════════════════════════════════════════════════════
-
-/**
- * Parse a dotted path into segments.
- * "compaction.enabled" → ["compaction", "enabled"]
- * "theme.dark" → ["theme", "dark"]
- */
-function parsePath(path: string): string[] {
-	return path.split(".");
-}
 
 /**
  * Get a nested value from an object by path segments.
@@ -137,7 +135,7 @@ export class Settings {
 
 		if (options.overrides) {
 			for (const [key, value] of Object.entries(options.overrides)) {
-				setByPath(this.#overrides, parsePath(key), value);
+				setByPath(this.#overrides, key.split("."), value);
 			}
 		}
 	}
@@ -200,7 +198,7 @@ export class Settings {
 	 * Returns the merged value from global + project + overrides, or the default.
 	 */
 	get<P extends SettingPath>(path: P): SettingValue<P> {
-		const segments = parsePath(path);
+		const segments = path.split(".");
 		const value = getByPath(this.#merged, segments);
 		if (value !== undefined) {
 			return value as SettingValue<P>;
@@ -215,7 +213,7 @@ export class Settings {
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
 		const prev = this.get(path);
-		const segments = parsePath(path);
+		const segments = path.split(".");
 		setByPath(this.#global, segments, value);
 		this.#modified.add(path);
 		this.#rebuildMerged();
@@ -232,7 +230,7 @@ export class Settings {
 	 * Apply runtime overrides (not persisted).
 	 */
 	override<P extends SettingPath>(path: P, value: SettingValue<P>): void {
-		const segments = parsePath(path);
+		const segments = path.split(".");
 		setByPath(this.#overrides, segments, value);
 		this.#rebuildMerged();
 	}
@@ -241,7 +239,7 @@ export class Settings {
 	 * Clear a runtime override.
 	 */
 	clearOverride(path: SettingPath): void {
-		const segments = parsePath(path);
+		const segments = path.split(".");
 		let current = this.#overrides;
 		for (let i = 0; i < segments.length - 1; i++) {
 			const segment = segments[i];
@@ -267,6 +265,21 @@ export class Settings {
 		if (this.#modified.size > 0) {
 			await this.#saveNow();
 		}
+	}
+
+	async cloneForCwd(cwd: string): Promise<Settings> {
+		const cloned = new Settings({
+			cwd,
+			agentDir: this.#agentDir,
+			inMemory: !this.#persist,
+		});
+		cloned.#storage = this.#storage;
+		cloned.#global = structuredClone(this.#global);
+		cloned.#project = this.#persist ? await cloned.#loadProjectSettings() : structuredClone(this.#project);
+		cloned.#overrides = structuredClone(this.#overrides);
+		cloned.#rebuildMerged();
+		cloned.#fireAllHooks();
+		return cloned;
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────
@@ -555,7 +568,7 @@ export class Settings {
 
 				// Apply only our modified paths
 				for (const modPath of modifiedPaths) {
-					const segments = parsePath(modPath);
+					const segments = modPath.split(".");
 					const value = getByPath(this.#global, segments);
 					setByPath(current, segments, value);
 				}

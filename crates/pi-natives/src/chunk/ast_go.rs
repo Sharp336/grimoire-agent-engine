@@ -1,160 +1,250 @@
-//! Language-specific chunk classifier for Go.
-
-use std::collections::HashMap;
-
 use tree_sitter::Node;
 
 use super::{
-	classify::LangClassifier, common::*, rename_chunk_subtree, sort_chunk_children_by_position,
-	types::ChunkNode,
+	classify::{
+		ClassifierTables, LangClassifier, NamingMode, RecurseMode, RuleStyle, StructuralOverrides,
+		semantic_rule,
+	},
+	common::*,
+	kind::ChunkKind,
 };
 
 pub struct GoClassifier;
 
+const ROOT_RULES: &[super::classify::SemanticRule] = &[
+	// ── Imports / package ──
+	semantic_rule(
+		"import_declaration",
+		ChunkKind::Imports,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"package_clause",
+		ChunkKind::Imports,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	// ── Functions ──
+	semantic_rule(
+		"function_declaration",
+		ChunkKind::Function,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"method_declaration",
+		ChunkKind::Function,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	// ── Statements ──
+	semantic_rule(
+		"expression_statement",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"go_statement",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"defer_statement",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"send_statement",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+];
+
+const CLASS_RULES: &[super::classify::SemanticRule] = &[
+	// ── Methods ──
+	semantic_rule(
+		"method_spec",
+		ChunkKind::Method,
+		RuleStyle::Named,
+		NamingMode::AutoIdentifier,
+		RecurseMode::None,
+	),
+	// ── Field / method lists ──
+	semantic_rule(
+		"field_declaration_list",
+		ChunkKind::Fields,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"method_spec_list",
+		ChunkKind::Methods,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+];
+
+const FUNCTION_RULES: &[super::classify::SemanticRule] = &[
+	// ── Control flow ──
+	semantic_rule(
+		"if_statement",
+		ChunkKind::If,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"for_statement",
+		ChunkKind::For,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"switch_statement",
+		ChunkKind::Switch,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"expression_switch_statement",
+		ChunkKind::Switch,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"type_switch_statement",
+		ChunkKind::Switch,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	semantic_rule(
+		"select_statement",
+		ChunkKind::Switch,
+		RuleStyle::Named,
+		NamingMode::None,
+		RecurseMode::Auto(ChunkContext::FunctionBody),
+	),
+	// ── Statements ──
+	semantic_rule(
+		"go_statement",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"defer_statement",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+	semantic_rule(
+		"send_statement",
+		ChunkKind::Statements,
+		RuleStyle::Group,
+		NamingMode::None,
+		RecurseMode::None,
+	),
+];
+
+const GO_TABLES: ClassifierTables = ClassifierTables {
+	root:                 ROOT_RULES,
+	class:                CLASS_RULES,
+	function:             FUNCTION_RULES,
+	structural_overrides: StructuralOverrides::EMPTY,
+};
+
 impl LangClassifier for GoClassifier {
-	fn classify_root<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		match node.kind() {
-			// ── Imports / package ──
-			"import_declaration" | "package_clause" => Some(group_candidate(node, "imports", source)),
-
-			// ── Variables ──
-			"const_declaration" | "var_declaration" | "short_var_declaration" => {
-				Some(match extract_identifier(node, source) {
-					Some(name) => make_named_chunk(node, format!("var_{name}"), source, None),
-					None => group_candidate(node, "decls", source),
-				})
-			},
-
-			// ── Functions ──
-			"function_declaration" => Some(named_candidate(
-				node,
-				"fn",
-				source,
-				recurse_body(node, ChunkContext::FunctionBody),
-			)),
-			"method_declaration" => Some(named_candidate(
-				node,
-				"fn",
-				source,
-				recurse_body(node, ChunkContext::FunctionBody),
-			)),
-
-			// ── Containers ──
-			"type_declaration" => Some(classify_type_decl(node, source)),
-
-			// ── Control flow (top-level scripts) ──
-			"if_statement"
-			| "switch_statement"
-			| "expression_switch_statement"
-			| "type_switch_statement"
-			| "select_statement"
-			| "for_statement" => Some(classify_function_go(node, source)),
-
-			// ── Statements ──
-			"expression_statement" | "go_statement" | "defer_statement" | "send_statement" => {
-				Some(group_candidate(node, "stmts", source))
-			},
-
-			_ => None,
-		}
+	fn tables(&self) -> &'static ClassifierTables {
+		&GO_TABLES
 	}
 
-	fn classify_class<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		match node.kind() {
-			// ── Methods ──
-			"method_spec" => Some(named_candidate(node, "meth", source, None)),
-
-			// ── Fields ──
-			"field_declaration" | "embedded_field" => Some(match extract_identifier(node, source) {
-				Some(name) => make_named_chunk(node, format!("field_{name}"), source, None),
-				None => group_candidate(node, "fields", source),
-			}),
-
-			// ── Field / method lists ──
-			"field_declaration_list" => Some(group_candidate(node, "fields", source)),
-			"method_spec_list" => Some(group_candidate(node, "methods", source)),
-
-			_ => None,
-		}
-	}
-
-	fn classify_function<'t>(&self, node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
-		match node.kind() {
-			// ── Control flow ──
-			"if_statement" => Some(make_candidate(
-				node,
-				"if".to_string(),
-				NameStyle::Named,
-				None,
-				recurse_body(node, ChunkContext::FunctionBody),
-				false,
-				source,
-			)),
-			"switch_statement" | "expression_switch_statement" | "type_switch_statement" => {
-				Some(make_candidate(
-					node,
-					"switch".to_string(),
-					NameStyle::Named,
-					None,
-					recurse_body(node, ChunkContext::FunctionBody),
-					false,
-					source,
-				))
-			},
-			"select_statement" => Some(make_candidate(
-				node,
-				"switch".to_string(),
-				NameStyle::Named,
-				None,
-				recurse_body(node, ChunkContext::FunctionBody),
-				false,
-				source,
-			)),
-
-			// ── Loops ──
-			"for_statement" => Some(make_candidate(
-				node,
-				"for".to_string(),
-				NameStyle::Named,
-				None,
-				recurse_body(node, ChunkContext::FunctionBody),
-				false,
-				source,
-			)),
-
-			// ── Blocks ──
-			"go_statement" | "defer_statement" | "send_statement" => {
-				Some(group_candidate(node, "stmts", source))
-			},
-
-			// ── Variables ──
-			"short_var_declaration" | "var_declaration" | "const_declaration" => {
-				let span = line_span(node.start_position().row + 1, node.end_position().row + 1);
-				Some(if span > 1 {
-					if let Some(name) = extract_identifier(node, source) {
-						make_named_chunk(node, format!("var_{name}"), source, None)
-					} else {
-						let kind_name = sanitize_node_kind(node.kind());
-						group_candidate(node, &kind_name, source)
-					}
-				} else {
-					let kind_name = sanitize_node_kind(node.kind());
-					group_candidate(node, &kind_name, source)
-				})
-			},
-
-			_ => None,
-		}
-	}
-
-	fn post_process(
+	fn classify_override<'t>(
 		&self,
-		chunks: &mut Vec<ChunkNode>,
-		root_children: &mut Vec<String>,
+		context: ChunkContext,
+		node: Node<'t>,
 		source: &str,
-	) {
-		reparent_receiver_methods(chunks, root_children, source);
-		reparent_new_type_constructors(chunks, root_children, source);
+	) -> Option<RawChunkCandidate<'t>> {
+		match context {
+			ChunkContext::Root => classify_root_custom(node, source),
+			ChunkContext::ClassBody => classify_class_custom(node, source),
+			ChunkContext::FunctionBody => classify_function_custom(node, source),
+		}
+	}
+}
+
+fn classify_root_custom<'t>(node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
+	match node.kind() {
+		// ── Variables ──
+		"const_declaration" | "var_declaration" | "short_var_declaration" => {
+			Some(match extract_identifier(node, source) {
+				Some(name) => make_kind_chunk(node, ChunkKind::Variable, Some(name), source, None),
+				None => group_candidate(node, ChunkKind::Declarations, source),
+			})
+		},
+
+		// ── Containers ──
+		"type_declaration" => Some(classify_type_decl(node, source)),
+
+		// ── Control flow (top-level scripts) ──
+		"if_statement"
+		| "switch_statement"
+		| "expression_switch_statement"
+		| "type_switch_statement"
+		| "select_statement"
+		| "for_statement" => Some(classify_function_go(node, source)),
+
+		_ => None,
+	}
+}
+
+fn classify_class_custom<'t>(node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
+	match node.kind() {
+		// ── Fields ──
+		"field_declaration" | "embedded_field" => Some(match extract_identifier(node, source) {
+			Some(name) => make_kind_chunk(node, ChunkKind::Field, Some(name), source, None),
+			None => group_candidate(node, ChunkKind::Fields, source),
+		}),
+		_ => None,
+	}
+}
+
+fn classify_function_custom<'t>(node: Node<'t>, source: &str) -> Option<RawChunkCandidate<'t>> {
+	match node.kind() {
+		// ── Variables ──
+		"short_var_declaration" | "var_declaration" | "const_declaration" => {
+			let span = line_span(node.start_position().row + 1, node.end_position().row + 1);
+			Some(if span > 1 {
+				if let Some(name) = extract_identifier(node, source) {
+					make_kind_chunk(node, ChunkKind::Variable, Some(name), source, None)
+				} else {
+					group_from_sanitized(node, source)
+				}
+			} else {
+				group_from_sanitized(node, source)
+			})
+		},
+		_ => None,
 	}
 }
 
@@ -164,30 +254,18 @@ fn classify_function_go<'t>(node: Node<'t>, source: &str) -> RawChunkCandidate<'
 	let fn_recurse = || recurse_body(node, ChunkContext::FunctionBody);
 	match node.kind() {
 		"if_statement" => {
-			make_candidate(node, "if".to_string(), NameStyle::Named, None, fn_recurse(), false, source)
+			make_candidate(node, ChunkKind::If, None, NameStyle::Named, None, fn_recurse(), source)
 		},
 		"switch_statement"
 		| "expression_switch_statement"
 		| "type_switch_statement"
-		| "select_statement" => make_candidate(
-			node,
-			"switch".to_string(),
-			NameStyle::Named,
-			None,
-			fn_recurse(),
-			false,
-			source,
-		),
-		"for_statement" => make_candidate(
-			node,
-			"for".to_string(),
-			NameStyle::Named,
-			None,
-			fn_recurse(),
-			false,
-			source,
-		),
-		_ => group_candidate(node, "stmts", source),
+		| "select_statement" => {
+			make_candidate(node, ChunkKind::Switch, None, NameStyle::Named, None, fn_recurse(), source)
+		},
+		"for_statement" => {
+			make_candidate(node, ChunkKind::For, None, NameStyle::Named, None, fn_recurse(), source)
+		},
+		_ => group_candidate(node, ChunkKind::Statements, source),
 	}
 }
 
@@ -209,15 +287,27 @@ fn classify_type_decl<'t>(node: Node<'t>, source: &str) -> RawChunkCandidate<'t>
 			return make_container_chunk_from(
 				node,
 				spec,
-				format!("type_{name}"),
+				ChunkKind::Type,
+				Some(name),
 				source,
 				Some(recurse),
 			);
 		}
-		return make_named_chunk_from(node, spec, format!("type_{name}"), source, None);
+		return make_kind_chunk_from(node, spec, ChunkKind::Type, Some(name), source, None);
 	}
 
-	group_candidate(node, "decls", source)
+	group_candidate(node, ChunkKind::Declarations, source)
+}
+
+fn group_from_sanitized<'t>(node: Node<'t>, source: &str) -> RawChunkCandidate<'t> {
+	let sanitized = sanitize_node_kind(node.kind());
+	let kind = ChunkKind::from_sanitized_kind(sanitized);
+	let identifier = if kind == ChunkKind::Chunk {
+		Some(sanitized.to_string())
+	} else {
+		None
+	};
+	make_candidate(node, kind, identifier, NameStyle::Group, None, None, source)
 }
 
 /// For a `type_spec`, find a `struct_type` or `interface_type` child and return
@@ -227,143 +317,4 @@ fn recurse_type_spec(node: Node<'_>) -> Option<RecurseSpec<'_>> {
 	let body = child_by_kind(container, &["field_declaration_list", "method_spec_list"])
 		.unwrap_or(container);
 	Some(RecurseSpec { node: body, context: ChunkContext::ClassBody })
-}
-
-/// Move receiver methods (`fn_X`) under their corresponding `type_Y` chunk.
-///
-/// For `func (s *Server) Start()`, extracts receiver type `Server` and
-/// reparents the method chunk under `type_Server`.
-fn reparent_receiver_methods(
-	chunks: &mut [ChunkNode],
-	root_children: &mut Vec<String>,
-	source: &str,
-) {
-	// Build map: type name -> chunk path for root-level type chunks.
-	let type_paths: HashMap<String, String> = chunks
-		.iter()
-		.filter(|c| c.parent_path.as_deref() == Some("") && c.path.starts_with("type_"))
-		.filter_map(|c| {
-			c.path
-				.strip_prefix("type_")
-				.map(|name| (name.to_string(), c.path.clone()))
-		})
-		.collect();
-
-	// Collect root-level function paths that may be receiver methods.
-	let receiver_methods: Vec<String> = root_children
-		.iter()
-		.filter(|p| p.starts_with("fn_"))
-		.cloned()
-		.collect();
-
-	for method_path in receiver_methods {
-		let Some(method_idx) = chunks.iter().position(|c| c.path == method_path) else {
-			continue;
-		};
-		let Some(receiver_type) = extract_receiver_type_name(&chunks[method_idx], source) else {
-			continue;
-		};
-		let Some(type_path) = type_paths.get(receiver_type.as_str()) else {
-			continue;
-		};
-
-		let method_name = chunks[method_idx].name.clone();
-		let new_path = format!("{type_path}.{method_name}");
-
-		rename_chunk_subtree(chunks, &method_path, &new_path, type_path);
-		root_children.retain(|p| p != &method_path);
-
-		if let Some(type_idx) = chunks.iter().position(|c| c.path == *type_path) {
-			let type_chunk = &mut chunks[type_idx];
-			type_chunk.leaf = false;
-			if !type_chunk.children.iter().any(|child| child == &new_path) {
-				type_chunk.children.push(new_path);
-			}
-		}
-	}
-
-	sort_chunk_children_by_position(chunks);
-}
-
-/// Move `func NewTypeName(...)` constructors under `type_TypeName` so tree
-/// order matches source order (avoids root-level `fn_NewX` appearing after
-/// nested methods with a lower file line).
-fn reparent_new_type_constructors(
-	chunks: &mut [ChunkNode],
-	root_children: &mut Vec<String>,
-	_source: &str,
-) {
-	let type_paths: HashMap<String, String> = chunks
-		.iter()
-		.filter(|c| c.parent_path.as_deref() == Some("") && c.path.starts_with("type_"))
-		.filter_map(|c| {
-			c.path
-				.strip_prefix("type_")
-				.map(|name| (name.to_string(), c.path.clone()))
-		})
-		.collect();
-
-	let constructors: Vec<String> = root_children
-		.iter()
-		.filter(|p| {
-			p.starts_with("fn_")
-				&& constructor_suffix_after_new(p)
-					.is_some_and(|tail| type_paths.contains_key(tail.as_str()))
-		})
-		.cloned()
-		.collect();
-
-	for fn_path in constructors {
-		let Some(fn_idx) = chunks.iter().position(|c| c.path == fn_path) else {
-			continue;
-		};
-		let Some(tail) = constructor_suffix_after_new(&fn_path) else {
-			continue;
-		};
-		let Some(type_path) = type_paths.get(tail.as_str()) else {
-			continue;
-		};
-		let fn_name = chunks[fn_idx].name.clone();
-		let new_path = format!("{type_path}.{fn_name}");
-
-		rename_chunk_subtree(chunks, &fn_path, &new_path, type_path);
-		root_children.retain(|p| p != &fn_path);
-
-		if let Some(type_idx) = chunks.iter().position(|c| c.path == *type_path) {
-			let type_chunk = &mut chunks[type_idx];
-			type_chunk.leaf = false;
-			if !type_chunk.children.iter().any(|child| child == &new_path) {
-				type_chunk.children.push(new_path);
-			}
-		}
-	}
-
-	sort_chunk_children_by_position(chunks);
-}
-
-/// `fn_NewServer` + type `Server` -> `Some("Server")`; `fn_Start` -> None.
-fn constructor_suffix_after_new(fn_path: &str) -> Option<String> {
-	let name = fn_path.strip_prefix("fn_")?;
-	let tail = name.strip_prefix("New")?;
-	if tail.is_empty() {
-		return None;
-	}
-	Some(tail.to_string())
-}
-
-/// Extract the receiver type name from a Go method's header.
-///
-/// `func (s *Server) Start()` -> `Some("Server")`
-/// `func (s Server) Stop()`   -> `Some("Server")`
-fn extract_receiver_type_name(chunk: &ChunkNode, source: &str) -> Option<String> {
-	let header = normalized_header(source, chunk.start_byte as usize, chunk.end_byte as usize);
-	let receiver = header
-		.strip_prefix("func")?
-		.trim_start()
-		.strip_prefix('(')?
-		.split(')')
-		.next()?
-		.trim();
-	let receiver_type = receiver.split_whitespace().last()?;
-	sanitize_identifier(receiver_type)
 }

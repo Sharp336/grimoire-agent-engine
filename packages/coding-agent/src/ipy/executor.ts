@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import { getAgentDir, getProjectDir, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getProjectDir, isBunTestRuntime, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import { OutputSink } from "../session/streaming-output";
 import { shutdownSharedGateway } from "./gateway-coordinator";
 import {
@@ -299,6 +299,44 @@ async function writePreludeCache(state: PreludeCacheState, helpers: PreludeHelpe
 	}
 }
 
+function getPreludeIntrospectionOptions(
+	options: KernelSessionExecutionOptions = {},
+): Pick<KernelExecuteOptions, "signal" | "timeoutMs"> {
+	return {
+		signal: options.signal,
+		timeoutMs: requireRemainingTimeoutMs(options.deadlineMs),
+	};
+}
+
+async function cachePreludeDocs(
+	cwd: string,
+	docs: PreludeHelper[],
+	cacheState?: PreludeCacheState | null,
+): Promise<PreludeHelper[]> {
+	cachedPreludeDocs = docs;
+	if (!isBunTestRuntime() && docs.length > 0) {
+		const state = cacheState ?? (await buildPreludeCacheState(cwd));
+		await writePreludeCache(state, docs);
+	}
+	return docs;
+}
+
+async function ensurePreludeDocsLoaded(
+	kernel: PythonKernel,
+	cwd: string,
+	options: KernelSessionExecutionOptions = {},
+	cacheState?: PreludeCacheState | null,
+): Promise<PreludeHelper[]> {
+	if (cachedPreludeDocs && cachedPreludeDocs.length > 0) {
+		return cachedPreludeDocs;
+	}
+	const docs = await kernel.introspectPrelude(getPreludeIntrospectionOptions(options));
+	if (docs.length === 0) {
+		throw new Error("Python prelude helpers unavailable");
+	}
+	return cachePreludeDocs(cwd, docs, cacheState);
+}
+
 function startCleanupTimer(): void {
 	if (cleanupTimer) return;
 	cleanupTimer = setInterval(() => {
@@ -366,16 +404,15 @@ export async function warmPythonEnvironment(
 	useSharedGateway?: boolean,
 	sessionFile?: string,
 ): Promise<{ ok: boolean; reason?: string; docs: PreludeHelper[] }> {
-	const isTestEnv = Bun.env.BUN_ENV === "test" || Bun.env.NODE_ENV === "test";
 	let cacheState: PreludeCacheState | null = null;
 	try {
-		await logger.timeAsync("warmPython:ensureKernelAvailable", () => ensureKernelAvailable(cwd));
+		await logger.time("warmPython:ensureKernelAvailable", ensureKernelAvailable, cwd);
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
 		cachedPreludeDocs = [];
 		return { ok: false, reason, docs: [] };
 	}
-	if (!isTestEnv) {
+	if (!isBunTestRuntime()) {
 		try {
 			cacheState = await buildPreludeCacheState(cwd);
 			const cached = await readPreludeCache(cacheState);
@@ -393,17 +430,17 @@ export async function warmPythonEnvironment(
 	}
 	const resolvedSessionId = sessionId ?? `session:${cwd}`;
 	try {
-		const docs = await logger.timeAsync("warmPython:withKernelSession", () =>
-			withKernelSession(resolvedSessionId, cwd, async kernel => kernel.introspectPrelude(), {
+		const docs = await logger.time(
+			"warmPython:withKernelSession",
+			withKernelSession,
+			resolvedSessionId,
+			cwd,
+			kernel => ensurePreludeDocsLoaded(kernel, cwd, { useSharedGateway, sessionFile }, cacheState),
+			{
 				useSharedGateway,
 				sessionFile,
-			}),
+			},
 		);
-		cachedPreludeDocs = docs;
-		if (!isTestEnv && docs.length > 0) {
-			const state = cacheState ?? (await buildPreludeCacheState(cwd));
-			await writePreludeCache(state, docs);
-		}
 		return { ok: true, docs };
 	} catch (err: unknown) {
 		const reason = err instanceof Error ? err.message : String(err);
@@ -461,7 +498,7 @@ async function createKernelSession(
 
 	let kernel: PythonKernel;
 	try {
-		kernel = await logger.timeAsync("createKernelSession:PythonKernel.start", () => PythonKernel.start(startOptions));
+		kernel = await logger.time("createKernelSession:PythonKernel.start", PythonKernel.start, startOptions);
 	} catch (err) {
 		if (!isRetry && isResourceExhaustionError(err)) {
 			await recoverFromResourceExhaustion();
@@ -541,7 +578,7 @@ async function withKernelSession<T>(
 		if (options.signal?.aborted) {
 			throw new PythonExecutionCancelledError(isTimedOutCancellation(options.signal.reason, options.signal));
 		}
-		session = await logger.timeAsync("kernel:createKernelSession", createKernelSession, sessionId, cwd, options);
+		session = await logger.time("kernel:createKernelSession", createKernelSession, sessionId, cwd, options);
 		kernelSessions.set(sessionId, session);
 		startCleanupTimer();
 	}
@@ -549,18 +586,18 @@ async function withKernelSession<T>(
 	const run = async (): Promise<T> => {
 		session!.lastUsedAt = Date.now();
 		if (session!.dead || !session!.kernel.isAlive()) {
-			await logger.timeAsync("kernel:restartKernelSession", restartKernelSession, session!, cwd, options);
+			await logger.time("kernel:restartKernelSession", restartKernelSession, session!, cwd, options);
 		}
 		try {
-			const result = await logger.timeAsync("kernel:withSession:handler", handler, session!.kernel);
+			const result = await logger.time("kernel:withSession:handler", handler, session!.kernel);
 			session!.restartCount = 0;
 			return result;
 		} catch (err) {
 			if (!session!.dead && session!.kernel.isAlive()) {
 				throw err;
 			}
-			await logger.timeAsync("kernel:restartKernelSession", restartKernelSession, session!, cwd, options);
-			const result = await logger.timeAsync("kernel:postRestart:handler", handler, session!.kernel);
+			await logger.time("kernel:restartKernelSession", restartKernelSession, session!, cwd, options);
+			const result = await logger.time("kernel:postRestart:handler", handler, session!.kernel);
 			session!.restartCount = 0;
 			return result;
 		}
