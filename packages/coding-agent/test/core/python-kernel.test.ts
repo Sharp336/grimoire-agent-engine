@@ -303,12 +303,17 @@ describe("PythonKernel (external gateway)", () => {
 	});
 
 	it("returns an unconfirmed shutdown result when kernel deletion is not acknowledged", async () => {
+		let deleteAttempts = 0;
 		const fetchMock = vi.fn(async (url: string, init?: RequestInit) => {
 			if (url.endsWith("/api/kernels") && init?.method === "POST") {
 				return new Response(JSON.stringify({ id: "kernel-delete-failure" }), { status: 201 });
 			}
 			if (url.includes("/api/kernels/") && init?.method === "DELETE") {
-				return new Response("delete failed", { status: 500, statusText: "Server Error" });
+				deleteAttempts += 1;
+				if (deleteAttempts === 1) {
+					return new Response("delete failed", { status: 500, statusText: "Server Error" });
+				}
+				return new Response("already gone", { status: 404, statusText: "Not Found" });
 			}
 			return new Response("", { status: 200 });
 		});
@@ -324,13 +329,12 @@ describe("PythonKernel (external gateway)", () => {
 		});
 
 		const kernel = await kernelPromise;
-		expect(await kernel.shutdown()).toEqual({ confirmed: false });
-		expect(await kernel.shutdown()).toEqual({ confirmed: false });
-		expect(
-			fetchMock.mock.calls.filter(
-				([url, init]) => String(url).endsWith("/api/kernels/kernel-delete-failure") && init?.method === "DELETE",
-			),
-		).toHaveLength(1);
+		await expect(kernel.shutdown()).resolves.toEqual({ confirmed: false });
+		expect(deleteAttempts).toBe(1);
+		await expect(kernel.shutdown()).resolves.toEqual({ confirmed: true });
+		expect(deleteAttempts).toBe(2);
+		await expect(kernel.shutdown()).resolves.toEqual({ confirmed: true });
+		expect(deleteAttempts).toBe(2);
 	});
 
 	it("initializes the IPython prelude", async () => {

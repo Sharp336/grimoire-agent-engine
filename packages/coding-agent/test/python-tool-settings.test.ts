@@ -14,6 +14,7 @@ function createSession(
 	sessionFile: string,
 	overrides?: Partial<Record<SettingPath, unknown>>,
 	kernelOwnerId?: string,
+	forcePythonWarmup = false,
 ): ToolSession {
 	return {
 		cwd,
@@ -21,7 +22,7 @@ function createSession(
 		getSessionFile: () => sessionFile,
 		getSessionSpawns: () => null,
 		getPythonKernelOwnerId: () => kernelOwnerId ?? null,
-		forcePythonWarmup: true,
+		forcePythonWarmup,
 		settings: Settings.isolated({ "python.toolMode": "ipy-only", ...overrides }),
 	};
 }
@@ -106,14 +107,25 @@ describe("python tool settings", () => {
 
 		const sessionFile = path.join(testDir, "session-create-tools.jsonl");
 		const kernelOwnerId = "owner-create-tools";
-		await createTools(createSession(testDir, sessionFile, undefined, kernelOwnerId), ["python"]);
+		const previousSkipCheck = Bun.env.PI_PYTHON_SKIP_CHECK;
 
-		expect(warmupSpy).toHaveBeenCalledWith(
-			testDir,
-			`session:${sessionFile}:cwd:${testDir}`,
-			true,
-			sessionFile,
-			kernelOwnerId,
-		);
+		delete Bun.env.PI_PYTHON_SKIP_CHECK;
+		try {
+			await createTools(createSession(testDir, sessionFile, undefined, kernelOwnerId, true), ["python"]);
+
+			expect(warmupSpy).toHaveBeenCalledWith(
+				testDir,
+				`session:${sessionFile}:cwd:${testDir}`,
+				true,
+				sessionFile,
+				kernelOwnerId,
+			);
+		} finally {
+			if (previousSkipCheck === undefined) {
+				delete Bun.env.PI_PYTHON_SKIP_CHECK;
+			} else {
+				Bun.env.PI_PYTHON_SKIP_CHECK = previousSkipCheck;
+			}
+		}
 	});
 });

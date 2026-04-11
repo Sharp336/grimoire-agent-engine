@@ -303,7 +303,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		(requestedTools === undefined || requestedTools.includes("python"));
 	const isTestEnv = isBunTestRuntime();
 	const forcePythonWarmup = session.forcePythonWarmup === true;
-	const skipPythonWarm = !forcePythonWarmup && (isTestEnv || $flag("PI_PYTHON_SKIP_CHECK"));
+	const skipPythonWarm = (isTestEnv && !forcePythonWarmup) || $flag("PI_PYTHON_SKIP_CHECK");
 	if (shouldCheckPython) {
 		const availability = await logger.time("createTools:pythonCheck", checkPythonKernelAvailability, session.cwd);
 		pythonAvailable = availability.ok;

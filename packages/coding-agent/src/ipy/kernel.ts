@@ -403,6 +403,7 @@ export class PythonKernel {
 	#ws: WebSocket | null = null;
 	#disposed = false;
 	#alive = true;
+	#shutdownStarted = false;
 	#shutdownConfirmed = false;
 	#messageHandlers = new Map<string, (msg: JupyterMessage) => void>();
 	#channelHandlers = new Map<string, Set<(msg: JupyterMessage) => void>>();
@@ -1009,10 +1010,17 @@ export class PythonKernel {
 	}
 
 	async shutdown(options?: KernelShutdownOptions): Promise<KernelShutdownResult> {
-		if (this.#disposed) return { confirmed: this.#shutdownConfirmed };
-		this.#disposed = true;
-		this.#alive = false;
-		this.#abortPendingExecutions("Kernel shutdown");
+		if (this.#shutdownConfirmed) return { confirmed: true };
+		if (!this.#shutdownStarted) {
+			this.#shutdownStarted = true;
+			this.#alive = false;
+			this.#abortPendingExecutions("Kernel shutdown");
+
+			if (this.#ws) {
+				this.#ws.close();
+				this.#ws = null;
+			}
+		}
 
 		const shutdownSignal = combineAbortSignal(
 			{ signal: options?.signal },
@@ -1027,7 +1035,8 @@ export class PythonKernel {
 				headers: this.#authHeaders(),
 				signal: shutdownSignal,
 			});
-			confirmed = response.ok;
+			const deleteConfirmed = response.status === 404 || response.status === 410;
+			confirmed = response.ok || deleteConfirmed;
 			if (!confirmed) {
 				logger.warn("Kernel delete request was not confirmed", {
 					status: response.status,
@@ -1038,11 +1047,7 @@ export class PythonKernel {
 			logger.warn("Failed to delete kernel via API", { error: err instanceof Error ? err.message : String(err) });
 		}
 		this.#shutdownConfirmed = confirmed;
-
-		if (this.#ws) {
-			this.#ws.close();
-			this.#ws = null;
-		}
+		this.#disposed = confirmed;
 
 		if (this.isSharedGateway) {
 			try {

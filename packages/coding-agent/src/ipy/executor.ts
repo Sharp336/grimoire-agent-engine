@@ -84,10 +84,12 @@ interface KernelSession {
 	restartCount: number;
 	dead: boolean;
 	disposing: boolean;
-	disposePromise?: Promise<void>;
 	disposeCapacityPromise?: Promise<void>;
 	resolveDisposeCapacity?: () => void;
+	disposeAttemptPromise?: Promise<void>;
+	resolveDisposeAttempt?: () => void;
 	disposeResultPromise?: Promise<KernelDisposalResult>;
+	disposeResultTimeoutMs?: number;
 	lastUsedAt: number;
 	ownerIds: Set<string>;
 	heartbeatTimer?: NodeJS.Timeout;
@@ -403,6 +405,9 @@ function finishDisposingKernelSession(session: KernelSession): void {
 	disposingKernelSessions.delete(session);
 	session.resolveDisposeCapacity?.();
 	session.resolveDisposeCapacity = undefined;
+	session.disposeCapacityPromise = undefined;
+	session.resolveDisposeAttempt = undefined;
+	session.disposeAttemptPromise = undefined;
 	if (kernelSessions.size === 0 && disposingKernelSessions.size === 0) {
 		stopCleanupTimer();
 	}
@@ -411,21 +416,34 @@ function finishDisposingKernelSession(session: KernelSession): void {
 async function waitForDisposalCapacity(
 	options: Pick<KernelSessionExecutionOptions, "signal" | "deadlineMs">,
 ): Promise<void> {
-	const disposalPromises = Array.from(disposingKernelSessions, session => session.disposeCapacityPromise).filter(
-		(promise): promise is Promise<void> => promise !== undefined,
-	);
-	if (disposalPromises.length === 0) return;
-	await waitForPromiseWithCancellation(
-		Promise.race(
-			disposalPromises.map(promise =>
-				promise.then(
+	for (const session of disposingKernelSessions.values()) {
+		if (!session.disposeResultPromise) {
+			void disposeKernelSession(session);
+		}
+	}
+
+	const disposalPromises: Promise<void>[] = [];
+	for (const session of disposingKernelSessions.values()) {
+		if (session.disposeCapacityPromise) {
+			disposalPromises.push(
+				session.disposeCapacityPromise.then(
 					() => undefined,
 					() => undefined,
 				),
-			),
-		),
-		options,
-	);
+			);
+		}
+		if (session.disposeAttemptPromise) {
+			disposalPromises.push(
+				session.disposeAttemptPromise.then(
+					() => undefined,
+					() => undefined,
+				),
+			);
+		}
+	}
+	if (disposalPromises.length === 0) return;
+
+	await waitForPromiseWithCancellation(Promise.race(disposalPromises), options);
 }
 
 async function ensureKernelSessionCapacity(
@@ -475,7 +493,7 @@ async function evictOldestSession(): Promise<void> {
 
 export async function disposeAllKernelSessions(): Promise<void> {
 	stopCleanupTimer();
-	const sessions = Array.from(kernelSessions.values());
+	const sessions = Array.from(new Set([...kernelSessions.values(), ...disposingKernelSessions.values()]));
 	await Promise.allSettled(sessions.map(session => disposeKernelSession(session)));
 }
 
@@ -593,6 +611,8 @@ function clearRetainedKernelSessionTracking(): void {
 		}
 		session.resolveDisposeCapacity?.();
 		session.resolveDisposeCapacity = undefined;
+		session.resolveDisposeAttempt?.();
+		session.resolveDisposeAttempt = undefined;
 	}
 	kernelSessions.clear();
 	disposingKernelSessions.clear();
@@ -635,7 +655,6 @@ async function createKernelSession(
 		restartCount: 0,
 		dead: false,
 		disposing: false,
-		disposePromise: undefined,
 		disposeResultPromise: undefined,
 		lastUsedAt: Date.now(),
 		ownerIds: options.kernelOwnerId ? new Set([options.kernelOwnerId]) : new Set(),
@@ -677,6 +696,7 @@ async function restartKernelSession(
 }
 
 type KernelDisposalResult = { status: "confirmed" } | { status: "unconfirmed" } | { status: "failed"; err: unknown };
+type KernelDisposalWaitResult = KernelDisposalResult | { status: "timedOut" };
 
 function createKernelDisposalResultPromise(session: KernelSession, timeoutMs?: number): Promise<KernelDisposalResult> {
 	return Promise.resolve()
@@ -687,18 +707,52 @@ function createKernelDisposalResultPromise(session: KernelSession, timeoutMs?: n
 		);
 }
 
-async function waitForKernelSessionDisposal(session: KernelSession, timeoutMs?: number): Promise<void> {
-	if (!session.disposePromise || !session.disposeResultPromise) {
-		return;
+function getOrStartKernelDisposalResultPromise(
+	session: KernelSession,
+	timeoutMs?: number,
+): Promise<KernelDisposalResult> {
+	if (!session.disposeResultPromise) {
+		session.disposeResultTimeoutMs = timeoutMs;
+		const releaseDisposalAttempt = Promise.withResolvers<void>();
+		session.disposeAttemptPromise = releaseDisposalAttempt.promise;
+		session.resolveDisposeAttempt = releaseDisposalAttempt.resolve;
+		const disposeResultPromise = createKernelDisposalResultPromise(session, timeoutMs);
+		void disposeResultPromise.then(result => {
+			if (result.status === "confirmed") {
+				finishDisposingKernelSession(session);
+			}
+		});
+		const disposalAttemptPromise = disposeResultPromise.finally(() => {
+			releaseDisposalAttempt.resolve();
+			if (session.disposeResultPromise === disposalAttemptPromise) {
+				session.disposeResultPromise = undefined;
+				session.disposeResultTimeoutMs = undefined;
+			}
+			if (session.disposeAttemptPromise === releaseDisposalAttempt.promise) {
+				session.disposeAttemptPromise = undefined;
+				session.resolveDisposeAttempt = undefined;
+			}
+		});
+		session.disposeResultPromise = disposalAttemptPromise;
+	}
+	return session.disposeResultPromise;
+}
+
+async function waitForKernelSessionDisposal(
+	session: KernelSession,
+	timeoutMs?: number,
+): Promise<KernelDisposalWaitResult | undefined> {
+	const disposeResultPromise = session.disposeResultPromise;
+	if (!disposeResultPromise) {
+		return undefined;
 	}
 	if (timeoutMs === undefined) {
-		await session.disposePromise;
-		return;
+		return await disposeResultPromise;
 	}
 
 	let timeoutId: NodeJS.Timeout | undefined;
 	const result = await Promise.race([
-		session.disposeResultPromise,
+		disposeResultPromise,
 		new Promise<{ status: "timedOut" }>(resolve => {
 			timeoutId = setTimeout(() => resolve({ status: "timedOut" }), timeoutMs);
 			timeoutId.unref();
@@ -708,54 +762,92 @@ async function waitForKernelSessionDisposal(session: KernelSession, timeoutMs?: 
 	if (timeoutId) {
 		clearTimeout(timeoutId);
 	}
+	return result;
+}
 
-	if (result.status === "timedOut") {
-		logger.warn("Timed out shutting down retained kernel during owner cleanup", {
-			sessionId: session.id,
-			timeoutMs,
-		});
-		return;
-	}
-
-	if (result.status === "unconfirmed") {
-		logger.warn("Retained kernel shutdown was not confirmed during owner cleanup", {
-			sessionId: session.id,
-		});
-		return;
-	}
-
-	if (result.status === "failed") {
-		logger.warn("Failed to shutdown retained kernel during owner cleanup", {
-			sessionId: session.id,
-			error: result.err instanceof Error ? result.err.message : String(result.err),
-		});
-	}
+function retryKernelSessionDisposalInBackground(session: KernelSession): void {
+	void disposeKernelSession(session);
 }
 
 async function disposeKernelSession(session: KernelSession, shutdownTimeoutMs?: number): Promise<void> {
-	if (!session.disposePromise) {
+	if (!session.disposing) {
 		if (!beginDisposingKernelSession(session)) return;
 		const releaseDisposalCapacity = Promise.withResolvers<void>();
 		session.disposeCapacityPromise = releaseDisposalCapacity.promise;
 		session.resolveDisposeCapacity = releaseDisposalCapacity.resolve;
-		session.disposeResultPromise = createKernelDisposalResultPromise(session, shutdownTimeoutMs);
-		session.disposePromise = session.disposeResultPromise.then(result => {
-			if (result.status === "confirmed") {
-				finishDisposingKernelSession(session);
-				return;
-			}
-			if (result.status === "unconfirmed") {
-				logger.warn("Kernel shutdown was not confirmed; retained capacity remains reserved", {
-					sessionId: session.id,
-				});
-				return;
-			}
-			logger.warn("Failed to shutdown kernel", {
-				error: result.err instanceof Error ? result.err.message : String(result.err),
-			});
+	}
+
+	if (
+		shutdownTimeoutMs === undefined &&
+		session.disposeResultPromise &&
+		session.disposeResultTimeoutMs !== undefined
+	) {
+		const inheritedResult = await session.disposeResultPromise;
+		if (inheritedResult.status === "confirmed") {
+			finishDisposingKernelSession(session);
+			return;
+		}
+		session.disposeResultPromise = undefined;
+		session.disposeResultTimeoutMs = undefined;
+		logger.warn("Retained kernel shutdown was not confirmed during owner cleanup; retrying without timeout", {
+			sessionId: session.id,
 		});
 	}
-	await waitForKernelSessionDisposal(session, shutdownTimeoutMs);
+
+	const inheritedBackgroundRetryTimeoutMs =
+		shutdownTimeoutMs === undefined && session.disposeResultPromise && session.disposeResultTimeoutMs === undefined
+			? OWNER_CLEANUP_KERNEL_SHUTDOWN_TIMEOUT_MS
+			: shutdownTimeoutMs;
+
+	getOrStartKernelDisposalResultPromise(session, shutdownTimeoutMs);
+	const result = await waitForKernelSessionDisposal(session, inheritedBackgroundRetryTimeoutMs);
+	if (!result) {
+		return;
+	}
+	if (result.status === "timedOut") {
+		logger.warn(
+			shutdownTimeoutMs === undefined
+				? "Timed out waiting for retained kernel shutdown during global cleanup; retained capacity remains reserved"
+				: "Timed out shutting down retained kernel during owner cleanup",
+			{
+				sessionId: session.id,
+				timeoutMs: inheritedBackgroundRetryTimeoutMs,
+			},
+		);
+		if (shutdownTimeoutMs !== undefined) {
+			retryKernelSessionDisposalInBackground(session);
+		}
+		return;
+	}
+	if (result.status === "confirmed") {
+		finishDisposingKernelSession(session);
+		return;
+	}
+	if (result.status === "unconfirmed") {
+		logger.warn(
+			shutdownTimeoutMs === undefined
+				? "Kernel shutdown was not confirmed; retained capacity remains reserved"
+				: "Retained kernel shutdown was not confirmed during owner cleanup",
+			{ sessionId: session.id },
+		);
+		if (shutdownTimeoutMs !== undefined) {
+			retryKernelSessionDisposalInBackground(session);
+		}
+		return;
+	}
+	logger.warn(
+		shutdownTimeoutMs === undefined
+			? "Failed to shutdown kernel"
+			: "Failed to shutdown retained kernel during owner cleanup",
+		{
+			sessionId: session.id,
+			error: result.err instanceof Error ? result.err.message : String(result.err),
+		},
+	);
+	if (shutdownTimeoutMs !== undefined) {
+		retryKernelSessionDisposalInBackground(session);
+	}
+	return;
 }
 
 async function withKernelSession<T>(
