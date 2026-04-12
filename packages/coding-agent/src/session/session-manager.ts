@@ -72,6 +72,8 @@ export interface SessionEntryBase {
 	id: string;
 	parentId: string | null;
 	timestamp: string;
+	/** FlowState snapshot at the moment this entry was created. Present when OMP_FLOW=1. */
+	flowState?: import("../flow/types").FlowState;
 }
 
 export interface SessionMessageEntry extends SessionEntryBase {
@@ -1416,6 +1418,25 @@ export class SessionManager {
 	#inMemoryArtifactCounter = 0;
 	readonly #blobStore: BlobStore;
 
+	/** Optional getter injected by FlowExecutionStrategy. When set, every
+	 *  session entry gets a flowState snapshot at creation time. */
+	#flowStateGetter: (() => import("../flow/types").FlowState) | null = null;
+
+	/** Returns the correct flowFrameId for a message at persist time.
+	 *  The strategy owns the logic (node-entry → parent, ret → parent,
+	 *  otherwise → top). Session manager is just the single writer. */
+	#flowFrameIdGetter: ((msg: any) => string | undefined) | null = null;
+
+	setFlowStateGetter(getter: (() => import("../flow/types").FlowState) | null): void {
+		this.#flowStateGetter = getter;
+	}
+
+	setFlowFrameIdGetter(getter: ((msg: any) => string | undefined) | null): void {
+		this.#flowFrameIdGetter = getter;
+	}
+
+
+
 	private constructor(
 		private cwd: string,
 		private sessionDir: string,
@@ -2004,6 +2025,18 @@ export class SessionManager {
 	}
 
 	#appendEntry(entry: SessionEntry): void {
+		if (this.#flowStateGetter) {
+			entry.flowState = this.#flowStateGetter();
+		}
+		// Stamp flowFrameId on the message so transformContext can filter
+		// by open/closed frames. The strategy owns the "which frame?"
+		// logic; session manager is just the single writer.
+		if (this.#flowFrameIdGetter && entry.type === "message" && !(entry.message as any).flowFrameId) {
+			const frameId = this.#flowFrameIdGetter(entry.message);
+			if (frameId) {
+				(entry.message as any).flowFrameId = frameId;
+			}
+		}
 		this.#fileEntries.push(entry);
 		this.#byId.set(entry.id, entry);
 		this.#leafId = entry.id;

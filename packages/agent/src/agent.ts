@@ -21,6 +21,12 @@ import {
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
 import { agentLoop, agentLoopContinue } from "./agent-loop";
+import {
+	applyStrategyConvertToLlm,
+	composeSyncBeforeModelCall,
+	composeTransformContext,
+	type ExecutionStrategy,
+} from "./execution-strategy";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -245,6 +251,7 @@ export class Agent {
 	#getToolChoice?: () => ToolChoice | undefined;
 	#onPayload?: SimpleStreamOptions["onPayload"];
 	#onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
+	#strategy?: ExecutionStrategy;
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
 	#cursorToolResultBuffer: CursorToolResultEntry[] = [];
@@ -417,6 +424,56 @@ export class Agent {
 		fn: ((message: AssistantMessage, event: AssistantMessageEvent) => void) | undefined,
 	): void {
 		this.#onAssistantMessageEvent = fn;
+	}
+
+	/**
+	 * Install (or remove) an execution strategy. Strategies compose with the
+	 * Agent's base hooks — they do not replace them. Pass `undefined` to
+	 * revert to the base behavior. See {@link ExecutionStrategy} for the
+	 * composition rules.
+	 *
+	 * Swapping the strategy while the agent is streaming is safe from a
+	 * memory-safety standpoint but semantically dubious: the in-flight turn
+	 * will finish under whichever strategy was active when its
+	 * AgentLoopConfig was built. Prefer to install before calling `prompt()`.
+	 */
+	setExecutionStrategy(strategy: ExecutionStrategy | undefined): void {
+		this.#strategy = strategy;
+	}
+
+	/** Currently installed execution strategy, or `undefined` for default. */
+	get executionStrategy(): ExecutionStrategy | undefined {
+		return this.#strategy;
+	}
+
+	/**
+	 * Install (or replace) an `onPayload` hook that sees every provider
+	 * request payload right before it is sent over HTTP. Use with care: the
+	 * hook is invoked on the hot path of every LLM call.
+	 *
+	 * When an existing hook is present, the new one wraps it — the old hook
+	 * runs first, the new hook sees its result.
+	 *
+	 * Passing `undefined` removes the **entire** hook chain, not just the
+	 * last layer. There is no per-layer unwrap — this is intentional for
+	 * simplicity given a single-consumer use case (flow trace logger).
+	 */
+	setOnPayload(fn: SimpleStreamOptions["onPayload"] | undefined): void {
+		if (!fn) {
+			this.#onPayload = undefined;
+			return;
+		}
+		const existing = this.#onPayload;
+		if (!existing) {
+			this.#onPayload = fn;
+			return;
+		}
+		this.#onPayload = async (payload, model) => {
+			const first = await existing(payload, model);
+			const effective = first ?? payload;
+			const second = await fn(effective, model);
+			return second ?? effective;
+		};
 	}
 
 	emitExternalEvent(event: AgentEvent) {
@@ -742,6 +799,28 @@ export class Agent {
 		const getToolChoice = () =>
 			this.#getToolChoice?.() ?? refreshToolChoiceForActiveTools(options?.toolChoice, this.#state.tools);
 
+		// Base syncContextBeforeModelCall — refreshes live session state
+		// (system prompt, tools) onto the loop's working context before
+		// every model call. An installed ExecutionStrategy, if any, runs
+		// *before* this base hook so its observations happen on the
+		// untouched context.
+		const baseSyncBeforeModelCall = async (context: AgentContext) => {
+			if (this.#listeners.size > 0) {
+				await Bun.sleep(0);
+			}
+			context.systemPrompt = this.#state.systemPrompt;
+			context.tools = this.#state.tools;
+		};
+
+		// Compose the base hooks with the installed strategy (if any).
+		// When no strategy is present these reduce to the base hooks
+		// unchanged, so default behavior is byte-identical.
+		const strategy = this.#strategy;
+		const effectiveConvertToLlm = applyStrategyConvertToLlm(this.#convertToLlm, strategy);
+		const effectiveTransformContext = composeTransformContext(this.#transformContext, strategy);
+		const effectiveSyncBeforeModelCall =
+			composeSyncBeforeModelCall(baseSyncBeforeModelCall, strategy) ?? baseSyncBeforeModelCall;
+
 		const config: AgentLoopConfig = {
 			model,
 			reasoning,
@@ -759,18 +838,12 @@ export class Agent {
 			maxRetryDelayMs: this.#maxRetryDelayMs,
 			kimiApiFormat: this.#kimiApiFormat,
 			preferWebsockets: this.#preferWebsockets,
-			convertToLlm: this.#convertToLlm,
-			transformContext: this.#transformContext,
+			convertToLlm: effectiveConvertToLlm,
+			transformContext: effectiveTransformContext,
 			onPayload: this.#onPayload,
 			getApiKey: this.getApiKey,
 			getToolContext: this.#getToolContext,
-			syncContextBeforeModelCall: async context => {
-				if (this.#listeners.size > 0) {
-					await Bun.sleep(0);
-				}
-				context.systemPrompt = this.#state.systemPrompt;
-				context.tools = this.#state.tools;
-			},
+			syncContextBeforeModelCall: effectiveSyncBeforeModelCall,
 			cursorExecHandlers: this.#cursorExecHandlers,
 			cursorOnToolResult,
 			transformToolCallArguments: this.#transformToolCallArguments,
@@ -837,11 +910,24 @@ export class Agent {
 						if (event.message.role === "assistant" && (event.message as any).errorMessage) {
 							this.#state.error = (event.message as any).errorMessage;
 						}
+						if (strategy?.onTurnEnd) {
+							await strategy.onTurnEnd({
+								context,
+								message: event.message,
+								newMessages: [event.message, ...event.toolResults],
+							});
+						}
 						break;
 
 					case "agent_end":
 						this.#state.isStreaming = false;
 						this.#state.streamMessage = null;
+						if (strategy?.onAgentEnd) {
+							await strategy.onAgentEnd({
+								context,
+								newMessages: event.messages,
+							});
+						}
 						break;
 				}
 

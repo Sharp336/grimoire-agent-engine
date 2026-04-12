@@ -1,0 +1,195 @@
+{
+	"$schema": "https://json-schema.org/draft/2020-12/schema",
+	"$id": "https://oh-my-pi/schemas/flow.json",
+	"title": "Flow",
+	"description": "Data-driven flow definition. A flow is a DAG of nodes connected by edges, with optional auto-push triggers. Every node is a pure closure; behavior comes from onEnter/onLeave/onError hooks and the edges that connect nodes together.",
+	"type": "object",
+	"required": ["version", "id", "nodes", "edges"],
+	"additionalProperties": false,
+	"properties": {
+		"version": {
+			"const": 1,
+			"description": "Schema version. Must be 1."
+		},
+		"id": {
+			"type": "string",
+			"description": "Unique flow id. Lowercase snake_case, e.g. `tool_selection`, `backend_editor`.",
+			"pattern": "^[a-z][a-z0-9_]*$"
+		},
+		"description": {
+			"type": "string",
+			"description": "Human-readable summary of what the flow does."
+		},
+		"nodes": {
+			"type": "object",
+			"description": "All nodes in the flow, keyed by node id. Any node may serve as an entry point — the runtime decides which one to push based on the caller or trigger.",
+			"additionalProperties": { "$ref": "#/$defs/node" }
+		},
+		"edges": {
+			"type": "array",
+			"description": "Directed transitions between nodes. The `when` clause decides which edge fires based on the current frame's most recent event.",
+			"items": { "$ref": "#/$defs/edge" }
+		},
+		"triggers": {
+			"type": "array",
+			"description": "Conditions under which the runtime auto-pushes this flow onto the stack. Without triggers, the flow is only callable explicitly.",
+			"items": { "$ref": "#/$defs/trigger" }
+		}
+	},
+
+	"$defs": {
+		"node": {
+			"type": "object",
+			"description": "A pure closure. No executor — behavior comes from hooks and outgoing edges.",
+			"additionalProperties": false,
+			"properties": {
+				"env": {
+					"type": "object",
+					"description": "Per-node runtime environment, scoped to the frame.",
+					"additionalProperties": true
+				},
+				"description": {
+					"type": "string",
+					"description": "What this node represents."
+				},
+				"available_tools": {
+					"type": "array",
+					"description": "Tool filter applied when this frame is on top of the stack. Each entry is `name` (allow) or `!name` (deny). Effective set = parentScope ∩ filter.",
+					"items": {
+						"type": "string",
+						"pattern": "^!?[a-zA-Z_][a-zA-Z0-9_*]*$"
+					}
+				},
+				"onEnter": {
+					"type": "array",
+					"description": "Hardcoded tool calls executed automatically when this frame is pushed. Used to inject rule files, load context, etc., so the model does not have to do it.",
+					"items": { "$ref": "#/$defs/hookCall" }
+				},
+				"onLeave": {
+					"type": "array",
+					"description": "Hardcoded tool calls executed automatically when this frame is popped.",
+					"items": { "$ref": "#/$defs/hookCall" }
+				},
+				"onError": {
+					"type": "array",
+					"description": "Hardcoded tool calls executed when a hook or nested frame errors out.",
+					"items": { "$ref": "#/$defs/hookCall" }
+				}
+			}
+		},
+
+		"hookCall": {
+			"type": "object",
+			"description": "A hardcoded tool invocation the runtime performs automatically on a lifecycle boundary. Static args only — no templating.",
+			"required": ["tool"],
+			"additionalProperties": false,
+			"properties": {
+				"tool": {
+					"type": "string",
+					"description": "Name of a tool available at the parent scope (builtin, sub-flow, or MCP tool)."
+				},
+				"args": {
+					"type": "object",
+					"description": "Fixed argument object passed to the tool.",
+					"additionalProperties": true
+				}
+			}
+		},
+
+		"edge": {
+			"type": "object",
+			"required": ["from", "to"],
+			"additionalProperties": false,
+			"properties": {
+				"from": { "type": "string" },
+				"to": { "type": "string" },
+				"when": { "$ref": "#/$defs/edgeCondition" }
+			}
+		},
+
+		"edgeCondition": {
+			"description": "Condition on the frame's most recent event that determines if this edge fires.",
+			"oneOf": [
+				{
+					"type": "object",
+					"required": ["kind"],
+					"properties": { "kind": { "const": "always" } },
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": ["kind", "name"],
+					"properties": {
+						"kind": { "const": "tool_call" },
+						"name": { "type": "string", "description": "Tool name whose call fires this edge." }
+					},
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": ["kind"],
+					"properties": { "kind": { "const": "ret" } },
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": ["kind"],
+					"properties": { "kind": { "const": "error" } },
+					"additionalProperties": false
+				},
+				{
+					"type": "object",
+					"required": ["kind", "expr"],
+					"properties": {
+						"kind": { "const": "custom" },
+						"expr": { "type": "string", "description": "Runtime-defined expression on the event payload." }
+					},
+					"additionalProperties": false
+				}
+			]
+		},
+
+		"trigger": {
+			"type": "object",
+			"required": ["when", "match"],
+			"additionalProperties": false,
+			"properties": {
+				"when": {
+					"enum": [
+						"before_tool_call",
+						"after_tool_call",
+						"on_user_message",
+						"on_flow_enter",
+						"on_flow_leave"
+					],
+					"description": "Runtime phase at which to check the trigger."
+				},
+				"match": { "$ref": "#/$defs/triggerMatch" }
+			}
+		},
+
+		"triggerMatch": {
+			"type": "object",
+			"description": "Pattern matched against the event payload. All specified fields must match.",
+			"additionalProperties": false,
+			"properties": {
+				"tool": {
+					"type": "string",
+					"description": "Tool name glob, e.g. `file_write`, `mcp_gitea_*`."
+				},
+				"path": {
+					"type": "string",
+					"description": "File path glob against args.path, e.g. `backend/**/*.ts`."
+				},
+				"flow": {
+					"type": "string",
+					"description": "Flow id match, for on_flow_enter / on_flow_leave."
+				},
+				"expr": {
+					"type": "string",
+					"description": "Runtime-defined expression on the event payload."
+				}
+			}
+		}
+	}
+}

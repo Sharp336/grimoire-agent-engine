@@ -1,0 +1,52 @@
+{
+  "version": 1,
+  "id": "base_flow",
+  "description": "Minimal seed flow. `chat` is the root with core builtin tools + access to tool_selection and flow_editor sub-flows.",
+  "nodes": {
+    "chat": {
+      "description": "Root conversation node. Has the core builtin toolkit always active (bash, read, write, edit, grep, find, lsp, ast_grep, ast_edit, task, todo_write, web_search, fetch, ask). Use these directly. Enter `tool_selection` for MCP tools or niche capabilities. Enter `flow_editor` to inspect or mutate the flow itself."
+    },
+    "tool_selection": {
+      "description": "Sub-flow for discovering and activating tools from the MCP catalog. Inside, you have search_tools, describe_tool, select_tool, drop_tool, and ret. Selected tools attach to the parent (chat) frame."
+    },
+    "scout": {
+      "description": "Isolated exploration frame. Read files, search code, run commands — all output stays here. When done, call ret(summary) to push findings back to chat. Everything else is discarded."
+    },
+    "flow_editor": {
+      "description": "Sub-flow for inspecting and mutating the live flow definition. Inside, you have read_flow and flow_edit. Any change persists immediately to the on-disk flow file.",
+      "available_tools": ["read_flow", "flow_edit"],
+      "onEnter": [
+        {
+          "tool": "read",
+          "args": {
+            "path": "skill://flow-editor"
+          }
+        }
+      ]
+    },
+    "ui-editor": {
+      "description": "Sub-flow for visual editing and UI component management.",
+      "onEnter": [
+        {
+          "tool": "read",
+          "args": {
+            "path": "skill://ui-editor"
+          }
+        }
+      ]
+    },
+    "skill_writer": {
+      "description": "Skill to write the ui-editor instructions.",
+      "onEnter": [
+        {
+          "args": {
+            "content": "# UI Editor Skill\nYou are the UI Editor. Your purpose is to help users design and manage UI components.\n\n## Capabilities\n- Component Inspection\n- Layout Management\n- Style Configuration\n\n## Guidelines\n- Always prioritize user intent for visual hierarchy.\n- Maintain consistency with existing design systems.",
+            "path": "skill://ui-editor"
+          },
+          "tool": "write"
+        }
+      ]
+    }
+  },
+  "edges": []
+}

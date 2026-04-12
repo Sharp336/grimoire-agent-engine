@@ -40,6 +40,7 @@ import {
 	MarketplaceManager,
 } from "./extensibility/plugins/marketplace";
 import type { MCPManager } from "./mcp";
+import { FlowExecutionStrategy } from "./flow";
 import { InteractiveMode, runAcpMode, runPrintMode, runRpcMode } from "./modes";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
@@ -849,6 +850,50 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 		}
 		return nextSession;
 	};
+
+	// Opt-in flow agent: install a FlowExecutionStrategy on the live Agent
+	// so every subsequent session.prompt() — interactive, print, rpc, acp —
+	// runs through the flow semantics. No mode replacement; the existing
+	// dispatch below is reused unchanged.
+	if ($env.OMP_FLOW) {
+		const sm = session.sessionManager;
+		const flowStrategy = new FlowExecutionStrategy({
+			getSubAgentModel: () => session.model,
+			sessionId: session.sessionId,
+			// Persist injected messages through the normal pipeline
+			// (agent state + session.jsonl). Custom messages (flow state)
+			// route through appendCustomMessageEntry; everything else
+			// (node-prompt user messages, etc.) goes through appendMessage.
+			persistMessage: msg => {
+				session.agent.appendMessage(msg);
+				const m = msg as any;
+				if (m.role === "custom") {
+					sm.appendCustomMessageEntry(
+						m.customType,
+						m.content,
+						m.display,
+						m.details,
+						m.attribution ?? "agent",
+					);
+				} else {
+					sm.appendMessage(m);
+				}
+			},
+		});
+		session.agent.setExecutionStrategy(flowStrategy);
+		sm.setFlowStateGetter(() => flowStrategy.state);
+		sm.setFlowFrameIdGetter((msg: any) => flowStrategy.getFrameIdForMessage(msg));
+		const payloadLogger = flowStrategy.createPayloadLogger();
+		if (payloadLogger) {
+			session.agent.setOnPayload(payloadLogger);
+		}
+		// Register flow nodes as slash commands (e.g. /fixer, /scout)
+		if (session.extensionRunner) {
+			flowStrategy.registerNodeCommands(session.extensionRunner, async (text: string) => {
+				await session.prompt(text);
+			});
+		}
+	}
 
 	if (mode === "rpc") {
 		await runRpcMode(session);

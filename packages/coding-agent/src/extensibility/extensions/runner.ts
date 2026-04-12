@@ -176,6 +176,7 @@ export class ExtensionRunner {
 	#reloadHandler: () => Promise<void> = async () => {};
 	#shutdownHandler: ShutdownHandler = () => {};
 	#commandDiagnostics: Array<{ type: string; message: string; path: string }> = [];
+	#externalCommands = new Map<string, RegisteredCommand>();
 
 	constructor(
 		private readonly extensions: Extension[],
@@ -350,6 +351,12 @@ export class ExtensionRunner {
 		this.#commandDiagnostics = [];
 
 		const commands = new Map<string, RegisteredCommand>();
+		// External commands (registered via runner.registerCommand from
+		// outside the extension system, e.g. flow strategy nodes).
+		for (const command of this.#externalCommands.values()) {
+			if (reserved?.has(command.name)) continue;
+			commands.set(command.name, command);
+		}
 		for (const ext of this.extensions) {
 			for (const command of ext.commands.values()) {
 				if (reserved?.has(command.name)) {
@@ -372,6 +379,8 @@ export class ExtensionRunner {
 	}
 
 	getCommand(name: string): RegisteredCommand | undefined {
+		const ext = this.#externalCommands.get(name);
+		if (ext) return ext;
 		for (let index = this.extensions.length - 1; index >= 0; index -= 1) {
 			const command = this.extensions[index]?.commands.get(name);
 			if (command) {
@@ -379,6 +388,11 @@ export class ExtensionRunner {
 			}
 		}
 		return undefined;
+	}
+
+	/** Register a command from outside the extension system (e.g. flow strategy). */
+	registerCommand(name: string, options: { description?: string; handler: RegisteredCommand["handler"] }): void {
+		this.#externalCommands.set(name, { name, ...options });
 	}
 
 	createContext(): ExtensionContext {
