@@ -39,6 +39,7 @@ import {
 	type SettingPath,
 	type SettingValue,
 } from "./settings-schema";
+import { getConfigProfileSettings, resolveConfigProfileId } from "./profiles";
 
 // Re-export types that callers need
 export type * from "./settings-schema";
@@ -119,11 +120,13 @@ export class Settings {
 
 	/** Global settings from config.yml */
 	#global: RawSettings = {};
-	/** Project settings from .claude/settings.yml etc */
+	/** Project settings from .claude/settings.json etc */
 	#project: RawSettings = {};
 	/** Runtime overrides (not persisted) */
 	#overrides: RawSettings = {};
-	/** Merged view (global + project + overrides) */
+	/** Built-in profile defaults selected by the active profile */
+	#profileDefaults: RawSettings = {};
+	/** Merged view (profile + global + project + overrides) */
 	#merged: RawSettings = {};
 
 	/** Paths modified during this session (for partial save) */
@@ -223,7 +226,11 @@ export class Settings {
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
 		const prev = this.get(path);
 		const segments = parsePath(path);
-		setByPath(this.#global, segments, value);
+		const nextValue =
+			path === "profile"
+				? ((resolveConfigProfileId(value) ?? getDefault("profile")) as SettingValue<P>)
+				: value;
+		setByPath(this.#global, segments, nextValue);
 		this.#modified.add(path);
 		this.#rebuildMerged();
 		this.#queueSave();
@@ -231,7 +238,10 @@ export class Settings {
 		// Trigger hook if exists
 		const hook = SETTING_HOOKS[path];
 		if (hook) {
-			hook(value, prev);
+			hook(nextValue, prev);
+		}
+		if (path === "profile") {
+			this.#fireAllHooks();
 		}
 	}
 
@@ -240,8 +250,15 @@ export class Settings {
 	 */
 	override<P extends SettingPath>(path: P, value: SettingValue<P>): void {
 		const segments = parsePath(path);
-		setByPath(this.#overrides, segments, value);
+		const nextValue =
+			path === "profile"
+				? ((resolveConfigProfileId(value) ?? getDefault("profile")) as SettingValue<P>)
+				: value;
+		setByPath(this.#overrides, segments, nextValue);
 		this.#rebuildMerged();
+		if (path === "profile") {
+			this.#fireAllHooks();
+		}
 	}
 
 	/**
@@ -257,6 +274,9 @@ export class Settings {
 		}
 		delete current[segments[segments.length - 1]];
 		this.#rebuildMerged();
+		if (path === "profile") {
+			this.#fireAllHooks();
+		}
 	}
 
 	/**
@@ -526,6 +546,16 @@ export class Settings {
 			delete isolationObj.enabled;
 		}
 
+		if ("profile" in raw) {
+			const profile = resolveConfigProfileId(raw.profile);
+			if (profile) {
+				raw.profile = profile;
+			} else {
+				delete raw.profile;
+			}
+		}
+
+
 		return raw;
 	}
 
@@ -587,8 +617,17 @@ export class Settings {
 	// ─────────────────────────────────────────────────────────────────────────
 
 	#rebuildMerged(): void {
-		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#project);
+		const activeProfile =
+			resolveConfigProfileId(this.#overrides.profile) ??
+			resolveConfigProfileId(this.#project.profile) ??
+			resolveConfigProfileId(this.#global.profile) ??
+			getDefault("profile");
+		this.#profileDefaults = getConfigProfileSettings(activeProfile);
+		this.#merged = this.#deepMerge({}, this.#profileDefaults);
+		this.#merged = this.#deepMerge(this.#merged, this.#global);
+		this.#merged = this.#deepMerge(this.#merged, this.#project);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
+		this.#merged.profile = activeProfile;
 	}
 
 	#fireAllHooks(): void {

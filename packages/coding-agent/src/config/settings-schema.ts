@@ -1,4 +1,5 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
+import { CONFIG_PROFILE_IDS } from "./profiles";
 
 /** Unified settings schema - single source of truth for all settings.
  * Unified settings schema - single source of truth for all settings.
@@ -215,6 +216,18 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			label: "Auto Resume",
 			description: "Automatically resume the most recent session in the current directory",
+		},
+	},
+
+	profile: {
+		type: "enum",
+		values: CONFIG_PROFILE_IDS,
+		default: "developer",
+		ui: {
+			tab: "config",
+			label: "Profile",
+			description: "Built-in UX defaults pack. Applies before explicit settings and never changes managed policy.",
+			submenu: true,
 		},
 	},
 	shellPath: { type: "string", default: undefined },

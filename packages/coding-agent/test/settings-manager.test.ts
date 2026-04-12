@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { _resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getProjectAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
+import { getSymbolPresetOverride, setSymbolPreset } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { YAML } from "bun";
 
 describe("Settings", () => {
@@ -12,9 +13,10 @@ describe("Settings", () => {
 	let agentDir: string;
 	let projectDir: string;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		// Reset global singleton so each test gets a fresh instance
 		_resetSettingsForTest();
+		await setSymbolPreset("unicode");
 
 		// Use snowflake to isolate parallel test runs (SQLite files can't be shared)
 		testDir = path.join(os.tmpdir(), "test-settings-tmp", Snowflake.next());
@@ -34,6 +36,12 @@ describe("Settings", () => {
 		await Bun.write(getConfigPath(), YAML.stringify(settings, null, 2));
 	};
 
+	const writeProjectSettings = async (settings: Record<string, unknown>) => {
+		const projectSettingsPath = path.join(projectDir, ".claude", "settings.json");
+		await fs.promises.mkdir(path.dirname(projectSettingsPath), { recursive: true });
+		await Bun.write(projectSettingsPath, JSON.stringify(settings, null, 2));
+	};
+
 	const readSettings = async (): Promise<Record<string, unknown>> => {
 		const file = Bun.file(getConfigPath());
 		if (!(await file.exists())) return {};
@@ -43,7 +51,9 @@ describe("Settings", () => {
 		return parsed as Record<string, unknown>;
 	};
 
-	afterEach(() => {
+	afterEach(async () => {
+		_resetSettingsForTest();
+		await setSymbolPreset("unicode");
 		if (fs.existsSync(testDir)) {
 			fs.rmSync(testDir, { recursive: true });
 		}
@@ -119,6 +129,65 @@ describe("Settings", () => {
 
 			const savedSettings = await readSettings();
 			expect(savedSettings.defaultThinkingLevel).toBe(Effort.High);
+		});
+	});
+
+	describe("profiles", () => {
+		it("applies profile defaults before explicit overrides", () => {
+			const settings = Settings.isolated({
+				profile: "enterprise",
+				"mcp.enableProjectConfig": true,
+			});
+
+			expect(settings.get("profile")).toBe("enterprise");
+			expect(settings.get("mcp.discoveryMode")).toBe(true);
+			expect(settings.get("mcp.enableProjectConfig")).toBe(true);
+			expect(settings.get("skills.enableClaudeProject")).toBe(false);
+		});
+
+		it("lets project settings override profile defaults", async () => {
+			await writeSettings({ profile: "enterprise" });
+			await writeProjectSettings({
+				mcp: { enableProjectConfig: true },
+			});
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("profile")).toBe("enterprise");
+			expect(settings.get("mcp.discoveryMode")).toBe(true);
+			expect(settings.get("mcp.enableProjectConfig")).toBe(true);
+		});
+
+		it("fires setting hooks when the active profile changes", async () => {
+			const settings = await Settings.init({ inMemory: true, cwd: projectDir });
+
+			settings.set("profile", "minimal");
+
+			expect(getSymbolPresetOverride()).toBe("ascii");
+		});
+
+
+		it("persists only the selected profile, not its expanded defaults", async () => {
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			settings.set("profile", "enterprise");
+			await settings.flush();
+
+			const savedSettings = await readSettings();
+			expect(savedSettings.profile).toBe("enterprise");
+			expect(savedSettings.mcp).toBeUndefined();
+			expect(savedSettings.skills).toBeUndefined();
+			expect(savedSettings.commands).toBeUndefined();
+		});
+
+		it("falls back to developer defaults for an unknown profile name", async () => {
+			await writeSettings({ profile: "bogus" });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("profile")).toBe("developer");
+			expect(settings.get("mcp.enableProjectConfig")).toBe(true);
+			expect(settings.get("mcp.discoveryMode")).toBe(false);
 		});
 	});
 });

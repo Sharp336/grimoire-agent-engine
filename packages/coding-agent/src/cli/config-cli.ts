@@ -17,6 +17,7 @@ import {
 	type SettingValue,
 	settings,
 } from "../config/settings";
+import { listConfigProfiles } from "../config/profiles";
 import { SETTINGS_SCHEMA } from "../config/settings-schema";
 import { theme } from "../modes/theme/theme";
 import { initXdg } from "./commands/init-xdg";
@@ -25,7 +26,7 @@ import { initXdg } from "./commands/init-xdg";
 // Types
 // =============================================================================
 
-export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "init-xdg";
+export type ConfigAction = "list" | "get" | "set" | "reset" | "path" | "profile" | "init-xdg";
 
 export interface ConfigCommandArgs {
 	action: ConfigAction;
@@ -73,7 +74,7 @@ function getSettingValues(def: CliSettingDef): readonly string[] | undefined {
 // Argument Parser
 // =============================================================================
 
-const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "init-xdg"];
+const VALID_ACTIONS: ConfigAction[] = ["list", "get", "set", "reset", "path", "profile", "init-xdg"];
 
 /**
  * Parse config subcommand arguments.
@@ -251,6 +252,9 @@ export async function runConfigCommand(cmd: ConfigCommandArgs): Promise<void> {
 		case "path":
 			handlePath();
 			break;
+		case "profile":
+			handleProfile(cmd.flags);
+			break;
 		case "init-xdg":
 			await initXdg();
 			break;
@@ -347,6 +351,7 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 	}
 
 	const newValue = settings.get(def.path);
+	await settings.flush();
 
 	if (flags.json) {
 		console.log(JSON.stringify({ key: def.path, value: newValue }));
@@ -354,6 +359,7 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 		console.log(chalk.green(`${theme.status.success} Set ${def.path} = ${formatValue(newValue)}`));
 	}
 }
+
 
 async function handleReset(key: string | undefined, flags: { json?: boolean }): Promise<void> {
 	if (!key) {
@@ -372,6 +378,7 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 	const path = def.path as SettingPath;
 	const defaultValue = getDefault(path);
 	settings.set(path, defaultValue as SettingValue<typeof path>);
+	await settings.flush();
 
 	if (flags.json) {
 		console.log(JSON.stringify({ key: def.path, value: defaultValue }));
@@ -380,8 +387,41 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 	}
 }
 
+
 function handlePath(): void {
 	console.log(getAgentDir());
+}
+
+function handleProfile(flags: { json?: boolean }): void {
+	const current = settings.get("profile");
+	const profiles = listConfigProfiles();
+
+	if (flags.json) {
+		console.log(
+			JSON.stringify(
+				{
+					current,
+					profiles: profiles.map(profile => ({
+						id: profile.id,
+						description: profile.description,
+					})),
+				},
+				null,
+				2,
+			),
+		);
+		return;
+	}
+
+	console.log(chalk.bold("Config profile"));
+	console.log(`  active: ${chalk.yellow(String(current))}`);
+	console.log("");
+	console.log(chalk.bold("Available profiles:"));
+	for (const profile of profiles) {
+		const activeMarker = profile.id === current ? chalk.green(" (active)") : "";
+		console.log(`  ${chalk.white(profile.id)}${activeMarker}`);
+		console.log(chalk.dim(`    ${profile.description}`));
+	}
 }
 
 // =============================================================================
@@ -397,6 +437,7 @@ ${chalk.bold("Commands:")}
   set <key> <value>  Set a setting value
   reset <key>        Reset a setting to its default value
   path               Print the config directory path
+  profile            Show the active profile and built-in profiles
   init-xdg           Initialize XDG Base Directory structure
 
 ${chalk.bold("Options:")}
@@ -408,6 +449,9 @@ ${chalk.bold("Examples:")}
   ${APP_NAME} config set theme catppuccin-mocha
   ${APP_NAME} config set compaction.remoteEnabled false
   ${APP_NAME} config set defaultThinkingLevel medium
+  ${APP_NAME} config set profile enterprise
+  ${APP_NAME} config profile
+  ${APP_NAME} config profile --json
   ${APP_NAME} config reset steeringMode
   ${APP_NAME} config list --json
   ${APP_NAME} config init-xdg

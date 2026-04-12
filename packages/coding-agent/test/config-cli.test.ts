@@ -141,4 +141,39 @@ describe("config CLI schema coverage", () => {
 			value: 600,
 		});
 	});
+	it("shows the active profile and available profiles as JSON", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runConfigCommand({ action: "set", key: "profile", value: "enterprise", flags: { json: true } });
+		await runConfigCommand({ action: "profile", flags: { json: true } });
+
+		const payload = logSpy.mock.calls.at(-1)?.[0];
+		expect(typeof payload).toBe("string");
+		const parsed = JSON.parse(String(payload)) as {
+			current: string;
+			profiles: Array<{ id: string; description: string }>;
+		};
+		expect(parsed.current).toBe("enterprise");
+		expect(parsed.profiles.map(profile => profile.id)).toEqual([
+			"developer",
+			"current",
+			"enterprise",
+			"minimal",
+		]);
+		expect(parsed.profiles.find(profile => profile.id === "enterprise")?.description).toContain("project-loaded commands and skills");
+	});
+
+	it("shows the active profile in text output", async () => {
+		const logSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+
+		await runConfigCommand({ action: "set", key: "profile", value: "minimal", flags: { json: true } });
+		await runConfigCommand({ action: "profile", flags: {} });
+
+		const lines = logSpy.mock.calls.map(call => Bun.stripANSI(String(call[0] ?? "")));
+		expect(lines).toContain("Config profile");
+		expect(lines).toContain("  active: minimal");
+		expect(lines).toContain("Available profiles:");
+	});
+
+
 });
