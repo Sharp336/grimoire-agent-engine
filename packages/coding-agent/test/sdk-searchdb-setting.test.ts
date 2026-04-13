@@ -3,10 +3,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-ai";
-import { SearchDb } from "@oh-my-pi/pi-natives";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { SearchDb } from "@oh-my-pi/pi-natives";
 import { Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("createAgentSession SearchDb setting", () => {

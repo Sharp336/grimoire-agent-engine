@@ -1,7 +1,6 @@
 #!/usr/bin/env bun
 
-import { $ } from "bun";
-import * as path from "node:path";
+import { getWorkingTreeChangedPaths, isCI, repoRoot } from "./git-changes";
 
 const RUST_AFFECTING_FILE_NAMES = [
 	"Cargo.toml",
@@ -41,7 +40,6 @@ const TASK_COMMANDS = {
 
 type RustTaskName = keyof typeof TASK_COMMANDS;
 
-const repoRoot = path.join(import.meta.dir, "..");
 const taskName = process.argv[2];
 
 if (!isRustTaskName(taskName)) {
@@ -65,48 +63,13 @@ function isRustTaskName(value: string | undefined): value is RustTaskName {
 	return value != null && value in TASK_COMMANDS;
 }
 
-function isCI(): boolean {
-	const value = Bun.env.CI;
-	if (!value) return false;
-	const normalized = value.trim().toLowerCase();
-	return normalized !== "" && normalized !== "0" && normalized !== "false";
-}
-
 async function hasRustAffectingChanges(): Promise<boolean> {
-	const result = await $`git status --porcelain -z`.cwd(repoRoot).quiet().nothrow();
-	if (result.exitCode !== 0) {
-		const stderr = result.stderr.toString().trim();
-		const suffix = stderr === "" ? `exit ${result.exitCode}` : stderr;
-		console.warn(`Warning: failed to inspect git status: ${suffix}. Running ${taskName} conservatively.`);
+	const changedPaths = await getWorkingTreeChangedPaths();
+	if (changedPaths == null) {
+		console.warn(`Warning: failed to inspect git status. Running ${taskName} conservatively.`);
 		return true;
 	}
-	return getChangedPathsFromPorcelain(result.stdout).some(isRustAffectingPath);
-}
-
-function getChangedPathsFromPorcelain(buf: Uint8Array): string[] {
-	const entries = new TextDecoder().decode(buf).split("\0").filter(Boolean);
-	const changedPaths: string[] = [];
-
-	for (let index = 0; index < entries.length; index += 1) {
-		const entry = entries[index];
-		if (entry.length < 4) continue;
-
-		const status = entry.slice(0, 2);
-		const changedPath = entry.slice(3);
-		if (changedPath !== "") {
-			changedPaths.push(changedPath);
-		}
-
-		if (status.includes("R") || status.includes("C")) {
-			const renamedPath = entries[index + 1];
-			if (renamedPath) {
-				changedPaths.push(renamedPath);
-				index += 1;
-			}
-		}
-	}
-
-	return changedPaths;
+	return changedPaths.some(isRustAffectingPath);
 }
 
 function isRustAffectingPath(changedPath: string): boolean {
@@ -124,7 +87,7 @@ function isOneOf<T extends string>(value: string, values: readonly T[]): value i
 }
 
 async function runCommand(command: readonly string[]): Promise<number> {
-	const proc = Bun.spawn(command, {
+	const proc = Bun.spawn([...command], {
 		cwd: repoRoot,
 		stdin: "inherit",
 		stdout: "inherit",
