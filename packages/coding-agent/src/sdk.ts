@@ -897,7 +897,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const pythonKernelOwnerId = `agent-session:${Snowflake.next()}`;
 
 	try {
-		const searchDb = options.searchDb ?? new SearchDb(getSearchDbDir(agentDir));
+		const searchDb =
+			options.searchDb ??
+			(settings.get("searchDb.enabled") === false ? undefined : new SearchDb(getSearchDbDir(agentDir)));
 		const toolSession: ToolSession = {
 			cwd,
 			hasUI: options.hasUI ?? false,

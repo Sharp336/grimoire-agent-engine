@@ -1178,6 +1178,16 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Search and AST tools
+	"searchDb.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Search Database",
+			description: "Keep the native SearchDb index available for grep, find, autocomplete, and task workflows",
+		},
+	},
+
 	"find.enabled": {
 		type: "boolean",
 		default: true,

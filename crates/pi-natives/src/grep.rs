@@ -28,11 +28,7 @@ use napi_derive::napi;
 use rayon::prelude::*;
 use smallvec::SmallVec;
 
-use crate::{
-	fs_cache, glob_util,
-	search_db::{SearchDb, wait_for_picker_scan},
-	task,
-};
+use crate::{fs_cache, glob_util, search_db::SearchDb, task};
 
 const MAX_FILE_BYTES: u64 = 4 * 1024 * 1024;
 
@@ -801,44 +797,33 @@ fn collect_files_from_picker(
 	include_hidden: bool,
 	ct: &task::CancelToken,
 ) -> Result<Vec<FileEntry>> {
-	let shared_picker = db.get_or_init_picker(root)?;
+	let picker = db.access_picker(root, ct)?;
 	ct.heartbeat()?;
-	// Wait for the background scan to finish.  On repeated calls this is a
-	// no-op (the signal is already cleared).  On first call it blocks until
-	// the initial directory walk completes, which is equivalent in latency
-	// to a fresh fs_cache::force_rescan but is then never repeated.
-	wait_for_picker_scan(&shared_picker, ct)?;
-
-	let guard = shared_picker
-		.read()
-		.map_err(|_| Error::from_reason("shared picker lock poisoned"))?;
-	let Some(picker) = guard.as_ref() else {
-		return Ok(Vec::new());
-	};
-
-	let mut entries = Vec::new();
-	for file in picker.get_files() {
-		if !include_hidden && has_hidden_component(&file.relative_path) {
-			continue;
+	picker.read(|picker| {
+		let mut entries = Vec::new();
+		for file in picker.get_files() {
+			if !include_hidden && has_hidden_component(&file.relative_path) {
+				continue;
+			}
+			if let Some(glob_set) = glob_set
+				&& !glob_set.is_match(Path::new(&file.relative_path))
+			{
+				continue;
+			}
+			let path = root.join(&file.relative_path);
+			if let Some(filter) = type_filter
+				&& !matches_type_filter(&path, filter)
+			{
+				continue;
+			}
+			entries.push(FileEntry {
+				path,
+				relative_path: file.relative_path.clone(),
+				prefer_text_fast_path: true,
+			});
 		}
-		if let Some(glob_set) = glob_set
-			&& !glob_set.is_match(Path::new(&file.relative_path))
-		{
-			continue;
-		}
-		let path = root.join(&file.relative_path);
-		if let Some(filter) = type_filter
-			&& !matches_type_filter(&path, filter)
-		{
-			continue;
-		}
-		entries.push(FileEntry {
-			path,
-			relative_path: file.relative_path.clone(),
-			prefer_text_fast_path: true,
-		});
-	}
-	Ok(entries)
+		Ok(entries)
+	})
 }
 // ---------------------------------------------------------------------------
 // Regex brace sanitization

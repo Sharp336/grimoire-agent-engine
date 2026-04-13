@@ -5,6 +5,10 @@
 
 - Added support for honoring the `ZIG` environment variable when resolving the Zig executable for native builds
 
+### Fixed
+
+- Fixed SearchDb picker lifecycle to stop background watchers after scans, refresh stale cached roots on reuse, and evict idle cached pickers
+
 ## [14.0.5] - 2026-04-11
 ### Breaking Changes
 

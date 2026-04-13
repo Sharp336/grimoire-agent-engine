@@ -15,6 +15,7 @@ import {
 	MacOSPowerAssertion,
 	PtySession,
 	sanitizeText,
+	SearchDb,
 	truncateToWidth,
 	visibleWidth,
 	wrapTextWithAnsi,
@@ -275,6 +276,58 @@ describe("pi-natives", () => {
 			});
 
 			expect(result.matches.some(match => match.path === "history-search.ts")).toBe(true);
+		});
+	});
+
+	describe("SearchDb", () => {
+		it("should keep SearchDb-backed glob, grep, and fuzzyFind working across repeated calls and roots", async () => {
+			const scopedDir = await fs.mkdtemp(path.join(os.tmpdir(), "natives-search-db-"));
+			const dbPath = path.join(scopedDir, "search-db");
+			const rootA = path.join(scopedDir, "root-a");
+			const rootB = path.join(scopedDir, "root-b");
+			await fs.mkdir(rootA, { recursive: true });
+			await fs.mkdir(rootB, { recursive: true });
+
+			try {
+				await fs.writeFile(
+					path.join(rootA, "alpha-search.ts"),
+					'export const alphaToken = "ROOT_A_SEARCH_TOKEN";\n',
+				);
+				await fs.writeFile(path.join(rootA, "notes.md"), "alpha notes\n");
+				await fs.writeFile(path.join(rootB, "beta-search.ts"), 'export const betaToken = "ROOT_B_SEARCH_TOKEN";\n');
+				await fs.writeFile(path.join(rootB, "notes.md"), "beta notes\n");
+
+				const searchDb = new SearchDb(dbPath);
+
+				const firstRootAGlob = await glob({ pattern: "*.ts", path: rootA }, undefined, searchDb);
+				const secondRootAGlob = await glob({ pattern: "*.ts", path: rootA }, undefined, searchDb);
+				const rootBGlob = await glob({ pattern: "*.ts", path: rootB }, undefined, searchDb);
+
+				expect(firstRootAGlob.matches.map(match => match.path)).toEqual(["alpha-search.ts"]);
+				expect(secondRootAGlob.matches.map(match => match.path)).toEqual(["alpha-search.ts"]);
+				expect(rootBGlob.matches.map(match => match.path)).toEqual(["beta-search.ts"]);
+
+				const firstRootAGrep = await grep({ pattern: "ROOT_A_SEARCH_TOKEN", path: rootA }, undefined, searchDb);
+				const secondRootAGrep = await grep({ pattern: "ROOT_A_SEARCH_TOKEN", path: rootA }, undefined, searchDb);
+				const rootBGrep = await grep({ pattern: "ROOT_B_SEARCH_TOKEN", path: rootB }, undefined, searchDb);
+
+				expect(firstRootAGrep.totalMatches).toBe(1);
+				expect(firstRootAGrep.matches.map(match => match.path)).toEqual(["alpha-search.ts"]);
+				expect(secondRootAGrep.totalMatches).toBe(1);
+				expect(secondRootAGrep.matches.map(match => match.path)).toEqual(["alpha-search.ts"]);
+				expect(rootBGrep.totalMatches).toBe(1);
+				expect(rootBGrep.matches.map(match => match.path)).toEqual(["beta-search.ts"]);
+
+				const firstRootAFuzzy = await fuzzyFind({ query: "alphasearch", path: rootA, maxResults: 20 }, searchDb);
+				const secondRootAFuzzy = await fuzzyFind({ query: "alphasearch", path: rootA, maxResults: 20 }, searchDb);
+				const rootBFuzzy = await fuzzyFind({ query: "betasearch", path: rootB, maxResults: 20 }, searchDb);
+
+				expect(firstRootAFuzzy.matches.some(match => match.path === "alpha-search.ts")).toBe(true);
+				expect(secondRootAFuzzy.matches.some(match => match.path === "alpha-search.ts")).toBe(true);
+				expect(rootBFuzzy.matches.some(match => match.path === "beta-search.ts")).toBe(true);
+			} finally {
+				await fs.rm(scopedDir, { recursive: true, force: true });
+			}
 		});
 	});
 

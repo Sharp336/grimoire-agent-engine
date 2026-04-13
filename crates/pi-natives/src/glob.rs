@@ -25,11 +25,7 @@ use napi_derive::napi;
 
 // Re-export entry types so existing `glob::FileType` / `glob::GlobMatch` paths still work.
 pub use crate::fs_cache::{FileType, GlobMatch};
-use crate::{
-	fs_cache, glob_util,
-	search_db::{SearchDb, wait_for_picker_scan},
-	task,
-};
+use crate::{fs_cache, glob_util, search_db::SearchDb, task};
 
 /// Input options for `glob`, including traversal, filtering, and cancellation.
 #[napi(object)]
@@ -138,46 +134,39 @@ fn collect_files_from_picker(
 	on_match: Option<&ThreadsafeFunction<GlobMatch>>,
 	ct: &task::CancelToken,
 ) -> Result<Vec<GlobMatch>> {
-	let shared_picker = db.get_or_init_picker(root)?;
-	wait_for_picker_scan(&shared_picker, ct)?;
+	let picker = db.access_picker(root, ct)?;
+	picker.read(|picker| {
+		let mut matches = Vec::new();
+		for file in picker.get_files() {
+			ct.heartbeat()?;
+			let relative_path = file.relative_path.replace('\\', "/");
+			if !config.include_hidden && has_hidden_component(&relative_path) {
+				continue;
+			}
+			if fs_cache::should_skip_path(Path::new(&relative_path), config.mentions_node_modules) {
+				continue;
+			}
+			if !glob_set.is_match(Path::new(&relative_path)) {
+				continue;
+			}
 
-	let guard = shared_picker
-		.read()
-		.map_err(|_| Error::from_reason("shared picker lock poisoned"))?;
-	let Some(picker) = guard.as_ref() else {
-		return Ok(Vec::new());
-	};
+			let matched_entry = GlobMatch {
+				path:      relative_path,
+				file_type: FileType::File,
+				mtime:     Some((file.modified as f64) * 1000.0),
+			};
 
-	let mut matches = Vec::new();
-	for file in picker.get_files() {
-		ct.heartbeat()?;
-		let relative_path = file.relative_path.replace('\\', "/");
-		if !config.include_hidden && has_hidden_component(&relative_path) {
-			continue;
-		}
-		if fs_cache::should_skip_path(Path::new(&relative_path), config.mentions_node_modules) {
-			continue;
-		}
-		if !glob_set.is_match(Path::new(&relative_path)) {
-			continue;
+			if let Some(callback) = on_match {
+				callback.call(Ok(matched_entry.clone()), ThreadsafeFunctionCallMode::NonBlocking);
+			}
+			matches.push(matched_entry);
+			if !config.sort_by_mtime && matches.len() >= config.max_results {
+				break;
+			}
 		}
 
-		let matched_entry = GlobMatch {
-			path:      relative_path,
-			file_type: FileType::File,
-			mtime:     Some((file.modified as f64) * 1000.0),
-		};
-
-		if let Some(callback) = on_match {
-			callback.call(Ok(matched_entry.clone()), ThreadsafeFunctionCallMode::NonBlocking);
-		}
-		matches.push(matched_entry);
-		if !config.sort_by_mtime && matches.len() >= config.max_results {
-			break;
-		}
-	}
-
-	Ok(matches)
+		Ok(matches)
+	})
 }
 
 /// Filter and collect matching entries from a pre-scanned list.

@@ -6,6 +6,7 @@
 - Added support for `computeHashlineDiff` to accept hashline edits with `loc` and `content` payloads without requiring pre-resolved `op` fields
 - Added `/rename <title>` slash command to set an explicit session name, updating the session header and terminal tab title ([#658](https://github.com/can1357/oh-my-pi/issues/658))
 - Added `session_name` status line segment: displays the session name in the status bar right side with a stable hash-derived accent color unique to each name; shown in all presets when a name is set
+- Added a `searchDb.enabled` Tools setting to let users disable automatic SearchDb session creation while keeping SearchDb integration optional.
 
 ### Changed
 

@@ -12,11 +12,7 @@ use fff::{FileItem, FilePicker, FuzzySearchOptions, PaginationArgs, QueryParser}
 use napi::bindgen_prelude::*;
 use napi_derive::napi;
 
-use crate::{
-	fs_cache,
-	search_db::{SearchDb, wait_for_picker_scan},
-	task,
-};
+use crate::{fs_cache, search_db::SearchDb, task};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Public types
@@ -197,22 +193,17 @@ fn search_stateful_files(
 	db: &SearchDb,
 	ct: &task::CancelToken,
 ) -> Result<(Vec<RankedMatch>, u32)> {
-	let shared_picker = db.get_or_init_picker(root)?;
-	wait_for_picker_scan(&shared_picker, ct)?;
-	let guard = shared_picker
-		.read()
-		.map_err(|_| Error::from_reason("shared picker lock poisoned"))?;
-	let Some(picker) = guard.as_ref() else {
-		return Ok((Vec::new(), 0));
-	};
-
-	let parser = QueryParser::default();
-	let parsed = parser.parse(query);
-	let results = FilePicker::fuzzy_search(picker.get_files(), &parsed, None, FuzzySearchOptions {
-		pagination: PaginationArgs { offset: 0, limit },
-		..Default::default()
-	});
-	Ok(to_ranked_matches(results, &HashSet::new()))
+	let picker = db.access_picker(root, ct)?;
+	picker.read(|picker| {
+		let parser = QueryParser::default();
+		let parsed = parser.parse(query);
+		let results =
+			FilePicker::fuzzy_search(picker.get_files(), &parsed, None, FuzzySearchOptions {
+				pagination: PaginationArgs { offset: 0, limit },
+				..Default::default()
+			});
+		Ok(to_ranked_matches(results, &HashSet::new()))
+	})
 }
 
 fn finalize_results(
