@@ -19,6 +19,11 @@ interface GitHubPullRequestEvent {
 	};
 }
 
+export interface PullRequestChangedPathsResult {
+	kind: "not_pull_request" | "resolved" | "unavailable";
+	changedPaths: string[];
+}
+
 export function isCI(): boolean {
 	const value = Bun.env.CI;
 	if (!value) return false;
@@ -34,16 +39,37 @@ export async function getWorkingTreeChangedPaths(): Promise<string[] | null> {
 	return uniqueSorted(getChangedPathsFromPorcelain(result.stdout));
 }
 
-export async function getPullRequestChangedPaths(): Promise<string[] | null> {
-	const refs = await readPullRequestRefs();
-	if (!refs) return null;
+export async function getBranchChangedPaths(): Promise<string[] | null> {
+	const baseRef = await resolveBaseBranchRef();
+	if (!baseRef) {
+		return null;
+	}
 
-	const result = await runGitDiffNameOnly([refs.baseSha, refs.headSha]);
+	const result = await runGitDiffNameOnly([baseRef, "HEAD"]);
 	if (result == null) {
 		return null;
 	}
 
 	return uniqueSorted(result);
+}
+
+export async function getPullRequestChangedPaths(): Promise<PullRequestChangedPathsResult> {
+	const eventName = Bun.env.GITHUB_EVENT_NAME?.trim();
+	if (eventName !== "pull_request" && eventName !== "pull_request_target") {
+		return { kind: "not_pull_request", changedPaths: [] };
+	}
+
+	const refs = await readPullRequestRefs();
+	if (!refs) {
+		return { kind: "unavailable", changedPaths: [] };
+	}
+
+	const result = await runGitDiffNameOnly([refs.baseSha, refs.headSha]);
+	if (result == null) {
+		return { kind: "unavailable", changedPaths: [] };
+	}
+
+	return { kind: "resolved", changedPaths: uniqueSorted(result) };
 }
 
 export function getChangedPathsFromPorcelain(buf: Uint8Array): string[] {
@@ -73,9 +99,8 @@ export function getChangedPathsFromPorcelain(buf: Uint8Array): string[] {
 }
 
 async function readPullRequestRefs(): Promise<PullRequestRefs | null> {
-	const eventName = Bun.env.GITHUB_EVENT_NAME?.trim();
 	const eventPath = Bun.env.GITHUB_EVENT_PATH?.trim();
-	if (eventName !== "pull_request" || !eventPath) return null;
+	if (!eventPath) return null;
 
 	try {
 		const event = (await Bun.file(eventPath).json()) as GitHubPullRequestEvent;
@@ -86,6 +111,43 @@ async function readPullRequestRefs(): Promise<PullRequestRefs | null> {
 	} catch {
 		return null;
 	}
+}
+
+async function resolveBaseBranchRef(): Promise<string | null> {
+	const configuredDefaultRef = await getConfiguredRemoteDefaultBranchRef();
+	const candidateRefs = [configuredDefaultRef, "origin/main", "origin/master", "main", "master"];
+	const seenRefs = new Set<string>();
+
+	for (const candidateRef of candidateRefs) {
+		const normalizedCandidateRef = candidateRef?.trim();
+		if (!normalizedCandidateRef || seenRefs.has(normalizedCandidateRef)) {
+			continue;
+		}
+
+		seenRefs.add(normalizedCandidateRef);
+		if (await gitRefExists(normalizedCandidateRef)) {
+			return normalizedCandidateRef;
+		}
+	}
+
+	return null;
+}
+
+async function getConfiguredRemoteDefaultBranchRef(): Promise<string | null> {
+	const result = await $`git symbolic-ref --quiet --short refs/remotes/origin/HEAD`.cwd(repoRoot).quiet().nothrow();
+	if (result.exitCode !== 0) {
+		return null;
+	}
+
+	const resolvedRef = decoder.decode(result.stdout).trim();
+	return resolvedRef === "" ? null : resolvedRef;
+}
+
+async function gitRefExists(ref: string): Promise<boolean> {
+	const commitish = `${ref}^{commit}`;
+	const result = await $`git rev-parse --verify --quiet ${commitish}`.cwd(repoRoot).quiet().nothrow();
+	return result.exitCode === 0;
+
 }
 
 async function runGitDiffNameOnly(range: readonly [string, string]): Promise<string[] | null> {

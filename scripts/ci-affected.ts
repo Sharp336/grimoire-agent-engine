@@ -1,10 +1,11 @@
 #!/usr/bin/env bun
 
 import * as path from "node:path";
-import { getPullRequestChangedPaths, getWorkingTreeChangedPaths, repoRoot } from "./git-changes";
+import { getBranchChangedPaths, getPullRequestChangedPaths, getWorkingTreeChangedPaths, repoRoot } from "./git-changes";
 
 const WORKSPACE_PACKAGE_JSON_GLOB = "packages/*/package.json";
 const NATIVE_WORKSPACE_DIR = "packages/natives";
+const RUST_TEST_COMMAND = ["bun", "run", "test:rs"] as const;
 const DEPENDENCY_FIELDS = ["dependencies", "devDependencies", "peerDependencies", "optionalDependencies"] as const;
 const ROOT_FULL_COMMANDS = {
 	check: "ci:check:full",
@@ -52,19 +53,23 @@ interface WorkspaceInfo {
 
 interface ChangedPathResult {
 	changedPaths: string[];
-	source: "override" | "pull_request" | "working_tree";
+	source: "override" | "pull_request" | "local";
+	forceFullReason?: string;
 }
 
 interface AffectedResolution {
 	mode: "full" | "scoped" | "none";
 	reason: string;
 	workspaces: WorkspaceInfo[];
+	runRustTests: boolean;
 }
 
 const options = parseArgs(process.argv.slice(2));
 const allWorkspaces = await loadWorkspaces();
 const changedPathResult = await detectChangedPaths(options.overrideChangedPaths);
-const resolution = resolveAffectedWorkspaces(allWorkspaces, changedPathResult.changedPaths);
+const resolution: AffectedResolution = changedPathResult.forceFullReason
+	? { mode: "full", reason: changedPathResult.forceFullReason, workspaces: [], runRustTests: false }
+	: resolveAffectedWorkspaces(allWorkspaces, changedPathResult.changedPaths);
 
 switch (resolution.mode) {
 	case "none":
@@ -76,14 +81,20 @@ switch (resolution.mode) {
 		break;
 	case "scoped": {
 		const runnableWorkspaces = resolution.workspaces.filter(workspace => workspace.scripts.has(options.action));
-		if (runnableWorkspaces.length === 0) {
-			console.log(`${options.action}: no affected workspaces define ${options.action}.`);
+		const shouldRunRustTests = options.action === "test" && resolution.runRustTests;
+		const scopedTargetCount = runnableWorkspaces.length + (shouldRunRustTests ? 1 : 0);
+		if (scopedTargetCount === 0) {
+			console.log(`${options.action}: no affected targets define ${options.action}.`);
 			process.exit(0);
 		}
 
 		console.log(
-			`${options.action}: ${runnableWorkspaces.length} affected workspace${runnableWorkspaces.length === 1 ? "" : "s"} (${changedPathResult.source}).`,
+			`${options.action}: running ${scopedTargetCount} scoped target${scopedTargetCount === 1 ? "" : "s"} (${changedPathResult.source}).`,
 		);
+		if (shouldRunRustTests) {
+			console.log(`- ${RUST_TEST_COMMAND.join(" ")}`);
+			await runCommand(RUST_TEST_COMMAND, options.dryRun);
+		}
 		for (const workspace of runnableWorkspaces) {
 			console.log(`- ${workspace.name}`);
 			await runCommand(["bun", "--cwd", workspace.dir, "run", options.action], options.dryRun);
@@ -166,26 +177,48 @@ async function detectChangedPaths(overrideChangedPaths: readonly string[]): Prom
 	}
 
 	const pullRequestChangedPaths = await getPullRequestChangedPaths();
-	if (pullRequestChangedPaths != null) {
-		return { changedPaths: pullRequestChangedPaths, source: "pull_request" };
+	if (pullRequestChangedPaths.kind === "resolved") {
+		return { changedPaths: pullRequestChangedPaths.changedPaths, source: "pull_request" };
+	}
+	if (pullRequestChangedPaths.kind === "unavailable") {
+		return {
+			changedPaths: [],
+			source: "pull_request",
+			forceFullReason: "pull request diff unavailable; running full workspace",
+		};
 	}
 
-	const workingTreeChangedPaths = await getWorkingTreeChangedPaths();
-	if (workingTreeChangedPaths != null) {
-		return { changedPaths: workingTreeChangedPaths, source: "working_tree" };
+	const [branchChangedPaths, workingTreeChangedPaths] = await Promise.all([
+		getBranchChangedPaths(),
+		getWorkingTreeChangedPaths(),
+	]);
+	if (branchChangedPaths == null) {
+		return {
+			changedPaths: workingTreeChangedPaths ?? [],
+			source: "local",
+			forceFullReason: "local branch diff unavailable; running full workspace",
+		};
+	}
+	if (workingTreeChangedPaths == null) {
+		return {
+			changedPaths: branchChangedPaths,
+			source: "local",
+			forceFullReason: "local git status unavailable; running full workspace",
+		};
 	}
 
-	throw new Error("Unable to determine changed files from pull request context or local git status.");
+	return { changedPaths: uniqueSorted([...branchChangedPaths, ...workingTreeChangedPaths]), source: "local" };
 }
 
 function resolveAffectedWorkspaces(allWorkspaces: readonly WorkspaceInfo[], changedPaths: readonly string[]): AffectedResolution {
 	if (changedPaths.length === 0) {
-		return { mode: "none", reason: "no changed files", workspaces: [] };
+		return { mode: "none", reason: "no changed files", workspaces: [], runRustTests: false };
 	}
 
 	const workspacesByDir = new Map(allWorkspaces.map(workspace => [workspace.dir, workspace]));
 	const dependentWorkspaceNames = buildDependentWorkspaceMap(allWorkspaces);
 	const affectedWorkspaceNames = new Set<string>();
+	let runRustTests = false;
 
 	for (const changedPath of changedPaths) {
 		if (isIgnoredRootDocumentationPath(changedPath)) {
@@ -193,10 +226,11 @@ function resolveAffectedWorkspaces(allWorkspaces: readonly WorkspaceInfo[], chan
 		}
 
 		if (isRootToolingChange(changedPath)) {
-			return { mode: "full", reason: `unsafe root/tooling change: ${changedPath}`, workspaces: [] };
+			return { mode: "full", reason: `unsafe root/tooling change: ${changedPath}`, workspaces: [], runRustTests: false };
 		}
 
 		if (isNativeChange(changedPath)) {
+			runRustTests = true;
 			affectedWorkspaceNames.add(workspacesByDir.get(NATIVE_WORKSPACE_DIR)?.name ?? "");
 			continue;
 		}
@@ -207,19 +241,19 @@ function resolveAffectedWorkspaces(allWorkspaces: readonly WorkspaceInfo[], chan
 			continue;
 		}
 
-		return { mode: "full", reason: `unscoped change: ${changedPath}`, workspaces: [] };
+		return { mode: "full", reason: `unscoped change: ${changedPath}`, workspaces: [], runRustTests: false };
 	}
 
 	affectedWorkspaceNames.delete("");
 	if (affectedWorkspaceNames.size === 0) {
-		return { mode: "none", reason: "no relevant workspace changes", workspaces: [] };
+		return { mode: "none", reason: "no relevant workspace changes", workspaces: [], runRustTests };
 	}
 
 	const expandedWorkspaceNames = expandDependents(affectedWorkspaceNames, dependentWorkspaceNames);
 	const workspaces = allWorkspaces
 		.filter(workspace => expandedWorkspaceNames.has(workspace.name))
 		.sort((left, right) => left.name.localeCompare(right.name));
-	return { mode: workspaces.length === 0 ? "none" : "scoped", reason: "workspace-scoped change", workspaces };
+	return { mode: workspaces.length === 0 ? "none" : "scoped", reason: "workspace-scoped change", workspaces, runRustTests };
 }
 
 function buildDependentWorkspaceMap(allWorkspaces: readonly WorkspaceInfo[]): Map<string, string[]> {

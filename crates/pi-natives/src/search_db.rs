@@ -233,7 +233,10 @@ impl SearchDb {
 	) -> Option<Arc<PickerEntry>> {
 		let mut pickers = self.inner.pickers.lock();
 		let current = pickers.get(key)?;
-		if !Arc::ptr_eq(current, entry) || current.metadata.lock().initial_scan_complete {
+		if !Arc::ptr_eq(current, entry) {
+			return None;
+		}
+		if current.metadata.lock().initial_scan_complete || current.active_lease_count() != 1 {
 			return None;
 		}
 		pickers.remove(key)
@@ -451,6 +454,30 @@ mod tests {
 		fn contains_picker(&self, key: &str) -> bool {
 			self.inner.pickers.lock().contains_key(key)
 		}
+	}
+
+	#[test]
+	fn keeps_uninitialized_picker_when_another_lease_is_active() {
+		let db = SearchDb::new_for_tests(SearchDbConfig::default());
+		let now = Instant::now();
+		let entry = db.insert_test_entry("/shared", now, 2, false);
+
+		let removed = db.take_uninitialized_picker("/shared", &entry);
+
+		assert!(removed.is_none());
+		assert!(db.contains_picker("/shared"));
+	}
+
+	#[test]
+	fn removes_orphaned_uninitialized_picker_for_last_lease() {
+		let db = SearchDb::new_for_tests(SearchDbConfig::default());
+		let now = Instant::now();
+		let entry = db.insert_test_entry("/orphaned", now, 1, false);
+
+		let removed = db.take_uninitialized_picker("/orphaned", &entry);
+
+		assert!(removed.is_some());
+		assert!(!db.contains_picker("/orphaned"));
 	}
 
 	#[test]
