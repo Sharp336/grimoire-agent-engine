@@ -22,7 +22,7 @@ use parking_lot::Mutex;
 use crate::task;
 
 const MAX_RETAINED_PICKERS: usize = 8;
-const PICKER_IDLE_TTL: Duration = Duration::from_secs(120);
+const PICKER_IDLE_TTL: Duration = Duration::from_mins(2);
 const PICKER_STALE_AFTER: Duration = Duration::from_secs(30);
 const PICKER_WAIT_INTERVAL: Duration = Duration::from_millis(10);
 
@@ -58,7 +58,7 @@ struct PickerEntry {
 }
 
 impl PickerEntry {
-	fn new(key: String, shared_picker: SharedPicker, now: Instant) -> Self {
+	const fn new(key: String, shared_picker: SharedPicker, now: Instant) -> Self {
 		Self {
 			key,
 			shared_picker,
