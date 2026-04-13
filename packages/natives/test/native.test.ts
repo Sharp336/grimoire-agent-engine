@@ -299,24 +299,24 @@ describe("pi-natives", () => {
 
 				const searchDb = new SearchDb(dbPath);
 
-				const firstRootAGlob = await glob({ pattern: "*.ts", path: rootA }, undefined, searchDb);
-				const secondRootAGlob = await glob({ pattern: "*.ts", path: rootA }, undefined, searchDb);
-				const rootBGlob = await glob({ pattern: "*.ts", path: rootB }, undefined, searchDb);
-
-				expect(firstRootAGlob.matches.map(match => match.path)).toEqual(["alpha-search.ts"]);
-				expect(secondRootAGlob.matches.map(match => match.path)).toEqual(["alpha-search.ts"]);
-				expect(rootBGlob.matches.map(match => match.path)).toEqual(["beta-search.ts"]);
-
 				const firstRootAGrep = await grep({ pattern: "ROOT_A_SEARCH_TOKEN", path: rootA }, undefined, searchDb);
 				const secondRootAGrep = await grep({ pattern: "ROOT_A_SEARCH_TOKEN", path: rootA }, undefined, searchDb);
-				const rootBGrep = await grep({ pattern: "ROOT_B_SEARCH_TOKEN", path: rootB }, undefined, searchDb);
+				const firstRootBGlob = await glob({ pattern: "*.ts", path: rootB }, undefined, searchDb);
+				const firstRootBGrep = await grep({ pattern: "ROOT_B_SEARCH_TOKEN", path: rootB }, undefined, searchDb);
+				const firstRootAGlob = await glob({ pattern: "*.ts", path: rootA }, undefined, searchDb);
+				const secondRootAGlob = await glob({ pattern: "*.ts", path: rootA }, undefined, searchDb);
+				const secondRootBGlob = await glob({ pattern: "*.ts", path: rootB }, undefined, searchDb);
 
 				expect(firstRootAGrep.totalMatches).toBe(1);
 				expect(firstRootAGrep.matches.map(match => match.path)).toEqual(["alpha-search.ts"]);
 				expect(secondRootAGrep.totalMatches).toBe(1);
 				expect(secondRootAGrep.matches.map(match => match.path)).toEqual(["alpha-search.ts"]);
-				expect(rootBGrep.totalMatches).toBe(1);
-				expect(rootBGrep.matches.map(match => match.path)).toEqual(["beta-search.ts"]);
+				expect(firstRootBGlob.matches.map(match => match.path)).toEqual(["beta-search.ts"]);
+				expect(firstRootBGrep.totalMatches).toBe(1);
+				expect(firstRootBGrep.matches.map(match => match.path)).toEqual(["beta-search.ts"]);
+				expect(firstRootAGlob.matches.map(match => match.path)).toEqual(["alpha-search.ts"]);
+				expect(secondRootAGlob.matches.map(match => match.path)).toEqual(["alpha-search.ts"]);
+				expect(secondRootBGlob.matches.map(match => match.path)).toEqual(["beta-search.ts"]);
 
 				const firstRootAFuzzy = await fuzzyFind({ query: "alphasearch", path: rootA, maxResults: 20 }, searchDb);
 				const secondRootAFuzzy = await fuzzyFind({ query: "alphasearch", path: rootA, maxResults: 20 }, searchDb);

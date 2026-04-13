@@ -193,7 +193,11 @@ impl SearchDb {
 		let lease = entry.start_lease();
 
 		if let Err(error) = self.prepare_picker_for_access(&entry, ct) {
+			let removed_entry = self.take_uninitialized_picker(&key, &entry);
 			drop(lease);
+			if let Some(entry) = removed_entry {
+				shutdown_picker(&entry.shared_picker);
+			}
 			return Err(error);
 		}
 
@@ -220,6 +224,19 @@ impl SearchDb {
 		let entry = Arc::new(PickerEntry::new(key.to_string(), shared_picker, Instant::now()));
 		pickers.insert(key.to_string(), Arc::clone(&entry));
 		Ok(entry)
+	}
+
+	fn take_uninitialized_picker(
+		&self,
+		key: &str,
+		entry: &Arc<PickerEntry>,
+	) -> Option<Arc<PickerEntry>> {
+		let mut pickers = self.inner.pickers.lock();
+		let current = pickers.get(key)?;
+		if !Arc::ptr_eq(current, entry) || current.metadata.lock().initial_scan_complete {
+			return None;
+		}
+		pickers.remove(key)
 	}
 
 	fn prepare_picker_for_access(
