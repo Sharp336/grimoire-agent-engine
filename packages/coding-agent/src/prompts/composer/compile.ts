@@ -145,7 +145,7 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 				systemPrompt: metaPromptContent,
 				messages: [{ role: "user", content: userMessage, timestamp: Date.now() }],
 			},
-			{ apiKey },
+			{ apiKey, maxTokens: tokenBudget },
 		);
 	} catch (err) {
 		logger.error("composer: compilation failed", {
