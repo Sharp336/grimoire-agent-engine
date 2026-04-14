@@ -924,3 +924,19 @@ export class GenerateImageTool implements AgentTool<typeof geminiImageSchema, Ge
 		);
 	}
 }
+
+export async function getGeminiImageTools(): Promise<
+	Array<CustomTool<typeof geminiImageSchema, GeminiImageToolDetails>>
+> {
+	const apiKey = await findImageApiKey();
+	if (!apiKey) return [];
+	return [geminiImageTool];
+}
+
+export async function getGeminiImageToolsWithRegistry(
+	modelRegistry: ModelRegistry,
+): Promise<Array<CustomTool<typeof geminiImageSchema, GeminiImageToolDetails>>> {
+	const apiKey = await findImageApiKey(modelRegistry);
+	if (!apiKey) return [];
+	return [geminiImageTool];
+}

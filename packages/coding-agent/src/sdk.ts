@@ -12,6 +12,7 @@ import {
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import type { Component } from "@oh-my-pi/pi-tui";
+import { getGeminiImageTools } from "./tools/gemini-image";
 import {
 	$env,
 	$flag,
