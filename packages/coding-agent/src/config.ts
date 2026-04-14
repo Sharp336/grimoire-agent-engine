@@ -37,7 +37,7 @@ export function getPackageDir(): string {
 		return expandTilde(envDir);
 	}
 
-	let dir = import.meta.dir;
+	let dir = import.meta.dirname!;
 	while (dir !== path.dirname(dir)) {
 		if (fs.existsSync(path.join(dir, "package.json"))) {
 			return dir;
@@ -65,7 +65,9 @@ function migrateJsonToYml(jsonPath: string, ymlPath: string) {
 		const content = fs.readFileSync(jsonPath, "utf-8");
 		const parsed = JSON.parse(content);
 		if (!parsed) {
-			logger.warn("migrateJsonToYml: invalid json structure", { path: jsonPath });
+			logger.warn("migrateJsonToYml: invalid json structure", {
+				path: jsonPath,
+			});
 			return;
 		}
 		fs.writeFileSync(ymlPath, YAML.stringify(parsed, null, 2));
@@ -182,7 +184,10 @@ export class ConfigFile<T> implements IConfigFile<T> {
 			try {
 				validate(value);
 			} catch (error) {
-				throw new ConfigError(this.id, undefined, { err: error, stage: `Validate(${name})` });
+				throw new ConfigError(this.id, undefined, {
+					err: error,
+					stage: `Validate(${name})`,
+				});
 			}
 		};
 		return this;
@@ -215,7 +220,10 @@ export class ConfigFile<T> implements IConfigFile<T> {
 			const validate = ajv.compile(this.schema) as ValidateFunction<T>;
 			if (!validate(parsed)) {
 				const error = new ConfigError(this.id, validate.errors);
-				logger.warn("Failed to parse config file", { path: this.path(), error });
+				logger.warn("Failed to parse config file", {
+					path: this.path(),
+					error,
+				});
 				return this.#storeCache({ error, status: "error" });
 			}
 			return this.#storeCache({ value: parsed, status: "ok" });
@@ -225,7 +233,10 @@ export class ConfigFile<T> implements IConfigFile<T> {
 			}
 			logger.warn("Failed to parse config file", { path: this.path(), error });
 			return this.#storeCache({
-				error: new ConfigError(this.id, undefined, { err: error, stage: "Unexpected" }),
+				error: new ConfigError(this.id, undefined, {
+					err: error,
+					stage: "Unexpected",
+				}),
 				status: "error",
 			});
 		}

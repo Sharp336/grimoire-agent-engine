@@ -18,8 +18,8 @@ const getEmbeddedClientArchive = (() => {
 	return () => Buffer.from(txt, "base64");
 })();
 
-const CLIENT_DIR = path.join(import.meta.dir, "client");
-const STATIC_DIR = path.join(import.meta.dir, "..", "dist", "client");
+const CLIENT_DIR = path.join(import.meta.dirname!, "client");
+const STATIC_DIR = path.join(import.meta.dirname!, "..", "dist", "client");
 const IS_BUN_COMPILED =
 	Bun.env.PI_COMPILED ||
 	import.meta.url.includes("$bunfs") ||
@@ -108,7 +108,7 @@ const ensureClientBuild = async () => {
 	const indexPath = path.join(STATIC_DIR, "index.html");
 	const cssPath = path.join(STATIC_DIR, "styles.css");
 	const clientSourceMtime = await getLatestMtime(CLIENT_DIR);
-	const tailwindConfigPath = path.join(import.meta.dir, "..", "tailwind.config.js");
+	const tailwindConfigPath = path.join(import.meta.dirname!, "..", "tailwind.config.js");
 	let tailwindConfigMtime = 0;
 	try {
 		const tailwindConfigStats = await fs.stat(tailwindConfigPath);
@@ -135,7 +135,7 @@ const ensureClientBuild = async () => {
 	await fs.rm(STATIC_DIR, { recursive: true, force: true });
 
 	console.log("Building stats client...");
-	const packageRoot = path.join(import.meta.dir, "..");
+	const packageRoot = path.join(import.meta.dirname!, "..");
 	const buildResult = await $`bun run build.ts`.cwd(packageRoot).quiet().nothrow();
 	if (buildResult.exitCode !== 0) {
 		const output = buildResult.text().trim();
