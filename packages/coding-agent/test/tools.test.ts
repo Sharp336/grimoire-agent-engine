@@ -16,7 +16,7 @@ import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-m
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import * as markitUtils from "@oh-my-pi/pi-coding-agent/utils/markit";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
 import { unzipSync } from "fflate";
 
 // Helper to extract text from content blocks
@@ -798,6 +798,31 @@ function b() {
 
 			expect(getTextOutput(result)).toContain("test output");
 			expect(result.details).toBeUndefined();
+		});
+
+		it("should allow shell execution without UI when policy mode is omitted", async () => {
+			const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
+			const originalPolicyPath = process.env.OH_OMP_POLICY_PATH;
+			const agentDir = path.join(testDir, "agent");
+			const policyPath = path.join(testDir, "policy.yml");
+			const fallbackAgentDir = originalAgentDir ?? path.join(getConfigRootDir(), "agent");
+
+			fs.mkdirSync(agentDir, { recursive: true });
+			fs.writeFileSync(policyPath, ["version: 1", "capabilities:", "  shell-exec: deny", ""].join("\n"));
+			setAgentDir(agentDir);
+			process.env.OH_OMP_POLICY_PATH = policyPath;
+
+			try {
+				const result = await bashTool.execute("test-call-8-policy-off", { command: "echo passthrough" });
+				expect(getTextOutput(result)).toContain("passthrough");
+			} finally {
+				setAgentDir(fallbackAgentDir);
+				if (originalPolicyPath === undefined) {
+					delete process.env.OH_OMP_POLICY_PATH;
+				} else {
+					process.env.OH_OMP_POLICY_PATH = originalPolicyPath;
+				}
+			}
 		});
 
 		it("should expose built-in interceptor defaults truthfully", () => {

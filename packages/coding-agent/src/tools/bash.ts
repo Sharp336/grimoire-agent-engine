@@ -354,7 +354,7 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 					cwd: commandCwd,
 					capability: "shell-exec",
 				});
-		if (capabilityDecision.decision !== "allow" && !ctx?.ui) {
+		if (capabilityDecision.enforcementMode === "enforce" && capabilityDecision.decision !== "allow" && !ctx?.ui) {
 			throw new ToolError(formatCapabilityBlockMessage("Bash command execution", capabilityDecision));
 		}
 

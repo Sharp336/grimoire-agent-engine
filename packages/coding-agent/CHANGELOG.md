@@ -6,6 +6,12 @@
 
 - Fork base is currently synced through upstream `v13.19.0`.
 
+## [0.7.1] - 2026-04-14
+
+### Fixed
+
+- Bash execution in no-UI contexts (including cron-dispatch/agent-run flows) now respects managed-policy rollout mode and only blocks when policy `mode: enforce` is explicitly enabled.
+
 ## [0.7.0] - 2026-04-14
 
 ### Added
