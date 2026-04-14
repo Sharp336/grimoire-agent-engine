@@ -59,6 +59,7 @@ if (g.Bun) {
   g.Bun.connect = connect as unknown as Record<string, unknown>;
   g.Bun.color = color;
   g.Bun.version ??= "1.3.7";
+  g.Bun.nanoseconds = () => performance.now() * 1e6;
 
   const rawEnv = g.Bun.env as Record<string, string>;
   const envProxy = new Proxy(rawEnv, {

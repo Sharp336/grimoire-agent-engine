@@ -283,7 +283,7 @@ declare var Bun: {
   semver: { satisfies: Promise<unknown>; order: Promise<unknown> };
 
   sleep(ms: number): Promise<void>;
-  nanoseconds(): bigint;
+  nanoseconds(): number;
   which(name: string, options?: BunWhichOptions): string | null;
   file(path: string): BunFile;
   write(

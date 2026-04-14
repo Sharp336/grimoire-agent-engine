@@ -1,4 +1,5 @@
 import "@lu-zero/bun-compat";
+import "./bootstrap.ts";
 import { $, file, write, spawn, Glob, CryptoHasher } from "bun";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -166,11 +167,14 @@ await test("wyhash native", async () => {
 });
 
 console.log("\n=== E2E: Bun.nanoseconds ===");
-await test("nanoseconds returns bigint", async () => {
-  const { nanoseconds } = await import("@lu-zero/bun-compat/bun");
-  const ns = nanoseconds();
-  if (typeof ns !== "bigint")
-    throw new Error(`expected bigint, got ${typeof ns}`);
+await test("Bun.nanoseconds() works for arithmetic", async () => {
+  const ns1 = Bun.nanoseconds();
+  const ns2 = Bun.nanoseconds();
+  const diff = (ns2 as number) - (ns1 as number);
+  if (diff < 0) throw new Error(`negative diff: ${diff}`);
+  const ms = diff / 1e6;
+  if (typeof ms !== "number")
+    throw new Error(`expected number, got ${typeof ms}`);
 });
 
 await fs.rm(tmpDir, { recursive: true, force: true });
