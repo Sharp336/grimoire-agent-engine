@@ -61,6 +61,67 @@ describe("security hardening", () => {
 		expect(result.policy?.verification.publicKeyPath).toBe(publicKeyPath);
 	});
 
+	it("defaults managed policy rollout to off and allows existing behavior to pass through", async () => {
+		const agentDir = path.join(tempDir, "agent");
+		const workspaceDir = path.join(tempDir, "workspace");
+		const policyPath = path.join(tempDir, "policy.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.mkdirSync(workspaceDir, { recursive: true });
+		fs.writeFileSync(policyPath, ["version: 1", "capabilities:", "  shell-exec: deny", ""].join("\n"));
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		setAgentDir(agentDir);
+		process.env.OH_OMP_POLICY_PATH = policyPath;
+
+		const policyResult = await loadManagedPolicyFile(policyPath, "override");
+		const granted = await requestWorkspaceCapabilityAccess({
+			cwd: workspaceDir,
+			capability: "shell-exec",
+			action: "Bash command execution",
+		});
+		const resolved = await resolveWorkspaceCapabilityDecision({
+			cwd: workspaceDir,
+			capability: "shell-exec",
+		});
+
+		expect(policyResult.policy?.document.mode).toBe("off");
+		expect(granted.decision).toBe("allow");
+		expect(granted.enforcementMode).toBe("off");
+		expect(resolved.decision).toBe("deny");
+		expect(resolved.enforcementMode).toBe("off");
+		expect(fs.existsSync(path.join(getAgentDir(), "workspace-trust.yml"))).toBe(false);
+	});
+
+	it("allows report-only policies to observe without blocking", async () => {
+		const agentDir = path.join(tempDir, "agent");
+		const workspaceDir = path.join(tempDir, "workspace");
+		const policyPath = path.join(tempDir, "policy.yml");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.mkdirSync(workspaceDir, { recursive: true });
+		fs.writeFileSync(
+			policyPath,
+			["version: 1", "mode: report-only", "capabilities:", "  shell-exec: deny", ""].join("\n"),
+		);
+		process.env.PI_CODING_AGENT_DIR = agentDir;
+		setAgentDir(agentDir);
+		process.env.OH_OMP_POLICY_PATH = policyPath;
+
+		const granted = await requestWorkspaceCapabilityAccess({
+			cwd: workspaceDir,
+			capability: "shell-exec",
+			action: "Bash command execution",
+		});
+		const resolved = await resolveWorkspaceCapabilityDecision({
+			cwd: workspaceDir,
+			capability: "shell-exec",
+		});
+
+		expect(granted.decision).toBe("allow");
+		expect(granted.enforcementMode).toBe("report-only");
+		expect(resolved.decision).toBe("deny");
+		expect(resolved.enforcementMode).toBe("report-only");
+		expect(fs.existsSync(path.join(getAgentDir(), "workspace-trust.yml"))).toBe(false);
+	});
+
 	it("rejects policies that request signed loading without a valid detached signature", async () => {
 		const policyPath = path.join(tempDir, "policy.yml");
 		fs.writeFileSync(policyPath, ["version: 1", "integrity:", "  requireSignedManagedPolicy: true", ""].join("\n"));
@@ -81,7 +142,7 @@ describe("security hardening", () => {
 		};
 		fs.mkdirSync(agentDir, { recursive: true });
 		fs.mkdirSync(workspaceDir, { recursive: true });
-		fs.writeFileSync(policyPath, "version: 1\n");
+		fs.writeFileSync(policyPath, ["version: 1", "mode: enforce", ""].join("\n"));
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		setAgentDir(agentDir);
 		process.env.OH_OMP_POLICY_PATH = policyPath;
@@ -115,7 +176,7 @@ describe("security hardening", () => {
 		};
 		fs.mkdirSync(agentDir, { recursive: true });
 		fs.mkdirSync(workspaceDir, { recursive: true });
-		fs.writeFileSync(policyPath, ["version: 1", "capabilities:", "  shell-exec: deny", ""].join("\n"));
+		fs.writeFileSync(policyPath, ["version: 1", "mode: enforce", "capabilities:", "  shell-exec: deny", ""].join("\n"));
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		setAgentDir(agentDir);
 		process.env.OH_OMP_POLICY_PATH = policyPath;
@@ -153,7 +214,7 @@ describe("security hardening", () => {
 		};
 		fs.mkdirSync(agentDir, { recursive: true });
 		fs.mkdirSync(workspaceDir, { recursive: true });
-		fs.writeFileSync(policyPath, ["version: 1", "capabilities:", "  shell-exec: confirm", ""].join("\n"));
+		fs.writeFileSync(policyPath, ["version: 1", "mode: enforce", "capabilities:", "  shell-exec: confirm", ""].join("\n"));
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		setAgentDir(agentDir);
 		process.env.OH_OMP_POLICY_PATH = policyPath;

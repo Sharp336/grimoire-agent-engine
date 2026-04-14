@@ -9,10 +9,11 @@ import {
 	type ManagedPolicyDocument,
 	type ManagedPolicyFileSource,
 	type ManagedPolicyLoadResult,
+	type PolicyDecision,
+	type PolicyEnforcementMode,
+	type PolicyIssue,
 	POLICY_DECISIONS,
 	POLICY_ENFORCEMENT_MODES,
-	type PolicyDecision,
-	type PolicyIssue,
 	SECURITY_CAPABILITIES,
 	type SecurityCapability,
 	WORKSPACE_TRUST_MATCH_MODES,
@@ -39,6 +40,10 @@ export async function loadManagedPolicy(): Promise<ManagedPolicyLoadResult> {
 		policy: null,
 		issues: [],
 	};
+}
+
+export function resolvePolicyEnforcementMode(policy?: ManagedPolicy | null): PolicyEnforcementMode {
+	return policy?.document.mode ?? "off";
 }
 
 export async function loadManagedPolicyFile(
@@ -124,6 +129,7 @@ export function resolveCapabilityDecision(options: {
 	readonly workspaceTrust?: WorkspaceTrustRecord | null;
 }): EffectiveCapabilityDecision {
 	const defaultDecision = BUILTIN_CAPABILITY_DEFAULTS[options.capability];
+	const enforcementMode = resolvePolicyEnforcementMode(options.policy);
 	const managedDecision = options.policy?.document.capabilities?.[options.capability] ?? null;
 	const localTrustEnabled = options.policy?.document.workspaceTrust?.allowLocalTrustGrants !== false;
 	const workspaceTrustDecision = localTrustEnabled
@@ -135,6 +141,7 @@ export function resolveCapabilityDecision(options: {
 			capability: options.capability,
 			decision: "deny",
 			source: "managed",
+			enforcementMode,
 			defaultDecision,
 			managedDecision,
 			workspaceTrustDecision,
@@ -151,6 +158,7 @@ export function resolveCapabilityDecision(options: {
 			capability: options.capability,
 			decision,
 			source: "workspace-trust",
+			enforcementMode,
 			defaultDecision,
 			managedDecision,
 			workspaceTrustDecision,
@@ -164,6 +172,7 @@ export function resolveCapabilityDecision(options: {
 			capability: options.capability,
 			decision: managedDecision,
 			source: "managed",
+			enforcementMode,
 			defaultDecision,
 			managedDecision,
 			workspaceTrustDecision: null,
@@ -176,6 +185,7 @@ export function resolveCapabilityDecision(options: {
 		capability: options.capability,
 		decision: defaultDecision,
 		source: "default",
+		enforcementMode,
 		defaultDecision,
 		managedDecision: null,
 		workspaceTrustDecision: null,
@@ -236,7 +246,7 @@ function validateManagedPolicyDocument(
 	return {
 		document: {
 			version: 1,
-			mode: mode ?? "enforce",
+			mode: mode ?? "off",
 			capabilities,
 			workspaceTrust,
 			integrity,

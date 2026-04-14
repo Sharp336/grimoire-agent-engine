@@ -82,6 +82,7 @@ export async function requestWorkspaceCapabilityAccess(
 		policy: context.policy,
 		workspaceTrust: context.workspaceTrust,
 	});
+	if (decision.enforcementMode !== "enforce") return asRuntimeAllowedDecision(decision);
 	if (decision.decision === "allow") return decision;
 
 	if (decision.decision === "confirm") {
@@ -118,6 +119,9 @@ export async function assertWorkspaceCapabilityAllowed(
 	request: WorkspaceCapabilityRequest,
 ): Promise<EffectiveCapabilityDecision> {
 	const decision = await resolveWorkspaceCapabilityDecision(request);
+	if (decision.enforcementMode !== "enforce") {
+		return asRuntimeAllowedDecision(decision);
+	}
 	if (decision.decision !== "allow") {
 		throw new Error(formatCapabilityBlockMessage(request.action, decision));
 	}

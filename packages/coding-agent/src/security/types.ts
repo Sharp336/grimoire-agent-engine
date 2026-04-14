@@ -15,7 +15,7 @@ export const POLICY_DECISIONS = ["deny", "confirm", "allow"] as const;
 
 export type PolicyDecision = (typeof POLICY_DECISIONS)[number];
 
-export const POLICY_ENFORCEMENT_MODES = ["enforce", "report-only"] as const;
+export const POLICY_ENFORCEMENT_MODES = ["off", "enforce", "report-only"] as const;
 
 export type PolicyEnforcementMode = (typeof POLICY_ENFORCEMENT_MODES)[number];
 
@@ -118,6 +118,7 @@ export interface EffectiveCapabilityDecision {
 	readonly capability: SecurityCapability;
 	readonly decision: PolicyDecision;
 	readonly source: PolicySource;
+	readonly enforcementMode: PolicyEnforcementMode;
 	readonly defaultDecision: PolicyDecision;
 	readonly managedDecision: PolicyDecision | null;
 	readonly workspaceTrustDecision: PolicyDecision | null;

@@ -12,7 +12,7 @@ import * as path from "node:path";
 
 import { isEnoent, logger } from "@oh-my-pi/pi-utils";
 
-import { loadManagedPolicy } from "../../../security/policy";
+import { loadManagedPolicy, resolvePolicyEnforcementMode } from "../../../security/policy";
 import * as git from "../../../utils/git";
 import { cachePlugin } from "./cache";
 import { classifySource, fetchMarketplace, parseMarketplaceCatalog, promoteCloneToCache } from "./fetcher";
@@ -722,7 +722,9 @@ export class MarketplaceManager {
 		marketplaceRoot: string;
 	}): Promise<PluginInstallIntegrityAssessment> {
 		const managedPolicy = (await loadManagedPolicy()).policy;
-		const requirePluginSha = managedPolicy?.document.integrity?.requirePluginSha === true;
+		const requirePluginSha =
+			resolvePolicyEnforcementMode(managedPolicy) === "enforce" &&
+			managedPolicy?.document.integrity?.requirePluginSha === true;
 		const { pluginEntry, marketplaceEntry, marketplaceRoot } = options;
 
 		if (typeof pluginEntry.source === "string") {

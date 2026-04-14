@@ -8,8 +8,9 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { type AssistantMessage, completeSimple, type Model } from "@oh-my-pi/pi-ai";
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
-import { loadManagedPolicy } from "../../security/policy.js";
-import type { ManagedPolicyIntegrity } from "../../security/types.js";
+import { loadManagedPolicy, resolvePolicyEnforcementMode } from "../../security/policy.js";
+
+import type { ManagedPolicyIntegrity, PolicyEnforcementMode } from "../../security/types.js";
 import { buildInventory, type InventoryInput } from "./inventory.js";
 import { collectGuidanceLibrary } from "./library.js";
 
@@ -83,7 +84,10 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 	const cacheKey = Bun.hash(cacheInput).toString(36);
 	const cachePath = path.join(CACHE_DIR, `${cacheKey}.txt`);
 	const managedPolicyResult = await loadManagedPolicy();
-	const cacheDisabledForIntegrity = shouldDisableCompiledPromptCache(managedPolicyResult.policy?.document.integrity);
+	const cacheDisabledForIntegrity = shouldDisableCompiledPromptCache(
+		managedPolicyResult.policy?.document.integrity,
+		resolvePolicyEnforcementMode(managedPolicyResult.policy),
+	);
 	const cacheEnabled = !noCache && !cacheDisabledForIntegrity;
 
 	logger.debug("composer: checking cache", {
@@ -209,8 +213,11 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 	};
 }
 
-function shouldDisableCompiledPromptCache(integrity: ManagedPolicyIntegrity | undefined): boolean {
-	if (!integrity) return false;
+function shouldDisableCompiledPromptCache(
+	integrity: ManagedPolicyIntegrity | undefined,
+	enforcementMode: PolicyEnforcementMode,
+): boolean {
+	if (enforcementMode !== "enforce" || !integrity) return false;
 	return integrity.requireSignedManagedPolicy === true || integrity.disableUnsignedUserCodeLoad === true;
 }
 
