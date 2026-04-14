@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,6 +13,7 @@ import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import type { SlashCommand } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
+import { resolveUserPluginsDir } from "@oh-my-pi/pi-utils";
 
 describe("parseClaudePluginsRegistry", () => {
 	test("parses valid registry", () => {
@@ -468,6 +469,112 @@ describe("listClaudePluginRoots", () => {
 		const found = result.all.find(command => command.name === "manifest-commands-outside:ship");
 
 		expect(found).toBeUndefined();
+
+	describe("XDG data directory support", () => {
+		let homedirSpy: ReturnType<typeof spyOn> | undefined;
+		let savedXdgDataHome: string | undefined;
+
+		beforeEach(() => {
+			homedirSpy = undefined;
+			savedXdgDataHome = process.env.XDG_DATA_HOME;
+		});
+
+		afterEach(() => {
+			homedirSpy?.mockRestore();
+			if (savedXdgDataHome === undefined) {
+				delete process.env.XDG_DATA_HOME;
+			} else {
+				process.env.XDG_DATA_HOME = savedXdgDataHome;
+			}
+			clearClaudePluginRootsCache();
+			clearFsCache();
+		});
+
+		const makeEntry = (installPath: string) => ({
+			scope: "user" as const,
+			installPath,
+			version: "1.0.0",
+			installedAt: "2025-01-01T00:00:00Z",
+			lastUpdated: "2025-01-01T00:00:00Z",
+		});
+
+		test("uses XDG plugins dir when $XDG_DATA_HOME/omp directory exists", async () => {
+			// Spy so the home-match guard in resolveUserPluginsDir fires against tempDir.
+			homedirSpy = spyOn(os, "homedir").mockReturnValue(tempDir);
+			const xdgBase = path.join(tempDir, "xdg");
+			process.env.XDG_DATA_HOME = xdgBase;
+
+			// Create $XDG_DATA_HOME/omp directory — this is the activation condition.
+			const xdgRoot = path.join(xdgBase, "omp");
+			await fs.mkdir(xdgRoot, { recursive: true });
+
+			const xdgPluginsDir = path.join(xdgRoot, "plugins");
+			await fs.mkdir(xdgPluginsDir, { recursive: true });
+			await fs.writeFile(
+				path.join(xdgPluginsDir, "installed_plugins.json"),
+				JSON.stringify({ version: 2, plugins: { "xdg-plugin@mkt": [makeEntry("/xdg/path")] } }),
+			);
+
+			// resolveUserPluginsDir must return the XDG path, not the legacy path.
+			expect(resolveUserPluginsDir(tempDir)).toBe(xdgPluginsDir);
+
+			const result = await listClaudePluginRoots(tempDir);
+			expect(result.roots).toHaveLength(1);
+			expect(result.roots[0]?.id).toBe("xdg-plugin@mkt");
+			expect(result.roots[0]?.path).toBe("/xdg/path");
+		});
+
+		test("falls back to legacy path when $XDG_DATA_HOME/omp directory does not exist", async () => {
+			homedirSpy = spyOn(os, "homedir").mockReturnValue(tempDir);
+			process.env.XDG_DATA_HOME = path.join(tempDir, "xdg-absent");
+			// Do NOT create $XDG_DATA_HOME/omp — activation condition not met.
+
+			const legacyPluginsDir = path.join(tempDir, ".omp", "plugins");
+			await fs.mkdir(legacyPluginsDir, { recursive: true });
+			await fs.writeFile(
+				path.join(legacyPluginsDir, "installed_plugins.json"),
+				JSON.stringify({ version: 2, plugins: { "legacy-plugin@mkt": [makeEntry("/legacy/path")] } }),
+			);
+
+			expect(resolveUserPluginsDir(tempDir)).toBe(legacyPluginsDir);
+
+			const result = await listClaudePluginRoots(tempDir);
+			expect(result.roots).toHaveLength(1);
+			expect(result.roots[0]?.id).toBe("legacy-plugin@mkt");
+		});
+
+		test("XDG dir exists but no registry: legacy registry is not read", async () => {
+			// Critical: write/read must use the same path. If XDG dir exists, the write path
+			// (DirResolver) writes to XDG. Discovery must also read from XDG, not fall back
+			// to legacy — even when the XDG registry file is absent.
+			homedirSpy = spyOn(os, "homedir").mockReturnValue(tempDir);
+			const xdgBase = path.join(tempDir, "xdg");
+			process.env.XDG_DATA_HOME = xdgBase;
+			await fs.mkdir(path.join(xdgBase, "omp"), { recursive: true });
+			// No XDG registry file — but write a legacy registry to confirm it is not read.
+			const legacyPluginsDir = path.join(tempDir, ".omp", "plugins");
+			await fs.mkdir(legacyPluginsDir, { recursive: true });
+			await fs.writeFile(
+				path.join(legacyPluginsDir, "installed_plugins.json"),
+				JSON.stringify({ version: 2, plugins: { "stale-plugin@mkt": [makeEntry("/stale/path")] } }),
+			);
+
+			const result = await listClaudePluginRoots(tempDir);
+			// Must return empty: XDG is active (dir exists), XDG registry is absent.
+			// A file-existence-based fallback would incorrectly surface the legacy entry.
+			expect(result.roots).toHaveLength(0);
+		});
+
+		test("XDG not applied when home differs from os.homedir()", async () => {
+			// No spy — os.homedir() returns the real home, but tempDir != real home.
+			// resolveUserPluginsDir must skip XDG even if XDG_DATA_HOME is set.
+			const xdgBase = path.join(tempDir, "xdg");
+			process.env.XDG_DATA_HOME = xdgBase;
+			await fs.mkdir(path.join(xdgBase, "omp"), { recursive: true });
+
+			const legacyPluginsDir = path.join(tempDir, ".omp", "plugins");
+			expect(resolveUserPluginsDir(tempDir)).toBe(legacyPluginsDir);
+		});
 	});
 });
 

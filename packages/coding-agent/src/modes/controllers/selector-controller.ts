@@ -1,3 +1,4 @@
+import * as os from "node:os";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/utils/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/utils/oauth/types";
@@ -9,7 +10,7 @@ import { formatModelSelectorValue } from "../../config/model-resolver";
 import { settings } from "../../config/settings";
 import { DebugSelectorComponent } from "../../debug";
 import { disableProvider, enableProvider } from "../../discovery";
-import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+import { clearClaudePluginDiscoveryCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
 	getInstalledPluginsRegistryPath,
 	getMarketplacesCacheDir,
@@ -448,7 +449,9 @@ export class SelectorController {
 			projectInstalledRegistryPath: (await resolveActiveProjectRegistryPath(getProjectDir())) ?? undefined,
 			marketplacesCacheDir: getMarketplacesCacheDir(),
 			pluginsCacheDir: getPluginsCacheDir(),
-			clearPluginRootsCache: clearPluginRootsAndCaches,
+			clearPluginRootsCache: (extraPaths?: readonly string[]) => {
+				clearClaudePluginDiscoveryCaches(os.homedir(), extraPaths);
+			},
 		});
 
 		const [marketplaces, installed] = await Promise.all([mgr.listMarketplaces(), mgr.listInstalledPlugins()]);

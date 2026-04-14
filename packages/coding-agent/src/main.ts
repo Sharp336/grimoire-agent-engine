@@ -24,7 +24,7 @@ import { resolveCliModel, resolveModelRoleValue, resolveModelScope, type ScopedM
 import { getDefault, type SettingPath, Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
-	clearPluginRootsAndCaches,
+	clearClaudePluginDiscoveryCaches,
 	injectPluginDirRoots,
 	preloadPluginRoots,
 	resolveActiveProjectRegistryPath,
@@ -761,7 +761,9 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 					projectInstalledRegistryPath: (await resolveActiveProjectRegistryPath(getProjectDir())) ?? undefined,
 					marketplacesCacheDir: getMarketplacesCacheDir(),
 					pluginsCacheDir: getPluginsCacheDir(),
-					clearPluginRootsCache: clearPluginRootsAndCaches,
+					clearPluginRootsCache: (extraPaths?: readonly string[]) => {
+						clearClaudePluginDiscoveryCaches(os.homedir(), extraPaths);
+					},
 				});
 				await mgr.refreshStaleMarketplaces();
 				const updates = await mgr.checkForUpdates();

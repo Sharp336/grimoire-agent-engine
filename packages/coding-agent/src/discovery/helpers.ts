@@ -4,11 +4,12 @@ import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { FileType, glob } from "@oh-my-pi/pi-natives";
 import {
+	APP_NAME,
 	CONFIG_DIR_NAME,
 	getConfigDirName,
-	getPluginsDir,
 	getProjectDir,
 	parseFrontmatter,
+	resolveUserPluginsDir,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
 import type { ExtensionModule } from "../capability/extension-module";
@@ -743,6 +744,28 @@ export async function resolveOrDefaultProjectRegistryPath(cwd: string): Promise<
 	return path.join(cwd, getConfigDirName(), "plugins", "installed_plugins.json");
 }
 
+/**
+ * Clears all discovery caches for the given home directory, including both
+ * the legacy config path and the XDG path (if XDG_DATA_HOME is set).
+ * Must clear both candidates unconditionally: after uninstall the XDG file
+ * is gone so resolveUserPluginsDir() routes to the legacy path, but the
+ * XDG fs-cache entry still needs eviction.
+ */
+export function clearClaudePluginDiscoveryCaches(home: string, extraPaths?: readonly string[]): void {
+	invalidateFsCache(path.join(home, ".claude", "plugins", "installed_plugins.json"));
+	// Legacy OMP path
+	invalidateFsCache(path.join(home, getConfigDirName(), "plugins", "installed_plugins.json"));
+	// XDG OMP path (if configured)
+	const xdgDataHome = process.env.XDG_DATA_HOME;
+	if (xdgDataHome) {
+		invalidateFsCache(path.join(xdgDataHome, APP_NAME, "plugins", "installed_plugins.json"));
+	}
+	for (const filePath of extraPaths ?? []) {
+		invalidateFsCache(filePath);
+	}
+	clearClaudePluginRootsCache();
+}
+
 const pluginRootsCache = new Map<string, { roots: ClaudePluginRoot[]; warnings: string[] }>();
 
 /**
@@ -811,9 +834,10 @@ export async function listClaudePluginRoots(
 
 	// ── OMP installed plugins registry ───────────────────────────────────────
 	// OMP registry is authoritative: its entries replace Claude's entries for the same plugin ID.
-	// getPluginsDir() resolves to the same path the marketplace writer uses
-	// (XDG-aware via the dir resolver), so reads and writes always agree.
-	const ompRegistryPath = path.join(getPluginsDir(), "installed_plugins.json");
+	// Path derived from `home` (not os.homedir()) so test isolation works when home is overridden.
+	// resolveUserPluginsDir applies XDG with the same directory-existence condition as DirResolver,
+	// ensuring read and write paths stay in sync.
+	const ompRegistryPath = path.join(resolveUserPluginsDir(home), "installed_plugins.json");
 	const ompContent = await readFile(ompRegistryPath);
 	if (ompContent) {
 		const ompRegistry = parseClaudePluginsRegistry(ompContent);

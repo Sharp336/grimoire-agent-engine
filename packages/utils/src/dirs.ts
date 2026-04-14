@@ -241,6 +241,30 @@ export function getPluginsDir(): string {
 	return dirs.rootSubdir("plugins", "data");
 }
 
+/**
+ * Resolves the plugins directory path for the given user home, respecting XDG.
+ * Uses the same activation condition as DirResolver: $XDG_DATA_HOME/omp directory must exist.
+ * When `home` differs from the current os.homedir(), XDG is not applied —
+ * this preserves test isolation when a caller passes a temp directory as home.
+ */
+export function resolveUserPluginsDir(home: string): string {
+	if (
+		(process.platform === "linux" || process.platform === "darwin") &&
+		path.resolve(home) === path.resolve(os.homedir())
+	) {
+		const xdgData = process.env.XDG_DATA_HOME;
+		if (xdgData) {
+			try {
+				const xdgRoot = path.join(xdgData, APP_NAME);
+				if (fs.existsSync(xdgRoot)) {
+					return path.join(xdgRoot, "plugins");
+				}
+			} catch {}
+		}
+	}
+	return path.join(home, getConfigDirName(), "plugins");
+}
+
 /** Where npm installs packages (~/.omp/plugins/node_modules). */
 export function getPluginsNodeModules(): string {
 	return path.join(getPluginsDir(), "node_modules");

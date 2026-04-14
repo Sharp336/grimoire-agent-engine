@@ -1,8 +1,10 @@
-import { getOAuthProviders } from "@oh-my-pi/pi-ai/utils/oauth";
+import * as os from "node:os";
+
+import { getOAuthProviders } from "@oh-my-pi/pi-ai";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import {
-	clearPluginRootsAndCaches,
+	clearClaudePluginDiscoveryCaches,
 	resolveActiveProjectRegistryPath,
 	resolveOrDefaultProjectRegistryPath,
 } from "../discovery/helpers.js";
@@ -697,7 +699,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 				),
 				marketplacesCacheDir: getMarketplacesCacheDir(),
 				pluginsCacheDir: getPluginsCacheDir(),
-				clearPluginRootsCache: clearPluginRootsAndCaches,
+				clearPluginRootsCache: (extraPaths?: readonly string[]) => {
+					clearClaudePluginDiscoveryCaches(os.homedir(), extraPaths);
+				},
 			});
 
 			try {
@@ -885,7 +889,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 					),
 					marketplacesCacheDir: getMarketplacesCacheDir(),
 					pluginsCacheDir: getPluginsCacheDir(),
-					clearPluginRootsCache: clearPluginRootsAndCaches,
+					clearPluginRootsCache: (extraPaths?: readonly string[]) => {
+						clearClaudePluginDiscoveryCaches(os.homedir(), extraPaths);
+					},
 				});
 
 				switch (sub) {
@@ -946,10 +952,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		name: "reload-plugins",
 		description: "Reload all plugins (skills, commands, hooks, tools, agents, MCP)",
 		handle: async (_command, runtime) => {
-			// Invalidate registry fs caches and the plugin roots cache so
-			// listClaudePluginRoots re-reads from disk on next access.
 			const projectPath = await resolveActiveProjectRegistryPath(runtime.ctx.sessionManager.getCwd());
-			clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+			clearClaudePluginDiscoveryCaches(os.homedir(), projectPath ? [projectPath] : undefined);
 			await runtime.ctx.refreshSlashCommandState();
 			runtime.ctx.showStatus("Plugins reloaded.");
 			runtime.ctx.editor.setText("");
