@@ -29,6 +29,7 @@ import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
 import { DebugTool } from "./debug";
 import { ExitPlanModeTool } from "./exit-plan-mode";
 import { FindTool } from "./find";
+import { findImageApiKey, GenerateImageTool } from "./gemini-image";
 import {
 	GhIssueViewTool,
 	GhPrCheckoutTool,
@@ -227,6 +228,12 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	gh_search_issues: GhSearchIssuesTool.createIf,
 	gh_search_prs: GhSearchPrsTool.createIf,
 	find: s => new FindTool(s),
+	generate_image: async s => {
+		if (!s.settings.get("generate_image.enabled")) return null;
+		const apiKey = await findImageApiKey(s.modelRegistry);
+		if (!apiKey) return null;
+		return new GenerateImageTool(s, apiKey);
+	},
 	grep: s => new GrepTool(s),
 	lsp: LspTool.createIf,
 	notebook: s => new NotebookTool(s),
@@ -403,6 +410,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "search_tool_bm25") return session.settings.get("mcp.discoveryMode");
 		if (name === "calc") return session.settings.get("calc.enabled");
 		if (name === "browser") return session.settings.get("browser.enabled");
+		if (name === "generate_image") return session.settings.get("generate_image.enabled");
 		if (name === "checkpoint" || name === "rewind") return session.settings.get("checkpoint.enabled");
 		if (name === "task") {
 			const maxDepth = session.settings.get("task.maxRecursionDepth") ?? 2;

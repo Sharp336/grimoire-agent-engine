@@ -1322,6 +1322,16 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"generate_image.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Generate Image",
+			description: "Enable the generate_image tool for AI image generation",
+		},
+	},
+
 	"browser.headless": {
 		type: "boolean",
 		default: true,

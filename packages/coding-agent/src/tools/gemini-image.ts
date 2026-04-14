@@ -1,5 +1,6 @@
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { getAntigravityHeaders, getEnvApiKey, StringEnum } from "@oh-my-pi/pi-ai";
 import {
 	$env,
@@ -13,8 +14,9 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import type { ModelRegistry } from "../config/model-registry";
-import type { CustomTool } from "../extensibility/custom-tools/types";
+import type { CustomTool, CustomToolContext } from "../extensibility/custom-tools/types";
 import geminiImageDescription from "../prompts/tools/gemini-image.md" with { type: "text" };
+import type { ToolSession } from "./index";
 import { resolveReadPath } from "./path-utils";
 
 const DEFAULT_MODEL = "gemini-3-pro-image-preview";
@@ -379,7 +381,7 @@ async function findAntigravityCredentials(modelRegistry: ModelRegistry): Promise
 	};
 }
 
-async function findImageApiKey(modelRegistry?: ModelRegistry): Promise<ImageApiKey | null> {
+export async function findImageApiKey(modelRegistry?: ModelRegistry): Promise<ImageApiKey | null> {
 	// If a specific provider is preferred, try it first
 	if (preferredImageProvider === "antigravity" && modelRegistry) {
 		const antigravity = await findAntigravityCredentials(modelRegistry);
@@ -880,18 +882,45 @@ export const geminiImageTool: CustomTool<typeof geminiImageSchema, GeminiImageTo
 	},
 };
 
-export async function getGeminiImageTools(): Promise<
-	Array<CustomTool<typeof geminiImageSchema, GeminiImageToolDetails>>
-> {
-	const apiKey = await findImageApiKey();
-	if (!apiKey) return [];
-	return [geminiImageTool];
-}
+export class GenerateImageTool implements AgentTool<typeof geminiImageSchema, GeminiImageToolDetails> {
+	readonly name = "generate_image";
+	readonly label = "GenerateImage";
+	readonly description: string;
+	readonly parameters = geminiImageSchema;
 
-export async function getGeminiImageToolsWithRegistry(
-	modelRegistry: ModelRegistry,
-): Promise<Array<CustomTool<typeof geminiImageSchema, GeminiImageToolDetails>>> {
-	const apiKey = await findImageApiKey(modelRegistry);
-	if (!apiKey) return [];
-	return [geminiImageTool];
+	constructor(
+		private readonly session: ToolSession,
+		readonly _apiKey: ImageApiKey,
+	) {
+		this.description = prompt.render(geminiImageDescription);
+	}
+
+	async execute(
+		_toolCallId: string,
+		params: Static<typeof geminiImageSchema>,
+		signal?: AbortSignal,
+		_onUpdate?: AgentToolUpdateCallback<GeminiImageToolDetails>,
+		_context?: AgentToolContext,
+	): Promise<AgentToolResult<GeminiImageToolDetails>> {
+		// Adapter: AgentTool signature -> CustomTool signature
+		// AgentTool: (toolCallId, params, signal?, onUpdate?, context?)
+		// CustomTool: (toolCallId, params, onUpdate, ctx, signal)
+		const customCtx: CustomToolContext = {
+			modelRegistry: this.session.modelRegistry!,
+			sessionManager: {
+				getCwd: () => this.session.cwd,
+			} as unknown as CustomToolContext["sessionManager"],
+			model: undefined,
+			isIdle: () => true,
+			hasQueuedMessages: () => false,
+			abort: () => {},
+		};
+		return geminiImageTool.execute(
+			_toolCallId,
+			params,
+			_onUpdate ?? (() => {}),
+			customCtx,
+			signal ?? new AbortController().signal,
+		);
+	}
 }
