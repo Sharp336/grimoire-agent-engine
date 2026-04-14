@@ -6,6 +6,22 @@
 
 - Fork base is currently synced through upstream `v13.19.0`.
 
+## [0.7.0] - 2026-04-14
+
+### Added
+
+- Added built-in settings profiles (`developer`, `current`, `enterprise`, `minimal`) plus `oh-omp config profile` for inspecting the active profile and available defaults.
+- Added hybrid recall fallback retrieval so recall can stay useful when the primary retriever cannot satisfy a request.
+
+### Changed
+
+- Added managed-policy capability, workspace-trust, and provenance controls across shell execution, MCP process spawn, and custom code-loading surfaces, but keep runtime enforcement dormant unless policy `mode: enforce` is explicitly set.
+
+### Fixed
+
+- Composer now appends required invariants when the compiled prompt omits them instead of failing the request.
+- Composer now forwards `tokenBudget` as `maxTokens` to the compilation LLM call.
+
 ## [0.6.2] - 2026-04-06
 
 ### Fixed

@@ -261,10 +261,7 @@ export async function startServer(port = 3847): Promise<{ port: number; stop: ()
 				return await handleStatic(path);
 			} catch (error) {
 				console.error("Server error:", error);
-				return Response.json(
-					{ error: error instanceof Error ? error.message : "Unknown error" },
-					{ status: 500 },
-				);
+				return Response.json({ error: error instanceof Error ? error.message : "Unknown error" }, { status: 500 });
 			}
 		},
 	});

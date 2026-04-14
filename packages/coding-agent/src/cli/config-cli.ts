@@ -7,6 +7,7 @@
 
 import { APP_NAME, getAgentDir } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { listConfigProfiles } from "../config/profiles";
 import {
 	getDefault,
 	getEnumValues,
@@ -17,7 +18,6 @@ import {
 	type SettingValue,
 	settings,
 } from "../config/settings";
-import { listConfigProfiles } from "../config/profiles";
 import { SETTINGS_SCHEMA } from "../config/settings-schema";
 import { theme } from "../modes/theme/theme";
 import { initXdg } from "./commands/init-xdg";
@@ -360,7 +360,6 @@ async function handleSet(key: string | undefined, value: string | undefined, fla
 	}
 }
 
-
 async function handleReset(key: string | undefined, flags: { json?: boolean }): Promise<void> {
 	if (!key) {
 		console.error(chalk.red(`Usage: ${APP_NAME} config reset <key>`));
@@ -386,7 +385,6 @@ async function handleReset(key: string | undefined, flags: { json?: boolean }): 
 		console.log(chalk.green(`${theme.status.success} Reset ${def.path} to ${formatValue(defaultValue)}`));
 	}
 }
-
 
 function handlePath(): void {
 	console.log(getAgentDir());

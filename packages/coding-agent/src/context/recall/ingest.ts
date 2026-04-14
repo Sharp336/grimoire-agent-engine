@@ -7,9 +7,9 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
-import type { ToolResultStore } from "./tool-result-store";
 import { embed } from "./embed";
 import type { RecallStore } from "./store";
+import type { ToolResultStore } from "./tool-result-store";
 import { buildRecallRowKey, type RecallRow } from "./types";
 
 /** Maximum concurrent embedding requests allowed in flight. */

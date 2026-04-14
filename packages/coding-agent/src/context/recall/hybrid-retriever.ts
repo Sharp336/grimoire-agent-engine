@@ -2,7 +2,13 @@ import * as path from "node:path";
 import { mmrRerank } from "./mmr";
 import type { RecallStore } from "./store";
 import type { ToolResultStore } from "./tool-result-store";
-import { buildRecallLookupKey, buildRecallRowKey, type MmrCandidate, type RecallRow, type RecallSearchResult } from "./types";
+import {
+	buildRecallLookupKey,
+	buildRecallRowKey,
+	type MmrCandidate,
+	type RecallRow,
+	type RecallSearchResult,
+} from "./types";
 
 const DEFAULT_RRF_K = 60;
 const DEFAULT_SEMANTIC_OVERFETCH_FACTOR = 3;
@@ -133,13 +139,15 @@ export class HybridRetriever {
 		const keywordRankByKey = new Map<string, number>();
 		const unresolvedKeywordLookups: ReturnType<typeof buildRecallLookupKey>[] = [];
 		for (const [index, result] of keywordResults.entries()) {
-			const keywordRowKey = result.rowKey || buildRecallRowKey({
-				session_id: result.sessionId,
-				turn: result.turnNumber,
-				role: result.role,
-				tool_name: result.toolName,
-				text: result.content,
-			});
+			const keywordRowKey =
+				result.rowKey ||
+				buildRecallRowKey({
+					session_id: result.sessionId,
+					turn: result.turnNumber,
+					role: result.role,
+					tool_name: result.toolName,
+					text: result.content,
+				});
 			keywordRankByKey.set(keywordRowKey, index + 1);
 			if (!semanticByKey.has(keywordRowKey)) {
 				unresolvedKeywordLookups.push(

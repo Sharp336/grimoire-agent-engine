@@ -30,6 +30,7 @@ import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset }
 import { type EditMode, normalizeEditMode } from "../patch";
 import { AgentStorage } from "../session/agent-storage";
 import { withFileLock } from "./file-lock";
+import { getConfigProfileSettings, resolveConfigProfileId } from "./profiles";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -39,7 +40,6 @@ import {
 	type SettingPath,
 	type SettingValue,
 } from "./settings-schema";
-import { getConfigProfileSettings, resolveConfigProfileId } from "./profiles";
 
 // Re-export types that callers need
 export type * from "./settings-schema";
@@ -227,9 +227,7 @@ export class Settings {
 		const prev = this.get(path);
 		const segments = parsePath(path);
 		const nextValue =
-			path === "profile"
-				? ((resolveConfigProfileId(value) ?? getDefault("profile")) as SettingValue<P>)
-				: value;
+			path === "profile" ? ((resolveConfigProfileId(value) ?? getDefault("profile")) as SettingValue<P>) : value;
 		setByPath(this.#global, segments, nextValue);
 		this.#modified.add(path);
 		this.#rebuildMerged();
@@ -251,9 +249,7 @@ export class Settings {
 	override<P extends SettingPath>(path: P, value: SettingValue<P>): void {
 		const segments = parsePath(path);
 		const nextValue =
-			path === "profile"
-				? ((resolveConfigProfileId(value) ?? getDefault("profile")) as SettingValue<P>)
-				: value;
+			path === "profile" ? ((resolveConfigProfileId(value) ?? getDefault("profile")) as SettingValue<P>) : value;
 		setByPath(this.#overrides, segments, nextValue);
 		this.#rebuildMerged();
 		if (path === "profile") {
@@ -554,7 +550,6 @@ export class Settings {
 				delete raw.profile;
 			}
 		}
-
 
 		return raw;
 	}

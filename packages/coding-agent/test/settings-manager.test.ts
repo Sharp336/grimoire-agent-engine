@@ -4,8 +4,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Effort } from "@oh-my-pi/pi-ai";
 import { _resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { getProjectAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
 import { getSymbolPresetOverride, setSymbolPreset } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getProjectAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
 
 describe("Settings", () => {
@@ -165,7 +165,6 @@ describe("Settings", () => {
 
 			expect(getSymbolPresetOverride()).toBe("ascii");
 		});
-
 
 		it("persists only the selected profile, not its expanded defaults", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });

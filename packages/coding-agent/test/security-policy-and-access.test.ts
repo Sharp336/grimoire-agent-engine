@@ -176,7 +176,10 @@ describe("security hardening", () => {
 		};
 		fs.mkdirSync(agentDir, { recursive: true });
 		fs.mkdirSync(workspaceDir, { recursive: true });
-		fs.writeFileSync(policyPath, ["version: 1", "mode: enforce", "capabilities:", "  shell-exec: deny", ""].join("\n"));
+		fs.writeFileSync(
+			policyPath,
+			["version: 1", "mode: enforce", "capabilities:", "  shell-exec: deny", ""].join("\n"),
+		);
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		setAgentDir(agentDir);
 		process.env.OH_OMP_POLICY_PATH = policyPath;
@@ -214,7 +217,10 @@ describe("security hardening", () => {
 		};
 		fs.mkdirSync(agentDir, { recursive: true });
 		fs.mkdirSync(workspaceDir, { recursive: true });
-		fs.writeFileSync(policyPath, ["version: 1", "mode: enforce", "capabilities:", "  shell-exec: confirm", ""].join("\n"));
+		fs.writeFileSync(
+			policyPath,
+			["version: 1", "mode: enforce", "capabilities:", "  shell-exec: confirm", ""].join("\n"),
+		);
 		process.env.PI_CODING_AGENT_DIR = agentDir;
 		setAgentDir(agentDir);
 		process.env.OH_OMP_POLICY_PATH = policyPath;

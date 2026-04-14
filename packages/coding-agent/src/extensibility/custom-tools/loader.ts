@@ -9,7 +9,7 @@ import * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
 import { logger } from "@oh-my-pi/pi-utils";
 import * as typebox from "@sinclair/typebox";
 import { toolCapability } from "../../capability/tool";
-import { type SourceMeta, type CustomTool, loadCapability } from "../../discovery";
+import { type CustomTool, loadCapability, type SourceMeta } from "../../discovery";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";

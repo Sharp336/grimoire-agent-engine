@@ -14,12 +14,12 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { parseMCPToolName } from "../../mcp/tool-bridge";
-import type { ToolResultStore } from "./tool-result-store";
 import { embed } from "./embed";
-import { extractAssistantText, extractToolResultText, extractUserText } from "./message-text";
 import { HybridRetriever } from "./hybrid-retriever";
+import { extractAssistantText, extractToolResultText, extractUserText } from "./message-text";
 import { cosineSimilarity } from "./mmr";
 import type { RecallStore } from "./store";
+import type { ToolResultStore } from "./tool-result-store";
 import { DEFAULT_RECALL_MMR_LAMBDA, type RecallSearchResult } from "./types";
 
 // ═══════════════════════════════════════════════════════════════════════════

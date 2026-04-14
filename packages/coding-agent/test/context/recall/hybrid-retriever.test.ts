@@ -42,7 +42,9 @@ function makeRow(overrides: Partial<RecallRow> & { text: string; turn: number })
 	};
 }
 
-async function createStores(rows: RecallRow[]): Promise<{ recallStore: RecallStore; toolResultStore: ToolResultStore }> {
+async function createStores(
+	rows: RecallRow[],
+): Promise<{ recallStore: RecallStore; toolResultStore: ToolResultStore }> {
 	testCounter++;
 	const dir = path.join(tmpDir, `case-${testCounter}`);
 	await fs.mkdir(dir, { recursive: true });

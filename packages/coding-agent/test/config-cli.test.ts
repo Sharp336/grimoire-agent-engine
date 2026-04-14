@@ -154,13 +154,10 @@ describe("config CLI schema coverage", () => {
 			profiles: Array<{ id: string; description: string }>;
 		};
 		expect(parsed.current).toBe("enterprise");
-		expect(parsed.profiles.map(profile => profile.id)).toEqual([
-			"developer",
-			"current",
-			"enterprise",
-			"minimal",
-		]);
-		expect(parsed.profiles.find(profile => profile.id === "enterprise")?.description).toContain("project-loaded commands and skills");
+		expect(parsed.profiles.map(profile => profile.id)).toEqual(["developer", "current", "enterprise", "minimal"]);
+		expect(parsed.profiles.find(profile => profile.id === "enterprise")?.description).toContain(
+			"project-loaded commands and skills",
+		);
 	});
 
 	it("shows the active profile in text output", async () => {
@@ -174,6 +171,4 @@ describe("config CLI schema coverage", () => {
 		expect(lines).toContain("  active: minimal");
 		expect(lines).toContain("Available profiles:");
 	});
-
-
 });

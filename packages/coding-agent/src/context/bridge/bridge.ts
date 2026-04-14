@@ -159,8 +159,6 @@ export class ToolResultBridge {
 		this.#accumulateSTM(profile);
 
 		return profile;
-
-		return profile;
 	}
 
 	// ═════════════════════════════════════════════════════════════════════
@@ -341,40 +339,6 @@ function extractArtifactId(result: unknown): string | null {
 	if (typeof result !== "string") return null;
 	const match = result.match(/artifact:\/\/([^\s/]+)/);
 	return match ? match[1] : null;
-}
-
-/** Extract text content from a tool result for FTS5 indexing. */
-function extractTextContent(result: unknown): string | null {
-	if (typeof result === "string") return result || null;
-
-	const blocks = extractTextBlocks(result);
-	if (blocks.length > 0) return blocks.join("\n");
-
-	if (result && typeof result === "object" && "content" in result) {
-		const withContent = result as { content?: unknown };
-		const nestedBlocks = extractTextBlocks(withContent.content);
-		if (nestedBlocks.length > 0) return nestedBlocks.join("\n");
-	}
-
-	return null;
-}
-
-function extractTextBlocks(value: unknown): string[] {
-	if (!Array.isArray(value)) return [];
-	const parts: string[] = [];
-	for (const block of value) {
-		if (typeof block === "string") {
-			parts.push(block);
-			continue;
-		}
-		if (block && typeof block === "object" && "type" in block) {
-			const textBlock = block as { type: string; text?: string };
-			if (textBlock.type === "text" && typeof textBlock.text === "string" && textBlock.text.length > 0) {
-				parts.push(textBlock.text);
-			}
-		}
-	}
-	return parts;
 }
 
 function buildLocatorStubPointer(locator: MemoryLocatorEntry): string {

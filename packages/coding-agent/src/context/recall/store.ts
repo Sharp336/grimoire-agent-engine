@@ -1,7 +1,13 @@
 import * as path from "node:path";
 import { type Connection, connect, type Table } from "@lancedb/lancedb";
 import { logger } from "@oh-my-pi/pi-utils";
-import { buildRecallRowKey, EMBEDDING_DIM, type RecallLookupKey, type RecallRow, type RecallSearchResult } from "./types";
+import {
+	buildRecallRowKey,
+	EMBEDDING_DIM,
+	type RecallLookupKey,
+	type RecallRow,
+	type RecallSearchResult,
+} from "./types";
 
 /** LanceDB accepts plain objects with string keys. */
 type LanceData = Record<string, unknown>[];

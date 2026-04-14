@@ -67,7 +67,6 @@ interface PluginInstallIntegrityAssessment {
 	readonly blockedReason?: string;
 }
 
-
 // ── Manager ──────────────────────────────────────────────────────────────────
 
 export class MarketplaceManager {
@@ -771,7 +770,7 @@ export class MarketplaceManager {
 					return {
 						sourceAudit,
 						installAllowed: false,
-						blockedReason: `plugin source \"${pluginEntry.source.source}\" must include an explicit sha`,
+						blockedReason: `plugin source "${pluginEntry.source.source}" must include an explicit sha`,
 					};
 				}
 				return {
@@ -814,7 +813,6 @@ export class MarketplaceManager {
 			}
 		}
 	}
-
 
 	async #findInBothRegistries(pluginId: string): Promise<{
 		userEntries: InstalledPluginEntry[] | undefined;

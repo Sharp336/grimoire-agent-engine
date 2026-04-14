@@ -104,7 +104,6 @@ describe("parseArgs", () => {
 			expect(result.model).toBe("gpt-4o");
 		});
 
-
 		test("parses --system-prompt", () => {
 			const result = parseArgs(["--system-prompt", "You are a helpful assistant"]);
 			expect(result.systemPrompt).toBe("You are a helpful assistant");
