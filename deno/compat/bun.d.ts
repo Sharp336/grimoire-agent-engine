@@ -353,5 +353,13 @@ declare var Bun: {
   WhichOptions: BunWhichOptions;
   CryptoHasher: BunCryptoHasherConstructor;
 
+  stripANSI(text: string): string;
+  inspect(
+    value: unknown,
+    options?: { depth?: number; colors?: boolean },
+  ): string;
+  gc(major?: boolean): void;
+  generateHeapSnapshot(format?: string): object;
+
   (strings: TemplateStringsArray, ...values: unknown[]): BunShellPromise;
 };

@@ -3,12 +3,6 @@ import { hash as hashCallable } from "@lu-zero/bun-compat/bun";
 import { Archive } from "./archive.ts";
 import { build } from "./build.ts";
 import { listen, connect } from "./socket.ts";
-import natives from "../../packages/natives/src/index.ts";
-
-(hashCallable as unknown as Record<string, unknown>).wyhash =
-  function wyhashNative(input: Uint8Array | string, seed?: number): bigint {
-    return natives.wyhash(input, seed) as bigint;
-  };
 
 function color(input: string | number, format: string): string | null {
   if (typeof input === "number") {
