@@ -132,6 +132,7 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	huggingface: () => $pickenv("HUGGINGFACE_HUB_TOKEN", "HF_TOKEN"),
 	litellm: "LITELLM_API_KEY",
 	moonshot: "MOONSHOT_API_KEY",
+	meridian: "MERIDIAN_API_KEY",
 	nvidia: "NVIDIA_API_KEY",
 	nanogpt: "NANO_GPT_API_KEY",
 	"lm-studio": "LM_STUDIO_API_KEY",
@@ -190,7 +191,7 @@ export function stream<TApi extends Api>(
 		return streamBedrock(model as Model<"bedrock-converse-stream">, context, (options || {}) as BedrockOptions);
 	}
 
-	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || (model.provider === "meridian" ? "x" : undefined);
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
@@ -261,7 +262,7 @@ export function streamSimple<TApi extends Api>(
 		return stream(model, context, providerOptions);
 	}
 
-	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	const apiKey = options?.apiKey || getEnvApiKey(model.provider) || (model.provider === "meridian" ? "x" : undefined);
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}

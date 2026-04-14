@@ -493,6 +493,7 @@ return config
 | Ollama (`ollama`)                               | `OLLAMA_API_KEY` _(optional)_                |
 | LiteLLM (`litellm`)                             | `LITELLM_API_KEY`                            |
 | LM Studio (`lm-studio`)                         | `LM_STUDIO_API_KEY` _(optional)_             |
+| Meridian (`meridian`)                           | `MERIDIAN_API_KEY` _(optional; `x` works)_   |
 | llama.cpp (`llama.cpp`)                         | `LLAMA_CPP_API_KEY` _(optional)_             |
 | Xiaomi MiMo (`xiaomi`)                          | `XIAOMI_API_KEY`                             |
 | Moonshot (`moonshot`)                           | `MOONSHOT_API_KEY`                           |
@@ -533,6 +534,7 @@ Use `/login` with supported providers:
 - Qianfan (`qianfan`)
 - Ollama (local / self-hosted, `ollama`)
 - LM Studio (local / self-hosted, `lm-studio`)
+- Meridian (local Anthropic-compatible proxy, `meridian`)
 - llama.cpp (local / self-hosted, `llama.cpp`)
 - vLLM (local OpenAI-compatible, `vllm`)
 - Z.AI (GLM Coding Plan)
@@ -550,6 +552,7 @@ Use `/login` with supported providers:
 For `ollama`, API key is optional. Leave it unset for local no-auth instances, or set `OLLAMA_API_KEY` for authenticated hosts.
 For `llama.cpp`, API key is optional. Leave it unset for local no-auth instances, or set `LLAMA_CPP_API_KEY` for authenticated hosts.
 For `lm-studio`, API key is optional. Leave it unset for local no-auth instances, or set `LM_STUDIO_API_KEY` for authenticated hosts.
+For `meridian`, the default endpoint is `http://127.0.0.1:3456`. Any placeholder API key works (for example `x`), and you can override the endpoint with `MERIDIAN_BASE_URL`.
 For `vllm`, paste your key in `/login` (or use `VLLM_API_KEY`). For local no-auth servers, any placeholder value works (for example `vllm-local`).
 For `nanogpt`, `/login nanogpt` opens `https://nano-gpt.com/api` and prompts for your `sk-...` key (or set `NANO_GPT_API_KEY`). Login validates the key via NanoGPT's models endpoint (not a fixed model entitlement).
 For `cloudflare-ai-gateway`, set provider base URL to

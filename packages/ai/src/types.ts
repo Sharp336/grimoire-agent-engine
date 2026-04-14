@@ -116,6 +116,7 @@ export type KnownProvider =
 	| "huggingface"
 	| "litellm"
 	| "moonshot"
+	| "meridian"
 	| "nvidia"
 	| "nanogpt"
 	| "ollama"

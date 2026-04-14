@@ -219,6 +219,8 @@ export function getExtraHelpText(): string {
   OPENROUTER_API_KEY         - OpenRouter aggregated models
   KILO_API_KEY               - Kilo Gateway models
   MISTRAL_API_KEY            - Mistral models
+  MERIDIAN_API_KEY           - Meridian local Anthropic-compatible proxy (placeholder value is fine)
+  MERIDIAN_BASE_URL          - Meridian endpoint override (default http://127.0.0.1:3456)
   ZAI_API_KEY                - z.ai models (ZhipuAI/GLM)
   MINIMAX_API_KEY            - MiniMax models
   OPENCODE_API_KEY           - OpenCode Zen/OpenCode Go models

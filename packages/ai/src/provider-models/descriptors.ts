@@ -19,6 +19,7 @@ import {
 	kimiCodeModelManagerOptions,
 	litellmModelManagerOptions,
 	lmStudioModelManagerOptions,
+	meridianModelManagerOptions,
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
@@ -220,6 +221,9 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		config => litellmModelManagerOptions(config),
 		catalog("LiteLLM", ["LITELLM_API_KEY"], { allowUnauthenticated: true }),
 	),
+	descriptor("meridian", "claude-sonnet-4-6", config => meridianModelManagerOptions(config), {
+		allowUnauthenticated: true,
+	}),
 	descriptor("lm-studio", "llama-3-8b", config => lmStudioModelManagerOptions(config), { allowUnauthenticated: true }),
 	catalogDescriptor(
 		"vllm",

@@ -81,6 +81,8 @@ export { loginKimi, refreshKimiToken } from "./kimi";
 export { loginLiteLLM } from "./litellm";
 // LM Studio (optional API key)
 export { DEFAULT_LOCAL_TOKEN, loginLmStudio } from "./lm-studio";
+// Meridian (optional placeholder API key)
+export { loginMeridian } from "./meridian";
 // MiniMax Coding Plan (API key)
 export { loginMiniMaxCode, loginMiniMaxCodeCn } from "./minimax-code";
 // Moonshot (API key)
@@ -258,6 +260,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 	{
 		id: "nanogpt",
 		name: "NanoGPT",
+		available: true,
+	},
+	{
+		id: "meridian",
+		name: "Meridian (Local Anthropic-compatible)",
 		available: true,
 	},
 	{

@@ -1722,11 +1722,17 @@ export class ModelRegistry {
 		return this.#models;
 	}
 
+	#usesImplicitPlaceholderAuth(provider: string): boolean {
+		return provider === "meridian";
+	}
+
 	#isModelAvailable(model: Model<Api>): boolean {
 		const disabledProviders = getDisabledProviderIdsFromSettings();
 		return (
 			!disabledProviders.has(model.provider) &&
-			(this.#keylessProviders.has(model.provider) || this.authStorage.hasAuth(model.provider))
+			(this.#keylessProviders.has(model.provider) ||
+				this.#usesImplicitPlaceholderAuth(model.provider) ||
+				this.authStorage.hasAuth(model.provider))
 		);
 	}
 
@@ -1889,7 +1895,17 @@ export class ModelRegistry {
 		if (this.#keylessProviders.has(model.provider)) {
 			return kNoAuth;
 		}
-		return this.authStorage.getApiKey(model.provider, sessionId, { baseUrl: model.baseUrl, modelId: model.id });
+		const resolved = await this.authStorage.getApiKey(model.provider, sessionId, {
+			baseUrl: model.baseUrl,
+			modelId: model.id,
+		});
+		if (resolved) {
+			return resolved;
+		}
+		if (this.#usesImplicitPlaceholderAuth(model.provider)) {
+			return "x";
+		}
+		return undefined;
 	}
 
 	/**

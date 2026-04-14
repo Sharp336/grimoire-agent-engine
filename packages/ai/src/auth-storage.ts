@@ -46,6 +46,7 @@ import { loginKilo } from "./utils/oauth/kilo";
 import { loginKimi } from "./utils/oauth/kimi";
 import { loginLiteLLM } from "./utils/oauth/litellm";
 import { loginLmStudio } from "./utils/oauth/lm-studio";
+import { loginMeridian } from "./utils/oauth/meridian";
 import { loginMiniMaxCode, loginMiniMaxCodeCn } from "./utils/oauth/minimax-code";
 import { loginMoonshot } from "./utils/oauth/moonshot";
 import { loginNanoGPT } from "./utils/oauth/nanogpt";
@@ -876,6 +877,11 @@ export class AuthStorage {
 			}
 			case "litellm": {
 				const apiKey = await loginLiteLLM(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
+			case "meridian": {
+				const apiKey = await loginMeridian(ctrl);
 				await saveApiKeyCredential(apiKey);
 				return;
 			}

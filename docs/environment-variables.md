@@ -47,6 +47,7 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `VENICE_API_KEY`                | Venice auth | Using `venice` provider                                       |                                                                                                     |
 | `LITELLM_API_KEY`               | LiteLLM auth | Using `litellm` provider                                      | OpenAI-compatible LiteLLM proxy key                                                                 |
 | `LM_STUDIO_API_KEY`             | LM Studio auth (optional) | Using `lm-studio` provider with authenticated hosts           | Local LM Studio usually runs without auth; any non-empty token works when a key is required         |
+| `MERIDIAN_API_KEY`              | Meridian auth (optional) | Using `meridian` provider                                     | Local Meridian accepts any placeholder token; `x` is sufficient for the default local proxy         |
 | `OLLAMA_API_KEY`                | Ollama auth (optional) | Using `ollama` provider with authenticated hosts              | Local Ollama usually runs without auth; any non-empty token works when a key is required            |
 | `LLAMA_CPP_API_KEY`             | Ollama auth (optional) | Using `llama-server` with `--api-key` parameter              | Local llama.cpp usually runs without auth; any non-empty token works when a key is configured       |
 | `XIAOMI_API_KEY`                | Xiaomi MiMo auth | Using `xiaomi` provider                                       |                                                                                                     |
@@ -258,6 +259,7 @@ Extra conditional behavior:
 | `PI_PACKAGE_DIR`           | Overrides package asset base dir resolution (docs/examples/changelog path lookup)            |
 | `PI_DISABLE_LSPMUX`        | If `1`, disables lspmux detection/integration and forces direct LSP server spawning          |
 | `LM_STUDIO_BASE_URL`       | Default implicit LM Studio discovery base URL override (`http://127.0.0.1:1234/v1` if unset) |
+| `MERIDIAN_BASE_URL`        | Meridian provider base URL override (`http://127.0.0.1:3456` if unset)                       |
 | `OLLAMA_BASE_URL`          | Default implicit Ollama discovery base URL override (`http://127.0.0.1:11434` if unset)      |
 | `LLAMA_CPP_BASE_URL`       | Default implicit Llama.cpp discovery base URL override (`http://127.0.0.1:8080` if unset)    |
 | `PI_EDIT_VARIANT`          | If `hashline`, forces hashline read/grep display mode when edit tool available               |

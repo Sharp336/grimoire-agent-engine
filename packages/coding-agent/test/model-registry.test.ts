@@ -1396,6 +1396,30 @@ describe("ModelRegistry", () => {
 			expect(registry.getAvailable().some(m => m.provider === "ollama" && m.id === "phi4-mini")).toBe(true);
 			expect(await registry.getApiKey(ollamaModels[0])).toBe(kNoAuth);
 		});
+		test("discovers Meridian models at runtime and uses the implicit placeholder key", async () => {
+			using _hook = hookFetch(input => {
+				const url = String(input);
+				if (url === "https://models.dev/api.json") {
+					return new Response("{}", { status: 200, headers: { "Content-Type": "application/json" } });
+				}
+				if (url === "http://127.0.0.1:3456/v1/models") {
+					return new Response(
+						JSON.stringify({ data: [{ id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6" }] }),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					);
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			await registry.refresh();
+			const meridianModels = getModelsForProvider(registry, "meridian");
+			expect(meridianModels.some(m => m.id === "claude-sonnet-4-6")).toBe(true);
+			expect(registry.getAvailable().some(m => m.provider === "meridian" && m.id === "claude-sonnet-4-6")).toBe(
+				true,
+			);
+			expect(await registry.getApiKey(meridianModels[0])).toBe("x");
+		});
 
 		test("discovers ollama models at runtime and treats auth:none providers as available", async () => {
 			writeRawModelsJson({

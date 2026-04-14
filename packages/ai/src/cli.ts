@@ -10,6 +10,7 @@ import { loginGeminiCli } from "./utils/oauth/google-gemini-cli";
 import { loginKagi } from "./utils/oauth/kagi";
 import { loginKilo } from "./utils/oauth/kilo";
 import { loginKimi } from "./utils/oauth/kimi";
+import { loginMeridian } from "./utils/oauth/meridian";
 import { loginMiniMaxCode, loginMiniMaxCodeCn } from "./utils/oauth/minimax-code";
 import { loginNanoGPT } from "./utils/oauth/nanogpt";
 import { loginOpenAICodex } from "./utils/oauth/openai-codex";
@@ -238,6 +239,22 @@ async function login(provider: OAuthProvider): Promise<void> {
 				return;
 			}
 
+			case "meridian": {
+				const apiKey = await loginMeridian({
+					onAuth(info) {
+						const { url, instructions } = info;
+						console.log(`\nOpen this URL in your browser:\n${url}`);
+						if (instructions) console.log(instructions);
+						console.log();
+					},
+					onPrompt(p) {
+						return promptFn(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
+					},
+				});
+				storage.saveApiKey(provider, apiKey);
+				console.log(`\nAPI key saved to ~/.omp/agent/agent.db`);
+				return;
+			}
 			case "nanogpt": {
 				const apiKey = await loginNanoGPT({
 					onAuth(info) {
@@ -343,6 +360,7 @@ Providers:
   tavily            Tavily
   zai               Z.AI (GLM Coding Plan)
   nanogpt           NanoGPT
+  meridian          Meridian (Local Anthropic-compatible)
   minimax-code      MiniMax Coding Plan (International)
   minimax-code-cn   MiniMax Coding Plan (China)
   cursor            Cursor (Claude, GPT, etc.)

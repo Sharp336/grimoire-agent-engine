@@ -1570,6 +1570,67 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 	};
 }
 
+const MERIDIAN_BASE_URL = "http://127.0.0.1:3456/v1";
+
+function resolveMeridianBaseUrl(baseUrl?: string): string {
+	const value = baseUrl?.trim() || Bun.env.MERIDIAN_BASE_URL?.trim();
+	if (!value) {
+		return MERIDIAN_BASE_URL;
+	}
+	return toAnthropicDiscoveryBaseUrl(value.replace(/\/+$/, ""));
+}
+
+export interface MeridianModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+export function meridianModelManagerOptions(
+	config?: MeridianModelManagerConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	const apiKey = config?.apiKey ?? "x";
+	const baseUrl = resolveMeridianBaseUrl(config?.baseUrl);
+	return {
+		providerId: "meridian",
+		fetchDynamicModels: async () => {
+			const modelsDevModels = await fetchModelsDevPayload()
+				.then(payload => mapAnthropicModelsDev(payload, baseUrl))
+				.catch(() => []);
+			const references = buildAnthropicReferenceMap(modelsDevModels);
+			return (
+				fetchOpenAICompatibleModels({
+					api: "anthropic-messages",
+					provider: "meridian",
+					baseUrl,
+					headers: buildAnthropicDiscoveryHeaders(apiKey),
+					mapModel: (
+						entry: OpenAICompatibleModelRecord,
+						defaults: Model<"anthropic-messages">,
+						_context: OpenAICompatibleModelMapperContext<"anthropic-messages">,
+					): Model<"anthropic-messages"> => {
+						const discoveredName = typeof entry.display_name === "string" ? entry.display_name : defaults.name;
+						const reference = references.get(defaults.id);
+						if (!reference) {
+							return {
+								...defaults,
+								name: discoveredName,
+							};
+						}
+						return {
+							...reference,
+							id: defaults.id,
+							name: discoveredName,
+							api: "anthropic-messages",
+							provider: "meridian",
+							baseUrl,
+						};
+					},
+				}) ?? null
+			);
+		},
+	};
+}
+
 // ---------------------------------------------------------------------------
 // 24. Anthropic
 // ---------------------------------------------------------------------------
