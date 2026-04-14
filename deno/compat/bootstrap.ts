@@ -1,88 +1,14 @@
 import "@lu-zero/bun-compat";
-import { hash as hashObj } from "@lu-zero/bun-compat/bun";
+import { hash as hashCallable } from "@lu-zero/bun-compat/bun";
 import { Archive } from "./archive.ts";
 import { build } from "./build.ts";
 import { listen, connect } from "./socket.ts";
 import natives from "../../packages/natives/src/index.ts";
 
-function hash(input: string | Uint8Array | ArrayBuffer, seed?: number): number {
-  return Number(
-    hashObj.xxHash64(
-      input instanceof ArrayBuffer ? new Uint8Array(input) : input,
-      seed,
-    ),
-  );
-}
-function xxHash32(input: string | Uint8Array, seed: number = 0): number {
-  const data =
-    typeof input === "string" ? new TextEncoder().encode(input) : input;
-  const len = data.length;
-  let h32 = (seed + 0x9e3779b1 + len * 0x85ebca6b) >>> 0;
-  if (len >= 16) {
-    const limit = len - 16;
-    let i = 0;
-    while (i <= limit) {
-      h32 =
-        (h32 +
-          Math.imul(
-            data[i]! |
-              (data[i + 1]! << 8) |
-              (data[i + 2]! << 16) |
-              (data[i + 3]! << 24),
-            0x9e3779b1,
-          )) >>>
-        0;
-      h32 =
-        (h32 +
-          Math.imul(
-            data[i + 4]! |
-              (data[i + 5]! << 8) |
-              (data[i + 6]! << 16) |
-              (data[i + 7]! << 24),
-            0x85ebca6b,
-          )) >>>
-        0;
-      h32 =
-        (h32 +
-          Math.imul(
-            data[i + 8]! |
-              (data[i + 9]! << 8) |
-              (data[i + 10]! << 16) |
-              (data[i + 11]! << 24),
-            0x9e3779b1,
-          )) >>>
-        0;
-      h32 =
-        (h32 +
-          Math.imul(
-            data[i + 12]! |
-              (data[i + 13]! << 8) |
-              (data[i + 14]! << 16) |
-              (data[i + 15]! << 24),
-            0x85ebca6b,
-          )) >>>
-        0;
-      h32 = Math.imul(h32 ^ (h32 >>> 16), 0x85ebca6b) >>> 0;
-      h32 = Math.imul(h32 ^ (h32 >>> 13), 0x9e3779b1) >>> 0;
-      h32 = h32 ^ (h32 >>> 16);
-      i += 16;
-    }
-  }
-  for (let i = len & ~0xf; i < len; i++) {
-    h32 = (h32 + data[i]! * 0x9e3779b1) >>> 0;
-  }
-  h32 = Math.imul(h32 ^ (h32 >>> 15), 0x85ebca6b) >>> 0;
-  h32 = Math.imul(h32 ^ (h32 >>> 13), 0x9e3779b1) >>> 0;
-  return (h32 ^ (h32 >>> 16)) >>> 0;
-}
-(hash as unknown as Record<string, unknown>).xxHash64 = hashObj.xxHash64;
-(hash as unknown as Record<string, unknown>).wyhash = function wyhashNative(
-  input: Uint8Array | string,
-  seed?: number,
-): bigint {
-  return natives.wyhash(input, seed) as bigint;
-};
-(hash as unknown as Record<string, unknown>).xxHash32 = xxHash32;
+(hashCallable as unknown as Record<string, unknown>).wyhash =
+  function wyhashNative(input: Uint8Array | string, seed?: number): bigint {
+    return natives.wyhash(input, seed) as bigint;
+  };
 
 function color(input: string | number, format: string): string | null {
   if (typeof input === "number") {
@@ -126,7 +52,7 @@ function color(input: string | number, format: string): string | null {
 
 const g = globalThis as unknown as Record<string, Record<string, unknown>>;
 if (g.Bun) {
-  g.Bun.hash = hash as unknown as Record<string, unknown>;
+  g.Bun.hash = hashCallable as unknown as Record<string, unknown>;
   g.Bun.Archive = Archive;
   g.Bun.build = build as unknown as Record<string, unknown>;
   g.Bun.listen = listen as unknown as Record<string, unknown>;
