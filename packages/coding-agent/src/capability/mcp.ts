@@ -4,7 +4,7 @@
  * Canonical shape for MCP server configurations, regardless of source format.
  * All providers translate their native format to this shape.
  */
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 /**

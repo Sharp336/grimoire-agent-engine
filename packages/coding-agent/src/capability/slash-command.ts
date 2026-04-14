@@ -3,7 +3,7 @@
  *
  * File-based slash commands defined as markdown files.
  */
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 /**

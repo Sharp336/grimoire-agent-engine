@@ -5,7 +5,7 @@
  * persistent guidance to the agent.
  */
 import * as path from "node:path";
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 /**

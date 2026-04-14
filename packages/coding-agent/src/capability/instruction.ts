@@ -3,7 +3,7 @@
  *
  * GitHub Copilot-style instructions with optional file pattern matching.
  */
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 /**

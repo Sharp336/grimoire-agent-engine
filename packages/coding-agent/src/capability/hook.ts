@@ -3,7 +3,7 @@
  *
  * Pre/post tool execution hooks defined as shell scripts.
  */
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 /**

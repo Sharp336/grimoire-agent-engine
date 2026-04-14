@@ -3,7 +3,7 @@
  *
  * Canonical shape for SSH host entries, regardless of source format.
  */
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 /**

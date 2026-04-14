@@ -3,7 +3,7 @@
  *
  * Configuration settings from various sources (JSON, TOML, etc.)
  */
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 /**

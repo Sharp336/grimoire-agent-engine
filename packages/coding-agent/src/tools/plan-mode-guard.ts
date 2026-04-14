@@ -1,5 +1,5 @@
 import { resolveLocalUrlToPath } from "../internal-urls";
-import type { ToolSession } from ".";
+import type { ToolSession } from "./index.ts";
 import { resolveToCwd } from "./path-utils";
 import { ToolError } from "./tool-errors";
 

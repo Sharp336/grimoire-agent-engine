@@ -3,7 +3,7 @@
  *
  * TypeScript/JavaScript extension modules loaded by the extension system.
  */
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 /**

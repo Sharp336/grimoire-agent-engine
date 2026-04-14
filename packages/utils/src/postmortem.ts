@@ -7,7 +7,7 @@
  */
 import inspector from "node:inspector";
 import { isMainThread } from "node:worker_threads";
-import { logger } from ".";
+import { logger } from "./index.ts";
 
 // Cleanup reasons, in order of priority/meaning.
 export enum Reason {

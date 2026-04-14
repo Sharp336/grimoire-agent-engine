@@ -14,7 +14,7 @@ import {
 import type { Theme } from "../modes/theme/theme";
 import searchToolBm25Description from "../prompts/tools/search-tool-bm25.md" with { type: "text" };
 import { renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
-import type { ToolSession } from ".";
+import type { ToolSession } from "./index.ts";
 import { formatCount, replaceTabs, TRUNCATE_LENGTHS } from "./render-utils";
 import { ToolError } from "./tool-errors";
 

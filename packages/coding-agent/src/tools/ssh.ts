@@ -15,7 +15,7 @@ import { ensureHostInfo, getHostInfoForHost } from "../ssh/connection-manager";
 import { executeSSH } from "../ssh/ssh-executor";
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
-import type { ToolSession } from ".";
+import type { ToolSession } from "./index.ts";
 import { formatStyledTruncationWarning, type OutputMeta } from "./output-meta";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";

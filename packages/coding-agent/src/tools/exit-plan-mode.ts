@@ -3,7 +3,7 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import exitPlanModeDescription from "../prompts/tools/exit-plan-mode.md" with { type: "text" };
-import type { ToolSession } from ".";
+import type { ToolSession } from "./index.ts";
 import { resolvePlanPath } from "./plan-mode-guard";
 import { ToolError } from "./tool-errors";
 

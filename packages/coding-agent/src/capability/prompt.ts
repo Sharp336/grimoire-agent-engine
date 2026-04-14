@@ -3,7 +3,7 @@
  *
  * Reusable prompt templates (Codex format) available via /prompts: menu.
  */
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 /**

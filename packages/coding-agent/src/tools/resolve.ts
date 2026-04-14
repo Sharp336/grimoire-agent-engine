@@ -7,7 +7,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import resolveDescription from "../prompts/tools/resolve.md" with { type: "text" };
 import { Ellipsis, padToWidth, renderStatusLine, truncateToWidth } from "../tui";
-import type { ToolSession } from ".";
+import type { ToolSession } from "./index.ts";
 import { replaceTabs } from "./render-utils";
 import { ToolError } from "./tool-errors";
 

@@ -9,7 +9,7 @@ import type { Static, TSchema } from "@sinclair/typebox";
 import { Type } from "@sinclair/typebox";
 import Ajv, { type ErrorObject, type ValidateFunction } from "ajv";
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
-import type { ToolSession } from ".";
+import type { ToolSession } from "./index.ts";
 import { jtdToJsonSchema } from "./jtd-to-json-schema";
 
 export interface SubmitResultDetails {

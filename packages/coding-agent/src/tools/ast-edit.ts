@@ -11,7 +11,7 @@ import type { Theme } from "../modes/theme/theme";
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import type { ToolSession } from ".";
+import type { ToolSession } from "./index.ts";
 import type { OutputMeta } from "./output-meta";
 import {
 	combineSearchGlobs,

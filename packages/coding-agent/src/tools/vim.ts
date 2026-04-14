@@ -22,7 +22,7 @@ import {
 } from "../vim/render";
 import type { VimFingerprint, VimKeyToken, VimLoadedFile, VimToolDetails, VimViewportLine } from "../vim/types";
 import { VimInputError } from "../vim/types";
-import type { ToolSession } from ".";
+import type { ToolSession } from "./index.ts";
 import { parseArchivePathCandidates } from "./archive-reader";
 import { assertEditableFile } from "./auto-generated-guard";
 import { isReadableUrlPath } from "./fetch";

@@ -15,7 +15,7 @@ import { DEFAULT_MAX_COLUMN, type TruncationResult, truncateHead } from "../sess
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import { resolveEditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import type { ToolSession } from ".";
+import type { ToolSession } from "./index.ts";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import {
 	combineSearchGlobs,

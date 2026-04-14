@@ -20,7 +20,7 @@ import {
 	renderTreeList,
 	truncateToWidth,
 } from "../tui";
-import type { ToolSession } from ".";
+import type { ToolSession } from "./index.ts";
 import { applyListLimit } from "./list-limit";
 import { formatFullOutputReference, type OutputMeta } from "./output-meta";
 import { normalizePathLikeInput, parseFindPattern, resolveMultiFindPattern, resolveToCwd } from "./path-utils";

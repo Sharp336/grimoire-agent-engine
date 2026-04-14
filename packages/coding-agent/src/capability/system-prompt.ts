@@ -4,7 +4,7 @@
  * Custom system prompt files (SYSTEM.md) that modify the agent's base system prompt.
  * Distinct from context-files which are user instructions shown in conversation.
  */
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 /**

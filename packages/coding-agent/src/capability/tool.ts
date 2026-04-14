@@ -3,7 +3,7 @@
  *
  * User-defined tools that extend agent capabilities.
  */
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 /**

@@ -4,7 +4,7 @@
  * Project-specific rules from Cursor (.mdc), Windsurf (.md), and Cline formats.
  * Translated to a canonical shape regardless of source format.
  */
-import { defineCapability } from ".";
+import { defineCapability } from "./index.ts";
 import type { SourceMeta } from "./types";
 
 const CONDITION_GLOB_SCOPE_TOOLS = ["edit", "write"] as const;

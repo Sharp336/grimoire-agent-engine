@@ -36,7 +36,7 @@ import type { Theme } from "../modes/theme/theme";
 import debugDescription from "../prompts/tools/debug.md" with { type: "text" };
 import { renderStatusLine } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
-import type { ToolSession } from ".";
+import type { ToolSession } from "./index.ts";
 import type { OutputMeta } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import {
