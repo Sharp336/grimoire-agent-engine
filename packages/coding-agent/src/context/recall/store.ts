@@ -1,8 +1,7 @@
 import * as path from "node:path";
 import { type Connection, connect, type Table } from "@lancedb/lancedb";
 import { logger } from "@oh-my-pi/pi-utils";
-import type { RecallRow, RecallSearchResult } from "./types";
-import { EMBEDDING_DIM } from "./types";
+import { buildRecallRowKey, EMBEDDING_DIM, type RecallLookupKey, type RecallRow, type RecallSearchResult } from "./types";
 
 /** LanceDB accepts plain objects with string keys. */
 type LanceData = Record<string, unknown>[];
@@ -91,6 +90,48 @@ export class RecallStore {
 		const query = this.#table.query().where(filter).limit(20).toArray();
 		const timeout = Bun.sleep(5000).then(() => [] as RecallRow[]);
 		return Promise.race([query as Promise<RecallRow[]>, timeout]);
+	}
+
+	async getByLookupKeys(keys: RecallLookupKey[]): Promise<Map<string, RecallRow>> {
+		if (keys.length === 0) return new Map();
+
+		const turnsBySession = new Map<string, Set<number>>();
+		for (const key of keys) {
+			let turns = turnsBySession.get(key.session_id);
+			if (!turns) {
+				turns = new Set<number>();
+				turnsBySession.set(key.session_id, turns);
+			}
+			turns.add(key.turn);
+		}
+
+		const clauses = Array.from(turnsBySession.entries()).map(([sessionId, turns]) => {
+			const escapedId = sessionId.replace(/'/g, "''");
+			const turnList = Array.from(turns).join(", ");
+			return `(session_id = '${escapedId}' AND turn IN (${turnList}))`;
+		});
+		const filter = clauses.join(" OR ");
+		const timeout = Bun.sleep(5000).then(() => [] as RecallRow[]);
+		const results = (await Promise.race([
+			this.#table
+				.query()
+				.where(filter)
+				.limit(Math.max(keys.length * 10, 30))
+				.toArray(),
+			timeout,
+		])) as RecallRow[];
+
+		const wanted = new Set(
+			keys.map(key => `${key.session_id}:${key.turn}:${key.role}:${key.tool_name ?? ""}:${key.text_hash}`),
+		);
+		const matched = new Map<string, RecallRow>();
+		for (const row of results) {
+			const rowKey = buildRecallRowKey(row);
+			if (wanted.has(rowKey) && !matched.has(rowKey)) {
+				matched.set(rowKey, row);
+			}
+		}
+		return matched;
 	}
 
 	async getEmbeddingsByTurns(turns: number[], sessionId: string): Promise<Map<number, Float32Array>> {

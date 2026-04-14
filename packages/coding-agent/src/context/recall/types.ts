@@ -32,9 +32,41 @@ export interface RecallSearchResult extends RecallRow {
 	_distance: number;
 }
 
+/** Deterministic lookup key shared between semantic rows and lexical index rows. */
+export interface RecallLookupKey {
+	session_id: string;
+	turn: number;
+	role: RecallRow["role"];
+	tool_name: string | null;
+	text_hash: string;
+}
+
 /** Input item for MMR reranking. */
 export interface MmrCandidate<T> {
 	vector: number[];
 	score: number;
 	data: T;
+}
+
+export function hashRecallText(text: string): string {
+	return Bun.hash(text).toString(16);
+}
+
+export function buildRecallLookupKey(
+	input: Pick<RecallRow, "session_id" | "turn" | "role" | "tool_name" | "text">,
+): RecallLookupKey {
+	return {
+		session_id: input.session_id,
+		turn: input.turn,
+		role: input.role,
+		tool_name: input.tool_name,
+		text_hash: hashRecallText(input.text),
+	};
+}
+
+export function buildRecallRowKey(
+	input: Pick<RecallRow, "session_id" | "turn" | "role" | "tool_name" | "text">,
+): string {
+	const key = buildRecallLookupKey(input);
+	return `${key.session_id}:${key.turn}:${key.role}:${key.tool_name ?? ""}:${key.text_hash}`;
 }

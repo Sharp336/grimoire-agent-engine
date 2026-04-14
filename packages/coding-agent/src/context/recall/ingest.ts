@@ -7,15 +7,17 @@
  */
 
 import { logger } from "@oh-my-pi/pi-utils";
+import type { ToolResultStore } from "./tool-result-store";
 import { embed } from "./embed";
 import type { RecallStore } from "./store";
-import type { RecallRow } from "./types";
+import { buildRecallRowKey, type RecallRow } from "./types";
 
 /** Maximum concurrent embedding requests allowed in flight. */
 const MAX_IN_FLIGHT = 4;
 
 export interface IngestPipelineOptions {
 	store: RecallStore;
+	toolResultStore?: ToolResultStore;
 	license: string;
 	sessionId: string;
 	projectCwd: string;
@@ -32,6 +34,7 @@ export interface IngestItem {
 
 export class IngestPipeline {
 	#store: RecallStore;
+	#toolResultStore?: ToolResultStore;
 	#license: string;
 	#sessionId: string;
 	#projectCwd: string;
@@ -40,6 +43,7 @@ export class IngestPipeline {
 
 	constructor(options: IngestPipelineOptions) {
 		this.#store = options.store;
+		this.#toolResultStore = options.toolResultStore;
 		this.#license = options.license;
 		this.#sessionId = options.sessionId;
 		this.#projectCwd = options.projectCwd;
@@ -100,6 +104,18 @@ export class IngestPipeline {
 			};
 
 			await this.#store.insert([row]);
+			if (this.#toolResultStore) {
+				this.#toolResultStore.indexSync({
+					content: item.text,
+					role: item.role,
+					toolName: item.toolName ?? null,
+					sessionId: this.#sessionId,
+					projectCwd: this.#projectCwd,
+					turnNumber: item.turn,
+					paths: item.paths ?? [],
+					rowKey: buildRecallRowKey(row),
+				});
+			}
 			logger.debug("IngestPipeline: stored row", {
 				role: item.role,
 				turn: item.turn,

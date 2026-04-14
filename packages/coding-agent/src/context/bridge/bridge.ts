@@ -44,7 +44,6 @@ export class ToolResultBridge {
 	readonly #stm: ShortTermMemoryRecord;
 	readonly #config: BridgeConfig & { now: string; maxLocatorEntries: number };
 	readonly #editedPaths = new Set<string>();
-	#resultCounter = 0;
 
 	constructor(config: BridgeConfig = {}) {
 		const now = config.now ?? new Date().toISOString();
@@ -52,8 +51,6 @@ export class ToolResultBridge {
 		this.#config = {
 			now: now,
 			maxLocatorEntries: config.maxLocatorEntries ?? DEFAULT_MAX_LOCATOR_ENTRIES,
-			sessionId: config.sessionId,
-			toolResultStore: config.toolResultStore,
 		};
 
 		this.#contract = {
@@ -161,21 +158,7 @@ export class ToolResultBridge {
 		// Accumulate STM state
 		this.#accumulateSTM(profile);
 
-		// Index into FTS5 for keyword search.
-		const resultStore = this.#config.toolResultStore;
-		if (resultStore) {
-			const text = extractTextContent(result);
-			if (text) {
-				const turnNumber = ++this.#resultCounter;
-				resultStore.index({
-					content: text,
-					toolName: profile.toolName,
-					sessionId: this.#config.sessionId ?? "",
-					turnNumber,
-					paths: profile.touchedPaths,
-				});
-			}
-		}
+		return profile;
 
 		return profile;
 	}

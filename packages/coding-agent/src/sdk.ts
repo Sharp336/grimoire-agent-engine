@@ -1558,10 +1558,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// Pre-create bridge so it's available to transformContext.
 	// Event subscription is wired after session creation below.
-	const assemblerBridge = new ToolResultBridge({
-		sessionId: sessionManager.getSessionId(),
-		toolResultStore,
-	});
+	const assemblerBridge = new ToolResultBridge();
 
 	// Initialize recall ingest pipeline and passive hydrator.
 	// Reuses the RecallStore + license initialized earlier (before tool creation).
@@ -1570,13 +1567,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (recallStore && memexLicense) {
 		ingestPipeline = new IngestPipeline({
 			store: recallStore,
+			toolResultStore,
 			license: memexLicense,
 			sessionId: sessionManager.getSessionId(),
 			projectCwd: cwd,
 		});
 		passiveHydrator = new PassiveHydrator({
 			store: recallStore,
+			toolResultStore,
 			license: memexLicense,
+			projectCwd: cwd,
 			sessionId,
 		});
 		logger.debug("Recall pipeline initialized (ingest + passive hydration)");
@@ -2038,7 +2038,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			}
 
-			// Ingest user and assistant messages into LanceDB + ToolResultStore
+			// Ingest conversation messages into the aligned recall stores.
 			if (event.type === "message_end") {
 				const msg = event.message;
 				if (msg.role === "user") {
@@ -2051,15 +2051,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							paths: extractPathsFromText(text),
 						});
 					}
-					if (toolResultStore && text) {
-						toolResultStore.index({
-							content: text,
-							toolName: "user",
-							sessionId,
-							turnNumber: ingestTurn,
-							paths: extractPathsFromText(text),
-						});
-					}
 				} else if (msg.role === "assistant") {
 					const text = extractAssistantText(msg.content);
 					if (ingestPipeline) {
@@ -2067,15 +2058,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							text,
 							role: "assistant",
 							turn: ingestTurn,
-							paths: extractPathsFromText(text),
-						});
-					}
-					if (toolResultStore && text) {
-						toolResultStore.index({
-							content: text,
-							toolName: "assistant",
-							sessionId,
-							turnNumber: ingestTurn,
 							paths: extractPathsFromText(text),
 						});
 					}

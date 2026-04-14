@@ -2,10 +2,10 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { embed } from "../context/recall/embed";
-import { mmrRerank } from "../context/recall/mmr";
+import { HybridRetriever, type HybridSearchMode } from "../context/recall/hybrid-retriever";
 import type { RecallStore } from "../context/recall/store";
 import type { SearchResult as KeywordSearchResult, ToolResultStore } from "../context/recall/tool-result-store";
-import type { MmrCandidate, RecallSearchResult } from "../context/recall/types";
+import type { RecallSearchResult } from "../context/recall/types";
 import { parseMCPToolName } from "../mcp/tool-bridge";
 import type { ToolSession } from ".";
 
@@ -30,9 +30,9 @@ const recallSchema = Type.Object({
 		}),
 	),
 	mode: Type.Optional(
-		Type.Union([Type.Literal("semantic"), Type.Literal("keyword")], {
+		Type.Union([Type.Literal("hybrid"), Type.Literal("semantic"), Type.Literal("keyword")], {
 			description:
-				"Search mode: 'semantic' (default, vector search) or 'keyword' (exact text match over tool results)",
+				"Search mode: 'hybrid' (default, semantic + exact text), 'semantic' (vector search only), or 'keyword' (exact text match over recalled rows)",
 		}),
 	),
 	turn: Type.Optional(
@@ -47,8 +47,6 @@ type RecallParams = Static<typeof recallSchema>;
 
 const DEFAULT_LIMIT = 5;
 const MAX_LIMIT = 20;
-/** Overfetch factor — retrieve more candidates than needed so MMR has room to diversify. */
-const OVERFETCH_FACTOR = 3;
 
 export class RecallTool implements AgentTool<typeof recallSchema> {
 	readonly name = "recall";
@@ -61,6 +59,7 @@ export class RecallTool implements AgentTool<typeof recallSchema> {
 	#license: string;
 	#cwd: string;
 	#sessionId: string;
+	#retriever: HybridRetriever;
 
 	constructor(store: RecallStore, license: string, cwd: string, sessionId: string, toolResultStore?: ToolResultStore) {
 		this.description = ""; // RNA experiment: tool descriptions compiled into system prompt, not sent per-turn;
@@ -69,6 +68,12 @@ export class RecallTool implements AgentTool<typeof recallSchema> {
 		this.#license = license;
 		this.#cwd = cwd;
 		this.#sessionId = sessionId;
+		this.#retriever = new HybridRetriever({
+			store,
+			toolResultStore,
+			sessionId,
+			projectCwd: cwd,
+		});
 	}
 
 	static createIf(session: ToolSession): RecallTool | null {
@@ -86,7 +91,7 @@ export class RecallTool implements AgentTool<typeof recallSchema> {
 				content: [
 					{
 						type: "text",
-						text: "A query is required for semantic and keyword search. Use turn parameter for turn expansion.",
+						text: "A query is required for semantic, hybrid, and keyword search. Use turn parameter for turn expansion.",
 					},
 				],
 			};
@@ -95,18 +100,8 @@ export class RecallTool implements AgentTool<typeof recallSchema> {
 			return this.#keywordSearch(params as RecallParams & { query: string });
 		}
 		const limit = Math.min(Math.max(params.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
-		const overfetchLimit = limit * OVERFETCH_FACTOR;
-		// Build LanceDB SQL filter clauses
-		const clauses: string[] = [];
-		if (params.role) clauses.push(`role = '${params.role}'`);
-		if (params.project === "current") {
-			// Escape single quotes in CWD to prevent SQL injection in LanceDB filter
-			const escapedCwd = this.#cwd.replace(/'/g, "''");
-			clauses.push(`project_cwd = '${escapedCwd}'`);
-		}
-		const filter = clauses.length > 0 ? clauses.join(" AND ") : undefined;
+		const filter = buildRecallFilter({ cwd: this.#cwd, project: params.project, role: params.role });
 
-		// Step 1: Embed the query
 		let queryVector: number[];
 		try {
 			const vectors = await embed([params.query], this.#license);
@@ -120,13 +115,33 @@ export class RecallTool implements AgentTool<typeof recallSchema> {
 			};
 		}
 
-		// Step 2: Search LanceDB (overfetch for MMR diversity)
+		const mode: HybridSearchMode = params.mode === "semantic" ? "semantic" : "hybrid";
 		let results: RecallSearchResult[];
+		let trace:
+			| {
+					mode: HybridSearchMode;
+					semanticCandidates: number;
+					keywordCandidates: number;
+					resolvedKeywordCandidates: number;
+					fusedCandidates: number;
+			  }
+			| undefined;
 		try {
-			results = await this.#store.search(queryVector, overfetchLimit, filter);
+			const response = await this.#retriever.search({
+				query: params.query,
+				queryVector,
+				limit,
+				filter,
+				role: params.role,
+				project: params.project,
+				mode,
+			});
+			results = response.results;
+			trace = response.trace;
 		} catch (err) {
 			logger.warn("Recall: search failed", {
 				error: err instanceof Error ? err.message : String(err),
+				mode,
 			});
 			return {
 				content: [{ type: "text", text: "Failed to search session history. Recall is temporarily unavailable." }],
@@ -139,26 +154,16 @@ export class RecallTool implements AgentTool<typeof recallSchema> {
 			};
 		}
 
-		// Step 3: Build MMR candidates — convert distance (lower = closer) to score (higher = better)
-		const candidates: MmrCandidate<RecallSearchResult>[] = results.map(r => ({
-			vector: r.vector,
-			score: 1 / (1 + r._distance),
-			data: r,
-		}));
-
-		// Step 4: MMR rerank for diversity
-		const reranked = mmrRerank(candidates);
-
-		// Step 5: Take top `limit` results
-		const topResults = reranked.slice(0, limit);
-
-		// Step 6: Format results
-		const formatted = topResults.map(r => formatResult(r.data, this.#sessionId)).join("\n\n---\n\n");
+		const formatted = results.map(result => formatResult(result, this.#sessionId)).join("\n\n---\n\n");
 
 		logger.debug("Recall: returned results", {
 			query: params.query.slice(0, 80),
-			total: results.length,
-			returned: topResults.length,
+			mode,
+			returned: results.length,
+			semanticCandidates: trace?.semanticCandidates ?? 0,
+			keywordCandidates: trace?.keywordCandidates ?? 0,
+			resolvedKeywordCandidates: trace?.resolvedKeywordCandidates ?? 0,
+			fusedCandidates: trace?.fusedCandidates ?? 0,
 		});
 
 		return {
@@ -211,17 +216,19 @@ export class RecallTool implements AgentTool<typeof recallSchema> {
 		}
 
 		const limit = Math.min(Math.max(params.limit ?? DEFAULT_LIMIT, 1), MAX_LIMIT);
-		const sessionId = params.project === "current" ? this.#sessionId : undefined;
-
-		const results = this.#toolResultStore.search(params.query, { limit, sessionId });
+		const results = this.#toolResultStore.search(params.query, {
+			limit,
+			projectCwd: params.project === "current" ? this.#cwd : undefined,
+			role: params.role,
+		});
 
 		if (results.length === 0) {
 			return {
-				content: [{ type: "text", text: "No matching tool results found." }],
+				content: [{ type: "text", text: "No matching exact-text results found." }],
 			};
 		}
 
-		const formatted = results.map(r => formatKeywordResult(r, this.#sessionId)).join("\n\n---\n\n");
+		const formatted = results.map(result => formatKeywordResult(result, this.#sessionId)).join("\n\n---\n\n");
 
 		logger.debug("Recall keyword: returned results", {
 			query: params.query.slice(0, 80),
@@ -235,12 +242,10 @@ export class RecallTool implements AgentTool<typeof recallSchema> {
 }
 
 function formatResult(r: RecallSearchResult, currentSessionId: string): string {
-	// Header: Turn N [role: tool_name] source: <tag> session: <age> project: /path paths: x, y
 	let header = `Turn ${r.turn} [${r.role}`;
 	if (r.tool_name) header += `: ${r.tool_name}`;
 	header += "]";
 
-	// Source tag
 	if (r.tool_name) {
 		const mcpParts = parseMCPToolName(r.tool_name);
 		if (mcpParts) {
@@ -252,7 +257,6 @@ function formatResult(r: RecallSearchResult, currentSessionId: string): string {
 		header += ` source: ${r.role}`;
 	}
 
-	// Session age
 	header += ` session: ${r.session_id === currentSessionId ? "current" : "other"}`;
 
 	if (r.project_cwd) {
@@ -276,9 +280,32 @@ function formatResult(r: RecallSearchResult, currentSessionId: string): string {
 function formatKeywordResult(r: KeywordSearchResult, currentSessionId: string): string {
 	const isCurrentSession = r.sessionId === currentSessionId;
 	const sessionTag = isCurrentSession ? "current" : `session:${r.sessionId.slice(0, 8)}`;
-	let header = `Turn ${r.turnNumber} [tool:${r.toolName}] ${sessionTag}`;
+	let header = `Turn ${r.turnNumber} [`;
+	if (r.role === "tool_result") {
+		header += `tool:${r.toolName ?? "unknown"}`;
+	} else {
+		header += r.role;
+	}
+	header += `] ${sessionTag}`;
+	if (r.projectCwd) {
+		header += ` project: ${shortenPath(r.projectCwd)}`;
+	}
 	if (r.paths.length > 0) {
 		header += ` paths: ${r.paths.slice(0, 5).join(", ")}`;
 	}
 	return `${header}\n${r.snippet}`;
+}
+
+function buildRecallFilter(options: {
+	cwd: string;
+	project?: "current" | "all";
+	role?: "user" | "assistant" | "tool_result";
+}): string | undefined {
+	const clauses: string[] = [];
+	if (options.role) clauses.push(`role = '${options.role}'`);
+	if (options.project === "current") {
+		const escapedCwd = options.cwd.replace(/'/g, "''");
+		clauses.push(`project_cwd = '${escapedCwd}'`);
+	}
+	return clauses.length > 0 ? clauses.join(" AND ") : undefined;
 }

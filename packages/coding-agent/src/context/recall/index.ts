@@ -1,4 +1,5 @@
 export * from "./embed";
+export * from "./hybrid-retriever";
 export * from "./ingest";
 export * from "./message-text";
 export * from "./mmr";

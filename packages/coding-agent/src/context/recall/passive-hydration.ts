@@ -1,11 +1,11 @@
 /**
- * Passive hydration: auto-inject semantically relevant past context each turn.
+ * Passive hydration: auto-inject relevant past context each turn.
  *
  * Each turn, the hot window text (last N turns) is embedded and compared against
  * a cached embedding from the previous turn. If the conversation has shifted
- * meaningfully (cosine distance exceeds threshold), LanceDB is searched for
- * semantically similar past content, which is then MMR-reranked for diversity
- * and injected into the context before the hot window.
+ * meaningfully (cosine distance exceeds threshold), hybrid retrieval runs over
+ * recalled rows and the fused candidates are MMR-reranked for diversity before
+ * being injected into the context ahead of the hot window.
  *
  * When the conversation is stable (cache hit), the previous results are reused
  * without any embed or search calls.
@@ -14,12 +14,13 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { parseMCPToolName } from "../../mcp/tool-bridge";
+import type { ToolResultStore } from "./tool-result-store";
 import { embed } from "./embed";
 import { extractAssistantText, extractToolResultText, extractUserText } from "./message-text";
-import { cosineSimilarity, mmrRerank } from "./mmr";
+import { HybridRetriever } from "./hybrid-retriever";
+import { cosineSimilarity } from "./mmr";
 import type { RecallStore } from "./store";
-import type { MmrCandidate, RecallSearchResult } from "./types";
-import { DEFAULT_RECALL_MMR_LAMBDA } from "./types";
+import { DEFAULT_RECALL_MMR_LAMBDA, type RecallSearchResult } from "./types";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Configuration
@@ -31,11 +32,8 @@ const DEFAULT_HOT_WINDOW_TURNS = 5;
 /** Cosine distance threshold for cache invalidation. Below this = cache hit. */
 const DEFAULT_COSINE_THRESHOLD = 0.15;
 
-/** Default number of results to inject after MMR reranking. */
+/** Default number of results to inject after hybrid retrieval + MMR reranking. */
 const DEFAULT_TOP_K = 10;
-
-/** Oversample factor for LanceDB search before MMR reranking. */
-const SEARCH_OVERSAMPLE = 3;
 
 /** Maximum wall-clock time for the hydration pipeline (embed + search + MMR). */
 const MAX_HYDRATION_MS = 2000;
@@ -187,7 +185,9 @@ export function formatHydratedContext(results: RecallSearchResult[], currentSess
 
 export interface PassiveHydratorOptions {
 	store: RecallStore;
+	toolResultStore?: ToolResultStore;
 	license: string;
+	projectCwd: string;
 	sessionId?: string;
 	topK?: number;
 	mmrLambda?: number;
@@ -207,22 +207,26 @@ export interface HydrationResult {
 }
 
 export class PassiveHydrator {
-	#store: RecallStore;
 	#license: string;
 	#sessionId: string;
 	#cache: CosineCache;
 	#topK: number;
-	#mmrLambda: number;
 	#hotWindowTurns: number;
+	#retriever: HybridRetriever;
 
 	constructor(options: PassiveHydratorOptions) {
-		this.#store = options.store;
 		this.#license = options.license;
 		this.#sessionId = options.sessionId ?? "unknown";
 		this.#topK = options.topK ?? DEFAULT_TOP_K;
-		this.#mmrLambda = options.mmrLambda ?? DEFAULT_RECALL_MMR_LAMBDA;
 		this.#cache = new CosineCache(options.cosineThreshold ?? DEFAULT_COSINE_THRESHOLD);
 		this.#hotWindowTurns = options.hotWindowTurns ?? DEFAULT_HOT_WINDOW_TURNS;
+		this.#retriever = new HybridRetriever({
+			store: options.store,
+			toolResultStore: options.toolResultStore,
+			sessionId: this.#sessionId,
+			projectCwd: options.projectCwd,
+			mmrLambda: options.mmrLambda ?? DEFAULT_RECALL_MMR_LAMBDA,
+		});
 	}
 
 	/**
@@ -231,7 +235,7 @@ export class PassiveHydrator {
 	 * 1. Extract hot window text from conversation messages
 	 * 2. Embed the hot window
 	 * 3. Check cosine cache
-	 * 4. On miss: search LanceDB + MMR rerank
+	 * 4. On miss: run shared hybrid retrieval + MMR rerank
 	 * 5. Format results for injection
 	 *
 	 * The entire pipeline is time-bounded by MAX_HYDRATION_MS.
@@ -289,38 +293,36 @@ export class PassiveHydrator {
 			};
 		}
 
-		// 4. Search LanceDB
-		const searchLimit = this.#topK * SEARCH_OVERSAMPLE;
-		const searchResults = await this.#store.search(Array.from(embedding), searchLimit);
+		// 4. Run shared hybrid retrieval
+		const response = await this.#retriever.search({
+			query: hotWindowText,
+			queryVector: Array.from(embedding),
+			limit: this.#topK,
+			mode: "hybrid",
+			project: "all",
+		});
+		const topResults = response.results;
 
-		if (searchResults.length === 0) {
+		if (topResults.length === 0) {
 			this.#cache.update(embedding, []);
 			return { text: null, results: [], cacheHit: false, durationMs: Date.now() - start };
 		}
 
-		// 5. MMR rerank for diversity
-		const candidates: MmrCandidate<RecallSearchResult>[] = searchResults.map(r => ({
-			vector: r.vector,
-			// LanceDB _distance is L2 distance; convert to a similarity score.
-			// Lower distance = more similar = higher score.
-			score: 1 / (1 + r._distance),
-			data: r,
-		}));
-		const reranked = mmrRerank(candidates, this.#mmrLambda);
-		const topResults = reranked.slice(0, this.#topK).map(c => c.data);
-
-		// 6. Update cache
+		// 5. Update cache
 		this.#cache.update(embedding, topResults);
 
-		// 7. Format
+		// 6. Format
 		const text = formatHydratedContext(topResults, this.#sessionId);
 		const durationMs = Date.now() - start;
 
 		logger.debug("PassiveHydrator: hydration complete", {
-			searched: searchResults.length,
-			selected: topResults.length,
+			returned: topResults.length,
 			cacheHit: false,
 			durationMs: Math.round(durationMs),
+			semanticCandidates: response.trace.semanticCandidates,
+			keywordCandidates: response.trace.keywordCandidates,
+			resolvedKeywordCandidates: response.trace.resolvedKeywordCandidates,
+			fusedCandidates: response.trace.fusedCandidates,
 		});
 
 		return { text, results: topResults, cacheHit: false, durationMs };
