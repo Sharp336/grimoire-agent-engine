@@ -3,6 +3,7 @@ import { hash as hashObj } from "@lu-zero/bun-compat/bun";
 import { Archive } from "./archive.ts";
 import { build } from "./build.ts";
 import { listen, connect } from "./socket.ts";
+import natives from "../../packages/natives/src/index.ts";
 
 function hash(input: string | Uint8Array | ArrayBuffer, seed?: number): number {
   return Number(
@@ -75,7 +76,12 @@ function xxHash32(input: string | Uint8Array, seed: number = 0): number {
   return (h32 ^ (h32 >>> 16)) >>> 0;
 }
 (hash as unknown as Record<string, unknown>).xxHash64 = hashObj.xxHash64;
-(hash as unknown as Record<string, unknown>).wyhash = hashObj.wyhash;
+(hash as unknown as Record<string, unknown>).wyhash = function wyhashNative(
+  input: Uint8Array | string,
+  seed?: number,
+): bigint {
+  return natives.wyhash(input, seed) as bigint;
+};
 (hash as unknown as Record<string, unknown>).xxHash32 = xxHash32;
 
 function color(input: string | number, format: string): string | null {

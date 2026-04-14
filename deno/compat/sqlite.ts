@@ -3,20 +3,84 @@ import { type StatementSync } from "node:sqlite";
 
 type SqliteValue = string | number | bigint | Uint8Array | null;
 
-class Statement {
+export type SQLQueryBindings =
+  | null
+  | undefined
+  | number
+  | string
+  | bigint
+  | Uint8Array
+  | boolean
+  | Record<string, SqliteValue>
+  | SqliteValue[];
+
+export class Statement<
+  Row = Record<string, SqliteValue>,
+  Bindings extends SQLQueryBindings = SQLQueryBindings,
+> {
   #stmt: StatementSync;
+  #columnNames: string[] | null = null;
+
   constructor(stmt: StatementSync) {
     this.#stmt = stmt;
   }
-  get(...params: SqliteValue[]) {
-    return this.#stmt.get(...params) as Record<string, SqliteValue> | undefined;
+
+  get(...params: SqliteValue[]): Row | undefined {
+    const result = this.#stmt.get(...params);
+    return result as Row | undefined;
   }
-  all(...params: SqliteValue[]) {
-    return this.#stmt.all(...params) as Record<string, SqliteValue>[];
+
+  all(...params: SqliteValue[]): Row[] {
+    return this.#stmt.all(...params) as Row[];
   }
-  run(...params: SqliteValue[]) {
-    return this.#stmt.run(...params);
+
+  run(...params: SqliteValue[]): {
+    changes: number;
+    lastInsertRowid: number | bigint;
+  } {
+    return this.#stmt.run(...params) as {
+      changes: number;
+      lastInsertRowid: number | bigint;
+    };
   }
+
+  get columnNames(): string[] {
+    if (this.#columnNames === null) {
+      this.#columnNames = this.#stmt.columns().map((c) => c.name);
+    }
+    return this.#columnNames;
+  }
+
+  get paramsCount(): number {
+    const sql = this.#stmt.sourceSQL ?? "";
+    let count = 0;
+    let inString = false;
+    let stringChar = "";
+    for (let i = 0; i < sql.length; i++) {
+      const ch = sql[i];
+      if (inString) {
+        if (ch === stringChar && sql[i - 1] !== "\\") inString = false;
+        continue;
+      }
+      if (ch === "'" || ch === '"') {
+        inString = true;
+        stringChar = ch;
+        continue;
+      }
+      if (ch === "?") count++;
+      if (ch === "$" || ch === ":" || ch === "@") {
+        const rest = sql.slice(i);
+        if (/^[$:@]\d+/.test(rest)) {
+          count++;
+          while (i < sql.length && /\d/.test(sql[i]!)) i++;
+          i--;
+        }
+      }
+    }
+    return count;
+  }
+
+  finalize(): void {}
 }
 
 export class Database {
@@ -24,17 +88,24 @@ export class Database {
 
   constructor(
     path: string,
-    options?: { create?: boolean; readwrite?: boolean },
+    options?: {
+      create?: boolean;
+      readwrite?: boolean;
+      readonly?: boolean;
+      strict?: boolean;
+    },
   ) {
-    this.#db = new BaseDatabase(path, options);
+    this.#db = new BaseDatabase(path, {
+      create: options?.create,
+      readonly: options?.readonly,
+    });
   }
 
-  #wrapStmt(stmt: StatementSync): Statement {
-    return new Statement(stmt);
-  }
-
-  prepare(sql: string): Statement {
-    return this.#wrapStmt(this.#db.prepare(sql));
+  prepare<
+    Row = Record<string, SqliteValue>,
+    Bindings extends SQLQueryBindings = SQLQueryBindings,
+  >(sql: string): Statement<Row, Bindings> {
+    return new Statement(this.#db.prepare(sql));
   }
 
   run(sql: string, params?: Record<string, SqliteValue>) {
@@ -43,10 +114,6 @@ export class Database {
       return { changes: 0, lastInsertRowid: 0n };
     }
     return this.#db.run(sql, params);
-  }
-
-  query(sql: string, params?: Record<string, SqliteValue>) {
-    return this.#db.query(sql, params);
   }
 
   exec(sql: string) {
@@ -69,7 +136,18 @@ export class Database {
     this.#db.deserialize(fn);
   }
 
-  transaction<T>(fn: (...args: unknown[]) => T): (...args: unknown[]) => T {
-    return this.#db.transaction(fn) as (...args: unknown[]) => T;
+  transaction<T extends (...args: any[]) => any>(fn: T): T {
+    const wrapper = (...args: Parameters<T>): ReturnType<T> => {
+      this.#db.exec("BEGIN");
+      try {
+        const result = fn(...args);
+        this.#db.exec("COMMIT");
+        return result;
+      } catch (e) {
+        this.#db.exec("ROLLBACK");
+        throw e;
+      }
+    };
+    return wrapper as T;
   }
 }

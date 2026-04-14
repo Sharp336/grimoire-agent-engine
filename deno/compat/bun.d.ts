@@ -157,6 +157,20 @@ interface BunWhichOptions {
   PATH?: string;
 }
 
+interface BunCryptoHasher {
+  update(data: string | Uint8Array | ArrayBuffer | Buffer): BunCryptoHasher;
+  digest(
+    encoding?: "hex" | "base64" | "buffer" | "latin1",
+  ): Uint8Array | string;
+  digestSync(
+    encoding?: "hex" | "base64" | "buffer" | "latin1",
+  ): Uint8Array | string;
+}
+
+interface BunCryptoHasherConstructor {
+  new (algorithm: string): BunCryptoHasher;
+}
+
 interface BunSpawnOptions<
   In =
     | "pipe"
@@ -337,6 +351,7 @@ declare var Bun: {
 
   SpawnOptions: typeof Bun.SpawnOptions;
   WhichOptions: BunWhichOptions;
+  CryptoHasher: BunCryptoHasherConstructor;
 
   (strings: TemplateStringsArray, ...values: unknown[]): BunShellPromise;
 };

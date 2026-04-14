@@ -3,6 +3,7 @@ import "@lu-zero/bun-compat";
 import {
   $,
   type BunFile,
+  CryptoHasher,
   Database,
   type FFIType,
   Glob as BunCompatGlob,
@@ -37,6 +38,7 @@ import {
 export {
   $,
   type BunFile,
+  CryptoHasher,
   type Database,
   type FFIType,
   type JSCallback,
