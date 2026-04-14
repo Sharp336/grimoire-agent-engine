@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, spyOn, test, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, type Mock, spyOn, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -469,9 +469,10 @@ describe("listClaudePluginRoots", () => {
 		const found = result.all.find(command => command.name === "manifest-commands-outside:ship");
 
 		expect(found).toBeUndefined();
+		});
 
 	describe("XDG data directory support", () => {
-		let homedirSpy: ReturnType<typeof spyOn> | undefined;
+		let homedirSpy: Mock<() => string> | undefined;
 		let savedXdgDataHome: string | undefined;
 
 		beforeEach(() => {

@@ -130,8 +130,10 @@ class DirResolver {
 		this.agentDir = agentDirOverride ? path.resolve(agentDirOverride) : defaultAgent;
 		const isDefault = this.agentDir === defaultAgent;
 
-		// XDG is a Linux convention. On other platforms, or for non-default
-		// profiles, all categories resolve to the legacy paths.
+		// XDG is a Linux convention, but macOS users sometimes configure these vars
+		// (e.g. via Homebrew dotfiles or Nix). We respect them on darwin too; the
+		// directory-existence guard below prevents accidental activation on systems
+		// where the vars are set but no migration has been done.
 		let xdgData: string | undefined;
 		let xdgState: string | undefined;
 		let xdgCache: string | undefined;
@@ -244,12 +246,26 @@ export function getPluginsDir(): string {
 /**
  * Resolves the plugins directory path for the given user home, respecting XDG.
  * Uses the same activation condition as DirResolver: $XDG_DATA_HOME/omp directory must exist.
- * When `home` differs from the current os.homedir(), XDG is not applied —
- * this preserves test isolation when a caller passes a temp directory as home.
+ *
+ * XDG is a Linux convention, but macOS users sometimes configure XDG_DATA_HOME
+ * (e.g. via Homebrew dotfiles or Nix). darwin is therefore treated identically
+ * to linux. The directory-existence guard prevents activation on systems where
+ * the var is set but data has not been migrated.
+ *
+ * When `home` differs from os.homedir(), or when the agent dir is non-default
+ * (matching DirResolver's `isDefault` guard exactly: PI_CODING_AGENT_DIR must
+ * be unset or point to the same path as the default agent dir), XDG is not
+ * applied — preserving test isolation and consistency with the write path.
  */
 export function resolveUserPluginsDir(home: string): string {
+	// Replicate DirResolver's `isDefault` guard exactly: XDG is skipped when a
+	// non-default agent dir is active. This mirrors `isDefault = agentDir === defaultAgent`.
+	const _agentDirOverride = process.env.PI_CODING_AGENT_DIR;
+	const _isDefaultAgentDir =
+		!_agentDirOverride || path.resolve(_agentDirOverride) === path.join(home, getConfigDirName(), "agent");
 	if (
 		(process.platform === "linux" || process.platform === "darwin") &&
+		_isDefaultAgentDir &&
 		path.resolve(home) === path.resolve(os.homedir())
 	) {
 		const xdgData = process.env.XDG_DATA_HOME;
