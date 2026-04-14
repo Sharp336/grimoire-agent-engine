@@ -35,6 +35,7 @@ pub mod fs_cache;
 pub mod glob;
 pub mod glob_util;
 pub mod grep;
+pub mod hash;
 pub mod highlight;
 pub mod html;
 pub mod image;

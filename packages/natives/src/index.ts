@@ -148,6 +148,7 @@ export const invalidateFsScanCache = bindings.invalidateFsScanCache;
 export const formatAnchor = bindings.formatAnchor;
 export const profileStart = bindings.profileStart;
 export const profileStop = bindings.profileStop;
+export const wyhash = bindings.wyhash;
 export const DapSession = bindings.DapSession;
 
 export const {

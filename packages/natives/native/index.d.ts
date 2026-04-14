@@ -1363,3 +1363,5 @@ export interface WorkProfile {
  * Returns UTF-16 lines with active SGR codes carried across line boundaries.
  */
 export declare function wrapTextWithAnsi(text: string, width: number, tabWidth: number): Array<string>
+
+export declare function wyhash(input: string | Buffer, seed?: number | undefined | null): bigint

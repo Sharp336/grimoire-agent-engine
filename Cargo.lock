@@ -2272,6 +2272,7 @@ dependencies = [
  "webp",
  "windows-sys 0.61.2",
  "winreg 0.55.0",
+ "wyhash-final4",
  "xxhash-rust",
 ]
 
@@ -4420,6 +4421,12 @@ name = "writeable"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ffae5123b2d3fc086436f8834ae3ab053a283cfac8fe0a0b8eaae044768a4c4"
+
+[[package]]
+name = "wyhash-final4"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e19276aeff1b4987182db862cc0e75a79023528cd1ec951ea3bd6cddba029c7d"
 
 [[package]]
 name = "wyz"
