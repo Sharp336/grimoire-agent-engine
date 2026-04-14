@@ -162,14 +162,19 @@ export async function compileSystemPrompt(options: CompileOptions): Promise<Comp
 		contentBlockCount: response.content.length,
 	});
 
-	const systemPrompt = extractCompiledPrompt(response);
+	let systemPrompt = extractCompiledPrompt(response);
 	if (!systemPrompt) {
 		logger.error("composer: response text extraction failed", {
 			contentBlockCount: response.content.length,
 		});
 		throw new Error("composer: compilation produced empty output");
 	}
-	validateCompiledPrompt(systemPrompt, invariants);
+	try {
+		validateCompiledPrompt(systemPrompt, invariants);
+	} catch {
+		logger.warn("composer: invariants missing from compiled prompt, appending");
+		systemPrompt = `${systemPrompt}\n\n${invariants}`;
+	}
 
 	logger.debug("composer: compiled", {
 		durationMs,
