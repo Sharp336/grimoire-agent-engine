@@ -18,6 +18,22 @@ afterEach(() => {
 	}
 });
 
+describe("openai stream idle timeout", () => {
+	it("defaults to 120 seconds when unset", () => {
+		delete Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS;
+
+		expect(getOpenAIStreamIdleTimeoutMs()).toBe(120_000);
+	});
+
+	it("drives the first-event timeout floor when no override is set", () => {
+		delete Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
+		delete Bun.env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS;
+
+		expect(getStreamFirstEventTimeoutMs(getOpenAIStreamIdleTimeoutMs())).toBe(120_000);
+	});
+});
+
+
 describe("stream first-event timeouts", () => {
 	it("defaults to 45 seconds when unset", () => {
 		delete Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;
