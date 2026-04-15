@@ -1,5 +1,4 @@
 import "@lu-zero/bun-compat";
-import { hash as hashCallable } from "@lu-zero/bun-compat/bun";
 import { Archive } from "./archive.ts";
 import { build } from "./build.ts";
 import { listen, connect } from "./socket.ts";
@@ -46,7 +45,6 @@ function color(input: string | number, format: string): string | null {
 
 const g = globalThis as unknown as Record<string, Record<string, unknown>>;
 if (g.Bun) {
-  g.Bun.hash = hashCallable as unknown as Record<string, unknown>;
   g.Bun.Archive = Archive;
   g.Bun.build = build as unknown as Record<string, unknown>;
   g.Bun.listen = listen as unknown as Record<string, unknown>;
@@ -54,39 +52,6 @@ if (g.Bun) {
   g.Bun.color = color;
   g.Bun.version ??= "1.3.7";
   g.Bun.nanoseconds = () => performance.now() * 1e6;
-
-  const rawEnv = g.Bun.env as Record<string, string>;
-  const envProxy = new Proxy(rawEnv, {
-    get(target, prop: string) {
-      const val = Deno.env.get(prop);
-      return val === undefined ? undefined : val;
-    },
-    set(_target, prop: string, value: string) {
-      Deno.env.set(prop, value);
-      return true;
-    },
-    deleteProperty(_target, prop: string) {
-      Deno.env.delete(prop);
-      return true;
-    },
-    ownKeys() {
-      return Reflect.ownKeys(Deno.env.toObject());
-    },
-    getOwnPropertyDescriptor(_target, prop: string) {
-      const val = Deno.env.get(prop);
-      if (val === undefined) return undefined;
-      return {
-        configurable: true,
-        enumerable: true,
-        value: val,
-        writable: true,
-      };
-    },
-    has(_target, prop: string) {
-      return Deno.env.get(prop) !== undefined;
-    },
-  });
-  g.Bun.env = envProxy;
 }
 
 {
