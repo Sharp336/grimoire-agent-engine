@@ -147,8 +147,6 @@ function applyGlobalModelsDevFallback(models: readonly Model[], modelsDevModels:
 			name: reference.name,
 			reasoning: reference.reasoning,
 			input: reference.input,
-			contextWindow: reference.contextWindow,
-			maxTokens: reference.maxTokens,
 		};
 	});
 }

@@ -69,7 +69,7 @@ describe("github copilot model limits mapping", () => {
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
-	it("uses capabilities.limits max_context_window_tokens as context window when context_length is absent", async () => {
+	it("uses capabilities.limits max_prompt_tokens as context window when context_length is absent", async () => {
 		const { models, fetchMock } = await discoverCopilotModels({
 			data: [
 				{
@@ -88,7 +88,7 @@ describe("github copilot model limits mapping", () => {
 
 		const model = models.find(candidate => candidate.id === "gemini-2.5-pro");
 		expect(model).toBeDefined();
-		expect(model?.contextWindow).toBe(1_048_576);
+		expect(model?.contextWindow).toBe(128_000);
 		expect(model?.maxTokens).toBe(64_000);
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
@@ -138,7 +138,7 @@ describe("github copilot model limits mapping", () => {
 
 		const model = models.find(candidate => candidate.id === "claude-opus-4.6");
 		expect(model).toBeDefined();
-		expect(model?.contextWindow).toBe(200_000);
+		expect(model?.contextWindow).toBe(128_000);
 		expect(model?.maxTokens).toBe(16_000);
 	});
 
@@ -179,5 +179,42 @@ describe("github copilot model limits mapping", () => {
 			minLevel: Effort.Low,
 			maxLevel: Effort.XHigh,
 		});
+	});
+
+	it("does not use max_context_window_tokens for contextWindow", async () => {
+		const { models } = await discoverCopilotModels({
+			data: [
+				{
+					id: "gpt-5.4",
+					name: "GPT-5.4",
+					capabilities: {
+						limits: {
+							max_context_window_tokens: 400_000,
+							max_output_tokens: 128_000,
+						},
+					},
+				},
+			],
+		});
+
+		const model = models.find(candidate => candidate.id === "gpt-5.4");
+		expect(model).toBeDefined();
+		expect(model?.contextWindow).toBe(272_000);
+		expect(model?.maxTokens).toBe(128_000);
+	});
+
+	it("prefers Copilot-specific bundled reference over global reference", async () => {
+		const { models } = await discoverCopilotModels({
+			data: [
+				{
+					id: "gpt-5.4",
+					name: "GPT-5.4",
+				},
+			],
+		});
+
+		const model = models.find(candidate => candidate.id === "gpt-5.4");
+		expect(model).toBeDefined();
+		expect(model?.contextWindow).toBe(272_000);
 	});
 });
