@@ -133,10 +133,10 @@ async function fetchOllamaUsageOutput(cookie: string): Promise<OllamaUsageJson> 
 function buildPrereqNote(): string {
 	const parts: string[] = [];
 	if (!checkOllamaUsageAvailable()) {
-		parts.push("install ollama-usage CLI (pip install ollama-usage)");
+		parts.push("install ollama-usage CLI (pip install git+https://github.com/florian-croiset/ollama-usage)");
 	}
 	if (!getBrowserCookie()) {
-		parts.push("set OLLAMA_BROWSER_COOKIE env var");
+		parts.push("set OLLAMA_BROWSER_COOKIE env var (See https://github.com/florian-croiset/ollama-usage?tab=readme-ov-file#finding-your-cookie-manually for info.");
 	}
 	return parts.length > 0 ? `Requires: ${parts.join(" and ")}` : "";
 }

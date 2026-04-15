@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed usage report renderer to display warning icon and `metadata.note` for providers with zero limits instead of showing "no limits"
+
 ## [14.1.1] - 2026-04-14
 
 ### Breaking Changes

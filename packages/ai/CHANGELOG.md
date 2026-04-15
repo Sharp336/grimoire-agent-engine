@@ -2,6 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Ollama Cloud provider (`ollama-cloud`) with OpenAI-compatible API routing via `https://ollama.com/v1`
+- Added 36 bundled Ollama Cloud models with context windows, input modalities, and thinking capabilities from `/api/tags` metadata
+- Added Ollama Cloud login flow directing users to `https://ollama.com/settings/keys` for API key creation
+- Added Ollama Cloud usage provider using `ollama-usage` CLI with `OLLAMA_BROWSER_COOKIE` for session and weekly quota tracking
+- Added `metadata.note` rendering in usage reports to display prerequisite warnings when `ollama-usage` CLI or `OLLAMA_BROWSER_COOKIE` is missing
+
+### Changed
+
+- Changed Ollama Cloud dynamic model discovery to merge with bundled references, falling back to 222k context window for unknown models
+
 ## [14.1.1] - 2026-04-14
 
 ### Added
