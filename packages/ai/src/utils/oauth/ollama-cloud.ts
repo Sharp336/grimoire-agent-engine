@@ -42,5 +42,9 @@ export async function loginOllamaCloud(options: OAuthController): Promise<string
 		throw new Error("Login cancelled");
 	}
 
-	return apiKey.trim();
+	const trimmed = apiKey.trim();
+	if (!trimmed) {
+		return "";
+	}
+	return trimmed;
 }

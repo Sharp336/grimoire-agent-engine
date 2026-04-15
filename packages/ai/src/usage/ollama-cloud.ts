@@ -26,6 +26,9 @@ import type {
 const FIVE_HOURS_MS = 5 * 60 * 60 * 1000;
 const SEVEN_DAYS_MS = 7 * 24 * 60 * 60 * 1000;
 
+const OLLAMA_USAGE_REPO = "https://github.com/1ts-Alec/ollama-usage";
+const MAX_STDERR_LENGTH = 200;
+
 interface OllamaUsageJson {
 	plan: string;
 	session: {
@@ -36,6 +39,20 @@ interface OllamaUsageJson {
 		used_pct: number;
 		resets_at: string;
 	};
+}
+
+function isValidUsageJson(value: unknown): value is OllamaUsageJson {
+	if (typeof value !== "object" || value === null) return false;
+	const obj = value as Record<string, unknown>;
+	if (typeof obj.plan !== "string") return false;
+	for (const key of ["session", "weekly"] as const) {
+		const bucket = obj[key];
+		if (typeof bucket !== "object" || bucket === null) return false;
+		const b = bucket as Record<string, unknown>;
+		if (typeof b.used_pct !== "number") return false;
+		if (typeof b.resets_at !== "string") return false;
+	}
+	return true;
 }
 
 function parseIsoTime(value: string | undefined): number | undefined {
@@ -98,51 +115,69 @@ function buildLimit(args: {
 	};
 }
 
-function checkOllamaUsageAvailable(): boolean {
+let ollamaUsageAvailable: boolean | undefined;
+
+async function checkOllamaUsageAvailable(): Promise<boolean> {
+	if (ollamaUsageAvailable !== undefined) return ollamaUsageAvailable;
 	try {
-		const result = Bun.spawnSync(["ollama-usage", "--version"], {
-			stdout: "pipe",
-			stderr: "pipe",
+		const proc = Bun.spawn(["ollama-usage", "--version"], {
+			stdout: "ignore",
+			stderr: "ignore",
 		});
-		return result.exitCode === 0;
+		const exitCode = await proc.exited;
+		ollamaUsageAvailable = exitCode === 0;
 	} catch {
-		return false;
+		ollamaUsageAvailable = false;
 	}
+	return ollamaUsageAvailable;
 }
 
 function getBrowserCookie(): string | undefined {
 	return Bun.env.OLLAMA_BROWSER_COOKIE?.trim() || undefined;
 }
 
+// The cookie is passed via OLLAMA_BROWSER_COOKIE env var — never as a CLI
+// argument, which would be visible in the process list to all local users.
 async function fetchOllamaUsageOutput(cookie: string): Promise<OllamaUsageJson> {
-	const proc = Bun.spawn(["ollama-usage", "--cookie", cookie, "--json"], {
+	const proc = Bun.spawn(["ollama-usage", "--json"], {
 		stdout: "pipe",
 		stderr: "pipe",
+		env: { ...process.env, OLLAMA_BROWSER_COOKIE: cookie },
 	});
 
 	const exitCode = await proc.exited;
 	if (exitCode !== 0) {
 		const stderr = await new Response(proc.stderr).text();
-		throw new Error(`ollama-usage exited with code ${exitCode}: ${stderr.trim()}`);
+		const sanitized = stderr
+			.trim()
+			.slice(0, MAX_STDERR_LENGTH)
+			.replaceAll(/[\t\r]/g, " ");
+		throw new Error(`ollama-usage exited with code ${exitCode}: ${sanitized}`);
 	}
 
 	const stdout = await new Response(proc.stdout).text();
-	return JSON.parse(stdout) as OllamaUsageJson;
+	const parsed: unknown = JSON.parse(stdout);
+	if (!isValidUsageJson(parsed)) {
+		throw new Error("ollama-usage returned unexpected JSON shape");
+	}
+	return parsed;
 }
 
-function buildPrereqNote(): string {
+async function buildPrereqNote(): Promise<string> {
 	const parts: string[] = [];
-	if (!checkOllamaUsageAvailable()) {
-		parts.push("install ollama-usage CLI (pip install git+https://github.com/florian-croiset/ollama-usage)");
+	if (!(await checkOllamaUsageAvailable())) {
+		parts.push(`install ollama-usage CLI (pip install git+${OLLAMA_USAGE_REPO})`);
 	}
 	if (!getBrowserCookie()) {
-		parts.push("set OLLAMA_BROWSER_COOKIE env var (See https://github.com/florian-croiset/ollama-usage?tab=readme-ov-file#finding-your-cookie-manually for info.");
+		parts.push(
+			`set OLLAMA_BROWSER_COOKIE env var (see ${OLLAMA_USAGE_REPO}?tab=readme-ov-file#finding-your-cookie-manually for info)`,
+		);
 	}
 	return parts.length > 0 ? `Requires: ${parts.join(" and ")}` : "";
 }
 
-function buildPrereqReport(): UsageReport {
-	const note = buildPrereqNote();
+async function buildPrereqReport(): Promise<UsageReport> {
+	const note = await buildPrereqNote();
 	return {
 		provider: "ollama-cloud",
 		fetchedAt: Date.now(),
@@ -155,7 +190,7 @@ function buildPrereqReport(): UsageReport {
 
 async function fetchOllamaCloudUsage(_params: UsageFetchParams, _ctx: UsageFetchContext): Promise<UsageReport | null> {
 	const cookie = getBrowserCookie();
-	const cliAvailable = checkOllamaUsageAvailable();
+	const cliAvailable = await checkOllamaUsageAvailable();
 
 	if (!cliAvailable || !cookie) {
 		return buildPrereqReport();
@@ -165,7 +200,6 @@ async function fetchOllamaCloudUsage(_params: UsageFetchParams, _ctx: UsageFetch
 	try {
 		output = await fetchOllamaUsageOutput(cookie);
 	} catch (error) {
-		// If the CLI fails, return a report with the error as a note
 		return {
 			provider: "ollama-cloud",
 			fetchedAt: Date.now(),
@@ -176,9 +210,9 @@ async function fetchOllamaCloudUsage(_params: UsageFetchParams, _ctx: UsageFetch
 		};
 	}
 
-	const plan = output.plan ?? "unknown";
-	const sessionResetsAt = parseIsoTime(output.session?.resets_at);
-	const weeklyResetsAt = parseIsoTime(output.weekly?.resets_at);
+	const plan = output.plan;
+	const sessionResetsAt = parseIsoTime(output.session.resets_at);
+	const weeklyResetsAt = parseIsoTime(output.weekly.resets_at);
 
 	const limits = [
 		buildLimit({
@@ -187,7 +221,7 @@ async function fetchOllamaCloudUsage(_params: UsageFetchParams, _ctx: UsageFetch
 			windowId: "session",
 			windowLabel: "Session",
 			durationMs: FIVE_HOURS_MS,
-			usedPct: output.session?.used_pct,
+			usedPct: output.session.used_pct,
 			resetsAt: sessionResetsAt,
 			plan,
 		}),
@@ -197,7 +231,7 @@ async function fetchOllamaCloudUsage(_params: UsageFetchParams, _ctx: UsageFetch
 			windowId: "weekly",
 			windowLabel: "Weekly",
 			durationMs: SEVEN_DAYS_MS,
-			usedPct: output.weekly?.used_pct,
+			usedPct: output.weekly.used_pct,
 			resetsAt: weeklyResetsAt,
 			plan,
 		}),
