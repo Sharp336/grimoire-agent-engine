@@ -41,6 +41,8 @@ packages/ai/test/.temp-images/
 # Project specific
 !.omp/
 .omp/plugins/
+.omp/agents/
+.omp/hooks/
 .mcp.json
 .oh/.cache/
 .fastembed_cache/
@@ -50,6 +52,12 @@ packages/ai/test/.temp-images/
 compaction-results/
 changes/
 __pycache__/
+
+bench/
+benchmark/
+logs/
+oh-omp.oh-omp-batch-10.json
+oh-omp.oh-omp-test-1.json
 
 # Scratch files
 syntax.jsonl
