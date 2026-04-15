@@ -1225,9 +1225,16 @@ function renderUsageReports(reports: UsageReport[], uiTheme: typeof theme, nowMs
 			const label = formatUnlimitedReportLabel(report, 0);
 			const tier = report.metadata?.planType as string | undefined;
 			const tierSuffix = tier ? ` ${uiTheme.fg("dim", `(${tier})`)}` : "";
-			lines.push(
-				`${uiTheme.fg("success", uiTheme.status.success)} ${label}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
-			);
+			const note = report.metadata?.note as string | undefined;
+			if (note) {
+				lines.push(
+					`${uiTheme.fg("warning", uiTheme.status.warning)} ${label}${tierSuffix} ${uiTheme.fg("dim", note)}`,
+				);
+			} else {
+				lines.push(
+					`${uiTheme.fg("success", uiTheme.status.success)} ${label}${tierSuffix} ${uiTheme.fg("dim", "-- no limits")}`,
+				);
+			}
 		}
 		// No per-provider footer; global header shows last check.
 	}

@@ -26,6 +26,7 @@ import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityUsageProvider } from "./usage/google-antigravity";
 import { kimiUsageProvider } from "./usage/kimi";
+import { ollamaCloudUsageProvider } from "./usage/ollama-cloud";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
 import { zaiUsageProvider } from "./usage/zai";
 import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken } from "./utils/oauth";
@@ -51,6 +52,7 @@ import { loginMoonshot } from "./utils/oauth/moonshot";
 import { loginNanoGPT } from "./utils/oauth/nanogpt";
 import { loginNvidia } from "./utils/oauth/nvidia";
 import { loginOllama } from "./utils/oauth/ollama";
+import { loginOllamaCloud } from "./utils/oauth/ollama-cloud";
 import { loginOpenAICodex } from "./utils/oauth/openai-codex";
 import { loginOpenCode } from "./utils/oauth/opencode";
 import { loginParallel } from "./utils/oauth/parallel";
@@ -158,6 +160,7 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	claudeUsageProvider,
 	zaiUsageProvider,
 	githubCopilotUsageProvider,
+	ollamaCloudUsageProvider,
 ];
 
 const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(
@@ -828,6 +831,14 @@ export class AuthStorage {
 			}
 			case "ollama": {
 				const apiKey = await loginOllama(ctrl);
+				if (!apiKey) {
+					return;
+				}
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
+			case "ollama-cloud": {
+				const apiKey = await loginOllamaCloud(ctrl);
 				if (!apiKey) {
 					return;
 				}

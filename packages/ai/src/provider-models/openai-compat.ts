@@ -645,6 +645,47 @@ export function ollamaModelManagerOptions(config?: OllamaModelManagerConfig): Mo
 }
 
 // ---------------------------------------------------------------------------
+// 9b. Ollama Cloud
+// ---------------------------------------------------------------------------
+
+export interface OllamaCloudModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+export function ollamaCloudModelManagerOptions(
+	config?: OllamaCloudModelManagerConfig,
+): ModelManagerOptions<"openai-responses"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://ollama.com/v1";
+	const references = createBundledReferenceMap<"openai-responses">("ollama-cloud");
+	return {
+		providerId: "ollama-cloud",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-responses",
+					provider: "ollama-cloud",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id);
+						if (!reference) {
+							return {
+								...defaults,
+								name: toModelName(entry.name, defaults.name),
+								contextWindow: 222000,
+								maxTokens: 16384,
+							};
+						}
+						return mapWithBundledReference(entry, defaults, reference);
+					},
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 10. OpenRouter
 // ---------------------------------------------------------------------------
 
@@ -2041,7 +2082,10 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 			return model;
 		},
 	}),
+	// --- Ollama Cloud ---
+	openAiCompletionsDescriptor("ollama-cloud", "ollama-cloud", "https://ollama.com/v1"),
 	// --- MiniMax (Anthropic) ---
+
 	anthropicMessagesDescriptor("minimax", "minimax", "https://api.minimax.io/anthropic"),
 	anthropicMessagesDescriptor("minimax-cn", "minimax-cn", "https://api.minimaxi.com/anthropic"),
 	// --- Qwen Portal ---

@@ -23,6 +23,7 @@ import {
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
 	nvidiaModelManagerOptions,
+	ollamaCloudModelManagerOptions,
 	ollamaModelManagerOptions,
 	openaiModelManagerOptions,
 	opencodeGoModelManagerOptions,
@@ -183,6 +184,12 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		config => ollamaModelManagerOptions(config),
 		catalog("Ollama", ["OLLAMA_API_KEY"]),
 		{ allowUnauthenticated: true },
+	),
+	catalogDescriptor(
+		"ollama-cloud",
+		"qwen3-coder-next",
+		config => ollamaCloudModelManagerOptions(config),
+		catalog("Ollama Cloud", ["OLLAMA_CLOUD_API_KEY"]),
 	),
 	catalogDescriptor(
 		"cloudflare-ai-gateway",

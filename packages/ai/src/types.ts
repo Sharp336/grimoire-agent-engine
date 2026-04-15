@@ -119,6 +119,7 @@ export type KnownProvider =
 	| "nvidia"
 	| "nanogpt"
 	| "ollama"
+	| "ollama-cloud"
 	| "qianfan"
 	| "qwen-portal"
 	| "together"
