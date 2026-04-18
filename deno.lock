@@ -1,17 +1,25 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@lu-zero/bun-compat@0.3": "0.3.0",
     "jsr:@std/collections@^1.1.3": "1.1.6",
     "jsr:@std/fs@*": "1.0.23",
+    "jsr:@std/fs@1": "1.0.23",
     "jsr:@std/internal@^1.0.12": "1.0.12",
     "jsr:@std/json@^1.0.2": "1.0.3",
     "jsr:@std/jsonc@*": "1.0.2",
+    "jsr:@std/jsonc@1": "1.0.2",
     "jsr:@std/media-types@*": "1.1.0",
+    "jsr:@std/media-types@1": "1.1.0",
     "jsr:@std/path@*": "1.1.4",
+    "jsr:@std/path@1": "1.1.4",
     "jsr:@std/path@^1.1.4": "1.1.4",
     "jsr:@std/semver@*": "1.0.8",
+    "jsr:@std/semver@1": "1.0.8",
     "jsr:@std/toml@*": "1.0.11",
+    "jsr:@std/toml@1": "1.0.11",
     "jsr:@std/yaml@*": "1.0.12",
+    "jsr:@std/yaml@1": "1.0.12",
     "npm:@agentclientprotocol/sdk@0.16.1": "0.16.1_zod@4.3.6",
     "npm:@anthropic-ai/sdk@0.78": "0.78.0_zod@4.3.6",
     "npm:@aws-sdk/client-bedrock-runtime@3": "3.1030.0",
@@ -57,6 +65,18 @@
     "npm:zod@4.3.6": "4.3.6"
   },
   "jsr": {
+    "@lu-zero/bun-compat@0.3.0": {
+      "integrity": "4c5c64ec3e50c16def95633a888278cb322c077e6611a880f301ace529d62204",
+      "dependencies": [
+        "jsr:@std/fs@1",
+        "jsr:@std/jsonc@1",
+        "jsr:@std/media-types@1",
+        "jsr:@std/path@1",
+        "jsr:@std/semver@1",
+        "jsr:@std/toml@1",
+        "jsr:@std/yaml@1"
+      ]
+    },
     "@std/collections@1.1.6": {
       "integrity": "b458160ce65ea5ad35da05d0a5cbee4b583677c8b443a10d7beb0c4ac63f2baa"
     },
@@ -2709,6 +2729,7 @@
   },
   "workspace": {
     "dependencies": [
+      "jsr:@lu-zero/bun-compat@0.3",
       "jsr:@std/fs@*",
       "jsr:@std/jsonc@*",
       "jsr:@std/media-types@*",

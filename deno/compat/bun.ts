@@ -4,8 +4,9 @@ import {
   $,
   type BunFile,
   CryptoHasher,
-  Database,
+  type Database,
   type FFIType,
+  FileSink,
   Glob as BunCompatGlob,
   inspect,
   type JSCallback,
@@ -45,6 +46,7 @@ export {
   CryptoHasher,
   type Database,
   type FFIType,
+  FileSink,
   type JSCallback,
   JSON5,
   JSONC,
@@ -93,7 +95,10 @@ export type BunWhichOptions = { cwd?: string; PATH?: string };
 
 export { defineEnum, defineStruct } from "@lu-zero/bun-compat/ffi-structs";
 
-import { Archive } from "./archive.ts";
+import { Archive } from "@lu-zero/bun-compat/archive";
+import { listen, connect } from "@lu-zero/bun-compat/socket";
+
+export { Archive, listen, connect };
 
 class Glob extends BunCompatGlob {
   override scan(

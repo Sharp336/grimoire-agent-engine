@@ -1,4 +1,4 @@
-import "/Users/lu_zero/Sources/bun-harness/oh-my-pi/deno/compat/bootstrap.ts";
+import "./bootstrap.ts";
 
 const entry = Deno.args[0];
 if (!entry) {

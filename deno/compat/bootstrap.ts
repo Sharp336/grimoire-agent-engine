@@ -1,7 +1,6 @@
 import "@lu-zero/bun-compat";
-import { Archive } from "./archive.ts";
-import { build } from "./build.ts";
-import { listen, connect } from "./socket.ts";
+import { Archive } from "@lu-zero/bun-compat/archive";
+import { listen, connect } from "@lu-zero/bun-compat/socket";
 
 function color(input: string | number, format: string): string | null {
   if (typeof input === "number") {
@@ -46,12 +45,29 @@ function color(input: string | number, format: string): string | null {
 const g = globalThis as unknown as Record<string, Record<string, unknown>>;
 if (g.Bun) {
   g.Bun.Archive = Archive;
-  g.Bun.build = build as unknown as Record<string, unknown>;
   g.Bun.listen = listen as unknown as Record<string, unknown>;
   g.Bun.connect = connect as unknown as Record<string, unknown>;
   g.Bun.color = color;
   g.Bun.version ??= "1.3.7";
   g.Bun.nanoseconds = () => performance.now() * 1e6;
+}
+
+function toBunTimer(id: unknown): BunTimer {
+  const num = typeof id === "number" ? id : 0;
+  const timer = {
+    [Symbol.toPrimitive]: () => num,
+    ref() {
+      return timer;
+    },
+    unref() {
+      return timer;
+    },
+    hasRef: () => false,
+    refresh() {
+      return timer;
+    },
+  } as BunTimer;
+  return timer;
 }
 
 {
@@ -63,15 +79,7 @@ if (g.Bun) {
     ...args: unknown[]
   ) {
     const id = origSetInterval(cb, ms, ...args);
-    return typeof id === "number"
-      ? {
-          [Symbol.toPrimitive]: () => id,
-          unref: () => {},
-          ref: () => {},
-          hasRef: () => false,
-          refresh: () => id,
-        }
-      : id;
+    return toBunTimer(id);
   } as unknown as typeof globalThis.setInterval;
   globalThis.setTimeout = function (
     cb: (...args: unknown[]) => void,
@@ -79,17 +87,17 @@ if (g.Bun) {
     ...args: unknown[]
   ) {
     const id = origSetTimeout(cb, ms, ...args);
-    return typeof id === "number"
-      ? {
-          [Symbol.toPrimitive]: () => id,
-          unref: () => {},
-          ref: () => {},
-          hasRef: () => false,
-          refresh: () => id,
-        }
-      : id;
+    return toBunTimer(id);
   } as unknown as typeof globalThis.setTimeout;
+  globalThis.clearTimeout = function (id?: BunTimer | number) {
+    if (typeof id === "number") {
+      try {
+        // deno-lint-ignore no-explicit-any
+        (Deno as any).unrefTimer(id);
+      } catch {}
+    }
+  } as unknown as typeof globalThis.clearTimeout;
 }
 
-export { Archive } from "./archive.ts";
-export { Database } from "./sqlite.ts";
+export { Archive } from "@lu-zero/bun-compat/archive";
+export { Database } from "@lu-zero/bun-compat/sqlite";

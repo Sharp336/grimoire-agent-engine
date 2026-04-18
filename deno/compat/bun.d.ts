@@ -1,3 +1,23 @@
+interface BunStat {
+  size: number;
+  mtimeMs: number | null;
+  atimeMs: number | null;
+  ctimeMs: number | null;
+  birthtimeMs: number | null;
+  mode: number | null;
+  uid: number | null;
+  gid: number | null;
+  dev: number | null;
+  ino: number | bigint | null;
+  nlink: number | null;
+  rdev: number | null;
+  blksize: number | null;
+  blocks: number | null;
+  isFile(): boolean;
+  isDirectory(): boolean;
+  isSymlink(): boolean;
+}
+
 interface BunFile {
   text(): Promise<string>;
   json(): Promise<unknown>;
@@ -8,9 +28,20 @@ interface BunFile {
   size: number;
   type: string | null;
   path: string;
-  stat(): Promise<{ size: number; mtimeMs?: number } | null>;
+  stat(): Promise<BunStat | null>;
   readable: ReadableStream<Uint8Array>;
-  writer: WritableStream<Uint8Array>;
+  writer(): BunFileSink;
+  slice(start?: number, end?: number, contentType?: string): BunFile;
+  unlink(): Promise<void>;
+  get writable(): WritableStream<Uint8Array>;
+}
+
+interface BunFileSink {
+  write(data: string | Uint8Array): number;
+  flush(): number | undefined;
+  end(): void;
+  ref(): void;
+  unref(): void;
 }
 
 interface BunSubprocess<
@@ -43,7 +74,7 @@ interface BunSubprocess<
     | WritableStream,
 > {
   pid: number;
-  stdin: In extends "pipe" ? WritableStream<Uint8Array> : null;
+  stdin: In extends "pipe" ? BunSpawnOptionsWritableToIO<Uint8Array> : null;
   stdout: Out extends "pipe" ? ReadableStream<Uint8Array> : null;
   stderr: Err extends "pipe" ? ReadableStream<Uint8Array> : null;
   exited: Promise<number>;
@@ -84,6 +115,7 @@ interface BunArchiveConstructor {
 
 interface BunGlobInstance {
   scan(options?: BunGlobScanOptions): AsyncIterable<string> & Promise<string[]>;
+  scanSync(options?: BunGlobScanOptions): string[];
   match(path: string): boolean;
 }
 
@@ -102,6 +134,7 @@ interface BunGlobScanOptions {
 
 interface BunHashCallable {
   (input: string | Uint8Array | ArrayBuffer, seed?: number | string): number;
+  xxHash32(input: string | Uint8Array, seed?: number): number;
   xxHash64(input: string | Uint8Array, seed?: number): string;
   wyhash(input: string | Uint8Array, seed?: number): string;
 }
@@ -208,6 +241,24 @@ interface BunSpawnOptions<
   stderr?: Err;
   onExit?(subprocess: BunSubprocess<In, Out, Err>, exitCode: number): void;
   windowsHide?: boolean;
+  signal?: AbortSignal;
+  timeout?: number;
+}
+
+interface BunServer {
+  port: number;
+  hostname: string;
+  stop(): void;
+  ref(): void;
+  unref(): void;
+}
+
+interface BunSpawnOptionsWritableToIO<T> extends WritableStream<T> {
+  write(data: string | Uint8Array): number;
+  flush(): number | undefined;
+  end(): void;
+  ref(): void;
+  unref(): void;
 }
 
 type Dict<T> = Record<string, T>;
@@ -224,6 +275,7 @@ declare class Buffer extends Uint8Array {
     data: string | ArrayLike<number> | ArrayBuffer,
     encoding?: string,
   ): number;
+  static isBuffer(obj: unknown): obj is Buffer;
   toString(encoding?: string): string;
   equals(other: Uint8Array): boolean;
   copy(
@@ -232,11 +284,63 @@ declare class Buffer extends Uint8Array {
     sourceStart?: number,
     sourceEnd?: number,
   ): number;
+  readUInt8(offset?: number): number;
+  readUInt16LE(offset?: number): number;
+  readUInt16BE(offset?: number): number;
+  readUInt32LE(offset?: number): number;
+  readUInt32BE(offset?: number): number;
+  readInt8(offset?: number): number;
+  readInt16LE(offset?: number): number;
+  readInt16BE(offset?: number): number;
+  readInt32LE(offset?: number): number;
+  readInt32BE(offset?: number): number;
+  readBigUInt64LE(offset?: number): bigint;
+  readBigUInt64BE(offset?: number): bigint;
+  readBigInt64LE(offset?: number): bigint;
+  readBigInt64BE(offset?: number): bigint;
+  readFloatLE(offset?: number): number;
+  readFloatBE(offset?: number): number;
+  readDoubleLE(offset?: number): number;
+  readDoubleBE(offset?: number): number;
+  writeUInt8(value: number, offset?: number): number;
+  writeUInt16LE(value: number, offset?: number): number;
+  writeUInt16BE(value: number, offset?: number): number;
+  writeUInt32LE(value: number, offset?: number): number;
+  writeUInt32BE(value: number, offset?: number): number;
+  writeInt8(value: number, offset?: number): number;
+  writeInt16LE(value: number, offset?: number): number;
+  writeInt16BE(value: number, offset?: number): number;
+  writeInt32LE(value: number, offset?: number): number;
+  writeInt32BE(value: number, offset?: number): number;
+  writeFloatLE(value: number, offset?: number): number;
+  writeFloatBE(value: number, offset?: number): number;
+  writeDoubleLE(value: number, offset?: number): number;
+  writeDoubleBE(value: number, offset?: number): number;
+  subarray(start?: number, end?: number): Buffer;
+  slice(start?: number, end?: number): Buffer;
 }
 
-interface BunSpawnOptionsWritableToIO<T> {
-  pipe(): WritableStream<T>;
-}
+declare var Buffer: {
+  prototype: Buffer;
+  new (str: string, encoding?: string): Buffer;
+  new (size: number): Buffer;
+  new (array: Uint8Array): Buffer;
+  new (arrayBuffer: ArrayBuffer): Buffer;
+  from(
+    data: ArrayLike<number> | ArrayBuffer | string,
+    encoding?: string,
+  ): Buffer;
+  alloc(size: number): Buffer;
+  allocUnsafe(size: number): Buffer;
+  concat(list: Uint8Array[], totalLength?: number): Buffer;
+  byteLength(
+    data: string | ArrayLike<number> | ArrayBuffer,
+    encoding?: string,
+  ): number;
+  isBuffer(obj: unknown): obj is Buffer;
+  isEncoding(encoding: string): boolean;
+  compare(buf1: Uint8Array, buf2: Uint8Array): number;
+};
 
 interface BunSocket<T = unknown> {
   write(data: string | Uint8Array): number;
@@ -258,12 +362,53 @@ interface BunListenResult {
   stop(): void;
 }
 
+interface BunColor {
+  (input: string | number, format: string): string | null;
+}
+
+declare type Timer = number;
+
+declare namespace NodeJS {
+  type Timeout = number;
+  type Timer = number;
+}
+
+interface BunTimer extends number {
+  ref(): BunTimer;
+  unref(): BunTimer;
+  hasRef(): boolean;
+  refresh(): BunTimer;
+}
+
+declare var setTimeout: {
+  <T extends (...args: any[]) => void>(
+    callback: T,
+    ms?: number,
+    ...args: Parameters<T>
+  ): BunTimer;
+  (ms?: number): Promise<void>;
+};
+
+declare var setInterval: {
+  <T extends (...args: any[]) => void>(
+    callback: T,
+    ms?: number,
+    ...args: Parameters<T>
+  ): BunTimer;
+};
+
+declare var clearTimeout: (id: BunTimer | number | undefined) => void;
+declare var clearInterval: (id: BunTimer | number | undefined) => void;
+
 declare namespace Bun {
   namespace SpawnOptions {
     type WritableToIO<T> = BunSpawnOptionsWritableToIO<T>;
   }
   type WhichOptions = BunWhichOptions;
   type Socket<T = unknown> = BunSocket<T>;
+  type FileSink = BunFileSink;
+  type Server = BunServer;
+  type BunFile = BunFile;
 }
 
 declare var Bun: {
@@ -281,9 +426,10 @@ declare var Bun: {
   Archive: BunArchiveConstructor;
   Glob: BunGlobConstructor;
   semver: { satisfies: Promise<unknown>; order: Promise<unknown> };
+  color: BunColor;
 
   sleep(ms: number): Promise<void>;
-  nanoseconds(): number;
+  nanoseconds(): bigint;
   which(name: string, options?: BunWhichOptions): string | null;
   file(path: string): BunFile;
   write(
@@ -309,20 +455,6 @@ declare var Bun: {
     port?: number;
     socket: BunSocketHandlers;
   }): Promise<BunSocket>;
-  build(options: {
-    entrypoints: string[];
-    outdir?: string;
-    minify?: boolean;
-    naming?: string;
-    target?: string | string[];
-    define?: Record<string, string>;
-    external?: string[];
-    sourcemap?: boolean;
-  }): Promise<{
-    success: boolean;
-    outputs: Map<string, unknown>;
-    logs: string[];
-  }>;
   spawn<In = "pipe", Out = "pipe", Err = "pipe">(
     cmd: string[] | string,
     options?: BunSpawnOptions<In, Out, Err>,
@@ -347,7 +479,6 @@ declare var Bun: {
   ): string;
   fileURLToPath(url: string | URL): string;
   pathToFileURL(path: string): URL;
-  listen(options: Record<string, unknown>): unknown;
 
   SpawnOptions: typeof Bun.SpawnOptions;
   WhichOptions: BunWhichOptions;
