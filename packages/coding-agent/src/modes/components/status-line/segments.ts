@@ -368,6 +368,45 @@ const sessionNameSegment: StatusLineSegment = {
 	},
 };
 
+// ---------------------------------------------------------------------------
+// Permission Mode
+// ---------------------------------------------------------------------------
+
+const PERMISSION_MODE_COLORS: Record<string, string> = {
+	"read-only": "dim",
+	"plan": "warning",
+	"standard": "muted",
+	"trust": "error",
+};
+
+const PERMISSION_MODE_LABELS: Record<string, string> = {
+	"read-only": "ro",
+	"plan": "plan",
+	"standard": "std",
+	"trust": "trust",
+};
+
+const permissionSegment: StatusLineSegment = {
+	id: "permission",
+	render(ctx) {
+		// Read mode from session entries (written by extensions that use
+		// customType "permission-mode" entries via SessionManager).
+		const entries = ctx.session.sessionManager?.getEntries() ?? [];
+		let mode = "standard";
+		for (let i = entries.length - 1; i >= 0; i--) {
+			const e = entries[i] as { type?: string; customType?: string; data?: { mode?: string } };
+			if (e.type === "custom" && e.customType === "permission-mode" && e.data?.mode) {
+				mode = e.data.mode;
+				break;
+			}
+		}
+
+		const color = PERMISSION_MODE_COLORS[mode] ?? "muted";
+		const label = PERMISSION_MODE_LABELS[mode] ?? mode;
+		return { content: theme.fg(color, label), visible: true };
+	},
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Registry
 // ═══════════════════════════════════════════════════════════════════════════
@@ -394,6 +433,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache_read: cacheReadSegment,
 	cache_write: cacheWriteSegment,
 	session_name: sessionNameSegment,
+	permission: permissionSegment,
 };
 
 export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {

@@ -646,6 +646,7 @@ export class ExtensionUiController {
 			return;
 		}
 		this.ctx.statusLine.setHookStatus(key, text);
+		this.ctx.updateEditorTopBorder();
 		this.ctx.ui.requestRender();
 	}
 
