@@ -6,7 +6,7 @@
 
 - Fork base is currently synced through upstream `v13.19.0`.
 
-## [0.51.0] - 2026-04-18
+## [0.8.0] - 2026-04-18
 
 ### Added
 
