@@ -33,7 +33,6 @@ describe("openai stream idle timeout", () => {
 	});
 });
 
-
 describe("stream first-event timeouts", () => {
 	it("defaults to 45 seconds when unset", () => {
 		delete Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS;

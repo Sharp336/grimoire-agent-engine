@@ -8,11 +8,16 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ExtensionUIContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { getAgentDir, getConfigDirName, setAgentDir, Snowflake } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getConfigDirName, Snowflake, setAgentDir } from "@oh-my-pi/pi-utils";
 
 const originalAgentDir = getAgentDir();
 
-function createProjectLayout(prefix: string): { rootDir: string; projectDir: string; agentDir: string; toolsDir: string } {
+function createProjectLayout(prefix: string): {
+	rootDir: string;
+	projectDir: string;
+	agentDir: string;
+	toolsDir: string;
+} {
 	const rootDir = path.join(os.tmpdir(), `${prefix}-${Snowflake.next()}`);
 	const projectDir = path.join(rootDir, "project");
 	const agentDir = path.join(rootDir, "agent");
@@ -106,12 +111,12 @@ describe("createAgentSession discoveredCustomToolsResult", () => {
 				"export default function (pi) {",
 				"\tconst { Type } = pi.typebox;",
 				"\treturn {",
-				"\t\tname: \"project_echo\",",
-				"\t\tlabel: \"Project Echo\",",
-				"\t\tdescription: \"Echoes the provided text.\",",
+				'\t\tname: "project_echo",',
+				'\t\tlabel: "Project Echo",',
+				'\t\tdescription: "Echoes the provided text.",',
 				"\t\tparameters: Type.Object({ text: Type.String() }),",
 				"\t\tasync execute(_toolCallId, params) {",
-				"\t\t\treturn { content: [{ type: \"text\", text: params.text }] };",
+				'\t\t\treturn { content: [{ type: "text", text: params.text }] };',
 				"\t\t},",
 				"\t};",
 				"}",
@@ -121,7 +126,9 @@ describe("createAgentSession discoveredCustomToolsResult", () => {
 		const result = await createIsolatedSession(projectDir, agentDir);
 		try {
 			expect(result.discoveredCustomToolsResult).toBeDefined();
-			const discoveredToolEntry = result.discoveredCustomToolsResult?.tools.find(tool => tool.resolvedPath === toolPath);
+			const discoveredToolEntry = result.discoveredCustomToolsResult?.tools.find(
+				tool => tool.resolvedPath === toolPath,
+			);
 			expect(discoveredToolEntry?.tool.name).toBe("project_echo");
 			expect(discoveredToolEntry?.resolvedPath).toBe(toolPath);
 			expect(result.discoveredCustomToolsResult?.errors.some(error => error.path === toolPath)).toBe(false);
@@ -143,12 +150,12 @@ describe("createAgentSession discoveredCustomToolsResult", () => {
 				"export default function (pi) {",
 				"\tconst { Type } = pi.typebox;",
 				"\treturn {",
-				"\t\tname: \"project_ui_state\",",
-				"\t\tlabel: \"Project UI State\",",
-				"\t\tdescription: \"Reports the current UI availability.\",",
+				'\t\tname: "project_ui_state",',
+				'\t\tlabel: "Project UI State",',
+				'\t\tdescription: "Reports the current UI availability.",',
 				"\t\tparameters: Type.Object({}),",
 				"\t\tasync execute() {",
-				"\t\t\treturn { content: [{ type: \"text\", text: `hasUI:${String(pi.hasUI)}` }] };",
+				'\t\t\treturn { content: [{ type: "text", text: "hasUI:" + String(pi.hasUI) }] };',
 				"\t\t},",
 				"\t};",
 				"}",
@@ -157,7 +164,9 @@ describe("createAgentSession discoveredCustomToolsResult", () => {
 
 		const result = await createIsolatedSession(projectDir, agentDir);
 		try {
-			const discoveredToolEntry = result.discoveredCustomToolsResult?.tools.find(tool => tool.resolvedPath === toolPath);
+			const discoveredToolEntry = result.discoveredCustomToolsResult?.tools.find(
+				tool => tool.resolvedPath === toolPath,
+			);
 			const discoveredTool = discoveredToolEntry?.tool;
 			expect(discoveredTool?.name).toBe("project_ui_state");
 			result.setToolUIContext(uiContext, true);
@@ -185,10 +194,14 @@ describe("createAgentSession discoveredCustomToolsResult", () => {
 		const result = await createIsolatedSession(projectDir, agentDir);
 		try {
 			expect(result.discoveredCustomToolsResult).toBeDefined();
-			const brokenToolError = result.discoveredCustomToolsResult?.errors.find(error => error.path === brokenToolPath);
+			const brokenToolError = result.discoveredCustomToolsResult?.errors.find(
+				error => error.path === brokenToolPath,
+			);
 			expect(brokenToolError).toBeDefined();
 			expect(brokenToolError?.error).toContain("Tool must export a default function");
-			expect(result.discoveredCustomToolsResult?.tools.some(tool => tool.resolvedPath === brokenToolPath)).toBe(false);
+			expect(result.discoveredCustomToolsResult?.tools.some(tool => tool.resolvedPath === brokenToolPath)).toBe(
+				false,
+			);
 		} finally {
 			await result.session.dispose();
 		}

@@ -74,6 +74,7 @@ import type {
 	CustomToolContext,
 	CustomToolSessionEvent,
 	CustomToolsLoadResult,
+	CustomToolUIContext,
 } from "./extensibility/custom-tools/types";
 import { CustomToolAdapter } from "./extensibility/custom-tools/wrapper";
 import {
@@ -274,7 +275,13 @@ export type { PromptTemplate } from "./config/prompt-templates";
 export { Settings, type SkillsSettings } from "./config/settings";
 export type { EffectivePromptSnapshot } from "./context/effective-prompt-snapshot";
 export type { CustomCommand, CustomCommandFactory } from "./extensibility/custom-commands/types";
-export type { CustomTool, CustomToolFactory, CustomToolsLoadResult, LoadedCustomTool, ToolLoadError } from "./extensibility/custom-tools/types";
+export type {
+	CustomTool,
+	CustomToolFactory,
+	CustomToolsLoadResult,
+	LoadedCustomTool,
+	ToolLoadError,
+} from "./extensibility/custom-tools/types";
 export type * from "./extensibility/extensions";
 export type { Skill } from "./extensibility/skills";
 export type { FileSlashCommand } from "./extensibility/slash-commands";
@@ -434,6 +441,21 @@ function createCustomToolContext(ctx: ExtensionContext): CustomToolContext {
 		isIdle: ctx.isIdle,
 		hasQueuedMessages: ctx.hasPendingMessages,
 		abort: ctx.abort,
+	};
+}
+
+function createCustomToolUIContext(uiContext: ExtensionUIContext): CustomToolUIContext {
+	return {
+		select: (title, options) => uiContext.select(title, options),
+		confirm: (title, message) => uiContext.confirm(title, message),
+		input: (title, placeholder) => uiContext.input(title, placeholder),
+		notify: (message, type) => uiContext.notify(message, type),
+		setStatus: (key, text) => uiContext.setStatus(key, text),
+		custom: factory => uiContext.custom((tui, theme, _keybindings, done) => factory(tui, theme, done)),
+		setEditorText: text => uiContext.setEditorText(text),
+		getEditorText: () => uiContext.getEditorText(),
+		editor: (title, prefill, options) => uiContext.editor(title, prefill, options),
+		theme: uiContext.theme,
 	};
 }
 
@@ -1552,7 +1574,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
 		toolContextStore.setUIContext(uiContext, hasUI);
-		discoveredCustomTools.setUIContext(uiContext, hasUI);
+		discoveredCustomTools.setUIContext(createCustomToolUIContext(uiContext), hasUI);
 	};
 
 	const initialTools = initialToolNames

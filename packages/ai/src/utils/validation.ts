@@ -149,10 +149,10 @@ function tryParseLeadingJsonContainer(value: string): unknown | undefined {
 }
 
 /**
-	* Replace literal `\\n`, `\\t`, `\\r` sequences that appear OUTSIDE of JSON
-	* strings with actual whitespace. LLMs sometimes produce these when they
-	* confuse the tool-call encoding with the content encoding.
-	*/
+ * Replace literal `\\n`, `\\t`, `\\r` sequences that appear OUTSIDE of JSON
+ * strings with actual whitespace. LLMs sometimes produce these when they
+ * confuse the tool-call encoding with the content encoding.
+ */
 function cleanLiteralEscapes(value: string): string {
 	let result = "";
 	let inString = false;
@@ -196,15 +196,15 @@ const MAX_HEAL_DISTANCE = 3;
 const BRACKET_CHARS = ["[", "]", "{", "}"] as const;
 
 /**
-	* Attempts to heal near-valid JSON by applying single-character edits near the
-	* end of the string. LLMs (especially smaller ones) sometimes produce JSON with
-	* a single misplaced, extra, or wrong bracket at the end — e.g. `"}]"` becomes
-	* `"]}"` or gets an extra `}` appended. This function tries:
-	*   1. Removing a single character from the last few positions
-	*   2. Replacing a single character in the last few positions with each bracket type
-	*
-	* Returns the parsed value on success, undefined on failure.
-	*/
+ * Attempts to heal near-valid JSON by applying single-character edits near the
+ * end of the string. LLMs (especially smaller ones) sometimes produce JSON with
+ * a single misplaced, extra, or wrong bracket at the end — e.g. `"}]"` becomes
+ * `"]}"` or gets an extra `}` appended. This function tries:
+ *   1. Removing a single character from the last few positions
+ *   2. Replacing a single character in the last few positions with each bracket type
+ *
+ * Returns the parsed value on success, undefined on failure.
+ */
 function tryHealMalformedJson(value: string): unknown | undefined {
 	try {
 		return JSON.parse(value) as unknown;
@@ -262,18 +262,18 @@ function tryHealMalformedJson(value: string): unknown | undefined {
 }
 
 /**
-	* Attempts to parse a string as JSON if it looks like a JSON literal and
-	* the parsed result matches one of the expected types.
-	*
-	* Only attempts parsing for strings that syntactically look like JSON:
-	*   - Objects: `{...}`
-	*   - Arrays: `[...]`
-	*   - Literals: `true`, `false`, `null`, or numeric strings
-	*
-	* Returns `{ changed: true }` only if parsing succeeded AND the result
-	* matches an expected type. This prevents false positives like parsing
-	* the string `"123"` when the schema actually wants a string.
-	*/
+ * Attempts to parse a string as JSON if it looks like a JSON literal and
+ * the parsed result matches one of the expected types.
+ *
+ * Only attempts parsing for strings that syntactically look like JSON:
+ *   - Objects: `{...}`
+ *   - Arrays: `[...]`
+ *   - Literals: `true`, `false`, `null`, or numeric strings
+ *
+ * Returns `{ changed: true }` only if parsing succeeded AND the result
+ * matches an expected type. This prevents false positives like parsing
+ * the string `"123"` when the schema actually wants a string.
+ */
 function tryParseJsonForTypes(value: string, expectedTypes: string[]): { value: unknown; changed: boolean } {
 	const trimmed = value.trim();
 	if (!trimmed) return { value, changed: false };

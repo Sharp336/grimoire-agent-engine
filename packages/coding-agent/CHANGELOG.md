@@ -6,6 +6,16 @@
 
 - Fork base is currently synced through upstream `v13.19.0`.
 
+## [0.51.0] - 2026-04-18
+
+### Added
+
+- Surfaced custom tool discovery results through the SDK flow so agent/tool callers can inspect what was discovered, with session UI context forwarded to discovered tools.
+
+### Changed
+
+- Backported stricter OpenAI/OpenRouter tool-call compatibility work, including strict-schema adaptation, safer strict-call retries, malformed tool-argument healing, Copilot limit fixes, and longer stream timeout tolerance for tool-heavy responses.
+
 ## [0.7.1] - 2026-04-14
 
 ### Fixed

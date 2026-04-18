@@ -244,7 +244,6 @@ describe("generated model policies", () => {
 		expect(models[3]?.priority).toBe(1);
 	});
 
-
 	it("does not special-case Copilot Opus 4.6 generated limits", () => {
 		const models: Model<Api>[] = [
 			{

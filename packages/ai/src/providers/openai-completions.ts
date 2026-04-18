@@ -32,10 +32,10 @@ import {
 import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import {
-	finalizeErrorMessage,
-	rewriteCopilotAuthError,
 	type CapturedHttpErrorResponse,
+	finalizeErrorMessage,
 	type RawHttpRequestDump,
+	rewriteCopilotAuthError,
 } from "../utils/http-inspector";
 import {
 	createFirstEventWatchdog,
@@ -46,8 +46,8 @@ import {
 } from "../utils/idle-iterator";
 import { parseStreamingJson } from "../utils/json-parse";
 import { getKimiCommonHeaders } from "../utils/oauth/kimi";
-import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
 import { extractHttpStatusFromError } from "../utils/retry";
+import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
 import { mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
 import {
 	buildCopilotDynamicHeaders,
@@ -123,6 +123,7 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	toolChoice?: ToolChoice;
 	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
 	serviceTier?: ServiceTier;
+	streamFirstEventTimeoutMs?: number;
 }
 
 type OpenAICompletionsSamplingParams = OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming & {
@@ -136,7 +137,6 @@ type BuiltOpenAICompletionTools = {
 	tools: OpenAI.Chat.Completions.ChatCompletionTool[];
 	toolStrictMode: AppliedToolStrictMode;
 };
-
 
 // LIMITATION: The think tag parser uses naive string matching for <think>/<thinking> tags.
 // If MiniMax models output these literal strings in code blocks, XML examples, or explanations,

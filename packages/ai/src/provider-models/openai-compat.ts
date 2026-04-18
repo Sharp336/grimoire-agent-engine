@@ -1510,7 +1510,10 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 						// breaks overflow handling and upstream parity for bundled Copilot models.
 						const contextWindow = toPositiveNumber(
 							entry.context_length,
-							toPositiveNumber(copilotLimits.maxPromptTokens, reference?.contextWindow ?? defaults.contextWindow),
+							toPositiveNumber(
+								copilotLimits.maxPromptTokens,
+								reference?.contextWindow ?? defaults.contextWindow,
+							),
 						);
 						const maxTokens = toPositiveNumber(
 							entry.max_completion_tokens,
