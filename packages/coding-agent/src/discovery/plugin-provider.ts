@@ -3,8 +3,12 @@
  *
  * Both `claude-plugins` and `omp-plugins` load capabilities from plugin roots
  * using identical logic — they differ only in which root-list function they
- * call and their provider metadata.  This module extracts that common pattern
+ * call and their provider metadata. This module extracts that common pattern
  * so each provider file is a thin configuration call.
+ *
+ * Skills and slash-commands honor `.claude-plugin/plugin.json` manifest
+ * overrides (`skills` and `slash-commands` keys). Hooks, tools, and MCP
+ * servers use fixed locations within the plugin root.
  */
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -28,6 +32,61 @@ export interface PluginProviderConfig {
 	listRoots: (home: string, cwd?: string) => Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }>;
 }
 
+// ─── Plugin manifest (.claude-plugin/plugin.json) ────────────────────────────
+
+interface PluginManifest {
+	skills?: string;
+	"slash-commands"?: string;
+}
+
+interface ResolvedPluginDir {
+	dir: string;
+	warning?: string;
+}
+
+async function readPluginManifest(root: ClaudePluginRoot): Promise<PluginManifest | null> {
+	const manifestPath = path.join(root.path, ".claude-plugin", "plugin.json");
+	const raw = await readFile(manifestPath);
+	if (raw === null) return null;
+
+	try {
+		const parsed = JSON.parse(raw);
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return null;
+		return parsed as PluginManifest;
+	} catch {
+		return null;
+	}
+}
+
+function isWithinPluginRoot(rootPath: string, targetPath: string): boolean {
+	const relative = path.relative(rootPath, targetPath);
+	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+async function resolvePluginDir(
+	providerId: string,
+	root: ClaudePluginRoot,
+	manifestKey: keyof PluginManifest,
+	fallback: string,
+): Promise<ResolvedPluginDir> {
+	const manifest = await readPluginManifest(root);
+	const fallbackDir = path.join(root.path, fallback);
+	const configured = manifest?.[manifestKey];
+	if (typeof configured !== "string" || !configured.trim()) {
+		return { dir: fallbackDir };
+	}
+
+	const resolved = path.resolve(root.path, configured.trim());
+	if (isWithinPluginRoot(root.path, resolved)) {
+		return { dir: resolved };
+	}
+
+	return {
+		dir: fallbackDir,
+		warning: `[${providerId}] Ignoring ${String(manifestKey)} path outside plugin root for ${root.id}: ${configured}`,
+	};
+}
+
 // ─── Loader factories ────────────────────────────────────────────────────────
 
 function makeLoadSkills(cfg: PluginProviderConfig) {
@@ -40,17 +99,18 @@ function makeLoadSkills(cfg: PluginProviderConfig) {
 
 		const results = await Promise.all(
 			roots.map(async root => {
-				const skillsDir = path.join(root.path, "skills");
+				const { dir: skillsDir, warning } = await resolvePluginDir(cfg.providerId, root, "skills", "skills");
 				const result = await scanSkillsFromDir(ctx, {
 					dir: skillsDir,
 					providerId: cfg.providerId,
 					level: root.scope,
 				});
-				return { root, result };
+				return { root, result, warning };
 			}),
 		);
 
-		for (const { root, result } of results) {
+		for (const { root, result, warning } of results) {
+			if (warning) warnings.push(warning);
 			for (const skill of result.items) {
 				if (root.plugin) skill.name = `${root.plugin}:${skill.name}`;
 				items.push(skill);
@@ -72,8 +132,13 @@ function makeLoadSlashCommands(cfg: PluginProviderConfig) {
 
 		const results = await Promise.all(
 			roots.map(async root => {
-				const commandsDir = path.join(root.path, "commands");
-				return loadFilesFromDir<SlashCommand>(ctx, commandsDir, cfg.providerId, root.scope, {
+				const { dir: commandsDir, warning } = await resolvePluginDir(
+					cfg.providerId,
+					root,
+					"slash-commands",
+					"commands",
+				);
+				const result = await loadFilesFromDir<SlashCommand>(ctx, commandsDir, cfg.providerId, root.scope, {
 					extensions: ["md"],
 					transform: (name, content, filePath, source) => {
 						const cmdName = name.replace(/\.md$/, "");
@@ -86,10 +151,12 @@ function makeLoadSlashCommands(cfg: PluginProviderConfig) {
 						};
 					},
 				});
+				return { result, warning };
 			}),
 		);
 
-		for (const result of results) {
+		for (const { result, warning } of results) {
+			if (warning) warnings.push(warning);
 			items.push(...result.items);
 			if (result.warnings) warnings.push(...result.warnings);
 		}
