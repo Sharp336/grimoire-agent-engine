@@ -469,7 +469,7 @@ describe("listClaudePluginRoots", () => {
 		const found = result.all.find(command => command.name === "manifest-commands-outside:ship");
 
 		expect(found).toBeUndefined();
-		});
+	});
 
 	describe("XDG data directory support", () => {
 		let homedirSpy: Mock<() => string> | undefined;
