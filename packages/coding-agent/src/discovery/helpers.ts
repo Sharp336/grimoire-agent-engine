@@ -763,15 +763,14 @@ const pluginRootsCache = new Map<
  *
  * Results are cached per `home:resolvedProjectPath` key to avoid repeated parsing.
  */
-export async function listClaudePluginRoots(
+async function loadRawPluginRoots(
 	home: string,
 	cwd?: string,
-): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
+): Promise<{ roots: ClaudePluginRoot[]; claudeWarnings: string[]; ompWarnings: string[] }> {
 	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd) : null;
 	const cacheKey = `${home}:${resolvedProjectPath ?? ""}`;
 	const cached = pluginRootsCache.get(cacheKey);
-	if (cached)
-		return { roots: applyOmpOverClaude(cached.roots), warnings: [...cached.claudeWarnings, ...cached.ompWarnings] };
+	if (cached) return cached;
 
 	const roots: ClaudePluginRoot[] = [];
 	const claudeWarnings: string[] = [];
@@ -933,7 +932,7 @@ export async function listClaudePluginRoots(
 
 	const result = { roots, claudeWarnings, ompWarnings };
 	pluginRootsCache.set(cacheKey, result);
-	return { roots: applyOmpOverClaude(roots), warnings: [...claudeWarnings, ...ompWarnings] };
+	return result;
 }
 
 /**
@@ -964,15 +963,18 @@ function applyOmpOverClaude(roots: ClaudePluginRoot[]): ClaudePluginRoot[] {
 	return roots.filter(r => r.registrySource !== "claude" || !ompIds.has(r.id));
 }
 
-/** Internal: ensure cache is warm and return the raw split entry. */
-async function loadRawPluginRoots(
+/**
+ * Public API: combined plugin roots with OMP→Claude shadowing applied.
+ * Consumers that bypass the capability layer (discoverAgents, LSP config)
+ * rely on this deduplicated view. The raw split is served separately via
+ * listClaudeOnlyPluginRoots and listOmpOnlyPluginRoots.
+ */
+export async function listClaudePluginRoots(
 	home: string,
 	cwd?: string,
-): Promise<{ roots: ClaudePluginRoot[]; claudeWarnings: string[]; ompWarnings: string[] }> {
-	// Populates the cache as a side effect.
-	await listClaudePluginRoots(home, cwd);
-	const resolvedProjectPath = cwd ? await resolveActiveProjectRegistryPath(cwd) : null;
-	return pluginRootsCache.get(`${home}:${resolvedProjectPath ?? ""}`)!;
+): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
+	const raw = await loadRawPluginRoots(home, cwd);
+	return { roots: applyOmpOverClaude(raw.roots), warnings: [...raw.claudeWarnings, ...raw.ompWarnings] };
 }
 
 /**
