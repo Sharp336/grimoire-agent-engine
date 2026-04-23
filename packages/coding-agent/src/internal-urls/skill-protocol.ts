@@ -125,10 +125,58 @@ export class SkillProtocolHandler implements ProtocolHandler {
 				// Use the resolved real path for the file read below.
 				targetPath = realTargetPath;
 			} catch (err) {
-				// ENOENT: file absent — lexical check already confirmed containment;
-				// the exists() check below handles the missing-file case.
-				// Re-throw anything else (permission denied, I/O errors).
+				if (err instanceof Error && err.message === "Path traversal is not allowed") throw err;
 				if (!isEnoent(err)) throw err;
+				// Target absent at this instant. Walk upward to the nearest existing
+				// ancestor and validate it — mirrors the bash-skill-urls resolver so a
+				// symlinked ancestor pointing outside the plugin root is rejected even
+				// when the terminal file does not yet exist. Prevents a TOCTOU where the
+				// file appears between this check and the Bun.file.exists() below.
+				let ancestor = path.dirname(targetPath);
+				while (ancestor !== path.dirname(ancestor)) {
+					if (!ancestor.startsWith(securityRoot + path.sep) && ancestor !== securityRoot) {
+						break;
+					}
+					try {
+						const realAncestor = await fs.realpath(ancestor);
+						if (!realAncestor.startsWith(realSecurityRoot + path.sep) && realAncestor !== realSecurityRoot) {
+							throw new Error("Path traversal is not allowed");
+						}
+						break;
+					} catch (ancestorErr) {
+						if (ancestorErr instanceof Error && ancestorErr.message === "Path traversal is not allowed") {
+							throw ancestorErr;
+						}
+						if (!isEnoent(ancestorErr)) throw ancestorErr;
+						// Dangling-symlink check: an ancestor whose realpath fails may itself
+						// be a symlink whose target is missing. If that target points outside
+						// the security root, a future read after the target appears would
+						// escape the plugin boundary.
+						try {
+							const stat = await fs.lstat(ancestor);
+							if (stat.isSymbolicLink()) {
+								const linkTarget = await fs.readlink(ancestor);
+								const resolvedLink = path.isAbsolute(linkTarget)
+									? path.resolve(linkTarget)
+									: path.resolve(path.dirname(ancestor), linkTarget);
+								if (
+									!resolvedLink.startsWith(realSecurityRoot + path.sep) &&
+									resolvedLink !== realSecurityRoot
+								) {
+									throw new Error("Path traversal is not allowed");
+								}
+								break;
+							}
+						} catch (lstatErr) {
+							if (lstatErr instanceof Error && lstatErr.message === "Path traversal is not allowed") {
+								throw lstatErr;
+							}
+							if (!isEnoent(lstatErr)) throw lstatErr;
+							// Truly absent; continue walking.
+						}
+						ancestor = path.dirname(ancestor);
+					}
+				}
 			}
 		} else {
 			// Read SKILL.md

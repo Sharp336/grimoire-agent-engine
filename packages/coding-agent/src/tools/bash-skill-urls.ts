@@ -138,6 +138,29 @@ export async function resolveSkillUrlToPath(url: string, skills: readonly Skill[
 			} catch (ancestorErr) {
 				if (ancestorErr instanceof ToolError) throw ancestorErr;
 				if (!isEnoent(ancestorErr)) throw ancestorErr;
+				// ENOENT from realpath can mean either the ancestor truly does not exist
+				// OR it IS a symlink whose target is missing (dangling). A dangling
+				// symlink pointing outside the security root must be rejected — once the
+				// target appears on disk (e.g. from a later bash command that creates
+				// parents), subsequent writes would escape the plugin boundary.
+				try {
+					const stat = await fs.lstat(ancestor);
+					if (stat.isSymbolicLink()) {
+						const linkTarget = await fs.readlink(ancestor);
+						const resolvedLink = path.isAbsolute(linkTarget)
+							? path.resolve(linkTarget)
+							: path.resolve(path.dirname(ancestor), linkTarget);
+						if (!resolvedLink.startsWith(realSecurityRoot + path.sep) && resolvedLink !== realSecurityRoot) {
+							throw new ToolError("Path traversal is not allowed in skill:// URLs");
+						}
+						// Target within root — stop walking; the symlink is the effective anchor.
+						break;
+					}
+				} catch (lstatErr) {
+					if (lstatErr instanceof ToolError) throw lstatErr;
+					if (!isEnoent(lstatErr)) throw lstatErr;
+					// Ancestor truly absent; continue walking.
+				}
 				ancestor = path.dirname(ancestor);
 			}
 		}
