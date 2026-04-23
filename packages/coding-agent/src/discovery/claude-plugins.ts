@@ -6,7 +6,23 @@
  * are handled by the separate omp-plugins provider.
  * Priority: 70 (below claude.ts at 80, so user overrides in .claude/ take precedence)
  */
-import { listClaudeOnlyPluginRoots } from "./helpers";
+import * as path from "node:path";
+import { logger } from "@oh-my-pi/pi-utils";
+import { registerProvider } from "../capability";
+import { readFile } from "../capability/fs";
+import { type Hook, hookCapability } from "../capability/hook";
+import { type MCPServer, mcpCapability } from "../capability/mcp";
+import { type Skill, skillCapability } from "../capability/skill";
+import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
+import { type CustomTool, toolCapability } from "../capability/tool";
+import type { LoadContext, LoadResult } from "../capability/types";
+import {
+	type ClaudePluginRoot,
+	createSourceMeta,
+	listClaudeOnlyPluginRoots,
+	loadFilesFromDir,
+	scanSkillsFromDir,
+} from "./helpers";
 import { registerPluginProvider } from "./plugin-provider";
 
 import { substitutePluginRoot } from "./substitute-plugin-root";
@@ -360,4 +376,12 @@ registerProvider<MCPServer>(mcpCapability.id, {
 	description: "Load MCP servers from marketplace plugin .mcp.json files",
 	priority: PRIORITY,
 	load: loadMCPServers,
+});
+
+registerPluginProvider({
+	providerId: "claude-plugins",
+	displayName: "Claude Code Marketplace",
+	priority: 70,
+	label: "Claude Code marketplace plugins",
+	listRoots: listClaudeOnlyPluginRoots,
 });
