@@ -567,8 +567,10 @@ describe("listClaudePluginRoots", () => {
 		});
 
 		test("XDG not applied when home differs from os.homedir()", async () => {
-			// No spy — os.homedir() returns the real home, but tempDir != real home.
+			// Override the outer describe's os.homedir mock so the home-equality guard
+			// in resolveUserPluginsDir fails — home=tempDir, os.homedir()=elsewhere.
 			// resolveUserPluginsDir must skip XDG even if XDG_DATA_HOME is set.
+			homedirSpy = spyOn(os, "homedir").mockReturnValue(path.join(tempDir, "not-home"));
 			const xdgBase = path.join(tempDir, "xdg");
 			process.env.XDG_DATA_HOME = xdgBase;
 			await fs.mkdir(path.join(xdgBase, "omp"), { recursive: true });
