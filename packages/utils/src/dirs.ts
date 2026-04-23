@@ -256,29 +256,59 @@ export function getPluginsDir(): string {
  * (matching DirResolver's `isDefault` guard exactly: PI_CODING_AGENT_DIR must
  * be unset or point to the same path as the default agent dir), XDG is not
  * applied — preserving test isolation and consistency with the write path.
+ *
+ * The decision is memoized per `(home, os.homedir(), XDG_DATA_HOME, PI_CODING_AGENT_DIR)`
+ * tuple so it matches `DirResolver`'s “decide once at startup” semantics. Without
+ * this, reads and writes can diverge if `$XDG_DATA_HOME/omp` is created after the
+ * process started (e.g. external migration), leaving newly-written plugins invisible
+ * to discovery until restart. Tests that intentionally mutate filesystem/env state
+ * within a single `home` scope can call `resetUserPluginsDirCache()` to re-evaluate.
  */
+const userPluginsDirCache = new Map<string, string>();
+
 export function resolveUserPluginsDir(home: string): string {
 	// Replicate DirResolver's `isDefault` guard exactly: XDG is skipped when a
 	// non-default agent dir is active. This mirrors `isDefault = agentDir === defaultAgent`.
-	const _agentDirOverride = process.env.PI_CODING_AGENT_DIR;
-	const _isDefaultAgentDir =
-		!_agentDirOverride || path.resolve(_agentDirOverride) === path.join(home, getConfigDirName(), "agent");
+	const agentDirOverride = process.env.PI_CODING_AGENT_DIR;
+	const xdgDataHome = process.env.XDG_DATA_HOME;
+	const realHome = os.homedir();
+
+	// Key includes every input that influences the decision. Different tests use
+	// different `home` tempdirs, so each test gets its own cache slot and the
+	// first call within a test captures that test's filesystem state correctly.
+	const cacheKey = `${home}\0${realHome}\0${xdgDataHome ?? ""}\0${agentDirOverride ?? ""}`;
+	const cached = userPluginsDirCache.get(cacheKey);
+	if (cached !== undefined) return cached;
+
+	const isDefaultAgentDir =
+		!agentDirOverride || path.resolve(agentDirOverride) === path.join(home, getConfigDirName(), "agent");
 	if (
 		(process.platform === "linux" || process.platform === "darwin") &&
-		_isDefaultAgentDir &&
-		path.resolve(home) === path.resolve(os.homedir())
+		isDefaultAgentDir &&
+		path.resolve(home) === path.resolve(realHome)
 	) {
-		const xdgData = process.env.XDG_DATA_HOME;
-		if (xdgData) {
+		if (xdgDataHome) {
 			try {
-				const xdgRoot = path.join(xdgData, APP_NAME);
+				const xdgRoot = path.join(xdgDataHome, APP_NAME);
 				if (fs.existsSync(xdgRoot)) {
-					return path.join(xdgRoot, "plugins");
+					const result = path.join(xdgRoot, "plugins");
+					userPluginsDirCache.set(cacheKey, result);
+					return result;
 				}
 			} catch {}
 		}
 	}
-	return path.join(home, getConfigDirName(), "plugins");
+	const result = path.join(home, getConfigDirName(), "plugins");
+	userPluginsDirCache.set(cacheKey, result);
+	return result;
+}
+
+/**
+ * Invalidate the XDG-activation cache. Call from tests that mutate
+ * `$XDG_DATA_HOME`/filesystem state within a single `home` scope.
+ */
+export function resetUserPluginsDirCache(): void {
+	userPluginsDirCache.clear();
 }
 
 /** Where npm installs packages (~/.omp/plugins/node_modules). */
