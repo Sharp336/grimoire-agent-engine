@@ -156,9 +156,19 @@ export class SkillProtocolHandler implements ProtocolHandler {
 							const stat = await fs.lstat(ancestor);
 							if (stat.isSymbolicLink()) {
 								const linkTarget = await fs.readlink(ancestor);
-								const resolvedLink = path.isAbsolute(linkTarget)
-									? path.resolve(linkTarget)
-									: path.resolve(path.dirname(ancestor), linkTarget);
+								// Resolve relative link targets against the REAL parent directory.
+								// Lexical path.dirname() is unsafe when an intermediate ancestor is a
+								// symlink: `PLUGIN_ROOT/evil -> /tmp/outside` + dangling
+								// `/tmp/outside/dang -> ../safe` would resolve lexically to
+								// `PLUGIN_ROOT/safe` (passes check) but the runtime target is
+								// `/tmp/safe`, outside the plugin root.
+								let resolvedLink: string;
+								if (path.isAbsolute(linkTarget)) {
+									resolvedLink = path.resolve(linkTarget);
+								} else {
+									const realParent = await fs.realpath(path.dirname(ancestor));
+									resolvedLink = path.resolve(realParent, linkTarget);
+								}
 								if (
 									!resolvedLink.startsWith(realSecurityRoot + path.sep) &&
 									resolvedLink !== realSecurityRoot

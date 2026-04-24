@@ -147,9 +147,19 @@ export async function resolveSkillUrlToPath(url: string, skills: readonly Skill[
 					const stat = await fs.lstat(ancestor);
 					if (stat.isSymbolicLink()) {
 						const linkTarget = await fs.readlink(ancestor);
-						const resolvedLink = path.isAbsolute(linkTarget)
-							? path.resolve(linkTarget)
-							: path.resolve(path.dirname(ancestor), linkTarget);
+						// Resolve relative link targets against the REAL parent directory.
+						// Lexical path.dirname() is unsafe when an intermediate ancestor is
+						// itself a symlink: a `PLUGIN_ROOT/evil -> /tmp/outside` + dangling
+						// `/tmp/outside/dang -> ../safe` chain would resolve `../safe`
+						// lexically to `PLUGIN_ROOT/safe` (passes the containment check) even
+						// though the runtime target is `/tmp/safe`, outside the plugin root.
+						let resolvedLink: string;
+						if (path.isAbsolute(linkTarget)) {
+							resolvedLink = path.resolve(linkTarget);
+						} else {
+							const realParent = await fs.realpath(path.dirname(ancestor));
+							resolvedLink = path.resolve(realParent, linkTarget);
+						}
 						if (!resolvedLink.startsWith(realSecurityRoot + path.sep) && resolvedLink !== realSecurityRoot) {
 							throw new ToolError("Path traversal is not allowed in skill:// URLs");
 						}
