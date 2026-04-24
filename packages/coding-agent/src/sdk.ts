@@ -51,14 +51,22 @@ import { ToolResultBridge } from "./context/bridge";
 import { captureEffectivePromptSnapshot, type EffectivePromptSnapshot } from "./context/effective-prompt-snapshot";
 import { extractPaths } from "./context/extract-paths";
 import {
+	buildRecallDebugEntries,
+	daysToRecallWindowMs,
 	extractAssistantText,
 	extractPathsFromText,
 	extractUserText,
 	formatHydratedContext,
+	formatRecallAge,
+	getRecallAgeMs,
+	getRecallBand,
 	IngestPipeline,
 	PassiveHydrator,
+	type RecallDebugTrace,
+	type RecallSearchResult,
 	RecallStore,
 	resolveMemexLicense,
+	selectHydrationResultIndexToDrop,
 } from "./context/recall";
 import { ToolResultStore } from "./context/recall/tool-result-store";
 import { initializeWithSettings } from "./discovery";
@@ -644,6 +652,55 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 	}
 	return commands;
 }
+function finalizeRecallDebugTrace(
+	trace: RecallDebugTrace,
+	options: {
+		turnId: string;
+		selected: RecallSearchResult[];
+		dropped: RecallSearchResult[];
+		injectedText: string | null;
+		injectedTokenEstimate: number;
+		sessionId: string;
+		projectCwd: string;
+		recentWindowMs: number;
+	},
+): RecallDebugTrace {
+	const now = Date.now();
+	const provenance = new Map(
+		trace.selected.map(entry => [
+			entry.rowKey,
+			{
+				rowKey: entry.rowKey,
+				semanticRank: entry.semanticRank,
+				keywordRank: entry.keywordRank,
+				source: entry.source,
+			},
+		]),
+	);
+	return {
+		...trace,
+		turnId: options.turnId,
+		capturedAt: new Date(now).toISOString(),
+		injected: !!options.injectedText,
+		selected: buildRecallDebugEntries(options.selected, {
+			now,
+			sessionId: options.sessionId,
+			projectCwd: options.projectCwd,
+			recentWindowMs: options.recentWindowMs,
+			provenance,
+		}),
+		dropped: buildRecallDebugEntries(options.dropped, {
+			now,
+			sessionId: options.sessionId,
+			projectCwd: options.projectCwd,
+			recentWindowMs: options.recentWindowMs,
+			provenance,
+		}),
+		injectedText: options.injectedText,
+		injectedTokenEstimate: options.injectedTokenEstimate,
+	};
+}
+
 /**
  * Create an AgentSession with the specified options.
  *
@@ -1608,6 +1665,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			license: memexLicense,
 			projectCwd: cwd,
 			sessionId,
+			recentWindowMs: daysToRecallWindowMs(settings.get("assembler.recentWindowDays")),
 		});
 		logger.debug("Recall pipeline initialized (ingest + passive hydration)");
 	}
@@ -1617,6 +1675,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Extensions transform is always composed when available.
 	// All modes capture an effective-prompt snapshot for canonical observability.
 	let lastPromptSnapshot: EffectivePromptSnapshot | null = null;
+	let lastRecallTrace: RecallDebugTrace | null = null;
+	const recallTraceHistory: RecallDebugTrace[] = [];
 	const transformContext = (() => {
 		const extensionTransform = extensionRunner
 			? (messages: AgentMessage[]) => extensionRunner.emitContext(messages)
@@ -1627,6 +1687,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const assemblerSettings = settings.getGroup("assembler") as AssemblerSettings;
 		const hotWindowTurns = assemblerSettings.hotWindowTurns;
 		const contextWindowCap = assemblerSettings.contextWindowCap;
+		const recentWindowMs = daysToRecallWindowMs(assemblerSettings.recentWindowDays);
 
 		const resolveToolResultStub = (message: { toolName?: string; toolCallId?: string }) =>
 			assemblerBridge.getToolResultStubPointer(message.toolName, message.toolCallId);
@@ -1669,7 +1730,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// Step 2: Run passive hydration (embed hot window -> cache check -> search -> MMR).
 			const hydration = passiveHydrator
 				? await passiveHydrator.hydrate(messages)
-				: { text: null, results: [], cacheHit: false, durationMs: 0 };
+				: { text: null, results: [], cacheHit: false, durationMs: 0, trace: null };
 
 			logger.debug("assembler:passive-hydration", {
 				resultCount: hydration.results.length,
@@ -1678,35 +1739,62 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 
 			// Step 3: Enforce hydration cap at entry level.
-			// When hydrated tokens exceed budget.hydrationBudgetMax, drop lowest-MMR-ranked
-			// entries (from the end of the results array — already ranked by MMR) until
-			// the total fits. Never truncate the XML blob.
+			// When hydrated tokens exceed budget.hydrationBudgetMax, drop lower-priority
+			// temporal bands (durable → recent → live) until the formatted XML fits.
+			// Never truncate the XML blob.
 			let cappedResults = hydration.results;
 			let hydratedText = hydration.text;
 			let hydratedTokens = hydratedText ? estimateMessageTokens([{ role: "developer", content: hydratedText }]) : 0;
+			let droppedEntries: RecallSearchResult[] = [];
 
 			if (budget && hydratedTokens > budget.hydrationBudgetMax && cappedResults.length > 0) {
-				// Drop entries from the end (lowest MMR rank) until within budget.
-				// Uses real token counts via formatHydratedContext + estimateMessageTokens
+				// Drop lower-priority temporal bands first (durable → recent → live),
+				// using real token counts via formatHydratedContext + estimateMessageTokens
 				// each iteration to account for XML wrapper overhead accurately.
 				const remaining = [...cappedResults];
+				const droppedDuringCap: RecallSearchResult[] = [];
 				while (remaining.length > 0) {
-					const candidateText = formatHydratedContext(remaining, sessionId);
+					const candidateText = formatHydratedContext(remaining, {
+						currentSessionId: sessionId,
+						currentProjectCwd: cwd,
+						recentWindowMs,
+					});
 					const candidateTokens = candidateText
 						? estimateMessageTokens([{ role: "developer", content: candidateText }])
 						: 0;
 					if (candidateTokens <= budget.hydrationBudgetMax) break;
-					remaining.pop();
+					const dropIndex = selectHydrationResultIndexToDrop(remaining, { recentWindowMs });
+					droppedDuringCap.push(remaining[dropIndex]);
+					remaining.splice(dropIndex, 1);
 				}
 
 				if (remaining.length < cappedResults.length) {
+					const droppedAt = Date.now();
 					logger.debug("assembler:hydration-cap-enforced", {
 						originalEntries: cappedResults.length,
 						survivingEntries: remaining.length,
 						hydrationBudgetMax: budget.hydrationBudgetMax,
+						droppedEntries: droppedDuringCap.map(entry => {
+							const ageMs = getRecallAgeMs(entry.timestamp, droppedAt);
+							return {
+								turn: entry.turn,
+								band: getRecallBand(ageMs, recentWindowMs),
+								age: formatRecallAge(ageMs),
+								session: entry.session_id === sessionId ? "current" : "other",
+								project: entry.project_cwd === cwd ? "current" : "other",
+							};
+						}),
 					});
+					droppedEntries = droppedDuringCap;
 					cappedResults = remaining;
-					hydratedText = remaining.length > 0 ? formatHydratedContext(remaining, sessionId) : null;
+					hydratedText =
+						remaining.length > 0
+							? formatHydratedContext(remaining, {
+									currentSessionId: sessionId,
+									currentProjectCwd: cwd,
+									recentWindowMs,
+								})
+							: null;
 					hydratedTokens = hydratedText
 						? estimateMessageTokens([{ role: "developer", content: hydratedText }])
 						: 0;
@@ -1866,6 +1954,24 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				assemblerBudget: budget ?? null,
 			});
 
+			if (hydration.trace) {
+				const finalizedTrace = finalizeRecallDebugTrace(hydration.trace, {
+					turnId,
+					selected: cappedResults,
+					dropped: droppedEntries,
+					injectedText: hydratedText,
+					injectedTokenEstimate: hydratedTokens,
+					sessionId,
+					projectCwd: cwd,
+					recentWindowMs,
+				});
+				lastRecallTrace = finalizedTrace;
+				recallTraceHistory.push(finalizedTrace);
+				if (recallTraceHistory.length > 20) {
+					recallTraceHistory.shift();
+				}
+			}
+
 			// Step 8: Inject assembly summary as developer message.
 			const summary = formatAssemblySummary(lastPromptSnapshot);
 			if (summary) {
@@ -1995,6 +2101,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		pendingActionStore,
 		assemblerBridge,
 		getLastPromptSnapshotFn: () => lastPromptSnapshot,
+		getLastRecallTraceFn: () => lastRecallTrace,
+		getRecallTraceHistoryFn: () => recallTraceHistory,
 		searchDb,
 	});
 

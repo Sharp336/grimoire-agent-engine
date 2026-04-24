@@ -1,3 +1,4 @@
+export * from "./debug-trace";
 export * from "./embed";
 export * from "./hybrid-retriever";
 export * from "./ingest";
@@ -5,4 +6,5 @@ export * from "./message-text";
 export * from "./mmr";
 export * from "./passive-hydration";
 export * from "./store";
+export * from "./temporal";
 export * from "./types";

@@ -14,11 +14,20 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { parseMCPToolName } from "../../mcp/tool-bridge";
+import { buildRecallDebugEntries, type RecallDebugTrace } from "./debug-trace";
 import { embed } from "./embed";
 import { HybridRetriever } from "./hybrid-retriever";
 import { extractAssistantText, extractToolResultText, extractUserText } from "./message-text";
 import { cosineSimilarity } from "./mmr";
 import type { RecallStore } from "./store";
+import {
+	DEFAULT_RECENT_WINDOW_MS,
+	formatRecallAge,
+	getRecallAgeMs,
+	getRecallBand,
+	normalizeRecentWindowMs,
+	type RecallBand,
+} from "./temporal";
 import type { ToolResultStore } from "./tool-result-store";
 import { DEFAULT_RECALL_MMR_LAMBDA, type RecallSearchResult } from "./types";
 
@@ -149,29 +158,77 @@ export class CosineCache {
  *
  * Returns null when there are no results to inject.
  */
-export function formatHydratedContext(results: RecallSearchResult[], currentSessionId?: string): string | null {
+export interface HydratedContextFormatOptions {
+	currentSessionId?: string;
+	currentProjectCwd?: string;
+	now?: number;
+	recentWindowMs?: number;
+}
+
+function countRecallBands(
+	results: RecallSearchResult[],
+	now: number,
+	recentWindowMs: number,
+): Record<RecallBand, number> {
+	const counts: Record<RecallBand, number> = { live: 0, recent: 0, durable: 0 };
+	for (const result of results) {
+		const ageMs = getRecallAgeMs(result.timestamp, now);
+		counts[getRecallBand(ageMs, recentWindowMs)]++;
+	}
+	return counts;
+}
+
+function escapeXml(value: string): string {
+	return value
+		.replaceAll("&", "&amp;")
+		.replaceAll("<", "&lt;")
+		.replaceAll(">", "&gt;")
+		.replaceAll('"', "&quot;")
+		.replaceAll("'", "&apos;");
+}
+
+function formatXmlAttr(name: string, value: string | number): string {
+	return `${name}="${escapeXml(String(value))}"`;
+}
+
+export function formatHydratedContext(
+	results: RecallSearchResult[],
+	options: HydratedContextFormatOptions = {},
+): string | null {
 	if (results.length === 0) return null;
 
-	const parts: string[] = ["<recalled-context>"];
+	const now = options.now ?? Date.now();
+	const recentWindowMs = normalizeRecentWindowMs(options.recentWindowMs ?? DEFAULT_RECENT_WINDOW_MS);
+	const parts: string[] = [`<recalled-context ${formatXmlAttr("now", new Date(now).toISOString())}>`];
 
 	for (const result of results) {
-		const attrs: string[] = [`turn="${result.turn}"`, `role="${result.role}"`];
+		const ageMs = getRecallAgeMs(result.timestamp, now);
+		const attrs: string[] = [
+			formatXmlAttr("turn", result.turn),
+			formatXmlAttr("role", result.role),
+			formatXmlAttr("band", getRecallBand(ageMs, recentWindowMs)),
+			formatXmlAttr("age", formatRecallAge(ageMs)),
+			formatXmlAttr("timestamp", new Date(result.timestamp).toISOString()),
+		];
 		if (result.tool_name) {
-			attrs.push(`tool="${result.tool_name}"`);
+			attrs.push(formatXmlAttr("tool", result.tool_name));
 			const mcpParts = parseMCPToolName(result.tool_name);
 			if (mcpParts) {
-				attrs.push(`source="mcp:${mcpParts.serverName}"`);
+				attrs.push(formatXmlAttr("source", `mcp:${mcpParts.serverName}`));
 			} else {
-				attrs.push(`source="tool:${result.tool_name}"`);
+				attrs.push(formatXmlAttr("source", `tool:${result.tool_name}`));
 			}
 		} else {
-			attrs.push(`source="${result.role}"`);
+			attrs.push(formatXmlAttr("source", result.role));
 		}
-		if (currentSessionId) {
-			attrs.push(`session="${result.session_id === currentSessionId ? "current" : "other"}"`);
+		if (options.currentSessionId) {
+			attrs.push(formatXmlAttr("session", result.session_id === options.currentSessionId ? "current" : "other"));
+		}
+		if (options.currentProjectCwd) {
+			attrs.push(formatXmlAttr("project", result.project_cwd === options.currentProjectCwd ? "current" : "other"));
 		}
 		parts.push(`<entry ${attrs.join(" ")}>`);
-		parts.push(result.text);
+		parts.push(escapeXml(result.text));
 		parts.push("</entry>");
 	}
 
@@ -193,6 +250,7 @@ export interface PassiveHydratorOptions {
 	mmrLambda?: number;
 	cosineThreshold?: number;
 	hotWindowTurns?: number;
+	recentWindowMs?: number;
 }
 
 export interface HydrationResult {
@@ -204,19 +262,24 @@ export interface HydrationResult {
 	cacheHit: boolean;
 	/** Wall-clock time of the hydration pipeline in ms. */
 	durationMs: number;
+	/** Structured observability payload for /recall debugging. */
+	trace: RecallDebugTrace | null;
 }
 
 export class PassiveHydrator {
 	#license: string;
 	#sessionId: string;
+	#projectCwd: string;
+	#recentWindowMs: number;
 	#cache: CosineCache;
 	#topK: number;
 	#hotWindowTurns: number;
 	#retriever: HybridRetriever;
-
 	constructor(options: PassiveHydratorOptions) {
 		this.#license = options.license;
 		this.#sessionId = options.sessionId ?? "unknown";
+		this.#projectCwd = options.projectCwd;
+		this.#recentWindowMs = normalizeRecentWindowMs(options.recentWindowMs);
 		this.#topK = options.topK ?? DEFAULT_TOP_K;
 		this.#cache = new CosineCache(options.cosineThreshold ?? DEFAULT_COSINE_THRESHOLD);
 		this.#hotWindowTurns = options.hotWindowTurns ?? DEFAULT_HOT_WINDOW_TURNS;
@@ -226,6 +289,7 @@ export class PassiveHydrator {
 			sessionId: this.#sessionId,
 			projectCwd: options.projectCwd,
 			mmrLambda: options.mmrLambda ?? DEFAULT_RECALL_MMR_LAMBDA,
+			recentWindowMs: this.#recentWindowMs,
 		});
 	}
 
@@ -252,7 +316,7 @@ export class PassiveHydrator {
 				error: err instanceof Error ? err.message : String(err),
 				durationMs: Math.round(durationMs),
 			});
-			return { text: null, results: [], cacheHit: false, durationMs };
+			return { text: null, results: [], cacheHit: false, durationMs, trace: null };
 		}
 	}
 
@@ -271,25 +335,52 @@ export class PassiveHydrator {
 		// 1. Extract hot window text
 		const hotWindowText = extractHotWindowText(messages, this.#hotWindowTurns);
 		if (!hotWindowText) {
-			return { text: null, results: [], cacheHit: false, durationMs: Date.now() - start };
+			return { text: null, results: [], cacheHit: false, durationMs: Date.now() - start, trace: null };
 		}
 
 		// 2. Embed the hot window
 		const vectors = await this.#embedWithTimeout(hotWindowText, start);
 		if (!vectors) {
-			return { text: null, results: [], cacheHit: false, durationMs: Date.now() - start };
+			const durationMs = Date.now() - start;
+			return {
+				text: null,
+				results: [],
+				cacheHit: false,
+				durationMs,
+				trace: this.#buildTrace({
+					hotWindowText,
+					results: [],
+					text: null,
+					cacheHit: false,
+					durationMs,
+					embeddingGenerated: false,
+				}),
+			};
 		}
 		const embedding = vectors[0];
 
 		// 3. Check cosine cache
 		const cacheResult = this.#cache.check(embedding);
 		if (cacheResult.hit) {
-			const text = formatHydratedContext(cacheResult.results, this.#sessionId);
+			const text = formatHydratedContext(cacheResult.results, {
+				currentSessionId: this.#sessionId,
+				currentProjectCwd: this.#projectCwd,
+				recentWindowMs: this.#recentWindowMs,
+			});
+			const durationMs = Date.now() - start;
 			return {
 				text,
 				results: cacheResult.results,
 				cacheHit: true,
-				durationMs: Date.now() - start,
+				durationMs,
+				trace: this.#buildTrace({
+					hotWindowText,
+					results: cacheResult.results,
+					text,
+					cacheHit: true,
+					durationMs,
+					embeddingGenerated: true,
+				}),
 			};
 		}
 
@@ -305,15 +396,37 @@ export class PassiveHydrator {
 
 		if (topResults.length === 0) {
 			this.#cache.update(embedding, []);
-			return { text: null, results: [], cacheHit: false, durationMs: Date.now() - start };
+			const durationMs = Date.now() - start;
+			return {
+				text: null,
+				results: [],
+				cacheHit: false,
+				durationMs,
+				trace: this.#buildTrace({
+					hotWindowText,
+					results: [],
+					text: null,
+					cacheHit: false,
+					durationMs,
+					embeddingGenerated: true,
+					responseTrace: response.trace,
+				}),
+			};
 		}
 
 		// 5. Update cache
 		this.#cache.update(embedding, topResults);
 
 		// 6. Format
-		const text = formatHydratedContext(topResults, this.#sessionId);
-		const durationMs = Date.now() - start;
+		const formattedAt = Date.now();
+		const text = formatHydratedContext(topResults, {
+			currentSessionId: this.#sessionId,
+			currentProjectCwd: this.#projectCwd,
+			now: formattedAt,
+			recentWindowMs: this.#recentWindowMs,
+		});
+		const durationMs = formattedAt - start;
+		const bandCounts = countRecallBands(topResults, formattedAt, this.#recentWindowMs);
 
 		logger.debug("PassiveHydrator: hydration complete", {
 			returned: topResults.length,
@@ -323,9 +436,89 @@ export class PassiveHydrator {
 			keywordCandidates: response.trace.keywordCandidates,
 			resolvedKeywordCandidates: response.trace.resolvedKeywordCandidates,
 			fusedCandidates: response.trace.fusedCandidates,
+			bandCounts,
 		});
 
-		return { text, results: topResults, cacheHit: false, durationMs };
+		return {
+			text,
+			results: topResults,
+			cacheHit: false,
+			durationMs,
+			trace: this.#buildTrace({
+				hotWindowText,
+				results: topResults,
+				text,
+				cacheHit: false,
+				durationMs,
+				embeddingGenerated: true,
+				responseTrace: response.trace,
+				now: formattedAt,
+			}),
+		};
+	}
+
+	#buildTrace(options: {
+		hotWindowText: string;
+		results: RecallSearchResult[];
+		text: string | null;
+		cacheHit: boolean;
+		durationMs: number;
+		embeddingGenerated: boolean;
+		responseTrace?: {
+			mode: "semantic" | "hybrid";
+			semanticCandidates: number;
+			keywordCandidates: number;
+			resolvedKeywordCandidates: number;
+			fusedCandidates: number;
+			candidates: Array<{
+				rowKey: string;
+				semanticRank: number | null;
+				keywordRank: number | null;
+				source: "semantic" | "keyword" | "fused" | "cache" | "unknown";
+			}>;
+		};
+		now?: number;
+	}): RecallDebugTrace {
+		const now = options.now ?? Date.now();
+		const provenance = new Map(options.responseTrace?.candidates.map(candidate => [candidate.rowKey, candidate]));
+		return {
+			turnId: null,
+			capturedAt: new Date(now).toISOString(),
+			attempted: true,
+			injected: !!options.text,
+			cacheHit: options.cacheHit,
+			durationMs: options.durationMs,
+			failure: null,
+			query: {
+				text: options.hotWindowText,
+				charCount: options.hotWindowText.length,
+				estimatedTokens: Math.ceil(options.hotWindowText.length / 4),
+				hotWindowTurns: this.#hotWindowTurns,
+				embeddingGenerated: options.embeddingGenerated,
+			},
+			retrieval: {
+				mode: options.responseTrace?.mode ?? "hybrid",
+				projectScope: "all",
+				roleFilter: null,
+				recentWindowMs: this.#recentWindowMs,
+				topK: this.#topK,
+				semanticCandidates: options.responseTrace?.semanticCandidates ?? 0,
+				keywordCandidates: options.responseTrace?.keywordCandidates ?? 0,
+				resolvedKeywordCandidates: options.responseTrace?.resolvedKeywordCandidates ?? 0,
+				fusedCandidates: options.responseTrace?.fusedCandidates ?? options.results.length,
+			},
+			selected: buildRecallDebugEntries(options.results, {
+				now,
+				sessionId: this.#sessionId,
+				projectCwd: this.#projectCwd,
+				recentWindowMs: this.#recentWindowMs,
+				provenance,
+				sourceFallback: options.cacheHit ? "cache" : "unknown",
+			}),
+			dropped: [],
+			injectedText: options.text,
+			injectedTokenEstimate: options.text ? Math.ceil(options.text.length / 4) : 0,
+		};
 	}
 
 	async #embedWithTimeout(text: string, start: number): Promise<Float32Array[] | null> {
