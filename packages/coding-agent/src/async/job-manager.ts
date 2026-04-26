@@ -16,6 +16,7 @@ export interface AsyncJob {
 	promise: Promise<void>;
 	resultText?: string;
 	errorText?: string;
+	resultDetails?: Record<string, unknown>;
 }
 
 export interface AsyncJobManagerOptions {
@@ -92,12 +93,16 @@ export class AsyncJobManager {
 			type,
 			status: "running",
 			startTime,
-			label,
+			// Collapse whitespace runs so multi-line commands stay on one status-row line.
+			label: label.replace(/\s+/g, " ").trim(),
 			abortController,
 			promise: Promise.resolve(),
 		};
 
 		const reportProgress = async (text: string, details?: Record<string, unknown>): Promise<void> => {
+			if (details) {
+				job.resultDetails = details;
+			}
 			if (!options?.onProgress) return;
 			try {
 				await options.onProgress(text, details);
@@ -113,6 +118,7 @@ export class AsyncJobManager {
 				const text = await run({ jobId: id, signal: abortController.signal, reportProgress });
 				if (job.status === "cancelled") {
 					job.resultText = text;
+					this.#enqueueDelivery(id, text);
 					this.#scheduleEviction(id);
 					return;
 				}
@@ -122,7 +128,9 @@ export class AsyncJobManager {
 				this.#scheduleEviction(id);
 			} catch (error) {
 				if (job.status === "cancelled") {
-					job.errorText = error instanceof Error ? error.message : String(error);
+					const errorText = error instanceof Error ? error.message : String(error);
+					job.errorText = errorText;
+					this.#enqueueDelivery(id, errorText);
 					this.#scheduleEviction(id);
 					return;
 				}
