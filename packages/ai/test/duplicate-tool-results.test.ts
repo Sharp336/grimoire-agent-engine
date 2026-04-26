@@ -87,7 +87,7 @@ describe("Duplicate Tool Results Regression", () => {
 		expect(toolResults.length).toBe(1);
 	});
 
-	it("does not synthesize 'No result provided' when a real tool result appears later in history", () => {
+	it("defers interleaved developer messages until after a later real tool result", () => {
 		const toolCallId = "toolu_deferred_result_123";
 
 		const assistantMessage: AssistantMessage = {
@@ -139,6 +139,49 @@ describe("Duplicate Tool Results Regression", () => {
 
 		expect(toolResults).toHaveLength(1);
 		expect((toolResults[0] as ToolResultMessage).content).toEqual([{ type: "text", text: "todo updated" }]);
+		expect(transformed.map(msg => msg.role)).toEqual(["assistant", "toolResult", "developer"]);
+		expect(transformed[1]).toBe(messages[2]);
+		expect(transformed[2]).toBe(messages[1]);
+	});
+
+	it("defers interleaved user breadcrumbs until after pending tool results", () => {
+		const toolCallId = "toolu_checkpoint_poll_123";
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: toolCallId, name: "poll", arguments: { timeout: 270 } }],
+			api: "anthropic-messages",
+			provider: "anthropic",
+			model: "claude-3-5-sonnet-20241022",
+			usage: {
+				input: 100,
+				output: 50,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 150,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+		const breadcrumb = {
+			role: "user" as const,
+			content: "**Pre-task checkpoint committed** before isolated task dispatch",
+			timestamp: Date.now(),
+		};
+		const toolResult: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId,
+			toolName: "poll",
+			content: [{ type: "text", text: "completed" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		const transformed = transformMessages([assistantMessage, breadcrumb, toolResult], model);
+
+		expect(transformed.map(msg => msg.role)).toEqual(["assistant", "toolResult", "user"]);
+		expect(transformed[1]).toBe(toolResult);
+		expect(transformed[2]).toBe(breadcrumb);
 	});
 
 	it("should not duplicate tool results for aborted messages when results already exist", () => {
