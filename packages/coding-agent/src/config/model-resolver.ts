@@ -508,6 +508,13 @@ function isSessionInheritedAgentPattern(value: string): boolean {
 	return value === DEFAULT_MODEL_ROLE || value === `${PREFIX_MODEL_ROLE}${DEFAULT_MODEL_ROLE}` || value === "pi/task";
 }
 
+/** Returns true when the value represents "use the default model" — undefined, empty, or the default role alias. */
+export function isDefaultModelAlias(value: string | readonly string[] | undefined): boolean {
+	if (!value || (Array.isArray(value) && value.length === 0)) return true;
+	if (Array.isArray(value)) return value.every(v => isDefaultModelAlias(v));
+	return value === DEFAULT_MODEL_ROLE || value === `${PREFIX_MODEL_ROLE}${DEFAULT_MODEL_ROLE}`;
+}
+
 function resolveConfiguredRolePattern(value: string, settings?: Settings): string[] | undefined {
 	const normalized = value.trim();
 	if (!normalized) return undefined;
