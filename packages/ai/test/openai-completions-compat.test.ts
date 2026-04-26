@@ -283,21 +283,57 @@ describe("openai-completions compatibility", () => {
 });
 
 describe("kimi model detection via detectCompat", () => {
-	function kimiOpenCodeModel(id: string): Model<"openai-completions"> {
+	function openCodeGoModel(id: string, reasoning = true): Model<"openai-completions"> {
 		return {
 			...getBundledModel("openai", "gpt-4o-mini"),
 			api: "openai-completions",
 			provider: "opencode-go",
 			baseUrl: "https://opencode.ai/zen/go/v1",
 			id,
-			reasoning: true,
+			reasoning,
 		};
+	}
+
+	function kimiOpenCodeModel(id: string): Model<"openai-completions"> {
+		return openCodeGoModel(id, true);
 	}
 
 	it("requires reasoning_content for tool calls on kimi-k2.5 (opencode-go)", () => {
 		const compat = detectCompat(kimiOpenCodeModel("kimi-k2.5"));
 		expect(compat.requiresReasoningContentForToolCalls).toBe(true);
 		expect(compat.requiresAssistantContentForToolCalls).toBe(true);
+	});
+
+	it("requires reasoning_content for tool calls on reasoning DeepSeek models via opencode-go", () => {
+		const compat = detectCompat(openCodeGoModel("deepseek-v4-pro", true));
+		expect(compat.requiresReasoningContentForToolCalls).toBe(true);
+		expect(compat.requiresAssistantContentForToolCalls).toBe(false);
+	});
+
+	it("injects reasoning_content placeholder for reasoning DeepSeek tool-call turns via opencode-go", () => {
+		const model = openCodeGoModel("deepseek-v4-pro", true);
+		const compat = detectCompat(model);
+		const toolCallMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "toolCall", id: "call_ds_go", name: "web_search", arguments: { query: "hi" } }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+		const messages = convertMessages(model, { messages: [toolCallMessage] }, compat);
+		const assistant = messages.find(m => m.role === "assistant");
+		expect(assistant).toBeDefined();
+		expect(Reflect.get(assistant as object, "reasoning_content")).toBe(".");
 	});
 
 	it("injects reasoning_content placeholder when assistant with tool calls has no reasoning field", () => {
@@ -338,15 +374,8 @@ describe("kimi model detection via detectCompat", () => {
 		expect((reasoningContent as string).length).toBeGreaterThan(0);
 	});
 
-	it("does not inject reasoning_content when model is not kimi", () => {
-		const model: Model<"openai-completions"> = {
-			...getBundledModel("openai", "gpt-4o-mini"),
-			api: "openai-completions",
-			provider: "opencode-go",
-			baseUrl: "https://opencode.ai/zen/go/v1",
-			id: "some-other-model",
-		};
-		const compat = detectCompat(model);
+	it("does not require reasoning_content when opencode-go model is not reasoning-capable", () => {
+		const compat = detectCompat(openCodeGoModel("some-other-model", false));
 		expect(compat.requiresReasoningContentForToolCalls).toBe(false);
 	});
 
