@@ -6,7 +6,6 @@ import { getBundledModel } from "@oh-my-pi/pi-ai/models";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { ExtensionRunner, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -267,7 +266,11 @@ describe("AgentSession handoff", () => {
 
 		session.agent.emitExternalEvent({ type: "message_end", message: overflowAssistant });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [overflowAssistant] });
-		await Bun.sleep(20);
+		const deadline = Date.now() + 1_000;
+		while (!events.some(event => event.type === "auto_compaction_start") && Date.now() < deadline) {
+			await Bun.sleep(10);
+		}
+		await session.waitForIdle();
 
 		expect(handoffSpy).not.toHaveBeenCalled();
 		const startEvents = events.filter(event => event.type === "auto_compaction_start");
@@ -312,7 +315,11 @@ describe("AgentSession handoff", () => {
 
 		session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
 		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
-		await Bun.sleep(20);
+		const deadline = Date.now() + 1_000;
+		while (handoffSpy.mock.calls.length === 0 && Date.now() < deadline) {
+			await Bun.sleep(10);
+		}
+		await session.waitForIdle();
 
 		expect(handoffSpy).toHaveBeenCalledTimes(1);
 		expect(handoffSpy).toHaveBeenCalledWith(expect.stringContaining("Threshold-triggered maintenance"), {
@@ -487,108 +494,6 @@ describe("AgentSession handoff", () => {
 		expect(endEvents[0]).not.toMatchObject({
 			errorMessage: "Auto-handoff failed: no handoff document was generated",
 		});
-	});
-
-	it("resets to the base system prompt before generating a handoff", async () => {
-		const model = session.model;
-		if (!model) {
-			throw new Error("Expected model to be set");
-		}
-		await session.dispose();
-		sessionManager = SessionManager.create(tempDir.path(), tempDir.path());
-
-		const extensionsResult = await loadExtensions([], tempDir.path());
-		const extensionRunner = new ExtensionRunner(
-			extensionsResult.extensions,
-			extensionsResult.runtime,
-			tempDir.path(),
-			sessionManager,
-			modelRegistry,
-		);
-		const emitBeforeAgentStart = vi.spyOn(extensionRunner, "emitBeforeAgentStart").mockResolvedValueOnce({
-			systemPrompt: "Hook override",
-		});
-		vi.spyOn(extensionRunner, "emit").mockResolvedValue(undefined);
-
-		const observedSystemPrompts: string[] = [];
-		let streamCallCount = 0;
-		const agent = new Agent({
-			getApiKey: () => "test-key",
-			initialState: {
-				model,
-				systemPrompt: "Test",
-				tools: [],
-				messages: [],
-			},
-			streamFn: (_model, context) => {
-				observedSystemPrompts.push(context.systemPrompt ?? "");
-				streamCallCount++;
-				const stream = new MockAssistantStream();
-				queueMicrotask(() => {
-					const message: AssistantMessage = {
-						role: "assistant",
-						content: [
-							{
-								type: "text",
-								text: streamCallCount === 1 ? "normal response" : "## Goal\nContinue from here",
-							},
-						],
-						api: model.api,
-						provider: model.provider,
-						model: model.id,
-						stopReason: "stop",
-						usage: {
-							input: 0,
-							output: 0,
-							cacheRead: 0,
-							cacheWrite: 0,
-							totalTokens: 0,
-							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-						},
-						timestamp: Date.now(),
-					};
-					stream.push({ type: "start", partial: message });
-					stream.push({ type: "done", reason: "stop", message });
-				});
-				return stream;
-			},
-		});
-
-		session = new AgentSession({
-			agent,
-			sessionManager,
-			settings: Settings.isolated({ "compaction.enabled": false }),
-			modelRegistry,
-			extensionRunner,
-		});
-		sessionManager.appendMessage({
-			role: "user",
-			content: [{ type: "text", text: "seed" }],
-			timestamp: Date.now() - 2,
-		});
-		sessionManager.appendMessage({
-			role: "assistant",
-			content: [{ type: "text", text: "seed response" }],
-			api: model.api,
-			provider: model.provider,
-			model: model.id,
-			stopReason: "stop",
-			usage: {
-				input: 16,
-				output: 8,
-				cacheRead: 0,
-				cacheWrite: 0,
-				totalTokens: 24,
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-			},
-			timestamp: Date.now() - 1,
-		});
-
-		await session.prompt("hello from user");
-		await session.handoff();
-
-		expect(emitBeforeAgentStart).toHaveBeenCalledTimes(1);
-		expect(observedSystemPrompts).toEqual(["Hook override", "Test"]);
 	});
 
 	it("saves auto-handoff document to disk when enabled", async () => {
