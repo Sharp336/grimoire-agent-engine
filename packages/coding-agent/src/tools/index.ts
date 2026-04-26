@@ -30,6 +30,7 @@ import { DebugTool } from "./debug";
 import { ExitPlanModeTool } from "./exit-plan-mode";
 import { FindTool } from "./find";
 import { GithubTool } from "./gh";
+import { GitCommitCheckpointTool } from "./git-commit-checkpoint";
 import { GrepTool } from "./grep";
 import { InspectImageTool } from "./inspect-image";
 import { IrcTool } from "./irc";
@@ -220,6 +221,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	read: s => new ReadTool(s),
 	inspect_image: s => new InspectImageTool(s),
 	browser: s => new BrowserTool(s),
+	git_commit_checkpoint: GitCommitCheckpointTool.createIf,
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
 	task: TaskTool.create,
