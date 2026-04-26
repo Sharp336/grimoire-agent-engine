@@ -45,10 +45,11 @@ const WAIT_DURATION_MS: Record<string, number> = {
 	"30s": 30_000,
 	"1m": 60_000,
 	"5m": 5 * 60_000,
+	"4m30s": 4 * 60_000 + 30_000,
 };
 
 function parseWaitDurationMs(value: string | undefined): number {
-	return (value ? WAIT_DURATION_MS[value] : undefined) ?? WAIT_DURATION_MS["30s"];
+	return (value ? WAIT_DURATION_MS[value] : undefined) ?? WAIT_DURATION_MS["4m30s"];
 }
 
 interface JobSnapshot {

@@ -1423,12 +1423,12 @@ export const SETTINGS_SCHEMA = {
 
 	"async.pollWaitDuration": {
 		type: "enum",
-		values: ["5s", "10s", "30s", "1m", "5m"] as const,
-		default: "30s",
+		values: ["5s", "10s", "30s", "1m", "5m", "4m30s"] as const,
+		default: "4m30s",
 		ui: {
 			tab: "tools",
 			label: "Poll Wait Duration",
-			description: "How long the poll tool waits for background job updates before returning the current state",
+			description: "How long the job tool waits for background job updates before returning the current state",
 			submenu: true,
 		},
 	},
