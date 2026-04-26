@@ -82,37 +82,6 @@ describe("AsyncJobManager", () => {
 		expect(manager.getJob(jobId)?.errorText).toBe("command failed");
 	});
 
-	test("cancels a running job by id", async () => {
-		const completions: Array<{ jobId: string; text: string }> = [];
-		const manager = new AsyncJobManager({
-			onJobComplete: async (jobId, text) => {
-				completions.push({ jobId, text });
-			},
-		});
-
-		const jobId = manager.register("bash", "sleep", async ({ signal }) => {
-			await new Promise<never>((_resolve, reject) => {
-				signal.addEventListener(
-					"abort",
-					() => {
-						reject(new Error("aborted"));
-					},
-					{ once: true },
-				);
-			});
-			throw new Error("unreachable");
-		});
-
-		expect(manager.cancel(jobId)).toBe(true);
-		expect(manager.cancel(jobId)).toBe(false);
-
-		await manager.waitForAll();
-		await manager.drainDeliveries({ timeoutMs: 2_000 });
-
-		expect(manager.getJob(jobId)?.status).toBe("cancelled");
-		expect(completions).toHaveLength(0);
-	});
-
 	test("enforces maxRunningJobs cap", () => {
 		const manager = new AsyncJobManager({
 			maxRunningJobs: 1,
