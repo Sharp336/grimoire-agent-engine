@@ -1212,8 +1212,8 @@ export function convertMessages(
 				(assistantMsg as any).reasoning_text !== undefined;
 			// Inject a `reasoning_content` placeholder on assistant tool-call turns when the backend
 			// rejects history without it. The compat flag captures the rule:
-			//   - Kimi (native or via OpenCode-Go): chat completion endpoint demands the field.
-			//   - Reasoning models reached through OpenRouter or OpenCode-Go (e.g. DeepSeek V4 Pro):
+			//   - Kimi (native or via OpenCode Zen/Go): chat completion endpoint demands the field.
+			//   - Reasoning models reached through OpenRouter or OpenCode Zen/Go (e.g. DeepSeek V4 Pro):
 			//     the upstream thinking-mode validator demands it on every prior assistant turn. omp
 			//     cannot synthesize real reasoning when the conversation was warmed up by another
 			//     provider whose reasoning is redacted/encrypted (Anthropic) or simply absent, so we

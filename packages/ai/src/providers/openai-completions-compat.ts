@@ -54,6 +54,8 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 	const isKimiModel = model.id.includes("moonshotai/kimi") || /^kimi[-.]/i.test(model.id);
 	const isAlibaba = provider === "alibaba-coding-plan" || baseUrl.includes("dashscope");
 	const isQwen = model.id.toLowerCase().includes("qwen");
+	const isOpenRouter = provider === "openrouter" || baseUrl.includes("openrouter.ai");
+	const isOpenCode = provider === "opencode-zen" || provider === "opencode-go" || baseUrl.includes("opencode.ai/zen");
 
 	const isNonStandard =
 		isCerebras ||
@@ -99,22 +101,20 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		requiresMistralToolIds: isMistral,
 		thinkingFormat: isZai
 			? "zai"
-			: provider === "openrouter" || baseUrl.includes("openrouter.ai")
+			: isOpenRouter
 				? "openrouter"
 				: isAlibaba || isQwen
 					? "qwen"
 					: "openai",
 		reasoningContentField: "reasoning_content",
 		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
-		//   - Kimi: documented invariant on its native API and via OpenCode-Go.
-		//   - Reasoning-capable models reached through OpenRouter or OpenCode-Go: DeepSeek V4 Pro and
-		//     similar enforce this server-side whenever the request is in thinking mode.
+		//   - Kimi: documented invariant on its native API and via OpenCode.
+		//   - Reasoning-capable models reached through OpenRouter or OpenCode (Zen/Go): DeepSeek V4 Pro,
+		//     Kimi, and similar models can enforce this server-side whenever the request is in thinking mode.
 		// We can't translate Anthropic's redacted/encrypted reasoning into DeepSeek's plaintext form, so
 		// cross-provider continuations rely on a placeholder — see `convertMessages` for injection rules.
 		requiresReasoningContentForToolCalls:
-			isKimiModel ||
-			((provider === "openrouter" || baseUrl.includes("openrouter.ai") || provider === "opencode-go" ||
-				baseUrl.includes("opencode.ai/zen/go")) && Boolean(model.reasoning)),
+			isKimiModel || ((isOpenRouter || isOpenCode) && Boolean(model.reasoning)),
 		requiresAssistantContentForToolCalls: isKimiModel,
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,
