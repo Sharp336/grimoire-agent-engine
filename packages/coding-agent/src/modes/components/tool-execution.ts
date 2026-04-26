@@ -343,7 +343,7 @@ export class ToolExecutionComponent extends Container {
 			this.#toolName === "task" &&
 			(this.#result?.details as { async?: { state?: string } } | undefined)?.async?.state === "running";
 		const isPartialTask =
-			this.#isPartial && (this.#toolName === "task" || this.#toolName === "poll") && !isBackgroundAsyncTask;
+			this.#isPartial && (this.#toolName === "task" || this.#toolName === "job") && !isBackgroundAsyncTask;
 		const needsSpinner = isStreamingArgs || isPartialTask;
 		if (needsSpinner && !this.#spinnerInterval) {
 			this.#spinnerInterval = setInterval(() => {
