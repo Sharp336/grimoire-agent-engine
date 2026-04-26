@@ -906,15 +906,15 @@ Despite the name `runSubprocess`, `packages/coding-agent/src/task/executor.ts` c
 
 What _is_ isolated is execution context and artifacts, not process memory:
 
-- Optional filesystem isolation is controlled by the `task.isolation.mode` setting (`"none"`, `"worktree"`, `"fuse-overlay"`, or `"fuse-projfs"`).
+- Optional filesystem isolation is controlled by the `task.isolation.mode` setting (`"none"`, `"worktree"`, `"reflink"`, or `"fuse-projfs"`).
   - **worktree**: `ensureWorktree(...)`, `applyBaseline(...)`, `captureDeltaPatch(...)`, `cleanupWorktree(...)`. Nested non-submodule git repos are discovered and handled independently.
-  - **fuse-overlay**: `ensureFuseOverlay(...)`, `captureDeltaPatch(...)`, `cleanupFuseOverlay(...)` using `fuse-overlayfs` on Unix hosts. On Windows, this mode falls back to `worktree` with a system notification.
+  - **reflink**: `ensureReflinkSnapshot(...)`, `captureDeltaPatch(...)`, `cleanupReflinkSnapshot(...)` using `cp --reflink=auto` on Linux or `cp -c` (APFS clone) on macOS. Produces a point-in-time snapshot that is independent of subsequent main-session writes (unlike the former `fuse-overlay` mode, which stacked a CoW layer over the live lowerdir). On Windows, this mode falls back to `worktree` with a system notification.
   - **fuse-projfs**: `ensureProjfsOverlay(...)`, `captureDeltaPatch(...)`, `cleanupProjfsOverlay(...)` using ProjFS on Windows. Missing ProjFS prerequisites fall back to `worktree` with a system notification; non-prerequisite startup errors still fail the task.
-- The `task.isolation.merge` setting controls how isolated changes are integrated back:
-  - **patch** (default): captures a diff via `captureDeltaPatch(...)`, combines patches, and applies with `git apply`.
-  - **branch**: each task commits to a temp branch (`omp/task/<id>`) via `commitToBranch(...)`, then `mergeTaskBranches(...)` cherry-picks them sequentially onto HEAD. If `git apply` fails inside `commitToBranch`, the error is non-fatal — the agent result is preserved with a `merge failed` status.
+- The `task.isolation.merge` setting controls how isolated changes are integrated back. Every task runs its own merge step inline as soon as it finishes, serialized across the batch through a per-invocation mutex so concurrent tasks don't race on parent-repo state.
+  - **patch** (default): captures a diff via `captureDeltaPatch(...)` and applies it against the live working tree with `git apply`. On failure, `patchPath` is preserved and the task's status flips to `merge failed`.
+  - **branch**: each task commits to a temp branch (`omp/task/<id>`) via `commitToBranch(...)`, then `mergeSingleBranch(...)` cherry-picks it onto HEAD. On cherry-pick conflict the branch stays in the repository verbatim and the task is reported as `merge failed`; successful branches are deleted immediately after merge.
 - The `task.isolation.commits` setting (`generic` or `ai`) controls commit messages for branch commits and nested repo patches. `ai` mode uses a smol model to generate conventional commit messages from diffs.
-- Nested repo patches are applied via `applyNestedPatches(...)` after the parent merge, grouped by repo with one commit per repo.
+- Nested repo patches are applied per task via `applyNestedPatches(...)` once the parent merge succeeds. Each nested repo is attempted independently so a failure in one sub-repo does not block siblings; failures are attributed back to the owning task's `error` and surface as `merge failed`. Multi-root workspaces (Cargo/npm/git-submodule-adjacent) therefore no longer collapse into one opaque batch failure.
 - Child session JSONL/markdown outputs are written under the task artifacts directory (`<id>.jsonl`, `<id>.md`, and in isolated mode `<id>.patch`).
 
 ### Tooling Surface in Child Sessions

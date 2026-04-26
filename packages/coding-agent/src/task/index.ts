@@ -51,13 +51,13 @@ import {
 	applyNestedPatches,
 	captureBaseline,
 	captureDeltaPatch,
-	cleanupFuseOverlay,
 	cleanupProjfsOverlay,
+	cleanupReflinkSnapshot,
 	cleanupTaskBranches,
 	cleanupWorktree,
 	commitToBranch,
-	ensureFuseOverlay,
 	ensureProjfsOverlay,
+	ensureReflinkSnapshot,
 	ensureWorktree,
 	getRepoRoot,
 	mergeTaskBranches,
@@ -517,7 +517,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 				content: [
 					{
 						type: "text",
-						text: "Task isolation is disabled. Remove the isolated argument or set task.isolation.mode to 'worktree', 'fuse-overlay', or 'fuse-projfs'.",
+						text: "Task isolation is disabled. Remove the isolated argument or set task.isolation.mode to 'worktree', 'reflink', or 'fuse-projfs'.",
 					},
 				],
 				details: {
@@ -867,12 +867,12 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 					}
 					const taskBaseline = structuredClone(baseline);
 
-					if (effectiveIsolationMode === "fuse-overlay") {
-						isolationDir = await ensureFuseOverlay(repoRoot, task.id);
+					if (effectiveIsolationMode === "reflink") {
+						isolationDir = await ensureReflinkSnapshot(repoRoot, task.id);
 					} else if (effectiveIsolationMode === "fuse-projfs") {
 						isolationDir = await ensureProjfsOverlay(repoRoot, task.id);
 					} else {
-						isolationDir = await ensureWorktree(repoRoot, task.id);
+						isolationDir = await ensureWorktree(repoRoot, task.id, taskBaseline.root.headCommit);
 						await applyBaseline(isolationDir, taskBaseline);
 					}
 
@@ -980,8 +980,8 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 					};
 				} finally {
 					if (isolationDir) {
-						if (effectiveIsolationMode === "fuse-overlay") {
-							await cleanupFuseOverlay(isolationDir);
+						if (effectiveIsolationMode === "reflink") {
+							await cleanupReflinkSnapshot(isolationDir);
 						} else if (effectiveIsolationMode === "fuse-projfs") {
 							await cleanupProjfsOverlay(isolationDir);
 						} else {

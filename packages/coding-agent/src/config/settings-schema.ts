@@ -333,7 +333,6 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
-
 	"statusLine.showHookStatus": {
 		type: "boolean",
 		default: true,
@@ -1498,13 +1497,13 @@ export const SETTINGS_SCHEMA = {
 	// Delegation
 	"task.isolation.mode": {
 		type: "enum",
-		values: ["none", "worktree", "fuse-overlay", "fuse-projfs"] as const,
+		values: ["none", "worktree", "reflink", "fuse-projfs"] as const,
 		default: "none",
 		ui: {
 			tab: "tasks",
 			label: "Isolation Mode",
 			description:
-				"Isolation mode for subagents (none, git worktree, fuse-overlayfs on Unix, or ProjFS on Windows via fuse-projfs; unsupported modes fall back to worktree)",
+				"Isolation mode for subagents (none, git worktree, reflink snapshot via cp --reflink on Unix, or ProjFS on Windows via fuse-projfs; unsupported modes fall back to worktree)",
 			submenu: true,
 		},
 	},
@@ -1520,7 +1519,6 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
-
 	"task.isolation.commits": {
 		type: "enum",
 		values: ["generic", "ai"] as const,
@@ -1532,7 +1530,6 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
-
 	"task.eager": {
 		type: "boolean",
 		default: false,
@@ -1542,7 +1539,6 @@ export const SETTINGS_SCHEMA = {
 			description: "Encourage the agent to delegate work to subagents unless changes are trivial",
 		},
 	},
-
 	"task.simple": {
 		type: "enum",
 		values: TASK_SIMPLE_MODES,
@@ -1554,7 +1550,6 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
-
 	"task.maxConcurrency": {
 		type: "number",
 		default: 32,
