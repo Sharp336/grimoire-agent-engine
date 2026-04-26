@@ -126,31 +126,53 @@ export function transformMessages<TApi extends Api>(
 		transformed.filter((msg): msg is ToolResultMessage => msg.role === "toolResult").map(msg => msg.toolCallId),
 	);
 
-	// Second pass: insert synthetic empty tool results for orphaned tool calls
-	// and preserve aborted/errored tool results when they were already persisted.
+	// Second pass: keep every assistant tool call adjacent to its tool result(s). Interleaved
+	// user/developer messages are deferred until later real results arrive; missing results get synthetic errors.
 	const result: Message[] = [];
 	let pendingToolCalls: ToolCall[] = [];
+	let deferredInterleavedMessages: Message[] = [];
 	let pendingAbortedToolCalls = new Map<string, ToolCall>();
 	let pendingAbortedTimestamp: number | undefined;
 	// Track tool call status: whether resolved (has result) or aborted (synthetic result injected, skip later real results)
 	const toolCallStatus = new Map<string, ToolCallStatus>();
 
+	const unresolvedPendingToolCalls = (): ToolCall[] => pendingToolCalls.filter(tc => !toolCallStatus.has(tc.id));
+
+	const pendingToolCallsAwaitRealResults = (): boolean =>
+		unresolvedPendingToolCalls().some(tc => realToolResultIds.has(tc.id));
+
+	const flushDeferredInterleavedMessages = (): void => {
+		if (deferredInterleavedMessages.length === 0) return;
+		result.push(...deferredInterleavedMessages);
+		deferredInterleavedMessages = [];
+	};
+
+	const synthesizePendingToolCalls = (timestamp: number): void => {
+		for (const tc of unresolvedPendingToolCalls()) {
+			result.push({
+				role: "toolResult",
+				toolCallId: tc.id,
+				toolName: tc.name,
+				content: [{ type: "text", text: "No result provided" }],
+				isError: true,
+				timestamp,
+			} as ToolResultMessage);
+			toolCallStatus.set(tc.id, ToolCallStatus.Resolved);
+		}
+	};
+
+	const finishPendingToolCallsIfReady = (timestamp: number): void => {
+		if (pendingToolCalls.length === 0 || pendingToolCallsAwaitRealResults()) return;
+		synthesizePendingToolCalls(timestamp);
+		pendingToolCalls = [];
+		flushDeferredInterleavedMessages();
+	};
+
 	const flushPendingToolCalls = (timestamp: number): void => {
 		if (pendingToolCalls.length === 0) return;
-		for (const tc of pendingToolCalls) {
-			if (!toolCallStatus.has(tc.id) && !realToolResultIds.has(tc.id)) {
-				result.push({
-					role: "toolResult",
-					toolCallId: tc.id,
-					toolName: tc.name,
-					content: [{ type: "text", text: "No result provided" }],
-					isError: true,
-					timestamp,
-				} as ToolResultMessage);
-				toolCallStatus.set(tc.id, ToolCallStatus.Resolved);
-			}
-		}
+		synthesizePendingToolCalls(timestamp);
 		pendingToolCalls = [];
+		flushDeferredInterleavedMessages();
 	};
 
 	const flushPendingAbortedToolCalls = (): void => {
@@ -210,14 +232,24 @@ export function transformMessages<TApi extends Api>(
 				continue;
 			}
 
-			if (toolCallStatus.get(msg.toolCallId) === ToolCallStatus.Aborted) continue;
+			const status = toolCallStatus.get(msg.toolCallId);
+			if (status === ToolCallStatus.Aborted || status === ToolCallStatus.Resolved) continue;
 			toolCallStatus.set(msg.toolCallId, ToolCallStatus.Resolved);
 			result.push(msg);
+			finishPendingToolCallsIfReady(messageTimestamp);
 		} else if (msg.role === "user" || msg.role === "developer") {
+			if (pendingToolCalls.length > 0 && pendingToolCallsAwaitRealResults()) {
+				deferredInterleavedMessages.push(msg);
+				continue;
+			}
 			flushPendingToolCalls(messageTimestamp);
 			flushPendingAbortedToolCalls();
 			result.push(msg);
 		} else {
+			if (pendingToolCalls.length > 0 && pendingToolCallsAwaitRealResults()) {
+				deferredInterleavedMessages.push(msg);
+				continue;
+			}
 			flushPendingToolCalls(messageTimestamp);
 			flushPendingAbortedToolCalls();
 			result.push(msg);
@@ -226,6 +258,7 @@ export function transformMessages<TApi extends Api>(
 
 	flushPendingToolCalls(Date.now());
 	flushPendingAbortedToolCalls();
+	flushDeferredInterleavedMessages();
 
 	return result;
 }
