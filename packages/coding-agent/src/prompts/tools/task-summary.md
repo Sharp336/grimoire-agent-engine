@@ -4,7 +4,9 @@
 {{#each summaries}}
 <agent id="{{id}}" agent="{{agent}}">
 <status>{{status}}</status>
-{{#if meta}}<meta lines="{{meta.lineCount}}" size="{{meta.charSize}}" />{{/if}}
+{{#if branch}}<branch>{{branch}}</branch>
+{{/if}}{{#if errorDetail}}<error>{{errorDetail}}</error>
+{{/if}}{{#if meta}}<meta lines="{{meta.lineCount}}" size="{{meta.charSize}}" />{{/if}}
 {{#if truncated}}
 <preview full-path="agent://{{id}}">
 {{preview}}

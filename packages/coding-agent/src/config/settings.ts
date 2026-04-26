@@ -169,6 +169,14 @@ export class Settings {
 	}
 
 	/**
+	 * Load a standalone settings instance without mutating the global singleton.
+	 */
+	static async load(options: SettingsOptions = {}): Promise<Settings> {
+		const instance = new Settings(options);
+		return instance.#load();
+	}
+
+	/**
 	 * Create an isolated instance for testing.
 	 * Does not affect the global singleton.
 	 */
@@ -530,6 +538,11 @@ export class Settings {
 				isolationObj.mode = isolationObj.enabled ? "worktree" : "none";
 			}
 			delete isolationObj.enabled;
+		}
+		// task.isolation.mode: fuse-overlay -> reflink (replaced CoW-over-live-repo
+		// with point-in-time snapshot via cp --reflink).
+		if (isolationObj && isolationObj.mode === "fuse-overlay") {
+			isolationObj.mode = "reflink";
 		}
 
 		return raw;

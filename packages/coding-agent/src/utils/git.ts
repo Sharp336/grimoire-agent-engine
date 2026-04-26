@@ -81,6 +81,7 @@ export interface PatchOptions {
 	readonly check?: boolean;
 	readonly env?: Record<string, string | undefined>;
 	readonly signal?: AbortSignal;
+	readonly threeWay?: boolean;
 }
 
 export interface RestoreOptions {
@@ -306,6 +307,7 @@ function buildApplyArgs(patchPath: string, options: PatchOptions): string[] {
 	const args = ["apply"];
 	if (options.check) args.push("--check");
 	if (options.cached) args.push("--cached");
+	if (options.threeWay) args.push("--3way");
 	args.push("--binary", patchPath);
 	return args;
 }
@@ -785,7 +787,7 @@ export const stage = {
 
 /** Create a commit with the given message (passed via stdin). */
 export async function commit(cwd: string, message: string, options: CommitOptions = {}): Promise<GitCommandResult> {
-	const args = ["commit", "-F", "-"];
+	const args = ["commit", "--no-gpg-sign", "-F", "-"];
 	if (options.allowEmpty) args.push("--allow-empty");
 	if (options.files?.length) args.push("--", ...options.files);
 	return runChecked(cwd, args, { signal: options.signal, stdin: message });
@@ -803,6 +805,11 @@ export async function push(cwd: string, options: PushOptions = {}): Promise<void
 /** Checkout a ref. */
 export async function checkout(cwd: string, ref: string, signal?: AbortSignal): Promise<void> {
 	await runEffect(cwd, ["checkout", ref], { signal });
+}
+
+/** Hard-reset the working tree and index to the given ref. */
+export async function resetHard(cwd: string, ref: string, signal?: AbortSignal): Promise<void> {
+	await runEffect(cwd, ["reset", "--hard", ref], { signal });
 }
 
 /** Fetch a specific refspec from a remote. */
@@ -1013,6 +1020,10 @@ export const config = {
 		return trimScalar(await tryText(cwd, ["config", "--get", key], { readOnly: true, signal }));
 	},
 
+	async originUrl(cwd: string, signal?: AbortSignal): Promise<string | undefined> {
+		return config.get(cwd, "remote.origin.url", signal);
+	},
+
 	async set(cwd: string, key: string, value: string, signal?: AbortSignal): Promise<void> {
 		await runEffect(cwd, ["config", key, value], { signal });
 	},
@@ -1094,6 +1105,11 @@ export const patch = {
 
 	/** Check if a patch file can be applied cleanly. */
 	async canApply(cwd: string, patchPath: string, options: Omit<PatchOptions, "check"> = {}): Promise<boolean> {
+		if (options.threeWay) {
+			throw new Error(
+				"git apply --check --3way is unsafe because it may mutate the working tree; run --3way only in an isolated worktree.",
+			);
+		}
 		const result = await runCommand(cwd, buildApplyArgs(patchPath, { ...options, check: true }), {
 			env: options.env,
 			readOnly: true,
@@ -1126,13 +1142,31 @@ export const patch = {
 // API: cherryPick
 // ════════════════════════════════════════════════════════════════════════════
 
+export interface CherryPickOptions {
+	strategyOption?: "theirs" | "ours";
+	signal?: AbortSignal;
+}
+
 export const cherryPick = Object.assign(
-	async function cherryPick(cwd: string, revision: string, signal?: AbortSignal): Promise<void> {
-		await runEffect(cwd, ["cherry-pick", revision], { signal });
+	async function cherryPick(cwd: string, revision: string, options: CherryPickOptions = {}): Promise<void> {
+		// --empty=drop: when a sibling task already merged identical content, applying this
+		// commit yields an empty diff. Default cherry-pick (--empty=stop) aborts with exit 1;
+		// we want to skip redundant commits silently so one task's duplicate work doesn't block
+		// the rest of the batch. Real conflicts still surface via non-zero exit.
+		const args = ["cherry-pick", "--no-gpg-sign", "--empty=drop"];
+		if (options.strategyOption) args.push(`-X${options.strategyOption}`);
+		args.push(revision);
+		await runEffect(cwd, args, { signal: options.signal });
 	},
 	{
 		async abort(cwd: string, signal?: AbortSignal): Promise<void> {
 			await runEffect(cwd, ["cherry-pick", "--abort"], { signal });
+		},
+		/** List unmerged (conflicted) paths in the current index. */
+		async conflictedFiles(cwd: string, signal?: AbortSignal): Promise<string[]> {
+			const out = await tryText(cwd, ["diff", "--name-only", "--diff-filter=U"], { signal });
+			if (!out) return [];
+			return splitLines(out);
 		},
 	},
 );

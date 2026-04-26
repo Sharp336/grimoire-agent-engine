@@ -187,9 +187,9 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "none", label: "None", description: "No isolation" },
 		{ value: "worktree", label: "Worktree", description: "Git worktree isolation" },
 		{
-			value: "fuse-overlay",
-			label: "Fuse Overlay",
-			description: "COW overlay via fuse-overlayfs (Unix only)",
+			value: "reflink",
+			label: "Reflink Snapshot",
+			description: "Point-in-time snapshot via cp --reflink (Unix only)",
 		},
 		{
 			value: "fuse-projfs",
