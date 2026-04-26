@@ -33,8 +33,13 @@ Subagents lack your conversation history. Every decision, file content, and user
 - `schema`: JSON-encoded JTD schema for expected output. Format lives here — **MUST NOT** be duplicated in assignments.
 {{/if}}
 - `tasks`: Tasks to execute in parallel.
+- `timeout`: Maximum seconds per subtask. Aborts subtasks exceeding the limit; completed results are still returned.
 {{#if isolationEnabled}}
+{{#if branchMode}}
+- `isolated`: Run in isolated environment. Each task auto-commits its changes to a dedicated `omp/task/<id>` branch and the branch is cherry-picked onto the current branch as soon as that task finishes — you never need to stage, commit, or push yourself. A task whose branch fails to merge is reported with status `merge failed` and its `omp/task/<id>` branch is preserved in the repository for manual reconciliation.
+{{else}}
 - `isolated`: Run in isolated environment; returns patches. Use when tasks edit overlapping files.
+{{/if}}
 {{/if}}
 </parameters>
 
@@ -44,9 +49,11 @@ Subagents lack your conversation history. Every decision, file content, and user
 {{else}}
 - Every `assignment` must repeat any constraints, reference paths, and acceptance criteria it needs — there is no shared `context` field.
 {{/if}}
-- **MUST NOT** tell tasks to run project-wide build/test/lint. Parallel agents share the working tree; each task edits, stops. Caller verifies after all complete.
+- **MUST NOT** tell tasks to run project-wide build/test/lint (e.g. full-repo `bun check:ts`, `bun test`, `biome check .`). Project-wide verification is the caller's job after all tasks complete.
+- **MUST** require each task to format its own edits and run scoped tests covering its own changes before calling `submit_result`. A task that yields unformatted code, failing scoped tests, or missing tests for behavior it changed has not delivered a finished product. Name the exact scoped verification commands in each assignment's `## Acceptance` (e.g. `bun fmt:ts packages/foo/src/bar.ts`, `bun test packages/foo/test/bar.test.ts`).
 - For large payloads (traces, JSON blobs), write to `local://<path>` and pass the path in {{#if contextEnabled}}`context`{{else}}the relevant `assignment`{{/if}}.
-- Prefer `task` agents that investigate **and** edit in one pass. Launch a dedicated read-only discovery step only when affected files are genuinely unknown.
+- **MUST NOT** instruct tasks to handle uncommitted changes, stash, or commit. The orchestrator captures and replicates working-tree state automatically — subagents see the correct baseline without intervention.
+- Prefer `task` agents that investigate **and** edit in one pass. Only launch a dedicated read-only discovery step when the affected files are genuinely unknown and cannot be inferred from the task description.
 </critical>
 
 <scope>

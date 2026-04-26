@@ -156,6 +156,11 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.stt.toggle")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleSTTToggle());
 		}
+		for (const key of this.ctx.keybindings.getKeys(
+			"app.orchestrator.toggle" as Parameters<InteractiveModeContext["keybindings"]["getKeys"]>[0],
+		)) {
+			this.ctx.editor.setCustomKeyHandler(key, () => void this.ctx.handleOrchestratorToggle());
+		}
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
 		}

@@ -41,9 +41,14 @@ function getStatusIcon(status: AgentProgress["status"], theme: Theme, spinnerFra
 			return formatStatusIcon("pending", theme);
 		case "running":
 			return formatStatusIcon("running", theme, spinnerFrame);
+		case "merging":
+			// Merging is still active work — agent has finished but parent-repo
+			// integration is in progress. Keep the spinner to reflect that.
+			return formatStatusIcon("running", theme, spinnerFrame);
 		case "completed":
 			return formatStatusIcon("success", theme);
 		case "failed":
+		case "merge_failed":
 			return formatStatusIcon("error", theme);
 		case "aborted":
 			return formatStatusIcon("aborted", theme);
@@ -488,7 +493,7 @@ export function renderCall(args: TaskParams, _options: RenderResultOptions, them
 /**
  * Render streaming progress for a single agent.
  */
-function renderAgentProgress(
+export function renderAgentProgress(
 	progress: AgentProgress,
 	isLast: boolean,
 	expanded: boolean,
@@ -726,7 +731,7 @@ function renderFindings(
 /**
  * Render final result for a single agent.
  */
-function renderAgentResult(result: SingleResult, isLast: boolean, expanded: boolean, theme: Theme): string[] {
+export function renderAgentResult(result: SingleResult, isLast: boolean, expanded: boolean, theme: Theme): string[] {
 	const lines: string[] = [];
 	const prefix = isLast ? theme.fg("dim", theme.tree.last) : theme.fg("dim", theme.tree.branch);
 	const continuePrefix = isLast ? "   " : `${theme.fg("dim", theme.tree.vertical)}  `;

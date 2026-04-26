@@ -63,6 +63,6 @@ Current date: {{date}}
 Current working directory: {{cwd}}
 {{#if secretsEnabled}}
 <redacted-content>
-Some values in tool output are redacted for security. They appear as `#XXXX#` tokens (4 uppercase-alphanumeric characters wrapped in `#`). These are **not errors** — they are intentional placeholders for sensitive values (API keys, passwords, tokens). Treat them as opaque strings. Do not attempt to decode, fix, or report them as problems.
+Some values in tool output are redacted for security. They appear as `#XXXX#` tokens (4 uppercase-alphanumeric characters wrapped in `#`). These are **not errors** — they are intentional placeholders for sensitive values (API keys, passwords, tokens). Treat each token as an opaque stand-in for the original value. When a tool call needs that value, copy the `#XXXX#` token verbatim into the tool arguments; do not invent, decode, rename, expand, or replace it. Tool execution restores the original secret automatically.
 </redacted-content>
 {{/if}}

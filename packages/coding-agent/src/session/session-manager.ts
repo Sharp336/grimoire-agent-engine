@@ -248,6 +248,8 @@ export interface SessionContext {
 	mode: string;
 	/** Mode-specific data from the last mode_change entry */
 	modeData?: Record<string, unknown>;
+	/** Whether orchestrator mode was active on this branch */
+	orchestratorMode: boolean;
 }
 
 export interface SessionInfo {
@@ -525,6 +527,7 @@ export function buildSessionContext(
 			selectedMCPToolNames: [],
 			hasPersistedMCPToolSelection: false,
 			mode: "none",
+			orchestratorMode: false,
 		};
 	}
 	if (leafId) {
@@ -545,6 +548,7 @@ export function buildSessionContext(
 			selectedMCPToolNames: [],
 			hasPersistedMCPToolSelection: false,
 			mode: "none",
+			orchestratorMode: false,
 		};
 	}
 
@@ -566,6 +570,7 @@ export function buildSessionContext(
 	let hasPersistedMCPToolSelection = false;
 	let mode = "none";
 	let modeData: Record<string, unknown> | undefined;
+	let orchestratorMode = false;
 
 	for (const entry of path) {
 		if (entry.type === "thinking_level_change") {
@@ -594,6 +599,8 @@ export function buildSessionContext(
 		} else if (entry.type === "mode_change") {
 			mode = entry.mode;
 			modeData = entry.data;
+		} else if (entry.type === "custom" && entry.customType === "orchestrator_mode") {
+			orchestratorMode = (entry.data as { enabled?: boolean } | undefined)?.enabled === true;
 		}
 	}
 
@@ -690,6 +697,7 @@ export function buildSessionContext(
 		hasPersistedMCPToolSelection,
 		mode,
 		modeData,
+		orchestratorMode,
 	};
 }
 

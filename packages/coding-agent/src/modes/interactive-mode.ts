@@ -735,6 +735,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#planModeHasEntered = true;
 			this.#updatePlanModeStatus();
 		}
+		if (sessionContext.orchestratorMode) {
+			await this.session.setOrchestratorMode(true);
+		}
 	}
 
 	async #enterPlanMode(options?: { planFilePath?: string; workflow?: "parallel" | "iterative" }): Promise<void> {
@@ -1357,6 +1360,21 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleMemoryCommand(text);
 	}
 
+	async handleOrchestratorToggle(): Promise<void> {
+		const shouldEnable = !this.session.orchestratorMode;
+		try {
+			const enabled = await this.session.toggleOrchestratorMode();
+			this.statusLine.invalidate();
+			this.updateEditorTopBorder();
+			this.ui.requestRender();
+			this.showStatus(`Orchestrator mode ${enabled ? "enabled" : "disabled"}.`);
+		} catch (error) {
+			if (!shouldEnable) throw error;
+			this.showStatus(
+				`Orchestrator mode failed to enable: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		}
+	}
 	async handleSTTToggle(): Promise<void> {
 		if (!settings.get("stt.enabled")) {
 			this.showWarning("Speech-to-text is disabled. Enable it in settings: stt.enabled");

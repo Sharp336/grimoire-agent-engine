@@ -29,7 +29,13 @@ import {
 	renderJsonTreeLines,
 } from "../../tools/json-tree";
 import { PYTHON_DEFAULT_PREVIEW_LINES } from "../../tools/python";
-import { formatExpandHint, replaceTabs, resolveImageOptions, truncateToWidth } from "../../tools/render-utils";
+import {
+	formatExpandHint,
+	replaceTabs,
+	resolveImageOptions,
+	shortenPath,
+	truncateToWidth,
+} from "../../tools/render-utils";
 import { toolRenderers } from "../../tools/renderers";
 import { renderStatusLine } from "../../tui";
 import { convertToPng } from "../../utils/image-convert";
@@ -336,7 +342,8 @@ export class ToolExecutionComponent extends Container {
 		const isBackgroundAsyncTask =
 			this.#toolName === "task" &&
 			(this.#result?.details as { async?: { state?: string } } | undefined)?.async?.state === "running";
-		const isPartialTask = this.#isPartial && this.#toolName === "task" && !isBackgroundAsyncTask;
+		const isPartialTask =
+			this.#isPartial && (this.#toolName === "task" || this.#toolName === "poll") && !isBackgroundAsyncTask;
 		const needsSpinner = isStreamingArgs || isPartialTask;
 		if (needsSpinner && !this.#spinnerInterval) {
 			this.#spinnerInterval = setInterval(() => {
@@ -719,10 +726,62 @@ export class ToolExecutionComponent extends Container {
 		return output;
 	}
 
+	#formatGitCommitCheckpointExecution(): string {
+		const lines: string[] = [];
+		const icon = this.#isPartial ? "pending" : this.#result?.isError ? "error" : "success";
+		const argsObject =
+			this.#args && typeof this.#args === "object" ? (this.#args as Record<string, unknown>) : undefined;
+		const reason = typeof argsObject?.reason === "string" ? argsObject.reason : "checkpoint";
+		lines.push(renderStatusLine({ icon, title: "Git Checkpoint", description: reason }, theme));
+		if (!this.#result) {
+			return lines.join("\n");
+		}
+		const details =
+			this.#result.details && typeof this.#result.details === "object" && !Array.isArray(this.#result.details)
+				? (this.#result.details as Record<string, unknown>)
+				: undefined;
+		const repos = Array.isArray(details?.repos) ? (details?.repos as Array<Record<string, unknown>>) : [];
+		if (repos.length === 0) {
+			lines.push(theme.fg("dim", "all repos clean"));
+			return lines.join("\n");
+		}
+		for (const entry of repos) {
+			const repoPath = typeof entry.repoPath === "string" ? shortenPath(entry.repoPath) : "(unknown)";
+			const status = typeof entry.status === "string" ? entry.status : "unknown";
+			if (status === "committed") {
+				const sha = typeof entry.sha === "string" ? entry.sha : "unknown";
+				const filesChanged = typeof entry.filesChanged === "number" ? entry.filesChanged : 0;
+				const subject = typeof entry.message === "string" ? entry.message.trim().split("\n")[0] : "";
+				const suffix = subject ? ` — ${subject}` : "";
+				lines.push(
+					theme.fg(
+						"toolOutput",
+						truncateToWidth(
+							replaceTabs(`${repoPath}: ${sha} (${filesChanged} file${filesChanged === 1 ? "" : "s"})${suffix}`),
+							80,
+						),
+					),
+				);
+			} else if (status === "skipped") {
+				const skippedReason = typeof entry.reason === "string" ? entry.reason : "no-changes";
+				lines.push(theme.fg("dim", `${repoPath}: skipped (${skippedReason})`));
+			} else {
+				const errorMessage = typeof entry.error === "string" ? entry.error : "unknown error";
+				lines.push(
+					theme.fg("toolOutput", truncateToWidth(replaceTabs(`${repoPath}: failed — ${errorMessage}`), 80)),
+				);
+			}
+		}
+		return lines.join("\n");
+	}
+
 	/**
 	 * Format a generic tool execution (fallback for tools without custom renderers)
 	 */
 	#formatToolExecution(): string {
+		if (this.#toolName === "git_commit_checkpoint") {
+			return this.#formatGitCommitCheckpointExecution();
+		}
 		const lines: string[] = [];
 		const icon = this.#isPartial ? "pending" : this.#result?.isError ? "error" : "success";
 		lines.push(renderStatusLine({ icon, title: this.#toolLabel }, theme));

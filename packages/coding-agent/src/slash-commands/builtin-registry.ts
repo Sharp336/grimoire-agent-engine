@@ -29,6 +29,26 @@ function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.ui.requestRender();
 }
 
+function setOrchestratorMode(ctx: InteractiveModeContext, enabled: boolean): Promise<void> {
+	if (!enabled) {
+		return ctx.session.setOrchestratorMode(enabled).then(() => {
+			refreshStatusLine(ctx);
+			ctx.showStatus("Orchestrator mode disabled.");
+		});
+	}
+	return ctx.session
+		.setOrchestratorMode(enabled)
+		.then(() => {
+			refreshStatusLine(ctx);
+			ctx.showStatus("Orchestrator mode enabled.");
+		})
+		.catch(error => {
+			ctx.showStatus(
+				`Orchestrator mode failed to enable: ${error instanceof Error ? error.message : String(error)}`,
+			);
+		});
+}
+
 /** Declarative subcommand definition for commands like /mcp. */
 export interface SubcommandDef {
 	name: string;
@@ -170,6 +190,70 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 			}
 			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "orchestrator",
+		description: "Toggle orchestrator mode (task delegation only)",
+		subcommands: [
+			{ name: "on", description: "Enable orchestrator mode" },
+			{ name: "off", description: "Disable orchestrator mode" },
+			{ name: "status", description: "Show orchestrator mode status" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (!arg || arg === "toggle") {
+				await runtime.ctx.handleOrchestratorToggle();
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (arg === "on") {
+				await setOrchestratorMode(runtime.ctx, true);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (arg === "off") {
+				await setOrchestratorMode(runtime.ctx, false);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (arg === "status") {
+				const enabled = runtime.ctx.session.orchestratorMode;
+				runtime.ctx.showStatus(`Orchestrator mode is ${enabled ? "on" : "off"}.`);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /orchestrator [on|off|status]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "gitcheckpoint",
+		description: "Commit outstanding work with the git_commit_checkpoint tool",
+		aliases: ["checkpoint"],
+		inlineHint: "[reason]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const tool = runtime.ctx.session.getToolByName("git_commit_checkpoint");
+			if (!tool) {
+				runtime.ctx.showStatus(
+					"git_commit_checkpoint is unavailable. Enable orchestrator mode and tools.gitCommitCheckpoint.enabled.",
+				);
+				return;
+			}
+			const reason = command.args.trim() || "slash-invoked checkpoint";
+			try {
+				const result = await tool.execute("slash-gitcheckpoint", { reason });
+				const text = result.content
+					.map(c => (c.type === "text" ? c.text : ""))
+					.join("\n")
+					.trim();
+				runtime.ctx.showStatus(text || "Checkpoint complete.");
+			} catch (err) {
+				runtime.ctx.showStatus(`Checkpoint failed: ${err instanceof Error ? err.message : String(err)}`);
+			}
 		},
 	},
 	{

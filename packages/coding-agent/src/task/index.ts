@@ -1,38 +1,26 @@
-/**
- * Task tool - Delegate tasks to specialized agents.
- *
- * Discovers agent definitions from:
- *   - Bundled agents (shipped with omp-coding-agent)
- *   - ~/.omp/agent/agents/*.md (user-level)
- *   - .omp/agents/*.md (project-level)
- *
- * Supports:
- *   - Single agent execution
- *   - Parallel execution with concurrency limits
- *   - Progress tracking via JSON events
- *   - Session artifacts for debugging
- */
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
-import type { ToolSession } from "..";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
 import type { Theme } from "../modes/theme/theme";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
+import type { ToolSession } from "../tools/index";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 // Import review tools for side effects (registers subagent tool handlers)
 import "../tools/review";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
+import { commitDirtyRepos } from "./auto-commit";
 import { discoverAgents, getAgent } from "./discovery";
 import { runSubprocess } from "./executor";
 import { resolveIsolationBackendForTaskExecution } from "./isolation-backend";
+import { resolveTaskIsolation, resolveTaskMergeMode } from "./orchestrator-mode";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
@@ -51,18 +39,65 @@ import {
 	applyNestedPatches,
 	captureBaseline,
 	captureDeltaPatch,
-	cleanupFuseOverlay,
 	cleanupProjfsOverlay,
+	cleanupReflinkSnapshot,
 	cleanupTaskBranches,
 	cleanupWorktree,
-	commitToBranch,
-	ensureFuseOverlay,
+	commitDeltaToBranch,
 	ensureProjfsOverlay,
+	ensureReflinkSnapshot,
 	ensureWorktree,
+	getOutermostRepoRoot,
 	getRepoRoot,
-	mergeTaskBranches,
+	mergeSingleBranch,
+	type NestedRepoPatch,
 	type WorktreeBaseline,
+	writeBranchDeltaArtifacts,
 } from "./worktree";
+
+/**
+ * Commit dirty state in the parent worktree before an isolated task is dispatched.
+ *
+ * Without this step, `mergeSingleBranch` must stash the orchestrator's uncommitted edits
+ * around the cherry-pick and pop them afterwards — a stash pop that overlaps the task's delta
+ * fails and preserves the task branch for manual reconciliation. Committing first eliminates
+ * the race entirely.
+ *
+ * Failures are logged but do not abort dispatch: the cherry-pick path still works on a dirty
+ * parent (it just has a stash-pop failure mode we now mostly avoid). Missing modelRegistry is
+ * logged and skipped so tests and sessions without a model can still dispatch tasks.
+ */
+async function autoCommitBeforeTask(repoRoot: string, session: ToolSession): Promise<void> {
+	if (!session.modelRegistry) {
+		logger.debug("autoCommitBeforeTask: no model registry; skipping pre-task auto-commit", { repoRoot });
+		return;
+	}
+	try {
+		const entries = await commitDirtyRepos({
+			cwd: repoRoot,
+			modelRegistry: session.modelRegistry,
+			settings: session.settings,
+			sessionId: session.getSessionId?.() ?? undefined,
+		});
+		const committed = entries.filter(e => e.status === "committed");
+		const failed = entries.filter(e => e.status === "failed");
+		if (committed.length > 0) {
+			logger.debug("autoCommitBeforeTask: committed parent dirty state", {
+				repos: committed.map(e => ({ path: e.repoPath, sha: e.sha, files: e.filesChanged })),
+			});
+		}
+		if (failed.length > 0) {
+			logger.warn("autoCommitBeforeTask: some repos failed to commit; proceeding with dispatch", {
+				failures: failed.map(e => ({ path: e.repoPath, error: e.error })),
+			});
+		}
+	} catch (err) {
+		logger.warn("autoCommitBeforeTask: unable to pre-commit parent dirty state; proceeding", {
+			repoRoot,
+			error: err instanceof Error ? err.message : String(err),
+		});
+	}
+}
 
 function createUsageTotals(): Usage {
 	return {
@@ -125,6 +160,27 @@ export {
 } from "./types";
 
 /**
+ * Apply a single task's nested-repo patches against the parent checkout.
+ * Each patch is attempted independently so that a failure in one nested repo
+ * does not block siblings. Returns a concise error message when any patch
+ * failed — the caller attaches it to the owning task's `error`.
+ */
+async function applyTaskNestedPatches(
+	repoRoot: string,
+	taskId: string,
+	description: string | undefined,
+	patches: NestedRepoPatch[],
+	commitMsg?: (diff: string) => Promise<string | null>,
+): Promise<string | undefined> {
+	const tagged = patches.map(np => ({ ...np, taskId, description }));
+	const result = await applyNestedPatches(repoRoot, tagged, commitMsg);
+	if (result.failed.length === 0) return undefined;
+	const details = result.failed.map(o => `${o.patch.relativePath}: ${o.error ?? "unknown"}`).join("; ");
+	const plural = result.failed.length === 1 ? "" : "es";
+	return `Nested repo patch${plural} failed: ${details}. Reconcile manually in the main session.`;
+}
+
+/**
  * Render the tool description from a cached agent list and current settings.
  */
 function renderDescription(
@@ -134,6 +190,7 @@ function renderDescription(
 	asyncEnabled: boolean,
 	disabledAgents: string[],
 	simpleMode: TaskSimpleMode,
+	branchMode: boolean,
 ): string {
 	const filteredAgents = disabledAgents.length > 0 ? agents.filter(a => !disabledAgents.includes(a.name)) : agents;
 	const { contextEnabled, customSchemaEnabled } = getTaskSimpleModeCapabilities(simpleMode);
@@ -147,6 +204,7 @@ function renderDescription(
 		defaultMode: simpleMode === "default",
 		schemaFreeMode: simpleMode === "schema-free",
 		independentMode: simpleMode === "independent",
+		branchMode,
 	});
 }
 
@@ -201,7 +259,12 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 
 	get parameters(): TSchema {
 		const isolationEnabled = this.session.settings.get("task.isolation.mode") !== "none";
-		return getTaskSchema({ isolationEnabled, simpleMode: this.#getTaskSimpleMode() });
+		return getTaskSchema({
+			isolationEnabled,
+			simpleMode: this.#getTaskSimpleMode(),
+			orchestratorMode: this.session.orchestratorMode === true,
+			taskDepth: this.session.taskDepth ?? 0,
+		});
 	}
 
 	renderCall(args: unknown, options: Parameters<typeof renderTaskCall>[1], theme: Theme) {
@@ -213,13 +276,23 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
 		const maxConcurrency = this.session.settings.get("task.maxConcurrency");
 		const isolationMode = this.session.settings.get("task.isolation.mode");
+		const orchestratorMode = this.session.orchestratorMode === true;
+		// Branch mode activates for top-level orchestrator sessions. In this mode,
+		// each task's changes land as a dedicated git commit rather than a patch artifact.
+		const branchMode =
+			resolveTaskMergeMode({
+				configuredMode: this.session.settings.get("task.isolation.merge"),
+				orchestratorMode,
+				taskDepth: 0,
+			}) === "branch";
 		return renderDescription(
 			this.#discoveredAgents,
 			maxConcurrency,
-			isolationMode !== "none",
+			!orchestratorMode && isolationMode !== "none",
 			this.session.settings.get("async.enabled"),
 			disabledAgents,
 			this.#getTaskSimpleMode(),
+			branchMode,
 		);
 	}
 	private constructor(
@@ -255,12 +328,12 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 			return createTaskModeError(validationError);
 		}
 
+		const taskItems = params.tasks ?? [];
 		const asyncEnabled = this.session.settings.get("async.enabled");
 		const selectedAgent = this.#discoveredAgents.find(agent => agent.name === params.agent);
 		if (!asyncEnabled || selectedAgent?.blocking === true) {
 			return this.#executeSync(_toolCallId, params, signal, onUpdate);
 		}
-
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
 			return {
@@ -268,8 +341,6 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 				details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
 			};
 		}
-
-		const taskItems = params.tasks ?? [];
 		if (taskItems.length === 0) {
 			return this.#executeSync(_toolCallId, params, signal, onUpdate);
 		}
@@ -302,10 +373,10 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 			});
 		}
 
-		const startedJobs: Array<{ jobId: string; taskId: string }> = [];
-		const failedSchedules: string[] = [];
-		let completedJobs = 0;
-		let failedJobs = 0;
+		const _startedJobs: Array<{ jobId: string; taskId: string }> = [];
+		const _failedSchedules: string[] = [];
+		const _completedJobs = 0;
+		const _failedJobs = 0;
 
 		const getProgressSnapshot = (): AgentProgress[] => {
 			return Array.from(progressByTaskId.values())
@@ -313,181 +384,79 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 				.map(progress => structuredClone(progress));
 		};
 
-		const buildAsyncDetails = (state: "running" | "completed" | "failed", jobId: string): TaskToolDetails => ({
+		const buildAsyncDetails = (
+			state: "running" | "completed" | "failed",
+			jobId: string,
+			totalDurationMs = 0,
+		): TaskToolDetails => ({
 			projectAgentsDir: null,
 			results: [],
-			totalDurationMs: 0,
+			totalDurationMs,
 			progress: getProgressSnapshot(),
 			async: { state, jobId, type: "task" },
 		});
+		const batchLabel = `${params.agent} (${taskItems.length} task${taskItems.length === 1 ? "" : "s"})`;
 
-		const emitAsyncUpdate = (state: "running" | "completed" | "failed", text: string): void => {
-			const primaryJobId = startedJobs[0]?.jobId ?? "task";
-			onUpdate?.({
-				content: [{ type: "text", text }],
-				details: buildAsyncDetails(state, primaryJobId),
-			});
-		};
-
-		const maxConcurrency = this.session.settings.get("task.maxConcurrency");
-		const semaphore = new Semaphore(maxConcurrency);
-
-		for (let i = 0; i < taskItems.length; i++) {
-			const taskItem = taskItems[i];
-			if (signal?.aborted) {
-				failedSchedules.push(`${taskItem.id}: cancelled before scheduling`);
-				const progress = progressByTaskId.get(taskItem.id);
-				if (progress) {
-					progress.status = "aborted";
-				}
-				continue;
-			}
-
-			const uniqueId = uniqueIds[i];
-			const singleParams: TaskParams = { ...params, tasks: [taskItem] };
-			const label = uniqueId;
-			try {
-				const jobId = manager.register(
-					"task",
-					label,
-					async ({ signal: runSignal, reportProgress }) => {
-						const startedAt = Date.now();
-						const progress = progressByTaskId.get(taskItem.id);
-						await semaphore.acquire();
-						if (runSignal.aborted) {
-							semaphore.release();
-							if (progress) {
-								progress.status = "aborted";
-							}
-							throw new Error("Aborted before execution");
-						}
-						if (progress) {
-							progress.status = "running";
-						}
-						await reportProgress(
-							`Running background task ${taskItem.id}...`,
-							buildAsyncDetails("running", startedJobs[0]?.jobId ?? label) as unknown as Record<string, unknown>,
-						);
-						try {
-							const result = await this.#executeSync(_toolCallId, singleParams, runSignal, undefined, [
-								uniqueId,
-							]);
-							const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
-							const singleResult = result.details?.results[0];
-							if (progress) {
-								progress.status = singleResult?.aborted
-									? "aborted"
-									: (singleResult?.exitCode ?? 0) === 0
-										? "completed"
-										: "failed";
-								progress.durationMs = singleResult?.durationMs ?? Math.max(0, Date.now() - startedAt);
-								progress.tokens = singleResult?.tokens ?? 0;
-								progress.extractedToolData = singleResult?.extractedToolData;
-							}
-							completedJobs += 1;
-							if (singleResult && ((singleResult.aborted ?? false) || singleResult.exitCode !== 0)) {
-								failedJobs += 1;
-							}
-							const remaining = taskItems.length - completedJobs;
-							const isDone = remaining === 0;
-							await reportProgress(
-								isDone
-									? `Background task batch complete: ${completedJobs}/${taskItems.length} finished.`
-									: `Background task batch progress: ${completedJobs}/${taskItems.length} finished (${remaining} running).`,
-								buildAsyncDetails(
-									isDone ? (failedJobs > 0 || failedSchedules.length > 0 ? "failed" : "completed") : "running",
-									startedJobs[0]?.jobId ?? label,
-								) as unknown as Record<string, unknown>,
-							);
-							if (isDone) {
-								emitAsyncUpdate(
-									failedJobs > 0 || failedSchedules.length > 0 ? "failed" : "completed",
-									`Background task batch complete: ${completedJobs}/${taskItems.length} finished.`,
-								);
-							}
-							return finalText;
-						} catch (error) {
-							if (progress) {
-								progress.status = "failed";
-								progress.durationMs = Math.max(0, Date.now() - startedAt);
-							}
-							completedJobs += 1;
-							failedJobs += 1;
-							const remaining = taskItems.length - completedJobs;
-							const isDone = remaining === 0;
-							await reportProgress(
-								isDone
-									? `Background task batch complete with failures: ${failedJobs} failed.`
-									: `Background task batch progress: ${completedJobs}/${taskItems.length} finished (${remaining} running).`,
-								buildAsyncDetails(
-									isDone ? "failed" : "running",
-									startedJobs[0]?.jobId ?? label,
-								) as unknown as Record<string, unknown>,
-							);
-							if (isDone) {
-								emitAsyncUpdate(
-									"failed",
-									`Background task batch complete with failures: ${failedJobs} failed.`,
-								);
-							}
-							throw error;
-						} finally {
-							semaphore.release();
-						}
-					},
-					{
-						id: label,
-						onProgress: (text, details) => {
-							const progressDetails =
-								(details as TaskToolDetails | undefined) ??
-								buildAsyncDetails("running", startedJobs[0]?.jobId ?? label);
-							onUpdate?.({ content: [{ type: "text", text }], details: progressDetails });
+		let batchJobId = "task";
+		try {
+			batchJobId = manager.register(
+				"task",
+				batchLabel,
+				async ({ jobId, signal: runSignal, reportProgress }) => {
+					const result = await this.#executeSync(
+						_toolCallId,
+						params,
+						runSignal,
+						async update => {
+							const text = update.content.find(part => part.type === "text")?.text ?? "Running task batch...";
+							const details =
+								(update.details as TaskToolDetails | undefined) ?? buildAsyncDetails("running", jobId);
+							await reportProgress(text, details as unknown as Record<string, unknown>);
 						},
+						uniqueIds,
+					);
+					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
+					return finalText;
+				},
+				{
+					onProgress: (text, details) => {
+						const progressDetails =
+							(details as TaskToolDetails | undefined) ?? buildAsyncDetails("running", batchJobId);
+						onUpdate?.({ content: [{ type: "text", text }], details: progressDetails });
 					},
-				);
-				startedJobs.push({ jobId, taskId: taskItem.id });
-			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				failedSchedules.push(`${taskItem.id}: ${message}`);
-				const progress = progressByTaskId.get(taskItem.id);
-				if (progress) {
-					progress.status = "failed";
-				}
-			}
-		}
-
-		if (startedJobs.length === 0) {
-			const failureText = `Failed to start background task jobs: ${failedSchedules.join("; ")}`;
+				},
+			);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
 			return {
-				content: [{ type: "text", text: failureText }],
-				details: { projectAgentsDir: null, results: [], totalDurationMs: 0 },
+				content: [{ type: "text", text: `Failed to start background task batch: ${message}` }],
+				details: {
+					projectAgentsDir: null,
+					results: [],
+					totalDurationMs: 0,
+					progress: getProgressSnapshot(),
+				},
 			};
 		}
 
-		emitAsyncUpdate(
-			"running",
-			`Launching ${startedJobs.length} background ${startedJobs.length === 1 ? "task" : "tasks"}...`,
-		);
-
-		const scheduleFailureSummary =
-			failedSchedules.length > 0
-				? ` Failed to schedule ${failedSchedules.length} task${failedSchedules.length === 1 ? "" : "s"}.`
-				: "";
+		onUpdate?.({
+			content: [
+				{
+					type: "text",
+					text: `Launching background task batch with ${taskItems.length} task${taskItems.length === 1 ? "" : "s"}...`,
+				},
+			],
+			details: buildAsyncDetails("running", batchJobId),
+		});
 
 		return {
 			content: [
 				{
 					type: "text",
-					text: `Started ${startedJobs.length} background task job${startedJobs.length === 1 ? "" : "s"} using ${params.agent}.${scheduleFailureSummary} Results will be delivered when complete.`,
+					text: `Started background task batch using ${params.agent} (${taskItems.length} task${taskItems.length === 1 ? "" : "s"}). Results will be delivered when complete.`,
 				},
 			],
-			details: {
-				projectAgentsDir: null,
-				results: [],
-				totalDurationMs: 0,
-				progress: getProgressSnapshot(),
-				async: { state: "running", jobId: startedJobs[0].jobId, type: "task" },
-			},
+			details: buildAsyncDetails("running", batchJobId),
 		};
 	}
 
@@ -505,31 +474,23 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 		const { contextEnabled, customSchemaEnabled } = getTaskSimpleModeCapabilities(simpleMode);
 		const sharedContext = contextEnabled ? context : undefined;
 		const isolationMode = this.session.settings.get("task.isolation.mode");
-		const isolationRequested = "isolated" in params ? params.isolated === true : false;
-		const isIsolated = isolationMode !== "none" && isolationRequested;
-		const mergeMode = this.session.settings.get("task.isolation.merge");
+		// Nested tasks (depth > 0) cannot open a fresh isolation layer on top of their parent;
+		// the schema hides the field there, but ignore a stray argument defensively as well.
+		const isolationRequested =
+			(this.session.taskDepth ?? 0) === 0 && "isolated" in params ? params.isolated === true : false;
+		const timeout = (params as { timeout?: number }).timeout;
+		let isIsolated = false;
+		const taskDepth = this.session.taskDepth ?? 0;
+		const mergeMode = resolveTaskMergeMode({
+			configuredMode: this.session.settings.get("task.isolation.merge"),
+			orchestratorMode: this.session.orchestratorMode === true,
+			taskDepth,
+		});
 		const commitStyle = this.session.settings.get("task.isolation.commits");
 		const maxConcurrency = this.session.settings.get("task.maxConcurrency");
-		const taskDepth = this.session.taskDepth ?? 0;
-
-		if (isolationMode === "none" && "isolated" in params) {
-			return {
-				content: [
-					{
-						type: "text",
-						text: "Task isolation is disabled. Remove the isolated argument or set task.isolation.mode to 'worktree', 'fuse-overlay', or 'fuse-projfs'.",
-					},
-				],
-				details: {
-					projectAgentsDir,
-					results: [],
-					totalDurationMs: 0,
-				},
-			};
-		}
 
 		// Validate agent exists
-		const agent = getAgent(agents, agentName);
+		let agent = getAgent(agents, agentName);
 		if (!agent) {
 			const available = agents.map(a => a.name).join(", ") || "none";
 			return {
@@ -576,6 +537,30 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 					spawns: undefined,
 				}
 			: agent;
+		agent = effectiveAgent;
+		const { taskIsolationMode } = resolveTaskIsolation({
+			configuredMode: isolationMode,
+			isolationRequested,
+			orchestratorMode: this.session.orchestratorMode === true,
+			agent: effectiveAgent,
+			taskDepth,
+		});
+		if (taskIsolationMode === "none" && isolationRequested) {
+			return {
+				content: [
+					{
+						type: "text",
+						text: "Task isolation is disabled. Remove the isolated argument or set task.isolation.mode to 'worktree', 'reflink', or 'fuse-projfs'.",
+					},
+				],
+				details: {
+					projectAgentsDir,
+					results: [],
+					totalDurationMs: 0,
+				},
+			};
+		}
+		isIsolated = taskIsolationMode !== "none";
 
 		// Apply per-agent model override from settings (highest priority)
 		const agentModelOverrides = this.session.settings.get("task.agentModelOverrides");
@@ -664,9 +649,31 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 
 		let repoRoot: string | null = null;
 		let baseline: WorktreeBaseline | null = null;
+		let effectiveIsolationMode = taskIsolationMode;
+		let isolationBackendWarning = "";
 		if (isIsolated) {
 			try {
 				repoRoot = await getRepoRoot(this.session.cwd);
+				const resolvedIsolation = await resolveIsolationBackendForTaskExecution(
+					taskIsolationMode,
+					isIsolated,
+					repoRoot,
+				);
+				effectiveIsolationMode = resolvedIsolation.effectiveIsolationMode;
+				isolationBackendWarning = resolvedIsolation.warning;
+				// Worktree isolation covers the outermost enclosing git root so the
+				// worktree spans the full workspace (e.g. Cargo/npm workspaces).
+				// Overlay modes mount from the immediate git root only.
+				if (effectiveIsolationMode === "worktree") {
+					repoRoot = await getOutermostRepoRoot(this.session.cwd);
+				}
+				// Commit any dirty state in the parent worktree before capturing the baseline.
+				// Cherry-picking a task branch onto a dirty parent has to stash + pop — and when the
+				// task's delta touches the same lines as the dirty state, stash pop conflicts. Baselining
+				// from a committed HEAD collapses that hazard: cherry-pick lands on clean parent and the
+				// subagent's changes end up in a distinct commit, on top of the orchestrator's commit.
+				// Only top-level sessions reach this branch (nested tasks can't request isolation).
+				await autoCommitBeforeTask(repoRoot, this.session);
 				baseline = await captureBaseline(repoRoot);
 			} catch (err) {
 				const message = err instanceof Error ? err.message : String(err);
@@ -684,29 +691,6 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 					},
 				};
 			}
-		}
-
-		let effectiveIsolationMode = isolationMode;
-		let isolationBackendWarning = "";
-		try {
-			const resolvedIsolation = await resolveIsolationBackendForTaskExecution(isolationMode, isIsolated, repoRoot);
-			effectiveIsolationMode = resolvedIsolation.effectiveIsolationMode;
-			isolationBackendWarning = resolvedIsolation.warning;
-		} catch (err) {
-			const message = err instanceof Error ? err.message : String(err);
-			return {
-				content: [
-					{
-						type: "text",
-						text: message,
-					},
-				],
-				details: {
-					projectAgentsDir,
-					results: [],
-					totalDurationMs: Date.now() - startTime,
-				},
-			};
 		}
 
 		// Derive artifacts directory
@@ -822,7 +806,28 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 			}
 			emitProgress();
 
+			// Serializes parent-repo integration across concurrent tasks. `commitToBranch`
+			// and `captureDeltaPatch` operate only on the isolation dir and can run in parallel,
+			// but cherry-pick / git apply / nested-patch application touch the parent repo's
+			// HEAD, index, and stash — those must happen one at a time.
+			const mergeLock = new Semaphore(1);
+			const commitMsgFn =
+				commitStyle === "ai" && this.session.modelRegistry
+					? async (diff: string) =>
+							generateCommitMessage(
+								diff,
+								this.session.modelRegistry!,
+								this.session.settings,
+								this.session.getSessionId?.() ?? undefined,
+							)
+					: undefined;
 			const runTask = async (task: (typeof tasksWithContext)[number], index: number) => {
+				const taskSignal =
+					timeout != null && timeout > 0
+						? signal
+							? AbortSignal.any([signal, AbortSignal.timeout(timeout * 1000)])
+							: AbortSignal.timeout(timeout * 1000)
+						: signal;
 				if (!isIsolated) {
 					return runSubprocess({
 						cwd: this.session.cwd,
@@ -841,7 +846,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 						artifactsDir: effectiveArtifactsDir,
 						contextFile: contextFilePath,
 						enableLsp: false,
-						signal,
+						signal: taskSignal,
 						eventBus: this.session.eventBus,
 						onProgress: progress => {
 							progressMap.set(index, {
@@ -867,12 +872,12 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 					}
 					const taskBaseline = structuredClone(baseline);
 
-					if (effectiveIsolationMode === "fuse-overlay") {
-						isolationDir = await ensureFuseOverlay(repoRoot, task.id);
+					if (effectiveIsolationMode === "reflink") {
+						isolationDir = await ensureReflinkSnapshot(repoRoot, task.id);
 					} else if (effectiveIsolationMode === "fuse-projfs") {
 						isolationDir = await ensureProjfsOverlay(repoRoot, task.id);
 					} else {
-						isolationDir = await ensureWorktree(repoRoot, task.id);
+						isolationDir = await ensureWorktree(repoRoot, task.id, taskBaseline.root.headCommit);
 						await applyBaseline(isolationDir, taskBaseline);
 					}
 
@@ -894,7 +899,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 						artifactsDir: effectiveArtifactsDir,
 						contextFile: contextFilePath,
 						enableLsp: false,
-						signal,
+						signal: taskSignal,
 						eventBus: this.session.eventBus,
 						onProgress: progress => {
 							progressMap.set(index, {
@@ -910,55 +915,187 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 						skills: availableSkills,
 						promptTemplates,
 					});
-					if (mergeMode === "branch" && result.exitCode === 0) {
+
+					// Surface that the agent finished but integration is still pending so the
+					// TUI doesn't falsely report `completed` during the capture+merge window.
+					const markMerging = () => {
+						const prev = progressMap.get(index);
+						if (prev) {
+							progressMap.set(index, { ...prev, status: "merging" });
+							emitProgress();
+						}
+					};
+					const markMergeOutcome = (error: string | undefined) => {
+						const prev = progressMap.get(index);
+						if (prev) {
+							progressMap.set(index, {
+								...prev,
+								status: error ? "merge_failed" : "completed",
+							});
+							emitProgress();
+						}
+					};
+					if (isIsolated && result.exitCode === 0 && !result.aborted) markMerging();
+
+					// Phase 1: capture the task's changes out of the isolation dir.
+					// Branch mode → commit to `omp/task/<id>`. Patch mode → write a patch file.
+					// Nothing here touches the parent repo's working tree, so captures can
+					// run in parallel.
+					let captured: SingleResult;
+					if (result.exitCode === 0 && !result.aborted) {
+						if (mergeMode === "branch") {
+							// Capture the delta and persist it as a recovery artifact BEFORE attempting
+							// the branch commit. If `git apply` succeeds but `git commit` fails (e.g. the
+							// patch applied as a no-op against a drifted baseline), the captured patch on
+							// disk + the partially-created `omp/task/<id>` branch are the only way to
+							// recover the subagent's work. Previous behavior dropped both, silently losing
+							// the entire task on any commit failure.
+							let artifactPaths: string[] = [];
+							try {
+								const delta = await captureDeltaPatch(isolationDir, taskBaseline);
+								artifactPaths = await writeBranchDeltaArtifacts(effectiveArtifactsDir, task.id, delta);
+								const commitResult = await commitDeltaToBranch(
+									delta,
+									taskBaseline,
+									task.id,
+									task.description,
+									commitMsgFn,
+								);
+								captured = {
+									...result,
+									branchName: commitResult?.branchName,
+									nestedBranches: commitResult?.nestedBranches,
+								};
+							} catch (commitErr) {
+								// Preserve any partially-created `omp/task/<id>` branches (root + nested)
+								// for manual reconciliation; deleting them here would destroy the only
+								// remaining trace of the subagent's work besides the patch artifacts.
+								const msg = commitErr instanceof Error ? commitErr.message : String(commitErr);
+								const recoveryHint =
+									artifactPaths.length > 0
+										? ` Captured delta preserved at: ${artifactPaths.join(", ")}.`
+										: " No delta artifacts were written (capture failed before disk persist).";
+								captured = { ...result, error: `Branch commit failed: ${msg}.${recoveryHint}` };
+							}
+						} else {
+							try {
+								const delta = await captureDeltaPatch(isolationDir, taskBaseline);
+								const patchPath = path.join(effectiveArtifactsDir, `${task.id}.patch`);
+								await Bun.write(patchPath, delta.rootPatch);
+								captured = {
+									...result,
+									patchPath,
+									nestedPatches: delta.nestedPatches,
+								};
+							} catch (patchErr) {
+								const msg = patchErr instanceof Error ? patchErr.message : String(patchErr);
+								captured = { ...result, error: `Patch capture failed: ${msg}` };
+							}
+						}
+					} else {
+						captured = result;
+						// Recovery: preserve the subagent's in-progress work before the isolation
+						// worktree is torn down in `finally`. Without this, connection hiccups or
+						// user aborts silently destroy minutes/hours of subagent edits.
+						if (isIsolated && isolationDir && effectiveArtifactsDir && result.aborted) {
+							try {
+								const delta = await captureDeltaPatch(isolationDir, taskBaseline);
+								const paths = await writeBranchDeltaArtifacts(effectiveArtifactsDir, task.id, delta);
+								if (paths.length > 0) {
+									captured = { ...captured, recoveryArtifacts: paths };
+								}
+							} catch (recoveryErr) {
+								const msg = recoveryErr instanceof Error ? recoveryErr.message : String(recoveryErr);
+								logger.warn("Aborted-task recovery capture failed", { taskId: task.id, error: msg });
+							}
+						}
+					}
+
+					// Phase 2: integrate into the parent repo. Serialized because cherry-pick,
+					// git apply, and stash operate on shared parent-repo state. A failure here
+					// is attributed to this task only — sibling tasks still get their own attempt.
+					if (isIsolated && repoRoot && captured.exitCode === 0 && !captured.aborted && !captured.error) {
+						await mergeLock.acquire();
 						try {
-							const commitMsg =
-								commitStyle === "ai" && this.session.modelRegistry
-									? async (diff: string) => {
-											return generateCommitMessage(
-												diff,
-												this.session.modelRegistry!,
-												this.session.settings,
-												this.session.getSessionId?.() ?? undefined,
-											);
+							if (mergeMode === "branch") {
+								// Merge root + each nested branch independently. Preserve branches
+								// on any failure so the main session can reconcile manually.
+								const targets: Array<{ repo: string; branchName: string; label: string }> = [];
+								if (captured.branchName) {
+									targets.push({ repo: repoRoot, branchName: captured.branchName, label: "root" });
+								}
+								for (const nb of captured.nestedBranches ?? []) {
+									targets.push({
+										repo: path.join(repoRoot, nb.relativePath),
+										branchName: nb.branchName,
+										label: nb.relativePath,
+									});
+								}
+								const preserved: string[] = [];
+								const conflicts: string[] = [];
+								const aggressiveMerges: Array<{ label: string; files: string[] }> = [];
+								for (const t of targets) {
+									const merged = await mergeSingleBranch(t.repo, {
+										branchName: t.branchName,
+										taskId: task.id,
+										description: task.description,
+									});
+									if (merged.ok) {
+										await cleanupTaskBranches(t.repo, [t.branchName]);
+										if (merged.aggressive) {
+											aggressiveMerges.push({ label: t.label, files: merged.aggressive.files });
 										}
-									: undefined;
-							const commitResult = await commitToBranch(
-								isolationDir,
-								taskBaseline,
-								task.id,
-								task.description,
-								commitMsg,
-							);
-							return {
-								...result,
-								branchName: commitResult?.branchName,
-								nestedPatches: commitResult?.nestedPatches,
-							};
-						} catch (mergeErr) {
-							// Agent succeeded but branch commit failed — clean up stale branch
-							const branchName = `omp/task/${task.id}`;
-							await git.branch.tryDelete(repoRoot, branchName);
-							const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
-							return { ...result, error: `Merge failed: ${msg}` };
+									} else {
+										preserved.push(`\`${t.branchName}\` in ${t.label}`);
+										conflicts.push(`${t.label}: ${merged.conflict ?? "unknown"}`);
+									}
+								}
+								if (preserved.length > 0) {
+									captured.error = `Branch merge failed; preserved for manual reconciliation: ${preserved.join(", ")}. Conflicts: ${conflicts.join("; ")}`;
+								}
+								if (aggressiveMerges.length > 0) {
+									captured.aggressiveMerges = aggressiveMerges;
+								}
+							} else if (mergeMode === "patch" && captured.patchPath) {
+								const patchText = await Bun.file(captured.patchPath).text();
+								if (patchText.trim()) {
+									const canApply = await git.patch.canApplyText(repoRoot, patchText);
+									if (!canApply) {
+										const localChangesPresent = (await git.status(repoRoot)).trim().length > 0;
+										const causePart = localChangesPresent
+											? " The parent working tree has local edits that conflict with this patch."
+											: "";
+										captured.error = `Patch could not be applied cleanly.${causePart} Patch preserved at ${captured.patchPath}.`;
+									} else {
+										try {
+											await git.patch.applyText(repoRoot, patchText);
+										} catch (err) {
+											const msg = err instanceof Error ? err.message : String(err);
+											logger.error("Patch apply failed despite canApply check", { error: msg });
+											captured.error = `Patch apply failed: ${msg}. Patch preserved at ${captured.patchPath}.`;
+										}
+									}
+								}
+								if (!captured.error && captured.nestedPatches && captured.nestedPatches.length > 0) {
+									const err = await applyTaskNestedPatches(
+										repoRoot,
+										task.id,
+										task.description,
+										captured.nestedPatches,
+										commitMsgFn,
+									);
+									if (err) captured.error = err;
+								}
+							}
+						} finally {
+							mergeLock.release();
 						}
 					}
-					if (result.exitCode === 0) {
-						try {
-							const delta = await captureDeltaPatch(isolationDir, taskBaseline);
-							const patchPath = path.join(effectiveArtifactsDir, `${task.id}.patch`);
-							await Bun.write(patchPath, delta.rootPatch);
-							return {
-								...result,
-								patchPath,
-								nestedPatches: delta.nestedPatches,
-							};
-						} catch (patchErr) {
-							const msg = patchErr instanceof Error ? patchErr.message : String(patchErr);
-							return { ...result, error: `Patch capture failed: ${msg}` };
-						}
+
+					if (isIsolated && captured.exitCode === 0 && !captured.aborted) {
+						markMergeOutcome(captured.error);
 					}
-					return result;
+					return captured;
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					return {
@@ -980,12 +1117,17 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 					};
 				} finally {
 					if (isolationDir) {
-						if (effectiveIsolationMode === "fuse-overlay") {
-							await cleanupFuseOverlay(isolationDir);
-						} else if (effectiveIsolationMode === "fuse-projfs") {
-							await cleanupProjfsOverlay(isolationDir);
-						} else {
-							await cleanupWorktree(isolationDir);
+						try {
+							if (effectiveIsolationMode === "reflink") {
+								await cleanupReflinkSnapshot(isolationDir);
+							} else if (effectiveIsolationMode === "fuse-projfs") {
+								await cleanupProjfsOverlay(isolationDir);
+							} else {
+								await cleanupWorktree(isolationDir);
+							}
+						} catch (cleanupErr) {
+							const msg = cleanupErr instanceof Error ? cleanupErr.message : String(cleanupErr);
+							logger.warn("Worktree cleanup failed", { isolationDir, error: msg });
 						}
 					}
 				}
@@ -1048,133 +1190,57 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 				}
 			}
 
+			// Per-task merge already ran inside each `runTask` under `mergeLock`. Anything
+			// that failed to integrate is recorded as `r.error` on the owning result.
+			// Here we only assemble the top-level summary of preserved artifacts so the
+			// main session can reconcile them manually.
 			let mergeSummary = "";
-			let changesApplied: boolean | null = null;
-			let mergedBranchesForNestedPatches: Set<string> | null = null;
-			if (isIsolated && repoRoot) {
-				try {
-					if (mergeMode === "branch") {
-						// Branch mode: merge task branches sequentially
-						const branchEntries = results
-							.filter(r => r.branchName && r.exitCode === 0 && !r.aborted)
-							.map(r => ({ branchName: r.branchName!, taskId: r.id, description: r.description }));
-
-						if (branchEntries.length === 0) {
-							changesApplied = true;
-						} else {
-							const mergeResult = await mergeTaskBranches(repoRoot, branchEntries);
-							mergedBranchesForNestedPatches = new Set(mergeResult.merged);
-							changesApplied = mergeResult.failed.length === 0;
-
-							if (changesApplied) {
-								mergeSummary = `\n\nMerged ${mergeResult.merged.length} branch${mergeResult.merged.length === 1 ? "" : "es"}: ${mergeResult.merged.join(", ")}`;
-							} else {
-								const mergedPart =
-									mergeResult.merged.length > 0 ? `Merged: ${mergeResult.merged.join(", ")}.\n` : "";
-								const failedPart = `Failed: ${mergeResult.failed.join(", ")}.`;
-								const conflictPart = mergeResult.conflict ? `\nConflict: ${mergeResult.conflict}` : "";
-								mergeSummary = `\n\n<system-notification>Branch merge failed. ${mergedPart}${failedPart}${conflictPart}\nUnmerged branches remain for manual resolution.</system-notification>`;
-							}
-						}
-
-						// Clean up merged branches (keep failed ones for manual resolution)
-						const allBranches = branchEntries.map(b => b.branchName);
-						if (changesApplied) {
-							await cleanupTaskBranches(repoRoot, allBranches);
-						}
-					} else {
-						// Patch mode: combine and apply patches
-						const patchesInOrder = results.map(result => result.patchPath).filter(Boolean) as string[];
-						const missingPatch = results.some(result => !result.patchPath);
-						if (missingPatch) {
-							changesApplied = false;
-						} else {
-							const patchStats = await Promise.all(
-								patchesInOrder.map(async patchPath => ({
-									patchPath,
-									size: (await fs.stat(patchPath)).size,
-								})),
-							);
-							const nonEmptyPatches = patchStats.filter(patch => patch.size > 0).map(patch => patch.patchPath);
-							if (nonEmptyPatches.length === 0) {
-								changesApplied = true;
-							} else {
-								const patchTexts = await Promise.all(
-									nonEmptyPatches.map(async patchPath => Bun.file(patchPath).text()),
-								);
-								const combinedPatch = patchTexts
-									.map(text => (text.endsWith("\n") ? text : `${text}\n`))
-									.join("");
-								if (!combinedPatch.trim()) {
-									changesApplied = true;
-								} else {
-									changesApplied = await git.patch.canApplyText(repoRoot, combinedPatch);
-									if (changesApplied) {
-										try {
-											await git.patch.applyText(repoRoot, combinedPatch);
-										} catch {
-											changesApplied = false;
-										}
-									}
-								}
-							}
-						}
-
-						if (changesApplied) {
-							mergeSummary = "\n\nApplied patches: yes";
-						} else {
-							const notification =
-								"<system-notification>Patches were not applied and must be handled manually.</system-notification>";
-							const patchList =
-								patchPaths.length > 0
-									? `\n\nPatch artifacts:\n${patchPaths.map(patch => `- ${patch}`).join("\n")}`
-									: "";
-							mergeSummary = `\n\n${notification}${patchList}`;
-						}
+			const preservedBranchTasks = results.filter(
+				r =>
+					r.error &&
+					r.exitCode === 0 &&
+					!r.aborted &&
+					(r.branchName || (r.nestedBranches && r.nestedBranches.length > 0)),
+			);
+			const preservedPatches = results.filter(r => r.patchPath && r.error && r.exitCode === 0 && !r.aborted);
+			if (preservedBranchTasks.length > 0) {
+				const lines: string[] = [];
+				for (const r of preservedBranchTasks) {
+					const label = r.description ? `${r.id} — ${r.description}` : r.id;
+					if (r.branchName) lines.push(`- ${r.branchName} in root (${label})`);
+					for (const nb of r.nestedBranches ?? []) {
+						lines.push(`- ${nb.branchName} in ${nb.relativePath} (${label})`);
 					}
-				} catch (mergeErr) {
-					const msg = mergeErr instanceof Error ? mergeErr.message : String(mergeErr);
-					changesApplied = false;
-					mergeSummary = `\n\n<system-notification>Merge phase failed: ${msg}\nTask outputs are preserved but changes were not applied.</system-notification>`;
 				}
+				const plural = lines.length === 1 ? "" : "es";
+				mergeSummary += `\n\n<system-notification>${lines.length} task branch${plural} preserved for manual reconciliation in the main session. Each owning task is marked \`merge failed\` above with its specific conflict.\nPreserved branches:\n${lines.join("\n")}</system-notification>`;
 			}
-
-			// Apply nested repo patches (separate from parent git)
-			if (isIsolated && repoRoot && (mergeMode === "branch" || changesApplied !== false)) {
-				const allNestedPatches = results
-					.filter(r => {
-						if (!r.nestedPatches || r.nestedPatches.length === 0 || r.exitCode !== 0 || r.aborted) {
-							return false;
-						}
-						if (mergeMode !== "branch") {
-							return true;
-						}
-						if (!r.branchName || !mergedBranchesForNestedPatches) {
-							return false;
-						}
-						return mergedBranchesForNestedPatches.has(r.branchName);
-					})
-					.flatMap(r => r.nestedPatches!);
-				if (allNestedPatches.length > 0) {
-					try {
-						const commitMsg =
-							commitStyle === "ai" && this.session.modelRegistry
-								? async (diff: string) => {
-										return generateCommitMessage(
-											diff,
-											this.session.modelRegistry!,
-											this.session.settings,
-											this.session.getSessionId?.() ?? undefined,
-										);
-									}
-								: undefined;
-						await applyNestedPatches(repoRoot, allNestedPatches, commitMsg);
-					} catch {
-						// Nested patch failures are non-fatal to the parent merge
-						mergeSummary +=
-							"\n\n<system-notification>Some nested repository patches failed to apply.</system-notification>";
+			if (preservedPatches.length > 0) {
+				const lines = preservedPatches.map(r => `- ${r.patchPath} (${r.id})`);
+				const plural = preservedPatches.length === 1 ? "" : "es";
+				mergeSummary += `\n\n<system-notification>${preservedPatches.length} patch${plural} preserved for manual review. Each owning task is marked \`merge failed\` above.\nPatch artifacts:\n${lines.join("\n")}</system-notification>`;
+			}
+			const aggressiveTasks = results.filter(r => r.aggressiveMerges && r.aggressiveMerges.length > 0);
+			if (aggressiveTasks.length > 0) {
+				const lines: string[] = [];
+				for (const r of aggressiveTasks) {
+					const label = r.description ? `${r.id} — ${r.description}` : r.id;
+					for (const entry of r.aggressiveMerges ?? []) {
+						const files = entry.files.length > 0 ? entry.files.join(", ") : "(no file list captured)";
+						lines.push(`- ${label} in ${entry.label}: ${files}`);
 					}
 				}
+				mergeSummary += `\n\n<system-notification>Aggressive merge applied: ${lines.length} repo/task pair${lines.length === 1 ? "" : "s"} had cherry-pick conflicts that were force-resolved with \`-X theirs\` (the picked branch's content won). Review these files — parallel tasks wrote divergent content and one side was silently overridden:\n${lines.join("\n")}</system-notification>`;
+			}
+			const recoveredTasks = results.filter(r => r.recoveryArtifacts && r.recoveryArtifacts.length > 0);
+			if (recoveredTasks.length > 0) {
+				const lines: string[] = [];
+				for (const r of recoveredTasks) {
+					const label = r.description ? `${r.id} — ${r.description}` : r.id;
+					lines.push(`- ${label}: ${(r.recoveryArtifacts ?? []).join(", ")}`);
+				}
+				const plural = recoveredTasks.length === 1 ? "" : "s";
+				mergeSummary += `\n\n<system-notification>${recoveredTasks.length} aborted task${plural} preserved as recovery patches. The isolation worktree was torn down but the in-progress edits survive on disk.\n\nRecovery patches:\n${lines.join("\n")}\n\nTo resume: dispatch a follow-up \`task\` with the **same original assignment** plus a \`## Resume\` section pointing at the patch path. Tell the subagent to \`git apply <path>\` first (the patch is against the original baseline, so it applies cleanly onto the fresh isolation worktree), then continue from where the previous attempt stopped. Do NOT restart from scratch — the patch contains the prior progress.</system-notification>`;
 			}
 
 			// Build final output - match plugin format
@@ -1205,6 +1271,8 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 					agent: r.agent,
 					status,
 					id: r.id,
+					branch: r.branchName,
+					errorDetail: r.exitCode === 0 && r.error ? r.error : undefined,
 					preview,
 					truncated,
 					meta: r.outputMeta
@@ -1231,8 +1299,10 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 			});
 
 			// Cleanup temp directory if used
-			const shouldCleanupTempArtifacts =
-				tempArtifactsDir && (!isIsolated || changesApplied === true || changesApplied === null);
+			// Keep the temp artifacts dir if any isolated task left a preserved patch;
+			// the patch path inside points into this dir and the main session needs it.
+			const hasPreservedPatchArtifact = isIsolated && preservedPatches.length > 0;
+			const shouldCleanupTempArtifacts = tempArtifactsDir && !hasPreservedPatchArtifact;
 			if (shouldCleanupTempArtifacts) {
 				await fs.rm(tempArtifactsDir, { recursive: true, force: true });
 			}

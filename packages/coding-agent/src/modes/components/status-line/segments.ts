@@ -38,8 +38,10 @@ function normalizePremiumRequests(value: number): number {
 
 const piSegment: StatusLineSegment = {
 	id: "pi",
-	render(_ctx) {
-		const content = theme.icon.pi ? `${theme.icon.pi} ` : "";
+	render(ctx) {
+		const marker = ctx.session.orchestratorMode ? "∈" : "";
+		const markerPrefix = marker && theme.icon.pi ? `${marker}\u2009` : marker;
+		const content = theme.icon.pi ? `${markerPrefix}${theme.icon.pi} ` : marker ? `${marker} ` : "";
 		return { content: theme.fg("accent", content), visible: true };
 	},
 };

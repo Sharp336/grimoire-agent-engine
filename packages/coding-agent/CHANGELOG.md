@@ -2,9 +2,34 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added orchestrator mode: a coordination-only session that delegates all file mutations to focused task agents running in isolated git worktrees. Edit-capable subagents auto-isolate with branch-based integration; a per-batch mutex serializes cherry-pick/apply so parallel tasks run concurrently without corrupting shared parent state. The orchestrator system prompt forbids direct edits and routes all code changes through the `task` tool. Toggle via `/orchestrator` slash command
+- Added `git_commit_checkpoint` tool, registered in orchestrator mode only, that commits outstanding work in the current project as a WIP checkpoint at scope boundaries. Iterates every dirty repo under the session cwd, generates the commit message via the smol model used by isolated task branches, and falls back to `wip: <reason>` when no model registry is available
+- Added pre-task auto-commit: isolated task dispatches from a dirty parent worktree auto-commit every dirty repo under the project root via the same model-generated commit path before capturing the baseline, so task branches cherry-pick onto a clean parent.
+- Added session observer overlay (`Ctrl+S`) for live read-only viewing of subagent sessions during orchestration; list sorts newest-first
+- Added `reflink` isolation mode that snapshots the repository to an isolated worktree via `cp --reflink=auto` for true point-in-time isolation; the snapshot is independent of the live working tree and survives concurrent edits
+- Added `timeout` option to the `task` tool that aborts long-running subtasks at the deadline and returns partial results
+
 ### Changed
 
+- Renamed `task.isolation.mode = fuse-overlay` to `task.isolation.mode = reflink`. Existing settings auto-migrate on load. fuse-overlay (CoW-over-live-repo) is replaced by reflink (point-in-time snapshot via `cp --reflink`); the new mode is independent of the live tree, so concurrent edits in the parent worktree no longer leak into the isolated task
+- Hardened isolated task lifecycle: aborted tasks now preserve in-progress subagent work as recovery patches under `<artifactsDir>/<taskId>.patch` before the worktree is torn down; cherry-pick uses `--empty=drop` so duplicate-content siblings (parallel subagents producing identical output, formatter noise) skip silently instead of aborting the merge; cherry-pick falls back to `-X theirs` when parallel tasks produce overlapping writes, surfacing the overridden files as an audit notification
+- Hardened orchestrator and subagent prompts: orchestrator MUST NOT change file contents directly by any means (bash, sed/awk/perl, heredocs, redirects, editors); the only direct-bash escape is git-repo structural work (`git init`, `git clone`, deleting `.git`, submodule add/remove, remote configuration). Each subagent task MUST deliver a finished product before yielding (formatted scoped to touched files, scoped tests covering changed behavior passing, tests written for new behavior); the orchestrator no longer absorbs post-hoc formatting or writes missing tests for subagent output
+- Reworked task summary rendering: summaries now include commit hashes for merged branches, use summary-driven merge reporting, and surface merge-failed branches verbatim with `<branch>` and `<error>` tags so the main session can re-delegate or cherry-pick manually
 - Persisted handoff sessions to disk before continuation, and emitted the handoff directive as a trailing `<system-reminder>` override block inside a developer message instead of resetting the active system prompt to base. The previous reset invalidated the Anthropic system cache whenever the prior turn ran with an extension override, plan-mode override, or SDK-supplied system prompt; the new path preserves cache hits across the handoff
+- Preserved orchestrator mode per session across resume; `Ctrl+S` toggles the session observer overlay using the main session renderer
+- Restored read/grep anchor output (hashlines, chunk tree, line numbers) in orchestrator-mode sessions. The previous `ToolSession.hasEditTool` carve-out forced false whenever orchestrator mode was on, which suppressed anchors regardless of `edit.mode` and left direct-edit carveouts with no way to target what they just read
+- Updated `AsyncJobManager.register` to collapse whitespace runs in job labels so multi-line bash commands (`for/do/done`) no longer break the single-line await/poll status rows
+
+- Reworked nested-repo handling: nested repos with no HEAD (freshly-init'd scaffold dirs) now fall back to git's well-known empty-tree SHA so delta capture succeeds; child directories whose names start with `.` are pruned from discovery to avoid traversing `.git` and similar tooling state
+
+### Fixed
+
+- Fixed `captureRepoBaseline` aborting delta capture for nested repos that had a `.git` directory but no commits (`fatal: Not a valid object name`), which previously collapsed the whole orchestrated task into `Branch commit failed: ... No delta artifacts were written` with no recovery path
+- Fixed isolated task commit failures losing the captured branch delta. Branch mode now writes each captured patch to `<artifactsDir>/<taskId>.patch` (and `<artifactsDir>/<taskId>.<sanitized-rel>.patch` per nested repo) before attempting the branch commit, never deletes partial `omp/task/<id>` branches on commit failure, and surfaces the recovery paths in the per-task error so the user can `git apply` manually
+- Fixed `commitPatchToRepoBranch` masking the suspicious 'patch applied as a no-op' case (captured patch non-empty but `git status` clean after apply) as a generic 'nothing to commit' error; the branch path now logs the captured patch head and throws a distinct error message
+>>>>>>> c5e09f2bb (feat(coding-agent): orchestrator mode with isolated subagent dispatch and scope-boundary checkpoints)
 
 ## [14.5.2] - 2026-04-26
 ### Breaking Changes

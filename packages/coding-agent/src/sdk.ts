@@ -388,6 +388,7 @@ export interface BuildSystemPromptOptions {
 	cwd?: string;
 	appendPrompt?: string;
 	repeatToolDescriptions?: boolean;
+	orchestratorMode?: boolean;
 }
 
 /**
@@ -400,6 +401,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles: options.contextFiles,
 		appendSystemPrompt: options.appendPrompt,
 		repeatToolDescriptions: options.repeatToolDescriptions,
+		orchestratorMode: options.orchestratorMode,
+		tools: options.tools ? new Map(options.tools.map(tool => [tool.name, tool])) : undefined,
 	});
 }
 
@@ -775,6 +778,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	}
 
 	const taskDepth = options.taskDepth ?? 0;
+	const initialOrchestratorMode = false;
+	const requestedToolNamesForSession = options.toolNames
+		? [
+				...new Set(
+					initialOrchestratorMode
+						? ["task", ...options.toolNames.map(name => name.toLowerCase())]
+						: options.toolNames.map(name => name.toLowerCase()),
+				),
+			]
+		: undefined;
 
 	let thinkingLevel = options.thinkingLevel;
 
@@ -916,15 +929,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (model) return formatModelString(model);
 			return undefined;
 		};
+		let toolRegistry: Map<string, Tool> | undefined;
 		const toolSession: ToolSession = {
 			cwd,
 			hasUI: options.hasUI ?? false,
 			enableLsp,
 			get hasEditTool() {
-				const requestedToolNames = options.toolNames
-					? [...new Set(options.toolNames.map(name => name.toLowerCase()))]
-					: undefined;
-				return !requestedToolNames || requestedToolNames.includes("edit");
+				return !requestedToolNamesForSession || requestedToolNamesForSession.includes("edit");
+			},
+			get orchestratorMode() {
+				return session?.orchestratorMode ?? initialOrchestratorMode;
 			},
 			skipPythonPreflight: options.skipPythonPreflight,
 			forcePythonWarmup: options.forcePythonWarmup,
@@ -1022,7 +1036,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		);
 
 		// Create built-in tools (already wrapped with meta notice formatting)
-		const builtinTools = await logger.time("createAllTools", createTools, toolSession, options.toolNames);
+		const builtinTools = await logger.time("createAllTools", createTools, toolSession, requestedToolNamesForSession);
 
 		// Discover MCP tools from .mcp.json files
 		let mcpManager: MCPManager | undefined = options.mcpManager;
@@ -1258,7 +1272,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 
 		// All built-in tools are active (conditional tools like git/ask return null from factory if disabled)
-		const toolRegistry = new Map<string, Tool>();
+		toolRegistry = new Map<string, Tool>();
 		for (const tool of builtinTools) {
 			toolRegistry.set(tool.name, tool);
 		}
@@ -1272,6 +1286,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		if (model?.provider === "cursor") {
 			toolRegistry.delete("edit");
+		}
+		if (initialOrchestratorMode && !toolRegistry.has("task")) {
+			throw new Error("orchestrator mode requires the task tool to remain available.");
 		}
 
 		const hasDeferrableTools = Array.from(toolRegistry.values()).some(tool => tool.deferrable === true);
@@ -1305,6 +1322,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				search_tool_bm25: { description: renderSearchToolBm25Description(discoverableMCPTools) },
 			});
 			const memoryInstructions = await buildMemoryToolDeveloperInstructions(agentDir, settings);
+			const orchestratorMode = session?.orchestratorMode ?? initialOrchestratorMode;
 
 			// Build combined append prompt: memory instructions + MCP server instructions
 			const serverInstructions = mcpManager?.getServerInstructions();
@@ -1340,6 +1358,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				mcpDiscoveryMode: hasDiscoverableMCPTools,
 				mcpDiscoveryServerSummaries: discoverableMCPSummary.servers.map(formatDiscoverableMCPToolServerSummary),
 				eagerTasks,
+				orchestratorMode,
 				secretsEnabled,
 			});
 
@@ -1363,6 +1382,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					mcpDiscoveryMode: hasDiscoverableMCPTools,
 					mcpDiscoveryServerSummaries: discoverableMCPSummary.servers.map(formatDiscoverableMCPToolServerSummary),
 					eagerTasks,
+					orchestratorMode,
 					secretsEnabled,
 				});
 			}
@@ -1370,9 +1390,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
-		const requestedToolNames =
-			(options.toolNames ? [...new Set(options.toolNames.map(name => name.toLowerCase()))] : undefined) ??
-			toolNamesFromRegistry;
+		const requestedToolNames = requestedToolNamesForSession ?? toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
 		const includeExitPlanMode = requestedToolNames.includes("exit_plan_mode");
 		const mcpDiscoveryEnabled = settings.get("mcp.discoveryMode") ?? false;
@@ -1382,10 +1400,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const requestedActiveToolNames = includeExitPlanMode
 			? normalizedRequested
 			: normalizedRequested.filter(name => name !== "exit_plan_mode");
-		const initialRequestedActiveToolNames = options.toolNames
+		const initialRequestedActiveToolNames = requestedToolNamesForSession
 			? requestedActiveToolNames
 			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));
-		const explicitlyRequestedMCPToolNames = options.toolNames
+		const explicitlyRequestedMCPToolNames = requestedToolNamesForSession
 			? requestedActiveToolNames.filter(name => name.startsWith("mcp_"))
 			: [];
 		const discoveryDefaultServers = new Set(
@@ -1593,6 +1611,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			onPayload,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			orchestratorMode: initialOrchestratorMode,
 			mcpDiscoveryEnabled,
 			initialSelectedMCPToolNames,
 			defaultSelectedMCPToolNames,

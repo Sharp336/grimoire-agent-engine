@@ -3,7 +3,7 @@ import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { getTaskSimpleModeCapabilities, type TaskSimpleMode } from "./simple-mode";
-import type { NestedRepoPatch } from "./worktree";
+import type { NestedRepoBranch, NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
@@ -110,12 +110,20 @@ const createTaskSchema = (options: { isolationEnabled: boolean; simpleMode: Task
 		);
 	}
 
+	properties.timeout = Type.Optional(
+		Type.Number({
+			description:
+				"Maximum duration in seconds for each subtask. When reached, the subtask is aborted and partial results are returned.",
+		}),
+	);
+
 	if (options.isolationEnabled) {
 		return Type.Object({
 			...properties,
 			isolated: Type.Optional(
 				Type.Boolean({
-					description: "Run in isolated environment; returns patches. Use when tasks edit overlapping files.",
+					description:
+						"Run in isolated environment; returns patches. Optional in orchestrator mode because edit-capable agents are auto-isolated while read-only agents stay non-isolated.",
 				}),
 			),
 		});
@@ -142,14 +150,25 @@ const ALL_TASK_SCHEMAS = [
 type DynamicTaskSchema = (typeof ALL_TASK_SCHEMAS)[number];
 export type TaskSchema = typeof taskSchema;
 
-export function getTaskSchema(options: { isolationEnabled: boolean; simpleMode: TaskSimpleMode }): DynamicTaskSchema {
+export function getTaskSchema(options: {
+	isolationEnabled: boolean;
+	simpleMode: TaskSimpleMode;
+	orchestratorMode?: boolean;
+	taskDepth?: number;
+}): DynamicTaskSchema {
+	// The `isolated` argument is hidden when it cannot take effect:
+	// - orchestrator mode: isolation is automatic, inferred from the agent's tool access.
+	// - nested tasks (taskDepth > 0): the parent task owns its integration path; a nested
+	//   subagent cannot open a fresh isolation layer on top of its own.
+	const nested = (options.taskDepth ?? 0) > 0;
+	const effectiveIsolation = options.orchestratorMode || nested ? false : options.isolationEnabled;
 	switch (options.simpleMode) {
 		case "schema-free":
-			return options.isolationEnabled ? taskSchemaSchemaFree : taskSchemaSchemaFreeNoIsolation;
+			return effectiveIsolation ? taskSchemaSchemaFree : taskSchemaSchemaFreeNoIsolation;
 		case "independent":
-			return options.isolationEnabled ? taskSchemaIndependent : taskSchemaIndependentNoIsolation;
+			return effectiveIsolation ? taskSchemaIndependent : taskSchemaIndependentNoIsolation;
 		default:
-			return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
+			return effectiveIsolation ? taskSchema : taskSchemaNoIsolation;
 	}
 }
 
@@ -159,6 +178,7 @@ export interface TaskParams {
 	schema?: string;
 	tasks: TaskItem[];
 	isolated?: boolean;
+	timeout?: number;
 }
 
 /** A code review finding reported by the reviewer agent */
@@ -206,7 +226,7 @@ export interface AgentProgress {
 	id: string;
 	agent: string;
 	agentSource: AgentSource;
-	status: "pending" | "running" | "completed" | "failed" | "aborted";
+	status: "pending" | "running" | "merging" | "completed" | "failed" | "merge_failed" | "aborted";
 	task: string;
 	assignment?: string;
 	description?: string;
@@ -250,10 +270,25 @@ export interface SingleResult {
 	outputPath?: string;
 	/** Patch path for isolated worktree output */
 	patchPath?: string;
-	/** Branch name for isolated branch-mode output */
+	/** Branch name for isolated branch-mode output (root repo). */
 	branchName?: string;
-	/** Nested repo patches to apply after parent merge */
+	/** Nested repo patches to apply after parent merge (patch-mode only). */
 	nestedPatches?: NestedRepoPatch[];
+	/** Nested repo branches created alongside root branch (branch-mode only). */
+	nestedBranches?: NestedRepoBranch[];
+	/**
+	 * Repos where cherry-pick conflicted and was force-resolved with `-X theirs`.
+	 * Each entry lists files whose parallel-task edits were silently overridden;
+	 * surfaced to the main session so overlapping work can be audited.
+	 */
+	aggressiveMerges?: Array<{ label: string; files: string[] }>;
+	/**
+	 * Patch artifact paths written for a task that was aborted mid-execution.
+	 * The isolation worktree is torn down after abort, so these files are the only
+	 * surviving trace of the subagent's in-progress work — surfaced to the main
+	 * session so the user can inspect or cherry-pick before retrying.
+	 */
+	recoveryArtifacts?: string[];
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/** Output metadata for agent:// URL integration */

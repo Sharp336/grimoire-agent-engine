@@ -46,6 +46,7 @@ interface AppKeybindings {
 	"app.tree.foldOrUp": true;
 	"app.tree.unfoldOrDown": true;
 	"app.plan.toggle": true;
+	"app.orchestrator.toggle": true;
 	"app.history.search": true;
 	"app.stt.toggle": true;
 }
@@ -180,6 +181,11 @@ export const KEYBINDINGS = {
 	"app.plan.toggle": {
 		defaultKeys: "alt+shift+p",
 		description: "Toggle plan mode",
+	},
+	"app.orchestrator.toggle": {
+		// Ctrl+M maps to carriage return/Enter in terminals.
+		defaultKeys: "alt+m",
+		description: "Toggle orchestrator mode",
 	},
 	"app.history.search": {
 		defaultKeys: "ctrl+r",

@@ -62,6 +62,7 @@ import {
 	setNativeKillTree,
 } from "@oh-my-pi/pi-utils";
 import type { AsyncJob, AsyncJobManager } from "../async";
+import { findRepoRoot } from "../capability/fs";
 import type { Rule } from "../capability/rule";
 import { MODEL_ROLE_IDS, type ModelRegistry } from "../config/model-registry";
 import {
@@ -246,6 +247,8 @@ export interface AgentSessionConfig {
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability */
 	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<string>;
+	/** Whether this top-level session is coordination-only and must delegate mutations. */
+	orchestratorMode?: boolean;
 	/** Enable hidden-by-default MCP tool discovery for this session. */
 	mcpDiscoveryEnabled?: boolean;
 	/** MCP tool names to activate for the current session when discovery mode is enabled. */
@@ -501,6 +504,8 @@ export class AgentSession {
 	#convertToLlm: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	#rebuildSystemPrompt: ((toolNames: string[], tools: Map<string, AgentTool>) => Promise<string>) | undefined;
 	#baseSystemPrompt: string;
+	#orchestratorMode = false;
+	#requestedActiveToolNames: string[] = [];
 	#mcpDiscoveryEnabled = false;
 	#discoverableMCPTools = new Map<string, DiscoverableMCPTool>();
 	#discoverableMCPSearchIndex: DiscoverableMCPSearchIndex | null = null;
@@ -587,6 +592,8 @@ export class AgentSession {
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
+		this.#orchestratorMode = config.orchestratorMode === true;
+		this.#requestedActiveToolNames = this.agent.state.tools.map(tool => tool.name);
 		this.#mcpDiscoveryEnabled = config.mcpDiscoveryEnabled ?? false;
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
 		this.#selectedMCPToolNames = new Set(config.initialSelectedMCPToolNames ?? []);
@@ -2023,6 +2030,27 @@ export class AgentSession {
 		this.sessionManager.appendMCPToolSelection(nextSelectedMCPToolNames);
 	}
 
+	#getRequestedActiveToolNames(): string[] {
+		return [...this.#requestedActiveToolNames];
+	}
+
+	#getRequestedActiveNonMCPToolNames(): string[] {
+		return this.#requestedActiveToolNames.filter(name => !isMCPToolName(name) && this.#toolRegistry.has(name));
+	}
+
+	#getEffectiveRequestedToolNames(toolNames: Iterable<string>): string[] {
+		const normalizedToolNames = Array.from(
+			new Set(Array.from(toolNames).filter(name => this.#toolRegistry.has(name))),
+		);
+		if (this.#orchestratorMode && !this.#toolRegistry.has("task")) {
+			throw new Error("orchestrator mode requires the task tool to remain available.");
+		}
+		if (this.#orchestratorMode && !normalizedToolNames.includes("task")) {
+			return ["task", ...normalizedToolNames];
+		}
+		return normalizedToolNames;
+	}
+
 	#getActiveNonMCPToolNames(): string[] {
 		return this.getActiveToolNames().filter(name => !isMCPToolName(name) && this.#toolRegistry.has(name));
 	}
@@ -2040,6 +2068,34 @@ export class AgentSession {
 		return this.#toolRegistry.has("edit");
 	}
 
+	/** Whether orchestration-only mode is currently enabled for this session. */
+	get orchestratorMode(): boolean {
+		return this.#orchestratorMode;
+	}
+
+	async setOrchestratorMode(enabled: boolean): Promise<void> {
+		if (this.#orchestratorMode === enabled) {
+			return;
+		}
+		if (enabled) {
+			if ((await findRepoRoot(this.sessionManager.getCwd())) === null) {
+				throw new Error("git repository not found");
+			}
+			if (!this.#toolRegistry.has("task")) {
+				throw new Error("orchestrator mode requires the task tool to remain available.");
+			}
+		}
+		const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
+		this.#orchestratorMode = enabled;
+		await this.#applyActiveToolsByName(this.#requestedActiveToolNames, { previousSelectedMCPToolNames });
+		this.sessionManager.appendCustomEntry("orchestrator_mode", { enabled });
+	}
+
+	toggleOrchestratorMode(): Promise<boolean> {
+		const nextEnabled = !this.#orchestratorMode;
+		return this.setOrchestratorMode(nextEnabled).then(() => nextEnabled);
+	}
+
 	/**
 	 * Get a tool by name from the registry.
 	 */
@@ -2051,7 +2107,8 @@ export class AgentSession {
 	 * Get all configured tool names (built-in via --tools or default, plus custom tools).
 	 */
 	getAllToolNames(): string[] {
-		return Array.from(this.#toolRegistry.keys());
+		const toolNames = Array.from(this.#toolRegistry.keys());
+		return toolNames;
 	}
 
 	#getEditModeSession() {
@@ -2108,7 +2165,7 @@ export class AgentSession {
 			return [];
 		}
 		const nextActive = [
-			...this.#getActiveNonMCPToolNames(),
+			...this.#getRequestedActiveNonMCPToolNames(),
 			...this.#filterSelectableMCPToolNames(nextSelectedMCPToolNames),
 		];
 		await this.setActiveToolsByName(nextActive);
@@ -2121,9 +2178,11 @@ export class AgentSession {
 	): Promise<void> {
 		toolNames = [...new Set(toolNames.map(name => name.toLowerCase()))];
 		const previousSelectedMCPToolNames = options?.previousSelectedMCPToolNames ?? this.getSelectedMCPToolNames();
+		this.#requestedActiveToolNames = Array.from(new Set(toolNames.filter(name => this.#toolRegistry.has(name))));
+		const requestedToolNames = this.#getEffectiveRequestedToolNames(this.#requestedActiveToolNames);
 		const tools: AgentTool[] = [];
 		const validToolNames: string[] = [];
-		for (const name of toolNames) {
+		for (const name of requestedToolNames) {
 			const tool = this.#toolRegistry.get(name);
 			if (tool) {
 				tools.push(tool);
@@ -2172,7 +2231,7 @@ export class AgentSession {
 		options?: { fallbackSelectedMCPToolNames?: Iterable<string> },
 	): Promise<void> {
 		if (!this.#mcpDiscoveryEnabled) return;
-		const nextActiveNonMCPToolNames = this.#getActiveNonMCPToolNames();
+		const nextActiveNonMCPToolNames = this.#getRequestedActiveNonMCPToolNames();
 		const fallbackSelectedMCPToolNames =
 			options?.fallbackSelectedMCPToolNames ?? this.#getConfiguredDefaultSelectedMCPToolNames();
 		const restoredMCPToolNames = sessionContext.hasPersistedMCPToolSelection
@@ -2194,10 +2253,6 @@ export class AgentSession {
 		this.agent.setSystemPrompt(this.#baseSystemPrompt);
 	}
 
-	/**
-	 * Replace MCP tools in the registry and recompute the visible MCP tool set immediately.
-	 * This allows /mcp add/remove/reauth to take effect without restarting the session.
-	 */
 	async refreshMCPTools(mcpTools: CustomTool[]): Promise<void> {
 		const previousSelectedMCPToolNames = this.getSelectedMCPToolNames();
 		const existingNames = Array.from(this.#toolRegistry.keys());
@@ -2239,13 +2294,10 @@ export class AgentSession {
 			this.#getConfiguredDefaultSelectedMCPToolNames(),
 		);
 
-		const nextActive = [...this.#getActiveNonMCPToolNames(), ...this.getSelectedMCPToolNames()];
+		const nextActive = [...this.#getRequestedActiveNonMCPToolNames(), ...this.getSelectedMCPToolNames()];
 		await this.#applyActiveToolsByName(nextActive, { previousSelectedMCPToolNames });
 	}
 
-	/**
-	 * Replace RPC host-owned tools and refresh the active tool set before the next model call.
-	 */
 	async refreshRpcHostTools(rpcTools: AgentTool[]): Promise<void> {
 		const nextToolNames = rpcTools.map(tool => tool.name);
 		const uniqueToolNames = new Set(nextToolNames);
@@ -2260,7 +2312,7 @@ export class AgentSession {
 		}
 
 		const previousRpcHostToolNames = new Set(this.#rpcHostToolNames);
-		const previousActiveToolNames = this.getActiveToolNames();
+		const previousRequestedToolNames = this.#getRequestedActiveToolNames();
 		for (const name of previousRpcHostToolNames) {
 			this.#toolRegistry.delete(name);
 		}
@@ -2274,8 +2326,8 @@ export class AgentSession {
 			this.#rpcHostToolNames.add(finalTool.name);
 		}
 
-		const activeNonRpcToolNames = previousActiveToolNames.filter(name => !previousRpcHostToolNames.has(name));
-		const preservedRpcToolNames = previousActiveToolNames.filter(
+		const activeNonRpcToolNames = previousRequestedToolNames.filter(name => !previousRpcHostToolNames.has(name));
+		const preservedRpcToolNames = previousRequestedToolNames.filter(
 			name => previousRpcHostToolNames.has(name) && this.#rpcHostToolNames.has(name),
 		);
 		const autoActivatedRpcToolNames = rpcTools
@@ -3414,6 +3466,7 @@ export class AgentSession {
 		this.#followUpMessages = [];
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#orchestratorMode = false;
 
 		this.sessionManager.appendThinkingLevelChange(this.thinkingLevel);
 		this.sessionManager.appendServiceTierChange(this.serviceTier ?? null);
@@ -4179,6 +4232,9 @@ export class AgentSession {
 			this.#pendingNextTurnMessages = [];
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#todoReminderCount = 0;
+			if (this.#orchestratorMode) {
+				this.sessionManager.appendCustomEntry("orchestrator_mode", { enabled: true });
+			}
 
 			// Inject the handoff document as a custom message
 			const handoffContent = `<handoff-context>\n${handoffText}\n</handoff-context>\n\nThe above is a handoff document from a previous session. Use this context to continue the work seamlessly.`;
@@ -6412,6 +6468,9 @@ export class AgentSession {
 
 		if (!selectedEntry.parentId) {
 			await this.sessionManager.newSession({ parentSession: previousSessionFile });
+			if (this.#orchestratorMode) {
+				this.sessionManager.appendCustomEntry("orchestrator_mode", { enabled: true });
+			}
 		} else {
 			this.sessionManager.createBranchedSession(selectedEntry.parentId);
 		}

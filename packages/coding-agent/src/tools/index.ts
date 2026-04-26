@@ -99,7 +99,6 @@ export type ContextFileEntry = {
 
 export type { DiscoverableMCPTool } from "../mcp/discoverable-tool-metadata";
 
-/** Session context for tool factories */
 export interface ToolSession {
 	/** Current working directory */
 	cwd: string;
@@ -119,6 +118,8 @@ export interface ToolSession {
 	enableLsp?: boolean;
 	/** Whether an edit-capable tool is available in this session (controls hashline output) */
 	hasEditTool?: boolean;
+	/** Whether this session is in orchestrator (coordination-only) mode */
+	orchestratorMode?: boolean;
 	/** Event bus for tool/extension communication */
 	eventBus?: EventBus;
 	/** Output schema for structured completion (subagents) */

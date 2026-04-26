@@ -435,6 +435,8 @@ export interface BuildSystemPromptOptions {
 	mcpDiscoveryServerSummaries?: string[];
 	/** Encourage the agent to delegate via tasks unless changes are trivial. */
 	eagerTasks?: boolean;
+	/** Whether the top-level session is coordination-only and must delegate mutations. */
+	orchestratorMode?: boolean;
 	/** Rules with alwaysApply=true — their full content is injected into the prompt. */
 	alwaysApplyRules?: AlwaysApplyRule[];
 	/** Whether secret obfuscation is active. When true, explains the redaction format in the prompt. */
@@ -463,6 +465,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		mcpDiscoveryMode = false,
 		mcpDiscoveryServerSummaries = [],
 		eagerTasks = false,
+		orchestratorMode = false,
 		secretsEnabled = false,
 	} = options;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -611,6 +614,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasMCPDiscoveryServers: mcpDiscoveryServerSummaries.length > 0,
 		mcpDiscoveryServerSummaries,
 		eagerTasks,
+		orchestratorMode,
 		secretsEnabled,
 	};
 	let rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);

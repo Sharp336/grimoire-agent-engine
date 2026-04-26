@@ -192,6 +192,7 @@ export interface InteractiveModeContext {
 	handleMoveCommand(targetPath: string): Promise<void>;
 	handleRenameCommand(title: string): Promise<void>;
 	handleMemoryCommand(text: string): Promise<void>;
+	handleOrchestratorToggle(): Promise<void>;
 	handleSTTToggle(): Promise<void>;
 	executeCompaction(customInstructionsOrOptions?: string | CompactOptions, isAuto?: boolean): Promise<void>;
 	openInBrowser(urlOrPath: string): void;

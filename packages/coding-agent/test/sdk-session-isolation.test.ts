@@ -128,6 +128,7 @@ describe("createAgentSession session storage isolation", () => {
 	it("shows redaction guidance only when secrets are actually loaded", async () => {
 		await withClearedSecretEnv(async () => {
 			const redactionGuidance = "redacted as `#XXXX#` tokens";
+			const toolCallGuidance = "copy the `#XXXX#` token verbatim into the tool arguments";
 			const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), `pi-sdk-secrets-${Snowflake.next()}-`));
 			tempDirs.push(tempDir);
 			const cwd = path.join(tempDir, "project");
@@ -150,6 +151,7 @@ describe("createAgentSession session storage isolation", () => {
 			const withoutSecrets = await createAgentSession(commonOptions);
 			try {
 				expect(withoutSecrets.session.systemPrompt).not.toContain(redactionGuidance);
+				expect(withoutSecrets.session.systemPrompt).not.toContain(toolCallGuidance);
 			} finally {
 				await withoutSecrets.session.dispose();
 			}
@@ -160,6 +162,7 @@ describe("createAgentSession session storage isolation", () => {
 			const withSecrets = await createAgentSession(commonOptions);
 			try {
 				expect(withSecrets.session.systemPrompt).toContain(redactionGuidance);
+				expect(withSecrets.session.systemPrompt).toContain(toolCallGuidance);
 			} finally {
 				await withSecrets.session.dispose();
 			}

@@ -32,12 +32,18 @@ type FakeEditor = {
 
 async function createContext() {
 	let editorText = "";
+	const customKeyHandlers = new Map<string, () => void>();
 	const keyMap: Record<string, string[]> = {
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["ctrl+l"],
+		"app.orchestrator.toggle": ["alt+m"],
 	};
 	const setActionKeys = vi.fn();
 	const showModelSelector = vi.fn();
+	const handleOrchestratorToggle = vi.fn(async () => {});
+	const setCustomKeyHandler = vi.fn((key: string, handler: () => void) => {
+		customKeyHandlers.set(key, handler);
+	});
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
@@ -47,8 +53,8 @@ async function createContext() {
 		},
 		addToHistory: vi.fn(),
 		setActionKeys,
-		setCustomKeyHandler: vi.fn(),
-		clearCustomKeyHandlers: vi.fn(),
+		setCustomKeyHandler,
+		clearCustomKeyHandlers: vi.fn(() => customKeyHandlers.clear()),
 	};
 	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
@@ -81,6 +87,7 @@ async function createContext() {
 		showUserMessageSelector: vi.fn(),
 		showSessionSelector: vi.fn(),
 		handleSTTToggle: vi.fn(),
+		handleOrchestratorToggle,
 		showDebugSelector: vi.fn(),
 		showHistorySearch: vi.fn(),
 		toggleThinkingBlockVisibility: vi.fn(),
@@ -95,7 +102,10 @@ async function createContext() {
 		editor,
 		spies: {
 			setActionKeys,
+			setCustomKeyHandler,
 			showModelSelector,
+			handleOrchestratorToggle,
+			customKeyHandlers,
 		},
 	};
 }
@@ -118,5 +128,19 @@ describe("InputController keybinding setup", () => {
 
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
+	});
+
+	it("registers orchestrator toggle custom keys against the shared context handler", async () => {
+		const { InputController, ctx, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+
+		expect(spies.setCustomKeyHandler).toHaveBeenCalledWith("alt+m", expect.any(Function));
+		const handler = spies.customKeyHandlers.get("alt+m");
+		expect(handler).toBeDefined();
+
+		handler?.();
+		expect(spies.handleOrchestratorToggle).toHaveBeenCalledTimes(1);
 	});
 });
