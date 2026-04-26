@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Persisted handoff sessions to disk before continuation, and emitted the handoff directive as a trailing `<system-reminder>` override block inside a developer message instead of resetting the active system prompt to base. The previous reset invalidated the Anthropic system cache whenever the prior turn ran with an extension override, plan-mode override, or SDK-supplied system prompt; the new path preserves cache hits across the handoff
+
 ## [14.5.2] - 2026-04-26
 ### Breaking Changes
 

@@ -760,12 +760,13 @@ export class AgentSession {
 			}
 		}
 
+		const persistedMessage = event.type === "message_end" ? event.message : undefined;
+		let displayEvent: AgentSessionEvent = event;
 		// Deobfuscate assistant message content for display emission — the LLM echoes back
 		// obfuscated placeholders, but listeners (TUI, extensions, exporters) must see real
 		// values. The original event.message stays obfuscated so the persistence path below
 		// writes `#HASH#` tokens to the session file; convertToLlm re-obfuscates outbound
 		// traffic on the next turn. Walks text, thinking, and toolCall arguments/intent.
-		let displayEvent: AgentEvent = event;
 		const obfuscator = this.#obfuscator;
 		if (obfuscator && event.type === "message_end" && event.message.role === "assistant") {
 			const message = event.message;
@@ -774,7 +775,6 @@ export class AgentSession {
 				displayEvent = { ...event, message: { ...message, content: deobfuscatedContent } };
 			}
 		}
-
 		await this.#emitSessionEvent(displayEvent);
 
 		if (event.type === "turn_start") {
@@ -917,6 +917,7 @@ export class AgentSession {
 
 		// Handle session persistence
 		if (event.type === "message_end") {
+			const messageEndMessage = persistedMessage ?? event.message;
 			// Check if this is a hook/custom message
 			if (event.message.role === "hookMessage" || event.message.role === "custom") {
 				// Persist as CustomMessageEntry
@@ -931,14 +932,14 @@ export class AgentSession {
 					this.#markTtsrInjected(this.#extractTtsrRuleNames(event.message.details));
 				}
 			} else if (
-				event.message.role === "user" ||
-				event.message.role === "developer" ||
-				event.message.role === "assistant" ||
-				event.message.role === "toolResult" ||
-				event.message.role === "fileMention"
+				messageEndMessage.role === "user" ||
+				messageEndMessage.role === "developer" ||
+				messageEndMessage.role === "assistant" ||
+				messageEndMessage.role === "toolResult" ||
+				messageEndMessage.role === "fileMention"
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				this.sessionManager.appendMessage(messageEndMessage);
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -978,8 +979,8 @@ export class AgentSession {
 				}
 			}
 
-			if (event.message.role === "toolResult") {
-				const { toolName, details, isError, content } = event.message as {
+			if (messageEndMessage.role === "toolResult") {
+				const { toolName, details, isError, content } = messageEndMessage as {
 					toolName?: string;
 					details?: { path?: string; phases?: TodoPhase[]; report?: string; startedAt?: string };
 					isError?: boolean;
@@ -4141,7 +4142,12 @@ export class AgentSession {
 			}
 			this.#promptInFlightCount++;
 			try {
-				this.agent.setSystemPrompt(this.#baseSystemPrompt);
+				// Do NOT reset the system prompt here: keeping whatever was active on the
+				// previous turn preserves the Anthropic system-block cache, so the handoff
+				// generation only pays for the appended override directive instead of
+				// rebilling the entire system prompt + tools. The handoff directive is
+				// wrapped in <system-reminder> inside the developer message so it remains
+				// authoritative even if a non-base system prompt is active (plan mode, etc.).
 				await this.#promptAgentWithIdleRetry([
 					{
 						role: "developer",
@@ -4177,6 +4183,8 @@ export class AgentSession {
 			// Inject the handoff document as a custom message
 			const handoffContent = `<handoff-context>\n${handoffText}\n</handoff-context>\n\nThe above is a handoff document from a previous session. Use this context to continue the work seamlessly.`;
 			this.sessionManager.appendCustomMessageEntry("handoff", handoffContent, true, undefined, "agent");
+			// Flush the new session to disk so the handoff survives a restart
+			await this.sessionManager.ensureOnDisk();
 			let savedPath: string | undefined;
 			if (options?.autoTriggered && this.settings.get("compaction.handoffSaveToDisk")) {
 				const artifactsDir = this.sessionManager.getArtifactsDir();
@@ -4861,6 +4869,7 @@ export class AgentSession {
 
 		let action: "context-full" | "handoff" =
 			compactionSettings.strategy === "handoff" && reason !== "overflow" ? "handoff" : "context-full";
+		await this.sessionManager.flush();
 		await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 		// Abort any older auto-compaction before installing this run's controller.
 		this.#autoCompactionAbortController?.abort();
@@ -5129,6 +5138,7 @@ export class AgentSession {
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#syncTodoPhasesFromBranch();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
+			await this.sessionManager.flush();
 
 			// Get the saved compaction entry for the hook
 			const savedCompactionEntry = newEntries.find(e => e.type === "compaction" && e.summary === summary) as
