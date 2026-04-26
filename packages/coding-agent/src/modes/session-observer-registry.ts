@@ -55,7 +55,7 @@ export class SessionObserverRegistry {
 		sessions.sort((a, b) => {
 			if (a.kind === "main") return -1;
 			if (b.kind === "main") return 1;
-			return a.lastUpdate - b.lastUpdate;
+			return b.lastUpdate - a.lastUpdate;
 		});
 		return sessions;
 	}
