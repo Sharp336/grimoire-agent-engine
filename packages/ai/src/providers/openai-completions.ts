@@ -1206,7 +1206,7 @@ export function convertMessages(
 			}
 
 			const toolCalls = msg.content.filter(b => b.type === "toolCall") as ToolCall[];
-			const hasReasoningField =
+			let hasReasoningField =
 				(assistantMsg as any).reasoning_content !== undefined ||
 				(assistantMsg as any).reasoning !== undefined ||
 				(assistantMsg as any).reasoning_text !== undefined;
@@ -1227,6 +1227,7 @@ export function convertMessages(
 			if (toolCalls.length > 0 && stubsReasoningContent && !hasReasoningField) {
 				const reasoningField = compat.reasoningContentField ?? "reasoning_content";
 				(assistantMsg as any)[reasoningField] = ".";
+				hasReasoningField = true;
 			}
 			if (toolCalls.length > 0) {
 				assistantMsg.tool_calls = toolCalls.map((tc, toolCallIndex) => {

@@ -393,6 +393,7 @@ describe("kimi model detection via detectCompat", () => {
 		const assistant = messages.find(m => m.role === "assistant");
 		expect(assistant).toBeDefined();
 		expect(Reflect.get(assistant as object, "reasoning_content")).toBe(".");
+		expect(Reflect.get(assistant as object, "content")).toBe("");
 	});
 
 	it("injects reasoning_content placeholder for reasoning DeepSeek tool-call turns via opencode-zen", () => {
@@ -419,6 +420,7 @@ describe("kimi model detection via detectCompat", () => {
 		const assistant = messages.find(m => m.role === "assistant");
 		expect(assistant).toBeDefined();
 		expect(Reflect.get(assistant as object, "reasoning_content")).toBe(".");
+		expect(Reflect.get(assistant as object, "content")).toBe("");
 	});
 
 	it("injects reasoning_content placeholder when assistant with tool calls has no reasoning field", () => {
