@@ -54,6 +54,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 	const isKimiModel = model.id.includes("moonshotai/kimi") || /^kimi[-.]/i.test(model.id);
 	const isAlibaba = provider === "alibaba-coding-plan" || baseUrl.includes("dashscope");
 	const isQwen = model.id.toLowerCase().includes("qwen");
+	const isDeepSeekModel = model.id.toLowerCase().includes("deepseek");
 	const isOpenRouter = provider === "openrouter" || baseUrl.includes("openrouter.ai");
 	const isOpenCode = provider === "opencode-zen" || provider === "opencode-go" || baseUrl.includes("opencode.ai/zen");
 
@@ -109,12 +110,12 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		reasoningContentField: "reasoning_content",
 		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
 		//   - Kimi: documented invariant on its native API and via OpenCode.
-		//   - Reasoning-capable models reached through OpenRouter or OpenCode (Zen/Go): DeepSeek V4 Pro,
-		//     Kimi, and similar models can enforce this server-side whenever the request is in thinking mode.
+		//   - DeepSeek reasoning models reached through OpenRouter or OpenCode (Zen/Go): enforced when
+		//     thinking mode is enabled on those model families.
 		// We can't translate Anthropic's redacted/encrypted reasoning into DeepSeek's plaintext form, so
 		// cross-provider continuations rely on a placeholder — see `convertMessages` for injection rules.
 		requiresReasoningContentForToolCalls:
-			isKimiModel || ((isOpenRouter || isOpenCode) && Boolean(model.reasoning)),
+			isKimiModel || (isDeepSeekModel && (isOpenRouter || isOpenCode) && Boolean(model.reasoning)),
 		requiresAssistantContentForToolCalls: isKimiModel,
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,

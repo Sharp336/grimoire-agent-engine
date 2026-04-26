@@ -333,6 +333,29 @@ describe("kimi model detection via detectCompat", () => {
 		expect(compat.requiresAssistantContentForToolCalls).toBe(false);
 	});
 
+	it("does not require reasoning_content for non-DeepSeek reasoning models via opencode-go", () => {
+		const compat = detectCompat(openCodeGoModel("glm-5", true));
+		expect(compat.requiresReasoningContentForToolCalls).toBe(false);
+	});
+
+	it("does not require reasoning_content for non-DeepSeek reasoning models via opencode-zen", () => {
+		const compat = detectCompat(openCodeZenModel("glm-5", true));
+		expect(compat.requiresReasoningContentForToolCalls).toBe(false);
+	});
+
+	it("does not require reasoning_content when custom openai provider targets opencode zen baseUrl with non-DeepSeek model", () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+			provider: "openai",
+			baseUrl: "https://opencode.ai/zen/v1",
+			id: "glm-5",
+			reasoning: true,
+		};
+		const compat = detectCompat(model);
+		expect(compat.requiresReasoningContentForToolCalls).toBe(false);
+	});
+
 	it("requires reasoning_content when custom openai provider targets opencode zen baseUrl", () => {
 		const model: Model<"openai-completions"> = {
 			...getBundledModel("openai", "gpt-4o-mini"),
@@ -450,6 +473,19 @@ describe("kimi model detection via detectCompat", () => {
 
 	it("does not require reasoning_content when opencode-go model is not reasoning-capable", () => {
 		const compat = detectCompat(openCodeGoModel("some-other-model", false));
+		expect(compat.requiresReasoningContentForToolCalls).toBe(false);
+	});
+
+	it("does not require reasoning_content for non-DeepSeek reasoning models via openrouter", () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			id: "openai/gpt-4.1-mini",
+			reasoning: true,
+		};
+		const compat = detectCompat(model);
 		expect(compat.requiresReasoningContentForToolCalls).toBe(false);
 	});
 
