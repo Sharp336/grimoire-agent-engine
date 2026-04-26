@@ -7,6 +7,7 @@ import { isBackgroundJobSupportEnabled } from "../async";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import jobDescription from "../prompts/tools/job.md" with { type: "text" };
+import type { AgentProgress } from "../task/types";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from "./index";
 import {
@@ -58,6 +59,7 @@ interface JobSnapshot {
 	durationMs: number;
 	resultText?: string;
 	errorText?: string;
+	progress?: AgentProgress[];
 }
 
 type CancelStatus = "cancelled" | "not_found" | "already_completed";
@@ -233,6 +235,7 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 		return jobs.map(j => {
 			const current = this.session.asyncJobManager?.getJob(j.id);
 			const latest = current ?? j;
+			const progress = current?.type === "task" ? extractAgentProgress(current.resultDetails) : undefined;
 			return {
 				id: latest.id,
 				type: latest.type,
@@ -241,6 +244,7 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 				durationMs: Math.max(0, now - latest.startTime),
 				...(latest.resultText ? { resultText: latest.resultText } : {}),
 				...(latest.errorText ? { errorText: latest.errorText } : {}),
+				...(progress ? { progress } : {}),
 			};
 		});
 	}
@@ -323,6 +327,8 @@ interface JobRenderArgs {
 
 const COLLAPSED_LIST_LIMIT = PREVIEW_LIMITS.COLLAPSED_ITEMS;
 const LABEL_MAX_WIDTH = 60;
+const PROGRESS_COLLAPSED_LIMIT = 5;
+const PROGRESS_TASK_WIDTH = 50;
 const PREVIEW_LINES_COLLAPSED = 1;
 const PREVIEW_LINES_EXPANDED = 4;
 const PREVIEW_LINE_WIDTH = 80;
@@ -353,6 +359,24 @@ function statusToColor(status: JobSnapshot["status"]): ToolUIColor {
 	}
 }
 
+function progressStatusToIcon(status: AgentProgress["status"]): ToolUIStatus {
+	switch (status) {
+		case "completed":
+			return "success";
+		case "failed":
+			return "error";
+		case "merge_failed":
+			return "warning";
+		case "aborted":
+			return "aborted";
+		case "pending":
+			return "pending";
+		case "running":
+		case "merging":
+			return "running";
+	}
+}
+
 function describeTarget(args: JobRenderArgs | undefined): string {
 	const poll = args?.poll ?? [];
 	const cancel = args?.cancel ?? [];
@@ -365,6 +389,12 @@ function describeTarget(args: JobRenderArgs | undefined): string {
 	}
 	if (parts.length === 0) return "all running jobs";
 	return parts.join(", ");
+}
+
+function extractAgentProgress(details: Record<string, unknown> | undefined): AgentProgress[] | undefined {
+	if (!details) return undefined;
+	const progress = (details as { progress?: unknown }).progress;
+	return Array.isArray(progress) && progress.length > 0 ? (progress as AgentProgress[]) : undefined;
 }
 
 export const jobToolRenderer = {
@@ -459,6 +489,36 @@ export const jobToolRenderer = {
 							const labelText = uiTheme.fg("toolOutput", label);
 							const durationText = uiTheme.fg("dim", formatDuration(job.durationMs));
 							lines.push(`${icon} ${idText} ${typeBadge} ${labelText} ${durationText}`);
+
+							if (job.progress && job.progress.length > 0) {
+								const limit = expanded ? job.progress.length : PROGRESS_COLLAPSED_LIMIT;
+								const visible = job.progress.slice(0, limit);
+								for (const p of visible) {
+									const pIcon = formatStatusIcon(
+										progressStatusToIcon(p.status),
+										uiTheme,
+										p.status === "running" || p.status === "merging" ? options.spinnerFrame : undefined,
+									);
+									const pAgent = uiTheme.fg("muted", p.agent);
+									const pTask = uiTheme.fg(
+										"toolOutput",
+										truncateToWidth(
+											replaceTabs(p.task || p.description || "(task)"),
+											PROGRESS_TASK_WIDTH,
+											Ellipsis.Unicode,
+										),
+									);
+									const tail: string[] = [];
+									if (p.currentTool) tail.push(p.currentTool);
+									if (p.durationMs) tail.push(formatDuration(p.durationMs));
+									const tailText = tail.length > 0 ? ` ${uiTheme.fg("dim", tail.join(" "))}` : "";
+									lines.push(`  ${pIcon} ${pAgent} ${pTask}${tailText}`);
+								}
+								if (job.progress.length > visible.length) {
+									const hidden = job.progress.length - visible.length;
+									lines.push(`  ${uiTheme.fg("dim", `+${hidden} more`)}`);
+								}
+							}
 
 							const preview = job.errorText?.trim() || job.resultText?.trim();
 							if (preview) {
