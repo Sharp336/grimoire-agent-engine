@@ -1,4 +1,4 @@
-import type { Dirent } from "node:fs";
+import type * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -36,6 +36,24 @@ export async function getRepoRoot(cwd: string): Promise<string> {
 	return repoRoot;
 }
 
+/**
+ * Walk up from the immediate git root to find the outermost enclosing .git directory.
+ * Checkpoint discovery needs the full workspace root when invoked from inside a nested repo.
+ */
+export async function getOutermostRepoRoot(cwd: string): Promise<string> {
+	let root = await getRepoRoot(cwd);
+	let dir = path.dirname(root);
+	while (dir.length < root.length) {
+		try {
+			await fs.access(path.join(dir, ".git"));
+			root = dir;
+		} catch {
+			break;
+		}
+		dir = path.dirname(dir);
+	}
+	return root;
+}
 const PROJFS_UNAVAILABLE_PREFIX = "PROJFS_UNAVAILABLE:";
 const GIT_NO_INDEX_NULL_PATH = process.platform === "win32" ? "NUL" : "/dev/null";
 
@@ -58,25 +76,41 @@ export async function ensureWorktree(baseCwd: string, id: string): Promise<strin
 	return worktreeDir;
 }
 
+function shouldPruneRepoDiscoveryDir(name: string): boolean {
+	return name.startsWith(".") || name === "node_modules";
+}
+
 /** Find nested git repositories (non-submodule) under the given root. */
-async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
+export async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
 	// Get submodule paths so we can exclude them
 	const submodulePaths = new Set(await git.ls.submodules(repoRoot));
-
+	const rootStats = await fs.stat(repoRoot);
 	// Find all .git dirs/files that aren't the root or known submodules
 	const result: string[] = [];
 	async function walk(dir: string): Promise<void> {
-		let entries: Dirent[];
+		let entries: nodeFs.Dirent[];
 		try {
 			entries = await fs.readdir(dir, { withFileTypes: true });
 		} catch {
 			return;
 		}
 		for (const entry of entries) {
-			if (entry.name === "node_modules" || entry.name === ".git") continue;
 			if (!entry.isDirectory()) continue;
+			if (shouldPruneRepoDiscoveryDir(entry.name)) continue;
 			const full = path.join(dir, entry.name);
 			const rel = path.relative(repoRoot, full);
+
+			const stats = await fs.stat(full).catch(err => {
+				if (isEnoent(err)) return null;
+				throw err;
+			});
+			if (!stats) continue;
+			if (stats.dev !== rootStats.dev) {
+				throw new Error(
+					`Checkpoint/task discovery refuses to cross filesystem device boundaries at "${rel}" before staging. The directory is on a different filesystem device than the repository root.`,
+				);
+			}
+
 			// Check if this directory is itself a git repo
 			const gitDir = path.join(full, ".git");
 			let hasGit = false;

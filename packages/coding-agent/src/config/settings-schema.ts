@@ -1157,6 +1157,17 @@ export const SETTINGS_SCHEMA = {
 	// Tools
 	// ────────────────────────────────────────────────────────────────────────
 
+	// Git checkpoint tool
+	"tools.gitCommitCheckpoint.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Git Checkpoint",
+			description: "Expose `git_commit_checkpoint` so the agent can land WIP checkpoints for every dirty repo",
+		},
+	},
+
 	// Todo tool
 	"todo.enabled": {
 		type: "boolean",
