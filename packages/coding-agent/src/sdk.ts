@@ -26,8 +26,7 @@ import {
 import chalk from "chalk";
 import { AsyncJobManager, isBackgroundJobSupportEnabled } from "./async";
 import { createAutoresearchExtension } from "./autoresearch";
-import { loadCapability } from "./capability";
-import { type Rule, ruleCapability } from "./capability/rule";
+import type { Rule } from "./capability/rule";
 import { ModelRegistry } from "./config/model-registry";
 import { formatModelString, parseModelPattern, parseModelString, resolveModelRoleValue } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
@@ -36,7 +35,6 @@ import { CursorExecHandlers } from "./cursor";
 import "./discovery";
 import { resolveConfigValue } from "./config/resolve-config-value";
 import { initializeWithSettings } from "./discovery";
-import { TtsrManager } from "./export/ttsr";
 import {
 	type CustomCommandsLoadResult,
 	type LoadedCustomCommand,
@@ -53,8 +51,6 @@ import {
 	ExtensionToolWrapper,
 	type ExtensionUIContext,
 	type LoadExtensionsResult,
-	loadExtensionFromFactory,
-	loadExtensions,
 	type ToolDefinition,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
@@ -84,6 +80,7 @@ import {
 import { buildMemoryToolDeveloperInstructions, getMemoryRoot, startMemoryStartupTask } from "./memories";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
+import { RuntimeResourceLoader } from "./runtime/resource-loader";
 import {
 	collectEnvSecrets,
 	deobfuscateSessionContext,
@@ -668,12 +665,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (!options.modelRegistry) {
 		modelRegistry.refreshInBackground();
 	}
-	const skillsSettings = settings.getGroup("skills");
-	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
-	const discoveredSkillsPromise =
-		options.skills === undefined
-			? discoverSkills(cwd, agentDir, { ...skillsSettings, disabledExtensions: disabledExtensionIds })
-			: undefined;
+	const resourceLoader = new RuntimeResourceLoader({ cwd, agentDir, settings, eventBus });
+	const discoveredSkillsPromise = options.skills === undefined ? resourceLoader.loadSkills({}) : undefined;
 
 	// Initialize provider preferences from settings
 	const webSearchProvider = settings.get("providers.webSearch");
@@ -803,49 +796,28 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	let skills: Skill[];
 	let skillWarnings: SkillWarning[];
 	if (options.skills !== undefined) {
-		skills = options.skills;
-		skillWarnings = [];
+		const loaded = await resourceLoader.loadSkills({ skills: options.skills });
+		skills = loaded.skills;
+		skillWarnings = loaded.warnings;
 	} else {
 		const discovered = await logger.time(
 			"discoverSkills",
-			() => discoveredSkillsPromise ?? Promise.resolve({ skills: [], warnings: [] }),
+			() => discoveredSkillsPromise ?? resourceLoader.loadSkills({}),
 		);
 		skills = discovered.skills;
 		skillWarnings = discovered.warnings;
 	}
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
-	const { ttsrManager, rulebookRules, alwaysApplyRules } = await logger.time("discoverTtsrRules", async () => {
-		const ttsrSettings = settings.getGroup("ttsr");
-		const ttsrManager = new TtsrManager(ttsrSettings);
-		const rulesResult =
-			options.rules !== undefined
-				? { items: options.rules, warnings: undefined }
-				: await loadCapability<Rule>(ruleCapability.id, { cwd });
-		const rulebookRules: Rule[] = [];
-		const alwaysApplyRules: Rule[] = [];
-		for (const rule of rulesResult.items) {
-			const isTtsrRule = rule.condition && rule.condition.length > 0 ? ttsrManager.addRule(rule) : false;
-			if (isTtsrRule) {
-				continue;
-			}
-			if (rule.alwaysApply === true) {
-				alwaysApplyRules.push(rule);
-				continue;
-			}
-			if (rule.description) {
-				rulebookRules.push(rule);
-			}
-		}
-		if (existingSession.injectedTtsrRules.length > 0) {
-			ttsrManager.restoreInjected(existingSession.injectedTtsrRules);
-		}
-		return { ttsrManager, rulebookRules, alwaysApplyRules };
-	});
+	const { ttsrManager, rulebookRules, alwaysApplyRules } = await logger.time("discoverTtsrRules", () =>
+		resourceLoader.loadRules({
+			rules: options.rules,
+			injectedTtsrRules: existingSession.injectedTtsrRules,
+		}),
+	);
 
-	const contextFiles = await logger.time(
-		"discoverContextFiles",
-		async () => options.contextFiles ?? (await discoverContextFiles(cwd, agentDir)),
+	const contextFiles = await logger.time("discoverContextFiles", () =>
+		resourceLoader.loadContextFiles({ contextFiles: options.contextFiles }),
 	);
 
 	let agent: Agent;
@@ -1102,46 +1074,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 
 		// Load extensions (discovers from standard locations + configured paths)
-		let extensionsResult: LoadExtensionsResult;
-		if (options.disableExtensionDiscovery) {
-			const configuredPaths = options.additionalExtensionPaths ?? [];
-			extensionsResult = await logger.time("loadExtensions", loadExtensions, configuredPaths, cwd, eventBus);
-			for (const { path, error } of extensionsResult.errors) {
-				logger.error("Failed to load extension", { path, error });
-			}
-		} else if (options.preloadedExtensions) {
-			extensionsResult = options.preloadedExtensions;
-		} else {
-			// Merge CLI extension paths with settings extension paths
-			const configuredPaths = [...(options.additionalExtensionPaths ?? []), ...(settings.get("extensions") ?? [])];
-			const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
-			extensionsResult = await logger.time(
-				"discoverAndLoadExtensions",
-				discoverAndLoadExtensions,
-				configuredPaths,
-				cwd,
-				eventBus,
-				disabledExtensionIds,
-			);
-			for (const { path, error } of extensionsResult.errors) {
-				logger.error("Failed to load extension", { path, error });
-			}
-		}
-
-		// Load inline extensions from factories
-		if (inlineExtensions.length > 0) {
-			for (let i = 0; i < inlineExtensions.length; i++) {
-				const factory = inlineExtensions[i];
-				const loaded = await loadExtensionFromFactory(
-					factory,
-					cwd,
-					eventBus,
-					extensionsResult.runtime,
-					`<inline-${i}>`,
-				);
-				extensionsResult.extensions.push(loaded);
-			}
-		}
+		const extensionsResult = await resourceLoader.loadExtensions({
+			disableExtensionDiscovery: options.disableExtensionDiscovery,
+			preloadedExtensions: options.preloadedExtensions,
+			additionalExtensionPaths: options.additionalExtensionPaths,
+			inlineExtensions,
+		});
 
 		// Process provider registrations queued during extension loading.
 		// This must happen before the runner is created so that models registered by
@@ -1197,13 +1135,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		// Discover custom commands (TypeScript slash commands)
 		const customCommandsResult: CustomCommandsLoadResult = options.disableExtensionDiscovery
-			? { commands: [], errors: [] }
-			: await logger.time("discoverCustomCommands", loadCustomCommandsInternal, { cwd, agentDir });
-		if (!options.disableExtensionDiscovery) {
-			for (const { path, error } of customCommandsResult.errors) {
-				logger.error("Failed to load custom command", { path, error });
-			}
-		}
+			? await resourceLoader.loadCustomCommands({ disableExtensionDiscovery: true })
+			: await logger.time("discoverCustomCommands", () => resourceLoader.loadCustomCommands({}));
 
 		let extensionRunner: ExtensionRunner | undefined;
 		if (extensionsResult.extensions.length > 0) {
@@ -1438,11 +1371,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 		const promptTemplates =
 			options.promptTemplates ??
-			(await logger.time("discoverPromptTemplates", discoverPromptTemplates, cwd, agentDir));
+			(await logger.time("discoverPromptTemplates", () => resourceLoader.loadPromptTemplates({})));
 		toolSession.promptTemplates = promptTemplates;
 
 		const slashCommands =
-			options.slashCommands ?? (await logger.time("discoverSlashCommands", discoverSlashCommands, cwd));
+			options.slashCommands ??
+			(await logger.time("discoverSlashCommands", () => resourceLoader.loadSlashCommands({})));
 
 		// Create convertToLlm wrapper that filters images if blockImages is enabled (defense-in-depth)
 		const convertToLlmWithBlockImages = (messages: AgentMessage[]): Message[] => {
