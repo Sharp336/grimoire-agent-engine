@@ -251,3 +251,17 @@ Legacy manifest key still accepted:
   }
 }
 ```
+
+
+## Pi package compatibility
+
+Installed plugin extensions are loaded after native `.omp` extension modules. For Pi-compatible packages, OMP adds two adapter steps before importing extension code:
+
+1. It generates import shim packages under OMP's managed plugin `node_modules` directory so upstream imports such as `@mariozechner/pi-coding-agent`, `@mariozechner/pi-ai/oauth`, and `typebox/compile` resolve to OMP equivalents.
+2. It activates a scoped Pi-compatible process environment for OMP-managed extension runtime. This prepends `~/.omp/pi-compat/bin` to `PATH`, sets `PI_CODING_AGENT=true`, points `PI_CODING_AGENT_DIR` at the OMP agent dir, and points `PI_PACKAGE_DIR` at the OMP plugin dir.
+
+The scoped `pi` executable is not global. It delegates to `omp` only for child processes launched from the OMP compatibility environment.
+
+Pi packages can declare extension entry points through either `package.json.omp.extensions` or `package.json.pi.extensions`. If no manifest exists, plugin manifest normalization can use conventional Pi resource directories. Pi plugin skills and prompts are registered through discovery providers; theme paths are exposed by plugin resource resolvers for explicit user-controlled bridging.
+
+See `docs/pi-compatibility.md` for compatibility tiers, path bridge modes, and diagnostics.

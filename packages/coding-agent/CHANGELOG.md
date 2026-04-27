@@ -6,6 +6,7 @@
 
 ### Added
 
+- Added Pi package compatibility for plugin install/source parsing, Pi manifest resources, import shims, scoped `pi` CLI shim, path bridge diagnostics, and known package profiles
 - Added bracketed `loc` forms `(anchor)`, `[anchor]`, `[anchor`, `(anchor`, `anchor]`, and `anchor)` to `atom` `splice` editing so a single anchor can target a block body, whole node, or partial node region
 - Added automatic block-delimiter inference for block splices using file extension, defaulting to `{` and using `(` for Lisp-family files
 - Added optional `pre`/`post` arguments to the `href` prompt helper so hashline references can be wrapped as bracketed or parenthesized anchors

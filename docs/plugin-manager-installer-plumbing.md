@@ -262,3 +262,45 @@ Operationally, `doctor --fix` can repair some drift (`bun install`, orphaned con
 - [`src/extensibility/plugins/parser.ts`](../packages/coding-agent/src/extensibility/plugins/parser.ts) — install spec and package-name parsing helpers
 - [`src/extensibility/plugins/types.ts`](../packages/coding-agent/src/extensibility/plugins/types.ts) — manifest/runtime/override type contracts
 - [`src/extensibility/custom-tools/loader.ts`](../packages/coding-agent/src/extensibility/custom-tools/loader.ts) — runtime wiring for plugin-provided tool modules
+
+
+## Pi compatibility additions
+
+`PluginManager.install` accepts Pi-style source grammar in addition to normal npm package specs:
+
+- `npm:<pkg>@<version>` is installed as the npm package spec without the `npm:` prefix.
+- `git:github.com/user/repo@ref` is normalized to a Bun-compatible GitHub dependency.
+- local paths (`./pkg`, `../pkg`, `/abs/pkg`, `file:/abs/pkg`) are linked into the OMP plugin `node_modules` directory and recorded in the plugin package manifest.
+
+Use `--compat-pi` with `omp plugin install` to enable Pi compatibility environment setup during install:
+
+```bash
+omp plugin install npm:@tmustier/pi-agent-teams@0.5.4 --compat-pi
+omp plugin install git:github.com/user/repo@v1 --compat-pi
+omp plugin install ./local-pi-package --compat-pi
+```
+
+Manifest normalization now resolves plugin metadata as:
+
+1. `package.json.omp`
+2. `package.json.pi`
+3. conventional Pi resource directories (`extensions/`, `skills/`, `prompts/`, `themes/`)
+
+The runtime resolver includes Pi resource keys:
+
+- `resolvePluginSkillPaths` / `getAllPluginSkillPaths`
+- `resolvePluginPromptPaths` / `getAllPluginPromptPaths`
+- `resolvePluginThemePaths` / `getAllPluginThemePaths`
+
+Skills and prompts from installed Pi-compatible plugins are registered through the capability discovery system. Theme paths are resolved for compatibility diagnostics and user-controlled bridging.
+
+Dedicated compatibility commands live under `omp pi`:
+
+```bash
+omp pi install npm:pi-teams@0.9.14
+omp pi doctor npm:pi-teams@0.9.14
+omp pi shim
+omp pi bridge plan
+```
+
+See `docs/pi-compatibility.md` for tiers, bridge modes, security behavior, and known package profiles.
