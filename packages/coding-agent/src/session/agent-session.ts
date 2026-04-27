@@ -2870,7 +2870,7 @@ export class AgentSession {
 				return { cancelled: !success };
 			},
 			reload: async () => {
-				await this.reload();
+				await this.reloadSessionFile();
 			},
 			getSystemPrompt: () => this.systemPrompt,
 		};
@@ -6241,15 +6241,33 @@ export class AgentSession {
 	// =========================================================================
 
 	/**
-	 * Reload the current session from disk.
+	 * Reload the current session file from disk.
 	 *
 	 * Intended for extension commands and headless modes to re-read the current session
 	 * file and re-emit session_switch hooks.
 	 */
-	async reload(): Promise<void> {
+	async reloadSessionFile(): Promise<void> {
 		const sessionFile = this.sessionFile;
 		if (!sessionFile) return;
 		await this.switchSession(sessionFile);
+	}
+
+	/**
+	 * Reload runtime resources such as settings, extensions, tools, skills, prompts, and rules.
+	 *
+	 * This is intentionally separate from session-file reload. Runtime resource reload
+	 * will be implemented by the runtime host layer in a follow-up change.
+	 */
+	async reloadRuntimeResources(): Promise<void> {
+		throw new Error("Runtime resource reload is not implemented yet.");
+	}
+
+	/**
+	 * Reload the current session file from disk.
+	 * @deprecated Use reloadSessionFile() for session-file reload semantics.
+	 */
+	async reload(): Promise<void> {
+		await this.reloadSessionFile();
 	}
 
 	/**

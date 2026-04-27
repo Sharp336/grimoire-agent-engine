@@ -477,7 +477,7 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 					return { cancelled: !success };
 				},
 				reload: async () => {
-					await session.reload();
+					await session.reloadSessionFile();
 				},
 				compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 			},

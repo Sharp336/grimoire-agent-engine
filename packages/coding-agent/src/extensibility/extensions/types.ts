@@ -46,10 +46,10 @@ import type {
 	BashToolInput,
 	FindToolDetails,
 	FindToolInput,
-	SearchToolDetails,
-	SearchToolInput,
 	ReadToolDetails,
 	ReadToolInput,
+	SearchToolDetails,
+	SearchToolInput,
 	WriteToolInput,
 } from "../../tools";
 import type { TodoItem } from "../../tools/todo-write";
@@ -271,7 +271,7 @@ export interface ExtensionCommandContext extends ExtensionContext {
 	/** Switch to a different session file. */
 	switchSession(sessionPath: string): Promise<{ cancelled: boolean }>;
 
-	/** Reload the current session/runtime state. */
+	/** Reload the current session file from disk. Runtime resource reload is a separate future API. */
 	reload(): Promise<void>;
 
 	/** Compact the session context (interactive mode shows UI). */
@@ -1326,6 +1326,7 @@ export interface ExtensionCommandContextActions {
 	navigateTree: (targetId: string, options?: { summarize?: boolean }) => Promise<{ cancelled: boolean }>;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	switchSession: (sessionPath: string) => Promise<{ cancelled: boolean }>;
+	/** Reload the current session file from disk. */
 	reload: () => Promise<void>;
 }
 

@@ -221,7 +221,7 @@ describe("createAgentSession session storage isolation", () => {
 				expect(getAssistantText(session.messages.at(-1) as AssistantMessage | undefined)).toContain(
 					"sdk-secret-token-123456",
 				);
-				await session.reload();
+				await session.reloadSessionFile();
 				expect(getAssistantText(session.messages.at(-1) as AssistantMessage | undefined)).toContain(
 					"sdk-secret-token-123456",
 				);

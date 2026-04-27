@@ -351,7 +351,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		const closeSpy = vi.fn();
 		session.providerSessionState.set("openai-codex-responses", { close: closeSpy } satisfies ProviderSessionState);
 
-		await session.reload();
+		await session.reloadSessionFile();
 
 		expect(closeSpy).not.toHaveBeenCalled();
 		expect(session.providerSessionState.size).toBe(1);
@@ -404,7 +404,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 			});
 		fs.writeFileSync(sessionFile, `${rewrittenLines.join("\n")}\n`, "utf8");
 
-		await session.reload();
+		await session.reloadSessionFile();
 
 		expect(closeSpy).not.toHaveBeenCalled();
 		expect(session.providerSessionState.size).toBe(1);
@@ -454,7 +454,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		const originalSessionFile = session.sessionFile;
 		expect(originalSessionFile).toBeDefined();
 
-		await session.reload();
+		await session.reloadSessionFile();
 
 		expect(() => session.sessionManager.captureState()).not.toThrow();
 		expect(session.sessionFile).toBe(originalSessionFile);
@@ -496,7 +496,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		await mutatedSessionManager.flush();
 		await mutatedSessionManager.close();
 
-		await session.reload();
+		await session.reloadSessionFile();
 
 		expect(closeSpy).toHaveBeenCalledTimes(1);
 		expect(session.providerSessionState.size).toBe(0);
@@ -542,7 +542,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(mutatedSessionManager.buildSessionContext().models.default).toBe("openai/gpt-5-mini");
 		await mutatedSessionManager.close();
 
-		await session.reload();
+		await session.reloadSessionFile();
 
 		expect(session.model?.provider).toBe("openai");
 		expect(session.model?.id).toBe("gpt-5-mini");
@@ -575,7 +575,7 @@ describe("AgentSession OpenAI Responses replay boundaries", () => {
 		expect(mutatedSessionManager.buildSessionContext().models.default).toBe("openai/gpt-5.4-mini");
 		await mutatedSessionManager.close();
 
-		await session.reload();
+		await session.reloadSessionFile();
 
 		expect(session.model?.provider).toBe("openai");
 		expect(session.model?.id).toBe("gpt-5.4-mini");

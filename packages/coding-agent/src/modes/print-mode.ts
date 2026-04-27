@@ -109,7 +109,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 					return { cancelled: !success };
 				},
 				reload: async () => {
-					await session.reload();
+					await session.reloadSessionFile();
 				},
 				compact: instructionsOrOptions => runExtensionCompact(session, instructionsOrOptions),
 			},

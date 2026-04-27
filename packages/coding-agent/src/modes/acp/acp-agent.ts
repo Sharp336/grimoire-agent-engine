@@ -1263,7 +1263,7 @@ export class AcpAgent implements Agent {
 					return { cancelled: !success };
 				},
 				reload: async () => {
-					await record.session.reload();
+					await record.session.reloadSessionFile();
 				},
 				compact: instructionsOrOptions => runExtensionCompact(record.session, instructionsOrOptions),
 			},

@@ -129,7 +129,7 @@ export class ExtensionUiController {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			waitForIdle: () => this.ctx.session.agent.waitForIdle(),
 			reload: async () => {
-				await this.ctx.session.reload();
+				await this.ctx.session.reloadSessionFile();
 				this.ctx.chatContainer.clear();
 				this.ctx.renderInitialMessages();
 				await this.ctx.reloadTodos();
@@ -377,7 +377,7 @@ export class ExtensionUiController {
 				if (this.ctx.isBackgrounded) {
 					return;
 				}
-				await this.ctx.session.reload();
+				await this.ctx.session.reloadSessionFile();
 				this.ctx.chatContainer.clear();
 				this.ctx.renderInitialMessages();
 				await this.ctx.reloadTodos();
