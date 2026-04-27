@@ -776,6 +776,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		this.#pendingModelSwitch = undefined;
 		const previousTools = this.#planModePreviousTools;
 		if (previousTools && previousTools.length > 0) {
 			await this.session.setActiveToolsByName(previousTools);
