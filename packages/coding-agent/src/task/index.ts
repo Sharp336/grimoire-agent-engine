@@ -36,6 +36,7 @@ import { resolveIsolationBackendForTaskExecution } from "./isolation-backend";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
+import { inheritContextFilesForSubagent } from "./context-files";
 import { getTaskSimpleModeCapabilities, type TaskSimpleMode } from "./simple-mode";
 import { renderTemplate } from "./template";
 import {
@@ -63,6 +64,8 @@ import {
 	mergeTaskBranches,
 	type WorktreeBaseline,
 } from "./worktree";
+
+
 
 function createUsageTotals(): Usage {
 	return {
@@ -795,9 +798,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 			// Build full prompts using shared context only when the current task mode allows it.
 			const tasksWithContext = tasksWithUniqueIds.map(t => renderTemplate(sharedContext, t, simpleMode));
 			const availableSkills = [...(this.session.skills ?? [])];
-			const contextFiles = this.session.contextFiles?.filter(
-				file => path.basename(file.path).toLowerCase() !== "agents.md",
-			);
+			const contextFiles = inheritContextFilesForSubagent(this.session.contextFiles);
 			const promptTemplates = this.session.promptTemplates;
 
 			// Initialize progress for all tasks

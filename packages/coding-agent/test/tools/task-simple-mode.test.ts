@@ -14,14 +14,15 @@ const TEST_AGENTS = [
 	},
 ];
 
-function createSession(overrides: Partial<Record<string, unknown>> = {}): ToolSession {
+function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
 		cwd: "/tmp",
 		hasUI: false,
-		settings: Settings.isolated(overrides),
+		settings: Settings.isolated(),
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
-	} as unknown as ToolSession;
+		...overrides,
+	} as ToolSession;
 }
 
 function getSchemaProperties(tool: TaskTool): Record<string, unknown> {
