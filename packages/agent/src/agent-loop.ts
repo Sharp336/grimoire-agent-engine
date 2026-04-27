@@ -207,7 +207,6 @@ async function runLoop(
 	// Outer loop: continues when queued follow-up messages arrive after agent would stop
 	while (true) {
 		let hasMoreToolCalls = true;
-		let shouldTerminateTurn = false;
 
 		// Inner loop: process tool calls and steering messages
 		while (hasMoreToolCalls || pendingMessages.length > 0) {
@@ -288,14 +287,9 @@ async function runLoop(
 			pendingMessages = steeringMessagesFromExecution ?? ((await config.getSteeringMessages?.()) || []);
 			if (hasMoreToolCalls && toolResults.length > 0 && toolResults.every(result => result.terminate === true)) {
 				if (pendingMessages.length === 0) {
-					shouldTerminateTurn = true;
 					hasMoreToolCalls = false;
 				}
 			}
-		}
-
-		if (shouldTerminateTurn) {
-			break;
 		}
 
 		// Agent would stop here. Check for follow-up messages.

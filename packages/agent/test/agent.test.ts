@@ -370,6 +370,72 @@ describe("Agent", () => {
 		expect(toolResult?.terminate).toBe(true);
 	});
 
+	it("prompt() processes queued follow-up after a terminating tool result", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		let streamCallCount = 0;
+		let agent: Agent;
+
+		const alphaTool: AgentTool<typeof toolSchema> = {
+			name: "alpha",
+			label: "Alpha",
+			description: "Alpha tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				agent.followUp({
+					role: "user",
+					content: [{ type: "text", text: "Queued follow-up" }],
+					timestamp: Date.now(),
+				});
+				return { content: [{ type: "text", text: `alpha:${params.value}` }], terminate: true };
+			},
+		};
+
+		agent = new Agent({
+			initialState: { tools: [alphaTool] },
+			streamFn: () => {
+				const callIndex = streamCallCount;
+				streamCallCount += 1;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (callIndex === 0) {
+						const message = createAssistantMessage(
+							[{ type: "toolCall", id: "tool-1", name: "alpha", arguments: { value: "hello" } }],
+							"toolUse",
+						);
+						stream.push({ type: "done", reason: "toolUse", message });
+					} else {
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "processed follow-up" }]),
+						});
+					}
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("run alpha");
+
+		expect(streamCallCount).toBe(2);
+		expect(agent.hasQueuedMessages()).toBe(false);
+		expect(agent.state.messages.map(message => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"user",
+			"assistant",
+		]);
+		expect(agent.state.messages.at(-2)).toMatchObject({
+			role: "user",
+			content: [{ type: "text", text: "Queued follow-up" }],
+		});
+		expect(agent.state.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "processed follow-up" }],
+		});
+	});
+
 	it("prompt() follows up after a mixed terminating and non-terminating tool batch", async () => {
 		const toolSchema = Type.Object({ value: Type.String() });
 		let streamCallCount = 0;
