@@ -41,6 +41,17 @@ function packageHintFromRepo(repo: string): string | undefined {
 	return parts.at(-1);
 }
 
+function packageNameFromNpmSpec(spec: string): string {
+	if (spec.startsWith("@")) {
+		const slashIndex = spec.indexOf("/");
+		if (slashIndex === -1) return spec;
+		const versionIndex = spec.indexOf("@", slashIndex + 1);
+		return versionIndex === -1 ? spec : spec.slice(0, versionIndex);
+	}
+	const versionIndex = spec.indexOf("@");
+	return versionIndex === -1 ? spec : spec.slice(0, versionIndex);
+}
+
 function normalizeGithubSource(value: string): { installSpec: string; packageNameHint?: string; ref?: string } | null {
 	const { base, ref } = splitRef(value);
 	let ownerRepo: string | undefined;
@@ -92,7 +103,7 @@ export function parsePiInstallSource(spec: string, cwd: string = process.cwd()):
 			kind: "npm",
 			original: spec,
 			installSpec: packageSpec,
-			packageNameHint: packageSpec,
+			packageNameHint: packageNameFromNpmSpec(packageSpec),
 		};
 	}
 
@@ -143,6 +154,6 @@ export function parsePiInstallSource(spec: string, cwd: string = process.cwd()):
 		kind: "npm",
 		original: spec,
 		installSpec: spec,
-		packageNameHint: spec,
+		packageNameHint: packageNameFromNpmSpec(spec),
 	};
 }

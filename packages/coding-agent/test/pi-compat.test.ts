@@ -9,6 +9,7 @@ import { loadCustomTools } from "../src/extensibility/custom-tools/loader";
 import { loadExtensions } from "../src/extensibility/extensions/loader";
 import "../src/discovery/plugins";
 import {
+	buildPiCompatEnv,
 	doctorPiCompatTarget,
 	ensurePiCliShim,
 	ensurePiCompatImportShims,
@@ -55,10 +56,12 @@ describe("Pi compatibility source parsing", () => {
 		expect(parsePiInstallSource("npm:pi-teams@0.9.14", cwd)).toMatchObject({
 			kind: "npm",
 			installSpec: "pi-teams@0.9.14",
+			packageNameHint: "pi-teams",
 		});
 		expect(parsePiInstallSource("npm:@scope/pkg@1.2.3", cwd)).toMatchObject({
 			kind: "npm",
 			installSpec: "@scope/pkg@1.2.3",
+			packageNameHint: "@scope/pkg",
 		});
 		expect(parsePiInstallSource("git:github.com/u/r@v1", cwd)).toMatchObject({
 			kind: "git",
@@ -243,9 +246,42 @@ describe("Pi compatibility shims and doctor", () => {
 		}
 	});
 
+	it("sets Windows home variables for child-home bridge env", () => {
+		const env = buildPiCompatEnv({
+			baseEnv: {
+				PATH: "/usr/bin",
+				HOME: "/real-home",
+				USERPROFILE: "C:\\Users\\real",
+				HOMEDRIVE: "C:",
+				HOMEPATH: "\\Users\\real",
+			},
+			bridgeMode: "child-home",
+		});
+
+		expect(env.HOME).toBe(getPiCompatHomeDir());
+		expect(env.USERPROFILE).toBe(getPiCompatHomeDir());
+		expect(env.HOMEDRIVE).not.toBe("C:");
+		expect(env.HOMEPATH).not.toBe("\\Users\\real");
+	});
+
+	it("applies profiles for version-pinned npm package sources", () => {
+		const source = parsePiInstallSource("npm:@tmustier/pi-agent-teams@0.5.4");
+		const env = buildPiCompatEnv({
+			baseEnv: { PATH: "/usr/bin" },
+			bridgeMode: "profile",
+			packageName: source.packageNameHint,
+		});
+
+		expect(source.packageNameHint).toBe("@tmustier/pi-agent-teams");
+		expect(env.PI_TEAMS_ROOT_DIR).toBe(path.join(getAgentDir(), "teams"));
+	});
+
 	it("preserves selected bridge mode when loading extensions", async () => {
 		const envSnapshot = snapshotProcessEnv([
 			"HOME",
+			"USERPROFILE",
+			"HOMEDRIVE",
+			"HOMEPATH",
 			"PATH",
 			"OMP_PI_COMPAT",
 			"OMP_PI_COMPAT_HOME",
@@ -273,6 +309,9 @@ describe("Pi compatibility shims and doctor", () => {
 	it("preserves selected bridge mode when loading custom tools", async () => {
 		const envSnapshot = snapshotProcessEnv([
 			"HOME",
+			"USERPROFILE",
+			"HOMEDRIVE",
+			"HOMEPATH",
 			"PATH",
 			"OMP_PI_COMPAT",
 			"OMP_PI_COMPAT_HOME",

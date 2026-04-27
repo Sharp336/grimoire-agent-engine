@@ -43,6 +43,22 @@ function parseBridgeMode(value: string | undefined): PiCompatPathBridgeMode | un
 	return undefined;
 }
 
+function assignChildHomeEnv(env: Record<string, string>, homeDir: string): void {
+	env.HOME = homeDir;
+	env.USERPROFILE = homeDir;
+
+	const normalizedWinHome = path.win32.normalize(homeDir);
+	const winRoot = path.win32.parse(normalizedWinHome).root;
+	if (/^[a-zA-Z]:\\?$/.test(winRoot)) {
+		env.HOMEDRIVE = winRoot.slice(0, 2);
+		env.HOMEPATH = normalizedWinHome.slice(2) || "\\";
+		return;
+	}
+
+	env.HOMEDRIVE = "";
+	env.HOMEPATH = homeDir;
+}
+
 export function buildPiCompatEnv(options: PiCompatEnvOptions = {}): Record<string, string> {
 	const env = copyEnv(options.baseEnv ?? process.env);
 	const mode: PiCompatPathBridgeMode = options.bridgeMode ?? parseBridgeMode(env.OMP_PI_COMPAT_BRIDGE) ?? "env";
@@ -57,7 +73,7 @@ export function buildPiCompatEnv(options: PiCompatEnvOptions = {}): Record<strin
 	env.OMP_PI_COMPAT_BRIDGE = mode;
 
 	if (mode === "child-home") {
-		env.HOME = getPiCompatHomeDir();
+		assignChildHomeEnv(env, getPiCompatHomeDir());
 	}
 
 	if (mode === "profile" || options.packageName) {
