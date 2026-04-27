@@ -353,6 +353,7 @@ export class AgentDashboard extends Container {
 
 	onClose?: () => void;
 	onRequestRender?: () => void;
+	onApplySystemPrompt?: (agentName: string, prompt: string) => void;
 
 	private constructor(
 		private readonly cwd: string,
@@ -550,6 +551,12 @@ export class AgentDashboard extends Container {
 		this.#editingAgentName = null;
 		this.#editInput = null;
 		this.#buildLayout();
+	}
+
+	#applySelectedAgentPrompt(): void {
+		const selected = this.#selectedAgent();
+		if (!selected?.systemPrompt) return;
+		this.onApplySystemPrompt?.(selected.name, selected.systemPrompt);
 	}
 
 	#beginCreateFlow(): void {
@@ -975,7 +982,7 @@ export class AgentDashboard extends Container {
 				new Text(
 					theme.fg(
 						"dim",
-						" ↑/↓: navigate  Space: toggle  Enter: model override  N: new agent  Tab: source  Ctrl+R: reload  Esc: close",
+						" ↑/↓: navigate  Space: toggle  Enter: model override  S: apply prompt  N: new agent  Tab: source  Ctrl+R: reload  Esc: close",
 					),
 					0,
 					0,
@@ -1088,6 +1095,10 @@ export class AgentDashboard extends Container {
 		}
 		if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 			this.#beginModelEdit();
+			return;
+		}
+		if (data.toLowerCase() === "s") {
+			this.#applySelectedAgentPrompt();
 			return;
 		}
 		if (data.toLowerCase() === "n") {

@@ -3840,6 +3840,21 @@ export class AgentSession {
 		this.settings.set("interruptMode", mode);
 	}
 
+	/**
+	 * Apply an agent's system prompt to the current session.
+	 * Updates the agent's system prompt and appends a custom message entry.
+	 */
+	applyAgentSystemPrompt(agentName: string, prompt: string): void {
+		this.agent.setSystemPrompt(prompt);
+		this.sessionManager.appendCustomMessageEntry(
+			"agent-prompt-override",
+			`Agent prompt override: ${agentName}`,
+			false,
+			{ agentName },
+			"agent",
+		);
+	}
+
 	// =========================================================================
 	// Compaction
 	// =========================================================================

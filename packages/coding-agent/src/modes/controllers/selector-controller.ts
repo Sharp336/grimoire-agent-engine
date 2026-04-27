@@ -206,6 +206,12 @@ export class SelectorController {
 			dashboard.onRequestRender = () => {
 				this.ctx.ui.requestRender();
 			};
+			dashboard.onApplySystemPrompt = (agentName, prompt) => {
+				this.ctx.session.applyAgentSystemPrompt(agentName, prompt);
+				this.ctx.showStatus(`Applied ${agentName} agent prompt`);
+				done();
+				this.ctx.ui.requestRender();
+			};
 			return { component: dashboard, focus: dashboard };
 		});
 	}
