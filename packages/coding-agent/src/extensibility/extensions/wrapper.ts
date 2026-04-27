@@ -9,6 +9,12 @@ import { applyToolProxy } from "../tool-proxy";
 import type { ExtensionRunner } from "./runner";
 import type { RegisteredTool, ToolCallEventResult } from "./types";
 
+type ToolResultWithTerminate<TDetails> = {
+	content: (TextContent | ImageContent)[];
+	details?: TDetails;
+	terminate?: boolean;
+};
+
 /**
  * Adapts a RegisteredTool into an AgentTool.
  */
@@ -132,7 +138,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		}
 
 		// Execute the actual tool
-		let result: { content: any; details?: TDetails };
+		let result: ToolResultWithTerminate<TDetails>;
 		let executionError: Error | undefined;
 
 		try {
@@ -155,11 +161,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				content: result.content,
 				details: result.details,
 				isError: !!executionError,
+				terminate: result.terminate,
 			});
 
 			if (resultResult) {
 				const modifiedContent: (TextContent | ImageContent)[] = resultResult.content ?? result.content;
 				const modifiedDetails = (resultResult.details ?? result.details) as TDetails;
+				const modifiedTerminate = resultResult.terminate ?? result.terminate;
 
 				// Extension can override error status
 				if (resultResult.isError === true && !executionError) {
@@ -170,14 +178,14 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				}
 				if (resultResult.isError === false && executionError) {
 					// Extension clears the error - return success
-					return { content: modifiedContent, details: modifiedDetails };
+					return { content: modifiedContent, details: modifiedDetails, terminate: modifiedTerminate };
 				}
 
 				// Error status unchanged, but content/details may be modified
 				if (executionError) {
 					throw executionError;
 				}
-				return { content: modifiedContent, details: modifiedDetails };
+				return { content: modifiedContent, details: modifiedDetails, terminate: modifiedTerminate };
 			}
 		}
 

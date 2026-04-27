@@ -9,6 +9,7 @@
 
 ### Added
 
+- Added the `defineTool()` extension SDK helper and termination metadata propagation through extension and hook `tool_result` handlers.
 - Added internal URL support to the `search` tool, allowing `artifact://`-style paths that resolve to local files to be searched directly
 - Added IRC relay observation in the main agent UI so every IRC exchange between agents is rendered in the main transcript, even when the main agent is not a direct participant
 

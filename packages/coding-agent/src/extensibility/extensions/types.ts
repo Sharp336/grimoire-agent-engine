@@ -46,10 +46,10 @@ import type {
 	BashToolInput,
 	FindToolDetails,
 	FindToolInput,
-	SearchToolDetails,
-	SearchToolInput,
 	ReadToolDetails,
 	ReadToolInput,
+	SearchToolDetails,
+	SearchToolInput,
 	WriteToolInput,
 } from "../../tools";
 import type { TodoItem } from "../../tools/todo-write";
@@ -345,6 +345,13 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 		theme: Theme,
 		args?: Static<TParams>,
 	) => Component;
+}
+
+/** Typed identity helper for defining extension tools. */
+export function defineTool<TParams extends TSchema, TDetails = unknown>(
+	definition: ToolDefinition<TParams, TDetails>,
+): ToolDefinition<TParams, TDetails> {
+	return definition;
 }
 
 // ============================================================================
@@ -714,6 +721,7 @@ interface ToolResultEventBase {
 	input: Record<string, unknown>;
 	content: (TextContent | ImageContent)[];
 	isError: boolean;
+	terminate?: boolean;
 }
 
 export interface BashToolResultEvent extends ToolResultEventBase {
@@ -865,6 +873,7 @@ export interface ToolResultEventResult {
 	content?: (TextContent | ImageContent)[];
 	details?: unknown;
 	isError?: boolean;
+	terminate?: boolean;
 }
 
 export interface BeforeAgentStartEventResult {

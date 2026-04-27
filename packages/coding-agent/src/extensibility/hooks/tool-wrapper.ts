@@ -2,10 +2,17 @@
  * Tool wrapper - wraps tools with hook callbacks for interception.
  */
 import type { AgentTool, AgentToolContext, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import type { Static, TSchema } from "@sinclair/typebox";
 import { applyToolProxy } from "../tool-proxy";
 import type { HookRunner } from "./runner";
 import type { ToolCallEventResult, ToolResultEventResult } from "./types";
+
+type ToolResultWithTerminate<TDetails> = {
+	content: (TextContent | ImageContent)[];
+	details?: TDetails;
+	terminate?: boolean;
+};
 
 /**
  * Wraps an AgentTool with hook callbacks for interception.
@@ -64,7 +71,13 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 
 		// Execute the actual tool, forwarding onUpdate for progress streaming
 		try {
-			const result = await this.tool.execute(toolCallId, params, signal, onUpdate, context);
+			const result = (await this.tool.execute(
+				toolCallId,
+				params,
+				signal,
+				onUpdate,
+				context,
+			)) as ToolResultWithTerminate<TDetails>;
 
 			// Emit tool_result event - hooks can modify the result
 			if (this.hookRunner.hasHandlers("tool_result")) {
@@ -76,6 +89,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					content: result.content,
 					details: result.details,
 					isError: false,
+					terminate: result.terminate,
 				})) as ToolResultEventResult | undefined;
 
 				// Apply modifications if any
@@ -83,6 +97,7 @@ export class HookToolWrapper<TParameters extends TSchema = TSchema, TDetails = u
 					return {
 						content: resultResult.content ?? result.content,
 						details: (resultResult.details ?? result.details) as TDetails,
+						terminate: resultResult.terminate ?? result.terminate,
 					};
 				}
 			}

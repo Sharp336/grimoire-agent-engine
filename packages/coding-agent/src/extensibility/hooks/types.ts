@@ -468,6 +468,8 @@ interface ToolResultEventBase {
 	content: (TextContent | ImageContent)[];
 	/** Whether the tool execution was an error */
 	isError?: boolean;
+	/** Whether this tool result should terminate the current turn */
+	terminate?: boolean;
 }
 
 /** Tool result event for bash tool */
@@ -581,6 +583,8 @@ export interface ToolResultEventResult {
 	details?: unknown;
 	/** Override isError flag */
 	isError?: boolean;
+	/** Override whether this tool result should terminate the current turn */
+	terminate?: boolean;
 }
 
 /**

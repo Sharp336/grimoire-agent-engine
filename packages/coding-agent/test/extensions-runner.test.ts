@@ -5,12 +5,15 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { defineTool, ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { discoverAndLoadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
+import { Type } from "@sinclair/typebox";
 import { filterUserExtensionErrors, filterUserExtensions } from "./utils/filter-user-extensions";
 
 describe("ExtensionRunner", () => {
@@ -522,6 +525,86 @@ describe("ExtensionRunner", () => {
 				details: { source: "ext1" },
 				isError: true,
 			});
+		});
+	});
+
+	describe("tool_result termination", () => {
+		it("defineTool is exported as a typed identity helper", () => {
+			const definition = defineTool({
+				name: "identity_tool",
+				label: "Identity Tool",
+				description: "Returns identity",
+				parameters: Type.Object({}),
+				execute: async () => ({ content: [{ type: "text", text: "ok" }] }),
+			});
+
+			expect(definition.name).toBe("identity_tool");
+		});
+
+		it("preserves terminate when tool_result handlers return partial patches", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_result", async () => ({
+						content: [{ type: "text", text: "modified" }],
+					}));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-terminate-preserve.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const emptyParameters = Type.Object({});
+			const terminatingTool: AgentTool<typeof emptyParameters> = {
+				name: "terminating_tool",
+				label: "Terminating Tool",
+				description: "Terminates",
+				parameters: emptyParameters,
+				execute: async () => ({ content: [{ type: "text", text: "base" }], terminate: true }),
+			};
+			const tool = new ExtensionToolWrapper(terminatingTool, runner);
+
+			const wrappedResult = await tool.execute("call-terminate", {}, undefined);
+
+			expect(wrappedResult.content).toEqual([{ type: "text", text: "modified" }]);
+			expect((wrappedResult as { terminate?: boolean }).terminate).toBe(true);
+		});
+
+		it("lets tool_result handlers explicitly clear terminate", async () => {
+			const extCode = `
+				export default function(pi) {
+					pi.on("tool_result", async () => ({ terminate: false }));
+				}
+			`;
+			fs.writeFileSync(path.join(extensionsDir, "tool-result-terminate-clear.ts"), extCode);
+
+			const result = await loadTestExtensions();
+			const runner = new ExtensionRunner(
+				result.extensions,
+				result.runtime,
+				tempDir.path(),
+				sessionManager,
+				modelRegistry,
+			);
+			const emptyParameters = Type.Object({});
+			const terminatingTool: AgentTool<typeof emptyParameters> = {
+				name: "terminating_tool",
+				label: "Terminating Tool",
+				description: "Terminates",
+				parameters: emptyParameters,
+				execute: async () => ({ content: [{ type: "text", text: "base" }], terminate: true }),
+			};
+			const tool = new ExtensionToolWrapper(terminatingTool, runner);
+
+			const wrappedResult = await tool.execute("call-terminate", {}, undefined);
+
+			expect(wrappedResult.content).toEqual([{ type: "text", text: "base" }]);
+			expect((wrappedResult as { terminate?: boolean }).terminate).toBe(false);
 		});
 	});
 

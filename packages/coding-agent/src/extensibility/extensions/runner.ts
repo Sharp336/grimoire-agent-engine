@@ -496,6 +496,10 @@ export class ExtensionRunner {
 						currentEvent.isError = handlerResult.isError;
 						modified = true;
 					}
+					if (handlerResult.terminate !== undefined) {
+						currentEvent.terminate = handlerResult.terminate;
+						modified = true;
+					}
 				} catch (err) {
 					const message = err instanceof Error ? err.message : String(err);
 					const stack = err instanceof Error ? err.stack : undefined;
@@ -515,6 +519,7 @@ export class ExtensionRunner {
 			content: currentEvent.content,
 			details: currentEvent.details,
 			isError: currentEvent.isError,
+			terminate: currentEvent.terminate,
 		};
 	}
 
