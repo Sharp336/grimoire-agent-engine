@@ -7,6 +7,7 @@
 import { APP_NAME, getProjectDir } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { resolveOrDefaultProjectRegistryPath } from "../discovery/helpers";
+import { doctorPiCompatTarget } from "../extensibility/pi-compat";
 import { PluginManager, parseSettingValue, validateSetting } from "../extensibility/plugins";
 import {
 	getInstalledPluginsRegistryPath,
@@ -16,6 +17,7 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace/index.js";
 import { theme } from "../modes/theme/theme";
+import { formatPiDoctorReport } from "./pi-cli";
 
 // =============================================================================
 // Types
@@ -48,6 +50,7 @@ export interface PluginCommandArgs {
 		disable?: string;
 		set?: string;
 		scope?: "user" | "project";
+		compatPi?: boolean;
 	};
 }
 
@@ -108,6 +111,8 @@ export function parsePluginArgs(args: string[]): PluginCommandArgs | undefined {
 		} else if (arg === "--dry-run") {
 			result.flags.dryRun = true;
 		} else if (arg === "-l" || arg === "--local") {
+		} else if (arg === "--compat-pi") {
+			result.flags.compatPi = true;
 			result.flags.local = true;
 		} else if (arg === "--enable" && i + 1 < args.length) {
 			result.flags.enable = args[++i];
@@ -163,7 +168,7 @@ export async function runPluginCommand(cmd: PluginCommandArgs): Promise<void> {
 			await handleLink(manager, cmd.args, cmd.flags);
 			break;
 		case "doctor":
-			await handleDoctor(manager, cmd.flags);
+			await handleDoctor(manager, cmd.args, cmd.flags);
 			break;
 		case "features":
 			await handleFeatures(manager, cmd.args, cmd.flags);
@@ -345,7 +350,7 @@ async function handleUpgrade(args: string[], flags: PluginCommandArgs["flags"]):
 async function handleInstall(
 	manager: PluginManager,
 	packages: string[],
-	flags: { json?: boolean; force?: boolean; dryRun?: boolean; scope?: "user" | "project" },
+	flags: { json?: boolean; force?: boolean; dryRun?: boolean; scope?: "user" | "project"; compatPi?: boolean },
 ): Promise<void> {
 	if (packages.length === 0) {
 		console.error(chalk.red(`Usage: ${APP_NAME} plugin install <package[@version]>[features] ...`));
@@ -391,7 +396,11 @@ async function handleInstall(
 
 		// npm path
 		try {
-			const result = await manager.install(spec, { force: flags.force, dryRun: flags.dryRun });
+			const result = await manager.install(spec, {
+				force: flags.force,
+				dryRun: flags.dryRun,
+				compatPi: flags.compatPi,
+			});
 
 			if (flags.json) {
 				console.log(JSON.stringify(result, null, 2));
@@ -532,8 +541,25 @@ async function handleLink(manager: PluginManager, paths: string[], flags: { json
 	}
 }
 
-async function handleDoctor(manager: PluginManager, flags: { json?: boolean; fix?: boolean }): Promise<void> {
-	const checks = await manager.doctor({ fix: flags.fix });
+async function handleDoctor(
+	manager: PluginManager,
+	args: string[],
+	flags: { json?: boolean; fix?: boolean; compatPi?: boolean },
+): Promise<void> {
+	if (flags.compatPi && args.length > 0) {
+		const reports = await Promise.all(args.map(spec => doctorPiCompatTarget(spec)));
+		if (flags.json) {
+			console.log(JSON.stringify(reports, null, 2));
+			return;
+		}
+		for (let i = 0; i < reports.length; i++) {
+			if (i > 0) console.log("");
+			console.log(formatPiDoctorReport(reports[i]));
+		}
+		return;
+	}
+
+	const checks = await manager.doctor({ fix: flags.fix, compatPi: flags.compatPi });
 
 	if (flags.json) {
 		console.log(JSON.stringify(checks, null, 2));
@@ -929,6 +955,7 @@ ${chalk.bold("Options:")}
   --force          Overwrite without prompting (install)
   --scope <scope>  Install scope: user (default) or project (install name@marketplace)
   --dry-run        Preview changes without applying (install)
+	--compat-pi     Enable Pi package compatibility for install/doctor
   -l, --local      Use project-local overrides
 
 ${chalk.bold("Examples:")}

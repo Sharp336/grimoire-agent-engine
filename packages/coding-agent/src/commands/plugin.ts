@@ -45,6 +45,7 @@ export default class Plugin extends Command {
 		enable: Flags.string({ description: "Enable a feature" }),
 		disable: Flags.string({ description: "Disable a feature" }),
 		set: Flags.string({ description: "Set plugin config (key=value)" }),
+		"compat-pi": Flags.boolean({ description: "Enable Pi compatibility install/doctor behavior" }),
 		scope: Flags.string({
 			description: 'Install scope: "user" (default) or "project"',
 			options: ["user", "project"],
@@ -68,6 +69,7 @@ export default class Plugin extends Command {
 				enable: flags.enable,
 				disable: flags.disable,
 				set: flags.set,
+				compatPi: flags["compat-pi"],
 				scope: flags.scope as "user" | "project" | undefined,
 			},
 		};

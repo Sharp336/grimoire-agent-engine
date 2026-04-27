@@ -19,6 +19,12 @@ export interface PluginFeature {
 	hooks?: string[];
 	/** Additional command files provided by this feature */
 	commands?: string[];
+	/** Additional skill directories or entries provided by this feature */
+	skills?: string[];
+	/** Additional prompt directories or files provided by this feature */
+	prompts?: string[];
+	/** Additional theme directories or files provided by this feature */
+	themes?: string[];
 }
 
 /**
@@ -40,6 +46,12 @@ export interface PluginManifest {
 	extensions?: string[];
 	/** Command files (relative paths from package root) */
 	commands?: string[];
+	/** Skill directories or entries (relative paths from package root) */
+	skills?: string[];
+	/** Prompt directories or files (relative paths from package root) */
+	prompts?: string[];
+	/** Theme directories or files (relative paths from package root) */
+	themes?: string[];
 
 	/** Feature definitions for selective installation */
 	features?: Record<string, PluginFeature>;
@@ -186,9 +198,13 @@ export interface InstallOptions {
 	force?: boolean;
 	/** Preview changes without applying */
 	dryRun?: boolean;
+	/** Enable Pi compatibility environment while installing/linking this package */
+	compatPi?: boolean;
 }
 
 export interface DoctorOptions {
 	/** Attempt automatic fixes */
 	fix?: boolean;
+	/** Diagnose a package or source as a Pi-compatible package */
+	compatPi?: boolean;
 }

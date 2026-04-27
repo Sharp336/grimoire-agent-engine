@@ -14,6 +14,8 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
 import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
+import { ensurePiCompatImportShims } from "../pi-compat/aliases";
+import { activatePiCompatEnvironment } from "../pi-compat/shims";
 import { createNoOpUIContext, resolvePath } from "../utils";
 import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
 
@@ -170,6 +172,11 @@ export async function loadCustomTools(
 		reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
 	}) => void,
 ) {
+	if (pathsWithSources.length > 0) {
+		await ensurePiCompatImportShims();
+		await activatePiCompatEnvironment({ bridgeMode: "env" });
+	}
+
 	const loader = new CustomToolLoader(
 		await import("@oh-my-pi/pi-coding-agent"),
 		cwd,

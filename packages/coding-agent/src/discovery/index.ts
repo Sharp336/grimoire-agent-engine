@@ -32,6 +32,7 @@ import "./gemini";
 import "./opencode";
 import "./github";
 import "./mcp-json";
+import "./plugins";
 import "./ssh";
 import "./vscode";
 import "./windsurf";

@@ -17,6 +17,9 @@ import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
 import type { CustomMessage } from "../../session/messages";
 import { EventBus } from "../../utils/event-bus";
+import { ensurePiCompatImportShims } from "../pi-compat/aliases";
+import { buildPiCompatEnv } from "../pi-compat/path-bridge";
+import { activatePiCompatEnvironment } from "../pi-compat/shims";
 import { getAllPluginExtensionPaths } from "../plugins/loader";
 import { resolvePath } from "../utils";
 import type {
@@ -200,7 +203,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	}
 
 	exec(command: string, args: string[], options?: ExecOptions) {
-		return execCommand(command, args, options?.cwd ?? this.cwd, options);
+		return execCommand(command, args, options?.cwd ?? this.cwd, {
+			...options,
+			env: buildPiCompatEnv({ baseEnv: process.env }),
+		});
 	}
 
 	getActiveTools(): string[] {
@@ -320,6 +326,10 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? new EventBus();
 	const runtime = new ExtensionRuntime();
+	if (paths.length > 0) {
+		await ensurePiCompatImportShims();
+		await activatePiCompatEnvironment({ bridgeMode: "env" });
+	}
 
 	for (const extPath of paths) {
 		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);

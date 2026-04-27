@@ -51,6 +51,7 @@ const commands: CommandEntry[] = [
 	{ name: "grievances", load: () => import("./commands/grievances").then(m => m.default) },
 	{ name: "jupyter", load: () => import("./commands/jupyter").then(m => m.default) },
 	{ name: "plugin", load: () => import("./commands/plugin").then(m => m.default) },
+	{ name: "pi", load: () => import("./commands/pi").then(m => m.default) },
 	{ name: "setup", load: () => import("./commands/setup").then(m => m.default) },
 	{ name: "shell", load: () => import("./commands/shell").then(m => m.default) },
 	{ name: "ssh", load: () => import("./commands/ssh").then(m => m.default) },

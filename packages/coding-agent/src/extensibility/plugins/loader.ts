@@ -8,6 +8,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { getPluginsLockfile, getPluginsNodeModules, getPluginsPackageJson, isEnoent } from "@oh-my-pi/pi-utils";
 import { getConfigDirPaths } from "../../config";
+import { normalizePiCompatibleManifest } from "../pi-compat/manifest";
 import type { InstalledPlugin, PluginManifest, PluginRuntimeConfig, ProjectPluginOverrides } from "./types";
 
 // =============================================================================
@@ -71,7 +72,8 @@ export async function getEnabledPlugins(cwd: string): Promise<InstalledPlugin[]>
 	const plugins: InstalledPlugin[] = [];
 
 	for (const [name] of Object.entries(deps)) {
-		const pluginPkgPath = path.join(nodeModulesPath, name, "package.json");
+		const pluginPath = path.join(nodeModulesPath, name);
+		const pluginPkgPath = path.join(pluginPath, "package.json");
 		let pluginPkg: { version: string; omp?: PluginManifest; pi?: PluginManifest };
 		try {
 			pluginPkg = await Bun.file(pluginPkgPath).json();
@@ -80,14 +82,13 @@ export async function getEnabledPlugins(cwd: string): Promise<InstalledPlugin[]>
 			throw err;
 		}
 
-		const manifest: PluginManifest | undefined = pluginPkg.omp || pluginPkg.pi;
+		const manifestResult = await normalizePiCompatibleManifest(pluginPkg, pluginPath);
+		const manifest = manifestResult.manifest;
 
 		if (!manifest) {
-			// Not an omp plugin, skip
+			// Not an omp/pi plugin and no conventional Pi resource dirs, skip
 			continue;
 		}
-
-		manifest.version = pluginPkg.version;
 
 		const runtimeState = runtimeConfig.plugins[name];
 
@@ -107,7 +108,7 @@ export async function getEnabledPlugins(cwd: string): Promise<InstalledPlugin[]>
 		plugins.push({
 			name,
 			version: pluginPkg.version,
-			path: path.join(nodeModulesPath, name),
+			path: pluginPath,
 			manifest,
 			enabledFeatures,
 			enabled: true,
@@ -121,11 +122,13 @@ export async function getEnabledPlugins(cwd: string): Promise<InstalledPlugin[]>
 // Path Resolution
 // =============================================================================
 
+type PluginResourceKey = "tools" | "hooks" | "commands" | "extensions" | "skills" | "prompts" | "themes";
+
 /**
- * Generic path resolver for plugin manifest entries (tools, hooks, commands, extensions).
+ * Generic path resolver for plugin manifest entries.
  * Handles both single-string and string[] base entries, plus feature-specific entries.
  */
-function resolvePluginPaths(plugin: InstalledPlugin, key: "tools" | "hooks" | "commands" | "extensions"): string[] {
+function resolvePluginPaths(plugin: InstalledPlugin, key: PluginResourceKey): string[] {
 	const paths: string[] = [];
 	const manifest = plugin.manifest;
 
@@ -192,6 +195,18 @@ export function resolvePluginExtensionPaths(plugin: InstalledPlugin): string[] {
 	return resolvePluginPaths(plugin, "extensions");
 }
 
+export function resolvePluginSkillPaths(plugin: InstalledPlugin): string[] {
+	return resolvePluginPaths(plugin, "skills");
+}
+
+export function resolvePluginPromptPaths(plugin: InstalledPlugin): string[] {
+	return resolvePluginPaths(plugin, "prompts");
+}
+
+export function resolvePluginThemePaths(plugin: InstalledPlugin): string[] {
+	return resolvePluginPaths(plugin, "themes");
+}
+
 // =============================================================================
 // Aggregated Discovery
 // =============================================================================
@@ -247,6 +262,39 @@ export async function getAllPluginExtensionPaths(cwd: string): Promise<string[]>
 
 	for (const plugin of plugins) {
 		paths.push(...resolvePluginExtensionPaths(plugin));
+	}
+
+	return paths;
+}
+
+export async function getAllPluginSkillPaths(cwd: string): Promise<string[]> {
+	const plugins = await getEnabledPlugins(cwd);
+	const paths: string[] = [];
+
+	for (const plugin of plugins) {
+		paths.push(...resolvePluginSkillPaths(plugin));
+	}
+
+	return paths;
+}
+
+export async function getAllPluginPromptPaths(cwd: string): Promise<string[]> {
+	const plugins = await getEnabledPlugins(cwd);
+	const paths: string[] = [];
+
+	for (const plugin of plugins) {
+		paths.push(...resolvePluginPromptPaths(plugin));
+	}
+
+	return paths;
+}
+
+export async function getAllPluginThemePaths(cwd: string): Promise<string[]> {
+	const plugins = await getEnabledPlugins(cwd);
+	const paths: string[] = [];
+
+	for (const plugin of plugins) {
+		paths.push(...resolvePluginThemePaths(plugin));
 	}
 
 	return paths;

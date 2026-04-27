@@ -13,6 +13,8 @@ export interface ExecOptions {
 	timeout?: number;
 	/** Working directory */
 	cwd?: string;
+	/** Environment variables to merge into the child process */
+	env?: Record<string, string>;
 }
 
 /**
@@ -39,6 +41,7 @@ export async function execCommand(
 		cwd,
 		signal: options?.signal,
 		timeout: options?.timeout,
+		env: options?.env,
 		allowNonZero: true,
 		allowAbort: true,
 		stderr: "full",

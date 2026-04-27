@@ -10,6 +10,9 @@ import {
 	isEnoent,
 	logger,
 } from "@oh-my-pi/pi-utils";
+import { normalizePiCompatibleManifest } from "../pi-compat/manifest";
+import { activatePiCompatEnvironment } from "../pi-compat/shims";
+import { parsePiInstallSource } from "../pi-compat/source";
 import { extractPackageName, parsePluginSpec } from "./parser";
 import type {
 	DoctorCheck,
@@ -127,6 +130,130 @@ export class PluginManager {
 		}
 	}
 
+	async #readPluginsPackageJson(): Promise<{ dependencies?: Record<string, string> }> {
+		await this.#ensurePackageJson();
+		return await Bun.file(getPluginsPackageJson()).json();
+	}
+
+	async #upsertPackageDependency(name: string, dependencySpec: string): Promise<void> {
+		const pkg = await this.#readPluginsPackageJson();
+		pkg.dependencies = pkg.dependencies ?? {};
+		pkg.dependencies[name] = dependencySpec;
+		await Bun.write(getPluginsPackageJson(), JSON.stringify(pkg, null, 2));
+	}
+
+	#resolveEnabledFeatures(
+		packageName: string,
+		manifest: PluginManifest,
+		features: string[] | null | "*",
+	): string[] | null {
+		if (features === "*") {
+			return manifest.features ? Object.keys(manifest.features) : null;
+		}
+		if (!Array.isArray(features)) return null;
+		if (features.length === 0) return [];
+		if (manifest.features) {
+			for (const feat of features) {
+				if (!(feat in manifest.features)) {
+					throw new Error(
+						`Unknown feature "${feat}" in ${packageName}. Available: ${Object.keys(manifest.features).join(", ")}`,
+					);
+				}
+			}
+		}
+		return features;
+	}
+
+	async #readInstalledPlugin(actualName: string, features: string[] | null | "*"): Promise<InstalledPlugin> {
+		const pluginPath = path.join(getPluginsNodeModules(), actualName);
+		const pkgPath = path.join(pluginPath, "package.json");
+		let pkg: { name: string; version: string; omp?: PluginManifest; pi?: PluginManifest };
+		try {
+			pkg = await Bun.file(pkgPath).json();
+		} catch (err) {
+			if (isEnoent(err)) {
+				throw new Error(`Package installed but package.json not found at ${pkgPath}`);
+			}
+			throw err;
+		}
+
+		const manifestResult = await normalizePiCompatibleManifest(pkg, pluginPath);
+		const manifest = manifestResult.manifest ?? { version: pkg.version };
+		manifest.version = pkg.version;
+		const enabledFeatures = this.#resolveEnabledFeatures(pkg.name, manifest, features);
+
+		return {
+			name: pkg.name,
+			version: pkg.version,
+			path: pluginPath,
+			manifest,
+			enabledFeatures,
+			enabled: true,
+		};
+	}
+
+	async #resolveInstalledPackageName(
+		installSpec: string,
+		previousDeps: Record<string, string>,
+		fallbackName: string | undefined,
+	): Promise<string> {
+		const pkg = await this.#readPluginsPackageJson();
+		const deps = pkg.dependencies ?? {};
+		const changed = Object.entries(deps).filter(([name, version]) => previousDeps[name] !== version);
+		if (changed.length === 1) return changed[0][0];
+		if (fallbackName) {
+			const actualName = extractPackageName(fallbackName);
+			try {
+				await Bun.file(path.join(getPluginsNodeModules(), actualName, "package.json")).json();
+				return actualName;
+			} catch (err) {
+				if (!isEnoent(err)) throw err;
+			}
+		}
+		throw new Error(`Package installed but could not resolve installed package name for ${installSpec}`);
+	}
+
+	async #linkLocalPlugin(absolutePath: string, features: string[] | null | "*"): Promise<InstalledPlugin> {
+		const pkgFilePath = path.join(absolutePath, "package.json");
+		let pkg: { name?: string; version: string; omp?: PluginManifest; pi?: PluginManifest };
+		try {
+			pkg = await Bun.file(pkgFilePath).json();
+		} catch (err) {
+			if (isEnoent(err)) throw new Error(`package.json not found at ${absolutePath}`);
+			throw err;
+		}
+		if (!pkg.name) {
+			throw new Error("package.json must have a name field");
+		}
+
+		await this.#ensurePluginsDir();
+		const linkPath = path.join(getPluginsNodeModules(), pkg.name);
+		if (pkg.name.startsWith("@")) {
+			const scopeDir = path.join(getPluginsNodeModules(), pkg.name.split("/")[0]);
+			await fs.promises.mkdir(scopeDir, { recursive: true });
+		}
+		try {
+			const stats = await fs.promises.lstat(linkPath);
+			if (stats.isSymbolicLink() || stats.isDirectory()) {
+				await fs.promises.rm(linkPath, { recursive: true, force: true });
+			}
+		} catch (err) {
+			if (!isEnoent(err)) throw err;
+		}
+		await fs.promises.symlink(absolutePath, linkPath);
+		await this.#upsertPackageDependency(pkg.name, `file:${absolutePath}`);
+
+		const plugin = await this.#readInstalledPlugin(pkg.name, features);
+		const config = await this.#ensureConfigLoaded();
+		config.plugins[plugin.name] = {
+			version: plugin.version,
+			enabledFeatures: plugin.enabledFeatures,
+			enabled: true,
+		};
+		await this.#saveRuntimeConfig();
+		return plugin;
+	}
+
 	// ==========================================================================
 	// Install / Uninstall
 	// ==========================================================================
@@ -140,13 +267,21 @@ export class PluginManager {
 	 */
 	async install(specString: string, options: InstallOptions = {}): Promise<InstalledPlugin> {
 		const spec = parsePluginSpec(specString);
-		validatePackageName(spec.packageName);
+		const source = parsePiInstallSource(spec.packageName, this.#cwd);
+
+		if (source.kind === "npm") {
+			validatePackageName(source.installSpec);
+		}
 
 		await this.#ensurePackageJson();
 
+		if (options.compatPi) {
+			await activatePiCompatEnvironment({ packageName: source.packageNameHint, bridgeMode: "profile" });
+		}
+
 		if (options.dryRun) {
 			return {
-				name: spec.packageName,
+				name: source.packageNameHint ?? spec.packageName,
 				version: "0.0.0-dryrun",
 				path: "",
 				manifest: { version: "0.0.0-dryrun" },
@@ -155,8 +290,12 @@ export class PluginManager {
 			};
 		}
 
-		// Run npm install
-		const proc = Bun.spawn(["bun", "install", spec.packageName], {
+		if (source.kind === "local" && source.localPath) {
+			return await this.#linkLocalPlugin(source.localPath, spec.features);
+		}
+
+		const previousDeps = (await this.#readPluginsPackageJson()).dependencies ?? {};
+		const proc = Bun.spawn(["bun", "install", source.installSpec], {
 			cwd: getPluginsDir(),
 			stdin: "ignore",
 			stdout: "pipe",
@@ -167,67 +306,25 @@ export class PluginManager {
 		const exitCode = await proc.exited;
 		if (exitCode !== 0) {
 			const stderr = await new Response(proc.stderr).text();
-			throw new Error(`npm install failed: ${stderr}`);
+			throw new Error(`package install failed: ${stderr}`);
 		}
 
-		// Resolve actual package name (strip version specifier)
-		const actualName = extractPackageName(spec.packageName);
-		const pkgPath = path.join(getPluginsNodeModules(), actualName, "package.json");
+		const actualName = await this.#resolveInstalledPackageName(
+			source.installSpec,
+			previousDeps,
+			source.packageNameHint,
+		);
+		const plugin = await this.#readInstalledPlugin(actualName, spec.features);
 
-		let pkg: { name: string; version: string; omp?: PluginManifest; pi?: PluginManifest };
-		try {
-			pkg = await Bun.file(pkgPath).json();
-		} catch (err) {
-			if (isEnoent(err)) {
-				throw new Error(`Package installed but package.json not found at ${pkgPath}`);
-			}
-			throw err;
-		}
-		const manifest: PluginManifest = pkg.omp || pkg.pi || { version: pkg.version };
-		manifest.version = pkg.version;
-
-		// Resolve enabled features
-		let enabledFeatures: string[] | null = null;
-		if (spec.features === "*") {
-			// All features
-			enabledFeatures = manifest.features ? Object.keys(manifest.features) : null;
-		} else if (Array.isArray(spec.features)) {
-			if (spec.features.length > 0) {
-				// Validate requested features exist
-				if (manifest.features) {
-					for (const feat of spec.features) {
-						if (!(feat in manifest.features)) {
-							throw new Error(
-								`Unknown feature "${feat}" in ${actualName}. Available: ${Object.keys(manifest.features).join(", ")}`,
-							);
-						}
-					}
-				}
-				enabledFeatures = spec.features;
-			} else {
-				// Empty array = no optional features
-				enabledFeatures = [];
-			}
-		}
-		// null = use defaults
-
-		// Update runtime config
 		const config = await this.#ensureConfigLoaded();
-		config.plugins[pkg.name] = {
-			version: pkg.version,
-			enabledFeatures,
+		config.plugins[plugin.name] = {
+			version: plugin.version,
+			enabledFeatures: plugin.enabledFeatures,
 			enabled: true,
 		};
 		await this.#saveRuntimeConfig();
 
-		return {
-			name: pkg.name,
-			version: pkg.version,
-			path: path.join(getPluginsNodeModules(), actualName),
-			manifest,
-			enabledFeatures,
-			enabled: true,
-		};
+		return plugin;
 	}
 
 	/**
@@ -276,7 +373,8 @@ export class PluginManager {
 		const plugins: InstalledPlugin[] = [];
 
 		for (const [name] of Object.entries(deps)) {
-			const pluginPkgPath = path.join(getPluginsNodeModules(), name, "package.json");
+			const pluginPath = path.join(getPluginsNodeModules(), name);
+			const pluginPkgPath = path.join(pluginPath, "package.json");
 			let pluginPkg: { version: string; omp?: PluginManifest; pi?: PluginManifest };
 			try {
 				pluginPkg = await Bun.file(pluginPkgPath).json();
@@ -284,7 +382,8 @@ export class PluginManager {
 				if (isEnoent(err)) continue;
 				throw err;
 			}
-			const manifest: PluginManifest = pluginPkg.omp || pluginPkg.pi || { version: pluginPkg.version };
+			const manifestResult = await normalizePiCompatibleManifest(pluginPkg, pluginPath);
+			const manifest: PluginManifest = manifestResult.manifest || { version: pluginPkg.version };
 			manifest.version = pluginPkg.version;
 
 			const runtimeState = config.plugins[name] || {
@@ -300,7 +399,7 @@ export class PluginManager {
 			plugins.push({
 				name,
 				version: pluginPkg.version,
-				path: path.join(getPluginsNodeModules(), name),
+				path: pluginPath,
 				manifest,
 				enabledFeatures: projectFeatures ?? runtimeState.enabledFeatures,
 				enabled: runtimeState.enabled && !isDisabledInProject,
@@ -315,61 +414,7 @@ export class PluginManager {
 	 */
 	async link(localPath: string): Promise<InstalledPlugin> {
 		const absolutePath = path.resolve(this.#cwd, localPath);
-
-		const pkgFilePath = path.join(absolutePath, "package.json");
-		let pkg: { name?: string; version: string; omp?: PluginManifest; pi?: PluginManifest };
-		try {
-			pkg = await Bun.file(pkgFilePath).json();
-		} catch (err) {
-			if (isEnoent(err)) throw new Error(`package.json not found at ${absolutePath}`);
-			throw err;
-		}
-		if (!pkg.name) {
-			throw new Error("package.json must have a name field");
-		}
-
-		await this.#ensurePluginsDir();
-
-		const linkPath = path.join(getPluginsNodeModules(), pkg.name);
-
-		// Handle scoped packages
-		if (pkg.name.startsWith("@")) {
-			const scopeDir = path.join(getPluginsNodeModules(), pkg.name.split("/")[0]);
-			await fs.promises.mkdir(scopeDir, { recursive: true });
-		}
-
-		// Remove existing
-		try {
-			const stats = await fs.promises.lstat(linkPath);
-			if (stats.isSymbolicLink() || stats.isDirectory()) {
-				await fs.promises.unlink(linkPath);
-			}
-		} catch (err) {
-			if (!isEnoent(err)) throw err;
-		}
-
-		await fs.promises.symlink(absolutePath, linkPath);
-
-		const manifest: PluginManifest = pkg.omp || pkg.pi || { version: pkg.version };
-		manifest.version = pkg.version;
-
-		// Add to runtime config
-		const config = await this.#ensureConfigLoaded();
-		config.plugins[pkg.name] = {
-			version: pkg.version,
-			enabledFeatures: null,
-			enabled: true,
-		};
-		await this.#saveRuntimeConfig();
-
-		return {
-			name: pkg.name,
-			version: pkg.version,
-			path: absolutePath,
-			manifest,
-			enabledFeatures: null,
-			enabled: true,
-		};
+		return await this.#linkLocalPlugin(absolutePath, null);
 	}
 
 	// ==========================================================================
