@@ -124,6 +124,61 @@ export async function getEnabledPlugins(cwd: string): Promise<InstalledPlugin[]>
 
 type PluginResourceKey = "tools" | "hooks" | "commands" | "extensions" | "skills" | "prompts" | "themes";
 
+function isExtensionEntryFile(filePath: string): boolean {
+	return filePath.endsWith(".ts") || filePath.endsWith(".js");
+}
+
+function resolveExtensionDirectoryEntries(dir: string): string[] {
+	const indexTs = path.join(dir, "index.ts");
+	if (fs.existsSync(indexTs)) return [indexTs];
+
+	const indexJs = path.join(dir, "index.js");
+	if (fs.existsSync(indexJs)) return [indexJs];
+
+	const entries: string[] = [];
+	let dirents: fs.Dirent[];
+	try {
+		dirents = fs.readdirSync(dir, { withFileTypes: true });
+	} catch {
+		return entries;
+	}
+
+	for (const entry of dirents) {
+		const entryPath = path.join(dir, entry.name);
+		if ((entry.isFile() || entry.isSymbolicLink()) && isExtensionEntryFile(entry.name)) {
+			entries.push(entryPath);
+			continue;
+		}
+
+		if (entry.isDirectory() || entry.isSymbolicLink()) {
+			const nestedIndexTs = path.join(entryPath, "index.ts");
+			if (fs.existsSync(nestedIndexTs)) {
+				entries.push(nestedIndexTs);
+				continue;
+			}
+			const nestedIndexJs = path.join(entryPath, "index.js");
+			if (fs.existsSync(nestedIndexJs)) {
+				entries.push(nestedIndexJs);
+			}
+		}
+	}
+
+	return entries;
+}
+
+function resolvePluginEntryPath(key: PluginResourceKey, resolved: string): string[] {
+	if (key !== "extensions") return [resolved];
+	try {
+		if (fs.statSync(resolved).isDirectory()) {
+			const entries = resolveExtensionDirectoryEntries(resolved);
+			return entries.length > 0 ? entries : [resolved];
+		}
+	} catch {
+		return [];
+	}
+	return [resolved];
+}
+
 /**
  * Generic path resolver for plugin manifest entries.
  * Handles both single-string and string[] base entries, plus feature-specific entries.
@@ -139,7 +194,7 @@ function resolvePluginPaths(plugin: InstalledPlugin, key: PluginResourceKey): st
 		for (const entry of entries) {
 			const resolved = path.join(plugin.path, entry);
 			if (fs.existsSync(resolved)) {
-				paths.push(resolved);
+				paths.push(...resolvePluginEntryPath(key, resolved));
 			}
 		}
 	}
@@ -155,7 +210,7 @@ function resolvePluginPaths(plugin: InstalledPlugin, key: PluginResourceKey): st
 				for (const entry of feat[key]) {
 					const resolved = path.join(plugin.path, entry);
 					if (fs.existsSync(resolved)) {
-						paths.push(resolved);
+						paths.push(...resolvePluginEntryPath(key, resolved));
 					}
 				}
 			}
@@ -169,7 +224,7 @@ function resolvePluginPaths(plugin: InstalledPlugin, key: PluginResourceKey): st
 				for (const entry of feat[key]) {
 					const resolved = path.join(plugin.path, entry);
 					if (fs.existsSync(resolved)) {
-						paths.push(resolved);
+						paths.push(...resolvePluginEntryPath(key, resolved));
 					}
 				}
 			}

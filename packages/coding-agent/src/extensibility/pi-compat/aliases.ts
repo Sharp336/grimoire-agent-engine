@@ -23,14 +23,81 @@ interface ShimPackage {
 	name: string;
 	files: Record<string, string>;
 	exports: Record<string, string>;
+	skipIfPackageExists?: boolean;
+}
+
+function resolveShimTarget(target: string): string {
+	return import.meta.resolve(target);
 }
 
 function makeReExport(target: string): string {
-	return [`export * from "${target}";`, ""].join("\n");
+	return [`export * from "${resolveShimTarget(target)}";`, ""].join("\n");
+}
+
+function codingAgentShimContent(): string {
+	return [
+		makeReExport("@oh-my-pi/pi-coding-agent").trimEnd(),
+		`import { parseFrontmatter } from "${resolveShimTarget("@oh-my-pi/pi-utils/frontmatter")}";`,
+		"export { parseFrontmatter };",
+		"export function stripFrontmatter(content) {",
+		"\treturn parseFrontmatter(content).body;",
+		"}",
+		"export function keyText(key) {",
+		"\treturn key;",
+		"}",
+		"",
+	].join("\n");
+}
+
+function piAiShimContent(): string {
+	return [
+		makeReExport("@oh-my-pi/pi-ai").trimEnd(),
+		"export function getModel() {",
+		"\treturn undefined;",
+		"}",
+		"",
+	].join("\n");
+}
+
+function piTuiShimContent(): string {
+	return [
+		makeReExport("@oh-my-pi/pi-tui").trimEnd(),
+		"export const Key = {",
+		'\tescape: "escape",',
+		'\tenter: "enter",',
+		'\ttab: "tab",',
+		'\tbackspace: "backspace",',
+		'\tup: "up",',
+		'\tdown: "down",',
+		'\tleft: "left",',
+		'\tright: "right",',
+		"\tctrl: key => 'ctrl+' + key,",
+		"\tshift: key => 'shift+' + key,",
+		"\talt: key => 'alt+' + key,",
+		"\tctrlShift: key => 'ctrl+shift+' + key,",
+		"};",
+		"",
+	].join("\n");
+}
+
+function typeboxShimContent(): string {
+	const target = resolveShimTarget("@sinclair/typebox");
+	return [
+		`export * from "${target}";`,
+		`import { Type as BaseType } from "${target}";`,
+		"export const Type = {",
+		"\t...BaseType,",
+		"\tCyclic: BaseType.Cyclic ?? ((schema) => schema),",
+		"};",
+		"",
+	].join("\n");
 }
 
 async function writeShimPackage(nodeModulesDir: string, shim: ShimPackage): Promise<void> {
 	const packageDir = path.join(nodeModulesDir, shim.name);
+	if (shim.skipIfPackageExists && fs.existsSync(path.join(packageDir, "package.json"))) {
+		return;
+	}
 	await fs.promises.mkdir(packageDir, { recursive: true });
 	await Bun.write(
 		path.join(packageDir, "package.json"),
@@ -60,7 +127,7 @@ export async function ensurePiCompatImportShims(nodeModulesDir: string = getPlug
 	const shims: ShimPackage[] = [
 		{
 			name: "@mariozechner/pi-coding-agent",
-			files: { "index.ts": makeReExport("@oh-my-pi/pi-coding-agent") },
+			files: { "index.ts": codingAgentShimContent() },
 			exports: { ".": "./index.ts", "./*": "./*.ts" },
 		},
 		{
@@ -71,20 +138,20 @@ export async function ensurePiCompatImportShims(nodeModulesDir: string = getPlug
 		{
 			name: "@mariozechner/pi-ai",
 			files: {
-				"index.ts": makeReExport("@oh-my-pi/pi-ai"),
+				"index.ts": piAiShimContent(),
 				"oauth.ts": makeReExport("@oh-my-pi/pi-ai/utils/oauth"),
 			},
 			exports: { ".": "./index.ts", "./oauth": "./oauth.ts", "./*": "./*.ts" },
 		},
 		{
 			name: "@mariozechner/pi-tui",
-			files: { "index.ts": makeReExport("@oh-my-pi/pi-tui") },
+			files: { "index.ts": piTuiShimContent() },
 			exports: { ".": "./index.ts", "./*": "./*.ts" },
 		},
 		{
 			name: "typebox",
 			files: {
-				"index.ts": makeReExport("@sinclair/typebox"),
+				"index.ts": typeboxShimContent(),
 				"compile.ts": makeReExport("@sinclair/typebox/compiler"),
 				"compiler.ts": makeReExport("@sinclair/typebox/compiler"),
 				"value.ts": makeReExport("@sinclair/typebox/value"),
@@ -92,6 +159,20 @@ export async function ensurePiCompatImportShims(nodeModulesDir: string = getPlug
 			exports: {
 				".": "./index.ts",
 				"./compile": "./compile.ts",
+				"./compiler": "./compiler.ts",
+				"./value": "./value.ts",
+			},
+		},
+		{
+			name: "@sinclair/typebox",
+			skipIfPackageExists: true,
+			files: {
+				"index.ts": typeboxShimContent(),
+				"compiler.ts": makeReExport("@sinclair/typebox/compiler"),
+				"value.ts": makeReExport("@sinclair/typebox/value"),
+			},
+			exports: {
+				".": "./index.ts",
 				"./compiler": "./compiler.ts",
 				"./value": "./value.ts",
 			},

@@ -12,6 +12,7 @@ import {
 	planPiHomeSymlinkBridge,
 } from "../src/extensibility/pi-compat";
 import {
+	getAllPluginExtensionPaths,
 	getAllPluginPromptPaths,
 	getAllPluginSkillPaths,
 	getAllPluginThemePaths,
@@ -133,6 +134,27 @@ describe("Pi compatibility plugin resources", () => {
 		expect(await getAllPluginPromptPaths(process.cwd())).toEqual([path.join(pluginDir, "prompts")]);
 		expect(await getAllPluginThemePaths(process.cwd())).toEqual([path.join(pluginDir, "themes")]);
 	});
+
+	it("expands Pi extension directories to loadable entry files", async () => {
+		const pluginsDir = getPluginsDir();
+		const pluginDir = path.join(getPluginsNodeModules(), "pi-dir-extension");
+		writeJson(path.join(pluginsDir, "package.json"), {
+			name: "omp-plugins",
+			private: true,
+			dependencies: { "pi-dir-extension": "1.0.0" },
+		});
+		writeJson(path.join(pluginDir, "package.json"), {
+			name: "pi-dir-extension",
+			version: "1.0.0",
+			pi: { extensions: ["extensions"] },
+		});
+		fs.mkdirSync(path.join(pluginDir, "extensions", "teams"), { recursive: true });
+		fs.writeFileSync(path.join(pluginDir, "extensions", "teams", "index.ts"), "export default () => {};\n");
+
+		expect(await getAllPluginExtensionPaths(process.cwd())).toEqual([
+			path.join(pluginDir, "extensions", "teams", "index.ts"),
+		]);
+	});
 });
 
 describe("Pi compatibility shims and doctor", () => {
@@ -165,6 +187,8 @@ describe("Pi compatibility shims and doctor", () => {
 			true,
 		);
 		expect(fs.existsSync(path.join(getPluginsNodeModules(), "typebox", "compile.ts"))).toBe(true);
+		expect(fs.existsSync(path.join(getPluginsNodeModules(), "@sinclair", "typebox", "compiler.ts"))).toBe(true);
+		expect(fs.readFileSync(path.join(getPluginsNodeModules(), "typebox", "compile.ts"), "utf8")).toContain("file://");
 	});
 
 	it("refuses symlink bridge when .pi already exists", async () => {
