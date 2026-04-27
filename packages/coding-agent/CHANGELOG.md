@@ -14,6 +14,8 @@
 - Added dedicated rendering support for `search`, `recipe`, and `irc` tool calls in transcript exports
 - Added a collapsible `Available Tools` section with a tool count and chip-style compact tool names
 - Added macOS power assertion settings `power.preventIdleSleep`, `power.preventSystemSleep`, `power.declareUserActive`, and `power.preventDisplaySleep` so users can control what types of sleep are blocked during sessions
+- Added `MCPManager.setCwd` / `getCwd` and a `notifications/roots/list_changed` broadcast to connected MCP servers when the session working directory changes via `/move`, so file-aware MCP servers (indexers, search, code navigation) re-query `roots/list` and rescope to the new directory instead of operating against the original cwd.
+- Added shared `mcp/roots.ts` helpers (`buildRootsList`, `notifyRootsChanged`) and an exported `CLIENT_CAPABILITIES` constant in `mcp/client.ts`.
 
 ### Changed
 
@@ -25,6 +27,7 @@
 - Changed tool-call output to display internal `_i` intent separately and hide it from rendered argument JSON
 - Changed `ast_edit` and `find`/`search` rendering to show resolved path values and option flags such as `limit`, `no-hidden`, and `no-reply`
 - Changed power assertion behavior to take effect only while a prompt is in flight, replacing session-level persistent assertions
+- Changed MCP `initialize` capabilities to declare `roots.listChanged: true` (previously `false`), authorizing the client to push root-change notifications per the MCP spec.
 
 ### Fixed
 

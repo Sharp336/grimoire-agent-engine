@@ -978,6 +978,9 @@ export class CommandController {
 			await this.ctx.sessionManager.flush();
 			await this.ctx.sessionManager.moveTo(resolvedPath);
 			setProjectDir(resolvedPath);
+			// Notify connected MCP servers that the working directory (root) changed
+			// so they can re-query roots/list and rescope file-aware behaviour.
+			this.ctx.mcpManager?.setCwd(resolvedPath);
 			clearClaudePluginRootsCache(); // re-warms preloadedPluginRoots with new project dir (async)
 			resetCapabilities();
 			await this.ctx.refreshSlashCommandState(resolvedPath);

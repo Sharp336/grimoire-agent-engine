@@ -3,9 +3,8 @@
  *
  * Handles connection initialization, tool listing, and tool calling.
  */
-import * as path from "node:path";
-import * as url from "node:url";
 import { getProjectDir, logger, withTimeout } from "@oh-my-pi/pi-utils";
+import { buildRootsList } from "./roots";
 import { createHttpTransport } from "./transports/http";
 import { createStdioTransport } from "./transports/stdio";
 import type {
@@ -58,12 +57,8 @@ async function defaultRequestHandler(method: string, _params: unknown): Promise<
 	switch (method) {
 		case "ping":
 			return {};
-		case "roots/list": {
-			const cwd = getProjectDir();
-			return {
-				roots: [{ uri: url.pathToFileURL(cwd).href, name: path.basename(cwd) }],
-			};
-		}
+		case "roots/list":
+			return buildRootsList(getProjectDir());
 		default:
 			throw Object.assign(new Error(`Unsupported server request: ${method}`), { code: -32601 });
 	}
@@ -87,6 +82,14 @@ async function createTransport(config: MCPServerConfig): Promise<MCPTransport> {
 }
 
 /**
+ * Client capabilities advertised in `initialize`. Exported so tests can pin
+ * the contract (e.g. `roots.listChanged`) without driving a full handshake.
+ */
+export const CLIENT_CAPABILITIES = {
+	roots: { listChanged: true },
+} as const satisfies MCPInitializeParams["capabilities"];
+
+/**
  * Initialize connection with MCP server.
  */
 async function initializeConnection(
@@ -99,9 +102,7 @@ async function initializeConnection(
 ): Promise<MCPInitializeResult> {
 	const params: MCPInitializeParams = {
 		protocolVersion: PROTOCOL_VERSION,
-		capabilities: {
-			roots: { listChanged: false },
-		},
+		capabilities: CLIENT_CAPABILITIES,
 		clientInfo: CLIENT_INFO,
 	};
 

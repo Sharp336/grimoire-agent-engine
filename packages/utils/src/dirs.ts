@@ -76,7 +76,21 @@ export function relativePathWithinRoot(root: string, candidate: string): string 
 	return relative || null;
 }
 
-let projectDir = standardizeMacOSPath(process.cwd());
+/**
+ * Resolve `input` to an absolute path and apply platform-specific
+ * normalization (currently: `/private/...` stripping on macOS when both
+ * paths share a realpath).
+ *
+ * Use this whenever a value will be stored as the canonical project root,
+ * so independent callers (`setProjectDir`, `MCPManager.setCwd`, etc.) cannot
+ * drift apart on systems that expose the same directory under multiple
+ * absolute paths.
+ */
+export function normalizeProjectPath(input: string): string {
+	return standardizeMacOSPath(path.resolve(input));
+}
+
+let projectDir = normalizeProjectPath(process.cwd());
 
 /** Get the project directory. */
 export function getProjectDir(): string {
@@ -85,7 +99,7 @@ export function getProjectDir(): string {
 
 /** Set the project directory. */
 export function setProjectDir(dir: string): void {
-	projectDir = standardizeMacOSPath(path.resolve(dir));
+	projectDir = normalizeProjectPath(dir);
 	process.chdir(projectDir);
 }
 

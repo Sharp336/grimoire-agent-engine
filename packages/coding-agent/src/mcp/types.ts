@@ -399,12 +399,18 @@ export interface MCPGetPromptResult {
 // MCP Notification Method Names
 // =============================================================================
 
-/** MCP server notification method names */
+/** MCP notification method names (server -> client and client -> server). */
 export const MCPNotificationMethods = {
+	/** Server -> client: tools list changed; client should re-query `tools/list`. */
 	TOOLS_LIST_CHANGED: "notifications/tools/list_changed",
+	/** Server -> client: resources list changed; client should re-query `resources/list`. */
 	RESOURCES_LIST_CHANGED: "notifications/resources/list_changed",
+	/** Server -> client: a subscribed resource was updated. */
 	RESOURCES_UPDATED: "notifications/resources/updated",
+	/** Server -> client: prompts list changed; client should re-query `prompts/list`. */
 	PROMPTS_LIST_CHANGED: "notifications/prompts/list_changed",
+	/** Client -> server: roots list changed; server should re-query `roots/list`. */
+	ROOTS_LIST_CHANGED: "notifications/roots/list_changed",
 } as const;
 
 /** Extract a JsonRpcError from a thrown value. Preserves `.code` and `.message` from Error instances or plain objects. */

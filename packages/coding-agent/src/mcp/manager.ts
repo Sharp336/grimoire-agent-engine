@@ -4,9 +4,7 @@
  * Discovers, connects to, and manages MCP servers.
  * Handles tool loading and lifecycle.
  */
-import * as path from "node:path";
-import * as url from "node:url";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, normalizeProjectPath } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
 import type { SourceMeta } from "../capability/types";
 import { resolveConfigValue } from "../config/resolve-config-value";
@@ -28,6 +26,7 @@ import {
 } from "./client";
 import { loadAllMCPConfigs, validateServerConfig } from "./config";
 import { refreshMCPOAuthToken } from "./oauth-flow";
+import { buildRootsList, notifyRootsChanged } from "./roots";
 import type { MCPToolDetails } from "./tool-bridge";
 import { DeferredMCPTool, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
@@ -554,14 +553,26 @@ export class MCPManager {
 	}
 
 	#getRoots(): { roots: Array<{ uri: string; name: string }> } {
-		return {
-			roots: [
-				{
-					uri: url.pathToFileURL(this.cwd).href,
-					name: path.basename(this.cwd),
-				},
-			],
-		};
+		return buildRootsList(this.cwd);
+	}
+
+	/**
+	 * Current working directory exposed as the MCP root.
+	 */
+	getCwd(): string {
+		return this.cwd;
+	}
+
+	/**
+	 * Update the working directory and notify connected servers via
+	 * `notifications/roots/list_changed`. No-op when `newCwd` resolves to the
+	 * current cwd. Notification is best-effort and runs in the background.
+	 */
+	setCwd(newCwd: string): void {
+		const resolved = normalizeProjectPath(newCwd);
+		if (resolved === this.cwd) return;
+		this.cwd = resolved;
+		void notifyRootsChanged(this.#connections.values());
 	}
 
 	/**
