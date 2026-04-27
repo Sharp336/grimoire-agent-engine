@@ -80,6 +80,14 @@ describe("Pi compatibility source parsing", () => {
 			kind: "local",
 			localPath: path.normalize("C:/plugins/pi-local"),
 		});
+		expect(parsePiInstallSource(".\\local-plugin", cwd)).toMatchObject({
+			kind: "local",
+			localPath: path.join(cwd, "local-plugin"),
+		});
+		expect(parsePiInstallSource("..\\parent-plugin", cwd)).toMatchObject({
+			kind: "local",
+			localPath: path.resolve(cwd, "..", "parent-plugin"),
+		});
 	});
 
 	it("rejects shell metacharacters in package sources", () => {
@@ -104,6 +112,22 @@ describe("Pi compatibility manifest normalization", () => {
 		expect(result.manifest?.version).toBe("1.0.0");
 		expect(result.manifest?.extensions).toEqual(["omp-extension.ts"]);
 		expect(result.manifest?.skills).toEqual(["skills"]);
+		expect(result.manifest?.prompts).toEqual(["prompts"]);
+	});
+
+	it("respects explicit empty resource arrays when applying conventional fallbacks", async () => {
+		const root = makeTempDir("omp-pi-empty-resources-");
+		fs.mkdirSync(path.join(root, "skills"), { recursive: true });
+		fs.mkdirSync(path.join(root, "prompts"), { recursive: true });
+		const result = await normalizePiCompatibleManifest(
+			{
+				version: "1.0.0",
+				pi: { skills: [] },
+			},
+			root,
+		);
+
+		expect(result.manifest?.skills).toEqual([]);
 		expect(result.manifest?.prompts).toEqual(["prompts"]);
 	});
 

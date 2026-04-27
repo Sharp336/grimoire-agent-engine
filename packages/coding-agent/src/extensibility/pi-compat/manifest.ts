@@ -61,7 +61,7 @@ function applyConventionalFallbacks(
 ): string[] {
 	const applied: string[] = [];
 	for (const key of RESOURCE_KEYS) {
-		if (!manifest[key]?.length && conventional[key]?.length) {
+		if (!(key in manifest) && conventional[key]?.length) {
 			manifest[key] = conventional[key];
 			applied.push(key);
 		}
