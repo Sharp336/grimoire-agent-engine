@@ -295,6 +295,14 @@
 			"types": "./src/extensibility/hooks/*.ts",
 			"import": "./src/extensibility/hooks/*.ts"
 		},
+		"./extensibility/pi-compat": {
+			"types": "./src/extensibility/pi-compat/index.ts",
+			"import": "./src/extensibility/pi-compat/index.ts"
+		},
+		"./extensibility/pi-compat/*": {
+			"types": "./src/extensibility/pi-compat/*.ts",
+			"import": "./src/extensibility/pi-compat/*.ts"
+		},
 		"./extensibility/plugins": {
 			"types": "./src/extensibility/plugins/index.ts",
 			"import": "./src/extensibility/plugins/index.ts"
