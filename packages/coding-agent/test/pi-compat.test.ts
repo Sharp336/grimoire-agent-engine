@@ -5,11 +5,14 @@ import * as path from "node:path";
 import { getAgentDir, getPluginsDir, getPluginsNodeModules, setAgentDir } from "@oh-my-pi/pi-utils";
 import { loadCapability } from "../src/capability";
 import { type Skill, skillCapability } from "../src/capability/skill";
+import { loadCustomTools } from "../src/extensibility/custom-tools/loader";
+import { loadExtensions } from "../src/extensibility/extensions/loader";
 import "../src/discovery/plugins";
 import {
 	doctorPiCompatTarget,
 	ensurePiCliShim,
 	ensurePiCompatImportShims,
+	getPiCompatHomeDir,
 	normalizePiCompatibleManifest,
 	parsePiInstallSource,
 	planPiHomeSymlinkBridge,
@@ -29,6 +32,21 @@ function makeTempDir(prefix: string): string {
 function writeJson(filePath: string, value: unknown): void {
 	fs.mkdirSync(path.dirname(filePath), { recursive: true });
 	fs.writeFileSync(filePath, JSON.stringify(value, null, 2));
+}
+
+function snapshotProcessEnv(keys: string[]): Record<string, string | undefined> {
+	const snapshot: Record<string, string | undefined> = {};
+	for (const key of keys) {
+		snapshot[key] = process.env[key];
+	}
+	return snapshot;
+}
+
+function restoreProcessEnv(snapshot: Record<string, string | undefined>): void {
+	for (const [key, value] of Object.entries(snapshot)) {
+		if (value === undefined) delete process.env[key];
+		else process.env[key] = value;
+	}
 }
 
 describe("Pi compatibility source parsing", () => {
@@ -222,6 +240,76 @@ describe("Pi compatibility shims and doctor", () => {
 			else process.env.OMP_PI_COMPAT = originalCompat;
 			if (originalBridge === undefined) delete process.env.OMP_PI_COMPAT_BRIDGE;
 			else process.env.OMP_PI_COMPAT_BRIDGE = originalBridge;
+		}
+	});
+
+	it("preserves selected bridge mode when loading extensions", async () => {
+		const envSnapshot = snapshotProcessEnv([
+			"HOME",
+			"PATH",
+			"OMP_PI_COMPAT",
+			"OMP_PI_COMPAT_HOME",
+			"OMP_PI_COMPAT_BRIDGE",
+			"PI_CODING_AGENT",
+			"PI_CODING_AGENT_DIR",
+			"PI_PACKAGE_DIR",
+		]);
+		const extensionDir = makeTempDir("omp-pi-extension-bridge-");
+		const extensionPath = path.join(extensionDir, "extension.ts");
+		fs.writeFileSync(extensionPath, "export default function() {}\n");
+		process.env.OMP_PI_COMPAT_BRIDGE = "child-home";
+		try {
+			const result = await loadExtensions([extensionPath], process.cwd());
+
+			expect(result.errors).toHaveLength(0);
+			expect(process.env.OMP_PI_COMPAT_BRIDGE).toBe("child-home");
+			expect(process.env.HOME).toBe(getPiCompatHomeDir());
+		} finally {
+			fs.rmSync(extensionDir, { recursive: true, force: true });
+			restoreProcessEnv(envSnapshot);
+		}
+	});
+
+	it("preserves selected bridge mode when loading custom tools", async () => {
+		const envSnapshot = snapshotProcessEnv([
+			"HOME",
+			"PATH",
+			"OMP_PI_COMPAT",
+			"OMP_PI_COMPAT_HOME",
+			"OMP_PI_COMPAT_BRIDGE",
+			"PI_CODING_AGENT",
+			"PI_CODING_AGENT_DIR",
+			"PI_PACKAGE_DIR",
+		]);
+		const toolDir = makeTempDir("omp-pi-tool-bridge-");
+		const toolPath = path.join(toolDir, "tool.ts");
+		fs.writeFileSync(
+			toolPath,
+			[
+				"export default function(api) {",
+				"  return {",
+				'    name: "bridge_tool",',
+				'    label: "Bridge Tool",',
+				'    description: "Checks bridge activation",',
+				"    parameters: api.typebox.Type.Object({}),",
+				"    async execute() {",
+				'      return { content: [{ type: "text", text: "ok" }] };',
+				"    },",
+				"  };",
+				"}",
+			].join("\n"),
+		);
+		process.env.OMP_PI_COMPAT_BRIDGE = "child-home";
+		try {
+			const result = await loadCustomTools([{ path: toolPath }], process.cwd(), []);
+
+			expect(result.errors).toHaveLength(0);
+			expect(result.tools).toHaveLength(1);
+			expect(process.env.OMP_PI_COMPAT_BRIDGE).toBe("child-home");
+			expect(process.env.HOME).toBe(getPiCompatHomeDir());
+		} finally {
+			fs.rmSync(toolDir, { recursive: true, force: true });
+			restoreProcessEnv(envSnapshot);
 		}
 	});
 

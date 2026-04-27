@@ -328,7 +328,7 @@ export async function loadExtensions(paths: string[], cwd: string, eventBus?: Ev
 	const runtime = new ExtensionRuntime();
 	if (paths.length > 0) {
 		await ensurePiCompatImportShims();
-		await activatePiCompatEnvironment({ bridgeMode: "env" });
+		await activatePiCompatEnvironment();
 	}
 
 	for (const extPath of paths) {

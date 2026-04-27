@@ -174,7 +174,7 @@ export async function loadCustomTools(
 ) {
 	if (pathsWithSources.length > 0) {
 		await ensurePiCompatImportShims();
-		await activatePiCompatEnvironment({ bridgeMode: "env" });
+		await activatePiCompatEnvironment();
 	}
 
 	const loader = new CustomToolLoader(
