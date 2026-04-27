@@ -199,6 +199,8 @@ export interface AgentToolResult<T = any, _TInput = unknown> {
 	content: (TextContent | ImageContent)[];
 	// Details to be displayed in a UI or logged
 	details?: T;
+	// Whether this result should terminate the current agent turn without a follow-up model call
+	terminate?: boolean;
 }
 
 // Callback for streaming tool execution updates

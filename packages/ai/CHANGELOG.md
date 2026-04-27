@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional `terminate` metadata to tool-result messages for agent runtimes that support terminal tool results.
+
 ## [14.5.3] - 2026-04-27
 ### Added
 

@@ -378,6 +378,8 @@ export interface ToolResultMessage<TDetails = any> {
 	content: (TextContent | ImageContent)[]; // Supports text and images
 	details?: TDetails;
 	isError: boolean;
+	/** Whether this tool result should terminate the current agent turn without a follow-up model call. */
+	terminate?: boolean;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	/** Timestamp when output was pruned (ms since epoch). Undefined if unpruned. */

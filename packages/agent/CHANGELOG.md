@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added optional `terminate` support for tool results so deterministic tools can end the current turn without an automatic follow-up model call.
+
 ## [14.2.0] - 2026-04-23
 
 ### Changed

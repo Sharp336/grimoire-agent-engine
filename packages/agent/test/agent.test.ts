@@ -323,6 +323,122 @@ describe("Agent", () => {
 		]);
 	});
 
+	it("prompt() stops after a terminating tool result without a follow-up model call", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		let streamCallCount = 0;
+
+		const alphaTool: AgentTool<typeof toolSchema> = {
+			name: "alpha",
+			label: "Alpha",
+			description: "Alpha tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `alpha:${params.value}` }], terminate: true };
+			},
+		};
+
+		const agent = new Agent({
+			initialState: { tools: [alphaTool] },
+			streamFn: () => {
+				const callIndex = streamCallCount;
+				streamCallCount += 1;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (callIndex === 0) {
+						const message = createAssistantMessage(
+							[{ type: "toolCall", id: "tool-1", name: "alpha", arguments: { value: "hello" } }],
+							"toolUse",
+						);
+						stream.push({ type: "done", reason: "toolUse", message });
+					} else {
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "follow-up" }]),
+						});
+					}
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("run alpha");
+
+		expect(streamCallCount).toBe(1);
+		expect(agent.state.messages.map(message => message.role)).toEqual(["user", "assistant", "toolResult"]);
+		const toolResult = agent.state.messages.find(message => message.role === "toolResult");
+		expect(toolResult?.terminate).toBe(true);
+	});
+
+	it("prompt() follows up after a mixed terminating and non-terminating tool batch", async () => {
+		const toolSchema = Type.Object({ value: Type.String() });
+		let streamCallCount = 0;
+
+		const alphaTool: AgentTool<typeof toolSchema> = {
+			name: "alpha",
+			label: "Alpha",
+			description: "Alpha tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `alpha:${params.value}` }], terminate: true };
+			},
+		};
+		const betaTool: AgentTool<typeof toolSchema> = {
+			name: "beta",
+			label: "Beta",
+			description: "Beta tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: `beta:${params.value}` }] };
+			},
+		};
+
+		const agent = new Agent({
+			initialState: { tools: [alphaTool, betaTool] },
+			streamFn: () => {
+				const callIndex = streamCallCount;
+				streamCallCount += 1;
+				const stream = new MockAssistantStream();
+				queueMicrotask(() => {
+					if (callIndex === 0) {
+						const message = createAssistantMessage(
+							[
+								{ type: "toolCall", id: "tool-1", name: "alpha", arguments: { value: "hello" } },
+								{ type: "toolCall", id: "tool-2", name: "beta", arguments: { value: "world" } },
+							],
+							"toolUse",
+						);
+						stream.push({ type: "done", reason: "toolUse", message });
+					} else {
+						stream.push({
+							type: "done",
+							reason: "stop",
+							message: createAssistantMessage([{ type: "text", text: "follow-up" }]),
+						});
+					}
+				});
+				return stream;
+			},
+		});
+
+		await agent.prompt("run tools");
+
+		expect(streamCallCount).toBe(2);
+		expect(agent.state.messages.map(message => message.role)).toEqual([
+			"user",
+			"assistant",
+			"toolResult",
+			"toolResult",
+			"assistant",
+		]);
+		const toolResults = agent.state.messages.filter(message => message.role === "toolResult");
+		expect(toolResults.map(message => message.terminate)).toEqual([true, undefined]);
+		expect(agent.state.messages.at(-1)).toMatchObject({
+			role: "assistant",
+			content: [{ type: "text", text: "follow-up" }],
+		});
+	});
+
 	it("forwards sessionId and thinkingBudgets to streamFn options", async () => {
 		let receivedSessionId: string | undefined;
 		let receivedBudgets: ThinkingBudgets | undefined;
