@@ -13,13 +13,14 @@ const DISPLAY_NAME = "Plugins";
 const DESCRIPTION = "Installed OMP/Pi plugin package resources";
 const PRIORITY = 90;
 
-async function loadDirectSkill(skillDir: string): Promise<Skill | null> {
-	const skillPath = path.join(skillDir, "SKILL.md");
+async function loadDirectSkill(resourcePath: string): Promise<Skill | null> {
+	const isMarkdownFile = path.extname(resourcePath) === ".md";
+	const skillPath = isMarkdownFile ? resourcePath : path.join(resourcePath, "SKILL.md");
 	const content = await readFile(skillPath);
 	if (!content) return null;
 	const { frontmatter, body } = parseFrontmatter(content, { source: skillPath });
 	if (frontmatter.enabled === false || !frontmatter.description) return null;
-	const skillDirName = path.basename(skillDir);
+	const skillDirName = path.basename(isMarkdownFile ? path.dirname(skillPath) : resourcePath);
 	const rawName = frontmatter.name;
 	const name = typeof rawName === "string" ? rawName.trim() || skillDirName : skillDirName;
 	return {
@@ -33,6 +34,13 @@ async function loadDirectSkill(skillDir: string): Promise<Skill | null> {
 }
 
 async function scanPluginSkillPath(ctx: LoadContext, resourcePath: string): Promise<LoadResult<Skill>> {
+	if (path.extname(resourcePath) === ".md") {
+		const directSkill = await loadDirectSkill(resourcePath);
+		return {
+			items: directSkill ? [directSkill] : [],
+			warnings: directSkill ? [] : [`Failed to read skill file: ${resourcePath}`],
+		};
+	}
 	const collectionResult = await scanSkillsFromDir(ctx, {
 		dir: resourcePath,
 		providerId: PROVIDER_ID,

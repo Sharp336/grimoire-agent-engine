@@ -205,7 +205,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	exec(command: string, args: string[], options?: ExecOptions) {
 		return execCommand(command, args, options?.cwd ?? this.cwd, {
 			...options,
-			env: buildPiCompatEnv({ baseEnv: process.env }),
+			env: buildPiCompatEnv({ baseEnv: { ...process.env, ...options?.env } }),
 		});
 	}
 

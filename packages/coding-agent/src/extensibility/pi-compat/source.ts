@@ -4,11 +4,16 @@ import type { PiCompatInstallSource } from "./types";
 
 const SHELL_METACHARS = /[;&|`$(){}[\]<>\\]/;
 
+function isWindowsDrivePath(spec: string): boolean {
+	return /^[a-zA-Z]:[\\/]/.test(spec);
+}
+
 function assertSafeSpecifier(spec: string): void {
 	if (!spec || spec.includes("\0")) {
 		throw new Error("Package source must be a non-empty string");
 	}
-	if (SHELL_METACHARS.test(spec)) {
+	const valueToCheck = isWindowsDrivePath(spec) ? spec.replace(/\\/g, "/") : spec;
+	if (SHELL_METACHARS.test(valueToCheck)) {
 		throw new Error(`Invalid characters in package source: ${spec}`);
 	}
 }
@@ -62,6 +67,7 @@ function isLocalSource(spec: string): boolean {
 		spec.startsWith("../") ||
 		spec.startsWith("/") ||
 		spec.startsWith("~/") ||
+		isWindowsDrivePath(spec) ||
 		spec === "." ||
 		spec === ".." ||
 		spec.startsWith("file:")
@@ -71,6 +77,7 @@ function isLocalSource(spec: string): boolean {
 export function resolvePiCompatLocalPath(spec: string, cwd: string): string {
 	const raw = spec.startsWith("file:") ? spec.slice("file:".length) : spec;
 	const expanded = raw === "~" || raw.startsWith("~/") ? path.join(os.homedir(), raw.slice(2)) : raw;
+	if (isWindowsDrivePath(expanded)) return path.normalize(expanded);
 	return path.resolve(cwd, expanded);
 }
 

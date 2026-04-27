@@ -275,10 +275,6 @@ export class PluginManager {
 
 		await this.#ensurePackageJson();
 
-		if (options.compatPi) {
-			await activatePiCompatEnvironment({ packageName: source.packageNameHint, bridgeMode: "profile" });
-		}
-
 		if (options.dryRun) {
 			return {
 				name: source.packageNameHint ?? spec.packageName,
@@ -288,6 +284,10 @@ export class PluginManager {
 				enabledFeatures: spec.features === "*" ? null : (spec.features as string[] | null),
 				enabled: true,
 			};
+		}
+
+		if (options.compatPi) {
+			await activatePiCompatEnvironment({ packageName: source.packageNameHint, bridgeMode: "profile" });
 		}
 
 		if (source.kind === "local" && source.localPath) {

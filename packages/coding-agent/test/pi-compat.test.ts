@@ -3,6 +3,9 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, getPluginsDir, getPluginsNodeModules, setAgentDir } from "@oh-my-pi/pi-utils";
+import { loadCapability } from "../src/capability";
+import { type Skill, skillCapability } from "../src/capability/skill";
+import "../src/discovery/plugins";
 import {
 	doctorPiCompatTarget,
 	ensurePiCliShim,
@@ -11,6 +14,7 @@ import {
 	parsePiInstallSource,
 	planPiHomeSymlinkBridge,
 } from "../src/extensibility/pi-compat";
+import { PluginManager } from "../src/extensibility/plugins";
 import {
 	getAllPluginExtensionPaths,
 	getAllPluginPromptPaths,
@@ -51,6 +55,10 @@ describe("Pi compatibility source parsing", () => {
 		const local = parsePiInstallSource("./local-plugin", cwd);
 		expect(local.kind).toBe("local");
 		expect(local.localPath).toBe(path.join(cwd, "local-plugin"));
+		expect(parsePiInstallSource("C:/plugins/pi-local", cwd)).toMatchObject({
+			kind: "local",
+			localPath: path.normalize("C:/plugins/pi-local"),
+		});
 	});
 
 	it("rejects shell metacharacters in package sources", () => {
@@ -155,6 +163,28 @@ describe("Pi compatibility plugin resources", () => {
 			path.join(pluginDir, "extensions", "teams", "index.ts"),
 		]);
 	});
+
+	it("loads direct SKILL.md entries from plugin manifests", async () => {
+		const pluginsDir = getPluginsDir();
+		const pluginDir = path.join(getPluginsNodeModules(), "pi-direct-skill");
+		const skillPath = path.join(pluginDir, "skills", "direct", "SKILL.md");
+		writeJson(path.join(pluginsDir, "package.json"), {
+			name: "omp-plugins",
+			private: true,
+			dependencies: { "pi-direct-skill": "1.0.0" },
+		});
+		writeJson(path.join(pluginDir, "package.json"), {
+			name: "pi-direct-skill",
+			version: "1.0.0",
+			pi: { skills: ["skills/direct/SKILL.md"] },
+		});
+		fs.mkdirSync(path.dirname(skillPath), { recursive: true });
+		fs.writeFileSync(skillPath, "---\nname: direct\ndescription: Direct skill\n---\nBody\n");
+
+		const result = await loadCapability<Skill>(skillCapability.id, { providers: ["plugins"], cwd: process.cwd() });
+		expect(result.items.map(skill => skill.name)).toEqual(["direct"]);
+		expect(result.items[0]?.path).toBe(skillPath);
+	});
 });
 
 describe("Pi compatibility shims and doctor", () => {
@@ -175,6 +205,24 @@ describe("Pi compatibility shims and doctor", () => {
 		if (originalXdgDataHome === undefined) delete process.env.XDG_DATA_HOME;
 		else process.env.XDG_DATA_HOME = originalXdgDataHome;
 		setAgentDir(originalAgentDir);
+	});
+
+	it("does not activate Pi compatibility environment for dry-run installs", async () => {
+		const originalCompat = process.env.OMP_PI_COMPAT;
+		const originalBridge = process.env.OMP_PI_COMPAT_BRIDGE;
+		delete process.env.OMP_PI_COMPAT;
+		delete process.env.OMP_PI_COMPAT_BRIDGE;
+		try {
+			const manager = new PluginManager(process.cwd());
+			await manager.install("npm:pi-teams@0.9.14", { compatPi: true, dryRun: true });
+			expect(process.env.OMP_PI_COMPAT).toBeUndefined();
+			expect(process.env.OMP_PI_COMPAT_BRIDGE).toBeUndefined();
+		} finally {
+			if (originalCompat === undefined) delete process.env.OMP_PI_COMPAT;
+			else process.env.OMP_PI_COMPAT = originalCompat;
+			if (originalBridge === undefined) delete process.env.OMP_PI_COMPAT_BRIDGE;
+			else process.env.OMP_PI_COMPAT_BRIDGE = originalBridge;
+		}
 	});
 
 	it("generates scoped pi executable and import alias shims", async () => {
