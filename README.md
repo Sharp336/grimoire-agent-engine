@@ -1388,3 +1388,11 @@ MIT. See [LICENSE](LICENSE).
 
 Copyright (c) 2025 Mario Zechner  
 Copyright (c) 2025-2026 Can Bölük
+
+## 💰 Bounty Contribution
+
+- **Task:** GPT-5.5 context window should be 400k
+- **Reward:** $180
+- **Source:** GitHub-Paid
+- **Date:** 2026-04-27
+
