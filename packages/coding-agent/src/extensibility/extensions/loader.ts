@@ -7,7 +7,7 @@ import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model, TextContent } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "@oh-my-pi/pi-tui";
-import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { getPluginsNodeModules, hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
 import * as TypeBox from "@sinclair/typebox";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
@@ -104,6 +104,20 @@ export class ExtensionRuntime implements IExtensionRuntime {
 	}
 }
 
+function pluginPackageNameFromPath(filePath: string): string | undefined {
+	const nodeModulesPath = path.resolve(getPluginsNodeModules());
+	const resolvedPath = path.resolve(filePath);
+	const relativePath = path.relative(nodeModulesPath, resolvedPath);
+	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return undefined;
+
+	const parts = relativePath.split(path.sep).filter(Boolean);
+	if (parts.length === 0) return undefined;
+	if (parts[0]?.startsWith("@")) {
+		return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : undefined;
+	}
+	return parts[0];
+}
+
 /**
  * ExtensionAPI implementation for an extension.
  * Registration methods write to the extension object.
@@ -125,6 +139,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly runtime: IExtensionRuntime,
 		private readonly cwd: string,
 		public readonly events: EventBus,
+		private readonly packageName: string | undefined,
 	) {}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
@@ -205,7 +220,7 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 	exec(command: string, args: string[], options?: ExecOptions) {
 		return execCommand(command, args, options?.cwd ?? this.cwd, {
 			...options,
-			env: buildPiCompatEnv({ baseEnv: { ...process.env, ...options?.env } }),
+			env: buildPiCompatEnv({ baseEnv: { ...process.env, ...options?.env }, packageName: this.packageName }),
 		});
 	}
 
@@ -273,6 +288,11 @@ async function loadExtension(
 	runtime: IExtensionRuntime,
 ): Promise<{ extension: Extension | null; error: string | null }> {
 	const resolvedPath = resolvePath(extensionPath, cwd);
+	const packageName = pluginPackageNameFromPath(resolvedPath);
+
+	if (packageName) {
+		await activatePiCompatEnvironment({ packageName });
+	}
 
 	try {
 		const module = await import(resolvedPath);
@@ -292,6 +312,7 @@ async function loadExtension(
 			runtime,
 			cwd,
 			eventBus,
+			packageName,
 		);
 		await factory(api);
 
@@ -313,7 +334,14 @@ export async function loadExtensionFromFactory(
 	name = "<inline>",
 ): Promise<Extension> {
 	const extension = createExtension(name, name);
-	const api = new ConcreteExtensionAPI(await import("@oh-my-pi/pi-coding-agent"), extension, runtime, cwd, eventBus);
+	const api = new ConcreteExtensionAPI(
+		await import("@oh-my-pi/pi-coding-agent"),
+		extension,
+		runtime,
+		cwd,
+		eventBus,
+		undefined,
+	);
 	await factory(api);
 	return extension;
 }

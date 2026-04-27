@@ -201,6 +201,15 @@ export class PluginManager {
 		const deps = pkg.dependencies ?? {};
 		const changed = Object.entries(deps).filter(([name, version]) => previousDeps[name] !== version);
 		if (changed.length === 1) return changed[0][0];
+		for (const [name, version] of Object.entries(deps)) {
+			if (version !== installSpec) continue;
+			try {
+				await Bun.file(path.join(getPluginsNodeModules(), name, "package.json")).json();
+				return name;
+			} catch (err) {
+				if (!isEnoent(err)) throw err;
+			}
+		}
 		if (fallbackName) {
 			const actualName = extractPackageName(fallbackName);
 			try {

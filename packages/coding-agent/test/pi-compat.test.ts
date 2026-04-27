@@ -300,6 +300,38 @@ describe("Pi compatibility shims and doctor", () => {
 		expect(env.PI_TEAMS_ROOT_DIR).toBe(path.join(getAgentDir(), "teams"));
 	});
 
+	it("applies profile env when loading plugin extensions", async () => {
+		const envSnapshot = snapshotProcessEnv([
+			"HOME",
+			"PATH",
+			"OMP_PI_COMPAT",
+			"OMP_PI_COMPAT_HOME",
+			"OMP_PI_COMPAT_BRIDGE",
+			"PI_CODING_AGENT",
+			"PI_CODING_AGENT_DIR",
+			"PI_PACKAGE_DIR",
+			"PI_TEAMS_ROOT_DIR",
+			"PI_TEAMS_HOOKS_DIR",
+		]);
+		const pluginDir = path.join(getPluginsNodeModules(), "@tmustier", "pi-agent-teams");
+		const extensionPath = path.join(pluginDir, "dist", "extension.ts");
+		fs.mkdirSync(path.dirname(extensionPath), { recursive: true });
+		fs.writeFileSync(
+			extensionPath,
+			'export default function(pi) { pi.setLabel(process.env.PI_TEAMS_ROOT_DIR ?? "missing"); }\n',
+		);
+		process.env.OMP_PI_COMPAT_BRIDGE = "profile";
+		try {
+			const result = await loadExtensions([extensionPath], process.cwd());
+
+			expect(result.errors).toHaveLength(0);
+			expect(result.extensions[0]?.label).toBe(path.join(getAgentDir(), "teams"));
+		} finally {
+			fs.rmSync(pluginDir, { recursive: true, force: true });
+			restoreProcessEnv(envSnapshot);
+		}
+	});
+
 	it("preserves selected bridge mode when loading extensions", async () => {
 		const envSnapshot = snapshotProcessEnv([
 			"HOME",
