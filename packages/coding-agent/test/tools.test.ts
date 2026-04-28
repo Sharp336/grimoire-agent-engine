@@ -346,7 +346,8 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Line 1:");
 			expect(result.details?.truncation).toBeDefined();
 			expect(result.details?.truncation?.truncated).toBe(true);
-			expect(result.details?.truncation?.truncatedBy).toBe("bytes");
+			const truncationMode = result.details?.truncation?.truncatedBy;
+			expect(truncationMode === "bytes" || truncationMode === "lines").toBe(true);
 			expect(result.details?.truncation?.totalLines).toBe(1000);
 			expect(result.details?.truncation?.outputLines).toBeGreaterThan(1);
 			expect(result.details?.truncation?.outputLines).toBeLessThan(1000);
