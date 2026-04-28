@@ -11,14 +11,18 @@ import {
 	replaceTabs,
 	Spacer,
 	Text,
-	type TUI,
 	truncateToWidth,
+	type TUI,
+	type Component,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { matchesAppExternalEditor, matchesSelectCancel } from "../../modes/utils/keybinding-matchers";
 import { CountdownTimer } from "./countdown-timer";
 import { DynamicBorder } from "./dynamic-border";
+
+const MIN_SPLIT_WIDTH = 96;
+const PREVIEW_MIN_WIDTH = 30;
 
 export interface HookSelectorOptions {
 	tui?: TUI;
@@ -55,12 +59,93 @@ class OutlinedList extends Container {
 	}
 }
 
+class SelectorBody implements Component {
+	#listLines: string[] = [];
+	#outlinedList: OutlinedList | undefined;
+	#preview: Markdown;
+
+	constructor(outline: boolean) {
+		if (outline) {
+			this.#outlinedList = new OutlinedList();
+		}
+		this.#preview = new Markdown("", 0, 0, getMarkdownTheme(), { color: t => theme.fg("text", t) });
+	}
+
+	setListLines(lines: string[]): void {
+		this.#listLines = lines;
+		this.#outlinedList?.setLines(lines);
+	}
+
+	setPreviewText(text: string): void {
+		this.#preview.setText(text);
+	}
+
+	invalidate(): void {
+		this.#outlinedList?.invalidate();
+		this.#preview.invalidate();
+	}
+
+	render(width: number): string[] {
+		if (width >= MIN_SPLIT_WIDTH) {
+			const split = this.#renderSplit(width);
+			if (split) return split;
+		}
+
+		return this.#renderStacked(width);
+	}
+
+	#renderSplit(width: number): string[] | null {
+		const separator = theme.fg("dim", ` ${theme.boxSharp.vertical} `);
+		const separatorWidth = visibleWidth(separator);
+		const available = Math.max(1, width - separatorWidth);
+		const listWidth = Math.max(1, Math.floor(available * 0.45));
+		const previewWidth = Math.max(1, available - listWidth);
+		if (previewWidth < PREVIEW_MIN_WIDTH) {
+			return null;
+		}
+
+		const listLines = this.#renderList(listWidth);
+		const previewLines = this.#renderPreview(previewWidth);
+		const lineCount = Math.max(listLines.length, previewLines.length);
+		const lines: string[] = [];
+
+		for (let i = 0; i < lineCount; i++) {
+			const left = truncateToWidth(listLines[i] ?? "", listWidth);
+			const leftPadding = padding(Math.max(0, listWidth - visibleWidth(left)));
+			const right = truncateToWidth(previewLines[i] ?? "", previewWidth);
+			lines.push(`${left}${leftPadding}${separator}${right}`);
+		}
+
+		return lines;
+	}
+
+	#renderStacked(width: number): string[] {
+		const listLines = this.#renderList(width);
+		const previewLines = this.#renderPreview(width);
+		return [...listLines, "", ...previewLines];
+	}
+
+	#renderList(width: number): string[] {
+		if (this.#outlinedList) {
+			return this.#outlinedList.render(width);
+		}
+
+		return this.#listLines.map(line => truncateToWidth(replaceTabs(line), width));
+	}
+
+	#renderPreview(width: number): string[] {
+		const header = theme.fg("dim", "Preview");
+		const headerLine = truncateToWidth(header, width);
+		const contentLines = this.#preview.render(width);
+		return [headerLine, ...contentLines];
+	}
+}
+
 export class HookSelectorComponent extends Container {
 	#options: string[];
 	#selectedIndex: number;
 	#maxVisible: number;
-	#listContainer: Container | undefined;
-	#outlinedList: OutlinedList | undefined;
+	#selectorBody: SelectorBody;
 	#onSelectCallback: (option: string) => void;
 	#onCancelCallback: () => void;
 	#titleComponent: Markdown;
@@ -113,13 +198,8 @@ export class HookSelectorComponent extends Container {
 			);
 		}
 
-		if (opts?.outline) {
-			this.#outlinedList = new OutlinedList();
-			this.addChild(this.#outlinedList);
-		} else {
-			this.#listContainer = new Container();
-			this.addChild(this.#listContainer);
-		}
+		this.#selectorBody = new SelectorBody(Boolean(opts?.outline));
+		this.addChild(this.#selectorBody);
 		this.addChild(new Spacer(1));
 		const controlsHint = opts?.helpText ?? "up/down navigate  enter select  esc cancel";
 		this.addChild(new Text(theme.fg("dim", controlsHint), 1, 0));
@@ -150,14 +230,9 @@ export class HookSelectorComponent extends Container {
 		if (startIndex > 0 || endIndex < this.#options.length) {
 			lines.push(theme.fg("dim", `  (${this.#selectedIndex + 1}/${this.#options.length})`));
 		}
-		if (this.#outlinedList) {
-			this.#outlinedList.setLines(lines);
-			return;
-		}
-		this.#listContainer?.clear();
-		for (const line of lines) {
-			this.#listContainer?.addChild(new Text(line, 1, 0));
-		}
+
+		this.#selectorBody.setListLines(lines);
+		this.#selectorBody.setPreviewText(this.#options[this.#selectedIndex] ?? "");
 	}
 
 	handleInput(keyData: string): void {
