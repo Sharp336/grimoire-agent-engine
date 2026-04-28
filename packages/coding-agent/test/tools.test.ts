@@ -344,8 +344,12 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result);
 
 			expect(output).toContain("Line 1:");
-			// Should show byte limit message
-			expect(output).toMatch(/\[Showing lines 1-\d+ of 1000 \(\d+(\.\d+)?\s*KB limit\)\. Use sel=\d+ to continue\]/);
+			expect(result.details?.truncation).toBeDefined();
+			expect(result.details?.truncation?.truncated).toBe(true);
+			expect(result.details?.truncation?.truncatedBy).toBe("bytes");
+			expect(result.details?.truncation?.totalLines).toBe(1000);
+			expect(result.details?.truncation?.outputLines).toBeGreaterThan(1);
+			expect(result.details?.truncation?.outputLines).toBeLessThan(1000);
 		});
 
 		it("should handle offset parameter", async () => {
