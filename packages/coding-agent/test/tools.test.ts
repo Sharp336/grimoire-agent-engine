@@ -12,10 +12,10 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/find";
-import { SearchTool } from "@oh-my-pi/pi-coding-agent/tools/search";
 import { JobTool } from "@oh-my-pi/pi-coding-agent/tools/job";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { SearchTool } from "@oh-my-pi/pi-coding-agent/tools/search";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import * as markitUtils from "@oh-my-pi/pi-coding-agent/utils/markit";
 import { $which, Snowflake } from "@oh-my-pi/pi-utils";
@@ -1224,7 +1224,9 @@ function b() {
 			fs.writeFileSync(testFile, content);
 
 			const contextSettings = Settings.isolated({ "search.contextBefore": 1, "search.contextAfter": 1 });
-			const contextSearchTool = wrapToolWithMetaNotice(new SearchTool(createTestToolSession(testDir, contextSettings)));
+			const contextSearchTool = wrapToolWithMetaNotice(
+				new SearchTool(createTestToolSession(testDir, contextSettings)),
+			);
 			const result = await contextSearchTool.execute("test-call-12", {
 				pattern: "match",
 				path: testFile,
