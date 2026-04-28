@@ -30,13 +30,13 @@ import { formatBytes, formatDuration } from "../tools/render-utils";
 import "../tools/review";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
+import { inheritContextFilesForSubagent } from "./context-files";
 import { discoverAgents, getAgent } from "./discovery";
 import { runSubprocess } from "./executor";
 import { resolveIsolationBackendForTaskExecution } from "./isolation-backend";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
-import { inheritContextFilesForSubagent } from "./context-files";
 import { getTaskSimpleModeCapabilities, type TaskSimpleMode } from "./simple-mode";
 import { renderTemplate } from "./template";
 import {
@@ -64,8 +64,6 @@ import {
 	mergeTaskBranches,
 	type WorktreeBaseline,
 } from "./worktree";
-
-
 
 function createUsageTotals(): Usage {
 	return {

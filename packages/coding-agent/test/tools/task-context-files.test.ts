@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import type { ToolSession } from "../../src/tools";
 import { inheritContextFilesForSubagent } from "../../src/task/context-files";
+import type { ToolSession } from "../../src/tools";
 
 describe("task context file inheritance", () => {
 	it("preserves AGENTS.md files for subagents", () => {
