@@ -14,11 +14,16 @@ const TEST_AGENTS = [
 	},
 ];
 
-function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
+function createSession(
+	overrides: Partial<ToolSession> = {},
+	simpleMode?: "default" | "schema-free" | "independent",
+): ToolSession {
+	const settings = Settings.isolated();
+	if (simpleMode) settings.override("task.simple", simpleMode);
 	return {
 		cwd: "/tmp",
 		hasUI: false,
-		settings: Settings.isolated(),
+		settings,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 		...overrides,
@@ -51,7 +56,7 @@ describe("task.simple", () => {
 			projectAgentsDir: null,
 		});
 
-		const tool = await TaskTool.create(createSession({ "task.simple": "schema-free" }));
+		const tool = await TaskTool.create(createSession({}, "schema-free"));
 		const properties = getSchemaProperties(tool);
 
 		expect(properties.context).toBeDefined();
@@ -68,7 +73,7 @@ describe("task.simple", () => {
 			projectAgentsDir: null,
 		});
 
-		const tool = await TaskTool.create(createSession({ "task.simple": "independent" }));
+		const tool = await TaskTool.create(createSession({}, "independent"));
 		const properties = getSchemaProperties(tool);
 
 		expect(properties.context).toBeUndefined();
@@ -86,7 +91,7 @@ describe("task.simple", () => {
 			projectAgentsDir: null,
 		});
 
-		const schemaFreeTool = await TaskTool.create(createSession({ "task.simple": "schema-free" }));
+		const schemaFreeTool = await TaskTool.create(createSession({}, "schema-free"));
 		const schemaFreeResult = await schemaFreeTool.execute("tool-1", {
 			agent: "task",
 			schema: '{"properties":{"ok":{"type":"boolean"}}}',
@@ -94,7 +99,7 @@ describe("task.simple", () => {
 		} as TaskParams);
 		expect(getFirstText(schemaFreeResult)).toContain("does not accept `schema`");
 
-		const independentTool = await TaskTool.create(createSession({ "task.simple": "independent" }));
+		const independentTool = await TaskTool.create(createSession({}, "independent"));
 		const independentResult = await independentTool.execute("tool-2", {
 			agent: "task",
 			context: "Shared background",
