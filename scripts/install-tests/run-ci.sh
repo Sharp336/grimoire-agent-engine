@@ -38,6 +38,16 @@ find_tarball() {
 	echo "${matches[0]}"
 }
 
+discover_packages() {
+	for dir in "$ROOT_DIR"/packages/*/; do
+		[ -f "$dir/package.json" ] || continue
+		local is_private
+		is_private=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$dir/package.json','utf8')).private || false)")
+		[ "$is_private" = "true" ] && continue
+		printf '%s\n' "$dir"
+	done
+}
+
 section "Binary install smoke"
 bun --cwd=packages/natives run build
 bun --cwd=packages/coding-agent run build
@@ -59,20 +69,28 @@ SOURCE_BUN_HOME="$WORK_DIR/bun-source"
 section "Tarball install smoke"
 TARBALL_DIR="$WORK_DIR/tarballs"
 mkdir -p "$TARBALL_DIR"
-for pkg in utils natives ai agent tui stats coding-agent; do
+
+declare -a PKG_DIRS
+mapfile -t PKG_DIRS < <(discover_packages)
+for pkg_dir in "${PKG_DIRS[@]}"; do
 	(
-		cd "$ROOT_DIR/packages/$pkg"
+		cd "$pkg_dir"
 		bun pm pack --destination "$TARBALL_DIR" --quiet >/dev/null
 	)
 done
 
-utils_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-utils-*.tgz)"
-natives_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-natives-*.tgz)"
-ai_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-ai-*.tgz)"
-agent_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-agent-core-*.tgz)"
-tui_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-tui-*.tgz)"
-stats_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-omp-stats-*.tgz)"
-coding_agent_tgz="$(find_tarball "$TARBALL_DIR"/oh-my-pi-pi-coding-agent-*.tgz)"
+declare -A TARBALLS
+declare -a OVERRIDES
+declare -a ALL_TARBALLS
+for pkg_dir in "${PKG_DIRS[@]}"; do
+	pkg_name=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$pkg_dir/package.json','utf8')).name)")
+	tarball_stem="${pkg_name#@}"       # strip leading @
+	tarball_stem="${tarball_stem//\//-}" # replace / with -
+	pkg_tgz="$(find_tarball "$TARBALL_DIR"/${tarball_stem}-*.tgz)"
+	TARBALLS["$pkg_name"]="$pkg_tgz"
+	OVERRIDES+=("$pkg_name=$pkg_tgz")
+	ALL_TARBALLS+=("$pkg_tgz")
+done
 
 TARBALL_APP_DIR="$WORK_DIR/tarball-install"
 mkdir -p "$TARBALL_APP_DIR"
@@ -84,19 +102,11 @@ mkdir -p "$TARBALL_APP_DIR"
 	# (version 12.x.y hasn't been published yet when CI runs pre-release)
 	node -e "
 		const pkg = JSON.parse(require('fs').readFileSync('package.json', 'utf8'));
-		pkg.overrides = {
-			'@oh-my-pi/pi-utils': '$utils_tgz',
-			'@oh-my-pi/pi-natives': '$natives_tgz',
-			'@oh-my-pi/pi-ai': '$ai_tgz',
-			'@oh-my-pi/pi-agent-core': '$agent_tgz',
-			'@oh-my-pi/pi-tui': '$tui_tgz',
-			'@oh-my-pi/omp-stats': '$stats_tgz',
-			'@oh-my-pi/pi-coding-agent': '$coding_agent_tgz'
-		};
+		pkg.overrides = Object.fromEntries(process.argv.slice(1).map(e => e.split('=')));
 		require('fs').writeFileSync('package.json', JSON.stringify(pkg, null, 2));
-	"
+	" "${OVERRIDES[@]}"
 
-	bun add "$utils_tgz" "$natives_tgz" "$ai_tgz" "$agent_tgz" "$tui_tgz" "$stats_tgz" "$coding_agent_tgz"
+	bun add "${ALL_TARBALLS[@]}"
 	smoke_cli ./node_modules/.bin/omp
 )
 
