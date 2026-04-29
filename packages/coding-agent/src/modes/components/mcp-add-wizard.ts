@@ -6,6 +6,7 @@
 import {
 	Container,
 	Input,
+	isKeyRelease,
 	matchesKey,
 	replaceTabs,
 	Spacer,
@@ -463,6 +464,8 @@ export class MCPAddWizard extends Container {
 	}
 
 	handleInput(keyData: string): void {
+		// Ignore key-release events to prevent focus-shift ghost input.
+		if (isKeyRelease(keyData)) return;
 		// Handle Ctrl+C to cancel wizard immediately
 		if (keyData === "\x03") {
 			// Ctrl+C pressed - cancel wizard
