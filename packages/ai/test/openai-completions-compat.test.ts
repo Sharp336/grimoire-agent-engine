@@ -282,6 +282,17 @@ describe("openai-completions compatibility", () => {
 	});
 });
 
+describe("opencode-go bundled Qwen models", () => {
+	for (const id of ["qwen3.5-plus", "qwen3.6-plus"] as const) {
+		it(`${id} uses the documented OpenAI-compatible endpoint`, () => {
+			const model = getBundledModel("opencode-go", id);
+
+			expect(model?.api).toBe("openai-completions");
+			expect(model?.baseUrl).toBe("https://opencode.ai/zen/go/v1");
+		});
+	}
+});
+
 describe("kimi model detection via detectCompat", () => {
 	function kimiOpenCodeModel(id: string): Model<"openai-completions"> {
 		return {
