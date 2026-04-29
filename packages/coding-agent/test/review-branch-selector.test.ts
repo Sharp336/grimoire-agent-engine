@@ -66,6 +66,29 @@ describe("searchable review branch selection", () => {
 		expect(selected).toBe("origin/feature/payments");
 	});
 
+	it("treats typed j/k characters as search input instead of navigation", () => {
+		let selected: string | undefined;
+		const selector = new SearchableStringSelectorComponent(
+			"Select base branch to compare against",
+			["origin/feature/kappa", "origin/feature/payments", "origin/chore/docs"],
+			value => {
+				selected = value;
+			},
+			() => {},
+		);
+
+		selector.handleInput("k");
+
+		const rendered = renderText(selector);
+		expect(rendered).toContain("origin/feature/kappa");
+		expect(rendered).not.toContain("origin/feature/payments");
+		expect(rendered).not.toContain("origin/chore/docs");
+
+		selector.handleInput("\n");
+
+		expect(selected).toBe("origin/feature/kappa");
+	});
+
 	it("uses the searchable selector for PR-style review base branch selection", async () => {
 		vi.spyOn(git.branch, "list").mockResolvedValue(["origin/main", "origin/feature/payments", "origin/chore/docs"]);
 		vi.spyOn(git.branch, "current").mockResolvedValue("topic");

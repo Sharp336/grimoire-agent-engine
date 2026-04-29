@@ -14,6 +14,7 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { FindTool } from "@oh-my-pi/pi-coding-agent/tools/find";
 import { JobTool } from "@oh-my-pi/pi-coding-agent/tools/job";
 import { wrapToolWithMetaNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { formatPathRelativeToCwd } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { SearchTool } from "@oh-my-pi/pi-coding-agent/tools/search";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -336,8 +337,8 @@ describe("Coding Agent Tools", () => {
 
 		it("should truncate when byte limit exceeded", async () => {
 			const testFile = path.join(testDir, "large-bytes.txt");
-			// Create file with long lines so the byte budget triggers before the line limit.
-			const lines = Array.from({ length: 1000 }, (_, i) => `Line ${i + 1}: ${"x".repeat(600)}`);
+			// Keep line count below the default line limit so truncation is caused by bytes, not lines.
+			const lines = Array.from({ length: 400 }, (_, i) => `Line ${i + 1}: ${"x".repeat(1000)}`);
 			fs.writeFileSync(testFile, lines.join("\n"));
 
 			const result = await readTool.execute("test-call-4", { path: testFile });
@@ -345,7 +346,9 @@ describe("Coding Agent Tools", () => {
 
 			expect(output).toContain("Line 1:");
 			// Should show byte limit message
-			expect(output).toMatch(/\[Showing lines 1-\d+ of 1000 \(\d+(\.\d+)?\s*KB limit\)\. Use sel=\d+ to continue\]/);
+			expect(output).toMatch(
+				/\[Showing lines 1-\d+ of 400 \(\d+(\.\d+)?\s*KB limit\)\. Use sel=\d+ to continue(?:\. Read artifact:\/\/[^\]]+ for full output)?\]/,
+			);
 		});
 
 		it("should handle offset parameter", async () => {
@@ -548,7 +551,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("Bytes:");
 			expect(output).toContain("Dimensions:");
 			expect(output).toContain("inspect_image");
-			expect(output).toContain(`path="${path.basename(testFile)}"`);
+			expect(output).toContain(`path="${formatPathRelativeToCwd(testFile, testDir)}"`);
 			expect(output).toContain("question");
 			expect(output).not.toContain("optional context");
 			expect(result.content.some(c => c.type === "image")).toBe(false);
@@ -574,7 +577,7 @@ describe("Coding Agent Tools", () => {
 			const result = await writeTool.execute("test-call-3", { path: testFile, content });
 
 			expect(getTextOutput(result)).toContain("Successfully wrote");
-			expect(getTextOutput(result)).toContain(path.basename(testFile));
+			expect(getTextOutput(result)).toContain(formatPathRelativeToCwd(testFile, testDir));
 		});
 
 		it("should create parent directories", async () => {
@@ -593,7 +596,7 @@ describe("Coding Agent Tools", () => {
 			const result = await writeTool.execute("test-call-4-local", { path: localPath, content });
 
 			expect(getTextOutput(result)).toContain(
-				`Successfully wrote ${content.length} bytes to session/local/handoffs/new-output.json`,
+				`Successfully wrote ${content.length} bytes to ${formatPathRelativeToCwd(expectedPath, testDir)}`,
 			);
 			expect(fs.existsSync(expectedPath)).toBe(true);
 			expect(fs.readFileSync(expectedPath, "utf-8")).toBe(content);
@@ -616,7 +619,7 @@ describe("Coding Agent Tools", () => {
 			});
 
 			expect(getTextOutput(result)).toContain(
-				`Successfully wrote ${content.length} bytes to ${path.basename(archivePath)}:pkg/README.md`,
+				`Successfully wrote ${content.length} bytes to ${formatPathRelativeToCwd(archivePath, testDir)}:pkg/README.md`,
 			);
 
 			const unzipped = unzipSync(new Uint8Array(fs.readFileSync(archivePath)));
@@ -634,7 +637,7 @@ describe("Coding Agent Tools", () => {
 			});
 
 			expect(getTextOutput(result)).toContain(
-				`Successfully wrote ${content.length} bytes to nested/${path.basename(archivePath)}:pkg/new.txt`,
+				`Successfully wrote ${content.length} bytes to ${formatPathRelativeToCwd(archivePath, testDir)}:pkg/new.txt`,
 			);
 			expect(fs.existsSync(archivePath)).toBe(true);
 
@@ -653,7 +656,7 @@ describe("Coding Agent Tools", () => {
 			});
 
 			expect(getTextOutput(result)).toContain(
-				`Successfully wrote ${content.length} bytes to ${path.basename(archivePath)}`,
+				`Successfully wrote ${content.length} bytes to ${formatPathRelativeToCwd(archivePath, testDir)}`,
 			);
 			expect(fs.readFileSync(archivePath, "utf-8")).toBe(content);
 		});

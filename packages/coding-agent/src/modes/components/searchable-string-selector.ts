@@ -113,14 +113,14 @@ export class SearchableStringSelectorComponent extends Container {
 
 	handleInput(keyData: string): void {
 		const hasOptions = this.#filteredOptions.length > 0;
-		if (matchesKey(keyData, "up") || keyData === "k") {
+		if (matchesKey(keyData, "up")) {
 			if (!hasOptions) return;
 			this.#selectedIndex = Math.max(0, this.#selectedIndex - 1);
 			this.#updateList();
 			return;
 		}
 
-		if (matchesKey(keyData, "down") || keyData === "j") {
+		if (matchesKey(keyData, "down")) {
 			if (!hasOptions) return;
 			this.#selectedIndex = Math.min(this.#filteredOptions.length - 1, this.#selectedIndex + 1);
 			this.#updateList();
