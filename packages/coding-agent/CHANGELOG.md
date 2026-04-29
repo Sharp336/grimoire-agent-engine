@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added search filtering to the `/review` PR-style base branch selector so large branch lists can be narrowed before selection.
 
 ### Fixed
 

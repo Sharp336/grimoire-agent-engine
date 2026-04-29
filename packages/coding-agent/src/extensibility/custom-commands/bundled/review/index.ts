@@ -14,6 +14,7 @@
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { CustomCommand, CustomCommandAPI } from "../../../../extensibility/custom-commands/types";
 import type { HookCommandContext } from "../../../../extensibility/hooks/types";
+import { SearchableStringSelectorComponent } from "../../../../modes/components/searchable-string-selector";
 import reviewRequestTemplate from "../../../../prompts/review-request.md" with { type: "text" };
 import * as git from "../../../../utils/git";
 
@@ -269,7 +270,15 @@ export class ReviewCommand implements CustomCommand {
 					return undefined;
 				}
 
-				const baseBranch = await ctx.ui.select("Select base branch to compare against", branches);
+				const baseBranch = await ctx.ui.custom<string | undefined>(
+					(_tui, _theme, _keybindings, done) =>
+						new SearchableStringSelectorComponent(
+							"Select base branch to compare against",
+							branches,
+							branch => done(branch),
+							() => done(undefined),
+						),
+				);
 				if (!baseBranch) return undefined;
 
 				const currentBranch = await getCurrentBranch(this.api);
