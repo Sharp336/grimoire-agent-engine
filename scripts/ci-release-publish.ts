@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
 import * as path from "node:path";
-import { $ } from "bun";
+import { readFileSync } from "node:fs";
+import { $, Glob } from "bun";
 
 interface PublishPackage {
 	dir: string;
@@ -13,15 +14,23 @@ interface PackageJson {
 
 const repoRoot = path.join(import.meta.dir, "..");
 const isDryRun = process.argv.includes("--dry-run");
-const packageDirs: PublishPackage[] = [
-	{ dir: "packages/utils" },
-	{ dir: "packages/ai" },
-	{ dir: "packages/natives" },
-	{ dir: "packages/tui" },
-	{ dir: "packages/stats" },
-	{ dir: "packages/agent" },
-	{ dir: "packages/coding-agent" },
-];
+// Derive package list from workspace config instead of hardcoding (#856)
+const rootPkg = await Bun.file(path.join(repoRoot, "package.json")).json();
+const workspacePatterns: string[] = rootPkg.workspaces?.packages ?? rootPkg.workspaces ?? [];
+const packageDirs: PublishPackage[] = workspacePatterns
+	.flatMap((pattern: string) => {
+		const glob = new Glob(pattern);
+		return Array.from(glob.scanSync({ cwd: repoRoot, onlyFiles: false }));
+	})
+	.filter((dir: string) => {
+		try {
+			const pkg = JSON.parse(readFileSync(path.join(repoRoot, dir, "package.json"), "utf8"));
+			return !pkg.private;
+		} catch {
+			return false;
+		}
+	})
+	.map((dir: string) => ({ dir }));
 const alreadyPublishedPatterns = [
 	"previously published",
 	"cannot publish over",
