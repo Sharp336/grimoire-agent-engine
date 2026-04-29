@@ -31,15 +31,6 @@ const packageDirs: PublishPackage[] = workspacePatterns
 		}
 	})
 	.map((dir: string) => ({ dir }));
-const alreadyPublishedPatterns = [
-	"previously published",
-	"cannot publish over",
-	"You cannot publish over",
-];
-
-function isAlreadyPublished(output: string): boolean {
-	return alreadyPublishedPatterns.some((pattern) => output.includes(pattern));
-}
 
 async function readPackageJson(packageDir: string): Promise<PackageJson> {
 	return (await Bun.file(path.join(repoRoot, packageDir, "package.json")).json()) as PackageJson;
@@ -59,17 +50,15 @@ async function publishPackage(pkg: PublishPackage): Promise<void> {
 	}
 
 	console.log(`Publishing ${packageName}...`);
-	const result = await $`bun publish --access public`.cwd(path.join(repoRoot, pkg.dir)).quiet().nothrow();
+	// --tolerate-republish exits 0 when version already exists (#857)
+	const result = await $`bun publish --access public --tolerate-republish`.cwd(path.join(repoRoot, pkg.dir)).quiet().nothrow();
 	const output = `${result.stdout.toString()}${result.stderr.toString()}`.trim();
 	if (result.exitCode === 0) {
 		if (output) console.log(output);
 		return;
 	}
+	// Only real failures reach here
 	if (output) console.log(output);
-	if (isAlreadyPublished(output)) {
-		console.log("Already published, skipping");
-		return;
-	}
 	process.exit(result.exitCode ?? 1);
 }
 
