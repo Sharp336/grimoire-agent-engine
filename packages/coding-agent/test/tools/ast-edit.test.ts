@@ -6,6 +6,7 @@ import { adaptSchemaForStrict } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
 import { createTools, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { formatPathRelativeToCwd } from "@oh-my-pi/pi-coding-agent/tools/path-utils";
 
 type InvokedToolResult = {
 	content: Array<{ type: string; text?: string }>;
@@ -218,8 +219,14 @@ describe("ast_edit tool schema", () => {
 			expect(details?.totalReplacements).toBe(2);
 			expect(details?.fileReplacements).toEqual(
 				expect.arrayContaining([
-					expect.objectContaining({ path: "packages/pkg-123/src/root.ts", count: 1 }),
-					expect.objectContaining({ path: "packages/pkg-123/src/nested/child.ts", count: 1 }),
+					expect.objectContaining({
+						path: formatPathRelativeToCwd(path.join(sourceDir, "root.ts"), tempDir),
+						count: 1,
+					}),
+					expect.objectContaining({
+						path: formatPathRelativeToCwd(path.join(nestedDir, "child.ts"), tempDir),
+						count: 1,
+					}),
 				]),
 			);
 
