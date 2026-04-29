@@ -1558,6 +1558,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleSessionCommand();
 	}
 
+	handleDiffCommand(args: string): Promise<void> {
+		return this.#commandController.handleDiffCommand(args);
+	}
+
 	handleJobsCommand(): Promise<void> {
 		return this.#commandController.handleJobsCommand();
 	}

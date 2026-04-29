@@ -95,6 +95,10 @@ interface MenuRoleAction {
 const ALL_TAB = "ALL";
 const CANONICAL_TAB = "CANONICAL";
 
+const DEFAULT_MODEL_LIST_VISIBLE_ROWS = 10;
+const MODEL_SELECTOR_CHROME_ROWS = 13;
+const MIN_MODEL_LIST_VISIBLE_ROWS = 1;
+
 /**
  * Component that renders a model selector with provider tabs and context menu.
  * - Tab/Arrow Left/Right: Switch between provider tabs
@@ -112,6 +116,7 @@ export class ModelSelectorComponent extends Container {
 	#filteredModels: ModelItem[] = [];
 	#canonicalModels: CanonicalModelItem[] = [];
 	#filteredCanonicalModels: CanonicalModelItem[] = [];
+	#renderedListMaxVisible = DEFAULT_MODEL_LIST_VISIBLE_ROWS;
 	#selectedIndex: number = 0;
 	#roles = {} as Record<string, RoleAssignment | undefined>;
 	#settings = null as unknown as Settings;
@@ -612,7 +617,8 @@ export class ModelSelectorComponent extends Container {
 		const isCanonicalTab = this.#isCanonicalTab();
 		const visibleItems = isCanonicalTab ? this.#filteredCanonicalModels : this.#filteredModels;
 
-		const maxVisible = 10;
+		const maxVisible = this.#getListMaxVisible();
+		this.#renderedListMaxVisible = maxVisible;
 		const startIndex = Math.max(
 			0,
 			Math.min(this.#selectedIndex - Math.floor(maxVisible / 2), visibleItems.length - maxVisible),
@@ -712,6 +718,24 @@ export class ModelSelectorComponent extends Container {
 			);
 		}
 	}
+	#getListMaxVisible(): number {
+		const rows = this.#tui.terminal?.rows;
+		if (!Number.isFinite(rows) || rows <= 0) {
+			return DEFAULT_MODEL_LIST_VISIBLE_ROWS;
+		}
+
+		const availableRows = rows - MODEL_SELECTOR_CHROME_ROWS;
+		return Math.max(MIN_MODEL_LIST_VISIBLE_ROWS, Math.min(DEFAULT_MODEL_LIST_VISIBLE_ROWS, availableRows));
+	}
+
+	override render(width: number): string[] {
+		const desiredLineCount = this.#getListMaxVisible();
+		if (this.#renderedListMaxVisible !== desiredLineCount) {
+			this.#updateList();
+		}
+		return super.render(width);
+	}
+
 	#getThinkingLevelsForModel(model: Model): ReadonlyArray<ThinkingLevel> {
 		return [ThinkingLevel.Inherit, ThinkingLevel.Off, ...getSupportedEfforts(model)];
 	}

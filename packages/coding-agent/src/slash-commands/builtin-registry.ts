@@ -309,6 +309,25 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		},
 	},
 	{
+		name: "diff",
+		description: "Show repository diff snapshots",
+		subcommands: [
+			{ name: "show", description: "Show diff since latest snapshot", usage: "[latest|session|<label>]" },
+			{ name: "stat", description: "Show diff stat since a snapshot", usage: "[latest|session|<label>]" },
+			{
+				name: "snapshot",
+				description: "Create a new diff snapshot",
+				usage: "[label] [--repo <path>|--repo-root <path>] [--ref <revision>]",
+			},
+			{ name: "list", description: "List tracked diff snapshots" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			await runtime.ctx.handleDiffCommand(command.args);
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "jobs",
 		description: "Show async background jobs status",
 		handle: async (_command, runtime) => {

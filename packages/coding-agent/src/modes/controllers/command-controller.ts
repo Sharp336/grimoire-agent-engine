@@ -38,14 +38,120 @@ import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
+import {
+	createRepoDiffSnapshotAt,
+	createRepoDiffSnapshotsForKnownRepositories,
+	diffRepoFromSnapshot,
+	getRepoDiffSnapshots,
+	selectRepoDiffSnapshotForActiveRepo,
+} from "../../session/repo-diff-snapshots";
 import type { NewSessionOptions } from "../../session/session-manager";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
-import { replaceTabs } from "../../tools/render-utils";
+import { replaceTabs, shortenPath } from "../../tools/render-utils";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
+import { parseCommandArgs } from "../../utils/command-args";
+import * as git from "../../utils/git";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
+
+const MAX_DIFF_DISPLAY_CHARS = 200_000;
+
+function truncateDiffForDisplay(text: string): string {
+	if (text.length <= MAX_DIFF_DISPLAY_CHARS) return text;
+	return `${text.slice(0, MAX_DIFF_DISPLAY_CHARS)}\n\n[Diff output truncated at ${MAX_DIFF_DISPLAY_CHARS.toLocaleString()} characters]`;
+}
+
+function escapeMarkdownFence(text: string): string {
+	return text.replaceAll("```", "``\\`");
+}
+
+export function formatRepoDiffDisplayPath(repoRoot: string): string {
+	return replaceTabs(shortenPath(repoRoot));
+}
+
+const DIFF_SNAPSHOT_USAGE = "Usage: /diff snapshot [label] [--repo <path>|--repo-root <path>] [--ref <revision>]";
+const OMP_DIFF_SNAPSHOT_REF_PREFIX = "refs/omp/diff-snapshots/";
+
+type ParsedDiffSnapshotArgs = {
+	label?: string;
+	ref?: string;
+	repoRoot?: string;
+	usesExplicitTarget: boolean;
+};
+
+function parseDiffSnapshotArgs(tokens: readonly string[]): ParsedDiffSnapshotArgs | { error: string } {
+	const labelTokens: string[] = [];
+	let explicitLabel: string | undefined;
+	let ref: string | undefined;
+	let repoRoot: string | undefined;
+	let usesExplicitTarget = false;
+
+	for (let index = 0; index < tokens.length; index += 1) {
+		const token = tokens[index];
+		if (token === "--repo" || token === "--repo-root" || token === "--ref" || token === "--label") {
+			const value = tokens[index + 1];
+			if (!value || value.startsWith("--")) {
+				return { error: `${token} requires a value.\n${DIFF_SNAPSHOT_USAGE}` };
+			}
+			index += 1;
+			if (token === "--repo" || token === "--repo-root") {
+				repoRoot = value;
+				usesExplicitTarget = true;
+			} else if (token === "--ref") {
+				ref = value;
+				usesExplicitTarget = true;
+			} else {
+				explicitLabel = value;
+			}
+			continue;
+		}
+		if (token.startsWith("--")) {
+			return { error: `Unknown /diff snapshot option: ${token}.\n${DIFF_SNAPSHOT_USAGE}` };
+		}
+		labelTokens.push(token);
+	}
+
+	const positionalLabel = labelTokens.join(" ").trim() || undefined;
+	const label = explicitLabel?.trim() || positionalLabel;
+	return { label, ref, repoRoot, usesExplicitTarget };
+}
+
+export function formatRepoDiffSnapshotListDetails(snapshot: {
+	data: { commit: string; headCommit: string | null; ref: string; sourceRef?: string };
+}): string {
+	if (
+		!snapshot.data.sourceRef &&
+		snapshot.data.headCommit !== null &&
+		snapshot.data.ref.startsWith(OMP_DIFF_SNAPSHOT_REF_PREFIX)
+	) {
+		return "";
+	}
+	const displayRef = snapshot.data.sourceRef ?? snapshot.data.ref;
+	const parts = [`ref: \`${displayRef}\``];
+	const shortCommit = snapshot.data.commit.slice(0, 12);
+	if (shortCommit) parts.push(`commit: \`${shortCommit}\``);
+	return ` — ${parts.join(", ")}`;
+}
+
+export function buildRepoDiffMarkdown(
+	snapshot: { data: { label: string; repoRoot: string }; entryId: string },
+	diff: string,
+	mode: "show" | "stat",
+): string {
+	const body = truncateDiffForDisplay(replaceTabs(diff));
+	const language = mode === "stat" ? "" : "diff";
+	const fence = "````";
+	return [
+		`Snapshot: \`${snapshot.data.label}\` (${snapshot.entryId})`,
+		`Repository: \`${formatRepoDiffDisplayPath(snapshot.data.repoRoot)}\``,
+		"",
+		`${fence}${language}`,
+		escapeMarkdownFence(body),
+		fence,
+	].join("\n");
+}
 
 function showMarkdownPanel(ctx: InteractiveModeContext, title: string, markdown: string): void {
 	ctx.chatContainer.addChild(new Spacer(1));
@@ -452,6 +558,96 @@ export class CommandController {
 		this.ctx.chatContainer.addChild(new Spacer(1));
 		this.ctx.chatContainer.addChild(new Text(info, 1, 0));
 		this.ctx.ui.requestRender();
+	}
+
+	async handleDiffCommand(args: string): Promise<void> {
+		const tokens = parseCommandArgs(args);
+		const subcommand = tokens[0]?.toLowerCase() ?? "show";
+		const restTokens = tokens.slice(1);
+		const rest = restTokens.join(" ");
+
+		try {
+			if (subcommand === "snapshot" || subcommand === "mark") {
+				const parsedSnapshotArgs = parseDiffSnapshotArgs(restTokens);
+				if ("error" in parsedSnapshotArgs) {
+					this.ctx.showWarning(parsedSnapshotArgs.error);
+					return;
+				}
+
+				if (parsedSnapshotArgs.usesExplicitTarget) {
+					const snapshot = await createRepoDiffSnapshotAt(
+						this.ctx.sessionManager,
+						parsedSnapshotArgs.repoRoot ?? this.ctx.sessionManager.getCwd(),
+						parsedSnapshotArgs.ref,
+						{
+							label: parsedSnapshotArgs.label,
+						},
+					);
+					if (!snapshot) {
+						this.ctx.showWarning("No Git repository to snapshot.");
+						return;
+					}
+					const refSuffix = parsedSnapshotArgs.ref ? ` at ${parsedSnapshotArgs.ref}` : "";
+					this.ctx.showStatus(
+						`Repository diff snapshot created: ${snapshot.data.label}${refSuffix} (${snapshot.entryId})`,
+					);
+					return;
+				}
+
+				const snapshots = await createRepoDiffSnapshotsForKnownRepositories(
+					this.ctx.sessionManager,
+					[this.ctx.sessionManager.getCwd()],
+					{
+						label: parsedSnapshotArgs.label,
+					},
+				);
+				if (snapshots.length === 0) {
+					this.ctx.showWarning("No known Git repositories to snapshot.");
+					return;
+				}
+				if (snapshots.length === 1) {
+					const snapshot = snapshots[0];
+					this.ctx.showStatus(`Repository diff snapshot created: ${snapshot.data.label} (${snapshot.entryId})`);
+					return;
+				}
+				this.ctx.showStatus(`Repository diff snapshots created for ${snapshots.length} repositories.`);
+				return;
+			}
+
+			const snapshots = getRepoDiffSnapshots(this.ctx.sessionManager);
+			if (subcommand === "list") {
+				if (snapshots.length === 0) {
+					this.ctx.showWarning("No repository diff snapshots in this session.");
+					return;
+				}
+				const lines = snapshots.map(snapshot => {
+					const date = new Date(snapshot.data.createdAt).toLocaleString();
+					const details = formatRepoDiffSnapshotListDetails(snapshot);
+					return `- \`${snapshot.entryId}\` ${snapshot.data.label} (${snapshot.data.kind}, ${date}) — \`${formatRepoDiffDisplayPath(snapshot.data.repoRoot)}\`${details}`;
+				});
+				showMarkdownPanel(this.ctx, "Repository Diff Snapshots", lines.join("\n"));
+				return;
+			}
+
+			const selector = subcommand === "show" || subcommand === "stat" ? rest : args;
+			const activeRepoRoot = await git.repo.root(this.ctx.sessionManager.getCwd());
+			const mode = subcommand === "stat" ? "stat" : "show";
+			const snapshot = selectRepoDiffSnapshotForActiveRepo(snapshots, selector, activeRepoRoot);
+			if (!snapshot) {
+				this.ctx.showWarning("No matching repository diff snapshot. Use /diff snapshot [label] first.");
+				return;
+			}
+			const diff = await diffRepoFromSnapshot(snapshot, { stat: mode === "stat" });
+			if (!diff.trim()) {
+				this.ctx.showStatus(`No repository changes since snapshot ${snapshot.data.label}.`);
+				return;
+			}
+
+			const markdown = buildRepoDiffMarkdown(snapshot, diff, mode);
+			showMarkdownPanel(this.ctx, mode === "stat" ? "Repository Diff Stat" : "Repository Diff", markdown);
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+		}
 	}
 
 	async handleJobsCommand(): Promise<void> {

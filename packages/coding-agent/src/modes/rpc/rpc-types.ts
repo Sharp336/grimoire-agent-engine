@@ -10,6 +10,7 @@ import type { BashResult } from "../../exec/bash-executor";
 import type { ContextUsage } from "../../extensibility/extensions/types";
 import type { SessionStats } from "../../session/agent-session";
 import type { CompactionResult } from "../../session/compaction";
+import type { RepoDiffSnapshotRecord } from "../../session/repo-diff-snapshots";
 import type { TodoPhase } from "../../tools/todo-write";
 
 // ============================================================================
@@ -24,6 +25,7 @@ export type RpcCommand =
 	| { id?: string; type: "abort" }
 	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "new_session"; parentSession?: string }
+	| { id?: string; type: "fork" }
 
 	// State
 	| { id?: string; type: "get_state" }
@@ -65,6 +67,8 @@ export type RpcCommand =
 	| { id?: string; type: "get_last_assistant_text" }
 	| { id?: string; type: "set_session_name"; name: string }
 	| { id?: string; type: "handoff"; customInstructions?: string }
+	| { id?: string; type: "repo_diff_get"; selector?: string; headSelector?: string; stat?: boolean }
+	| { id?: string; type: "repo_diff_snapshot"; label?: string; repoRoot?: string; ref?: string }
 
 	// Messages
 	| { id?: string; type: "get_messages" }
@@ -103,6 +107,25 @@ export interface RpcHandoffResult {
 	savedPath?: string;
 }
 
+export interface RpcRepoDiffSnapshot {
+	entryId: string;
+	label: string;
+	commit: string;
+	kind: RepoDiffSnapshotRecord["data"]["kind"];
+	createdAt: string;
+	headCommit: string | null;
+	repoRoot: string;
+	ref: string;
+	sourceRef?: string;
+}
+
+export interface RpcRepoDiffResult {
+	snapshots: RpcRepoDiffSnapshot[];
+	selectedSnapshot: RpcRepoDiffSnapshot | null;
+	headSnapshot: RpcRepoDiffSnapshot | null;
+	diff: string;
+	stat: boolean;
+}
 // ============================================================================
 // RPC Responses (stdout)
 // ============================================================================
@@ -116,6 +139,7 @@ export type RpcResponse =
 	| { id?: string; type: "response"; command: "abort"; success: true }
 	| { id?: string; type: "response"; command: "abort_and_prompt"; success: true }
 	| { id?: string; type: "response"; command: "new_session"; success: true; data: { cancelled: boolean } }
+	| { id?: string; type: "response"; command: "fork"; success: true; data: { cancelled: boolean } }
 
 	// State
 	| { id?: string; type: "response"; command: "get_state"; success: true; data: RpcSessionState }
@@ -193,6 +217,8 @@ export type RpcResponse =
 	  }
 	| { id?: string; type: "response"; command: "set_session_name"; success: true }
 	| { id?: string; type: "response"; command: "handoff"; success: true; data: RpcHandoffResult | null }
+	| { id?: string; type: "response"; command: "repo_diff_get"; success: true; data: RpcRepoDiffResult }
+	| { id?: string; type: "response"; command: "repo_diff_snapshot"; success: true; data: RpcRepoDiffResult }
 
 	// Messages
 	| { id?: string; type: "response"; command: "get_messages"; success: true; data: { messages: AgentMessage[] } }

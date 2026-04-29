@@ -61,6 +61,34 @@ export interface DiffOptions {
 	readonly stat?: boolean;
 }
 
+export interface WorktreeSnapshotOptions {
+	readonly label?: string;
+	readonly signal?: AbortSignal;
+}
+
+export interface WorktreeSnapshot {
+	readonly commit: string;
+	readonly headCommit: string | null;
+	readonly ref: string;
+	readonly repoRoot: string;
+	readonly tree: string;
+}
+
+export interface ResolvedRefSnapshot {
+	readonly commit: string;
+	readonly headCommit: null;
+	readonly ref: string;
+	readonly sourceRef?: string;
+	readonly repoRoot: string;
+	readonly tree: string;
+}
+
+export interface SnapshotDiffOptions {
+	readonly nameOnly?: boolean;
+	readonly signal?: AbortSignal;
+	readonly stat?: boolean;
+}
+
 export interface StatusOptions {
 	readonly pathspecs?: readonly string[];
 	readonly porcelainV1?: boolean;
@@ -368,6 +396,85 @@ async function writeTempPatch(content: string): Promise<string> {
 	return tempPath;
 }
 
+const OMP_SNAPSHOT_REF_PREFIX = "refs/omp/diff-snapshots/";
+const OMP_SNAPSHOT_AUTHOR_ENV = {
+	GIT_AUTHOR_NAME: "Oh My Pi",
+	GIT_AUTHOR_EMAIL: "omp-diff-snapshot@localhost",
+	GIT_COMMITTER_NAME: "Oh My Pi",
+	GIT_COMMITTER_EMAIL: "omp-diff-snapshot@localhost",
+} as const;
+
+function formatSnapshotMessage(label: string | undefined): string {
+	const suffix = label?.trim();
+	return suffix ? `OMP diff snapshot: ${suffix}` : "OMP diff snapshot";
+}
+
+function createSnapshotRefName(): string {
+	return `${OMP_SNAPSHOT_REF_PREFIX}${Snowflake.next()}`;
+}
+
+async function withTemporaryGitIndex<T>(
+	repoRoot: string,
+	signal: AbortSignal | undefined,
+	operation: (env: Record<string, string>) => Promise<T>,
+): Promise<T> {
+	const tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-git-index-"));
+	try {
+		const env = { GIT_INDEX_FILE: path.join(tempDir, "index") };
+		const headCommit = trimScalar(await tryText(repoRoot, ["rev-parse", "--verify", "HEAD"], { signal }));
+		await runEffect(repoRoot, headCommit ? ["read-tree", headCommit] : ["read-tree", "--empty"], { env, signal });
+		return await operation(env);
+	} finally {
+		await fs.promises.rm(tempDir, { recursive: true, force: true });
+	}
+}
+
+async function writeWorktreeTree(repoRoot: string, signal?: AbortSignal): Promise<string> {
+	return withTemporaryGitIndex(repoRoot, signal, async env => {
+		await runEffect(repoRoot, ["add", "-A", "--", "."], { env, signal });
+		return (await runText(repoRoot, ["write-tree"], { env, signal })).trim();
+	});
+}
+
+async function resolveCommitishSnapshotRef(
+	repoRoot: string,
+	refName: string,
+	signal?: AbortSignal,
+): Promise<{ commit: string; tree: string }> {
+	const commitRevision = `${refName}^{commit}`;
+	const commitResult = await runCommand(repoRoot, ["rev-parse", "--verify", "--end-of-options", commitRevision], {
+		readOnly: true,
+		signal,
+	});
+	if (commitResult.exitCode !== 0) {
+		const objectResult = await runCommand(repoRoot, ["rev-parse", "--verify", "--end-of-options", refName], {
+			readOnly: true,
+			signal,
+		});
+		if (objectResult.exitCode !== 0) {
+			throw new Error(`Git ref does not resolve in repository: ${refName} (${repoRoot}).`);
+		}
+		const objectName = objectResult.stdout.trim();
+		const typeResult = await runCommand(repoRoot, ["cat-file", "-t", objectName], {
+			readOnly: true,
+			signal,
+		});
+		const objectType = typeResult.exitCode === 0 ? typeResult.stdout.trim() || "object" : "object";
+		throw new Error(`Git ref is not usable as a commit snapshot: ${refName} resolves to ${objectType}.`);
+	}
+
+	const commit = commitResult.stdout.trim();
+	const tree = (
+		await runText(repoRoot, ["rev-parse", "--verify", "--end-of-options", `${commit}^{tree}`], {
+			readOnly: true,
+			signal,
+		})
+	).trim();
+	if (!tree) {
+		throw new Error(`Git ref is not usable as a commit snapshot: ${refName} has no tree.`);
+	}
+	return { commit, tree };
+}
 // ════════════════════════════════════════════════════════════════════════════
 // Internal: Repository resolution
 // ════════════════════════════════════════════════════════════════════════════
@@ -375,7 +482,7 @@ async function writeTempPatch(content: string): Promise<string> {
 type EntryType = "directory" | "file";
 
 function shouldRetry(err: unknown, n: number) {
-	if (isEnoent(err) || hasFsCode(err, "ENFILE") || hasFsCode(err, "EMFILE")) return false;
+	if (isEnoent(err) || hasFsCode(err, "ENOTDIR") || hasFsCode(err, "ENFILE") || hasFsCode(err, "EMFILE")) return false;
 	if (hasFsCode(err, "EINTR")) return n < EINTR_MAX_RETRIES;
 	if (n > EINTR_MAX_RETRIES) throw err;
 	throw err;
@@ -771,6 +878,78 @@ export const diff = Object.assign(
 		},
 	},
 );
+
+// ════════════════════════════════════════════════════════════════════════════
+// API: snapshot
+// ════════════════════════════════════════════════════════════════════════════
+
+export const snapshot = {
+	/** Capture the full worktree into a Git tree without modifying the user's index. */
+	async create(cwd: string, options: WorktreeSnapshotOptions = {}): Promise<WorktreeSnapshot | null> {
+		const repository = await repo.resolve(cwd);
+		if (!repository) return null;
+
+		const tree = await writeWorktreeTree(repository.repoRoot, options.signal);
+		const refName = createSnapshotRefName();
+		const headCommit = await head.sha(repository.repoRoot, options.signal);
+		const commitArgs = ["commit-tree", tree, "-m", formatSnapshotMessage(options.label)];
+		if (headCommit) {
+			commitArgs.push("-p", headCommit);
+		}
+		const commit = (
+			await runText(repository.repoRoot, commitArgs, {
+				env: OMP_SNAPSHOT_AUTHOR_ENV,
+				signal: options.signal,
+			})
+		).trim();
+		await runEffect(repository.repoRoot, ["update-ref", refName, commit], { signal: options.signal });
+
+		return {
+			commit,
+			headCommit,
+			ref: refName,
+			repoRoot: repository.repoRoot,
+			tree,
+		};
+	},
+
+	/** Pin an existing commit-ish ref under an OMP snapshot ref for durable historical comparison. */
+	async resolveRef(cwd: string, refName: string, options: WorktreeSnapshotOptions = {}): Promise<ResolvedRefSnapshot> {
+		const repository = await repo.resolve(cwd);
+		if (!repository) {
+			throw new Error(`Repository is not a Git repository: ${cwd}.`);
+		}
+		const trimmedRef = refName.trim();
+		if (!trimmedRef) {
+			throw new Error("Git ref cannot be empty.");
+		}
+		const resolved = await resolveCommitishSnapshotRef(repository.repoRoot, trimmedRef, options.signal);
+		const snapshotRef = createSnapshotRefName();
+		await runEffect(repository.repoRoot, ["update-ref", snapshotRef, resolved.commit], { signal: options.signal });
+		return {
+			commit: resolved.commit,
+			headCommit: null,
+			ref: snapshotRef,
+			repoRoot: repository.repoRoot,
+			sourceRef: trimmedRef,
+			tree: resolved.tree,
+		};
+	},
+
+	/** Diff the current full worktree against a previously captured snapshot tree. */
+	async diff(cwd: string, baseTree: string, options: SnapshotDiffOptions = {}): Promise<string> {
+		const repository = await repo.resolve(cwd);
+		if (!repository) return "";
+		const currentTree = await writeWorktreeTree(repository.repoRoot, options.signal);
+		return diff(repository.repoRoot, {
+			base: baseTree,
+			head: currentTree,
+			nameOnly: options.nameOnly,
+			signal: options.signal,
+			stat: options.stat,
+		});
+	},
+};
 
 // ════════════════════════════════════════════════════════════════════════════
 // API: status

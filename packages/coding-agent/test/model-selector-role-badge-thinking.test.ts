@@ -17,14 +17,20 @@ function normalizeRenderedText(text: string): string {
 	);
 }
 
-function createSelector(model: Model, settings: Settings): ModelSelectorComponent {
+function createSelector(
+	model: Model,
+	settings: Settings,
+	options?: { models?: Model[]; terminalRows?: number },
+): ModelSelectorComponent {
+	const models = options?.models ?? [model];
 	const modelRegistry = {
-		getAll: () => [model],
+		getAll: () => models,
 		getDiscoverableProviders: () => [],
 		getCanonicalModels: () => [],
 		resolveCanonicalModel: () => undefined,
 	} as unknown as ModelRegistry;
 	const ui = {
+		terminal: { rows: options?.terminalRows ?? 24 },
 		requestRender: vi.fn(),
 	} as unknown as TUI;
 
@@ -33,7 +39,7 @@ function createSelector(model: Model, settings: Settings): ModelSelectorComponen
 		model,
 		settings,
 		modelRegistry,
-		[{ model, thinkingLevel: "off" }],
+		models.map(model => ({ model, thinkingLevel: "off" })),
 		() => {},
 		() => {},
 	);
@@ -124,5 +130,32 @@ describe("ModelSelector role badge thinking display", () => {
 		const menuRendered = normalizeRenderedText(selector.render(220).join("\n"));
 		expect(menuRendered).toContain("Set as custom-fast");
 		expect(menuRendered).toContain("Set as SMOL (Quick)");
+	});
+
+	test("keeps the model list inside the terminal viewport while selection moves down", async () => {
+		installTestTheme();
+		const baseModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!baseModel) throw new Error("Expected bundled model anthropic/claude-sonnet-4-5");
+
+		const models = Array.from({ length: 12 }, (_, index) => ({
+			...baseModel,
+			id: `test-model-${index.toString().padStart(2, "0")}`,
+			name: `Test Model ${index.toString().padStart(2, "0")}`,
+		}));
+		const settings = Settings.isolated({});
+		const selector = createSelector(models[0], settings, { models, terminalRows: 18 });
+
+		await Bun.sleep(0);
+		installTestTheme();
+
+		for (let i = 0; i < 6; i++) {
+			selector.handleInput("\x1b[B");
+		}
+
+		const renderedLines = selector.render(220);
+		const rendered = normalizeRenderedText(renderedLines.join("\n"));
+		expect(renderedLines).toHaveLength(18);
+		expect(rendered).toContain("test-model-06");
+		expect(rendered).not.toContain("test-model-02");
 	});
 });

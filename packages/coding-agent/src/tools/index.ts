@@ -42,6 +42,7 @@ import { wrapToolWithMetaNotice } from "./output-meta";
 import { ReadTool } from "./read";
 import { RecipeTool } from "./recipe";
 import { RenderMermaidTool } from "./render-mermaid";
+import { wrapToolWithRepoDiffTracking } from "./repo-diff-tracking";
 import { createReportToolIssueTool, isAutoQaEnabled } from "./report-tool-issue";
 import { ResolveTool } from "./resolve";
 import { reportFindingTool } from "./review";
@@ -474,7 +475,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const baseResults = await Promise.all(
 		baseEntries.map(async ([name, factory]) => {
 			const tool = await logger.time(`createTools:${name}`, factory as ToolFactory, session);
-			return tool ? wrapToolWithMetaNotice(tool) : null;
+			return tool ? wrapToolWithRepoDiffTracking(wrapToolWithMetaNotice(tool)) : null;
 		}),
 	);
 	const tools = baseResults.filter((r): r is Tool => r !== null);
@@ -482,7 +483,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	if (hasDeferrableTools && !tools.some(tool => tool.name === "resolve")) {
 		const resolveTool = await logger.time("createTools:resolve", HIDDEN_TOOLS.resolve, session);
 		if (resolveTool) {
-			tools.push(wrapToolWithMetaNotice(resolveTool));
+			tools.push(wrapToolWithRepoDiffTracking(wrapToolWithMetaNotice(resolveTool)));
 		}
 	}
 
@@ -492,7 +493,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	if (autoQA && !tools.some(t => t.name === "report_tool_issue")) {
 		const qaTool = await HIDDEN_TOOLS.report_tool_issue(session);
 		if (qaTool) {
-			tools.push(wrapToolWithMetaNotice(qaTool));
+			tools.push(wrapToolWithRepoDiffTracking(wrapToolWithMetaNotice(qaTool)));
 		}
 	}
 

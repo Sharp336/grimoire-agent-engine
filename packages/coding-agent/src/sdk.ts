@@ -96,6 +96,7 @@ import {
 import { AgentSession } from "./session/agent-session";
 import { AuthStorage } from "./session/auth-storage";
 import { convertToLlm } from "./session/messages";
+import { ensureSessionStartRepoDiffSnapshot } from "./session/repo-diff-snapshots";
 import { SessionManager } from "./session/session-manager";
 import { closeAllConnections } from "./ssh/connection-manager";
 import { unmountAll } from "./ssh/sshfs-mount";
@@ -744,6 +745,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		logger.time("sessionManager", () =>
 			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
 		);
+	try {
+		await logger.time("repoDiffSnapshot:start", ensureSessionStartRepoDiffSnapshot, sessionManager, cwd);
+	} catch (error) {
+		logger.debug("Failed to create repository diff start snapshot", { error: String(error) });
+	}
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
 	const modelApiKeyAvailability = new Map<string, boolean>();
 	const getModelAvailabilityKey = (candidate: Model): string =>

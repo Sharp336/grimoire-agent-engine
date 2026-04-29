@@ -192,6 +192,7 @@ export interface InteractiveModeContext {
 	handleCopyCommand(sub?: string): void;
 	handleTodoCommand(args: string): Promise<void>;
 	handleSessionCommand(): Promise<void>;
+	handleDiffCommand(args: string): Promise<void>;
 	handleJobsCommand(): Promise<void>;
 	handleUsageCommand(reports?: UsageReport[] | null): Promise<void>;
 	handleChangelogCommand(showFull?: boolean): Promise<void>;

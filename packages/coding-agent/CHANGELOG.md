@@ -157,6 +157,10 @@
 
 - Removed the exported `BUILTIN_TOOL_METADATA` API, including `BuiltinEntry`-style metadata exports and discoverable-built-in helper exports, which will break consumers relying on those symbols
 
+### Added
+
+- Added repository diff snapshots with `/diff snapshot`, `/diff show`, `/diff stat`, `/diff list`, RPC diff views, and automatic session-start snapshots for Git repositories.
+
 ### Changed
 
 - Updated discoverable tool search (`search_tool_bm25` and related discovery metadata) to read each tool’s own `summary` field when present, improving discoverability descriptions for built-in tools
@@ -585,6 +589,7 @@
 - Fixed atom edit streaming previews to use atom headers for file names instead of apply_patch parsing errors.
 - Fixed collapsed search result rendering so summary and truncation rows stay within the collapsed output budget
 - Updated search path handling to support path lists and internal file paths while preserving previous search behavior
+
 
 ## [14.5.3] - 2026-04-27
 

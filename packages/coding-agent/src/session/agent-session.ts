@@ -173,6 +173,7 @@ import {
 	type FileMentionMessage,
 	type PythonExecutionMessage,
 } from "./messages";
+import { ensureSessionStartRepoDiffSnapshots } from "./repo-diff-snapshots";
 import { formatSessionDumpText } from "./session-dump-format";
 import type {
 	BranchSummaryEntry,
@@ -3814,6 +3815,18 @@ export class AgentSession {
 		this.setTodoPhases(phases.filter(p => p.tasks.length > 0));
 	}
 
+	async #ensureSessionStartRepoDiffSnapshot(reason: string, options: { force?: boolean } = {}): Promise<void> {
+		try {
+			await ensureSessionStartRepoDiffSnapshots(this.sessionManager, [this.sessionManager.getCwd()], options);
+		} catch (error) {
+			logger.warn("Failed to create session-start repository diff snapshot", {
+				error: error instanceof Error ? error.message : String(error),
+				reason,
+				sessionId: this.sessionId,
+			});
+		}
+	}
+
 	#cloneTodoPhases(phases: TodoPhase[]): TodoPhase[] {
 		return phases.map(phase => ({
 			name: phase.name,
@@ -3984,6 +3997,7 @@ export class AgentSession {
 		this.#planReferenceSent = false;
 		this.#planReferencePath = "local://PLAN.md";
 		this.#reconnectToAgent();
+		await this.#ensureSessionStartRepoDiffSnapshot("new");
 
 		// Emit session_switch event with reason "new" to hooks
 		if (this.#extensionRunner) {
@@ -4056,6 +4070,7 @@ export class AgentSession {
 		// Update agent session ID
 		this.#syncAgentSessionId();
 		this.#rekeyHindsightMemoryForCurrentSessionId();
+		await this.#ensureSessionStartRepoDiffSnapshot("fork", { force: true });
 
 		// Emit session_switch event with reason "fork" to hooks
 		if (this.#extensionRunner) {
@@ -7058,6 +7073,7 @@ export class AgentSession {
 				this.#resetHindsightConversationTrackingIfHindsight();
 			}
 			this.#reconnectToAgent();
+			await this.#ensureSessionStartRepoDiffSnapshot("resume");
 			return true;
 		} catch (error) {
 			this.sessionManager.restoreState(previousSessionState);
@@ -7155,6 +7171,7 @@ export class AgentSession {
 		this.#syncTodoPhasesFromBranch();
 		this.#syncAgentSessionId();
 		this.#rekeyHindsightMemoryForCurrentSessionId();
+		await this.#ensureSessionStartRepoDiffSnapshot("branch", { force: true });
 		this.#resetHindsightConversationTrackingIfHindsight();
 
 		// Reload messages from entries (works for both file and in-memory mode)

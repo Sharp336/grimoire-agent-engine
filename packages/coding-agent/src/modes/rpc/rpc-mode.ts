@@ -11,7 +11,7 @@
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/utils/oauth";
-import { $env, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, logger, readJsonl, Snowflake } from "@oh-my-pi/pi-utils";
 import type {
 	ExtensionUIContext,
 	ExtensionUIDialogOptions,
@@ -20,6 +20,18 @@ import type {
 import { runExtensionCompact, runExtensionSetModel } from "../../extensibility/extensions/compact-handler";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
+import {
+	createRepoDiffSnapshotAt,
+	createRepoDiffSnapshotsForKnownRepositories,
+	diffRepoBetweenSnapshots,
+	diffRepoFromSnapshot,
+	ensureSessionStartRepoDiffSnapshots,
+	getRepoDiffSnapshots,
+	isDefaultRepoDiffSnapshotSelector,
+	type RepoDiffSnapshotRecord,
+	selectRepoDiffSnapshotForActiveRepo,
+} from "../../session/repo-diff-snapshots";
+import * as git from "../../utils/git";
 import { isRpcHostToolResult, isRpcHostToolUpdate, RpcHostToolBridge } from "./host-tools";
 import type {
 	RpcCommand,
@@ -78,6 +90,111 @@ function parseValueDialogResponse(
 	}
 	if ("value" in response) return response.value;
 	return undefined;
+}
+
+function toRpcRepoDiffSnapshot(snapshot: RepoDiffSnapshotRecord) {
+	return {
+		entryId: snapshot.entryId,
+		label: snapshot.data.label,
+		commit: snapshot.data.commit,
+		kind: snapshot.data.kind,
+		createdAt: snapshot.data.createdAt,
+		headCommit: snapshot.data.headCommit,
+		repoRoot: snapshot.data.repoRoot,
+		ref: snapshot.data.ref,
+		...(snapshot.data.sourceRef ? { sourceRef: snapshot.data.sourceRef } : {}),
+	};
+}
+
+function resolveHeadRepoDiffSnapshot(
+	snapshots: readonly RepoDiffSnapshotRecord[],
+	selector: string | undefined,
+	activeRepoRoot: string | null,
+): RepoDiffSnapshotRecord | null {
+	const normalized = selector?.trim();
+	if (!normalized || normalized === "current" || normalized === "now") return null;
+	const snapshot = selectRepoDiffSnapshotForActiveRepo(snapshots, normalized, activeRepoRoot);
+	if (!snapshot && !isDefaultRepoDiffSnapshotSelector(normalized)) {
+		throw new Error(`No matching repository diff snapshot for head selector: ${normalized}.`);
+	}
+	return snapshot;
+}
+
+async function buildRepoDiffResult(
+	session: AgentSession,
+	selector: string | undefined,
+	headSelector: string | undefined,
+	stat: boolean,
+	createdSnapshot?: RepoDiffSnapshotRecord | null,
+) {
+	const snapshots = getRepoDiffSnapshots(session.sessionManager);
+	const activeRepoRoot = await git.repo.root(session.sessionManager.getCwd());
+	// Default selectors (`latest`, `session`, omitted) are scoped to the active repo;
+	// explicit ids/labels remain global so clients can compare any known snapshot.
+	const selected = createdSnapshot ?? selectRepoDiffSnapshotForActiveRepo(snapshots, selector, activeRepoRoot);
+	const normalizedSelector = selector?.trim();
+	if (!selected && normalizedSelector && !isDefaultRepoDiffSnapshotSelector(normalizedSelector)) {
+		throw new Error(`No matching repository diff snapshot for selector: ${normalizedSelector}.`);
+	}
+	const headSnapshot = resolveHeadRepoDiffSnapshot(snapshots, headSelector, activeRepoRoot);
+	const diff = selected
+		? headSnapshot
+			? await diffRepoBetweenSnapshots(selected, headSnapshot, { stat })
+			: await diffRepoFromSnapshot(selected, { stat })
+		: "";
+	return {
+		snapshots: snapshots.map(toRpcRepoDiffSnapshot),
+		selectedSnapshot: selected ? toRpcRepoDiffSnapshot(selected) : null,
+		headSnapshot: headSnapshot ? toRpcRepoDiffSnapshot(headSnapshot) : null,
+		diff,
+		stat,
+	};
+}
+
+export async function handleRpcRepoDiffSnapshotCommand(
+	session: AgentSession,
+	command: Extract<RpcCommand, { type: "repo_diff_snapshot" }>,
+): Promise<RpcResponse> {
+	try {
+		const snapshot =
+			command.repoRoot !== undefined || command.ref !== undefined
+				? await createRepoDiffSnapshotAt(
+						session.sessionManager,
+						command.repoRoot ?? session.sessionManager.getCwd(),
+						command.ref,
+						{
+							label: command.label,
+						},
+					)
+				: ((
+						await createRepoDiffSnapshotsForKnownRepositories(
+							session.sessionManager,
+							[session.sessionManager.getCwd()],
+							{
+								label: command.label,
+							},
+						)
+					)[0] ?? null);
+		const result = await buildRepoDiffResult(session, snapshot?.entryId, undefined, false, snapshot);
+		return { id: command.id, type: "response", command: "repo_diff_snapshot", success: true, data: result };
+	} catch (repoDiffSnapshotError) {
+		const message =
+			repoDiffSnapshotError instanceof Error ? repoDiffSnapshotError.message : String(repoDiffSnapshotError);
+		return { id: command.id, type: "response", command: "repo_diff_snapshot", success: false, error: message };
+	}
+}
+
+export async function handleRpcRepoDiffGetCommand(
+	session: AgentSession,
+	command: Extract<RpcCommand, { type: "repo_diff_get" }>,
+): Promise<RpcResponse> {
+	try {
+		const result = await buildRepoDiffResult(session, command.selector, command.headSelector, command.stat === true);
+		return { id: command.id, type: "response", command: "repo_diff_get", success: true, data: result };
+	} catch (repoDiffGetError) {
+		const message = repoDiffGetError instanceof Error ? repoDiffGetError.message : String(repoDiffGetError);
+		return { id: command.id, type: "response", command: "repo_diff_get", success: false, error: message };
+	}
 }
 
 function shouldEmitRpcTitles(): boolean {
@@ -150,11 +267,23 @@ export function requestRpcEditor(
 	} as RpcExtensionUIRequest);
 	return promise;
 }
+
+async function ensureRpcSessionStartRepoDiffSnapshot(session: AgentSession): Promise<void> {
+	try {
+		await ensureSessionStartRepoDiffSnapshots(session.sessionManager, [session.sessionManager.getCwd()]);
+	} catch (error) {
+		logger.warn("Failed to create RPC session-start repository diff snapshot", {
+			error: error instanceof Error ? error.message : String(error),
+			sessionId: session.sessionId,
+		});
+	}
+}
 /**
  * Run in RPC mode.
  * Listens for JSON commands on stdin, outputs events and responses on stdout.
  */
 export async function runRpcMode(session: AgentSession): Promise<never> {
+	await ensureRpcSessionStartRepoDiffSnapshot(session);
 	// Signal to RPC clients that the server is ready to accept commands
 	process.stdout.write(`${JSON.stringify({ type: "ready" })}\n`);
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
@@ -548,6 +677,14 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 				return success(id, "new_session", { cancelled });
 			}
 
+			case "fork": {
+				if (session.isStreaming) {
+					return error(id, "fork", "Wait for the current response to finish or abort it before forking.");
+				}
+				const cancelled = !(await session.fork());
+				return success(id, "fork", { cancelled });
+			}
+
 			// =================================================================
 			// State
 			// =================================================================
@@ -745,6 +882,14 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 			case "handoff": {
 				const result = await session.handoff(command.customInstructions);
 				return success(id, "handoff", result ? { savedPath: result.savedPath } : null);
+			}
+
+			case "repo_diff_get": {
+				return handleRpcRepoDiffGetCommand(session, command);
+			}
+
+			case "repo_diff_snapshot": {
+				return handleRpcRepoDiffSnapshotCommand(session, command);
 			}
 
 			// =================================================================
