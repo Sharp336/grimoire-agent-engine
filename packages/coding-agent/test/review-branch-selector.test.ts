@@ -1,7 +1,7 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { Component, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 import * as typebox from "@sinclair/typebox";
-import type { KeybindingsManager } from "../src/config/keybindings";
+import { KeybindingsManager } from "../src/config/keybindings";
 import { ReviewCommand } from "../src/extensibility/custom-commands/bundled/review";
 import type { CustomCommandAPI } from "../src/extensibility/custom-commands/types";
 import type { HookCommandContext, HookUIContext } from "../src/extensibility/hooks/types";
@@ -37,6 +37,7 @@ beforeAll(() => {
 });
 
 afterEach(() => {
+	setKeybindings(KeybindingsManager.inMemory());
 	vi.restoreAllMocks();
 });
 
@@ -62,6 +63,49 @@ describe("searchable review branch selection", () => {
 		expect(rendered).not.toContain("origin/chore/docs");
 
 		selector.handleInput("\n");
+
+		expect(selected).toBe("origin/feature/payments");
+	});
+
+	it("selects the top-ranked match after filtering from a lower selection", () => {
+		let selected: string | undefined;
+		const selector = new SearchableStringSelectorComponent(
+			"Select base branch to compare against",
+			["origin/feature/payroll", "origin/feature/payments", "origin/chore/docs"],
+			value => {
+				selected = value;
+			},
+			() => {},
+		);
+
+		selector.handleInput("\x1b[B");
+		selector.handleInput("p");
+		selector.handleInput("a");
+		selector.handleInput("y");
+		selector.handleInput("\n");
+
+		expect(selected).toBe("origin/feature/payroll");
+	});
+
+	it("honors configured select keybindings for navigation and confirmation", () => {
+		setKeybindings(
+			KeybindingsManager.inMemory({
+				"tui.select.down": "ctrl+n",
+				"tui.select.confirm": "ctrl+y",
+			}),
+		);
+		let selected: string | undefined;
+		const selector = new SearchableStringSelectorComponent(
+			"Select base branch to compare against",
+			["origin/main", "origin/feature/payments", "origin/chore/docs"],
+			value => {
+				selected = value;
+			},
+			() => {},
+		);
+
+		selector.handleInput("\x0e");
+		selector.handleInput("\x19");
 
 		expect(selected).toBe("origin/feature/payments");
 	});

@@ -1,7 +1,7 @@
 import {
 	Container,
+	getKeybindings,
 	Input,
-	matchesKey,
 	padding,
 	replaceTabs,
 	Spacer,
@@ -9,7 +9,6 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/theme/theme";
-import { matchesSelectCancel } from "../../modes/utils/keybinding-matchers";
 import { fuzzyFilter } from "../../utils/fuzzy";
 import { DynamicBorder } from "./dynamic-border";
 
@@ -69,7 +68,7 @@ export class SearchableStringSelectorComponent extends Container {
 
 	#filterOptions(query: string): void {
 		this.#filteredOptions = fuzzyFilter(this.options, query, option => option);
-		this.#selectedIndex = Math.min(this.#selectedIndex, Math.max(0, this.#filteredOptions.length - 1));
+		this.#selectedIndex = 0;
 		this.#updateList();
 	}
 
@@ -112,41 +111,42 @@ export class SearchableStringSelectorComponent extends Container {
 	}
 
 	handleInput(keyData: string): void {
+		const keybindings = getKeybindings();
 		const hasOptions = this.#filteredOptions.length > 0;
-		if (matchesKey(keyData, "up")) {
+		if (keybindings.matches(keyData, "tui.select.up")) {
 			if (!hasOptions) return;
 			this.#selectedIndex = Math.max(0, this.#selectedIndex - 1);
 			this.#updateList();
 			return;
 		}
 
-		if (matchesKey(keyData, "down")) {
+		if (keybindings.matches(keyData, "tui.select.down")) {
 			if (!hasOptions) return;
 			this.#selectedIndex = Math.min(this.#filteredOptions.length - 1, this.#selectedIndex + 1);
 			this.#updateList();
 			return;
 		}
 
-		if (matchesKey(keyData, "pageUp")) {
+		if (keybindings.matches(keyData, "tui.select.pageUp")) {
 			if (!hasOptions) return;
 			this.#selectedIndex = Math.max(0, this.#selectedIndex - this.#maxVisible);
 			this.#updateList();
 			return;
 		}
 
-		if (matchesKey(keyData, "pageDown")) {
+		if (keybindings.matches(keyData, "tui.select.pageDown")) {
 			if (!hasOptions) return;
 			this.#selectedIndex = Math.min(this.#filteredOptions.length - 1, this.#selectedIndex + this.#maxVisible);
 			this.#updateList();
 			return;
 		}
 
-		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
+		if (keybindings.matches(keyData, "tui.select.confirm") || keyData === "\n") {
 			this.#selectCurrent();
 			return;
 		}
 
-		if (matchesSelectCancel(keyData)) {
+		if (keybindings.matches(keyData, "tui.select.cancel")) {
 			this.onCancel();
 			return;
 		}
