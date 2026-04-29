@@ -1438,6 +1438,18 @@ export class AuthStorage {
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
+			case "upb": {
+				const { loginUPB } = await import("./utils/oauth/upb");
+				const apiKey = await loginUPB(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
+			case "upb-gateway": {
+				const { loginUPBGateway } = await import("./utils/oauth/upb-gateway");
+				const apiKey = await loginUPBGateway(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
 			case "moonshot": {
 				const { loginMoonshot } = await import("./utils/oauth/moonshot");
 				const apiKey = await loginMoonshot(ctrl);

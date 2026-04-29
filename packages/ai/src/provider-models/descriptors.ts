@@ -36,6 +36,8 @@ import {
 	qwenPortalModelManagerOptions,
 	syntheticModelManagerOptions,
 	togetherModelManagerOptions,
+	upbGatewayModelManagerOptions,
+	upbModelManagerOptions,
 	veniceModelManagerOptions,
 	vercelAiGatewayModelManagerOptions,
 	vllmModelManagerOptions,
@@ -242,6 +244,18 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		"claude-opus-4-6",
 		config => litellmModelManagerOptions(config),
 		catalog("LiteLLM", ["LITELLM_API_KEY"], { allowUnauthenticated: true }),
+	),
+	catalogDescriptor(
+		"upb",
+		"openai.gpt-4o",
+		config => upbModelManagerOptions(config),
+		catalog("UPB AI Gateway", ["UPB_API_KEY"]),
+	),
+	catalogDescriptor(
+		"upb-gateway",
+		"openai.gpt-4o",
+		config => upbGatewayModelManagerOptions(config),
+		catalog("UPB AI Gateway (LiteLLM)", ["UPB_GATEWAY_API_KEY"]),
 	),
 	descriptor("lm-studio", "llama-3-8b", config => lmStudioModelManagerOptions(config), { allowUnauthenticated: true }),
 	catalogDescriptor(

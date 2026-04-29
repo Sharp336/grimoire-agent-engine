@@ -91,6 +91,16 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 		available: true,
 	},
 	{
+		id: "upb",
+		name: "UPB AI-Chat (Universit\u00e4t Paderborn)",
+		available: true,
+	},
+	{
+		id: "upb-gateway",
+		name: "UPB AI Gateway (LiteLLM)",
+		available: true,
+	},
+	{
 		id: "lm-studio",
 		name: "LM Studio (Local OpenAI-compatible)",
 		available: true,
@@ -128,6 +138,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 	{
 		id: "xiaomi",
 		name: "Xiaomi MiMo",
+		available: true,
+	},
+	{
+		id: "mimo-code",
+		name: "Xiaomi MiMo Coding Plan",
 		available: true,
 	},
 	{
