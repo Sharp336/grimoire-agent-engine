@@ -890,11 +890,13 @@ export async function sendNotification(client: LspClient, method: string, params
 /**
  * Shutdown all LSP clients.
  */
-export function shutdownAll(): void {
+export async function shutdownAll(): Promise<void> {
 	const clientsToShutdown = Array.from(clients.values());
 	clients.clear();
 
 	const err = new Error("LSP client shutdown");
+	const shutdownPromises: Promise<void>[] = [];
+
 	for (const client of clientsToShutdown) {
 		/// Reject all pending requests
 		const reqs = Array.from(client.pendingRequests.values());
@@ -903,14 +905,18 @@ export function shutdownAll(): void {
 			pending.reject(err);
 		}
 
-		void (async () => {
-			// Send shutdown request (best effort, don't wait)
-			const timeout = Bun.sleep(5_000);
-			const result = sendRequest(client, "shutdown", null).catch(() => {});
-			await Promise.race([result, timeout]);
-			client.proc.kill();
-		})().catch(() => {});
+		shutdownPromises.push(
+			(async () => {
+				// Send shutdown request (best effort, don't wait)
+				const timeout = Bun.sleep(5_000);
+				const result = sendRequest(client, "shutdown", null).catch(() => {});
+				await Promise.race([result, timeout]);
+				client.proc.kill();
+			})(),
+		);
 	}
+
+	await Promise.allSettled(shutdownPromises);
 }
 
 /** Status of an LSP server */
@@ -939,12 +945,28 @@ export function getActiveClients(): LspServerStatus[] {
 // Register cleanup on module unload
 if (typeof process !== "undefined") {
 	process.on("beforeExit", shutdownAll);
-	process.on("SIGINT", () => {
-		shutdownAll();
+	process.on("SIGINT", async () => {
+		await shutdownAll();
 		process.exit(0);
 	});
-	process.on("SIGTERM", () => {
-		shutdownAll();
+	process.on("SIGTERM", async () => {
+		await shutdownAll();
 		process.exit(0);
 	});
+}
+
+// =============================================================================
+// Test Helpers
+// =============================================================================
+
+/** @internal Inject a mock client into the internal clients map (test-only). */
+export function _injectClientForTest(key: string, client: LspClient): void {
+	clients.set(key, client);
+}
+
+/** @internal Clear all internal client state (test-only). */
+export function _resetClientsForTest(): void {
+	clients.clear();
+	clientLocks.clear();
+	fileOperationLocks.clear();
 }
