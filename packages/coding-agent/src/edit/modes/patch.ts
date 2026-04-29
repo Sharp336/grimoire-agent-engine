@@ -38,6 +38,8 @@ import {
 	adjustIndentation,
 	convertLeadingTabsToSpaces,
 	countLeadingWhitespace,
+	decodeUnicodeEscapes,
+	decodeUnicodeEscapesInDiffAdditions,
 	detectLineEnding,
 	getLeadingWhitespace,
 	normalizeToLF,
@@ -1709,7 +1711,13 @@ export async function executePatchSingle(
 		writethrough,
 		beginDeferredDiagnosticsForPath,
 	} = options;
-	const { op: rawOp, rename, diff } = params;
+	const { op: rawOp, rename, diff: rawDiff } = params;
+	const diff =
+		rawDiff != null
+			? rawOp === "create"
+				? decodeUnicodeEscapes(rawDiff) // create: full-text content, no "+" prefixes
+				: decodeUnicodeEscapesInDiffAdditions(rawDiff) // update: decode only "+" lines
+			: rawDiff;
 
 	const op: Operation = rawOp === "create" || rawOp === "delete" ? rawOp : "update";
 

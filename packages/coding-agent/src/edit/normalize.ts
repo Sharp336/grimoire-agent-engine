@@ -224,6 +224,39 @@ export function normalizeUnicode(s: string): string {
 }
 
 /**
+ * Decode JSON-style \uXXXX escape sequences in a string to their actual Unicode
+ * characters. Applies a second-pass decode for sequences that survived JSON parsing
+ * as literal text (e.g. the model emitted \\u2192 in JSON, producing the 6-char
+ * literal \u2192 instead of the arrow character).
+ *
+ * A \uXXXX preceded by another backslash (\\uXXXX) is intentional -- the model
+ * used \\\\uXXXX in JSON to write a literal backslash before a u-sequence -- and
+ * is left unchanged.
+ */
+export function decodeUnicodeEscapes(text: string): string {
+	return text.replace(/(?<!\\)\\u([0-9a-fA-F]{4})/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)));
+}
+
+/**
+ * Decode JSON-style \uXXXX escape sequences only in the addition lines of a
+ * unified diff string. Context lines (prefixed with a space) and removal lines
+ * (prefixed with `-`) are used for matching existing file content and must not be
+ * decoded. The `+++ ` file-header lines (identified by the trailing space, matching
+ * the unified-diff convention) are also left unchanged.
+ */
+export function decodeUnicodeEscapesInDiffAdditions(diff: string): string {
+	return diff
+		.split("\n")
+		.map(line => {
+			if (line.startsWith("+") && !line.startsWith("+++ ")) {
+				return `+${decodeUnicodeEscapes(line.slice(1))}`;
+			}
+			return line;
+		})
+		.join("\n");
+}
+
+/**
  * Normalize a line for fuzzy comparison.
  * Trims, collapses whitespace, and normalizes punctuation.
  */

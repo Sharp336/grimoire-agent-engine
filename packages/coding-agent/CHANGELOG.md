@@ -28,6 +28,7 @@
 ### Fixed
 
 - Fixed hook editors to recognize Ctrl+Enter when terminals include NumLock or keypad Enter metadata.
+- Edit and write tools now decode `\uXXXX` escape sequences to their actual Unicode characters before writing to disk. A sequence preceded by a second backslash (`\\uXXXX`) is left unchanged so intentional literal escapes are preserved.
 ## [14.5.6] - 2026-04-29
 ### Changed
 

@@ -14,6 +14,7 @@ import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-gua
 import { generateDiffString, replaceText } from "../diff";
 import {
 	countLeadingWhitespace,
+	decodeUnicodeEscapes,
 	detectLineEnding,
 	normalizeForFuzzy,
 	normalizeToLF,
@@ -1040,7 +1041,7 @@ export async function executeReplaceSingle(
 	const originalEnding = detectLineEnding(content);
 	const normalizedContent = normalizeToLF(content);
 	const normalizedOldText = normalizeToLF(old_text);
-	const normalizedNewText = normalizeToLF(new_text);
+	const normalizedNewText = normalizeToLF(decodeUnicodeEscapes(new_text));
 
 	const result = replaceText(normalizedContent, normalizedOldText, normalizedNewText, {
 		fuzzy: allowFuzzy,

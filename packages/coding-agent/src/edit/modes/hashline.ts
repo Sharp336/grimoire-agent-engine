@@ -29,7 +29,7 @@ import { enforcePlanModeWrite, resolvePlanPath } from "../../tools/plan-mode-gua
 import { formatCodeFrameLine } from "../../tools/render-utils";
 import { generateDiffString } from "../diff";
 import { computeLineHash, formatHashLine, HASHLINE_BIGRAM_RE_SRC, HASHLINE_CONTENT_SEPARATOR } from "../line-hash";
-import { detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "../normalize";
+import { decodeUnicodeEscapes, detectLineEnding, normalizeToLF, restoreLineEndings, stripBom } from "../normalize";
 import type { EditToolDetails, LspBatchRequest } from "../renderer";
 
 export interface HashMismatch {
@@ -194,7 +194,7 @@ export function hashlineParseText(edit: string[] | string | null | undefined): s
 		const normalizedEdit = edit.endsWith("\n") ? edit.slice(0, -1) : edit;
 		edit = normalizedEdit.replaceAll("\r", "").split("\n");
 	}
-	return stripNewLinePrefixes(edit);
+	return stripNewLinePrefixes(edit.map(decodeUnicodeEscapes));
 }
 
 function resolveEditAnchors(edits: HashlineToolEdit[]): HashlineEdit[] {

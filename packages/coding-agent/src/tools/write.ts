@@ -7,7 +7,7 @@ import { Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { unzipSync, zipSync } from "fflate";
-import { stripHashlinePrefixes } from "../edit";
+import { decodeUnicodeEscapes, stripHashlinePrefixes } from "../edit";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { createLspWritethrough, type FileDiagnosticsResult, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { getLanguageFromPath, type Theme } from "../modes/theme/theme";
@@ -422,7 +422,8 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		return untilAborted(signal, async () => {
 			// Strip hashline display prefixes (LINE+ID|) if the model copied them from read output
-			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
+			const { text: rawContent, stripped } = stripWriteContent(this.session, content);
+			const cleanContent = decodeUnicodeEscapes(rawContent);
 			const resolvedArchivePath = await this.#resolveArchiveWritePath(path);
 			if (resolvedArchivePath) {
 				enforcePlanModeWrite(this.session, resolvedArchivePath.archivePath, {
