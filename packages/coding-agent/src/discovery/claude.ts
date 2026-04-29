@@ -12,6 +12,7 @@ import { type ExtensionModule, extensionModuleCapability } from "../capability/e
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
+import { type Rule, ruleCapability } from "../capability/rule";
 import { type Settings, settingsCapability } from "../capability/settings";
 import { type Skill, skillCapability } from "../capability/skill";
 import { type SlashCommand, slashCommandCapability } from "../capability/slash-command";
@@ -20,6 +21,7 @@ import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { settings } from "../config/settings";
 import {
+	buildRuleFromMarkdown,
 	calculateDepth,
 	createSourceMeta,
 	discoverExtensionModulePaths,
@@ -206,6 +208,64 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 		} else if (!isMissingDirectoryError(projectResult.reason)) {
 			warnings.push(`Failed to scan Claude project skills: ${String(projectResult.reason)}`);
 		}
+	}
+
+	return { items, warnings };
+}
+
+// =============================================================================
+// Rules
+// =============================================================================
+
+async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
+	const userRulesDir = path.join(getUserClaude(ctx), "rules");
+
+	// Walk up from cwd finding .claude/rules/ in ancestors
+	const projectScans: Promise<LoadResult<Rule>>[] = [];
+	let current = ctx.cwd;
+	while (true) {
+		const rulesDir = path.join(current, CONFIG_DIR, "rules");
+		if (rulesDir !== userRulesDir) {
+			projectScans.push(
+				loadFilesFromDir<Rule>(ctx, rulesDir, PROVIDER_ID, "project", {
+					extensions: ["md", "mdc"],
+					transform: (name, content, filePath, source) =>
+						buildRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
+				}),
+			);
+		}
+		if (current === (ctx.repoRoot ?? ctx.home)) break;
+		const parent = path.dirname(current);
+		if (parent === current) break; // filesystem root
+		current = parent;
+	}
+
+	const [userResult, ...projectResults] = await Promise.allSettled([
+		loadFilesFromDir<Rule>(ctx, userRulesDir, PROVIDER_ID, "user", {
+			extensions: ["md", "mdc"],
+			transform: (name, content, filePath, source) =>
+				buildRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
+		}),
+		...projectScans,
+	]);
+
+	const items: Rule[] = [];
+	const warnings: string[] = [];
+
+	for (const projectResult of projectResults) {
+		if (projectResult.status === "fulfilled") {
+			items.push(...projectResult.value.items);
+			warnings.push(...(projectResult.value.warnings ?? []));
+		} else if (!isMissingDirectoryError(projectResult.reason)) {
+			warnings.push(`Failed to scan Claude project rules: ${String(projectResult.reason)}`);
+		}
+	}
+
+	if (userResult.status === "fulfilled") {
+		items.push(...userResult.value.items);
+		warnings.push(...(userResult.value.warnings ?? []));
+	} else if (!isMissingDirectoryError(userResult.reason)) {
+		warnings.push(`Failed to scan Claude user rules in ${userRulesDir}: ${String(userResult.reason)}`);
 	}
 
 	return { items, warnings };
@@ -514,6 +574,14 @@ registerProvider<Skill>(skillCapability.id, {
 	description: "Load skills from .claude/skills/*/SKILL.md",
 	priority: PRIORITY,
 	load: loadSkills,
+});
+
+registerProvider<Rule>(ruleCapability.id, {
+	id: PROVIDER_ID,
+	displayName: DISPLAY_NAME,
+	description: "Load rules from .claude/rules/*.md",
+	priority: PRIORITY,
+	load: loadRules,
 });
 
 registerProvider<ExtensionModule>(extensionModuleCapability.id, {
