@@ -6,6 +6,14 @@
 
 import { executeShell } from "@oh-my-pi/pi-natives";
 
+/** Identifies whether a config value originates from a trusted or untrusted source. */
+export enum ConfigSource {
+	/** User-level config (~/.mcp.json) — fully trusted, !-prefix commands allowed. */
+	User = "user",
+	/** Project-level config (.omp/mcp.json) — untrusted, !-prefix commands blocked. */
+	Project = "project",
+}
+
 /** Cache for successful shell command results (persists for process lifetime). */
 const commandResultCache = new Map<string, string>();
 
@@ -16,9 +24,22 @@ const commandInFlight = new Map<string, Promise<string | undefined>>();
  * Resolve a config value (API key, header value, etc.) to an actual value.
  * - If starts with "!", executes the rest as a shell command and uses stdout (cached)
  * - Otherwise checks environment variable first, then treats as literal (not cached)
+ *
+ * @param config - The raw config value string.
+ * @param source - Whether this value came from a user or project config.
+ *   Project-level configs are denied !-prefix shell execution to prevent RCE
+ *   from malicious .omp/mcp.json files in cloned repositories.
  */
-export async function resolveConfigValue(config: string): Promise<string | undefined> {
+export async function resolveConfigValue(
+	config: string,
+	source: ConfigSource = ConfigSource.User,
+): Promise<string | undefined> {
 	if (config.startsWith("!")) {
+		if (source === ConfigSource.Project) {
+			throw new Error(
+				"!command substitution is not allowed in project-level MCP config. Move this value to your user config (~/.mcp.json) or use an environment variable.",
+			);
+		}
 		return await executeCommand(config);
 	}
 	const envValue = process.env[config];
@@ -75,11 +96,12 @@ async function runShellCommand(command: string, timeoutMs: number): Promise<stri
  */
 export async function resolveHeaders(
 	headers: Record<string, string> | undefined,
+	source: ConfigSource = ConfigSource.User,
 ): Promise<Record<string, string> | undefined> {
 	if (!headers) return undefined;
 	const resolved: Record<string, string> = {};
 	for (const [key, value] of Object.entries(headers)) {
-		const resolvedValue = await resolveConfigValue(value);
+		const resolvedValue = await resolveConfigValue(value, source);
 		if (resolvedValue) {
 			resolved[key] = resolvedValue;
 		}
