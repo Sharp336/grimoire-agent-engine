@@ -360,12 +360,13 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "copy",
-		description: "Copy last agent message to clipboard",
+		description: "Copy exact text from the session to clipboard",
 		subcommands: [
 			{ name: "last", description: "Copy full last agent message" },
 			{ name: "code", description: "Copy last code block" },
 			{ name: "all", description: "Copy all code blocks from last message" },
 			{ name: "cmd", description: "Copy last bash/python command" },
+			{ name: "tool", description: "Copy last text tool result" },
 		],
 		allowArgs: true,
 		handleTui: async (command, runtime) => {

@@ -137,7 +137,7 @@ export class Markdown implements Component {
 	#defaultTextStyle?: DefaultTextStyle;
 	#theme: MarkdownTheme;
 	#defaultStylePrefix?: string;
-	/** Number of spaces used to indent code block content. */
+	/** Number of spaces used to indent code block content. Defaults to 0 so copied code is not prefixed with renderer-only whitespace. */
 	#codeBlockIndent: number;
 
 	// Cache for rendered output
@@ -151,7 +151,7 @@ export class Markdown implements Component {
 		paddingY: number,
 		theme: MarkdownTheme,
 		defaultTextStyle?: DefaultTextStyle,
-		codeBlockIndent: number = 2,
+		codeBlockIndent: number = 0,
 	) {
 		this.#text = text;
 		this.#paddingX = paddingX;
