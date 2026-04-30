@@ -269,3 +269,24 @@ module.exports.SamplingFilter = {
   Lanczos3: 5,
 };
 // --- end generated const enum exports ---
+
+
+// --- stubs for symbols declared in d.ts but not yet compiled into the .node binary ---
+if (!module.exports.Process) {
+  class Process {
+    static fromPid(_pid) { return null; }
+    static fromPath(_path) { return []; }
+    pid() { return -1; }
+    status() { return 'exited'; }
+    terminate() { return Promise.resolve(false); }
+    waitForExit() { return Promise.resolve(true); }
+  }
+  module.exports.Process = Process;
+}
+if (!module.exports.countTokens) {
+  module.exports.countTokens = function countTokens(_text, _encoding) { return 0; };
+}
+if (!module.exports.MacOSPowerAssertion) {
+  class MacOSPowerAssertion { release() {} }
+  module.exports.MacOSPowerAssertion = MacOSPowerAssertion;
+}

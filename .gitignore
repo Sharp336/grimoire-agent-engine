@@ -12,6 +12,7 @@ target/
 *.node
 *.b64.js
 
+.turbo/
 # Environment
 .env
 
