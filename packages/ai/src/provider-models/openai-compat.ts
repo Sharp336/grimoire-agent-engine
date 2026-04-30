@@ -953,7 +953,7 @@ export function alibabaCodingPlanModelManagerOptions(
 	config?: AlibabaCodingPlanModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? "https://coding-intl.dashscope.aliyuncs.com/v1";
+	const baseUrl = config?.baseUrl ?? "https://coding.dashscope.aliyuncs.com/v1";
 	const references = createBundledReferenceMap<"openai-completions">("alibaba-coding-plan");
 	return {
 		providerId: "alibaba-coding-plan",
@@ -961,6 +961,37 @@ export function alibabaCodingPlanModelManagerOptions(
 			fetchOpenAICompatibleModels({
 				api: "openai-completions",
 				provider: "alibaba-coding-plan",
+				baseUrl,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					const reference = references.get(defaults.id);
+					return mapWithBundledReference(entry, defaults, reference);
+				},
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// Bailian Coding Plan
+// ---------------------------------------------------------------------------
+
+export interface BailianCodingPlanModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+export function bailianCodingPlanModelManagerOptions(
+	config?: BailianCodingPlanModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://coding.dashscope.aliyuncs.com/v1";
+	const references = createBundledReferenceMap<"openai-completions">("bailian-coding-plan");
+	return {
+		providerId: "bailian-coding-plan",
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "bailian-coding-plan",
 				baseUrl,
 				apiKey,
 				mapModel: (entry, defaults) => {
@@ -2043,11 +2074,21 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 	openAiCompletionsDescriptor(
 		"alibaba-coding-plan",
 		"alibaba-coding-plan",
-		"https://coding-intl.dashscope.aliyuncs.com/v1",
+		"https://coding.dashscope.aliyuncs.com/v1",
 		{
 			compat: {
 				supportsDeveloperRole: false,
 			},
+		},
+	),
+	// --- Bailian Coding Plan ---
+	openAiCompletionsDescriptor(
+		"bailian-coding-plan",
+		"bailian-coding-plan",
+		"https://coding.dashscope.aliyuncs.com/v1",
+		{
+			defaultContextWindow: 1000000,
+			defaultMaxTokens: 65536,
 		},
 	),
 ];

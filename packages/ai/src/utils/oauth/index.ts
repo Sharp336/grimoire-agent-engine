@@ -45,6 +45,8 @@ import type {
 export { loginAlibabaCodingPlan } from "./alibaba-coding-plan";
 // Anthropic
 export { loginAnthropic, refreshAnthropicToken } from "./anthropic";
+// Bailian Coding Plan
+export { loginBailianCodingPlan } from "./bailian-coding-plan";
 // Cerebras (API key)
 export { loginCerebras } from "./cerebras";
 // Cloudflare AI Gateway (API key)
@@ -137,6 +139,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 	{
 		id: "alibaba-coding-plan",
 		name: "Alibaba Coding Plan",
+		available: true,
+	},
+	{
+		id: "bailian-coding-plan",
+		name: "Bailian Coding Plan",
 		available: true,
 	},
 	{

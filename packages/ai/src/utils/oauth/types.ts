@@ -11,6 +11,7 @@ export type OAuthCredentials = {
 export type OAuthProvider =
 	| "alibaba-coding-plan"
 	| "anthropic"
+	| "bailian-coding-plan"
 	| "cerebras"
 	| "cloudflare-ai-gateway"
 	| "cursor"

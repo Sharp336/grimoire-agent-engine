@@ -727,6 +727,11 @@ async function createClient(
 	clearCapturedErrorResponse: () => void;
 }> {
 	if (!apiKey) {
+		if (model.provider === "alibaba-coding-plan") {
+			throw new Error(
+				"Alibaba Coding Plan API key is required. Set ALIBABA_CODING_PLAN_API_KEY environment variable or pass it as an argument.",
+			);
+		}
 		if (!$env.OPENAI_API_KEY) {
 			throw new Error(
 				"OpenAI API key is required. Set OPENAI_API_KEY environment variable or pass it as an argument.",
@@ -742,6 +747,9 @@ async function createClient(
 	}
 	if (model.provider === "kimi-code") {
 		headers = { ...(await getKimiCommonHeaders()), ...headers };
+	}
+	if (model.provider === "alibaba-coding-plan") {
+		apiKey = apiKey.trim();
 	}
 	let copilotPremiumRequests: number | undefined;
 
@@ -798,6 +806,10 @@ async function createClient(
 		},
 		{ preconnect: fetch.preconnect },
 	);
+	if (model.provider === "alibaba-coding-plan") {
+		headers.Authorization = apiKey;
+	}
+
 	return {
 		client: new OpenAI({
 			apiKey,

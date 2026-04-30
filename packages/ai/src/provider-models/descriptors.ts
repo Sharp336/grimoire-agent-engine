@@ -11,6 +11,7 @@ import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
 	alibabaCodingPlanModelManagerOptions,
 	anthropicModelManagerOptions,
+	bailianCodingPlanModelManagerOptions,
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	deepseekModelManagerOptions,
@@ -131,6 +132,12 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		"qwen3.5-plus",
 		config => alibabaCodingPlanModelManagerOptions(config),
 		catalog("Alibaba Coding Plan", ["ALIBABA_CODING_PLAN_API_KEY"]),
+	),
+	catalogDescriptor(
+		"bailian-coding-plan",
+		"qwen3.5-plus",
+		config => bailianCodingPlanModelManagerOptions(config),
+		catalog("Bailian Coding Plan", ["BAILIAN_CODING_PLAN_API_KEY"]),
 	),
 	descriptor("openai", "gpt-5.4", config => openaiModelManagerOptions(config)),
 	descriptor("groq", "openai/gpt-oss-120b", config => groqModelManagerOptions(config)),

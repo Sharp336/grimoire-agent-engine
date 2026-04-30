@@ -33,6 +33,7 @@ import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken } from "./utils/oau
 // (these are used inside the login() switch-case)
 import { loginAlibabaCodingPlan } from "./utils/oauth/alibaba-coding-plan";
 import { loginAnthropic } from "./utils/oauth/anthropic";
+import { loginBailianCodingPlan } from "./utils/oauth/bailian-coding-plan";
 import { loginCerebras } from "./utils/oauth/cerebras";
 import { loginCloudflareAiGateway } from "./utils/oauth/cloudflare-ai-gateway";
 import { loginCursor } from "./utils/oauth/cursor";
@@ -766,6 +767,11 @@ export class AuthStorage {
 				break;
 			case "alibaba-coding-plan": {
 				const apiKey = await loginAlibabaCodingPlan(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
+			case "bailian-coding-plan": {
+				const apiKey = await loginBailianCodingPlan(ctrl);
 				await saveApiKeyCredential(apiKey);
 				return;
 			}

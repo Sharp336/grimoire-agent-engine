@@ -1,25 +1,24 @@
 /**
- * Alibaba Coding Plan login flow.
+ * Bailian Coding Plan login flow.
  *
- * Alibaba Coding Plan provides OpenAI-compatible models via https://coding.dashscope.aliyuncs.com/v1.
+ * Bailian Coding Plan provides models via Anthropic-compatible API:
+ * - International: https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1
+ * - China: https://coding.dashscope.aliyuncs.com/apps/anthropic/v1
  *
- * This is not OAuth - it's a simple API key flow:
- * 1. Open browser to Alibaba Cloud DashScope API key settings
- * 2. User copies their API key
- * 3. User pastes the API key into the CLI
+ * Uses API keys starting with "sk-sp-" (different from standard DashScope).
+ * Does not support "developer" role (must use "system").
  */
 
 import type { OAuthController } from "./types";
 
 const AUTH_URL = "https://modelstudio.console.alibabacloud.com/";
 const API_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1";
-const VALIDATION_MODEL = "qwen3.5-plus";
+const VALIDATION_MODEL = "qwen3-coder-plus";
 const VALIDATION_TIMEOUT_MS = 15_000;
 
-async function validateAlibabaApiKey(options: {
+async function validateBailianApiKey(options: {
 	apiKey: string;
 	baseUrl: string;
-	model: string;
 	signal?: AbortSignal;
 }): Promise<void> {
 	const timeoutSignal = AbortSignal.timeout(VALIDATION_TIMEOUT_MS);
@@ -29,13 +28,12 @@ async function validateAlibabaApiKey(options: {
 		method: "POST",
 		headers: {
 			"Content-Type": "application/json",
-			Authorization: options.apiKey,
+			Authorization: `Bearer ${options.apiKey}`,
 		},
 		body: JSON.stringify({
-			model: options.model,
+			model: VALIDATION_MODEL,
 			messages: [{ role: "user", content: "ping" }],
 			max_tokens: 1,
-			temperature: 0,
 		}),
 		signal,
 	});
@@ -52,30 +50,23 @@ async function validateAlibabaApiKey(options: {
 	}
 
 	const message = details
-		? `Alibaba Coding Plan API key validation failed (${response.status}): ${details}`
-		: `Alibaba Coding Plan API key validation failed (${response.status})`;
+		? `Bailian Coding Plan API key validation failed (${response.status}): ${details}`
+		: `Bailian Coding Plan API key validation failed (${response.status})`;
 	throw new Error(message);
 }
-
-/**
- * Login to Alibaba Coding Plan.
- *
- * Opens browser to API keys page, prompts user to paste their API key.
- * Returns the API key directly (not OAuthCredentials - this isn't OAuth).
- */
-export async function loginAlibabaCodingPlan(options: OAuthController): Promise<string> {
+export async function loginBailianCodingPlan(options: OAuthController): Promise<string> {
 	if (!options.onPrompt) {
-		throw new Error("Alibaba Coding Plan login requires onPrompt callback");
+		throw new Error("Bailian Coding Plan login requires onPrompt callback");
 	}
 
 	options.onAuth?.({
 		url: AUTH_URL,
-		instructions: "Copy your API key from the Alibaba Cloud DashScope console",
+		instructions: "Copy your API key from the Alibaba Cloud Bailian Model Studio console (starts with sk-sp-)",
 	});
 
 	const apiKey = await options.onPrompt({
-		message: "Paste your Alibaba Coding Plan API key",
-		placeholder: "sk-...",
+		message: "Paste your Bailian Coding Plan API key",
+		placeholder: "sk-sp-...",
 	});
 
 	if (options.signal?.aborted) {
@@ -88,10 +79,9 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 	}
 
 	options.onProgress?.("Validating API key...");
-	await validateAlibabaApiKey({
+	await validateBailianApiKey({
 		apiKey: trimmed,
 		baseUrl: API_BASE_URL,
-		model: VALIDATION_MODEL,
 		signal: options.signal,
 	});
 

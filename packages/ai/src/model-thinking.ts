@@ -31,6 +31,7 @@ const GEMINI_3_FLASH_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, E
 const GPT_5_2_PLUS_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 const GPT_5_1_CODEX_MINI_EFFORTS: readonly Effort[] = [Effort.Medium, Effort.High];
 const CLOUDFLARE_AI_GATEWAY_BASE_URL = "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic";
+const BAILIAN_CODING_PLAN_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1";
 
 type SemVer = {
 	major: number;
@@ -102,6 +103,29 @@ export const CLOUDFLARE_FALLBACK_MODEL: ApiModel<"anthropic-messages"> = {
 	},
 	contextWindow: 200000,
 	maxTokens: 64000,
+};
+
+/**
+ * Static fallback model injected when Bailian Coding Plan discovery
+ * returns no results. Ensures the provider always has at least one usable
+ * model entry in the catalog.
+ */
+export const BAILIAN_CODING_PLAN_FALLBACK_MODEL: ApiModel<"openai-completions"> = {
+	id: "qwen3-coder-plus",
+	name: "Qwen3 Coder Plus",
+	api: "openai-completions",
+	provider: "bailian-coding-plan",
+	baseUrl: BAILIAN_CODING_PLAN_BASE_URL,
+	reasoning: true,
+	input: ["text", "image"],
+	cost: {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+	},
+	contextWindow: 1000000,
+	maxTokens: 65536,
 };
 
 /**

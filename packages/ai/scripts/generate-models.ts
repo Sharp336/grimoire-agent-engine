@@ -15,6 +15,7 @@ import { AuthCredentialStore } from "../src/auth-storage";
 import { createModelManager } from "../src/model-manager";
 import {
 	applyGeneratedModelPolicies,
+	BAILIAN_CODING_PLAN_FALLBACK_MODEL,
 	CLOUDFLARE_FALLBACK_MODEL,
 	linkOpenAIPromotionTargets,
 } from "../src/model-thinking";
@@ -324,6 +325,10 @@ async function generateModels() {
 		[...modelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
 		modelsDevModels,
 	);
+
+	if (!allModels.some(model => model.provider === "bailian-coding-plan")) {
+		allModels.push(BAILIAN_CODING_PLAN_FALLBACK_MODEL);
+	}
 
 	if (!allModels.some(model => model.provider === "cloudflare-ai-gateway")) {
 		allModels.push(CLOUDFLARE_FALLBACK_MODEL);
