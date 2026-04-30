@@ -494,6 +494,29 @@ const noOpUIContext: ExtensionUIContext = {
 	setToolsExpanded: () => {},
 };
 
+/**
+ * Returns true when the assistant message handed control back to the user with
+ * a question. Used by auto-continue / todo-reminder gates to avoid answering on
+ * the user's behalf. Detects two shapes:
+ *   - a structured `ask` tool call (the canonical way to wait for input)
+ *   - a final assistant message with no tool calls whose trailing text ends in `?`
+ */
+export function assistantMessageEndsWithQuestion(msg: AssistantMessage): boolean {
+	const toolCalls = msg.content.filter((c): c is ToolCall => c.type === "toolCall");
+	if (toolCalls.length > 0) {
+		return toolCalls.some(call => call.name === "ask");
+	}
+	const texts = msg.content.filter((c): c is TextContent => c.type === "text");
+	const lastText = texts[texts.length - 1];
+	if (!lastText) return false;
+	const trimmed = lastText.text.trimEnd();
+	if (trimmed.length === 0) return false;
+	// Strip trailing closing punctuation that may follow a question mark
+	// (e.g. `do X?"`, `do X?)`, `do X?**`).
+	const stripped = trimmed.replace(/[\s)\]}"'`*_]+$/u, "");
+	return stripped.endsWith("?");
+}
+
 // ============================================================================
 // AgentSession Class
 // ============================================================================
@@ -1394,6 +1417,10 @@ export class AgentSession {
 			async signal => {
 				await Promise.resolve();
 				if (signal.aborted) return;
+				if (this.settings.get("ask.pauseOnQuestion") && this.#lastAssistantTurnEndsWithQuestion()) {
+					logger.debug("Auto-continue suppressed: assistant ended turn with a question to the user");
+					return;
+				}
 				await continuePrompt();
 			},
 			{ generation },
@@ -1660,6 +1687,21 @@ export class AgentSession {
 			}
 		}
 		return undefined;
+	}
+
+	/**
+	 * Returns true when the most recent assistant turn ended by asking the user a
+	 * question and yielded control. Used to suppress auto-continue / todo reminders
+	 * that would otherwise answer the question on the user's behalf.
+	 *
+	 * Detection covers two shapes:
+	 *   - a structured `ask` tool call (the canonical way to wait for input)
+	 *   - a final assistant message with no tool calls whose trailing text ends in `?`
+	 */
+	#lastAssistantTurnEndsWithQuestion(): boolean {
+		const msg = this.#findLastAssistantMessage();
+		if (!msg) return false;
+		return assistantMessageEndsWithQuestion(msg);
 	}
 
 	#resetStreamingEditState(): void {
@@ -5042,6 +5084,13 @@ export class AgentSession {
 		// the user wanted exactly that tool, not a follow-up nag about incomplete todos.
 		const lastServedLabel = this.#toolChoiceQueue.consumeLastServedLabel();
 		if (lastServedLabel === "user-force") {
+			return;
+		}
+
+		// Skip if the assistant explicitly handed control back to the user with a question;
+		// nagging about incomplete todos there would answer for them.
+		if (this.settings.get("ask.pauseOnQuestion") && this.#lastAssistantTurnEndsWithQuestion()) {
+			logger.debug("Todo reminder suppressed: assistant ended turn with a question to the user");
 			return;
 		}
 

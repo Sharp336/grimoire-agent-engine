@@ -927,6 +927,17 @@ export const SETTINGS_SCHEMA = {
 		ui: { tab: "interaction", label: "Ask Notification", description: "Notify when ask tool is waiting for input" },
 	},
 
+	"ask.pauseOnQuestion": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			label: "Pause On Pending Question",
+			description:
+				"Suppress auto-continue and todo reminders when the agent ends a turn with a question (via the ask tool or trailing '?').",
+		},
+	},
+
 	// Speech-to-text
 	"stt.enabled": {
 		type: "boolean",
