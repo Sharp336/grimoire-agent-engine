@@ -362,6 +362,61 @@ describe("Pi compatibility shims and doctor", () => {
 		}
 	});
 
+	it("applies profile env when loading plugin custom tools", async () => {
+		const envSnapshot = snapshotProcessEnv([
+			"PATH",
+			"OMP_PI_COMPAT",
+			"OMP_PI_COMPAT_HOME",
+			"OMP_PI_COMPAT_BRIDGE",
+			"PI_CODING_AGENT",
+			"PI_CODING_AGENT_DIR",
+			"PI_PACKAGE_DIR",
+			"PI_TEAMS_ROOT_DIR",
+			"PI_TEAMS_HOOKS_DIR",
+		]);
+		const pluginDir = path.join(getPluginsNodeModules(), "@tmustier", "pi-agent-teams");
+		const toolPath = path.join(pluginDir, "tools", "index.ts");
+		fs.mkdirSync(path.dirname(toolPath), { recursive: true });
+		fs.writeFileSync(
+			toolPath,
+			[
+				"export default function(api) {",
+				"  return {",
+				'    name: "profile_tool",',
+				"    label: process.env.PI_TEAMS_ROOT_DIR ?? 'missing',",
+				'    description: "Checks profile activation",',
+				"    parameters: api.typebox.Type.Object({}),",
+				"    async execute() {",
+				"      const result = await api.exec(process.execPath, ['-e', 'console.log(process.env.PI_TEAMS_ROOT_DIR ?? \\\"missing\\\")']);",
+				"      return { content: [{ type: 'text', text: result.stdout.trim() }] };",
+				"    },",
+				"  };",
+				"}",
+			].join("\n"),
+		);
+		process.env.OMP_PI_COMPAT_BRIDGE = "profile";
+		try {
+			const result = await loadCustomTools([{ path: toolPath }], process.cwd(), []);
+
+			expect(result.errors).toHaveLength(0);
+			expect(result.tools[0]?.tool.label).toBe(path.join(getAgentDir(), "teams"));
+			const execution = await result.tools[0]?.tool.execute?.(
+				"profile-tool-call",
+				{},
+				undefined as never,
+				undefined as never,
+				undefined as never,
+			);
+			expect(execution?.content[0]).toMatchObject({
+				type: "text",
+				text: path.join(getAgentDir(), "teams"),
+			});
+		} finally {
+			fs.rmSync(pluginDir, { recursive: true, force: true });
+			restoreProcessEnv(envSnapshot);
+		}
+	});
+
 	it("preserves selected bridge mode when loading custom tools", async () => {
 		const envSnapshot = snapshotProcessEnv([
 			"HOME",

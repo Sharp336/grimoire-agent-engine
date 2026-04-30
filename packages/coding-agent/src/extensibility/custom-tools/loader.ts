@@ -6,7 +6,7 @@
  */
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { logger } from "@oh-my-pi/pi-utils";
+import { getPluginsNodeModules, logger } from "@oh-my-pi/pi-utils";
 import * as typebox from "@sinclair/typebox";
 import { toolCapability } from "../../capability/tool";
 import { type CustomTool, loadCapability } from "../../discovery";
@@ -15,6 +15,7 @@ import { execCommand } from "../../exec/exec";
 import type { HookUIContext } from "../../extensibility/hooks/types";
 import { getAllPluginToolPaths } from "../../extensibility/plugins/loader";
 import { ensurePiCompatImportShims } from "../pi-compat/aliases";
+import { buildPiCompatEnv } from "../pi-compat/path-bridge";
 import { activatePiCompatEnvironment } from "../pi-compat/shims";
 import { createNoOpUIContext, resolvePath } from "../utils";
 import type { CustomToolAPI, CustomToolFactory, LoadedCustomTool, ToolLoadError } from "./types";
@@ -73,6 +74,20 @@ interface ToolPathWithSource {
 	source?: { provider: string; providerName: string; level: "user" | "project" };
 }
 
+function pluginPackageNameFromPath(filePath: string): string | undefined {
+	const nodeModulesPath = path.resolve(getPluginsNodeModules());
+	const resolvedPath = path.resolve(filePath);
+	const relativePath = path.relative(nodeModulesPath, resolvedPath);
+	if (relativePath.startsWith("..") || path.isAbsolute(relativePath)) return undefined;
+
+	const parts = relativePath.split(path.sep).filter(Boolean);
+	if (parts.length === 0) return undefined;
+	if (parts[0]?.startsWith("@")) {
+		return parts.length >= 2 ? `${parts[0]}/${parts[1]}` : undefined;
+	}
+	return parts[0];
+}
+
 /**
  * Loads custom tools from paths with conflict detection and error handling.
  *
@@ -84,33 +99,44 @@ export class CustomToolLoader {
 	tools: LoadedCustomTool[] = [];
 	errors: ToolLoadError[] = [];
 	#sharedApi: CustomToolAPI;
+	#apis: CustomToolAPI[] = [];
 	#seenNames: Set<string>;
 
 	constructor(
-		pi: typeof import("@oh-my-pi/pi-coding-agent"),
-		cwd: string,
+		private readonly pi: typeof import("@oh-my-pi/pi-coding-agent"),
+		private readonly cwd: string,
 		builtInToolNames: string[],
-		pushPendingAction?: (action: {
+		private readonly pushPendingAction?: (action: {
 			label: string;
 			sourceToolName: string;
 			apply(reason: string): Promise<AgentToolResult<unknown>>;
 			reject?(reason: string): Promise<AgentToolResult<unknown> | undefined>;
 		}) => void,
 	) {
-		this.#sharedApi = {
-			cwd,
+		this.#sharedApi = this.#createApi();
+		this.#seenNames = new Set<string>(builtInToolNames);
+	}
+
+	#createApi(packageName?: string): CustomToolAPI {
+		const api: CustomToolAPI = {
+			cwd: this.cwd,
 			exec: (command: string, args: string[], options?: ExecOptions) =>
-				execCommand(command, args, options?.cwd ?? cwd, options),
+				execCommand(command, args, options?.cwd ?? this.cwd, {
+					...options,
+					env: packageName
+						? buildPiCompatEnv({ baseEnv: { ...process.env, ...options?.env }, packageName })
+						: options?.env,
+				}),
 			ui: createNoOpUIContext(),
 			hasUI: false,
 			logger,
 			typebox,
-			pi,
+			pi: this.pi,
 			pushPendingAction: action => {
-				if (!pushPendingAction) {
+				if (!this.pushPendingAction) {
 					throw new Error("Pending action store unavailable for custom tools in this runtime.");
 				}
-				pushPendingAction({
+				this.pushPendingAction({
 					label: action.label,
 					sourceToolName: action.sourceToolName ?? "custom_tool",
 					apply: action.apply,
@@ -118,12 +144,19 @@ export class CustomToolLoader {
 				});
 			},
 		};
-		this.#seenNames = new Set<string>(builtInToolNames);
+		this.#apis.push(api);
+		return api;
 	}
 
 	async load(pathsWithSources: ToolPathWithSource[]): Promise<void> {
 		for (const { path: toolPath, source } of pathsWithSources) {
-			const { tools: loadedTools, error } = await loadTool(toolPath, this.#sharedApi.cwd, this.#sharedApi, source);
+			const resolvedPath = resolvePath(toolPath, this.cwd);
+			const packageName = pluginPackageNameFromPath(resolvedPath);
+			if (packageName) {
+				await activatePiCompatEnvironment({ packageName });
+			}
+			const api = packageName ? this.#createApi(packageName) : this.#sharedApi;
+			const { tools: loadedTools, error } = await loadTool(toolPath, this.cwd, api, source);
 
 			if (error) {
 				this.errors.push(error);
@@ -150,8 +183,10 @@ export class CustomToolLoader {
 	}
 
 	setUIContext(uiContext: HookUIContext, hasUI: boolean): void {
-		this.#sharedApi.ui = uiContext;
-		this.#sharedApi.hasUI = hasUI;
+		for (const api of this.#apis) {
+			api.ui = uiContext;
+			api.hasUI = hasUI;
+		}
 	}
 }
 
