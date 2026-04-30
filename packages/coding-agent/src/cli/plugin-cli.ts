@@ -111,9 +111,9 @@ export function parsePluginArgs(args: string[]): PluginCommandArgs | undefined {
 		} else if (arg === "--dry-run") {
 			result.flags.dryRun = true;
 		} else if (arg === "-l" || arg === "--local") {
+			result.flags.local = true;
 		} else if (arg === "--compat-pi") {
 			result.flags.compatPi = true;
-			result.flags.local = true;
 		} else if (arg === "--enable" && i + 1 < args.length) {
 			result.flags.enable = args[++i];
 		} else if (arg === "--disable" && i + 1 < args.length) {
