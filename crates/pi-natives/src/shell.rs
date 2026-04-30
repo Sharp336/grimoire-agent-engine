@@ -901,8 +901,15 @@ async fn read_output(
 ) {
 	const REPLACEMENT: &str = "\u{FFFD}";
 	const BUF: usize = 65536;
+	// Flush the JS callback at most once per FLUSH_INTERVAL or when the
+	// accumulator exceeds FLUSH_THRESHOLD bytes.  This batches many small
+	// pipe reads into fewer ThreadsafeFunction calls, reducing pressure on
+	// the JS event loop when multiple shell sessions run concurrently.
+	const FLUSH_INTERVAL: Duration = Duration::from_millis(50);
+	const FLUSH_THRESHOLD: usize = 32_768;
 	let mut buf = vec![0u8; BUF + 4]; // +4 for max UTF-8 char
 	let mut it = 0;
+	let mut accum = String::new();
 
 	#[cfg(unix)]
 	let Ok(reader) = register_nonblocking_pipe(reader) else {
@@ -913,11 +920,25 @@ async fn read_output(
 	#[cfg(not(unix))]
 	tokio::pin!(reader);
 
+	let flush = |accum: &mut String| {
+		if !accum.is_empty() {
+			emit_chunk(accum, on_chunk.as_ref());
+			accum.clear();
+		}
+	};
+
+	let mut flush_deadline = Box::pin(time::sleep(FLUSH_INTERVAL));
+
 	loop {
 		#[cfg(unix)]
 		let n = {
 			let Ok(mut readiness) = (tokio::select! {
 				ready = reader.readable() => ready,
+				() = &mut flush_deadline, if !accum.is_empty() => {
+					flush(&mut accum);
+					flush_deadline.as_mut().reset(time::Instant::now() + FLUSH_INTERVAL);
+					continue;
+				},
 				() = cancel_token.cancelled() => break,
 			}) else {
 				break;
@@ -936,6 +957,11 @@ async fn read_output(
 			tokio::pin!(read_future);
 			match tokio::select! {
 				res = &mut read_future => res,
+				() = &mut flush_deadline, if !accum.is_empty() => {
+					flush(&mut accum);
+					flush_deadline.as_mut().reset(time::Instant::now() + FLUSH_INTERVAL);
+					continue;
+				},
 				() = cancel_token.cancelled() => break,
 			} {
 				Ok(0) => break, // EOF
@@ -954,7 +980,7 @@ async fn read_output(
 			let pending = &buf[..it];
 			match str::from_utf8(pending) {
 				Ok(text) => {
-					emit_chunk(text, on_chunk.as_ref());
+					accum.push_str(text);
 					it = 0;
 					break;
 				},
@@ -963,7 +989,7 @@ async fn read_output(
 					if p > 0 {
 						// SAFETY: [..p] is guaranteed valid UTF-8 by valid_up_to().
 						let text = unsafe { str::from_utf8_unchecked(&pending[..p]) };
-						emit_chunk(text, on_chunk.as_ref());
+						accum.push_str(text);
 						// copy p..it to the beginning of the buffer
 						buf.copy_within(p..it, 0);
 						it -= p;
@@ -972,7 +998,7 @@ async fn read_output(
 					match err.error_len() {
 						Some(p) => {
 							// Invalid byte sequence: emit replacement and drop those bytes.
-							emit_chunk(REPLACEMENT, on_chunk.as_ref());
+							accum.push_str(REPLACEMENT);
 							// copy p..it to the beginning of the buffer
 							buf.copy_within(p..it, 0);
 							it -= p;
@@ -987,18 +1013,25 @@ async fn read_output(
 				},
 			}
 		}
+
+		// Flush when the accumulator exceeds the size threshold.
+		if accum.len() >= FLUSH_THRESHOLD {
+			flush(&mut accum);
+			flush_deadline.as_mut().reset(time::Instant::now() + FLUSH_INTERVAL);
+		}
 	}
 
 	// Flush whatever is left at EOF (including an incomplete final sequence).
 	for chunk in buf[..it].utf8_chunks() {
 		let valid = chunk.valid();
 		if !valid.is_empty() {
-			emit_chunk(valid, on_chunk.as_ref());
+			accum.push_str(valid);
 		}
 		if !chunk.invalid().is_empty() {
-			emit_chunk(REPLACEMENT, on_chunk.as_ref());
+			accum.push_str(REPLACEMENT);
 		}
 	}
+	flush(&mut accum);
 }
 
 async fn read_output_buffered(

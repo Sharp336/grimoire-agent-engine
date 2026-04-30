@@ -222,6 +222,8 @@ export interface AgentProgress {
 	modelOverride?: string | string[];
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
+	retry?: { retryAtMs: number; attempt: number; maxAttempts: number };
+	result?: { output: string; stderr: string; truncated: boolean };
 }
 
 /** Result from a single agent execution */
@@ -274,4 +276,20 @@ export interface TaskToolDetails {
 		jobId: string;
 		type: "task";
 	};
+}
+
+/** Channel name for task background run events (via EventBus or similar). */
+export const TASK_BACKGROUND_RUN_CHANNEL = "task:background-run";
+
+/** Event emitted when a task run starts/progresses/completes in the background. */
+export interface TaskBackgroundRunEvent {
+	type: "started" | "progress" | "completed" | "failed" | "background_run_complete";
+	runId: string;
+	taskId: string;
+	agentId: string;
+	description?: string;
+	progress: AgentProgress[];
+	timestamp: number;
+	result?: SingleResult;
+	error?: string;
 }

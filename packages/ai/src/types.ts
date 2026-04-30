@@ -427,6 +427,8 @@ export interface ToolResultMessage<TDetails = any> {
 	/** Timestamp when output was pruned (ms since epoch). Undefined if unpruned. */
 	prunedAt?: number;
 	timestamp: number; // Unix timestamp in milliseconds
+	/** Cold storage references for lazily materialized content blocks. */
+	coldRefs?: Array<{ blockIndex: number; ref: string; byteLen: number }>;
 }
 
 export type Message = UserMessage | DeveloperMessage | AssistantMessage | ToolResultMessage;

@@ -16,6 +16,10 @@ export interface AsyncJob {
 	promise: Promise<void>;
 	resultText?: string;
 	errorText?: string;
+	/** Current tool being executed (for task-type jobs) */
+	currentTool?: string;
+	/** Current tool arguments preview */
+	currentToolArgs?: string;
 }
 
 export interface AsyncJobManagerOptions {
@@ -150,6 +154,13 @@ export class AsyncJobManager {
 
 	getJob(id: string): AsyncJob | undefined {
 		return this.#jobs.get(id);
+	}
+
+	updateJobTool(id: string, currentTool?: string, currentToolArgs?: string): void {
+		const job = this.#jobs.get(id);
+		if (!job || job.status !== "running") return;
+		job.currentTool = currentTool;
+		job.currentToolArgs = currentToolArgs;
 	}
 
 	getRunningJobs(): AsyncJob[] {

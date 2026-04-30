@@ -1,5 +1,10 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent, Message } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessage,
+	type ImageContent,
+	isRetryableError as isTransportRetryableError,
+	type Message,
+} from "@oh-my-pi/pi-ai";
 import { Spacer, Text, TruncatedText } from "@oh-my-pi/pi-tui";
 import { settings } from "../../config/settings";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
@@ -9,6 +14,7 @@ import { CompactionSummaryMessageComponent } from "../../modes/components/compac
 import { CustomMessageComponent } from "../../modes/components/custom-message";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { PythonExecutionComponent } from "../../modes/components/python-execution";
+import { QueuedUserMessageComponent } from "../../modes/components/queued-user-message";
 import { ReadToolGroupComponent } from "../../modes/components/read-tool-group";
 import { SkillMessageComponent } from "../../modes/components/skill-message";
 import { ToolExecutionComponent } from "../../modes/components/tool-execution";
@@ -27,7 +33,25 @@ type QueuedMessages = {
 };
 
 export class UiHelpers {
+	#queuedSpinnerFrame = 0;
+	#queuedSpinnerInterval?: NodeJS.Timeout;
+
 	constructor(private ctx: InteractiveModeContext) {}
+
+	#updateQueuedSpinnerAnimation(needsSpinner: boolean): void {
+		if (needsSpinner && !this.#queuedSpinnerInterval) {
+			this.#queuedSpinnerInterval = setInterval(() => {
+				const frameCount = theme.getSpinnerFrames("activity").length;
+				if (frameCount === 0) return;
+				this.#queuedSpinnerFrame = (this.#queuedSpinnerFrame + 1) % frameCount;
+				this.ctx.ui.requestRender();
+			}, 80);
+		} else if (!needsSpinner && this.#queuedSpinnerInterval) {
+			clearInterval(this.#queuedSpinnerInterval);
+			this.#queuedSpinnerInterval = undefined;
+			this.#queuedSpinnerFrame = 0;
+		}
+	}
 
 	/** Extract text content from a user message */
 	getUserMessageText(message: Message): string {
@@ -283,10 +307,13 @@ export class UiHelpers {
 						? (() => {
 								const retryAttempt = this.ctx.session.retryAttempt;
 								return retryAttempt > 0
-									? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-									: "Operation aborted";
+									? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""} — Enter to resume`
+									: "Operation aborted — Enter to resume";
 							})()
-						: message.errorMessage || "Error"
+						: (() => {
+								const msg = message.errorMessage || "Error";
+								return isTransportRetryableError(new Error(msg)) ? `${msg} — Enter to resume` : msg;
+							})()
 					: null;
 
 				// Render tool call components
@@ -492,33 +519,43 @@ export class UiHelpers {
 	updatePendingMessagesDisplay(): void {
 		this.ctx.pendingMessagesContainer.clear();
 		const queuedMessages = this.ctx.session.getQueuedMessages() as QueuedMessages;
+		const prefixWidth = 3;
+		const spinnerFrames = theme.getSpinnerFrames("activity");
+		const getSpinnerFrame = () => this.#queuedSpinnerFrame;
 
-		const steeringMessages: Array<{ message: string; label: string }> = [];
+		const steeringMessages: Array<{ message: string }> = [];
 		for (const message of queuedMessages.steering) {
-			steeringMessages.push({ message, label: "Steer" });
+			steeringMessages.push({ message });
 		}
 		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
 			if (entry.mode === "steer") {
-				steeringMessages.push({ message: entry.text, label: "Steer" });
+				steeringMessages.push({ message: entry.text });
 			}
 		}
 
-		const followUpMessages: Array<{ message: string; label: string }> = [];
+		const followUpMessages: Array<{ message: string }> = [];
 		for (const message of queuedMessages.followUp) {
-			followUpMessages.push({ message, label: "Follow-up" });
+			followUpMessages.push({ message });
 		}
 		for (const entry of this.ctx.compactionQueuedMessages as CompactionQueuedMessage[]) {
 			if (entry.mode === "followUp") {
-				followUpMessages.push({ message: entry.text, label: "Follow-up" });
+				followUpMessages.push({ message: entry.text });
 			}
 		}
-
 		const allMessages = [...steeringMessages, ...followUpMessages];
-		if (allMessages.length > 0) {
-			this.ctx.pendingMessagesContainer.addChild(new Spacer(1));
+		const hasQueuedMessages = allMessages.length > 0;
+		this.#updateQueuedSpinnerAnimation(hasQueuedMessages);
+
+		if (hasQueuedMessages) {
 			for (const entry of allMessages) {
-				const queuedText = theme.fg("dim", `${entry.label}: ${entry.message}`);
-				this.ctx.pendingMessagesContainer.addChild(new TruncatedText(queuedText, 1, 0));
+				this.ctx.pendingMessagesContainer.addChild(
+					new QueuedUserMessageComponent({
+						text: entry.message,
+						getSpinnerFrame,
+						spinnerFrames,
+						prefixWidth,
+					}),
+				);
 			}
 			const dequeueKey = this.ctx.keybindings.getDisplayString("app.message.dequeue") || "Alt+Up";
 			const hintText = theme.fg("dim", `${theme.tree.hook} ${dequeueKey} to edit`);

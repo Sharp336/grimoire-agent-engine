@@ -195,6 +195,16 @@ export class InputController {
 				return;
 			}
 
+			// Empty submit while not streaming: resume if last assistant message was aborted/errored
+			if (!text && !this.ctx.session.isStreaming && !this.ctx.isBackgrounded) {
+				const canResume = this.ctx.session.canResume();
+				if (canResume) {
+					this.ctx.editor.setText("");
+					this.ctx.session.resume();
+					return;
+				}
+			}
+
 			if (!text) return;
 
 			// Continue shortcuts: "." or "c" sends empty message (agent continues, no visible message)
@@ -419,12 +429,49 @@ export class InputController {
 		process.kill(0, "SIGTSTP");
 	}
 
-	handleDequeue(): void {
-		const restored = this.restoreQueuedMessagesToEditor();
-		if (restored === 0) {
+	async handleDequeue(): Promise<void> {
+		const message = this.ctx.session.popLastQueuedMessage();
+		if (message) {
+			const currentText = this.ctx.editor.getText();
+			const combinedText = [message, currentText].filter(t => t.trim()).join("\n\n");
+			this.ctx.editor.setText(combinedText);
+			this.ctx.updatePendingMessagesDisplay();
+			this.ctx.showStatus("Dequeued 1 message to editor");
+			return;
+		}
+
+		if (this.ctx.session.isStreaming) {
+			this.ctx.updatePendingMessagesDisplay();
 			this.ctx.showStatus("No queued messages to restore");
-		} else {
-			this.ctx.showStatus(`Restored ${restored} queued message${restored > 1 ? "s" : ""} to editor`);
+			return;
+		}
+
+		const branch = this.ctx.sessionManager.getBranch();
+		const lastEntry = branch[branch.length - 1];
+		if (!lastEntry || lastEntry.type !== "message" || lastEntry.message.role !== "user") {
+			this.ctx.updatePendingMessagesDisplay();
+			this.ctx.showStatus("Nothing to restore");
+			return;
+		}
+
+		try {
+			const result = await this.ctx.session.navigateTree(lastEntry.id);
+			if (result.cancelled) {
+				return;
+			}
+
+			this.ctx.chatContainer.clear();
+			this.ctx.renderInitialMessages();
+			await this.ctx.reloadTodos();
+
+			if (result.editorText) {
+				const currentText = this.ctx.editor.getText();
+				const combinedText = [result.editorText, currentText].filter(t => t.trim()).join("\n\n");
+				this.ctx.editor.setText(combinedText);
+			}
+			this.ctx.showStatus("Restored last message to editor");
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
 		}
 	}
 
@@ -432,6 +479,15 @@ export class InputController {
 	async handleFollowUp(): Promise<void> {
 		const text = this.ctx.editor.getText().trim();
 		if (!text) return;
+
+		if (
+			await executeBuiltinSlashCommand(text, {
+				ctx: this.ctx,
+				handleBackgroundCommand: () => this.handleBackgroundCommand(),
+			})
+		) {
+			return;
+		}
 
 		if (this.ctx.session.isCompacting) {
 			this.ctx.queueCompactionMessage(text, "followUp");

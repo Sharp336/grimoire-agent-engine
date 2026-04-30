@@ -16,6 +16,7 @@ import {
 } from "../providers/anthropic";
 import { getEnvApiKey } from "../stream";
 import { isFoundryEnabled } from "./foundry";
+import { refreshAnthropicToken } from "./oauth/anthropic";
 
 /** Auth configuration for Anthropic */
 export interface AnthropicAuthConfig {
@@ -103,7 +104,7 @@ async function readAnthropicOAuthCredentials(store?: AuthCredentialStore): Promi
  * Finds Anthropic auth config using priority:
  *   1. ANTHROPIC_SEARCH_API_KEY / ANTHROPIC_SEARCH_BASE_URL
  *   2. ANTHROPIC_FOUNDRY_API_KEY override when Foundry mode is enabled
- *   3. OAuth in agent.db (with 5-minute expiry buffer)
+ *   3. OAuth in agent.db (refreshes expired tokens)
  *   4. API key in agent.db
  *   5. ANTHROPIC_API_KEY / ANTHROPIC_BASE_URL fallback
  * @param store - Optional credential store (creates one from default db path if not provided)
@@ -135,19 +136,32 @@ export async function findAnthropicAuth(store?: AuthCredentialStore): Promise<An
 	const ownsStore = !store;
 	const effectiveStore = store ?? (await AuthCredentialStore.open(getAgentDbPath()));
 	try {
-		// 3. OAuth credentials in agent.db (with 5-minute expiry buffer)
-		const expiryBuffer = 5 * 60 * 1000; // 5 minutes
+		// 3. OAuth credentials in agent.db
 		const now = Date.now();
 		const credentials = await readAnthropicOAuthCredentials(effectiveStore);
 		for (const credential of credentials) {
 			if (!credential.access) continue;
-			if (credential.expires > now + expiryBuffer) {
+			if (credential.expires > now) {
 				return {
 					apiKey: credential.access,
 					baseUrl: DEFAULT_BASE_URL,
 					isOAuth: true,
 				};
 			}
+		}
+
+		// Second pass: try refreshing expired OAuth credentials
+		for (const credential of credentials) {
+			if (!credential.refresh) continue;
+			try {
+				const refreshed = await refreshAnthropicToken(credential.refresh);
+				effectiveStore.saveOAuth("anthropic", refreshed);
+				return {
+					apiKey: refreshed.access,
+					baseUrl: DEFAULT_BASE_URL,
+					isOAuth: true,
+				};
+			} catch {}
 		}
 
 		// 4. API key credentials in agent.db

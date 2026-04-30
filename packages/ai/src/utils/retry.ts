@@ -3,11 +3,12 @@ import { abortableSleep } from "@oh-my-pi/pi-utils";
 type ErrorLike = {
 	message?: string;
 	name?: string;
-	status?: number;
-	statusCode?: number;
-	response?: { status?: number };
-	cause?: unknown;
 	code?: unknown;
+	errno?: string | number;
+	status?: number | string;
+	statusCode?: number | string;
+	response?: { status?: number | string };
+	cause?: unknown;
 	error?: { code?: unknown } | null;
 };
 
@@ -16,7 +17,13 @@ export function isUnexpectedSocketCloseMessage(message: string): boolean {
 }
 
 const TRANSIENT_MESSAGE_PATTERN =
-	/overloaded|rate.?limit|too many requests|service.?unavailable|server error|internal error|connection.?error|unable to connect|fetch failed|stream stall/i;
+	/overloaded|rate.?limit|too many requests|service.?unavailable|server[_ ]?error|internal[_ ]?error|connection.?error|unable to connect|fetch failed|stream stall|socket hang up|other side closed|upstream.?connect|reset before headers|client network socket disconnected before secure tls connection was established/i;
+
+const CERTIFICATE_MESSAGE_PATTERN =
+	/unknown certificate verification error|certificate verification|unable to verify(?: the first)? certificate|unable to get local issuer certificate|self[ -]?signed certificate|self signed cert(?:ificate)? in cert(?:ificate)? chain|hostname\/ip does not match certificate|altname invalid|tlsv1 alert|ssl routines|certificate has expired|cert has expired/i;
+
+const TRANSIENT_ERROR_CODE_PATTERN =
+	/^(?:ECONNRESET|ECONNREFUSED|ECONNABORTED|EHOSTUNREACH|ENETUNREACH|ENETDOWN|EAI_AGAIN|ETIMEDOUT|EPIPE|UND_ERR_CONNECT_TIMEOUT|UND_ERR_HEADERS_TIMEOUT|UND_ERR_SOCKET|UND_ERR_BODY_TIMEOUT|UND_ERR_TLS|UNABLE_TO_VERIFY_LEAF_SIGNATURE|SELF_SIGNED_CERT_IN_CHAIN|DEPTH_ZERO_SELF_SIGNED_CERT|ERR_TLS_CERT_ALTNAME_INVALID|CERT[_A-Z]+)$/i;
 
 const VALIDATION_MESSAGE_PATTERN =
 	/invalid|validation|bad request|unsupported|schema|missing required|not found|unauthorized|forbidden/i;
@@ -25,10 +32,12 @@ const VALIDATION_MESSAGE_PATTERN =
  * Identify errors that should be retried (timeouts, 5xx, 408, 429, transient network failures).
  */
 export function isRetryableError(error: unknown): boolean {
-	const info = error as ErrorLike | null;
-	const message = info?.message ?? "";
-	const name = info?.name ?? "";
-	if (name === "AbortError" || /timeout|timed out|aborted/i.test(message)) return true;
+	const details = collectErrorSignals(error);
+	const combined = details.join("\n");
+	const message = combined.toLowerCase();
+
+	if (/timeout|timed out|deadline exceeded|waiting for the first event/i.test(combined)) return true;
+	if (/\baborted\b/i.test(combined)) return false;
 
 	const status = extractHttpStatusFromError(error);
 	if (status !== undefined) {
@@ -37,6 +46,8 @@ export function isRetryableError(error: unknown): boolean {
 		if (status >= 400 && status < 500) return false;
 	}
 
+	if (TRANSIENT_ERROR_CODE_PATTERN.test(combined)) return true;
+	if (CERTIFICATE_MESSAGE_PATTERN.test(message)) return true;
 	if (VALIDATION_MESSAGE_PATTERN.test(message)) return false;
 
 	return isUnexpectedSocketCloseMessage(message) || TRANSIENT_MESSAGE_PATTERN.test(message);
@@ -77,6 +88,24 @@ function extractHttpStatusFromErrorInternal(error: unknown, depth: number): numb
 		return extractHttpStatusFromErrorInternal(info.cause, depth + 1);
 	}
 
+	return undefined;
+}
+
+function collectErrorSignals(error: unknown, depth = 0): string[] {
+	if (depth > 2 || error === null || error === undefined) return [];
+	if (typeof error === "string") return [error];
+	if (typeof error !== "object") return [];
+
+	const info = error as ErrorLike;
+	const values = [info.message, info.name, normalizeSignalValue(info.code), normalizeSignalValue(info.errno)].filter(
+		(value): value is string => !!value,
+	);
+	return info.cause ? [...values, ...collectErrorSignals(info.cause, depth + 1)] : values;
+}
+
+function normalizeSignalValue(value: unknown): string | undefined {
+	if (typeof value === "string") return value;
+	if (typeof value === "number" && Number.isFinite(value)) return String(value);
 	return undefined;
 }
 

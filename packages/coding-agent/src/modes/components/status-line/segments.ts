@@ -4,6 +4,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import { theme } from "../../../modes/theme/theme";
+import type { OAuthCredential } from "../../../session/auth-storage";
 import { shortenPath } from "../../../tools/render-utils";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
 import { sanitizeStatusText } from "../../shared";
@@ -31,6 +32,21 @@ function stripDisplayRoot(pwd: string): string {
 function normalizePremiumRequests(value: number): number {
 	return Math.round((value + Number.EPSILON) * 100) / 100;
 }
+
+const PROVIDER_SHORT_NAMES: Record<string, string> = {
+	anthropic: "Anthropic",
+	"openai-codex": "OpenAI",
+	"kimi-code": "Kimi",
+	"github-copilot": "Copilot",
+	"google-gemini-cli": "Gemini",
+	"google-antigravity": "Antigravity",
+	cursor: "Cursor",
+	opencode: "OpenCode",
+	zai: "Z.AI",
+	"minimax-code": "MiniMax",
+	"minimax-code-cn": "MiniMax CN",
+	perplexity: "Perplexity",
+};
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Implementations
@@ -374,6 +390,37 @@ const sessionNameSegment: StatusLineSegment = {
 	},
 };
 
+const accountSegment: StatusLineSegment = {
+	id: "account",
+	render(ctx) {
+		const model = ctx.session.state.model;
+		if (!model) return { content: "", visible: false };
+		const authStorage = ctx.session.modelRegistry.authStorage;
+		const infos = authStorage.getAccountInfos(model.provider);
+		if (infos.length === 0) return { content: "", visible: false };
+		const status = authStorage.getAccountStatus(model.provider, ctx.session.sessionId);
+		const activeIndex = status?.activeIndex ?? 0;
+		const activeCount = status?.active ?? 1;
+		const totalCount = status?.total ?? infos.length;
+		const activeInfo = infos[activeIndex] ?? infos[0];
+		let label = `${activeIndex + 1}`;
+		if (activeInfo?.credential.type === "oauth") {
+			const oauth = activeInfo.credential as OAuthCredential;
+			const email = oauth.email;
+			if (email) {
+				label = email;
+			} else if (oauth.accountId) {
+				label = oauth.accountId.length > 12 ? oauth.accountId.slice(0, 12) : oauth.accountId;
+			}
+		}
+		const color = activeCount === totalCount ? ("success" as const) : ("warning" as const);
+		const providerName = PROVIDER_SHORT_NAMES[model.provider] ?? model.provider;
+		const countText = totalCount > 1 ? ` (${activeCount}/${totalCount})` : "";
+		const content = theme.fg(color, `${providerName} ${label}${countText}`);
+		return { content, visible: true };
+	},
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Registry
 // ═══════════════════════════════════════════════════════════════════════════
@@ -382,6 +429,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	pi: piSegment,
 	model: modelSegment,
 	mode: modeSegment,
+	account: accountSegment,
 	path: pathSegment,
 	git: gitSegment,
 	pr: prSegment,

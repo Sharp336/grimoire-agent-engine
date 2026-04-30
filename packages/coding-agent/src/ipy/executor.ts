@@ -1103,15 +1103,27 @@ export async function executePython(code: string, options?: PythonExecutorOption
 		deadlineMs,
 	};
 
+	const signal = executionOptions.signal;
+	const raceAbort = async <T>(promise: Promise<T>): Promise<T> => {
+		if (!signal) return promise;
+		if (signal.aborted) throw signal.reason;
+		const { promise: abortPromise, reject } = Promise.withResolvers<never>();
+		const onAbort = () => reject(signal.reason);
+		signal.addEventListener("abort", onAbort, { once: true });
+		try {
+			return await Promise.race([promise, abortPromise]);
+		} finally {
+			signal.removeEventListener("abort", onAbort);
+		}
+	};
+
 	try {
 		requireRemainingTimeoutMs(deadlineMs);
-		if (executionOptions.signal?.aborted) {
-			throw new PythonExecutionCancelledError(
-				isTimedOutCancellation(executionOptions.signal.reason, executionOptions.signal),
-			);
+		if (signal?.aborted) {
+			throw new PythonExecutionCancelledError(isTimedOutCancellation(signal.reason, signal));
 		}
 
-		await ensureKernelAvailable(cwd);
+		await raceAbort(ensureKernelAvailable(cwd));
 
 		const kernelMode = executionOptions.kernelMode ?? "session";
 		const sessionFile = executionOptions.sessionFile;
@@ -1120,7 +1132,7 @@ export async function executePython(code: string, options?: PythonExecutorOption
 			const env: Record<string, string> | undefined = sessionFile ? { PI_SESSION_FILE: sessionFile } : undefined;
 			requireRemainingTimeoutMs(deadlineMs);
 			const startOptions = buildKernelStartOptions(cwd, env, executionOptions);
-			const kernel = await PythonKernel.start(startOptions);
+			const kernel = await raceAbort(PythonKernel.start(startOptions));
 			try {
 				return await executeWithKernel(kernel, code, executionOptions);
 			} finally {
@@ -1138,15 +1150,17 @@ export async function executePython(code: string, options?: PythonExecutorOption
 				}
 			}
 		}
-		return await withKernelSession(
-			sessionId,
-			cwd,
-			async kernel => executeWithKernel(kernel, code, executionOptions),
-			executionOptions,
+		return await raceAbort(
+			withKernelSession(
+				sessionId,
+				cwd,
+				async kernel => executeWithKernel(kernel, code, executionOptions),
+				executionOptions,
+			),
 		);
 	} catch (err) {
-		if (isCancellationError(err) || executionOptions.signal?.aborted) {
-			return createCancelledPythonResult(isTimedOutCancellation(err, executionOptions.signal));
+		if (isCancellationError(err) || signal?.aborted) {
+			return createCancelledPythonResult(isTimedOutCancellation(err, signal));
 		}
 		throw err;
 	}

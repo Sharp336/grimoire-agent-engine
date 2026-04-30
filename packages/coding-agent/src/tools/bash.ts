@@ -638,7 +638,14 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		}
 
 		// Track output for streaming updates (tail only)
-		const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
+		const maxOutputBytes = this.session.settings.get("bash.maxOutputBytes");
+		const effectiveMaxBytes =
+			maxOutputBytes != null && maxOutputBytes > 0
+				? maxOutputBytes
+				: maxOutputBytes === 0
+					? Number.MAX_SAFE_INTEGER
+					: DEFAULT_MAX_BYTES;
+		const tailBuffer = new TailBuffer(effectiveMaxBytes);
 
 		// Allocate artifact for truncated output storage
 		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};

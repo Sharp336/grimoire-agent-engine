@@ -53,7 +53,9 @@ import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHexForTitle } from "../utils/session-color";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
+
 import type { AssistantMessageComponent } from "./components/assistant-message";
+import { BackgroundTaskRunsComponent } from "./components/background-task-runs";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
@@ -86,6 +88,17 @@ import {
 } from "./theme/theme";
 import type { CompactionQueuedMessage, InteractiveModeContext, SubmittedUserInput, TodoItem, TodoPhase } from "./types";
 import { UiHelpers } from "./utils/ui-helpers";
+
+function getInvokedBinName(): string {
+	const candidates = [process.argv0, process.argv[1], APP_NAME];
+	for (const candidate of candidates) {
+		if (!candidate) continue;
+		const base = path.basename(candidate);
+		if (!base || base === "bun" || base === "node" || base === "cli.ts") continue;
+		return base;
+	}
+	return APP_NAME;
+}
 
 const EDITOR_MAX_HEIGHT_MIN = 6;
 const EDITOR_MAX_HEIGHT_MAX = 18;
@@ -140,6 +153,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	chatContainer: Container;
 	pendingMessagesContainer: Container;
 	statusContainer: Container;
+	backgroundTaskRunsContainer: Container;
+	backgroundTaskRunsComponent: BackgroundTaskRunsComponent;
 	todoContainer: Container;
 	btwContainer: Container;
 	editor: CustomEditor;
@@ -261,6 +276,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.chatContainer = new Container();
 		this.pendingMessagesContainer = new Container();
 		this.statusContainer = new Container();
+		this.backgroundTaskRunsContainer = new Container();
+		this.backgroundTaskRunsComponent = new BackgroundTaskRunsComponent(this.ui, session);
+		this.backgroundTaskRunsComponent.setExpanded(this.toolOutputExpanded);
+		this.backgroundTaskRunsContainer.addChild(this.backgroundTaskRunsComponent);
 		this.todoContainer = new Container();
 		this.btwContainer = new Container();
 		this.editor = new CustomEditor(getEditorTheme());
@@ -403,6 +422,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		this.ui.addChild(this.chatContainer);
 		this.ui.addChild(this.pendingMessagesContainer);
+		this.ui.addChild(this.backgroundTaskRunsContainer);
 		this.ui.addChild(this.statusContainer);
 		this.ui.addChild(this.todoContainer);
 		this.ui.addChild(this.btwContainer);
@@ -1187,7 +1207,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const sessionId = this.sessionManager.getSessionId();
 		const sessionFile = this.sessionManager.getSessionFile();
 		if (sessionId && sessionFile) {
-			process.stderr.write(`\n${chalk.dim(`Resume this session with ${APP_NAME} --resume ${sessionId}`)}\n`);
+			const command = getInvokedBinName();
+			process.stderr.write(
+				`\n${chalk.dim("Resume this session with:")}\n${chalk.cyan(`${command} --resume ${sessionId}`)}\n`,
+			);
 		}
 
 		await postmortem.quit(0);
@@ -1640,6 +1663,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void> {
 		return this.#selectorController.showOAuthSelector(mode, providerId);
+	}
+
+	showAccountsSelector(): void {
+		this.#selectorController.showAccountsSelector();
 	}
 
 	showHookConfirm(title: string, message: string): Promise<boolean> {

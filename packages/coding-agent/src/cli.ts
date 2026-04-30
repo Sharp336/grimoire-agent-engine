@@ -1,9 +1,10 @@
 #!/usr/bin/env bun
-import { APP_NAME, MIN_BUN_VERSION, VERSION } from "@oh-my-pi/pi-utils";
 /**
  * CLI entry point — registers all commands explicitly and delegates to the
  * lightweight CLI runner from pi-utils.
  */
+import * as path from "node:path";
+import { APP_NAME, MIN_BUN_VERSION, VERSION } from "@oh-my-pi/pi-utils";
 import { type CommandEntry, run } from "@oh-my-pi/pi-utils/cli";
 
 function parseSemver(version: string): [number, number, number] {
@@ -40,9 +41,22 @@ if (Bun.stringWidth("\x1b[0m\x1b]8;;\x07") !== 0) {
 	process.exit(1);
 }
 
-process.title = APP_NAME;
+const invokedBinName = getInvokedBinName();
+
+function getInvokedBinName(): string {
+	const candidates = [process.argv0, process.argv[1], APP_NAME];
+	for (const candidate of candidates) {
+		if (!candidate) continue;
+		const base = path.basename(candidate);
+		if (!base || base === "bun" || base === "node" || base === "cli.ts") continue;
+		return base;
+	}
+	return APP_NAME;
+}
+process.title = invokedBinName;
 
 const commands: CommandEntry[] = [
+	{ name: "accounts", load: () => import("./commands/accounts").then(m => m.default) },
 	{ name: "launch", load: () => import("./commands/launch").then(m => m.default) },
 	{ name: "agents", load: () => import("./commands/agents").then(m => m.default) },
 	{ name: "commit", load: () => import("./commands/commit").then(m => m.default) },
@@ -89,7 +103,7 @@ export function runCli(argv: string[]): Promise<void> {
 			: isSubcommand(first)
 				? argv
 				: ["launch", ...argv];
-	return run({ bin: APP_NAME, version: VERSION, argv: runArgv, commands, help: showHelp });
+	return run({ bin: invokedBinName, version: VERSION, argv: runArgv, commands, help: showHelp });
 }
 
 await runCli(process.argv.slice(2));

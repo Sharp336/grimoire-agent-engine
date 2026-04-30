@@ -4,6 +4,7 @@
  */
 
 export type {
+	AccountInfo,
 	ApiKeyCredential,
 	AuthCredential,
 	AuthCredentialEntry,

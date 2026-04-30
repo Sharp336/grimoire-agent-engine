@@ -222,15 +222,34 @@ function normalizePathForComparison(value: string): string {
 	return process.platform === "win32" ? realPath.toLowerCase() : realPath;
 }
 
-async function promptForkSession(session: SessionInfo): Promise<boolean> {
+const enum SessionAction {
+	Fork,
+	Cd,
+	Exit,
+}
+
+async function promptSessionAction(session: SessionInfo): Promise<SessionAction> {
 	if (!process.stdin.isTTY) {
-		return false;
+		return SessionAction.Exit;
 	}
-	const message = `Session found in different project: ${session.cwd}. Fork into current directory? [y/N] `;
+	const lines = [
+		`Session found in different project: ${session.cwd}`,
+		`  [1] Fork into current directory`,
+		`  [2] cd to ${session.cwd} and resume`,
+		`  [3] Exit`,
+		`Choice [1/2/3]: `,
+	];
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	try {
-		const answer = (await rl.question(message)).trim().toLowerCase();
-		return answer === "y" || answer === "yes";
+		const answer = (await rl.question(lines.join("\n"))).trim();
+		switch (answer) {
+			case "1":
+				return SessionAction.Fork;
+			case "2":
+				return SessionAction.Cd;
+			default:
+				return SessionAction.Exit;
+		}
 	} finally {
 		rl.close();
 	}
@@ -293,11 +312,16 @@ async function createSessionManager(parsed: Args, cwd: string): Promise<SessionM
 			const normalizedCwd = normalizePathForComparison(cwd);
 			const normalizedMatchCwd = normalizePathForComparison(match.session.cwd || cwd);
 			if (normalizedCwd !== normalizedMatchCwd) {
-				const shouldFork = await promptForkSession(match.session);
-				if (!shouldFork) {
-					throw new Error(`Session "${sessionArg}" is in another project (${match.session.cwd}).`);
+				const action = await promptSessionAction(match.session);
+				switch (action) {
+					case SessionAction.Fork:
+						return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
+					case SessionAction.Cd:
+						process.chdir(match.session.cwd!);
+						return await SessionManager.open(match.session.path, parsed.sessionDir);
+					case SessionAction.Exit:
+						process.exit(0);
 				}
-				return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
 			}
 		}
 		return await SessionManager.open(match.session.path, parsed.sessionDir);

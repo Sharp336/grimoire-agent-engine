@@ -52,15 +52,25 @@ function createContext(): {
 		abortPython: ReturnType<typeof vi.fn>;
 		addMessageToChat: ReturnType<typeof vi.fn>;
 		cancelPendingSubmission: ReturnType<typeof vi.fn>;
+		canResume: ReturnType<typeof vi.fn>;
 		clearQueue: ReturnType<typeof vi.fn>;
 		ensureLoadingAnimation: ReturnType<typeof vi.fn>;
 		handleBtwCommand: ReturnType<typeof vi.fn>;
 		handleBtwEscape: ReturnType<typeof vi.fn>;
 		hasActiveBtw: ReturnType<typeof vi.fn>;
+		navigateTree: ReturnType<typeof vi.fn>;
 		onInputCallback: ReturnType<typeof vi.fn>;
+		popLastQueuedMessage: ReturnType<typeof vi.fn>;
 		prompt: ReturnType<typeof vi.fn>;
+		reloadTodos: ReturnType<typeof vi.fn>;
 		requestRender: ReturnType<typeof vi.fn>;
+		resume: ReturnType<typeof vi.fn>;
+		retryFailedTasks: ReturnType<typeof vi.fn>;
+		showError: ReturnType<typeof vi.fn>;
+		showStatus: ReturnType<typeof vi.fn>;
+		showWarning: ReturnType<typeof vi.fn>;
 		startPendingSubmission: ReturnType<typeof vi.fn>;
+		updatePendingMessagesDisplay: ReturnType<typeof vi.fn>;
 	};
 } {
 	let editorText = "";
@@ -69,17 +79,23 @@ function createContext(): {
 	const abortPython = vi.fn();
 	const addMessageToChat = vi.fn();
 	const cancelPendingSubmission = vi.fn(() => false);
+	const canResume = vi.fn(() => false);
 	const clearQueue = vi.fn(() => ({ steering: [], followUp: [] }));
-	const onInputCallback = vi.fn();
-	const prompt = vi.fn();
-	const requestRender = vi.fn();
 	const handleBtwCommand = vi.fn(async () => {});
 	const handleBtwEscape = vi.fn(() => true);
 	const hasActiveBtw = vi.fn(() => false);
-	const startPendingSubmission = vi.fn((input: { text: string; images?: InteractiveModeContext["pendingImages"] }) => {
-		ensureLoadingAnimation();
-		return createSubmission(input);
-	});
+	const navigateTree = vi.fn(async () => ({ cancelled: false, editorText: "restored message" }));
+	const onInputCallback = vi.fn();
+	const popLastQueuedMessage = vi.fn(() => undefined);
+	const prompt = vi.fn();
+	const reloadTodos = vi.fn(async () => {});
+	const requestRender = vi.fn();
+	const resume = vi.fn();
+	const retryFailedTasks = vi.fn(async () => null);
+	const showError = vi.fn();
+	const showStatus = vi.fn();
+	const showWarning = vi.fn();
+	const updatePendingMessagesDisplay = vi.fn();
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
@@ -96,6 +112,10 @@ function createContext(): {
 	let ctx!: InteractiveModeContext;
 	const ensureLoadingAnimation = vi.fn(() => {
 		ctx.loadingAnimation = {} as InteractiveModeContext["loadingAnimation"];
+	});
+	const startPendingSubmission = vi.fn((input: { text: string; images?: InteractiveModeContext["pendingImages"] }) => {
+		ensureLoadingAnimation();
+		return createSubmission(input);
 	});
 
 	ctx = {
@@ -118,11 +138,17 @@ function createContext(): {
 			abort,
 			abortBash,
 			abortPython,
+			canResume,
 			clearQueue,
+			navigateTree,
+			popLastQueuedMessage,
 			prompt,
+			resume,
+			retryFailedTasks,
 		} as unknown as InteractiveModeContext["session"],
 		sessionManager: {
 			getSessionName: () => "existing session",
+			getBranch: () => [],
 		} as unknown as InteractiveModeContext["sessionManager"],
 		keybindings: {
 			getKeys: () => [],
@@ -135,12 +161,18 @@ function createContext(): {
 		onInputCallback,
 		addMessageToChat,
 		cancelPendingSubmission,
+		chatContainer: { clear: vi.fn() } as unknown as InteractiveModeContext["chatContainer"],
 		ensureLoadingAnimation,
 		finishPendingSubmission: vi.fn(),
 		flushPendingBashComponents: vi.fn(),
 		markPendingSubmissionStarted: vi.fn(() => true),
+		reloadTodos,
+		renderInitialMessages: vi.fn(),
+		showError,
+		showStatus,
+		showWarning,
 		startPendingSubmission,
-		updatePendingMessagesDisplay: vi.fn(),
+		updatePendingMessagesDisplay,
 		updateEditorBorderColor: vi.fn(),
 		showDebugSelector: vi.fn(),
 		toggleTodoExpansion: vi.fn(),
@@ -163,15 +195,25 @@ function createContext(): {
 			abortPython,
 			addMessageToChat,
 			cancelPendingSubmission,
+			canResume,
 			clearQueue,
 			ensureLoadingAnimation,
 			handleBtwCommand,
 			handleBtwEscape,
 			hasActiveBtw,
+			navigateTree,
 			onInputCallback,
+			popLastQueuedMessage,
 			prompt,
+			reloadTodos,
 			requestRender,
+			resume,
+			retryFailedTasks,
+			showError,
+			showStatus,
+			showWarning,
 			startPendingSubmission,
+			updatePendingMessagesDisplay,
 		},
 	};
 }
@@ -309,5 +351,46 @@ describe("InputController escape behavior", () => {
 		expect(spies.cancelPendingSubmission).not.toHaveBeenCalled();
 		expect(spies.clearQueue).not.toHaveBeenCalled();
 		expect(spies.abort).toHaveBeenCalledTimes(1);
+	});
+});
+
+describe("InputController submit behavior", () => {
+	it("resumes the session on empty submit after an aborted turn", async () => {
+		const { ctx, editor, spies } = createContext();
+		spies.canResume.mockReturnValue(true);
+		const controller = new InputController(ctx);
+
+		controller.setupEditorSubmitHandler();
+		await editor.onSubmit?.("");
+
+		expect(spies.resume).toHaveBeenCalledTimes(1);
+		expect(spies.prompt).not.toHaveBeenCalled();
+	});
+
+	it("executes /retry through follow-up handling instead of sending it to the model", async () => {
+		const { ctx, editor, spies } = createContext();
+		const controller = new InputController(ctx);
+		editor.setText("/retry");
+
+		controller.setupEditorSubmitHandler();
+		await controller.handleFollowUp();
+
+		expect(spies.retryFailedTasks).toHaveBeenCalledTimes(1);
+		expect(spies.prompt).not.toHaveBeenCalled();
+	});
+
+	it("rewinds the last user message into the editor when dequeue finds no queued messages", async () => {
+		const { ctx, editor, spies } = createContext();
+		const controller = new InputController(ctx);
+		(ctx.sessionManager as unknown as { getBranch: () => unknown[] }).getBranch = () => [
+			{ type: "message", id: "m1", message: { role: "user" } },
+		];
+
+		await controller.handleDequeue();
+
+		expect(spies.navigateTree).toHaveBeenCalledWith("m1");
+		expect(editor.getText()).toContain("restored message");
+		expect(spies.reloadTodos).toHaveBeenCalledTimes(1);
+		expect(spies.showStatus).toHaveBeenCalledWith("Restored last message to editor");
 	});
 });

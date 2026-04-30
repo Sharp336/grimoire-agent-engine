@@ -94,6 +94,7 @@ import {
 } from "./secrets";
 import { AgentSession } from "./session/agent-session";
 import { AuthStorage } from "./session/auth-storage";
+import { materializeMessages } from "./session/content-store";
 import { convertToLlm } from "./session/messages";
 import { SessionManager } from "./session/session-manager";
 import { closeAllConnections } from "./ssh/connection-manager";
@@ -667,6 +668,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Use provided or create AuthStorage and ModelRegistry
 	const authStorage = options.authStorage ?? (await logger.time("discoverModels", discoverAuthStorage, agentDir));
 	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage);
+	// Keep OAuth refresh-token sliding windows alive while the session runs.
+	// Without this, providers like Anthropic expire tokens overnight and force re-login.
+	authStorage.startProactiveRefresh();
 
 	const settings = options.settings ?? (await logger.time("settings", Settings.init, { cwd, agentDir }));
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
@@ -1504,9 +1508,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 		};
 
-		// Final convertToLlm: chain block-images filter with secret obfuscation
-		const convertToLlmFinal = (messages: AgentMessage[]): Message[] => {
-			const converted = convertToLlmWithBlockImages(messages);
+		// Final convertToLlm: rehydrate cold tool-result text from the content store,
+		// then chain the block-images filter with secret obfuscation. Rehydration is
+		// the single chokepoint before providers see messages, so any code path
+		// (main loop, subagent, compaction) ends up with fully materialized content.
+		const contentStore = sessionManager.contentStore;
+		const convertToLlmFinal = async (messages: AgentMessage[]): Promise<Message[]> => {
+			const warm = await materializeMessages(messages, contentStore);
+			const converted = convertToLlmWithBlockImages(warm);
 			if (!obfuscator?.hasSecrets()) return converted;
 			return obfuscateMessages(obfuscator, converted);
 		};

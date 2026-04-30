@@ -37,6 +37,7 @@ import {
 	resolveImageData,
 	resolveImageDataUrl,
 } from "./blob-store";
+import { ContentStore, hollowToolResultInPlace } from "./content-store";
 import {
 	type BashExecutionMessage,
 	type CustomMessage,
@@ -1118,7 +1119,18 @@ async function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: 
 	return obj;
 }
 
-async function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStore): Promise<FileEntry> {
+async function prepareEntryForPersistence(
+	entry: FileEntry,
+	blobStore: BlobStore,
+	contentStore: ContentStore,
+): Promise<FileEntry> {
+	// Hollow tool-result text in place BEFORE the generic persistence pass.
+	// Mutating here propagates to `#fileEntries` (persistence array) AND to
+	// `agent.state.messages` (when both hold the same object reference),
+	// immediately shrinking the live V8 heap once the blob hits disk.
+	if (entry.type === "message" && entry.message.role === "toolResult") {
+		await hollowToolResultInPlace(entry.message, contentStore);
+	}
 	return truncateForPersistence(entry, blobStore);
 }
 
@@ -1623,6 +1635,7 @@ export class SessionManager {
 	#inMemoryArtifacts: Map<string, string> | null = null;
 	#inMemoryArtifactCounter = 0;
 	readonly #blobStore: BlobStore;
+	readonly #contentStore: ContentStore;
 
 	private constructor(
 		private cwd: string,
@@ -1631,6 +1644,7 @@ export class SessionManager {
 		private readonly storage: SessionStorage,
 	) {
 		this.#blobStore = new BlobStore(getBlobsDir());
+		this.#contentStore = new ContentStore(this.#blobStore);
 		if (persist && sessionDir) {
 			this.storage.ensureDirSync(sessionDir);
 		}
@@ -1640,6 +1654,15 @@ export class SessionManager {
 	/** Puts a binary blob into the blob store and returns the blob reference */
 	async putBlob(data: Buffer): Promise<BlobPutResult> {
 		return this.#blobStore.put(data);
+	}
+
+	/**
+	 * Content store used to externalize large tool-result text off the V8 heap.
+	 * Exposed so the LLM hot path can rehydrate cold messages before sending them
+	 * to a provider; see `materializeMessages` in `content-store.ts`.
+	 */
+	get contentStore(): ContentStore {
+		return this.#contentStore;
 	}
 
 	captureState(): SessionManagerStateSnapshot {
@@ -2048,7 +2071,7 @@ export class SessionManager {
 		await this.#queuePersistTask(async () => {
 			await this.#closePersistWriterInternal();
 			const entries = await Promise.all(
-				this.#fileEntries.map(entry => prepareEntryForPersistence(entry, this.#blobStore)),
+				this.#fileEntries.map(entry => prepareEntryForPersistence(entry, this.#blobStore, this.#contentStore)),
 			);
 			await this.#writeEntriesAtomically(entries);
 			this.#needsFullRewriteOnNextPersist = false;
@@ -2253,7 +2276,7 @@ export class SessionManager {
 			this.#queuePersistTask(async () => {
 				const writer = this.#ensurePersistWriter();
 				if (!writer) return;
-				const persistedEntry = await prepareEntryForPersistence(entry, this.#blobStore);
+				const persistedEntry = await prepareEntryForPersistence(entry, this.#blobStore, this.#contentStore);
 				await writer.write(persistedEntry);
 			}).catch(() => {});
 		}

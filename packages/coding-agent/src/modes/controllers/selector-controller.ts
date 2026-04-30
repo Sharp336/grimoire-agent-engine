@@ -34,6 +34,8 @@ import { type SessionInfo, SessionManager } from "../../session/session-manager"
 import { FileSessionStorage } from "../../session/session-storage";
 import { isSearchProviderPreference, setPreferredImageProvider, setPreferredSearchProvider } from "../../tools";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
+import { AccountDetailComponent } from "../components/account-detail";
+import { AccountsSelectorComponent } from "../components/accounts-selector";
 import { AgentDashboard } from "../components/agent-dashboard";
 import { AssistantMessageComponent } from "../components/assistant-message";
 import { ExtensionDashboard } from "../components/extensions";
@@ -1003,5 +1005,110 @@ export class SelectorController {
 		});
 		this.ctx.ui.setFocus(selector);
 		this.ctx.ui.requestRender();
+	}
+
+	showAccountsSelector(): void {
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
+
+		this.showSelector(done => {
+			const selector = new AccountsSelectorComponent(
+				authStorage,
+				this.ctx.session.sessionId,
+				(_providerId: string) => {
+					done();
+					this.showOAuthSelector("login");
+				},
+				(provider: string, credentialIndex: number) => {
+					done();
+					this.showAccountDetail(provider, credentialIndex);
+				},
+				async (provider: string, credentialIndex: number) => {
+					const infos = authStorage.getAccountInfos(provider);
+					const info = infos[credentialIndex];
+					if (!info) return;
+					const remaining = infos.length - 1;
+					if (remaining === 0) {
+						await authStorage.logout(provider);
+					} else {
+						const allCreds = infos.map(i => i.credential);
+						allCreds.splice(credentialIndex, 1);
+						await authStorage.set(provider, allCreds);
+					}
+					await this.ctx.session.modelRegistry.refresh();
+					this.ctx.statusLine.invalidate();
+					this.ctx.ui.requestRender();
+					this.ctx.showStatus(`Account removed (${remaining} remaining for ${provider})`);
+					done();
+					this.showAccountsSelector();
+				},
+				async (provider: string, credentialIndex: number) => {
+					const sessionId = this.ctx.session.sessionId;
+					const ok = authStorage.setActiveAccount(provider, sessionId, credentialIndex);
+					if (ok) {
+						await this.ctx.session.modelRegistry.refresh();
+						this.ctx.statusLine.invalidate();
+						this.ctx.ui.requestRender();
+						this.ctx.showStatus(`Switched account for ${provider} to #${credentialIndex + 1}`);
+					} else {
+						this.ctx.showStatus(`Failed to switch account for ${provider}`);
+					}
+					done();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+				() => this.ctx.ui.requestRender(),
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
+	showAccountDetail(provider: string, credentialIndex: number): void {
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
+
+		this.showSelector(done => {
+			const detail = new AccountDetailComponent(
+				authStorage,
+				provider,
+				credentialIndex,
+				async () => {
+					const infos = authStorage.getAccountInfos(provider);
+					const remaining = infos.length - 1;
+					if (remaining === 0) {
+						await authStorage.logout(provider);
+					} else {
+						const allCreds = infos.map(i => i.credential);
+						allCreds.splice(credentialIndex, 1);
+						await authStorage.set(provider, allCreds);
+					}
+					await this.ctx.session.modelRegistry.refresh();
+					this.ctx.statusLine.invalidate();
+					this.ctx.ui.requestRender();
+					this.ctx.showStatus("Account removed");
+					done();
+					this.showAccountsSelector();
+				},
+				async () => {
+					const sessionId = this.ctx.session.sessionId;
+					const ok = authStorage.setActiveAccount(provider, sessionId, credentialIndex);
+					if (ok) {
+						await this.ctx.session.modelRegistry.refresh();
+						this.ctx.statusLine.invalidate();
+						this.ctx.ui.requestRender();
+						this.ctx.showStatus(`Switched account for ${provider} to #${credentialIndex + 1}`);
+					} else {
+						this.ctx.showStatus(`Failed to switch account for ${provider}`);
+					}
+					done();
+				},
+				() => {
+					done();
+					this.showAccountsSelector();
+				},
+				() => this.ctx.ui.requestRender(),
+			);
+			return { component: detail, focus: detail };
+		});
 	}
 }

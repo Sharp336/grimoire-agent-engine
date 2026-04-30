@@ -13,6 +13,24 @@ const CALLBACK_PORT = 54545;
 const CALLBACK_PATH = "/callback";
 const SCOPES = "org:create_api_key user:profile user:inference";
 
+const PROFILE_URL = "https://api.anthropic.com/api/oauth/profile";
+
+interface ClaudeProfile {
+	account?: { uuid?: string; email?: string };
+}
+
+async function fetchProfile(accessToken: string): Promise<ClaudeProfile | null> {
+	try {
+		const res = await fetch(PROFILE_URL, {
+			headers: { Authorization: `Bearer ${accessToken}` },
+		});
+		if (!res.ok) return null;
+		return (await res.json()) as ClaudeProfile;
+	} catch {
+		return null;
+	}
+}
+
 export class AnthropicOAuthFlow extends OAuthCallbackFlow {
 	#verifier: string = "";
 	#challenge: string = "";
@@ -85,10 +103,14 @@ export class AnthropicOAuthFlow extends OAuthCallbackFlow {
 			expires_in: number;
 		};
 
+		const profile = await fetchProfile(tokenData.access_token);
+
 		return {
 			refresh: tokenData.refresh_token,
 			access: tokenData.access_token,
 			expires: Date.now() + tokenData.expires_in * 1000 - 5 * 60 * 1000,
+			email: profile?.account?.email,
+			accountId: profile?.account?.uuid,
 		};
 	}
 }
@@ -126,9 +148,14 @@ export async function refreshAnthropicToken(refreshToken: string): Promise<OAuth
 		expires_in: number;
 	};
 
+	const accessToken = data.access_token;
+	const profile = await fetchProfile(accessToken);
+
 	return {
 		refresh: data.refresh_token || refreshToken,
-		access: data.access_token,
+		access: accessToken,
 		expires: Date.now() + data.expires_in * 1000 - 5 * 60 * 1000,
+		email: profile?.account?.email,
+		accountId: profile?.account?.uuid,
 	};
 }

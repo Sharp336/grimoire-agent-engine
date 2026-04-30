@@ -21,6 +21,7 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
 import type { InteractiveModeContext } from "../modes/types";
+import { setSessionTerminalTitle, setTerminalTitle } from "../utils/title-generator";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 
 function refreshStatusLine(ctx: InteractiveModeContext): void {
@@ -452,8 +453,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 				return;
 			}
 
-			void runtime.ctx.showOAuthSelector("login");
 			runtime.ctx.editor.setText("");
+			runtime.ctx.showAccountsSelector?.();
 		},
 	},
 	{
@@ -569,6 +570,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 	},
 	{
 		name: "btw",
+		aliases: ["ask"],
 		description: "Ask an ephemeral side question using the current session context",
 		inlineHint: "<question>",
 		allowArgs: true,
@@ -991,6 +993,52 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		description: "Quit the application",
 		handle: shutdownHandler,
 	},
+	{
+		name: "title",
+		description: "Set terminal title (clear with no args)",
+		inlineHint: "[title text]",
+		allowArgs: true,
+		handle: (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const titleArg = _command.args?.trim() ?? "";
+			if (!titleArg) {
+				const sessionName = runtime.ctx.sessionManager?.getSessionName?.();
+				setSessionTerminalTitle(sessionName, runtime.ctx.sessionManager?.getCwd());
+				runtime.ctx.showStatus("Title override cleared");
+			} else {
+				setTerminalTitle(`\u03C0: ${titleArg}`);
+				runtime.ctx.showStatus(`Title set: \u03C0 ${titleArg}`);
+			}
+		},
+	},
+	{
+		name: "retry",
+		description: "Retry failed background tasks",
+		handle: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const result = await runtime.ctx.session.retryFailedTasks?.();
+			if (!result) {
+				runtime.ctx.showWarning("No failed tasks to retry");
+				return;
+			}
+			const lines = [`Retrying ${result.count} failed task(s)...`];
+			for (const task of result.info) {
+				lines.push(
+					`  ${task.id}: ${task.tokens} tokens, ${task.toolCount} tools${task.lastTool ? ` (last: ${task.lastTool})` : ""}${task.description ? ` \u2014 ${task.description}` : ""}`,
+				);
+			}
+			runtime.ctx.showStatus(lines.join("\n"));
+		},
+	},
+	{
+		name: "switch",
+		aliases: ["account", "accounts"],
+		description: "Switch active account for current provider",
+		handle: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			runtime.ctx.showAccountsSelector?.();
+		},
+	},
 ];
 
 const BUILTIN_SLASH_COMMAND_LOOKUP = new Map<string, BuiltinSlashCommandSpec>();
@@ -1002,13 +1050,21 @@ for (const command of BUILTIN_SLASH_COMMAND_REGISTRY) {
 }
 
 /** Builtin command metadata used for slash-command autocomplete and help text. */
-export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BUILTIN_SLASH_COMMAND_REGISTRY.map(
-	command => ({
-		name: command.name,
-		description: command.description,
-		subcommands: command.subcommands,
-		inlineHint: command.inlineHint,
-	}),
+export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BUILTIN_SLASH_COMMAND_REGISTRY.flatMap(
+	command => [
+		{
+			name: command.name,
+			description: command.description,
+			subcommands: command.subcommands,
+			inlineHint: command.inlineHint,
+		},
+		...(command.aliases ?? []).map(alias => ({
+			name: alias,
+			description: `${command.description} (alias for /${command.name})`,
+			subcommands: command.subcommands,
+			inlineHint: command.inlineHint,
+		})),
+	],
 );
 
 /**

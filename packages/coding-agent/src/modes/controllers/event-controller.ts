@@ -1,5 +1,9 @@
 import { INTENT_FIELD } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessage,
+	type ImageContent,
+	isRetryableError as isTransportRetryableError,
+} from "@oh-my-pi/pi-ai";
 import { Loader, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import { settings } from "../../config/settings";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
@@ -53,6 +57,7 @@ export class EventController {
 			todo_reminder: e => this.#handleTodoReminder(e),
 			todo_auto_clear: e => this.#handleTodoAutoClear(e),
 			irc_message: e => this.#handleIrcMessage(e),
+			credential_switched: e => this.#handleCredentialSwitched(e),
 		} satisfies AgentSessionEventHandlers;
 	}
 
@@ -319,6 +324,12 @@ export class EventController {
 						? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
 						: "Operation aborted";
 				this.ctx.streamingMessage.errorMessage = errorMessage;
+			}
+			if (this.ctx.streamingMessage.stopReason === "error" && this.ctx.streamingMessage.errorMessage) {
+				const msg = this.ctx.streamingMessage.errorMessage;
+				if (isTransportRetryableError(new Error(msg))) {
+					this.ctx.streamingMessage.errorMessage = `${msg} \u2014 Enter to resume`;
+				}
 			}
 			if (this.ctx.session.isTtsrAbortPending && this.ctx.streamingMessage.stopReason === "aborted") {
 				const msgWithoutAbort = { ...this.ctx.streamingMessage, stopReason: "stop" as const };
@@ -626,6 +637,17 @@ export class EventController {
 
 	async #handleTodoAutoClear(_event: Extract<AgentSessionEvent, { type: "todo_auto_clear" }>): Promise<void> {
 		await this.ctx.reloadTodos();
+	}
+
+	async #handleCredentialSwitched(event: Extract<AgentSessionEvent, { type: "credential_switched" }>): Promise<void> {
+		if (event.fromProvider) {
+			this.ctx.showStatus(`All ${event.fromProvider} accounts rate-limited, falling back to ${event.provider}`);
+		} else {
+			const account = event.fromEmail ?? event.provider;
+			this.ctx.showStatus(`Rate limited ${account}, switching to next account`);
+		}
+		this.ctx.statusLine.invalidate();
+		this.ctx.ui.requestRender();
 	}
 
 	#cancelIdleCompaction(): void {

@@ -50,6 +50,11 @@ describe("isProviderRetryableError", () => {
 		);
 	});
 
+	it("retries certificate verification transport errors", () => {
+		expect(isProviderRetryableError(new Error("unknown certificate verification error"))).toBe(true);
+		expect(isProviderRetryableError(new Error("self-signed certificate in certificate chain"))).toBe(true);
+	});
+
 	it("does not retry non-transient validation errors", () => {
 		expect(isProviderRetryableError(new Error("Invalid tool schema"))).toBe(false);
 		expect(isProviderRetryableError(new Error("Bad request"))).toBe(false);

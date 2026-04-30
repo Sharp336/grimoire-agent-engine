@@ -139,5 +139,9 @@
 	},
 	"lint-staged": {
 		"*.{js,ts,jsx,tsx,json,jsonc,css}": "biome check --write --no-errors-on-unmatched"
+	},
+	"dependencies": {
+		"fflate": "0.8.2",
+		"markit-ai": "0.5.0"
 	}
 }

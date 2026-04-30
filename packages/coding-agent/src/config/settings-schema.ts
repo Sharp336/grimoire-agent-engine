@@ -25,6 +25,8 @@ export type SettingTab =
 	| "context"
 	| "editing"
 	| "tools"
+	| "bash"
+	| "agent"
 	| "tasks"
 	| "providers";
 
@@ -39,6 +41,8 @@ export const SETTING_TABS: SettingTab[] = [
 	"context",
 	"editing",
 	"tools",
+	"bash",
+	"agent",
 	"tasks",
 	"providers",
 ];
@@ -51,6 +55,8 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
 	context: { label: "Context", icon: "tab.context" },
 	editing: { label: "Editing", icon: "tab.editing" },
 	tools: { label: "Tools", icon: "tab.tools" },
+	bash: { label: "Bash", icon: "tab.bash" },
+	agent: { label: "Agent", icon: "tab.agent" },
 	tasks: { label: "Tasks", icon: "tab.tasks" },
 	providers: { label: "Providers", icon: "tab.providers" },
 };
@@ -60,6 +66,7 @@ export type StatusLineSegmentId =
 	| "pi"
 	| "model"
 	| "mode"
+	| "account"
 	| "path"
 	| "git"
 	| "pr"
@@ -566,6 +573,18 @@ export const SETTINGS_SCHEMA = {
 			tab: "model",
 			label: "Fallback Revert Policy",
 			description: "When to return to the primary model after a fallback",
+			submenu: true,
+		},
+	},
+
+	"retry.providerFallback": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "agent",
+			label: "Provider fallback on rate limit",
+			description:
+				"When all accounts for a provider are rate-limited, automatically switch to a model from another provider",
 			submenu: true,
 		},
 	},
@@ -1136,6 +1155,16 @@ export const SETTINGS_SCHEMA = {
 			submenu: true,
 		},
 	},
+	"bash.maxOutputBytes": {
+		type: "number",
+		default: 51200,
+		ui: {
+			tab: "bash",
+			label: "Max output bytes",
+			description: "Maximum bytes of output to capture from bash/python/ssh commands",
+			submenu: true,
+		},
+	},
 
 	// Python
 	"python.toolMode": {
@@ -1235,6 +1264,17 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Search Context After",
 			description: "Lines of context after each search match",
+			submenu: true,
+		},
+	},
+
+	"grep.timeout": {
+		type: "number",
+		default: 30,
+		ui: {
+			tab: "tools",
+			label: "Grep timeout (seconds)",
+			description: "Maximum time for a grep search before aborting (0 = no timeout)",
 			submenu: true,
 		},
 	},
@@ -1956,6 +1996,7 @@ export interface RetrySettings {
 	enabled: boolean;
 	maxRetries: number;
 	baseDelayMs: number;
+	providerFallback: boolean;
 }
 
 export interface MemoriesSettings {

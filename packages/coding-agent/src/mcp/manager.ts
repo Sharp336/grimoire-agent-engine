@@ -428,7 +428,15 @@ export class MCPManager {
 
 				const pendingWithoutCache = pendingTasks.filter(task => !cachedTools.has(task.name));
 				if (pendingWithoutCache.length > 0) {
-					await Promise.allSettled(pendingWithoutCache.map(task => task.tracked.promise));
+					// Await pending servers with a hard timeout to avoid hanging startup
+					const MCP_PENDING_TIMEOUT_MS = 5000;
+					await Promise.race([
+						Promise.allSettled(pendingWithoutCache.map(task => task.tracked.promise)),
+						Bun.sleep(MCP_PENDING_TIMEOUT_MS),
+					]);
+					if (pendingWithoutCache.length > 0) {
+						logger.warn("MCP servers still connecting after timeout", { count: pendingWithoutCache.length });
+					}
 				}
 			}
 

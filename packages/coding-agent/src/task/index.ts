@@ -15,7 +15,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { TSchema } from "@sinclair/typebox";
@@ -32,7 +32,7 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
 import { discoverAgents, getAgent } from "./discovery";
-import { runSubprocess } from "./executor";
+import { type ExecutorOptions, runSubprocess } from "./executor";
 import { resolveIsolationBackendForTaskExecution } from "./isolation-backend";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
@@ -125,6 +125,32 @@ export {
 	taskSchema,
 } from "./types";
 
+/** Metadata for a failed task that can be retried */
+export interface FailedTask {
+	/** Unique task ID */
+	id: string;
+	/** Agent name used */
+	agent: string;
+	/** Task description */
+	description?: string;
+	/** Task assignment text */
+	task: string;
+	/** Path to the subagent session file */
+	sessionFile: string;
+	/** Tokens consumed before failure */
+	tokens: number;
+	/** Duration in ms before failure */
+	durationMs: number;
+	/** Error message */
+	error: string;
+	/** Tool count at time of failure */
+	toolCount: number;
+	/** Last tool the agent was using */
+	lastTool?: string;
+	/** Original executor options needed to re-run */
+	executorOptions: ExecutorOptions;
+}
+
 /**
  * Render the tool description from a cached agent list and current settings.
  */
@@ -209,6 +235,9 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 		return renderTaskCall(args as TaskParams, options, theme);
 	}
 
+	/** Failed tasks from the most recent execution that can be retried */
+	#failedTasks: FailedTask[] = [];
+
 	/** Dynamic description that reflects current disabled-agent settings */
 	get description(): string {
 		const disabledAgents = this.session.settings.get("task.disabledAgents") as string[];
@@ -234,6 +263,192 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 	#getTaskSimpleMode(): TaskSimpleMode {
 		return this.session.settings.get("task.simple");
 	}
+	/** Get the list of failed tasks that can be retried */
+	get failedTasks(): readonly FailedTask[] {
+		return this.#failedTasks;
+	}
+
+	async recoverFailedTasksFromHistory(messages: AgentMessage[]): Promise<void> {
+		if (this.#failedTasks.length > 0) return;
+		const sessionFile = this.session.getSessionFile();
+		if (!sessionFile) return;
+		const artifactsDir = sessionFile.slice(0, -6);
+
+		const lastTaskResult = [...messages]
+			.reverse()
+			.find(m => m.role === "toolResult" && (m as { toolName?: unknown }).toolName === "task") as
+			| { role: "toolResult"; details?: unknown }
+			| undefined;
+		const details = lastTaskResult?.details as { results?: unknown } | undefined;
+		const results = details?.results;
+		if (!Array.isArray(results) || results.length === 0) return;
+
+		const { agents } = await discoverAgents(this.session.cwd);
+		const taskDepth = this.session.taskDepth ?? 0;
+
+		for (const entry of results) {
+			const result = entry as Partial<SingleResult>;
+			if (typeof result.id !== "string") continue;
+			if (typeof result.agent !== "string") continue;
+			if (typeof result.task !== "string") continue;
+			if (typeof result.index !== "number") continue;
+			if (result.exitCode === 0) continue;
+
+			const taskSessionFile = path.join(artifactsDir, `${result.id}.jsonl`);
+			try {
+				await fs.access(taskSessionFile);
+			} catch {
+				continue;
+			}
+
+			const agent = getAgent(agents, result.agent);
+			if (!agent) continue;
+
+			this.#failedTasks.push({
+				id: result.id,
+				agent: result.agent,
+				description: typeof result.description === "string" ? result.description : undefined,
+				task: result.task,
+				sessionFile: taskSessionFile,
+				tokens: typeof result.tokens === "number" ? result.tokens : 0,
+				durationMs: typeof result.durationMs === "number" ? result.durationMs : 0,
+				error: typeof result.error === "string" ? result.error : (result.stderr ?? ""),
+				toolCount: 0,
+				lastTool: undefined,
+				executorOptions: {
+					cwd: this.session.cwd,
+					agent,
+					task: result.task,
+					description: typeof result.description === "string" ? result.description : undefined,
+					index: result.index,
+					id: result.id,
+					taskDepth,
+					modelOverride: result.modelOverride,
+					thinkingLevel: agent.thinkingLevel,
+					sessionFile: taskSessionFile,
+					persistArtifacts: true,
+					artifactsDir,
+					authStorage: this.session.authStorage,
+					modelRegistry: this.session.modelRegistry,
+					settings: this.session.settings,
+					mcpManager: this.session.mcpManager,
+					contextFiles: this.session.contextFiles?.filter(
+						file => path.basename(file.path).toLowerCase() !== "agents.md",
+					),
+					skills: this.session.skills ?? [],
+					promptTemplates: this.session.promptTemplates,
+				},
+			});
+		}
+	}
+
+	/**
+	 * Retry all failed tasks from the last execution.
+	 * Resumes subagent sessions from their existing session files.
+	 * Returns null if no failed tasks.
+	 */
+	async retry(onUpdate?: (status: string) => void): Promise<{ summary: string; results: SingleResult[] } | null> {
+		if (this.#failedTasks.length === 0) return null;
+
+		const tasks = [...this.#failedTasks];
+		this.#failedTasks = [];
+		const startTime = Date.now();
+
+		onUpdate?.(`Retrying ${tasks.length} failed task(s)...`);
+
+		const maxConcurrency = this.session.settings.get("task.maxConcurrency");
+		const semaphore = new Semaphore(maxConcurrency);
+		const results = await Promise.all(
+			tasks.map(async (failed, index) => {
+				onUpdate?.(`Resuming ${failed.id} (${failed.tokens} tokens, ${failed.toolCount} tools used)...`);
+				await semaphore.acquire();
+				try {
+					const result = await runSubprocess({
+						...failed.executorOptions,
+						sessionFile: failed.sessionFile,
+						signal: undefined,
+						onProgress: progress => {
+							onUpdate?.(
+								`[${index + 1}/${tasks.length}] ${failed.id}: ${progress.status}` +
+									(progress.currentTool ? ` (${progress.currentTool})` : ""),
+							);
+						},
+					});
+					if (result.exitCode !== 0) {
+						this.#failedTasks.push({
+							...failed,
+							tokens: result.tokens,
+							durationMs: result.durationMs,
+							error: result.error ?? result.stderr,
+						});
+					}
+					return result;
+				} catch (err) {
+					const message = err instanceof Error ? err.message : String(err);
+					this.#failedTasks.push({ ...failed, error: message });
+					return {
+						index: failed.executorOptions.index,
+						id: failed.id,
+						agent: failed.agent,
+						agentSource: failed.executorOptions.agent.source,
+						task: failed.task,
+						description: failed.description,
+						exitCode: 1,
+						output: "",
+						stderr: message,
+						truncated: false,
+						durationMs: Date.now() - startTime,
+						tokens: failed.tokens,
+						modelOverride: failed.executorOptions.modelOverride,
+						error: message,
+					} satisfies SingleResult;
+				} finally {
+					semaphore.release();
+				}
+			}),
+		);
+
+		const successCount = results.filter(r => r.exitCode === 0).length;
+		const totalDuration = Date.now() - startTime;
+		const summaries = results.map(r => {
+			const status = r.exitCode === 0 ? "completed" : `failed (exit ${r.exitCode})`;
+			const output = r.output.trim() || r.stderr.trim() || "(no output)";
+			const outputCharCount = r.outputMeta?.charCount ?? output.length;
+			const fullOutputThreshold = 5000;
+			let preview = output;
+			let truncated = false;
+			if (outputCharCount > fullOutputThreshold) {
+				const slice = output.slice(0, fullOutputThreshold);
+				const lastNewline = slice.lastIndexOf("\n");
+				preview = lastNewline >= 0 ? slice.slice(0, lastNewline) : slice;
+				truncated = true;
+			}
+			return {
+				agent: r.agent,
+				status,
+				id: r.id,
+				preview,
+				truncated,
+				meta: r.outputMeta
+					? { lineCount: r.outputMeta.lineCount, charSize: formatBytes(r.outputMeta.charCount) }
+					: undefined,
+			};
+		});
+		const outputIds = results.filter(r => r.output.trim()).map(r => `agent://${r.id}`);
+		const summary = prompt.render(taskSummaryTemplate, {
+			successCount,
+			totalCount: results.length,
+			cancelledCount: 0,
+			hasCancelledNote: false,
+			duration: formatDuration(totalDuration),
+			summaries,
+			outputIds,
+			agentName: tasks[0]?.agent ?? "unknown",
+			mergeSummary: "",
+		});
+
+		return { summary, results };
+	}
 
 	/**
 	 * Create a TaskTool instance with async agent discovery.
@@ -256,6 +471,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 			return createTaskModeError(validationError);
 		}
 
+		this.#failedTasks = [];
 		const asyncEnabled = this.session.settings.get("async.enabled");
 		const selectedAgent = this.#discoveredAgents.find(agent => agent.name === params.agent);
 		if (!asyncEnabled || selectedAgent?.blocking === true) {
@@ -351,7 +567,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 				const jobId = manager.register(
 					"task",
 					label,
-					async ({ signal: runSignal, reportProgress }) => {
+					async ({ jobId: asyncJobId, signal: runSignal, reportProgress }) => {
 						const startedAt = Date.now();
 						const progress = progressByTaskId.get(taskItem.id);
 						await semaphore.acquire();
@@ -370,9 +586,16 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 							buildAsyncDetails("running", startedJobs[0]?.jobId ?? label) as unknown as Record<string, unknown>,
 						);
 						try {
-							const result = await this.#executeSync(_toolCallId, singleParams, runSignal, undefined, [
-								uniqueId,
-							]);
+							const result = await this.#executeSync(
+								_toolCallId,
+								singleParams,
+								runSignal,
+								undefined,
+								[uniqueId],
+								progress => {
+									manager.updateJobTool(asyncJobId, progress.currentTool, progress.currentToolArgs);
+								},
+							);
 							const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 							const singleResult = result.details?.results[0];
 							if (progress) {
@@ -498,6 +721,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 		preAllocatedIds?: string[],
+		onSubProgress?: (progress: AgentProgress) => void,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const { agents, projectAgentsDir } = await discoverAgents(this.session.cwd);
@@ -855,6 +1079,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 								...structuredClone(progress),
 							});
 							emitProgress();
+							onSubProgress?.(progress);
 						},
 						authStorage: this.session.authStorage,
 						modelRegistry: this.session.modelRegistry,
@@ -909,6 +1134,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 								...structuredClone(progress),
 							});
 							emitProgress();
+							onSubProgress?.(progress);
 						},
 						authStorage: this.session.authStorage,
 						modelRegistry: this.session.modelRegistry,
@@ -1042,6 +1268,55 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 				if (result.usage) {
 					addUsageTotals(aggregatedUsage, result.usage);
 					hasAggregatedUsage = true;
+				}
+			}
+
+			// Track failed tasks for retry
+			for (const result of results) {
+				if (result.exitCode !== 0 && !result.aborted) {
+					const taskSessionFile = path.join(effectiveArtifactsDir, `${result.id}.jsonl`);
+					try {
+						await fs.access(taskSessionFile);
+						const matchingTask = tasksWithContext.find(t => t.id === result.id);
+						this.#failedTasks.push({
+							id: result.id,
+							agent: result.agent,
+							description: result.description,
+							task: result.task,
+							sessionFile: taskSessionFile,
+							tokens: result.tokens,
+							durationMs: result.durationMs,
+							error: result.error ?? result.stderr,
+							toolCount: progressMap.get(result.index)?.toolCount ?? 0,
+							lastTool: progressMap.get(result.index)?.currentTool,
+							executorOptions: {
+								cwd: this.session.cwd,
+								agent: effectiveAgent,
+								task: matchingTask?.task ?? result.task,
+								description: result.description,
+								index: result.index,
+								id: result.id,
+								taskDepth,
+								modelOverride,
+								thinkingLevel: thinkingLevelOverride,
+								outputSchema: effectiveOutputSchema,
+								sessionFile: taskSessionFile,
+								persistArtifacts: !!artifactsDir,
+								artifactsDir: effectiveArtifactsDir,
+								authStorage: this.session.authStorage,
+								modelRegistry: this.session.modelRegistry,
+								settings: this.session.settings,
+								mcpManager: this.session.mcpManager,
+								contextFiles: this.session.contextFiles?.filter(
+									file => path.basename(file.path).toLowerCase() !== "agents.md",
+								),
+								skills: this.session.skills ?? [],
+								promptTemplates: this.session.promptTemplates,
+							},
+						});
+					} catch {
+						// Session file doesn't exist — can't retry
+					}
 				}
 			}
 
@@ -1246,8 +1521,12 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 				await fs.rm(tempArtifactsDir, { recursive: true, force: true });
 			}
 
+			const text =
+				this.#failedTasks.length > 0
+					? `${summary}\n\n<system-notification>${this.#failedTasks.length} task(s) failed and can be retried with /retry. Session state is preserved.</system-notification>`
+					: summary;
 			return {
-				content: [{ type: "text", text: summary }],
+				content: [{ type: "text", text }],
 				details: {
 					projectAgentsDir,
 					results: results,
