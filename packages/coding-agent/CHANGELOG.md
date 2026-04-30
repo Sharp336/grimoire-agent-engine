@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+
+### Changed
+- Documented Unicode escape semantics in the `write`, `replace`, `patch`, and `hashline` tool prompts. JSON natively decodes `\uXXXX`, so emitting `"\u2192"` (one backslash) writes the character → and emitting `"\\u2192"` (two backslashes) writes the literal 6-char escape sequence — useful for JS regex source, Python raw strings, JSON fixtures, and docs about Unicode.
+
 ## [14.7.0] - 2026-05-04
 ### Breaking Changes
 

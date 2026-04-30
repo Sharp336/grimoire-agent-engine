@@ -99,3 +99,10 @@ If your replacement payload would render with even one unchanged line in the dif
 - `= A..B` deletes the range; payload is what's written. If a payload edge line already exists immediately outside `A..B`, widen the range to cover it — otherwise it duplicates.
 - Multiple ops in one patch are cheap. Prefer two narrow ops over one wide `=`.
 </critical>
+
+<unicode-content>
+Your tool-call JSON is parsed before this tool sees `content`, so `\uXXXX` decodes natively.
+- To insert the **character** → (U+2192): emit `"\u2192"` (one backslash) in the JSON, or the literal → character.
+- To insert the **literal 6-char escape sequence** `\u2192` (source code that already contains `\u2192` — JS regex `/\u2192/`, Python `r"\u2192"`, JSON fixtures): emit `"\\u2192"` (two backslashes) in the JSON. The 6 chars arrive verbatim.
+- **NEVER** emit `"\\u2192"` when you intend the character →. That is a literal escape, not a Unicode character.
+</unicode-content>

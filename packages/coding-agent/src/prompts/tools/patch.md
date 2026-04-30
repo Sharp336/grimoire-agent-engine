@@ -50,6 +50,13 @@ Returns success/failure; on failure, error message indicates:
 - **NEVER** use edit to fix indentation, whitespace, or reformat code. Formatting is a single command run once at the end (`bun fmt`, `cargo fmt`, `prettier —write`, etc.)—not N individual edits. If you see inconsistent indentation after an edit, leave it; the formatter will fix all of it in one pass.
 </critical>
 
+<unicode-content>
+Your tool-call JSON is parsed before this tool sees `diff`, so `\uXXXX` decodes natively in `+` lines, ` ` context, and `op:create` payloads.
+- To match or add the **character** → (U+2192): emit `"\u2192"` (one backslash) in the JSON, or the literal → character.
+- To match or add the **literal 6-char escape sequence** `\u2192` (source code that already contains `\u2192` — JS regex `/\u2192/`, Python `r"\u2192"`, JSON fixtures): emit `"\\u2192"` (two backslashes) in the JSON. The 6 chars arrive verbatim.
+- **NEVER** emit `"\\u2192"` when you intend the character →. That is a literal escape, not a Unicode character.
+</unicode-content>
+
 <examples>
 # Create
 `edit {"path":"hello.txt","edits":[{"op":"create","diff":"Hello\n"}]}`

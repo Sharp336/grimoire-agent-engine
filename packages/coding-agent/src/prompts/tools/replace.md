@@ -15,6 +15,13 @@ Returns success/failure status. On success, file modified in place with replacem
 - You **MUST** read the file at least once in the conversation before editing. Tool errors if you attempt edit without reading file first.
 </critical>
 
+<unicode-content>
+Your tool-call JSON is parsed before this tool sees `old_text` / `new_text`, so `\uXXXX` decodes natively.
+- To match or write the **character** → (U+2192): emit `"\u2192"` (one backslash) in the JSON, or the literal → character. Both arrive as →.
+- To match or write the **literal 6-char escape sequence** `\u2192` (e.g. `old_text` for source code that already contains `\u2192`, or `new_text` for JS regex `/\u2192/`, Python `r"\u2192"`, JSON fixtures): emit `"\\u2192"` (two backslashes) in the JSON. The 6 chars arrive verbatim.
+- **NEVER** emit `"\\u2192"` when you intend the character →. That is a literal escape, not a Unicode character.
+</unicode-content>
+
 <bash-alternatives>
 Replace for content-addressed changes—you identify \_what* to change by its text.
 
