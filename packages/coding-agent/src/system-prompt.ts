@@ -89,7 +89,7 @@ const AGENTS_MD_LIMIT = 200;
 const SYSTEM_PROMPT_PREP_TIMEOUT_MS = 5000;
 const AGENTS_MD_EXCLUDED_DIRS = new Set(["node_modules", ".git"]);
 
-interface AgentsMdSearch {
+export interface AgentsMdSearch {
 	scopePath: string;
 	limit: number;
 	pattern: string;
@@ -163,7 +163,7 @@ async function listAgentsMdFiles(root: string, limit: number): Promise<string[]>
 	}
 }
 
-async function buildAgentsMdSearch(cwd: string): Promise<AgentsMdSearch> {
+export async function buildAgentsMdSearch(cwd: string): Promise<AgentsMdSearch> {
 	const files = await listAgentsMdFiles(cwd, AGENTS_MD_LIMIT);
 	return {
 		scopePath: ".",
@@ -384,6 +384,8 @@ export async function loadSystemPromptFiles(options: LoadContextFilesOptions = {
 export interface SystemPromptToolMetadata {
 	label: string;
 	description: string;
+	/** Tool name the model sees on the provider wire. Defaults to the internal tool name. */
+	wireName?: string;
 }
 
 export function buildSystemPromptToolMetadata(
@@ -394,12 +396,16 @@ export function buildSystemPromptToolMetadata(
 		Array.from(tools.entries(), ([name, tool]) => {
 			const toolRecord = tool as AgentTool & { label?: string; description?: string };
 			const override = overrides[name];
+			const wireName =
+				override?.wireName ??
+				(typeof toolRecord.customWireName === "string" ? toolRecord.customWireName : undefined);
 			return [
 				name,
 				{
 					label: override?.label ?? (typeof toolRecord.label === "string" ? toolRecord.label : ""),
 					description:
 						override?.description ?? (typeof toolRecord.description === "string" ? toolRecord.description : ""),
+					wireName,
 				},
 			] as const;
 		}),
@@ -439,6 +445,8 @@ export interface BuildSystemPromptOptions {
 	alwaysApplyRules?: AlwaysApplyRule[];
 	/** Whether secret obfuscation is active. When true, explains the redaction format in the prompt. */
 	secretsEnabled?: boolean;
+	/** Pre-loaded AGENTS.md search (skips discovery if provided). May be a Promise to allow early kick-off. */
+	agentsMdSearch?: AgentsMdSearch | Promise<AgentsMdSearch>;
 }
 
 /** Build the system prompt with tools, guidelines, and context */
@@ -464,6 +472,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		mcpDiscoveryServerSummaries = [],
 		eagerTasks = false,
 		secretsEnabled = false,
+		agentsMdSearch: providedAgentsMdSearch,
 	} = options;
 	const resolvedCwd = cwd ?? getProjectDir();
 
@@ -474,7 +483,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		const contextFilesPromise = providedContextFiles
 			? Promise.resolve(providedContextFiles)
 			: logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
-		const agentsMdSearchPromise = logger.time("buildAgentsMdSearch", buildAgentsMdSearch, resolvedCwd);
+		const agentsMdSearchPromise =
+			providedAgentsMdSearch !== undefined
+				? Promise.resolve(providedAgentsMdSearch)
+				: logger.time("buildAgentsMdSearch", buildAgentsMdSearch, resolvedCwd);
 		const skillsPromise: Promise<Skill[]> =
 			providedSkills !== undefined
 				? Promise.resolve(providedSkills)
@@ -570,14 +582,17 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		}
 	}
 
-	// Build tool descriptions for system prompt rendering
+	// Build tool descriptions for system prompt rendering.
+	const toolPromptNames = new Map<string, string>(toolNames.map(name => [name, tools?.get(name)?.wireName ?? name]));
+	const toolRefs = Object.fromEntries(toolPromptNames.entries());
 	const toolInfo = toolNames.map(name => ({
-		name,
+		name: toolPromptNames.get(name) ?? name,
+		internalName: name,
 		label: tools?.get(name)?.label ?? "",
 		description: tools?.get(name)?.description ?? "",
 	}));
 
-	// Filter skills to only include those with read tool
+	// Filter skills to only include those with read tool.
 	const hasRead = tools?.has("read");
 	const filteredSkills = hasRead ? skills : [];
 
@@ -589,6 +604,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
 	const environment = await logger.time("getEnvironmentInfo", getEnvironmentInfo);
+	const reportToolIssueToolName = toolPromptNames.get("report_tool_issue") ?? "report_tool_issue";
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
@@ -596,6 +612,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		tools: toolNames,
 		toolInfo,
 		repeatToolDescriptions,
+		toolRefs,
 		environment,
 		contextFiles,
 		agentsMdSearch,
@@ -617,8 +634,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	// When autoqa is active the report_tool_issue tool is in the tool set — nudge the agent.
 	if (toolNames.includes("report_tool_issue")) {
-		rendered +=
-			"\n\n<critical>\nThe `report_tool_issue` tool is available for automated QA. If ANY tool you call returns output that is unexpected, incorrect, malformed, or otherwise inconsistent with what you anticipated given the tool's described behavior and your parameters, call `report_tool_issue` with the tool name and a concise description of the discrepancy. Do not hesitate to report — false positives are acceptable.\n</critical>";
+		rendered += `\n\n<critical>\nThe \`${reportToolIssueToolName}\` tool is available for automated QA. If ANY tool you call returns output that is unexpected, incorrect, malformed, or otherwise inconsistent with what you anticipated given the tool's described behavior and your parameters, call \`${reportToolIssueToolName}\` with the tool name and a concise description of the discrepancy. Do not hesitate to report — false positives are acceptable.\n</critical>`;
 	}
 
 	return rendered;

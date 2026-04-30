@@ -14,7 +14,17 @@ import {
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
 import type { Component, SlashCommand } from "@oh-my-pi/pi-tui";
-import { Container, Loader, Markdown, ProcessTerminal, Spacer, Text, TUI, visibleWidth } from "@oh-my-pi/pi-tui";
+import {
+	Container,
+	clearRenderCache,
+	Loader,
+	Markdown,
+	ProcessTerminal,
+	Spacer,
+	Text,
+	TUI,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
 import { APP_NAME, getProjectDir, hsvToRgb, isEnoent, logger, postmortem, prompt } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { KeybindingsManager } from "../config/keybindings";
@@ -38,6 +48,7 @@ import { getRecentSessions } from "../session/session-manager";
 import { STTController, type SttState } from "../stt";
 import type { ExitPlanModeDetails, LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme } from "../tools/path-utils";
+import { formatPhaseDisplayName } from "../tools/todo-write";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHexForTitle } from "../utils/session-color";
@@ -145,6 +156,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	planModeEnabled = false;
 	planModePaused = false;
 	planModePlanFilePath: string | undefined = undefined;
+	loopModeEnabled = false;
+	loopPrompt: string | undefined = undefined;
+	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	todoPhases: TodoPhase[] = [];
 	hideThinkingBlock = false;
 	pendingImages: ImageContent[] = [];
@@ -167,6 +181,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
 	optimisticUserMessageSignature: string | undefined = undefined;
+	locallySubmittedUserSignatures: Set<string> = new Set();
 	#pendingSubmittedInput: SubmittedUserInput | undefined;
 	lastSigintTime = 0;
 	lastEscapeTime = 0;
@@ -320,8 +335,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	async init(): Promise<void> {
 		if (this.isInitialized) return;
 
-		logger.time("InteractiveMode.init:keybindings");
-		this.keybindings = KeybindingsManager.create();
+		this.keybindings = logger.time("InteractiveMode.init:keybindings", () => KeybindingsManager.create());
 
 		// Register session manager flush for signal handlers (SIGINT, SIGTERM, SIGHUP)
 		this.#cleanupUnsubscribe = postmortem.register("session-manager-flush", () => this.sessionManager.flush());
@@ -438,6 +452,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Set up theme file watcher
 		onThemeChange(() => {
+			clearRenderCache();
 			this.ui.invalidate();
 			this.updateEditorBorderColor();
 			this.ui.requestRender();
@@ -483,7 +498,76 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.onInputCallback = undefined;
 			resolve(input);
 		};
+		this.#scheduleLoopAutoSubmit();
 		return promise;
+	}
+
+	#scheduleLoopAutoSubmit(): void {
+		this.#cancelLoopAutoSubmit();
+		if (!this.loopModeEnabled || !this.loopPrompt) return;
+		const prompt = this.loopPrompt;
+		const loopAction = settings.get("loop.mode");
+		// Brief delay so the user has a chance to press Esc between iterations.
+		this.#loopAutoSubmitTimer = setTimeout(() => {
+			this.#loopAutoSubmitTimer = undefined;
+			if (!this.loopModeEnabled || !this.onInputCallback) return;
+			void this.#runLoopIteration(loopAction, prompt);
+		}, 800);
+	}
+
+	#cancelLoopAutoSubmit(): void {
+		if (this.#loopAutoSubmitTimer) {
+			clearTimeout(this.#loopAutoSubmitTimer);
+			this.#loopAutoSubmitTimer = undefined;
+		}
+	}
+
+	async #runLoopIteration(action: "prompt" | "compact" | "reset", prompt: string): Promise<void> {
+		if (action === "compact") {
+			await this.handleCompactCommand();
+		} else if (action === "reset") {
+			await this.handleClearCommand();
+		}
+		if (!this.loopModeEnabled || !this.onInputCallback) return;
+		this.onInputCallback(this.startPendingSubmission({ text: prompt }));
+	}
+
+	disableLoopMode(): void {
+		const wasEnabled = this.loopModeEnabled;
+		this.loopModeEnabled = false;
+		this.loopPrompt = undefined;
+		this.#cancelLoopAutoSubmit();
+		this.statusLine.setLoopModeStatus(undefined);
+		this.updateEditorTopBorder();
+		this.ui.requestRender();
+		if (wasEnabled) {
+			this.showStatus("Loop mode disabled.");
+		}
+	}
+
+	/**
+	 * Pause the loop without exiting it: drops the captured prompt and any
+	 * pending auto-resubmit. Loop mode stays enabled — the next prompt the
+	 * user submits becomes the new loop prompt and resumes iteration.
+	 */
+	pauseLoop(): void {
+		this.loopPrompt = undefined;
+		this.#cancelLoopAutoSubmit();
+	}
+
+	async handleLoopCommand(): Promise<void> {
+		if (this.loopModeEnabled) {
+			this.disableLoopMode();
+			return;
+		}
+		this.loopModeEnabled = true;
+		this.loopPrompt = undefined;
+		this.statusLine.setLoopModeStatus({ enabled: true });
+		this.updateEditorTopBorder();
+		this.ui.requestRender();
+		this.showStatus(
+			"Loop mode enabled. Your next prompt will repeat after each turn. Esc cancels the current iteration; /loop again to disable.",
+		);
 	}
 
 	startPendingSubmission(input: { text: string; images?: ImageContent[] }): SubmittedUserInput {
@@ -495,6 +579,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		};
 		this.#pendingSubmittedInput = submission;
 		this.optimisticUserMessageSignature = `${submission.text}\u0000${submission.images?.length ?? 0}`;
+		this.locallySubmittedUserSignatures.add(this.optimisticUserMessageSignature);
 		this.addMessageToChat({
 			role: "user",
 			content: [{ type: "text", text: submission.text }, ...(submission.images ?? [])],
@@ -516,6 +601,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		submission.cancelled = true;
 		this.#pendingSubmittedInput = undefined;
 		this.optimisticUserMessageSignature = undefined;
+		this.locallySubmittedUserSignatures.delete(`${submission.text}\u0000${submission.images?.length ?? 0}`);
 		this.#pendingWorkingMessage = undefined;
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
@@ -621,9 +707,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		const lines = ["", indent + theme.bold(theme.fg("accent", "Todos"))];
 
 		if (!this.todoExpanded) {
-			const activePhase = this.#getActivePhase(phases);
+			const activeIdx = phases.indexOf(this.#getActivePhase(phases) ?? phases[0]);
+			const activePhase = phases[activeIdx];
 			if (!activePhase) return;
-			lines.push(`${indent}${theme.fg("accent", `${hook} ${activePhase.name}`)}`);
+			lines.push(
+				`${indent}${theme.fg("accent", `${hook} ${formatPhaseDisplayName(activePhase.name, activeIdx + 1)}`)}`,
+			);
 			const visibleTasks = activePhase.tasks.slice(0, 5);
 			visibleTasks.forEach((todo, index) => {
 				const prefix = `${indent}${index === 0 ? hook : " "} `;
@@ -637,13 +726,13 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
-		for (const phase of phases) {
-			lines.push(`${indent}${theme.fg("accent", `${hook} ${phase.name}`)}`);
+		phases.forEach((phase, phaseIndex) => {
+			lines.push(`${indent}${theme.fg("accent", `${hook} ${formatPhaseDisplayName(phase.name, phaseIndex + 1)}`)}`);
 			phase.tasks.forEach((todo, index) => {
 				const prefix = `${indent}${index === 0 ? hook : " "} `;
 				lines.push(this.#formatTodoLine(todo, prefix));
 			});
-		}
+		});
 
 		this.todoContainer.addChild(new Text(lines.join("\n"), 1, 0));
 	}
@@ -791,6 +880,19 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#pendingModelSwitch = { model: prev.model, thinkingLevel: prev.thinkingLevel };
 			} else {
 				await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
+			}
+			// If #applyPlanModeModel queued a deferred switch to the plan-role model
+			// (because the session was streaming on entry), drop it now: we are
+			// leaving plan mode, so flushing it on the next agent_end would land the
+			// session on the plan-role model after the user has exited plan mode
+			// (issue #816). Only clear when the pending target matches the plan-role
+			// model — leave any unrelated user-queued switch intact.
+			const pending = this.#pendingModelSwitch;
+			if (pending) {
+				const planResolution = this.session.resolveRoleModelWithThinking("plan");
+				if (planResolution.model && modelsAreEqual(pending.model, planResolution.model)) {
+					this.#pendingModelSwitch = undefined;
+				}
 			}
 		}
 		this.session.setPlanModeState(undefined);
@@ -1259,8 +1361,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#uiHelpers.renderSessionContext(sessionContext, options);
 	}
 
-	renderInitialMessages(): void {
-		this.#uiHelpers.renderInitialMessages();
+	renderInitialMessages(prebuiltContext?: SessionContext): void {
+		this.#uiHelpers.renderInitialMessages(prebuiltContext);
 	}
 
 	getUserMessageText(message: Message): string {
@@ -1322,6 +1424,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	handleToolsCommand(): void {
 		this.#commandController.handleToolsCommand();
+	}
+
+	handleContextCommand(): void {
+		this.#commandController.handleContextCommand();
 	}
 
 	#prepareSessionSwitch(): void {
@@ -1609,7 +1715,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		} else {
 			this.todoPhases = [
 				{
-					id: "default",
 					name: "Todos",
 					tasks: todos as TodoItem[],
 				},

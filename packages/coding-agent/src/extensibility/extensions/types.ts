@@ -15,12 +15,12 @@ import type {
 	Context,
 	ImageContent,
 	Model,
-	OAuthCredentials,
-	OAuthLoginCallbacks,
+	ProviderResponseMetadata,
 	SimpleStreamOptions,
 	TextContent,
 	ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/utils/oauth/types";
 import type * as piCodingAgent from "@oh-my-pi/pi-coding-agent";
 import type { AutocompleteItem, Component, EditorComponent, EditorTheme, KeyId, TUI } from "@oh-my-pi/pi-tui";
 import type { Static, TSchema } from "@sinclair/typebox";
@@ -46,10 +46,10 @@ import type {
 	BashToolInput,
 	FindToolDetails,
 	FindToolInput,
-	SearchToolDetails,
-	SearchToolInput,
 	ReadToolDetails,
 	ReadToolInput,
+	SearchToolDetails,
+	SearchToolInput,
 	WriteToolInput,
 } from "../../tools";
 import type { TodoItem } from "../../tools/todo-write";
@@ -482,6 +482,11 @@ export interface BeforeProviderRequestEvent {
 	payload: unknown;
 }
 
+/** Fired after a provider response is received, before its stream body is consumed. */
+export interface AfterProviderResponseEvent extends ProviderResponseMetadata {
+	type: "after_provider_response";
+}
+
 /** Fired after user submits prompt but before agent loop. */
 export interface BeforeAgentStartEvent {
 	type: "before_agent_start";
@@ -801,6 +806,7 @@ export type ExtensionEvent =
 	| SessionEvent
 	| ContextEvent
 	| BeforeProviderRequestEvent
+	| AfterProviderResponseEvent
 	| BeforeAgentStartEvent
 	| AgentStartEvent
 	| AgentEndEvent
@@ -981,6 +987,7 @@ export interface ExtensionAPI {
 		event: "before_provider_request",
 		handler: ExtensionHandler<BeforeProviderRequestEvent, BeforeProviderRequestEventResult>,
 	): void;
+	on(event: "after_provider_response", handler: ExtensionHandler<AfterProviderResponseEvent>): void;
 	on(event: "before_agent_start", handler: ExtensionHandler<BeforeAgentStartEvent, BeforeAgentStartEventResult>): void;
 	on(event: "agent_start", handler: ExtensionHandler<AgentStartEvent>): void;
 	on(event: "agent_end", handler: ExtensionHandler<AgentEndEvent>): void;

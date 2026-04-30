@@ -1,7 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 
-import { getOAuthProviders } from "@oh-my-pi/pi-ai";
+import { getOAuthProviders } from "@oh-my-pi/pi-ai/utils/oauth";
 import { getConfigDirName } from "@oh-my-pi/pi-utils";
 import { invalidate as invalidateFsCache } from "../capability/fs";
 import type { SettingPath, SettingValue } from "../config/settings";
@@ -118,6 +118,15 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			await runtime.ctx.handlePlanModeCommand(command.args || undefined);
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "loop",
+		description:
+			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Esc cancels the current iteration; /loop again to disable.",
+		handle: async (_command, runtime) => {
+			await runtime.ctx.handleLoopCommand();
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -343,6 +352,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		description: "Show tools currently visible to the agent",
 		handle: (_command, runtime) => {
 			runtime.ctx.handleToolsCommand();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "context",
+		description: "Show estimated context usage breakdown",
+		handle: (_command, runtime) => {
+			runtime.ctx.handleContextCommand();
 			runtime.ctx.editor.setText("");
 		},
 	},

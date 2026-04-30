@@ -348,7 +348,7 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "kagi", label: "Kagi", description: "Requires KAGI_API_KEY and Kagi Search API beta access" },
 		{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
 		{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
-		{ value: "searxng", label: "SearXNG", description: "Self-hosted metasearch; set searxng.endpoint" },
+		{ value: "searxng", label: "SearXNG", description: "Requires searxng.endpoint" },
 	],
 	"providers.image": [
 		{
@@ -449,6 +449,16 @@ const OPTION_PROVIDERS: Partial<Record<SettingPath, OptionProvider>> = {
 		{ value: "block", label: "Block", description: "Solid blocks" },
 		{ value: "none", label: "None", description: "Space only" },
 		{ value: "ascii", label: "ASCII", description: "Greater-than signs" },
+	],
+	// Loop mode
+	"loop.mode": [
+		{
+			value: "prompt",
+			label: "Prompt",
+			description: "Re-submit the prompt as a follow-up message (current behavior)",
+		},
+		{ value: "compact", label: "Compact", description: "Compact the session context, then re-submit the prompt" },
+		{ value: "reset", label: "Reset", description: "Start a new session, then re-submit the prompt" },
 	],
 };
 

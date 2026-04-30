@@ -326,7 +326,7 @@ export class Settings {
 
 	/**
 	 * Get the edit variant for a specific model.
-	 * Returns "patch", "replace", "hashline", "vim", "apply_patch", or null (use global default).
+	 * Returns "patch", "replace", "hashline", "atom", "vim", "apply_patch", or null (use global default).
 	 */
 	getEditVariantForModel(model: string | undefined): EditMode | null {
 		if (!model) return null;
@@ -530,6 +530,22 @@ export class Settings {
 				isolationObj.mode = isolationObj.enabled ? "worktree" : "none";
 			}
 			delete isolationObj.enabled;
+		}
+
+		// statusLine: rename "plan_mode" segment to "mode"
+		const statusLineObj = raw.statusLine as Record<string, unknown> | undefined;
+		if (statusLineObj) {
+			for (const key of ["leftSegments", "rightSegments"] as const) {
+				const segments = statusLineObj[key];
+				if (Array.isArray(segments)) {
+					statusLineObj[key] = segments.map(seg => (seg === "plan_mode" ? "mode" : seg));
+				}
+			}
+			const segmentOptions = statusLineObj.segmentOptions as Record<string, unknown> | undefined;
+			if (segmentOptions && "plan_mode" in segmentOptions && !("mode" in segmentOptions)) {
+				segmentOptions.mode = segmentOptions.plan_mode;
+				delete segmentOptions.plan_mode;
+			}
 		}
 
 		return raw;

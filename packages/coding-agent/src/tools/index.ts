@@ -37,6 +37,7 @@ import { NotebookTool } from "./notebook";
 import { wrapToolWithMetaNotice } from "./output-meta";
 import { PythonTool } from "./python";
 import { ReadTool } from "./read";
+import { RecipeTool } from "./recipe";
 import { RenderMermaidTool } from "./render-mermaid";
 import { createReportToolIssueTool, isAutoQaEnabled } from "./report-tool-issue";
 import { ResolveTool } from "./resolve";
@@ -75,6 +76,7 @@ export * from "./job";
 export * from "./notebook";
 export * from "./python";
 export * from "./read";
+export * from "./recipe";
 export * from "./render-mermaid";
 export * from "./report-tool-issue";
 export * from "./resolve";
@@ -224,6 +226,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	rewind: RewindTool.createIf,
 	task: TaskTool.create,
 	job: JobTool.createIf,
+	recipe: RecipeTool.createIf,
 	irc: IrcTool.createIf,
 	todo_write: s => new TodoWriteTool(s),
 	web_search: s => new WebSearchTool(s),
@@ -370,6 +373,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		) {
 			requestedTools.push("ast_edit");
 		}
+		if (
+			requestedTools.includes("bash") &&
+			!requestedTools.includes("recipe") &&
+			session.settings.get("recipe.enabled")
+		) {
+			requestedTools.push("recipe");
+		}
 	}
 	const allTools: Record<string, ToolFactory> = { ...BUILTIN_TOOLS, ...HIDDEN_TOOLS };
 	const isToolAllowed = (name: string) => {
@@ -392,6 +402,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "browser") return session.settings.get("browser.enabled");
 		if (name === "checkpoint" || name === "rewind") return session.settings.get("checkpoint.enabled");
 		if (name === "irc") return session.settings.get("irc.enabled");
+		if (name === "recipe") return session.settings.get("recipe.enabled");
 		if (name === "task") {
 			const maxDepth = session.settings.get("task.maxRecursionDepth") ?? 2;
 			const currentDepth = session.taskDepth ?? 0;

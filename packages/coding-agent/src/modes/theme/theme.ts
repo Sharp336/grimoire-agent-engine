@@ -91,6 +91,7 @@ export type SymbolKey =
 	// Icons
 	| "icon.model"
 	| "icon.plan"
+	| "icon.loop"
 	| "icon.folder"
 	| "icon.file"
 	| "icon.git"
@@ -250,6 +251,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	// Icons
 	"icon.model": "⬢",
 	"icon.plan": "🗺",
+	"icon.loop": "↻",
 	"icon.folder": "📁",
 	"icon.file": "📄",
 	"icon.git": "⎇",
@@ -460,6 +462,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.model": "\uec19",
 	// pick:  | alt:  
 	"icon.plan": "\uf2d2",
+	// pick: ↻ | alt: ⟳
+	"icon.loop": "\uf021",
 	// pick:  | alt:  
 	"icon.folder": "\uf115",
 	// pick:  | alt:  
@@ -659,6 +663,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	// Icons
 	"icon.model": "[M]",
 	"icon.plan": "plan",
+	"icon.loop": "loop",
 	"icon.folder": "[D]",
 	"icon.file": "[F]",
 	"icon.git": "git:",
@@ -1434,6 +1439,7 @@ export class Theme {
 		return {
 			model: this.#symbols["icon.model"],
 			plan: this.#symbols["icon.plan"],
+			loop: this.#symbols["icon.loop"],
 			folder: this.#symbols["icon.folder"],
 			file: this.#symbols["icon.file"],
 			git: this.#symbols["icon.git"],
@@ -2322,8 +2328,14 @@ export function getSymbolTheme(): SymbolTheme {
 	};
 }
 
+let _markdownTheme: MarkdownTheme | undefined;
+let _markdownThemeRef: Theme | undefined;
+
 export function getMarkdownTheme(): MarkdownTheme {
-	return {
+	if (_markdownTheme !== undefined && _markdownThemeRef === theme) {
+		return _markdownTheme;
+	}
+	const markdownTheme: MarkdownTheme = {
 		heading: (text: string) => theme.fg("mdHeading", text),
 		link: (text: string) => theme.fg("mdLink", text),
 		linkUrl: (text: string) => theme.fg("mdLinkUrl", text),
@@ -2349,6 +2361,9 @@ export function getMarkdownTheme(): MarkdownTheme {
 			}
 		},
 	};
+	_markdownTheme = markdownTheme;
+	_markdownThemeRef = theme;
+	return markdownTheme;
 }
 
 export function getSelectListTheme(): SelectListTheme {

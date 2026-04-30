@@ -250,7 +250,7 @@ export class UiHelpers {
 		sessionContext: SessionContext,
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): void {
-		this.ctx.optimisticUserMessageSignature = undefined;
+		// Preserved: message_start handler owns this lifecycle (see #783)
 		this.ctx.pendingTools.clear();
 
 		if (options.updateFooter) {
@@ -414,7 +414,7 @@ export class UiHelpers {
 		this.ctx.ui.requestRender();
 	}
 
-	renderInitialMessages(): void {
+	renderInitialMessages(prebuiltContext?: SessionContext): void {
 		// This path is used to rebuild the visible chat transcript (e.g. after custom/debug UI).
 		// Clear existing rendered chat first to avoid duplicating the full session in the container.
 		this.ctx.chatContainer.clear();
@@ -422,8 +422,8 @@ export class UiHelpers {
 		this.ctx.pendingBashComponents = [];
 		this.ctx.pendingPythonComponents = [];
 
-		// Get aligned messages and entries from session context
-		const context = this.ctx.sessionManager.buildSessionContext();
+		// Reuse a pre-built context when available (e.g. from navigateTree) to avoid a second O(N) walk.
+		const context = prebuiltContext ?? this.ctx.sessionManager.buildSessionContext();
 		this.ctx.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: true,
@@ -610,9 +610,22 @@ export class UiHelpers {
 				await this.ctx.session.prompt(message.text);
 			}
 
-			const promptPromise = this.ctx.session.prompt(firstPrompt.text).catch((error: unknown) => {
-				restoreQueue(error);
-			});
+			// Pass streamingBehavior so that if the session is still streaming when
+			// compaction-end fires (race window between isStreaming flipping false and
+			// the event landing here), prompt() routes the message into the steer/
+			// follow-up queue instead of throwing AgentBusyError. When the session is
+			// genuinely idle, streamingBehavior is ignored and a fresh prompt runs as
+			// before. This keeps the steer preview honest: if delivery has to be
+			// deferred, the message lands in the same queue every other consumer
+			// (Alt+Up dequeue, post-stream drain) already drains, instead of being
+			// stranded in compactionQueuedMessages with no drainer.
+			const promptPromise = this.ctx.session
+				.prompt(firstPrompt.text, {
+					streamingBehavior: firstPrompt.mode === "followUp" ? "followUp" : "steer",
+				})
+				.catch((error: unknown) => {
+					restoreQueue(error);
+				});
 
 			for (const message of rest) {
 				if (this.ctx.isKnownSlashCommand(message.text)) {

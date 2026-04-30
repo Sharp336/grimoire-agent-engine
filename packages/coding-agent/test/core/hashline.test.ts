@@ -767,7 +767,7 @@ describe("buildCompactHashlineDiffPreview", () => {
 		expect(preview.preview).not.toContain("ctx-b");
 		expect(preview.preview).toContain(` 3${computeLineHash(3, "ctx-c")}|ctx-c`);
 		expect(preview.preview).toContain(` 4${computeLineHash(4, "ctx-d")}|ctx-d`);
-		expect(preview.preview).toContain(" ... 2 more unchanged lines");
+		expect(preview.preview).not.toContain("more unchanged lines");
 		expect(preview.preview).toContain(`+5${computeLineHash(5, "added")}|added`);
 	});
 
@@ -780,23 +780,85 @@ describe("buildCompactHashlineDiffPreview", () => {
 		expect(preview.preview).toContain(`+3${computeLineHash(3, "two")}|two`);
 		expect(preview.preview).toContain(`+4${computeLineHash(4, "three")}|three`);
 		expect(preview.preview).toContain(`+5${computeLineHash(5, "four")}|four`);
-		expect(preview.preview).toContain("-2   |old");
+		expect(preview.preview).toContain("-2  |old");
 		expect(preview.preview).not.toContain(`-2${computeLineHash(2, "old")}`);
 		expect(preview.addedLines).toBe(4);
 		expect(preview.removedLines).toBe(1);
 	});
 
-	it("keeps leading context for last unchanged run and hashes visible lines", () => {
+	it("collapses adjacent (-, +) into a single `*` modification line and keeps leading context", () => {
 		const diff = ["-10|old", "+10|new", " 11|ctx-a", " 12|ctx-b", " 13|ctx-c", " 14|ctx-d"].join("\n");
 
 		const preview = buildCompactHashlineDiffPreview(diff);
 
-		expect(preview.preview).toContain(`+10${computeLineHash(10, "new")}|new`);
+		expect(preview.preview).toContain(`*10${computeLineHash(10, "new")}|new`);
+		expect(preview.preview).not.toContain(`+10${computeLineHash(10, "new")}|new`);
+		expect(preview.preview).not.toContain("-10  |old");
 		expect(preview.preview).toContain(` 11${computeLineHash(11, "ctx-a")}|ctx-a`);
 		expect(preview.preview).toContain(` 12${computeLineHash(12, "ctx-b")}|ctx-b`);
 		expect(preview.preview).not.toContain("ctx-c");
 		expect(preview.preview).not.toContain("ctx-d");
-		expect(preview.preview).toContain(" ... 2 more unchanged lines");
+		expect(preview.preview).not.toContain("more unchanged lines");
+		// `*` modifications still count toward both added and removed totals.
+		expect(preview.addedLines).toBe(1);
+		expect(preview.removedLines).toBe(1);
+	});
+
+	it("keeps surplus removals after the paired `*` block when more old lines were dropped than added", () => {
+		const diff = ["-100|del-a", "-101|del-b", "-102|del-c", "+100|new-a", " 103|tail"].join("\n");
+
+		const preview = buildCompactHashlineDiffPreview(diff);
+		const lines = preview.preview.split("\n");
+
+		expect(lines).toEqual([
+			`*100${computeLineHash(100, "new-a")}|new-a`,
+			"-101  |del-b",
+			"-102  |del-c",
+			` 101${computeLineHash(101, "tail")}|tail`,
+		]);
+		expect(preview.addedLines).toBe(1);
+		expect(preview.removedLines).toBe(3);
+	});
+
+	it("keeps surplus additions after the paired `*` block when more new lines were added than removed", () => {
+		const diff = ["-10|old", "+10|new-a", "+11|new-b", "+12|new-c", " 11|tail"].join("\n");
+
+		const preview = buildCompactHashlineDiffPreview(diff);
+		const lines = preview.preview.split("\n");
+
+		expect(lines).toEqual([
+			`*10${computeLineHash(10, "new-a")}|new-a`,
+			`+11${computeLineHash(11, "new-b")}|new-b`,
+			`+12${computeLineHash(12, "new-c")}|new-c`,
+			` 13${computeLineHash(13, "tail")}|tail`,
+		]);
+		expect(preview.addedLines).toBe(3);
+		expect(preview.removedLines).toBe(1);
+	});
+
+	it("does not pair when `+` runs precede `-` runs (preserves unified-diff ordering only)", () => {
+		const diff = [" 1|head", "+2|one", "+3|two", "-2|old"].join("\n");
+
+		const preview = buildCompactHashlineDiffPreview(diff);
+
+		expect(preview.preview).not.toContain("*");
+		expect(preview.preview).toContain(`+2${computeLineHash(2, "one")}|one`);
+		expect(preview.preview).toContain(`+3${computeLineHash(3, "two")}|two`);
+		expect(preview.preview).toContain("-2  |old");
+	});
+
+	it("never truncates change runs — every removed and added line is shown in full", () => {
+		const dels = Array.from({ length: 30 }, (_, i) => `-${100 + i}|del-${i}`);
+		const diff = [" 99|head", ...dels, " 130|tail"].join("\n");
+
+		const preview = buildCompactHashlineDiffPreview(diff);
+
+		expect(preview.removedLines).toBe(30);
+		expect(preview.preview).not.toContain("more removed lines");
+		expect(preview.preview).not.toContain("more preview lines");
+		for (let i = 0; i < 30; i++) {
+			expect(preview.preview).toContain(`-${100 + i}  |del-${i}`);
+		}
 	});
 
 	it("uses new-file line numbers for unchanged lines after insertions", () => {

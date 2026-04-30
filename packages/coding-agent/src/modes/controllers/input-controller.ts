@@ -44,6 +44,15 @@ export class InputController {
 					this.ctx.retryEscapeHandler,
 			);
 		this.ctx.editor.onEscape = () => {
+			if (this.ctx.loopModeEnabled) {
+				this.ctx.pauseLoop();
+				if (this.ctx.session.isStreaming) {
+					void this.ctx.session.abort();
+				} else {
+					this.ctx.cancelPendingSubmission();
+				}
+				return;
+			}
 			if (this.ctx.hasActiveBtw() && this.ctx.handleBtwEscape()) {
 				return;
 			}
@@ -308,6 +317,12 @@ export class InputController {
 				}
 			}
 
+			// While loop mode is on, every user-typed prompt becomes the new loop
+			// prompt that auto-resubmits after each yield.
+			if (this.ctx.loopModeEnabled) {
+				this.ctx.loopPrompt = text;
+			}
+
 			// Queue input during compaction
 			if (this.ctx.session.isCompacting) {
 				if (this.ctx.pendingImages.length > 0) {
@@ -325,6 +340,11 @@ export class InputController {
 				this.ctx.editor.setText("");
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 				this.ctx.pendingImages = [];
+				// Record the signature so the queued message's eventual delivery
+				// (a user-role `message_start` event) leaves any draft the user has
+				// typed since queuing intact. Same protection as #783, applied to
+				// the streaming/queue path.
+				this.ctx.locallySubmittedUserSignatures.add(`${text}\u0000${images?.length ?? 0}`);
 				await this.ctx.session.prompt(text, { streamingBehavior: "steer", images });
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
@@ -434,6 +454,7 @@ export class InputController {
 	}
 
 	restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
+		this.ctx.locallySubmittedUserSignatures.clear();
 		const { steering, followUp } = this.ctx.session.clearQueue();
 		const allQueued = [...steering, ...followUp];
 		if (allQueued.length === 0) {

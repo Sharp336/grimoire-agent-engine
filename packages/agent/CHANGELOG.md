@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [14.5.10] - 2026-04-30
+
+### Added
+
+- Added an `onResponse` stream option for observing provider response metadata after response headers arrive.
+
 ## [14.2.0] - 2026-04-23
 
 ### Changed

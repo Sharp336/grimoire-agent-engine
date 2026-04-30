@@ -14,17 +14,19 @@ import { askToolRenderer } from "./ask";
 import { astEditToolRenderer } from "./ast-edit";
 import { astGrepToolRenderer } from "./ast-grep";
 import { bashToolRenderer } from "./bash";
+import { browserToolRenderer } from "./browser/render";
 import { calculatorToolRenderer } from "./calculator";
 import { debugToolRenderer } from "./debug";
 import { findToolRenderer } from "./find";
 import { githubToolRenderer } from "./gh-renderer";
-import { searchToolRenderer } from "./search";
 import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { jobToolRenderer } from "./job";
 import { notebookToolRenderer } from "./notebook";
 import { pythonToolRenderer } from "./python";
 import { readToolRenderer } from "./read";
+import { recipeToolRenderer } from "./recipe/render";
 import { resolveToolRenderer } from "./resolve";
+import { searchToolRenderer } from "./search";
 import { searchToolBm25Renderer } from "./search-tool-bm25";
 import { sshToolRenderer } from "./ssh";
 import { todoWriteToolRenderer } from "./todo-write";
@@ -48,6 +50,8 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	ast_grep: astGrepToolRenderer as ToolRenderer,
 	ast_edit: astEditToolRenderer as ToolRenderer,
 	bash: bashToolRenderer as ToolRenderer,
+	browser: browserToolRenderer as ToolRenderer,
+	recipe: recipeToolRenderer as ToolRenderer,
 	debug: debugToolRenderer as ToolRenderer,
 	python: pythonToolRenderer as ToolRenderer,
 	calc: calculatorToolRenderer as ToolRenderer,

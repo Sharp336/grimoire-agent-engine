@@ -40,7 +40,8 @@ import { finalizeErrorMessage, type RawHttpRequestDump, rewriteCopilotError } fr
 import { createWatchdog, getStreamFirstEventTimeoutMs } from "../utils/idle-iterator";
 import { parseStreamingJson } from "../utils/json-parse";
 import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
-import { extractHttpStatusFromError, isCopilotRetryableError } from "../utils/retry";
+import { notifyProviderResponse } from "../utils/provider-response";
+import { extractHttpStatusFromError, isCopilotRetryableError, isUnexpectedSocketCloseMessage } from "../utils/retry";
 import { COMBINATOR_KEYS, NO_STRICT } from "../utils/schema";
 import {
 	buildCopilotDynamicHeaders,
@@ -678,6 +679,7 @@ export function isProviderRetryableError(error: unknown, provider?: string): boo
 	if (provider === "github-copilot" && isCopilotRetryableError(error)) return true;
 	const msg = error.message.toLowerCase();
 	return (
+		isUnexpectedSocketCloseMessage(msg) ||
 		/rate.?limit|too many requests|overloaded|service.?unavailable|internal_error|stream error.*received from peer|1302|timed?\s*out while waiting for the first event|timeout waiting for first/i.test(
 			msg,
 		) ||
@@ -696,6 +698,42 @@ function createEmptyUsage(premiumRequests?: number): Usage {
 		...(premiumRequests === undefined ? {} : { premiumRequests }),
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 	};
+}
+
+export type AnthropicUsageLike = {
+	cache_creation?: { ephemeral_5m_input_tokens?: number | null; ephemeral_1h_input_tokens?: number | null } | null;
+	server_tool_use?: { web_search_requests?: number | null; web_fetch_requests?: number | null } | null;
+};
+
+/**
+ * Capture Anthropic's optional cache-creation TTL breakdown and server-tool-use
+ * counters into the harness Usage shape. Only sets fields that were reported, so
+ * a `message_delta` that omits `cache_creation` does not clobber the breakdown
+ * established at `message_start`.
+ */
+export function applyAnthropicUsageExtras(usage: Usage, source: AnthropicUsageLike): void {
+	const cacheCreation = source.cache_creation;
+	if (cacheCreation) {
+		const fiveMinute = cacheCreation.ephemeral_5m_input_tokens ?? 0;
+		const oneHour = cacheCreation.ephemeral_1h_input_tokens ?? 0;
+		if (fiveMinute > 0 || oneHour > 0) {
+			usage.cttl = {
+				...(fiveMinute > 0 ? { ephemeral5m: fiveMinute } : {}),
+				...(oneHour > 0 ? { ephemeral1h: oneHour } : {}),
+			};
+		}
+	}
+	const serverToolUse = source.server_tool_use;
+	if (serverToolUse) {
+		const webSearch = serverToolUse.web_search_requests ?? 0;
+		const webFetch = serverToolUse.web_fetch_requests ?? 0;
+		if (webSearch > 0 || webFetch > 0) {
+			usage.server = {
+				...(webSearch > 0 ? { webSearch } : {}),
+				...(webFetch > 0 ? { webFetch } : {}),
+			};
+		}
+	}
 }
 
 export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
@@ -759,7 +797,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				resolveAnthropicBaseUrl(model, options?.apiKey ?? getEnvApiKey(model.provider) ?? "") ??
 				"https://api.anthropic.com";
 			const providerSessionState = getAnthropicProviderSessionState(options?.providerSessionState);
-			let disableStrictTools = providerSessionState?.strictToolsDisabled ?? false;
+			let disableStrictTools =
+				(providerSessionState?.strictToolsDisabled ?? false) || (model.compat?.disableStrictTools ?? false);
 			let strictFallbackErrorMessage: string | undefined;
 			const prepareParams = async (): Promise<MessageCreateParamsStreaming> => {
 				let nextParams = buildParams(model, baseUrl, context, isOAuthToken, options, disableStrictTools);
@@ -805,7 +844,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				let streamedReplayUnsafeContent = false;
 
 				try {
-					const { data: anthropicStream } = await anthropicRequest.withResponse();
+					const { data: anthropicStream, response, request_id } = await anthropicRequest.withResponse();
+					await notifyProviderResponse(options, response, model, request_id);
 					const firstEventWatchdog = createWatchdog(firstEventTimeoutMs, () =>
 						activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
 					);
@@ -824,6 +864,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 								continue;
 							}
 							sawMessageStart = true;
+							applyAnthropicUsageExtras(output.usage, event.message.usage);
 							output.responseId = event.message.id;
 							output.usage.input = event.message.usage.input_tokens || 0;
 							output.usage.output = event.message.usage.output_tokens || 0;
@@ -989,6 +1030,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 							if (event.usage.cache_creation_input_tokens != null) {
 								output.usage.cacheWrite = event.usage.cache_creation_input_tokens;
 							}
+							applyAnthropicUsageExtras(output.usage, event.usage);
 							output.usage.totalTokens =
 								output.usage.input + output.usage.output + output.usage.cacheRead + output.usage.cacheWrite;
 							calculateCost(model, output.usage);
@@ -1525,7 +1567,8 @@ function buildParams(
 		const effort =
 			options.effort ?? (requestedEffort ? mapEffortToAnthropicAdaptiveEffort(model, requestedEffort) : undefined);
 
-		if (mode === "anthropic-adaptive") {
+		const disableAdaptiveThinking = model.compat?.disableAdaptiveThinking ?? false;
+		if (mode === "anthropic-adaptive" && !disableAdaptiveThinking) {
 			// Starting with Claude Opus 4.7, adaptive thinking content is omitted from the
 			// response by default. Opt into summarized reasoning so thinking deltas keep
 			// streaming with human-readable content for callers that rely on it.
@@ -1589,6 +1632,39 @@ function buildParams(
 	normalizeCacheControlTtlOrdering(params);
 
 	return params;
+}
+
+/**
+ * Z.AI's Anthropic-compatible proxy at `api.z.ai/api/anthropic` deserializes
+ * tool_result blocks into a Python class that accesses `.id`, even though
+ * Anthropic's standard tool_result schema only carries `tool_use_id`. Detect
+ * that endpoint so we can emit the non-standard alias for it without
+ * polluting requests to api.anthropic.com or other compatible proxies.
+ * See: https://github.com/can1357/oh-my-pi/issues/814
+ */
+function isZaiAnthropicEndpoint(model: Model<"anthropic-messages">): boolean {
+	if (model.provider === "zai") return true;
+	const baseUrl = model.baseUrl;
+	if (!baseUrl) return false;
+	try {
+		return new URL(baseUrl).hostname.toLowerCase() === "api.z.ai";
+	} catch {
+		return false;
+	}
+}
+
+function buildToolResultBlock(model: Model<"anthropic-messages">, msg: ToolResultMessage): ContentBlockParam {
+	const block: ContentBlockParam = {
+		type: "tool_result",
+		tool_use_id: msg.toolCallId,
+		content: convertContentBlocks(msg.content),
+		is_error: msg.isError,
+	};
+	if (isZaiAnthropicEndpoint(model)) {
+		// Z.AI workaround (issue #814): include `id` aliased to `tool_use_id`.
+		(block as unknown as Record<string, unknown>).id = msg.toolCallId;
+	}
+	return block;
 }
 
 export function convertAnthropicMessages(
@@ -1712,23 +1788,13 @@ export function convertAnthropicMessages(
 			const toolResults: ContentBlockParam[] = [];
 
 			// Add the current tool result
-			toolResults.push({
-				type: "tool_result",
-				tool_use_id: msg.toolCallId,
-				content: convertContentBlocks(msg.content),
-				is_error: msg.isError,
-			});
+			toolResults.push(buildToolResultBlock(model, msg));
 
 			// Look ahead for consecutive toolResult messages
 			let j = i + 1;
 			while (j < transformedMessages.length && transformedMessages[j].role === "toolResult") {
 				const nextMsg = transformedMessages[j] as ToolResultMessage; // We know it's a toolResult
-				toolResults.push({
-					type: "tool_result",
-					tool_use_id: nextMsg.toolCallId,
-					content: convertContentBlocks(nextMsg.content),
-					is_error: nextMsg.isError,
-				});
+				toolResults.push(buildToolResultBlock(model, nextMsg));
 				j++;
 			}
 

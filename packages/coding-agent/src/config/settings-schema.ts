@@ -1,5 +1,6 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { TASK_SIMPLE_MODES } from "../task/simple-mode";
+import { EDIT_MODES } from "../utils/edit-mode";
 
 /** Unified settings schema - single source of truth for all settings.
  * Unified settings schema - single source of truth for all settings.
@@ -58,7 +59,7 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
 export type StatusLineSegmentId =
 	| "pi"
 	| "model"
-	| "plan_mode"
+	| "mode"
 	| "path"
 	| "git"
 	| "pr"
@@ -607,6 +608,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"loop.mode": {
+		type: "enum",
+		values: ["prompt", "compact", "reset"] as const,
+		default: "prompt",
+		ui: {
+			tab: "interaction",
+			label: "Loop Mode",
+			description: "What happens between /loop iterations before re-submitting the prompt",
+			submenu: true,
+		},
+	},
+
 	// Input and startup
 	doubleEscapeAction: {
 		type: "enum",
@@ -955,12 +968,12 @@ export const SETTINGS_SCHEMA = {
 	// Edit tool
 	"edit.mode": {
 		type: "enum",
-		values: ["replace", "patch", "hashline", "vim", "apply_patch", "atom"] as const,
+		values: EDIT_MODES,
 		default: "hashline",
 		ui: {
 			tab: "editing",
 			label: "Edit Mode",
-			description: "Select the edit tool variant (replace, patch, hashline, vim, or apply_patch)",
+			description: "Select the edit tool variant (replace, patch, hashline, atom, vim, or apply_patch)",
 		},
 	},
 
@@ -1290,6 +1303,17 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Calculator",
 			description: "Enable the calculator tool for basic calculations",
+		},
+	},
+
+	"recipe.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Recipe",
+			description:
+				"Enable the recipe tool when a justfile / package.json / Cargo.toml / Makefile / Taskfile is present",
 		},
 	},
 
@@ -1769,38 +1793,33 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "providers",
 			label: "SearXNG Endpoint",
-			description: "Base URL of the SearXNG instance (e.g. https://searx.example.org)",
+			description: "Self-hosted search base URL",
 		},
 	},
 
 	"searxng.token": {
 		type: "string",
 		default: undefined,
-		ui: {
-			tab: "providers",
-			label: "SearXNG Token",
-			description: "Optional bearer token for SearXNG authentication",
-		},
+	},
+
+	"searxng.basicUsername": {
+		type: "string",
+		default: undefined,
+	},
+
+	"searxng.basicPassword": {
+		type: "string",
+		default: undefined,
 	},
 
 	"searxng.categories": {
 		type: "string",
 		default: undefined,
-		ui: {
-			tab: "providers",
-			label: "SearXNG Categories",
-			description: "Comma-separated categories filter (e.g. general,news,science)",
-		},
 	},
 
 	"searxng.language": {
 		type: "string",
 		default: undefined,
-		ui: {
-			tab: "providers",
-			label: "SearXNG Language",
-			description: "Language code for search results (e.g. en, zh-CN)",
-		},
 	},
 
 	"commit.mapReduceEnabled": { type: "boolean", default: true },

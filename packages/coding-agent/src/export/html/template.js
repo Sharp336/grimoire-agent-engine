@@ -964,6 +964,16 @@
         return html;
       }
 
+      function todoRoman(n) {
+        if (n <= 0) return '';
+        var pairs = [[1000,'M'],[900,'CM'],[500,'D'],[400,'CD'],[100,'C'],[90,'XC'],[50,'L'],[40,'XL'],[10,'X'],[9,'IX'],[5,'V'],[4,'IV'],[1,'I']];
+        var out = '', rem = n;
+        for (var i = 0; i < pairs.length; i++) {
+          while (rem >= pairs[i][0]) { out += pairs[i][1]; rem -= pairs[i][0]; }
+        }
+        return out;
+      }
+
       function renderTodoWrite(name, args, result, ctx) {
         let html = toolHead('todo_write');
         const ops = Array.isArray(args.ops) ? args.ops : null;
@@ -983,8 +993,10 @@
         const phases = result?.details?.phases;
         if (Array.isArray(phases)) {
           html += '<div class="todo-tree">';
-          for (const phase of phases) {
-            html += '<div class="todo-phase">' + escapeHtml(String(phase.name || '')) + '</div>';
+          for (var __i = 0; __i < phases.length; __i++) {
+            var phase = phases[__i];
+            var phaseLabel = todoRoman(__i + 1) + '. ' + String(phase.name || '');
+            html += '<div class="todo-phase">' + escapeHtml(phaseLabel) + '</div>';
             if (Array.isArray(phase.tasks)) {
               for (const task of phase.tasks) {
                 const status = task.status || 'pending';
@@ -1066,17 +1078,24 @@
         return html;
       }
 
-      function renderPuppeteer(name, args, result, ctx) {
+      function renderBrowser(name, args, result, ctx) {
         const action = str(args.action) || '?';
+        const tabName = str(args.name);
         const badges = [];
+        if (tabName) badges.push('name=' + tabName);
         if (args.url) badges.push(String(args.url));
-        if (args.selector) badges.push('selector=' + args.selector);
-        if (args.element_id != null) badges.push('id=' + args.element_id);
-        let head = '<span class="tool-name">puppeteer</span> <span class="tool-badge">' + escapeHtml(action) + '</span>';
+        if (args.app && typeof args.app === 'object') {
+          if (args.app.path) badges.push('app=' + shortenPath(String(args.app.path)));
+          else if (args.app.cdp_url) badges.push('cdp=' + String(args.app.cdp_url));
+        }
+        if (args.all) badges.push('all');
+        if (args.kill) badges.push('kill');
+        let head = '<span class="tool-name">browser</span> <span class="tool-badge">' + escapeHtml(action) + '</span>';
         for (const b of badges) head += ' <span class="tool-badge">' + escapeHtml(String(b)) + '</span>';
         let html = '<div class="tool-header">' + head + '</div>';
-        if (args.script) html += codeBlock(String(args.script), 'javascript');
-        if (args.text) html += '<div class="tool-output"><div>' + escapeHtml(String(args.text)) + '</div></div>';
+        if (action === 'run' && args.code) {
+          html += codeBlock(String(args.code), 'javascript');
+        }
         if (result) {
           html += ctx.renderResultImages();
           const output = ctx.getResultText();
@@ -1265,7 +1284,8 @@
         web_search: renderWebSearch,
         fetch: renderFetch,
         debug: renderDebug,
-        puppeteer: renderPuppeteer,
+        puppeteer: renderBrowser,
+        browser: renderBrowser,
         inspect_image: renderInspectImage,
         generate_image: renderGenerateImage,
         ask: renderAsk,

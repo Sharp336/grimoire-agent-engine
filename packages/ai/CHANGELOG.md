@@ -1,6 +1,36 @@
 # Changelog
 
 ## [Unreleased]
+### Breaking Changes
+
+- Removed `utils/oauth` re-exports from the package entrypoint, so OAuth helper imports from the root module must be updated
+
+## [14.5.10] - 2026-04-30
+
+### Added
+
+- Added provider response metadata callbacks for Anthropic and OpenAI streaming requests.
+
+## [14.5.9] - 2026-04-30
+### Added
+
+- Added `usage.reasoningTokens` to OpenAI and Google usage output when providers report reasoning/thinking tokens
+- Added `usage.cttl.ephemeral5m` and `usage.cttl.ephemeral1h` to report Anthropic cache-write TTL token buckets
+- Added `usage.server.webSearch` and `usage.server.webFetch` to report Anthropic server tool-call request counts
+
+### Fixed
+
+- Fixed OpenAI usage attribution to avoid double-counting `reasoning_tokens` in output totals
+- Fixed Anthropic streaming usage handling so a previously populated cache TTL breakdown is preserved when later events omit `cache_creation`
+
+## [14.5.4] - 2026-04-28
+### Changed
+
+- Changed OpenAI custom Lark grammar payloads to strip comments and blank lines before sending provider requests.
+
+### Fixed
+
+- Fixed OpenAI Codex GPT model pricing by inheriting matching OpenAI catalog rates for zero-priced discovered Codex entries.
 
 ## [14.5.3] - 2026-04-27
 ### Added
