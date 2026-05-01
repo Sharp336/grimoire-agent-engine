@@ -50,6 +50,7 @@ describe("issue #883 / #810 — DeepSeek V4 reasoning_content tool-call replay",
 			}),
 		);
 		expect(compat.requiresReasoningContentForToolCalls).toBe(true);
+		expect(compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
 	});
 
 	it("flags requiresReasoningContentForToolCalls for deepseek-v4 served by a non-deepseek host (e.g. Deepinfra)", () => {
@@ -61,9 +62,10 @@ describe("issue #883 / #810 — DeepSeek V4 reasoning_content tool-call replay",
 			}),
 		);
 		expect(compat.requiresReasoningContentForToolCalls).toBe(true);
+		expect(compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
 	});
 
-	it("injects reasoning_content placeholder on assistant tool-call turn for deepseek-v4-pro", () => {
+	it("does not inject a reasoning_content placeholder for deepseek-v4-pro without captured reasoning", () => {
 		const model = deepseekModel({
 			provider: "deepseek",
 			baseUrl: "https://api.deepseek.com/v1",
@@ -73,24 +75,26 @@ describe("issue #883 / #810 — DeepSeek V4 reasoning_content tool-call replay",
 		const messages = convertMessages(model, { messages: [assistantWithToolCall(model)] }, compat);
 		const assistant = messages.find(m => m.role === "assistant");
 		expect(assistant).toBeDefined();
-		const reasoningContent = Reflect.get(assistant as object, "reasoning_content");
-		expect(typeof reasoningContent).toBe("string");
-		expect((reasoningContent as string).length).toBeGreaterThan(0);
+		expect(Reflect.get(assistant as object, "reasoning_content")).toBeUndefined();
 	});
 
-	it("normalizes assistant content to '' when reasoning_content placeholder is injected (DeepSeek invariant)", () => {
+	it("replays exact captured reasoning_content on assistant tool-call turns for DeepSeek", () => {
 		const model = deepseekModel({
 			provider: "deepinfra",
 			baseUrl: "https://api.deepinfra.com/v1/openai",
 			id: "deepseek-ai/DeepSeek-V4-Pro",
 		});
 		const compat = detectCompat(model);
-		// Assistant turn whose only content is a tool call (no text) - matches what the SDK
-		// produces after a pure tool-use turn. content must end up "" (not null) because
-		// DeepSeek rejects null content alongside reasoning_content.
+		// Assistant turn whose only replayable content is actual provider reasoning plus a tool call.
+		// The provider requires content to be "" (not null) whenever reasoning_content is present.
 		const toolOnly: AssistantMessage = {
 			role: "assistant",
 			content: [
+				{
+					type: "thinking",
+					thinking: "Inspect the directory before answering.",
+					thinkingSignature: "reasoning_content",
+				},
 				{
 					type: "toolCall",
 					id: "call_repro_2",
@@ -115,6 +119,7 @@ describe("issue #883 / #810 — DeepSeek V4 reasoning_content tool-call replay",
 		const messages = convertMessages(model, { messages: [toolOnly] }, compat);
 		const assistant = messages.find(m => m.role === "assistant");
 		expect(assistant).toBeDefined();
+		expect(Reflect.get(assistant as object, "reasoning_content")).toBe("Inspect the directory before answering.");
 		expect((assistant as { content: unknown }).content).toBe("");
 	});
 });

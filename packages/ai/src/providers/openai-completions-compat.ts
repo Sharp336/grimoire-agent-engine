@@ -131,16 +131,16 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 					? "qwen"
 					: "openai",
 		reasoningContentField: "reasoning_content",
-		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
-		//   - Kimi: documented invariant on its native API and via OpenCode-Go.
-		//   - Any reasoning-capable model reached through OpenRouter: DeepSeek V4 Pro and similar enforce
-		//     this server-side whenever the request is in thinking mode. We can't translate Anthropic's
-		//     redacted/encrypted reasoning into DeepSeek's plaintext form, so cross-provider continuations
-		//     rely on a placeholder — see `convertMessages` for the placeholder injection.
+		// Backends that care about reasoning replay on prior assistant tool-call turns.
+		// DeepSeek-family reasoning models require the exact generated `reasoning_content` to be
+		// replayed when it exists; do not fabricate it when the prior turn lacks captured reasoning.
+		// Kimi-compatible endpoints additionally accept a synthetic placeholder fallback when actual
+		// reasoning is unavailable.
 		requiresReasoningContentForToolCalls:
 			isKimiModel ||
 			(isDeepseekFamily && Boolean(model.reasoning)) ||
 			((provider === "openrouter" || baseUrl.includes("openrouter.ai")) && Boolean(model.reasoning)),
+		allowsSyntheticReasoningContentForToolCalls: isKimiModel,
 		requiresAssistantContentForToolCalls: isKimiModel,
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,
@@ -183,6 +183,9 @@ export function resolveOpenAICompat(
 		reasoningContentField: model.compat.reasoningContentField ?? detected.reasoningContentField,
 		requiresReasoningContentForToolCalls:
 			model.compat.requiresReasoningContentForToolCalls ?? detected.requiresReasoningContentForToolCalls,
+		allowsSyntheticReasoningContentForToolCalls:
+			model.compat.allowsSyntheticReasoningContentForToolCalls ??
+			detected.allowsSyntheticReasoningContentForToolCalls,
 		requiresAssistantContentForToolCalls:
 			model.compat.requiresAssistantContentForToolCalls ?? detected.requiresAssistantContentForToolCalls,
 		disableReasoningOnForcedToolChoice:

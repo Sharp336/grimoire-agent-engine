@@ -28,6 +28,7 @@ const compat: Required<OpenAICompat> = {
 	thinkingFormat: "openai",
 	reasoningContentField: "reasoning_content",
 	requiresReasoningContentForToolCalls: false,
+	allowsSyntheticReasoningContentForToolCalls: false,
 	requiresAssistantContentForToolCalls: false,
 	openRouterRouting: {},
 	vercelGatewayRouting: {},

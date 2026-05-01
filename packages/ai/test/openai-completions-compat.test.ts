@@ -82,6 +82,7 @@ describe("openai-completions compatibility", () => {
 			thinkingFormat: "openai",
 			reasoningContentField: "reasoning_content",
 			requiresReasoningContentForToolCalls: false,
+			allowsSyntheticReasoningContentForToolCalls: false,
 			requiresAssistantContentForToolCalls: false,
 			openRouterRouting: {},
 			vercelGatewayRouting: {},
@@ -298,6 +299,7 @@ describe("kimi model detection via detectCompat", () => {
 	it("requires reasoning_content for tool calls on kimi-k2.5 (opencode-go)", () => {
 		const compat = detectCompat(kimiOpenCodeModel("kimi-k2.5"));
 		expect(compat.requiresReasoningContentForToolCalls).toBe(true);
+		expect(compat.allowsSyntheticReasoningContentForToolCalls).toBe(true);
 		expect(compat.requiresAssistantContentForToolCalls).toBe(true);
 	});
 
@@ -335,6 +337,7 @@ describe("kimi model detection via detectCompat", () => {
 		expect(assistant).toBeDefined();
 		const reasoningContent = Reflect.get(assistant as object, "reasoning_content");
 		expect(reasoningContent).toBeDefined();
+		expect(compat.allowsSyntheticReasoningContentForToolCalls).toBe(true);
 		expect(typeof reasoningContent).toBe("string");
 		expect((reasoningContent as string).length).toBeGreaterThan(0);
 	});
@@ -349,11 +352,13 @@ describe("kimi model detection via detectCompat", () => {
 		};
 		const compat = detectCompat(model);
 		expect(compat.requiresReasoningContentForToolCalls).toBe(false);
+		expect(compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
 	});
 
 	it.each(["kimi-k2.5", "kimi-k1.5", "kimi-k2-5"])("matches kimi model id: %s", id => {
 		const compat = detectCompat(kimiOpenCodeModel(id));
 		expect(compat.requiresReasoningContentForToolCalls).toBe(true);
+		expect(compat.allowsSyntheticReasoningContentForToolCalls).toBe(true);
 	});
 
 	it("still matches moonshotai/kimi via openrouter", () => {
@@ -367,6 +372,7 @@ describe("kimi model detection via detectCompat", () => {
 		};
 		const compat = detectCompat(model);
 		expect(compat.requiresReasoningContentForToolCalls).toBe(true);
+		expect(compat.allowsSyntheticReasoningContentForToolCalls).toBe(true);
 	});
 });
 

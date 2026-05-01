@@ -5,6 +5,10 @@
 
 - Removed `utils/oauth` re-exports from the package entrypoint, so OAuth helper imports from the root module must be updated
 
+### Fixed
+
+- Fixed DeepSeek V4 tool-call follow-up requests to replay actual `reasoning_content` without sending the invalid synthetic placeholder rejected by DeepSeek ([#897](https://github.com/can1357/oh-my-pi/issues/897))
+
 ## [14.5.10] - 2026-04-30
 
 ### Added

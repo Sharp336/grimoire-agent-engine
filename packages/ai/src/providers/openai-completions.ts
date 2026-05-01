@@ -1234,25 +1234,20 @@ export function convertMessages(
 			}
 
 			const toolCalls = msg.content.filter(b => b.type === "toolCall") as ToolCall[];
-			// Inject a `reasoning_content` placeholder on assistant tool-call turns when the backend
-			// rejects history without it. The compat flag captures the rule:
-			//   - Kimi (native or via OpenCode-Go): chat completion endpoint demands the field.
-			//   - Reasoning models reached through OpenRouter (e.g. DeepSeek V4 Pro): the underlying
-			//     provider's thinking-mode validator demands it on every prior assistant turn. omp
-			//     cannot synthesize real reasoning when the conversation was warmed up by another
-			//     provider whose reasoning is redacted/encrypted (Anthropic) or simply absent, so we
-			//     emit a placeholder. Real captured reasoning, when present, is preserved earlier via
-			//     the `thinkingSignature` echo path and short-circuits via `hasReasoningField`.
-			// `thinkingFormat` is gated to formats that consume the field (openai/openrouter chat
-			// completions); formats with their own conventions (zai, qwen) are excluded.
-			const stubsReasoningContent =
+			// Replay actual reasoning fields on assistant tool-call turns for backends that validate
+			// thinking-mode history. DeepSeek-family models require the exact generated
+			// `reasoning_content` value and reject fabricated placeholders, so synthetic fallback is
+			// controlled by a separate compat policy. Kimi/OpenCode keeps the placeholder fallback
+			// because those endpoints accept it when actual reasoning is unavailable.
+			const canUseSyntheticReasoningContent =
 				compat.requiresReasoningContentForToolCalls &&
+				compat.allowsSyntheticReasoningContentForToolCalls &&
 				(compat.thinkingFormat === "openai" || compat.thinkingFormat === "openrouter");
 			let hasReasoningField =
 				(assistantMsg as any).reasoning_content !== undefined ||
 				(assistantMsg as any).reasoning !== undefined ||
 				(assistantMsg as any).reasoning_text !== undefined;
-			if (toolCalls.length > 0 && stubsReasoningContent && !hasReasoningField) {
+			if (toolCalls.length > 0 && canUseSyntheticReasoningContent && !hasReasoningField) {
 				const reasoningField = compat.reasoningContentField ?? "reasoning_content";
 				(assistantMsg as any)[reasoningField] = ".";
 				hasReasoningField = true;
