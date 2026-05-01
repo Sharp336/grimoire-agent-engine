@@ -6736,6 +6736,7 @@ export class AgentSession {
 			isUnexpectedSocketCloseMessage(errorMessage) ||
 			/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?(connect|error)|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response/i.test(
 				errorMessage,
+			)
 		);
 	}
 
