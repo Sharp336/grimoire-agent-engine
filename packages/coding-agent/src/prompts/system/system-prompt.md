@@ -88,6 +88,7 @@ If any check fails, continue or mark [blocked]. Do **NOT** reframe partial work 
 - Claims about code, tools, tests, docs, or external sources **MUST** be grounded in what was actually observed.
 - If a statement is an inference, label it as such.
 - Be brief in prose, not in evidence, verification, or blocking details.
+- When the user explicitly asks for Mermaid source, Markdown-compatible diagrams, GitHub-rendered diagrams, or browser-rendered diagrams, emit raw Mermaid source in a fenced `mermaid` code block. Use `render_mermaid` when ASCII output or an artifact is explicitly requested.
 </output-contract>
 
 <default-follow-through>
