@@ -3,7 +3,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { FileType, glob } from "@oh-my-pi/pi-natives";
-import { CONFIG_DIR_NAME, getConfigDirName, getProjectDir, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
+import { CONFIG_DIR_NAME, getConfigDirName, getProjectDir, getUserPluginsRegistryDir, parseFrontmatter, tryParseJson } from "@oh-my-pi/pi-utils";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
 import { parseRuleConditionAndScope, type Rule, type RuleFrontmatter } from "../capability/rule";
@@ -805,7 +805,7 @@ export async function listClaudePluginRoots(
 	// ── OMP installed plugins registry ───────────────────────────────────────
 	// OMP registry is authoritative: its entries replace Claude's entries for the same plugin ID.
 	// Path derived from `home` (not os.homedir()) so test isolation works when home is overridden.
-	const ompRegistryPath = path.join(home, getConfigDirName(), "plugins", "installed_plugins.json");
+	const ompRegistryPath = path.join(getUserPluginsRegistryDir(home));
 	const ompContent = await readFile(ompRegistryPath);
 	if (ompContent) {
 		const ompRegistry = parseClaudePluginsRegistry(ompContent);

@@ -241,6 +241,15 @@ export function getPluginsDir(): string {
 	return dirs.rootSubdir("plugins", "data");
 }
 
+/** Get the users plugins directory (~/.omp/plugins or ~/.local/share/omp/plugins). */
+export function getUserPluginsRegistryDir(home: string): string {
+	if (home != os.homedir()) {
+		// If a custom home directory is provided, assume plugins are stored under it without XDG redirection.
+		return path.join(home, getConfigDirName(), "plugins", "installed_plugins.json");
+	}
+	return path.join(getPluginsDir(), "installed_plugins.json")
+}
+
 /** Where npm installs packages (~/.omp/plugins/node_modules). */
 export function getPluginsNodeModules(): string {
 	return path.join(getPluginsDir(), "node_modules");
