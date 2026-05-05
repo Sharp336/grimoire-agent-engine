@@ -13,7 +13,7 @@ import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import "@oh-my-pi/pi-coding-agent/discovery/claude-plugins";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/capability/skill";
 import type { SlashCommand } from "@oh-my-pi/pi-coding-agent/capability/slash-command";
-import { resolveUserPluginsDir } from "@oh-my-pi/pi-utils";
+import { getConfigDirName, resetUserPluginsDirCache, resolveUserPluginsDir } from "@oh-my-pi/pi-utils";
 
 describe("parseClaudePluginsRegistry", () => {
 	test("parses valid registry", () => {
@@ -61,11 +61,15 @@ describe("parseClaudePluginsRegistry", () => {
 describe("listClaudePluginRoots", () => {
 	let tempDir: string;
 	let originalHome: string | undefined;
+	let savedXdgDataHome: string | undefined;
 
 	beforeEach(async () => {
 		clearClaudePluginRootsCache();
 		clearFsCache();
+		resetUserPluginsDirCache();
 		originalHome = process.env.HOME;
+		savedXdgDataHome = process.env.XDG_DATA_HOME;
+		delete process.env.XDG_DATA_HOME;
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "claude-plugins-test-"));
 		process.env.HOME = tempDir;
 		vi.spyOn(os, "homedir").mockReturnValue(tempDir);
@@ -74,11 +78,17 @@ describe("listClaudePluginRoots", () => {
 	afterEach(async () => {
 		clearClaudePluginRootsCache();
 		clearFsCache();
+		resetUserPluginsDirCache();
 		vi.restoreAllMocks();
 		if (originalHome === undefined) {
 			delete process.env.HOME;
 		} else {
 			process.env.HOME = originalHome;
+			if (savedXdgDataHome === undefined) {
+				delete process.env.XDG_DATA_HOME;
+			} else {
+				process.env.XDG_DATA_HOME = savedXdgDataHome;
+			}
 		}
 		await fs.rm(tempDir, { recursive: true, force: true });
 	});
@@ -489,6 +499,7 @@ describe("listClaudePluginRoots", () => {
 			}
 			clearClaudePluginRootsCache();
 			clearFsCache();
+			resetUserPluginsDirCache();
 		});
 
 		const makeEntry = (installPath: string) => ({
@@ -530,7 +541,7 @@ describe("listClaudePluginRoots", () => {
 			process.env.XDG_DATA_HOME = path.join(tempDir, "xdg-absent");
 			// Do NOT create $XDG_DATA_HOME/omp — activation condition not met.
 
-			const legacyPluginsDir = path.join(tempDir, ".omp", "plugins");
+			const legacyPluginsDir = path.join(tempDir, getConfigDirName(), "plugins");
 			await fs.mkdir(legacyPluginsDir, { recursive: true });
 			await fs.writeFile(
 				path.join(legacyPluginsDir, "installed_plugins.json"),
@@ -553,7 +564,7 @@ describe("listClaudePluginRoots", () => {
 			process.env.XDG_DATA_HOME = xdgBase;
 			await fs.mkdir(path.join(xdgBase, "omp"), { recursive: true });
 			// No XDG registry file — but write a legacy registry to confirm it is not read.
-			const legacyPluginsDir = path.join(tempDir, ".omp", "plugins");
+			const legacyPluginsDir = path.join(tempDir, getConfigDirName(), "plugins");
 			await fs.mkdir(legacyPluginsDir, { recursive: true });
 			await fs.writeFile(
 				path.join(legacyPluginsDir, "installed_plugins.json"),
@@ -575,7 +586,7 @@ describe("listClaudePluginRoots", () => {
 			process.env.XDG_DATA_HOME = xdgBase;
 			await fs.mkdir(path.join(xdgBase, "omp"), { recursive: true });
 
-			const legacyPluginsDir = path.join(tempDir, ".omp", "plugins");
+			const legacyPluginsDir = path.join(tempDir, getConfigDirName(), "plugins");
 			expect(resolveUserPluginsDir(tempDir)).toBe(legacyPluginsDir);
 		});
 	});
