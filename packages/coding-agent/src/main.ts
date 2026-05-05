@@ -5,7 +5,6 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -50,11 +49,11 @@ import type { LspStartupServerInfo } from "./tools";
 import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog";
 import type { EventBus } from "./utils/event-bus";
 
-// realpathSync.native delegates to GetFinalPathNameByHandle on Windows, which correctly
-// follows NTFS junction reparse points. The JS-impl realpathSync fails with ENOENT on junctions.
-const resolveRealPath = (p: string): string => {
-  try { return realpathSync.native(p); } catch { return path.resolve(p); }
-};
+// Project paths are normalized with path.resolve only — symlinks are NOT followed.
+// Following symlinks (realpathSync) breaks session matching when the user navigates
+// via a symlink: the session is saved with the symlink path but looked up at the real path.
+// path.resolve handles ./.. normalization and is sufficient for project identity.
+const resolveRealPath = (p: string): string => path.resolve(p);
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!settings.get("startup.checkUpdate")) {
