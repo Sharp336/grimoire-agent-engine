@@ -47,13 +47,11 @@ function standardizeMacOSPath(p: string): string {
 	return p;
 }
 
+// path.resolve is used instead of realpathSync to preserve symlink paths.
+// Following symlinks breaks session matching: a project accessed via a symlink
+// would encode to a different session dir name than the one sessions were saved under.
 export function resolveEquivalentPath(inputPath: string): string {
-	const resolvedPath = path.resolve(inputPath);
-	try {
-		return fs.realpathSync(resolvedPath);
-	} catch {
-		return resolvedPath;
-	}
+	return path.resolve(inputPath);
 }
 
 export function normalizePathForComparison(inputPath: string): string {
