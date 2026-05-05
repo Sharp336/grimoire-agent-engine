@@ -1,6 +1,6 @@
 import * as os from "node:os";
 
-import { getOAuthProviders } from "@oh-my-pi/pi-ai";
+import { getOAuthProviders } from "@oh-my-pi/pi-ai/utils/oauth";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import {

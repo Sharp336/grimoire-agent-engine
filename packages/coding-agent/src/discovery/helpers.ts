@@ -7,6 +7,7 @@ import {
 	APP_NAME,
 	CONFIG_DIR_NAME,
 	getConfigDirName,
+	getPluginsDir,
 	getProjectDir,
 	parseFrontmatter,
 	resolveUserPluginsDir,
