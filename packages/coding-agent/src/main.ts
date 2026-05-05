@@ -50,6 +50,12 @@ import type { LspStartupServerInfo } from "./tools";
 import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog";
 import type { EventBus } from "./utils/event-bus";
 
+// realpathSync.native delegates to GetFinalPathNameByHandle on Windows, which correctly
+// follows NTFS junction reparse points. The JS-impl realpathSync fails with ENOENT on junctions.
+const resolveRealPath = (p: string): string => {
+  try { return realpathSync.native(p); } catch { return path.resolve(p); }
+};
+
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!settings.get("startup.checkUpdate")) {
 		return;
@@ -220,7 +226,7 @@ function normalizePathForComparison(value: string): string {
 	const resolved = path.resolve(value);
 	let realPath = resolved;
 	try {
-		realPath = realpathSync(resolved);
+		realPath = resolveRealPath(resolved);
 	} catch {}
 	return process.platform === "win32" ? realPath.toLowerCase() : realPath;
 }
@@ -354,7 +360,7 @@ async function maybeAutoChdir(parsed: Args): Promise<void> {
 	}
 
 	const normalizePath = (value: string) => {
-		const resolved = realpathSync(path.resolve(value));
+		const resolved = resolveRealPath(path.resolve(value));
 		return process.platform === "win32" ? resolved.toLowerCase() : resolved;
 	};
 
