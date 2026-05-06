@@ -16,6 +16,7 @@ export class TraceRecorder {
 	#sessionId: string | undefined;
 	#pendingPrompt: string | undefined;
 
+	#injectedEpisodeIds: string[] = [];
 	getTrace(): SessionTrace | undefined {
 		return this.#trace;
 	}
@@ -31,6 +32,9 @@ export class TraceRecorder {
 		}
 	}
 
+	setInjectedEpisodes(ids: string[]): void {
+		this.#injectedEpisodeIds = ids;
+	}
 	onAgentStart(_event: AgentStartEvent, ctx: ExtensionContext): void {
 		this.#sessionId = ctx.sessionManager.getSessionId();
 		// Use pending prompt if set by before_agent_start before trace existed
@@ -107,6 +111,8 @@ export class TraceRecorder {
 		// Heuristic: completed successfully if no errors and at least one tool call
 		this.#trace.completedSuccessfully = this.#trace.errorCount === 0 && this.#trace.toolCallCount > 0;
 		const result = this.#trace;
+		this.#trace.injectedEpisodeIds = this.#injectedEpisodeIds;
+		this.#injectedEpisodeIds = [];
 		this.#trace = undefined;
 		return result;
 	}
@@ -114,6 +120,7 @@ export class TraceRecorder {
 	reset(): void {
 		this.#trace = undefined;
 		this.#pendingPrompt = undefined;
+		this.#injectedEpisodeIds = [];
 	}
 }
 

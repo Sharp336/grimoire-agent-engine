@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ContextAwareRetriever } from "../src/context-aware-retriever";
-import type { Episode, EpisodeStore, IntentStore } from "../src/types";
+import type { EpisodeStore, IntentStore } from "../src/storage/types";
+import type { Episode } from "../src/types";
 
 class MockEpisodeStore implements EpisodeStore {
 	#episodes: Episode[] = [];
@@ -13,9 +14,15 @@ class MockEpisodeStore implements EpisodeStore {
 	async listRecent(limit: number): Promise<Episode[]> {
 		return this.#episodes.slice(0, limit);
 	}
-	async searchByKeyword(): Promise<Episode[]> { return []; }
-	async deleteOld(): Promise<number> { return 0; }
-	async count(): Promise<number> { return this.#episodes.length; }
+	async searchByKeyword(): Promise<Episode[]> {
+		return [];
+	}
+	async deleteOld(): Promise<number> {
+		return 0;
+	}
+	async count(): Promise<number> {
+		return this.#episodes.length;
+	}
 }
 
 class MockIntentStore implements IntentStore {
@@ -34,7 +41,8 @@ class MockIntentStore implements IntentStore {
 		const results: any[] = [];
 		for (const [epId, intents] of this.#intents) {
 			const match = intents.find(i => i.intent === intent);
-			if (match) results.push({ episodeId: epId, intent: match.intent, confidence: match.confidence, source: "rule" });
+			if (match)
+				results.push({ episodeId: epId, intent: match.intent, confidence: match.confidence, source: "rule" });
 		}
 		return results.slice(0, limit);
 	}

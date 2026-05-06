@@ -1,10 +1,12 @@
 /**
  * ContextAwareRetriever: intent-filtered + profile-ranked episode retrieval.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+
 import type { Model } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import rerankEpisodesTemplate from "./prompts/rerank-episodes.md" with { type: "text" };
-import type { Episode, EpisodeStore, IntentStore, RerankedEpisode, UserProfile } from "./types";
+import type { EpisodeStore, IntentStore } from "./storage/types";
+import type { Episode, RerankedEpisode, UserProfile } from "./types";
 import { callBackgroundLlm } from "./utils/llm";
 
 export interface ContextRetrievalOptions {
@@ -34,10 +36,10 @@ export class ContextAwareRetriever {
 		candidates.sort((a, b) => b.score - a.score);
 
 		// Filter by relevance threshold
-		const relevant = candidates.filter((c) => c.score >= 30);
+		const relevant = candidates.filter(c => c.score >= 30);
 		if (relevant.length === 0) {
 			// Fallback: return top keyword matches regardless of intent
-			return candidates.slice(0, 3).map((c) => ({
+			return candidates.slice(0, 3).map(c => ({
 				episode: c.episode,
 				relevanceScore: c.score,
 				reason: "fallback keyword match",
@@ -48,7 +50,7 @@ export class ContextAwareRetriever {
 		const topCandidates = relevant.slice(0, 10);
 
 		if (!options.llmRerank || !options.model || topCandidates.length <= 3) {
-			return topCandidates.slice(0, 3).map((c) => ({
+			return topCandidates.slice(0, 3).map(c => ({
 				episode: c.episode,
 				relevanceScore: c.score,
 				reason: c.reason,
@@ -63,17 +65,20 @@ export class ContextAwareRetriever {
 		query: string,
 		options: ContextRetrievalOptions,
 	): Promise<Array<{ episode: Episode; score: number; reason: string }>> {
-		const queryWords = query.toLowerCase().split(/\W+/).filter((w) => w.length > 2);
+		const queryWords = query
+			.toLowerCase()
+			.split(/\W+/)
+			.filter(w => w.length > 2);
 
 		return Promise.all(
-			episodes.map(async (episode) => {
+			episodes.map(async episode => {
 				let score = 0;
 				const reasons: string[] = [];
 
 				// 1. Intent match (0-40 points)
 				if (options.currentIntent) {
 					const intents = await this.#intentStore.getByEpisode(episode.id);
-					const match = intents.find((i) => i.intent === options.currentIntent);
+					const match = intents.find(i => i.intent === options.currentIntent);
 					if (match) {
 						score += Math.min(40, match.confidence * 0.4);
 						reasons.push("intent match");
@@ -132,7 +137,7 @@ export class ContextAwareRetriever {
 
 		const response = await callBackgroundLlm(model, rerankEpisodesTemplate, userPrompt);
 		if (!response) {
-			return candidates.slice(0, 3).map((c) => ({
+			return candidates.slice(0, 3).map(c => ({
 				episode: c.episode,
 				relevanceScore: c.score,
 				reason: "LLM rerank failed, using scored ranking",
@@ -151,7 +156,7 @@ export class ContextAwareRetriever {
 			const result: RerankedEpisode[] = [];
 			for (const item of parsed) {
 				if (!item.episodeId) continue;
-				const candidate = candidates.find((c) => c.episode.id === item.episodeId);
+				const candidate = candidates.find(c => c.episode.id === item.episodeId);
 				if (candidate) {
 					result.push({
 						episode: candidate.episode,
@@ -162,7 +167,7 @@ export class ContextAwareRetriever {
 			}
 			return result.length > 0
 				? result
-				: candidates.slice(0, 3).map((c) => ({
+				: candidates.slice(0, 3).map(c => ({
 						episode: c.episode,
 						relevanceScore: c.score,
 						reason: "LLM returned no valid matches",
@@ -171,7 +176,7 @@ export class ContextAwareRetriever {
 			logger.warn("LLM context-aware rerank parse failed", {
 				error: err instanceof Error ? err.message : String(err),
 			});
-			return candidates.slice(0, 3).map((c) => ({
+			return candidates.slice(0, 3).map(c => ({
 				episode: c.episode,
 				relevanceScore: c.score,
 				reason: "LLM rerank parse failed",
