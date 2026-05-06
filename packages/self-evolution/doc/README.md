@@ -34,7 +34,11 @@ This plugin is bundled with `pi-coding-agent` and loads automatically as an inli
 
 Example:
 ```bash
-omp --self-evolution-skill-threshold=2
+# Space syntax (required by omp)
+omp --self-evolution-skill-threshold 2
+
+# Equals syntax is NOT supported
+# omp --self-evolution-skill-threshold=2
 ```
 
 ## Slash Commands

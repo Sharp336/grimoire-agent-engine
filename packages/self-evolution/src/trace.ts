@@ -14,19 +14,32 @@ import type { SessionTrace } from "./types";
 export class TraceRecorder {
 	#trace: SessionTrace | undefined;
 	#sessionId: string | undefined;
+	#pendingPrompt: string | undefined;
 
 	getTrace(): SessionTrace | undefined {
 		return this.#trace;
 	}
 
+	/**
+	 * Seed the user prompt before the trace is created (e.g. from before_agent_start).
+	 */
+	seedPrompt(prompt: string): void {
+		if (this.#trace) {
+			this.#trace.userPrompt = prompt;
+		} else {
+			this.#pendingPrompt = prompt;
+		}
+	}
+
 	onAgentStart(_event: AgentStartEvent, ctx: ExtensionContext): void {
 		this.#sessionId = ctx.sessionManager.getSessionId();
-		// Preserve userPrompt if trace was already seeded by before_agent_start
-		const existingPrompt = this.#trace?.userPrompt ?? "";
+		// Use pending prompt if set by before_agent_start before trace existed
+		const userPrompt = this.#pendingPrompt ?? this.#trace?.userPrompt ?? "";
+		this.#pendingPrompt = undefined;
 		this.#trace = {
 			sessionId: this.#sessionId,
 			cwd: ctx.cwd,
-			userPrompt: existingPrompt,
+			userPrompt,
 			startTime: Date.now(),
 			endTime: 0,
 			entries: [],
@@ -100,6 +113,7 @@ export class TraceRecorder {
 
 	reset(): void {
 		this.#trace = undefined;
+		this.#pendingPrompt = undefined;
 	}
 }
 

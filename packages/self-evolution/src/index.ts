@@ -250,11 +250,8 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	api.on("before_agent_start", async (event, ctx) => {
 		try {
 			ensureInit(ctx.cwd);
-			// Capture user prompt from before_agent_start if input event missed it
-			const trace = recorder?.getTrace();
-			if (trace && event.prompt && !trace.userPrompt) {
-				trace.userPrompt = event.prompt;
-			}
+			// Capture user prompt from before_agent_start before trace exists
+			recorder?.seedPrompt(event.prompt);
 			if (!flags.enablePromptInjection) return;
 			if (!episodeRetriever || !recorder) return;
 
