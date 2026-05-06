@@ -127,4 +127,50 @@ export function initSchema(db: Database): void {
 			value INTEGER NOT NULL
 		);
 	`);
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS episode_intents (
+			episode_id TEXT NOT NULL,
+			intent TEXT NOT NULL,
+			confidence REAL NOT NULL,
+			source TEXT NOT NULL CHECK(source IN ('rule', 'llm')),
+			PRIMARY KEY (episode_id, intent),
+			FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+		);
+	`);
+
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS workflow_patterns (
+			id TEXT PRIMARY KEY,
+			intent TEXT NOT NULL,
+			tool_sequence TEXT NOT NULL,
+			occurrence_count INTEGER NOT NULL DEFAULT 1,
+			avg_quality_score REAL,
+			last_seen_at INTEGER NOT NULL
+		);
+	`);
+
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS user_profiles (
+			id TEXT PRIMARY KEY DEFAULT 'default',
+			profile_json TEXT NOT NULL,
+			updated_at INTEGER NOT NULL
+		);
+	`);
+
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS episode_effectiveness (
+			episode_id TEXT PRIMARY KEY,
+			times_injected INTEGER NOT NULL DEFAULT 0,
+			times_helped INTEGER NOT NULL DEFAULT 0,
+			times_failed INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+		);
+	`);
+
+	// Migrate skills table: add intent column if missing
+	const skillsColumns = db.prepare("PRAGMA table_info(skills)").all() as Array<{ name: string }>;
+	const hasIntentCol = skillsColumns.some(c => c.name === "intent");
+	if (!hasIntentCol) {
+		db.exec(`ALTER TABLE skills ADD COLUMN intent TEXT;`);
+	}
 }

@@ -7,16 +7,24 @@
 import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { logger } from "@oh-my-pi/pi-utils";
 import { registerSelfEvolutionCommands } from "./commands";
-import { SkillExtractor } from "./extractor";
+import { ContextAwareRetriever } from "./context-aware-retriever";
+import type { SkillExtractor } from "./extractor";
+import { FeedbackTracker } from "./feedback-tracker";
+import { IntentClassifier } from "./intent-classifier";
 import { ActivityLogger } from "./logging/activity-logger";
 import { SkillManager } from "./manager";
-import { EpisodeRetriever } from "./retrieval";
+import type { EpisodeRetriever } from "./retrieval";
 import { closeEvolutionDb, getEvolutionDb } from "./storage/db";
+import { SqliteEffectivenessStore } from "./storage/effectiveness";
 import { SqliteEpisodeStore } from "./storage/episodes";
+import { SqliteIntentStore } from "./storage/intents";
+import { SqliteProfileStore } from "./storage/profiles";
 import { SqliteSkillStore, SqliteSkillVersionStore, SqliteStatsStore } from "./storage/skills";
 import { registerSelfEvolutionTools } from "./tools";
 import { summarizeTrace, TraceRecorder } from "./trace";
 import type { SelfEvolutionFlags } from "./types";
+import { UserProfiler } from "./user-profiler";
+import { WorkflowMiner } from "./workflow-miner";
 
 export type { SelfEvolutionFlags };
 
@@ -87,10 +95,17 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	let versionStore: SqliteSkillVersionStore | undefined;
 	let statsStore: SqliteStatsStore | undefined;
 	let skillManager: SkillManager | undefined;
+	let intentStore: SqliteIntentStore | undefined;
+	let profileStore: SqliteProfileStore | undefined;
+	let effectivenessStore: SqliteEffectivenessStore | undefined;
+	let intentClassifier: IntentClassifier | undefined;
+	let workflowMiner: WorkflowMiner | undefined;
+	let userProfiler: UserProfiler | undefined;
+	let feedbackTracker: FeedbackTracker | undefined;
+	let contextAwareRetriever: ContextAwareRetriever | undefined;
 	let episodeRetriever: EpisodeRetriever | undefined;
 	let extractor: SkillExtractor | undefined;
-
-	function ensureInit(cwd: string): void {
+	function _ensureInit(cwd: string): void {
 		if (recorder) return;
 		flags = parseFlags(api);
 		recorder = new TraceRecorder();
@@ -104,14 +119,20 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			enableVersioning: flags.enableVersioning,
 			maxVersions: 20,
 		});
-		episodeRetriever = new EpisodeRetriever(episodeStore);
-		extractor = new SkillExtractor();
+		intentStore = new SqliteIntentStore(db);
+		profileStore = new SqliteProfileStore(db);
+		effectivenessStore = new SqliteEffectivenessStore(db);
+		contextAwareRetriever = new ContextAwareRetriever(episodeStore, intentStore);
+		intentClassifier = new IntentClassifier();
+		workflowMiner = new WorkflowMiner();
+		userProfiler = new UserProfiler();
+		feedbackTracker = new FeedbackTracker(effectivenessStore);
 	}
 
 	// Register commands and tools in the factory body so they are collected
 	// by the extension loader. Handlers call ensureInit on demand.
 	registerSelfEvolutionCommands(api, {
-		ensureInit,
+		ensureInit: _ensureInit,
 		episodeStore: () => episodeStore!,
 		skillStore: () => skillStore!,
 		versionStore: () => versionStore!,
@@ -121,7 +142,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	});
 
 	registerSelfEvolutionTools(api, {
-		ensureInit,
+		ensureInit: _ensureInit,
 		episodeRetriever: () => episodeRetriever!,
 		skillStore: () => skillStore!,
 		skillManager: () => skillManager!,
@@ -130,7 +151,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 
 	api.on("agent_start", (event, ctx) => {
 		try {
-			ensureInit(ctx.cwd);
+			_ensureInit(ctx.cwd);
 			recorder!.onAgentStart(event, ctx);
 			activityLogger!
 				.log("trace_started", {
@@ -228,6 +249,51 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				toolCallCount: trace.toolCallCount,
 			});
 
+			// Extract intent
+			const intentResult = intentClassifier?.ruleClassify(trace);
+			if (intentResult) {
+				await intentStore?.insert({
+					episodeId: episode.id,
+					intent: intentResult.intent,
+					confidence: intentResult.confidence,
+					source: intentResult.source,
+				});
+				await activityLogger?.log("intent_classified", {
+					episodeId: episode.id,
+					intent: intentResult.intent,
+					confidence: intentResult.confidence,
+					source: intentResult.source,
+				});
+			}
+
+			// Mine workflow pattern
+			const pattern = workflowMiner?.mine(trace, intentResult?.intent ?? "exploration");
+			if (pattern) {
+				await activityLogger?.log("workflow_mined", {
+					patternId: pattern.id,
+					intent: pattern.intent,
+					sequence: pattern.toolSequence,
+				});
+			}
+
+			// Update user profile
+			if (userProfiler && intentResult) {
+				userProfiler.updateProfile(trace, intentResult.intent);
+				const profile = userProfiler.getProfile();
+				await profileStore?.upsert("default", profile);
+				await activityLogger?.log("profile_updated", {
+					sessionCount: profile.sessionCount,
+					topIntent: Object.entries(profile.intentDistribution).sort((a, b) => b[1] - a[1])[0]?.[0],
+				});
+			}
+
+			// Record feedback for previously injected episodes
+			const prevInjected = trace.injectedEpisodeIds;
+			if (prevInjected && prevInjected.length > 0 && feedbackTracker) {
+				const succeeded = trace.completedSuccessfully && trace.errorCount === 0;
+				await feedbackTracker.recordOutcome(prevInjected, succeeded);
+			}
+
 			// Extract skill if significant
 			if (extractor) {
 				const extracted = await extractor.extract(trace, {
@@ -249,23 +315,43 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 
 	api.on("before_agent_start", async (event, ctx) => {
 		try {
-			ensureInit(ctx.cwd);
+			_ensureInit(ctx.cwd);
 			// Capture user prompt from before_agent_start before trace exists
 			recorder?.seedPrompt(event.prompt);
 			if (!flags.enablePromptInjection) return;
-			if (!episodeRetriever || !recorder) return;
+			if (!contextAwareRetriever || !recorder) return;
 
-			const episodes = await episodeRetriever.retrieve(event.prompt, {
+			const intentResult = intentClassifier?.ruleClassify({
+				sessionId: "",
+				cwd: ctx.cwd,
+				userPrompt: event.prompt,
+				startTime: Date.now(),
+				endTime: 0,
+				entries: [],
+				toolCallCount: 0,
+				errorCount: 0,
+				hadRecovery: false,
+				completedSuccessfully: false,
+			});
+
+			const profile = await profileStore?.get("default");
+			const episodes = await contextAwareRetriever.retrieve(event.prompt, {
 				maxEpisodes: flags.maxEpisodes,
 				llmRerank: flags.llmRerank,
 				model: ctx.model,
+				currentIntent: intentResult?.intent,
+				profile: profile ?? undefined,
 			});
 			if (episodes.length === 0) return;
 
-			let injection = "\n\n## Past Experience\n\n";
+			// Track injected episodes for feedback
+			recorder?.setInjectedEpisodes(episodes.map(e => e.episode.id));
+			await feedbackTracker?.trackInjection(episodes.map(e => e.episode.id));
+
+			let injection = "\n\n## Relevant Past Experience\n\n";
 			for (const e of episodes) {
 				const text = e.episode.summary.slice(0, 200);
-				injection += `- ${text}\n`;
+				injection += `[${e.episode.id}] ${text} (${e.reason})\n`;
 			}
 
 			// Rough token guard: ~4 chars per token
@@ -277,6 +363,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				sessionId: ctx.sessionManager.getSessionId(),
 				episodeIds: episodes.map(e => e.episode.id),
 				tokenCount: Math.ceil(injection.length / 4),
+				intent: intentResult?.intent,
 			});
 
 			return {
@@ -299,6 +386,14 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			statsStore = undefined;
 			skillManager = undefined;
 			episodeRetriever = undefined;
+			intentStore = undefined;
+			profileStore = undefined;
+			effectivenessStore = undefined;
+			intentClassifier = undefined;
+			workflowMiner = undefined;
+			userProfiler = undefined;
+			feedbackTracker = undefined;
+			contextAwareRetriever = undefined;
 			extractor = undefined;
 		} catch (err) {
 			logger.error("Self-evolution session_shutdown handler failed", { error: String(err) });

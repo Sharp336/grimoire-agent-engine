@@ -59,14 +59,14 @@ export class UserProfiler {
 		this.#profile.updatedAt = Date.now();
 
 		// Tool frequency
-		const toolCalls = trace.entries.filter(e => e.type === "tool_call" && e.toolName);
+		const toolCalls = trace.entries.filter((e) => e.type === "tool_call" && e.toolName);
 		for (const entry of toolCalls) {
 			const tool = entry.toolName!;
 			this.#profile.toolFrequency[tool] = (this.#profile.toolFrequency[tool] ?? 0) + 1;
 		}
 
 		// Tool transitions
-		const toolNames = toolCalls.map(e => e.toolName!);
+		const toolNames = toolCalls.map((e) => e.toolName!);
 		for (let i = 0; i < toolNames.length - 1; i++) {
 			const transition = `${toolNames[i]}→${toolNames[i + 1]}`;
 			this.#profile.toolTransitions[transition] = (this.#profile.toolTransitions[transition] ?? 0) + 1;
