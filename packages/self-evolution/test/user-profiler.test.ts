@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { UserProfiler } from "../src/user-profiler";
 import type { SessionTrace } from "../src/types";
+import { UserProfiler } from "../src/user-profiler";
 
 function makeTrace(overrides: Partial<SessionTrace> = {}): SessionTrace {
 	return {
@@ -37,8 +37,8 @@ describe("UserProfiler", () => {
 		});
 		profiler.updateProfile(trace, "refactoring");
 		const profile = profiler.getProfile();
-		expect(profile.toolFrequency["read"]).toBe(2);
-		expect(profile.toolFrequency["edit"]).toBe(1);
+		expect(profile.toolFrequency.read).toBe(2);
+		expect(profile.toolFrequency.edit).toBe(1);
 		expect(profile.sessionCount).toBe(1);
 	});
 
@@ -69,8 +69,8 @@ describe("UserProfiler", () => {
 		profiler.updateProfile(makeTrace(), "refactoring");
 		profiler.updateProfile(makeTrace(), "bugfix");
 		const profile = profiler.getProfile();
-		expect(profile.intentDistribution["refactoring"]).toBe(2);
-		expect(profile.intentDistribution["bugfix"]).toBe(1);
+		expect(profile.intentDistribution.refactoring).toBe(2);
+		expect(profile.intentDistribution.bugfix).toBe(1);
 	});
 
 	test("updateProfile detects preferred languages from files", () => {
@@ -89,10 +89,13 @@ describe("UserProfiler", () => {
 
 	test("serialize and deserialize preserves data", () => {
 		const profiler = new UserProfiler();
-		profiler.updateProfile(makeTrace({ entries: [{ type: "tool_call", timestamp: Date.now(), toolName: "read", args: {} }] }), "exploration");
+		profiler.updateProfile(
+			makeTrace({ entries: [{ type: "tool_call", timestamp: Date.now(), toolName: "read", args: {} }] }),
+			"exploration",
+		);
 		const json = profiler.serialize();
 		const restored = UserProfiler.deserialize(json);
-		expect(restored.getProfile().toolFrequency["read"]).toBe(1);
+		expect(restored.getProfile().toolFrequency.read).toBe(1);
 		expect(restored.getProfile().sessionCount).toBe(1);
 	});
 });

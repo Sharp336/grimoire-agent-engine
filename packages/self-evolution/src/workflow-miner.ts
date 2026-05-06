@@ -9,7 +9,7 @@ export class WorkflowMiner {
 	 * Returns undefined if no tool calls exist.
 	 */
 	mine(trace: SessionTrace, intent: string): WorkflowPattern | undefined {
-		const toolCalls = trace.entries.filter((e) => e.type === "tool_call" && e.toolName);
+		const toolCalls = trace.entries.filter(e => e.type === "tool_call" && e.toolName);
 		if (toolCalls.length === 0) return undefined;
 
 		// Deduplicate consecutive identical tools

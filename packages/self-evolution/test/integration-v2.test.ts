@@ -1,18 +1,18 @@
-import { describe, expect, test, beforeAll, afterAll } from "bun:test";
 import { Database } from "bun:sqlite";
-import * as path from "node:path";
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import * as os from "node:os";
+import * as path from "node:path";
+import { ContextAwareRetriever } from "../src/context-aware-retriever";
+import { FeedbackTracker } from "../src/feedback-tracker";
+import { IntentClassifier } from "../src/intent-classifier";
 import { initSchema } from "../src/storage/db";
+import { SqliteEffectivenessStore } from "../src/storage/effectiveness";
 import { SqliteEpisodeStore } from "../src/storage/episodes";
 import { SqliteIntentStore } from "../src/storage/intents";
 import { SqliteProfileStore } from "../src/storage/profiles";
-import { SqliteEffectivenessStore } from "../src/storage/effectiveness";
-import { IntentClassifier } from "../src/intent-classifier";
+import type { SessionTrace } from "../src/types";
 import { UserProfiler } from "../src/user-profiler";
 import { WorkflowMiner } from "../src/workflow-miner";
-import { FeedbackTracker } from "../src/feedback-tracker";
-import { ContextAwareRetriever } from "../src/context-aware-retriever";
-import type { SessionTrace } from "../src/types";
 
 describe("v2 end-to-end", () => {
 	let db: Database;
@@ -92,7 +92,7 @@ describe("v2 end-to-end", () => {
 		profiler.updateProfile(trace, intentResult.intent);
 		const profile = profiler.getProfile();
 		expect(profile.sessionCount).toBe(1);
-		expect(profile.toolFrequency["read"]).toBe(1);
+		expect(profile.toolFrequency.read).toBe(1);
 		await profileStore.upsert("default", profile);
 
 		// 5. Mine workflow
