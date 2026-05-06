@@ -53,7 +53,7 @@ export class WelcomeComponent implements Component {
 		const minRightCol = 20;
 		const leftMinContentWidth = Math.max(
 			minLeftCol,
-			visibleWidth("Welcome back!"),
+			visibleWidth("Welcome back, Magnum,"),
 			visibleWidth(this.modelName),
 			visibleWidth(this.providerName),
 		);
@@ -67,25 +67,24 @@ export class WelcomeComponent implements Component {
 		const leftCol = showRightColumn ? dualLeftCol : boxWidth - 2;
 		const rightCol = showRightColumn ? dualRightCol : 0;
 
-		// Block-based OMP logo (gradient: magenta → cyan)
+		// Block-based Magnum "M" logo (gradient: platinum → midnight blue)
 		// biome-ignore format: preserve ASCII art layout
-		const piLogo = ["▀████████████▀", " ╘███    ███  ", "  ███    ███  ", "  ███    ███  ", " ▄███▄  ▄███▄ "];
+		const mLogo = ["███      ███", "████    ████", "██ ██  ██ ██", "██  ████  ██", "██   ██   ██"];
 
 		// Apply gradient to logo
-		const logoColored = piLogo.map(line => this.#gradientLine(line));
+		const logoColored = mLogo.map(line => this.#gradientLine(line));
 
 		// Left column - centered content
 		const leftLines = [
 			"",
-			this.#centerText(theme.bold("Welcome back!"), leftCol),
+			this.#centerText(theme.bold("Welcome back, Magnum,"), leftCol),
+			this.#centerText(theme.bold("have a nice day"), leftCol),
 			"",
 			...logoColored.map(l => this.#centerText(l, leftCol)),
 			"",
 			this.#centerText(theme.fg("muted", this.modelName), leftCol),
 			this.#centerText(theme.fg("borderMuted", this.providerName), leftCol),
 		];
-
-		// Right column separator
 		const separatorWidth = Math.max(0, rightCol - 2); // padding on each side
 		const separator = ` ${theme.fg("dim", theme.boxRound.horizontal.repeat(separatorWidth))}`;
 
@@ -191,15 +190,14 @@ export class WelcomeComponent implements Component {
 		return padding(leftPad) + text + padding(rightPad);
 	}
 
-	/** Apply magenta→cyan gradient to a string */
+	/** Apply platinum → midnight blue gradient to a string */
 	#gradientLine(line: string): string {
 		const colors = [
-			"\x1b[38;5;199m", // bright magenta
-			"\x1b[38;5;171m", // magenta-purple
-			"\x1b[38;5;135m", // purple
-			"\x1b[38;5;99m", // purple-blue
-			"\x1b[38;5;75m", // cyan-blue
-			"\x1b[38;5;51m", // bright cyan
+			"\x1b[38;5;189m", // bright platinum
+			"\x1b[38;5;153m", // light steel blue
+			"\x1b[38;5;117m", // sky blue
+			"\x1b[38;5;111m", // steel blue
+			"\x1b[38;5;75m", // midnight blue
 		];
 		const reset = "\x1b[0m";
 
