@@ -1,7 +1,15 @@
 /**
  * Storage abstraction interfaces for self-evolution.
  */
-import type { Episode, EvolvedSkill, SkillVersion } from "../types";
+import type {
+	Episode,
+	EpisodeEffectiveness,
+	EpisodeIntent,
+	EvolvedSkill,
+	SkillVersion,
+	UserProfile,
+	WorkflowPattern,
+} from "../types";
 
 export interface EpisodeStore {
 	insert(episode: Episode): Promise<void>;
@@ -30,4 +38,27 @@ export interface SkillVersionStore {
 export interface StatsStore {
 	get(key: string): Promise<number>;
 	increment(key: string, delta?: number): Promise<void>;
+}
+
+export interface IntentStore {
+	insert(intent: EpisodeIntent): Promise<void>;
+	getByEpisode(episodeId: string): Promise<EpisodeIntent[]>;
+	getByIntent(intent: string, limit: number): Promise<EpisodeIntent[]>;
+}
+
+export interface WorkflowPatternStore {
+	upsert(pattern: WorkflowPattern): Promise<void>;
+	getByIntent(intent: string, limit: number): Promise<WorkflowPattern[]>;
+	getById(id: string): Promise<WorkflowPattern | undefined>;
+}
+
+export interface ProfileStore {
+	get(id: string): Promise<UserProfile | undefined>;
+	upsert(id: string, profile: UserProfile): Promise<void>;
+}
+
+export interface EffectivenessStore {
+	get(episodeId: string): Promise<EpisodeEffectiveness | undefined>;
+	recordInjection(episodeId: string): Promise<void>;
+	recordOutcome(episodeId: string, helped: boolean): Promise<void>;
 }

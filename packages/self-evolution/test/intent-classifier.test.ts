@@ -35,9 +35,7 @@ describe("IntentClassifier.ruleClassify", () => {
 		const trace = makeTrace({
 			userPrompt: "fix the broken login",
 			errorCount: 2,
-			entries: [
-				{ type: "tool_call", timestamp: Date.now(), toolName: "read", args: {} },
-			],
+			entries: [{ type: "tool_call", timestamp: Date.now(), toolName: "read", args: {} }],
 		});
 		const result = classifier.ruleClassify(trace);
 		expect(result.intent).toBe("bugfix");
@@ -66,8 +64,15 @@ describe("IntentClassifier.ruleClassify", () => {
 		const trace = makeTrace({ userPrompt: "test" });
 		const result = classifier.ruleClassify(trace);
 		const categories = [
-			"refactoring", "bugfix", "feature-add", "testing",
-			"documentation", "configuration", "exploration", "optimization", "integration",
+			"refactoring",
+			"bugfix",
+			"feature-add",
+			"testing",
+			"documentation",
+			"configuration",
+			"exploration",
+			"optimization",
+			"integration",
 		];
 		for (const cat of categories) {
 			expect(result.allScores[cat as keyof typeof result.allScores]).toBeDefined();
