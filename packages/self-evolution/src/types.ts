@@ -124,6 +124,8 @@ export interface SelfEvolutionFlags {
 	llmRerank: boolean;
 	enableVersioning: boolean;
 	enableActivityLog: boolean;
+	/** Use a global store shared across all projects instead of per-project isolation */
+	globalStore: boolean;
 }
 
 // ============================================================================

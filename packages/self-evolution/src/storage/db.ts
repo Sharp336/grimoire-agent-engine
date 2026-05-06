@@ -1,38 +1,66 @@
 /**
  * SQLite database initialization for self-evolution.
+ *
+ * Uses per-path reference counting to safely share DB connections across
+ * sessions in the same process. Prevents one session's shutdown from
+ * closing a DB still in use by another session.
  */
-
 import { Database } from "bun:sqlite";
+import * as os from "node:os";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 
-let dbInstance: Database | undefined;
+interface DbEntry {
+	db: Database;
+	refCount: number;
+}
 
-export function getEvolutionDb(cwd: string): Database {
-	if (dbInstance) return dbInstance;
+const dbCache = new Map<string, DbEntry>();
 
-	const dbDir = path.join(cwd, ".omp", "self-evolution");
-	const dbPath = path.join(dbDir, "evolution.db");
+function resolveDbPath(cwd: string, globalStore?: boolean): string {
+	const dbDir = globalStore
+		? path.join(os.homedir(), ".omp", "self-evolution")
+		: path.join(cwd, ".omp", "self-evolution");
+	return path.join(dbDir, "evolution.db");
+}
+
+export function getEvolutionDb(cwd: string, globalStore?: boolean): Database {
+	const dbPath = resolveDbPath(cwd, globalStore);
+
+	const existing = dbCache.get(dbPath);
+	if (existing) {
+		existing.refCount++;
+		return existing.db;
+	}
 
 	// Bun.write auto-creates parent dirs when writing files, but SQLite
 	// open() needs the directory to exist. Use sync mkdir for init.
 	// eslint-disable-next-line @typescript-eslint/no-require-imports
 	const fs = require("node:fs");
-	fs.mkdirSync(dbDir, { recursive: true });
+	fs.mkdirSync(path.dirname(dbPath), { recursive: true });
 
-	dbInstance = new Database(dbPath);
-	dbInstance.exec("PRAGMA journal_mode = WAL;");
-	dbInstance.exec("PRAGMA foreign_keys = ON;");
+	const db = new Database(dbPath);
+	db.exec("PRAGMA journal_mode = WAL;");
+	db.exec("PRAGMA foreign_keys = ON;");
+	db.exec("PRAGMA busy_timeout = 5000;");
 
-	initSchema(dbInstance);
+	initSchema(db);
 	logger.debug("Self-evolution DB initialized", { path: dbPath });
-	return dbInstance;
+	dbCache.set(dbPath, { db, refCount: 1 });
+	return db;
 }
 
-export function closeEvolutionDb(): void {
-	if (dbInstance) {
-		dbInstance.close();
-		dbInstance = undefined;
+export function closeEvolutionDb(cwd?: string, globalStore?: boolean): void {
+	const dbPath = resolveDbPath(cwd ?? "", globalStore);
+
+	const entry = dbCache.get(dbPath);
+	if (!entry) return;
+
+	entry.refCount--;
+	if (entry.refCount <= 0) {
+		entry.db.close();
+		dbCache.delete(dbPath);
+		logger.debug("Self-evolution DB closed", { path: dbPath });
 	}
 }
 

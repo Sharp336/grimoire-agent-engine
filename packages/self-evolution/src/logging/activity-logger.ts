@@ -1,8 +1,11 @@
 /**
  * Structured activity logger (JSONL) for audit and debugging.
+ *
+ * Uses per-path reference counting so multiple sessions sharing the same
+ * global store do not interfere with each other's flush timers.
  */
-
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { LogEntry } from "../types";
@@ -10,13 +13,54 @@ import type { LogEntry } from "../types";
 const MAX_LOG_SIZE = 10 * 1024 * 1024; // 10MB
 const MAX_LOG_FILES = 3;
 
+interface LoggerEntry {
+	logger: ActivityLogger;
+	refCount: number;
+}
+
+const loggerCache = new Map<string, LoggerEntry>();
+
+function resolveLogPath(cwd: string, globalStore?: boolean): string {
+	const baseDir = globalStore
+		? path.join(os.homedir(), ".omp", "self-evolution")
+		: path.join(cwd, ".omp", "self-evolution");
+	return path.join(baseDir, "activity.log");
+}
+
+export function getActivityLogger(cwd: string, globalStore?: boolean): ActivityLogger {
+	const logPath = resolveLogPath(cwd, globalStore);
+
+	const existing = loggerCache.get(logPath);
+	if (existing) {
+		existing.refCount++;
+		return existing.logger;
+	}
+
+	const instance = new ActivityLogger(logPath);
+	loggerCache.set(logPath, { logger: instance, refCount: 1 });
+	return instance;
+}
+
+export function closeActivityLogger(cwd?: string, globalStore?: boolean): void {
+	const logPath = resolveLogPath(cwd ?? "", globalStore);
+
+	const entry = loggerCache.get(logPath);
+	if (!entry) return;
+
+	entry.refCount--;
+	if (entry.refCount <= 0) {
+		entry.logger.close();
+		loggerCache.delete(logPath);
+	}
+}
+
 export class ActivityLogger {
 	#logPath: string;
 	#pending: LogEntry[] = [];
 	#flushTimer: NodeJS.Timeout | undefined;
 
-	constructor(cwd: string) {
-		this.#logPath = path.join(cwd, ".omp", "self-evolution", "activity.log");
+	constructor(logPath: string) {
+		this.#logPath = logPath;
 		this.#startFlushTimer();
 	}
 

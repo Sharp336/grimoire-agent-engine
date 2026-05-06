@@ -11,7 +11,7 @@ import { ContextAwareRetriever } from "./context-aware-retriever";
 import type { SkillExtractor } from "./extractor";
 import { FeedbackTracker } from "./feedback-tracker";
 import { IntentClassifier } from "./intent-classifier";
-import { ActivityLogger } from "./logging/activity-logger";
+import { ActivityLogger, closeActivityLogger, getActivityLogger } from "./logging/activity-logger";
 import { SkillManager } from "./manager";
 import type { EpisodeRetriever } from "./retrieval";
 import { closeEvolutionDb, getEvolutionDb } from "./storage/db";
@@ -38,9 +38,9 @@ export function parseFlags(api: ExtensionAPI): SelfEvolutionFlags {
 		llmRerank: api.getFlag("self-evolution-llm-rerank") !== false,
 		enableVersioning: api.getFlag("self-evolution-enable-versioning") !== false,
 		enableActivityLog: api.getFlag("self-evolution-enable-activity-log") !== false,
+		globalStore: api.getFlag("self-evolution-global-store") === true,
 	};
 }
-
 export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	// Register CLI flags
 	api.registerFlag("self-evolution", { type: "boolean", default: true, description: "Enable self-evolution plugin" });
@@ -79,6 +79,11 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		default: true,
 		description: "Enable JSONL activity logging",
 	});
+	api.registerFlag("self-evolution-global-store", {
+		type: "boolean",
+		default: false,
+		description: "Use a global store shared across all projects (instead of per-project isolation)",
+	});
 
 	let flags = parseFlags(api);
 	if (!flags.enabled) {
@@ -109,8 +114,8 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		if (recorder) return;
 		flags = parseFlags(api);
 		recorder = new TraceRecorder();
-		activityLogger = new ActivityLogger(cwd);
-		const db = getEvolutionDb(cwd);
+		activityLogger = getActivityLogger(cwd, flags.globalStore);
+		const db = getEvolutionDb(cwd, flags.globalStore);
 		episodeStore = new SqliteEpisodeStore(db);
 		skillStore = new SqliteSkillStore(db);
 		versionStore = new SqliteSkillVersionStore(db);
@@ -159,7 +164,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 					cwd: ctx.cwd,
 					userPrompt: "",
 				})
-				.catch(err => logger.warn("activity log failed", { error: String(err) }));
+				.catch((err: unknown) => logger.warn("activity log failed", { error: String(err) }));
 		} catch (err) {
 			logger.error("Self-evolution agent_start handler failed", { error: String(err) });
 		}
@@ -182,7 +187,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 					toolCallId: event.toolCallId,
 					toolName: event.toolName,
 				})
-				.catch(err => logger.warn("activity log failed", { error: String(err) }));
+				.catch((err: unknown) => logger.warn("activity log failed", { error: String(err) }));
 		} catch (err) {
 			logger.error("Self-evolution tool_execution_start handler failed", { error: String(err) });
 		}
@@ -197,7 +202,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 					toolCallId: event.toolCallId,
 					isError: event.isError,
 				})
-				.catch(err => logger.warn("activity log failed", { error: String(err) }));
+				.catch((err: unknown) => logger.warn("activity log failed", { error: String(err) }));
 		} catch (err) {
 			logger.error("Self-evolution tool_execution_end handler failed", { error: String(err) });
 		}
@@ -376,10 +381,9 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 
 	api.on("session_shutdown", async (_event, _ctx) => {
 		try {
-			await activityLogger?.close();
-			closeEvolutionDb();
+			closeActivityLogger(_ctx.cwd, flags.globalStore);
+			closeEvolutionDb(_ctx.cwd, flags.globalStore);
 			recorder = undefined;
-			activityLogger = undefined;
 			episodeStore = undefined;
 			skillStore = undefined;
 			versionStore = undefined;
