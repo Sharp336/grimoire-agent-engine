@@ -27,6 +27,7 @@ export interface SessionTrace {
 	errorCount: number;
 	hadRecovery: boolean;
 	completedSuccessfully: boolean;
+	injectedEpisodeIds?: string[];
 }
 
 // ============================================================================
@@ -138,4 +139,74 @@ export interface RerankedEpisode {
 	episode: Episode;
 	relevanceScore: number;
 	reason: string;
+}
+
+// ============================================================================
+// Intent Classification (v2)
+// ============================================================================
+
+export type IntentCategory =
+	| "refactoring"
+	| "bugfix"
+	| "feature-add"
+	| "testing"
+	| "documentation"
+	| "configuration"
+	| "exploration"
+	| "optimization"
+	| "integration";
+
+export interface IntentResult {
+	intent: IntentCategory;
+	confidence: number;
+	source: "rule" | "llm";
+	allScores: Record<IntentCategory, number>;
+}
+
+export interface EpisodeIntent {
+	episodeId: string;
+	intent: IntentCategory;
+	confidence: number;
+	source: "rule" | "llm";
+}
+
+// ============================================================================
+// Workflow Patterns (v2)
+// ============================================================================
+
+export interface WorkflowPattern {
+	id: string;
+	intent: IntentCategory;
+	toolSequence: string[];
+	occurrenceCount: number;
+	avgQualityScore: number;
+	lastSeenAt: number;
+}
+
+// ============================================================================
+// User Profile (v2)
+// ============================================================================
+
+export interface UserProfile {
+	toolFrequency: Record<string, number>;
+	toolTransitions: Record<string, number>;
+	intentDistribution: Record<string, number>;
+	avgToolCallsPerSession: number;
+	avgFilesModifiedPerSession: number;
+	errorRate: number;
+	recoveryRate: number;
+	preferredLanguages: string[];
+	sessionCount: number;
+	updatedAt: number;
+}
+
+// ============================================================================
+// Episode Effectiveness (v2)
+// ============================================================================
+
+export interface EpisodeEffectiveness {
+	episodeId: string;
+	timesInjected: number;
+	timesHelped: number;
+	timesFailed: number;
 }
