@@ -52,6 +52,7 @@
 		"@oh-my-pi/pi-natives": "catalog:",
 		"@oh-my-pi/pi-tui": "catalog:",
 		"@oh-my-pi/pi-utils": "catalog:",
+		"@oh-my-pi/self-evolution": "catalog:",
 		"@puppeteer/browsers": "catalog:",
 		"@sinclair/typebox": "catalog:",
 		"@xterm/headless": "catalog:",

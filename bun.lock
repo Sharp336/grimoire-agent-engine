@@ -69,6 +69,7 @@
         "@oh-my-pi/pi-natives": "catalog:",
         "@oh-my-pi/pi-tui": "catalog:",
         "@oh-my-pi/pi-utils": "catalog:",
+        "@oh-my-pi/self-evolution": "catalog:",
         "@puppeteer/browsers": "catalog:",
         "@sinclair/typebox": "catalog:",
         "@xterm/headless": "catalog:",
@@ -95,6 +96,19 @@
       "version": "14.5.11",
       "devDependencies": {
         "@napi-rs/cli": "catalog:",
+        "@types/bun": "catalog:",
+      },
+    },
+    "packages/self-evolution": {
+      "name": "@oh-my-pi/self-evolution",
+      "version": "14.5.11",
+      "dependencies": {
+        "@oh-my-pi/pi-ai": "catalog:",
+        "@oh-my-pi/pi-coding-agent": "catalog:",
+        "@oh-my-pi/pi-utils": "catalog:",
+      },
+      "devDependencies": {
+        "@sinclair/typebox": "catalog:",
         "@types/bun": "catalog:",
       },
     },
@@ -219,6 +233,7 @@
     "@oh-my-pi/pi-natives": "14.5.11",
     "@oh-my-pi/pi-tui": "14.5.11",
     "@oh-my-pi/pi-utils": "14.5.11",
+    "@oh-my-pi/self-evolution": "14.5.11",
     "@puppeteer/browsers": "^2.13.0",
     "@sinclair/typebox": "^0.34.49",
     "@smithy/node-http-handler": "^4.6.1",
@@ -590,6 +605,8 @@
     "@oh-my-pi/pi-tui": ["@oh-my-pi/pi-tui@workspace:packages/tui"],
 
     "@oh-my-pi/pi-utils": ["@oh-my-pi/pi-utils@workspace:packages/utils"],
+
+    "@oh-my-pi/self-evolution": ["@oh-my-pi/self-evolution@workspace:packages/self-evolution"],
 
     "@oh-my-pi/swarm-extension": ["@oh-my-pi/swarm-extension@workspace:packages/swarm-extension"],
 

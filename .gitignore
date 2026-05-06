@@ -41,6 +41,7 @@ packages/ai/test/.temp-images/
 # Project specific
 !.omp/
 .omp/plugins/
+.omp/self-evolution/
 .pi_config/
 .opencode/
 .worktrees/
