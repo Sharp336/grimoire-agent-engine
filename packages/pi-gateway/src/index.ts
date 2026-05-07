@@ -9,8 +9,17 @@
  * Channels supported: DingTalk (with Stream mode), Feishu, WeChat (planned).
  */
 
+export { AgentBridge } from "./agent-bridge";
 export { BaseChannel, ChannelRegistry, DingTalkChannel } from "./channels";
 export { getConfigPath, getDataDir, getDingTalkConfig, getEnabledChannels, loadConfig } from "./config";
 export { Gateway } from "./gateway";
+export {
+	detectPlatform,
+	getServiceStatus,
+	installService,
+	startService,
+	stopService,
+	uninstallService,
+} from "./service-installer";
 export { SQLiteSessionStore } from "./session-store";
 export type * from "./types";
