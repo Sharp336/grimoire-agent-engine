@@ -11,10 +11,10 @@ import exploreMd from "../prompts/agents/explore.md" with { type: "text" };
 // Embed agent markdown files at build time
 import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
 import librarianMd from "../prompts/agents/librarian.md" with { type: "text" };
-
 import planMd from "../prompts/agents/plan.md" with { type: "text" };
 import reviewerMd from "../prompts/agents/reviewer.md" with { type: "text" };
 import taskMd from "../prompts/agents/task.md" with { type: "text" };
+import testMd from "../prompts/agents/test.md" with { type: "text" };
 
 import type { AgentDefinition, AgentSource } from "./types";
 
@@ -46,6 +46,7 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 	{ fileName: "designer.md", template: designerMd },
 	{ fileName: "reviewer.md", template: reviewerMd },
 	{ fileName: "librarian.md", template: librarianMd },
+	{ fileName: "test.md", template: testMd },
 	{
 		fileName: "task.md",
 		frontmatter: {
@@ -68,7 +69,6 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 		template: taskMd,
 	},
 ];
-
 const EMBEDDED_AGENTS: { name: string; content: string }[] = EMBEDDED_AGENT_DEFS.map(def => ({
 	name: def.fileName,
 	content: buildAgentContent(def),
