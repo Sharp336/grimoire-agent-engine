@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI Chat Completions serialization to send ordered system prompt blocks as one leading `system`/`developer` message so strict chat templates do not reject follow-up system messages.
+
 ## [14.7.2] - 2026-05-06
 
 ### Fixed

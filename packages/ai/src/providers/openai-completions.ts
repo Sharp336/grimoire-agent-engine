@@ -1191,9 +1191,7 @@ export function convertMessages(
 	if (systemPrompts.length > 0) {
 		const useDeveloperRole = model.reasoning && compat.supportsDeveloperRole;
 		const role = useDeveloperRole ? "developer" : "system";
-		for (const systemPrompt of systemPrompts) {
-			params.push({ role, content: systemPrompt });
-		}
+		params.push({ role, content: systemPrompts.join("\n\n") });
 	}
 
 	let lastRole: string | null = null;

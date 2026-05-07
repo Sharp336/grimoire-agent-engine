@@ -121,7 +121,7 @@ describe("openai-completions compatibility", () => {
 		expect(assistant.content).toBe("hello world");
 	});
 
-	it("preserves multiple system prompts as leading system messages for chat completions", () => {
+	it("coalesces multiple system prompts into one leading system message for chat completions", () => {
 		const model: Model<"openai-completions"> = {
 			...getBundledModel("openai", "gpt-4o-mini"),
 			api: "openai-completions",
@@ -136,9 +136,8 @@ describe("openai-completions compatibility", () => {
 			detectCompat(model),
 		);
 
-		expect(messages.slice(0, 3)).toEqual([
-			{ role: "system", content: "stable instructions" },
-			{ role: "system", content: "cacheable policy" },
+		expect(messages.slice(0, 2)).toEqual([
+			{ role: "system", content: "stable instructions\n\ncacheable policy" },
 			{ role: "user", content: "hello" },
 		]);
 	});
@@ -159,9 +158,8 @@ describe("openai-completions compatibility", () => {
 			detectCompat(model),
 		);
 
-		expect(supportedMessages.slice(0, 3)).toEqual([
-			{ role: "developer", content: "stable instructions" },
-			{ role: "developer", content: "cacheable policy" },
+		expect(supportedMessages.slice(0, 2)).toEqual([
+			{ role: "developer", content: "stable instructions\n\ncacheable policy" },
 			{ role: "user", content: "hello" },
 		]);
 
@@ -174,9 +172,8 @@ describe("openai-completions compatibility", () => {
 			{ ...detectCompat(model), supportsDeveloperRole: false },
 		);
 
-		expect(unsupportedMessages.slice(0, 3)).toEqual([
-			{ role: "system", content: "stable instructions" },
-			{ role: "system", content: "cacheable policy" },
+		expect(unsupportedMessages.slice(0, 2)).toEqual([
+			{ role: "system", content: "stable instructions\n\ncacheable policy" },
 			{ role: "user", content: "hello" },
 		]);
 	});
