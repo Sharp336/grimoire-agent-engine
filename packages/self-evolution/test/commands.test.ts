@@ -45,7 +45,10 @@ describe("Self-evolution commands", () => {
 		commands = new Map();
 
 		const api = {
-			registerCommand: (name: string, options: { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }) => {
+			registerCommand: (
+				name: string,
+				options: { description?: string; handler: (args: string, ctx: unknown) => Promise<void> },
+			) => {
 				commands.set(name, options);
 			},
 		};

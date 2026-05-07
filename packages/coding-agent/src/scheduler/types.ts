@@ -11,6 +11,9 @@ export interface ScheduledTask {
 	cron: string;
 	command: string;
 	status: TaskStatus;
+	scheduleType?: "cron" | "interval" | "once";
+	taskType?: "shell" | "agent";
+	timeoutMs?: number;
 	createdAt: number;
 	updatedAt: number;
 	lastRunAt?: number;
@@ -97,13 +100,78 @@ export function generateExecutionId(): string {
 	return `exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+export type ScheduleType = "cron" | "interval" | "once";
+export type TaskType = "shell" | "agent";
+
+export interface ParsedSchedule {
+	type: ScheduleType;
+	schedule: string;
+	intervalMs?: number;
+	nextRunAt?: number;
+	error?: string;
+}
+
+function parseRelativeTime(input: string): number | undefined {
+	const match = input.match(/^\+(\d+)(ms|s|m|h|d)$/);
+	if (!match) return undefined;
+	const value = Number.parseInt(match[1]!, 10);
+	const unit = match[2]!;
+	const multipliers: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+	return value * multipliers[unit]!;
+}
+
+function parseInterval(input: string): number | undefined {
+	const match = input.match(/^(\d+)(ms|s|m|h|d)$/);
+	if (!match) return undefined;
+	const value = Number.parseInt(match[1]!, 10);
+	const unit = match[2]!;
+	const multipliers: Record<string, number> = { ms: 1, s: 1000, m: 60_000, h: 3_600_000, d: 86_400_000 };
+	return value * multipliers[unit]!;
+}
+
+function parseIsoTimestamp(input: string): number | undefined {
+	// Require at least a year-month-day structure (e.g., 2026-05-08 or 2026/05/08)
+	if (!/\d{4}[-/]\d{2}[-/]\d{2}/.test(input)) return undefined;
+	const d = new Date(input);
+	if (Number.isNaN(d.getTime())) return undefined;
+	return d.getTime();
+}
+
+export function parseSchedule(input: string): ParsedSchedule {
+	const trimmed = input.trim();
+
+	// Relative time: +5m, +1h, +2d
+	const relativeMs = parseRelativeTime(trimmed);
+	if (relativeMs !== undefined) {
+		return { type: "once", schedule: trimmed, nextRunAt: Date.now() + relativeMs };
+	}
+
+	// Interval: 5m, 1h (not starting with +)
+	const intervalMs = parseInterval(trimmed);
+	if (intervalMs !== undefined) {
+		return { type: "interval", schedule: trimmed, intervalMs };
+	}
+
+	// ISO timestamp: 2026-05-08T09:00:00
+	const ts = parseIsoTimestamp(trimmed);
+	if (ts !== undefined) {
+		return { type: "once", schedule: trimmed, nextRunAt: ts };
+	}
+
+	// Fall back to cron validation
+	const cronValidation = validateCron(trimmed);
+	if (cronValidation.valid) {
+		return { type: "cron", schedule: trimmed };
+	}
+
+	return { type: "cron", schedule: trimmed, error: cronValidation.error };
+}
+
 export function validateCron(cron: string): { valid: boolean; error?: string } {
 	try {
-		// croner will validate on construction; we just check syntax here
 		if (!cron || cron.trim().length === 0) {
 			return { valid: false, error: "Cron expression is empty" };
 		}
-		// Try to import croner and validate
 		const { Cron } = require("croner");
 		new Cron(cron, { maxIterations: 0 });
 		return { valid: true };
@@ -203,7 +271,8 @@ export async function waitForDaemonStart(pidPath: string, timeoutMs = 5000): Pro
 export function formatTaskRow(task: ScheduledTask): string {
 	const next = task.status === "active" && task.nextRunAt ? new Date(task.nextRunAt).toLocaleString() : "—";
 	const last = task.lastRunAt ? new Date(task.lastRunAt).toLocaleString() : "never";
-	return `${task.name.padEnd(20)} ${task.status.padEnd(10)} ${task.cron.padEnd(20)} ${next.padEnd(20)} ${last}`;
+	const typeLabel = task.taskType === "agent" ? "[A]" : "   ";
+	return `${typeLabel} ${task.name.padEnd(18)} ${task.status.padEnd(10)} ${(task.scheduleType || "cron").padEnd(8)} ${task.cron.padEnd(18)} ${next.padEnd(20)} ${last}`;
 }
 
 export function formatExecutionRow(exec: TaskExecution): string {
@@ -213,6 +282,8 @@ export function formatExecutionRow(exec: TaskExecution): string {
 
 export function formatNextRuns(task: ScheduledTask, count = 3): string {
 	if (task.status !== "active") return "(disabled)";
+	if (task.scheduleType === "interval") return `every ${task.cron}`;
+	if (task.scheduleType === "once") return task.nextRunAt ? new Date(task.nextRunAt).toLocaleString() : "(past)";
 	const runs = getNextRuns(task.cron, count);
 	if (runs.length === 0) return "(invalid cron)";
 	return runs.map(d => d.toLocaleString()).join(", ");

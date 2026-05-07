@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { SchedulerEngine } from "./engine";
+import { executeScheduledCommand } from "./executor";
 import { SchedulerDbStorage } from "./storage";
 import type { DaemonOptions, DaemonStatus, ScheduledTask } from "./types";
 import {
@@ -91,45 +92,35 @@ export class SchedulerDaemon {
 	async #onTrigger(task: ScheduledTask, executionId: string): Promise<void> {
 		if (!this.#storage) return;
 
-		const proc = Bun.spawn([this.#ompBinary, "--print", task.command], {
-			stdout: "pipe",
-			stderr: "pipe",
-			stdin: "ignore",
+		const { exitCode, output, stderr, timedOut } = await executeScheduledCommand(task.command, {
+			taskType: task.taskType,
+			timeoutMs: task.timeoutMs,
+			ompBinary: this.#ompBinary,
 		});
-
-		let output = "";
-		let stderr = "";
-
-		try {
-			const [outText, errText] = await Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]);
-			output = outText;
-			stderr = errText;
-		} catch (error) {
-			logger.error("Failed to capture process output", { taskId: task.id, error: String(error) });
-		}
-
-		const exitCode = await proc.exited;
 		const endedAt = Date.now();
 
 		this.#storage.updateExecution(executionId, {
 			status: exitCode === 0 ? "success" : "failure",
 			exitCode,
-			output,
-			stderr,
+			output: timedOut
+				? `[TIMED OUT after ${task.timeoutMs ?? 30_000}ms]
+${output}`
+				: output,
+			stderr: timedOut
+				? `[TIMED OUT]
+${stderr}`
+				: stderr,
 			endedAt,
 		});
 
-		if (exitCode !== 0) {
+		if (exitCode !== 0 || timedOut) {
 			const currentTask = this.#storage.getTask(task.id);
 			if (currentTask) {
 				this.#storage.updateTask(task.id, {
 					failCount: currentTask.failCount + 1,
 				});
 			}
-			logger.warn("Task execution failed", { taskId: task.id, exitCode, executionId });
+			logger.warn("Task execution failed", { taskId: task.id, exitCode, executionId, timedOut });
 		} else {
 			logger.debug("Task execution succeeded", { taskId: task.id, executionId });
 		}

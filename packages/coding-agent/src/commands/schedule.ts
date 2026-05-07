@@ -3,14 +3,15 @@
  */
 import { Args, Command, Flags, renderCommandHelp } from "@oh-my-pi/pi-utils/cli";
 import { initTheme } from "../modes/theme/theme";
+import { executeScheduledCommand } from "../scheduler/executor";
 import { SchedulerDbStorage } from "../scheduler/storage";
 import {
 	formatExecutionRow,
 	formatTaskRow,
 	getNextRun,
 	getSchedulerDbPath,
+	parseSchedule,
 	type ScheduleAction,
-	validateCron,
 } from "../scheduler/types";
 
 const ACTIONS: ScheduleAction[] = ["add", "list", "remove", "run", "enable", "disable", "logs"];
@@ -41,13 +42,16 @@ export default class Schedule extends Command {
 
 	static flags = {
 		description: Flags.string({ description: "Task description" }),
+		type: Flags.string({ description: "Task type: shell (default) or agent", options: ["shell", "agent"] }),
+		timeout: Flags.integer({ description: "Timeout in milliseconds (default: 30000)" }),
 		json: Flags.boolean({ description: "Output JSON" }),
 	};
 
 	static examples = [
-		"# Add a new scheduled task\n  omp schedule add backup '0 2 * * *' omp --print 'backup script'",
+		"# Add a new scheduled task\n  omp schedule add backup '0 2 * * *' bun run scripts/backup.ts",
+		"# Add an interval task\n  omp schedule add health '5m' --type shell 'curl http://localhost/health'",
+		"# Add a one-shot reminder\n  omp schedule add remind '+30m' --type agent 'review the PRs'",
 		"# List all tasks\n  omp schedule list",
-		"# Remove a task\n  omp schedule remove backup",
 		"# Run a task immediately\n  omp schedule run backup",
 		"# Enable/disable a task\n  omp schedule enable backup",
 		"# View recent logs\n  omp schedule logs backup",
@@ -102,14 +106,21 @@ export default class Schedule extends Command {
 		const commandParts = args.command as string[] | undefined;
 
 		if (!name || !cron || !commandParts || commandParts.length === 0) {
-			process.stderr.write("Usage: omp schedule add <name> <cron> <command...>\n");
+			process.stderr.write("Usage: omp schedule add <name> <schedule> <command...>\n");
+			process.stderr.write("  Schedule: cron expr, interval (5m, 1h), or one-shot (+30m, ISO timestamp)\n");
 			process.exitCode = 1;
 			return;
 		}
 
-		const validation = validateCron(cron);
-		if (!validation.valid) {
-			process.stderr.write(`Invalid cron expression: ${validation.error}\n`);
+		const parsed = parseSchedule(cron);
+		if (parsed.error) {
+			process.stderr.write(`Invalid schedule: ${parsed.error}\n`);
+			process.exitCode = 1;
+			return;
+		}
+
+		if (process.env._OMP_SCHEDULE_EXECUTING) {
+			process.stderr.write("Cannot create schedules from within a scheduled task execution.\n");
 			process.exitCode = 1;
 			return;
 		}
@@ -122,22 +133,34 @@ export default class Schedule extends Command {
 		}
 
 		const command = commandParts.join(" ");
-		const nextRun = getNextRun(cron);
+		const nextRun =
+			parsed.type === "cron"
+				? getNextRun(parsed.schedule)
+				: parsed.nextRunAt
+					? new Date(parsed.nextRunAt)
+					: undefined;
 		const task = storage.addTask({
 			name,
 			description: (flags.description as string | undefined) ?? undefined,
-			cron,
+			cron: parsed.schedule,
 			command,
+			scheduleType: parsed.type,
+			taskType: (flags.type as "shell" | "agent" | undefined) ?? "shell",
+			timeoutMs:
+				(flags.timeout as number | undefined) ??
+				((flags.type as string | undefined) === "agent" ? 120_000 : 30_000),
 			status: "active",
 			createdAt: Date.now(),
 			updatedAt: Date.now(),
-			nextRunAt: nextRun ? nextRun.getTime() : undefined,
+			nextRunAt: nextRun ? nextRun.getTime() : parsed.nextRunAt,
 			runCount: 0,
 			failCount: 0,
 		});
 
 		process.stdout.write(`Task "${task.name}" added successfully.\n`);
-		process.stdout.write(`Next run: ${nextRun ? nextRun.toLocaleString() : "—"}\n`);
+		process.stdout.write(
+			`Type: ${parsed.type} | Next run: ${nextRun ? nextRun.toLocaleString() : parsed.nextRunAt ? new Date(parsed.nextRunAt).toLocaleString() : "—"}\n`,
+		);
 	}
 
 	async #handleList(
@@ -213,21 +236,18 @@ export default class Schedule extends Command {
 		});
 
 		try {
-			const proc = Bun.spawn(["sh", "-c", task.command], {
-				stdout: "pipe",
-				stderr: "pipe",
+			process.env._OMP_SCHEDULE_EXECUTING = "1";
+			const { exitCode, output, stderr, timedOut } = await executeScheduledCommand(task.command, {
+				taskType: task.taskType,
+				timeoutMs: task.timeoutMs,
 			});
-			const [stdout, stderr] = await Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-			]);
-			const exitCode = proc.exitCode ?? 1;
+			delete process.env._OMP_SCHEDULE_EXECUTING;
 
 			storage.updateExecution(exec.id, {
 				endedAt: Date.now(),
 				exitCode,
-				output: stdout,
-				stderr,
+				output: timedOut ? `[TIMED OUT after ${task.timeoutMs ?? 30_000}ms]\n${output}` : output,
+				stderr: timedOut ? `[TIMED OUT]\n${stderr}` : stderr,
 				status: exitCode === 0 ? "success" : "failure",
 			});
 
@@ -246,6 +266,7 @@ export default class Schedule extends Command {
 
 			process.stdout.write(`Task "${name}" completed successfully.\n`);
 		} catch (err) {
+			delete process.env._OMP_SCHEDULE_EXECUTING;
 			storage.updateExecution(exec.id, {
 				endedAt: Date.now(),
 				exitCode: 1,
@@ -281,10 +302,19 @@ export default class Schedule extends Command {
 			return;
 		}
 
-		const nextRun = getNextRun(task.cron);
+		const parsed = parseSchedule(task.cron);
+		let nextRunAt: number | undefined;
+		if (parsed.type === "cron") {
+			const next = getNextRun(task.cron);
+			nextRunAt = next ? next.getTime() : undefined;
+		} else if (parsed.type === "interval" && parsed.intervalMs) {
+			nextRunAt = Date.now() + parsed.intervalMs;
+		} else {
+			nextRunAt = task.nextRunAt;
+		}
 		storage.updateTask(task.id, {
 			status: "active",
-			nextRunAt: nextRun ? nextRun.getTime() : undefined,
+			nextRunAt,
 			updatedAt: Date.now(),
 		});
 		process.stdout.write(`Task "${name}" enabled.\n`);
