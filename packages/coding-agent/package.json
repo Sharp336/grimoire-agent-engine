@@ -58,6 +58,7 @@
 		"@xterm/headless": "catalog:",
 		"ajv": "catalog:",
 		"chalk": "catalog:",
+		"croner": "10.0.1",
 		"diff": "catalog:",
 		"fflate": "catalog:",
 		"handlebars": "catalog:",
@@ -517,7 +518,6 @@
 			"types": "./src/web/search/providers/*.ts",
 			"import": "./src/web/search/providers/*.ts"
 		},
-
 		"./*.js": "./src/*.ts"
 	}
 }

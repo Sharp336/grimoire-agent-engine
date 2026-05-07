@@ -56,6 +56,8 @@ const commands: CommandEntry[] = [
 	{ name: "ssh", load: () => import("./commands/ssh").then(m => m.default) },
 	{ name: "stats", load: () => import("./commands/stats").then(m => m.default) },
 	{ name: "update", load: () => import("./commands/update").then(m => m.default) },
+	{ name: "schedule", load: () => import("./commands/schedule").then(m => m.default) },
+	{ name: "daemon", load: () => import("./commands/daemon").then(m => m.default) },
 	{ name: "search", load: () => import("./commands/web-search").then(m => m.default), aliases: ["q"] },
 ];
 
