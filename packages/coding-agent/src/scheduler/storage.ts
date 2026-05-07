@@ -25,6 +25,9 @@ type TaskRow = {
 	cron: string;
 	command: string;
 	status: string;
+	schedule_type: string | null;
+	task_type: string | null;
+	timeout_ms: number | null;
 	created_at: number;
 	updated_at: number;
 	last_run_at: number | null;
@@ -54,6 +57,9 @@ const TASK_UPDATE_FIELDS = new Set<string>([
 	"cron",
 	"command",
 	"status",
+	"scheduleType",
+	"taskType",
+	"timeoutMs",
 	"createdAt",
 	"updatedAt",
 	"lastRunAt",
@@ -84,6 +90,9 @@ function toTask(row: TaskRow): ScheduledTask {
 		cron: row.cron,
 		command: row.command,
 		status: row.status as ScheduledTask["status"],
+		scheduleType: (row.schedule_type as ScheduledTask["scheduleType"]) ?? "cron",
+		taskType: (row.task_type as ScheduledTask["taskType"]) ?? "shell",
+		timeoutMs: row.timeout_ms ?? 30_000,
 		createdAt: row.created_at,
 		updatedAt: row.updated_at,
 		lastRunAt: row.last_run_at ?? undefined,
@@ -168,9 +177,10 @@ export class SchedulerDbStorage implements SchedulerStorage {
 		this.#insertTaskStmt = this.#db.prepare(`
 			INSERT INTO tasks (
 				id, name, description, cron, command, status,
+				schedule_type, task_type, timeout_ms,
 				created_at, updated_at, last_run_at, next_run_at,
 				run_count, fail_count
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 
 		this.#getTaskStmt = this.#db.prepare("SELECT * FROM tasks WHERE id = ?");
@@ -201,6 +211,9 @@ export class SchedulerDbStorage implements SchedulerStorage {
 				cron TEXT NOT NULL,
 				command TEXT NOT NULL,
 				status TEXT NOT NULL CHECK(status IN ('active', 'paused', 'disabled')),
+				schedule_type TEXT,
+				task_type TEXT,
+				timeout_ms INTEGER,
 				created_at INTEGER NOT NULL,
 				updated_at INTEGER NOT NULL,
 				last_run_at INTEGER,
@@ -224,6 +237,14 @@ export class SchedulerDbStorage implements SchedulerStorage {
 			)
 		`);
 
+		// Migrate: add new columns if missing
+		const columns = this.#db.prepare("PRAGMA table_info(tasks)").all() as Array<{ name: string }>;
+		const hasScheduleType = columns.some(c => c.name === "schedule_type");
+		const hasTaskType = columns.some(c => c.name === "task_type");
+		const hasTimeoutMs = columns.some(c => c.name === "timeout_ms");
+		if (!hasScheduleType) this.#db.exec("ALTER TABLE tasks ADD COLUMN schedule_type TEXT;");
+		if (!hasTaskType) this.#db.exec("ALTER TABLE tasks ADD COLUMN task_type TEXT;");
+		if (!hasTimeoutMs) this.#db.exec("ALTER TABLE tasks ADD COLUMN timeout_ms INTEGER;");
 		this.#db.exec("CREATE INDEX IF NOT EXISTS idx_executions_task_id ON executions(task_id)");
 		this.#db.exec("CREATE INDEX IF NOT EXISTS idx_executions_started_at ON executions(started_at DESC)");
 	}
@@ -238,6 +259,9 @@ export class SchedulerDbStorage implements SchedulerStorage {
 			task.cron,
 			task.command,
 			task.status,
+			task.scheduleType ?? "cron",
+			task.taskType ?? "shell",
+			task.timeoutMs ?? 30_000,
 			task.createdAt ?? now,
 			task.updatedAt ?? now,
 			task.lastRunAt ?? null,

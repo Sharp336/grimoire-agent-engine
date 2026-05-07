@@ -8,7 +8,7 @@ The scheduler module adds cron-style task scheduling to omp. Unlike in-process t
 
 - Persists tasks in `~/.omp/scheduler.db` (SQLite with WAL mode)
 - Runs a lightweight background process via `omp daemon start`
-- Spawns `omp --print` child processes when tasks are due
+- Spawns `sh -c "<command>"` child processes when tasks are due (same path as `omp schedule run`)
 - Tracks execution history (stdout, stderr, exit code)
 
 ## Architecture
@@ -21,12 +21,11 @@ The scheduler module adds cron-style task scheduling to omp. Unlike in-process t
          │                                        └─────────────────┘
          │                                               │
          ▼                                               ▼
-┌─────────────────┐                           ┌─────────────────┐
-│  omp --print    │                           │   tasks table   │
-│  (child process)│                           │  executions table│
-└─────────────────┘                           └─────────────────┘
-```
-
+ao|┌─────────────────┐                           ┌─────────────────┐
+eo|│  sh -c "cmd"    │                           │   tasks table   │
+ip|│  (child process)│                           │  executions table│
+vo|└─────────────────┘                           └─────────────────┘
+um|```
 ### Components
 
 | File | Responsibility |
