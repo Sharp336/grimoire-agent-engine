@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added API key authentication as an alternative to OAuth for the Kimi Code provider. Users can now log in with an API key from https://www.kimi.com/code/console instead of relying solely on OAuth tokens that require daily refresh.
+
 ## [14.7.5] - 2026-05-07
 
 ### Added

@@ -3,6 +3,7 @@ import * as readline from "node:readline";
 import { AuthCredentialStore } from "./auth-storage";
 import { getOAuthProviders } from "./utils/oauth";
 import type { OAuthCredentials, OAuthProvider } from "./utils/oauth/types";
+import { loginKimiApiKey } from "./utils/oauth/kimi-api-key";
 
 const PROVIDERS = getOAuthProviders();
 
@@ -137,6 +138,25 @@ async function login(provider: OAuthProvider): Promise<void> {
 			}
 
 			case "kimi-code": {
+				const method = await promptFn(
+					"Choose authentication method: 1) OAuth (browser login), 2) API key (paste key):",
+				);
+				if (method.trim() === "2") {
+					const apiKey = await loginKimiApiKey({
+						onAuth(info) {
+							const { url, instructions } = info;
+							console.log(`\nOpen this URL in your browser:\n${url}`);
+							if (instructions) console.log(instructions);
+							console.log();
+						},
+						onPrompt(p) {
+							return promptFn(`${p.message}${p.placeholder ? ` (${p.placeholder})` : ""}:`);
+						},
+					});
+					storage.saveApiKey(provider, apiKey);
+					console.log(`\nAPI key saved to ~/.omp/agent/agent.db`);
+					return;
+				}
 				const { loginKimi } = await import("./utils/oauth/kimi");
 				credentials = await loginKimi({
 					onAuth(info) {
@@ -364,7 +384,7 @@ Providers:
   google-gemini-cli Google Gemini CLI
   google-antigravity Antigravity (Gemini 3, Claude, GPT-OSS)
   openai-codex      OpenAI Codex (ChatGPT Plus/Pro)
-  kimi-code         Kimi Code
+  kimi-code         Kimi Code (OAuth or API key)
   kilo              Kilo Gateway
   kagi              Kagi
   tavily            Tavily

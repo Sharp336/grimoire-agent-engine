@@ -29,6 +29,7 @@ import { kimiUsageProvider } from "./usage/kimi";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
 import { zaiUsageProvider } from "./usage/zai";
 import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken } from "./utils/oauth";
+import { loginKimiApiKey } from "./utils/oauth/kimi-api-key";
 import type { OAuthController, OAuthCredentials, OAuthProvider, OAuthProviderId } from "./utils/oauth/types";
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -776,6 +777,15 @@ export class AuthStorage {
 				break;
 			}
 			case "kimi-code": {
+				const method = await ctrl.onPrompt({
+					message: "Choose authentication method: 1) OAuth (browser login), 2) API key (paste key)",
+					placeholder: "1 or 2",
+				});
+				if (method.trim() === "2") {
+					const apiKey = await loginKimiApiKey(ctrl);
+					await saveApiKeyCredential(apiKey);
+					return;
+				}
 				const { loginKimi } = await import("./utils/oauth/kimi");
 				credentials = await loginKimi(ctrl);
 				break;
