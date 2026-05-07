@@ -5,13 +5,14 @@
  * global DB open. Verifies that closing session N does not close the
  * DB while session N+1 is still active.
  */
-import { getEvolutionDb, closeEvolutionDb } from "./src/storage/db";
-import { getActivityLogger, closeActivityLogger } from "./src/logging/activity-logger";
+
+import { closeActivityLogger, getActivityLogger } from "./src/logging/activity-logger";
+import { closeEvolutionDb, getEvolutionDb } from "./src/storage/db";
 
 const TEST_CWD = "/tmp/test-project";
 const GLOBAL = true;
 
-function sleep(ms: number): Promise<void> {
+function _sleep(ms: number): Promise<void> {
 	return new Promise(r => setTimeout(r, ms));
 }
 
@@ -27,7 +28,21 @@ async function main() {
 	db1.run(
 		`INSERT INTO episodes (id, session_id, cwd, user_prompt, timestamp, duration_ms, tool_call_count, error_count, had_recovery, completed_successfully, summary, tools_used, files_modified)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		["refcount-ep-1", "refcount-test", TEST_CWD, "Session 1 write", Date.now(), 100, 1, 0, 0, 1, "S1", "read", "s1.ts"],
+		[
+			"refcount-ep-1",
+			"refcount-test",
+			TEST_CWD,
+			"Session 1 write",
+			Date.now(),
+			100,
+			1,
+			0,
+			0,
+			1,
+			"S1",
+			"read",
+			"s1.ts",
+		],
 	);
 	await log1.log("s1_write", {});
 	console.log("[1] Session-1 wrote 1 episode");
@@ -45,7 +60,21 @@ async function main() {
 	db2.run(
 		`INSERT INTO episodes (id, session_id, cwd, user_prompt, timestamp, duration_ms, tool_call_count, error_count, had_recovery, completed_successfully, summary, tools_used, files_modified)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		["refcount-ep-2", "refcount-test", TEST_CWD, "Session 2 write", Date.now(), 100, 1, 0, 0, 1, "S2", "read", "s2.ts"],
+		[
+			"refcount-ep-2",
+			"refcount-test",
+			TEST_CWD,
+			"Session 2 write",
+			Date.now(),
+			100,
+			1,
+			0,
+			0,
+			1,
+			"S2",
+			"read",
+			"s2.ts",
+		],
 	);
 	await log2.log("s2_write", {});
 	console.log("[2] Session-2 wrote 1 episode");
@@ -62,7 +91,21 @@ async function main() {
 		db2.run(
 			`INSERT INTO episodes (id, session_id, cwd, user_prompt, timestamp, duration_ms, tool_call_count, error_count, had_recovery, completed_successfully, summary, tools_used, files_modified)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			["refcount-ep-3", "refcount-test", TEST_CWD, "Session 2 post-close write", Date.now(), 100, 1, 0, 0, 1, "S2-after", "read", "s2-after.ts"],
+			[
+				"refcount-ep-3",
+				"refcount-test",
+				TEST_CWD,
+				"Session 2 post-close write",
+				Date.now(),
+				100,
+				1,
+				0,
+				0,
+				1,
+				"S2-after",
+				"read",
+				"s2-after.ts",
+			],
 		);
 		await log2.log("s2_post_close", {});
 		console.log("[4] Session-2 write SUCCESS (refcount protected)");
@@ -80,7 +123,9 @@ async function main() {
 	// Verify all data persisted
 	console.log("\n[6] Reopening DB to verify data...");
 	const db3 = getEvolutionDb(TEST_CWD, GLOBAL);
-	const count = (db3.query("SELECT COUNT(*) as c FROM episodes WHERE session_id = 'refcount-test'").get() as { c: number }).c;
+	const count = (
+		db3.query("SELECT COUNT(*) as c FROM episodes WHERE session_id = 'refcount-test'").get() as { c: number }
+	).c;
 	console.log(`[6] Total refcount-test episodes: ${count} (expected: 3)`);
 	console.log(`[6] Result: ${count === 3 ? "PASS" : "FAIL"}`);
 	closeEvolutionDb(TEST_CWD, GLOBAL);

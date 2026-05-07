@@ -12,6 +12,8 @@ export interface ScoreBreakdown {
 	descriptionQuality: number;
 	reusesHistory: number;
 	recoveryExperience: number;
+	autonomy: number;
+	userRating: number;
 	total: number;
 }
 
@@ -32,6 +34,8 @@ export class HeuristicSkillEvaluator {
 		)
 			? 3
 			: 0;
+		const autonomy = this.#scoreAutonomy(skill);
+		const userRating = 0; // New skill, no user rating yet
 
 		const total =
 			successRate +
@@ -41,7 +45,9 @@ export class HeuristicSkillEvaluator {
 			approachSubstance +
 			descriptionQuality +
 			reusesHistory +
-			recoveryExperience;
+			recoveryExperience +
+			autonomy +
+			userRating;
 
 		return {
 			successRate,
@@ -52,7 +58,9 @@ export class HeuristicSkillEvaluator {
 			descriptionQuality,
 			reusesHistory,
 			recoveryExperience,
-			total,
+			autonomy,
+			userRating,
+			total: Math.min(100, total),
 		};
 	}
 
@@ -73,6 +81,8 @@ export class HeuristicSkillEvaluator {
 		)
 			? 3
 			: 0;
+		const autonomy = this.#scoreAutonomy(skill);
+		const userRating = this.#scoreUserRating(skill);
 
 		const total =
 			successRate +
@@ -82,7 +92,9 @@ export class HeuristicSkillEvaluator {
 			approachSubstance +
 			descriptionQuality +
 			reusesHistory +
-			recoveryExperience;
+			recoveryExperience +
+			autonomy +
+			userRating;
 
 		return {
 			successRate,
@@ -93,7 +105,37 @@ export class HeuristicSkillEvaluator {
 			descriptionQuality,
 			reusesHistory,
 			recoveryExperience,
-			total,
+			autonomy,
+			userRating,
+			total: Math.min(100, total),
 		};
+	}
+
+	#scoreAutonomy(skill: EvolvedSkill | ExtractedSkill): number {
+		let score = 0;
+		// +10 if approach includes explicit conditionals
+		const approachLower = skill.approach.toLowerCase();
+		if (/\b(if|else|when|unless)\b/.test(approachLower)) {
+			score += 10;
+		}
+		// +10 if approach length > 300
+		if (skill.approach.length > 300) {
+			score += 10;
+		}
+		// +5 if pitfalls include recovery steps
+		const hasRecoverySteps = skill.pitfalls.some(p =>
+			/\b(then|use|fall back|try|retry|recover|fix|resolve)\b/i.test(p),
+		);
+		if (hasRecoverySteps) {
+			score += 5;
+		}
+		return score;
+	}
+
+	#scoreUserRating(skill: EvolvedSkill): number {
+		if (!skill.userRating) return 0;
+		// Map 1-5 stars to -10 to +10 adjustment
+		const map = { 1: -10, 2: -5, 3: 0, 4: 5, 5: 10 };
+		return map[skill.userRating as keyof typeof map] ?? 0;
 	}
 }

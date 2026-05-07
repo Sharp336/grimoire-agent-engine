@@ -194,11 +194,45 @@ export function initSchema(db: Database): void {
 			FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
 		);
 	`);
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS skill_effectiveness (
+			skill_name TEXT PRIMARY KEY,
+			times_injected INTEGER NOT NULL DEFAULT 0,
+			times_helped INTEGER NOT NULL DEFAULT 0,
+			times_failed INTEGER NOT NULL DEFAULT 0,
+			last_injected_at INTEGER NOT NULL DEFAULT 0
+		);
+	`);
+
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS nudge_history (
+			id TEXT PRIMARY KEY,
+			session_id TEXT NOT NULL,
+			project TEXT NOT NULL DEFAULT '',
+			type TEXT NOT NULL,
+			severity TEXT NOT NULL,
+			message TEXT NOT NULL,
+			suggestion TEXT NOT NULL,
+			detected_at INTEGER NOT NULL
+		);
+	`);
 
 	// Migrate skills table: add intent column if missing
 	const skillsColumns = db.prepare("PRAGMA table_info(skills)").all() as Array<{ name: string }>;
 	const hasIntentCol = skillsColumns.some(c => c.name === "intent");
 	if (!hasIntentCol) {
 		db.exec(`ALTER TABLE skills ADD COLUMN intent TEXT;`);
+	}
+	const hasAutonomyNotesCol = skillsColumns.some(c => c.name === "autonomy_notes");
+	if (!hasAutonomyNotesCol) {
+		db.exec(`ALTER TABLE skills ADD COLUMN autonomy_notes TEXT;`);
+	}
+	const hasLastOptimizedAtCol = skillsColumns.some(c => c.name === "last_optimized_at");
+	if (!hasLastOptimizedAtCol) {
+		db.exec(`ALTER TABLE skills ADD COLUMN last_optimized_at INTEGER;`);
+	}
+	const hasUserRatingCol = skillsColumns.some(c => c.name === "user_rating");
+	if (!hasUserRatingCol) {
+		db.exec(`ALTER TABLE skills ADD COLUMN user_rating INTEGER;`);
 	}
 }

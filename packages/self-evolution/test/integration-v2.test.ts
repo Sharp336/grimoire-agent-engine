@@ -10,6 +10,7 @@ import { SqliteEffectivenessStore } from "../src/storage/effectiveness";
 import { SqliteEpisodeStore } from "../src/storage/episodes";
 import { SqliteIntentStore } from "../src/storage/intents";
 import { SqliteProfileStore } from "../src/storage/profiles";
+import { SqliteSkillEffectivenessStore } from "../src/storage/skill-effectiveness";
 import type { SessionTrace } from "../src/types";
 import { UserProfiler } from "../src/user-profiler";
 import { WorkflowMiner } from "../src/workflow-miner";
@@ -113,7 +114,7 @@ describe("v2 end-to-end", () => {
 		expect(results[0]!.episode.id).toBe(episode.id);
 
 		// 7. Feedback tracking
-		const tracker = new FeedbackTracker(effectivenessStore);
+		const tracker = new FeedbackTracker(effectivenessStore, new SqliteSkillEffectivenessStore(db));
 		await tracker.trackInjection([episode.id]);
 		await tracker.recordOutcome([episode.id], true);
 		const eff = await effectivenessStore.get(episode.id);

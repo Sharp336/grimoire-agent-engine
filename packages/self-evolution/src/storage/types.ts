@@ -1,11 +1,10 @@
-/**
- * Storage abstraction interfaces for self-evolution.
- */
 import type {
 	Episode,
 	EpisodeEffectiveness,
 	EpisodeIntent,
 	EvolvedSkill,
+	NudgeRecord,
+	SkillEffectiveness,
 	SkillVersion,
 	UserProfile,
 	WorkflowPattern,
@@ -15,6 +14,7 @@ export interface EpisodeStore {
 	insert(episode: Episode): Promise<void>;
 	listRecent(limit: number): Promise<Episode[]>;
 	searchByKeyword(query: string, limit: number): Promise<Episode[]>;
+	searchFailedByKeyword(query: string, limit: number): Promise<Episode[]>;
 	deleteOld(keepCount: number): Promise<number>;
 	count(): Promise<number>;
 }
@@ -61,4 +61,16 @@ export interface EffectivenessStore {
 	get(episodeId: string): Promise<EpisodeEffectiveness | undefined>;
 	recordInjection(episodeId: string): Promise<void>;
 	recordOutcome(episodeId: string, helped: boolean): Promise<void>;
+}
+export interface SkillEffectivenessStore {
+	get(skillName: string): Promise<SkillEffectiveness | undefined>;
+	recordInjection(skillName: string): Promise<void>;
+	recordOutcome(skillName: string, succeeded: boolean): Promise<void>;
+}
+
+export interface NudgeHistoryStore {
+	insert(record: NudgeRecord): Promise<void>;
+	listRecent(limit: number): Promise<NudgeRecord[]>;
+	listByType(type: string, limit: number): Promise<NudgeRecord[]>;
+	countByType(type: string, since: number): Promise<number>;
 }
