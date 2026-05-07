@@ -7,7 +7,7 @@ import { HeuristicSkillEvaluator } from "./evaluator";
 import type { ActivityLogger } from "./logging/activity-logger";
 import type { SkillManager } from "./manager";
 import type { SqliteStatsStore } from "./storage/skills";
-import type { EpisodeStore, SkillStore, SkillVersionStore } from "./storage/types";
+import type { EpisodeStore, ProfileStore, SkillStore, SkillVersionStore, WorkflowPatternStore } from "./storage/types";
 
 export interface CommandStores {
 	ensureInit(cwd: string): void;
@@ -17,6 +17,8 @@ export interface CommandStores {
 	statsStore(): SqliteStatsStore;
 	skillManager(): SkillManager;
 	activityLogger(): ActivityLogger;
+	profileStore(): ProfileStore;
+	workflowPatternStore(): WorkflowPatternStore;
 }
 
 export function registerSelfEvolutionCommands(api: ExtensionAPI, stores: CommandStores): void {
@@ -220,6 +222,70 @@ export function registerSelfEvolutionCommands(api: ExtensionAPI, stores: Command
 			} catch (err) {
 				logger.error("evolution-rollback failed", { error: String(err) });
 				ctx.ui.notify("Rollback failed", "error");
+			}
+		},
+	});
+	api.registerCommand("evolution-profile", {
+		description: "Display current user behavioral profile.",
+		async handler(_args, ctx): Promise<void> {
+			stores.ensureInit(ctx.cwd);
+			try {
+				const profile = await stores.profileStore().get("default");
+				if (!profile) {
+					ctx.ui.notify("No profile data yet. Complete a few sessions first.", "info");
+					return;
+				}
+				const lines: string[] = [];
+				lines.push(
+					`Sessions: ${profile.sessionCount} | Tool calls/session: ${profile.avgToolCallsPerSession.toFixed(1)} | Files/session: ${profile.avgFilesModifiedPerSession.toFixed(1)}`,
+				);
+				lines.push(
+					`Error rate: ${(profile.errorRate * 100).toFixed(0)}% | Recovery rate: ${(profile.recoveryRate * 100).toFixed(0)}%`,
+				);
+				lines.push(`Preferred languages: ${profile.preferredLanguages.join(", ") || "none yet"}`);
+
+				const topTools = Object.entries(profile.toolFrequency)
+					.sort((a, b) => b[1] - a[1])
+					.slice(0, 5)
+					.map(([t, c]) => `${t}(${c})`)
+					.join(", ");
+				if (topTools) lines.push(`Top tools: ${topTools}`);
+
+				const topIntents = Object.entries(profile.intentDistribution)
+					.sort((a, b) => b[1] - a[1])
+					.map(([i, c]) => `${i}(${c})`)
+					.join(", ");
+				if (topIntents) lines.push(`Intent distribution: ${topIntents}`);
+
+				ctx.ui.notify(lines.join("\n"), "info");
+			} catch (err) {
+				logger.error("evolution-profile failed", { error: String(err) });
+				ctx.ui.notify("Failed to load profile", "error");
+			}
+		},
+	});
+
+	api.registerCommand("evolution-workflows", {
+		description: "List mined workflow patterns by intent.",
+		async handler(args, ctx): Promise<void> {
+			stores.ensureInit(ctx.cwd);
+			try {
+				const intentFilter = args.trim();
+				const patterns = intentFilter
+					? await stores.workflowPatternStore().getByIntent(intentFilter, 20)
+					: await stores.workflowPatternStore().listAll();
+				if (patterns.length === 0) {
+					const msg = intentFilter
+						? `No workflow patterns found for intent "${intentFilter}"`
+						: "No workflow patterns mined yet";
+					ctx.ui.notify(msg, "info");
+					return;
+				}
+				const lines = patterns.map(p => `${p.intent}: ${p.toolSequence.join(" → ")} (seen ${p.occurrenceCount}x)`);
+				ctx.ui.notify(lines.join("\n"), "info");
+			} catch (err) {
+				logger.error("evolution-workflows failed", { error: String(err) });
+				ctx.ui.notify("Failed to list workflow patterns", "error");
 			}
 		},
 	});

@@ -24,6 +24,7 @@ import { SqliteNudgeHistoryStore } from "./storage/nudge-history";
 import { SqliteProfileStore } from "./storage/profiles";
 import { SqliteSkillEffectivenessStore } from "./storage/skill-effectiveness";
 import { SqliteSkillStore, SqliteSkillVersionStore, type SqliteStatsStore } from "./storage/skills";
+import { SqliteWorkflowPatternStore } from "./storage/workflow-patterns";
 import { registerSelfEvolutionTools } from "./tools";
 import { summarizeTrace, TraceRecorder } from "./trace";
 import type { SelfEvolutionFlags } from "./types";
@@ -111,6 +112,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	let intentClassifier: IntentClassifier | undefined;
 	let workflowMiner: WorkflowMiner | undefined;
 	let userProfiler: UserProfiler | undefined;
+	let workflowPatternStore: SqliteWorkflowPatternStore | undefined;
 	let feedbackTracker: FeedbackTracker | undefined;
 	let contextAwareRetriever: ContextAwareRetriever | undefined;
 	let episodeRetriever: EpisodeRetriever | undefined;
@@ -134,6 +136,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 
 		intentStore = new SqliteIntentStore(db);
 		profileStore = new SqliteProfileStore(db);
+		workflowPatternStore = new SqliteWorkflowPatternStore(db);
 		effectivenessStore = new SqliteEffectivenessStore(db);
 		contextAwareRetriever = new ContextAwareRetriever(episodeStore, intentStore);
 		intentClassifier = new IntentClassifier();
@@ -182,6 +185,8 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		statsStore: () => statsStore!,
 		skillManager: () => skillManager!,
 		activityLogger: () => activityLogger!,
+		profileStore: () => profileStore!,
+		workflowPatternStore: () => workflowPatternStore!,
 	});
 
 	registerSelfEvolutionTools(api, {
@@ -333,6 +338,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			// Mine workflow pattern
 			const pattern = workflowMiner?.mine(trace, intentResult?.intent ?? "exploration");
 			if (pattern) {
+				await workflowPatternStore?.upsert(pattern);
 				await activityLogger?.log("workflow_mined", {
 					patternId: pattern.id,
 					intent: pattern.intent,

@@ -50,6 +50,7 @@ export interface WorkflowPatternStore {
 	upsert(pattern: WorkflowPattern): Promise<void>;
 	getByIntent(intent: string, limit: number): Promise<WorkflowPattern[]>;
 	getById(id: string): Promise<WorkflowPattern | undefined>;
+	listAll(): Promise<WorkflowPattern[]>;
 }
 
 export interface ProfileStore {
