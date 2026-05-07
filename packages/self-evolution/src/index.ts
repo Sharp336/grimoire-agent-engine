@@ -8,18 +8,22 @@ import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent/e
 import { logger } from "@oh-my-pi/pi-utils";
 import { registerSelfEvolutionCommands } from "./commands";
 import { ContextAwareRetriever } from "./context-aware-retriever";
+import { CrossSessionNudgeEngine } from "./cross-session-nudge";
 import type { SkillExtractor } from "./extractor";
 import { FeedbackTracker } from "./feedback-tracker";
 import { IntentClassifier } from "./intent-classifier";
-import { ActivityLogger, closeActivityLogger, getActivityLogger } from "./logging/activity-logger";
+import { type ActivityLogger, closeActivityLogger, getActivityLogger } from "./logging/activity-logger";
 import { SkillManager } from "./manager";
+import { NudgeDeliverer } from "./nudge-deliverer";
 import type { EpisodeRetriever } from "./retrieval";
 import { closeEvolutionDb, getEvolutionDb } from "./storage/db";
 import { SqliteEffectivenessStore } from "./storage/effectiveness";
 import { SqliteEpisodeStore } from "./storage/episodes";
 import { SqliteIntentStore } from "./storage/intents";
+import { SqliteNudgeHistoryStore } from "./storage/nudge-history";
 import { SqliteProfileStore } from "./storage/profiles";
-import { SqliteSkillStore, SqliteSkillVersionStore, SqliteStatsStore } from "./storage/skills";
+import { SqliteSkillEffectivenessStore } from "./storage/skill-effectiveness";
+import { SqliteSkillStore, SqliteSkillVersionStore, type SqliteStatsStore } from "./storage/skills";
 import { registerSelfEvolutionTools } from "./tools";
 import { summarizeTrace, TraceRecorder } from "./trace";
 import type { SelfEvolutionFlags } from "./types";
@@ -38,7 +42,7 @@ export function parseFlags(api: ExtensionAPI): SelfEvolutionFlags {
 		llmRerank: api.getFlag("self-evolution-llm-rerank") !== false,
 		enableVersioning: api.getFlag("self-evolution-enable-versioning") !== false,
 		enableActivityLog: api.getFlag("self-evolution-enable-activity-log") !== false,
-		globalStore: api.getFlag("self-evolution-global-store") === true,
+		globalStore: api.getFlag("self-evolution-global-store") !== false,
 	};
 }
 export const createSelfEvolutionExtension: ExtensionFactory = api => {
@@ -103,6 +107,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	let intentStore: SqliteIntentStore | undefined;
 	let profileStore: SqliteProfileStore | undefined;
 	let effectivenessStore: SqliteEffectivenessStore | undefined;
+	let skillEffectivenessStore: SqliteSkillEffectivenessStore | undefined;
 	let intentClassifier: IntentClassifier | undefined;
 	let workflowMiner: WorkflowMiner | undefined;
 	let userProfiler: UserProfiler | undefined;
@@ -110,6 +115,8 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	let contextAwareRetriever: ContextAwareRetriever | undefined;
 	let episodeRetriever: EpisodeRetriever | undefined;
 	let extractor: SkillExtractor | undefined;
+	let nudgeHistoryStore: SqliteNudgeHistoryStore | undefined;
+	let crossSessionNudgeEngine: CrossSessionNudgeEngine | undefined;
 	function _ensureInit(cwd: string): void {
 		if (recorder) return;
 		flags = parseFlags(api);
@@ -119,11 +126,12 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		episodeStore = new SqliteEpisodeStore(db);
 		skillStore = new SqliteSkillStore(db);
 		versionStore = new SqliteSkillVersionStore(db);
-		statsStore = new SqliteStatsStore(db);
-		skillManager = new SkillManager(skillStore, versionStore, activityLogger, {
+		skillEffectivenessStore = new SqliteSkillEffectivenessStore(db);
+		skillManager = new SkillManager(skillStore, versionStore, activityLogger, skillEffectivenessStore, episodeStore, {
 			enableVersioning: flags.enableVersioning,
 			maxVersions: 20,
 		});
+
 		intentStore = new SqliteIntentStore(db);
 		profileStore = new SqliteProfileStore(db);
 		effectivenessStore = new SqliteEffectivenessStore(db);
@@ -131,7 +139,37 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		intentClassifier = new IntentClassifier();
 		workflowMiner = new WorkflowMiner();
 		userProfiler = new UserProfiler();
-		feedbackTracker = new FeedbackTracker(effectivenessStore);
+		feedbackTracker = new FeedbackTracker(effectivenessStore, skillEffectivenessStore);
+		nudgeHistoryStore = new SqliteNudgeHistoryStore(db);
+		crossSessionNudgeEngine = new CrossSessionNudgeEngine(nudgeHistoryStore, episodeStore, intentStore);
+	}
+	async function _retrieveRelevantSkills(
+		query: string,
+	): Promise<Array<{ name: string; taskPattern: string; approach: string }>> {
+		if (!skillStore) return [];
+		const skills = await skillStore.list({ deprecated: false });
+		if (skills.length === 0) return [];
+
+		const queryWords = query
+			.toLowerCase()
+			.split(/\W+/)
+			.filter(w => w.length > 2);
+
+		const scored = skills.map(skill => {
+			const text = `${skill.name} ${skill.description} ${skill.taskPattern} ${skill.approach}`.toLowerCase();
+			let matches = 0;
+			for (const word of queryWords) {
+				if (text.includes(word)) matches++;
+			}
+			const score = queryWords.length > 0 ? (matches / queryWords.length) * 100 : 50;
+			return { skill, score };
+		});
+
+		scored.sort((a, b) => b.score - a.score);
+		return scored
+			.filter(s => s.score >= 30)
+			.slice(0, 3)
+			.map(s => ({ name: s.skill.name, taskPattern: s.skill.taskPattern, approach: s.skill.approach }));
 	}
 
 	// Register commands and tools in the factory body so they are collected
@@ -158,6 +196,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		try {
 			_ensureInit(ctx.cwd);
 			recorder!.onAgentStart(event, ctx);
+			crossSessionNudgeEngine?.resetSession();
 			activityLogger!
 				.log("trace_started", {
 					sessionId: ctx.sessionManager.getSessionId(),
@@ -203,6 +242,26 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 					isError: event.isError,
 				})
 				.catch((err: unknown) => logger.warn("activity log failed", { error: String(err) }));
+
+			const nudge = recorder?.checkForNudges();
+			if (nudge && _ctx.hasUI) {
+				new NudgeDeliverer().deliver(nudge, _ctx);
+			}
+			if (nudge && nudgeHistoryStore) {
+				const trace = recorder?.getTrace();
+				nudgeHistoryStore
+					.insert({
+						id: `${trace?.sessionId ?? "unknown"}-${nudge.type}-${Date.now()}`,
+						sessionId: trace?.sessionId ?? "unknown",
+						project: trace?.cwd ?? "",
+						type: nudge.type,
+						severity: nudge.severity,
+						message: nudge.message,
+						suggestion: nudge.suggestion,
+						detectedAt: Date.now(),
+					})
+					.catch((err: unknown) => logger.warn("nudge history insert failed", { error: String(err) }));
+			}
 		} catch (err) {
 			logger.error("Self-evolution tool_execution_end handler failed", { error: String(err) });
 		}
@@ -298,6 +357,17 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				const succeeded = trace.completedSuccessfully && trace.errorCount === 0;
 				await feedbackTracker.recordOutcome(prevInjected, succeeded);
 			}
+			// Record feedback for previously injected skills
+			const prevInjectedSkills = trace.injectedSkillNames;
+			if (prevInjectedSkills && prevInjectedSkills.length > 0 && feedbackTracker) {
+				const succeeded = trace.completedSuccessfully && trace.errorCount === 0;
+				await feedbackTracker.recordSkillOutcome(prevInjectedSkills, succeeded);
+				if (succeeded && skillManager) {
+					for (const name of prevInjectedSkills) {
+						await skillManager.recordSkillUsage(name, true);
+					}
+				}
+			}
 
 			// Extract skill if significant
 			if (extractor) {
@@ -320,7 +390,6 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 
 	api.on("before_agent_start", async (event, ctx) => {
 		try {
-			_ensureInit(ctx.cwd);
 			// Capture user prompt from before_agent_start before trace exists
 			recorder?.seedPrompt(event.prompt);
 			if (!flags.enablePromptInjection) return;
@@ -347,16 +416,38 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				currentIntent: intentResult?.intent,
 				profile: profile ?? undefined,
 			});
-			if (episodes.length === 0) return;
+			const relevantSkills = await _retrieveRelevantSkills(event.prompt);
+			if (episodes.length === 0 && relevantSkills.length === 0) return;
 
 			// Track injected episodes for feedback
 			recorder?.setInjectedEpisodes(episodes.map(e => e.episode.id));
 			await feedbackTracker?.trackInjection(episodes.map(e => e.episode.id));
 
-			let injection = "\n\n## Relevant Past Experience\n\n";
-			for (const e of episodes) {
-				const text = e.episode.summary.slice(0, 200);
-				injection += `[${e.episode.id}] ${text} (${e.reason})\n`;
+			// Track injected skills for feedback
+			recorder?.setInjectedSkills(relevantSkills.map(s => s.name));
+			await feedbackTracker?.trackSkillInjection(relevantSkills.map(s => s.name));
+			// Cross-session nudge analysis
+			const crossNudge = await crossSessionNudgeEngine?.analyze(ctx.cwd, event.prompt);
+			if (crossNudge && ctx.hasUI) {
+				ctx.ui.notify(
+					`[Cross-Session ${crossNudge.severity === "warn" ? "Warning" : "Tip"}] ${crossNudge.message}\nSuggestion: ${crossNudge.suggestion}`,
+					crossNudge.severity === "warn" ? "warning" : "info",
+				);
+			}
+
+			let injection = "";
+			if (episodes.length > 0) {
+				injection += "\n\n## Relevant Past Experience\n\n";
+				for (const e of episodes) {
+					const text = e.episode.summary.slice(0, 200);
+					injection += `[${e.episode.id}] ${text} (${e.reason})\n`;
+				}
+			}
+			if (relevantSkills.length > 0) {
+				injection += "\n\n## Relevant Skills\n\n";
+				for (const s of relevantSkills) {
+					injection += `**${s.name}**: ${s.taskPattern.slice(0, 120)}\n${s.approach.slice(0, 300)}\n\n`;
+				}
 			}
 
 			// Rough token guard: ~4 chars per token
@@ -367,6 +458,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			await activityLogger?.log("prompt_injected", {
 				sessionId: ctx.sessionManager.getSessionId(),
 				episodeIds: episodes.map(e => e.episode.id),
+				skillNames: relevantSkills.map(s => s.name),
 				tokenCount: Math.ceil(injection.length / 4),
 				intent: intentResult?.intent,
 			});
@@ -393,6 +485,10 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			intentStore = undefined;
 			profileStore = undefined;
 			effectivenessStore = undefined;
+			skillEffectivenessStore = undefined;
+			nudgeHistoryStore = undefined;
+			crossSessionNudgeEngine = undefined;
+
 			intentClassifier = undefined;
 			workflowMiner = undefined;
 			userProfiler = undefined;

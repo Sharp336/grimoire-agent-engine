@@ -3,6 +3,7 @@
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { logger } from "@oh-my-pi/pi-utils";
+import { HeuristicSkillEvaluator } from "./evaluator";
 import type { ActivityLogger } from "./logging/activity-logger";
 import type { SkillManager } from "./manager";
 import type { SqliteStatsStore } from "./storage/skills";
@@ -42,8 +43,8 @@ export function registerSelfEvolutionCommands(api: ExtensionAPI, stores: Command
 	});
 
 	api.registerCommand("evolution-skills", {
-		description: "List evolved skills with success rate and quality score.",
-		async handler(_args, ctx): Promise<void> {
+		description: "List evolved skills with detailed score breakdown.",
+		async handler(args, ctx): Promise<void> {
 			stores.ensureInit(ctx.cwd);
 			try {
 				const skills = await stores.skillStore().list();
@@ -51,15 +52,84 @@ export function registerSelfEvolutionCommands(api: ExtensionAPI, stores: Command
 					ctx.ui.notify("No evolved skills yet", "info");
 					return;
 				}
-				const lines = skills.map(s => {
+
+				// Check if user wants detailed view
+				const showDetail = args.trim() === "--detail";
+				const evaluator = new HeuristicSkillEvaluator();
+
+				const lines: string[] = [];
+				for (const s of skills) {
 					const total = s.successCount + s.failureCount;
 					const rate = total > 0 ? `${Math.round((s.successCount / total) * 100)}%` : "n/a";
-					return `${s.name} (v${s.version}) | quality: ${s.qualityScore ?? "?"} | success: ${rate} | used: ${s.usageCount}${s.deprecated ? " [DEPRECATED]" : ""}`;
-				});
+					const userStars = s.userRating ? "★".repeat(s.userRating) + "☆".repeat(5 - s.userRating) : "unrated";
+
+					lines.push(
+						`${s.name} (v${s.version}) | quality: ${s.qualityScore ?? "?"} | success: ${rate} | used: ${s.usageCount} | your rating: ${userStars}${s.deprecated ? " [DEPRECATED]" : ""}`,
+					);
+
+					if (showDetail) {
+						const breakdown = evaluator.reevaluate(s);
+						lines.push(
+							`  └─ successRate=${breakdown.successRate} diversity=${breakdown.toolDiversity} pitfalls=${breakdown.pitfallCoverage} ` +
+								`pattern=${breakdown.taskPatternSubstance} approach=${breakdown.approachSubstance} desc=${breakdown.descriptionQuality} ` +
+								`history=${breakdown.reusesHistory} recovery=${breakdown.recoveryExperience} autonomy=${breakdown.autonomy} user=${breakdown.userRating} ` +
+								`- TOTAL=${breakdown.total}`,
+						);
+					}
+				}
 				ctx.ui.notify(lines.join("\n"), "info");
 			} catch (err) {
 				logger.error("evolution-skills failed", { error: String(err) });
 				ctx.ui.notify("Failed to list skills", "error");
+			}
+		},
+	});
+
+	api.registerCommand("evolution-rate", {
+		description: "Rate a skill 1-5 stars. Usage: /evolution-rate <name> <1-5>",
+		async handler(args, ctx): Promise<void> {
+			stores.ensureInit(ctx.cwd);
+			const trimmed = args.trim();
+			const parts = trimmed.split(/\s+/);
+			if (parts.length < 2) {
+				ctx.ui.notify("Usage: /evolution-rate <skill-name> <1-5>", "warning");
+				return;
+			}
+
+			const ratingStr = parts.pop()!;
+			const name = parts.join(" ");
+			const rating = Number.parseInt(ratingStr, 10);
+
+			if (Number.isNaN(rating) || rating < 1 || rating > 5) {
+				ctx.ui.notify("Rating must be a number between 1 and 5", "error");
+				return;
+			}
+
+			try {
+				const skill = await stores.skillStore().get(name);
+				if (!skill) {
+					ctx.ui.notify(`Skill "${name}" not found. Use /evolution-skills to list.`, "error");
+					return;
+				}
+
+				skill.userRating = rating;
+				// Re-evaluate to update quality score with user rating
+				const evaluator = new HeuristicSkillEvaluator();
+				const breakdown = evaluator.reevaluate(skill);
+				skill.qualityScore = breakdown.total;
+
+				await stores.skillStore().upsert(skill);
+				await stores.activityLogger().log("skill_user_rated", {
+					skillName: name,
+					rating,
+					newQualityScore: skill.qualityScore,
+				});
+
+				const stars = "★".repeat(rating) + "☆".repeat(5 - rating);
+				ctx.ui.notify(`Rated "${name}" ${stars} (quality updated to ${skill.qualityScore})`, "info");
+			} catch (err) {
+				logger.error("evolution-rate failed", { error: String(err) });
+				ctx.ui.notify("Failed to rate skill", "error");
 			}
 		},
 	});
@@ -77,7 +147,7 @@ export function registerSelfEvolutionCommands(api: ExtensionAPI, stores: Command
 					ctx.ui.notify("Cancelled", "info");
 					return;
 				}
-				ctx.ui.notify("Please delete the .omp/self-evolution/ directory manually to clear all data.", "warning");
+				ctx.ui.notify("Please delete the ~/.omp/self-evolution/ directory manually to clear all data.", "warning");
 			} catch (err) {
 				logger.error("evolution-clear failed", { error: String(err) });
 			}

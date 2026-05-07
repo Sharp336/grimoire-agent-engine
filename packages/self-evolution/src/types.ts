@@ -27,9 +27,10 @@ export interface SessionTrace {
 	errorCount: number;
 	hadRecovery: boolean;
 	completedSuccessfully: boolean;
+	nudges?: import("./nudge-detector").Nudge[];
 	injectedEpisodeIds?: string[];
+	injectedSkillNames?: string[];
 }
-
 // ============================================================================
 // Episode (persisted)
 // ============================================================================
@@ -71,6 +72,10 @@ export interface EvolvedSkill {
 	optimizedPrompt?: string;
 	deprecated?: boolean;
 	deprecationReason?: string;
+	autonomyNotes?: string;
+	lastOptimizedAt?: number;
+	optimizationCount?: number;
+	userRating?: number; // 1-5 star rating from user
 }
 
 // ============================================================================
@@ -109,6 +114,7 @@ export interface ExtractedSkill {
 	pitfalls: string[];
 	qualityScore: number;
 	llmRefined: boolean;
+	autonomyNotes?: string;
 }
 
 // ============================================================================
@@ -211,4 +217,38 @@ export interface EpisodeEffectiveness {
 	timesInjected: number;
 	timesHelped: number;
 	timesFailed: number;
+}
+// ============================================================================
+// Skill Effectiveness (v2)
+// ============================================================================
+
+export interface SkillEffectiveness {
+	skillName: string;
+	timesInjected: number;
+	timesHelped: number;
+	timesFailed: number;
+	lastInjectedAt: number;
+}
+
+// ============================================================================
+// Cross-Session Nudges
+// ============================================================================
+
+export interface CrossSessionNudge {
+	type: string;
+	severity: "info" | "warn";
+	message: string;
+	suggestion: string;
+	detectedAt: number;
+}
+
+export interface NudgeRecord {
+	id: string;
+	sessionId: string;
+	project: string;
+	type: string;
+	severity: string;
+	message: string;
+	suggestion: string;
+	detectedAt: number;
 }

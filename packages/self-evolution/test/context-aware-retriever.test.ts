@@ -17,6 +17,9 @@ class MockEpisodeStore implements EpisodeStore {
 	async searchByKeyword(): Promise<Episode[]> {
 		return [];
 	}
+	async searchFailedByKeyword(): Promise<Episode[]> {
+		return [];
+	}
 	async deleteOld(): Promise<number> {
 		return 0;
 	}

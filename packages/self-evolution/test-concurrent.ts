@@ -7,8 +7,9 @@
  * 3. busy_timeout handling
  * 4. Data visibility across sessions
  */
-import { getEvolutionDb, closeEvolutionDb } from "./src/storage/db";
-import { getActivityLogger, closeActivityLogger } from "./src/logging/activity-logger";
+
+import { closeActivityLogger, getActivityLogger } from "./src/logging/activity-logger";
+import { closeEvolutionDb, getEvolutionDb } from "./src/storage/db";
 
 const TEST_CWD = "/tmp/test-project";
 const GLOBAL_STORE = true;
@@ -36,7 +37,21 @@ async function runSession(sessionId: string, writeCount: number, delayMs: number
 		db.run(
 			`INSERT INTO episodes (id, session_id, cwd, user_prompt, timestamp, duration_ms, tool_call_count, error_count, had_recovery, completed_successfully, summary, tools_used, files_modified)
 			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			[id, sessionId, TEST_CWD, `Write ${i} from ${sessionId}`, ts, 100, 1, 0, 0, 1, `Episode ${i}`, "read", "test.ts"],
+			[
+				id,
+				sessionId,
+				TEST_CWD,
+				`Write ${i} from ${sessionId}`,
+				ts,
+				100,
+				1,
+				0,
+				0,
+				1,
+				`Episode ${i}`,
+				"read",
+				"test.ts",
+			],
 		);
 		await logger.log("episode_written", { sessionId, episodeId: id, index: i });
 
@@ -48,7 +63,8 @@ async function runSession(sessionId: string, writeCount: number, delayMs: number
 	console.log(`[${sessionId}] Wrote ${writeCount} episodes`);
 
 	// Read back total count
-	const count = (db.query("SELECT COUNT(*) as c FROM episodes WHERE session_id = ?").get(sessionId) as { c: number }).c;
+	const count = (db.query("SELECT COUNT(*) as c FROM episodes WHERE session_id = ?").get(sessionId) as { c: number })
+		.c;
 	console.log(`[${sessionId}] Verified own episodes: ${count}`);
 
 	// Simulate session end
@@ -78,8 +94,12 @@ async function main() {
 
 		// Verify both sessions' data is present
 		const db = getEvolutionDb(TEST_CWD, GLOBAL_STORE);
-		const countA = (db.query("SELECT COUNT(*) as c FROM episodes WHERE session_id = 'session-A'").get() as { c: number }).c;
-		const countB = (db.query("SELECT COUNT(*) as c FROM episodes WHERE session_id = 'session-B'").get() as { c: number }).c;
+		const countA = (
+			db.query("SELECT COUNT(*) as c FROM episodes WHERE session_id = 'session-A'").get() as { c: number }
+		).c;
+		const countB = (
+			db.query("SELECT COUNT(*) as c FROM episodes WHERE session_id = 'session-B'").get() as { c: number }
+		).c;
 		console.log(`\n[VERIFY] Session A episodes: ${countA} (expected 10)`);
 		console.log(`[VERIFY] Session B episodes: ${countB} (expected 10)`);
 		console.log(`[VERIFY] Result: ${countA === 10 && countB === 10 ? "PASS" : "FAIL"}`);
@@ -90,7 +110,9 @@ async function main() {
 		await Promise.all(writers);
 
 		const db = getEvolutionDb(TEST_CWD, GLOBAL_STORE);
-		const total = (db.query("SELECT COUNT(*) as c FROM episodes WHERE session_id LIKE 'stress-%'").get() as { c: number }).c;
+		const total = (
+			db.query("SELECT COUNT(*) as c FROM episodes WHERE session_id LIKE 'stress-%'").get() as { c: number }
+		).c;
 		console.log(`\n[VERIFY] Total stress episodes: ${total} (expected 200)`);
 		console.log(`[VERIFY] Result: ${total === 200 ? "PASS" : "FAIL"}`);
 		closeEvolutionDb(TEST_CWD, GLOBAL_STORE);
@@ -99,8 +121,21 @@ async function main() {
 		console.log("[SWITCH] Opening session 1...");
 		const db1 = getEvolutionDb(TEST_CWD, GLOBAL_STORE);
 		const log1 = getActivityLogger(TEST_CWD, GLOBAL_STORE);
-		db1.run(`INSERT INTO episodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			["switch-test-1", "switch", TEST_CWD, "First session", Date.now(), 100, 1, 0, 0, 1, "First", "read", "first.ts"]);
+		db1.run(`INSERT INTO episodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+			"switch-test-1",
+			"switch",
+			TEST_CWD,
+			"First session",
+			Date.now(),
+			100,
+			1,
+			0,
+			0,
+			1,
+			"First",
+			"read",
+			"first.ts",
+		]);
 		await log1.log("first_session", {});
 
 		console.log("[SWITCH] Closing session 1 (refcount should not close DB since no other users)...");
@@ -115,8 +150,21 @@ async function main() {
 		const row = db2.query("SELECT * FROM episodes WHERE id = 'switch-test-1'").get() as Record<string, unknown>;
 		console.log(`[SWITCH] Session 1 data visible in session 2: ${row ? "YES" : "NO"}`);
 
-		db2.run(`INSERT INTO episodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			["switch-test-2", "switch", TEST_CWD, "Second session", Date.now(), 100, 1, 0, 0, 1, "Second", "bash", "second.ts"]);
+		db2.run(`INSERT INTO episodes VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, [
+			"switch-test-2",
+			"switch",
+			TEST_CWD,
+			"Second session",
+			Date.now(),
+			100,
+			1,
+			0,
+			0,
+			1,
+			"Second",
+			"bash",
+			"second.ts",
+		]);
 		await log2.log("second_session", {});
 
 		closeActivityLogger(TEST_CWD, GLOBAL_STORE);

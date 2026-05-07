@@ -35,8 +35,9 @@ export class SqliteSkillStore implements SkillStore {
 			INSERT INTO skills (
 				name, description, task_pattern, approach, tools, pitfalls,
 				created_at, usage_count, last_used_at, success_count, failure_count,
-				version, quality_score, optimized_prompt, deprecated, deprecation_reason
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				version, quality_score, optimized_prompt, deprecated, deprecation_reason,
+				autonomy_notes, last_optimized_at, user_rating
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(name) DO UPDATE SET
 				description = excluded.description,
 				task_pattern = excluded.task_pattern,
@@ -51,7 +52,10 @@ export class SqliteSkillStore implements SkillStore {
 				quality_score = excluded.quality_score,
 				optimized_prompt = excluded.optimized_prompt,
 				deprecated = excluded.deprecated,
-				deprecation_reason = excluded.deprecation_reason
+				deprecation_reason = excluded.deprecation_reason,
+				autonomy_notes = excluded.autonomy_notes,
+				last_optimized_at = excluded.last_optimized_at,
+				user_rating = excluded.user_rating
 		`);
 		stmt.run(
 			skill.name,
@@ -70,6 +74,9 @@ export class SqliteSkillStore implements SkillStore {
 			skill.optimizedPrompt ?? null,
 			skill.deprecated ? 1 : 0,
 			skill.deprecationReason ?? null,
+			skill.autonomyNotes ?? null,
+			skill.lastOptimizedAt ?? null,
+			skill.userRating ?? null,
 		);
 		stmt.finalize();
 	}
@@ -196,6 +203,9 @@ interface RawSkillRow {
 	optimized_prompt: string | null;
 	deprecated: number;
 	deprecation_reason: string | null;
+	autonomy_notes: string | null;
+	last_optimized_at: number | null;
+	user_rating: number | null;
 }
 
 interface RawVersionRow {
@@ -225,6 +235,9 @@ function rowToSkill(row: RawSkillRow): EvolvedSkill {
 		optimizedPrompt: row.optimized_prompt ?? undefined,
 		deprecated: Boolean(row.deprecated),
 		deprecationReason: row.deprecation_reason ?? undefined,
+		autonomyNotes: row.autonomy_notes ?? undefined,
+		lastOptimizedAt: row.last_optimized_at ?? undefined,
+		userRating: row.user_rating ?? undefined,
 	};
 }
 

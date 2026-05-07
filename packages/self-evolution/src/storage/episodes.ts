@@ -84,6 +84,20 @@ export class SqliteEpisodeStore implements EpisodeStore {
 		stmt.finalize();
 		return rows.map(rowToEpisode);
 	}
+	async searchFailedByKeyword(query: string, limit: number): Promise<Episode[]> {
+		// Fallback to LIKE search on failed episodes
+		const pattern = `%${query.replace(/[%_]/g, "\\$&")}%`;
+		const stmt = this.db.prepare(`
+      SELECT * FROM episodes
+      WHERE completed_successfully = 0
+        AND (user_prompt LIKE ? OR summary LIKE ?)
+      ORDER BY timestamp DESC
+      LIMIT ?
+    `);
+		const rows = stmt.all(pattern, pattern, limit) as RawEpisodeRow[];
+		stmt.finalize();
+		return rows.map(rowToEpisode);
+	}
 
 	async deleteOld(keepCount: number): Promise<number> {
 		const countStmt = this.db.prepare(`SELECT COUNT(*) as c FROM episodes`);

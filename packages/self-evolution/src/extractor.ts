@@ -81,6 +81,7 @@ export class SkillExtractor {
 			pitfalls,
 			qualityScore: 0,
 			llmRefined: false,
+			autonomyNotes: "Initial extraction. May need refinement for full autonomy.",
 		};
 	}
 

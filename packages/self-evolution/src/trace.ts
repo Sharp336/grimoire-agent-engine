@@ -9,6 +9,7 @@ import type {
 	ToolExecutionEndEvent,
 	ToolExecutionStartEvent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { NudgeDetector } from "./nudge-detector";
 import type { SessionTrace } from "./types";
 
 export class TraceRecorder {
@@ -17,6 +18,9 @@ export class TraceRecorder {
 	#pendingPrompt: string | undefined;
 
 	#injectedEpisodeIds: string[] = [];
+	#injectedSkillNames: string[] = [];
+	#nudgeDetector = new NudgeDetector();
+
 	getTrace(): SessionTrace | undefined {
 		return this.#trace;
 	}
@@ -34,6 +38,9 @@ export class TraceRecorder {
 
 	setInjectedEpisodes(ids: string[]): void {
 		this.#injectedEpisodeIds = ids;
+	}
+	setInjectedSkills(names: string[]): void {
+		this.#injectedSkillNames = names;
 	}
 	onAgentStart(_event: AgentStartEvent, ctx: ExtensionContext): void {
 		this.#sessionId = ctx.sessionManager.getSessionId();
@@ -105,6 +112,16 @@ export class TraceRecorder {
 		}
 	}
 
+	checkForNudges(): import("./nudge-detector").Nudge | undefined {
+		if (!this.#trace) return undefined;
+		const nudge = this.#nudgeDetector.check(this.#trace);
+		if (nudge) {
+			this.#trace.nudges ??= [];
+			this.#trace.nudges.push(nudge);
+		}
+		return nudge;
+	}
+
 	onAgentEnd(_event: AgentEndEvent): SessionTrace | undefined {
 		if (!this.#trace) return undefined;
 		this.#trace.endTime = Date.now();
@@ -112,6 +129,8 @@ export class TraceRecorder {
 		this.#trace.completedSuccessfully = this.#trace.errorCount === 0 && this.#trace.toolCallCount > 0;
 		const result = this.#trace;
 		this.#trace.injectedEpisodeIds = this.#injectedEpisodeIds;
+		this.#trace.injectedSkillNames = this.#injectedSkillNames;
+		this.#injectedSkillNames = [];
 		this.#injectedEpisodeIds = [];
 		this.#trace = undefined;
 		return result;
@@ -120,6 +139,7 @@ export class TraceRecorder {
 	reset(): void {
 		this.#trace = undefined;
 		this.#pendingPrompt = undefined;
+		this.#injectedSkillNames = [];
 		this.#injectedEpisodeIds = [];
 	}
 }
