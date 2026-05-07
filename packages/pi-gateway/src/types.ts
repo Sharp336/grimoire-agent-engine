@@ -34,6 +34,8 @@ export interface OutboundMessage {
 	content: MessageContent;
 	replyTo?: string;
 	mentions?: string[];
+	/** If set, update an existing message instead of creating new one */
+	messageId?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -81,6 +83,7 @@ export interface SessionRecord {
 	createdAt: number;
 	updatedAt: number;
 	lastMessageId?: string;
+	ompSessionPath?: string;
 	status: "active" | "idle" | "closed";
 }
 

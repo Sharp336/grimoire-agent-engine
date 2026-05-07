@@ -104,15 +104,22 @@ export class Gateway {
 		try {
 			// Find or create session
 			let session = await this.#store?.getSession(msg.channelId, msg.conversationId);
+			const now = Date.now();
 			if (!session && this.#store) {
+				const sessionPath = this.#buildSessionPath(msg.channelId, msg.conversationId);
 				session = await this.#store.createSession({
 					channelId: msg.channelId,
 					userId: msg.userId,
 					conversationId: msg.conversationId,
-					createdAt: Date.now(),
-					updatedAt: Date.now(),
+					createdAt: now,
+					updatedAt: now,
+					ompSessionPath: sessionPath,
 					status: "active",
 				});
+			} else if (session && !session.ompSessionPath && this.#store) {
+				const sessionPath = this.#buildSessionPath(msg.channelId, msg.conversationId);
+				await this.#store.updateSession(session.id, { ompSessionPath: sessionPath, updatedAt: now });
+				session = { ...session, ompSessionPath: sessionPath };
 			}
 
 			if (!session) {
@@ -120,10 +127,18 @@ export class Gateway {
 				return;
 			}
 
+			// Send "processing" placeholder first
+			const placeholder: OutboundMessage = {
+				channelId: msg.channelId,
+				conversationId: msg.conversationId,
+				content: { type: "markdown", markdown: "💭 思考中..." },
+			};
+			await this.#registry.sendMessage(placeholder);
+
 			// Forward to agent bridge
 			const response = await this.#forwardToAgent(msg, session);
 
-			// Send response back to channel
+			// Send final response
 			if (response) {
 				const outbound: OutboundMessage = {
 					channelId: msg.channelId,
@@ -146,5 +161,12 @@ export class Gateway {
 
 	async #forwardToAgent(msg: InboundMessage, session: SessionRecord): Promise<string | null> {
 		return this.#bridge.forward(msg, session);
+	}
+
+	#buildSessionPath(channelId: string, conversationId: string): string {
+		const dataDir = this.#config.dataDir ?? `${process.env.HOME}/.pi/gateway-data`;
+		// Sanitize conversationId for filesystem safety
+		const safeId = conversationId.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
+		return `${dataDir}/sessions/${channelId}/${safeId}.jsonl`;
 	}
 }

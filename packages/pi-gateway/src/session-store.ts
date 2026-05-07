@@ -22,11 +22,10 @@ CREATE TABLE IF NOT EXISTS sessions (
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL,
   last_message_id TEXT,
+  omp_session_path TEXT,
   status TEXT NOT NULL DEFAULT 'active',
   UNIQUE(channel_id, conversation_id)
-);
-`;
-
+);`;
 // ═══════════════════════════════════════════════════════════════════════
 // Implementation
 // ═══════════════════════════════════════════════════════════════════════
@@ -34,8 +33,11 @@ CREATE TABLE IF NOT EXISTS sessions (
 export class SQLiteSessionStore implements SessionStore {
 	#db: Database;
 	#getSessionByConv: Statement<SessionRecord, [string, string]>;
-	#insertSession: Statement<void, [string, string, string, string, number, number, string | null, string]>;
-	#updateSession: Statement<void, [number, string | null, string, string]>;
+	#insertSession: Statement<
+		void,
+		[string, string, string, string, number, number, string | null, string | null, string]
+	>;
+	#updateSession: Statement<void, [number, string | null, string | null, string, string]>;
 	#closeSession: Statement<void, [number, string]>;
 	#getActiveSessions: Statement<SessionRecord, [string | null]>;
 
@@ -47,18 +49,19 @@ export class SQLiteSessionStore implements SessionStore {
 		this.#getSessionByConv = this.#db.prepare<SessionRecord, [string, string]>(`
 			SELECT id, channel_id as channelId, user_id as userId, conversation_id as conversationId,
 			       created_at as createdAt, updated_at as updatedAt,
-			       last_message_id as lastMessageId, status
+			       last_message_id as lastMessageId, omp_session_path as ompSessionPath, status
 			FROM sessions
 			WHERE channel_id = ? AND conversation_id = ? AND status != 'closed'
 		`);
 
 		this.#insertSession = this.#db.prepare(`
-			INSERT INTO sessions (id, channel_id, user_id, conversation_id, created_at, updated_at, last_message_id, status)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO sessions (id, channel_id, user_id, conversation_id, created_at, updated_at, last_message_id, omp_session_path, status)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 
 		this.#updateSession = this.#db.prepare(`
 			UPDATE sessions SET updated_at = ?, last_message_id = COALESCE(?, last_message_id),
+			                    omp_session_path = COALESCE(?, omp_session_path),
 			                    status = COALESCE(NULLIF(?, ''), status)
 			WHERE id = ?
 		`);
@@ -70,7 +73,7 @@ export class SQLiteSessionStore implements SessionStore {
 		this.#getActiveSessions = this.#db.prepare<SessionRecord, [string | null]>(`
 			SELECT id, channel_id as channelId, user_id as userId, conversation_id as conversationId,
 			       created_at as createdAt, updated_at as updatedAt,
-			       last_message_id as lastMessageId, status
+			       last_message_id as lastMessageId, omp_session_path as ompSessionPath, status
 			FROM sessions
 			WHERE status != 'closed' AND channel_id = COALESCE(?, channel_id)
 		`);
@@ -90,6 +93,7 @@ export class SQLiteSessionStore implements SessionStore {
 			session.createdAt,
 			session.updatedAt,
 			session.lastMessageId ?? null,
+			session.ompSessionPath ?? null,
 			session.status ?? "active",
 		);
 		return { ...session, id };
@@ -97,7 +101,13 @@ export class SQLiteSessionStore implements SessionStore {
 
 	async updateSession(id: string, updates: Partial<SessionRecord>): Promise<void> {
 		const now = Date.now();
-		this.#updateSession.run(now, updates.lastMessageId ?? null, updates.status ?? "", id);
+		this.#updateSession.run(
+			now,
+			updates.lastMessageId ?? null,
+			updates.ompSessionPath ?? null,
+			updates.status ?? "",
+			id,
+		);
 	}
 
 	async closeSession(id: string): Promise<void> {

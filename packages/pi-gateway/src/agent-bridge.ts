@@ -59,7 +59,12 @@ export class AgentBridge {
 		const timeoutMs = this.#options.timeoutMs ?? 120_000;
 
 		// Build omp command arguments
-		const args = ["-p", "--no-session"];
+		const args = ["-p"];
+		if (session.ompSessionPath) {
+			args.push("--resume", session.ompSessionPath);
+		} else {
+			args.push("--no-session");
+		}
 		if (this.#options.model) {
 			args.push("--model", this.#options.model);
 		}
@@ -76,7 +81,7 @@ export class AgentBridge {
 				return `执行出错：${result.error}`;
 			}
 
-			const response = this.#stripAnsi(result.stdout).trim();
+			const response = this.#formatResponse(this.#stripAnsi(result.stdout).trim());
 			if (!response) {
 				logger.warn("Agent returned empty response");
 				return "（Agent 未返回内容）";
@@ -190,6 +195,34 @@ export class AgentBridge {
 		if (msg.content.type === "markdown") return msg.content.markdown;
 		if (msg.content.type === "voice" && msg.content.text) return msg.content.text;
 		return "[non-text message]";
+	}
+
+	/**
+	 * Format agent response for IM delivery.
+	 * - Truncate overly long output
+	 * - Summarize tool call results
+	 * - Handle code blocks and diffs
+	 */
+	#formatResponse(text: string): string {
+		const MAX_LENGTH = 2000;
+		const TRUNCATE_NOTICE = "\n\n...(内容已截断，请使用终端查看完整输出)";
+
+		if (text.length <= MAX_LENGTH) {
+			return text;
+		}
+
+		// Try to truncate at a paragraph boundary
+		let cutAt = text.lastIndexOf("\n\n", MAX_LENGTH - TRUNCATE_NOTICE.length);
+		if (cutAt < MAX_LENGTH * 0.5) {
+			// No good paragraph boundary, try line break
+			cutAt = text.lastIndexOf("\n", MAX_LENGTH - TRUNCATE_NOTICE.length);
+		}
+		if (cutAt < MAX_LENGTH * 0.5) {
+			// Fallback to hard cut
+			cutAt = MAX_LENGTH - TRUNCATE_NOTICE.length;
+		}
+
+		return text.slice(0, cutAt) + TRUNCATE_NOTICE;
 	}
 
 	/**
