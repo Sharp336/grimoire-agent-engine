@@ -144,7 +144,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		userProfiler = new UserProfiler();
 		feedbackTracker = new FeedbackTracker(effectivenessStore, skillEffectivenessStore);
 		nudgeHistoryStore = new SqliteNudgeHistoryStore(db);
-		crossSessionNudgeEngine = new CrossSessionNudgeEngine(nudgeHistoryStore, episodeStore, intentStore);
+		crossSessionNudgeEngine = new CrossSessionNudgeEngine(nudgeHistoryStore, episodeStore, profileStore);
 	}
 	async function _retrieveRelevantSkills(
 		query: string,

@@ -17,6 +17,43 @@ export interface ContextRetrievalOptions {
 	profile?: UserProfile;
 }
 
+function getLanguageFromPath(filePath: string): string | undefined {
+	const ext = filePath.match(/\.([a-zA-Z0-9]+)$/)?.[1]?.toLowerCase();
+	if (!ext) return undefined;
+	const map: Record<string, string> = {
+		ts: "typescript",
+		tsx: "typescript",
+		js: "javascript",
+		jsx: "javascript",
+		rs: "rust",
+		py: "python",
+		go: "go",
+		java: "java",
+		kt: "kotlin",
+		swift: "swift",
+		cpp: "cpp",
+		cc: "cpp",
+		cxx: "cpp",
+		h: "cpp",
+		hpp: "cpp",
+		c: "c",
+		cs: "csharp",
+		rb: "ruby",
+		php: "php",
+		scala: "scala",
+		r: "r",
+		sh: "shell",
+		bash: "shell",
+		zsh: "shell",
+		md: "markdown",
+		yml: "yaml",
+		yaml: "yaml",
+		json: "json",
+		toml: "toml",
+	};
+	return map[ext];
+}
+
 export class ContextAwareRetriever {
 	#episodeStore: EpisodeStore;
 	#intentStore: IntentStore;
@@ -76,8 +113,8 @@ export class ContextAwareRetriever {
 				const reasons: string[] = [];
 
 				// 1. Intent match (0-40 points)
+				const intents = await this.#intentStore.getByEpisode(episode.id);
 				if (options.currentIntent) {
-					const intents = await this.#intentStore.getByEpisode(episode.id);
 					const match = intents.find(i => i.intent === options.currentIntent);
 					if (match) {
 						score += Math.min(40, match.confidence * 0.4);
@@ -111,6 +148,45 @@ export class ContextAwareRetriever {
 				// 5. Recency boost (0-10 points)
 				const daysAgo = Math.floor((Date.now() - episode.timestamp) / 86400000);
 				score += Math.max(0, 10 - daysAgo);
+
+				// 6. Profile affinity boost (0-15 points)
+				if (options.profile) {
+					const p = options.profile;
+
+					// 6a. Language match (0-5)
+					const epLangs = new Set<string>();
+					for (const file of episode.filesModified) {
+						const lang = getLanguageFromPath(file);
+						if (lang) epLangs.add(lang);
+					}
+					const langMatch = [...epLangs].some(l => p.preferredLanguages.includes(l));
+					if (langMatch) {
+						score += 5;
+						reasons.push("language match");
+					}
+
+					// 6b. Tool affinity (0-5)
+					const topTools = Object.entries(p.toolFrequency)
+						.sort((a, b) => b[1] - a[1])
+						.slice(0, 3)
+						.map(([t]) => t);
+					const hasTopTool = episode.toolsUsed.some(t => topTools.includes(t));
+					if (hasTopTool) {
+						score += 5;
+						reasons.push("tool affinity");
+					}
+
+					// 6c. Intent affinity (0-5) — reuse intents queried above
+					const topIntents = Object.entries(p.intentDistribution)
+						.sort((a, b) => b[1] - a[1])
+						.slice(0, 3)
+						.map(([i]) => i);
+					const hasTopIntent = intents.some(i => topIntents.includes(i.intent));
+					if (hasTopIntent && !reasons.includes("intent match")) {
+						score += 5;
+						reasons.push("intent affinity");
+					}
+				}
 
 				return {
 					episode,

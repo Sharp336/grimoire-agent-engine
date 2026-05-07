@@ -3,8 +3,8 @@
  * and delivers proactive insights before each new session starts.
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import type { EpisodeStore, IntentStore, NudgeHistoryStore } from "./storage/types";
-import type { CrossSessionNudge } from "./types";
+import type { EpisodeStore, NudgeHistoryStore, ProfileStore } from "./storage/types";
+import type { CrossSessionNudge, UserProfile } from "./types";
 
 const CROSS_SESSION_COOLDOWN_MS = 60_000;
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
@@ -15,12 +15,14 @@ const MIN_EPISODES_FOR_PROJECT_ANALYSIS = 5;
 export class CrossSessionNudgeEngine {
 	#nudgeHistoryStore: NudgeHistoryStore;
 	#episodeStore: EpisodeStore;
+	#profileStore: ProfileStore;
 	#lastDeliveredAt = 0;
 	#deliveredThisSession = false;
 
-	constructor(nudgeHistoryStore: NudgeHistoryStore, episodeStore: EpisodeStore, _intentStore: IntentStore) {
+	constructor(nudgeHistoryStore: NudgeHistoryStore, episodeStore: EpisodeStore, profileStore: ProfileStore) {
 		this.#nudgeHistoryStore = nudgeHistoryStore;
 		this.#episodeStore = episodeStore;
+		this.#profileStore = profileStore;
 	}
 
 	resetSession(): void {
@@ -35,12 +37,14 @@ export class CrossSessionNudgeEngine {
 		try {
 			const last30d = now - THIRTY_DAYS_MS;
 			const project = cwd;
+			const profile = await this.#profileStore.get("default");
 
 			const nudge =
+				(await this.#detectHighGlobalErrorRate(profile)) ??
 				(await this.#detectRecurringRedundantSearch(last30d)) ??
 				(await this.#detectRecurringErrorCascade(last30d)) ??
-				(await this.#detectSlowProjectWarmup(project)) ??
-				(await this.#detectSkillUnderutilization(userPrompt));
+				(await this.#detectSlowProjectWarmup(project, profile)) ??
+				(await this.#detectSkillUnderutilization(userPrompt, profile));
 
 			if (nudge) {
 				this.#lastDeliveredAt = now;
@@ -82,8 +86,24 @@ export class CrossSessionNudgeEngine {
 		return undefined;
 	}
 
-	async #detectSlowProjectWarmup(project: string): Promise<CrossSessionNudge | undefined> {
-		// Get recent episodes for this project
+	async #detectHighGlobalErrorRate(profile: UserProfile | undefined): Promise<CrossSessionNudge | undefined> {
+		if (!profile || profile.sessionCount < 5) return undefined;
+		if (profile.errorRate > 0.3) {
+			return {
+				type: "cross-session-high-error-rate",
+				severity: "warn",
+				message: `Your recent sessions have a ${(profile.errorRate * 100).toFixed(0)}% error rate.`,
+				suggestion: "Review common failure patterns: missing files, permission issues, or incomplete commands.",
+				detectedAt: Date.now(),
+			};
+		}
+		return undefined;
+	}
+
+	async #detectSlowProjectWarmup(
+		project: string,
+		profile: UserProfile | undefined,
+	): Promise<CrossSessionNudge | undefined> {
 		const recentEpisodes = await this.#episodeStore.listRecent(50);
 		const projectEpisodes = recentEpisodes.filter(e => e.cwd === project);
 
@@ -96,11 +116,15 @@ export class CrossSessionNudgeEngine {
 		const successCount = projectEpisodes.filter(e => e.completedSuccessfully).length;
 		const successRate = successCount / projectEpisodes.length;
 
-		if (avgToolCalls >= HIGH_TOOL_CALL_THRESHOLD && successRate <= LOW_SUCCESS_RATE_THRESHOLD) {
+		// Use profile baseline if available, otherwise use fixed thresholds
+		const baselineToolCalls = profile?.avgToolCallsPerSession ?? HIGH_TOOL_CALL_THRESHOLD;
+		const baselineSuccessRate = profile ? 1 - profile.errorRate : 1 - LOW_SUCCESS_RATE_THRESHOLD;
+
+		if (avgToolCalls >= baselineToolCalls * 1.5 && successRate <= baselineSuccessRate * 0.7) {
 			return {
 				type: "cross-session-slow-warmup",
 				severity: "warn",
-				message: `This project has a high exploration overhead (${Math.round(avgToolCalls)} avg tool calls per session with low success rate).`,
+				message: `This project has a high exploration overhead (${Math.round(avgToolCalls)} avg tool calls vs your baseline ${baselineToolCalls.toFixed(1)}).`,
 				suggestion: "Consider creating an init skill to document the architecture and reduce repeated exploration.",
 				detectedAt: Date.now(),
 			};
@@ -108,39 +132,80 @@ export class CrossSessionNudgeEngine {
 		return undefined;
 	}
 
-	async #detectSkillUnderutilization(userPrompt: string): Promise<CrossSessionNudge | undefined> {
-		// This is a lightweight heuristic: we don't have access to the skill store here,
-		// so we rely on episode intents. If the user frequently does the same type of task
-		// but episodes show high tool counts (suggesting they don't use skills), nudge them.
-		const recentEpisodes = await this.#episodeStore.listRecent(20);
-		if (recentEpisodes.length < 3) return undefined;
+	async #detectSkillUnderutilization(
+		userPrompt: string,
+		profile: UserProfile | undefined,
+	): Promise<CrossSessionNudge | undefined> {
+		if (!profile || profile.sessionCount < 3) {
+			// Fall back to episode-based heuristic when profile is unavailable
+			const recentEpisodes = await this.#episodeStore.listRecent(20);
+			if (recentEpisodes.length < 3) return undefined;
 
-		// Check if recent similar-prompt episodes had high tool call counts
+			const promptWords = userPrompt
+				.toLowerCase()
+				.split(/\W+/)
+				.filter(w => w.length > 3);
+
+			const similarEpisodes = recentEpisodes.filter(e => {
+				const epWords = e.userPrompt
+					.toLowerCase()
+					.split(/\W+/)
+					.filter(w => w.length > 3);
+				const common = promptWords.filter(w => epWords.includes(w));
+				return common.length >= 2;
+			});
+
+			if (similarEpisodes.length >= 3) {
+				const avgToolCalls = similarEpisodes.reduce((sum, e) => sum + e.toolCallCount, 0) / similarEpisodes.length;
+				if (avgToolCalls >= 10) {
+					return {
+						type: "cross-session-skill-underutilization",
+						severity: "info",
+						message: `You've performed similar tasks multiple times with high tool usage.`,
+						suggestion: "Consider extracting a skill for this workflow to reduce repetition in future sessions.",
+						detectedAt: Date.now(),
+					};
+				}
+			}
+			return undefined;
+		}
+
+		// Profile-based heuristic: check if current prompt words match top intents
 		const promptWords = userPrompt
 			.toLowerCase()
 			.split(/\W+/)
 			.filter(w => w.length > 3);
+		const topIntents = Object.entries(profile.intentDistribution)
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, 3)
+			.map(([i]) => i);
 
-		const similarEpisodes = recentEpisodes.filter(e => {
-			const epWords = e.userPrompt
-				.toLowerCase()
-				.split(/\W+/)
-				.filter(w => w.length > 3);
-			const common = promptWords.filter(w => epWords.includes(w));
-			return common.length >= 2;
+		// Simple heuristic: if prompt contains words related to top intent
+		const intentWordMap: Record<string, string[]> = {
+			refactoring: ["refactor", "restructure", "rename", "extract", "move"],
+			bugfix: ["fix", "bug", "error", "crash", "broken", "repair"],
+			"feature-add": ["add", "feature", "implement", "create", "new"],
+			testing: ["test", "spec", "coverage", "jest", "vitest"],
+			documentation: ["doc", "readme", "comment", "markdown"],
+			configuration: ["config", "setup", "env", "dockerfile", "yaml"],
+			exploration: ["explore", "investigate", "research", "understand"],
+			optimization: ["optimize", "perf", "performance", "cache", "speed"],
+			integration: ["integrate", "api", "webhook", "sync", "connect"],
+		};
+
+		const matchedTopIntent = topIntents.find(intent => {
+			const words = intentWordMap[intent] ?? [];
+			return words.some(w => promptWords.includes(w));
 		});
 
-		if (similarEpisodes.length >= 3) {
-			const avgToolCalls = similarEpisodes.reduce((sum, e) => sum + e.toolCallCount, 0) / similarEpisodes.length;
-			if (avgToolCalls >= 10) {
-				return {
-					type: "cross-session-skill-underutilization",
-					severity: "info",
-					message: `You've performed similar tasks multiple times with high tool usage.`,
-					suggestion: "Consider extracting a skill for this workflow to reduce repetition in future sessions.",
-					detectedAt: Date.now(),
-				};
-			}
+		if (matchedTopIntent && profile.avgToolCallsPerSession >= 10) {
+			return {
+				type: "cross-session-skill-underutilization",
+				severity: "info",
+				message: `You frequently work on "${matchedTopIntent}" tasks with ${profile.avgToolCallsPerSession.toFixed(1)} avg tool calls per session.`,
+				suggestion: `Consider extracting a skill for "${matchedTopIntent}" workflows to reduce repetition.`,
+				detectedAt: Date.now(),
+			};
 		}
 		return undefined;
 	}
