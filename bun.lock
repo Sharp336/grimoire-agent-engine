@@ -100,6 +100,24 @@
         "@types/bun": "catalog:",
       },
     },
+    "packages/pi-gateway": {
+      "name": "@oh-my-pi/pi-gateway",
+      "version": "0.1.0",
+      "bin": {
+        "pi-gateway": "./src/cli.ts",
+      },
+      "dependencies": {
+        "@oh-my-pi/pi-utils": "catalog:",
+        "@sinclair/typebox": "catalog:",
+        "zod": "catalog:",
+      },
+      "devDependencies": {
+        "@biomejs/biome": "catalog:",
+        "@types/bun": "catalog:",
+        "@typescript/native-preview": "catalog:",
+        "typescript": "catalog:",
+      },
+    },
     "packages/self-evolution": {
       "name": "@oh-my-pi/self-evolution",
       "version": "14.5.11",
@@ -600,6 +618,8 @@
     "@oh-my-pi/pi-ai": ["@oh-my-pi/pi-ai@workspace:packages/ai"],
 
     "@oh-my-pi/pi-coding-agent": ["@oh-my-pi/pi-coding-agent@workspace:packages/coding-agent"],
+
+    "@oh-my-pi/pi-gateway": ["@oh-my-pi/pi-gateway@workspace:packages/pi-gateway"],
 
     "@oh-my-pi/pi-natives": ["@oh-my-pi/pi-natives@workspace:packages/natives"],
 
