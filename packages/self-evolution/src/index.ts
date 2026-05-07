@@ -15,7 +15,7 @@ import { IntentClassifier } from "./intent-classifier";
 import { type ActivityLogger, closeActivityLogger, getActivityLogger } from "./logging/activity-logger";
 import { SkillManager } from "./manager";
 import { NudgeDeliverer } from "./nudge-deliverer";
-import type { EpisodeRetriever } from "./retrieval";
+import { EpisodeRetriever } from "./retrieval";
 import { closeEvolutionDb, getEvolutionDb } from "./storage/db";
 import { SqliteEffectivenessStore } from "./storage/effectiveness";
 import { SqliteEpisodeStore } from "./storage/episodes";
@@ -139,6 +139,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		workflowPatternStore = new SqliteWorkflowPatternStore(db);
 		effectivenessStore = new SqliteEffectivenessStore(db);
 		contextAwareRetriever = new ContextAwareRetriever(episodeStore, intentStore);
+		episodeRetriever = new EpisodeRetriever(episodeStore);
 		intentClassifier = new IntentClassifier();
 		workflowMiner = new WorkflowMiner();
 		userProfiler = new UserProfiler();
