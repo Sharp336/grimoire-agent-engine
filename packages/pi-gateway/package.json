@@ -1,0 +1,33 @@
+{
+  "name": "@oh-my-pi/pi-gateway",
+  "version": "0.1.0",
+  "description": "IM gateway for Oh My Pi — connects AI agents to messaging platforms",
+  "type": "module",
+  "main": "./src/index.ts",
+  "types": "./src/index.ts",
+  "bin": {
+    "pi-gateway": "./src/cli.ts"
+  },
+  "scripts": {
+    "start": "bun run src/cli.ts start",
+    "check": "biome check . && tsgo -p tsconfig.json --noEmit",
+    "lint": "biome lint .",
+    "fmt": "biome format --write .",
+    "fix": "biome check --write --unsafe .",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@oh-my-pi/pi-utils": "catalog:",
+    "@sinclair/typebox": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:",
+    "@biomejs/biome": "catalog:",
+    "@typescript/native-preview": "catalog:",
+    "typescript": "catalog:"
+  },
+  "engines": {
+    "bun": ">=1.3.7"
+  }
+}
