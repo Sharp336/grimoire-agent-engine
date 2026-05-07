@@ -103,7 +103,7 @@ describe("v2 end-to-end", () => {
 		expect(pattern!.toolSequence).toEqual(["read", "ast_edit", "test"]);
 
 		// 6. Context-aware retrieval
-		const retriever = new ContextAwareRetriever(episodeStore, intentStore);
+		const retriever = new ContextAwareRetriever(episodeStore, intentStore, effectivenessStore);
 		const results = await retriever.retrieve("refactor auth", {
 			maxEpisodes: 10,
 			llmRerank: false,

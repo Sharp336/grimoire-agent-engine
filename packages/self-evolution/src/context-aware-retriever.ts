@@ -5,7 +5,7 @@
 import type { Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import rerankEpisodesTemplate from "./prompts/rerank-episodes.md" with { type: "text" };
-import type { EpisodeStore, IntentStore } from "./storage/types";
+import type { EffectivenessStore, EpisodeStore, IntentStore } from "./storage/types";
 import type { Episode, RerankedEpisode, UserProfile } from "./types";
 import { callBackgroundLlm } from "./utils/llm";
 
@@ -57,10 +57,12 @@ function getLanguageFromPath(filePath: string): string | undefined {
 export class ContextAwareRetriever {
 	#episodeStore: EpisodeStore;
 	#intentStore: IntentStore;
+	#effectivenessStore: EffectivenessStore;
 
-	constructor(episodeStore: EpisodeStore, intentStore: IntentStore) {
+	constructor(episodeStore: EpisodeStore, intentStore: IntentStore, effectivenessStore: EffectivenessStore) {
 		this.#episodeStore = episodeStore;
 		this.#intentStore = intentStore;
+		this.#effectivenessStore = effectivenessStore;
 	}
 
 	async retrieve(query: string, options: ContextRetrievalOptions): Promise<RerankedEpisode[]> {
@@ -185,6 +187,19 @@ export class ContextAwareRetriever {
 					if (hasTopIntent && !reasons.includes("intent match")) {
 						score += 5;
 						reasons.push("intent affinity");
+					}
+				}
+
+				// 7. Effectiveness feedback boost (0-10 points)
+				const eff = await this.#effectivenessStore.get(episode.id);
+				if (eff && eff.timesInjected > 0) {
+					const helpRate = eff.timesHelped / eff.timesInjected;
+					if (helpRate >= 0.5) {
+						score += Math.min(10, Math.round(helpRate * 10));
+						reasons.push("proven helpful");
+					} else if (eff.timesFailed > 0) {
+						score -= Math.min(10, Math.round((eff.timesFailed / eff.timesInjected) * 10));
+						reasons.push("previously unhelpful");
 					}
 				}
 

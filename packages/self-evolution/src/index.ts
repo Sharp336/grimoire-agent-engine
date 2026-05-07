@@ -138,7 +138,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		profileStore = new SqliteProfileStore(db);
 		workflowPatternStore = new SqliteWorkflowPatternStore(db);
 		effectivenessStore = new SqliteEffectivenessStore(db);
-		contextAwareRetriever = new ContextAwareRetriever(episodeStore, intentStore);
+		contextAwareRetriever = new ContextAwareRetriever(episodeStore, intentStore, effectivenessStore);
 		episodeRetriever = new EpisodeRetriever(episodeStore);
 		intentClassifier = new IntentClassifier();
 		workflowMiner = new WorkflowMiner();

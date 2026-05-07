@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { ContextAwareRetriever } from "../src/context-aware-retriever";
-import type { EpisodeStore, IntentStore } from "../src/storage/types";
-import type { Episode, UserProfile } from "../src/types";
+import type { EffectivenessStore, EpisodeStore, IntentStore } from "../src/storage/types";
+import type { Episode, EpisodeEffectiveness, UserProfile } from "../src/types";
 
 class MockEpisodeStore implements EpisodeStore {
 	#episodes: Episode[] = [];
@@ -50,6 +50,20 @@ class MockIntentStore implements IntentStore {
 		return results.slice(0, limit);
 	}
 }
+class MockEffectivenessStore implements EffectivenessStore {
+	#data = new Map<string, EpisodeEffectiveness>();
+
+	setEffectiveness(episodeId: string, data: EpisodeEffectiveness) {
+		this.#data.set(episodeId, data);
+	}
+
+	async get(episodeId: string): Promise<EpisodeEffectiveness | undefined> {
+		return this.#data.get(episodeId);
+	}
+
+	async recordInjection(): Promise<void> {}
+	async recordOutcome(): Promise<void> {}
+}
 
 function makeEpisode(id: string, prompt: string, toolCallCount: number = 2, overrides: Partial<Episode> = {}): Episode {
 	return {
@@ -97,7 +111,7 @@ describe("ContextAwareRetriever", () => {
 		intentStore.setIntents("ep1", [{ intent: "refactoring", confidence: 85 }]);
 		intentStore.setIntents("ep2", [{ intent: "bugfix", confidence: 90 }]);
 
-		const retriever = new ContextAwareRetriever(episodeStore, intentStore);
+		const retriever = new ContextAwareRetriever(episodeStore, intentStore, new MockEffectivenessStore());
 		const results = await retriever.retrieve("refactor something", {
 			maxEpisodes: 10,
 			llmRerank: false,
@@ -116,7 +130,7 @@ describe("ContextAwareRetriever", () => {
 		episodeStore.setEpisodes([ep1]);
 		intentStore.setIntents("ep1", [{ intent: "exploration", confidence: 60 }]);
 
-		const retriever = new ContextAwareRetriever(episodeStore, intentStore);
+		const retriever = new ContextAwareRetriever(episodeStore, intentStore, new MockEffectivenessStore());
 		const results = await retriever.retrieve("test", {
 			maxEpisodes: 10,
 			llmRerank: false,
@@ -141,7 +155,7 @@ describe("ContextAwareRetriever", () => {
 		intentStore.setIntents("ep1", [{ intent: "refactoring", confidence: 80 }]);
 		intentStore.setIntents("ep2", [{ intent: "refactoring", confidence: 80 }]);
 
-		const retriever = new ContextAwareRetriever(episodeStore, intentStore);
+		const retriever = new ContextAwareRetriever(episodeStore, intentStore, new MockEffectivenessStore());
 		const results = await retriever.retrieve("refactor", {
 			maxEpisodes: 10,
 			llmRerank: false,
@@ -167,7 +181,7 @@ describe("ContextAwareRetriever", () => {
 		intentStore.setIntents("ep1", [{ intent: "refactoring", confidence: 80 }]);
 		intentStore.setIntents("ep2", [{ intent: "refactoring", confidence: 80 }]);
 
-		const retriever = new ContextAwareRetriever(episodeStore, intentStore);
+		const retriever = new ContextAwareRetriever(episodeStore, intentStore, new MockEffectivenessStore());
 		const profile = makeProfile({ preferredLanguages: ["typescript"] });
 		const results = await retriever.retrieve("refactor", {
 			maxEpisodes: 10,
@@ -196,7 +210,7 @@ describe("ContextAwareRetriever", () => {
 		intentStore.setIntents("ep1", [{ intent: "exploration", confidence: 60 }]);
 		intentStore.setIntents("ep2", [{ intent: "exploration", confidence: 60 }]);
 
-		const retriever = new ContextAwareRetriever(episodeStore, intentStore);
+		const retriever = new ContextAwareRetriever(episodeStore, intentStore, new MockEffectivenessStore());
 		const profile = makeProfile({
 			toolFrequency: { bash: 10, read: 5, find: 1 },
 		});
@@ -221,7 +235,7 @@ describe("ContextAwareRetriever", () => {
 		intentStore.setIntents("ep1", [{ intent: "refactoring", confidence: 80 }]);
 		intentStore.setIntents("ep2", [{ intent: "bugfix", confidence: 80 }]);
 
-		const retriever = new ContextAwareRetriever(episodeStore, intentStore);
+		const retriever = new ContextAwareRetriever(episodeStore, intentStore, new MockEffectivenessStore());
 		const profile = makeProfile({
 			intentDistribution: { refactoring: 5, bugfix: 1 },
 		});
@@ -245,7 +259,7 @@ describe("ContextAwareRetriever", () => {
 		episodeStore.setEpisodes([ep1]);
 		intentStore.setIntents("ep1", [{ intent: "refactoring", confidence: 80 }]);
 
-		const retriever = new ContextAwareRetriever(episodeStore, intentStore);
+		const retriever = new ContextAwareRetriever(episodeStore, intentStore, new MockEffectivenessStore());
 		const profile = makeProfile({
 			intentDistribution: { refactoring: 5 },
 		});
@@ -259,5 +273,66 @@ describe("ContextAwareRetriever", () => {
 		expect(results.length).toBe(1);
 		expect(results[0]!.reason).toContain("intent match");
 		expect(results[0]!.reason).not.toContain("intent affinity");
+	});
+
+	test("effectiveness feedback boosts high-help-rate episodes", async () => {
+		const episodeStore = new MockEpisodeStore();
+		const intentStore = new MockIntentStore();
+		const effectivenessStore = new MockEffectivenessStore();
+
+		const ep1 = makeEpisode("ep1", "refactor code");
+		const ep2 = makeEpisode("ep2", "refactor code");
+		episodeStore.setEpisodes([ep1, ep2]);
+		intentStore.setIntents("ep1", [{ intent: "refactoring", confidence: 80 }]);
+		intentStore.setIntents("ep2", [{ intent: "refactoring", confidence: 80 }]);
+
+		// ep1 was injected 4 times, helped 3 times (75%)
+		effectivenessStore.setEffectiveness("ep1", {
+			episodeId: "ep1",
+			timesInjected: 4,
+			timesHelped: 3,
+			timesFailed: 0,
+		});
+		// ep2 was injected 4 times, helped 0 times, failed 3 times
+		effectivenessStore.setEffectiveness("ep2", {
+			episodeId: "ep2",
+			timesInjected: 4,
+			timesHelped: 0,
+			timesFailed: 3,
+		});
+
+		const retriever = new ContextAwareRetriever(episodeStore, intentStore, effectivenessStore);
+		const results = await retriever.retrieve("refactor", {
+			maxEpisodes: 10,
+			llmRerank: false,
+			currentIntent: "refactoring",
+		});
+
+		expect(results.length).toBe(2);
+		expect(results[0]!.episode.id).toBe("ep1");
+		expect(results[0]!.reason).toContain("proven helpful");
+		expect(results[1]!.episode.id).toBe("ep2");
+		expect(results[1]!.reason).toContain("previously unhelpful");
+	});
+
+	test("effectiveness feedback ignored when no injection record", async () => {
+		const episodeStore = new MockEpisodeStore();
+		const intentStore = new MockIntentStore();
+		const effectivenessStore = new MockEffectivenessStore();
+
+		const ep1 = makeEpisode("ep1", "refactor code");
+		episodeStore.setEpisodes([ep1]);
+		intentStore.setIntents("ep1", [{ intent: "refactoring", confidence: 80 }]);
+
+		const retriever = new ContextAwareRetriever(episodeStore, intentStore, effectivenessStore);
+		const results = await retriever.retrieve("refactor", {
+			maxEpisodes: 10,
+			llmRerank: false,
+			currentIntent: "refactoring",
+		});
+
+		expect(results.length).toBe(1);
+		expect(results[0]!.reason).not.toContain("proven helpful");
+		expect(results[0]!.reason).not.toContain("previously unhelpful");
 	});
 });
