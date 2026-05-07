@@ -86,6 +86,9 @@ export class TraceRecorder {
 		if (!this.#trace) return;
 		if (event.isError) {
 			this.#trace.errorCount++;
+			this.#trace.errorDetails ??= [];
+			const detail = this.#extractErrorDetail(event);
+			if (detail) this.#trace.errorDetails.push(detail);
 		}
 		// Recovery = error followed by non-error within same session
 		if (this.#trace.errorCount > 0 && !event.isError) {
@@ -98,6 +101,19 @@ export class TraceRecorder {
 			result: event.result,
 			isError: event.isError,
 		});
+	}
+
+	#extractErrorDetail(event: ToolExecutionEndEvent): string | undefined {
+		if (!event.result) return undefined;
+		let text: string;
+		try {
+			text = typeof event.result === "string" ? event.result : JSON.stringify(event.result);
+		} catch {
+			return `${event.toolName}: error (non-serializable result)`;
+		}
+		const firstLine = text.split("\n")[0]?.trim();
+		if (!firstLine || firstLine.length < 5) return undefined;
+		return `${event.toolName}: ${firstLine.slice(0, 300)}`;
 	}
 
 	onMessageEnd(event: MessageEndEvent): void {

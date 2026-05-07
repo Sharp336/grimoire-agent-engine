@@ -75,3 +75,11 @@ export interface NudgeHistoryStore {
 	listByType(type: string, limit: number): Promise<NudgeRecord[]>;
 	countByType(type: string, since: number): Promise<number>;
 }
+
+export interface ConventionStore {
+	insert(convention: import("../types").Convention): Promise<void>;
+	get(id: string): Promise<import("../types").Convention | undefined>;
+	listAll(): Promise<import("../types").Convention[]>;
+	listByType(type: string): Promise<import("../types").Convention[]>;
+	updateStats(id: string, applied: boolean, violated: boolean): Promise<void>;
+}

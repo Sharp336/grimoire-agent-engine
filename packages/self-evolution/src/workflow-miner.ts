@@ -21,7 +21,7 @@ export class WorkflowMiner {
 			}
 		}
 
-		const id = this.#hashSequence(sequence);
+		const id = this.#hashSequence(sequence, intent);
 
 		return {
 			id,
@@ -33,7 +33,7 @@ export class WorkflowMiner {
 		};
 	}
 
-	#hashSequence(sequence: string[]): string {
-		return sequence.join("→");
+	#hashSequence(sequence: string[], intent: string): string {
+		return `${intent}:${sequence.join("→")}`;
 	}
 }

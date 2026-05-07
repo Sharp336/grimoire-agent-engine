@@ -1,7 +1,9 @@
 import { Database } from "bun:sqlite";
 import { beforeEach, describe, expect, test } from "bun:test";
 import { registerSelfEvolutionCommands } from "../src/commands";
+import { SqliteConventionStore } from "../src/storage/conventions";
 import { initSchema } from "../src/storage/db";
+import { SqliteEffectivenessStore } from "../src/storage/effectiveness";
 import { SqliteEpisodeStore } from "../src/storage/episodes";
 import { SqliteProfileStore } from "../src/storage/profiles";
 import { SqliteSkillStore, SqliteSkillVersionStore, SqliteStatsStore } from "../src/storage/skills";
@@ -16,6 +18,8 @@ describe("Self-evolution commands", () => {
 	let skillStore: SqliteSkillStore;
 	let versionStore: SqliteSkillVersionStore;
 	let statsStore: SqliteStatsStore;
+	let conventionStore: SqliteConventionStore;
+	let effectivenessStore: SqliteEffectivenessStore;
 	let notified: Array<{ message: string; type?: string }>;
 	let commands: Map<string, { description?: string; handler: (args: string, ctx: unknown) => Promise<void> }>;
 	let ensureInitCalled: boolean;
@@ -40,6 +44,8 @@ describe("Self-evolution commands", () => {
 		skillStore = new SqliteSkillStore(db);
 		versionStore = new SqliteSkillVersionStore(db);
 		statsStore = new SqliteStatsStore(db);
+		conventionStore = new SqliteConventionStore(db);
+		effectivenessStore = new SqliteEffectivenessStore(db);
 		notified = [];
 		ensureInitCalled = false;
 		commands = new Map();
@@ -70,6 +76,8 @@ describe("Self-evolution commands", () => {
 			activityLogger: () => ({ log: async () => {} }) as never,
 			profileStore: () => profileStore,
 			workflowPatternStore: () => workflowPatternStore,
+			conventionStore: () => conventionStore,
+			effectivenessStore: () => effectivenessStore,
 		});
 	});
 

@@ -8,14 +8,19 @@ import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent/e
 import { logger } from "@oh-my-pi/pi-utils";
 import { registerSelfEvolutionCommands } from "./commands";
 import { ContextAwareRetriever } from "./context-aware-retriever";
+import { ConventionExtractor } from "./convention-extractor";
 import { CrossSessionNudgeEngine } from "./cross-session-nudge";
+import { EffectivenessAnalyzer } from "./effectiveness-analyzer";
+import { ErrorPatternExtractor } from "./error-pattern-extractor";
 import type { SkillExtractor } from "./extractor";
 import { FeedbackTracker } from "./feedback-tracker";
+import { InjectionFormatter } from "./injection-formatter";
 import { IntentClassifier } from "./intent-classifier";
 import { type ActivityLogger, closeActivityLogger, getActivityLogger } from "./logging/activity-logger";
 import { SkillManager } from "./manager";
 import { NudgeDeliverer } from "./nudge-deliverer";
 import { EpisodeRetriever } from "./retrieval";
+import { SqliteConventionStore } from "./storage/conventions";
 import { closeEvolutionDb, getEvolutionDb } from "./storage/db";
 import { SqliteEffectivenessStore } from "./storage/effectiveness";
 import { SqliteEpisodeStore } from "./storage/episodes";
@@ -119,6 +124,12 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	let extractor: SkillExtractor | undefined;
 	let nudgeHistoryStore: SqliteNudgeHistoryStore | undefined;
 	let crossSessionNudgeEngine: CrossSessionNudgeEngine | undefined;
+
+	let conventionStore: SqliteConventionStore | undefined;
+	let conventionExtractor: ConventionExtractor | undefined;
+	let effectivenessAnalyzer: EffectivenessAnalyzer | undefined;
+	let injectionFormatter: InjectionFormatter | undefined;
+	let errorPatternExtractor: ErrorPatternExtractor | undefined;
 	function _ensureInit(cwd: string): void {
 		if (recorder) return;
 		flags = parseFlags(api);
@@ -146,6 +157,11 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		feedbackTracker = new FeedbackTracker(effectivenessStore, skillEffectivenessStore);
 		nudgeHistoryStore = new SqliteNudgeHistoryStore(db);
 		crossSessionNudgeEngine = new CrossSessionNudgeEngine(nudgeHistoryStore, episodeStore, profileStore);
+		conventionStore = new SqliteConventionStore(db);
+		conventionExtractor = new ConventionExtractor();
+		effectivenessAnalyzer = new EffectivenessAnalyzer();
+		injectionFormatter = new InjectionFormatter();
+		errorPatternExtractor = new ErrorPatternExtractor();
 	}
 	async function _retrieveRelevantSkills(
 		query: string,
@@ -188,6 +204,8 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		activityLogger: () => activityLogger!,
 		profileStore: () => profileStore!,
 		workflowPatternStore: () => workflowPatternStore!,
+		conventionStore: () => conventionStore!,
+		effectivenessStore: () => effectivenessStore!,
 	});
 
 	registerSelfEvolutionTools(api, {
@@ -358,11 +376,62 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				});
 			}
 
-			// Record feedback for previously injected episodes
+			// Extract conventions from user dialogue
+			if (conventionExtractor && conventionStore) {
+				const conventions = conventionExtractor.extract(trace);
+				for (const c of conventions) {
+					// insert() handles deduplication and confidence boost
+					await conventionStore.insert(c);
+					await conventionStore.updateStats(c.id, true, false);
+				}
+				if (conventions.length > 0) {
+					await activityLogger?.log("conventions_extracted", { count: conventions.length });
+				}
+			}
+
+			// Extract error patterns from this session
+			if (errorPatternExtractor && conventionStore) {
+				const patterns = errorPatternExtractor.extract(trace);
+				for (const p of patterns) {
+					for (const convention of p.extractedConventions) {
+						const c = {
+							id: `${p.id}-convention`,
+							type: "negative_rule" as const,
+							content: convention,
+							sourceEpisodeId: trace.sessionId,
+							confidence: 60,
+							timesApplied: 0,
+							timesViolated: 0,
+							createdAt: Date.now(),
+							lastSeenAt: Date.now(),
+						};
+						// insert() handles deduplication and confidence boost
+						await conventionStore.insert(c);
+						await conventionStore.updateStats(c.id, true, false);
+					}
+				}
+				if (patterns.length > 0) {
+					await activityLogger?.log("error_patterns_detected", {
+						count: patterns.length,
+						sessionId: trace.sessionId,
+					});
+				}
+			}
+
+			// Record feedback for previously injected episodes using multi-dimensional analysis
 			const prevInjected = trace.injectedEpisodeIds;
-			if (prevInjected && prevInjected.length > 0 && feedbackTracker) {
-				const succeeded = trace.completedSuccessfully && trace.errorCount === 0;
-				await feedbackTracker.recordOutcome(prevInjected, succeeded);
+			if (prevInjected && prevInjected.length > 0 && feedbackTracker && effectivenessAnalyzer && episodeStore) {
+				const outcomes = [];
+				for (const id of prevInjected) {
+					const episode = await episodeStore.get(id);
+					if (episode) {
+						const outcome = effectivenessAnalyzer.analyze(trace, episode);
+						outcomes.push(outcome);
+					}
+				}
+				if (outcomes.length > 0) {
+					await feedbackTracker.recordDetailedOutcome(outcomes);
+				}
 			}
 			// Record feedback for previously injected skills
 			const prevInjectedSkills = trace.injectedSkillNames;
@@ -424,7 +493,11 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				profile: profile ?? undefined,
 			});
 			const relevantSkills = await _retrieveRelevantSkills(event.prompt);
-			if (episodes.length === 0 && relevantSkills.length === 0) return;
+			const conventions = ((await conventionStore?.listAll()) ?? [])
+				.filter(c => c.confidence >= 60)
+				.sort((a, b) => b.confidence - a.confidence)
+				.slice(0, 10);
+			if (episodes.length === 0 && relevantSkills.length === 0 && conventions.length === 0) return;
 
 			// Track injected episodes for feedback
 			recorder?.setInjectedEpisodes(episodes.map(e => e.episode.id));
@@ -442,30 +515,37 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				);
 			}
 
+			// Build injection using formatter
 			let injection = "";
-			if (episodes.length > 0) {
-				injection += "\n\n## Relevant Past Experience\n\n";
-				for (const e of episodes) {
-					const text = e.episode.summary.slice(0, 200);
-					injection += `[${e.episode.id}] ${text} (${e.reason})\n`;
+			if (injectionFormatter) {
+				injection = injectionFormatter.formatInjection(episodes, conventions, relevantSkills);
+			} else {
+				// Fallback: old inline formatting
+				if (episodes.length > 0) {
+					injection += "\n\n## Relevant Past Experience\n\n";
+					for (const e of episodes) {
+						const text = e.episode.summary.slice(0, 200);
+						injection += `[${e.episode.id}] ${text} (${e.reason})\n`;
+					}
 				}
-			}
-			if (relevantSkills.length > 0) {
-				injection += "\n\n## Relevant Skills\n\n";
-				for (const s of relevantSkills) {
-					injection += `**${s.name}**: ${s.taskPattern.slice(0, 120)}\n${s.approach.slice(0, 300)}\n\n`;
+				if (relevantSkills.length > 0) {
+					injection += "\n\n## Relevant Skills\n\n";
+					for (const s of relevantSkills) {
+						injection += `**${s.name}**: ${s.taskPattern.slice(0, 120)}\n${s.approach.slice(0, 300)}\n\n`;
+					}
+				}
+				if (injection.length > 2000) {
+					injection = injection.slice(0, 2000);
 				}
 			}
 
-			// Rough token guard: ~4 chars per token
-			if (injection.length > 2000) {
-				injection = injection.slice(0, 2000);
-			}
+			if (!injection) return;
 
 			await activityLogger?.log("prompt_injected", {
 				sessionId: ctx.sessionManager.getSessionId(),
 				episodeIds: episodes.map(e => e.episode.id),
 				skillNames: relevantSkills.map(s => s.name),
+				conventionCount: conventions.length,
 				tokenCount: Math.ceil(injection.length / 4),
 				intent: intentResult?.intent,
 			});
@@ -495,6 +575,11 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			skillEffectivenessStore = undefined;
 			nudgeHistoryStore = undefined;
 			crossSessionNudgeEngine = undefined;
+			conventionStore = undefined;
+			conventionExtractor = undefined;
+			effectivenessAnalyzer = undefined;
+			injectionFormatter = undefined;
+			errorPatternExtractor = undefined;
 
 			intentClassifier = undefined;
 			workflowMiner = undefined;

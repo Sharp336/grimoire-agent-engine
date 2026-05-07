@@ -6,7 +6,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import rerankEpisodesTemplate from "./prompts/rerank-episodes.md" with { type: "text" };
 import type { EffectivenessStore, EpisodeStore, IntentStore } from "./storage/types";
-import type { Episode, RerankedEpisode, UserProfile } from "./types";
+import type { Episode, UserProfile } from "./types";
 import { callBackgroundLlm } from "./utils/llm";
 
 export interface ContextRetrievalOptions {
@@ -15,6 +15,13 @@ export interface ContextRetrievalOptions {
 	model?: Model;
 	currentIntent?: string;
 	profile?: UserProfile;
+}
+export interface RetrievedEpisode {
+	episode: Episode;
+	relevanceScore: number;
+	reason: string;
+	timesInjected: number;
+	helpRate: number;
 }
 
 function getLanguageFromPath(filePath: string): string | undefined {
@@ -65,7 +72,7 @@ export class ContextAwareRetriever {
 		this.#effectivenessStore = effectivenessStore;
 	}
 
-	async retrieve(query: string, options: ContextRetrievalOptions): Promise<RerankedEpisode[]> {
+	async retrieve(query: string, options: ContextRetrievalOptions): Promise<RetrievedEpisode[]> {
 		// Load recent episodes
 		const recent = await this.#episodeStore.listRecent(options.maxEpisodes * 2);
 		if (recent.length === 0) return [];
@@ -82,6 +89,8 @@ export class ContextAwareRetriever {
 				episode: c.episode,
 				relevanceScore: c.score,
 				reason: "fallback keyword match",
+				timesInjected: c.timesInjected,
+				helpRate: c.helpRate,
 			}));
 		}
 
@@ -93,6 +102,8 @@ export class ContextAwareRetriever {
 				episode: c.episode,
 				relevanceScore: c.score,
 				reason: c.reason,
+				timesInjected: c.timesInjected,
+				helpRate: c.helpRate,
 			}));
 		}
 
@@ -103,7 +114,7 @@ export class ContextAwareRetriever {
 		episodes: Episode[],
 		query: string,
 		options: ContextRetrievalOptions,
-	): Promise<Array<{ episode: Episode; score: number; reason: string }>> {
+	): Promise<Array<{ episode: Episode; score: number; reason: string; timesInjected: number; helpRate: number }>> {
 		const queryWords = query
 			.toLowerCase()
 			.split(/\W+/)
@@ -190,13 +201,19 @@ export class ContextAwareRetriever {
 					}
 				}
 
-				// 7. Effectiveness feedback boost (0-10 points)
+				// 7. Effectiveness feedback boost (0-20 points)
 				const eff = await this.#effectivenessStore.get(episode.id);
+				let timesInjected = 0;
+				let helpRate = 0;
 				if (eff && eff.timesInjected > 0) {
-					const helpRate = eff.timesHelped / eff.timesInjected;
+					timesInjected = eff.timesInjected;
+					helpRate = eff.timesHelped / eff.timesInjected;
 					if (helpRate >= 0.5) {
-						score += Math.min(10, Math.round(helpRate * 10));
+						score += Math.min(20, Math.round(helpRate * 20));
 						reasons.push("proven helpful");
+					} else if (helpRate < 0.2 && timesInjected >= 3) {
+						score -= 15;
+						reasons.push("proven unhelpful");
 					} else if (eff.timesFailed > 0) {
 						score -= Math.min(10, Math.round((eff.timesFailed / eff.timesInjected) * 10));
 						reasons.push("previously unhelpful");
@@ -207,16 +224,18 @@ export class ContextAwareRetriever {
 					episode,
 					score: Math.min(100, Math.round(score)),
 					reason: reasons.join(", ") || "recent episode",
+					timesInjected,
+					helpRate,
 				};
 			}),
 		);
 	}
 
 	async #llmRerank(
-		candidates: Array<{ episode: Episode; score: number; reason: string }>,
+		candidates: Array<{ episode: Episode; score: number; reason: string; timesInjected: number; helpRate: number }>,
 		query: string,
 		model: Model,
-	): Promise<RerankedEpisode[]> {
+	): Promise<RetrievedEpisode[]> {
 		const episodesBlock = candidates
 			.map(
 				(c, i) =>
@@ -232,6 +251,8 @@ export class ContextAwareRetriever {
 				episode: c.episode,
 				relevanceScore: c.score,
 				reason: "LLM rerank failed, using scored ranking",
+				timesInjected: c.timesInjected,
+				helpRate: c.helpRate,
 			}));
 		}
 
@@ -244,7 +265,7 @@ export class ContextAwareRetriever {
 				reason?: string;
 			}>;
 
-			const result: RerankedEpisode[] = [];
+			const result: RetrievedEpisode[] = [];
 			for (const item of parsed) {
 				if (!item.episodeId) continue;
 				const candidate = candidates.find(c => c.episode.id === item.episodeId);
@@ -253,6 +274,8 @@ export class ContextAwareRetriever {
 						episode: candidate.episode,
 						relevanceScore: Math.min(100, Math.max(0, item.relevanceScore ?? 50)),
 						reason: item.reason || "LLM selected",
+						timesInjected: candidate.timesInjected,
+						helpRate: candidate.helpRate,
 					});
 				}
 			}
@@ -262,6 +285,8 @@ export class ContextAwareRetriever {
 						episode: c.episode,
 						relevanceScore: c.score,
 						reason: "LLM returned no valid matches",
+						timesInjected: c.timesInjected,
+						helpRate: c.helpRate,
 					}));
 		} catch (err) {
 			logger.warn("LLM context-aware rerank parse failed", {
@@ -271,6 +296,8 @@ export class ContextAwareRetriever {
 				episode: c.episode,
 				relevanceScore: c.score,
 				reason: "LLM rerank parse failed",
+				timesInjected: c.timesInjected,
+				helpRate: c.helpRate,
 			}));
 		}
 	}

@@ -27,6 +27,7 @@ export interface SessionTrace {
 	errorCount: number;
 	hadRecovery: boolean;
 	completedSuccessfully: boolean;
+	errorDetails?: string[];
 	nudges?: import("./nudge-detector").Nudge[];
 	injectedEpisodeIds?: string[];
 	injectedSkillNames?: string[];
@@ -251,4 +252,76 @@ export interface NudgeRecord {
 	message: string;
 	suggestion: string;
 	detectedAt: number;
+}
+
+// ============================================================================
+// Convention — project-specific rules extracted from user dialogue (v2.5)
+// ============================================================================
+
+export type ConventionType = "negative_rule" | "positive_rule" | "preference" | "project_fact" | "procedural_rule";
+
+export interface Convention {
+	id: string;
+	type: ConventionType;
+	content: string;
+	sourceEpisodeId: string;
+	confidence: number;
+	timesApplied: number;
+	timesViolated: number;
+	createdAt: number;
+	lastSeenAt: number;
+}
+
+// ============================================================================
+// Injection Outcome — multi-dimensional effectiveness scoring (v2.5)
+// ============================================================================
+
+export interface InjectionOutcome {
+	episodeId: string;
+	helpfulness: number;
+	hasExplicitCorrection: boolean;
+	hasExplicitApproval: boolean;
+	wasRedundant: boolean;
+	avoidedPreviousErrors: boolean;
+	toolEfficiency: number;
+}
+
+export interface ErrorPattern {
+	id: string;
+	name: string;
+	description: string;
+	regex: string;
+	category: "syntax" | "format" | "runtime" | "permission" | "not_found" | "type" | "other";
+	affectedSessions: string[];
+	count: number;
+	firstSeenAt: number;
+	lastSeenAt: number;
+	extractedConventions: string[];
+}
+
+export interface DailyReport {
+	date: string;
+	totalSessions: number;
+	successfulSessions: number;
+	failedSessions: number;
+	emptySessions: number;
+	partialSessions: number;
+	sessions: Array<{
+		sessionId: string;
+		userPrompt: string;
+		toolCallCount: number;
+		errorCount: number;
+		completedSuccessfully: boolean;
+		errors: string[];
+		highlights: string[];
+	}>;
+	topErrorPatterns: ErrorPattern[];
+	newConventions: Convention[];
+	topTools: Array<{ tool: string; count: number }>;
+	keyMoments: Array<{
+		type: "error" | "recovery" | "success" | "correction";
+		sessionId: string;
+		description: string;
+		timestamp: number;
+	}>;
 }

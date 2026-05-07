@@ -217,6 +217,20 @@ export function initSchema(db: Database): void {
 		);
 	`);
 
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS conventions (
+			id TEXT PRIMARY KEY,
+			type TEXT NOT NULL CHECK(type IN ('negative_rule','positive_rule','preference','project_fact','procedural_rule')),
+			content TEXT NOT NULL,
+			source_episode_id TEXT NOT NULL,
+			confidence INTEGER NOT NULL DEFAULT 50,
+			times_applied INTEGER NOT NULL DEFAULT 0,
+			times_violated INTEGER NOT NULL DEFAULT 0,
+			created_at INTEGER NOT NULL,
+			last_seen_at INTEGER NOT NULL
+		);
+	`);
+
 	// Migrate skills table: add intent column if missing
 	const skillsColumns = db.prepare("PRAGMA table_info(skills)").all() as Array<{ name: string }>;
 	const hasIntentCol = skillsColumns.some(c => c.name === "intent");

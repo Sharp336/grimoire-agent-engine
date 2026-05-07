@@ -98,7 +98,19 @@ export class SkillExtractor {
 		const errorSummary = trace.errorCount > 0 ? `Errors encountered: ${trace.errorCount}` : "No errors";
 		const recoverySummary = trace.hadRecovery ? "The agent recovered from errors during execution." : "";
 
-		const userPrompt = `Task: ${trace.userPrompt}\n\nTools used: ${toolSummary}\n${errorSummary}\n${recoverySummary}\n\nCurrent rule-based extraction:\n- Name: ${ruleSkill.name}\n- Task pattern: ${ruleSkill.taskPattern}\n- Approach: ${ruleSkill.approach}\n- Tools: ${ruleSkill.tools.join(", ")}\n- Pitfalls: ${ruleSkill.pitfalls.join("; ") || "none"}\n\nPlease refine the approach and pitfalls based on the actual execution trace. Return ONLY a JSON object with fields: approach (string), pitfalls (string[]), description (string), taskPattern (string).`;
+		// Extract recent user inputs and assistant reasoning from the trace
+		const userInputs = trace.entries
+			.filter(e => e.type === "user_input" && e.content)
+			.slice(-5)
+			.map((e, i) => `User input ${i + 1}: ${e.content}`)
+			.join("\n");
+		const assistantMessages = trace.entries
+			.filter(e => e.type === "assistant_message" && e.content)
+			.slice(-3)
+			.map((e, i) => `Agent reasoning ${i + 1}: ${e.content}`)
+			.join("\n");
+
+		const userPrompt = `Task: ${trace.userPrompt}\n\nTools used: ${toolSummary}\n${errorSummary}\n${recoverySummary}\n\nRecent user dialogue:\n${userInputs || "(none recorded)"}\n\nRecent agent reasoning:\n${assistantMessages || "(none recorded)"}\n\nWhat project-specific conventions did the user enforce? What pitfalls are specific to THIS codebase?\n\nCurrent rule-based extraction:\n- Name: ${ruleSkill.name}\n- Task pattern: ${ruleSkill.taskPattern}\n- Approach: ${ruleSkill.approach}\n- Tools: ${ruleSkill.tools.join(", ")}\n- Pitfalls: ${ruleSkill.pitfalls.join("; ") || "none"}\n\nPlease refine the approach and pitfalls based on the actual execution trace. Return ONLY a JSON object with fields: approach (string), pitfalls (string[]), description (string), taskPattern (string).`;
 
 		const response = await callBackgroundLlm(model, extractSkillPromptTemplate, userPrompt);
 		if (!response) return undefined;

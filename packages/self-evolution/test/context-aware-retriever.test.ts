@@ -312,7 +312,7 @@ describe("ContextAwareRetriever", () => {
 		expect(results[0]!.episode.id).toBe("ep1");
 		expect(results[0]!.reason).toContain("proven helpful");
 		expect(results[1]!.episode.id).toBe("ep2");
-		expect(results[1]!.reason).toContain("previously unhelpful");
+		expect(results[1]!.reason).toContain("proven unhelpful");
 	});
 
 	test("effectiveness feedback ignored when no injection record", async () => {

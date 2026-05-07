@@ -4,6 +4,10 @@
 
 export type TaskStatus = "active" | "paused" | "disabled";
 
+export type ScheduleType = "cron" | "interval" | "once";
+
+export type TaskType = "shell" | "agent";
+
 export interface ScheduledTask {
 	id: string;
 	name: string;
@@ -99,9 +103,6 @@ export function generateTaskId(): string {
 export function generateExecutionId(): string {
 	return `exec_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
-
-export type ScheduleType = "cron" | "interval" | "once";
-export type TaskType = "shell" | "agent";
 
 export interface ParsedSchedule {
 	type: ScheduleType;

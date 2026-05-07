@@ -42,6 +42,13 @@ export class SqliteEpisodeStore implements EpisodeStore {
 		stmt.finalize();
 		return rows.map(rowToEpisode);
 	}
+	async get(id: string): Promise<Episode | undefined> {
+		const stmt = this.db.prepare(`SELECT * FROM episodes WHERE id = ?`);
+		const row = stmt.get(id) as RawEpisodeRow | undefined;
+		stmt.finalize();
+		if (!row) return undefined;
+		return rowToEpisode(row);
+	}
 
 	async searchByKeyword(query: string, limit: number): Promise<Episode[]> {
 		// Use FTS5 for full-text search, fallback to LIKE if FTS5 table is empty

@@ -3,11 +3,20 @@
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { logger } from "@oh-my-pi/pi-utils";
+import { DailyReportGenerator } from "./daily-report";
 import { HeuristicSkillEvaluator } from "./evaluator";
 import type { ActivityLogger } from "./logging/activity-logger";
 import type { SkillManager } from "./manager";
 import type { SqliteStatsStore } from "./storage/skills";
-import type { EpisodeStore, ProfileStore, SkillStore, SkillVersionStore, WorkflowPatternStore } from "./storage/types";
+import type {
+	ConventionStore,
+	EffectivenessStore,
+	EpisodeStore,
+	ProfileStore,
+	SkillStore,
+	SkillVersionStore,
+	WorkflowPatternStore,
+} from "./storage/types";
 
 export interface CommandStores {
 	ensureInit(cwd: string): void;
@@ -19,6 +28,8 @@ export interface CommandStores {
 	activityLogger(): ActivityLogger;
 	profileStore(): ProfileStore;
 	workflowPatternStore(): WorkflowPatternStore;
+	conventionStore(): ConventionStore;
+	effectivenessStore(): EffectivenessStore;
 }
 
 export function registerSelfEvolutionCommands(api: ExtensionAPI, stores: CommandStores): void {
@@ -286,6 +297,25 @@ export function registerSelfEvolutionCommands(api: ExtensionAPI, stores: Command
 			} catch (err) {
 				logger.error("evolution-workflows failed", { error: String(err) });
 				ctx.ui.notify("Failed to list workflow patterns", "error");
+			}
+		},
+	});
+	api.registerCommand("daily-report", {
+		description: "Generate a daily report of sessions, errors, and learnings.",
+		async handler(_args, ctx): Promise<void> {
+			stores.ensureInit(ctx.cwd);
+			try {
+				const generator = new DailyReportGenerator(
+					stores.episodeStore(),
+					stores.conventionStore(),
+					stores.effectivenessStore(),
+				);
+				const report = await generator.generate();
+				const text = generator.formatReport(report);
+				ctx.ui.notify(text, "info");
+			} catch (err) {
+				logger.error("daily-report failed", { error: String(err) });
+				ctx.ui.notify("Failed to generate daily report", "error");
 			}
 		},
 	});
