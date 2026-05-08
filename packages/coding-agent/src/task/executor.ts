@@ -1059,7 +1059,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						getAllTools: () => session.getAllToolNames(),
 						setActiveTools: (toolNames: string[]) =>
 							session.setActiveToolsByName(toolNames.filter(name => !parentOwnedToolNames.has(name))),
-						getCommands: () => [],
+						getCommands: () =>
+							session.extensionRunner?.getRegisteredCommands().map(cmd => ({
+								name: cmd.name,
+								description: cmd.description,
+								source: "extension" as const,
+							})) ?? [],
 						setModel: model => runExtensionSetModel(session, model),
 						getThinkingLevel: () => session.thinkingLevel,
 						setThinkingLevel: level => session.setThinkingLevel(level),

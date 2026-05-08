@@ -845,6 +845,14 @@ export class AcpAgent implements Agent {
 			});
 		}
 
+		for (const command of session.extensionRunner?.getRegisteredCommands() ?? []) {
+			appendCommand({
+				name: command.name,
+				description: command.description ?? "",
+				input: { hint: "arguments" },
+			});
+		}
+
 		return commands;
 	}
 
@@ -1212,7 +1220,12 @@ export class AcpAgent implements Agent {
 				getActiveTools: () => record.session.getActiveToolNames(),
 				getAllTools: () => record.session.getAllToolNames(),
 				setActiveTools: toolNames => record.session.setActiveToolsByName(toolNames),
-				getCommands: () => [],
+				getCommands: () =>
+					record.session.extensionRunner?.getRegisteredCommands().map(cmd => ({
+						name: cmd.name,
+						description: cmd.description,
+						source: "extension" as const,
+					})) ?? [],
 				setModel: async model => {
 					const apiKey = await record.session.modelRegistry.getApiKey(model);
 					if (!apiKey) {

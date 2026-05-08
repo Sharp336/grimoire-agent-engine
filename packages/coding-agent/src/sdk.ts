@@ -24,6 +24,7 @@ import {
 	Snowflake,
 } from "@oh-my-pi/pi-utils";
 import { createSelfEvolutionExtension } from "@oh-my-pi/self-evolution";
+import swarmExtension from "@oh-my-pi/swarm-extension";
 import chalk from "chalk";
 import { AsyncJobManager, isBackgroundJobSupportEnabled } from "./async";
 import { createAutoresearchExtension } from "./autoresearch";
@@ -1109,6 +1110,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const inlineExtensions: ExtensionFactory[] = options.extensions ? [...options.extensions] : [];
 		inlineExtensions.push(createAutoresearchExtension);
 		inlineExtensions.push(createSelfEvolutionExtension);
+		inlineExtensions.push(swarmExtension);
 		if (customTools.length > 0) {
 			inlineExtensions.push(createCustomToolsExtension(customTools));
 		}

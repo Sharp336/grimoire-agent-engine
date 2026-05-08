@@ -20,6 +20,8 @@
 		"agent",
 		"extension"
 	],
+	"main": "./src/extension.ts",
+	"types": "./src/extension.ts",
 	"bin": {
 		"omp-swarm": "src/cli.ts"
 	},
@@ -50,5 +52,11 @@
 	"files": [
 		"src",
 		"README.md"
-	]
+	],
+	"exports": {
+		".": {
+			"types": "./src/extension.ts",
+			"import": "./src/extension.ts"
+		}
+	}
 }

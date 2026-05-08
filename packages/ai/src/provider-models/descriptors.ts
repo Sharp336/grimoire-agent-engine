@@ -137,7 +137,7 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		"bailian-coding-plan",
 		"qwen3.5-plus",
 		config => bailianCodingPlanModelManagerOptions(config),
-		catalog("Bailian Coding Plan", ["BAILIAN_CODING_PLAN_API_KEY"]),
+		catalog("Bailian Coding Plan", ["ALIBABA_API_KEY", "BAILIAN_CODING_PLAN_API_KEY"]),
 	),
 	descriptor("openai", "gpt-5.4", config => openaiModelManagerOptions(config)),
 	descriptor("groq", "openai/gpt-oss-120b", config => groqModelManagerOptions(config)),

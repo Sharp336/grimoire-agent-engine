@@ -530,6 +530,91 @@ export class CommandController {
 		showMarkdownPanel(this.ctx, "Available Tools", tools);
 	}
 
+	async handleEvolutionBoardCommand(text: string): Promise<void> {
+		const argumentText = text.slice(17).trim(); // "/evolution-board" length
+		const action = argumentText.split(/\s+/, 1)[0]?.toLowerCase() || "list";
+		const args = argumentText.slice(action.length).trim();
+
+		const { createEvolutionBoard } = await import("../../evolution-board/board");
+		const { renderTopicDetail } = await import("../../evolution-board/renderer");
+
+		const board = createEvolutionBoard();
+		const yamlPath = path.join(this.ctx.session.sessionManager.getCwd(), "docs", "evolution-board.yaml");
+
+		try {
+			const content = await Bun.file(yamlPath).text();
+			board.load(content);
+		} catch {
+			this.ctx.showWarning("No evolution board found. Create docs/evolution-board.yaml first.");
+			return;
+		}
+
+		let output = "";
+		switch (action) {
+			case "list": {
+				const topics = board.getTopics();
+				if (topics.length === 0) {
+					output = "No topics found.";
+				} else {
+					output = topics.map(t => `| ${t.status} | ${t.name} | ${t.brief} |`).join("\n");
+				}
+				break;
+			}
+			case "show": {
+				const topicId = args || argumentText;
+				if (!topicId) {
+					this.ctx.showWarning("Topic ID is required. Usage: /evolution-board show <id>");
+					return;
+				}
+				const topic = board.getTopic(topicId);
+				if (!topic) {
+					this.ctx.showWarning(`Topic "${topicId}" not found.`);
+					return;
+				}
+				const lines = renderTopicDetail(topic, 120, theme);
+				output = lines.join("\n");
+				break;
+			}
+			case "filter": {
+				let topics = board.getTopics();
+				if (args.startsWith("status:")) {
+					const status = args.slice(7).trim();
+					topics = board.getByStatus(status as never);
+				} else if (args.startsWith("module:")) {
+					const module = args.slice(7).trim();
+					topics = board.getByModule(module);
+				} else if (args.startsWith("tag:")) {
+					const tag = args.slice(4).trim();
+					topics = board.getByTag(tag);
+				} else {
+					this.ctx.showWarning(
+						"Filter requires status:|module:|tag: prefix. Usage: /evolution-board filter status:in-progress",
+					);
+					return;
+				}
+				if (topics.length === 0) {
+					output = "No topics match the filter.";
+				} else {
+					output = topics.map(t => `| ${t.status} | ${t.name} | ${t.brief} |`).join("\n");
+				}
+				break;
+			}
+			default: {
+				this.ctx.showWarning(`Unknown action: ${action}. Available actions: list, show, filter`);
+				return;
+			}
+		}
+
+		this.ctx.chatContainer.addChild(new Spacer(1));
+		this.ctx.chatContainer.addChild(new DynamicBorder());
+		this.ctx.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "Evolution Board")), 1, 0));
+		this.ctx.chatContainer.addChild(new Spacer(1));
+		this.ctx.chatContainer.addChild(new Text(output, 1, 0));
+		this.ctx.chatContainer.addChild(new DynamicBorder());
+		this.ctx.editor.setText("");
+		this.ctx.ui.requestRender();
+	}
+
 	handleContextCommand(): void {
 		const breakdown = computeContextBreakdown(this.ctx.session);
 		if (breakdown.contextWindow <= 0) {

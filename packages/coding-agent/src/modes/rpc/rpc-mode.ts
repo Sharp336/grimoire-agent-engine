@@ -430,7 +430,12 @@ export async function runRpcMode(session: AgentSession): Promise<never> {
 				getActiveTools: () => session.getActiveToolNames(),
 				getAllTools: () => session.getAllToolNames(),
 				setActiveTools: (toolNames: string[]) => session.setActiveToolsByName(toolNames),
-				getCommands: () => [],
+				getCommands: () =>
+					session.extensionRunner?.getRegisteredCommands().map(cmd => ({
+						name: cmd.name,
+						description: cmd.description,
+						source: "extension" as const,
+					})) ?? [],
 				setModel: model => runExtensionSetModel(session, model),
 				getThinkingLevel: () => session.thinkingLevel,
 				setThinkingLevel: level => session.setThinkingLevel(level),

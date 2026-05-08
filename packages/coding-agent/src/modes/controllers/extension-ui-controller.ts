@@ -109,7 +109,12 @@ export class ExtensionUiController {
 			},
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
 			setThinkingLevel: level => this.ctx.session.setThinkingLevel(level),
-			getCommands: () => [],
+			getCommands: () =>
+				this.ctx.session.extensionRunner?.getRegisteredCommands().map(cmd => ({
+					name: cmd.name,
+					description: cmd.description,
+					source: "extension" as const,
+				})) ?? [],
 			getSessionName: () => this.ctx.sessionManager.getSessionName(),
 			setSessionName: name => this.#updateSessionName(name),
 		};
@@ -354,7 +359,12 @@ export class ExtensionUiController {
 			},
 			getThinkingLevel: () => this.ctx.session.thinkingLevel,
 			setThinkingLevel: (level, persist) => this.ctx.session.setThinkingLevel(level, persist),
-			getCommands: () => [],
+			getCommands: () =>
+				this.ctx.session.extensionRunner?.getRegisteredCommands().map(cmd => ({
+					name: cmd.name,
+					description: cmd.description,
+					source: "extension" as const,
+				})) ?? [],
 			getSessionName: () => this.ctx.sessionManager.getSessionName(),
 			setSessionName: name => this.#updateSessionName(name),
 		};
