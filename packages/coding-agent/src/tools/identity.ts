@@ -31,6 +31,8 @@ interface AgentIdentity {
 	name: string;
 	role: string;
 	model: string;
+	modelName: string;
+	modelProvider: string;
 	agentId: string;
 	taskDepth: number;
 	cwd: string;
@@ -115,10 +117,8 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 
 		for (const [tool, settingKey] of toolSettings) {
 			if (settingKey === null) {
-				// Always available tools
 				tools.push(tool);
 			} else {
-				// Check settings, default to true if not explicitly false
 				const enabled = settings.get(settingKey as any);
 				if (enabled !== false) {
 					tools.push(tool);
@@ -133,11 +133,24 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 		return this.#session.skills?.map(s => s.name) ?? [];
 	}
 
+	#parseModel(modelStr: string): { provider: string; name: string } {
+		if (modelStr.includes("/")) {
+			const parts = modelStr.split("/");
+			return { provider: parts[0], name: parts[1] };
+		}
+		return { provider: "unknown", name: modelStr };
+	}
+
 	#handleWhoRu(): AgentToolResult<IdentityToolDetails> {
+		const modelStr = this.#session.getActiveModelString?.() ?? "unknown";
+		const { provider, name } = this.#parseModel(modelStr);
+
 		const identity: AgentIdentity = {
 			name: "Oh My Pi",
 			role: "全栈编码搭档与技术顾问",
-			model: this.#session.getActiveModelString?.() ?? "unknown",
+			model: modelStr,
+			modelName: name,
+			modelProvider: provider,
 			agentId: this.#session.getAgentId?.() ?? "0-Main",
 			taskDepth: this.#session.taskDepth ?? 0,
 			cwd: this.#session.cwd,
@@ -174,10 +187,11 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 			"## 身份定位",
 			`- 名称：${identity.name}`,
 			`- 角色：${identity.role}`,
-			"- 形态：基于 Claude 大模型的 AI 编程智能体",
+			`- 形态：基于 ${identity.modelProvider} 提供的 ${identity.modelName} 大模型的 AI 编程智能体`,
 			"",
 			"## 当前配置",
 			`- 模型：${identity.model}`,
+			`- 提供商：${identity.modelProvider}`,
 			`- 会话：${identity.agentId} | 深度 ${identity.taskDepth}`,
 			`- 工作目录：${identity.cwd}`,
 			"",
