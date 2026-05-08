@@ -136,7 +136,19 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 	#parseModel(modelStr: string): { provider: string; name: string } {
 		if (modelStr.includes("/")) {
 			const parts = modelStr.split("/");
-			return { provider: parts[0], name: parts[1] };
+			const rawProvider = parts[0];
+			const name = parts[1];
+
+			// Detect actual provider from environment variables.
+			// The API may use a compatible format (e.g., anthropic-compatible on dashscope).
+			if (rawProvider === "anthropic") {
+				const baseUrl = process.env.ANTHROPIC_BASE_URL || "";
+				if (baseUrl.includes("dashscope") || baseUrl.includes("aliyun")) {
+					return { provider: "aliyun-dashscope", name };
+				}
+			}
+
+			return { provider: rawProvider, name };
 		}
 		return { provider: "unknown", name: modelStr };
 	}
