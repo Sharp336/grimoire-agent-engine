@@ -27,6 +27,7 @@ import { BrowserTool } from "./browser";
 import { CalculatorTool } from "./calculator";
 import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
 import { DebugTool } from "./debug";
+import { EvolutionBoardTool } from "./evolution-board";
 import { ExitPlanModeTool } from "./exit-plan-mode";
 import { FindTool } from "./find";
 import { GithubTool } from "./gh";
@@ -67,6 +68,7 @@ export * from "./browser";
 export * from "./calculator";
 export * from "./checkpoint";
 export * from "./debug";
+export * from "./evolution-board";
 export * from "./exit-plan-mode";
 export * from "./find";
 export * from "./gh";
@@ -233,6 +235,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	web_search: s => new WebSearchTool(s),
 	search_tool_bm25: SearchToolBm25Tool.createIf,
 	identity: s => new IdentityTool(s),
+	evolution_board: s => new EvolutionBoardTool(s),
 	write: s => new WriteTool(s),
 };
 

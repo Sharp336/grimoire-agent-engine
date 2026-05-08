@@ -1,0 +1,37 @@
+# OMP 功能进化看板
+# 读者：开发者 + omp agent
+# 维护方式：手动更新状态，agent 读取并渲染
+
+topics:
+  - id: feature-dashboard
+    name: 功能进化看板
+    brief: 在 TUI 中展示 omp 二次开发任务状态
+    description: |
+      追踪 omp 二次开发任务的全生命周期状态，包括功能定义、
+      版本状态、影响模块、参考方案等。通过 TUI 列表视图和
+      详情视图展示，agent 也可查询。
+    status: in-progress
+    progress: 30
+    started: 2026-05-08
+    target: 2026-05-20
+    modules:
+      - coding-agent
+      - pi-tui
+      - pi-utils
+    design:
+      spec: docs/superpowers/specs/2026-05-08-omp-evolution-board-design.md
+      plan: docs/superpowers/plans/2026-05-08-omp-evolution-board-plan.md
+    references:
+      - name: GitHub Projects
+        url: https://docs.github.com/en/issues/planning-and-tracking-with-projects
+        note: GitHub 原生项目管理视图
+      - name: Linear
+        url: https://linear.app
+        note: 现代 issue 追踪工具的状态流设计
+    github:
+      issues:
+        - "#123"
+    notes: |
+      当前阶段：实现计划编写
+      下一步：按 plan 逐步实施
+    tags: [tui, developer-tool, dashboard]
