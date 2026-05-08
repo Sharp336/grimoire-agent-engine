@@ -1,6 +1,6 @@
-import * as path from "node:path";
 import * as os from "node:os";
-import { createEmptyPersona, type UserPersona } from "./types";
+import * as path from "node:path";
+import type { UserPersona } from "./types";
 
 export interface PersonaStore {
 	load(): Promise<UserPersona | undefined>;

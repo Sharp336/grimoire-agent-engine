@@ -1,9 +1,9 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import { type Static, Type } from "@sinclair/typebox";
 import { prompt } from "@oh-my-pi/pi-utils";
-import identityDescription from "../prompts/tools/identity.md" with { type: "text" };
+import { type Static, Type } from "@sinclair/typebox";
 import { FilePersonaStore } from "../persona/store";
 import { createEmptyPersona, type UserPersona } from "../persona/types";
+import identityDescription from "../prompts/tools/identity.md" with { type: "text" };
 import type { ToolSession } from ".";
 
 const identitySchema = Type.Object({
@@ -77,15 +77,7 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 			case "update_persona":
 				return this.#handleUpdatePersona(params.section, params.data);
 			default:
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Unknown action: ${action}. Use whoRu, whoisme, or update_persona.`,
-						},
-					],
-					isError: true,
-				};
+				throw new Error(`Unknown action: ${action}. Use whoRu, whoisme, or update_persona.`);
 		}
 	}
 
@@ -238,36 +230,11 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 		data?: Record<string, unknown>,
 	): Promise<AgentToolResult<IdentityToolDetails>> {
 		if (!section || !data) {
-			return {
-				content: [
-					{
-						type: "text",
-						text: "update_persona requires both 'section' and 'data' parameters.",
-					},
-				],
-				isError: true,
-			};
+			throw new Error("update_persona requires both 'section' and 'data' parameters.");
 		}
-
-		const validSections = [
-			"basics",
-			"career",
-			"interests",
-			"preferences",
-			"interaction",
-			"thinking",
-			"constraints",
-		];
+		const validSections = ["basics", "career", "interests", "preferences", "interaction", "thinking", "constraints"];
 		if (!validSections.includes(section)) {
-			return {
-				content: [
-					{
-						type: "text",
-						text: `Invalid section "${section}". Valid: ${validSections.join(", ")}`,
-					},
-				],
-				isError: true,
-			};
+			throw new Error(`Invalid section "${section}". Valid: ${validSections.join(", ")}`);
 		}
 
 		let persona = await this.#store.load();
@@ -278,7 +245,7 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 		// Merge data into the specified section
 		const existing = persona[section as keyof UserPersona] as Record<string, unknown>;
 		const merged = { ...existing, ...data };
-		(persona as Record<string, unknown>)[section] = merged;
+		(persona as unknown as Record<string, unknown>)[section] = merged;
 		persona.updatedAt = Date.now();
 
 		await this.#store.save(persona);

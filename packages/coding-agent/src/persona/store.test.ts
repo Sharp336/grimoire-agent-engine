@@ -1,6 +1,6 @@
-import { describe, expect, it, beforeEach, afterEach } from "bun:test";
-import * as path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
+import * as path from "node:path";
 import { FilePersonaStore } from "./store";
 import { createEmptyPersona } from "./types";
 

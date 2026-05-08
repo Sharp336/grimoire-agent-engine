@@ -18,6 +18,7 @@ import { calculatorToolRenderer } from "./calculator";
 import { debugToolRenderer } from "./debug";
 import { findToolRenderer } from "./find";
 import { githubToolRenderer } from "./gh-renderer";
+import { identityToolRenderer } from "./identity-render";
 import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { jobToolRenderer } from "./job";
 import { notebookToolRenderer } from "./notebook";
@@ -29,7 +30,6 @@ import { searchToolRenderer } from "./search";
 import { searchToolBm25Renderer } from "./search-tool-bm25";
 import { sshToolRenderer } from "./ssh";
 import { todoWriteToolRenderer } from "./todo-write";
-import { identityToolRenderer } from "./identity-render";
 import { writeToolRenderer } from "./write";
 
 type ToolRenderer = {
@@ -72,5 +72,4 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	web_search: webSearchToolRenderer as ToolRenderer,
 	write: writeToolRenderer as ToolRenderer,
 	identity: identityToolRenderer as ToolRenderer,
-
 };

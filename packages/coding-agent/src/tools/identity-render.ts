@@ -2,7 +2,8 @@ import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
-import { formatErrorMessage, formatEmptyMessage, PREVIEW_LIMITS, renderStatusLine } from "./render-utils";
+import { renderStatusLine } from "../tui";
+import { formatEmptyMessage, formatErrorMessage, PREVIEW_LIMITS } from "./render-utils";
 
 export const identityToolRenderer = {
 	renderCall(args: { action?: string }, _options: RenderResultOptions, uiTheme: Theme): Component {
