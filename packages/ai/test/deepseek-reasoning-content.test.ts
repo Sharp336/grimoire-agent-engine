@@ -351,7 +351,7 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			expect(rc).toBe("");
 		});
 
-		it("sets content to empty string (not null) when reasoning_content is present", () => {
+		it("sets content to a non-null placeholder when reasoning_content is present", () => {
 			const model = deepseekModel({
 				provider: "nvidia",
 				baseUrl: "https://integrate.api.nvidia.com/v1",
@@ -369,7 +369,10 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			const messages = convertMessages(model, { messages: [msg] }, compat);
 			const assistant = messages.find(m => m.role === "assistant");
 			expect(assistant).toBeDefined();
-			expect((assistant as { content: unknown }).content).toBe("");
+			const content = (assistant as { content: unknown }).content;
+			expect(content).not.toBeNull();
+			expect(typeof content).toBe("string");
+			expect(content === "" || content === ".").toBe(true);
 		});
 	});
 

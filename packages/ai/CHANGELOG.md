@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed DeepSeek V4 reasoning models served through OpenAI-compatible aggregators (ZenMux, NVIDIA NIM, DeepInfra, KiloCode, etc.) failing thinking-mode tool-call replays by treating the entire DeepSeek family as non-standard regardless of host. `detectOpenAICompat` now disables `supportsStore`/`supportsDeveloperRole`, switches `maxTokensField` to `max_tokens`, and sets `requiresAssistantContentForToolCalls: true` whenever a DeepSeek-family reasoning model is detected (by provider, base URL, model id, or model name) so the conversation history matches the official `api.deepseek.com` invariants on every aggregator.
+
 ## [14.7.6] - 2026-05-07
 
 ### Added

@@ -1282,6 +1282,13 @@ export function convertMessages(
 			const thinkingBlocks = msg.content.filter(b => b.type === "thinking") as ThinkingContent[];
 			// Filter out empty thinking blocks to avoid API validation errors
 			const nonEmptyThinkingBlocks = thinkingBlocks.filter(b => b.thinking && b.thinking.trim().length > 0);
+			// Backends that validate the exact reasoning field name (DeepSeek V4 only accepts
+			// `reasoning_content`, never `reasoning` or `reasoning_text`). When this is true we
+			// must NOT honor whatever field name was streamed back from the upstream proxy
+			// (ZenMux/OpenRouter often surface `reasoning`); we force the canonical field instead.
+			const strictReasoningContentField =
+				compat.requiresReasoningContentForToolCalls && !compat.allowsSyntheticReasoningContentForToolCalls;
+			const canonicalReasoningField = compat.reasoningContentField ?? "reasoning_content";
 			if (nonEmptyThinkingBlocks.length > 0) {
 				if (compat.requiresThinkingAsText) {
 					// Convert thinking blocks to plain text (no tags to avoid model mimicking them)
@@ -1292,6 +1299,10 @@ export function convertMessages(
 					} else {
 						assistantMsg.content = [{ type: "text", text: thinkingText }];
 					}
+				} else if (strictReasoningContentField) {
+					// DeepSeek-family strict mode: always replay under the canonical field,
+					// regardless of which field name the upstream proxy streamed back.
+					(assistantMsg as any)[canonicalReasoningField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
 				} else {
 					// Use the signature from the first thinking block if available, but only for
 					// recognized OpenAI-compat reasoning field names. Opaque signatures from other
@@ -1306,12 +1317,15 @@ export function convertMessages(
 
 			if (compat.thinkingFormat === "openai") {
 				const streamedReasoningField = nonEmptyThinkingBlocks[0]?.thinkingSignature;
-				const reasoningField =
-					streamedReasoningField === "reasoning_content" ||
-					streamedReasoningField === "reasoning" ||
-					streamedReasoningField === "reasoning_text"
+				// In strict mode (DeepSeek family), always use the canonical field name. Otherwise
+				// honor the streamed field name when it's a recognized variant (Kimi, OpenRouter).
+				const reasoningField = strictReasoningContentField
+					? canonicalReasoningField
+					: streamedReasoningField === "reasoning_content" ||
+							streamedReasoningField === "reasoning" ||
+							streamedReasoningField === "reasoning_text"
 						? streamedReasoningField
-						: (compat.reasoningContentField ?? "reasoning_content");
+						: canonicalReasoningField;
 				const reasoningContent = (assistantMsg as any)[reasoningField];
 				if (!reasoningContent) {
 					const reasoning = (assistantMsg as any).reasoning;
@@ -1323,6 +1337,30 @@ export function convertMessages(
 					} else if (nonEmptyThinkingBlocks.length > 0) {
 						(assistantMsg as any)[reasoningField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
 					}
+				}
+			}
+
+			// Strict-mode hosts (DeepSeek V4) reject any non-canonical reasoning field. Drop
+			// `reasoning` / `reasoning_text` aliases that may have been carried over from
+			// streaming so the wire payload only contains `reasoning_content`.
+			if (strictReasoningContentField) {
+				if (canonicalReasoningField !== "reasoning" && (assistantMsg as any).reasoning !== undefined) {
+					if (
+						(assistantMsg as any)[canonicalReasoningField] === undefined ||
+						(assistantMsg as any)[canonicalReasoningField] === ""
+					) {
+						(assistantMsg as any)[canonicalReasoningField] = (assistantMsg as any).reasoning;
+					}
+					delete (assistantMsg as any).reasoning;
+				}
+				if (canonicalReasoningField !== "reasoning_text" && (assistantMsg as any).reasoning_text !== undefined) {
+					if (
+						(assistantMsg as any)[canonicalReasoningField] === undefined ||
+						(assistantMsg as any)[canonicalReasoningField] === ""
+					) {
+						(assistantMsg as any)[canonicalReasoningField] = (assistantMsg as any).reasoning_text;
+					}
+					delete (assistantMsg as any).reasoning_text;
 				}
 			}
 
@@ -1357,9 +1395,8 @@ export function convertMessages(
 			// This covers the case where thinking blocks have valid signatures but were excluded
 			// by the nonEmptyThinkingBlocks filter above, or where thinking text is empty but
 			// the signature identifies the correct field name for replay.
-			// Only recognized OpenAI-compat reasoning field names qualify — opaque signatures
-			// from other providers (Anthropic encrypted, OpenAI Responses JSON, etc.) are not
-			// valid property names for the wire message.
+			// In strict-reasoning-content mode (DeepSeek V4), we force the canonical field name
+			// regardless of which name was streamed back from upstream proxies.
 			if (
 				needsReasoningField &&
 				!hasReasoningField &&
@@ -1370,8 +1407,12 @@ export function convertMessages(
 				if (allThinkingBlocks.length > 0) {
 					const signature = allThinkingBlocks[0].thinkingSignature;
 					const recognizedFields = ["reasoning_content", "reasoning", "reasoning_text"];
-					if (signature && recognizedFields.includes(signature)) {
-						(assistantMsg as any)[signature] = allThinkingBlocks.map(b => b.thinking).join("\n");
+					const targetField =
+						strictReasoningContentField || !signature || !recognizedFields.includes(signature)
+							? canonicalReasoningField
+							: signature;
+					if (strictReasoningContentField || (signature && recognizedFields.includes(signature))) {
+						(assistantMsg as any)[targetField] = allThinkingBlocks.map(b => b.thinking).join("\n");
 						hasReasoningField = true;
 					}
 				}

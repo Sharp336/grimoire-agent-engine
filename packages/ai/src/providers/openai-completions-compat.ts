@@ -81,7 +81,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		provider === "mistral" ||
 		baseUrl.includes("mistral.ai") ||
 		baseUrl.includes("chutes.ai") ||
-		baseUrl.includes("deepseek.com") ||
+		isDeepseekFamily ||
 		baseUrl.includes("fireworks.ai") ||
 		isAlibaba ||
 		isZai ||
@@ -95,7 +95,8 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		provider === "mistral" ||
 		baseUrl.includes("mistral.ai") ||
 		baseUrl.includes("chutes.ai") ||
-		baseUrl.includes("fireworks.ai");
+		baseUrl.includes("fireworks.ai") ||
+		isDeepseekFamily;
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
 	const isMistral = provider === "mistral" || baseUrl.includes("mistral.ai");
 
@@ -194,7 +195,11 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		// DeepSeek V4 rejects synthetic reasoning_content placeholders (".") on tool-call turns.
 		// Kimi and OpenRouter accept them when actual reasoning is unavailable.
 		allowsSyntheticReasoningContentForToolCalls: !isDeepseekFamily || !model.reasoning,
-		requiresAssistantContentForToolCalls: isKimiModel,
+		// DeepSeek V4 (including via Zenmux/NVIDIA NIM/DeepInfra/Kilo etc.) rejects null content on
+		// assistant tool-call turns when reasoning_content is replayed; mirror Kimi's invariant so a
+		// non-null placeholder is preserved across hosts. The reasoning-mode gate keeps non-thinking
+		// DeepSeek calls untouched.
+		requiresAssistantContentForToolCalls: isKimiModel || (isDeepseekFamily && Boolean(model.reasoning)),
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),

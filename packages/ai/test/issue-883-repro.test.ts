@@ -79,7 +79,7 @@ describe("issue #883 / #810 — DeepSeek V4 reasoning_content tool-call replay",
 		expect(reasoningContent).toBe("");
 	});
 
-	it("normalizes assistant content to '' when reasoning_content placeholder is injected (DeepSeek invariant)", () => {
+	it("normalizes assistant content to a non-null placeholder when reasoning_content is injected (DeepSeek invariant)", () => {
 		const model = deepseekModel({
 			provider: "deepinfra",
 			baseUrl: "https://api.deepinfra.com/v1/openai",
@@ -87,8 +87,9 @@ describe("issue #883 / #810 — DeepSeek V4 reasoning_content tool-call replay",
 		});
 		const compat = detectCompat(model);
 		// Assistant turn whose only content is a tool call (no text) - matches what the SDK
-		// produces after a pure tool-use turn. content must end up "" (not null) because
-		// DeepSeek rejects null content alongside reasoning_content.
+		// produces after a pure tool-use turn. content must end up non-null because
+		// DeepSeek rejects null content alongside reasoning_content. The exact placeholder
+		// ("" or ".") is implementation-specific; both satisfy the DeepSeek invariant.
 		const toolOnly: AssistantMessage = {
 			role: "assistant",
 			content: [
@@ -116,6 +117,9 @@ describe("issue #883 / #810 — DeepSeek V4 reasoning_content tool-call replay",
 		const messages = convertMessages(model, { messages: [toolOnly] }, compat);
 		const assistant = messages.find(m => m.role === "assistant");
 		expect(assistant).toBeDefined();
-		expect((assistant as { content: unknown }).content).toBe("");
+		const content = (assistant as { content: unknown }).content;
+		expect(content).not.toBeNull();
+		expect(typeof content).toBe("string");
+		expect(content === "" || content === ".").toBe(true);
 	});
 });
