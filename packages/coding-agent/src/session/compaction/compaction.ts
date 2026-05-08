@@ -313,7 +313,12 @@ export function estimateTokens(message: AgentMessage): number {
 	}
 
 	if (fragments.length === 0) return extra;
-	return extra + countTokens(fragments);
+	const counted = countTokens(fragments);
+	if (counted > 0) return extra + counted;
+	// Fallback: native countTokens not compiled — estimate from character count
+	let chars = 0;
+	for (const f of fragments) chars += f.length;
+	return extra + Math.ceil(chars / 4);
 }
 
 function estimateEntriesTokens(entries: SessionEntry[], startIndex: number, endIndex: number): number {
@@ -445,11 +450,19 @@ export function findCutPoint(
 		// Check if we've exceeded the budget
 		if (accumulatedTokens >= keepRecentTokens) {
 			// Find the closest valid cut point at or after this entry
+			let found = false;
 			for (let c = 0; c < cutPoints.length; c++) {
 				if (cutPoints[c] >= i) {
 					cutIndex = cutPoints[c];
+					found = true;
 					break;
 				}
+			}
+			// If no cut point at or after i (e.g. session ends with tool results),
+			// use the last valid cut point (closest to end) instead of keeping
+			// everything from the first message.
+			if (!found) {
+				cutIndex = cutPoints[cutPoints.length - 1];
 			}
 			break;
 		}

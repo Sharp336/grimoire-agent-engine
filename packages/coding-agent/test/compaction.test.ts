@@ -815,6 +815,62 @@ describe("findCutPoint", () => {
 	});
 });
 
+describe("findCutPoint with trailing tool results", () => {
+	function createToolResultMessage(toolCallId: string, text: string): AgentMessage {
+		return {
+			role: "toolResult",
+			toolCallId,
+			toolName: "read",
+			content: [{ type: "text", text }],
+			isError: false,
+			timestamp: Date.now(),
+		} as AgentMessage;
+	}
+
+	it("should use last cut point when budget exceeded past all cut points", () => {
+		// Scenario: session ends with a large tool result, small budget.
+		// The last valid cut point is the assistant message before the tool result.
+		const entries: SessionEntry[] = [
+			createMessageEntry(createUserMessage("Do X")),
+			createMessageEntry(createAssistantMessage("Reading file", createMockUsage(0, 100, 1000, 0))),
+			createMessageEntry(createToolResultMessage("call_1", "x".repeat(20000))),
+		];
+
+		// Budget of 1 token: exceeds immediately at the tool result, which is not a valid cut point.
+		// Before the fix, this would fall back to cutPoints[0] (index 0), keeping everything.
+		const result = findCutPoint(entries, 0, entries.length, 1);
+
+		// Should cut at the assistant message (index 1), not fall back to index 0.
+		expect(result.firstKeptEntryIndex).toBe(1);
+	});
+
+	it("should produce a valid compaction preparation when session ends with tool results", () => {
+		// Full prepareCompaction scenario: after a previous compaction, a few turns ending in tool results.
+		const compaction = createCompactionEntry("Previous summary", "test-id-0");
+		const entries: SessionEntry[] = [
+			compaction,
+			createMessageEntry(createUserMessage("Turn 1")),
+			createMessageEntry(createAssistantMessage("tool call", createMockUsage(50000, 500, 200000, 100000))),
+			createMessageEntry(createToolResultMessage("call_1", "x".repeat(30000))),
+			createMessageEntry(createUserMessage("Turn 2")),
+			createMessageEntry(createAssistantMessage("another tool call", createMockUsage(60000, 500, 200000, 100000))),
+			createMessageEntry(createToolResultMessage("call_2", "y".repeat(50000))),
+		];
+
+		// With inflated promptTokens (350k) vs message content (~20k), ratio would be ~17x.
+		// Without the ratio clamp, keepRecentTokens would shrink to ~1100, triggering the
+		// fallback bug. With both fixes, compaction should still produce a valid preparation.
+		const preparation = prepareCompaction(entries, {
+			...DEFAULT_COMPACTION_SETTINGS,
+			keepRecentTokens: 20000,
+			remoteEnabled: false,
+		});
+
+		expect(preparation).toBeDefined();
+		expect(preparation!.messagesToSummarize.length + preparation!.turnPrefixMessages.length).toBeGreaterThan(0);
+	});
+});
+
 describe("buildSessionContext", () => {
 	it("should load all messages when no compaction", () => {
 		const entries: SessionEntry[] = [
