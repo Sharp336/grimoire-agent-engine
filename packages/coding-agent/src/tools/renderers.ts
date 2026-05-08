@@ -29,6 +29,7 @@ import { searchToolRenderer } from "./search";
 import { searchToolBm25Renderer } from "./search-tool-bm25";
 import { sshToolRenderer } from "./ssh";
 import { todoWriteToolRenderer } from "./todo-write";
+import { identityToolRenderer } from "./identity-render";
 import { writeToolRenderer } from "./write";
 
 type ToolRenderer = {
@@ -70,4 +71,6 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	github: githubToolRenderer as ToolRenderer,
 	web_search: webSearchToolRenderer as ToolRenderer,
 	write: writeToolRenderer as ToolRenderer,
+	identity: identityToolRenderer as ToolRenderer,
+
 };
