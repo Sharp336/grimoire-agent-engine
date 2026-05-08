@@ -1,3 +1,3 @@
-export * from "./types";
-export * from "./renderer";
 export { createEvolutionBoard } from "./board";
+export * from "./renderer";
+export * from "./types";

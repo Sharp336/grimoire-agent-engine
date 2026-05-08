@@ -1,7 +1,7 @@
-import { beforeAll, describe, expect, it } from "bun:test";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { describe, expect, it } from "bun:test";
+import { renderTopicDetail, renderTopicList } from "@oh-my-pi/pi-coding-agent/evolution-board/renderer";
 import type { EvolutionTopic } from "@oh-my-pi/pi-coding-agent/evolution-board/types";
-import { renderTopicList, renderTopicDetail } from "@oh-my-pi/pi-coding-agent/evolution-board/renderer";
+import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 const sampleTopic: EvolutionTopic = {
 	id: "feature-dashboard",
@@ -29,6 +29,6 @@ describe("EvolutionBoard Renderer", () => {
 		expect(theme).toBeDefined();
 		const lines = renderTopicDetail(sampleTopic, 80, theme!);
 		expect(lines.length).toBeGreaterThan(0);
-		expect(lines.some((l) => l.includes("功能进化看板"))).toBe(true);
+		expect(lines.some(l => l.includes("功能进化看板"))).toBe(true);
 	});
 });

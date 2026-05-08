@@ -24,10 +24,10 @@ export function renderTopicList(topics: EvolutionTopic[], width: number, theme: 
 	if (topics.length === 0) {
 		return [theme.fg("dim", "No topics found.")];
 	}
-	return topics.map((topic) => {
+	return topics.map(topic => {
 		const status = STATUS_LABELS[topic.status];
 		const statusColor = STATUS_COLORS[topic.status];
-		const statusTag = theme.fg(statusColor, `[${status.padEnd(8)}]`);
+		const statusTag = theme.fg(statusColor as never, `[${status.padEnd(8)}]`);
 		const name = truncateToWidth(topic.name, 20);
 		const modules = topic.modules?.join(", ") ?? "";
 		const progress = topic.progress !== undefined ? ` ${topic.progress}%` : "";
@@ -43,7 +43,7 @@ export function renderTopicDetail(topic: EvolutionTopic, width: number, theme: T
 	lines.push(theme.fg("accent", topic.name));
 	lines.push(
 		theme.fg(
-			statusColor,
+			statusColor as never,
 			`Status: ${topic.status}${topic.progress !== undefined ? ` (${topic.progress}%)` : ""}`,
 		),
 	);

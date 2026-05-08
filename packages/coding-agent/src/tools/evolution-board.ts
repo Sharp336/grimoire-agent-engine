@@ -2,14 +2,13 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
 import { createEvolutionBoard } from "../evolution-board/board";
-import type { ToolSession } from ".";
 import evolutionBoardDescription from "../prompts/tools/evolution-board.md" with { type: "text" };
+import type { ToolSession } from ".";
 
 const evolutionBoardSchema = Type.Object({
-	action: Type.Union(
-		[Type.Literal("list"), Type.Literal("show"), Type.Literal("filter")],
-		{ description: "操作类型" },
-	),
+	action: Type.Union([Type.Literal("list"), Type.Literal("show"), Type.Literal("filter")], {
+		description: "操作类型",
+	}),
 	topicId: Type.Optional(Type.String({ description: "Topic ID（show 时必填）" })),
 	filter: Type.Optional(
 		Type.Object({
@@ -33,10 +32,7 @@ export class EvolutionBoardTool implements AgentTool<typeof evolutionBoardSchema
 		this.description = prompt.render(evolutionBoardDescription);
 	}
 
-	async execute(
-		_toolCallId: string,
-		params: EvolutionBoardParams,
-	): Promise<AgentToolResult> {
+	async execute(_toolCallId: string, params: EvolutionBoardParams): Promise<AgentToolResult> {
 		const board = createEvolutionBoard();
 
 		const yamlPath = `${this.session.cwd}/docs/evolution-board.yaml`;
@@ -57,9 +53,7 @@ export class EvolutionBoardTool implements AgentTool<typeof evolutionBoardSchema
 		switch (params.action) {
 			case "list": {
 				const topics = board.getTopics();
-				const output = topics
-					.map((t) => `${t.status} | ${t.name} | ${t.brief}`)
-					.join("\n");
+				const output = topics.map(t => `${t.status} | ${t.name} | ${t.brief}`).join("\n");
 				return {
 					content: [{ type: "text", text: output || "No topics found." }],
 				};
@@ -73,7 +67,6 @@ export class EvolutionBoardTool implements AgentTool<typeof evolutionBoardSchema
 								text: "topicId is required for show action.",
 							},
 						],
-						isError: true,
 					};
 				}
 				const topic = board.getTopic(params.topicId);
@@ -85,7 +78,6 @@ export class EvolutionBoardTool implements AgentTool<typeof evolutionBoardSchema
 								text: `Topic "${params.topicId}" not found.`,
 							},
 						],
-						isError: true,
 					};
 				}
 				const lines = [
@@ -117,13 +109,9 @@ export class EvolutionBoardTool implements AgentTool<typeof evolutionBoardSchema
 				if (params.filter?.tag) {
 					topics = board.getByTag(params.filter.tag);
 				}
-				const output = topics
-					.map((t) => `${t.status} | ${t.name} | ${t.brief}`)
-					.join("\n");
+				const output = topics.map(t => `${t.status} | ${t.name} | ${t.brief}`).join("\n");
 				return {
-					content: [
-						{ type: "text", text: output || "No topics match the filter." },
-					],
+					content: [{ type: "text", text: output || "No topics match the filter." }],
 				};
 			}
 		}

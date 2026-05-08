@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { describe, expect, it } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvolutionBoardTool } from "@oh-my-pi/pi-coding-agent/tools/evolution-board";
@@ -18,6 +18,6 @@ describe("EvolutionBoardTool", () => {
 	it("returns error when no evolution board file exists", async () => {
 		const tool = new EvolutionBoardTool(createSession());
 		const result = await tool.execute("test-id", { action: "list" });
-		expect(result.content[0].text).toContain("No evolution board found");
+		expect((result.content[0] as { type: string; text: string }).text).toContain("No evolution board found");
 	});
 });
