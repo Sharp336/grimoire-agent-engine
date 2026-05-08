@@ -81,6 +81,58 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 		}
 	}
 
+	#getAvailableTools(): string[] {
+		const tools: string[] = [];
+		const settings = this.#session.settings;
+
+		const toolSettings: Array<[string, string | null]> = [
+			["read", null],
+			["edit", null],
+			["write", null],
+			["bash", null],
+			["python", null],
+			["search", "search.enabled"],
+			["find", "find.enabled"],
+			["ask", null],
+			["lsp", "lsp.enabled"],
+			["github", "github.enabled"],
+			["web_search", "web_search.enabled"],
+			["calc", "calc.enabled"],
+			["browser", "browser.enabled"],
+			["debug", "debug.enabled"],
+			["ast_grep", "astGrep.enabled"],
+			["ast_edit", "astEdit.enabled"],
+			["render_mermaid", "renderMermaid.enabled"],
+			["notebook", "notebook.enabled"],
+			["inspect_image", "inspect_image.enabled"],
+			["checkpoint", "checkpoint.enabled"],
+			["irc", "irc.enabled"],
+			["recipe", "recipe.enabled"],
+			["todo_write", "todo.enabled"],
+			["task", null],
+			["job", null],
+		];
+
+		for (const [tool, settingKey] of toolSettings) {
+			if (settingKey === null) {
+				// Always available tools
+				tools.push(tool);
+			} else {
+				// Check settings, default to true if not explicitly false
+				const enabled = settings.get(settingKey as any);
+				if (enabled !== false) {
+					tools.push(tool);
+				}
+			}
+		}
+
+		return tools;
+	}
+
+	#getSkills(): string[] {
+		return this.#session.skills?.map(s => s.name) ?? [];
+	}
+
 	#handleWhoRu(): AgentToolResult<IdentityToolDetails> {
 		const identity: AgentIdentity = {
 			name: "Oh My Pi",
@@ -89,8 +141,8 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 			agentId: this.#session.getAgentId?.() ?? "0-Main",
 			taskDepth: this.#session.taskDepth ?? 0,
 			cwd: this.#session.cwd,
-			availableTools: [], // populated from session context
-			skills: this.#session.skills?.map(s => s.name) ?? [],
+			availableTools: this.#getAvailableTools(),
+			skills: this.#getSkills(),
 			capabilities: [
 				"代码操作：读取、编辑、重构、搜索、批量替换",
 				"运行时：执行 Bash 命令、Python 脚本、Node.js",
@@ -136,12 +188,15 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 			`- ${identity.workStyle}`,
 			"",
 			"## 当前状态",
-			`- 可用工具：${identity.availableTools.length} 个`,
-			`- 已加载技能：${identity.skills.join(", ") || "none"}`,
-			"",
-			"## Agent 约束",
-			...identity.constraints.map(c => `- ${c}`),
+			`- 可用工具：${identity.availableTools.length} 个 [${identity.availableTools.join(", ")}]`,
 		];
+
+		if (identity.skills.length > 0) {
+			lines.push(`- 已加载技能：${identity.skills.join(", ")}`);
+		}
+
+		lines.push("", "## Agent 约束", ...identity.constraints.map(c => `- ${c}`));
+
 		return lines.join("\n");
 	}
 
@@ -232,6 +287,7 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 		if (!section || !data) {
 			throw new Error("update_persona requires both 'section' and 'data' parameters.");
 		}
+
 		const validSections = ["basics", "career", "interests", "preferences", "interaction", "thinking", "constraints"];
 		if (!validSections.includes(section)) {
 			throw new Error(`Invalid section "${section}". Valid: ${validSections.join(", ")}`);
