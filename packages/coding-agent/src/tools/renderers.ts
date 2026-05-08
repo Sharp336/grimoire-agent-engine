@@ -18,6 +18,7 @@ import { calculatorToolRenderer } from "./calculator";
 import { debugToolRenderer } from "./debug";
 import { findToolRenderer } from "./find";
 import { githubToolRenderer } from "./gh-renderer";
+import { identityToolRenderer } from "./identity-render";
 import { inspectImageToolRenderer } from "./inspect-image-renderer";
 import { jobToolRenderer } from "./job";
 import { notebookToolRenderer } from "./notebook";
@@ -70,4 +71,5 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	github: githubToolRenderer as ToolRenderer,
 	web_search: webSearchToolRenderer as ToolRenderer,
 	write: writeToolRenderer as ToolRenderer,
+	identity: identityToolRenderer as ToolRenderer,
 };
