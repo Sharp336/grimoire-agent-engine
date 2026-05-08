@@ -46,6 +46,7 @@ import { SearchTool } from "./search";
 import { SearchToolBm25Tool } from "./search-tool-bm25";
 import { loadSshTool } from "./ssh";
 import { type TodoPhase, TodoWriteTool } from "./todo-write";
+import { EvolutionBoardTool } from "./evolution-board";
 import { WriteTool } from "./write";
 import { YieldTool } from "./yield";
 
@@ -86,6 +87,7 @@ export * from "./search-tool-bm25";
 export * from "./ssh";
 export * from "./todo-write";
 export * from "./vim";
+export * from "./evolution-board";
 export * from "./write";
 export * from "./yield";
 
@@ -231,6 +233,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	todo_write: s => new TodoWriteTool(s),
 	web_search: s => new WebSearchTool(s),
 	search_tool_bm25: SearchToolBm25Tool.createIf,
+	evolution_board: s => new EvolutionBoardTool(s),
 	write: s => new WriteTool(s),
 };
 
