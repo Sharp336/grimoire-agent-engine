@@ -477,6 +477,20 @@ When adding or changing tests, test the contract the system exposes — not the 
 - Do not add tests for tiny, low-risk changes unless the change affects a real contract, fixes a regression-prone edge case, or would otherwise be easy to break silently.
 - When trimming or adding tests, prefer focused package-local verification for the changed area so the surviving suite proves the contract it claims to protect.
 
+## Interactive Testing
+
+After implementing a new feature or tool, **MUST** use tmux to start omp and test the feature in an interactive session.
+
+```bash
+# Start omp in tmux for interactive testing
+tmux new-session -d -s omp-test "bun packages/coding-agent/src/cli.ts"
+```
+
+- Test new tools by invoking them through the agent conversation
+- Test TUI components by verifying rendering in the actual terminal
+- Test end-to-end workflows, not just unit tests
+- Verify the feature works from a user's perspective
+
 ## GitHub Issues
 
 When reading issues:
@@ -544,7 +558,7 @@ The script handles: version bump, CHANGELOG finalization, commit, tag, publish, 
 <!-- gitnexus:start -->
 # GitNexus — Code Intelligence
 
-This project is indexed by GitNexus as **oh-my-pi** (56193 symbols, 102690 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
+This project is indexed by GitNexus as **oh-my-pi** (56594 symbols, 103344 relationships, 300 execution flows). Use the GitNexus MCP tools to understand code, assess impact, and navigate safely.
 
 > If any GitNexus tool warns the index is stale, run `npx gitnexus analyze` in terminal first.
 
