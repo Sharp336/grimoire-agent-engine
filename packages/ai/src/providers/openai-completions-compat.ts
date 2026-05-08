@@ -73,6 +73,13 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		baseUrl.includes("deepseek.com") ||
 		lowerId.includes("deepseek") ||
 		lowerName.includes("deepseek");
+	// GLM-family models (GLM-5, GLM-5.1, etc.) use `max_tokens` (not
+	// `max_completion_tokens`), don't support `reasoning_effort`, and
+	// surface thinking content under `reasoning` (not `reasoning_content`).
+	// Reachable through many providers (Z.AI, OpenCode-Go, ZenMux, OpenRouter,
+	// Together, etc.) — match purely by model id/name so the flags apply
+	// regardless of which provider routes the request.
+	const isGlmFamily = lowerId.includes("glm") || lowerName.includes("glm");
 
 	const isNonStandard =
 		isCerebras ||
@@ -96,7 +103,8 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		baseUrl.includes("mistral.ai") ||
 		baseUrl.includes("chutes.ai") ||
 		baseUrl.includes("fireworks.ai") ||
-		isDeepseekFamily;
+		isDeepseekFamily ||
+		isGlmFamily;
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
 	const isMistral = provider === "mistral" || baseUrl.includes("mistral.ai");
 
@@ -163,7 +171,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		supportsStore: !isNonStandard,
 		supportsDeveloperRole: !isNonStandard,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
-		supportsReasoningEffort: !isGrok && !isZai,
+		supportsReasoningEffort: !isGrok && !isZai && !isGlmFamily,
 		reasoningEffortMap,
 		supportsUsageInStreaming: !isCerebras,
 		disableReasoningOnForcedToolChoice: isKimiModel || isAnthropicModel,
@@ -174,14 +182,14 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		requiresAssistantAfterToolResult: false,
 		requiresThinkingAsText: isMistral,
 		requiresMistralToolIds: isMistral,
-		thinkingFormat: isZai
+		thinkingFormat: isGlmFamily
 			? "zai"
 			: provider === "openrouter" || baseUrl.includes("openrouter.ai")
 				? "openrouter"
 				: isAlibaba || isQwen
 					? "qwen"
 					: "openai",
-		reasoningContentField: "reasoning_content",
+		reasoningContentField: isGlmFamily ? "reasoning" : "reasoning_content",
 		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
 		//   - Kimi: documented invariant on its native API and via OpenCode-Go.
 		//   - Any reasoning-capable model reached through OpenRouter: DeepSeek V4 Pro and similar enforce
@@ -199,7 +207,8 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		// assistant tool-call turns when reasoning_content is replayed; mirror Kimi's invariant so a
 		// non-null placeholder is preserved across hosts. The reasoning-mode gate keeps non-thinking
 		// DeepSeek calls untouched.
-		requiresAssistantContentForToolCalls: isKimiModel || (isDeepseekFamily && Boolean(model.reasoning)),
+		requiresAssistantContentForToolCalls:
+			isKimiModel || (isDeepseekFamily && Boolean(model.reasoning)) || (isGlmFamily && Boolean(model.reasoning)),
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),

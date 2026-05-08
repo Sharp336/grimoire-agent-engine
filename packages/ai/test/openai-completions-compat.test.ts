@@ -557,6 +557,73 @@ describe("kimi model detection via detectCompat", () => {
 	});
 });
 
+describe("GLM-family model detection via detectCompat", () => {
+	function glmOpenCodeModel(id: string): Model<"openai-completions"> {
+		return {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			id,
+			reasoning: true,
+		};
+	}
+
+	it("uses max_tokens (not max_completion_tokens) for GLM-5.1 on opencode-go", () => {
+		const compat = detectCompat(glmOpenCodeModel("glm-5.1"));
+		expect(compat.maxTokensField).toBe("max_tokens");
+	});
+
+	it("disables reasoning_effort for GLM-family models", () => {
+		const compat = detectCompat(glmOpenCodeModel("glm-5.1"));
+		expect(compat.supportsReasoningEffort).toBe(false);
+	});
+
+	it("uses reasoning (not reasoning_content) as the reasoning content field for GLM", () => {
+		const compat = detectCompat(glmOpenCodeModel("glm-5.1"));
+		expect(compat.reasoningContentField).toBe("reasoning");
+	});
+
+	it("uses zai thinking format for GLM-family models", () => {
+		const compat = detectCompat(glmOpenCodeModel("glm-5.1"));
+		expect(compat.thinkingFormat).toBe("zai");
+	});
+
+	it("requires non-null assistant content for tool-call turns on reasoning GLM", () => {
+		const compat = detectCompat(glmOpenCodeModel("glm-5.1"));
+		expect(compat.requiresAssistantContentForToolCalls).toBe(true);
+	});
+
+	it("does not require assistant content for non-reasoning GLM", () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+			provider: "opencode-go",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+			id: "glm-5.1",
+			reasoning: false,
+		};
+		const compat = detectCompat(model);
+		expect(compat.requiresAssistantContentForToolCalls).toBe(false);
+	});
+
+	it("detects GLM-family by model name", () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+			provider: "together",
+			baseUrl: "https://api.together.xyz/v1",
+			id: "zai-org/glm-5.1",
+			name: "GLM-5.1",
+			reasoning: true,
+		};
+		const compat = detectCompat(model);
+		expect(compat.maxTokensField).toBe("max_tokens");
+		expect(compat.supportsReasoningEffort).toBe(false);
+		expect(compat.reasoningContentField).toBe("reasoning");
+	});
+});
+
 describe("NVIDIA NIM DeepSeek special-token stripping", () => {
 	function nvidiaDeepseekModel(): Model<"openai-completions"> {
 		return {

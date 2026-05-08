@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed GLM-family reasoning models (GLM-5, GLM-5.1, etc.) failing with HTTP 400 when accessed through OpenAI-compatible aggregators (OpenCode-Go, ZenMux, OpenRouter, Together, etc.) due to three incompatible wire-format defaults: `max_completion_tokens` (GLM expects `max_tokens`), `reasoning_effort` (GLM does not support it), and `reasoning_content` field name (GLM surfaces thinking under `reasoning`, not `reasoning_content`). `detectOpenAICompat` now detects GLM-family models by provider/URL/id/name and sets `maxTokensField: "max_tokens"`, `supportsReasoningEffort: false`, `reasoningContentField: "reasoning"`, `thinkingFormat: "zai"`, and `requiresAssistantContentForToolCalls: true` (for reasoning-capable variants) so the conversation history matches the official Z.AI invariants on every aggregator.
 - Fixed DeepSeek V4 reasoning models served through OpenAI-compatible aggregators (ZenMux, NVIDIA NIM, DeepInfra, KiloCode, etc.) failing thinking-mode tool-call replays by treating the entire DeepSeek family as non-standard regardless of host. `detectOpenAICompat` now disables `supportsStore`/`supportsDeveloperRole`, switches `maxTokensField` to `max_tokens`, and sets `requiresAssistantContentForToolCalls: true` whenever a DeepSeek-family reasoning model is detected (by provider, base URL, model id, or model name) so the conversation history matches the official `api.deepseek.com` invariants on every aggregator.
 
 ## [14.7.6] - 2026-05-07
