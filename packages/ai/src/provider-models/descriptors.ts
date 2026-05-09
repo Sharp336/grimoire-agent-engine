@@ -10,6 +10,7 @@ import { googleModelManagerOptions } from "./google";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
 	alibabaCodingPlanModelManagerOptions,
+	astraflowModelManagerOptions,
 	anthropicModelManagerOptions,
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
@@ -153,6 +154,12 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		catalog("Fireworks", ["FIREWORKS_API_KEY"]),
 	),
 	descriptor("xai", "grok-4-fast-non-reasoning", config => xaiModelManagerOptions(config)),
+	catalogDescriptor(
+		"astraflow",
+		"gpt-4o",
+		config => astraflowModelManagerOptions(config),
+		catalog("Astraflow", ["ASTRAFLOW_API_KEY", "ASTRAFLOW_CN_API_KEY"]),
+	),
 	catalogDescriptor(
 		"deepseek",
 		"deepseek-v4-pro",
