@@ -136,26 +136,26 @@ export class IdentityTool implements AgentTool<typeof identitySchema, IdentityTo
 	#parseModel(modelStr: string): { provider: string; name: string } {
 		if (modelStr.includes("/")) {
 			const parts = modelStr.split("/");
-			const rawProvider = parts[0];
-			const name = parts[1];
-
-			// Detect actual provider from environment variables.
-			// The API may use a compatible format (e.g., anthropic-compatible on dashscope).
-			if (rawProvider === "anthropic") {
-				const baseUrl = process.env.ANTHROPIC_BASE_URL || "";
-				if (baseUrl.includes("dashscope") || baseUrl.includes("aliyun")) {
-					return { provider: "aliyun-dashscope", name };
-				}
-			}
-
-			return { provider: rawProvider, name };
+			return { provider: parts[0], name: parts[1] };
 		}
 		return { provider: "unknown", name: modelStr };
 	}
 
+	#getActualProviderAndName(): { provider: string; name: string } {
+		// Prefer actual connected model details over configured model string.
+		// This handles proxy/routing scenarios where the configured provider
+		// differs from the actual API endpoint (e.g., anthropic-compatible via kimi).
+		const details = this.#session.getActiveModelDetails?.();
+		if (details) {
+			return { provider: details.provider, name: details.id };
+		}
+		const modelStr = this.#session.getActiveModelString?.() ?? "unknown";
+		return this.#parseModel(modelStr);
+	}
+
 	#handleWhoRu(): AgentToolResult<IdentityToolDetails> {
 		const modelStr = this.#session.getActiveModelString?.() ?? "unknown";
-		const { provider, name } = this.#parseModel(modelStr);
+		const { provider, name } = this.#getActualProviderAndName();
 
 		const identity: AgentIdentity = {
 			name: "Oh My Pi",

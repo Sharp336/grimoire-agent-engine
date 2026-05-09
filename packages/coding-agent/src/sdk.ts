@@ -957,6 +957,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
+			getActiveModelDetails: () => {
+				const activeModel = agent?.state.model ?? model;
+				if (!activeModel) return undefined;
+				return {
+					provider: activeModel.provider,
+					baseUrl: activeModel.baseUrl,
+					id: activeModel.id,
+					name: activeModel.name,
+					api: activeModel.api,
+				};
+			},
 			getPlanModeState: () => session.getPlanModeState(),
 			getCompactContext: () => session.formatCompactContext(),
 			getTodoPhases: () => session.getTodoPhases(),

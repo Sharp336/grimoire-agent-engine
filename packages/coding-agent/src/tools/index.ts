@@ -155,6 +155,10 @@ export interface ToolSession {
 	getModelString?: () => string | undefined;
 	/** Get the current session model string, regardless of how it was chosen */
 	getActiveModelString?: () => string | undefined;
+	/** Get actual connected model details (provider, baseUrl, etc) */
+	getActiveModelDetails?: () =>
+		| { provider: string; baseUrl: string; id: string; name: string; api: string }
+		| undefined;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: import("../session/auth-storage").AuthStorage;
 	/** Model registry for passing to subagents (avoids re-discovery) */
