@@ -140,7 +140,8 @@ export type KnownProvider =
 	| "vllm"
 	| "xiaomi"
 	| "zenmux"
-	| "lm-studio";
+	| "lm-studio"
+	| "astraflow";
 export type Provider = KnownProvider | string;
 
 import type { Effort } from "./model-thinking";
