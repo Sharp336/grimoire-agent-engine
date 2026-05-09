@@ -729,6 +729,9 @@ function buildAdditionalModelRequestFields(
 		medium: 8192,
 		high: 16384,
 		xhigh: 32768,
+		// Bedrock Converse Opus 4.6+ uses adaptive thinking and bypasses this branch;
+		// the entry exists only for type completeness if a non-adaptive path picks Max.
+		max: 32768,
 	};
 	const budget = options.thinkingBudgets?.[level] ?? defaultBudgets[level];
 

@@ -341,6 +341,9 @@ export const ANTHROPIC_THINKING: Record<Effort, number> = {
 	medium: 8192,
 	high: 16384,
 	xhigh: 32768,
+	// Adaptive Opus 4.7+ ignores explicit budgets — this fallback is used only when
+	// Max happens to flow through a budget-mode code path (e.g. legacy callers).
+	max: 65536,
 };
 
 const GOOGLE_THINKING: Record<Effort, number> = {
@@ -349,6 +352,8 @@ const GOOGLE_THINKING: Record<Effort, number> = {
 	medium: 8192,
 	high: 16384,
 	xhigh: 24575,
+	// Google does not expose a distinct max level; cap to its xhigh ceiling for safety.
+	max: 24575,
 };
 
 const BEDROCK_CLAUDE_THINKING: Record<Effort, number> = {
@@ -357,6 +362,8 @@ const BEDROCK_CLAUDE_THINKING: Record<Effort, number> = {
 	medium: 8192,
 	high: 16384,
 	xhigh: 16384,
+	// Bedrock Converse caps at 16384; keep parity for Max.
+	max: 16384,
 };
 
 function resolveBedrockThinkingBudget(

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `max` option to the thinking-level selector (cycle/`/effort`/settings) and a `thinkingBudgets.max` setting (default 65536). The new level is selectable only when the active model advertises `Effort.Max` in its supported set — currently Claude Opus 4.7+ on the direct Anthropic Messages API. The status-line border reuses the existing `thinkingXhigh` color until a dedicated `thinkingMax` token is added.
+
 ## [14.8.0] - 2026-05-09
 ### Added
 

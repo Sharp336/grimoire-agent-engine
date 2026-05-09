@@ -21,7 +21,7 @@ import { parseStreamingJson } from "../utils/json-parse";
 import { transformMessages } from "./transform-messages";
 
 export interface OllamaChatOptions extends StreamOptions {
-	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	toolChoice?: ToolChoice;
 }
 
@@ -93,6 +93,7 @@ function mapReasoning(reasoning: OllamaChatOptions["reasoning"]): boolean | "low
 			return "medium";
 		case "high":
 		case "xhigh":
+		case "max":
 			return "high";
 		default:
 			return undefined;

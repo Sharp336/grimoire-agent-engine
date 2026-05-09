@@ -66,7 +66,7 @@ function resolveDeploymentName(model: Model<"azure-openai-responses">, options?:
 
 // Azure OpenAI Responses-specific options
 export interface AzureOpenAIResponsesOptions extends StreamOptions {
-	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	azureApiVersion?: string;
 	azureResourceName?: string;
@@ -319,7 +319,9 @@ function buildParams(
 
 		if (options?.reasoning || options?.reasoningSummary !== undefined) {
 			const reasoningParams: NonNullable<typeof params.reasoning> = {
-				effort: options?.reasoning || "medium",
+				// `Effort.Max` is rejected at runtime by `requireSupportedEffort` for non-Anthropic
+				// models, so this assignment is type-safe in practice. Cast to satisfy the SDK shape.
+				effort: (options?.reasoning || "medium") as NonNullable<typeof params.reasoning>["effort"],
 			};
 			if (options?.reasoningSummary !== null) {
 				reasoningParams.summary = options?.reasoningSummary || "auto";

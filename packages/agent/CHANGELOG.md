@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ThinkingLevel.Max` mirroring the new `Effort.Max` from `@oh-my-pi/pi-ai`. Agent-local selectors now span `inherit | off | minimal | low | medium | high | xhigh | max`.
+
 ## [14.7.6] - 2026-05-07
 
 ### Added

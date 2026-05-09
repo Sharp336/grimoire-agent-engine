@@ -118,6 +118,16 @@ describe("model thinking metadata", () => {
 			minLevel: Effort.Minimal,
 			maxLevel: Effort.XHigh,
 		});
+		expect(opus47.thinking).toEqual({
+			mode: "anthropic-adaptive",
+			minLevel: Effort.Minimal,
+			maxLevel: Effort.Max,
+		});
+		expect(opus47Bedrock.thinking).toEqual({
+			mode: "anthropic-adaptive",
+			minLevel: Effort.Minimal,
+			maxLevel: Effort.XHigh,
+		});
 		expect(sonnet46.thinking).toEqual({
 			mode: "anthropic-adaptive",
 			minLevel: Effort.Minimal,
@@ -127,8 +137,15 @@ describe("model thinking metadata", () => {
 		expect(mapEffortToAnthropicAdaptiveEffort(opus46, Effort.XHigh)).toBe("max");
 		// Opus 4.7 on Messages API sends the new literal "xhigh" level.
 		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.XHigh)).toBe("xhigh");
-		// Bedrock Converse is not the Messages API, so xhigh is not available there yet.
+		// Opus 4.7 on Messages API also exposes a distinct "max" adaptive ceiling.
+		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.Max)).toBe("max");
+		expect(requireSupportedEffort(opus47, Effort.Max)).toBe(Effort.Max);
+		// Bedrock Converse is not the Messages API, so xhigh is not available there yet,
+		// and Max is not exposed because the legacy XHigh→max alias still covers the ceiling.
 		expect(mapEffortToAnthropicAdaptiveEffort(opus47Bedrock, Effort.XHigh)).toBe("max");
+		expect(() => requireSupportedEffort(opus47Bedrock, Effort.Max)).toThrow(/not supported/);
+		// Opus 4.6 caps at XHigh; Max is not part of its supported set.
+		expect(() => requireSupportedEffort(opus46, Effort.Max)).toThrow(/not supported/);
 		expect(() => mapEffortToAnthropicAdaptiveEffort(sonnet46, Effort.XHigh)).toThrow(/not supported/);
 	});
 });

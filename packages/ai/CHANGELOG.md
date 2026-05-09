@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `Effort.Max` ("max") as a sixth user-facing thinking level above `xhigh`. Currently exposed only by Anthropic Opus 4.7+ on the Messages API, where it maps directly to the wire `output_config.effort = "max"` (the unconstrained adaptive ceiling). Other Anthropic surfaces (Bedrock Converse, Opus 4.6 and earlier) keep their existing 5-level set; their legacy `XHigh → "max"` alias is unchanged. `mapEffortToGoogleThinkingLevel` clamps `Max` to `HIGH`, and `requireSupportedEffort` rejects `Max` for any model whose inferred supported set does not include it.
+
 ## [14.8.0] - 2026-05-09
 
 ### Fixed

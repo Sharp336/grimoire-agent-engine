@@ -10,7 +10,6 @@ import type {
 	ChatCompletionToolMessageParam,
 } from "openai/resources/chat/completions";
 import packageJson from "../../package.json" with { type: "json" };
-import type { Effort } from "../model-thinking";
 import { calculateCost } from "../models";
 import { getEnvApiKey } from "../stream";
 import {
@@ -165,7 +164,7 @@ function hasToolHistory(messages: Message[]): boolean {
 
 export interface OpenAICompletionsOptions extends StreamOptions {
 	toolChoice?: ToolChoice;
-	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	/** Force-disable reasoning for OpenRouter-format requests (sends `reasoning: { enabled: false }`). */
 	disableReasoning?: boolean;
 	serviceTier?: ServiceTier;
@@ -1003,7 +1002,10 @@ function buildParams(
 		compat.supportsReasoningEffort
 	) {
 		// OpenAI-style reasoning_effort
-		params.reasoning_effort = mapReasoningEffort(options.reasoning, compat.reasoningEffortMap) as Effort;
+		params.reasoning_effort = mapReasoningEffort(
+			options.reasoning,
+			compat.reasoningEffortMap,
+		) as typeof params.reasoning_effort;
 	}
 
 	if (compat.disableReasoningOnToolChoice && params.tool_choice !== undefined) {
