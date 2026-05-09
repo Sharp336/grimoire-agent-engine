@@ -587,6 +587,27 @@ export function xaiModelManagerOptions(config?: XaiModelManagerConfig): ModelMan
 }
 
 // ---------------------------------------------------------------------------
+// 6.1 Astraflow (UCloud / 优刻得 — OpenAI-compatible model aggregator, 200+ models)
+// ---------------------------------------------------------------------------
+
+export interface AstraflowModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+/**
+ * Astraflow exposes an OpenAI-compatible API surface. The global endpoint
+ * (https://api-us-ca.umodelverse.ai/v1) is used by default; pass `baseUrl`
+ * to switch to the China endpoint (https://api.modelverse.cn/v1) which
+ * authenticates against `ASTRAFLOW_CN_API_KEY`.
+ */
+export function astraflowModelManagerOptions(
+	config?: AstraflowModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createSimpleOpenAICompletionsOptions("astraflow", "https://api-us-ca.umodelverse.ai/v1", config);
+}
+
+// ---------------------------------------------------------------------------
 // 6.5 DeepSeek
 // ---------------------------------------------------------------------------
 
