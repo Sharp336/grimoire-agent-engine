@@ -116,7 +116,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		supportsReasoningEffort: !isGrok && !isZai,
 		reasoningEffortMap,
 		supportsUsageInStreaming: !isCerebras,
-		disableReasoningOnForcedToolChoice: isKimiModel || isAnthropicModel,
+		disableReasoningOnForcedToolChoice: isKimiModel || isAnthropicModel || isQwen,
 		supportsToolChoice: true,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: isMistral,

@@ -1,20 +1,47 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type Static, Type } from "@sinclair/typebox";
-import { createEvolutionBoard } from "../evolution-board/board";
+import { createEvolutionBoard, generateTopicId } from "../evolution-board/board";
+import type { EvolutionTopic } from "../evolution-board/types";
 import evolutionBoardDescription from "../prompts/tools/evolution-board.md" with { type: "text" };
 import type { ToolSession } from ".";
 
 const evolutionBoardSchema = Type.Object({
-	action: Type.Union([Type.Literal("list"), Type.Literal("show"), Type.Literal("filter")], {
+	action: Type.Union([Type.Literal("list"), Type.Literal("show"), Type.Literal("filter"), Type.Literal("add")], {
 		description: "操作类型",
 	}),
 	topicId: Type.Optional(Type.String({ description: "Topic ID（show 时必填）" })),
 	filter: Type.Optional(
 		Type.Object({
-			status: Type.Optional(Type.String({ description: "按状态过滤" })),
+			status: Type.Optional(
+				Type.String({ description: "按状态过滤（planned|in-progress|review|testing|shipped|deferred）" }),
+			),
 			module: Type.Optional(Type.String({ description: "按模块过滤" })),
 			tag: Type.Optional(Type.String({ description: "按标签过滤" })),
+		}),
+	),
+	topic: Type.Optional(
+		Type.Object({
+			name: Type.String({ description: "Topic 名称（add 时必填）" }),
+			brief: Type.String({ description: "Topic 简述（add 时必填）" }),
+			description: Type.Optional(Type.String({ description: "详细描述" })),
+			status: Type.Optional(
+				Type.String({ description: "状态: planned|in-progress|review|testing|shipped|deferred" }),
+			),
+			progress: Type.Optional(Type.Number({ description: "进度百分比 0-100" })),
+			modules: Type.Optional(Type.Array(Type.String(), { description: "所属模块列表" })),
+			tags: Type.Optional(Type.Array(Type.String(), { description: "标签列表" })),
+			notes: Type.Optional(Type.String({ description: "备注" })),
+			references: Type.Optional(
+				Type.Array(
+					Type.Object({
+						name: Type.String({ description: "引用名称" }),
+						url: Type.String({ description: "引用 URL" }),
+						note: Type.Optional(Type.String({ description: "引用备注" })),
+					}),
+					{ description: "参考链接列表" },
+				),
+			),
 		}),
 	),
 });
@@ -113,6 +140,66 @@ export class EvolutionBoardTool implements AgentTool<typeof evolutionBoardSchema
 				return {
 					content: [{ type: "text", text: output || "No topics match the filter." }],
 				};
+			}
+			case "add": {
+				if (!params.topic) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: "topic is required for add action. Provide topic name and brief at minimum.",
+							},
+						],
+					};
+				}
+				const { name, brief } = params.topic;
+				if (!name || name.trim() === "") {
+					return { content: [{ type: "text", text: "Topic name is required." }] };
+				}
+				if (!brief || brief.trim() === "") {
+					return { content: [{ type: "text", text: "Brief description is required." }] };
+				}
+				const id = generateTopicId(name);
+				if (board.getTopic(id)) {
+					return {
+						content: [{ type: "text", text: `A topic with ID "${id}" already exists. Use a different name.` }],
+					};
+				}
+				const validStatuses = ["planned", "in-progress", "review", "testing", "shipped", "deferred"] as const;
+				const rawStatus = params.topic.status ?? "planned";
+				const status = validStatuses.includes(rawStatus as (typeof validStatuses)[number])
+					? (rawStatus as EvolutionTopic["status"])
+					: "planned";
+				const topic: EvolutionTopic = {
+					id,
+					name: name.trim(),
+					brief: brief.trim(),
+					status,
+					...(params.topic.description ? { description: params.topic.description } : {}),
+					...(params.topic.progress !== undefined ? { progress: params.topic.progress } : {}),
+					...(params.topic.modules && params.topic.modules.length > 0 ? { modules: params.topic.modules } : {}),
+					...(params.topic.tags && params.topic.tags.length > 0 ? { tags: params.topic.tags } : {}),
+					...(params.topic.notes ? { notes: params.topic.notes } : {}),
+					...(params.topic.references && params.topic.references.length > 0
+						? { references: params.topic.references }
+						: {}),
+				};
+				try {
+					board.addTopic(topic);
+					await board.save(yamlPath);
+					return {
+						content: [{ type: "text", text: `Topic "${name}" added successfully with ID: ${id}` }],
+					};
+				} catch (error) {
+					return {
+						content: [
+							{
+								type: "text",
+								text: `Failed to save topic: ${error instanceof Error ? error.message : String(error)}`,
+							},
+						],
+					};
+				}
 			}
 		}
 	}

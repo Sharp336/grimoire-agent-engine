@@ -934,11 +934,14 @@ function buildParams(
 
 	if (compat.disableReasoningOnForcedToolChoice && isForcedToolChoice(params.tool_choice)) {
 		// Mirrors anthropic.ts:disableThinkingIfToolChoiceForced — backends like
-		// Kimi 400 with `tool_choice 'specified' is incompatible with thinking
-		// enabled`. Drop reasoning for this turn instead of dropping tool_choice;
-		// the agent still gets the forced tool call, just without thinking.
+		// Kimi and Qwen 400 with forced tool_choice + thinking enabled. Drop reasoning
+		// for this turn instead of dropping tool_choice; the agent still gets the forced
+		// tool call, just without thinking.
 		delete (params as { reasoning_effort?: unknown }).reasoning_effort;
 		delete (params as { reasoning?: unknown }).reasoning;
+		// Qwen uses enable_thinking instead of reasoning_effort:
+		delete (params as { enable_thinking?: unknown }).enable_thinking;
+		delete (params as { chat_template_kwargs?: unknown }).chat_template_kwargs;
 	}
 
 	// OpenRouter provider routing preferences

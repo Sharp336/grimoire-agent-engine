@@ -36,7 +36,7 @@ import { SqliteIntentStore } from "./storage/intents";
 import { SqliteNudgeHistoryStore } from "./storage/nudge-history";
 import { SqliteProfileStore } from "./storage/profiles";
 import { SqliteSkillEffectivenessStore } from "./storage/skill-effectiveness";
-import { SqliteSkillStore, SqliteSkillVersionStore, type SqliteStatsStore } from "./storage/skills";
+import { SqliteSkillStore, SqliteSkillVersionStore, SqliteStatsStore } from "./storage/skills";
 import { SqliteWorkflowPatternStore } from "./storage/workflow-patterns";
 import { registerSelfEvolutionTools } from "./tools";
 import { summarizeTrace, TraceRecorder } from "./trace";
@@ -198,6 +198,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		injectionFormatter = new InjectionFormatter();
 		errorPatternExtractor = new ErrorPatternExtractor();
 		diagnosisStore = new SqliteEpisodeDiagnosisStore(db);
+		statsStore = new SqliteStatsStore(db);
 
 		// Auto-register daily audit scheduled task if not present
 		try {
@@ -530,7 +531,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				for (const p of patterns) {
 					for (const convention of p.extractedConventions) {
 						const c = {
-							id: `${p.id}-convention`,
+							id: `conv_${Bun.hash(`negative_rule:${convention}`).toString(36)}`,
 							type: "negative_rule" as const,
 							content: convention,
 							sourceEpisodeId: trace.sessionId,
