@@ -149,7 +149,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 				dashboard.updateWidget(ctx, runtime);
 				const experimentTools = new Set(EXPERIMENT_TOOL_NAMES);
 				await api.setActiveTools(api.getActiveTools().filter(name => !experimentTools.has(name)));
-				ctx.ui.notify("Autoresearch mode disabled", "info");
+				ctx.ui?.notify("Autoresearch mode disabled", "info");
 				return;
 			}
 
@@ -158,7 +158,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 				dashboard.updateWidget(ctx, runtime);
 				const experimentTools = new Set(EXPERIMENT_TOOL_NAMES);
 				await api.setActiveTools(api.getActiveTools().filter(name => !experimentTools.has(name)));
-				ctx.ui.notify("Autoresearch mode disabled", "info");
+				ctx.ui?.notify("Autoresearch mode disabled", "info");
 				return;
 			}
 
@@ -173,11 +173,11 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 			const goalArg = trimmed.length > 0 ? trimmed : null;
 			const branchResult = await ensureAutoresearchBranch(api, ctx.cwd, goalArg ?? runtime.goal);
 			if (!branchResult.ok) {
-				ctx.ui.notify(branchResult.error, "error");
+				ctx.ui?.notify(branchResult.error, "error");
 				return;
 			}
 			if (branchResult.warning) {
-				ctx.ui.notify(branchResult.warning, "warning");
+				ctx.ui?.notify(branchResult.warning, "warning");
 			}
 
 			// Look up an existing session for the branch we just landed on. A session
@@ -220,7 +220,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 			if (goalArg !== null) {
 				api.sendUserMessage(goalArg);
 			} else {
-				ctx.ui.notify("Autoresearch enabled—describe what to optimize in your next message.", "info");
+				ctx.ui?.notify("Autoresearch enabled—describe what to optimize in your next message.", "info");
 			}
 		},
 	});
@@ -230,7 +230,7 @@ export const createAutoresearchExtension: ExtensionFactory = api => {
 		handler(ctx): void {
 			const runtime = getRuntime(ctx);
 			if (runtime.state.results.length === 0 && !runtime.runningExperiment) {
-				ctx.ui.notify("No autoresearch results yet", "info");
+				ctx.ui?.notify("No autoresearch results yet", "info");
 				return;
 			}
 			runtime.dashboardExpanded = !runtime.dashboardExpanded;
