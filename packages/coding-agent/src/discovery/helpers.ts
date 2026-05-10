@@ -978,7 +978,11 @@ export async function listClaudePluginRoots(
 }
 
 /**
- * Returns only the roots that originated from Claude Code's installed_plugins registry.
+ * Returns only the roots that originated from Claude Code's installed_plugins registry,
+ * excluding any Claude root whose plugin ID is shadowed by an OMP-family root (omp /
+ * project / injected). This prevents capability leakage when both providers are active:
+ * provider priority deduplicates individual capability keys, but a Claude root with
+ * non-overlapping skills/commands would still be loaded without this filter.
  * Use this in the claude-plugins provider. The mirror, listOmpOnlyPluginRoots, is used in omp-plugins.
  */
 export async function listClaudeOnlyPluginRoots(
@@ -986,7 +990,8 @@ export async function listClaudeOnlyPluginRoots(
 	cwd?: string,
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
 	const raw = await loadRawPluginRoots(home, cwd);
-	return { roots: raw.roots.filter(r => r.registrySource === "claude"), warnings: raw.claudeWarnings };
+	const shadowed = applyOmpOverClaude(raw.roots);
+	return { roots: shadowed.filter(r => r.registrySource === "claude"), warnings: raw.claudeWarnings };
 }
 
 /**
