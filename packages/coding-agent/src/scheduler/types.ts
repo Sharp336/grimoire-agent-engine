@@ -67,7 +67,7 @@ export interface DaemonStatus {
 	startedAt?: number;
 }
 
-export type ScheduleAction = "add" | "list" | "remove" | "run" | "enable" | "disable" | "logs";
+export type ScheduleAction = "add" | "diagnose" | "list" | "remove" | "run" | "enable" | "disable" | "logs";
 
 export type DaemonAction = "start" | "stop" | "status" | "restart";
 
@@ -272,8 +272,8 @@ export async function waitForDaemonStart(pidPath: string, timeoutMs = 5000): Pro
 export function formatTaskRow(task: ScheduledTask): string {
 	const next = task.status === "active" && task.nextRunAt ? new Date(task.nextRunAt).toLocaleString() : "—";
 	const last = task.lastRunAt ? new Date(task.lastRunAt).toLocaleString() : "never";
-	const typeLabel = task.taskType === "agent" ? "[A]" : "   ";
-	return `${typeLabel} ${task.name.padEnd(18)} ${task.status.padEnd(10)} ${(task.scheduleType || "cron").padEnd(8)} ${task.cron.padEnd(18)} ${next.padEnd(20)} ${last}`;
+	const typeLabel = task.taskType === "agent" ? "agent " : "shell ";
+	return `${task.name.padEnd(18)} ${typeLabel.padEnd(6)} ${task.status.padEnd(10)} ${(task.scheduleType || "cron").padEnd(8)} ${task.cron.padEnd(18)} ${next.padEnd(20)} ${last}`;
 }
 
 export function formatExecutionRow(exec: TaskExecution): string {

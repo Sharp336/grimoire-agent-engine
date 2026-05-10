@@ -10,11 +10,13 @@ import {
 	formatTaskRow,
 	getNextRun,
 	getSchedulerDbPath,
+	getSchedulerPidPath,
+	isDaemonRunning,
 	parseSchedule,
 	type ScheduleAction,
 } from "../scheduler/types";
 
-const ACTIONS: ScheduleAction[] = ["add", "list", "remove", "run", "enable", "disable", "logs"];
+const ACTIONS: ScheduleAction[] = ["add", "diagnose", "list", "remove", "run", "enable", "disable", "logs"];
 
 export default class Schedule extends Command {
 	static description = "Manage scheduled cron tasks";
@@ -89,6 +91,9 @@ export default class Schedule extends Command {
 					break;
 				case "logs":
 					await this.#handleLogs(args, flags, storage);
+					break;
+				case "diagnose":
+					await this.#handleDiagnose(args, flags, storage);
 					break;
 			}
 		} finally {
@@ -180,8 +185,10 @@ export default class Schedule extends Command {
 			return;
 		}
 
-		process.stdout.write(`NAME                 STATUS     CRON                 NEXT RUN             LAST RUN\n`);
-		process.stdout.write(`${"─".repeat(90)}\n`);
+		process.stdout.write(
+			`NAME                 TYPE    STATUS     CRON                 NEXT RUN             LAST RUN\n`,
+		);
+		process.stdout.write(`${"─".repeat(96)}\n`);
 		for (const task of tasks) {
 			process.stdout.write(`${formatTaskRow(task)}\n`);
 		}
@@ -377,11 +384,101 @@ export default class Schedule extends Command {
 			process.stdout.write(`No executions found for task "${name}".\n`);
 			return;
 		}
-
 		process.stdout.write(`ID                 STATUS   DURATION EXIT\n`);
 		process.stdout.write(`${"─".repeat(50)}\n`);
 		for (const exec of executions) {
 			process.stdout.write(`${formatExecutionRow(exec)}\n`);
 		}
+	}
+
+	async #handleDiagnose(
+		_args: Record<string, unknown>,
+		flags: Record<string, unknown>,
+		storage: SchedulerDbStorage,
+	): Promise<void> {
+		const tasks = storage.listTasks();
+		const total = tasks.length;
+		const active = tasks.filter(t => t.status === "active").length;
+		const paused = tasks.filter(t => t.status === "paused").length;
+		const disabled = tasks.filter(t => t.status === "disabled").length;
+
+		const pidPath = getSchedulerPidPath();
+		const daemonRunning = isDaemonRunning(pidPath);
+
+		// Check for stale running executions (> 5 minutes without end)
+		const fiveMinutesAgo = Date.now() - 5 * 60 * 1000;
+		let staleExecutions = 0;
+		for (const task of tasks) {
+			const execs = storage.getExecutions(task.id, 3);
+			for (const exec of execs) {
+				if (exec.status === "running" && exec.startedAt < fiveMinutesAgo) {
+					staleExecutions++;
+				}
+			}
+		}
+
+		// Count recent failures (last 24h)
+		const oneDayAgo = Date.now() - 24 * 60 * 60 * 1000;
+		let recentFailures = 0;
+		let recentSuccesses = 0;
+		for (const task of tasks) {
+			const execs = storage.getExecutions(task.id, 10);
+			for (const exec of execs) {
+				if (exec.startedAt >= oneDayAgo) {
+					if (exec.status === "failure") recentFailures++;
+					if (exec.status === "success") recentSuccesses++;
+				}
+			}
+		}
+
+		const lines: string[] = [];
+		lines.push("## Scheduler Diagnosis");
+		lines.push("");
+		lines.push(`Daemon: ${daemonRunning ? "running" : "stopped"}`);
+		lines.push(`Tasks: ${total} total (${active} active, ${paused} paused, ${disabled} disabled)`);
+		lines.push(`Recent executions (24h): ${recentSuccesses} success, ${recentFailures} failure`);
+		if (staleExecutions > 0) {
+			lines.push(`⚠ Stale executions: ${staleExecutions} stuck in "running" for > 5 min`);
+		}
+		lines.push("");
+
+		// Per-task health check
+		for (const task of tasks) {
+			const execs = storage.getExecutions(task.id, 5);
+			const failCount = execs.filter(e => e.status === "failure").length;
+			const timeoutCount = execs.filter(
+				e => e.status === "failure" && (e.output?.includes("[TIMED OUT]") || e.stderr?.includes("[TIMED OUT]")),
+			).length;
+			const stuck = execs.some(e => e.status === "running" && e.startedAt < fiveMinutesAgo);
+
+			if (failCount > 0 || stuck) {
+				lines.push(`Task "${task.name}":`);
+				if (stuck)
+					lines.push(
+						`  - Stuck execution (started ${new Date(execs.find(e => e.status === "running")!.startedAt).toLocaleString()})`,
+					);
+				if (timeoutCount > 0) lines.push(`  - ${timeoutCount} timeout(s) in last ${execs.length} runs`);
+				if (failCount > timeoutCount) lines.push(`  - ${failCount - timeoutCount} non-timeout failure(s)`);
+				lines.push("");
+			}
+		}
+
+		if (flags.json) {
+			process.stdout.write(
+				`${JSON.stringify(
+					{
+						daemonRunning,
+						taskCounts: { total, active, paused, disabled },
+						recentExecutions: { success: recentSuccesses, failure: recentFailures },
+						staleExecutions,
+					},
+					null,
+					2,
+				)}\n`,
+			);
+			return;
+		}
+
+		process.stdout.write(lines.join("\n").trimEnd() + "\n");
 	}
 }
