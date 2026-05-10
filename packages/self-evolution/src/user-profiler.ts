@@ -90,8 +90,8 @@ export class UserProfiler {
 		this.#profile.avgFilesModifiedPerSession =
 			(this.#profile.avgFilesModifiedPerSession * prevCount + filesModified.size) / this.#profile.sessionCount;
 
-		// Error rate
-		const totalErrors = this.#profile.errorRate * prevCount + (trace.errorCount > 0 ? 1 : 0);
+		// Error rate: use actual error count, not binary per-session flag
+		const totalErrors = this.#profile.errorRate * prevCount + trace.errorCount;
 		this.#profile.errorRate = totalErrors / this.#profile.sessionCount;
 
 		// Recovery rate

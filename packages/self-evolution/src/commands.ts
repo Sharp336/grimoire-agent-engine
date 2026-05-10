@@ -1,8 +1,10 @@
 /**
  * Slash commands for the self-evolution plugin.
  */
+import type { Database } from "bun:sqlite";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { logger } from "@oh-my-pi/pi-utils";
+import { formatAuditReport, generateAuditReport } from "./audit-report";
 import { DailyReportGenerator } from "./daily-report";
 import { HeuristicSkillEvaluator } from "./evaluator";
 import type { ActivityLogger } from "./logging/activity-logger";
@@ -17,6 +19,7 @@ import type {
 	SkillVersionStore,
 	WorkflowPatternStore,
 } from "./storage/types";
+import type { SelfEvolutionFlags } from "./types";
 
 export interface CommandStores {
 	ensureInit(cwd: string): void;
@@ -30,6 +33,8 @@ export interface CommandStores {
 	workflowPatternStore(): WorkflowPatternStore;
 	conventionStore(): ConventionStore;
 	effectivenessStore(): EffectivenessStore;
+	db(): Database;
+	flags(): SelfEvolutionFlags;
 }
 
 export function registerSelfEvolutionCommands(api: ExtensionAPI, stores: CommandStores): void {
@@ -297,6 +302,25 @@ export function registerSelfEvolutionCommands(api: ExtensionAPI, stores: Command
 			} catch (err) {
 				logger.error("evolution-workflows failed", { error: String(err) });
 				ctx.ui.notify("Failed to list workflow patterns", "error");
+			}
+		},
+	});
+	api.registerCommand("evolution-audit", {
+		description: "Generate a health report of the self-evolution system.",
+		async handler(_args, ctx): Promise<void> {
+			stores.ensureInit(ctx.cwd);
+			try {
+				const report = await generateAuditReport(
+					stores.db(),
+					stores.episodeStore(),
+					stores.skillStore(),
+					stores.flags().maxEpisodes,
+					stores.activityLogger(),
+				);
+				ctx.ui.notify(formatAuditReport(report), "info");
+			} catch (err) {
+				logger.error("evolution-audit failed", { error: String(err) });
+				ctx.ui.notify("Failed to generate audit report", "error");
 			}
 		},
 	});

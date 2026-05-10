@@ -73,6 +73,18 @@ function firstNonEmpty(...values: (string | undefined | null)[]): string | null 
 	}
 	return null;
 }
+function extractNeverRules(agentsMdContent: string): string[] {
+	const lines = agentsMdContent.split("\n");
+	const neverRules: string[] = [];
+	for (const line of lines) {
+		const stripped = line.replace(/\*\*/g, "").trim();
+		if (/\bNEVER\b|\bMUST NOT\b/i.test(stripped) && !stripped.startsWith("<!--") && !stripped.startsWith("#")) {
+			const entry = stripped.startsWith("- ") ? stripped : `- ${stripped}`;
+			neverRules.push(entry);
+		}
+	}
+	return neverRules;
+}
 
 function parseWmicTable(output: string, header: string): string | null {
 	const lines = output
@@ -588,7 +600,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 
 	// Filter skills to only include those with read tool.
 	const hasRead = tools?.has("read");
-	const filteredSkills = hasRead ? skills : [];
+	const _filteredSkills = hasRead ? skills : [];
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
@@ -598,6 +610,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
 	const environment = await logger.time("getEnvironmentInfo", getEnvironmentInfo);
+	const agentsMdRules = contextFiles
+		.filter(f => f.path.endsWith("/AGENTS.md") || f.path === "AGENTS.md")
+		.map(f => ({ path: f.path, content: f.content }));
+	const neverRules = extractNeverRules(agentsMdRules.map(f => f.content).join("\n\n"));
 	const reportToolIssueToolName = toolPromptNames.get("report_tool_issue") ?? "report_tool_issue";
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
@@ -610,7 +626,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		environment,
 		contextFiles,
 		agentsMdSearch,
-		skills: filteredSkills,
+		noYieldRules: neverRules,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		date,

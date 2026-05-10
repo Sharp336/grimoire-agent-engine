@@ -56,4 +56,10 @@ describe("v2 schema", () => {
 		const intentCol = rows.find(r => r.name === "intent");
 		expect(intentCol).toBeDefined();
 	});
+	test("episode_detailed_outcomes table exists", () => {
+		const stmt = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='episode_detailed_outcomes'");
+		const row = stmt.get() as { name: string } | undefined;
+		stmt.finalize();
+		expect(row?.name).toBe("episode_detailed_outcomes");
+	});
 });

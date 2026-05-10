@@ -4,13 +4,15 @@
  */
 import { logger } from "@oh-my-pi/pi-utils";
 import type { EpisodeStore, NudgeHistoryStore, ProfileStore } from "./storage/types";
-import type { CrossSessionNudge, UserProfile } from "./types";
+import type { CrossSessionNudge, Episode, UserProfile } from "./types";
 
 const CROSS_SESSION_COOLDOWN_MS = 60_000;
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const HIGH_TOOL_CALL_THRESHOLD = 20;
 const LOW_SUCCESS_RATE_THRESHOLD = 0.3;
 const MIN_EPISODES_FOR_PROJECT_ANALYSIS = 5;
+const DISMISS_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+const AUTO_DISMISS_THRESHOLD = 3; // auto-dismiss after 3 deliveries in 30 days
 
 export class CrossSessionNudgeEngine {
 	#nudgeHistoryStore: NudgeHistoryStore;
@@ -47,6 +49,16 @@ export class CrossSessionNudgeEngine {
 				(await this.#detectSkillUnderutilization(userPrompt, profile));
 
 			if (nudge) {
+				// Feedback loop: skip if this nudge type was dismissed recently or acknowledged
+				const shouldSkip = await this.#shouldSkipNudge(nudge.type, now);
+				if (shouldSkip) {
+					logger.debug("Cross-session nudge suppressed by feedback loop", { type: nudge.type });
+					return undefined;
+				}
+
+				// Auto-dismiss check: if delivered 3+ times in 30 days without ack, dismiss it
+				await this.#autoDismissIfStale(nudge.type, last30d);
+
 				this.#lastDeliveredAt = now;
 				this.#deliveredThisSession = true;
 			}
@@ -54,6 +66,32 @@ export class CrossSessionNudgeEngine {
 		} catch (err) {
 			logger.warn("CrossSessionNudgeEngine analyze failed", { error: String(err) });
 			return undefined;
+		}
+	}
+
+	async #shouldSkipNudge(type: string, now: number): Promise<boolean> {
+		const recent = await this.#nudgeHistoryStore.listByType(type, 10);
+		for (const record of recent) {
+			if (record.acknowledged) return true;
+			if (record.dismissedAt && now - record.dismissedAt < DISMISS_COOLDOWN_MS) return true;
+		}
+		return false;
+	}
+
+	async #autoDismissIfStale(type: string, since: number): Promise<void> {
+		try {
+			const history = await this.#nudgeHistoryStore.listByType(type, 20);
+			const recentDeliveries = history.filter(r => r.detectedAt >= since && !r.dismissedAt && !r.acknowledged);
+			if (recentDeliveries.length >= AUTO_DISMISS_THRESHOLD) {
+				// Dismiss the most recent record to start cooldown
+				const mostRecent = recentDeliveries[0];
+				if (mostRecent) {
+					await this.#nudgeHistoryStore.dismiss(mostRecent.id);
+					logger.debug("Auto-dismissed repetitive nudge", { type, count: recentDeliveries.length });
+				}
+			}
+		} catch {
+			// Best-effort; don't block nudge delivery on auto-dismiss failure
 		}
 	}
 
@@ -88,16 +126,68 @@ export class CrossSessionNudgeEngine {
 
 	async #detectHighGlobalErrorRate(profile: UserProfile | undefined): Promise<CrossSessionNudge | undefined> {
 		if (!profile || profile.sessionCount < 5) return undefined;
-		if (profile.errorRate > 0.3) {
-			return {
-				type: "cross-session-high-error-rate",
-				severity: "warn",
-				message: `Your recent sessions have a ${(profile.errorRate * 100).toFixed(0)}% error rate.`,
-				suggestion: "Review common failure patterns: missing files, permission issues, or incomplete commands.",
-				detectedAt: Date.now(),
-			};
+		if (profile.errorRate <= 0.3) return undefined;
+
+		// Data-aware: look at recent failed episodes to infer actual error patterns
+		const recentEpisodes = await this.#episodeStore.listRecent(30);
+		const failedEpisodes = recentEpisodes.filter(e => e.errorCount > 0 || !e.completedSuccessfully);
+		const suggestion = this.#buildErrorSuggestion(failedEpisodes);
+
+		return {
+			type: "cross-session-high-error-rate",
+			severity: "warn",
+			message: `Your recent sessions have a ${(profile.errorRate * 100).toFixed(0)}% error rate.`,
+			suggestion,
+			detectedAt: Date.now(),
+		};
+	}
+
+	#buildErrorSuggestion(failedEpisodes: Episode[]): string {
+		if (failedEpisodes.length === 0) {
+			return "Review recent sessions for patterns. High error rate may indicate tool misuse or environmental issues.";
 		}
-		return undefined;
+
+		// Count tool usage in failed episodes
+		const toolCounts: Record<string, number> = {};
+		for (const ep of failedEpisodes) {
+			for (const tool of ep.toolsUsed) {
+				toolCounts[tool] = (toolCounts[tool] || 0) + 1;
+			}
+		}
+		const dominantTool = Object.entries(toolCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+
+		// Check for specific patterns in summaries
+		const summaries = failedEpisodes.map(e => e.summary.toLowerCase()).join(" ");
+		const hasNotFound =
+			summaries.includes("enoent") || summaries.includes("not found") || summaries.includes("no such file");
+		const hasPermission = summaries.includes("eacces") || summaries.includes("permission denied");
+		const hasTimeout =
+			summaries.includes("timeout") || summaries.includes("etimedout") || summaries.includes("econnrefused");
+		const hasTypeError = summaries.includes("typeerror") || summaries.includes("cannot read property");
+		const hasSyntax = summaries.includes("syntaxerror") || summaries.includes("unexpected token");
+		const hasCommandFail = summaries.includes("exit code") || summaries.includes("command failed");
+
+		const patterns: string[] = [];
+		if (hasNotFound) patterns.push("missing files or paths");
+		if (hasPermission) patterns.push("permission issues");
+		if (hasTimeout) patterns.push("network timeouts or unavailable services");
+		if (hasTypeError) patterns.push("type errors or undefined values");
+		if (hasSyntax) patterns.push("syntax errors in generated code");
+		if (hasCommandFail) patterns.push("shell command failures");
+
+		if (patterns.length > 0) {
+			let suggestion = `Dominant failure patterns: ${patterns.join(", ")}.`;
+			if (dominantTool) {
+				suggestion += ` Most errors involve the "${dominantTool}" tool.`;
+			}
+			return suggestion;
+		}
+
+		if (dominantTool) {
+			return `Most failed episodes involve "${dominantTool}". Review how this tool is being used — check arguments, paths, and preconditions.`;
+		}
+
+		return `Review common failure patterns across ${failedEpisodes.length} recent failed sessions. Check tool arguments, file paths, and command syntax.`;
 	}
 
 	async #detectSlowProjectWarmup(

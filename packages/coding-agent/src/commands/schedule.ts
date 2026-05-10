@@ -479,6 +479,6 @@ export default class Schedule extends Command {
 			return;
 		}
 
-		process.stdout.write(lines.join("\n").trimEnd() + "\n");
+		process.stdout.write(`${lines.join("\n").trimEnd()}\n`);
 	}
 }

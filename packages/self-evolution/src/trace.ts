@@ -19,6 +19,7 @@ export class TraceRecorder {
 
 	#injectedEpisodeIds: string[] = [];
 	#injectedSkillNames: string[] = [];
+	#injectedConventionIds: string[] = [];
 	#nudgeDetector = new NudgeDetector();
 
 	getTrace(): SessionTrace | undefined {
@@ -41,6 +42,9 @@ export class TraceRecorder {
 	}
 	setInjectedSkills(names: string[]): void {
 		this.#injectedSkillNames = names;
+	}
+	setInjectedConventions(ids: string[]): void {
+		this.#injectedConventionIds = ids;
 	}
 	onAgentStart(_event: AgentStartEvent, ctx: ExtensionContext): void {
 		this.#sessionId = ctx.sessionManager.getSessionId();
@@ -146,8 +150,10 @@ export class TraceRecorder {
 		const result = this.#trace;
 		this.#trace.injectedEpisodeIds = this.#injectedEpisodeIds;
 		this.#trace.injectedSkillNames = this.#injectedSkillNames;
+		this.#trace.injectedConventionIds = this.#injectedConventionIds;
 		this.#injectedSkillNames = [];
 		this.#injectedEpisodeIds = [];
+		this.#injectedConventionIds = [];
 		this.#trace = undefined;
 		return result;
 	}
@@ -157,6 +163,7 @@ export class TraceRecorder {
 		this.#pendingPrompt = undefined;
 		this.#injectedSkillNames = [];
 		this.#injectedEpisodeIds = [];
+		this.#injectedConventionIds = [];
 	}
 }
 

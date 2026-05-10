@@ -360,6 +360,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		description: "Show OMP feature evolution board (development progress tracking)",
 		subcommands: [
 			{ name: "list", description: "List all topics" },
+			{ name: "add", description: "Add a new topic interactively" },
 			{ name: "show", description: "Show topic details (requires topic ID)" },
 			{ name: "filter", description: "Filter topics by status/module/tag" },
 		],

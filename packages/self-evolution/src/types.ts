@@ -31,6 +31,7 @@ export interface SessionTrace {
 	nudges?: import("./nudge-detector").Nudge[];
 	injectedEpisodeIds?: string[];
 	injectedSkillNames?: string[];
+	injectedConventionIds?: string[];
 }
 // ============================================================================
 // Episode (persisted)
@@ -252,6 +253,8 @@ export interface NudgeRecord {
 	message: string;
 	suggestion: string;
 	detectedAt: number;
+	dismissedAt?: number;
+	acknowledged?: boolean;
 }
 
 // ============================================================================
@@ -270,6 +273,20 @@ export interface Convention {
 	timesViolated: number;
 	createdAt: number;
 	lastSeenAt: number;
+}
+
+export interface ConventionFeedback {
+	conventionId: string;
+	sessionId: string;
+	complied: boolean; // true = agent followed, false = violated
+	violationDetails?: string; // what the agent did that violated the rule
+	recordedAt: number;
+}
+
+export interface ConventionViolation {
+	convention: Convention;
+	violationCount: number;
+	lastViolationAt: number;
 }
 
 // ============================================================================

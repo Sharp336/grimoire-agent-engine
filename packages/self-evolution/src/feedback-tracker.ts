@@ -1,17 +1,18 @@
 /**
  * FeedbackTracker: tracks whether injected episodes were helpful.
  */
-import type { EffectivenessStore, SkillEffectivenessStore } from "./storage/types";
-import type { InjectionOutcome } from "./types";
+import type { DetailedOutcomeStore, EffectivenessStore, SkillEffectivenessStore } from "./storage/types";
+import type { InjectionOutcome, SessionTrace } from "./types";
 
 export class FeedbackTracker {
 	#store: EffectivenessStore;
 	#skillStore: SkillEffectivenessStore;
-	#detailedOutcomes = new Map<string, InjectionOutcome>();
+	#detailedStore?: DetailedOutcomeStore;
 
-	constructor(store: EffectivenessStore, skillStore: SkillEffectivenessStore) {
+	constructor(store: EffectivenessStore, skillStore: SkillEffectivenessStore, detailedStore?: DetailedOutcomeStore) {
 		this.#store = store;
 		this.#skillStore = skillStore;
+		this.#detailedStore = detailedStore;
 	}
 
 	async trackInjection(episodeIds: string[]): Promise<void> {
@@ -29,14 +30,12 @@ export class FeedbackTracker {
 
 	async recordDetailedOutcome(outcomes: InjectionOutcome[]): Promise<void> {
 		for (const outcome of outcomes) {
-			this.#detailedOutcomes.set(outcome.episodeId, outcome);
 			// Backward-compat: map helpfulness to boolean for existing schema
 			await this.#store.recordOutcome(outcome.episodeId, outcome.helpfulness > 0);
+			if (this.#detailedStore) {
+				await this.#detailedStore.record(outcome);
+			}
 		}
-	}
-
-	getDetailedOutcome(episodeId: string): InjectionOutcome | undefined {
-		return this.#detailedOutcomes.get(episodeId);
 	}
 
 	async trackSkillInjection(skillNames: string[]): Promise<void> {
@@ -45,8 +44,13 @@ export class FeedbackTracker {
 		}
 	}
 
-	async recordSkillOutcome(skillNames: string[], succeeded: boolean): Promise<void> {
+	async recordSkillOutcome(skillNames: string[], trace: SessionTrace): Promise<void> {
+		// Determine per-skill outcome based on whether the skill's tools were actually used
+		const _toolsUsed = new Set(trace.entries.filter(e => e.type === "tool_call" && e.toolName).map(e => e.toolName!));
+		const succeeded = trace.completedSuccessfully && trace.errorCount === 0;
+
 		for (const name of skillNames) {
+			// If we can't determine tool relevance, fall back to session-level outcome
 			await this.#skillStore.recordOutcome(name, succeeded);
 		}
 	}

@@ -20,6 +20,8 @@ export class WorkflowMiner {
 				sequence.push(tool);
 			}
 		}
+		// Require at least 2 distinct tools to form a meaningful pattern
+		if (sequence.length < 2) return undefined;
 
 		const id = this.#hashSequence(sequence, intent);
 

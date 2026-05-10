@@ -86,6 +86,30 @@ const ERROR_PATTERNS: Array<{
 		category: "runtime",
 		convention: "运行命令前确认工作目录和参数正确",
 	},
+	{
+		id: "rate-limited-429",
+		name: "Rate limited (429)",
+		description: "API rate limit exceeded",
+		regex: "429|rate limit|too many requests|throttled",
+		category: "runtime",
+		convention: "遇到 429 限流时主动降低请求频率，添加指数退避重试",
+	},
+	{
+		id: "network-timeout",
+		name: "Network timeout",
+		description: "Request timed out",
+		regex: "ETIMEDOUT|ECONNREFUSED|timeout|connection refused|network error",
+		category: "runtime",
+		convention: "网络超时或连接失败时检查服务可用性，必要时增加超时时间或重试",
+	},
+	{
+		id: "api-error-5xx",
+		name: "Server error (5xx)",
+		description: "Remote server returned 5xx",
+		regex: "500|502|503|504|Internal Server Error|Bad Gateway|Service Unavailable",
+		category: "runtime",
+		convention: "服务端返回 5xx 时稍后重试，或检查服务状态页面",
+	},
 ];
 
 function compileErrorPatterns(): ErrorPatternDef[] {

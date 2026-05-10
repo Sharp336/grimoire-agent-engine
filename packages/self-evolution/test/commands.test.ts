@@ -78,6 +78,8 @@ describe("Self-evolution commands", () => {
 			workflowPatternStore: () => workflowPatternStore,
 			conventionStore: () => conventionStore,
 			effectivenessStore: () => effectivenessStore,
+			db: () => db,
+			flags: () => ({ maxEpisodes: 500 }) as never,
 		});
 	});
 

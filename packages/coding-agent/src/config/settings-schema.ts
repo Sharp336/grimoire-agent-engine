@@ -687,6 +687,33 @@ export const SETTINGS_SCHEMA = {
 		default: "on",
 		ui: { tab: "interaction", label: "Completion Notification", description: "Notify when the agent completes" },
 	},
+	"completion.sound": {
+		type: "enum",
+		values: [
+			"off",
+			"bell",
+			"Basso",
+			"Blow",
+			"Bottle",
+			"Frog",
+			"Funk",
+			"Glass",
+			"Hero",
+			"Morse",
+			"Ping",
+			"Pop",
+			"Purr",
+			"Sosumi",
+			"Submarine",
+			"Tink",
+		] as const,
+		default: "Hero",
+		ui: {
+			tab: "interaction",
+			label: "Completion Sound",
+			description: "Sound played when the agent completes a response",
+		},
+	},
 
 	"ask.timeout": {
 		type: "number",

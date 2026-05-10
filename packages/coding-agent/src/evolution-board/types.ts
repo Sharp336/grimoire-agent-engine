@@ -23,5 +23,7 @@ export interface EvolutionBoard {
 	getByStatus(status: TopicStatus): EvolutionTopic[];
 	getByModule(module: string): EvolutionTopic[];
 	getByTag(tag: string): EvolutionTopic[];
+	addTopic(topic: EvolutionTopic): void;
 	load(yamlContent: string): void;
+	save(yamlPath: string): Promise<void>;
 }

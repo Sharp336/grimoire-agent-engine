@@ -73,28 +73,25 @@ export class ContextAwareRetriever {
 	}
 
 	async retrieve(query: string, options: ContextRetrievalOptions): Promise<RetrievedEpisode[]> {
-		// Load recent episodes
-		const recent = await this.#episodeStore.listRecent(options.maxEpisodes * 2);
-		if (recent.length === 0) return [];
+		// Stage 1: FTS5 BM25 recall for semantic relevance
+		const ftsCandidates = await this.#episodeStore.searchByKeyword(query, options.maxEpisodes);
 
-		// Score all candidates
-		const candidates = await this.#scoreCandidates(recent, query, options);
-		candidates.sort((a, b) => b.score - a.score);
+		// Stage 2: Score candidates with intent, keyword, success, profile affinity
+		const scored = await this.#scoreCandidates(ftsCandidates, query, options);
+		scored.sort((a, b) => b.score - a.score);
 
 		// Filter by relevance threshold
-		const relevant = candidates.filter(c => c.score >= 30);
+		const relevant = scored.filter(c => c.score >= 30);
 		if (relevant.length === 0) {
-			// Fallback: return top keyword matches regardless of intent
-			return candidates.slice(0, 3).map(c => ({
+			return scored.slice(0, 3).map(c => ({
 				episode: c.episode,
 				relevanceScore: c.score,
-				reason: "fallback keyword match",
+				reason: c.reason,
 				timesInjected: c.timesInjected,
 				helpRate: c.helpRate,
 			}));
 		}
 
-		// Take top for potential LLM reranking
 		const topCandidates = relevant.slice(0, 10);
 
 		if (!options.llmRerank || !options.model || topCandidates.length <= 3) {

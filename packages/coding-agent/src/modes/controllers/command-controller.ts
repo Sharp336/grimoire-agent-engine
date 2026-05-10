@@ -599,8 +599,13 @@ export class CommandController {
 				}
 				break;
 			}
+			case "add": {
+				await this.#handleEvolutionBoardAdd(board, yamlPath);
+				return;
+			}
+
 			default: {
-				this.ctx.showWarning(`Unknown action: ${action}. Available actions: list, show, filter`);
+				this.ctx.showWarning(`Unknown action: ${action}. Available actions: list, add, show, filter`);
 				return;
 			}
 		}
@@ -612,7 +617,73 @@ export class CommandController {
 		this.ctx.chatContainer.addChild(new Text(output, 1, 0));
 		this.ctx.chatContainer.addChild(new DynamicBorder());
 		this.ctx.editor.setText("");
-		this.ctx.ui.requestRender();
+	}
+
+	async #handleEvolutionBoardAdd(
+		board: import("../../evolution-board/types").EvolutionBoard,
+		yamlPath: string,
+	): Promise<void> {
+		const { generateTopicId } = await import("../../evolution-board/board");
+		type TopicStatus = import("../../evolution-board/types").TopicStatus;
+		type EvolutionTopic = import("../../evolution-board/types").EvolutionTopic;
+
+		// Get name (required)
+		const name = await this.ctx.showHookInput("Add Topic", "Enter topic name (required)");
+		if (!name || name.trim() === "") {
+			this.ctx.showWarning("Topic name is required.");
+			return;
+		}
+
+		// Get brief (required)
+		const brief = await this.ctx.showHookInput("Add Topic", "Enter brief description (required)");
+		if (!brief || brief.trim() === "") {
+			this.ctx.showWarning("Brief description is required.");
+			return;
+		}
+
+		// Get status (optional, default: planned)
+		const statusInput = await this.ctx.showHookInput(
+			"Add Topic",
+			"Enter status [planned|in-progress|review|testing|shipped|deferred] (default: planned)",
+		);
+		const validStatuses = ["planned", "in-progress", "review", "testing", "shipped", "deferred"];
+		const status = validStatuses.includes(statusInput?.trim().toLowerCase() || "")
+			? (statusInput?.trim().toLowerCase() as TopicStatus)
+			: "planned";
+
+		// Get modules (optional, comma-separated)
+		const modulesInput = await this.ctx.showHookInput("Add Topic", "Enter modules (comma-separated, optional)");
+		const modules =
+			modulesInput
+				?.split(",")
+				.map(m => m.trim())
+				.filter(m => m.length > 0) || undefined;
+
+		// Generate ID from name
+		const id = generateTopicId(name);
+
+		// Check for duplicate ID
+		if (board.getTopic(id)) {
+			this.ctx.showWarning(`A topic with ID "${id}" already exists. Please use a different name.`);
+			return;
+		}
+
+		// Create and add topic
+		const topic: EvolutionTopic = {
+			id,
+			name: name.trim(),
+			brief: brief.trim(),
+			status,
+			modules,
+		};
+
+		try {
+			board.addTopic(topic);
+			await board.save(yamlPath);
+			this.ctx.showStatus(`Topic "${name}" added successfully with ID: ${id}`);
+		} catch (error) {
+			this.ctx.showError(`Failed to save topic: ${error instanceof Error ? error.message : String(error)}`);
+		}
 	}
 
 	handleContextCommand(): void {

@@ -675,6 +675,17 @@ export class EventController {
 	}
 
 	sendCompletionNotification(): void {
+		const sound = settings.get("completion.sound");
+		if (sound !== "off") {
+			if (sound === "bell") {
+				process.stdout.write("\x07");
+			} else if (process.platform === "darwin") {
+				Bun.spawn(["afplay", `/System/Library/Sounds/${sound}.aiff`], { stdout: "ignore", stderr: "ignore" });
+			} else {
+				process.stdout.write("\x07");
+			}
+		}
+
 		if (this.ctx.isBackgrounded === false) return;
 		const notify = settings.get("completion.notify");
 		if (notify === "off") return;

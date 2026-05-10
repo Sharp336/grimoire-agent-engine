@@ -142,7 +142,13 @@ export class SkillExtractor {
 	}
 
 	#toKebabCase(input: string): string {
-		return input
+		// Filter out meaningless prompts that produce garbage skill names
+		const trimmed = input.trim();
+		const meaningless = /^\s*(yes|no|ok|sure|start|go|1|2|3|4|5|6|7|8|9|0|\d+)\s*$/i;
+		if (meaningless.test(trimmed) || trimmed.length < 5) {
+			return `task-${Date.now().toString(36)}`;
+		}
+		return trimmed
 			.toLowerCase()
 			.replace(/[^a-z0-9\s]+/g, " ")
 			.trim()

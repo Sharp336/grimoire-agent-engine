@@ -213,10 +213,11 @@ export function initSchema(db: Database): void {
 			severity TEXT NOT NULL,
 			message TEXT NOT NULL,
 			suggestion TEXT NOT NULL,
-			detected_at INTEGER NOT NULL
+			detected_at INTEGER NOT NULL,
+			dismissed_at INTEGER,
+			acknowledged INTEGER NOT NULL DEFAULT 0
 		);
 	`);
-
 	db.exec(`
 		CREATE TABLE IF NOT EXISTS conventions (
 			id TEXT PRIMARY KEY,
@@ -228,6 +229,20 @@ export function initSchema(db: Database): void {
 			times_violated INTEGER NOT NULL DEFAULT 0,
 			created_at INTEGER NOT NULL,
 			last_seen_at INTEGER NOT NULL
+		);
+	`);
+
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS episode_detailed_outcomes (
+			episode_id TEXT PRIMARY KEY,
+			helpfulness REAL NOT NULL DEFAULT 0,
+			has_explicit_correction INTEGER NOT NULL DEFAULT 0,
+			has_explicit_approval INTEGER NOT NULL DEFAULT 0,
+			was_redundant INTEGER NOT NULL DEFAULT 0,
+			avoided_previous_errors INTEGER NOT NULL DEFAULT 0,
+			tool_efficiency REAL NOT NULL DEFAULT 0,
+			recorded_at INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
 		);
 	`);
 
@@ -248,5 +263,16 @@ export function initSchema(db: Database): void {
 	const hasUserRatingCol = skillsColumns.some(c => c.name === "user_rating");
 	if (!hasUserRatingCol) {
 		db.exec(`ALTER TABLE skills ADD COLUMN user_rating INTEGER;`);
+	}
+
+	// Migrate nudge_history table: add dismissed_at and acknowledged if missing
+	const nudgeColumns = db.prepare("PRAGMA table_info(nudge_history)").all() as Array<{ name: string }>;
+	const hasDismissedAtCol = nudgeColumns.some(c => c.name === "dismissed_at");
+	if (!hasDismissedAtCol) {
+		db.exec(`ALTER TABLE nudge_history ADD COLUMN dismissed_at INTEGER;`);
+	}
+	const hasAcknowledgedCol = nudgeColumns.some(c => c.name === "acknowledged");
+	if (!hasAcknowledgedCol) {
+		db.exec(`ALTER TABLE nudge_history ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0;`);
 	}
 }

@@ -4,10 +4,15 @@
  * Registers event handlers, commands, tools, and flags for automatic
  * skill extraction and episodic memory retrieval.
  */
+import type { Database } from "bun:sqlite";
 import type { ExtensionAPI, ExtensionFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { FilePersonaStore } from "@oh-my-pi/pi-coding-agent/persona/store";
+import { SchedulerDbStorage } from "@oh-my-pi/pi-coding-agent/scheduler/storage";
+import { getNextRun, getSchedulerDbPath } from "@oh-my-pi/pi-coding-agent/scheduler/types";
 import { logger } from "@oh-my-pi/pi-utils";
 import { registerSelfEvolutionCommands } from "./commands";
 import { ContextAwareRetriever } from "./context-aware-retriever";
+import { ConventionComplianceChecker } from "./convention-compliance";
 import { ConventionExtractor } from "./convention-extractor";
 import { CrossSessionNudgeEngine } from "./cross-session-nudge";
 import { EffectivenessAnalyzer } from "./effectiveness-analyzer";
@@ -20,8 +25,10 @@ import { type ActivityLogger, closeActivityLogger, getActivityLogger } from "./l
 import { SkillManager } from "./manager";
 import { NudgeDeliverer } from "./nudge-deliverer";
 import { EpisodeRetriever } from "./retrieval";
+import { SqliteConventionFeedbackStore } from "./storage/convention-feedback";
 import { SqliteConventionStore } from "./storage/conventions";
 import { closeEvolutionDb, getEvolutionDb } from "./storage/db";
+import { SqliteDetailedOutcomeStore } from "./storage/detailed-outcomes";
 import { SqliteEffectivenessStore } from "./storage/effectiveness";
 import { SqliteEpisodeStore } from "./storage/episodes";
 import { SqliteIntentStore } from "./storage/intents";
@@ -61,7 +68,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	});
 	api.registerFlag("self-evolution-max-episodes", {
 		type: "string",
-		default: "100",
+		default: "500",
 		description: "Max episodes to retain for retrieval",
 	});
 	api.registerFlag("self-evolution-enable-prompt-injection", {
@@ -91,7 +98,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	});
 	api.registerFlag("self-evolution-global-store", {
 		type: "boolean",
-		default: false,
+		default: true,
 		description: "Use a global store shared across all projects (instead of per-project isolation)",
 	});
 
@@ -130,12 +137,17 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	let effectivenessAnalyzer: EffectivenessAnalyzer | undefined;
 	let injectionFormatter: InjectionFormatter | undefined;
 	let errorPatternExtractor: ErrorPatternExtractor | undefined;
+	let detailedOutcomeStore: SqliteDetailedOutcomeStore | undefined;
+	let conventionFeedbackStore: import("./storage/convention-feedback").SqliteConventionFeedbackStore | undefined;
+	let conventionComplianceChecker: import("./convention-compliance").ConventionComplianceChecker | undefined;
+	let db: Database | undefined;
 	function _ensureInit(cwd: string): void {
 		if (recorder) return;
 		flags = parseFlags(api);
 		recorder = new TraceRecorder();
 		activityLogger = getActivityLogger(cwd, flags.globalStore);
-		const db = getEvolutionDb(cwd, flags.globalStore);
+		const evolutionDb = getEvolutionDb(cwd, flags.globalStore);
+		db = evolutionDb;
 		episodeStore = new SqliteEpisodeStore(db);
 		skillStore = new SqliteSkillStore(db);
 		versionStore = new SqliteSkillVersionStore(db);
@@ -153,15 +165,62 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		episodeRetriever = new EpisodeRetriever(episodeStore);
 		intentClassifier = new IntentClassifier();
 		workflowMiner = new WorkflowMiner();
+		const savedProfile = profileStore
+			.get("default")
+			.then(p => p ?? undefined)
+			.catch(() => undefined);
+		// userProfiler must be initialized here — it was dead code before (issue #1)
 		userProfiler = new UserProfiler();
-		feedbackTracker = new FeedbackTracker(effectivenessStore, skillEffectivenessStore);
+		savedProfile
+			.then(p => {
+				if (p) userProfiler = UserProfiler.deserialize(JSON.stringify(p));
+			})
+			.catch(() => {});
+		detailedOutcomeStore = new SqliteDetailedOutcomeStore(db);
+		feedbackTracker = new FeedbackTracker(effectivenessStore, skillEffectivenessStore, detailedOutcomeStore);
 		nudgeHistoryStore = new SqliteNudgeHistoryStore(db);
 		crossSessionNudgeEngine = new CrossSessionNudgeEngine(nudgeHistoryStore, episodeStore, profileStore);
 		conventionStore = new SqliteConventionStore(db);
+		conventionFeedbackStore = new SqliteConventionFeedbackStore(db);
+		conventionComplianceChecker = new ConventionComplianceChecker();
 		conventionExtractor = new ConventionExtractor();
 		effectivenessAnalyzer = new EffectivenessAnalyzer();
 		injectionFormatter = new InjectionFormatter();
 		errorPatternExtractor = new ErrorPatternExtractor();
+
+		// Auto-register daily audit scheduled task if not present
+		try {
+			const schedulerStorage = new SchedulerDbStorage(getSchedulerDbPath());
+			const existing = schedulerStorage.getTaskByName("evolution-audit");
+			if (!existing) {
+				const cron = "0 9 * * *"; // Daily at 9 AM
+				const nextRun = getNextRun(cron);
+				schedulerStorage.addTask({
+					name: "evolution-audit",
+					description: "Daily self-evolution health audit",
+					cron,
+					command:
+						"Analyze the self-evolution database at ./.omp/self-evolution/evolution.db. " +
+						"Query the episodes, skills, effectiveness, episode_intents, workflow_patterns, and conventions tables to assess the health of the learning system. " +
+						"Calculate key metrics: episode count, skill extraction rate, average success rate, error rate, intent distribution, and convention coverage. " +
+						"Identify data quality issues (e.g., low skill extraction rate, poor episode success rate, stale conventions, workflow pattern noise). " +
+						"Suggest concrete, actionable improvements. Report findings in a concise summary.",
+					scheduleType: "cron",
+					taskType: "agent",
+					timeoutMs: 300_000,
+					status: "active",
+					createdAt: Date.now(),
+					updatedAt: Date.now(),
+					nextRunAt: nextRun ? nextRun.getTime() : undefined,
+					runCount: 0,
+					failCount: 0,
+				});
+				logger.debug("Auto-registered evolution-audit scheduled task");
+			}
+			schedulerStorage.close();
+		} catch {
+			// Scheduler DB may not be available; ignore
+		}
 	}
 	async function _retrieveRelevantSkills(
 		query: string,
@@ -206,6 +265,8 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		workflowPatternStore: () => workflowPatternStore!,
 		conventionStore: () => conventionStore!,
 		effectivenessStore: () => effectivenessStore!,
+		db: () => db!,
+		flags: () => flags,
 	});
 
 	registerSelfEvolutionTools(api, {
@@ -437,7 +498,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			const prevInjectedSkills = trace.injectedSkillNames;
 			if (prevInjectedSkills && prevInjectedSkills.length > 0 && feedbackTracker) {
 				const succeeded = trace.completedSuccessfully && trace.errorCount === 0;
-				await feedbackTracker.recordSkillOutcome(prevInjectedSkills, succeeded);
+				await feedbackTracker.recordSkillOutcome(prevInjectedSkills, trace);
 				if (succeeded && skillManager) {
 					for (const name of prevInjectedSkills) {
 						await skillManager.recordSkillUsage(name, true);
@@ -457,6 +518,39 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				}
 			}
 
+			// Check convention compliance for injected conventions
+			const prevInjectedConventions = trace.injectedConventionIds;
+			if (
+				prevInjectedConventions &&
+				prevInjectedConventions.length > 0 &&
+				conventionComplianceChecker &&
+				conventionStore &&
+				conventionFeedbackStore
+			) {
+				const injectedConventions = [];
+				for (const id of prevInjectedConventions) {
+					const c = await conventionStore.get(id);
+					if (c) injectedConventions.push(c);
+				}
+				if (injectedConventions.length > 0) {
+					const feedback = conventionComplianceChecker.check(trace, injectedConventions);
+					for (const fb of feedback) {
+						await conventionFeedbackStore.record(fb);
+						if (!fb.complied) {
+							// Update convention stats to reflect violation
+							await conventionStore.updateStats(fb.conventionId, false, true);
+						}
+					}
+					const violations = feedback.filter(f => !f.complied);
+					if (violations.length > 0) {
+						await activityLogger?.log("conventions_violated", {
+							sessionId: trace.sessionId,
+							count: violations.length,
+							conventionIds: violations.map(v => v.conventionId),
+						});
+					}
+				}
+			}
 			// Cleanup old episodes
 			await episodeStore?.deleteOld(flags.maxEpisodes);
 		} catch (err) {
@@ -485,6 +579,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			});
 
 			const profile = await profileStore?.get("default");
+			const persona = await new FilePersonaStore().load();
 			const episodes = await contextAwareRetriever.retrieve(event.prompt, {
 				maxEpisodes: flags.maxEpisodes,
 				llmRerank: flags.llmRerank,
@@ -497,7 +592,8 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				.filter(c => c.confidence >= 60)
 				.sort((a, b) => b.confidence - a.confidence)
 				.slice(0, 10);
-			if (episodes.length === 0 && relevantSkills.length === 0 && conventions.length === 0) return;
+			if (episodes.length === 0 && relevantSkills.length === 0 && conventions.length === 0 && !profile && !persona)
+				return;
 
 			// Track injected episodes for feedback
 			recorder?.setInjectedEpisodes(episodes.map(e => e.episode.id));
@@ -506,6 +602,10 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			// Track injected skills for feedback
 			recorder?.setInjectedSkills(relevantSkills.map(s => s.name));
 			await feedbackTracker?.trackSkillInjection(relevantSkills.map(s => s.name));
+
+			// Track injected conventions for compliance checking
+			recorder?.setInjectedConventions(conventions.map(c => c.id));
+
 			// Cross-session nudge analysis
 			const crossNudge = await crossSessionNudgeEngine?.analyze(ctx.cwd, event.prompt);
 			if (crossNudge && ctx.hasUI) {
@@ -513,12 +613,28 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 					`[Cross-Session ${crossNudge.severity === "warn" ? "Warning" : "Tip"}] ${crossNudge.message}\nSuggestion: ${crossNudge.suggestion}`,
 					crossNudge.severity === "warn" ? "warning" : "info",
 				);
+				// Record cross-session nudge to history for feedback loop
+				await nudgeHistoryStore?.insert({
+					id: `${ctx.sessionManager.getSessionId()}-${crossNudge.type}-${Date.now()}`,
+					sessionId: ctx.sessionManager.getSessionId(),
+					project: ctx.cwd,
+					type: crossNudge.type,
+					severity: crossNudge.severity,
+					message: crossNudge.message,
+					suggestion: crossNudge.suggestion,
+					detectedAt: Date.now(),
+				});
 			}
-
 			// Build injection using formatter
 			let injection = "";
 			if (injectionFormatter) {
-				injection = injectionFormatter.formatInjection(episodes, conventions, relevantSkills);
+				injection = injectionFormatter.formatInjection(
+					episodes,
+					conventions,
+					relevantSkills,
+					profile ?? undefined,
+					persona ?? undefined,
+				);
 			} else {
 				// Fallback: old inline formatting
 				if (episodes.length > 0) {
@@ -580,6 +696,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			effectivenessAnalyzer = undefined;
 			injectionFormatter = undefined;
 			errorPatternExtractor = undefined;
+			detailedOutcomeStore = undefined;
 
 			intentClassifier = undefined;
 			workflowMiner = undefined;

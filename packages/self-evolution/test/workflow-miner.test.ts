@@ -55,7 +55,7 @@ describe("WorkflowMiner", () => {
 
 	test("includes intent in pattern", () => {
 		const miner = new WorkflowMiner();
-		const trace = makeTrace([{ toolName: "read" }]);
+		const trace = makeTrace([{ toolName: "read" }, { toolName: "edit" }]);
 		const pattern = miner.mine(trace, "bugfix");
 		expect(pattern!.intent).toBe("bugfix");
 	});

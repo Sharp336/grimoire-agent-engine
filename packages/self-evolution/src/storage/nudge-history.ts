@@ -10,8 +10,8 @@ export class SqliteNudgeHistoryStore implements NudgeHistoryStore {
 
 	async insert(record: NudgeRecord): Promise<void> {
 		const stmt = this.db.prepare(`
-			INSERT INTO nudge_history (id, session_id, project, type, severity, message, suggestion, detected_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			INSERT INTO nudge_history (id, session_id, project, type, severity, message, suggestion, detected_at, dismissed_at, acknowledged)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		stmt.run(
 			record.id,
@@ -22,6 +22,8 @@ export class SqliteNudgeHistoryStore implements NudgeHistoryStore {
 			record.message,
 			record.suggestion,
 			record.detectedAt,
+			record.dismissedAt ?? null,
+			record.acknowledged ? 1 : 0,
 		);
 		stmt.finalize();
 	}
@@ -52,6 +54,22 @@ export class SqliteNudgeHistoryStore implements NudgeHistoryStore {
 		stmt.finalize();
 		return row.c;
 	}
+
+	async acknowledge(id: string): Promise<void> {
+		const stmt = this.db.prepare(`
+			UPDATE nudge_history SET acknowledged = 1 WHERE id = ?
+		`);
+		stmt.run(id);
+		stmt.finalize();
+	}
+
+	async dismiss(id: string): Promise<void> {
+		const stmt = this.db.prepare(`
+			UPDATE nudge_history SET dismissed_at = ? WHERE id = ?
+		`);
+		stmt.run(Date.now(), id);
+		stmt.finalize();
+	}
 }
 
 interface RawNudgeRow {
@@ -63,6 +81,8 @@ interface RawNudgeRow {
 	message: string;
 	suggestion: string;
 	detected_at: number;
+	dismissed_at: number | null;
+	acknowledged: number;
 }
 
 function rowToNudgeRecord(row: RawNudgeRow): NudgeRecord {
@@ -75,5 +95,7 @@ function rowToNudgeRecord(row: RawNudgeRow): NudgeRecord {
 		message: row.message,
 		suggestion: row.suggestion,
 		detectedAt: row.detected_at,
+		dismissedAt: row.dismissed_at ?? undefined,
+		acknowledged: Boolean(row.acknowledged),
 	};
 }

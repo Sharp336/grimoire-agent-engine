@@ -74,6 +74,8 @@ export interface NudgeHistoryStore {
 	listRecent(limit: number): Promise<NudgeRecord[]>;
 	listByType(type: string, limit: number): Promise<NudgeRecord[]>;
 	countByType(type: string, since: number): Promise<number>;
+	acknowledge(id: string): Promise<void>;
+	dismiss(id: string): Promise<void>;
 }
 
 export interface ConventionStore {
@@ -82,4 +84,16 @@ export interface ConventionStore {
 	listAll(): Promise<import("../types").Convention[]>;
 	listByType(type: string): Promise<import("../types").Convention[]>;
 	updateStats(id: string, applied: boolean, violated: boolean): Promise<void>;
+}
+
+export interface DetailedOutcomeStore {
+	record(outcome: import("../types").InjectionOutcome): Promise<void>;
+	get(episodeId: string): Promise<import("../types").InjectionOutcome | undefined>;
+	listRecent(limit: number): Promise<import("../types").InjectionOutcome[]>;
+}
+
+export interface ConventionFeedbackStore {
+	record(feedback: import("../types").ConventionFeedback): Promise<void>;
+	getByConvention(conventionId: string, limit: number): Promise<import("../types").ConventionFeedback[]>;
+	getViolations(since: number): Promise<import("../types").ConventionViolation[]>;
 }
