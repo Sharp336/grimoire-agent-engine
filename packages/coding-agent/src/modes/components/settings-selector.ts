@@ -535,6 +535,18 @@ export class SettingsSelectorComponent extends Container {
 				} else if (def.type === "enum") {
 					settings.set(path, newValue as never);
 					this.callbacks.onChange(path, newValue);
+
+					// Preview completion sound when changed
+					if (path === "completion.sound" && newValue !== "off") {
+						if (newValue === "bell") {
+							process.stdout.write("\x07");
+						} else if (process.platform === "darwin") {
+							Bun.spawn(["afplay", `/System/Library/Sounds/${newValue}.aiff`], {
+								stdout: "ignore",
+								stderr: "ignore",
+							});
+						}
+					}
 				}
 				// Submenu types are handled in createSubmenu
 			},
