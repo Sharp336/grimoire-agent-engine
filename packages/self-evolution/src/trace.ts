@@ -132,7 +132,7 @@ export class TraceRecorder {
 		}
 	}
 
-	checkForNudges(): import("./nudge-detector").Nudge | undefined {
+	checkForNudges(): import("./types").Nudge | undefined {
 		if (!this.#trace) return undefined;
 		const nudge = this.#nudgeDetector.check(this.#trace);
 		if (nudge) {

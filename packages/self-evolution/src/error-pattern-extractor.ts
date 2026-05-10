@@ -1,9 +1,10 @@
 /**
- * ErrorPatternExtractor: analyzes SessionTrace.errorDetails to identify
- * recurring error patterns and generate conventions.
+ * ErrorPatternExtractor: analyzes SessionTrace to identify recurring error
+ * patterns with root-cause attribution and causal tool-chain context.
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import type { ErrorPattern, SessionTrace } from "./types";
+import { TraceAnalyzer } from "./trace-analyzer";
+import type { ErrorPattern, ReadFailureType, SessionTrace } from "./types";
 
 interface ErrorPatternDef {
 	id: string;
@@ -14,7 +15,7 @@ interface ErrorPatternDef {
 	convention: string;
 }
 
-const ERROR_PATTERNS: Array<{
+const BASE_PATTERNS: Array<{
 	id: string;
 	name: string;
 	description: string;
@@ -113,7 +114,7 @@ const ERROR_PATTERNS: Array<{
 ];
 
 function compileErrorPatterns(): ErrorPatternDef[] {
-	return ERROR_PATTERNS.map(def => ({
+	return BASE_PATTERNS.map(def => ({
 		id: def.id,
 		name: def.name,
 		description: def.description,
@@ -123,8 +124,18 @@ function compileErrorPatterns(): ErrorPatternDef[] {
 	}));
 }
 
+const READ_FAILURE_CONVENTIONS: Record<ReadFailureType, string> = {
+	path_not_found: "操作文件前先确认路径存在，或使用 find 定位文件",
+	permission_denied: "遇到权限错误时检查文件权限或使用 sudo",
+	invalid_sel: "使用 read 时，sel 参数必须是 1-indexed 的有效行范围格式",
+	verify_after_edit_failure: "edit/write 失败后，read 验证路径可能是过期的 —— 先确认编辑是否成功再验证",
+	search_misled: "search/find 失败后再 read 猜测路径，容易再次失败 —— 先用 find 确认路径存在",
+	other: "read 调用失败，请检查路径、参数和文件存在性",
+};
+
 export class ErrorPatternExtractor {
 	readonly #patterns: ErrorPatternDef[] = compileErrorPatterns();
+	readonly #analyzer = new TraceAnalyzer();
 
 	extract(trace: SessionTrace): ErrorPattern[] {
 		const results: ErrorPattern[] = [];
@@ -132,15 +143,11 @@ export class ErrorPatternExtractor {
 		const now = Date.now();
 		const errorDetails = trace.errorDetails ?? [];
 
+		// Phase 1: Base regex matching (backward-compatible)
 		for (const errorDetail of errorDetails) {
 			for (const def of this.#patterns) {
-				if (!def.regex.test(errorDetail)) {
-					continue;
-				}
-
-				if (seen.has(def.id)) {
-					continue;
-				}
+				if (!def.regex.test(errorDetail)) continue;
+				if (seen.has(def.id)) continue;
 				seen.add(def.id);
 
 				const pattern: ErrorPattern = {
@@ -155,14 +162,70 @@ export class ErrorPatternExtractor {
 					lastSeenAt: now,
 					extractedConventions: [def.convention],
 				};
-
 				results.push(pattern);
-				logger.debug("Extracted error pattern", {
-					id: def.id,
-					name: def.name,
-					sessionId: trace.sessionId,
-				});
+				logger.debug("Extracted base error pattern", { id: def.id, sessionId: trace.sessionId });
 			}
+		}
+
+		// Phase 2: Causal read-failure analysis with root-cause attribution
+		const diagnosis = this.#analyzer.analyze(trace);
+		for (const rf of diagnosis.readFailures) {
+			const id = `read-failure-${rf.failureType}`;
+			if (seen.has(id)) continue;
+			seen.add(id);
+
+			const convention = READ_FAILURE_CONVENTIONS[rf.failureType];
+			const contextualConvention = rf.precedingTool
+				? `${convention} (context: preceded by ${rf.precedingTool} which ${rf.precedingToolSuccess ? "succeeded" : "failed"})`
+				: convention;
+
+			const pattern: ErrorPattern = {
+				id,
+				name: `Read failure: ${rf.failureType}`,
+				description: `read tool failed with ${rf.failureType}${rf.attemptedPath ? ` on path "${rf.attemptedPath}"` : ""}`,
+				regex: rf.failureType,
+				category: "not_found",
+				affectedSessions: [trace.sessionId],
+				count: 1,
+				firstSeenAt: now,
+				lastSeenAt: now,
+				extractedConventions: [contextualConvention, rf.suggestion],
+			};
+			results.push(pattern);
+			logger.debug("Extracted causal read-failure pattern", {
+				failureType: rf.failureType,
+				precedingTool: rf.precedingTool,
+				sessionId: trace.sessionId,
+			});
+		}
+
+		// Phase 3: Cascade pattern extraction
+		for (const cascade of diagnosis.cascadePatterns) {
+			const id = `cascade-${cascade.triggerTool}-${cascade.followUpTool}`;
+			if (seen.has(id)) continue;
+			seen.add(id);
+
+			const pattern: ErrorPattern = {
+				id,
+				name: `Cascade: ${cascade.triggerTool} → ${cascade.followUpTool}`,
+				description: cascade.rootCause,
+				regex: `${cascade.triggerTool}.*${cascade.followUpTool}`,
+				category: "other",
+				affectedSessions: [trace.sessionId],
+				count: cascade.count,
+				firstSeenAt: now,
+				lastSeenAt: now,
+				extractedConventions: [
+					`${cascade.triggerTool} 失败后不要立即用 ${cascade.followUpTool} 补救，先分析根因: ${cascade.rootCause}`,
+				],
+			};
+			results.push(pattern);
+			logger.debug("Extracted cascade pattern", {
+				trigger: cascade.triggerTool,
+				followUp: cascade.followUpTool,
+				rootCause: cascade.rootCause,
+				sessionId: trace.sessionId,
+			});
 		}
 
 		return results;

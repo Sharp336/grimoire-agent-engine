@@ -97,3 +97,18 @@ export interface ConventionFeedbackStore {
 	getByConvention(conventionId: string, limit: number): Promise<import("../types").ConventionFeedback[]>;
 	getViolations(since: number): Promise<import("../types").ConventionViolation[]>;
 }
+
+export interface FitScoreStore {
+	upsert(record: import("../types").FitScoreRecord): Promise<void>;
+	get(date: string): Promise<import("../types").FitScoreRecord | undefined>;
+	getLast(): Promise<import("../types").FitScoreRecord | undefined>;
+	listRecent(limit: number): Promise<import("../types").FitScoreRecord[]>;
+}
+export interface EpisodeDiagnosisStore {
+	insert(diagnosis: import("../types").ToolChainDiagnosis): Promise<void>;
+	get(episodeId: string): Promise<import("../types").ToolChainDiagnosis | undefined>;
+	listRecent(limit: number): Promise<import("../types").ToolChainDiagnosis[]>;
+	listByEpisodeIds(episodeIds: string[]): Promise<import("../types").ToolChainDiagnosis[]>;
+	count(): Promise<number>;
+	deleteOld(keepCount: number): Promise<number>;
+}

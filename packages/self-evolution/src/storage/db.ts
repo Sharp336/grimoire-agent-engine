@@ -246,6 +246,21 @@ export function initSchema(db: Database): void {
 		);
 	`);
 
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS episode_diagnoses (
+			episode_id TEXT PRIMARY KEY,
+			read_failures_json TEXT NOT NULL,
+			cascade_patterns_json TEXT NOT NULL,
+			redundant_searches INTEGER NOT NULL DEFAULT 0,
+			slow_loop INTEGER NOT NULL DEFAULT 0,
+			tool_efficiency REAL NOT NULL DEFAULT 1.0,
+			dominant_error_tool TEXT,
+			dominant_error_pattern TEXT,
+			suggested_action TEXT NOT NULL DEFAULT '',
+			recorded_at INTEGER NOT NULL DEFAULT 0,
+			FOREIGN KEY (episode_id) REFERENCES episodes(id) ON DELETE CASCADE
+		);
+	`);
 	// Migrate skills table: add intent column if missing
 	const skillsColumns = db.prepare("PRAGMA table_info(skills)").all() as Array<{ name: string }>;
 	const hasIntentCol = skillsColumns.some(c => c.name === "intent");
@@ -275,4 +290,21 @@ export function initSchema(db: Database): void {
 	if (!hasAcknowledgedCol) {
 		db.exec(`ALTER TABLE nudge_history ADD COLUMN acknowledged INTEGER NOT NULL DEFAULT 0;`);
 	}
+
+	// Migrate: add fit_scores table for "understanding me" evaluation
+	db.exec(`
+		CREATE TABLE IF NOT EXISTS fit_scores (
+			date TEXT PRIMARY KEY,
+			total_score REAL NOT NULL,
+			memory_score REAL NOT NULL,
+			thinking_score REAL NOT NULL,
+			style_score REAL NOT NULL,
+			prediction_score REAL NOT NULL,
+			history_score REAL NOT NULL,
+			change_from_last REAL,
+			verdict TEXT NOT NULL,
+			detail_json TEXT NOT NULL,
+			computed_at INTEGER NOT NULL
+		);
+	`);
 }

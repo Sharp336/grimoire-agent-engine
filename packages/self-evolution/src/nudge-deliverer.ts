@@ -2,8 +2,7 @@
  * NudgeDeliverer: formats and delivers nudge messages to the user.
  */
 import type { ExtensionContext } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import type { Nudge } from "./nudge-detector";
-
+import type { Nudge } from "./types";
 export class NudgeDeliverer {
 	format(nudge: Nudge): string {
 		const severityLabel = nudge.severity === "warn" ? "Warning" : "Tip";

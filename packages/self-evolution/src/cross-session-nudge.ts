@@ -3,7 +3,7 @@
  * and delivers proactive insights before each new session starts.
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import type { EpisodeStore, NudgeHistoryStore, ProfileStore } from "./storage/types";
+import type { EpisodeDiagnosisStore, EpisodeStore, NudgeHistoryStore, ProfileStore } from "./storage/types";
 import type { CrossSessionNudge, Episode, UserProfile } from "./types";
 
 const CROSS_SESSION_COOLDOWN_MS = 60_000;
@@ -18,13 +18,21 @@ export class CrossSessionNudgeEngine {
 	#nudgeHistoryStore: NudgeHistoryStore;
 	#episodeStore: EpisodeStore;
 	#profileStore: ProfileStore;
+	#diagnosisStore: EpisodeDiagnosisStore | undefined;
+
 	#lastDeliveredAt = 0;
 	#deliveredThisSession = false;
 
-	constructor(nudgeHistoryStore: NudgeHistoryStore, episodeStore: EpisodeStore, profileStore: ProfileStore) {
+	constructor(
+		nudgeHistoryStore: NudgeHistoryStore,
+		episodeStore: EpisodeStore,
+		profileStore: ProfileStore,
+		diagnosisStore?: EpisodeDiagnosisStore,
+	) {
 		this.#nudgeHistoryStore = nudgeHistoryStore;
 		this.#episodeStore = episodeStore;
 		this.#profileStore = profileStore;
+		this.#diagnosisStore = diagnosisStore;
 	}
 
 	resetSession(): void {
@@ -128,7 +136,27 @@ export class CrossSessionNudgeEngine {
 		if (!profile || profile.sessionCount < 5) return undefined;
 		if (profile.errorRate <= 0.3) return undefined;
 
-		// Data-aware: look at recent failed episodes to infer actual error patterns
+		// If diagnosis store is available, use aggregateDiagnoses for root-cause analysis
+		if (this.#diagnosisStore) {
+			const recentDiagnoses = await this.#diagnosisStore.listRecent(30);
+			if (recentDiagnoses.length >= 3) {
+				const { aggregateDiagnoses } = await import("./trace-analyzer");
+				const project = "global"; // Cross-session nudges are global for now
+				const aggregated = aggregateDiagnoses(recentDiagnoses, project);
+				if (aggregated.failedEpisodes >= 2) {
+					const suggestion = this.#buildDiagnosisSuggestion(aggregated);
+					return {
+						type: "cross-session-high-error-rate",
+						severity: "warn",
+						message: `Your recent sessions have a ${(profile.errorRate * 100).toFixed(0)}% error rate.`,
+						suggestion,
+						detectedAt: Date.now(),
+					};
+				}
+			}
+		}
+
+		// Fallback: episode-based heuristic
 		const recentEpisodes = await this.#episodeStore.listRecent(30);
 		const failedEpisodes = recentEpisodes.filter(e => e.errorCount > 0 || !e.completedSuccessfully);
 		const suggestion = this.#buildErrorSuggestion(failedEpisodes);
@@ -149,12 +177,24 @@ export class CrossSessionNudgeEngine {
 
 		// Count tool usage in failed episodes
 		const toolCounts: Record<string, number> = {};
+		const toolComboCounts: Record<string, number> = {};
 		for (const ep of failedEpisodes) {
 			for (const tool of ep.toolsUsed) {
 				toolCounts[tool] = (toolCounts[tool] || 0) + 1;
 			}
+			// Detect high-risk tool combos
+			if (ep.toolsUsed.includes("read") && ep.toolsUsed.includes("edit")) {
+				toolComboCounts["read+edit"] = (toolComboCounts["read+edit"] || 0) + 1;
+			}
+			if (ep.toolsUsed.includes("read") && ep.toolsUsed.includes("search")) {
+				toolComboCounts["read+search"] = (toolComboCounts["read+search"] || 0) + 1;
+			}
+			if (ep.toolsUsed.includes("bash") && ep.toolsUsed.includes("read")) {
+				toolComboCounts["bash+read"] = (toolComboCounts["bash+read"] || 0) + 1;
+			}
 		}
 		const dominantTool = Object.entries(toolCounts).sort((a, b) => b[1] - a[1])[0]?.[0];
+		const dominantCombo = Object.entries(toolComboCounts).sort((a, b) => b[1] - a[1])[0];
 
 		// Check for specific patterns in summaries
 		const summaries = failedEpisodes.map(e => e.summary.toLowerCase()).join(" ");
@@ -166,6 +206,7 @@ export class CrossSessionNudgeEngine {
 		const hasTypeError = summaries.includes("typeerror") || summaries.includes("cannot read property");
 		const hasSyntax = summaries.includes("syntaxerror") || summaries.includes("unexpected token");
 		const hasCommandFail = summaries.includes("exit code") || summaries.includes("command failed");
+		const hasEditFail = summaries.includes("edit") && (summaries.includes("anchor") || summaries.includes("payload"));
 
 		const patterns: string[] = [];
 		if (hasNotFound) patterns.push("missing files or paths");
@@ -174,6 +215,21 @@ export class CrossSessionNudgeEngine {
 		if (hasTypeError) patterns.push("type errors or undefined values");
 		if (hasSyntax) patterns.push("syntax errors in generated code");
 		if (hasCommandFail) patterns.push("shell command failures");
+		if (hasEditFail) patterns.push("edit tool failures (anchor/payload mismatch)");
+
+		// Build targeted suggestion based on dominant tool + combo + patterns
+		if (dominantTool === "read" && dominantCombo) {
+			const [combo, count] = dominantCombo;
+			if (combo === "read+edit" && count >= 2) {
+				return `${count} failed sessions show a read+edit cascade: edits are failing (anchor/payload mismatch) and subsequent read verifications see unchanged/missing files. Fix: confirm edit success before reading back.`;
+			}
+			if (combo === "read+search" && count >= 2) {
+				return `${count} failed sessions show search→read guess failures. Fix: use find to confirm file existence before reading, rather than guessing paths after failed searches.`;
+			}
+			if (combo === "bash+read" && count >= 2) {
+				return `${count} failed sessions show bash commands failing, then reads targeting output files that were never created. Fix: verify command exit code before reading expected outputs.`;
+			}
+		}
 
 		if (patterns.length > 0) {
 			let suggestion = `Dominant failure patterns: ${patterns.join(", ")}.`;
@@ -188,6 +244,39 @@ export class CrossSessionNudgeEngine {
 		}
 
 		return `Review common failure patterns across ${failedEpisodes.length} recent failed sessions. Check tool arguments, file paths, and command syntax.`;
+	}
+
+	#buildDiagnosisSuggestion(aggregated: import("./types").CrossSessionDiagnosis): string {
+		const parts: string[] = [];
+
+		// Report dominant read failure type with count
+		const breakdown = aggregated.readFailureBreakdown;
+		const topType = Object.entries(breakdown)
+			.filter(([, count]) => count > 0)
+			.sort((a, b) => b[1] - a[1])[0];
+		if (topType) {
+			const [type, count] = topType;
+			parts.push(`${count} sessions show "${type}" read failures.`);
+		}
+
+		// Report top cascade pattern
+		if (aggregated.topCascadePattern) {
+			const c = aggregated.topCascadePattern;
+			parts.push(`Top cascade: ${c.triggerTool} failure → ${c.followUpTool} failure (${c.count}x). ${c.rootCause}.`);
+		}
+
+		// Report trend
+		if (aggregated.trend === "degrading") {
+			parts.push("Trend is degrading — failures are increasing over time.");
+		} else if (aggregated.trend === "improving") {
+			parts.push("Trend is improving — keep current practices.");
+		}
+
+		if (parts.length === 0) {
+			return aggregated.rootCauseSummary;
+		}
+
+		return parts.join(" ");
 	}
 
 	async #detectSlowProjectWarmup(

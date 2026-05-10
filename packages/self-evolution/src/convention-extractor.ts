@@ -5,7 +5,7 @@
  * from user_input and assistant_message trace entries.
  */
 import { logger } from "@oh-my-pi/pi-utils";
-import type { Convention, ConventionType, SessionTrace } from "./types";
+import type { Convention, ConventionType, SessionTrace, ToolChainDiagnosis } from "./types";
 
 interface PatternDef {
 	type: ConventionType;
@@ -143,6 +143,108 @@ export class ConventionExtractor {
 						confidence: boost,
 					});
 				}
+			}
+		}
+
+		return results;
+	}
+	extractFromDiagnosis(diagnosis: ToolChainDiagnosis): Convention[] {
+		const results: Convention[] = [];
+		const seen = new Set<string>();
+		const now = Date.now();
+
+		// Extract negative_rule conventions from read failure root causes
+		for (const rf of diagnosis.readFailures) {
+			let content: string | undefined;
+			switch (rf.failureType) {
+				case "verify_after_edit_failure":
+					content = "Always verify edit/write success before reading back to confirm changes.";
+					break;
+				case "search_misled":
+					content = "Do not guess file paths after a failed search; use find to confirm existence before reading.";
+					break;
+				case "path_not_found":
+					content = "Use find or search to confirm a path exists before calling read.";
+					break;
+				case "invalid_sel":
+					content = "Validate line-range selectors (1-indexed) before passing them to read.";
+					break;
+				case "permission_denied":
+					content = "Check file permissions before attempting to read restricted files.";
+					break;
+			}
+
+			if (content && !seen.has(content)) {
+				seen.add(content);
+				results.push({
+					id: generateId(content, "negative_rule"),
+					type: "negative_rule",
+					content,
+					sourceEpisodeId: diagnosis.sessionId,
+					confidence: 70,
+					timesApplied: 0,
+					timesViolated: 0,
+					createdAt: now,
+					lastSeenAt: now,
+				});
+			}
+		}
+
+		// Extract procedural_rule conventions from cascade patterns
+		for (const cp of diagnosis.cascadePatterns) {
+			if (cp.count >= 2) {
+				const content = `When ${cp.triggerTool} fails, avoid immediate ${cp.followUpTool} remediation; address the root cause (${cp.rootCause}) first.`;
+				if (!seen.has(content)) {
+					seen.add(content);
+					results.push({
+						id: generateId(content, "procedural_rule"),
+						type: "procedural_rule",
+						content,
+						sourceEpisodeId: diagnosis.sessionId,
+						confidence: 65,
+						timesApplied: 0,
+						timesViolated: 0,
+						createdAt: now,
+						lastSeenAt: now,
+					});
+				}
+			}
+		}
+
+		// Extract preference conventions from efficiency issues
+		if (diagnosis.redundantSearches) {
+			const content = "Prefer ast_grep or find over repeated text searches for structural code queries.";
+			if (!seen.has(content)) {
+				seen.add(content);
+				results.push({
+					id: generateId(content, "preference"),
+					type: "preference",
+					content,
+					sourceEpisodeId: diagnosis.sessionId,
+					confidence: 60,
+					timesApplied: 0,
+					timesViolated: 0,
+					createdAt: now,
+					lastSeenAt: now,
+				});
+			}
+		}
+
+		if (diagnosis.slowLoop) {
+			const content = "Re-evaluate approach if multiple tool calls produce no successful file modifications.";
+			if (!seen.has(content)) {
+				seen.add(content);
+				results.push({
+					id: generateId(content, "preference"),
+					type: "preference",
+					content,
+					sourceEpisodeId: diagnosis.sessionId,
+					confidence: 55,
+					timesApplied: 0,
+					timesViolated: 0,
+					createdAt: now,
+					lastSeenAt: now,
+				});
 			}
 		}
 

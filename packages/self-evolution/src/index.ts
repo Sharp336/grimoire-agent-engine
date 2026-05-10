@@ -29,6 +29,7 @@ import { SqliteConventionFeedbackStore } from "./storage/convention-feedback";
 import { SqliteConventionStore } from "./storage/conventions";
 import { closeEvolutionDb, getEvolutionDb } from "./storage/db";
 import { SqliteDetailedOutcomeStore } from "./storage/detailed-outcomes";
+import { SqliteEpisodeDiagnosisStore } from "./storage/diagnoses";
 import { SqliteEffectivenessStore } from "./storage/effectiveness";
 import { SqliteEpisodeStore } from "./storage/episodes";
 import { SqliteIntentStore } from "./storage/intents";
@@ -39,6 +40,7 @@ import { SqliteSkillStore, SqliteSkillVersionStore, type SqliteStatsStore } from
 import { SqliteWorkflowPatternStore } from "./storage/workflow-patterns";
 import { registerSelfEvolutionTools } from "./tools";
 import { summarizeTrace, TraceRecorder } from "./trace";
+import { TraceAnalyzer } from "./trace-analyzer";
 import type { SelfEvolutionFlags } from "./types";
 import { UserProfiler } from "./user-profiler";
 import { WorkflowMiner } from "./workflow-miner";
@@ -110,6 +112,8 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 
 	// Lazily initialize per-session state. Variables are declared here
 	// and populated by ensureInit when first needed (event handler or command).
+	let traceAnalyzer: TraceAnalyzer | undefined;
+	let diagnosisStore: SqliteEpisodeDiagnosisStore | undefined;
 	let recorder: TraceRecorder | undefined;
 	let activityLogger: ActivityLogger | undefined;
 	let episodeStore: SqliteEpisodeStore | undefined;
@@ -144,6 +148,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 	function _ensureInit(cwd: string): void {
 		if (recorder) return;
 		flags = parseFlags(api);
+		traceAnalyzer = new TraceAnalyzer();
 		recorder = new TraceRecorder();
 		activityLogger = getActivityLogger(cwd, flags.globalStore);
 		const evolutionDb = getEvolutionDb(cwd, flags.globalStore);
@@ -179,7 +184,12 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		detailedOutcomeStore = new SqliteDetailedOutcomeStore(db);
 		feedbackTracker = new FeedbackTracker(effectivenessStore, skillEffectivenessStore, detailedOutcomeStore);
 		nudgeHistoryStore = new SqliteNudgeHistoryStore(db);
-		crossSessionNudgeEngine = new CrossSessionNudgeEngine(nudgeHistoryStore, episodeStore, profileStore);
+		crossSessionNudgeEngine = new CrossSessionNudgeEngine(
+			nudgeHistoryStore,
+			episodeStore,
+			profileStore,
+			diagnosisStore,
+		);
 		conventionStore = new SqliteConventionStore(db);
 		conventionFeedbackStore = new SqliteConventionFeedbackStore(db);
 		conventionComplianceChecker = new ConventionComplianceChecker();
@@ -187,6 +197,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		effectivenessAnalyzer = new EffectivenessAnalyzer();
 		injectionFormatter = new InjectionFormatter();
 		errorPatternExtractor = new ErrorPatternExtractor();
+		diagnosisStore = new SqliteEpisodeDiagnosisStore(db);
 
 		// Auto-register daily audit scheduled task if not present
 		try {
@@ -216,6 +227,41 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 					failCount: 0,
 				});
 				logger.debug("Auto-registered evolution-audit scheduled task");
+			}
+			schedulerStorage.close();
+		} catch {
+			// Scheduler DB may not be available; ignore
+		}
+
+		// Auto-register fit evaluation scheduled task (every 3 days at 10 AM)
+		try {
+			const schedulerStorage = new SchedulerDbStorage(getSchedulerDbPath());
+			const existing = schedulerStorage.getTaskByName("evolution-fit");
+			if (!existing) {
+				const cron = "0 10 */3 * *"; // Every 3 days at 10 AM
+				const nextRun = getNextRun(cron);
+				schedulerStorage.addTask({
+					name: "evolution-fit",
+					description: "Agent '懂我程度' fit evaluation",
+					cron,
+					command:
+						"Run the '懂我程度' (agent understanding me) fit evaluation. " +
+						"Execute each test prompt from the fit-test-tasks dataset (20 prompts across 5 dimensions: memory, thinking, style, prediction, history). " +
+						"For each prompt, respond naturally as you would in a real session. " +
+						"After responding to all prompts, run '/evolution-fit' to generate the score report. " +
+						"The report should show total score out of 100, per-dimension scores, trend vs. last evaluation, and improvement suggestions. " +
+						"Output the report directly — no preamble, no explanation.",
+					scheduleType: "cron",
+					taskType: "agent",
+					timeoutMs: 600_000,
+					status: "active",
+					createdAt: Date.now(),
+					updatedAt: Date.now(),
+					nextRunAt: nextRun ? nextRun.getTime() : undefined,
+					runCount: 0,
+					failCount: 0,
+				});
+				logger.debug("Auto-registered evolution-fit scheduled task");
 			}
 			schedulerStorage.close();
 		} catch {
@@ -398,6 +444,21 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				toolCallCount: trace.toolCallCount,
 			});
 
+			// Deep causal diagnosis (LLM-enhanced when model is available)
+			const diagnosis = await traceAnalyzer?.analyzeWithLlm(trace, ctx.model);
+			if (diagnosis) {
+				await activityLogger?.log("trace_diagnosed", {
+					sessionId: trace.sessionId,
+					readFailureCount: diagnosis.readFailures.length,
+					cascadePatternCount: diagnosis.cascadePatterns.length,
+					dominantErrorTool: diagnosis.dominantErrorTool,
+					suggestedAction: diagnosis.suggestedAction,
+				});
+			}
+
+			if (diagnosis) {
+				await diagnosisStore?.insert(diagnosis);
+			}
 			// Extract intent
 			const intentResult = intentClassifier?.ruleClassify(trace);
 			if (intentResult) {
@@ -437,16 +498,27 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				});
 			}
 
-			// Extract conventions from user dialogue
+			// Extract conventions from user dialogue (enhanced with causal diagnosis)
 			if (conventionExtractor && conventionStore) {
 				const conventions = conventionExtractor.extract(trace);
+				let diagnosisConventions: import("./types").Convention[] = [];
 				for (const c of conventions) {
-					// insert() handles deduplication and confidence boost
 					await conventionStore.insert(c);
 					await conventionStore.updateStats(c.id, true, false);
 				}
-				if (conventions.length > 0) {
-					await activityLogger?.log("conventions_extracted", { count: conventions.length });
+				if (diagnosis) {
+					diagnosisConventions = conventionExtractor.extractFromDiagnosis(diagnosis);
+					for (const c of diagnosisConventions) {
+						await conventionStore.insert(c);
+						await conventionStore.updateStats(c.id, true, false);
+					}
+					if (diagnosisConventions.length > 0) {
+						await activityLogger?.log("diagnosis_conventions_extracted", { count: diagnosisConventions.length });
+					}
+				}
+				const total = conventions.length + diagnosisConventions.length;
+				if (total > 0) {
+					await activityLogger?.log("conventions_extracted", { count: total });
 				}
 			}
 
@@ -506,13 +578,17 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 				}
 			}
 
-			// Extract skill if significant
+			// Extract skill if significant (enhanced with causal diagnosis)
 			if (extractor) {
-				const extracted = await extractor.extract(trace, {
-					skillThreshold: flags.skillThreshold,
-					llmRefinement: flags.llmRefinement,
-					model: ctx.model,
-				});
+				const extracted = await extractor.extract(
+					trace,
+					{
+						skillThreshold: flags.skillThreshold,
+						llmRefinement: flags.llmRefinement,
+						model: ctx.model,
+					},
+					diagnosis ?? undefined,
+				);
 				if (extracted && skillManager) {
 					await skillManager.integrate(extracted, ctx.model);
 				}
@@ -678,6 +754,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 		try {
 			closeActivityLogger(_ctx.cwd, flags.globalStore);
 			closeEvolutionDb(_ctx.cwd, flags.globalStore);
+			traceAnalyzer = undefined;
 			recorder = undefined;
 			episodeStore = undefined;
 			skillStore = undefined;
@@ -696,6 +773,7 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			effectivenessAnalyzer = undefined;
 			injectionFormatter = undefined;
 			errorPatternExtractor = undefined;
+			diagnosisStore = undefined;
 			detailedOutcomeStore = undefined;
 
 			intentClassifier = undefined;

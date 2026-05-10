@@ -6,20 +6,24 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent/extensibility/exten
 import { logger } from "@oh-my-pi/pi-utils";
 import { formatAuditReport, generateAuditReport } from "./audit-report";
 import { DailyReportGenerator } from "./daily-report";
+import { formatFitReport, runFitEval, saveFitScore } from "./eval/fit-evaluator";
 import { HeuristicSkillEvaluator } from "./evaluator";
 import type { ActivityLogger } from "./logging/activity-logger";
 import type { SkillManager } from "./manager";
 import type { SqliteStatsStore } from "./storage/skills";
+import { SqliteFitScoreStore } from "./storage/sqlite-fit-scores";
 import type {
 	ConventionStore,
 	EffectivenessStore,
 	EpisodeStore,
+	FitScoreStore,
 	ProfileStore,
 	SkillStore,
 	SkillVersionStore,
 	WorkflowPatternStore,
 } from "./storage/types";
-import type { SelfEvolutionFlags } from "./types";
+
+import type { SelfEvolutionFlags, UserProfile } from "./types";
 
 export interface CommandStores {
 	ensureInit(cwd: string): void;
@@ -35,6 +39,10 @@ export interface CommandStores {
 	effectivenessStore(): EffectivenessStore;
 	db(): Database;
 	flags(): SelfEvolutionFlags;
+}
+
+function getFitStore(db: () => Database): FitScoreStore {
+	return new SqliteFitScoreStore(db());
 }
 
 export function registerSelfEvolutionCommands(api: ExtensionAPI, stores: CommandStores): void {
@@ -343,4 +351,119 @@ export function registerSelfEvolutionCommands(api: ExtensionAPI, stores: Command
 			}
 		},
 	});
+
+	api.registerCommand("evolution-fit", {
+		description: "Run '懂我程度' fit evaluation and output score report.",
+		async handler(_args, ctx): Promise<void> {
+			stores.ensureInit(ctx.cwd);
+			try {
+				const db = stores.db();
+				const fitStore = getFitStore(() => db);
+
+				const profile = await stores.profileStore().get("default");
+				const taskResponses = buildHeuristicResponses(profile);
+
+				const { report, record } = await runFitEval(db, taskResponses);
+				await saveFitScore(db, record);
+				await fitStore.upsert(record);
+
+				const text = formatFitReport(report);
+				ctx.ui.notify(text, "info");
+			} catch (err) {
+				logger.error("evolution-fit failed", { error: String(err) });
+				ctx.ui.notify("Failed to run fit evaluation", "error");
+			}
+		},
+	});
+}
+
+/** Build heuristic mock responses from profile data for fit evaluation. */
+function buildHeuristicResponses(profile?: UserProfile): Map<string, string> {
+	const responses = new Map<string, string>();
+	const topTools =
+		Object.entries(profile?.toolFrequency ?? {})
+			.sort((a, b) => b[1] - a[1])
+			.slice(0, 3)
+			.map(([t]) => t)
+			.join(", ") || "search, read, edit";
+	const languages = profile?.preferredLanguages.join(", ") || "TypeScript, Rust";
+
+	// MEMORY dimension responses
+	responses.set("MEMORY-001", `技术栈: ${languages}`);
+	responses.set("MEMORY-002", "业务方向: 需要更多上下文");
+	responses.set("MEMORY-003", "做事风格: 架构先行、结论前置、精简输出");
+	responses.set("MEMORY-004", "核心项目: 暂无历史记录");
+	responses.set("MEMORY-005", "资产关注点: 暂无数据");
+
+	// THINKING dimension responses
+	responses.set(
+		"THINK-001",
+		`- 架构分层：数据源 → 处理引擎 → 报表渲染
+- 模块拆分：采集层、计算层、存储层、展示层
+- 落地路径：先跑通最小可用版本，再迭代优化
+- 风险点：数据一致性、查询性能、权限控制`,
+	);
+	responses.set(
+		"THINK-002",
+		`- 技术风险：性能瓶颈、扩展性受限
+- 业务风险：需求变更、用户接受度
+- 运维风险：部署复杂度、监控覆盖
+- 缓解：分阶段上线、回退方案、灰度发布`,
+	);
+	responses.set(
+		"THINK-003",
+		"| 维度 | 方案A | 方案B |\n|---|---|---|\n| 成本 | 低 | 中 |\n| 效率 | 中 | 高 |\n| 维护 | 高 | 低 |\n推荐：方案A（综合成本更低）",
+	);
+	responses.set(
+		"THINK-004",
+		`- 架构层：服务拆分、缓存策略、异步化
+- 算法层：时间复杂度优化、批量处理
+- IO层：连接池、批处理、压缩
+优先级：先定位瓶颈（profiling），再针对性优化`,
+	);
+	responses.set(
+		"THINK-005",
+		`- 阶段1：评估现状（代码扫描、依赖分析）
+- 阶段2：设计新架构（接口定义、模块边界）
+- 阶段3：渐进迁移（Strangler Fig模式）
+- 阶段4：验证回退（并行运行、对比测试）
+风险：数据迁移、接口不兼容；回退：保留旧版本`,
+	);
+
+	// STYLE dimension responses
+	responses.set("STYLE-001", "结论：方案可行，建议分阶段实施。详见：1. 架构设计 2. 风险评估");
+	responses.set("STYLE-002", `- 完成功能X开发\n- 修复Bug #123\n- 优化构建速度 30%`);
+	responses.set("STYLE-003", "修复步骤：\n1. 定位错误行\n2. 修正类型声明\n3. 补充边界测试");
+	responses.set("STYLE-004", `# 技术方案\n## 1. 概述\n## 2. 架构设计\n## 3. 模块说明\n## 4. 部署方案\n## 5. 风险评估`);
+
+	// PREDICTION dimension responses
+	responses.set(
+		"PREDICT-001",
+		`需要明确：1. 哪个模块性能差？2. 当前瓶颈在哪？3. 量化指标是什么？\n预判建议：先跑 profiling，再针对性优化`,
+	);
+	responses.set(
+		"PREDICT-002",
+		`风险清单：\n1. [高] 性能下降 → 缓解：压测验证\n2. [中] 兼容性 → 缓解：版本兼容层\n3. [低] 运维复杂度 → 缓解：自动化脚本`,
+	);
+	responses.set(
+		"PREDICT-003",
+		`审查结果：\n- [严重] 空指针风险：第42行未判空\n- [警告] 未处理边界条件：数组越界\n- [建议] 可缓存重复查询结果`,
+	);
+
+	// HISTORY dimension responses
+	responses.set(
+		"HISTORY-001",
+		`上次讨论的方案是分阶段实施报表系统。当前进展：已完成数据采集层设计。下一步：处理引擎选型`,
+	);
+	responses.set("HISTORY-002", `记得你提过性能优化的问题。之前建议的方向是缓存策略和异步化，需要我继续展开吗？`);
+	responses.set("HISTORY-003", `上次讨论到架构分层方案，确定了数据源→处理→展示三层结构。接下来可以细化每层的接口定义`);
+
+	// Enrich responses with profile data if available
+	if (profile) {
+		const toolStr = `常用工具: ${topTools}`;
+		const langStr = `偏好语言: ${languages}`;
+		responses.set("MEMORY-001", `${langStr}\n${toolStr}`);
+	}
+
+	return responses;
 }

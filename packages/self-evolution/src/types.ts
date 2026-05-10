@@ -28,7 +28,7 @@ export interface SessionTrace {
 	hadRecovery: boolean;
 	completedSuccessfully: boolean;
 	errorDetails?: string[];
-	nudges?: import("./nudge-detector").Nudge[];
+	nudges?: Nudge[];
 	injectedEpisodeIds?: string[];
 	injectedSkillNames?: string[];
 	injectedConventionIds?: string[];
@@ -236,6 +236,13 @@ export interface SkillEffectiveness {
 // Cross-Session Nudges
 // ============================================================================
 
+export interface Nudge {
+	type: string;
+	severity: "info" | "warn";
+	message: string;
+	suggestion: string;
+}
+
 export interface CrossSessionNudge {
 	type: string;
 	severity: "info" | "warn";
@@ -341,4 +348,101 @@ export interface DailyReport {
 		description: string;
 		timestamp: number;
 	}>;
+}
+
+// ============================================================================
+// Fit Evaluation — "懂我程度" personal fit scoring
+// ============================================================================
+
+export type FitVerdict = "明显更懂我" | "轻微更懂我" | "持平" | "变生疏" | "明显不懂我";
+
+export interface FitScoreRecord {
+	date: string; // YYYY-MM-DD
+	totalScore: number;
+	memoryScore: number;
+	thinkingScore: number;
+	styleScore: number;
+	predictionScore: number;
+	historyScore: number;
+	changeFromLast: number | null;
+	verdict: FitVerdict;
+	detailJson: string;
+	computedAt: number;
+}
+
+export interface FitDimensionScore {
+	name: string;
+	score: number;
+	maxScore: number;
+	change: number | null;
+	description: string;
+}
+
+export interface FitReport {
+	date: string;
+	totalScore: number;
+	maxScore: 100;
+	change: number | null;
+	verdict: FitVerdict;
+	dimensions: FitDimensionScore[];
+	history: FitScoreRecord[];
+	improvements: string[];
+}
+
+// ============================================================================
+// Trace Analysis — causal tool-chain diagnosis (v2.6)
+// ============================================================================
+
+export interface ToolCallResult {
+	call: TraceEntry;
+	result: TraceEntry;
+	index: number;
+}
+
+export interface CascadePattern {
+	triggerTool: string;
+	triggerError: string;
+	followUpTool: string;
+	followUpError?: string;
+	rootCause: string;
+	count: number;
+}
+
+export type ReadFailureType =
+	| "path_not_found"
+	| "permission_denied"
+	| "invalid_sel"
+	| "verify_after_edit_failure"
+	| "search_misled"
+	| "other";
+
+export interface ReadFailureAnalysis {
+	failureType: ReadFailureType;
+	attemptedPath?: string;
+	precedingTool?: string;
+	precedingToolSuccess?: boolean;
+	suggestion: string;
+}
+
+export interface ToolChainDiagnosis {
+	sessionId: string;
+	readFailures: ReadFailureAnalysis[];
+	cascadePatterns: CascadePattern[];
+	redundantSearches: boolean;
+	slowLoop: boolean;
+	toolEfficiency: number; // successful_modifications / total_calls
+	dominantErrorTool?: string;
+	dominantErrorPattern?: string;
+	suggestedAction: string;
+}
+
+export interface CrossSessionDiagnosis {
+	project: string;
+	totalEpisodes: number;
+	failedEpisodes: number;
+	readFailureRate: number;
+	readFailureBreakdown: Record<ReadFailureType, number>;
+	topCascadePattern?: CascadePattern;
+	trend: "improving" | "stable" | "degrading";
+	rootCauseSummary: string;
 }

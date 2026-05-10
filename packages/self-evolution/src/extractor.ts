@@ -6,7 +6,7 @@ import type { Model } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import { HeuristicSkillEvaluator } from "./evaluator";
 import extractSkillPromptTemplate from "./prompts/extract-skill.md" with { type: "text" };
-import type { ExtractedSkill, SessionTrace } from "./types";
+import type { ExtractedSkill, SessionTrace, ToolChainDiagnosis } from "./types";
 import { callBackgroundLlm } from "./utils/llm";
 
 export interface ExtractorOptions {
@@ -18,7 +18,11 @@ export interface ExtractorOptions {
 export class SkillExtractor {
 	#evaluator = new HeuristicSkillEvaluator();
 
-	async extract(trace: SessionTrace, options: ExtractorOptions): Promise<ExtractedSkill | undefined> {
+	async extract(
+		trace: SessionTrace,
+		options: ExtractorOptions,
+		diagnosis?: ToolChainDiagnosis,
+	): Promise<ExtractedSkill | undefined> {
 		// Rule 1: must have enough tool calls OR had recovery OR had errors
 		const isSignificant = trace.toolCallCount >= options.skillThreshold || trace.hadRecovery || trace.errorCount > 0;
 		if (!isSignificant) {
@@ -30,7 +34,7 @@ export class SkillExtractor {
 		}
 
 		// Rule-based extraction (always runs)
-		const ruleSkill = this.#ruleExtract(trace);
+		const ruleSkill = this.#ruleExtract(trace, diagnosis);
 
 		// LLM refinement (only for complex successful tasks)
 		if (options.llmRefinement && trace.toolCallCount >= options.skillThreshold && trace.completedSuccessfully) {
@@ -47,7 +51,7 @@ export class SkillExtractor {
 		return ruleSkill;
 	}
 
-	#ruleExtract(trace: SessionTrace): ExtractedSkill {
+	#ruleExtract(trace: SessionTrace, diagnosis?: ToolChainDiagnosis): ExtractedSkill {
 		const toolsUsed = new Set<string>();
 		const filesModified = new Set<string>();
 
@@ -70,7 +74,8 @@ export class SkillExtractor {
 		const approach = this.#buildApproach(trace, Array.from(filesModified));
 
 		// Build pitfalls from errors observed
-		const pitfalls = this.#buildPitfalls(trace);
+		// Build pitfalls from errors observed (enhanced with causal diagnosis)
+		const pitfalls = this.#buildPitfalls(trace, diagnosis);
 
 		return {
 			name,
@@ -168,8 +173,43 @@ export class SkillExtractor {
 		return `Tool sequence: ${deduped.join(" → ")}.${fileHint}`;
 	}
 
-	#buildPitfalls(trace: SessionTrace): string[] {
+	#buildPitfalls(trace: SessionTrace, diagnosis?: ToolChainDiagnosis): string[] {
 		const pitfalls: string[] = [];
+
+		// Add diagnosis-driven pitfalls when available
+		if (diagnosis) {
+			// Report top read failure type with specific guidance
+			if (diagnosis.readFailures.length > 0) {
+				const byType = new Map<string, number>();
+				for (const rf of diagnosis.readFailures) {
+					byType.set(rf.failureType, (byType.get(rf.failureType) ?? 0) + 1);
+				}
+				const top = [...byType.entries()].sort((a, b) => b[1] - a[1])[0];
+				if (top) {
+					const [type, count] = top;
+					pitfalls.push(
+						`Causal diagnosis: ${count} read failure(s) of type "${type}". ${this.#readFailurePitfall(type)}`,
+					);
+				}
+			}
+
+			// Report top cascade pattern
+			if (diagnosis.cascadePatterns.length > 0) {
+				const top = diagnosis.cascadePatterns[0];
+				pitfalls.push(
+					`Cascade risk: ${top.triggerTool} failure can trigger ${top.followUpTool} failure. Root cause: ${top.rootCause}.`,
+				);
+			}
+
+			if (diagnosis.redundantSearches) {
+				pitfalls.push("Redundant search chains detected; prefer find or ast_grep for structural queries.");
+			}
+
+			if (diagnosis.slowLoop) {
+				pitfalls.push("Slow tool loop: many calls with no successful modifications. Re-evaluate approach earlier.");
+			}
+		}
+
 		if (trace.errorCount > 0) {
 			pitfalls.push(`Watch for errors when running similar tasks; ${trace.errorCount} error(s) occurred.`);
 		}
@@ -177,5 +217,22 @@ export class SkillExtractor {
 			pitfalls.push("Agent recovered from an error mid-task; verify outputs when retrying.");
 		}
 		return pitfalls;
+	}
+
+	#readFailurePitfall(type: string): string {
+		switch (type) {
+			case "path_not_found":
+				return "Always confirm file existence with find before reading.";
+			case "permission_denied":
+				return "Check file permissions before attempting reads.";
+			case "invalid_sel":
+				return "Validate line range selectors; use 1-indexed format.";
+			case "verify_after_edit_failure":
+				return "Confirm edit success before reading back to verify.";
+			case "search_misled":
+				return "Do not guess paths from failed searches; confirm with find.";
+			default:
+				return "Review read arguments and preconditions carefully.";
+		}
 	}
 }
