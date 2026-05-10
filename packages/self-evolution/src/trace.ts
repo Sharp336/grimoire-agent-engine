@@ -123,7 +123,23 @@ export class TraceRecorder {
 	onMessageEnd(event: MessageEndEvent): void {
 		if (!this.#trace) return;
 		const msg = event.message;
-		if (msg.role === "assistant" && typeof msg.content === "string") {
+		if (msg.role !== "assistant") return;
+
+		// Capture model API failures (429, 401, timeout, etc.)
+		if (msg.stopReason === "error" && msg.errorMessage) {
+			this.#trace.errorCount++;
+			this.#trace.errorDetails ??= [];
+			this.#trace.errorDetails.push(msg.errorMessage);
+			this.#trace.completedSuccessfully = false;
+			this.#trace.entries.push({
+				type: "model_error",
+				timestamp: Date.now(),
+				content: msg.errorMessage,
+			});
+			return;
+		}
+
+		if (typeof msg.content === "string") {
 			this.#trace.entries.push({
 				type: "assistant_message",
 				timestamp: Date.now(),

@@ -7,7 +7,7 @@
 // ============================================================================
 
 export interface TraceEntry {
-	type: "tool_call" | "tool_result" | "user_input" | "assistant_message";
+	type: "tool_call" | "tool_result" | "user_input" | "assistant_message" | "model_error";
 	timestamp: number;
 	toolName?: string;
 	args?: unknown;
