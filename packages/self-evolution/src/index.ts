@@ -447,6 +447,8 @@ export const createSelfEvolutionExtension: ExtensionFactory = api => {
 			// Deep causal diagnosis (LLM-enhanced when model is available)
 			const diagnosis = await traceAnalyzer?.analyzeWithLlm(trace, ctx.model);
 			if (diagnosis) {
+				// Align diagnosis sessionId with episode id for FK constraint
+				diagnosis.sessionId = episode.id;
 				await activityLogger?.log("trace_diagnosed", {
 					sessionId: trace.sessionId,
 					readFailureCount: diagnosis.readFailures.length,
