@@ -12,7 +12,6 @@
 import { listClaudeOnlyPluginRoots } from "./helpers";
 import { registerPluginProvider } from "./plugin-provider";
 
-
 registerPluginProvider({
 	providerId: "claude-plugins",
 	displayName: "Claude Code Marketplace",

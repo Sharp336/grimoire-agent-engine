@@ -268,10 +268,26 @@ function makeLoadMCPServers(cfg: PluginProviderConfig) {
 			}
 
 			if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
-			const config = parsed as { mcpServers?: Record<string, unknown> };
-			if (!config.mcpServers || typeof config.mcpServers !== "object") continue;
+			const obj = parsed as Record<string, unknown>;
 
-			for (const [serverName, serverCfg] of Object.entries(config.mcpServers)) {
+			// Two shapes are supported:
+			//   nested: { "mcpServers": { name: cfg, ... } }   (OMP/Claude Code project shape)
+			//   flat:   { name: cfg, ... }                      (Claude marketplace plugin shape)
+			let servers: Record<string, unknown>;
+			if (
+				obj.mcpServers !== undefined &&
+				obj.mcpServers !== null &&
+				typeof obj.mcpServers === "object" &&
+				!Array.isArray(obj.mcpServers)
+			) {
+				servers = obj.mcpServers as Record<string, unknown>;
+			} else if (!("mcpServers" in obj)) {
+				servers = obj;
+			} else {
+				continue;
+			}
+
+			for (const [serverName, serverCfg] of Object.entries(servers)) {
 				if (!serverCfg || typeof serverCfg !== "object" || Array.isArray(serverCfg)) continue;
 				const raw = serverCfg as {
 					enabled?: boolean;
@@ -286,6 +302,14 @@ function makeLoadMCPServers(cfg: PluginProviderConfig) {
 					oauth?: MCPServer["oauth"];
 					type?: string;
 				};
+				// Require either command (stdio) or url (HTTP/SSE) — entries with neither
+				// would register a useless server and surface as a connection error at runtime.
+				if (typeof raw.command !== "string" && typeof raw.url !== "string") {
+					warnings.push(
+						`[${cfg.providerId}] Skipping MCP server "${serverName}" in ${mcpPath}: missing command or url`,
+					);
+					continue;
+				}
 				const namespacedName = root.plugin ? `${root.plugin}:${serverName}` : serverName;
 				const server: MCPServer = {
 					name: namespacedName,
