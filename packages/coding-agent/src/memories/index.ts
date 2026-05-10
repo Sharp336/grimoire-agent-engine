@@ -385,7 +385,7 @@ async function runPhase2(options: {
 		const phase2Model = await resolveMemoryModel({
 			modelRegistry,
 			session,
-			fallbackRole: "smol",
+			fallbackRole: "default",
 		});
 		if (!phase2Model) {
 			markPhase2FailureWithFallback(db, {
@@ -746,9 +746,17 @@ async function runConsolidationModel(options: { memoryRoot: string; model: Model
 		.join("\n")
 		.trim();
 	const parsed = parseJsonObject(text);
-	if (!parsed) throw new Error("phase2 JSON parse failure");
+	if (!parsed) {
+		logger.warn("phase2 JSON parse failure — raw text logged", { textSnippet: text.slice(0, 500) });
+		throw new Error("phase2 JSON parse failure");
+	}
 	const schemaOutput = parseConsolidationOutputSchema(parsed);
-	if (!schemaOutput) throw new Error("phase2 JSON schema validation failure");
+	if (!schemaOutput) {
+		logger.warn("phase2 JSON schema validation failure — parsed object logged", {
+			parsedKeys: Object.keys(parsed).join(", "),
+		});
+		throw new Error("phase2 JSON schema validation failure");
+	}
 	const memoryMd = redactSecrets(schemaOutput.memory_md).trim();
 	const memorySummary = redactSecrets(schemaOutput.memory_summary).trim();
 	const skills = schemaOutput.skills
@@ -881,23 +889,47 @@ function formatRolloutFilename(threadId: string, rolloutSlug: string | null): st
 
 function parseJsonObject(text: string): Record<string, unknown> | undefined {
 	if (!text) return undefined;
+
+	// 1. Strip markdown code blocks
+	let candidate = text.trim();
+	const codeBlockMatch = candidate.match(/```(?:json)?\s*([\s\S]*?)```/);
+	if (codeBlockMatch) {
+		candidate = codeBlockMatch[1].trim();
+	}
+
+	// 2. Try direct parse
 	try {
-		const parsed = JSON.parse(text) as unknown;
+		const parsed = JSON.parse(candidate) as unknown;
 		if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
 			return parsed as Record<string, unknown>;
 		}
 	} catch {
-		const match = text.match(/\{[\s\S]*\}/);
-		if (!match) return undefined;
-		try {
-			const parsed = JSON.parse(match[0]) as unknown;
-			if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
-				return parsed as Record<string, unknown>;
+		/* continue */
+	}
+
+	// 3. Try to extract outermost JSON object using balanced brace matching
+	let depth = 0;
+	let start = -1;
+	for (let i = 0; i < candidate.length; i++) {
+		if (candidate[i] === "{" && (i === 0 || candidate[i - 1] !== "\\")) {
+			if (depth === 0) start = i;
+			depth++;
+		} else if (candidate[i] === "}" && (i === 0 || candidate[i - 1] !== "\\")) {
+			depth--;
+			if (depth === 0 && start !== -1) {
+				try {
+					const extracted = candidate.slice(start, i + 1);
+					const parsed = JSON.parse(extracted) as unknown;
+					if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+						return parsed as Record<string, unknown>;
+					}
+				} catch {
+					/* continue searching */
+				}
 			}
-		} catch {
-			return undefined;
 		}
 	}
+
 	return undefined;
 }
 
@@ -922,7 +954,7 @@ function parseConsolidationOutputSchema(value: Record<string, unknown>): Consoli
 	for (const item of value.skills) {
 		if (!item || typeof item !== "object" || Array.isArray(item)) return undefined;
 		const data = item as Record<string, unknown>;
-		if (!hasExactKeys(data, ["name", "content", "scripts", "templates", "examples"], true)) return undefined;
+		if (!hasExactKeys(data, ["name", "content", "scripts", "templates", "examples"], false, true)) return undefined;
 		if (typeof data.name !== "string") return undefined;
 		if (!(typeof data.content === "string" || data.content === undefined)) return undefined;
 		const scripts = parseConsolidationSkillFileArray(data.scripts);
@@ -944,17 +976,30 @@ function parseConsolidationOutputSchema(value: Record<string, unknown>): Consoli
 	};
 }
 
-function hasExactKeys(value: Record<string, unknown>, expectedKeys: string[], allowMissing = false): boolean {
+function hasExactKeys(
+	value: Record<string, unknown>,
+	expectedKeys: string[],
+	allowMissing = false,
+	allowExtra = false,
+): boolean {
 	const sortedKeys = Object.keys(value).sort();
 	const sortedExpected = [...expectedKeys].sort();
-	if (!allowMissing && sortedKeys.length !== sortedExpected.length) return false;
-	for (const key of sortedKeys) {
-		if (!sortedExpected.includes(key)) return false;
+
+	// Check for extra keys
+	if (!allowExtra) {
+		for (const key of sortedKeys) {
+			if (!sortedExpected.includes(key)) return false;
+		}
 	}
-	if (allowMissing) return true;
-	for (let i = 0; i < sortedExpected.length; i += 1) {
-		if (sortedKeys[i] !== sortedExpected[i]) return false;
+
+	// Check length (if no extras allowed and no missing allowed)
+	if (!allowExtra && !allowMissing && sortedKeys.length !== sortedExpected.length) return false;
+
+	// Check that all expected keys are present
+	for (const key of sortedExpected) {
+		if (!sortedKeys.includes(key) && !allowMissing) return false;
 	}
+
 	return true;
 }
 
