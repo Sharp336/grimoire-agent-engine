@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `AuthStorage.setCredentialDisabledHandler(handler)` and `getCredentialDisabledHandler()` so embedders that build the `AuthStorage` before their event runner exists (e.g. `coding-agent`'s `discoverAuthStorage()` runs before the extension runner is constructed) can wire the `onCredentialDisabled` callback after construction. Pass `undefined` to detach. `credential_disabled` events fired while no handler is attached are buffered (capped at 32, FIFO) and replayed in insertion order on the next attach, so attaching a handler late doesn't lose events that happened during startup probes (model restore, fallback model selection).
+
 ## [14.9.0] - 2026-05-10
 
 ### Added

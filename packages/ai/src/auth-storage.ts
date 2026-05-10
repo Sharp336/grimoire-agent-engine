@@ -154,6 +154,12 @@ const USAGE_CACHE_PREFIX = "usage_cache:";
 const USAGE_REPORT_TTL_MS = 30_000;
 const DEFAULT_USAGE_REQUEST_TIMEOUT_MS = 3_000;
 const DEFAULT_OAUTH_REFRESH_TIMEOUT_MS = 10_000;
+/**
+ * Cap on the buffered credential_disabled backlog held while no handler is attached.
+ * In practice the backlog is 0–N where N ≈ active providers (≤ ~20). The cap exists so
+ * pathological detach-without-reattach loops can't grow memory unboundedly.
+ */
+const MAX_PENDING_DISABLED_EVENTS = 32;
 
 type UsageCacheEntry<T> = {
 	value: T;
@@ -284,6 +290,14 @@ export class AuthStorage {
 	#store: AuthCredentialStore;
 	#configValueResolver: (config: string) => Promise<string | undefined>;
 	#onCredentialDisabled?: (event: CredentialDisabledEvent) => void | Promise<void>;
+	/**
+	 * Buffer for credential_disabled events fired while no handler was attached.
+	 * Drained (in insertion order) when a handler is attached via {@link setCredentialDisabledHandler}.
+	 * Bounded at {@link MAX_PENDING_DISABLED_EVENTS}; oldest entries are dropped to keep memory predictable
+	 * if a long-lived AuthStorage somehow accumulates a backlog (provider count is naturally small,
+	 * but a misbehaving caller that detaches without re-attaching shouldn't grow this unboundedly).
+	 */
+	#pendingDisabledEvents: CredentialDisabledEvent[] = [];
 	#closed = false;
 
 	constructor(store: AuthCredentialStore, options: AuthStorageOptions = {}) {
@@ -322,6 +336,27 @@ export class AuthStorage {
 		if (this.#closed) return;
 		this.#closed = true;
 		this.#store.close();
+	}
+
+	/**
+	 * Late-binding setter for embedders that construct AuthStorage before the event sink exists.
+	 * If credential_disabled events were buffered while no handler was attached
+	 * (see {@link CredentialDisabledEvent}), they are drained to the new handler in insertion order.
+	 * Pass `undefined` to detach; subsequent events will buffer until the next attach.
+	 */
+	setCredentialDisabledHandler(handler: ((event: CredentialDisabledEvent) => void | Promise<void>) | undefined): void {
+		this.#onCredentialDisabled = handler;
+		if (!handler || this.#pendingDisabledEvents.length === 0) return;
+		const drained = this.#pendingDisabledEvents;
+		this.#pendingDisabledEvents = [];
+		for (const event of drained) {
+			this.#invokeCredentialDisabledHandler(handler, event);
+		}
+	}
+
+	/** Read the currently installed handler so a later setter can compare-and-clear safely. */
+	getCredentialDisabledHandler(): ((event: CredentialDisabledEvent) => void | Promise<void>) | undefined {
+		return this.#onCredentialDisabled;
 	}
 
 	/**
@@ -631,7 +666,22 @@ export class AuthStorage {
 
 	#emitCredentialDisabled(event: CredentialDisabledEvent): void {
 		const handler = this.#onCredentialDisabled;
-		if (!handler) return;
+		if (!handler) {
+			// Buffer for later replay when a handler is attached. Cap the backlog so a misbehaving
+			// caller can't grow memory unboundedly; drop oldest under pressure.
+			if (this.#pendingDisabledEvents.length >= MAX_PENDING_DISABLED_EVENTS) {
+				this.#pendingDisabledEvents.shift();
+			}
+			this.#pendingDisabledEvents.push(event);
+			return;
+		}
+		this.#invokeCredentialDisabledHandler(handler, event);
+	}
+
+	#invokeCredentialDisabledHandler(
+		handler: (event: CredentialDisabledEvent) => void | Promise<void>,
+		event: CredentialDisabledEvent,
+	): void {
 		const logHandlerError = (error: unknown): void => {
 			logger.warn("onCredentialDisabled handler threw", { provider: event.provider, error: String(error) });
 		};

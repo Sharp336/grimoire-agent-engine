@@ -153,4 +153,166 @@ describe("AuthStorage onCredentialDisabled callback", () => {
 			process.off("unhandledRejection", onUnhandled);
 		}
 	});
+
+	test("setCredentialDisabledHandler replaces the constructor handler at runtime", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		const lateEvents: CredentialDisabledEvent[] = [];
+		authStorage.setCredentialDisabledHandler(event => {
+			lateEvents.push(event);
+		});
+
+		await authStorage.set("anthropic", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "stale-refresh",
+				expires: Date.now() - 60_000,
+			},
+		]);
+
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async () => {
+			throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+		});
+
+		await authStorage.getApiKey("anthropic", "session-late-handler");
+
+		// The constructor handler from beforeEach() must NOT have been called.
+		expect(events).toHaveLength(0);
+		expect(lateEvents).toHaveLength(1);
+		expect(lateEvents[0]?.provider).toBe("anthropic");
+		expect(lateEvents[0]?.disabledCause).toContain("invalid_grant");
+	});
+
+	test("setCredentialDisabledHandler(undefined) detaches the current handler", async () => {
+		if (!authStorage) throw new Error("test setup failed");
+
+		authStorage.setCredentialDisabledHandler(undefined);
+
+		await authStorage.set("anthropic", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "stale-refresh",
+				expires: Date.now() - 60_000,
+			},
+		]);
+
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async () => {
+			throw new Error("invalid_grant");
+		});
+
+		await expect(authStorage.getApiKey("anthropic", "session-detached-handler")).resolves.toBeUndefined();
+		// The credential is still disabled — the handler is just disconnected.
+		expect(authStorage.list()).not.toContain("anthropic");
+		expect(events).toHaveLength(0);
+	});
+
+	test("buffers credential_disabled events fired before any handler is attached, and replays them on attach", async () => {
+		// Replace the constructor-attached AuthStorage with one that has NO handler at construction time.
+		store?.close();
+		store = await AuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const noHandlerStorage = new AuthStorage(store);
+
+		await noHandlerStorage.set("anthropic", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "stale-refresh",
+				expires: Date.now() - 60_000,
+			},
+		]);
+
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async () => {
+			throw new Error('HTTP 400 invalid_grant {"error":"invalid_grant"}');
+		});
+
+		// Triggers a soft-disable while no handler is attached. Today this drops the event.
+		// Tomorrow we want it buffered.
+		await noHandlerStorage.getApiKey("anthropic", "session-pre-handler");
+
+		// No handler ran yet (none was attached).
+		const replayed: CredentialDisabledEvent[] = [];
+		noHandlerStorage.setCredentialDisabledHandler(event => {
+			replayed.push(event);
+		});
+
+		// Wait one microtask: the drain may schedule async handler invocation.
+		await Promise.resolve();
+
+		expect(replayed).toHaveLength(1);
+		expect(replayed[0]?.provider).toBe("anthropic");
+		expect(replayed[0]?.disabledCause).toContain("invalid_grant");
+	});
+
+	test("drains the buffer once: a second handler attached later does not re-receive past events", async () => {
+		store?.close();
+		store = await AuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const noHandlerStorage = new AuthStorage(store);
+
+		await noHandlerStorage.set("anthropic", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "stale-refresh",
+				expires: Date.now() - 60_000,
+			},
+		]);
+
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async () => {
+			throw new Error("invalid_grant");
+		});
+
+		await noHandlerStorage.getApiKey("anthropic", "session-pre-first-handler");
+
+		const firstHandlerEvents: CredentialDisabledEvent[] = [];
+		noHandlerStorage.setCredentialDisabledHandler(event => {
+			firstHandlerEvents.push(event);
+		});
+		await Promise.resolve();
+		expect(firstHandlerEvents).toHaveLength(1);
+
+		const secondHandlerEvents: CredentialDisabledEvent[] = [];
+		noHandlerStorage.setCredentialDisabledHandler(event => {
+			secondHandlerEvents.push(event);
+		});
+		await Promise.resolve();
+
+		// The buffer was drained by the first handler; the second handler must not receive past events.
+		expect(secondHandlerEvents).toHaveLength(0);
+	});
+
+	test("buffers events fired during a detach gap, replaying them on the next attach", async () => {
+		// Constructor handler is set (from beforeEach). Detach, fire a disable, attach a new handler.
+		if (!authStorage) throw new Error("test setup failed");
+
+		authStorage.setCredentialDisabledHandler(undefined);
+
+		await authStorage.set("anthropic", [
+			{
+				type: "oauth",
+				access: "expired-access",
+				refresh: "stale-refresh",
+				expires: Date.now() - 60_000,
+			},
+		]);
+
+		vi.spyOn(oauthUtils, "getOAuthApiKey").mockImplementation(async () => {
+			throw new Error("invalid_grant");
+		});
+
+		await authStorage.getApiKey("anthropic", "session-detach-gap");
+
+		// Constructor handler must not have fired (it was detached).
+		expect(events).toHaveLength(0);
+
+		const reattached: CredentialDisabledEvent[] = [];
+		authStorage.setCredentialDisabledHandler(event => {
+			reattached.push(event);
+		});
+		await Promise.resolve();
+
+		expect(reattached).toHaveLength(1);
+		expect(reattached[0]?.provider).toBe("anthropic");
+	});
 });

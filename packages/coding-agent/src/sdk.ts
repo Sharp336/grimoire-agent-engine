@@ -53,6 +53,8 @@ import {
 	ExtensionRunner,
 	ExtensionToolWrapper,
 	type ExtensionUIContext,
+	installCredentialDisabledBridge,
+	installStartupBuffer,
 	type LoadExtensionsResult,
 	loadExtensionFromFactory,
 	loadExtensions,
@@ -681,6 +683,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Use provided or create AuthStorage and ModelRegistry
 	const authStorage = options.authStorage ?? (await logger.time("discoverModels", discoverAuthStorage, agentDir));
 	const modelRegistry = options.modelRegistry ?? new ModelRegistry(authStorage);
+	// Capture credential_disabled events fired during startup model probes (model restore,
+	// fallback model selection) so we can replay them to the extension runner once it
+	// exists. Without this, an OAuth invalid_grant during startup would soft-disable the
+	// credential before the bridge is wired and extensions subscribed to credential_disabled
+	// would silently miss it. The wrapper also forwards events to whatever embedder handler
+	// was attached at AuthStorage construction so caller-provided onCredentialDisabled keeps
+	// firing during the gap.
+	const credentialDisabledStartup = installStartupBuffer(authStorage);
+	// Hoisted to function scope so the outer catch can release the bridge if startup throws
+	// after the bridge is installed but before session.dispose is wrapped.
+	let releaseCredentialDisabledBridge: (() => void) | undefined;
 
 	const settings = options.settings ?? (await logger.time("settings", Settings.init, { cwd, agentDir }));
 	logger.time("initializeWithSettings", initializeWithSettings, settings);
@@ -1292,6 +1305,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			);
 		}
 
+		// Replace the startup-buffer wrapper with the real bridge once the runner exists.
+		// installCredentialDisabledBridge composes with whatever embedder handler was attached
+		// before the wrapper was installed, drains startup-window events to the runner, and
+		// returns a release fn that restores the most-recent non-disposed predecessor on dispose.
+		// If no runner was constructed (no extensions loaded), just remove the wrapper.
+		credentialDisabledStartup.remove();
+		if (extensionRunner) {
+			releaseCredentialDisabledBridge = installCredentialDisabledBridge(
+				authStorage,
+				extensionRunner,
+				credentialDisabledStartup.buffer,
+			);
+		}
+
 		const getSessionContext = () => ({
 			sessionManager,
 			modelRegistry,
@@ -1769,6 +1796,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					await originalDispose();
 				} finally {
 					agentRegistry.unregister(resolvedAgentId);
+					// Marks the bridge disposed and restores the most-recent non-disposed predecessor
+					// in the previous-handler chain (skips past sibling bridges that have already
+					// been released, lands on the embedder's handler — or undefined — at the end).
+					// Skips if the slot has been overwritten by a later session.
+					releaseCredentialDisabledBridge?.();
 				}
 			};
 		}
@@ -1904,6 +1936,28 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			eventBus,
 		};
 	} catch (error) {
+		// Tear down credential-disabled handler state regardless of session-construction
+		// progress. Both helpers are idempotent (no-op if their slot has been overwritten),
+		// so calling them in addition to session.dispose() — which also calls
+		// releaseCredentialDisabledBridge — for the hasSession path is safe. Without this,
+		// a throw between installStartupBuffer (function-body) and the dispose-wrap
+		// (post-hasSession) would leave a stale wrapper or bridge installed on the shared
+		// AuthStorage; repeated startup retries would then accumulate stale frames in the
+		// previousHandler chain.
+		try {
+			releaseCredentialDisabledBridge?.();
+		} catch (cleanupError) {
+			logger.warn("Failed to release credential-disabled bridge after startup error", {
+				error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+			});
+		}
+		try {
+			credentialDisabledStartup.remove();
+		} catch (cleanupError) {
+			logger.warn("Failed to remove credential-disabled startup wrapper after startup error", {
+				error: cleanupError instanceof Error ? cleanupError.message : String(cleanupError),
+			});
+		}
 		try {
 			if (hasSession) {
 				await session.dispose();
