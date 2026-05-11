@@ -8,6 +8,7 @@ import {
 	isAgentReadOnly,
 	loadBundledAgents,
 } from "../../src/task/agents";
+import { buildReadOnlyDispatchError } from "../../src/task/dispatch-guards";
 import { buildSubagentSystemPrompt } from "../../src/task/executor";
 import type { AgentDefinition } from "../../src/task/types";
 
@@ -244,5 +245,94 @@ describe("assignmentRequiresWrite", () => {
 		expect(assignmentRequiresWrite("REFACTOR agents.ts")).toBe(true);
 		expect(assignmentRequiresWrite("refactor agents.ts")).toBe(true);
 		expect(assignmentRequiresWrite("Refactor agents.ts")).toBe(true);
+	});
+});
+
+// `buildReadOnlyDispatchError` is the helper the task tool invokes both before async
+// scheduling and inside `#executeSync` — see https://github.com/can1357/oh-my-pi/pull/1016
+// discussion_r3222623330 for the silent-success regression that motivated the split.
+// Tested at the helper level on purpose: importing `TaskTool` here trips the
+// `BUILTIN_TOOLS` TDZ cycle this module was carved out to avoid.
+describe("buildReadOnlyDispatchError", () => {
+	const readOnlyAgent = { readOnly: true };
+	const writeCapableAgent = { readOnly: false };
+	const writeTask = { id: "T1", assignment: "Refactor agents.ts to use a class" };
+	const investigateTask = { id: "T2", assignment: "Investigate the agents module" };
+
+	function getText(result: ReturnType<typeof buildReadOnlyDispatchError>): string {
+		const part = result?.content.find(p => p.type === "text");
+		return part?.type === "text" ? (part.text ?? "") : "";
+	}
+
+	it("returns undefined when the agent is write-capable", () => {
+		expect(
+			buildReadOnlyDispatchError({
+				agent: writeCapableAgent,
+				planModeEnabled: false,
+				tasks: [writeTask],
+				agentName: "task",
+			}),
+		).toBeUndefined();
+	});
+
+	it("returns undefined when a read-only agent gets only investigation tasks", () => {
+		expect(
+			buildReadOnlyDispatchError({
+				agent: readOnlyAgent,
+				planModeEnabled: false,
+				tasks: [investigateTask],
+				agentName: "explore",
+			}),
+		).toBeUndefined();
+	});
+
+	it("returns a structured error when a read-only agent is asked to write", () => {
+		const result = buildReadOnlyDispatchError({
+			agent: readOnlyAgent,
+			planModeEnabled: false,
+			tasks: [writeTask, investigateTask],
+			agentName: "explore",
+		});
+
+		const text = getText(result);
+		expect(text).toContain("Cannot dispatch");
+		expect(text).toContain('agent "explore" is read-only');
+		expect(text).toContain('"T1"');
+		expect(text).not.toContain('"T2"');
+		expect(result?.details).toMatchObject({ results: [], totalDurationMs: 0, projectAgentsDir: null });
+	});
+
+	it("treats plan mode as read-only regardless of the agent's own flag", () => {
+		const result = buildReadOnlyDispatchError({
+			agent: writeCapableAgent,
+			planModeEnabled: true,
+			tasks: [writeTask],
+			agentName: "task",
+		});
+
+		expect(getText(result)).toContain("plan mode restricts every agent");
+	});
+
+	it("propagates projectAgentsDir into the error details when supplied", () => {
+		const result = buildReadOnlyDispatchError({
+			agent: readOnlyAgent,
+			planModeEnabled: false,
+			tasks: [writeTask],
+			agentName: "explore",
+			projectAgentsDir: "/repo/.agents",
+		});
+
+		expect(result?.details?.projectAgentsDir).toBe("/repo/.agents");
+	});
+
+	it("pluralizes the message when multiple tasks are write-intent", () => {
+		const result = buildReadOnlyDispatchError({
+			agent: readOnlyAgent,
+			planModeEnabled: false,
+			tasks: [writeTask, { id: "T3", assignment: "Implement the bar" }],
+			agentName: "explore",
+		});
+
+		expect(getText(result)).toContain('tasks "T1", "T3" require');
 	});
 });

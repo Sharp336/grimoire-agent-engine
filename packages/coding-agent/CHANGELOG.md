@@ -16,6 +16,7 @@
 ### Fixed
 
 - Fixed `task.readSafeTools` malformed config (non-array, scalar, mixed entries) crashing or polluting the allowlist: the three call sites route through `loadAgentsForCwd`, which validates the value via the shared `parseArrayOrCSV` helper and degrades to "no user extensions" rather than `TypeError` ([#1013](https://github.com/can1357/oh-my-pi/issues/1013))
+- Fixed the pre-dispatch read-only mismatch check silently surfacing as a "completed" background job when `async.enabled` was true: the check ran inside `#executeSync` *after* per-task async jobs were scheduled, and each rejected dispatch returned `details.results: []`, so the async wrapper saw `singleResult === undefined`, treated `(undefined ?? 0) === 0` as success, and never incremented `failedJobs`. The check now runs in `TaskTool.execute()` before async scheduling, with the same helper still invoked inside `#executeSync` as defense in depth ([#1016](https://github.com/can1357/oh-my-pi/pull/1016))
 
 ## [14.9.9] - 2026-05-12
 

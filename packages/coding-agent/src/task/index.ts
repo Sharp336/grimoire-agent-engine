@@ -34,8 +34,8 @@ import "../tools/review";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
-import { assignmentRequiresWrite } from "./agents";
 import { getAgent, loadAgentsForCwd } from "./discovery";
+import { buildReadOnlyDispatchError } from "./dispatch-guards";
 import { runSubprocess } from "./executor";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
@@ -268,6 +268,19 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 
 		const asyncEnabled = this.session.settings.get("async.enabled");
 		const selectedAgent = this.#discoveredAgents.find(agent => agent.name === params.agent);
+		if (selectedAgent) {
+			// Pre-async fast path: reject a read-only/plan-mode mismatch before scheduling
+			// background jobs. Otherwise the async wrapper would treat the rejected dispatch
+			// (which returns `details.results: []`) as a successful background job.
+			const planModeState = this.session.getPlanModeState?.();
+			const mismatch = buildReadOnlyDispatchError({
+				agent: selectedAgent,
+				planModeEnabled: planModeState?.enabled === true,
+				tasks: params.tasks ?? [],
+				agentName: params.agent,
+			});
+			if (mismatch) return mismatch;
+		}
 		if (!asyncEnabled || selectedAgent?.blocking === true) {
 			return this.#executeSync(_toolCallId, params, signal, onUpdate);
 		}
@@ -677,31 +690,14 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 		// in this case, but only after loading its system prompt. Short-circuit clear cases here
 		// so the caller pays zero subagent tokens. Plan mode restricts every agent to a read-only
 		// tool set regardless of nominal readOnly, so it counts as read-only too.
-		const agentIsReadOnly = planModeState?.enabled === true || effectiveAgent.readOnly === true;
-		if (agentIsReadOnly) {
-			const writeIntentTasks = tasks.filter(t => assignmentRequiresWrite(t.assignment));
-			if (writeIntentTasks.length > 0) {
-				const taskIds = writeIntentTasks.map(t => `"${t.id}"`).join(", ");
-				const subject = writeIntentTasks.length === 1 ? `task ${taskIds} requires` : `tasks ${taskIds} require`;
-				const cause =
-					planModeState?.enabled === true
-						? "plan mode restricts every agent to a read-only tool set"
-						: `agent "${agentName}" is read-only`;
-				return {
-					content: [
-						{
-							type: "text",
-							text: `Cannot dispatch: ${cause}, but ${subject} file edits or state-changing commands. Re-dispatch with a write-capable agent (e.g. "task"). If this is a false positive, rephrase the assignment to start with an investigation verb (investigate, find, locate, analyze, summarize, review) instead of a write verb.`,
-						},
-					],
-					details: {
-						projectAgentsDir,
-						results: [],
-						totalDurationMs: 0,
-					},
-				};
-			}
-		}
+		const readOnlyMismatch = buildReadOnlyDispatchError({
+			agent: effectiveAgent,
+			planModeEnabled: planModeState?.enabled === true,
+			tasks,
+			agentName,
+			projectAgentsDir,
+		});
+		if (readOnlyMismatch) return readOnlyMismatch;
 
 		let repoRoot: string | null = null;
 		let baseline: WorktreeBaseline | null = null;
