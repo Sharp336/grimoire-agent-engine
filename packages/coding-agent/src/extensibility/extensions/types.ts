@@ -31,6 +31,7 @@ import type { EditToolDetails } from "../../edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
+import type { GoalStatus, ThreadGoal } from "../../goals";
 import type { CustomEditor } from "../../modes/components/custom-editor";
 import type { Theme } from "../../modes/theme/theme";
 import type { CompactionPreparation, CompactionResult } from "../../session/compaction";
@@ -248,6 +249,14 @@ export interface ExtensionContext {
 	shutdown(): void;
 	/** Get the current effective system prompt. */
 	getSystemPrompt(): string[];
+	/** Programmatic goal controls for the active session. */
+	goals: {
+		get(): Promise<ThreadGoal | null>;
+		pause(): Promise<ThreadGoal | null>;
+		resume(): Promise<ThreadGoal | null>;
+		setBudget(n: number | null): Promise<ThreadGoal | null>;
+		clear(): Promise<boolean>;
+	};
 	/** @deprecated Use hasPendingMessages() instead */
 	hasQueuedMessages(): boolean;
 }
@@ -624,6 +633,22 @@ export interface TodoReminderEvent {
 	maxAttempts: number;
 }
 
+/** Fired when the current thread goal is created, updated, or cleared. */
+export interface GoalUpdatedEvent {
+	type: "goal_updated";
+	goal: ThreadGoal | null;
+	previous?: ThreadGoal | null;
+}
+
+export interface GoalStatusChangeEvent {
+	type: "goal_status_change";
+	goal: ThreadGoal;
+	proposed: { status?: GoalStatus; tokenBudget?: number | null };
+	reason: "tool" | "system" | "user" | "rpc";
+}
+
+export type GoalStatusChangeResult = { allow: true } | { allow: false; reason?: string };
+
 // ============================================================================
 // User Bash Events
 // ============================================================================
@@ -831,6 +856,8 @@ export type ExtensionEvent =
 	| AutoRetryEndEvent
 	| TtsrTriggeredEvent
 	| TodoReminderEvent
+	| GoalUpdatedEvent
+	| GoalStatusChangeEvent
 	| UserBashEvent
 	| UserPythonEvent
 	| InputEvent
@@ -1012,6 +1039,8 @@ export interface ExtensionAPI {
 	on(event: "auto_retry_end", handler: ExtensionHandler<AutoRetryEndEvent>): void;
 	on(event: "ttsr_triggered", handler: ExtensionHandler<TtsrTriggeredEvent>): void;
 	on(event: "todo_reminder", handler: ExtensionHandler<TodoReminderEvent>): void;
+	on(event: "goal_updated", handler: ExtensionHandler<GoalUpdatedEvent>): void;
+	on(event: "goal_status_change", handler: ExtensionHandler<GoalStatusChangeEvent, GoalStatusChangeResult>): void;
 	on(event: "input", handler: ExtensionHandler<InputEvent, InputEventResult>): void;
 	on(event: "tool_call", handler: ExtensionHandler<ToolCallEvent, ToolCallEventResult>): void;
 	on(event: "tool_result", handler: ExtensionHandler<ToolResultEvent, ToolResultEventResult>): void;
@@ -1326,6 +1355,7 @@ export interface ExtensionContextActions {
 	getContextUsage: () => ContextUsage | undefined;
 	compact: (instructionsOrOptions?: string | CompactOptions) => Promise<void>;
 	getSystemPrompt: () => string[];
+	goals?: ExtensionContext["goals"];
 }
 
 /** Actions for ExtensionCommandContext (ctx.* in command handlers). */

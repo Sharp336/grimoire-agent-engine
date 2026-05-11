@@ -804,6 +804,7 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 		createAgentSession,
 		sessionOptions,
 	);
+	session.setRunMode(isInteractive ? "interactive" : mode === "rpc" || mode === "acp" ? mode : "print");
 	// Kick off background model discovery only after createAgentSession finishes its parallel
 	// discovery arms; running these concurrently contends for the event loop and stretches
 	// every parallel arm by ~30ms.
@@ -871,6 +872,7 @@ export async function runRootCommand(parsed: Args, rawArgs: string[]): Promise<v
 			modelRegistry,
 			hasUI: false,
 		});
+		nextSession.setRunMode("acp");
 		if (nextSession.extensionRunner) {
 			for (const [flagName, value] of extensionFlagValues) {
 				nextSession.extensionRunner.setFlagValue(flagName, value);

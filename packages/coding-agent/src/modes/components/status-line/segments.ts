@@ -374,6 +374,20 @@ const sessionNameSegment: StatusLineSegment = {
 	},
 };
 
+const goalSegment: StatusLineSegment = {
+	id: "goal",
+	render(ctx) {
+		if (!ctx.session.settings.get("goals.statusInFooter")) return { content: "", visible: false };
+		const goal = ctx.session.getCurrentGoal();
+		if (!goal) return { content: "", visible: false };
+		const budget =
+			goal.tokenBudget === null
+				? formatNumber(goal.tokensUsed)
+				: `${formatNumber(goal.tokensUsed)}/${formatNumber(goal.tokenBudget)}`;
+		return { content: theme.fg("accent", `goal ${goal.status} ${budget}`), visible: true };
+	},
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Registry
 // ═══════════════════════════════════════════════════════════════════════════
@@ -400,6 +414,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache_read: cacheReadSegment,
 	cache_write: cacheWriteSegment,
 	session_name: sessionNameSegment,
+	goal: goalSegment,
 };
 
 export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {

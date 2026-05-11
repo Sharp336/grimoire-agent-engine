@@ -7,6 +7,8 @@ import type { Settings } from "../config/settings";
 import { EditTool } from "../edit";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import type { Skill } from "../extensibility/skills";
+import type { ThreadGoal } from "../goals";
+import { CreateGoalTool, GetGoalTool, UpdateGoalTool } from "../goals/tools/tools";
 import type { HindsightSessionState } from "../hindsight/state";
 import type { InternalUrlRouter } from "../internal-urls";
 import { LspTool } from "../lsp";
@@ -181,6 +183,12 @@ export interface ToolSession {
 	asyncJobManager?: AsyncJobManager;
 	/** Settings instance for passing to subagents */
 	settings: Settings;
+	/** Per-thread goal API when goals are enabled for this session. */
+	goals?: {
+		get(): Promise<ThreadGoal | null>;
+		create(input: { objective: string; tokenBudget?: number | null }): Promise<ThreadGoal>;
+		complete(): Promise<ThreadGoal | null>;
+	};
 	/** Plan mode state (if active) */
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Get compact conversation context for subagents (excludes tool results, system prompts) */
@@ -293,6 +301,9 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	retain: HindsightRetainTool.createIf,
 	recall: HindsightRecallTool.createIf,
 	reflect: HindsightReflectTool.createIf,
+	get_goal: s => new GetGoalTool(s),
+	create_goal: s => new CreateGoalTool(s),
+	update_goal: s => new UpdateGoalTool(s),
 };
 
 export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
@@ -438,6 +449,9 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "render_mermaid") return session.settings.get("renderMermaid.enabled");
 		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
 		if (name === "web_search") return session.settings.get("web_search.enabled");
+		if (name === "get_goal" || name === "create_goal" || name === "update_goal") {
+			return session.settings.get("goals.enabled");
+		}
 		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
 		if (name === "search_tool_bm25") return discoveryActive;
 		if (name === "calc") return session.settings.get("calc.enabled");

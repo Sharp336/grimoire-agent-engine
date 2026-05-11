@@ -32,6 +32,7 @@ const allToolsSettings = Settings.isolated({
 	"todo.enabled": true,
 	"memory.backend": "hindsight",
 	"tools.discoveryMode": "all",
+	"goals.enabled": true,
 });
 
 const toolSession: ToolSession = {

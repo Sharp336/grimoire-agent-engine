@@ -30,6 +30,7 @@ import type {
 	ExtensionRuntime,
 	ExtensionShortcut,
 	ExtensionUIContext,
+	GoalStatusChangeResult,
 	InputEvent,
 	InputEventResult,
 	MessageRenderer,
@@ -107,7 +108,9 @@ type RunnerEmitResult<TEvent extends RunnerEmitEvent> = TEvent extends { type: "
 				? SessionBeforeTreeResult | undefined
 				: TEvent extends { type: "session.compacting" }
 					? SessionCompactingResult | undefined
-					: undefined;
+					: TEvent extends { type: "goal_status_change" }
+						? GoalStatusChangeResult | undefined
+						: undefined;
 
 export type NewSessionHandler = (options?: {
 	parentSession?: string;
@@ -178,6 +181,13 @@ export class ExtensionRunner {
 	#getContextUsageFn: () => ContextUsage | undefined = () => undefined;
 	#compactFn: (instructionsOrOptions?: string | CompactOptions) => Promise<void> = async () => {};
 	#getSystemPromptFn: () => string[] = () => [];
+	#goalsActions: ExtensionContext["goals"] = {
+		get: async () => null,
+		pause: async () => null,
+		resume: async () => null,
+		setBudget: async () => null,
+		clear: async () => false,
+	};
 	#newSessionHandler: NewSessionHandler = async () => ({ cancelled: false });
 	#branchHandler: BranchHandler = async () => ({ cancelled: false });
 	#navigateTreeHandler: NavigateTreeHandler = async () => ({ cancelled: false });
@@ -223,6 +233,9 @@ export class ExtensionRunner {
 		this.#hasPendingMessagesFn = contextActions.hasPendingMessages;
 		this.#shutdownHandler = contextActions.shutdown;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
+		if (contextActions.goals) {
+			this.#goalsActions = contextActions.goals;
+		}
 
 		// Command context actions (optional, only for interactive mode)
 		if (commandContextActions) {
@@ -409,6 +422,7 @@ export class ExtensionRunner {
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),
 			shutdown: () => this.#shutdownHandler(),
 			getSystemPrompt: () => this.#getSystemPromptFn(),
+			goals: this.#goalsActions,
 			hasQueuedMessages: () => this.#hasPendingMessagesFn(), // deprecated alias
 		};
 	}
@@ -509,6 +523,13 @@ export class ExtensionRunner {
 
 				if (event.type === "session.compacting" && handlerResult) {
 					result = handlerResult as SessionCompactingResult;
+				}
+
+				if (event.type === "goal_status_change" && handlerResult) {
+					const goalResult = handlerResult as GoalStatusChangeResult;
+					if (goalResult.allow === false) {
+						return goalResult as RunnerEmitResult<TEvent>;
+					}
 				}
 			}
 		}

@@ -81,7 +81,8 @@ export type StatusLineSegmentId =
 	| "hostname"
 	| "cache_read"
 	| "cache_write"
-	| "session_name";
+	| "session_name"
+	| "goal";
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {
@@ -1132,6 +1133,18 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+
+	"goals.enabled": { type: "boolean", default: false },
+
+	"goals.defaultTokenBudget": { type: "number", default: 0 },
+
+	"goals.continuationEnabled": { type: "boolean", default: true },
+
+	"goals.continuationModes": { type: "array", default: ["interactive"] },
+
+	"goals.recordContinuationsInTranscript": { type: "boolean", default: false },
+
+	"goals.statusInFooter": { type: "boolean", default: false },
 	// Branch summaries
 	"branchSummary.enabled": {
 		type: "boolean",
@@ -2600,6 +2613,15 @@ export interface CompactionSettings {
 	idleTimeoutSeconds: number;
 }
 
+export interface GoalsSettings {
+	enabled: boolean;
+	defaultTokenBudget: number;
+	continuationEnabled: boolean;
+	continuationModes: string[];
+	recordContinuationsInTranscript: boolean;
+	statusInFooter: boolean;
+}
+
 export interface ContextPromotionSettings {
 	enabled: boolean;
 }
@@ -2719,6 +2741,7 @@ export interface ShellMinimizerSettings {
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
+	goals: GoalsSettings;
 	contextPromotion: ContextPromotionSettings;
 	retry: RetrySettings;
 	memories: MemoriesSettings;

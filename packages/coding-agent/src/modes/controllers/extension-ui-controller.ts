@@ -124,6 +124,13 @@ export class ExtensionUiController {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
+			goals: {
+				get: () => this.ctx.session.goals.get(),
+				pause: () => this.ctx.session.goals.pause(),
+				resume: () => this.ctx.session.goals.resume(),
+				setBudget: n => this.ctx.session.goals.setBudget(n),
+				clear: () => this.ctx.session.goals.clear(),
+			},
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -361,6 +368,13 @@ export class ExtensionUiController {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
 			compact: instructionsOrOptions => this.#compactSession(instructionsOrOptions),
 			getSystemPrompt: () => this.ctx.session.systemPrompt,
+			goals: {
+				get: () => this.ctx.session.goals.get(),
+				pause: () => this.ctx.session.goals.pause(),
+				resume: () => this.ctx.session.goals.resume(),
+				setBudget: n => this.ctx.session.goals.setBudget(n),
+				clear: () => this.ctx.session.goals.clear(),
+			},
 		};
 		const commandActions: ExtensionCommandContextActions = {
 			getContextUsage: () => this.ctx.session.getContextUsage(),
@@ -538,6 +552,13 @@ export class ExtensionUiController {
 							// Signal shutdown request
 						},
 						getSystemPrompt: () => this.ctx.session.systemPrompt,
+						goals: {
+							get: () => this.ctx.session.goals.get(),
+							pause: () => this.ctx.session.goals.pause(),
+							resume: () => this.ctx.session.goals.resume(),
+							setBudget: n => this.ctx.session.goals.setBudget(n),
+							clear: () => this.ctx.session.goals.clear(),
+						},
 					});
 				} catch (err) {
 					this.showToolError(registeredTool.definition.name, err instanceof Error ? err.message : String(err));

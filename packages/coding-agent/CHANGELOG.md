@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in per-thread goals with SQLite persistence, model tools, `/goal` management commands, and basic token/time accounting.
+
 ## [14.9.3] - 2026-05-10
 ### Breaking Changes
 

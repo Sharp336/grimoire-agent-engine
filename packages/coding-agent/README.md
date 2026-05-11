@@ -13,6 +13,7 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 - [RenderMermaid guide](../../docs/render-mermaid.md)
+- [Thread goals](../../docs/goals.md)
 
 ## Memory backends
 

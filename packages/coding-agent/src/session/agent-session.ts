@@ -104,6 +104,14 @@ import { ExtensionToolWrapper } from "../extensibility/extensions/wrapper";
 import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { Skill, SkillWarning } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
+import {
+	calculateGoalTokenDelta,
+	GoalStorage,
+	openGoalDb,
+	renderGoalBudgetLimitPrompt,
+	renderGoalContinuationPrompt,
+	type ThreadGoal,
+} from "../goals";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import {
@@ -206,6 +214,7 @@ export type AgentSessionEvent =
 	| { type: "todo_reminder"; todos: TodoItem[]; attempt: number; maxAttempts: number }
 	| { type: "todo_auto_clear" }
 	| { type: "irc_message"; message: CustomMessage }
+	| { type: "goal_updated"; goal: ThreadGoal | null; previous?: ThreadGoal | null }
 	| { type: "notice"; level: "info" | "warning" | "error"; message: string; source?: string };
 
 /** Listener function for agent session events */
@@ -296,6 +305,8 @@ export interface AgentSessionConfig {
 	 * so that credential sticky selection is consistent with the session's streaming calls.
 	 */
 	providerSessionId?: string;
+	/** Runtime mode used to gate automatic goal continuations. */
+	runMode?: "interactive" | "print" | "rpc" | "acp";
 }
 
 /** Options for AgentSession.prompt() */
@@ -645,6 +656,13 @@ export class AgentSession {
 	#promptGeneration = 0;
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
+	#goalStorage: GoalStorage | undefined = undefined;
+	#goalActiveTurnStartedAt: number | undefined = undefined;
+	#goalContinuationGoalId: string | undefined = undefined;
+	#goalFizzledGoalId: string | undefined = undefined;
+	#goalBudgetLimitReportedGoalId: string | undefined = undefined;
+	#unpersistedGoalContinuationTimestamps = new Set<number>();
+	#runMode: "interactive" | "print" | "rpc" | "acp" = "interactive";
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
 
 	#acquirePowerAssertion(): void {
@@ -763,6 +781,7 @@ export class AgentSession {
 		this.#agentId = config.agentId;
 		this.#agentRegistry = config.agentRegistry;
 		this.#providerSessionId = config.providerSessionId;
+		this.#runMode = config.runMode ?? "interactive";
 		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
 			const event: AgentEvent = {
 				type: "message_update",
@@ -784,6 +803,217 @@ export class AgentSession {
 	/** Model registry for API key resolution and model discovery */
 	get modelRegistry(): ModelRegistry {
 		return this.#modelRegistry;
+	}
+
+	#getGoalStorage(): GoalStorage {
+		if (!this.#goalStorage) {
+			this.#goalStorage = new GoalStorage(openGoalDb());
+		}
+		return this.#goalStorage;
+	}
+
+	async #accountGoalUsage(usage: Usage | undefined, elapsedSeconds: number): Promise<void> {
+		if (!this.settings.get("goals.enabled")) return;
+		const previous = this.#getGoalStorage().getGoal(this.sessionId);
+		if (!previous || previous.status !== "active") return;
+		const zeroUsage: Usage = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		};
+		const tokenDelta = usage ? calculateGoalTokenDelta(zeroUsage, usage).tokens : 0;
+		const wouldBudgetLimit =
+			previous.tokenBudget !== null && previous.tokensUsed + tokenDelta >= previous.tokenBudget;
+		const allowBudgetLimit =
+			!wouldBudgetLimit || (await this.#allowGoalStatusChange(previous, { status: "budget_limited" }, "system"));
+		const result = this.#getGoalStorage().accountUsage(
+			this.sessionId,
+			tokenDelta,
+			elapsedSeconds,
+			allowBudgetLimit ? "active_only" : "active_status_only",
+			previous.goalId,
+		);
+		if (result.outcome === "updated") {
+			await this.#emitSessionEvent({ type: "goal_updated", goal: result.goal, previous });
+			if (result.goal?.status === "budget_limited") {
+				this.emitNotice("warning", "goal budget reached", "goals");
+				this.#steerGoalBudgetLimit(result.goal);
+			}
+		}
+	}
+
+	async #allowGoalStatusChange(
+		goal: ThreadGoal,
+		proposed: { status?: ThreadGoal["status"]; tokenBudget?: number | null },
+		reason: "tool" | "system" | "user" | "rpc",
+	): Promise<boolean> {
+		if (!this.#extensionRunner?.hasHandlers("goal_status_change")) return true;
+		const result = (await this.#extensionRunner.emit({
+			type: "goal_status_change",
+			goal,
+			proposed,
+			reason,
+		})) as { allow: boolean; reason?: string } | undefined;
+		if (result?.allow === false) {
+			if (reason === "system") {
+				logger.warn("Goal status transition vetoed", { reason: result.reason ?? "extension veto" });
+			}
+			return false;
+		}
+		return true;
+	}
+
+	#goalContinuationAllowed(): boolean {
+		if (!this.settings.get("goals.enabled")) return false;
+		if (!this.settings.get("goals.continuationEnabled")) return false;
+		if (this.#planModeState?.enabled) return false;
+		if (this.#runMode === "print") return false;
+		const continuationModes: readonly string[] = this.settings.get("goals.continuationModes");
+		if (!continuationModes.includes(this.#runMode)) return false;
+		return true;
+	}
+
+	#steerGoalBudgetLimit(goal: ThreadGoal): void {
+		if (this.#goalBudgetLimitReportedGoalId === goal.goalId) return;
+		if (this.#planModeState?.enabled) return;
+		this.#goalBudgetLimitReportedGoalId = goal.goalId;
+		this.agent.steer({
+			role: "developer",
+			content: [{ type: "text", text: renderGoalBudgetLimitPrompt(goal) }],
+			attribution: "agent",
+			timestamp: Date.now(),
+		});
+	}
+
+	async continueGoal(goalId: string): Promise<void> {
+		if (!this.#goalContinuationAllowed()) return;
+		if (this.isStreaming || this.agent.hasQueuedMessages() || this.queuedMessageCount > 0) return;
+		const goal = this.#getGoalStorage().getGoal(this.sessionId);
+		if (!goal || goal.goalId !== goalId || goal.status !== "active") return;
+		if (this.#goalFizzledGoalId === goal.goalId) return;
+		this.emitNotice("info", "goal continuation", "goals");
+		this.#goalContinuationGoalId = goal.goalId;
+		const timestamp = Date.now();
+		if (!this.settings.get("goals.recordContinuationsInTranscript")) {
+			this.#unpersistedGoalContinuationTimestamps.add(timestamp);
+		}
+		await this.#promptAgentWithIdleRetry(
+			[
+				{
+					role: "developer",
+					content: [{ type: "text", text: renderGoalContinuationPrompt(goal) }],
+					attribution: "agent",
+					timestamp,
+				},
+			],
+			{ skipCompactionCheck: true },
+		);
+	}
+
+	#maybeScheduleGoalContinuation(goalId: string): void {
+		if (!this.#goalContinuationAllowed()) return;
+		this.#schedulePostPromptTask(
+			async () => {
+				await this.continueGoal(goalId);
+			},
+			{ delayMs: 1, generation: this.#promptGeneration },
+		);
+	}
+
+	get goals(): {
+		get: () => Promise<ThreadGoal | null>;
+		create: (input: { objective: string; tokenBudget?: number | null }) => Promise<ThreadGoal>;
+		complete: () => Promise<ThreadGoal | null>;
+		replace: (input: { objective: string; tokenBudget?: number | null }) => Promise<ThreadGoal>;
+		clear: () => Promise<boolean>;
+		pause: () => Promise<ThreadGoal | null>;
+		resume: () => Promise<ThreadGoal | null>;
+		setBudget: (tokenBudget: number | null) => Promise<ThreadGoal | null>;
+	} {
+		return {
+			get: async () => this.#getGoalStorage().getGoal(this.sessionId),
+			create: async input => {
+				const previous = this.#getGoalStorage().getGoal(this.sessionId);
+				const defaultBudget = this.settings.get("goals.defaultTokenBudget");
+				const budget = input.tokenBudget ?? (defaultBudget > 0 ? defaultBudget : undefined);
+				const goal = this.#getGoalStorage().insertGoal(this.sessionId, input.objective, budget);
+				this.#goalFizzledGoalId = undefined;
+				this.#goalBudgetLimitReportedGoalId = undefined;
+				await this.#emitSessionEvent({ type: "goal_updated", goal, previous });
+				return goal;
+			},
+			complete: async () => {
+				const previous = this.#getGoalStorage().getGoal(this.sessionId);
+				if (previous && !(await this.#allowGoalStatusChange(previous, { status: "complete" }, "tool"))) {
+					throw new Error("Goal completion was rejected by an extension.");
+				}
+				const goal = this.#getGoalStorage().updateGoal(this.sessionId, { status: "complete" });
+				await this.#emitSessionEvent({ type: "goal_updated", goal, previous });
+				return goal;
+			},
+			replace: async input => {
+				const previous = this.#getGoalStorage().getGoal(this.sessionId);
+				const defaultBudget = this.settings.get("goals.defaultTokenBudget");
+				const budget = input.tokenBudget ?? (defaultBudget > 0 ? defaultBudget : undefined);
+				const goal = this.#getGoalStorage().replaceGoal(this.sessionId, input.objective, "active", budget);
+				this.#goalFizzledGoalId = undefined;
+				this.#goalBudgetLimitReportedGoalId = undefined;
+				await this.#emitSessionEvent({ type: "goal_updated", goal, previous });
+				return goal;
+			},
+			clear: async () => {
+				const previous = this.#getGoalStorage().getGoal(this.sessionId);
+				const cleared = this.#getGoalStorage().clearGoal(this.sessionId);
+				if (cleared) {
+					this.#goalFizzledGoalId = undefined;
+					this.#goalBudgetLimitReportedGoalId = undefined;
+					await this.#emitSessionEvent({ type: "goal_updated", goal: null, previous });
+				}
+				return cleared;
+			},
+			pause: async () => {
+				const previous = this.#getGoalStorage().getGoal(this.sessionId);
+				if (previous && !(await this.#allowGoalStatusChange(previous, { status: "paused" }, "user"))) {
+					throw new Error("Goal pause was rejected by an extension.");
+				}
+				const goal = this.#getGoalStorage().pauseActiveGoal(this.sessionId);
+				if (goal !== previous) await this.#emitSessionEvent({ type: "goal_updated", goal, previous });
+				return goal;
+			},
+			resume: async () => {
+				const previous = this.#getGoalStorage().getGoal(this.sessionId);
+				if (previous && !(await this.#allowGoalStatusChange(previous, { status: "active" }, "user"))) {
+					throw new Error("Goal resume was rejected by an extension.");
+				}
+				const goal =
+					previous?.status === "paused"
+						? this.#getGoalStorage().updateGoal(this.sessionId, { status: "active" })
+						: previous;
+				if (goal !== previous) await this.#emitSessionEvent({ type: "goal_updated", goal, previous });
+				return goal;
+			},
+			setBudget: async tokenBudget => {
+				const previous = this.#getGoalStorage().getGoal(this.sessionId);
+				if (previous && !(await this.#allowGoalStatusChange(previous, { tokenBudget }, "user"))) {
+					throw new Error("Goal budget update was rejected by an extension.");
+				}
+				const goal = this.#getGoalStorage().updateGoal(this.sessionId, { tokenBudget });
+				await this.#emitSessionEvent({ type: "goal_updated", goal, previous });
+				return goal;
+			},
+		};
+	}
+
+	getCurrentGoal(): ThreadGoal | null {
+		if (!this.settings.get("goals.enabled")) return null;
+		return this.#getGoalStorage().getGoal(this.sessionId);
+	}
+
+	setRunMode(mode: "interactive" | "print" | "rpc" | "acp"): void {
+		this.#runMode = mode;
 	}
 
 	/** Advance the tool-choice queue and return the next directive for the upcoming LLM call. */
@@ -956,6 +1186,9 @@ export class AgentSession {
 
 		if (event.type === "turn_start") {
 			this.#resetStreamingEditState();
+			if (this.settings.get("goals.enabled")) {
+				this.#goalActiveTurnStartedAt = Date.now();
+			}
 			// TTSR: Reset buffer on turn start
 			this.#ttsrManager?.resetBuffer();
 		}
@@ -1115,7 +1348,15 @@ export class AgentSession {
 				event.message.role === "fileMention"
 			) {
 				// Regular LLM message - persist as SessionMessageEntry
-				this.sessionManager.appendMessage(event.message);
+				if (
+					event.message.role === "developer" &&
+					this.#unpersistedGoalContinuationTimestamps.delete(event.message.timestamp)
+				) {
+					// Goal continuation prompts are visible in the live transcript but are not
+					// persisted unless goals.recordContinuationsInTranscript is enabled.
+				} else {
+					this.sessionManager.appendMessage(event.message);
+				}
 			}
 			// Other message types (bashExecution, compactionSummary, branchSummary) are persisted elsewhere
 
@@ -1123,6 +1364,9 @@ export class AgentSession {
 			if (event.message.role === "assistant") {
 				this.#lastAssistantMessage = event.message;
 				const assistantMsg = event.message as AssistantMessage;
+				if (this.settings.get("goals.enabled")) {
+					await this.#accountGoalUsage(assistantMsg.usage, 0);
+				}
 				// Resolve TTSR resume gate before checking for new deferred injections.
 				// Gate on #ttsrAbortPending, not stopReason: a non-TTSR abort (e.g. streaming
 				// edit) also produces stopReason === "aborted" but has no continuation coming.
@@ -1210,14 +1454,24 @@ export class AgentSession {
 
 		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
+			const goalStartedAt = this.#goalActiveTurnStartedAt;
+			this.#goalActiveTurnStartedAt = undefined;
+			const continuationGoalId = this.#goalContinuationGoalId;
+			this.#goalContinuationGoalId = undefined;
 			const fallbackAssistant = [...event.messages]
 				.reverse()
 				.find((message): message is AssistantMessage => message.role === "assistant");
 			const msg = this.#lastAssistantMessage ?? fallbackAssistant;
 			this.#lastAssistantMessage = undefined;
+			if (goalStartedAt !== undefined) {
+				await this.#accountGoalUsage(undefined, Math.max(0, Math.floor((Date.now() - goalStartedAt) / 1000)));
+			}
 			if (!msg) {
 				this.#lastSuccessfulYieldToolCallId = undefined;
 				return;
+			}
+			if (continuationGoalId && !msg.content.some(content => content.type === "toolCall")) {
+				this.#goalFizzledGoalId = continuationGoalId;
 			}
 
 			// Invalidate GitHub Copilot credentials on auth failure so stale tokens
@@ -1266,6 +1520,12 @@ export class AgentSession {
 					return;
 				}
 				await this.#checkTodoCompletion();
+				const activeGoal = this.settings.get("goals.enabled")
+					? this.#getGoalStorage().getGoal(this.sessionId)
+					: null;
+				if (activeGoal?.status === "active" && !this.agent.hasQueuedMessages()) {
+					this.#maybeScheduleGoalContinuation(activeGoal.goalId);
+				}
 			}
 		}
 	};
@@ -2057,6 +2317,12 @@ export class AgentSession {
 				todos: event.todos,
 				attempt: event.attempt,
 				maxAttempts: event.maxAttempts,
+			});
+		} else if (event.type === "goal_updated") {
+			await this.#extensionRunner.emit({
+				type: "goal_updated",
+				goal: event.goal,
+				previous: event.previous,
 			});
 		}
 	}
@@ -3157,6 +3423,7 @@ export class AgentSession {
 			this.#toolChoiceQueue.removeByLabel("eager-todo");
 		}
 		if (!options?.synthetic) {
+			this.#goalFizzledGoalId = undefined;
 			await this.#enforcePlanModeToolDecision();
 		}
 	}
@@ -3413,6 +3680,13 @@ export class AgentSession {
 				await this.reload();
 			},
 			getSystemPrompt: () => this.systemPrompt,
+			goals: {
+				get: () => this.goals.get(),
+				pause: () => this.goals.pause(),
+				resume: () => this.goals.resume(),
+				setBudget: n => this.goals.setBudget(n),
+				clear: () => this.goals.clear(),
+			},
 		};
 	}
 
@@ -3905,6 +4179,14 @@ export class AgentSession {
 		this.agent.abort();
 		await postPromptDrain;
 		await this.agent.waitForIdle();
+		if (this.settings.get("goals.enabled")) {
+			const previous = this.#getGoalStorage().getGoal(this.sessionId);
+			const goal = this.#getGoalStorage().pauseActiveGoal(this.sessionId);
+			if (previous?.status === "active" && goal?.status === "paused") {
+				await this.#emitSessionEvent({ type: "goal_updated", goal, previous });
+			}
+			this.#goalActiveTurnStartedAt = undefined;
+		}
 		// Clear prompt-in-flight state: waitForIdle resolves when the agent loop's finally
 		// block runs, but nested prompt setup/finalizers may still be unwinding. Without this,
 		// a subsequent prompt() can incorrectly observe the session as busy after an abort.
@@ -6291,7 +6573,10 @@ export class AgentSession {
 		this.#resolveRetry();
 	}
 
-	async #promptAgentWithIdleRetry(messages: AgentMessage[], options?: { toolChoice?: ToolChoice }): Promise<void> {
+	async #promptAgentWithIdleRetry(
+		messages: AgentMessage[],
+		options?: { toolChoice?: ToolChoice; skipCompactionCheck?: boolean },
+	): Promise<void> {
 		const deadline = Date.now() + 30_000;
 		for (;;) {
 			try {

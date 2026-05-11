@@ -96,6 +96,13 @@ const shutdownHandler = (_command: ParsedBuiltinSlashCommand, runtime: BuiltinSl
 	void runtime.ctx.shutdown();
 };
 
+function parseGoalSetArgs(args: string): { objective: string; tokenBudget?: number } {
+	const budgetMatch = args.match(/\s--budget\s+(\d+)\s*$/);
+	const objective = (budgetMatch ? args.slice(0, budgetMatch.index).trim() : args.trim()).trim();
+	const tokenBudget = budgetMatch ? Number(budgetMatch[1]) : undefined;
+	return { objective, tokenBudget };
+}
+
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 	{
 		name: "settings",
@@ -112,6 +119,70 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 		allowArgs: true,
 		handle: async (command, runtime) => {
 			await runtime.ctx.handlePlanModeCommand(command.args || undefined);
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "goal",
+		description: "Manage the current thread goal",
+		subcommands: [
+			{ name: "set", description: "Create or replace goal", usage: "<objective> [--budget N]" },
+			{ name: "show", description: "Show current goal" },
+			{ name: "clear", description: "Clear current goal" },
+			{ name: "pause", description: "Pause current goal" },
+			{ name: "resume", description: "Resume paused goal" },
+			{ name: "budget", description: "Set or clear token budget", usage: "<N|off>" },
+		],
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			if (!settings.get("goals.enabled")) {
+				runtime.ctx.showWarning("Goals are disabled (enable goals.enabled in settings)");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			const [subcommand = "show", ...rest] = command.args.trim().split(/\s+/);
+			const restText = rest.join(" ").trim();
+			if (subcommand === "set") {
+				const parsed = parseGoalSetArgs(restText);
+				if (!parsed.objective) {
+					runtime.ctx.showStatus("Usage: /goal set <objective> [--budget N]");
+				} else {
+					await runtime.ctx.session.goals.replace(parsed);
+					runtime.ctx.showStatus("Goal set.");
+				}
+			} else if (subcommand === "show") {
+				const goal = await runtime.ctx.session.goals.get();
+				if (!goal) {
+					runtime.ctx.showStatus("No goal set.");
+				} else {
+					const budget = goal.tokenBudget === null ? "no budget" : `${goal.tokensUsed}/${goal.tokenBudget} tokens`;
+					runtime.ctx.showStatus(`Goal ${goal.status}: ${goal.objective} (${budget})`);
+				}
+			} else if (subcommand === "clear") {
+				const cleared = await runtime.ctx.session.goals.clear();
+				runtime.ctx.showStatus(cleared ? "Goal cleared." : "No goal set.");
+			} else if (subcommand === "pause") {
+				await runtime.ctx.session.goals.pause();
+				runtime.ctx.showStatus("Goal paused.");
+			} else if (subcommand === "resume") {
+				await runtime.ctx.session.goals.resume();
+				runtime.ctx.showStatus("Goal resumed.");
+			} else if (subcommand === "budget") {
+				if (restText === "off") {
+					await runtime.ctx.session.goals.setBudget(null);
+					runtime.ctx.showStatus("Goal budget cleared.");
+				} else {
+					const tokenBudget = Number(restText);
+					if (!Number.isInteger(tokenBudget) || tokenBudget <= 0) {
+						runtime.ctx.showStatus("Usage: /goal budget <N|off>");
+					} else {
+						await runtime.ctx.session.goals.setBudget(tokenBudget);
+						runtime.ctx.showStatus("Goal budget updated.");
+					}
+				}
+			} else {
+				runtime.ctx.showStatus("Usage: /goal [set|show|clear|pause|resume|budget]");
+			}
 			runtime.ctx.editor.setText("");
 		},
 	},

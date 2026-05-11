@@ -1056,6 +1056,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			},
 			settings,
+			goals: {
+				get: () => session.goals.get(),
+				create: input => session.goals.create(input),
+				complete: () => session.goals.complete(),
+			},
 			authStorage,
 			modelRegistry,
 			asyncJobManager,

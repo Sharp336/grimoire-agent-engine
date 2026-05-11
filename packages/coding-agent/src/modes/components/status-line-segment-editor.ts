@@ -37,6 +37,7 @@ const SEGMENT_INFO: Record<StatusLineSegmentId, { label: string; short: string }
 	cache_read: { label: "Cache ↑", short: "cache read" },
 	cache_write: { label: "Cache ↓", short: "cache write" },
 	session_name: { label: "Session Name", short: "named session" },
+	goal: { label: "Goal", short: "goal status" },
 };
 
 type Column = "left" | "right" | "disabled";
