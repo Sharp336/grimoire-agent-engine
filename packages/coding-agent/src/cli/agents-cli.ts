@@ -52,7 +52,7 @@ function resolveTargetDir(flags: AgentsCommandArgs["flags"]): string {
 	return path.join(getAgentDir(), "agents");
 }
 
-function toFrontmatter(agent: AgentDefinition): Record<string, unknown> {
+export function toFrontmatter(agent: AgentDefinition): Record<string, unknown> {
 	const frontmatter: Record<string, unknown> = {
 		name: agent.name,
 		description: agent.description,
@@ -64,11 +64,12 @@ function toFrontmatter(agent: AgentDefinition): Record<string, unknown> {
 	if (agent.thinkingLevel) frontmatter.thinkingLevel = agent.thinkingLevel;
 	if (agent.output !== undefined) frontmatter.output = agent.output;
 	if (agent.blocking) frontmatter.blocking = true;
+	if (agent.explicitReadOnly !== undefined) frontmatter.readOnly = agent.explicitReadOnly;
 
 	return frontmatter;
 }
 
-function serializeAgent(agent: AgentDefinition): string {
+export function serializeAgent(agent: AgentDefinition): string {
 	const frontmatter = YAML.stringify(toFrontmatter(agent), null, 2).trimEnd();
 	const body = agent.systemPrompt.trim();
 	return `---\n${frontmatter}\n---\n\n${body}\n`;

@@ -113,6 +113,8 @@ export function parseAgent(
 	}
 	return {
 		...fields,
+		explicitReadOnly: fields.readOnly,
+		readOnly: resolveReadOnly(fields.readOnly, fields.tools),
 		systemPrompt: body,
 		source,
 		filePath,
@@ -163,3 +165,71 @@ export function clearBundledAgentsCache(): void {
 
 // Re-export for backward compatibility
 export const BUNDLED_AGENTS = loadBundledAgents;
+
+// Read-safe tool allowlist. Membership rule + escape hatches: AGENTS.md#read-only-agent-tool-allowlist.
+const KNOWN_READ_TOOLS: ReadonlySet<string> = new Set([
+	"read",
+	"search",
+	"find",
+	"lsp",
+	"ast_grep",
+	"web_search",
+	"inspect_image",
+	"calc",
+	"render_mermaid",
+	"recall",
+	"search_tool_bm25",
+	"yield",
+	"report_finding",
+]);
+
+export function buildReadSafeToolSet(userReadSafeTools: readonly string[] = []): ReadonlySet<string> {
+	if (userReadSafeTools.length === 0) return KNOWN_READ_TOOLS;
+	return new Set<string>([...KNOWN_READ_TOOLS, ...userReadSafeTools]);
+}
+
+function resolveReadOnly(
+	explicit: boolean | undefined,
+	tools: string[] | undefined,
+	readSafeSet: ReadonlySet<string> = KNOWN_READ_TOOLS,
+): boolean {
+	if (explicit !== undefined) return explicit;
+	if (!tools || tools.length === 0) return false;
+	return tools.every(name => readSafeSet.has(name));
+}
+
+export function isAgentReadOnly(
+	agent: { readOnly?: boolean; tools?: string[] },
+	userReadSafeTools: readonly string[] = [],
+): boolean {
+	return resolveReadOnly(agent.readOnly, agent.tools, buildReadSafeToolSet(userReadSafeTools));
+}
+
+// Two effects: re-infer readOnly against the extended allowlist (explicit frontmatter wins),
+// and append user-vouched tools to bundled agents' constrained `tools` lists so they can be
+// called without shadowing the bundled file.
+export function applyUserReadSafeTools(
+	agents: AgentDefinition[],
+	userReadSafeTools: readonly string[],
+): AgentDefinition[] {
+	if (userReadSafeTools.length === 0) return agents;
+	const extendedSet = buildReadSafeToolSet(userReadSafeTools);
+	return agents.map(agent => {
+		const readOnly =
+			agent.explicitReadOnly !== undefined
+				? agent.explicitReadOnly
+				: resolveReadOnly(undefined, agent.tools, extendedSet);
+		const shouldAugmentTools = agent.source === "bundled" && agent.tools !== undefined;
+		if (!shouldAugmentTools && readOnly === agent.readOnly) return agent;
+		const tools = shouldAugmentTools ? [...new Set([...agent.tools!, ...userReadSafeTools])] : agent.tools;
+		return { ...agent, readOnly, tools };
+	});
+}
+
+// Fails closed to [] for non-array or non-string-element values so a malformed config
+// disables the feature for this session rather than crashing or spreading a scalar string
+// as characters into the allowlist.
+export function getUserReadSafeTools(value: unknown): string[] {
+	if (!Array.isArray(value)) return [];
+	return value.filter((item): item is string => typeof item === "string");
+}

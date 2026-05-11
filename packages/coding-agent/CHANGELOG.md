@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `readOnly` agent contract: the four bundled read-only agents (`explore`, `plan`, `reviewer`, `librarian`) now declare `readOnly: true` and render with a `[read-only]` tag in the task tool's `<agents>` list so write-heavy assignments are routed away before subagent boot. Custom agents without an explicit flag are inferred read-only only when every tool is in a known-read allowlist; unknown tools fail closed to write-capable. Membership rule and escape hatches documented in `AGENTS.md#read-only-agent-tool-allowlist` ([#1013](https://github.com/can1357/oh-my-pi/issues/1013))
+- Added a `[CAPABILITY]` directive in the subagent system prompt that tells read-only agents to `yield` immediately when the assignment requires edits, so a mis-routed dispatch fails fast ([#1013](https://github.com/can1357/oh-my-pi/issues/1013))
+- Added `task.readSafeTools` user setting — a list of custom/MCP tool names the user vouches for as side-effect-free. Extends the inference allowlist and is also appended to bundled agents' constrained `tools:` lists so they can be called without shadowing the bundled file ([#1013](https://github.com/can1357/oh-my-pi/issues/1013))
+
+### Changed
+
+- Changed the task tool's routing rule to explicitly prefer `[read-only]` agents only for purely investigative work; otherwise pick a write-capable agent ([#1013](https://github.com/can1357/oh-my-pi/issues/1013))
+
+### Fixed
+
+- Fixed `task.readSafeTools` malformed config (non-array, scalar, mixed entries) crashing or polluting the allowlist: the three call sites route through `loadAgentsForCwd`, which validates the value via `getUserReadSafeTools` and degrades to "no user extensions" rather than `TypeError` ([#1013](https://github.com/can1357/oh-my-pi/issues/1013))
+
 ## [14.9.9] - 2026-05-12
 
 ### Added
@@ -14,7 +28,6 @@
 
 - Changed `task.isolation.enabled=true` migration to map to `task.isolation.mode = "auto"` instead of legacy `worktree` isolation
 - Updated isolation configuration UI labels and descriptions to expose new back-end names (`overlayfs`, `projfs`, etc.) and removed references to deprecated values in guidance text
-
 ### Fixed
 
 - Fixed worktree delta capture to include previously untracked file state by baselining untracked patches for both snapshots

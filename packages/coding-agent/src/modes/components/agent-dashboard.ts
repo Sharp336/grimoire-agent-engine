@@ -45,7 +45,7 @@ import { Settings } from "../../config/settings";
 import agentCreationArchitectPrompt from "../../prompts/system/agent-creation-architect.md" with { type: "text" };
 import agentCreationUserPrompt from "../../prompts/system/agent-creation-user.md" with { type: "text" };
 import { createAgentSession } from "../../sdk";
-import { discoverAgents } from "../../task/discovery";
+import { loadAgentsForCwd } from "../../task/discovery";
 import type { AgentDefinition, AgentSource } from "../../task/types";
 import { shortenPath } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
@@ -388,7 +388,8 @@ export class AgentDashboard extends Container {
 		try {
 			const selectedName = this.#selectedAgent()?.name;
 			const activeTabId = this.#tabs[this.#activeTabIndex]?.id ?? "all";
-			const { agents } = await discoverAgents(this.cwd);
+			const settings = this.#settingsManager ?? Settings.instance;
+			const { agents } = await loadAgentsForCwd(this.cwd, settings);
 			const disabled = new Set((this.#settingsManager?.get("task.disabledAgents") as string[] | undefined) ?? []);
 			const overrides = this.#settingsManager?.get("task.agentModelOverrides") ?? {};
 

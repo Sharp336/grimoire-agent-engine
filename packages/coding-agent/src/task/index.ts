@@ -34,7 +34,7 @@ import "../tools/review";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
-import { discoverAgents, getAgent } from "./discovery";
+import { getAgent, loadAgentsForCwd } from "./discovery";
 import { runSubprocess } from "./executor";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
@@ -111,7 +111,7 @@ function addUsageTotals(target: Usage, usage: Partial<Usage>): void {
 // Re-export types and utilities
 export { loadBundledAgents as BUNDLED_AGENTS } from "./agents";
 export { discoverCommands, expandCommand, getCommand } from "./commands";
-export { discoverAgents, getAgent } from "./discovery";
+export { discoverAgents, getAgent, loadAgentsForCwd } from "./discovery";
 export { AgentOutputManager } from "./output-manager";
 export type {
 	AgentDefinition,
@@ -248,7 +248,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
-		const { agents } = await discoverAgents(session.cwd);
+		const { agents } = await loadAgentsForCwd(session.cwd, session.settings);
 		return new TaskTool(session, agents);
 	}
 
@@ -508,7 +508,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 		preAllocatedIds?: string[],
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
-		const { agents, projectAgentsDir } = await discoverAgents(this.session.cwd);
+		const { agents, projectAgentsDir } = await loadAgentsForCwd(this.session.cwd, this.session.settings);
 		const { agent: agentName, context, schema: outputSchema } = params;
 		const simpleMode = this.#getTaskSimpleMode();
 		const { contextEnabled, customSchemaEnabled } = getTaskSimpleModeCapabilities(simpleMode);

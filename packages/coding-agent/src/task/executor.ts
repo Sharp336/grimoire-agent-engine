@@ -283,6 +283,30 @@ export const SUBAGENT_WARNING_NULL_YIELD = "SYSTEM WARNING: Subagent called yiel
 export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
 
+// Extracted so the readOnly→[CAPABILITY] wiring is testable without spawning a real subagent.
+export interface SubagentSystemPromptInputs {
+	agent: AgentDefinition;
+	context: string | undefined;
+	worktree: string;
+	outputSchema: unknown;
+	contextFile: string | undefined;
+	ircPeers: string;
+	ircSelfId: string;
+}
+
+export function buildSubagentSystemPrompt(inputs: SubagentSystemPromptInputs): string {
+	return prompt.render(subagentSystemPromptTemplate, {
+		agent: inputs.agent.systemPrompt,
+		context: inputs.context?.trim() ?? "",
+		worktree: inputs.worktree,
+		outputSchema: inputs.outputSchema,
+		contextFile: inputs.contextFile,
+		ircPeers: inputs.ircPeers,
+		ircSelfId: inputs.ircSelfId,
+		readOnly: inputs.agent.readOnly,
+	});
+}
+
 export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): FinalizeSubprocessOutputResult {
 	let { rawOutput, exitCode, stderr } = args;
 	const { yieldItems, reportFindings, doneAborted, signalAborted, outputSchema } = args;
@@ -1008,9 +1032,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				promptTemplates: options.promptTemplates,
 				workspaceTree: options.workspaceTree,
 				systemPrompt: defaultPrompt => {
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-						agent: agent.systemPrompt,
-						context: options.context?.trim() ?? "",
+					const subagentPrompt = buildSubagentSystemPrompt({
+						agent,
+						context: options.context,
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
 						contextFile: contextFileForPrompt,

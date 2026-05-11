@@ -2222,6 +2222,11 @@ export const SETTINGS_SCHEMA = {
 		default: [] as string[],
 	},
 
+	"task.readSafeTools": {
+		type: "array",
+		default: [] as string[],
+	},
+
 	"task.agentModelOverrides": {
 		type: "record",
 		default: {} as Record<string, string>,

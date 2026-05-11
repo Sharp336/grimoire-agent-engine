@@ -66,4 +66,34 @@ describe("parseAgentFields", () => {
 
 		expect(fields?.tools).toEqual(["read", "search", "yield"]);
 	});
+
+	test("parses readOnly from boolean frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "explore",
+			description: "desc",
+			readOnly: true,
+		});
+
+		expect(fields?.readOnly).toBe(true);
+	});
+
+	test("parses readOnly from string frontmatter", () => {
+		const fields = parseAgentFields({
+			name: "explore",
+			description: "desc",
+			readOnly: "true",
+		});
+
+		expect(fields?.readOnly).toBe(true);
+	});
+
+	test("ignores invalid readOnly values", () => {
+		const fields = parseAgentFields({
+			name: "explore",
+			description: "desc",
+			readOnly: "maybe",
+		});
+
+		expect(fields?.readOnly).toBeUndefined();
+	});
 });

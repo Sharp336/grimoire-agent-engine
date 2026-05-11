@@ -2,6 +2,7 @@
 name: explore
 description: Fast read-only codebase scout returning compressed context for handoff
 tools: read, search, find, web_search
+readOnly: true
 model: pi/smol
 thinking-level: med
 output:

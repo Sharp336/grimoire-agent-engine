@@ -16,8 +16,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
+import type { Settings } from "../config/settings";
 import { listClaudePluginRoots } from "../discovery/helpers";
-import { loadBundledAgents, parseAgent } from "./agents";
+import { applyUserReadSafeTools, getUserReadSafeTools, loadBundledAgents, parseAgent } from "./agents";
 import type { AgentDefinition, AgentSource } from "./types";
 
 /** Result of agent discovery */
@@ -123,4 +124,15 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
  */
 export function getAgent(agents: AgentDefinition[], name: string): AgentDefinition | undefined {
 	return agents.find(a => a.name === name);
+}
+
+// Canonical entry point: discovery + `task.readSafeTools` augmentation. Callers that use raw
+// `discoverAgents` will silently drop the user's read-safe-tool config.
+export async function loadAgentsForCwd(cwd: string, settings: Settings, home?: string): Promise<DiscoveryResult> {
+	const result = await discoverAgents(cwd, home);
+	const userReadSafeTools = getUserReadSafeTools(settings.get("task.readSafeTools"));
+	return {
+		...result,
+		agents: applyUserReadSafeTools(result.agents, userReadSafeTools),
+	};
 }

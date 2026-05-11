@@ -244,3 +244,19 @@ Location: `packages/*/CHANGELOG.md` (per package).
 2. Run `bun run release`.
 
 The script handles version bump, CHANGELOG finalization, commit, tag, publish, and adding new `[Unreleased]` sections.
+
+## Read-only agent tool allowlist
+
+Agents may declare `readOnly: true` in their frontmatter, earning them a `[read-only]` tag in the task tool's agent roster and a `[CAPABILITY]` directive that tells them to `yield` immediately if the assignment requires edits. When `readOnly` is omitted, the value is inferred: an agent is read-only only when every declared tool is in the `KNOWN_READ_TOOLS` allowlist in `packages/coding-agent/src/task/agents.ts`. Unknown tools (custom, MCP, future built-ins) tip the agent to write-capable, so misclassification fails closed.
+
+**Membership rule.** The `[read-only]` tag promises the router a *fire-and-forget* dispatch, so a tool qualifies only if it neither
+
+- mutates the user's project (filesystem, version control, package state), nor
+- suspends the agent on out-of-process state (user attention, persisted memory, plan handoff).
+
+Session-local emitters (`report_finding`, `render_mermaid`) qualify; tools that pause for user attention (`ask`) or persist plan/memory across the boundary (`exit_plan_mode`, `retain`, `reflect`) do not.
+
+**Escape hatches** for custom/MCP tools you trust:
+
+1. Set `readOnly: true` explicitly in the agent's frontmatter (per-agent; explicit wins over inference).
+2. List the tool in `task.readSafeTools` (extends the allowlist globally and is appended to bundled agents' `tools:` lists so they can call the vouched tool).

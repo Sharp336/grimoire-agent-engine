@@ -196,6 +196,10 @@ export interface AgentDefinition {
 	thinkingLevel?: ThinkingLevel;
 	output?: unknown;
 	blocking?: boolean;
+	/** Resolved read-only contract (explicit frontmatter wins, else inferred from `tools`). Drives the `[CAPABILITY]` directive. */
+	readOnly?: boolean;
+	/** Raw frontmatter value, preserved so post-parse re-inference doesn't clobber author intent. */
+	explicitReadOnly?: boolean;
 	source: AgentSource;
 	filePath?: string;
 }

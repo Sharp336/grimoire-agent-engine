@@ -34,7 +34,7 @@ Subagents have no conversation history. Every fact, file path, and direction the
 {{/if}}
 - Pass large payloads via `local://<path>` URIs, not inline.
 {{#if contextEnabled}}- Put shared constraints in `context` once; do not duplicate across assignments.{{/if}}
-- Prefer agents that investigate **and** edit in one pass; only spin a read-only discovery step when affected files are genuinely unknown.
+- Pick a `[read-only]` agent only when the assignment is purely investigative. If it requires file edits or state-changing commands, pick a write-capable agent (e.g. `task`).
 </rules>
 
 <parallelization>
@@ -65,7 +65,7 @@ Parallel when tasks touch disjoint files or are independent refactors/tests.
 
 <agents>
 {{#list agents join="\n"}}
-# {{name}}
+# {{name}}{{#if readOnly}} [read-only]{{/if}}
 {{description}}
 {{/list}}
 </agents>
