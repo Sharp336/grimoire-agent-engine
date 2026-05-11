@@ -658,6 +658,7 @@ export class AgentSession {
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
 	#goalStorage: GoalStorage | undefined = undefined;
 	#goalActiveTurnStartedAt: number | undefined = undefined;
+	#goalTurnInProgress = false;
 	#goalContinuationGoalId: string | undefined = undefined;
 	#goalFizzledGoalId: string | undefined = undefined;
 	#goalBudgetLimitReportedGoalId: string | undefined = undefined;
@@ -845,6 +846,15 @@ export class AgentSession {
 		}
 	}
 
+	#startGoalTimerIfActive(): void {
+		if (!this.settings.get("goals.enabled")) return;
+		if (this.#goalActiveTurnStartedAt !== undefined) return;
+		const goal = this.#getGoalStorage().getGoal(this.sessionId);
+		if (goal?.status === "active") {
+			this.#goalActiveTurnStartedAt = Date.now();
+		}
+	}
+
 	async #allowGoalStatusChange(
 		goal: ThreadGoal,
 		proposed: { status?: ThreadGoal["status"]; tokenBudget?: number | null },
@@ -940,6 +950,9 @@ export class AgentSession {
 				const defaultBudget = this.settings.get("goals.defaultTokenBudget");
 				const budget = input.tokenBudget ?? (defaultBudget > 0 ? defaultBudget : undefined);
 				const goal = this.#getGoalStorage().insertGoal(this.sessionId, input.objective, budget);
+				if (this.#goalTurnInProgress) {
+					this.#startGoalTimerIfActive();
+				}
 				this.#goalFizzledGoalId = undefined;
 				this.#goalBudgetLimitReportedGoalId = undefined;
 				await this.#emitSessionEvent({ type: "goal_updated", goal, previous });
@@ -959,6 +972,9 @@ export class AgentSession {
 				const defaultBudget = this.settings.get("goals.defaultTokenBudget");
 				const budget = input.tokenBudget ?? (defaultBudget > 0 ? defaultBudget : undefined);
 				const goal = this.#getGoalStorage().replaceGoal(this.sessionId, input.objective, "active", budget);
+				if (this.#goalTurnInProgress) {
+					this.#startGoalTimerIfActive();
+				}
 				this.#goalFizzledGoalId = undefined;
 				this.#goalBudgetLimitReportedGoalId = undefined;
 				await this.#emitSessionEvent({ type: "goal_updated", goal, previous });
@@ -1186,9 +1202,9 @@ export class AgentSession {
 
 		if (event.type === "turn_start") {
 			this.#resetStreamingEditState();
-			if (this.settings.get("goals.enabled")) {
-				this.#goalActiveTurnStartedAt = Date.now();
-			}
+			this.#goalTurnInProgress = true;
+			this.#goalActiveTurnStartedAt = undefined;
+			this.#startGoalTimerIfActive();
 			// TTSR: Reset buffer on turn start
 			this.#ttsrManager?.resetBuffer();
 		}
@@ -1455,6 +1471,7 @@ export class AgentSession {
 		// Check auto-retry and auto-compaction after agent completes
 		if (event.type === "agent_end") {
 			const goalStartedAt = this.#goalActiveTurnStartedAt;
+			this.#goalTurnInProgress = false;
 			this.#goalActiveTurnStartedAt = undefined;
 			const continuationGoalId = this.#goalContinuationGoalId;
 			this.#goalContinuationGoalId = undefined;
@@ -4181,10 +4198,15 @@ export class AgentSession {
 		await this.agent.waitForIdle();
 		if (this.settings.get("goals.enabled")) {
 			const previous = this.#getGoalStorage().getGoal(this.sessionId);
-			const goal = this.#getGoalStorage().pauseActiveGoal(this.sessionId);
+			const allowPause =
+				!previous ||
+				previous.status !== "active" ||
+				(await this.#allowGoalStatusChange(previous, { status: "paused" }, "system"));
+			const goal = allowPause ? this.#getGoalStorage().pauseActiveGoal(this.sessionId) : previous;
 			if (previous?.status === "active" && goal?.status === "paused") {
 				await this.#emitSessionEvent({ type: "goal_updated", goal, previous });
 			}
+			this.#goalTurnInProgress = false;
 			this.#goalActiveTurnStartedAt = undefined;
 		}
 		// Clear prompt-in-flight state: waitForIdle resolves when the agent loop's finally
