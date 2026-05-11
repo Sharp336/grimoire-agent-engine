@@ -1,6 +1,6 @@
 {
   "name": "@oh-my-pi/pi-gateway",
-  "version": "0.1.0",
+  "version": "14.5.12",
   "description": "IM gateway for Oh My Pi — connects AI agents to messaging platforms",
   "type": "module",
   "main": "./src/index.ts",
