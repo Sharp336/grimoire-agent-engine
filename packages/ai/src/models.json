@@ -35705,6 +35705,11 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 384000,
+			"compat": {
+				"supportsToolChoice": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true
+			},
 			"thinking": {
 				"mode": "effort",
 				"minLevel": "minimal",
@@ -35729,6 +35734,11 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 384000,
+			"compat": {
+				"supportsToolChoice": false,
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true
+			},
 			"thinking": {
 				"mode": "effort",
 				"minLevel": "minimal",
