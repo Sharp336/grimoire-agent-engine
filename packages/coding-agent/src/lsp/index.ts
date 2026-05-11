@@ -91,7 +91,7 @@ export interface LspWarmupOptions {
 }
 
 export function discoverStartupLspServers(cwd: string): LspStartupServerInfo[] {
-	const config = loadConfig(cwd);
+	const config = getConfig(cwd);
 	return getLspServers(config).map(([name, serverConfig]) => ({
 		name,
 		status: "connecting",
@@ -108,7 +108,7 @@ export function discoverStartupLspServers(cwd: string): LspStartupServerInfo[] {
  * @returns Status of each server that was started
  */
 export async function warmupLspServers(cwd: string, options?: LspWarmupOptions): Promise<LspWarmupResult> {
-	const config = loadConfig(cwd);
+	const config = getConfig(cwd);
 	setIdleTimeout(config.idleTimeoutMs);
 	const servers: LspWarmupResult["servers"] = [];
 	const lspServers = getLspServers(config);

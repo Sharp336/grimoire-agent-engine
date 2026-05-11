@@ -400,8 +400,8 @@ async function sendResponse(
 // Client Management
 // =============================================================================
 
-/** Timeout for warmup initialize requests (5 seconds) */
-export const WARMUP_TIMEOUT_MS = 5000;
+/** Timeout for warmup initialize requests (2 seconds) */
+export const WARMUP_TIMEOUT_MS = 2000;
 
 /** Max time to wait for the server to report project loading completion via $/progress */
 const PROJECT_LOAD_TIMEOUT_MS = 15_000;

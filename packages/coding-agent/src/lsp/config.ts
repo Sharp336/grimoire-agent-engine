@@ -158,7 +158,10 @@ export function hasRootMarkers(cwd: string, markers: string[]): boolean {
 		// Handle glob-like patterns (e.g., "*.cabal")
 		if (marker.includes("*")) {
 			try {
-				const scan = new Bun.Glob(marker).scanSync({ cwd, onlyFiles: false });
+				// Root markers live at project root — limit scan to depth 0 to avoid
+				// walking large directories (e.g. node_modules) when the glob doesn't match.
+				// `depth` is a valid runtime option but missing from Bun's TypeScript types.
+				const scan = new Bun.Glob(marker).scanSync({ cwd, onlyFiles: false, depth: 0 } as Record<string, unknown>);
 				for (const _ of scan) {
 					return true;
 				}
