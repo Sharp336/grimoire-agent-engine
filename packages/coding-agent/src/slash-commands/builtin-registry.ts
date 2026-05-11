@@ -1013,15 +1013,15 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<BuiltinSlashCommandSpec> = [
 	},
 	{
 		name: "retry",
-		description: "Retry failed background tasks",
+		description: "Retry failed or cancelled background tasks",
 		handle: async (_command, runtime) => {
 			runtime.ctx.editor.setText("");
 			const result = await runtime.ctx.session.retryFailedTasks?.();
 			if (!result) {
-				runtime.ctx.showWarning("No failed tasks to retry");
+				runtime.ctx.showWarning("No failed or cancelled tasks to retry");
 				return;
 			}
-			const lines = [`Retrying ${result.count} failed task(s)...`];
+			const lines = [`Retrying ${result.count} task(s)...`];
 			for (const task of result.info) {
 				lines.push(
 					`  ${task.id}: ${task.tokens} tokens, ${task.toolCount} tools${task.lastTool ? ` (last: ${task.lastTool})` : ""}${task.description ? ` \u2014 ${task.description}` : ""}`,

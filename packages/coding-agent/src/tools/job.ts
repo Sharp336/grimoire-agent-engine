@@ -2,11 +2,11 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
-import { type Static, Type } from "@sinclair/typebox";
+import { type Static, type TSchema, Type } from "@sinclair/typebox";
 import { isBackgroundJobSupportEnabled } from "../async";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
-import jobDescription from "../prompts/tools/job.md" with { type: "text" };
+import jobDescriptionTemplate from "../prompts/tools/job.md" with { type: "text" };
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import type { ToolSession } from "./index";
 import {
@@ -21,20 +21,22 @@ import {
 	type ToolUIStatus,
 } from "./render-utils";
 
-const jobSchema = Type.Object({
-	poll: Type.Optional(
-		Type.Array(Type.String(), {
-			description: "background job ids to wait for; omit (with no `cancel`) to wait on all running jobs",
-			examples: [["job-1234"]],
-		}),
-	),
-	cancel: Type.Optional(
-		Type.Array(Type.String(), {
-			description: "background job ids to cancel",
-			examples: [["job-1234"]],
-		}),
-	),
-});
+const pollParam = Type.Optional(
+	Type.Array(Type.String(), {
+		description: "background job ids to wait for; omit (with no `cancel`) to wait on all running jobs",
+		examples: [["job-1234"]],
+	}),
+);
+
+const cancelParam = Type.Optional(
+	Type.Array(Type.String(), {
+		description: "background job ids to cancel",
+		examples: [["job-1234"]],
+	}),
+);
+
+const jobSchema = Type.Object({ poll: pollParam, cancel: cancelParam });
+const jobSchemaPollOnly = Type.Object({ poll: pollParam });
 
 type JobParams = Static<typeof jobSchema>;
 
@@ -73,15 +75,21 @@ export interface JobToolDetails {
 	cancelled?: { id: string; status: CancelStatus }[];
 }
 
-export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
+export class JobTool implements AgentTool<TSchema, JobToolDetails> {
 	readonly name = "job";
 	readonly label = "Job";
-	readonly description: string;
-	readonly parameters = jobSchema;
 	readonly strict = true;
 
-	constructor(private readonly session: ToolSession) {
-		this.description = prompt.render(jobDescription);
+	constructor(private readonly session: ToolSession) {}
+
+	get description(): string {
+		const allowCancel = this.session.settings.get("async.allowCancel");
+		return prompt.render(jobDescriptionTemplate, { allowCancel });
+	}
+
+	get parameters(): TSchema {
+		const allowCancel = this.session.settings.get("async.allowCancel");
+		return allowCancel ? jobSchema : jobSchemaPollOnly;
 	}
 
 	static createIf(session: ToolSession): JobTool | null {
@@ -91,11 +99,12 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 
 	async execute(
 		_toolCallId: string,
-		params: JobParams,
+		rawParams: unknown,
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<JobToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<JobToolDetails>> {
+		const params = rawParams as JobParams;
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
 			return {
@@ -104,7 +113,19 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 			};
 		}
 
-		const cancelIds = params.cancel ?? [];
+		const allowCancel = this.session.settings.get("async.allowCancel");
+		const cancelIds = allowCancel ? (params.cancel ?? []) : [];
+		if (!allowCancel && params.cancel?.length) {
+			return {
+				content: [
+					{
+						type: "text",
+						text: "Job cancellation is disabled. Change the async.allowCancel setting to enable it.",
+					},
+				],
+				details: { jobs: [] },
+			};
+		}
 		const cancelOutcomes: CancelOutcome[] = [];
 		for (const id of cancelIds) {
 			const existing = manager.getJob(id);

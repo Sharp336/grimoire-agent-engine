@@ -1487,6 +1487,16 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"async.allowCancel": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			label: "Allow Job Cancellation",
+			description: "Allow the agent to cancel running background jobs and subagents",
+		},
+	},
+
 	"bash.autoBackground.enabled": {
 		type: "boolean",
 		default: false,

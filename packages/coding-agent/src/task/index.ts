@@ -295,10 +295,13 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 			if (result.exitCode === 0) continue;
 
 			const taskSessionFile = path.join(artifactsDir, `${result.id}.jsonl`);
-			try {
-				await fs.access(taskSessionFile);
-			} catch {
-				continue;
+			// Non-aborted tasks require a session file to resume; aborted tasks retry from scratch.
+			if (!result.aborted) {
+				try {
+					await fs.access(taskSessionFile);
+				} catch {
+					continue;
+				}
 			}
 
 			const agent = getAgent(agents, result.agent);
@@ -354,13 +357,15 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 		this.#failedTasks = [];
 		const startTime = Date.now();
 
-		onUpdate?.(`Retrying ${tasks.length} failed task(s)...`);
+		onUpdate?.(`Retrying ${tasks.length} task(s)...`);
 
 		const maxConcurrency = this.session.settings.get("task.maxConcurrency");
 		const semaphore = new Semaphore(maxConcurrency);
 		const results = await Promise.all(
 			tasks.map(async (failed, index) => {
-				onUpdate?.(`Resuming ${failed.id} (${failed.tokens} tokens, ${failed.toolCount} tools used)...`);
+				onUpdate?.(
+					`${failed.tokens > 0 ? "Resuming" : "Starting"} ${failed.id} (${failed.tokens} tokens, ${failed.toolCount} tools used)...`,
+				);
 				await semaphore.acquire();
 				try {
 					const result = await runSubprocess({
@@ -1271,52 +1276,56 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 				}
 			}
 
-			// Track failed tasks for retry
+			// Track failed and cancelled tasks for retry
 			for (const result of results) {
-				if (result.exitCode !== 0 && !result.aborted) {
+				if (result.exitCode !== 0) {
 					const taskSessionFile = path.join(effectiveArtifactsDir, `${result.id}.jsonl`);
-					try {
-						await fs.access(taskSessionFile);
-						const matchingTask = tasksWithContext.find(t => t.id === result.id);
-						this.#failedTasks.push({
-							id: result.id,
-							agent: result.agent,
-							description: result.description,
-							task: result.task,
-							sessionFile: taskSessionFile,
-							tokens: result.tokens,
-							durationMs: result.durationMs,
-							error: result.error ?? result.stderr,
-							toolCount: progressMap.get(result.index)?.toolCount ?? 0,
-							lastTool: progressMap.get(result.index)?.currentTool,
-							executorOptions: {
-								cwd: this.session.cwd,
-								agent: effectiveAgent,
-								task: matchingTask?.task ?? result.task,
-								description: result.description,
-								index: result.index,
-								id: result.id,
-								taskDepth,
-								modelOverride,
-								thinkingLevel: thinkingLevelOverride,
-								outputSchema: effectiveOutputSchema,
-								sessionFile: taskSessionFile,
-								persistArtifacts: !!artifactsDir,
-								artifactsDir: effectiveArtifactsDir,
-								authStorage: this.session.authStorage,
-								modelRegistry: this.session.modelRegistry,
-								settings: this.session.settings,
-								mcpManager: this.session.mcpManager,
-								contextFiles: this.session.contextFiles?.filter(
-									file => path.basename(file.path).toLowerCase() !== "agents.md",
-								),
-								skills: this.session.skills ?? [],
-								promptTemplates: this.session.promptTemplates,
-							},
-						});
-					} catch {
-						// Session file doesn't exist — can't retry
+					// For non-aborted tasks, require session file to exist for resume.
+					// Aborted tasks (cancelled before start) may not have one yet — retry starts fresh.
+					if (!result.aborted) {
+						try {
+							await fs.access(taskSessionFile);
+						} catch {
+							continue;
+						}
 					}
+					const matchingTask = tasksWithContext.find(t => t.id === result.id);
+					this.#failedTasks.push({
+						id: result.id,
+						agent: result.agent,
+						description: result.description,
+						task: result.task,
+						sessionFile: taskSessionFile,
+						tokens: result.tokens,
+						durationMs: result.durationMs,
+						error: result.error ?? result.stderr,
+						toolCount: progressMap.get(result.index)?.toolCount ?? 0,
+						lastTool: progressMap.get(result.index)?.currentTool,
+						executorOptions: {
+							cwd: this.session.cwd,
+							agent: effectiveAgent,
+							task: matchingTask?.task ?? result.task,
+							description: result.description,
+							index: result.index,
+							id: result.id,
+							taskDepth,
+							modelOverride,
+							thinkingLevel: thinkingLevelOverride,
+							outputSchema: effectiveOutputSchema,
+							sessionFile: taskSessionFile,
+							persistArtifacts: !!artifactsDir,
+							artifactsDir: effectiveArtifactsDir,
+							authStorage: this.session.authStorage,
+							modelRegistry: this.session.modelRegistry,
+							settings: this.session.settings,
+							mcpManager: this.session.mcpManager,
+							contextFiles: this.session.contextFiles?.filter(
+								file => path.basename(file.path).toLowerCase() !== "agents.md",
+							),
+							skills: this.session.skills ?? [],
+							promptTemplates: this.session.promptTemplates,
+						},
+					});
 				}
 			}
 
@@ -1523,7 +1532,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 
 			const text =
 				this.#failedTasks.length > 0
-					? `${summary}\n\n<system-notification>${this.#failedTasks.length} task(s) failed and can be retried with /retry. Session state is preserved.</system-notification>`
+					? `${summary}\n\n<system-notification>${this.#failedTasks.length} task(s) failed or were cancelled and can be retried with /retry. Session state is preserved.</system-notification>`
 					: summary;
 			return {
 				content: [{ type: "text", text }],
