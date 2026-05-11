@@ -29,10 +29,13 @@ export interface SettingsListTheme {
 
 export interface SettingsListOptions {
 	enableSearch?: boolean;
+	/** Items to search across (defaults to the visible items). */
+	searchScope?: SettingItem[];
 }
 
 export class SettingsList implements Component {
 	#items: SettingItem[];
+	#searchScope: SettingItem[];
 	#filteredItems: SettingItem[];
 	#theme: SettingsListTheme;
 	#selectedIndex = 0;
@@ -55,6 +58,7 @@ export class SettingsList implements Component {
 		options: SettingsListOptions = {},
 	) {
 		this.#items = items;
+		this.#searchScope = options.searchScope ?? items;
 		this.#filteredItems = items;
 		this.#maxVisible = maxVisible;
 		this.#theme = theme;
@@ -218,7 +222,11 @@ export class SettingsList implements Component {
 	}
 
 	#applyFilter(query: string): void {
-		this.#filteredItems = fuzzyFilter(this.#items, query, item => item.label);
+		if (!query) {
+			this.#filteredItems = this.#items;
+		} else {
+			this.#filteredItems = fuzzyFilter(this.#searchScope, query, item => item.label);
+		}
 		this.#selectedIndex = 0;
 	}
 

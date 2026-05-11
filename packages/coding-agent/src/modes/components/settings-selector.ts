@@ -26,7 +26,7 @@ import { matchesAppInterrupt } from "../../modes/utils/keybinding-matchers";
 import { getTabBarTheme } from "../shared";
 import { DynamicBorder } from "./dynamic-border";
 import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings";
-import { getSettingsForTab, type SettingDef } from "./settings-defs";
+import { getAllSettingDefs, getSettingsForTab, type SettingDef } from "./settings-defs";
 import { getPreset } from "./status-line/presets";
 
 /**
@@ -503,6 +503,16 @@ export class SettingsSelectorComponent extends Container {
 			}
 		}
 
+		// Build search scope from all tabs so cross-tab search works
+		const allDefs = getAllSettingDefs();
+		const searchScope: SettingItem[] = [];
+		for (const def of allDefs) {
+			const item = this.#defToItem(def);
+			if (item) {
+				searchScope.push(item);
+			}
+		}
+
 		// Add status line preview for appearance tab
 		if (tabId === "appearance") {
 			this.#statusPreviewContainer = new Container();
@@ -519,7 +529,7 @@ export class SettingsSelectorComponent extends Container {
 			10,
 			getSettingsListTheme(),
 			(id, newValue) => {
-				const def = defs.find(d => d.path === id);
+				const def = allDefs.find(d => d.path === id);
 				if (!def) return;
 
 				const path = def.path;
@@ -539,8 +549,8 @@ export class SettingsSelectorComponent extends Container {
 				// Submenu types are handled in createSubmenu
 			},
 			() => this.callbacks.onCancel(),
+			{ enableSearch: true, searchScope },
 		);
-
 		this.addChild(this.#currentList);
 	}
 
