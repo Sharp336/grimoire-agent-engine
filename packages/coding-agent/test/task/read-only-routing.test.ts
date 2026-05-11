@@ -3,6 +3,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import taskDescriptionTemplate from "../../src/prompts/tools/task.md" with { type: "text" };
 import {
 	applyUserReadSafeTools,
+	assignmentRequiresWrite,
 	buildReadSafeToolSet,
 	getUserReadSafeTools,
 	isAgentReadOnly,
@@ -188,5 +189,77 @@ describe("buildSubagentSystemPrompt", () => {
 		expect(rundef).not.toContain("[CAPABILITY]");
 		// Pre-feature byte-identical: no leading blank line.
 		expect(rfalse.startsWith("[ROLE]")).toBe(true);
+	});
+});
+
+describe("assignmentRequiresWrite", () => {
+	it("flags assignments that start with a high-signal write verb", () => {
+		expect(assignmentRequiresWrite("Refactor agents.ts to use a class")).toBe(true);
+		expect(assignmentRequiresWrite("Implement the feature in foo.ts")).toBe(true);
+		expect(assignmentRequiresWrite("Edit foo.ts to handle the new flag")).toBe(true);
+		expect(assignmentRequiresWrite("Modify the parser to accept trailing commas")).toBe(true);
+		expect(assignmentRequiresWrite("Fix the parser bug in tokenizer.ts")).toBe(true);
+		expect(assignmentRequiresWrite("Rename foo to bar across the codebase")).toBe(true);
+		expect(assignmentRequiresWrite("Scaffold a new module at src/foo.ts")).toBe(true);
+		expect(assignmentRequiresWrite("Migrate the data model to the new schema")).toBe(true);
+		expect(assignmentRequiresWrite("Install the missing dependency")).toBe(true);
+	});
+
+	it("does not flag assignments that start with an investigation verb", () => {
+		expect(assignmentRequiresWrite("Investigate how the parser handles edge cases")).toBe(false);
+		expect(assignmentRequiresWrite("Find all call sites of doStuff")).toBe(false);
+		expect(assignmentRequiresWrite("Locate the config loader")).toBe(false);
+		expect(assignmentRequiresWrite("Summarize the architecture of the task module")).toBe(false);
+		expect(assignmentRequiresWrite("Trace the lifecycle of a subagent dispatch")).toBe(false);
+		expect(assignmentRequiresWrite("Review the changes in this PR")).toBe(false);
+	});
+
+	it("does not flag descriptive verbs commonly used in investigation prose", () => {
+		// These verbs are ambiguous: they often describe code behavior or summarization tasks
+		// rather than imperative file mutation. They are deliberately excluded from WRITE_INTENT_VERBS.
+		expect(assignmentRequiresWrite("Investigate how class Foo generates JSON")).toBe(false);
+		expect(assignmentRequiresWrite("Create a summary of the dispatch flow")).toBe(false);
+		expect(assignmentRequiresWrite("Write up the findings as structured notes")).toBe(false);
+		expect(assignmentRequiresWrite("Add notes about the parser's error handling")).toBe(false);
+		expect(assignmentRequiresWrite("Build a picture of how the task graph executes")).toBe(false);
+		expect(assignmentRequiresWrite("Update your understanding of the lifecycle")).toBe(false);
+		expect(assignmentRequiresWrite("Generate a list of all hot paths")).toBe(false);
+		expect(assignmentRequiresWrite("Remove the option from consideration in your report")).toBe(false);
+	});
+
+	it("strips markdown list and heading markers before matching", () => {
+		expect(assignmentRequiresWrite("# Goal\nRefactor X")).toBe(true);
+		expect(assignmentRequiresWrite("- Refactor X")).toBe(true);
+		expect(assignmentRequiresWrite("* Implement Y")).toBe(true);
+		expect(assignmentRequiresWrite("1. Implement Y")).toBe(true);
+		expect(assignmentRequiresWrite("1) Modify Z")).toBe(true);
+		expect(assignmentRequiresWrite("> Edit foo.ts")).toBe(true);
+	});
+
+	it("strips a single 'Label:' prefix so structured assignments still surface the verb", () => {
+		expect(assignmentRequiresWrite("Goal: Refactor agents.ts")).toBe(true);
+		expect(assignmentRequiresWrite("Target: Investigate the parser")).toBe(false);
+	});
+
+	it("scans every line, not only the first", () => {
+		const assignment = "# Target\n- foo.ts\n\n# Change\nRefactor the module";
+		expect(assignmentRequiresWrite(assignment)).toBe(true);
+	});
+
+	it("ignores write verbs that appear inside a sentence (non-imperative position)", () => {
+		// "the" / "we" is the first word, so the inner write verb is not in imperative position
+		expect(assignmentRequiresWrite("Understand the refactor pattern used here")).toBe(false);
+		expect(assignmentRequiresWrite("Note: we will refactor this later")).toBe(false);
+	});
+
+	it("returns false for empty or whitespace-only assignments", () => {
+		expect(assignmentRequiresWrite("")).toBe(false);
+		expect(assignmentRequiresWrite("   \n\t  \n")).toBe(false);
+	});
+
+	it("is case-insensitive on the verb", () => {
+		expect(assignmentRequiresWrite("REFACTOR agents.ts")).toBe(true);
+		expect(assignmentRequiresWrite("refactor agents.ts")).toBe(true);
+		expect(assignmentRequiresWrite("Refactor agents.ts")).toBe(true);
 	});
 });

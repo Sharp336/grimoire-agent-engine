@@ -233,3 +233,44 @@ export function getUserReadSafeTools(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
 	return value.filter((item): item is string => typeof item === "string");
 }
+
+// Verbs that, in imperative position (first word after optional markdown markup), unambiguously
+// indicate file edits or state-changing commands. Deliberately conservative: misses are absorbed
+// by the [CAPABILITY] block in the subagent system prompt; false positives force re-dispatch as
+// `task`, but they also block a possibly-legitimate read-only run, so we err toward inclusion of
+// only verbs whose dominant usage is imperative file/code mutation.
+//
+// Deliberately EXCLUDED because they appear too often in investigation prose describing code
+// behavior or summarizing findings: add, build, commit, convert, create, delete, extract,
+// generate, patch, port, remove, replace, rewrite, update, write.
+const WRITE_INTENT_VERBS: ReadonlySet<string> = new Set([
+	"edit",
+	"fix",
+	"implement",
+	"install",
+	"migrate",
+	"modify",
+	"refactor",
+	"rename",
+	"scaffold",
+]);
+
+// Strips leading markdown list/heading markers (`#`, `*`, `-`, `>`, `1.`) and one optional
+// "Label:" prefix so "# Change\nRefactor X" and "Goal: Refactor X" both surface "Refactor".
+const IMPERATIVE_PREFIX = /^\s*(?:(?:[#*\->]+|\d+[.)])\s+)*(?:[a-zA-Z][a-zA-Z _-]*:\s+)?/;
+const FIRST_WORD = /^([a-zA-Z]+)\b/;
+
+/**
+ * Heuristic: does the assignment imperatively request file edits or state-changing commands?
+ * Scans each line's first content word (after markdown markup) against {@link WRITE_INTENT_VERBS}.
+ * Conservative by design — see {@link WRITE_INTENT_VERBS} comment for the failure-mode tradeoff.
+ */
+export function assignmentRequiresWrite(assignment: string): boolean {
+	for (const rawLine of assignment.split("\n")) {
+		const stripped = rawLine.replace(IMPERATIVE_PREFIX, "");
+		const match = stripped.match(FIRST_WORD);
+		if (!match) continue;
+		if (WRITE_INTENT_VERBS.has(match[1].toLowerCase())) return true;
+	}
+	return false;
+}

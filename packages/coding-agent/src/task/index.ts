@@ -34,6 +34,7 @@ import "../tools/review";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
+import { assignmentRequiresWrite } from "./agents";
 import { getAgent, loadAgentsForCwd } from "./discovery";
 import { runSubprocess } from "./executor";
 import { AgentOutputManager } from "./output-manager";
@@ -670,6 +671,37 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 					totalDurationMs: 0,
 				},
 			};
+		}
+
+		// Pre-dispatch read-only mismatch check. The subagent's [CAPABILITY] block also yields
+		// in this case, but only after loading its system prompt. Short-circuit clear cases here
+		// so the caller pays zero subagent tokens. Plan mode restricts every agent to a read-only
+		// tool set regardless of nominal readOnly, so it counts as read-only too.
+		const agentIsReadOnly = planModeState?.enabled === true || effectiveAgent.readOnly === true;
+		if (agentIsReadOnly) {
+			const writeIntentTasks = tasks.filter(t => assignmentRequiresWrite(t.assignment));
+			if (writeIntentTasks.length > 0) {
+				const taskIds = writeIntentTasks.map(t => `"${t.id}"`).join(", ");
+				const noun = writeIntentTasks.length === 1 ? "task" : "tasks";
+				const verb = writeIntentTasks.length === 1 ? "requires" : "require";
+				const cause =
+					planModeState?.enabled === true
+						? "plan mode restricts every agent to a read-only tool set"
+						: `agent "${agentName}" is read-only`;
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Cannot dispatch: ${cause}, but ${noun} ${taskIds} ${verb} file edits or state-changing commands. Re-dispatch with a write-capable agent (e.g. "task"). If this is a false positive, rephrase the assignment to start with an investigation verb (investigate, find, locate, analyze, summarize, review) instead of a write verb.`,
+						},
+					],
+					details: {
+						projectAgentsDir,
+						results: [],
+						totalDurationMs: 0,
+					},
+				};
+			}
 		}
 
 		let repoRoot: string | null = null;
