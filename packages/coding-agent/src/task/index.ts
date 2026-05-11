@@ -682,8 +682,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 			const writeIntentTasks = tasks.filter(t => assignmentRequiresWrite(t.assignment));
 			if (writeIntentTasks.length > 0) {
 				const taskIds = writeIntentTasks.map(t => `"${t.id}"`).join(", ");
-				const noun = writeIntentTasks.length === 1 ? "task" : "tasks";
-				const verb = writeIntentTasks.length === 1 ? "requires" : "require";
+				const subject = writeIntentTasks.length === 1 ? `task ${taskIds} requires` : `tasks ${taskIds} require`;
 				const cause =
 					planModeState?.enabled === true
 						? "plan mode restricts every agent to a read-only tool set"
@@ -692,7 +691,7 @@ export class TaskTool implements AgentTool<TSchema, TaskToolDetails, Theme> {
 					content: [
 						{
 							type: "text",
-							text: `Cannot dispatch: ${cause}, but ${noun} ${taskIds} ${verb} file edits or state-changing commands. Re-dispatch with a write-capable agent (e.g. "task"). If this is a false positive, rephrase the assignment to start with an investigation verb (investigate, find, locate, analyze, summarize, review) instead of a write verb.`,
+							text: `Cannot dispatch: ${cause}, but ${subject} file edits or state-changing commands. Re-dispatch with a write-capable agent (e.g. "task"). If this is a false positive, rephrase the assignment to start with an investigation verb (investigate, find, locate, analyze, summarize, review) instead of a write verb.`,
 						},
 					],
 					details: {

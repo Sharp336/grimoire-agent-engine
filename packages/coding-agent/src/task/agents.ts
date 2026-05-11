@@ -114,7 +114,7 @@ export function parseAgent(
 	return {
 		...fields,
 		explicitReadOnly: fields.readOnly,
-		readOnly: resolveReadOnly(fields.readOnly, fields.tools),
+		readOnly: resolveReadOnly(fields.readOnly, fields.tools, KNOWN_READ_TOOLS),
 		systemPrompt: body,
 		source,
 		filePath,
@@ -191,7 +191,7 @@ export function buildReadSafeToolSet(userReadSafeTools: readonly string[] = []):
 function resolveReadOnly(
 	explicit: boolean | undefined,
 	tools: string[] | undefined,
-	readSafeSet: ReadonlySet<string> = KNOWN_READ_TOOLS,
+	readSafeSet: ReadonlySet<string>,
 ): boolean {
 	if (explicit !== undefined) return explicit;
 	if (!tools || tools.length === 0) return false;
@@ -205,9 +205,6 @@ export function isAgentReadOnly(
 	return resolveReadOnly(agent.readOnly, agent.tools, buildReadSafeToolSet(userReadSafeTools));
 }
 
-// Two effects: re-infer readOnly against the extended allowlist (explicit frontmatter wins),
-// and append user-vouched tools to bundled agents' constrained `tools` lists so they can be
-// called without shadowing the bundled file.
 export function applyUserReadSafeTools(
 	agents: AgentDefinition[],
 	userReadSafeTools: readonly string[],
@@ -224,14 +221,6 @@ export function applyUserReadSafeTools(
 		const tools = shouldAugmentTools ? [...new Set([...agent.tools!, ...userReadSafeTools])] : agent.tools;
 		return { ...agent, readOnly, tools };
 	});
-}
-
-// Fails closed to [] for non-array or non-string-element values so a malformed config
-// disables the feature for this session rather than crashing or spreading a scalar string
-// as characters into the allowlist.
-export function getUserReadSafeTools(value: unknown): string[] {
-	if (!Array.isArray(value)) return [];
-	return value.filter((item): item is string => typeof item === "string");
 }
 
 // Verbs that, in imperative position (first word after optional markdown markup), unambiguously

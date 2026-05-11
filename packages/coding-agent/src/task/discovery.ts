@@ -17,8 +17,8 @@ import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import type { Settings } from "../config/settings";
-import { listClaudePluginRoots } from "../discovery/helpers";
-import { applyUserReadSafeTools, getUserReadSafeTools, loadBundledAgents, parseAgent } from "./agents";
+import { listClaudePluginRoots, parseArrayOrCSV } from "../discovery/helpers";
+import { applyUserReadSafeTools, loadBundledAgents, parseAgent } from "./agents";
 import type { AgentDefinition, AgentSource } from "./types";
 
 /** Result of agent discovery */
@@ -130,7 +130,7 @@ export function getAgent(agents: AgentDefinition[], name: string): AgentDefiniti
 // `discoverAgents` will silently drop the user's read-safe-tool config.
 export async function loadAgentsForCwd(cwd: string, settings: Settings, home?: string): Promise<DiscoveryResult> {
 	const result = await discoverAgents(cwd, home);
-	const userReadSafeTools = getUserReadSafeTools(settings.get("task.readSafeTools"));
+	const userReadSafeTools = parseArrayOrCSV(settings.get("task.readSafeTools")) ?? [];
 	return {
 		...result,
 		agents: applyUserReadSafeTools(result.agents, userReadSafeTools),

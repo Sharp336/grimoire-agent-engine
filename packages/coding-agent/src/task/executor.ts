@@ -283,7 +283,6 @@ export const SUBAGENT_WARNING_NULL_YIELD = "SYSTEM WARNING: Subagent called yiel
 export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
 
-// Extracted so the readOnly→[CAPABILITY] wiring is testable without spawning a real subagent.
 export interface SubagentSystemPromptInputs {
 	agent: AgentDefinition;
 	context: string | undefined;

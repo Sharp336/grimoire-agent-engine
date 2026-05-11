@@ -15,7 +15,7 @@
 
 ### Fixed
 
-- Fixed `task.readSafeTools` malformed config (non-array, scalar, mixed entries) crashing or polluting the allowlist: the three call sites route through `loadAgentsForCwd`, which validates the value via `getUserReadSafeTools` and degrades to "no user extensions" rather than `TypeError` ([#1013](https://github.com/can1357/oh-my-pi/issues/1013))
+- Fixed `task.readSafeTools` malformed config (non-array, scalar, mixed entries) crashing or polluting the allowlist: the three call sites route through `loadAgentsForCwd`, which validates the value via the shared `parseArrayOrCSV` helper and degrades to "no user extensions" rather than `TypeError` ([#1013](https://github.com/can1357/oh-my-pi/issues/1013))
 
 ## [14.9.9] - 2026-05-12
 

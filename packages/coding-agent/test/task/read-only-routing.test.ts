@@ -5,7 +5,6 @@ import {
 	applyUserReadSafeTools,
 	assignmentRequiresWrite,
 	buildReadSafeToolSet,
-	getUserReadSafeTools,
 	isAgentReadOnly,
 	loadBundledAgents,
 } from "../../src/task/agents";
@@ -145,22 +144,6 @@ describe("bundled agents and task tool description", () => {
 	it("carries a routing rule that references the [read-only] tag", () => {
 		expect(description).toMatch(/`\[read-only\]`/);
 		expect(description).toMatch(/write-capable agent/);
-	});
-});
-
-describe("getUserReadSafeTools", () => {
-	it("returns string arrays as-is and filters non-string entries", () => {
-		expect(getUserReadSafeTools(["my_tool", "other"])).toEqual(["my_tool", "other"]);
-		expect(getUserReadSafeTools(["read", 42, null, "ok"])).toEqual(["read", "ok"]);
-		expect(getUserReadSafeTools([])).toEqual([]);
-	});
-
-	it.each([
-		["string scalar", "my_tool"],
-		["null", null],
-		["object", { my_tool: true }],
-	])("returns [] for non-array config: %s", (_label, value) => {
-		expect(getUserReadSafeTools(value)).toEqual([]);
 	});
 });
 
