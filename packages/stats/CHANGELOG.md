@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added separate input-token and output-token totals to the overview dashboard cards.
+
 ### Fixed
 
 - Fixed `omp stats` in compiled binaries by using the serial sync path instead of spawning a raw file-asset worker that cannot import bundled parser code.
