@@ -1160,6 +1160,7 @@ omp <command> [args] [flags]
 | `--no-rules`                          | Disable rules discovery and loading                                |
 | `--allow-home`                        | Allow starting from home dir without auto-chdir                    |
 | `--no-title`                          | Disable automatic session title generation                         |
+| `--auto-approve`, `--yolo`            | Auto-approve all destructive tool operations (bypass prompts)      |
 | `--export <file> [output]`            | Export session to HTML                                             |
 | `--help`, `-h`                        | Show help                                                          |
 | `--version`, `-v`                     | Show version                                                       |

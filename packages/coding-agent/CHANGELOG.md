@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added per-tool approval policies with `--auto-approve` (alias `--yolo`) CLI flag to bypass confirmation prompts
+- Added `tools.approval.<toolName>` configuration for per-tool approval policies (`allow`, `deny`, or `prompt`)
+- Added action-based exception system for fine-grained approval control (e.g., LSP readonly actions, bash critical patterns)
+- Added built-in approval defaults: read-only tools auto-allowed; destructive tools (bash, write, edit, ast_edit) require approval
+- Added safety overrides: critical bash patterns (e.g., `rm -rf /`, `sudo rm`, fork bombs) always prompt even with user allowlist
+- Added non-interactive mode error with actionable guidance when approval needed but UI unavailable
+
 ## [14.9.9] - 2026-05-12
 
 ### Added
