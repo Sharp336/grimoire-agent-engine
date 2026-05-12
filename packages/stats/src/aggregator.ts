@@ -18,10 +18,12 @@ import {
 	initDb,
 	insertMessageStats,
 	insertUserMessageStats,
+	markUserMessageLinksRepairComplete,
+	markUserMessagesBackfillComplete,
 	setFileOffset,
 	updateUserMessageLinks,
 } from "./db";
-import { getSessionEntry, listAllSessionFiles, type ParseSessionResult } from "./parser";
+import { getSessionEntry, listAllSessionFiles, type ParseSessionResult, parseSessionFile } from "./parser";
 import type { SyncWorkerRequest, SyncWorkerResponse } from "./sync-worker";
 // `with { type: "file" }` resolves to the worker's absolute path at runtime
 // (dev) and survives bundling (the asset is copied alongside the build).
@@ -63,12 +65,15 @@ export interface SyncOptions {
 	/**
 	 * Worker pool size. Defaults to a sensible value derived from the host
 	 * (capped to avoid drowning a small machine in workers). Set to `1` to
-	 * force serial parsing without spawning workers.
+	 * force serial parsing without spawning workers. Compiled binaries also
+	 * use the serial path because Bun loads file-asset workers as raw files.
 	 */
 	workers?: number;
 }
 
 function defaultWorkerCount(): number {
+	if (isCompiledBinary()) return 1;
+
 	// `navigator.hardwareConcurrency` is the portable answer in Bun; fall
 	// back to a small fixed pool if it's somehow unavailable.
 	const hw = typeof navigator !== "undefined" ? (navigator.hardwareConcurrency ?? 0) : 0;
@@ -119,27 +124,109 @@ function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<Par
 	return promise;
 }
 
+interface PendingSessionFile {
+	sessionFile: string;
+	lastModified: number;
+	fromOffset: number;
+}
+
+async function getPendingSessionFile(sessionFile: string): Promise<PendingSessionFile | null> {
+	let fileStats: fs.Stats;
+	try {
+		fileStats = await fs.promises.stat(sessionFile);
+	} catch {
+		return null;
+	}
+
+	const lastModified = fileStats.mtimeMs;
+	const stored = getFileOffset(sessionFile);
+	if (stored && stored.lastModified >= lastModified) return null;
+
+	return {
+		sessionFile,
+		lastModified,
+		fromOffset: stored?.offset ?? 0,
+	};
+}
+
+function isCompiledBinary(): boolean {
+	if (process.env.PI_COMPILED) return true;
+	if (import.meta.url.includes("$bunfs")) return true;
+	if (import.meta.url.includes("~BUN")) return true;
+	if (import.meta.url.includes("%7EBUN")) return true;
+	return false;
+}
+
+function markSyncBackfillsComplete(): void {
+	markUserMessagesBackfillComplete();
+	markUserMessageLinksRepairComplete();
+}
+
+async function syncAllSessionsSerial(
+	files: string[],
+	opts?: SyncOptions,
+): Promise<{ processed: number; files: number }> {
+	let totalProcessed = 0;
+	let filesProcessed = 0;
+	let completed = 0;
+
+	const report = (sessionFile: string) => {
+		completed++;
+		opts?.onProgress?.({
+			current: completed,
+			total: files.length,
+			processed: totalProcessed,
+			sessionFile,
+		});
+	};
+
+	for (const sessionFile of files) {
+		const pending = await getPendingSessionFile(sessionFile);
+		if (pending) {
+			const result = await parseSessionFile(pending.sessionFile, pending.fromOffset);
+			const inserted = applyParseResult(pending.sessionFile, pending.lastModified, result);
+			if (inserted > 0) {
+				totalProcessed += inserted;
+				filesProcessed++;
+			}
+		}
+		report(sessionFile);
+	}
+
+	return { processed: totalProcessed, files: filesProcessed };
+}
+
 /**
  * Sync all session files to the database.
  *
- * Parsing fans out across a worker pool (one in-flight job per worker)
- * while DB writes and offset bookkeeping stay on the calling thread so the
- * single SQLite handle stays uncontended. `onProgress` fires once per
- * completed file (skipped files included so the bar walks at a steady
- * rate).
+ * Parsing normally fans out across a worker pool (one in-flight job per
+ * worker) while DB writes and offset bookkeeping stay on the calling thread
+ * so the single SQLite handle stays uncontended. When workers are disabled
+ * or unavailable in compiled binaries, parsing runs serially on the calling
+ * thread. `onProgress` fires once per completed file (skipped files included
+ * so the bar walks at a steady rate).
  */
 export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: number; files: number }> {
 	await initDb();
 
 	const files = await listAllSessionFiles();
-	if (files.length === 0) return { processed: 0, files: 0 };
+	if (files.length === 0) {
+		markSyncBackfillsComplete();
+		return { processed: 0, files: 0 };
+	}
+
+	const poolSize = Math.max(1, Math.min(files.length, opts?.workers ?? defaultWorkerCount()));
+	if (poolSize === 1 || isCompiledBinary()) {
+		const result = await syncAllSessionsSerial(files, opts);
+		markSyncBackfillsComplete();
+		return result;
+	}
 
 	let totalProcessed = 0;
 	let filesProcessed = 0;
 	let completed = 0;
 	let cursor = 0;
 
-	const poolSize = Math.max(1, Math.min(files.length, opts?.workers ?? defaultWorkerCount()));
 	const handles: WorkerHandle[] = [];
 	for (let i = 0; i < poolSize; i++) handles.push(spawnWorker());
 
@@ -159,23 +246,14 @@ export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: 
 			if (idx >= files.length) return;
 			const sessionFile = files[idx];
 
-			let fileStats: fs.Stats;
-			try {
-				fileStats = await fs.promises.stat(sessionFile);
-			} catch {
-				report(sessionFile);
-				continue;
-			}
-			const lastModified = fileStats.mtimeMs;
-			const stored = getFileOffset(sessionFile);
-			if (stored && stored.lastModified >= lastModified) {
+			const pending = await getPendingSessionFile(sessionFile);
+			if (!pending) {
 				report(sessionFile);
 				continue;
 			}
 
-			const fromOffset = stored?.offset ?? 0;
-			const result = await dispatch(handle, { sessionFile, fromOffset });
-			const inserted = applyParseResult(sessionFile, lastModified, result);
+			const result = await dispatch(handle, { sessionFile: pending.sessionFile, fromOffset: pending.fromOffset });
+			const inserted = applyParseResult(pending.sessionFile, pending.lastModified, result);
 			if (inserted > 0) {
 				totalProcessed += inserted;
 				filesProcessed++;
@@ -190,6 +268,7 @@ export async function syncAllSessions(opts?: SyncOptions): Promise<{ processed: 
 		for (const handle of handles) handle.worker.terminate();
 	}
 
+	markSyncBackfillsComplete();
 	return { processed: totalProcessed, files: filesProcessed };
 }
 

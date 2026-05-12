@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `omp stats` in compiled binaries by using the serial sync path instead of spawning a raw file-asset worker that cannot import bundled parser code.
+- Fixed behavior backfills after failed compiled-binary sync attempts by marking the backfill sentinel only after a successful full sync.
+
 ## [14.9.7] - 2026-05-12
 ### Breaking Changes
 
