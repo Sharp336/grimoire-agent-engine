@@ -136,8 +136,22 @@ If `skills.enableSkillCommands` is true, interactive mode registers one slash co
 
 - reads the skill file directly from `filePath`
 - strips frontmatter
-- injects skill body as a follow-up custom message
+- injects skill body as a custom message
+- defaults to **follow-up** delivery; pass `--steer` to interrupt the current turn, or `--follow-up` to be explicit
+- the mode flag is position-independent and is stripped before `args` are forwarded
 - appends metadata (`Skill: <path>`, optional `User: <args>`)
+
+The mode flag only affects delivery while the agent is **streaming**, since `streamingBehavior` is only consulted on the streaming path of `promptCustomMessage`. When the agent is idle, the message prompts normally regardless of which mode flag was given.
+
+Examples:
+
+```text
+/skill:debugging                          → followUp (default)
+/skill:debugging --steer                  → steer (interrupt)
+/skill:debugging --steer focus on hooks   → steer; args="focus on hooks"
+/skill:debugging focus --follow-up        → followUp; args="focus"
+/skill:debugging --steer --follow-up      → followUp (last-occurrence wins)
+```
 
 ## `skill://` URL behavior
 

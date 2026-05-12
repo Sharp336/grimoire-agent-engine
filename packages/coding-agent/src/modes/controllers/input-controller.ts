@@ -244,12 +244,13 @@ export class InputController {
 			if (text.startsWith("/skill:")) {
 				const spaceIndex = text.indexOf(" ");
 				const commandName = spaceIndex === -1 ? text.slice(1) : text.slice(1, spaceIndex);
-				const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
+				const rawArgs = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
 				const skillPath = this.ctx.skillCommands?.get(commandName);
 				if (skillPath) {
 					this.ctx.editor.addToHistory(text);
 					this.ctx.editor.setText("");
 					try {
+						const { args, streamingBehavior } = parseSkillInvocationArgs(rawArgs);
 						const content = await Bun.file(skillPath).text();
 						const body = content.replace(/^---\n[\s\S]*?\n---\n/, "").trim();
 						const metaLines = [`Skill: ${skillPath}`];
@@ -272,7 +273,7 @@ export class InputController {
 								details,
 								attribution: "user",
 							},
-							{ streamingBehavior: "followUp" },
+							{ streamingBehavior },
 						);
 					} catch (err) {
 						this.ctx.showError(`Failed to load skill: ${err instanceof Error ? err.message : String(err)}`);
@@ -800,4 +801,43 @@ export class InputController {
 			});
 		}
 	}
+}
+
+const STEER_FLAGS: ReadonlySet<string> = new Set(["--steer"]);
+const FOLLOWUP_FLAGS: ReadonlySet<string> = new Set(["--follow-up", "--followup"]);
+
+/**
+ * Parse the streaming-behavior flag out of a `/skill:<name>` argument string.
+ *
+ * Recognized tokens:
+ *   - `--steer`               -> streamingBehavior = "steer"
+ *   - `--follow-up`           -> streamingBehavior = "followUp"
+ *   - `--followup` (alias)    -> streamingBehavior = "followUp"
+ *
+ * Flag is position-independent, stripped from the returned `args`, and
+ * last-occurrence wins if multiple are given. Defaults to `"followUp"` when
+ * no flag is present, preserving prior behavior.
+ */
+function parseSkillInvocationArgs(rawArgs: string): {
+	args: string;
+	streamingBehavior: "steer" | "followUp";
+} {
+	if (!rawArgs) {
+		return { args: "", streamingBehavior: "followUp" };
+	}
+	const tokens = rawArgs.split(/\s+/);
+	let mode: "steer" | "followUp" = "followUp";
+	const rest: string[] = [];
+	for (const token of tokens) {
+		if (STEER_FLAGS.has(token)) {
+			mode = "steer";
+			continue;
+		}
+		if (FOLLOWUP_FLAGS.has(token)) {
+			mode = "followUp";
+			continue;
+		}
+		rest.push(token);
+	}
+	return { args: rest.join(" "), streamingBehavior: mode };
 }
