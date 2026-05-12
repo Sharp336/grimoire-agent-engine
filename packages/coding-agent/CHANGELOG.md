@@ -14,6 +14,7 @@
 - Added dedicated rendering support for `search`, `recipe`, and `irc` tool calls in transcript exports
 - Added a collapsible `Available Tools` section with a tool count and chip-style compact tool names
 - Added macOS power assertion settings `power.preventIdleSleep`, `power.preventSystemSleep`, `power.declareUserActive`, and `power.preventDisplaySleep` so users can control what types of sleep are blocked during sessions
+- Added built-in `/goal` command and `get_goal`/`update_goal` tools for persistent autonomous goals — the agent keeps working toward a long-running objective until complete, paused, cleared, or token-budget-limited
 
 ### Changed
 
