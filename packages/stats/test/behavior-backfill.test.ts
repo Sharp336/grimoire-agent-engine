@@ -5,7 +5,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getAgentDir, getStatsDbPath, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 import { syncAllSessions } from "../src/aggregator";
-import { closeDb, getBehaviorOverall, initDb } from "../src/db";
+import { closeDb, getBehaviorOverall, getFileOffset, initDb } from "../src/db";
 
 const originalConfigDir = process.env.PI_CONFIG_DIR;
 const originalAgentDir = getAgentDir();
@@ -96,5 +96,24 @@ describe("behavior backfill", () => {
 		expect(synced.files).toBe(1);
 		expect(behavior.totalMessages).toBe(1);
 		expect(behavior.totalYelling).toBe(1);
+	});
+
+	it("does not re-wipe existing progress when the backfill sentinel is already pending", async () => {
+		const sessionFile = await writeSessionFile();
+		await syncAllSessions();
+		expect(getBehaviorOverall(null).totalMessages).toBe(1);
+		expect(getFileOffset(sessionFile)).not.toBeNull();
+		closeDb();
+
+		const database = new Database(getStatsDbPath());
+		database.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)").run("user_messages_v5", "pending");
+		database
+			.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
+			.run("user_message_links_v1", "pending");
+		database.close();
+
+		await initDb();
+		expect(getBehaviorOverall(null).totalMessages).toBe(1);
+		expect(getFileOffset(sessionFile)).not.toBeNull();
 	});
 });

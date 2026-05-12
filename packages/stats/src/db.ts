@@ -35,9 +35,12 @@ interface CostBackfillRow {
 let db: Database | null = null;
 
 const BACKFILL_COMPLETE = "complete";
+const BACKFILL_PENDING = "pending";
 const USER_MESSAGES_BACKFILL_KEY = "user_messages_v5";
 const USER_MESSAGE_LINKS_REPAIR_KEY = "user_message_links_v1";
-
+function shouldResetBackfill(value: string | undefined): boolean {
+	return value !== BACKFILL_COMPLETE && value !== BACKFILL_PENDING;
+}
 /**
  * Initialize the database and create tables.
  */
@@ -748,13 +751,13 @@ function backfillUserMessages(database: Database): void {
 	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(USER_MESSAGES_BACKFILL_KEY) as
 		| { value: string }
 		| undefined;
-	if (row?.value === BACKFILL_COMPLETE) return;
+	if (!shouldResetBackfill(row?.value)) return;
 
 	database.exec("DELETE FROM user_messages");
 	database.exec("DELETE FROM file_offsets");
 	database
 		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-		.run(USER_MESSAGES_BACKFILL_KEY, "pending");
+		.run(USER_MESSAGES_BACKFILL_KEY, BACKFILL_PENDING);
 }
 
 /**
@@ -769,12 +772,12 @@ function repairUserMessageLinks(database: Database): void {
 	const row = database.prepare("SELECT value FROM meta WHERE key = ?").get(USER_MESSAGE_LINKS_REPAIR_KEY) as
 		| { value: string }
 		| undefined;
-	if (row?.value === BACKFILL_COMPLETE) return;
+	if (!shouldResetBackfill(row?.value)) return;
 
 	database.exec("DELETE FROM file_offsets");
 	database
 		.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)")
-		.run(USER_MESSAGE_LINKS_REPAIR_KEY, "pending");
+		.run(USER_MESSAGE_LINKS_REPAIR_KEY, BACKFILL_PENDING);
 }
 
 export function markUserMessagesBackfillComplete(): void {
