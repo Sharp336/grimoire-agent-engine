@@ -2,7 +2,6 @@ import * as fs from "node:fs";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatCount, getProjectDir } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
 import { settings } from "../../config/settings";
 import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "../../config/settings-schema";
 import { theme } from "../../modes/theme/theme";
@@ -224,8 +223,14 @@ export class StatusLineComponent implements Component {
 
 		const stalePr = this.#cachedPr;
 
-		// Don't look up if no branch, detached HEAD, default branch, or already in flight
-		if (!branch || branch === "detached" || this.#isDefaultBranch(branch) || this.#prLookupInFlight) {
+		// Don't look up if no branch or detached HEAD — no PR context to show.
+		// Default branch: never show a PR segment; return null immediately, not stale
+		// (stale would be from the previous feature branch and is always wrong here).
+		if (!branch || branch === "detached" || this.#isDefaultBranch(branch)) {
+			return null;
+		}
+		// Already in flight: keep stale visible to avoid flicker
+		if (this.#prLookupInFlight) {
 			return stalePr ?? null;
 		}
 
@@ -246,18 +251,29 @@ export class StatusLineComponent implements Component {
 				}
 			};
 			try {
-				// Requires `gh repo set-default` to be configured; fails gracefully if not
-				const result = await $`gh pr view --json number,url`.quiet().nothrow();
-				if (result.exitCode !== 0) {
-					setCachedPr(null);
-					return;
+				// GH_HOST must be fully removed so gh falls back to matching remotes
+				// against its configured hosts. Setting it to empty is not enough.
+				// Bun Shell .env() can only override, not delete, so we spawn directly.
+				// gh pr view correctly resolves cross-fork PRs without extra logic.
+				const ghEnv = { ...process.env };
+				delete ghEnv.GH_HOST;
+				const prViewProc = Bun.spawn(["gh", "pr", "view", "--json", "number,url"], {
+					env: ghEnv,
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				await prViewProc.exited;
+				if (prViewProc.exitCode === 0) {
+					const pr = JSON.parse(await new Response(prViewProc.stdout).text()) as {
+						number: number;
+						url: string;
+					};
+					if (typeof pr.number === "number") {
+						setCachedPr({ number: pr.number, url: pr.url });
+						return;
+					}
 				}
-				const pr = JSON.parse(result.stdout.toString()) as { number: number; url: string };
-				if (typeof pr.number === "number") {
-					setCachedPr({ number: pr.number, url: pr.url });
-				} else {
-					setCachedPr(null);
-				}
+				setCachedPr(null);
 			} catch {
 				setCachedPr(null);
 			} finally {
