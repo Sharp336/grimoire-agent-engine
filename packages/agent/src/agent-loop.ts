@@ -5,6 +5,7 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
+	type AssistantMessageEventStream,
 	type Context,
 	EventStream,
 	streamSimple,
@@ -19,7 +20,7 @@ import {
 	isHarmonyLeakMitigationTarget,
 	signalListLabel,
 } from "./harmony-leak";
-import { endSpan, markSpanError, setSpanAttributes, startSpan } from "./otel";
+import { endSpan, markSpanError, runInActiveSpan, setSpanAttributes, startSpan } from "./otel";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -498,122 +499,126 @@ async function streamAssistantResponse(
 		return msg;
 	};
 
-	let response: Awaited<ReturnType<typeof streamFunction>>;
-	try {
-		response = await streamFunction(config.model, llmContext, {
-			...config,
-			apiKey: resolvedApiKey,
-			metadata: resolvedMetadata,
-			toolChoice: dynamicToolChoice ?? config.toolChoice,
-			reasoning: dynamicReasoning ?? config.reasoning,
-			temperature:
-				harmonyRetryAttempt > 0 && config.temperature !== undefined
-					? config.temperature + 0.05
-					: config.temperature,
-			signal: requestSignal,
-		});
-	} catch (err) {
-		endSpan(llmSpan, err);
-		throw err;
-	}
-
-	let partialMessage: AssistantMessage | null = null;
-	let addedPartial = false;
-
-	const responseIterator = response[Symbol.asyncIterator]();
-
-	// Set up a single abort race: register the abort listener once for the whole
-	// stream and reuse the same race promise for every iterator.next() instead of
-	// allocating Promise.withResolvers and add/removeEventListener per event.
-	let abortRacePromise: Promise<typeof ABORTED> | undefined;
-	let detachAbortListener: (() => void) | undefined;
-	if (requestSignal) {
-		if (requestSignal.aborted) {
-			return finishLlmSpan(emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream));
+	return runInActiveSpan(llmSpan, async (): Promise<AssistantMessage> => {
+		let response: AssistantMessageEventStream;
+		try {
+			response = await streamFunction(config.model, llmContext, {
+				...config,
+				apiKey: resolvedApiKey,
+				metadata: resolvedMetadata,
+				toolChoice: dynamicToolChoice ?? config.toolChoice,
+				reasoning: dynamicReasoning ?? config.reasoning,
+				temperature:
+					harmonyRetryAttempt > 0 && config.temperature !== undefined
+						? config.temperature + 0.05
+						: config.temperature,
+				signal: requestSignal,
+			});
+		} catch (err) {
+			endSpan(llmSpan, err);
+			throw err;
 		}
-		const { promise, resolve } = Promise.withResolvers<typeof ABORTED>();
-		const onAbort = () => resolve(ABORTED);
-		requestSignal.addEventListener("abort", onAbort, { once: true });
-		abortRacePromise = promise;
-		detachAbortListener = () => requestSignal.removeEventListener("abort", onAbort);
-	}
 
-	try {
-		while (true) {
-			let next: IteratorResult<AssistantMessageEvent>;
-			if (abortRacePromise) {
-				const result = await Promise.race([responseIterator.next(), abortRacePromise]);
-				if (result === ABORTED) {
-					responseIterator.return?.()?.catch(() => {});
-					return finishLlmSpan(emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream));
-				}
-				next = result;
-			} else {
-				next = await responseIterator.next();
-			}
-			if (requestSignal?.aborted) {
+		let partialMessage: AssistantMessage | null = null;
+		let addedPartial = false;
+
+		const responseIterator = response[Symbol.asyncIterator]();
+
+		// Set up a single abort race: register the abort listener once for the whole
+		// stream and reuse the same race promise for every iterator.next() instead of
+		// allocating Promise.withResolvers and add/removeEventListener per event.
+		let abortRacePromise: Promise<typeof ABORTED> | undefined;
+		let detachAbortListener: (() => void) | undefined;
+		if (requestSignal) {
+			if (requestSignal.aborted) {
 				return finishLlmSpan(emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream));
 			}
-			if (next.done) break;
+			const { promise, resolve } = Promise.withResolvers<typeof ABORTED>();
+			const onAbort = () => resolve(ABORTED);
+			requestSignal.addEventListener("abort", onAbort, { once: true });
+			abortRacePromise = promise;
+			detachAbortListener = () => requestSignal.removeEventListener("abort", onAbort);
+		}
 
-			const event = next.value;
+		try {
+			while (true) {
+				let next: IteratorResult<AssistantMessageEvent>;
+				if (abortRacePromise) {
+					const result = await Promise.race([responseIterator.next(), abortRacePromise]);
+					if (result === ABORTED) {
+						responseIterator.return?.()?.catch(() => {});
+						return finishLlmSpan(
+							emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream),
+						);
+					}
+					next = result;
+				} else {
+					next = await responseIterator.next();
+				}
+				if (requestSignal?.aborted) {
+					return finishLlmSpan(emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream));
+				}
+				if (next.done) break;
 
-			switch (event.type) {
-				case "start":
-					partialMessage = event.partial;
-					context.messages.push(partialMessage);
-					addedPartial = true;
-					stream.push({ type: "message_start", message: { ...partialMessage } });
-					break;
+				const event = next.value;
 
-				case "text_start":
-				case "text_delta":
-				case "text_end":
-				case "thinking_start":
-				case "thinking_delta":
-				case "thinking_end":
-				case "toolcall_start":
-				case "toolcall_delta":
-				case "toolcall_end":
-					if (partialMessage) {
+				switch (event.type) {
+					case "start":
 						partialMessage = event.partial;
-						context.messages[context.messages.length - 1] = partialMessage;
-						config.onAssistantMessageEvent?.(partialMessage, event);
-						if (signal?.aborted) {
-							continue;
-						}
-						stream.push({
-							type: "message_update",
-							assistantMessageEvent: event,
-							message: { ...partialMessage },
-						});
-					}
-					break;
+						context.messages.push(partialMessage);
+						addedPartial = true;
+						stream.push({ type: "message_start", message: { ...partialMessage } });
+						break;
 
-				case "done":
-				case "error": {
-					const finalMessage = await response.result();
-					if (addedPartial) {
-						context.messages[context.messages.length - 1] = finalMessage;
-					} else {
-						context.messages.push(finalMessage);
+					case "text_start":
+					case "text_delta":
+					case "text_end":
+					case "thinking_start":
+					case "thinking_delta":
+					case "thinking_end":
+					case "toolcall_start":
+					case "toolcall_delta":
+					case "toolcall_end":
+						if (partialMessage) {
+							partialMessage = event.partial;
+							context.messages[context.messages.length - 1] = partialMessage;
+							config.onAssistantMessageEvent?.(partialMessage, event);
+							if (signal?.aborted) {
+								continue;
+							}
+							stream.push({
+								type: "message_update",
+								assistantMessageEvent: event,
+								message: { ...partialMessage },
+							});
+						}
+						break;
+
+					case "done":
+					case "error": {
+						const finalMessage = await response.result();
+						if (addedPartial) {
+							context.messages[context.messages.length - 1] = finalMessage;
+						} else {
+							context.messages.push(finalMessage);
+						}
+						if (!addedPartial) {
+							stream.push({ type: "message_start", message: { ...finalMessage } });
+						}
+						stream.push({ type: "message_end", message: finalMessage });
+						return finishLlmSpan(finalMessage);
 					}
-					if (!addedPartial) {
-						stream.push({ type: "message_start", message: { ...finalMessage } });
-					}
-					stream.push({ type: "message_end", message: finalMessage });
-					return finishLlmSpan(finalMessage);
 				}
 			}
+		} catch (err) {
+			endSpan(llmSpan, err);
+			throw err;
+		} finally {
+			detachAbortListener?.();
 		}
-	} catch (err) {
-		endSpan(llmSpan, err);
-		throw err;
-	} finally {
-		detachAbortListener?.();
-	}
 
-	return finishLlmSpan(await response.result());
+		return finishLlmSpan(await response.result());
+	});
 }
 
 function emitAbortedAssistantMessage(
@@ -802,7 +807,7 @@ async function executeToolCalls(
 			intent: toolCall.intent,
 		});
 
-		let result: AgentToolResult<any>;
+		let result!: AgentToolResult<any>;
 		let isError = false;
 		let caughtError: unknown;
 		const toolSpan = startSpan(otelEnabled, "agent.tool_execution", {
@@ -810,71 +815,104 @@ async function executeToolCalls(
 			"tool.call_id": toolCall.id,
 		});
 
-		try {
-			if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
-
-			let effectiveArgs: Record<string, unknown>;
+		await runInActiveSpan(toolSpan, async () => {
 			try {
-				effectiveArgs = validateToolArguments(tool, { ...toolCall, arguments: argsForExecution });
-			} catch (validationError) {
-				if (tool.lenientArgValidation) {
-					effectiveArgs = argsForExecution;
-				} else {
-					throw validationError;
-				}
-			}
+				if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
 
-			if (beforeToolCall) {
-				const beforeResult = await beforeToolCall(
-					{
-						assistantMessage,
-						toolCall,
-						args: effectiveArgs,
-						context: currentContext,
+				let effectiveArgs: Record<string, unknown>;
+				try {
+					effectiveArgs = validateToolArguments(tool, { ...toolCall, arguments: argsForExecution });
+				} catch (validationError) {
+					if (tool.lenientArgValidation) {
+						effectiveArgs = argsForExecution;
+					} else {
+						throw validationError;
+					}
+				}
+
+				if (beforeToolCall) {
+					const beforeResult = await beforeToolCall(
+						{
+							assistantMessage,
+							toolCall,
+							args: effectiveArgs,
+							context: currentContext,
+						},
+						toolSignal,
+					);
+					if (beforeResult?.block) {
+						throw new Error(beforeResult.reason || "Tool execution was blocked");
+					}
+				}
+				// Reflect post-hook args so emitted tool results / afterToolCall see what actually executed.
+				record.args = effectiveArgs;
+
+				const toolContext = getToolContext
+					? getToolContext({
+							batchId,
+							index,
+							total: toolCalls.length,
+							toolCalls: toolCallInfos,
+						})
+					: undefined;
+				const rawResult = await tool.execute(
+					toolCall.id,
+					transformToolCallArguments ? transformToolCallArguments(effectiveArgs, toolCall.name) : effectiveArgs,
+					tool.nonAbortable ? undefined : toolSignal,
+					partialResult => {
+						stream.push({
+							type: "tool_execution_update",
+							toolCallId: toolCall.id,
+							toolName: toolCall.name,
+							args: effectiveArgs,
+							partialResult: coerceToolResult(partialResult).result,
+						});
 					},
-					toolSignal,
+					toolContext,
 				);
-				if (beforeResult?.block) {
-					throw new Error(beforeResult.reason || "Tool execution was blocked");
+				const coerced = coerceToolResult(rawResult);
+				result = coerced.result;
+				if (coerced.malformed || result.isError) isError = true;
+			} catch (e) {
+				result = {
+					content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
+					details: {},
+				};
+				isError = true;
+				caughtError = e;
+			}
+
+			if (afterToolCall) {
+				try {
+					const after = await afterToolCall(
+						{
+							assistantMessage,
+							toolCall,
+							args: record.args,
+							result,
+							isError,
+							context: currentContext,
+						},
+						toolSignal,
+					);
+					if (after) {
+						result = {
+							content: after.content ?? result.content,
+							details: after.details ?? result.details,
+							isError: after.isError ?? result.isError,
+						};
+						isError = after.isError ?? isError;
+					}
+				} catch (e) {
+					result = {
+						content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
+						details: {},
+					};
+					isError = true;
+					caughtError = e;
 				}
 			}
-			// Reflect post-hook args so emitted tool results / afterToolCall see what actually executed.
-			record.args = effectiveArgs;
-
-			const toolContext = getToolContext
-				? getToolContext({
-						batchId,
-						index,
-						total: toolCalls.length,
-						toolCalls: toolCallInfos,
-					})
-				: undefined;
-			const rawResult = await tool.execute(
-				toolCall.id,
-				transformToolCallArguments ? transformToolCallArguments(effectiveArgs, toolCall.name) : effectiveArgs,
-				tool.nonAbortable ? undefined : toolSignal,
-				partialResult => {
-					stream.push({
-						type: "tool_execution_update",
-						toolCallId: toolCall.id,
-						toolName: toolCall.name,
-						args: effectiveArgs,
-						partialResult: coerceToolResult(partialResult).result,
-					});
-				},
-				toolContext,
-			);
-			const coerced = coerceToolResult(rawResult);
-			result = coerced.result;
-			if (coerced.malformed || result.isError) isError = true;
-		} catch (e) {
-			result = {
-				content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-				details: {},
-			};
-			isError = true;
-			caughtError = e;
-		}
+		});
 
 		// Single span-close site. A thrown error gets recordException +
 		// ERROR status via endSpan(span, err). A non-throwing isError (tool
@@ -890,36 +928,6 @@ async function executeToolCalls(
 				markSpanError(toolSpan, message);
 			}
 			endSpan(toolSpan);
-		}
-
-		if (afterToolCall) {
-			try {
-				const after = await afterToolCall(
-					{
-						assistantMessage,
-						toolCall,
-						args: record.args,
-						result,
-						isError,
-						context: currentContext,
-					},
-					toolSignal,
-				);
-				if (after) {
-					result = {
-						content: after.content ?? result.content,
-						details: after.details ?? result.details,
-						isError: after.isError ?? result.isError,
-					};
-					isError = after.isError ?? isError;
-				}
-			} catch (e) {
-				result = {
-					content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-					details: {},
-				};
-				isError = true;
-			}
 		}
 
 		if (interruptState.triggered) {

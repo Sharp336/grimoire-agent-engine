@@ -10,7 +10,7 @@
  * Span naming and attributes follow the OpenTelemetry GenAI semantic
  * conventions (https://opentelemetry.io/docs/specs/semconv/gen-ai/).
  */
-import { type Attributes, type Span, SpanStatusCode, type Tracer, trace } from "@opentelemetry/api";
+import { type Attributes, context, type Span, SpanStatusCode, type Tracer, trace } from "@opentelemetry/api";
 
 const TRACER_NAME = "@oh-my-pi/pi-agent-core";
 
@@ -59,4 +59,18 @@ export function setSpanAttributes(span: Span | undefined, attributes: Attributes
 export function markSpanError(span: Span | undefined, message: string): void {
 	if (!span) return;
 	span.setStatus({ code: SpanStatusCode.ERROR, message });
+}
+
+/**
+ * Run `fn` with `span` activated on the OTEL context. Spans created downstream
+ * (provider HTTP clients, MCP tools, user code) attach as children. No-op when
+ * `span` is undefined.
+ *
+ * Required because `tracer.startSpan` creates the span object but does not
+ * activate it — without this wrapper downstream spans attach to whatever
+ * context was active before and the parent linkage we advertise is lost.
+ */
+export function runInActiveSpan<T>(span: Span | undefined, fn: () => Promise<T>): Promise<T> {
+	if (!span) return fn();
+	return context.with(trace.setSpan(context.active(), span), fn);
 }
