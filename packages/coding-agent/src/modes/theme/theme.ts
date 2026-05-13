@@ -290,7 +290,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"thinking.low": "◑ low",
 	"thinking.medium": "◒ med",
 	"thinking.high": "◕ high",
-	"thinking.xhigh": "◉ xhi",
+	"thinking.xhigh": "◉ xhigh",
 	// Checkboxes
 	"checkbox.checked": "☑",
 	"checkbox.unchecked": "☐",
@@ -535,8 +535,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"thinking.medium": "\u{F192} med",
 	// pick: 🤯 high | alt:  high  high
 	"thinking.high": "\u{F111} high",
-	// pick: 🧠 xhi | alt:  xhi  xhi
-	"thinking.xhigh": "\u{F06D} xhi",
+	// pick: 🧠 xhigh | alt:  xhigh  xhigh
+	"thinking.xhigh": "\u{F06D} xhigh",
 	// Checkboxes
 	// pick:  | alt:  
 	"checkbox.checked": "\uf14a",
@@ -704,7 +704,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"thinking.low": "[low]",
 	"thinking.medium": "[med]",
 	"thinking.high": "[high]",
-	"thinking.xhigh": "[xhi]",
+	"thinking.xhigh": "[xhigh]",
 	// Checkboxes
 	"checkbox.checked": "[x]",
 	"checkbox.unchecked": "[ ]",

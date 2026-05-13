@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed the status-line thinking-level label for `xhigh` from `xhi` to `xhigh` across the unicode, nerd, and ASCII symbol presets. The 3-char abbreviation was ambiguous (`xhi` is not a recognizable shorthand for `xhigh`), and the status line has the column budget for the extra two characters.
+
 ## [14.9.9] - 2026-05-12
 
 ### Added
