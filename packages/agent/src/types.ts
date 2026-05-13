@@ -201,6 +201,26 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined> | AfterToolCallResult | undefined;
+
+	/**
+	 * Experimental opt-in features. Subject to change; not covered by semver
+	 * stability guarantees.
+	 */
+	experimental?: {
+		/**
+		 * Emit OpenTelemetry spans for LLM calls and tool executions. When
+		 * unset (default) the agent loop performs no tracer lookups and adds
+		 * no runtime overhead. When `true`, the loop opens spans via the
+		 * global `@opentelemetry/api` tracer — these are no-ops if the host
+		 * has not registered an OTEL SDK, so enabling the flag without an
+		 * SDK is safe.
+		 *
+		 * Span hierarchy:
+		 *   agent.llm_call     (gen_ai.* attributes per OTEL GenAI semconv)
+		 *   agent.tool_execution
+		 */
+		openTelemetry?: boolean;
+	};
 }
 
 /**

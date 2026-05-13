@@ -244,6 +244,21 @@ export interface CreateAgentSessionOptions {
 
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
+
+	/**
+	 * Experimental opt-in features. Subject to change between minor versions.
+	 *
+	 * Forwarded verbatim into the underlying Agent / agent loop — see
+	 * `AgentLoopConfig.experimental` for full semantics.
+	 *
+	 * `openTelemetry: true` emits OTEL spans (`agent.llm_call`,
+	 * `agent.tool_execution`) following the GenAI semantic conventions.
+	 * Safe to enable without an OTEL SDK registered in the host: the
+	 * `@opentelemetry/api` package returns a no-op tracer in that case.
+	 */
+	experimental?: {
+		openTelemetry?: boolean;
+	};
 }
 
 /** Result from createAgentSession */
@@ -1733,6 +1748,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return key;
 			},
 			cursorExecHandlers,
+			experimental: options.experimental,
 			transformToolCallArguments: (args, _toolName) => {
 				let result = args;
 				const maxTimeout = settings.get("tools.maxTimeout");

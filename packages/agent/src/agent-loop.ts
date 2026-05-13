@@ -19,6 +19,7 @@ import {
 	isHarmonyLeakMitigationTarget,
 	signalListLabel,
 } from "./harmony-leak";
+import { endSpan, markSpanError, setSpanAttributes, startSpan } from "./otel";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -474,16 +475,47 @@ async function streamAssistantResponse(
 			? AbortSignal.any([signal, harmonyAbortController.signal])
 			: harmonyAbortController.signal
 		: signal;
-	const response = await streamFunction(config.model, llmContext, {
-		...config,
-		apiKey: resolvedApiKey,
-		metadata: resolvedMetadata,
-		toolChoice: dynamicToolChoice ?? config.toolChoice,
-		reasoning: dynamicReasoning ?? config.reasoning,
-		temperature:
-			harmonyRetryAttempt > 0 && config.temperature !== undefined ? config.temperature + 0.05 : config.temperature,
-		signal: requestSignal,
+
+	const otelEnabled = config.experimental?.openTelemetry;
+	const llmSpan = startSpan(otelEnabled, "agent.llm_call", {
+		"gen_ai.system": config.model.provider,
+		"gen_ai.request.model": config.model.id,
 	});
+	// Finalize the span with usage + finish_reason taken from the resolved
+	// AssistantMessage, then end it. Returns the message untouched so call
+	// sites stay one-liners. No-op when OTEL is disabled (llmSpan undefined).
+	const finishLlmSpan = (msg: AssistantMessage): AssistantMessage => {
+		if (llmSpan) {
+			setSpanAttributes(llmSpan, {
+				"gen_ai.usage.input_tokens": msg.usage.input,
+				"gen_ai.usage.output_tokens": msg.usage.output,
+				"gen_ai.usage.cached_input_tokens": msg.usage.cacheRead,
+				"gen_ai.response.finish_reason": msg.stopReason,
+			});
+			if (msg.errorMessage) markSpanError(llmSpan, msg.errorMessage);
+			endSpan(llmSpan);
+		}
+		return msg;
+	};
+
+	let response: Awaited<ReturnType<typeof streamFunction>>;
+	try {
+		response = await streamFunction(config.model, llmContext, {
+			...config,
+			apiKey: resolvedApiKey,
+			metadata: resolvedMetadata,
+			toolChoice: dynamicToolChoice ?? config.toolChoice,
+			reasoning: dynamicReasoning ?? config.reasoning,
+			temperature:
+				harmonyRetryAttempt > 0 && config.temperature !== undefined
+					? config.temperature + 0.05
+					: config.temperature,
+			signal: requestSignal,
+		});
+	} catch (err) {
+		endSpan(llmSpan, err);
+		throw err;
+	}
 
 	let partialMessage: AssistantMessage | null = null;
 	let addedPartial = false;
@@ -497,7 +529,7 @@ async function streamAssistantResponse(
 	let detachAbortListener: (() => void) | undefined;
 	if (requestSignal) {
 		if (requestSignal.aborted) {
-			return emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
+			return finishLlmSpan(emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream));
 		}
 		const { promise, resolve } = Promise.withResolvers<typeof ABORTED>();
 		const onAbort = () => resolve(ABORTED);
@@ -513,14 +545,14 @@ async function streamAssistantResponse(
 				const result = await Promise.race([responseIterator.next(), abortRacePromise]);
 				if (result === ABORTED) {
 					responseIterator.return?.()?.catch(() => {});
-					return emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
+					return finishLlmSpan(emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream));
 				}
 				next = result;
 			} else {
 				next = await responseIterator.next();
 			}
 			if (requestSignal?.aborted) {
-				return emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
+				return finishLlmSpan(emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream));
 			}
 			if (next.done) break;
 
@@ -570,15 +602,18 @@ async function streamAssistantResponse(
 						stream.push({ type: "message_start", message: { ...finalMessage } });
 					}
 					stream.push({ type: "message_end", message: finalMessage });
-					return finalMessage;
+					return finishLlmSpan(finalMessage);
 				}
 			}
 		}
+	} catch (err) {
+		endSpan(llmSpan, err);
+		throw err;
 	} finally {
 		detachAbortListener?.();
 	}
 
-	return await response.result();
+	return finishLlmSpan(await response.result());
 }
 
 function emitAbortedAssistantMessage(
@@ -638,7 +673,9 @@ async function executeToolCalls(
 		intentTracing,
 		beforeToolCall,
 		afterToolCall,
+		experimental,
 	} = config;
+	const otelEnabled = experimental?.openTelemetry;
 	type ToolCallContent = Extract<AssistantMessage["content"][number], { type: "toolCall" }>;
 	const toolCalls = assistantMessage.content.filter((c): c is ToolCallContent => c.type === "toolCall");
 	const emittedToolResults: ToolResultMessage[] = [];
@@ -767,6 +804,11 @@ async function executeToolCalls(
 
 		let result: AgentToolResult<any>;
 		let isError = false;
+		let caughtError: unknown;
+		const toolSpan = startSpan(otelEnabled, "agent.tool_execution", {
+			"tool.name": toolCall.name,
+			"tool.call_id": toolCall.id,
+		});
 
 		try {
 			if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
@@ -831,6 +873,23 @@ async function executeToolCalls(
 				details: {},
 			};
 			isError = true;
+			caughtError = e;
+		}
+
+		// Single span-close site. A thrown error gets recordException +
+		// ERROR status via endSpan(span, err). A non-throwing isError (tool
+		// returned isError, malformed result, or tool not found path
+		// catch-fall-through) gets ERROR status with the first text block
+		// as the message, but no exception attached.
+		if (caughtError !== undefined) {
+			endSpan(toolSpan, caughtError);
+		} else {
+			if (isError) {
+				const firstBlock = result.content?.[0];
+				const message = firstBlock?.type === "text" ? firstBlock.text : "tool returned error";
+				markSpanError(toolSpan, message);
+			}
+			endSpan(toolSpan);
 		}
 
 		if (afterToolCall) {
