@@ -78,6 +78,7 @@
 - Changed `--mode acp` to apply the same stdout-quiet overrides as `--mode rpc` so no banner or status text leaks into the JSON-RPC channel
 - Changed ACP startup to no longer require a configured model so registry validators and clients can complete `initialize` and `authenticate` before any model is selected
 ### Fixed
+- Fixed ACP prompts submitted while a session is already streaming to be accepted as steering input instead of failing the request with an active-turn error.
 
 - Deferred flushing of buffered `credential_disabled` events during extension runner initialization to a microtask so handler failures are now routed through `onError()` registrations made immediately after `initialize()`, preserving extension error reporting
 - Fixed `eval` tool dynamic `await import("./relative.ts")` calls failing with `Cannot find module ... from .../eval/js/shared/runtime.ts`. The static-import rewriter only handled `ImportDeclaration` nodes, so dynamic-import call expressions resolved their specifier against the worker module's URL instead of the session cwd. The rewriter now walks the full AST and additionally swaps `import` callees in `CallExpression` nodes for `__omp_import__`, which forwards the optional options bag verbatim to native `import()` so `{ with: { type: "json" } }` round-trips. Renamed `rewriteStaticImports` → `rewriteImports`.

@@ -95,6 +95,7 @@ type PromptTurnState = {
 	settled: boolean;
 	usageBaseline: UsageStatistics;
 	unsubscribe: (() => void) | undefined;
+	promise: Promise<PromptResponse>;
 	resolve: (value: PromptResponse) => void;
 	reject: (reason?: unknown) => void;
 };
@@ -103,6 +104,8 @@ type ManagedSessionRecord = {
 	session: AgentSession;
 	mcpManager: MCPManager | undefined;
 	promptTurn: PromptTurnState | undefined;
+	promptQueue: Promise<void>;
+	promptClosed: boolean;
 	liveMessageId: string | undefined;
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
 	extensionsConfigured: boolean;
@@ -380,8 +383,36 @@ export class AcpAgent implements Agent {
 
 	async prompt(params: PromptRequest): Promise<PromptResponse> {
 		const record = this.#getSessionRecord(params.sessionId);
-		if (record.promptTurn && !record.promptTurn.settled) {
-			throw new Error("ACP prompt already in progress for this session");
+		const activeTurn = record.promptTurn;
+		if (activeTurn && !activeTurn.settled && record.session.isStreaming) {
+			const converted = this.#convertPromptBlocks(params.prompt);
+			await this.#runPromptOrCommand(record, converted.text, converted.images, "steer");
+			return this.#buildAcceptedPromptResponse(params.messageId ?? undefined);
+		}
+
+		let releaseQueue!: () => void;
+		const previousQueue = record.promptQueue;
+		record.promptQueue = new Promise<void>(resolve => {
+			releaseQueue = resolve;
+		});
+		const queued = previousQueue.then(async () => {
+			try {
+				return await this.#runTrackedPrompt(record, params);
+			} finally {
+				releaseQueue();
+			}
+		});
+		return await queued;
+	}
+
+	async #runTrackedPrompt(record: ManagedSessionRecord, params: PromptRequest): Promise<PromptResponse> {
+		const activeTurn = record.promptTurn;
+		if (activeTurn && !activeTurn.settled) {
+			await activeTurn.promise;
+		}
+
+		if (record.promptClosed) {
+			throw new Error(`ACP session is closed: ${record.session.sessionId}`);
 		}
 
 		const converted = this.#convertPromptBlocks(params.prompt);
@@ -392,6 +423,7 @@ export class AcpAgent implements Agent {
 			settled: false,
 			usageBaseline: this.#cloneUsageStatistics(record.session.sessionManager.getUsageStatistics()),
 			unsubscribe: undefined,
+			promise: pendingPrompt.promise,
 			resolve: pendingPrompt.resolve,
 			reject: pendingPrompt.reject,
 		};
@@ -407,8 +439,13 @@ export class AcpAgent implements Agent {
 		return await pendingPrompt.promise;
 	}
 
-	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
-		const skillResult = await this.#tryRunSkillCommand(record, text);
+	async #runPromptOrCommand(
+		record: ManagedSessionRecord,
+		text: string,
+		images: AgentImageContent[],
+		streamingBehavior?: "steer" | "followUp",
+	): Promise<void> {
+		const skillResult = await this.#tryRunSkillCommand(record, text, streamingBehavior);
 		if (skillResult) {
 			return;
 		}
@@ -437,7 +474,13 @@ export class AcpAgent implements Agent {
 		});
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
-				await record.session.prompt(builtinResult.prompt, { images });
+				if (streamingBehavior && !record.session.isStreaming) {
+					throw new Error("ACP steer prompt was accepted after the session stopped streaming");
+				}
+				await record.session.prompt(builtinResult.prompt, { images, streamingBehavior });
+				return;
+			}
+			if (streamingBehavior) {
 				return;
 			}
 			const promptTurn = record.promptTurn;
@@ -453,10 +496,14 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
-		await record.session.prompt(text, { images });
+		await record.session.prompt(text, { images, streamingBehavior });
 	}
 
-	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string): Promise<boolean> {
+	async #tryRunSkillCommand(
+		record: ManagedSessionRecord,
+		text: string,
+		streamingBehavior?: "steer" | "followUp",
+	): Promise<boolean> {
 		if (!text.startsWith("/skill:")) {
 			return false;
 		}
@@ -472,13 +519,19 @@ export class AcpAgent implements Agent {
 			return false;
 		}
 		const built = await buildSkillPromptMessage(skill, args);
-		await record.session.promptCustomMessage({
-			customType: SKILL_PROMPT_MESSAGE_TYPE,
-			content: built.message,
-			display: true,
-			details: built.details,
-			attribution: "user",
-		});
+		if (streamingBehavior && !record.session.isStreaming) {
+			throw new Error("ACP steer prompt was accepted after the session stopped streaming");
+		}
+		await record.session.promptCustomMessage(
+			{
+				customType: SKILL_PROMPT_MESSAGE_TYPE,
+				content: built.message,
+				display: true,
+				details: built.details,
+				attribution: "user",
+			},
+			{ streamingBehavior },
+		);
 		return true;
 	}
 
@@ -700,6 +753,8 @@ export class AcpAgent implements Agent {
 			session,
 			mcpManager: undefined,
 			promptTurn: undefined,
+			promptQueue: Promise.resolve(),
+			promptClosed: false,
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
 			extensionsConfigured: false,
@@ -1267,6 +1322,13 @@ export class AcpAgent implements Agent {
 		};
 	}
 
+	#buildAcceptedPromptResponse(messageId: string | undefined): PromptResponse {
+		return {
+			stopReason: "end_turn",
+			userMessageId: messageId ?? crypto.randomUUID(),
+		};
+	}
+
 	#buildTurnUsage(previous: UsageStatistics, current: UsageStatistics): Usage | undefined {
 		const inputTokens = Math.max(0, current.input - previous.input);
 		const outputTokens = Math.max(0, current.output - previous.output);
@@ -1681,6 +1743,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #closeManagedSession(sessionId: string, record: ManagedSessionRecord): Promise<void> {
+		record.promptClosed = true;
 		this.#sessions.delete(sessionId);
 		await this.#cancelPromptForClose(record);
 		await this.#disposeSessionRecord(record);

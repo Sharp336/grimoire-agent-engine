@@ -87,8 +87,13 @@ class FakeAgentSession {
 	disposed = false;
 	fastMode = false;
 	forcedToolChoice: string | undefined;
-	promptCalls: string[] = [];
-	customMessages: Array<{ customType: string; content: string; details?: unknown }> = [];
+	promptCalls: Array<{ text: string; streamingBehavior?: "steer" | "followUp" }> = [];
+	customMessages: Array<{
+		customType: string;
+		content: string;
+		details?: unknown;
+		streamingBehavior?: "steer" | "followUp";
+	}> = [];
 	skillsSettings = { enableSkillCommands: true };
 	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
 	planModeState: PlanModeState | undefined;
@@ -153,51 +158,58 @@ class FakeAgentSession {
 		};
 	}
 
-	async prompt(text: string): Promise<void> {
-		this.promptCalls.push(text);
+	listeners(): Array<(event: AgentSessionEvent) => void> {
+		return [...this.#listeners];
+	}
+
+	async prompt(text: string, options?: { streamingBehavior?: "steer" | "followUp" }): Promise<void> {
+		this.promptCalls.push({ text, streamingBehavior: options?.streamingBehavior });
 		this.isStreaming = true;
 		this.sessionManager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
 		const assistantMessage = makeAssistantMessage("pong");
 		for (const listener of this.#listeners) {
-			listener({
+			void listener({
 				type: "message_update",
 				message: assistantMessage,
 				assistantMessageEvent: { type: "text_delta", delta: "pong" },
 			} as AgentSessionEvent);
 		}
 		this.sessionManager.appendMessage(assistantMessage);
+		this.isStreaming = false;
 		for (const listener of this.#listeners) {
-			listener({
+			void listener({
 				type: "agent_end",
 				messages: [assistantMessage],
 			} as AgentSessionEvent);
 		}
-		this.isStreaming = false;
 	}
 
 	async abort(): Promise<void> {
 		this.isStreaming = false;
 	}
 
-	async promptCustomMessage(message: { customType: string; content: string; details?: unknown }): Promise<void> {
-		this.customMessages.push(message);
+	async promptCustomMessage(
+		message: { customType: string; content: string; details?: unknown },
+		options?: { streamingBehavior?: "steer" | "followUp" },
+	): Promise<void> {
+		this.customMessages.push({ ...message, streamingBehavior: options?.streamingBehavior });
 		this.isStreaming = true;
 		const assistantMessage = makeAssistantMessage("skill pong");
 		for (const listener of this.#listeners) {
-			listener({
+			void listener({
 				type: "message_update",
 				message: assistantMessage,
 				assistantMessageEvent: { type: "text_delta", delta: "skill pong" },
 			} as AgentSessionEvent);
 		}
 		this.sessionManager.appendMessage(assistantMessage);
+		this.isStreaming = false;
 		for (const listener of this.#listeners) {
-			listener({
+			void listener({
 				type: "agent_end",
 				messages: [assistantMessage],
 			} as AgentSessionEvent);
 		}
-		this.isStreaming = false;
 	}
 
 	async refreshMCPTools(_tools: unknown[]): Promise<void> {}
@@ -297,6 +309,8 @@ class FakeAgentSession {
 interface AgentHarness {
 	agent: AcpAgent;
 	updates: SessionNotification[];
+	blockSessionUpdates(blocker: () => Promise<void>): void;
+	clearSessionUpdateBlocker(): void;
 	abortController: AbortController;
 	sessions: FakeAgentSession[];
 	cwdA: string;
@@ -348,9 +362,11 @@ async function createHarness(): Promise<AgentHarness> {
 	const updates: SessionNotification[] = [];
 	const abortController = new AbortController();
 	const sessions: FakeAgentSession[] = [];
+	let sessionUpdateBlocker: (() => Promise<void>) | undefined;
 	const connection = {
 		sessionUpdate: async (notification: SessionNotification) => {
 			updates.push(notification);
+			await sessionUpdateBlocker?.();
 		},
 		signal: abortController.signal,
 		closed: Promise.withResolvers<void>().promise,
@@ -367,6 +383,12 @@ async function createHarness(): Promise<AgentHarness> {
 	return {
 		agent: new AcpAgent(connection, initialSession as unknown as AgentSession, factory),
 		updates,
+		blockSessionUpdates: blocker => {
+			sessionUpdateBlocker = blocker;
+		},
+		clearSessionUpdateBlocker: () => {
+			sessionUpdateBlocker = undefined;
+		},
 		abortController,
 		sessions,
 		cwdA,
@@ -382,6 +404,39 @@ async function createHarness(): Promise<AgentHarness> {
  */
 async function waitForBootstrapGuard(): Promise<void> {
 	await Bun.sleep(ACP_BOOTSTRAP_RACE_GUARD_MS + 30);
+}
+
+function holdNextPrompt(session: FakeAgentSession): () => void {
+	let finishPrompt!: () => void;
+	session.prompt = async (text: string, options?: { streamingBehavior?: "steer" | "followUp" }): Promise<void> => {
+		session.promptCalls.push({ text, streamingBehavior: options?.streamingBehavior });
+		if (options?.streamingBehavior === "steer") {
+			return;
+		}
+
+		session.isStreaming = true;
+		await new Promise<void>(resolve => {
+			finishPrompt = resolve;
+		});
+
+		const assistantMessage = makeAssistantMessage("pong");
+		for (const listener of session.listeners()) {
+			void listener({
+				type: "message_update",
+				message: assistantMessage,
+				assistantMessageEvent: { type: "text_delta", delta: "pong" },
+			} as AgentSessionEvent);
+		}
+		session.sessionManager.appendMessage(assistantMessage);
+		session.isStreaming = false;
+		for (const listener of session.listeners()) {
+			void listener({
+				type: "agent_end",
+				messages: [assistantMessage],
+			} as AgentSessionEvent);
+		}
+	};
+	return () => finishPrompt();
 }
 
 describe("ACP agent", () => {
@@ -747,6 +802,285 @@ describe("ACP agent", () => {
 		);
 		expect(markerChunks).toHaveLength(0);
 
+
+	it("routes prompts submitted during an active ACP turn through steer", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdNextPrompt(session);
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000011",
+			prompt: [{ type: "text", text: "start long task" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const secondPrompt = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000012",
+			prompt: [{ type: "text", text: "please adjust course" }],
+		} as PromptRequest);
+
+		expect(secondPrompt.userMessageId).toBe("00000000-0000-4000-8000-000000000012");
+		expect(session.promptCalls).toEqual([
+			{ text: "start long task", streamingBehavior: undefined },
+			{ text: "please adjust course", streamingBehavior: "steer" },
+		]);
+
+		finishPrompt();
+		await firstPrompt;
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("routes skill prompts submitted during an active ACP turn through steer", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const skillDir = path.join(harness.cwdA, ".skills", "sample");
+		const skillPath = path.join(skillDir, "SKILL.md");
+		await fs.promises.mkdir(skillDir, { recursive: true });
+		await fs.promises.writeFile(skillPath, "---\ndescription: Sample skill\n---\n# Sample\nDo work.\n");
+		session.skills = [
+			{
+				name: "sample",
+				description: "Sample skill",
+				filePath: skillPath,
+				baseDir: skillDir,
+				source: "test",
+			},
+		];
+		const finishPrompt = holdNextPrompt(session);
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000013",
+			prompt: [{ type: "text", text: "start long task" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const secondPrompt = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000014",
+			prompt: [{ type: "text", text: "/skill:sample extra context" }],
+		} as PromptRequest);
+
+		expect(secondPrompt.userMessageId).toBe("00000000-0000-4000-8000-000000000014");
+		expect(session.customMessages).toHaveLength(1);
+		expect(session.customMessages[0]!.streamingBehavior).toBe("steer");
+		expect(session.customMessages[0]!.content).toContain("User: extra context");
+
+		finishPrompt();
+		await firstPrompt;
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("falls back to a tracked prompt if a steer input stops streaming before dispatch", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdNextPrompt(session);
+		const skillDir = path.join(harness.cwdA, ".skills", "sample");
+		const skillPath = path.join(skillDir, "SKILL.md");
+		await fs.promises.mkdir(skillDir, { recursive: true });
+		await fs.promises.writeFile(skillPath, "---\ndescription: Sample skill\n---\n# Sample\nDo work.\n");
+		session.skills = [
+			{
+				name: "sample",
+				description: "Sample skill",
+				filePath: skillPath,
+				baseDir: skillDir,
+				source: "test",
+			},
+		];
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000022",
+			prompt: [{ type: "text", text: "start long task" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+		session.isStreaming = false;
+
+		const secondPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000023",
+			prompt: [{ type: "text", text: "/skill:sample extra context" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+		expect(session.customMessages).toEqual([]);
+
+		finishPrompt();
+		await firstPrompt;
+		await secondPrompt;
+		expect(session.customMessages[0]!.streamingBehavior).toBeUndefined();
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("does not finish the owner ACP turn when active-turn input is a consumed builtin", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdNextPrompt(session);
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000017",
+			prompt: [{ type: "text", text: "start long task" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		const builtinResponse = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000018",
+			prompt: [{ type: "text", text: "/fast on" }],
+		} as PromptRequest);
+
+		expect(builtinResponse.userMessageId).toBe("00000000-0000-4000-8000-000000000018");
+		expect(session.isFastModeEnabled()).toBe(true);
+		const ownerSettled = await Promise.race([firstPrompt.then(() => true), Bun.sleep(0).then(() => false)]);
+		expect(ownerSettled).toBe(false);
+
+		finishPrompt();
+		await firstPrompt;
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("waits for an unsettled idle ACP turn before starting the next prompt", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const { promise: endUpdateBlocked, resolve: markEndUpdateBlocked } = Promise.withResolvers<void>();
+		const { promise: releaseEndUpdate, resolve: unblockEndUpdate } = Promise.withResolvers<void>();
+		let blockedIdleUpdate = false;
+		harness.blockSessionUpdates(async () => {
+			if (!blockedIdleUpdate && !session.isStreaming) {
+				blockedIdleUpdate = true;
+				markEndUpdateBlocked();
+				await releaseEndUpdate;
+			}
+		});
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000015",
+			prompt: [{ type: "text", text: "quick task" }],
+		} as PromptRequest);
+		await endUpdateBlocked;
+
+		try {
+			expect(session.isStreaming).toBe(false);
+			const secondPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000016",
+				prompt: [{ type: "text", text: "next task" }],
+			} as PromptRequest);
+			await Bun.sleep(0);
+
+			expect(session.promptCalls).toEqual([{ text: "quick task", streamingBehavior: undefined }]);
+
+			harness.clearSessionUpdateBlocker();
+			unblockEndUpdate();
+			await firstPrompt;
+			const secondResponse = await secondPrompt;
+
+			expect(secondResponse.userMessageId).toBe("00000000-0000-4000-8000-000000000016");
+			expect(session.promptCalls).toEqual([
+				{ text: "quick task", streamingBehavior: undefined },
+				{ text: "next task", streamingBehavior: undefined },
+			]);
+		} finally {
+			harness.clearSessionUpdateBlocker();
+			unblockEndUpdate();
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
+	it("serializes prompts that wait for the same unsettled idle ACP turn", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const { promise: endUpdateBlocked, resolve: markEndUpdateBlocked } = Promise.withResolvers<void>();
+		const { promise: releaseEndUpdate, resolve: unblockEndUpdate } = Promise.withResolvers<void>();
+		let blockedIdleUpdate = false;
+		harness.blockSessionUpdates(async () => {
+			if (!blockedIdleUpdate && !session.isStreaming) {
+				blockedIdleUpdate = true;
+				markEndUpdateBlocked();
+				await releaseEndUpdate;
+			}
+		});
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000019",
+			prompt: [{ type: "text", text: "quick task" }],
+		} as PromptRequest);
+		await endUpdateBlocked;
+
+		try {
+			const secondPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000020",
+				prompt: [{ type: "text", text: "next task" }],
+			} as PromptRequest);
+			const thirdPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000021",
+				prompt: [{ type: "text", text: "third task" }],
+			} as PromptRequest);
+			await Bun.sleep(0);
+			expect(session.promptCalls).toEqual([{ text: "quick task", streamingBehavior: undefined }]);
+
+			harness.clearSessionUpdateBlocker();
+			unblockEndUpdate();
+			await firstPrompt;
+			await secondPrompt;
+			await thirdPrompt;
+
+			expect(session.promptCalls).toEqual([
+				{ text: "quick task", streamingBehavior: undefined },
+				{ text: "next task", streamingBehavior: undefined },
+				{ text: "third task", streamingBehavior: undefined },
+			]);
+		} finally {
+			harness.clearSessionUpdateBlocker();
+			unblockEndUpdate();
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
+	});
+
+	it("rejects queued prompts when the ACP session closes", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdNextPrompt(session);
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000024",
+			prompt: [{ type: "text", text: "start long task" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+		session.isStreaming = false;
+		const queuedPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000025",
+			prompt: [{ type: "text", text: "queued task" }],
+		} as PromptRequest);
+		await Bun.sleep(0);
+
+		await harness.agent.closeSession({ sessionId: created.sessionId });
+		finishPrompt();
+		await firstPrompt;
+		await expect(queuedPrompt).rejects.toThrow("ACP session is closed");
+		expect(session.promptCalls).toEqual([{ text: "start long task", streamingBehavior: undefined }]);
 		harness.abortController.abort();
 		await Bun.sleep(0);
 	});
@@ -881,7 +1215,7 @@ describe("ACP agent", () => {
 		} as PromptRequest);
 
 		expect(session.forcedToolChoice).toBe("read");
-		expect(session.promptCalls).toEqual(["inspect package.json"]);
+		expect(session.promptCalls).toEqual([{ text: "inspect package.json", streamingBehavior: undefined }]);
 
 		harness.abortController.abort();
 		await Bun.sleep(0);
