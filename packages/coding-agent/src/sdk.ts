@@ -130,6 +130,7 @@ import {
 	WriteTool,
 	warmupLspServers,
 } from "./tools";
+import { ApprovalToolWrapper } from "./tools/approval-wrapper";
 import { ToolContextStore } from "./tools/context";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
@@ -1335,6 +1336,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			for (const tool of toolRegistry.values()) {
 				toolRegistry.set(tool.name, new ExtensionToolWrapper(tool, extensionRunner));
 			}
+		}
+		// Apply approval policy wrapper to every tool (built-in + custom + extension),
+		// regardless of whether extensions are loaded. The wrapper short-circuits when
+		// autoApprove is set or when the resolved policy is "allow".
+		for (const tool of toolRegistry.values()) {
+			toolRegistry.set(tool.name, new ApprovalToolWrapper(tool));
 		}
 		if (model?.provider === "cursor") {
 			toolRegistry.delete("edit");

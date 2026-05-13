@@ -17,6 +17,7 @@ describe("DEFAULT_APPROVAL_POLICIES", () => {
 		expect(DEFAULT_APPROVAL_POLICIES.search).toBe("allow");
 		expect(DEFAULT_APPROVAL_POLICIES.ast_grep).toBe("allow");
 		expect(DEFAULT_APPROVAL_POLICIES.web_search).toBe("allow");
+		expect(DEFAULT_APPROVAL_POLICIES.recall).toBe("allow");
 	});
 
 	it("requires approval for LSP (readonly actions exempted in logic)", () => {

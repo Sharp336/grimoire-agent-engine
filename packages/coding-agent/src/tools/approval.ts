@@ -39,7 +39,7 @@ export const DEFAULT_APPROVAL_POLICIES: Record<string, ApprovalPolicy> = {
 	search: "allow",
 	ast_grep: "allow",
 	web_search: "allow",
-	hindsight_recall: "allow",
+	recall: "allow",
 	inspect_image: "allow",
 	job: "allow", // Polling/status check
 
