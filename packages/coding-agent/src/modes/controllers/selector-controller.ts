@@ -30,9 +30,11 @@ import type { InteractiveModeContext } from "../../modes/types";
 import { type SessionInfo, SessionManager } from "../../session/session-manager";
 import { FileSessionStorage } from "../../session/session-storage";
 import { isSearchProviderPreference, setPreferredImageProvider, setPreferredSearchProvider } from "../../tools";
+import * as git from "../../utils/git";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
 import { AgentDashboard } from "../components/agent-dashboard";
 import { AssistantMessageComponent } from "../components/assistant-message";
+import { formatBranchHistory } from "../components/branch-label";
 import { ExtensionDashboard } from "../components/extensions";
 import { HistorySearchComponent } from "../components/history-search";
 import { ModelSelectorComponent } from "../components/model-selector";
@@ -786,9 +788,30 @@ export class SelectorController {
 		this.#refreshSessionTerminalTitle();
 		this.ctx.updateEditorBorderColor();
 
+		// Record current HEAD into the resumed session's chronology so the banner
+		// (and future surfaces) see the resumed-on-different-branch state.
+		try {
+			const headState = git.head.resolveSync(getProjectDir());
+			if (headState?.kind === "ref" && headState.branchName) {
+				this.ctx.sessionManager.recordGitRef(headState.branchName);
+			}
+		} catch {}
+
 		// Clear and re-render the chat
 		this.ctx.chatContainer.clear();
 		this.ctx.renderInitialMessages();
+
+		// Render the branch-history banner inline with the resume indicator
+		// when the session toured two or more branches.
+		const chronology = this.ctx.sessionManager.getGitRefChronology();
+		if (chronology.length >= 2) {
+			const banner = formatBranchHistory(chronology, new Date(), { branch: theme.icon.branch });
+			if (banner) {
+				this.ctx.chatContainer.addChild(new Spacer(1));
+				this.ctx.chatContainer.addChild(new Text(theme.fg("dim", banner), 1, 0));
+			}
+		}
+
 		await this.ctx.reloadTodos();
 		this.ctx.showStatus("Resumed session");
 	}
