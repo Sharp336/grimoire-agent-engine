@@ -207,4 +207,47 @@ describe("Git branch tracking in sessions", () => {
 		expect(recent[0]!.branchInitial).toBe("main");
 		expect(recent[0]!.branchLatest).toBe("main");
 	});
+
+	it("SessionManager.list captures git_ref entries past the 4 KiB head window", async () => {
+		mockResolvedBranch("main");
+		using tempDir = TempDir.createSync("@pi-git-ref-list-past-head-");
+		const sessionDir = tempDir.path();
+
+		const session = SessionManager.create(TEST_CWD, sessionDir);
+		// Bury the switch deep in the file: enough padding to clear the 4 KiB head
+		// window used by the prefix scan and the 4 KiB tail window used by the old
+		// tail-only reader, while still leaving plenty of room between.
+		session.appendMessage({ role: "user", content: "x".repeat(8192), timestamp: 1 });
+		session.recordGitRef("feature/buried");
+		session.appendMessage({ role: "user", content: "y".repeat(8192), timestamp: 2 });
+		await session.ensureOnDisk();
+		await session.flush();
+
+		const sessions = await SessionManager.list(TEST_CWD, sessionDir);
+		expect(sessions.length).toBe(1);
+		const info = sessions[0]!;
+		expect(info.gitBranchInitial).toBe("main");
+		expect(info.gitBranchLatest).toBe("feature/buried");
+		expect(info.gitRefs!.map(r => r.branch)).toEqual(["main", "feature/buried"]);
+	});
+
+	it("getRecentSessions finds branch switches even when both head and tail windows would miss them", async () => {
+		mockResolvedBranch("main");
+		using tempDir = TempDir.createSync("@pi-git-ref-recent-past-tail-");
+		const sessionDir = tempDir.path();
+
+		const session = SessionManager.create(TEST_CWD, sessionDir);
+		// Symmetric padding so the git_ref sits in the middle of the file, beyond
+		// both the 4 KiB head and the 4 KiB tail.
+		session.appendMessage({ role: "user", content: "x".repeat(8192), timestamp: 1 });
+		session.recordGitRef("feature/middle");
+		session.appendMessage({ role: "user", content: "y".repeat(8192), timestamp: 2 });
+		await session.ensureOnDisk();
+		await session.flush();
+
+		const recent = await getRecentSessions(sessionDir);
+		expect(recent.length).toBe(1);
+		expect(recent[0]!.branchInitial).toBe("main");
+		expect(recent[0]!.branchLatest).toBe("feature/middle");
+	});
 });

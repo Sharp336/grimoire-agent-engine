@@ -1381,7 +1381,8 @@ export async function getRecentSessions(
 	const recentSessions = sessions.slice(0, limit);
 	await Promise.all(
 		recentSessions.map(async info => {
-			info.branchLatest = (await readLastGitRefFromTail(info.path, storage)) ?? info.branchInitial;
+			const chronology = await readGitRefChronology(info.path, storage);
+			info.branchLatest = chronology.at(-1)?.branch ?? info.branchInitial;
 		}),
 	);
 	return recentSessions;
@@ -1442,57 +1443,53 @@ async function readSessionListPrefix(file: string, storage: SessionStorage, buff
 	}
 }
 
-async function readLastGitRefFromTail(
-	file: string,
-	storage: SessionStorage,
-	maxBytes = 4096,
-): Promise<string | undefined> {
+/**
+ * Read every `git_ref` custom entry from a session file in chronological order.
+ *
+ * The prefix-based session list scan is intentionally bounded to the first 4 KiB
+ * for cost reasons, but `git_ref` entries can land anywhere in the file (a branch
+ * switch hours into a session is past the head AND tail windows of a long
+ * transcript). We resolve this by reading the full file once and applying a cheap
+ * substring pre-filter before JSON parsing, so non-matching lines cost only a
+ * memchr-class scan.
+ *
+ * If this becomes a hotspot for users with hundreds of multi-MB sessions, the
+ * call site can be refactored to load chronology lazily (e.g. only for the
+ * focused selector row and the active ACP session). The current eager design
+ * keeps `SessionInfo.gitRefs` synchronously available everywhere.
+ */
+async function readGitRefChronology(file: string, storage: SessionStorage): Promise<GitRefRecord[]> {
+	const records: GitRefRecord[] = [];
 	let content: string;
-	let startsAtByteZero = true;
-
-	if (!(storage instanceof FileSessionStorage)) {
-		const fullContent = await storage.readText(file);
-		const bytes = Buffer.from(fullContent, "utf-8");
-		const start = Math.max(0, bytes.byteLength - maxBytes);
-		startsAtByteZero = start === 0;
-		content = sessionListPrefixDecoder.decode(bytes.subarray(start));
-	} else {
-		let handle: fs.promises.FileHandle | undefined;
-		try {
-			const size = storage.statSync(file).size;
-			const start = Math.max(0, size - maxBytes);
-			const buffer = Buffer.allocUnsafe(size - start);
-			startsAtByteZero = start === 0;
-			handle = await fs.promises.open(file, "r");
-			const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, start);
-			content = sessionListPrefixDecoder.decode(buffer.subarray(0, bytesRead));
-		} catch (err) {
-			if (isEnoent(err)) return undefined;
-			throw err;
-		} finally {
-			await handle?.close();
-		}
+	try {
+		content = await storage.readText(file);
+	} catch (err) {
+		if (isEnoent(err)) return records;
+		throw err;
 	}
 
-	if (!startsAtByteZero) {
-		const firstNewline = content.indexOf("\n");
-		if (firstNewline === -1) return undefined;
-		content = content.slice(firstNewline + 1);
-	}
-
-	const lines = content.split(/\r?\n/);
-	for (let i = lines.length - 1; i >= 0; i--) {
-		const line = lines[i];
-		if (!line) continue;
-		try {
-			const parsed = JSON.parse(line) as Record<string, unknown>;
-			if (parsed.type === "custom" && parsed.customType === "git_ref" && typeof parsed.data === "string") {
-				return parsed.data;
+	const len = content.length;
+	let start = 0;
+	for (let i = 0; i <= len; i++) {
+		if (i !== len && content.charCodeAt(i) !== 10 /* \n */) continue;
+		if (start < i) {
+			const line = content.slice(start, i);
+			if (line.includes('"customType":"git_ref"')) {
+				try {
+					const parsed = JSON.parse(line) as Record<string, unknown>;
+					if (parsed.type === "custom" && parsed.customType === "git_ref" && typeof parsed.data === "string") {
+						records.push({
+							branch: parsed.data,
+							at: typeof parsed.timestamp === "string" ? parsed.timestamp : undefined,
+						});
+					}
+				} catch {}
 			}
-		} catch {}
+		}
+		start = i + 1;
 	}
 
-	return undefined;
+	return records;
 }
 
 function decodeJsonStringFragment(value: string): string {
@@ -1644,26 +1641,15 @@ async function collectSessionFromFile(
 		let firstMessage = "";
 		const allMessages: string[] = [];
 		let shortSummary: string | undefined;
-		const gitRefs: GitRefRecord[] = [];
-		if (header.gitBranch) {
-			gitRefs.push({ branch: header.gitBranch, at: header.timestamp });
-		}
 		for (let i = 1; i < entries.length; i++) {
 			const entry = entries[i] as {
 				type?: string;
 				message?: Message;
 				shortSummary?: string;
-				customType?: string;
-				data?: unknown;
-				timestamp?: string;
 			};
 
 			if (entry.type === "compaction" && typeof entry.shortSummary === "string") {
 				shortSummary = entry.shortSummary;
-			}
-
-			if (entry.type === "custom" && entry.customType === "git_ref" && typeof entry.data === "string") {
-				gitRefs.push({ branch: entry.data, at: typeof entry.timestamp === "string" ? entry.timestamp : undefined });
 			}
 
 			if (entry.type === "message" && entry.message) {
@@ -1686,6 +1672,12 @@ async function collectSessionFromFile(
 		firstMessage ||= extractFirstUserMessageFromPrefix(content) ?? "";
 		const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content));
 		const stats = storage.statSync(file);
+		const chronology = await readGitRefChronology(file, storage);
+		const gitRefs: GitRefRecord[] = [];
+		if (header.gitBranch) {
+			gitRefs.push({ branch: header.gitBranch, at: header.timestamp });
+		}
+		for (const record of chronology) gitRefs.push(record);
 		const gitBranchInitial = header.gitBranch;
 		const gitBranchLatest = gitRefs.at(-1)?.branch ?? gitBranchInitial;
 		return {

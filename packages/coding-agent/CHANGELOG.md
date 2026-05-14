@@ -14,6 +14,10 @@
 
 - Changed session-selector fuzzy search to index the initial branch, the latest branch, and every historical branch ever observed during a session.
 
+### Fixed
+
+- Fixed `git_ref` entries past the first 4 KiB of a session file being silently dropped from session listings, recent-session surfaces, and ACP `_meta.gitRefs`. `collectSessionFromFile` and the welcome's `branchLatest` resolver now consume the full ordered chronology via a streaming substring-pre-filtered scan, so long sessions whose branch switches sit deep in the transcript report accurate chronology, latest branch, and ACP metadata.
+
 ## [15.0.1] - 2026-05-14
 ### Breaking Changes
 
