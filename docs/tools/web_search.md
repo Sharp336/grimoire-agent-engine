@@ -65,7 +65,7 @@ Failure output is not thrown at the tool boundary when at least one provider was
 - `details.response.provider = <last attempted provider> | "none"`
 - `details.error = ...`
 
-Streaming: none. `WebSearchTool.execute()` does not forward its `_signal` argument into `executeSearch()`, so provider cancellation is only available to internal callers that place `signal` inside `SearchQueryParams`.
+Streaming: none. `WebSearchTool.execute()` and the custom-tool wrapper forward their `AbortSignal` into `executeSearch()`, which passes it to the selected provider as `SearchParams.signal`. Cancellation then depends on the provider adapter forwarding that signal into its transport.
 
 ## Flow
 1. `WebSearchTool.execute()` in `packages/coding-agent/src/web/search/index.ts` delegates directly to `executeSearch()`.
@@ -75,9 +75,10 @@ Streaming: none. `WebSearchTool.execute()` does not forward its `_signal` argume
 3. `resolveProviderChain()` lazily loads each provider module on demand, checks `isAvailable()`, and returns only available providers. If a preferred provider is set, it is tried first, then the static `SEARCH_PROVIDER_ORDER` excluding that provider.
 4. If no providers are available, `executeSearch()` returns `Error: No web search provider configured.` with `details.response.provider = "none"`.
 5. For each provider in order, `executeSearch()` calls `provider.search()` with:
-   - `query` after year-rewrite,
-   - `limit`, `recency`, `temperature`, `maxOutputTokens`, `numSearchResults`,
-   - `systemPrompt` from `packages/coding-agent/src/prompts/tools/web-search.md`.
+	- `query` after year-rewrite,
+	- `limit`, `recency`, `temperature`, `maxOutputTokens`, `numSearchResults`,
+	- `systemPrompt` from `packages/coding-agent/src/prompts/tools/web-search.md`,
+	- the tool/custom-tool `AbortSignal`.
 6. On the first successful `SearchResponse`, `formatForLLM()` renders answer/sources/citations/related/search-queries into one text block and returns it with `details.response`.
 7. If a provider throws, `executeSearch()` records the error and tries the next provider. There is no provider-level parallel fan-out; fallback is sequential.
 8. After all candidates fail, `formatProviderError()` normalizes the last error:
@@ -185,7 +186,9 @@ Streaming: none. `WebSearchTool.execute()` does not forward its `_signal` argume
   - Uses a module-global preferred-provider setting in the same file.
   - `packages/coding-agent/src/tools/index.ts` gates tool availability behind `session.settings.get("web_search.enabled")`.
 - Background work / cancellation
-  - Many provider adapters accept `AbortSignal`, but `WebSearchTool.execute()` does not pass its `_signal` into `executeSearch()`. Internal callers can still use cancellation by calling `runSearchQuery()` / `executeSearch()` with `signal` embedded in params.
+	- `WebSearchTool.execute()` and `webSearchCustomTool.execute()` pass their `AbortSignal` into `executeSearch()` and then into `provider.search()` as `SearchParams.signal`.
+	- Provider adapters opt into cancellation by forwarding `SearchParams.signal` into their HTTP/SSE/JSON-RPC transport. Anthropic, Brave, Codex, Gemini, Kagi, Kimi, Parallel, Perplexity, SearXNG, Synthetic, Tavily, and the shared Parallel HTTP client do this; Exa, Jina, and Z.AI still have transport paths that do not forward the signal.
+	- `runSearchQuery()` currently calls `executeSearch()` without a signal, so CLI/testing callers through that helper are not abortable unless the helper API grows a signal parameter.
 
 ## Limits & Caps
 - Provider auto-order length: 14 providers (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/provider.ts`).
