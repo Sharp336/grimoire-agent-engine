@@ -64,6 +64,7 @@ import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-colo
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
+import { formatBranchHistory } from "./components/branch-label";
 import { CustomEditor } from "./components/custom-editor";
 import { DynamicBorder } from "./components/dynamic-border";
 import type { EvalExecutionComponent } from "./components/eval-execution";
@@ -408,6 +409,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const startupQuiet = settings.get("startup.quiet");
 		this.#welcomeComponent = undefined;
+		try {
+			const headState = git.head.resolveSync(getProjectDir());
+			if (headState?.kind === "ref" && headState.branchName) {
+				this.sessionManager.recordGitRef(headState.branchName);
+			}
+		} catch {}
 
 		for (const warning of this.session.configWarnings) {
 			this.ui.addChild(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0));
@@ -445,6 +452,15 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.ui.addChild(new Spacer(1));
 				}
 				this.ui.addChild(new DynamicBorder());
+			}
+
+			const chronology = this.sessionManager.getGitRefChronology();
+			if (chronology.length >= 2) {
+				const banner = formatBranchHistory(chronology, new Date(), { branch: theme.icon.branch });
+				if (banner) {
+					this.ui.addChild(new Spacer(1));
+					this.ui.addChild(new Text(theme.fg("dim", banner), 1, 0));
+				}
 			}
 		}
 
@@ -541,7 +557,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.ui.requestRender();
 			recordCurrentGitRef();
 		});
-		recordCurrentGitRef();
 
 		// Initial top border update
 		this.updateEditorTopBorder();
