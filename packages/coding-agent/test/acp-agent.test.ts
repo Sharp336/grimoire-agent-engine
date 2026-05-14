@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -13,6 +13,7 @@ import {
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getConfigRootDir, setAgentDir } from "@oh-my-pi/pi-utils";
 import { resetSettingsForTest, Settings } from "../src/config/settings";
+import * as Skills from "../src/extensibility/skills";
 import { ACP_BOOTSTRAP_RACE_GUARD_MS, AcpAgent } from "../src/modes/acp/acp-agent";
 import type { PlanModeState } from "../src/plan-mode/state";
 import type { AgentSession, AgentSessionEvent } from "../src/session/agent-session";
@@ -94,6 +95,7 @@ class FakeAgentSession {
 		details?: unknown;
 		streamingBehavior?: "steer" | "followUp";
 	}> = [];
+	steerEvents: Array<"prompt" | "custom"> = [];
 	skillsSettings = { enableSkillCommands: true };
 	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
 	planModeState: PlanModeState | undefined;
@@ -164,6 +166,10 @@ class FakeAgentSession {
 
 	async prompt(text: string, options?: { streamingBehavior?: "steer" | "followUp" }): Promise<void> {
 		this.promptCalls.push({ text, streamingBehavior: options?.streamingBehavior });
+		if (options?.streamingBehavior === "steer") {
+			this.steerEvents.push("prompt");
+			return;
+		}
 		this.isStreaming = true;
 		this.sessionManager.appendMessage({ role: "user", content: text, timestamp: Date.now() });
 		const assistantMessage = makeAssistantMessage("pong");
@@ -193,6 +199,10 @@ class FakeAgentSession {
 		options?: { streamingBehavior?: "steer" | "followUp" },
 	): Promise<void> {
 		this.customMessages.push({ ...message, streamingBehavior: options?.streamingBehavior });
+		if (options?.streamingBehavior === "steer") {
+			this.steerEvents.push("custom");
+			return;
+		}
 		this.isStreaming = true;
 		const assistantMessage = makeAssistantMessage("skill pong");
 		for (const listener of this.#listeners) {
@@ -406,11 +416,22 @@ async function waitForBootstrapGuard(): Promise<void> {
 	await Bun.sleep(ACP_BOOTSTRAP_RACE_GUARD_MS + 30);
 }
 
+async function waitUntil(condition: () => boolean): Promise<void> {
+	for (let attempt = 0; attempt < 100; attempt++) {
+		if (condition()) {
+			return;
+		}
+		await Bun.sleep(0);
+	}
+	expect(condition()).toBe(true);
+}
+
 function holdNextPrompt(session: FakeAgentSession): () => void {
 	let finishPrompt!: () => void;
 	session.prompt = async (text: string, options?: { streamingBehavior?: "steer" | "followUp" }): Promise<void> => {
 		session.promptCalls.push({ text, streamingBehavior: options?.streamingBehavior });
 		if (options?.streamingBehavior === "steer") {
+			session.steerEvents.push("prompt");
 			return;
 		}
 
@@ -875,6 +896,68 @@ describe("ACP agent", () => {
 		await firstPrompt;
 		harness.abortController.abort();
 		await Bun.sleep(0);
+	});
+
+	it("serializes active-turn steer prompts before dispatch", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const skillDir = path.join(harness.cwdA, ".skills", "sample");
+		const skillPath = path.join(skillDir, "SKILL.md");
+		await fs.promises.mkdir(skillDir, { recursive: true });
+		await fs.promises.writeFile(skillPath, "---\ndescription: Sample skill\n---\n# Sample\nDo work.\n");
+		session.skills = [
+			{
+				name: "sample",
+				description: "Sample skill",
+				filePath: skillPath,
+				baseDir: skillDir,
+				source: "test",
+			},
+		];
+		const finishPrompt = holdNextPrompt(session);
+		const { promise: skillBuildBlocked, resolve: releaseSkillBuild } = Promise.withResolvers<void>();
+		const buildSkillSpy = spyOn(Skills, "buildSkillPromptMessage").mockImplementation(async (skill, args) => {
+			await skillBuildBlocked;
+			return {
+				message: `# Sample\nDo work.\n\n---\n\nSkill: ${skill.filePath}\nUser: ${args}`,
+				details: { name: skill.name, path: skill.filePath, args, lineCount: 1 },
+			};
+		});
+
+		try {
+			const firstPrompt = harness.agent.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000026",
+				prompt: [{ type: "text", text: "start long task" }],
+			} as PromptRequest);
+			await waitUntil(() => session.isStreaming);
+
+			const skillSteer = harness.agent.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000027",
+				prompt: [{ type: "text", text: "/skill:sample extra context" }],
+			} as PromptRequest);
+			const plainSteer = harness.agent.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000028",
+				prompt: [{ type: "text", text: "plain steer" }],
+			} as PromptRequest);
+			await Bun.sleep(0);
+			expect(session.steerEvents).toEqual([]);
+			releaseSkillBuild();
+			await skillSteer;
+			await plainSteer;
+
+			expect(session.steerEvents).toEqual(["custom", "prompt"]);
+			finishPrompt();
+			await firstPrompt;
+		} finally {
+			releaseSkillBuild();
+			buildSkillSpy.mockRestore();
+			harness.abortController.abort();
+			await Bun.sleep(0);
+		}
 	});
 
 	it("falls back to a tracked prompt if a steer input stops streaming before dispatch", async () => {

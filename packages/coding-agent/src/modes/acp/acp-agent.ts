@@ -46,7 +46,7 @@ import { Settings } from "../../config/settings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import type { ExtensionUIContext } from "../../extensibility/extensions";
 import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
-import { buildSkillPromptMessage, getSkillSlashCommandName } from "../../extensibility/skills";
+import * as skillsApi from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
@@ -73,15 +73,8 @@ const MODEL_CONFIG_ID = "model";
 const THINKING_CONFIG_ID = "thinking";
 const THINKING_OFF = "off";
 const SESSION_PAGE_SIZE = 50;
-/**
- * Delay between `session/new` (or `session/load` / `session/resume` /
- * `unstable_session/fork`) returning and the agent firing the first
- * notifications against the new session id. Mitigates Zed's
- * `Received session notification for unknown session` race — see
- * `#scheduleBootstrapUpdates`. Exported so the ACP test harness can
- * wait past this guard without hard-coding the literal.
- */
 export const ACP_BOOTSTRAP_RACE_GUARD_MS = 50;
+const STEER_NO_LONGER_STREAMING_ERROR_MESSAGE = "ACP steer prompt was accepted after the session stopped streaming";
 
 type AgentImageContent = {
 	type: "image";
@@ -105,6 +98,7 @@ type ManagedSessionRecord = {
 	mcpManager: MCPManager | undefined;
 	promptTurn: PromptTurnState | undefined;
 	promptQueue: Promise<void>;
+	steerQueue: Promise<void>;
 	promptClosed: boolean;
 	liveMessageId: string | undefined;
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
@@ -385,11 +379,51 @@ export class AcpAgent implements Agent {
 		const record = this.#getSessionRecord(params.sessionId);
 		const activeTurn = record.promptTurn;
 		if (activeTurn && !activeTurn.settled && record.session.isStreaming) {
-			const converted = this.#convertPromptBlocks(params.prompt);
-			await this.#runPromptOrCommand(record, converted.text, converted.images, "steer");
-			return this.#buildAcceptedPromptResponse(params.messageId ?? undefined);
+			return await this.#queueSteerPrompt(record, async () => {
+				if (record.promptClosed) {
+					throw new Error(`ACP session is closed: ${record.session.sessionId}`);
+				}
+				const currentTurn = record.promptTurn;
+				if (!currentTurn || currentTurn.settled || !record.session.isStreaming) {
+					return await this.#queueTrackedPrompt(record, params);
+				}
+				const converted = this.#convertPromptBlocks(params.prompt);
+				try {
+					await this.#runPromptOrCommand(record, converted.text, converted.images, "steer");
+				} catch (error) {
+					if (this.#isSteerNoLongerStreamingError(error)) {
+						return await this.#queueTrackedPrompt(record, params);
+					}
+					throw error;
+				}
+				return this.#buildAcceptedPromptResponse(params.messageId ?? undefined);
+			});
 		}
 
+		return await this.#queueTrackedPrompt(record, params);
+	}
+
+	async #queueTrackedPrompt(record: ManagedSessionRecord, params: PromptRequest): Promise<PromptResponse> {
+		return await this.#queuePrompt(record, () => this.#runTrackedPrompt(record, params));
+	}
+
+	async #queueSteerPrompt(record: ManagedSessionRecord, run: () => Promise<PromptResponse>): Promise<PromptResponse> {
+		let releaseQueue!: () => void;
+		const previousQueue = record.steerQueue;
+		record.steerQueue = new Promise<void>(resolve => {
+			releaseQueue = resolve;
+		});
+		const queued = previousQueue.then(async () => {
+			try {
+				return await run();
+			} finally {
+				releaseQueue();
+			}
+		});
+		return await queued;
+	}
+
+	async #queuePrompt(record: ManagedSessionRecord, run: () => Promise<PromptResponse>): Promise<PromptResponse> {
 		let releaseQueue!: () => void;
 		const previousQueue = record.promptQueue;
 		record.promptQueue = new Promise<void>(resolve => {
@@ -397,7 +431,7 @@ export class AcpAgent implements Agent {
 		});
 		const queued = previousQueue.then(async () => {
 			try {
-				return await this.#runTrackedPrompt(record, params);
+				return await run();
 			} finally {
 				releaseQueue();
 			}
@@ -475,7 +509,7 @@ export class AcpAgent implements Agent {
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
 				if (streamingBehavior && !record.session.isStreaming) {
-					throw new Error("ACP steer prompt was accepted after the session stopped streaming");
+					throw this.#createSteerNoLongerStreamingError();
 				}
 				await record.session.prompt(builtinResult.prompt, { images, streamingBehavior });
 				return;
@@ -496,7 +530,18 @@ export class AcpAgent implements Agent {
 			return;
 		}
 
+		if (streamingBehavior && !record.session.isStreaming) {
+			throw this.#createSteerNoLongerStreamingError();
+		}
 		await record.session.prompt(text, { images, streamingBehavior });
+	}
+
+	#createSteerNoLongerStreamingError(): Error {
+		return new Error(STEER_NO_LONGER_STREAMING_ERROR_MESSAGE);
+	}
+
+	#isSteerNoLongerStreamingError(error: unknown): boolean {
+		return error instanceof Error && error.message === STEER_NO_LONGER_STREAMING_ERROR_MESSAGE;
 	}
 
 	async #tryRunSkillCommand(
@@ -518,9 +563,9 @@ export class AcpAgent implements Agent {
 		if (!skill) {
 			return false;
 		}
-		const built = await buildSkillPromptMessage(skill, args);
+		const built = await skillsApi.buildSkillPromptMessage(skill, args);
 		if (streamingBehavior && !record.session.isStreaming) {
-			throw new Error("ACP steer prompt was accepted after the session stopped streaming");
+			throw this.#createSteerNoLongerStreamingError();
 		}
 		await record.session.promptCustomMessage(
 			{
@@ -754,6 +799,7 @@ export class AcpAgent implements Agent {
 			mcpManager: undefined,
 			promptTurn: undefined,
 			promptQueue: Promise.resolve(),
+			steerQueue: Promise.resolve(),
 			promptClosed: false,
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
@@ -1161,7 +1207,7 @@ export class AcpAgent implements Agent {
 		if (session.skillsSettings?.enableSkillCommands) {
 			for (const skill of session.skills) {
 				appendCommand({
-					name: getSkillSlashCommandName(skill),
+					name: skillsApi.getSkillSlashCommandName(skill),
 					description: skill.description || `Run ${skill.name} skill`,
 					input: { hint: "arguments" },
 				});
