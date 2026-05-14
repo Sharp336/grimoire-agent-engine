@@ -701,6 +701,27 @@ const ANTHROPIC_MESSAGE_EVENTS: ReadonlySet<string> = new Set([
 	"content_block_stop",
 ]);
 
+type AnthropicRefusalStopDetails = {
+	type: "refusal";
+	explanation?: string;
+	category?: string;
+};
+
+function getAnthropicRefusalStopDetails(delta: unknown): AnthropicRefusalStopDetails | undefined {
+	if (!isRecord(delta)) {
+		return undefined;
+	}
+	const stopDetails = delta.stop_details;
+	if (!isRecord(stopDetails) || stopDetails.type !== "refusal") {
+		return undefined;
+	}
+	return {
+		type: "refusal",
+		explanation: typeof stopDetails.explanation === "string" ? stopDetails.explanation : undefined,
+		category: typeof stopDetails.category === "string" ? stopDetails.category : undefined,
+	};
+}
+
 async function* iterateAnthropicEvents(
 	response: Response,
 	signal?: AbortSignal,
@@ -1206,8 +1227,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 								output.stopReason = mapStopReason(event.delta.stop_reason);
 								sawTerminalEnvelope = true;
 							}
-							const stopDetails = event.delta.stop_details;
-							if (stopDetails && stopDetails.type === "refusal") {
+							const stopDetails = getAnthropicRefusalStopDetails(event.delta);
+							if (stopDetails) {
 								const explanation = stopDetails.explanation?.trim();
 								const category = stopDetails.category;
 								const label = category ? `Refusal (${category})` : "Refusal";
