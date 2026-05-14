@@ -416,12 +416,11 @@ export class AcpAgent implements Agent {
 	}
 
 	async #queuePrompt(record: ManagedSessionRecord, run: () => Promise<PromptResponse>): Promise<PromptResponse> {
-		let releaseQueue!: () => void;
+		const nextQueue = Promise.withResolvers<void>();
+		const releaseQueue = nextQueue.resolve;
 		const previousQueue = record.promptQueue;
 		record.promptQueue = {
-			promise: new Promise<void>(resolve => {
-				releaseQueue = resolve;
-			}),
+			promise: nextQueue.promise,
 			release: releaseQueue,
 			owner: undefined,
 		};
