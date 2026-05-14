@@ -15,6 +15,7 @@ import { formatBytes } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../modes/utils/keybinding-matchers";
 import type { SessionInfo } from "../../session/session-manager";
+import { formatBranchLabel } from "./branch-label";
 import { DynamicBorder } from "./dynamic-border";
 import { HookSelectorComponent } from "./hook-selector";
 
@@ -59,8 +60,11 @@ class SessionList implements Component {
 				session.firstMessage ?? "",
 				session.allMessagesText,
 				session.path,
-				session.gitBranch ?? "",
-				...(session.gitRefs ?? []).filter(ref => ref !== session.gitBranch),
+				session.gitBranchInitial ?? "",
+				session.gitBranchLatest ?? "",
+				...(session.gitRefs ?? [])
+					.map(r => r.branch)
+					.filter(b => b !== session.gitBranchInitial && b !== session.gitBranchLatest),
 			];
 			return parts.filter(Boolean).join(" ");
 		});
@@ -162,8 +166,14 @@ class SessionList implements Component {
 
 			// Metadata line: date + file size + branch
 			const modified = formatDate(session.modified);
-			const branchSuffix = session.gitBranch ? ` ${theme.sep.dot} ${theme.icon.branch} ${session.gitBranch}` : "";
-			const metadata = `  ${modified} ${theme.sep.dot} ${formatBytes(session.size)}${branchSuffix}`;
+			const metaPrefix = `  ${modified} ${theme.sep.dot} ${formatBytes(session.size)}`;
+			const remainingWidth = Math.max(0, width - visibleWidth(metaPrefix) - visibleWidth(` ${theme.sep.dot} `));
+			const branchLabel = formatBranchLabel(
+				{ initial: session.gitBranchInitial, latest: session.gitBranchLatest },
+				remainingWidth,
+				{ branch: theme.icon.branch },
+			);
+			const metadata = branchLabel ? `${metaPrefix} ${theme.sep.dot} ${branchLabel}` : metaPrefix;
 			const metadataLine = theme.fg("dim", truncateToWidth(metadata, width));
 
 			lines.push(metadataLine);

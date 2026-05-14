@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { getRecentSessions, SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import type { GitRefHead } from "../../src/utils/git";
 import * as git from "../../src/utils/git";
@@ -38,34 +38,51 @@ describe("Git branch tracking in sessions", () => {
 		expect(header!.gitBranch).toBe("main");
 	});
 
-	it("does not set gitBranch when HEAD cannot be resolved", () => {
+	it("seeds chronology with the header branch on creation", () => {
+		mockResolvedBranch("main");
+		const session = SessionManager.inMemory(TEST_CWD);
+		const chronology = session.getGitRefChronology();
+		expect(chronology.length).toBe(1);
+		expect(chronology[0]!.branch).toBe("main");
+		expect(typeof chronology[0]!.at).toBe("string");
+		expect(session.getLatestGitRef()).toBe("main");
+	});
+
+	it("does not seed gitBranch when HEAD cannot be resolved", () => {
 		mockResolvedBranch(null);
 		const session = SessionManager.inMemory(TEST_CWD);
-		const header = session.getHeader();
-		expect(header!.gitBranch).toBeUndefined();
+		expect(session.getHeader()!.gitBranch).toBeUndefined();
+		expect(session.getGitRefChronology().length).toBe(0);
+		expect(session.getLatestGitRef()).toBeNull();
 		expect(session.getGitRefs()).toEqual([]);
 	});
 
-	it("recordGitRef deduplicates and getGitRefs returns all unique branches", () => {
+	it("recordGitRef no-ops when branch equals the previous chronology entry", () => {
 		mockResolvedBranch("main");
 		const session = SessionManager.inMemory(TEST_CWD);
 
-		// Header branch is already tracked
-		expect(session.getGitRefs()).toContain("main");
+		// Header seed already provides "main" as the previous entry.
+		expect(session.getGitRefChronology().length).toBe(1);
+		session.recordGitRef("main");
+		expect(session.getGitRefChronology().length).toBe(1);
 
-		// Recording a new branch
 		session.recordGitRef("feature/new");
-		expect(session.getGitRefs()).toContain("feature/new");
-
-		// Recording the same branch again should not duplicate
-		const countBefore = session.getGitRefs().length;
 		session.recordGitRef("feature/new");
-		expect(session.getGitRefs().length).toBe(countBefore);
+		expect(session.getGitRefChronology().length).toBe(2);
+	});
 
-		// Recording another branch
-		session.recordGitRef("fix/hotfix");
-		expect(session.getGitRefs()).toContain("fix/hotfix");
-		expect(session.getGitRefs().length).toBe(countBefore + 1);
+	it("recordGitRef preserves order for hotfix-style interruptions (X -> Y -> X)", () => {
+		mockResolvedBranch("feat/x");
+		const session = SessionManager.inMemory(TEST_CWD);
+
+		session.recordGitRef("hotfix/y");
+		session.recordGitRef("feat/x");
+
+		const chronology = session.getGitRefChronology();
+		expect(chronology.map(r => r.branch)).toEqual(["feat/x", "hotfix/y", "feat/x"]);
+		expect(session.getLatestGitRef()).toBe("feat/x");
+		// getGitRefs() compat shim returns unique branches only.
+		expect(session.getGitRefs().sort()).toEqual(["feat/x", "hotfix/y"]);
 	});
 
 	it("recordGitRef appends a custom entry to the session", () => {
@@ -80,7 +97,7 @@ describe("Git branch tracking in sessions", () => {
 		expect(gitRefEntry).toBeDefined();
 	});
 
-	it("list extraction includes both header gitBranch and runtime gitRefs", async () => {
+	it("list extraction exposes initial, latest, and ordered chronology", async () => {
 		mockResolvedBranch("main");
 		using tempDir = TempDir.createSync("@pi-git-ref-list-");
 		const sessionDir = tempDir.path();
@@ -95,13 +112,17 @@ describe("Git branch tracking in sessions", () => {
 		expect(sessions.length).toBe(1);
 
 		const info = sessions[0]!;
-		expect(info.gitBranch).toBe("main");
+		expect(info.gitBranchInitial).toBe("main");
+		expect(info.gitBranchLatest).toBe("feature/listed");
 		expect(info.gitRefs).toBeArray();
-		expect(info.gitRefs).toContain("main");
-		expect(info.gitRefs).toContain("feature/listed");
+		expect(info.gitRefs!.map(r => r.branch)).toEqual(["main", "feature/listed"]);
+		// Every chronology entry should have a timestamp (from entry-level or header).
+		for (const record of info.gitRefs!) {
+			expect(typeof record.at).toBe("string");
+		}
 	});
 
-	it("buildIndex seeds gitRefs on reload from file", async () => {
+	it("buildIndex rehydrates chronology in file order on reload", async () => {
 		mockResolvedBranch("main");
 		using tempDir = TempDir.createSync("@pi-git-ref-reload-");
 		const sessionDir = tempDir.path();
@@ -110,16 +131,15 @@ describe("Git branch tracking in sessions", () => {
 		session.appendMessage({ role: "user", content: "test reload", timestamp: 1 });
 		session.recordGitRef("feature/reloaded");
 		session.recordGitRef("fix/reloaded");
+		session.recordGitRef("feature/reloaded");
 		await session.ensureOnDisk();
 		await session.flush();
 
 		const sessionFile = session.getSessionFile()!;
-
 		const reopened = await SessionManager.open(sessionFile, sessionDir);
-		const refs = reopened.getGitRefs();
-		expect(refs).toContain("main");
-		expect(refs).toContain("feature/reloaded");
-		expect(refs).toContain("fix/reloaded");
+		const chronology = reopened.getGitRefChronology();
+		expect(chronology.map(r => r.branch)).toEqual(["main", "feature/reloaded", "fix/reloaded", "feature/reloaded"]);
+		expect(reopened.getLatestGitRef()).toBe("feature/reloaded");
 	});
 
 	it("fork preserves gitBranch in new header", async () => {
@@ -137,17 +157,54 @@ describe("Git branch tracking in sessions", () => {
 		expect(session.getHeader()!.gitBranch).toBe("main");
 	});
 
-	it("newSession resets stale refs and recaptures the latest branch", async () => {
+	it("newSession resets stale chronology and seeds from the new HEAD", async () => {
 		vi.spyOn(git.head, "resolveSync")
 			.mockReturnValueOnce(makeRefHead("main"))
 			.mockReturnValueOnce(makeRefHead("release"));
 		const session = SessionManager.inMemory(TEST_CWD);
 		session.recordGitRef("stale/branch");
-		expect(session.getGitRefs()).toContain("stale/branch");
+		expect(session.getGitRefChronology().map(r => r.branch)).toEqual(["main", "stale/branch"]);
 
 		await session.newSession();
-		expect(session.getGitRefs()).toContain("release");
-		expect(session.getGitRefs()).not.toContain("stale/branch");
+		const chronology = session.getGitRefChronology();
+		expect(chronology.map(r => r.branch)).toEqual(["release"]);
+		expect(session.getLatestGitRef()).toBe("release");
 		expect(session.getHeader()!.gitBranch).toBe("release");
+	});
+
+	it("getRecentSessions populates branchLatest via a bounded tail read past the head window", async () => {
+		mockResolvedBranch("main");
+		using tempDir = TempDir.createSync("@pi-git-ref-tail-");
+		const sessionDir = tempDir.path();
+
+		const session = SessionManager.create(TEST_CWD, sessionDir);
+		// Long padded message pushes any subsequent entry past the 4 KiB head window
+		// used by getSortedSessions / RecentSessionInfo.
+		session.appendMessage({ role: "user", content: "x".repeat(8192), timestamp: 1 });
+		session.recordGitRef("feature/tail");
+		await session.ensureOnDisk();
+		await session.flush();
+
+		const recent = await getRecentSessions(sessionDir);
+		expect(recent.length).toBe(1);
+		const info = recent[0]!;
+		expect(info.branchInitial).toBe("main");
+		expect(info.branchLatest).toBe("feature/tail");
+	});
+
+	it("getRecentSessions falls back to initial when no runtime ref was recorded", async () => {
+		mockResolvedBranch("main");
+		using tempDir = TempDir.createSync("@pi-git-ref-tail-noop-");
+		const sessionDir = tempDir.path();
+
+		const session = SessionManager.create(TEST_CWD, sessionDir);
+		session.appendMessage({ role: "user", content: "just a message", timestamp: 1 });
+		await session.ensureOnDisk();
+		await session.flush();
+
+		const recent = await getRecentSessions(sessionDir);
+		expect(recent.length).toBe(1);
+		expect(recent[0]!.branchInitial).toBe("main");
+		expect(recent[0]!.branchLatest).toBe("main");
 	});
 });

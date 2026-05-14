@@ -1140,7 +1140,9 @@ export class AcpAgent implements Agent {
 			_meta: {
 				messageCount: session.messageCount,
 				size: session.size,
-				gitBranch: session.gitBranch,
+				gitBranchInitial: session.gitBranchInitial,
+				gitBranchLatest: session.gitBranchLatest,
+				gitRefs: session.gitRefs,
 			},
 		};
 	}

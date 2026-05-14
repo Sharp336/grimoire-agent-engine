@@ -255,6 +255,12 @@ export interface SessionContext {
 	modeData?: Record<string, unknown>;
 }
 
+export interface GitRefRecord {
+	branch: string;
+	/** ISO 8601 UTC. Sourced from the persisted entry's `timestamp` field. */
+	at?: string;
+}
+
 export interface SessionInfo {
 	path: string;
 	id: string;
@@ -270,8 +276,9 @@ export interface SessionInfo {
 	size: number;
 	firstMessage: string;
 	allMessagesText: string;
-	gitBranch?: string;
-	gitRefs?: string[];
+	gitBranchInitial?: string;
+	gitBranchLatest?: string;
+	gitRefs?: GitRefRecord[];
 }
 
 export type ReadonlySessionManager = Pick<
@@ -297,6 +304,8 @@ export type ReadonlySessionManager = Pick<
 	| "getUsageStatistics"
 	| "putBlob"
 	| "getGitRefs"
+	| "getGitRefChronology"
+	| "getLatestGitRef"
 	| "recordGitRef"
 >;
 
@@ -882,7 +891,8 @@ class RecentSessionInfo {
 	#fullName: string | undefined;
 	#timeAgo: string | undefined;
 	readonly #headerTimestamp: string | undefined;
-	readonly branch: string | undefined;
+	readonly branchInitial: string | undefined;
+	branchLatest?: string;
 
 	constructor(
 		readonly path: string,
@@ -897,7 +907,7 @@ class RecentSessionInfo {
 		const trystr = (v: unknown) => (typeof v === "string" ? v : undefined);
 		this.#fullName = sanitizeSessionName(trystr(header.title)) ?? sanitizeSessionName(firstPrompt);
 		this.#headerTimestamp = trystr(header.timestamp);
-		this.branch = trystr(header.gitBranch);
+		this.branchInitial = trystr(header.gitBranch);
 	}
 
 	/** Display name. Falls back to a timestamp-based label, never the raw UUID. */
@@ -1368,7 +1378,13 @@ export async function getRecentSessions(
 	storage: SessionStorage = new FileSessionStorage(),
 ): Promise<RecentSessionInfo[]> {
 	const sessions = await getSortedSessions(sessionDir, storage);
-	return sessions.slice(0, limit);
+	const recentSessions = sessions.slice(0, limit);
+	await Promise.all(
+		recentSessions.map(async info => {
+			info.branchLatest = (await readLastGitRefFromTail(info.path, storage)) ?? info.branchInitial;
+		}),
+	);
+	return recentSessions;
 }
 
 /**
@@ -1424,6 +1440,59 @@ async function readSessionListPrefix(file: string, storage: SessionStorage, buff
 	} finally {
 		await handle.close();
 	}
+}
+
+async function readLastGitRefFromTail(
+	file: string,
+	storage: SessionStorage,
+	maxBytes = 4096,
+): Promise<string | undefined> {
+	let content: string;
+	let startsAtByteZero = true;
+
+	if (!(storage instanceof FileSessionStorage)) {
+		const fullContent = await storage.readText(file);
+		const bytes = Buffer.from(fullContent, "utf-8");
+		const start = Math.max(0, bytes.byteLength - maxBytes);
+		startsAtByteZero = start === 0;
+		content = sessionListPrefixDecoder.decode(bytes.subarray(start));
+	} else {
+		let handle: fs.promises.FileHandle | undefined;
+		try {
+			const size = storage.statSync(file).size;
+			const start = Math.max(0, size - maxBytes);
+			const buffer = Buffer.allocUnsafe(size - start);
+			startsAtByteZero = start === 0;
+			handle = await fs.promises.open(file, "r");
+			const { bytesRead } = await handle.read(buffer, 0, buffer.byteLength, start);
+			content = sessionListPrefixDecoder.decode(buffer.subarray(0, bytesRead));
+		} catch (err) {
+			if (isEnoent(err)) return undefined;
+			throw err;
+		} finally {
+			await handle?.close();
+		}
+	}
+
+	if (!startsAtByteZero) {
+		const firstNewline = content.indexOf("\n");
+		if (firstNewline === -1) return undefined;
+		content = content.slice(firstNewline + 1);
+	}
+
+	const lines = content.split(/\r?\n/);
+	for (let i = lines.length - 1; i >= 0; i--) {
+		const line = lines[i];
+		if (!line) continue;
+		try {
+			const parsed = JSON.parse(line) as Record<string, unknown>;
+			if (parsed.type === "custom" && parsed.customType === "git_ref" && typeof parsed.data === "string") {
+				return parsed.data;
+			}
+		} catch {}
+	}
+
+	return undefined;
 }
 
 function decodeJsonStringFragment(value: string): string {
@@ -1575,8 +1644,10 @@ async function collectSessionFromFile(
 		let firstMessage = "";
 		const allMessages: string[] = [];
 		let shortSummary: string | undefined;
-		const gitRefs = new Set<string>();
-		if (header.gitBranch) gitRefs.add(header.gitBranch);
+		const gitRefs: GitRefRecord[] = [];
+		if (header.gitBranch) {
+			gitRefs.push({ branch: header.gitBranch, at: header.timestamp });
+		}
 		for (let i = 1; i < entries.length; i++) {
 			const entry = entries[i] as {
 				type?: string;
@@ -1584,6 +1655,7 @@ async function collectSessionFromFile(
 				shortSummary?: string;
 				customType?: string;
 				data?: unknown;
+				timestamp?: string;
 			};
 
 			if (entry.type === "compaction" && typeof entry.shortSummary === "string") {
@@ -1591,7 +1663,7 @@ async function collectSessionFromFile(
 			}
 
 			if (entry.type === "custom" && entry.customType === "git_ref" && typeof entry.data === "string") {
-				gitRefs.add(entry.data);
+				gitRefs.push({ branch: entry.data, at: typeof entry.timestamp === "string" ? entry.timestamp : undefined });
 			}
 
 			if (entry.type === "message" && entry.message) {
@@ -1614,6 +1686,8 @@ async function collectSessionFromFile(
 		firstMessage ||= extractFirstUserMessageFromPrefix(content) ?? "";
 		const messageCount = Math.max(parsedMessageCount, countMessageMarkers(content));
 		const stats = storage.statSync(file);
+		const gitBranchInitial = header.gitBranch;
+		const gitBranchLatest = gitRefs.at(-1)?.branch ?? gitBranchInitial;
 		return {
 			path: file,
 			id: header.id,
@@ -1626,8 +1700,9 @@ async function collectSessionFromFile(
 			size: stats.size,
 			firstMessage: firstMessage || "(no messages)",
 			allMessagesText: allMessages.length > 0 ? allMessages.join(" ") : firstMessage,
-			gitBranch: header.gitBranch,
-			gitRefs: gitRefs.size > 0 ? Array.from(gitRefs) : undefined,
+			gitBranchInitial,
+			gitBranchLatest,
+			gitRefs: gitRefs.length > 0 ? gitRefs : undefined,
 		};
 	} catch {
 		return undefined;
@@ -1749,7 +1824,7 @@ export class SessionManager {
 		premiumRequests: 0,
 		cost: 0,
 	} satisfies UsageStatistics;
-	#gitRefs: Set<string> = new Set();
+	#gitRefChronology: GitRefRecord[] = [];
 	#persistWriter: NdjsonFileWriter | undefined;
 	#persistWriterPath: string | undefined;
 	#persistChain: Promise<void> = Promise.resolve();
@@ -2059,8 +2134,7 @@ export class SessionManager {
 		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 };
 		this.#inMemoryArtifacts = null;
 		this.#inMemoryArtifactCounter = 0;
-		this.#gitRefs.clear();
-		if (header.gitBranch) this.#gitRefs.add(header.gitBranch);
+		this.#gitRefChronology = header.gitBranch ? [{ branch: header.gitBranch, at: timestamp }] : [];
 
 		if (this.persist) {
 			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
@@ -2075,9 +2149,11 @@ export class SessionManager {
 		this.#labelsById.clear();
 		this.#leafId = null;
 		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 };
-		this.#gitRefs.clear();
+		this.#gitRefChronology = [];
 		const header = this.#fileEntries[0] as SessionHeader | undefined;
-		if (header?.type === "session" && header.gitBranch) this.#gitRefs.add(header.gitBranch);
+		if (header?.type === "session" && header.gitBranch) {
+			this.#gitRefChronology.push({ branch: header.gitBranch, at: header.timestamp });
+		}
 		for (const entry of this.#fileEntries) {
 			if (entry.type === "session") continue;
 			this.#byId.set(entry.id, entry);
@@ -2090,7 +2166,7 @@ export class SessionManager {
 				}
 			}
 			if (entry.type === "custom" && entry.customType === "git_ref" && typeof entry.data === "string") {
-				this.#gitRefs.add(entry.data);
+				this.#gitRefChronology.push({ branch: entry.data, at: entry.timestamp });
 			}
 			if (entry.type === "message" && entry.message.role === "assistant") {
 				const usage = entry.message.usage;
@@ -2766,16 +2842,28 @@ export class SessionManager {
 		return Array.from(ruleNames);
 	}
 
-	/** Record an observed git branch. Deduplicates and persists as a custom entry. */
+	/** Record an observed git branch. Deduplicates against the immediately previous branch and persists the change. */
 	recordGitRef(branch: string): void {
-		if (this.#gitRefs.has(branch)) return;
-		this.#gitRefs.add(branch);
-		this.appendCustomEntry("git_ref", branch);
+		if (this.#gitRefChronology.at(-1)?.branch === branch) return;
+		const entryId = this.appendCustomEntry("git_ref", branch);
+		const entry = this.#byId.get(entryId);
+		this.#gitRefChronology.push({
+			branch,
+			at: entry?.type === "custom" ? entry.timestamp : new Date().toISOString(),
+		});
 	}
 
 	/** All unique git branches observed during this session (header + runtime). */
 	getGitRefs(): string[] {
-		return Array.from(this.#gitRefs);
+		return Array.from(new Set(this.#gitRefChronology.map(record => record.branch)));
+	}
+
+	getGitRefChronology(): readonly GitRefRecord[] {
+		return this.#gitRefChronology;
+	}
+
+	getLatestGitRef(): string | null {
+		return this.#gitRefChronology.at(-1)?.branch ?? null;
 	}
 
 	// =========================================================================

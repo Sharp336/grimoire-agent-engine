@@ -400,7 +400,8 @@ export class InteractiveMode implements InteractiveModeContext {
 				sessions.map(s => ({
 					name: s.name,
 					timeAgo: s.timeAgo,
-					branch: s.branch,
+					branchInitial: s.branchInitial,
+					branchLatest: s.branchLatest,
 				})),
 			),
 		);

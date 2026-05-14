@@ -1,11 +1,13 @@
 import { type Component, padding, TERMINAL, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
+import { formatBranchLabel } from "./branch-label";
 
 export interface RecentSession {
 	name: string;
 	timeAgo: string;
-	branch?: string;
+	branchInitial?: string;
+	branchLatest?: string;
 }
 
 export interface LspServerInfo {
@@ -126,7 +128,14 @@ export class WelcomeComponent implements Component {
 			const bulletPrefix = ` ${theme.md.bullet} `;
 			const prefixWidth = visibleWidth(bulletPrefix);
 			for (const session of this.recentSessions.slice(0, 3)) {
-				const branchPart = session.branch ? ` ${theme.sep.dot} ${theme.icon.branch} ${session.branch}` : "";
+				const timeOnly = ` (${session.timeAgo})`;
+				const labelBudget = Math.max(0, rightCol - prefixWidth - visibleWidth(timeOnly) - visibleWidth(" · "));
+				const branchLabel = formatBranchLabel(
+					{ initial: session.branchInitial, latest: session.branchLatest },
+					labelBudget,
+					{ branch: theme.icon.branch },
+				);
+				const branchPart = branchLabel ? ` ${theme.sep.dot} ${branchLabel}` : "";
 				const timeSuffixRaw = ` (${session.timeAgo}${branchPart})`;
 				const timeWidth = visibleWidth(timeSuffixRaw);
 				const nameBudget = Math.max(1, rightCol - prefixWidth - timeWidth);
