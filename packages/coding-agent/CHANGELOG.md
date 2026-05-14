@@ -38,6 +38,9 @@
 
 - Fixed `$env:VAR` PowerShell variables being mangled on Windows when commands invoked PowerShell as a subprocess (e.g. `powershell -Command "Write-Host $env:SystemRoot"`). Brush-core applied POSIX parameter expansion to `$env` before spawning the child, leaving a dangling `:NAME`. The fix lives in `pi-shell` at env-var application time: every brush session now defines `env=$env` as an internal shell variable so `$env:NAME` expands to the literal `$env:NAME` token that PowerShell expects. The fallback is not exported, only influences brush's own expansion, and is shadowed by any user assignment to `env` (e.g. `env=prod; echo "$env:8080"` still prints `prod:8080`), so the POSIX bash contract is preserved. ([#1079](https://github.com/can1357/oh-my-pi/issues/1079))
 
+### Added
+
+- Added `experimental.openTelemetry?: boolean` to `CreateAgentSessionOptions`. When set, the underlying agent loop emits OpenTelemetry spans for LLM calls and tool executions following the GenAI semantic conventions. See the `[Unreleased]` entry in `@oh-my-pi/pi-agent-core` for the span schema. Opt-in and zero-cost when unset.
 
 ## [15.0.1] - 2026-05-14
 ### Breaking Changes

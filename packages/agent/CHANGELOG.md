@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added experimental opt-in OpenTelemetry instrumentation to the agent loop. When `experimental.openTelemetry` is set on `AgentLoopConfig` or `AgentOptions`, the loop emits `agent.llm_call` (with `gen_ai.system`, `gen_ai.request.model`, `gen_ai.usage.{input,output,cached_input}_tokens`, `gen_ai.response.finish_reason`) and `agent.tool_execution` (with `tool.name`, `tool.call_id`) spans following the OpenTelemetry GenAI semantic conventions. Spans are activated on the OTEL context via `runInActiveSpan` so downstream spans (provider HTTP clients, MCP tools, user code) attach as children. The flag is opt-in and zero-cost when unset; the new dependency on `@opentelemetry/api` returns a no-op tracer when no SDK is registered.
+
 ## [15.0.1] - 2026-05-14
 ### Breaking Changes
 
