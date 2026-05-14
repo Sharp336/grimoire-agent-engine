@@ -82,6 +82,12 @@ type AgentImageContent = {
 	mimeType: string;
 };
 
+type PromptQueueState = {
+	promise: Promise<void>;
+	release: (() => void) | undefined;
+	owner: PromptTurnState | undefined;
+};
+
 type PromptTurnState = {
 	userMessageId: string;
 	cancelRequested: boolean;
@@ -97,8 +103,7 @@ type ManagedSessionRecord = {
 	session: AgentSession;
 	mcpManager: MCPManager | undefined;
 	promptTurn: PromptTurnState | undefined;
-	promptQueue: Promise<void>;
-	steerQueue: Promise<void>;
+	promptQueue: PromptQueueState;
 	promptClosed: boolean;
 	liveMessageId: string | undefined;
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
@@ -379,20 +384,21 @@ export class AcpAgent implements Agent {
 		const record = this.#getSessionRecord(params.sessionId);
 		const activeTurn = record.promptTurn;
 		if (activeTurn && !activeTurn.settled && record.session.isStreaming) {
-			return await this.#queueSteerPrompt(record, async () => {
+			record.promptQueue.release?.();
+			return await this.#queuePrompt(record, async () => {
 				if (record.promptClosed) {
 					throw new Error(`ACP session is closed: ${record.session.sessionId}`);
 				}
 				const currentTurn = record.promptTurn;
-				if (!currentTurn || currentTurn.settled || !record.session.isStreaming) {
-					return await this.#queueTrackedPrompt(record, params);
+				if (currentTurn !== activeTurn || currentTurn.settled || !record.session.isStreaming) {
+					return await this.#runTrackedPrompt(record, params);
 				}
 				const converted = this.#convertPromptBlocks(params.prompt);
 				try {
 					await this.#runPromptOrCommand(record, converted.text, converted.images, "steer");
 				} catch (error) {
 					if (this.#isSteerNoLongerStreamingError(error)) {
-						return await this.#queueTrackedPrompt(record, params);
+						return await this.#runTrackedPrompt(record, params);
 					}
 					throw error;
 				}
@@ -407,36 +413,26 @@ export class AcpAgent implements Agent {
 		return await this.#queuePrompt(record, () => this.#runTrackedPrompt(record, params));
 	}
 
-	async #queueSteerPrompt(record: ManagedSessionRecord, run: () => Promise<PromptResponse>): Promise<PromptResponse> {
-		let releaseQueue!: () => void;
-		const previousQueue = record.steerQueue;
-		record.steerQueue = new Promise<void>(resolve => {
-			releaseQueue = resolve;
-		});
-		const queued = previousQueue.then(async () => {
-			try {
-				return await run();
-			} finally {
-				releaseQueue();
-			}
-		});
-		return await queued;
-	}
-
 	async #queuePrompt(record: ManagedSessionRecord, run: () => Promise<PromptResponse>): Promise<PromptResponse> {
 		let releaseQueue!: () => void;
 		const previousQueue = record.promptQueue;
-		record.promptQueue = new Promise<void>(resolve => {
-			releaseQueue = resolve;
-		});
-		const queued = previousQueue.then(async () => {
-			try {
-				return await run();
-			} finally {
-				releaseQueue();
+		record.promptQueue = {
+			promise: new Promise<void>(resolve => {
+				releaseQueue = resolve;
+			}),
+			release: releaseQueue,
+			owner: undefined,
+		};
+		await previousQueue.promise;
+		try {
+			return await run();
+		} finally {
+			releaseQueue();
+			if (record.promptQueue.release === releaseQueue) {
+				record.promptQueue.release = undefined;
+				record.promptQueue.owner = undefined;
 			}
-		});
-		return await queued;
+		}
 	}
 
 	async #runTrackedPrompt(record: ManagedSessionRecord, params: PromptRequest): Promise<PromptResponse> {
@@ -461,6 +457,7 @@ export class AcpAgent implements Agent {
 			resolve: pendingPrompt.resolve,
 			reject: pendingPrompt.reject,
 		};
+		record.promptQueue.owner = record.promptTurn;
 
 		record.promptTurn.unsubscribe = record.session.subscribe(event => {
 			void this.#handlePromptEvent(record, event);
@@ -798,8 +795,7 @@ export class AcpAgent implements Agent {
 			session,
 			mcpManager: undefined,
 			promptTurn: undefined,
-			promptQueue: Promise.resolve(),
-			steerQueue: Promise.resolve(),
+			promptQueue: { promise: Promise.resolve(), release: undefined, owner: undefined },
 			promptClosed: false,
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
