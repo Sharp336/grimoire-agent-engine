@@ -20,7 +20,7 @@ import { SILENT_ABORT_MARKER } from "../src/session/messages";
 import { SessionManager } from "../src/session/session-manager";
 import { expectAcpStructure } from "./helpers/acp-schema";
 
-type FakePromptDelivery = "streaming" | "started" | undefined;
+type FakePromptDelivery = "streaming" | "started" | "handled" | undefined;
 const TEST_MODELS: Model[] = [
 	{
 		id: "claude-sonnet-4-20250514",
@@ -100,6 +100,7 @@ class FakeAgentSession {
 	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
 	planModeState: PlanModeState | undefined;
 	staleSteerDelivery = false;
+	handledSteerPrompts = new Set<string>();
 	#listeners = new Set<(event: AgentSessionEvent) => void>();
 
 	constructor(
@@ -168,6 +169,9 @@ class FakeAgentSession {
 	async prompt(text: string, options?: { streamingBehavior?: "steer" | "followUp" }): Promise<FakePromptDelivery> {
 		this.promptCalls.push({ text, streamingBehavior: options?.streamingBehavior });
 		if (options?.streamingBehavior === "steer") {
+			if (this.handledSteerPrompts.has(text)) {
+				return "handled";
+			}
 			if (this.staleSteerDelivery) {
 				return "started";
 			}
@@ -887,6 +891,9 @@ describe("ACP agent", () => {
 		);
 		expect(markerChunks).toHaveLength(0);
 
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
 
 	it("routes prompts submitted during an active ACP turn through steer", async () => {
 		const harness = await createHarness();
@@ -1023,6 +1030,38 @@ describe("ACP agent", () => {
 		expect(session.steerEvents).toEqual(["custom", "prompt"]);
 		expect((await secondPrompt).userMessageId).toBe("00000000-0000-4000-8000-000000000037");
 		expect((await thirdPrompt).userMessageId).toBe("00000000-0000-4000-8000-000000000038");
+
+		finishPrompt();
+		await firstPrompt;
+		harness.abortController.abort();
+		await Bun.sleep(0);
+	});
+
+	it("keeps active-turn prompts accepted when AgentSession handles a steer command locally", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const finishPrompt = holdFirstTrackedPrompt(session);
+		session.handledSteerPrompts.add("/extension-local");
+
+		const firstPrompt = harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000039",
+			prompt: [{ type: "text", text: "start long task" }],
+		} as PromptRequest);
+		await waitUntil(() => session.isStreaming);
+
+		const secondResponse = await harness.agent.prompt({
+			sessionId: created.sessionId,
+			messageId: "00000000-0000-4000-8000-000000000040",
+			prompt: [{ type: "text", text: "/extension-local" }],
+		} as PromptRequest);
+
+		expect(secondResponse.userMessageId).toBe("00000000-0000-4000-8000-000000000040");
+		expect(session.promptCalls).toEqual([
+			{ text: "start long task", streamingBehavior: undefined },
+			{ text: "/extension-local", streamingBehavior: "steer" },
+		]);
 
 		finishPrompt();
 		await firstPrompt;

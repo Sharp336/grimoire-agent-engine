@@ -63,8 +63,8 @@ describe("submitInteractiveInput", () => {
 			checkShutdownRequested: vi.fn(async () => {}),
 		};
 		const session = {
-			prompt: vi.fn(async () => {}),
-			promptCustomMessage: vi.fn(async () => {}),
+			prompt: vi.fn(async () => undefined),
+			promptCustomMessage: vi.fn(async () => undefined),
 		};
 		const input = createInput({ text: "continue goal", customType: "goal-continuation" });
 

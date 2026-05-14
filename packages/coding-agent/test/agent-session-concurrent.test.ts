@@ -273,7 +273,7 @@ describe("AgentSession concurrent prompt guard", () => {
 		expect(session.isStreaming).toBe(false);
 
 		// Second prompt should work
-		await expect(session.prompt("Second message")).resolves.toBeUndefined();
+		await expect(session.prompt("Second message")).resolves.toBe("started");
 	});
 });
 

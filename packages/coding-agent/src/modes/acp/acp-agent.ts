@@ -538,7 +538,7 @@ export class AcpAgent implements Agent {
 	}
 
 	#assertSteerDeliveredToActiveTurn(delivery: PromptDelivery, streamingBehavior?: "steer" | "followUp"): void {
-		if (streamingBehavior && delivery !== "streaming") {
+		if (streamingBehavior && delivery !== "streaming" && delivery !== "handled") {
 			throw this.#createSteerNoLongerStreamingError();
 		}
 	}
