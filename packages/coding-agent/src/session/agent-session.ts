@@ -316,6 +316,8 @@ export interface AgentSessionConfig {
 	providerSessionId?: string;
 }
 
+export type PromptDelivery = "streaming" | "started" | "handled" | undefined;
+
 /** Options for AgentSession.prompt() */
 export interface PromptOptions {
 	/** Whether to expand file-based prompt templates (default: true) */
@@ -3560,21 +3562,21 @@ export class AgentSession {
 	 * @throws Error if streaming and no streamingBehavior specified
 	 * @throws Error if no model selected or no API key available (when not streaming)
 	 */
-	async prompt(text: string, options?: PromptOptions): Promise<void> {
+	async prompt(text: string, options?: PromptOptions): Promise<PromptDelivery> {
 		const expandPromptTemplates = options?.expandPromptTemplates ?? true;
 
 		// Handle extension commands first (execute immediately, even during streaming)
 		if (expandPromptTemplates && text.startsWith("/")) {
 			const handled = await this.#tryExecuteExtensionCommand(text);
 			if (handled) {
-				return;
+				return "handled";
 			}
 
 			// Try custom commands (TypeScript slash commands)
 			const customResult = await this.#tryExecuteCustomCommand(text);
 			if (customResult !== null) {
 				if (customResult === "") {
-					return;
+					return "handled";
 				}
 				text = customResult;
 			}
@@ -3599,7 +3601,7 @@ export class AgentSession {
 			} else {
 				await this.#queueSteer(expandedText, options?.images);
 			}
-			return;
+			return "streaming";
 		}
 
 		// Skip eager todo prelude when the user has already queued a directive
@@ -3636,12 +3638,13 @@ export class AgentSession {
 		if (!options?.synthetic) {
 			await this.#enforcePlanModeToolDecision();
 		}
+		return "started";
 	}
 
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice">,
-	): Promise<void> {
+	): Promise<PromptDelivery> {
 		const textContent =
 			typeof message.content === "string"
 				? message.content
@@ -3655,7 +3658,7 @@ export class AgentSession {
 				throw new AgentBusyError();
 			}
 			await this.sendCustomMessage(message, { deliverAs: options.streamingBehavior });
-			return;
+			return "streaming";
 		}
 
 		const customMessage: CustomMessage<T> = {
@@ -3669,6 +3672,7 @@ export class AgentSession {
 		};
 
 		await this.#promptWithMessage(customMessage, textContent, options);
+		return "started";
 	}
 
 	async #promptWithMessage(

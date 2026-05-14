@@ -52,7 +52,7 @@ import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
 import { theme } from "../../modes/theme/theme";
-import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
+import type { AgentSession, AgentSessionEvent, PromptDelivery } from "../../session/agent-session";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE } from "../../session/messages";
 import {
 	SessionManager,
@@ -384,7 +384,9 @@ export class AcpAgent implements Agent {
 		const record = this.#getSessionRecord(params.sessionId);
 		const activeTurn = record.promptTurn;
 		if (activeTurn && !activeTurn.settled && record.session.isStreaming) {
-			record.promptQueue.release?.();
+			if (record.promptQueue.owner === activeTurn) {
+				record.promptQueue.release?.();
+			}
 			return await this.#queuePrompt(record, async () => {
 				if (record.promptClosed) {
 					throw new Error(`ACP session is closed: ${record.session.sessionId}`);
@@ -508,7 +510,8 @@ export class AcpAgent implements Agent {
 				if (streamingBehavior && !record.session.isStreaming) {
 					throw this.#createSteerNoLongerStreamingError();
 				}
-				await record.session.prompt(builtinResult.prompt, { images, streamingBehavior });
+				const delivery = await record.session.prompt(builtinResult.prompt, { images, streamingBehavior });
+				this.#assertSteerDeliveredToActiveTurn(delivery, streamingBehavior);
 				return;
 			}
 			if (streamingBehavior) {
@@ -530,7 +533,14 @@ export class AcpAgent implements Agent {
 		if (streamingBehavior && !record.session.isStreaming) {
 			throw this.#createSteerNoLongerStreamingError();
 		}
-		await record.session.prompt(text, { images, streamingBehavior });
+		const delivery = await record.session.prompt(text, { images, streamingBehavior });
+		this.#assertSteerDeliveredToActiveTurn(delivery, streamingBehavior);
+	}
+
+	#assertSteerDeliveredToActiveTurn(delivery: PromptDelivery, streamingBehavior?: "steer" | "followUp"): void {
+		if (streamingBehavior && delivery !== "streaming") {
+			throw this.#createSteerNoLongerStreamingError();
+		}
 	}
 
 	#createSteerNoLongerStreamingError(): Error {
@@ -564,7 +574,7 @@ export class AcpAgent implements Agent {
 		if (streamingBehavior && !record.session.isStreaming) {
 			throw this.#createSteerNoLongerStreamingError();
 		}
-		await record.session.promptCustomMessage(
+		const delivery = await record.session.promptCustomMessage(
 			{
 				customType: SKILL_PROMPT_MESSAGE_TYPE,
 				content: built.message,
@@ -574,6 +584,7 @@ export class AcpAgent implements Agent {
 			},
 			{ streamingBehavior },
 		);
+		this.#assertSteerDeliveredToActiveTurn(delivery, streamingBehavior);
 		return true;
 	}
 
