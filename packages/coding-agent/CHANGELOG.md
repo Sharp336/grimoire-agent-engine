@@ -3,8 +3,16 @@
 ## [Unreleased]
 ### Added
 
-- Added git branch tracking to session metadata and history. New sessions now capture the current branch in the header, interactive mode records branch changes (and the current branch on resume/startup) as session custom entries, and recent-session surfaces can display/search across the observed branch refs.
+- Added ordered branch chronology to sessions. Sessions capture the initial branch in the header at creation, and every observed branch change during the session is appended as a `git_ref` custom entry in file order. The chronology is replayed when listing sessions and exposed via `SessionManager.getGitRefChronology()`. Branches are deduped against the immediately previous entry only, so hotfix-style interruption patterns (`feat/x → hotfix/y → feat/x`) record three entries, not two.
+- Added selector and welcome branch labels driven by the new chronology. Each row reads `⑂ initial → latest` when they differ, `⑂ branch` when they match, and is omitted when neither is known. Long labels degrade to `⑂ latest` under width pressure.
+- Added focused-row branch chronology to the session selector. When a highlighted row's chronology spans two or more branches, an extra dim line renders the full ordered chain (`⑂ a → b → c`), middle-truncating to `⑂ a → … → z` when too wide.
+- Added branch-history banner on session resume. When a resumed session's chronology has at least two branches, `init()` renders `Branch history: <chain> (current)` under the welcome with per-segment dwell hints (e.g. `main (10m) · feat/x (current)`).
+- Added bounded tail-read in `getRecentSessions` so the welcome screen's "latest" branch reflects entries past the 4 KiB head window.
+- Added `gitBranchInitial`, `gitBranchLatest`, and the ordered `gitRefs` chronology (each entry `{ branch, at }`) to the ACP session `_meta` payload.
 
+### Changed
+
+- Changed session-selector fuzzy search to index the initial branch, the latest branch, and every historical branch ever observed during a session.
 
 ## [15.0.1] - 2026-05-14
 ### Breaking Changes
