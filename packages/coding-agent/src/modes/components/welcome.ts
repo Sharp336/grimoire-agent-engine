@@ -5,6 +5,7 @@ import { theme } from "../../modes/theme/theme";
 export interface RecentSession {
 	name: string;
 	timeAgo: string;
+	branch?: string;
 }
 
 export interface LspServerInfo {
@@ -125,7 +126,8 @@ export class WelcomeComponent implements Component {
 			const bulletPrefix = ` ${theme.md.bullet} `;
 			const prefixWidth = visibleWidth(bulletPrefix);
 			for (const session of this.recentSessions.slice(0, 3)) {
-				const timeSuffixRaw = ` (${session.timeAgo})`;
+				const branchPart = session.branch ? ` ${theme.sep.dot} ${theme.icon.branch} ${session.branch}` : "";
+				const timeSuffixRaw = ` (${session.timeAgo}${branchPart})`;
 				const timeWidth = visibleWidth(timeSuffixRaw);
 				const nameBudget = Math.max(1, rightCol - prefixWidth - timeWidth);
 				const nameVis = visibleWidth(session.name);

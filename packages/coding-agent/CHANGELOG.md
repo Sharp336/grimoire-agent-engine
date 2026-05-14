@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added git branch tracking to session metadata and history. New sessions now capture the current branch in the header, interactive mode records branch changes (and the current branch on resume/startup) as session custom entries, and recent-session surfaces can display/search across the observed branch refs.
+
 
 ## [15.0.1] - 2026-05-14
 ### Breaking Changes

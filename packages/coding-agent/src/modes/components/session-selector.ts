@@ -59,6 +59,8 @@ class SessionList implements Component {
 				session.firstMessage ?? "",
 				session.allMessagesText,
 				session.path,
+				session.gitBranch ?? "",
+				...(session.gitRefs ?? []).filter(ref => ref !== session.gitBranch),
 			];
 			return parts.filter(Boolean).join(" ");
 		});
@@ -158,9 +160,10 @@ class SessionList implements Component {
 				lines.push(messageLine);
 			}
 
-			// Metadata line: date + file size
+			// Metadata line: date + file size + branch
 			const modified = formatDate(session.modified);
-			const metadata = `  ${modified} ${theme.sep.dot} ${formatBytes(session.size)}`;
+			const branchSuffix = session.gitBranch ? ` ${theme.sep.dot} ${theme.icon.branch} ${session.gitBranch}` : "";
+			const metadata = `  ${modified} ${theme.sep.dot} ${formatBytes(session.size)}${branchSuffix}`;
 			const metadataLine = theme.fg("dim", truncateToWidth(metadata, width));
 
 			lines.push(metadataLine);

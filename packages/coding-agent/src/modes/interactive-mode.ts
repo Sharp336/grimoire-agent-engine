@@ -59,6 +59,7 @@ import { formatPhaseDisplayName } from "../tools/todo-write";
 import { ToolError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
+import * as git from "../utils/git";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
 import type { AssistantMessageComponent } from "./components/assistant-message";
@@ -399,6 +400,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				sessions.map(s => ({
 					name: s.name,
 					timeAgo: s.timeAgo,
+					branch: s.branch,
 				})),
 			),
 		);
@@ -525,10 +527,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		});
 
 		// Set up git branch watcher
+		const recordCurrentGitRef = () => {
+			try {
+				const headState = git.head.resolveSync(getProjectDir());
+				if (headState?.kind === "ref" && headState.branchName) {
+					this.sessionManager.recordGitRef(headState.branchName);
+				}
+			} catch {}
+		};
 		this.statusLine.watchBranch(() => {
 			this.updateEditorTopBorder();
 			this.ui.requestRender();
+			recordCurrentGitRef();
 		});
+		recordCurrentGitRef();
 
 		// Initial top border update
 		this.updateEditorTopBorder();
