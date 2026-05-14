@@ -15,7 +15,7 @@ import { formatBytes } from "@oh-my-pi/pi-utils";
 import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../modes/utils/keybinding-matchers";
 import type { SessionInfo } from "../../session/session-manager";
-import { formatBranchLabel } from "./branch-label";
+import { formatBranchChain, formatBranchLabel } from "./branch-label";
 import { DynamicBorder } from "./dynamic-border";
 import { HookSelectorComponent } from "./hook-selector";
 
@@ -29,7 +29,7 @@ class SessionList implements Component {
 	onSelect?: (sessionPath: string) => void;
 	onCancel?: () => void;
 	onExit: () => void = () => {};
-	#maxVisible: number = 5; // Max sessions visible (each session is 3 lines: msg + metadata + blank)
+	#maxVisible: number = 5; // Base visible rows; focused rows may add one chronology line when session.gitRefs.length >= 2.
 
 	onDeleteRequest?: (session: SessionInfo) => void;
 
@@ -177,6 +177,15 @@ class SessionList implements Component {
 			const metadataLine = theme.fg("dim", truncateToWidth(metadata, width));
 
 			lines.push(metadataLine);
+			if (isSelected && session.gitRefs && session.gitRefs.length >= 2) {
+				const chainPrefix = "  ";
+				const chainBudget = Math.max(0, width - visibleWidth(chainPrefix));
+				const chain = session.gitRefs.map(r => r.branch);
+				const chainLabel = formatBranchChain(chain, chainBudget, { branch: theme.icon.branch });
+				if (chainLabel) {
+					lines.push(`${chainPrefix}${theme.fg("dim", chainLabel)}`);
+				}
+			}
 			lines.push(""); // Blank line between sessions
 		}
 
