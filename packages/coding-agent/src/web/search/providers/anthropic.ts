@@ -34,6 +34,7 @@ export interface AnthropicSearchParams {
 	query: string;
 	system_prompt?: string;
 	num_results?: number;
+	signal?: AbortSignal;
 	/** Maximum output tokens. Defaults to 4096. */
 	max_tokens?: number;
 	/** Sampling temperature (0–1). Lower = more focused/factual. */
@@ -86,6 +87,7 @@ async function callSearch(
 	systemPrompt?: string,
 	maxTokens?: number,
 	temperature?: number,
+	signal?: AbortSignal,
 ): Promise<AnthropicApiResponse> {
 	const url = buildAnthropicUrl(auth);
 	const headers = buildAnthropicSearchHeaders(auth);
@@ -116,6 +118,7 @@ async function callSearch(
 		method: "POST",
 		headers,
 		body: JSON.stringify(body),
+		signal,
 	});
 
 	if (!response.ok) {
@@ -253,6 +256,7 @@ export async function searchAnthropic(params: AnthropicSearchParams): Promise<Se
 		params.system_prompt,
 		params.max_tokens,
 		params.temperature,
+		params.signal,
 	);
 
 	const result = parseResponse(response);
@@ -279,6 +283,7 @@ export class AnthropicProvider extends SearchProvider {
 			query: params.query,
 			system_prompt: params.systemPrompt,
 			num_results: params.numSearchResults ?? params.limit,
+			signal: params.signal,
 			max_tokens: params.maxOutputTokens,
 			temperature: params.temperature,
 		});
