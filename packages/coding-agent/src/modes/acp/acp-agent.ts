@@ -438,7 +438,7 @@ export class AcpAgent implements Agent {
 	async #runTrackedPrompt(record: ManagedSessionRecord, params: PromptRequest): Promise<PromptResponse> {
 		const activeTurn = record.promptTurn;
 		if (activeTurn && !activeTurn.settled) {
-			await activeTurn.promise;
+			await activeTurn.promise.catch(() => undefined);
 		}
 
 		if (record.promptClosed) {

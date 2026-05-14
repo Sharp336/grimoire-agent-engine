@@ -459,6 +459,24 @@ function holdNextPrompt(session: FakeAgentSession): () => void {
 	return () => finishPrompt();
 }
 
+function failPromptAfterRelease(session: FakeAgentSession, message: string): () => void {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	session.prompt = async (
+		text: string,
+		options?: { streamingBehavior?: "steer" | "followUp" },
+	): Promise<FakePromptDelivery> => {
+		session.promptCalls.push({ text, streamingBehavior: options?.streamingBehavior });
+		if (options?.streamingBehavior === "steer") {
+			session.steerEvents.push("prompt");
+			return "streaming";
+		}
+		session.isStreaming = true;
+		await promise;
+		session.isStreaming = false;
+		throw new Error(message);
+	};
+	return resolve;
+}
 describe("ACP agent", () => {
 	it("supports multiple live ACP sessions with model and lifecycle handlers", async () => {
 		const harness = await createHarness();
@@ -1022,6 +1040,41 @@ describe("ACP agent", () => {
 			harness.abortController.abort();
 			await Bun.sleep(0);
 		}
+	});
+
+	it("starts queued prompt after previous prompt rejects", async () => {
+		const harness = await createHarness();
+		const created = await harness.agent.newSession({ cwd: harness.cwdA, mcpServers: [] });
+		const session = harness.findSession(created.sessionId)!;
+		const releaseFailure = failPromptAfterRelease(session, "boom");
+
+		const firstPrompt = harness.agent
+			.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000032",
+				prompt: [{ type: "text", text: "will fail" }],
+			} as PromptRequest)
+			.catch(error => error);
+		await waitUntil(() => session.isStreaming);
+
+		const secondPrompt = harness.agent
+			.prompt({
+				sessionId: created.sessionId,
+				messageId: "00000000-0000-4000-8000-000000000033",
+				prompt: [{ type: "text", text: "after failure" }],
+			} as PromptRequest)
+			.catch(error => error);
+		releaseFailure();
+		expect(await firstPrompt).toBeInstanceOf(Error);
+		await waitUntil(() => session.promptCalls.length === 2);
+
+		expect(await secondPrompt).toBeInstanceOf(Error);
+		expect(session.promptCalls).toEqual([
+			{ text: "will fail", streamingBehavior: undefined },
+			{ text: "after failure", streamingBehavior: undefined },
+		]);
+		harness.abortController.abort();
+		await Bun.sleep(0);
 	});
 
 	it("serializes prompts that wait for the same unsettled idle ACP turn", async () => {
