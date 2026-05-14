@@ -1,6 +1,7 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { isCursorMaxCapable } from "@oh-my-pi/pi-ai";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import { type ThemeColor, theme } from "../../../modes/theme/theme";
@@ -105,6 +106,11 @@ const modelSegment: StatusLineSegment = {
 					}
 				}
 			}
+		}
+
+		// Surface Cursor MAX mode when enabled — affects context window and pricing.
+		if (state.model && isCursorMaxCapable(state.model) && ctx.session.agent.getCursorMaxMode()) {
+			content += `${theme.sep.dot}${theme.fg("warning", "MAX")}`;
 		}
 
 		return { content: theme.fg("statusLineModel", content), visible: true };
@@ -360,7 +366,7 @@ const contextPctSegment: StatusLineSegment = {
 		const autoIcon = ctx.autoCompactEnabled && theme.icon.auto ? ` ${theme.icon.auto}` : "";
 		const text = `${formatContextUsage(pct, window)}${autoIcon}`;
 
-		const color = getContextUsageThemeColor(getContextUsageLevel(pct, window));
+		const color = pct === null ? "statusLineContext" : getContextUsageThemeColor(getContextUsageLevel(pct, window));
 		const content = withIcon(theme.icon.context, theme.fg(color, text));
 
 		return { content, visible: true };

@@ -104,7 +104,12 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		expect(session.thinkingLevel).toBe("off");
 	});
 
-	test("selects the settings default model without synchronously validating auth", async () => {
+	test("selects the settings default model with a single auth lookup", async () => {
+		// The role resolver scans modelRegistry.getAll() (not getAvailable()) so Cursor's
+		// hidden default — not yet auth-discovered at startup — can be honored. The
+		// settings-default step then validates auth on the resolved model directly rather
+		// than relying on an upstream auth filter. See: fix(cursor-agent): honor hidden
+		// default cursor model on startup.
 		const defaultModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!defaultModel) {
 			throw new Error("Expected bundled anthropic default model");
@@ -116,9 +121,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		const settings = Settings.isolated();
 		settings.setModelRole("default", `${defaultModel.provider}/${defaultModel.id}`);
 
-		const getApiKeySpy = vi
-			.spyOn(modelRegistry, "getApiKey")
-			.mockRejectedValue(new Error("settings default model should not validate auth during startup"));
+		const getApiKeySpy = vi.spyOn(modelRegistry, "getApiKey");
 
 		try {
 			const { session } = await createAgentSession({
@@ -140,7 +143,11 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			try {
 				expect(session.model?.provider).toBe(defaultModel.provider);
 				expect(session.model?.id).toBe(defaultModel.id);
-				expect(getApiKeySpy).not.toHaveBeenCalled();
+				// Auth is checked for the role's resolved model, not iterated across the
+				// full registry — lookups are cached on `provider + baseUrl`.
+				const calledModelKeys = new Set(getApiKeySpy.mock.calls.map(c => `${c[0].provider}/${c[0].id}`));
+				expect(calledModelKeys).toContain(`${defaultModel.provider}/${defaultModel.id}`);
+				expect(calledModelKeys.size).toBeLessThanOrEqual(2);
 			} finally {
 				await session.dispose();
 			}

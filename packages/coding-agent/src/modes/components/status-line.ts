@@ -570,7 +570,7 @@ export class StatusLineComponent implements Component {
 		const breakdown = this.getCachedContextBreakdown();
 		const contextTokens = breakdown.usedTokens;
 		const contextWindow = breakdown.contextWindow || state.model?.contextWindow || 0;
-		const contextPercent = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
+		const contextPercent = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : null;
 
 		return {
 			session: this.session,

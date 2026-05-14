@@ -47,6 +47,15 @@ export function transformMessages<TApi extends Api>(
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
 ): Message[] {
+	// Pre-pass: inject synthetic tool_call blocks for orphan tool_result messages.
+	// Some providers (e.g. Cursor's cursor-agent API) execute native tools via exec
+	// handlers without emitting tool_call blocks in the assistant message — the
+	// assistant message only carries text/thinking. When the resulting conversation
+	// is replayed against a provider that requires tool_use/tool_result pairing
+	// (Anthropic, Google, OpenAI Responses, ...), those orphan tool_result blocks
+	// either fail validation (invalid id format) or are rejected as unpaired.
+	messages = injectSyntheticToolCallsForOrphans(messages, model, normalizeToolCallId);
+
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
 
@@ -379,4 +388,197 @@ export function transformMessages<TApi extends Api>(
 	flushPendingAbortedToolCalls();
 
 	return result;
+}
+
+/**
+ * Detect tool_result messages whose tool_call_id has no matching tool_call block
+ * in any preceding assistant message, and inject a synthetic tool_call block so
+ * the conversation becomes well-formed for providers that require strict
+ * tool_use ↔ tool_result pairing (Anthropic, Google, OpenAI Responses, …).
+ *
+ * Cursor's `cursor-agent` API is the canonical example: it executes native and
+ * MCP tools via exec handlers and emits tool_result messages directly, without
+ * a corresponding tool_call in the assistant content. Such conversations are
+ * also the source of tool_call_ids containing characters outside
+ * `[a-zA-Z0-9_-]` (Cursor concatenates upstream OpenAI Responses `call_id` and
+ * item `id` with a newline), so this pass also normalizes those ids.
+ */
+function injectSyntheticToolCallsForOrphans<TApi extends Api>(
+	messages: Message[],
+	model: Model<TApi>,
+	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
+): Message[] {
+	let firstOrphanIndex = -1;
+	let knownToolCallIds = new Set<string>();
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i];
+		if (msg.role === "assistant") {
+			for (const id of getAssistantToolCallIds(msg)) knownToolCallIds.add(id);
+		} else if (msg.role === "user" || msg.role === "developer") {
+			knownToolCallIds = new Set();
+		} else if (msg.role === "toolResult" && !knownToolCallIds.has(msg.toolCallId)) {
+			firstOrphanIndex = i;
+			break;
+		}
+	}
+	if (firstOrphanIndex < 0) return messages;
+
+	const result: Message[] = messages.slice(0, firstOrphanIndex);
+	// Raw tool-call id → normalized id for orphan toolResults whose toolCall blocks we synthesized.
+	// Keyed by raw id (the format that input assistant.content blocks carry), so
+	// `normalizedToolCallIds.has(block.id)` doubles as the "is this block synthetic?" check.
+	const normalizedToolCallIds = new Map<string, string>();
+	knownToolCallIds = collectCurrentTurnToolCallIds(result);
+	let lastAssistantIndex = findCurrentTurnAssistantIndex(result);
+	// Batch synthetic toolCalls per source-assistant so K orphans against the same
+	// assistant cost O(K) array work, not O(K²) (each iteration would otherwise
+	// re-spread the assistant's full content). Flush whenever the target assistant
+	// changes or we finish walking the messages.
+	let pendingTargetIndex = -1;
+	let pendingSynthetics: ToolCall[] = [];
+	const flushPending = () => {
+		if (pendingTargetIndex < 0 || pendingSynthetics.length === 0) return;
+		const target = result[pendingTargetIndex] as AssistantMessage;
+		result[pendingTargetIndex] = {
+			...target,
+			content: [...target.content, ...pendingSynthetics],
+		};
+		pendingSynthetics = [];
+		pendingTargetIndex = -1;
+	};
+
+	const appendSyntheticFor = (msg: ToolResultMessage) => {
+		let sourceAssistant = lastAssistantIndex >= 0 ? (result[lastAssistantIndex] as AssistantMessage) : undefined;
+		if (!sourceAssistant) {
+			// Borrow provenance from any prior assistant in the stream so attribution
+			// (cost, retry-fallback, per-message provider) doesn't drift onto the
+			// replay target. Fall back to the target model only if no prior exists.
+			const priorAssistant = result.findLast((m): m is AssistantMessage => m.role === "assistant");
+			const provenance = priorAssistant
+				? { api: priorAssistant.api, provider: priorAssistant.provider, id: priorAssistant.model }
+				: { api: model.api, provider: model.provider, id: model.id };
+			sourceAssistant = createSyntheticAssistant(provenance, msg.timestamp, []);
+			lastAssistantIndex = result.length;
+			result.push(sourceAssistant);
+		}
+
+		const normalizedId = normalizeToolCallId
+			? normalizeToolCallId(msg.toolCallId, model, sourceAssistant)
+			: msg.toolCallId;
+		const normalizedTr = normalizedId === msg.toolCallId ? msg : { ...msg, toolCallId: normalizedId };
+		normalizedToolCallIds.set(msg.toolCallId, normalizedId);
+		const syntheticCall: ToolCall = {
+			type: "toolCall",
+			id: normalizedId,
+			name: normalizedTr.toolName,
+			arguments: {},
+		};
+
+		if (pendingTargetIndex !== lastAssistantIndex) {
+			flushPending();
+			pendingTargetIndex = lastAssistantIndex;
+		}
+		pendingSynthetics.push(syntheticCall);
+		knownToolCallIds.add(msg.toolCallId);
+		result.push(normalizedTr);
+	};
+
+	for (let i = firstOrphanIndex; i < messages.length; i++) {
+		const msg = messages[i];
+		if (msg.role === "assistant") {
+			flushPending();
+			const assistantMsg = msg as AssistantMessage;
+			const filteredContent = assistantMsg.content.filter(
+				block => block.type !== "toolCall" || !normalizedToolCallIds.has(block.id),
+			);
+			const nextAssistant =
+				filteredContent.length === assistantMsg.content.length
+					? assistantMsg
+					: { ...assistantMsg, content: filteredContent };
+			lastAssistantIndex = result.length;
+			for (const id of getAssistantToolCallIds(nextAssistant)) knownToolCallIds.add(id);
+			result.push(nextAssistant);
+			continue;
+		}
+		if (msg.role === "user" || msg.role === "developer") {
+			flushPending();
+			lastAssistantIndex = -1;
+			knownToolCallIds = new Set();
+			result.push(msg);
+			continue;
+		}
+		if (msg.role !== "toolResult") {
+			result.push(msg);
+			continue;
+		}
+
+		const normalizedId = normalizedToolCallIds.get(msg.toolCallId);
+		if (normalizedId && normalizedId !== msg.toolCallId) {
+			result.push({ ...msg, toolCallId: normalizedId });
+			continue;
+		}
+
+		if (knownToolCallIds.has(msg.toolCallId)) {
+			result.push(msg);
+			continue;
+		}
+
+		appendSyntheticFor(msg);
+	}
+	flushPending();
+
+	return result;
+}
+
+function getAssistantToolCallIds(message: AssistantMessage): Set<string> {
+	const ids = new Set<string>();
+	for (const block of message.content) {
+		if (block.type === "toolCall") ids.add(block.id);
+	}
+	return ids;
+}
+
+function findCurrentTurnAssistantIndex(messages: Message[]): number {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role === "assistant") return i;
+		if (msg.role === "user" || msg.role === "developer") break;
+	}
+	return -1;
+}
+
+function collectCurrentTurnToolCallIds(messages: Message[]): Set<string> {
+	const ids = new Set<string>();
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const msg = messages[i];
+		if (msg.role === "user" || msg.role === "developer") break;
+		if (msg.role === "assistant") {
+			for (const id of getAssistantToolCallIds(msg)) ids.add(id);
+		}
+	}
+	return ids;
+}
+
+function createSyntheticAssistant(
+	provenance: { api: Api; provider: string; id: string },
+	timestamp: number | undefined,
+	content: ToolCall[],
+): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: provenance.api,
+		provider: provenance.provider,
+		model: provenance.id,
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "toolUse",
+		timestamp: timestamp ?? Date.now(),
+	};
 }

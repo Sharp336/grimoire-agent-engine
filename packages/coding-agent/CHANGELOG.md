@@ -1,6 +1,20 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added a Cursor MAX-mode toggle to the model selector for models that declare `extendedContext` (currently Cursor GPT-5.4 / GPT-5.5 1M variants). After picking a role, the second selector step is a `MAX off / MAX on` choice instead of a thinking-effort list, and the chosen state is persisted in the role-value string as a `:max` suffix (e.g. `cursor/gpt-5.5-extra-high:max`). The status line surfaces a `· MAX` indicator when active.
+
+### Changed
+
+- Changed the `read` tool prompt to make structural summaries explicit orientation-only output and require re-reading folded ranges before reasoning about, debugging, or editing hidden bodies.
+
+### Fixed
+
+- Fixed the `edit` tool being excluded from the tool registry when using the Cursor provider. The tool is now advertised as an MCP tool and executes through the standard harness tool path, restoring surgical file editing for all Cursor-provider sessions.
+- Fixed subagents launched in the same parallel batch not seeing each other in their initial `# IRC Peers` system-prompt block by pre-registering the agent in the global `AgentRegistry` before `rebuildSystemPrompt` runs and attaching the live session afterwards.
+- Fixed the TUI status line's context-usage indicator double-accounting Cursor sessions and lagging until `message_end`. The status-line component now consumes `AgentSession.getContextUsage()` (which respects compaction boundaries, post-compaction validity, live streaming assistant usage, and the model-reported `contextWindow`) instead of re-deriving tokens via `calculatePromptTokens(lastAssistantMessage.usage)`.
+- Fixed `extractExplicitThinkingSelector` silently dropping the thinking level when the role value also carries a trailing `:max` flag (e.g. `provider/id:high:max`). The shared `peelSelectorFlags` helper now strips `:max` and `:<thinking>` segments in either order before reporting either flag.
 
 ## [15.9.69] - 2026-06-06
 ### Fixed

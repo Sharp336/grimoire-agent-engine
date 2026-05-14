@@ -1,6 +1,7 @@
 import { once } from "@oh-my-pi/pi-utils";
 import type { ModelManagerOptions } from "../model-manager";
 import { fetchCodexModels } from "../utils/discovery/codex";
+import { applyCursorDiscoveredModelPolicy } from "../utils/discovery/cursor";
 
 // ---------------------------------------------------------------------------
 // OpenAI Codex
@@ -43,6 +44,9 @@ export function cursorModelManagerOptions(config: CursorModelManagerConfig = {})
 	const { apiKey, baseUrl, clientVersion } = config;
 	return {
 		providerId: "cursor",
+		// Apply MAX-mode metadata to every resolved model regardless of source so
+		// a stale cache written before the policy existed still sees extendedContext.
+		modelPostProcess: applyCursorDiscoveredModelPolicy,
 		...(apiKey
 			? {
 					fetchDynamicModels: async () => {

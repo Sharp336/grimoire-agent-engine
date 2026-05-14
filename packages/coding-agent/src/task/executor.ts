@@ -163,6 +163,7 @@ export interface ExecutorOptions {
 	 */
 	parentActiveModelPattern?: string;
 	thinkingLevel?: ThinkingLevel;
+	cursorMaxMode?: boolean;
 	outputSchema?: unknown;
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
@@ -1150,6 +1151,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				model,
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
+				maxMode: resolvedMaxMode,
 				authFallbackUsed,
 			} = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
@@ -1178,6 +1180,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const effectiveThinkingLevel = explicitThinkingLevel
 				? resolvedThinkingLevel
 				: (thinkingLevel ?? resolvedThinkingLevel);
+			const effectiveCursorMaxMode =
+				resolvedMaxMode ?? (modelPatterns.length > 0 && !authFallbackUsed ? false : options.cursorMaxMode);
 
 			const sessionManager = sessionFile
 				? await awaitAbortable(SessionManager.open(sessionFile))
@@ -1228,6 +1232,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelRegistry,
 					settings: subagentSettings,
 					model,
+					cursorMaxMode: effectiveCursorMaxMode,
 					thinkingLevel: effectiveThinkingLevel,
 					toolNames,
 					outputSchema,

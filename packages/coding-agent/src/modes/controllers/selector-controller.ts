@@ -419,7 +419,7 @@ export class SelectorController {
 				this.ctx.settings,
 				this.ctx.session.modelRegistry,
 				this.ctx.session.scopedModels,
-				async (model, role, thinkingLevel, selector) => {
+				async (model, role, { thinkingLevel, selector, maxMode }) => {
 					// `auto` is session-global: never baked into a per-role model value
 					// (it can't round-trip through `model:<level>`). Apply it to the session
 					// separately and persist via `defaultThinkingLevel`.
@@ -428,7 +428,7 @@ export class SelectorController {
 					try {
 						if (role === null) {
 							// Temporary: update agent state but don't persist the model to settings
-							await this.ctx.session.setModelTemporary(model);
+							await this.ctx.session.setModelTemporary(model, { thinkingLevel: concreteThinking, maxMode });
 							if (isAuto) {
 								this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
 							}
@@ -442,6 +442,7 @@ export class SelectorController {
 							await this.ctx.session.setModel(model, role, {
 								selector,
 								thinkingLevel: concreteThinking,
+								maxMode,
 								persist: true,
 							});
 							if (isAuto) {
@@ -457,7 +458,11 @@ export class SelectorController {
 							// Other roles (smol, slow): just update settings, not current model
 							this.ctx.settings.setModelRole(
 								role,
-								formatModelSelectorValue(selector ?? `${model.provider}/${model.id}`, concreteThinking),
+								formatModelSelectorValue(
+									selector ?? `${model.provider}/${model.id}`,
+									concreteThinking,
+									maxMode,
+								),
 							);
 							if (isAuto) {
 								this.ctx.session.setThinkingLevel(AUTO_THINKING, true);

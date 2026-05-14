@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { Agent, type AgentEvent, type AgentTool, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { type SimpleStreamOptions, z } from "@oh-my-pi/pi-ai";
+import { getBundledModel, type SimpleStreamOptions, z } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { createAssistantMessage } from "./helpers";
@@ -408,6 +408,93 @@ describe("Agent", () => {
 		agent.setMetadataResolver(undefined);
 		expect(agent.metadataForProvider("any")).toEqual({ user_id: "static" });
 		expect(agent.metadata).toEqual({ user_id: "static" });
+	});
+
+	describe("setCursorMaxMode", () => {
+		const cursorMaxModel = {
+			id: "gpt-5.5-extra-high",
+			name: "GPT-5.5 Extra High",
+			api: "cursor-agent" as const,
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			input: ["text" as const],
+			reasoning: false,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxTokens: 64_000,
+			extendedContext: {
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+				baseContextWindow: 272_000,
+				baseMaxTokens: 64_000,
+			},
+		};
+
+		it("projects the model to extended dims when enabled on a cursor-agent model with extendedContext", () => {
+			const agent = new Agent({ initialState: { model: cursorMaxModel } });
+			agent.setCursorMaxMode(cursorMaxModel, true);
+			expect(agent.getCursorMaxMode()).toBe(true);
+			expect(agent.state.model?.contextWindow).toBe(1_000_000);
+			expect(agent.state.model?.maxTokens).toBe(128_000);
+		});
+
+		it("restores base dims when disabled", () => {
+			const agent = new Agent({ initialState: { model: cursorMaxModel } });
+			agent.setCursorMaxMode(cursorMaxModel, true);
+			agent.setCursorMaxMode(cursorMaxModel, false);
+			expect(agent.getCursorMaxMode()).toBe(false);
+			expect(agent.state.model?.contextWindow).toBe(272_000);
+			expect(agent.state.model?.maxTokens).toBe(64_000);
+		});
+
+		it("leaves model unchanged for non-cursor model but still stores the flag", () => {
+			const openaiModel = getBundledModel("openai", "gpt-4o-mini");
+			if (!openaiModel) throw new Error("bundled gpt-4o-mini missing");
+			const agent = new Agent({ initialState: { model: openaiModel } });
+			agent.setCursorMaxMode(openaiModel, true);
+			expect(agent.getCursorMaxMode()).toBe(true);
+			expect(agent.state.model).toEqual(openaiModel);
+		});
+
+		it("leaves model unchanged for cursor model without extendedContext", () => {
+			const plainCursor = { ...cursorMaxModel, extendedContext: undefined };
+			const agent = new Agent({ initialState: { model: plainCursor } });
+			agent.setCursorMaxMode(plainCursor, true);
+			expect(agent.getCursorMaxMode()).toBe(true);
+			expect(agent.state.model?.contextWindow).toBe(272_000);
+		});
+
+		it("uses the current model when model is undefined", () => {
+			const agent = new Agent({ initialState: { model: cursorMaxModel } });
+			agent.setCursorMaxMode(undefined, true);
+			expect(agent.getCursorMaxMode()).toBe(true);
+			expect(agent.state.model?.contextWindow).toBe(1_000_000);
+			expect(agent.state.model?.maxTokens).toBe(128_000);
+		});
+
+		it("restores base dims when disabling with the projected current model", () => {
+			const agent = new Agent({ initialState: { model: cursorMaxModel } });
+			agent.setCursorMaxMode(cursorMaxModel, true);
+			const projected = agent.state.model;
+			if (!projected) throw new Error("expected projected model");
+			agent.setCursorMaxMode(projected, false);
+			expect(agent.getCursorMaxMode()).toBe(false);
+			expect(agent.state.model?.contextWindow).toBe(272_000);
+			expect(agent.state.model?.maxTokens).toBe(64_000);
+		});
+
+		it("projects a newly set Cursor model when MAX mode is already enabled", () => {
+			const agent = new Agent({ initialState: { model: cursorMaxModel } });
+			agent.setCursorMaxMode(cursorMaxModel, true);
+			const nextModel = { ...cursorMaxModel, id: "gpt-5.5-high", name: "GPT-5.5 High" };
+
+			agent.setModel(nextModel);
+
+			expect(agent.getCursorMaxMode()).toBe(true);
+			expect(agent.state.model?.id).toBe("gpt-5.5-high");
+			expect(agent.state.model?.contextWindow).toBe(1_000_000);
+			expect(agent.state.model?.maxTokens).toBe(128_000);
+		});
 	});
 });
 

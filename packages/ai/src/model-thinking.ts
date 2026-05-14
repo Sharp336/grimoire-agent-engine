@@ -223,14 +223,13 @@ export function modelOmitsReasoningEffort<TApi extends Api>(model: ApiModel<TApi
 /**
  * Returns the supported thinking efforts declared on the model metadata.
  *
- * Catalog enrichment is responsible for normalizing bundled model metadata up front.
- * Runtime callers must treat explicit `model.thinking` on custom models as authoritative
- * so proxy-specific overrides from `models.yml` survive request construction.
- *
- * @throws Error when a reasoning-capable model is missing thinking metadata
+ * Catalog enrichment is responsible for normalizing bundled model metadata up front,
+ * but dynamically-discovered models may be flagged `reasoning: true` without a
+ * canonical `thinking` block — those return `[]` here so UI consumers can treat
+ * them as having no effort choices rather than crashing.
  */
 export function getSupportedEfforts<TApi extends Api>(model: ApiModel<TApi>): readonly Effort[] {
-	if (!model.reasoning) {
+	if (!model.reasoning || !model.thinking) {
 		return [];
 	}
 	// Models that reason natively but reject the `reasoning.effort` wire param
@@ -242,9 +241,6 @@ export function getSupportedEfforts<TApi extends Api>(model: ApiModel<TApi>): re
 	// changing that path's semantics is out-of-scope.
 	if (modelOmitsReasoningEffort(model)) {
 		return [];
-	}
-	if (!model.thinking) {
-		throw new Error(`Model ${model.provider}/${model.id} is missing thinking metadata`);
 	}
 	return expandEffortRange(model.thinking);
 }

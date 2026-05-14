@@ -1,6 +1,16 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `Agent.setCursorMaxMode(model, enabled)` / `Agent.getCursorMaxMode()` to flip Cursor's MAX-mode flag and project the active model's effective context window for the next prompt. The Agent now threads `cursorMaxMode` through the `AgentLoopConfig` so `mapOptionsForApi`'s `cursor-agent` branch sets it on `CursorOptions.maxMode` (and downstream `RequestedModel.max_mode` on the gRPC request). Off by default; non-cursor models ignore the request flag.
+
+### Fixed
+
+- Fixed preamble text broadcast in `#emitCursorSplitAssistantMessage`: replaced the all-blocks assignment with a `charBudget` walk that distributes the split boundary proportionally across text blocks
+- Fixed silent `catch {}` in `cursorOnToolResult`: transform errors are now logged via `logger.error` instead of being swallowed
+- Fixed `turn_end` `errorMessage` access: replaced `as any` casts with proper `AssistantMessage` narrowing after `role === 'assistant'` check
+- Fixed `reset()` not clearing `#cursorToolResultBuffer`, which could leak stale buffered tool results into subsequent runs
 
 ## [15.9.5] - 2026-06-05
 

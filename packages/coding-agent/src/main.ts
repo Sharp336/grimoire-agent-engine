@@ -30,7 +30,13 @@ import { runListModelsCommand } from "./cli/list-models";
 import { selectSession } from "./cli/session-picker";
 import { findConfigFile } from "./config";
 import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
-import { resolveCliModel, resolveModelRoleValue, resolveModelScope, type ScopedModel } from "./config/model-resolver";
+import {
+	formatModelSelectorValue,
+	resolveCliModel,
+	resolveModelRoleValue,
+	resolveModelScope,
+	type ScopedModel,
+} from "./config/model-resolver";
 import { getDefault, type SettingPath, Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
@@ -588,9 +594,9 @@ async function buildSessionOptions(
 			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
 		}
 		if (resolved.error) {
-			if (!parsed.provider && !parsed.model.includes(":")) {
-				// Model not found in built-in registry — defer resolution to after extensions load
-				// (extensions may register additional providers/models via registerProvider)
+			if (!parsed.provider) {
+				// Model not found in the initial registry. Defer resolution until after
+				// extension/dynamic providers load; selector flags like :max are parsed there.
 				options.modelPattern = parsed.model;
 			} else {
 				process.stderr.write(`${chalk.red(resolved.error)}\n`);
@@ -598,8 +604,13 @@ async function buildSessionOptions(
 			}
 		} else if (resolved.model) {
 			options.model = resolved.model;
+			options.cursorMaxMode = resolved.maxMode;
 			activeSettings.overrideModelRoles({
-				default: resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+				default: formatModelSelectorValue(
+					resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
+					undefined,
+					resolved.maxMode,
+				),
 			});
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;

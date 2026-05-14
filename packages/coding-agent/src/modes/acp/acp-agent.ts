@@ -1745,6 +1745,7 @@ export class AcpAgent implements Agent {
 			cacheWrite: usage.cacheWrite,
 			premiumRequests: usage.premiumRequests,
 			cost: usage.cost,
+			latestCursorTotalTokens: usage.latestCursorTotalTokens,
 		};
 	}
 

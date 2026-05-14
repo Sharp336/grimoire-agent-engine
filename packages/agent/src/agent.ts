@@ -10,6 +10,7 @@ import {
 	type Effort,
 	getBundledModel,
 	type ImageContent,
+	isCursorAgent,
 	type Message,
 	type Model,
 	type ProviderSessionState,
@@ -21,6 +22,7 @@ import {
 	type ToolChoice,
 	type ToolResultMessage,
 } from "@oh-my-pi/pi-ai";
+import { logger } from "@oh-my-pi/pi-utils";
 import { agentLoop, agentLoopContinue } from "./agent-loop";
 import type { AppendOnlyContextManager } from "./append-only-context";
 import type { HarmonyAuditEvent } from "./harmony-leak";
@@ -37,9 +39,6 @@ import type {
 } from "./types";
 import { EventLoopKeepalive } from "./utils/yield";
 
-/**
- * Default convertToLlm: Keep only LLM-compatible messages, convert attachments.
- */
 function defaultConvertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter((m): m is Message => m.role === "user" || m.role === "assistant" || m.role === "toolResult");
 }
@@ -299,6 +298,7 @@ export class Agent {
 	#getToolContext?: (toolCall?: ToolCallContext) => AgentToolContext | undefined;
 	#cursorExecHandlers?: CursorExecHandlers;
 	#cursorOnToolResult?: CursorToolResultHandler;
+	#cursorMaxMode: boolean = false;
 	#runningPrompt?: Promise<void>;
 	#resolveRunningPrompt?: () => void;
 	#kimiApiFormat?: "openai" | "anthropic";
@@ -634,11 +634,48 @@ export class Agent {
 	}
 
 	setModel(m: Model) {
+		if (isCursorAgent(m)) {
+			this.setCursorMaxMode(m, this.#cursorMaxMode);
+			return;
+		}
 		this.#state.model = m;
 	}
 
 	setThinkingLevel(l: Effort | undefined) {
 		this.#state.thinkingLevel = l;
+	}
+
+	/**
+	 * Atomic flag + model update for Cursor MAX mode. The model may be projected
+	 * (with `contextWindow` / `maxTokens` already overwritten to the extended
+	 * values) or canonical — `extendedContext.baseContextWindow` / `baseMaxTokens`
+	 * always carry the no-flag capacity, so projection and un-projection are
+	 * stateless. Pass `undefined` to reuse the current model.
+	 */
+	setCursorMaxMode(model: Model | undefined, enabled: boolean) {
+		const sourceModel = model ?? this.#state.model;
+		this.#cursorMaxMode = enabled;
+		if (!sourceModel) return;
+
+		const ext = isCursorAgent(sourceModel) ? sourceModel.extendedContext : undefined;
+		if (!ext) {
+			this.#state.model = sourceModel;
+			return;
+		}
+		const targetWindow = enabled ? ext.contextWindow : ext.baseContextWindow;
+		const targetMaxTokens = enabled ? ext.maxTokens : ext.baseMaxTokens;
+		// sourceModel may already carry the projected values (e.g. setCursorMaxMode called
+		// twice with the same flag, or setModel called with an already-projected model).
+		// Skip the spread to avoid creating an unnecessary new object.
+		if (sourceModel.contextWindow === targetWindow && sourceModel.maxTokens === targetMaxTokens) {
+			this.#state.model = sourceModel;
+			return;
+		}
+		this.#state.model = { ...sourceModel, contextWindow: targetWindow, maxTokens: targetMaxTokens };
+	}
+
+	getCursorMaxMode(): boolean {
+		return this.#cursorMaxMode;
 	}
 
 	setSteeringMode(mode: "all" | "one-at-a-time") {
@@ -784,6 +821,7 @@ export class Agent {
 		this.#state.error = undefined;
 		this.#steeringQueue = [];
 		this.#followUpQueue = [];
+		this.#cursorToolResultBuffer = [];
 	}
 
 	/** Send a prompt with an AgentMessage */
@@ -860,7 +898,7 @@ export class Agent {
 				return;
 			}
 
-			throw new Error("Cannot continue from message role: assistant");
+			throw new Error("Last message is from the assistant but no steering or follow-up messages are queued");
 		}
 
 		await this.#runLoop(undefined);
@@ -907,7 +945,9 @@ export class Agent {
 								if (updated) {
 									finalMessage = updated;
 								}
-							} catch {}
+							} catch (err) {
+								logger.error("Cursor tool result transform failed", { toolCallId: message.toolCallId, err });
+							}
 						}
 						// Buffer tool result with current text length for correct ordering later.
 						// Cursor executes tools server-side during streaming, so the assistant message
@@ -952,6 +992,8 @@ export class Agent {
 			getToolContext: this.#getToolContext,
 			syncContextBeforeModelCall: async context => {
 				if (this.#listeners.size > 0) {
+					// Yield to the microtask queue so state-update events dispatched by listeners
+					// flush before the next model call reads updated system prompt or tools.
 					await Bun.sleep(0);
 				}
 				context.systemPrompt = this.#state.systemPrompt;
@@ -959,6 +1001,7 @@ export class Agent {
 			},
 			cursorExecHandlers: this.#cursorExecHandlers,
 			cursorOnToolResult,
+			cursorMaxMode: this.#cursorMaxMode,
 			transformToolCallArguments: this.#transformToolCallArguments,
 			intentTracing: this.#intentTracing,
 			appendOnlyContext: this.#appendOnlyContext,
@@ -1021,8 +1064,9 @@ export class Agent {
 						break;
 
 					case "turn_end":
-						if (event.message.role === "assistant" && (event.message as any).errorMessage) {
-							this.#state.error = (event.message as any).errorMessage;
+						if (event.message.role === "assistant") {
+							const assistantMsg = event.message as AssistantMessage;
+							if (assistantMsg.errorMessage) this.#state.error = assistantMsg.errorMessage;
 						}
 						break;
 
@@ -1183,13 +1227,21 @@ export class Agent {
 		}
 
 		// Split the text
-		const preambleText = fullText.slice(0, splitPoint);
 		const continuationText = fullText.slice(splitPoint);
 
 		// Create preamble message (text before tools)
+		let charBudget = splitPoint;
 		const preambleContent = content.map(block => {
 			if (block.type === "text") {
-				return { ...block, text: preambleText };
+				const text = (block as TextContent).text;
+				if (charBudget <= 0) return { ...block, text: "" };
+				if (text.length <= charBudget) {
+					charBudget -= text.length;
+					return block;
+				}
+				const kept = text.slice(0, charBudget);
+				charBudget = 0;
+				return { ...block, text: kept };
 			}
 			return block;
 		});

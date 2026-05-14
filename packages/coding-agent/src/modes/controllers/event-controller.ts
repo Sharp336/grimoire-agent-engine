@@ -4,7 +4,7 @@ import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { type Component, Loader, TERMINAL, Text } from "@oh-my-pi/pi-tui";
 import { settings } from "../../config/settings";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
-import { AssistantMessageComponent } from "../../modes/components/assistant-message";
+import type { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import {
 	ReadToolGroupComponent,
 	readArgsHaveTarget,
@@ -20,6 +20,7 @@ import type { AgentSessionEvent } from "../../session/agent-session";
 import { isSilentAbort, readPendingDisplayTag } from "../../session/messages";
 import type { ResolveToolDetails } from "../../tools/resolve";
 import { interruptHint } from "../shared";
+import { SegmentedMessageBuilder } from "../utils/segmented-message-builder";
 
 type AgentSessionEventKind = AgentSessionEvent["type"];
 
@@ -61,6 +62,11 @@ export class EventController {
 	#idleCompactionTimer?: NodeJS.Timeout;
 	#ircExpiryTimers = new Map<string, NodeJS.Timeout>();
 	#handlers: AgentSessionEventHandlers;
+	// Streaming-assistant segmentation: when the model interleaves tool calls with text (e.g.
+	// GPT-5.5), the builder splits the message into AssistantMessageComponent segments slotted
+	// between tool components so chatContainer siblings appear in emission order. Created lazily
+	// per assistant message in `#handleMessageStart`.
+	#segmentBuilder: SegmentedMessageBuilder | undefined;
 
 	constructor(private ctx: InteractiveModeContext) {
 		this.#handlers = {
@@ -106,6 +112,27 @@ export class EventController {
 		this.#lastReadGroup = undefined;
 	}
 
+	// Split the currently open assistant segment so the next segment starts at
+	// `nextStartIndex`. The new segment becomes `streamingComponent` immediately so
+	// trackReadToolCall + subsequent text/thinking deltas route to it, but it is NOT attached
+	// to chatContainer here — that happens in `attachOpenSegment` once the tool component is
+	// in place so chatContainer order is: [closed segment, tool, new segment].
+	#openNewSegmentAt(nextStartIndex: number): void {
+		if (!this.#segmentBuilder) return;
+		const openStartIndex = this.#segmentBuilder.getOpenStartIndex();
+		// Only force a fresh ReadToolGroup when this boundary skipped over non-tool content
+		// (text/thinking). Tool calls separated only by other tool calls — i.e. parallel reads
+		// — keep sharing the existing group so they render as a single compact list.
+		const segmentHadContent = this.ctx.streamingMessage
+			? this.ctx.streamingMessage.content
+					.slice(openStartIndex, nextStartIndex)
+					.some(content => content.type !== "toolCall")
+			: openStartIndex < nextStartIndex;
+		if (segmentHadContent) this.#resetReadGroup();
+		const { opened } = this.#segmentBuilder.splitAt(nextStartIndex);
+		this.ctx.streamingComponent = opened;
+	}
+
 	#getReadGroup(): ReadToolGroupComponent {
 		if (!this.#lastReadGroup) {
 			this.ctx.chatContainer.addChild(new Text("", 0, 0));
@@ -125,7 +152,7 @@ export class EventController {
 			args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : {};
 		this.#readToolCallArgs.set(toolCallId, normalizedArgs);
 		const assistantComponent = this.ctx.streamingComponent ?? this.#lastAssistantComponent;
-		if (assistantComponent) {
+		if (assistantComponent && !this.#readToolCallAssistantComponents.has(toolCallId)) {
 			this.#readToolCallAssistantComponents.set(toolCallId, assistantComponent);
 		}
 	}
@@ -216,6 +243,7 @@ export class EventController {
 		this.#pinnedErrorComponent?.setErrorPinned(false);
 		this.#pinnedErrorComponent = undefined;
 		this.ctx.clearPinnedError();
+		this.#segmentBuilder = undefined;
 		if (this.ctx.retryEscapeHandler) {
 			this.ctx.editor.onEscape = this.ctx.retryEscapeHandler;
 			this.ctx.retryEscapeHandler = undefined;
@@ -302,16 +330,15 @@ export class EventController {
 			this.#lastThinkingCount = 0;
 			this.#assistantMessageStreaming = true;
 			this.#resetReadGroup();
-			this.ctx.streamingComponent = new AssistantMessageComponent(
-				undefined,
+			this.#segmentBuilder = new SegmentedMessageBuilder(
+				this.ctx.chatContainer,
 				this.ctx.hideThinkingBlock,
 				() => this.ctx.ui.requestRender(),
 				this.ctx.session.extensionRunner?.getAssistantThinkingRenderers(),
 				this.ctx.ui.imageBudget,
 			);
 			this.ctx.streamingMessage = event.message;
-			this.ctx.chatContainer.addChild(this.ctx.streamingComponent);
-			this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage);
+			this.ctx.streamingComponent = this.#segmentBuilder.startMessage(this.ctx.streamingMessage);
 			this.ctx.ui.requestRender();
 		}
 	}
@@ -355,7 +382,6 @@ export class EventController {
 	async #handleMessageUpdate(event: Extract<AgentSessionEvent, { type: "message_update" }>): Promise<void> {
 		if (this.ctx.streamingComponent && event.message.role === "assistant") {
 			this.ctx.streamingMessage = event.message;
-			this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage);
 
 			const thinkingCount = this.ctx.streamingMessage.content.filter(
 				content => content.type === "thinking" && content.thinking.trim(),
@@ -365,8 +391,19 @@ export class EventController {
 				this.#lastThinkingCount = thinkingCount;
 			}
 
-			for (const content of this.ctx.streamingMessage.content) {
+			for (let i = 0; i < this.ctx.streamingMessage.content.length; i++) {
+				const content = this.ctx.streamingMessage.content[i];
 				if (content.type !== "toolCall") continue;
+
+				// Open a new assistant segment for any not-yet-seen tool call so subsequent text/
+				// thinking deltas land in a NEW segment that gets appended to chatContainer AFTER
+				// the tool execution component. Without this, all post-tool text would render in
+				// the original segment (still positioned above the tool) and visually appear above
+				// tools that were emitted before it.
+				if (this.#segmentBuilder?.markToolSegmented(content.id)) {
+					this.#openNewSegmentAt(i + 1);
+				}
+
 				if (content.name === "read") {
 					if (!readArgsHaveTarget(content.arguments)) {
 						// Args still streaming — defer until path is parseable so we can route to the
@@ -384,6 +421,7 @@ export class EventController {
 							group.updateArgs(content.arguments, content.id);
 							this.ctx.pendingTools.set(content.id, group);
 						}
+						this.#segmentBuilder?.attachOpenSegment();
 						continue;
 					}
 					// Internal URL read falls through to ToolExecutionComponent below.
@@ -422,7 +460,13 @@ export class EventController {
 						component.updateArgs(renderArgs, content.id);
 					}
 				}
+				this.#segmentBuilder?.attachOpenSegment();
 			}
+
+			// Only the open segment can grow per delta; closed segments were finalized at
+			// their splitAt boundary and the wire protocol seals text/thinking blocks before
+			// tool boundaries. message_end runs a defensive updateClosedContent pass.
+			this.#segmentBuilder?.updateOpenContent(this.ctx.streamingMessage);
 
 			// Update working message with intent from streamed tool arguments
 			for (const content of this.ctx.streamingMessage.content) {
@@ -473,15 +517,19 @@ export class EventController {
 						: "Operation aborted";
 				this.ctx.streamingMessage.errorMessage = errorMessage;
 			}
-			if (silentlyAborted || ttsrSilenced) {
-				// Silence the streaming render by downgrading stopReason to "stop" for
-				// display only — does NOT mutate the persisted message's stopReason
-				// (the marker on errorMessage drives replay-side suppression).
-				const msgWithoutAbort = { ...this.ctx.streamingMessage, stopReason: "stop" as const };
-				this.ctx.streamingComponent.updateContent(msgWithoutAbort);
-			} else {
-				this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage);
-			}
+			// Mark the trailing (currently open) segment as final and let its endIndex flow to
+			// the end of content.length so any trailing text/thinking is included. For pending-
+			// TTSR aborts and silent aborts, render against a stopReason-cleared copy so the
+			// abort marker doesn't show on the message before TTSR retries.
+			const renderableMessage =
+				silentlyAborted || ttsrSilenced
+					? { ...this.ctx.streamingMessage, stopReason: "stop" as const }
+					: this.ctx.streamingMessage;
+			this.#segmentBuilder?.finalize(renderableMessage);
+			// Re-render closed segments too so any in-place text growth lands before message_end.
+			// Closed segments use the real streaming message (not renderableMessage) because the
+			// stopReason-cleared variant is only meaningful for the trailing segment's footer.
+			this.#segmentBuilder?.updateClosedContent(this.ctx.streamingMessage);
 
 			if (this.ctx.streamingMessage.stopReason !== "aborted" && this.ctx.streamingMessage.stopReason !== "error") {
 				for (const [toolCallId, component] of this.ctx.pendingTools.entries()) {
@@ -524,6 +572,20 @@ export class EventController {
 
 	async #handleToolExecutionStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): Promise<void> {
 		this.#updateWorkingMessageFromIntent(event.intent);
+
+		let openedSegmentForTool = false;
+		if (this.ctx.streamingComponent && this.#segmentBuilder?.markToolSegmented(event.toolCallId)) {
+			const toolCallIndex = this.ctx.streamingMessage?.content.findIndex(
+				content => content.type === "toolCall" && content.id === event.toolCallId,
+			);
+			const nextStartIndex =
+				toolCallIndex !== undefined && toolCallIndex >= 0
+					? toolCallIndex + 1
+					: (this.ctx.streamingMessage?.content.length ?? this.#segmentBuilder.getOpenStartIndex());
+			this.#openNewSegmentAt(nextStartIndex);
+			openedSegmentForTool = true;
+		}
+
 		if (!this.ctx.pendingTools.has(event.toolCallId)) {
 			if (event.toolName === "read" && readArgsHaveTarget(event.args) && !readArgsTargetInternalUrl(event.args)) {
 				this.#trackReadToolCall(event.toolCallId, event.args);
@@ -535,6 +597,7 @@ export class EventController {
 					group.updateArgs(event.args, event.toolCallId);
 					this.ctx.pendingTools.set(event.toolCallId, group);
 				}
+				if (openedSegmentForTool) this.#segmentBuilder?.attachOpenSegment();
 				this.ctx.ui.requestRender();
 				return;
 			}
@@ -558,6 +621,13 @@ export class EventController {
 			component.setExpanded(this.ctx.toolOutputExpanded);
 			this.ctx.chatContainer.addChild(component);
 			this.ctx.pendingTools.set(event.toolCallId, component);
+			if (openedSegmentForTool) this.#segmentBuilder?.attachOpenSegment();
+			this.ctx.ui.requestRender();
+			return;
+		}
+
+		if (openedSegmentForTool) {
+			this.#segmentBuilder?.attachOpenSegment();
 			this.ctx.ui.requestRender();
 		}
 	}
@@ -669,7 +739,9 @@ export class EventController {
 			this.ctx.statusContainer.clear();
 		}
 		if (this.ctx.streamingComponent) {
-			this.ctx.chatContainer.removeChild(this.ctx.streamingComponent);
+			// Only the trailing open segment is removed if the run ended without message_end.
+			// Earlier segments + their tool siblings already hold finalized content.
+			this.#segmentBuilder?.discardOpenSegment();
 			this.ctx.streamingComponent = undefined;
 			this.ctx.streamingMessage = undefined;
 		}
@@ -690,6 +762,7 @@ export class EventController {
 		this.#readToolCallArgs.clear();
 		this.#readToolCallAssistantComponents.clear();
 		this.#lastAssistantComponent = undefined;
+		this.#segmentBuilder = undefined;
 		this.ctx.ui.requestRender();
 		this.#scheduleIdleCompaction();
 		this.sendCompletionNotification();

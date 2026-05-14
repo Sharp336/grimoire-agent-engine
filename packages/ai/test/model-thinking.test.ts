@@ -461,7 +461,7 @@ describe("model thinking runtime helpers", () => {
 			maxTokens: 32000,
 		} as Model<"openai-responses">;
 
-		expect(() => requireSupportedEffort(model, Effort.High)).toThrow(/missing thinking metadata/);
+		expect(() => requireSupportedEffort(model, Effort.High)).toThrow(/is not supported/);
 	});
 
 	it("drops empty thinking metadata so presence checks stay meaningful", () => {

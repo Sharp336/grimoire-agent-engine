@@ -1361,7 +1361,7 @@ export class InteractiveMode implements InteractiveModeContext {
 				return;
 			}
 			try {
-				await this.session.setModelTemporary(resolved.model, planThinkingLevel);
+				await this.session.setModelTemporary(resolved.model, { thinkingLevel: planThinkingLevel });
 			} catch (error) {
 				this.showWarning(
 					`Failed to switch to plan model for plan mode: ${error instanceof Error ? error.message : String(error)}`,
@@ -1378,7 +1378,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!pending) return;
 		this.#pendingModelSwitch = undefined;
 		try {
-			await this.session.setModelTemporary(pending.model, pending.thinkingLevel);
+			await this.session.setModelTemporary(pending.model, { thinkingLevel: pending.thinkingLevel });
 		} catch (error) {
 			this.showWarning(
 				`Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
@@ -1567,7 +1567,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			} else if (this.session.isStreaming) {
 				this.#pendingModelSwitch = { model: prev.model, thinkingLevel: prev.thinkingLevel };
 			} else {
-				await this.session.setModelTemporary(prev.model, prev.thinkingLevel);
+				await this.session.setModelTemporary(prev.model, { thinkingLevel: prev.thinkingLevel });
 			}
 			// If #applyPlanModeModel queued a deferred switch to the plan-role model
 			// (because the session was streaming on entry), drop it now: we are

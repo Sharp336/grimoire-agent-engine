@@ -8,6 +8,7 @@ import { calculateCost } from "../models";
 import type {
 	Api,
 	AssistantMessage,
+	AssistantMessageEvent,
 	Context,
 	CursorExecHandlerResult,
 	CursorExecHandlers,
@@ -104,6 +105,7 @@ import {
 	RequestContextResultSchema,
 	RequestContextSchema,
 	RequestContextSuccessSchema,
+	RequestedModelSchema,
 	ResumeActionSchema,
 	SelectedContextSchema,
 	SelectedImageSchema,
@@ -129,6 +131,7 @@ import {
 	WriteShellStdinResultSchema,
 	WriteSuccessSchema,
 } from "./cursor/gen/agent_pb";
+import { applyCursorConversationTokenDetails, applyCursorTokenDelta } from "./cursor-utils";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
 export const CURSOR_CLIENT_VERSION = "cli-2026.01.09-231024f";
@@ -141,6 +144,12 @@ export interface CursorOptions extends StreamOptions {
 	conversationId?: string;
 	execHandlers?: CursorExecHandlers;
 	onToolResult?: CursorToolResultHandler;
+	/**
+	 * Enable Cursor's MAX mode for this request. Unlocks the model's full context
+	 * window (e.g. 1M for GPT-5.4 / GPT-5.5 1M variants) at the cost of Cursor's
+	 * premium pricing tier above the base window. Off by default.
+	 */
+	maxMode?: boolean;
 }
 
 const CONNECT_END_STREAM_FLAG = 0b00000010;
@@ -387,7 +396,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			let currentTextBlock: (TextContent & { index: number }) | null = null;
 			let currentThinkingBlock: (ThinkingContent & { index: number }) | null = null;
 			let currentToolCall: ToolCallState | null = null;
-			const usageState: UsageState = { sawTokenDelta: false };
 
 			const state: BlockState = {
 				get currentTextBlock() {
@@ -468,7 +476,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 							h2Request!,
 							options?.execHandlers,
 							options?.onToolResult,
-							usageState,
 							requestContextTools,
 							onConversationCheckpoint,
 						).catch(error => {
@@ -625,8 +632,8 @@ interface BlockState {
 	setFirstTokenTime: () => void;
 }
 
-interface UsageState {
-	sawTokenDelta: boolean;
+export interface ProcessInteractionUpdateOptions {
+	suppressMcpToolCalls?: boolean;
 }
 
 async function handleServerMessage(
@@ -638,7 +645,6 @@ async function handleServerMessage(
 	h2Request: http2.ClientHttp2Stream,
 	execHandlers: CursorExecHandlers | undefined,
 	onToolResult: CursorToolResultHandler | undefined,
-	usageState: UsageState,
 	requestContextTools: McpToolDefinition[],
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 ): Promise<void> {
@@ -647,7 +653,9 @@ async function handleServerMessage(
 	log("serverMessage", msgCase, msg.message.value);
 
 	if (msgCase === "interactionUpdate") {
-		processInteractionUpdate(msg.message.value, output, stream, state, usageState);
+		processInteractionUpdate(msg.message.value, output, stream, state, {
+			suppressMcpToolCalls: !!execHandlers?.mcp,
+		});
 	} else if (msgCase === "kvServerMessage") {
 		handleKvServerMessage(msg.message.value as KvServerMessage, blobStore, h2Request);
 	} else if (msgCase === "execServerMessage") {
@@ -659,7 +667,7 @@ async function handleServerMessage(
 			requestContextTools,
 		);
 	} else if (msgCase === "conversationCheckpointUpdate") {
-		handleConversationCheckpointUpdate(msg.message.value, output, usageState, onConversationCheckpoint);
+		handleConversationCheckpointUpdate(msg.message.value, output, onConversationCheckpoint);
 	}
 }
 
@@ -1945,16 +1953,43 @@ function processInteractionUpdate(
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
 	state: BlockState,
-	usageState: UsageState,
+	options: ProcessInteractionUpdateOptions = {},
 ): void {
 	const updateCase = update.message?.case;
 
 	log("interactionUpdate", updateCase, update.message?.value);
 
+	// Cursor's wire protocol has no explicit text_completed event — text blocks only get an
+	// end marker at stream tear-down. When the model interleaves text with thinking or tool
+	// calls (GPT-5.5 does), the next text_delta after the interleaving must start a NEW
+	// content block at the new index instead of appending to the original block. Otherwise
+	// post-tool text accumulates into the pre-tool block and chats look like "all text first,
+	// all tools last." Same reasoning applies to thinking blocks defensively.
+	const closeTextBlock = (): void => {
+		if (!state.currentTextBlock) return;
+		const idx = (state.currentTextBlock as TextContent & { index: number }).index;
+		delete (state.currentTextBlock as any).index;
+		stream.push({ type: "text_end", contentIndex: idx, content: state.currentTextBlock.text, partial: output });
+		state.setTextBlock(null);
+	};
+	const closeThinkingBlock = (): void => {
+		if (!state.currentThinkingBlock) return;
+		const idx = (state.currentThinkingBlock as ThinkingContent & { index: number }).index;
+		delete (state.currentThinkingBlock as any).index;
+		stream.push({
+			type: "thinking_end",
+			contentIndex: idx,
+			content: state.currentThinkingBlock.thinking,
+			partial: output,
+		});
+		state.setThinkingBlock(null);
+	};
+
 	if (updateCase === "textDelta") {
 		state.setFirstTokenTime();
 		const delta = update.message.value.text || "";
 		if (!state.currentTextBlock) {
+			closeThinkingBlock();
 			const block: TextContent & { index: number } = {
 				type: "text",
 				text: "",
@@ -1965,12 +2000,13 @@ function processInteractionUpdate(
 			stream.push({ type: "text_start", contentIndex: output.content.length - 1, partial: output });
 		}
 		state.currentTextBlock!.text += delta;
-		const idx = output.content.indexOf(state.currentTextBlock!);
+		const idx = (state.currentTextBlock as TextContent & { index: number }).index;
 		stream.push({ type: "text_delta", contentIndex: idx, delta, partial: output });
 	} else if (updateCase === "thinkingDelta") {
 		state.setFirstTokenTime();
 		const delta = update.message.value.text || "";
 		if (!state.currentThinkingBlock) {
+			closeTextBlock();
 			const block: ThinkingContent & { index: number } = {
 				type: "thinking",
 				thinking: "",
@@ -1981,25 +2017,23 @@ function processInteractionUpdate(
 			stream.push({ type: "thinking_start", contentIndex: output.content.length - 1, partial: output });
 		}
 		state.currentThinkingBlock!.thinking += delta;
-		const idx = output.content.indexOf(state.currentThinkingBlock!);
+		const idx = (state.currentThinkingBlock as ThinkingContent & { index: number }).index;
 		stream.push({ type: "thinking_delta", contentIndex: idx, delta, partial: output });
 	} else if (updateCase === "thinkingCompleted") {
-		if (state.currentThinkingBlock) {
-			const idx = output.content.indexOf(state.currentThinkingBlock);
-			delete (state.currentThinkingBlock as any).index;
-			stream.push({
-				type: "thinking_end",
-				contentIndex: idx,
-				content: state.currentThinkingBlock.thinking,
-				partial: output,
-			});
-			state.setThinkingBlock(null);
-		}
+		closeThinkingBlock();
 	} else if (updateCase === "toolCallStarted") {
+		closeTextBlock();
+		closeThinkingBlock();
 		const toolCall = update.message.value.toolCall;
 		if (toolCall) {
 			const mcpCall = toolCall.mcpToolCall;
 			if (mcpCall) {
+				if (options.suppressMcpToolCalls) {
+					// Cursor executes MCP tools through execServerMessage during the same stream.
+					// Leaving the tool call in assistant content makes the generic agent loop run it again.
+					state.setToolCall(null);
+					return;
+				}
 				const args = mcpCall.args || {};
 				const block: ToolCallState = {
 					type: "toolCall",
@@ -2064,31 +2098,86 @@ function processInteractionUpdate(
 	} else if (updateCase === "turnEnded") {
 		output.stopReason = "stop";
 	} else if (updateCase === "tokenDelta") {
-		const tokenDelta = update.message.value;
-		usageState.sawTokenDelta = true;
-		output.usage.output += tokenDelta.tokens || 0;
-		output.usage.totalTokens = output.usage.input + output.usage.output;
+		applyCursorTokenDelta(output, update.message.value?.tokens || 0);
 	}
+}
+
+/** @internal Test helper for Cursor interaction-update state transitions. */
+export function processCursorInteractionUpdatesForTest(
+	updates: unknown[],
+	options: ProcessInteractionUpdateOptions = {},
+): { output: AssistantMessage; events: AssistantMessageEvent[] } {
+	const output: AssistantMessage = {
+		role: "assistant",
+		content: [],
+		api: "cursor-agent" as Api,
+		provider: "cursor",
+		model: "cursor-test-model",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+	};
+	const events: AssistantMessageEvent[] = [];
+	const stream = new AssistantMessageEventStream();
+	const originalPush = stream.push.bind(stream);
+	stream.push = ((event: AssistantMessageEvent) => {
+		events.push(event);
+		originalPush(event);
+	}) as typeof stream.push;
+
+	let currentTextBlock: (TextContent & { index: number }) | null = null;
+	let currentThinkingBlock: (ThinkingContent & { index: number }) | null = null;
+	let currentToolCall: ToolCallState | null = null;
+	const state: BlockState = {
+		get currentTextBlock() {
+			return currentTextBlock;
+		},
+		get currentThinkingBlock() {
+			return currentThinkingBlock;
+		},
+		get currentToolCall() {
+			return currentToolCall;
+		},
+		get firstTokenTime() {
+			return undefined;
+		},
+		setTextBlock: block => {
+			currentTextBlock = block;
+		},
+		setThinkingBlock: block => {
+			currentThinkingBlock = block;
+		},
+		setToolCall: toolCall => {
+			currentToolCall = toolCall;
+		},
+		setFirstTokenTime: () => {},
+	};
+
+	for (const update of updates) {
+		processInteractionUpdate(update, output, stream, state, options);
+	}
+
+	return { output, events };
 }
 
 function handleConversationCheckpointUpdate(
 	checkpoint: ConversationStateStructure,
 	output: AssistantMessage,
-	usageState: UsageState,
 	onConversationCheckpoint?: (checkpoint: ConversationStateStructure) => void,
 ): void {
 	onConversationCheckpoint?.(checkpoint);
-	if (usageState.sawTokenDelta) {
-		return;
-	}
 	const usedTokens = checkpoint.tokenDetails?.usedTokens ?? 0;
 	if (usedTokens <= 0) {
 		return;
 	}
-	if (output.usage.output !== usedTokens) {
-		output.usage.output = usedTokens;
-		output.usage.totalTokens = output.usage.input + output.usage.output;
-	}
+	applyCursorConversationTokenDetails(output, usedTokens);
 }
 
 function createBlobId(data: Uint8Array): Uint8Array {
@@ -2468,7 +2557,7 @@ function extractImages(content: (TextContent | ImageContent)[]) {
 		);
 }
 
-function buildGrpcRequest(
+export function buildGrpcRequest(
 	model: Model<"cursor-agent">,
 	context: Context,
 	options: CursorOptions | undefined,
@@ -2568,16 +2657,26 @@ function buildGrpcRequest(
 		turns,
 	});
 
+	const maxMode = options?.maxMode === true;
 	const modelDetails = create(ModelDetailsSchema, {
 		modelId: model.id,
 		displayModelId: model.id,
 		displayName: model.name,
+		...(maxMode ? { maxMode: true } : {}),
+	});
+	// `requested_model` is the future replacement for `model_details` per the
+	// proto comment. Populate both so MAX is honored regardless of which one the
+	// server reads.
+	const requestedModel = create(RequestedModelSchema, {
+		modelId: model.id,
+		maxMode,
 	});
 
 	const runRequest = create(AgentRunRequestSchema, {
 		conversationState,
 		action,
 		modelDetails,
+		requestedModel,
 		conversationId: state.conversationId,
 	});
 

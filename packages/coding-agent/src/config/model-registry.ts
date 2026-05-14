@@ -2,6 +2,7 @@ import * as path from "node:path";
 import {
 	type Api,
 	type AssistantMessageEventStream,
+	applyCursorDiscoveredModelPolicy,
 	type Context,
 	createModelManager,
 	enrichModelThinking,
@@ -9,6 +10,7 @@ import {
 	getBundledProviders,
 	googleAntigravityModelManagerOptions,
 	googleGeminiCliModelManagerOptions,
+	isCursorAgent,
 	type Model,
 	type ModelManagerOptions,
 	type ModelRefreshStrategy,
@@ -971,9 +973,9 @@ export class ModelRegistry {
 		}
 	}
 
-	refreshInBackground(strategy: ModelRefreshStrategy = "online-if-uncached"): void {
+	refreshInBackground(strategy: ModelRefreshStrategy = "online-if-uncached"): Promise<void> {
 		if (this.#backgroundRefresh) {
-			return;
+			return this.#backgroundRefresh;
 		}
 		const refreshPromise = this.refresh(strategy)
 			.catch(error => {
@@ -987,6 +989,7 @@ export class ModelRegistry {
 				}
 			});
 		this.#backgroundRefresh = refreshPromise;
+		return refreshPromise;
 	}
 
 	async refreshProvider(providerId: string, strategy: ModelRefreshStrategy = "online"): Promise<void> {
@@ -2091,11 +2094,16 @@ export class ModelRegistry {
 		};
 	}
 	#applyRuntimeProviderOverrides(models: Model<Api>[]): Model<Api>[] {
-		if (this.#runtimeProviderOverrides.size === 0) return models;
+		// Combine the transport-override and cursor-policy passes into one walk so the catalog
+		// isn't iterated twice on every registry mutation (auth changes, refresh, OAuth modify).
+		const hasOverrides = this.#runtimeProviderOverrides.size > 0;
 		return models.map(model => {
-			const override = this.#runtimeProviderOverrides.get(model.provider);
-			if (!override) return model;
-			return this.#applyProviderTransportOverride(model, override);
+			const override = hasOverrides ? this.#runtimeProviderOverrides.get(model.provider) : undefined;
+			const overridden = override ? this.#applyProviderTransportOverride(model, override) : model;
+			// Enforce provider-level capability policies so the canonical index and all other
+			// consumers of this.#models see correct metadata regardless of source (bundled, cache,
+			// discovery, or OAuth-modified).
+			return isCursorAgent(overridden) ? applyCursorDiscoveredModelPolicy(overridden) : overridden;
 		});
 	}
 	#applyModelOverrides(models: Model<Api>[], overrides: Map<string, Map<string, ModelOverride>>): Model<Api>[] {
@@ -2551,13 +2559,15 @@ export class ModelRegistry {
 			if (config.oauth?.modifyModels) {
 				const credential = this.authStorage.getOAuthCredential(providerName);
 				if (credential) {
-					this.#models = config.oauth.modifyModels(withRuntimeTransportOverride, credential);
+					this.#models = this.#applyRuntimeProviderOverrides(
+						config.oauth.modifyModels(withRuntimeTransportOverride, credential),
+					);
 					this.#rebuildCanonicalIndex();
 					return;
 				}
 			}
 
-			this.#models = withRuntimeTransportOverride;
+			this.#models = this.#applyRuntimeProviderOverrides(withRuntimeTransportOverride);
 			this.#rebuildCanonicalIndex();
 			return;
 		}
@@ -2581,10 +2591,12 @@ export class ModelRegistry {
 				transportOverride,
 			);
 			this.#runtimeProviderOverrides.set(providerName, nextRuntimeOverride);
-			this.#models = this.#models.map(m => {
-				if (m.provider !== providerName) return m;
-				return this.#applyProviderTransportOverride(m, transportOverride);
-			});
+			this.#models = this.#applyRuntimeProviderOverrides(
+				this.#models.map(m => {
+					if (m.provider !== providerName) return m;
+					return this.#applyProviderTransportOverride(m, transportOverride);
+				}),
+			);
 			this.#rebuildCanonicalIndex();
 		}
 	}

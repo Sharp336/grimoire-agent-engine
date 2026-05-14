@@ -11,6 +11,7 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
+import { reconcileCursorCumulativeTokens } from "@oh-my-pi/pi-ai";
 import { getTerminalId } from "@oh-my-pi/pi-tui";
 import {
 	getBlobsDir,
@@ -1540,6 +1541,13 @@ export interface UsageStatistics {
 	cacheWrite: number;
 	premiumRequests: number;
 	cost: number;
+	/**
+	 * Running max of `usage.totalTokens` seen on `cursor-agent` assistant messages.
+	 * Cursor reports a monotonically-increasing cumulative counter; we anchor the
+	 * reconciled `input` against this so all consumers (footer, getSessionStats,
+	 * context-usage) agree on the cumulative total without re-walking messages.
+	 */
+	latestCursorTotalTokens: number;
 }
 
 function getTaskToolUsage(details: unknown): Usage | undefined {
@@ -1548,6 +1556,25 @@ function getTaskToolUsage(details: unknown): Usage | undefined {
 	const usage = record.usage;
 	if (!usage || typeof usage !== "object") return undefined;
 	return usage as Usage;
+}
+
+function addUsageToStatistics(stats: UsageStatistics, usage: Usage, api?: string): void {
+	stats.input += usage.input;
+	stats.output += usage.output;
+	stats.cacheRead += usage.cacheRead;
+	stats.cacheWrite += usage.cacheWrite;
+	stats.premiumRequests += usage.premiumRequests ?? 0;
+	stats.cost += usage.cost.total;
+	if (api === "cursor-agent") {
+		stats.latestCursorTotalTokens = Math.max(stats.latestCursorTotalTokens, usage.totalTokens ?? 0);
+		stats.input = reconcileCursorCumulativeTokens({
+			totalInput: stats.input,
+			totalOutput: stats.output,
+			totalCacheRead: stats.cacheRead,
+			totalCacheWrite: stats.cacheWrite,
+			latestCursorTotalTokens: stats.latestCursorTotalTokens,
+		}).totalInput;
+	}
 }
 
 function extractTextFromContent(content: Message["content"]): string {
@@ -1944,6 +1971,7 @@ export class SessionManager {
 		cacheWrite: 0,
 		premiumRequests: 0,
 		cost: 0,
+		latestCursorTotalTokens: 0,
 	} satisfies UsageStatistics;
 	/** Per-turn output-token budget set by a `+Nk` directive (total null when none this turn). */
 	#turnBudget: { total: number | null; hard: boolean } = { total: null, hard: false };
@@ -2273,7 +2301,15 @@ export class SessionManager {
 		this.#flushed = false;
 		this.#needsFullRewriteOnNextPersist = false;
 		this.#ensuredOnDisk = false;
-		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 };
+		this.#usageStatistics = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			premiumRequests: 0,
+			cost: 0,
+			latestCursorTotalTokens: 0,
+		};
 		this.#inMemoryArtifacts = null;
 		this.#inMemoryArtifactCounter = 0;
 
@@ -2289,7 +2325,15 @@ export class SessionManager {
 		this.#byId.clear();
 		this.#labelsById.clear();
 		this.#leafId = null;
-		this.#usageStatistics = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0 };
+		this.#usageStatistics = {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			premiumRequests: 0,
+			cost: 0,
+			latestCursorTotalTokens: 0,
+		};
 		for (const entry of this.#fileEntries) {
 			if (entry.type === "session") continue;
 			this.#byId.set(entry.id, entry);
@@ -2302,24 +2346,13 @@ export class SessionManager {
 				}
 			}
 			if (entry.type === "message" && entry.message.role === "assistant") {
-				const usage = entry.message.usage;
-				this.#usageStatistics.input += usage.input;
-				this.#usageStatistics.output += usage.output;
-				this.#usageStatistics.cacheRead += usage.cacheRead;
-				this.#usageStatistics.cacheWrite += usage.cacheWrite;
-				this.#usageStatistics.premiumRequests += usage.premiumRequests ?? 0;
-				this.#usageStatistics.cost += usage.cost.total;
+				addUsageToStatistics(this.#usageStatistics, entry.message.usage, entry.message.api);
 			}
 
 			if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
 				const usage = getTaskToolUsage(entry.message.details);
 				if (usage) {
-					this.#usageStatistics.input += usage.input;
-					this.#usageStatistics.output += usage.output;
-					this.#usageStatistics.cacheRead += usage.cacheRead;
-					this.#usageStatistics.cacheWrite += usage.cacheWrite;
-					this.#usageStatistics.premiumRequests += usage.premiumRequests ?? 0;
-					this.#usageStatistics.cost += usage.cost.total;
+					addUsageToStatistics(this.#usageStatistics, usage);
 				}
 			}
 		}
@@ -2816,24 +2849,13 @@ export class SessionManager {
 		this.#leafId = entry.id;
 		this._persist(entry);
 		if (entry.type === "message" && entry.message.role === "assistant") {
-			const usage = entry.message.usage;
-			this.#usageStatistics.input += usage.input;
-			this.#usageStatistics.output += usage.output;
-			this.#usageStatistics.cacheRead += usage.cacheRead;
-			this.#usageStatistics.cacheWrite += usage.cacheWrite;
-			this.#usageStatistics.premiumRequests += usage.premiumRequests ?? 0;
-			this.#usageStatistics.cost += usage.cost.total;
+			addUsageToStatistics(this.#usageStatistics, entry.message.usage, entry.message.api);
 		}
 
 		if (entry.type === "message" && entry.message.role === "toolResult" && entry.message.toolName === "task") {
 			const usage = getTaskToolUsage(entry.message.details);
 			if (usage) {
-				this.#usageStatistics.input += usage.input;
-				this.#usageStatistics.output += usage.output;
-				this.#usageStatistics.cacheRead += usage.cacheRead;
-				this.#usageStatistics.cacheWrite += usage.cacheWrite;
-				this.#usageStatistics.premiumRequests += usage.premiumRequests ?? 0;
-				this.#usageStatistics.cost += usage.cost.total;
+				addUsageToStatistics(this.#usageStatistics, usage);
 			}
 		}
 	}
@@ -3156,13 +3178,15 @@ export class SessionManager {
 	 * Use buildSessionContext() to get the resolved messages for the LLM.
 	 */
 	getBranch(fromId?: string): SessionEntry[] {
+		// Collect leaf→root, reverse once: avoids O(N²) unshift on each render.
 		const path: SessionEntry[] = [];
 		const startId = fromId ?? this.#leafId;
 		let current = startId ? this.#byId.get(startId) : undefined;
 		while (current) {
-			path.unshift(current);
+			path.push(current);
 			current = current.parentId ? this.#byId.get(current.parentId) : undefined;
 		}
+		path.reverse();
 		return path;
 	}
 

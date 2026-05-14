@@ -2,12 +2,16 @@ import { describe, expect, test } from "bun:test";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import {
 	expandRoleAlias,
+	extractExplicitMaxMode,
+	extractExplicitThinkingSelector,
+	formatModelSelectorValue,
 	parseModelPattern,
 	parseModelString,
 	resolveAgentModelPatterns,
 	resolveCliModel,
 	resolveModelFromString,
 	resolveModelOverride,
+	resolveModelOverrideWithAuthFallback,
 	resolveModelRoleValue,
 	resolveModelScope,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
@@ -650,6 +654,21 @@ describe("resolveCliModel", () => {
 		expect(result.model?.id).toBe("anthropic/claude-sonnet-4.5");
 	});
 
+	test("resolves canonical ids with :max selectors", () => {
+		const result = resolveCliModel({
+			cliModel: "claude-sonnet-4-5:max",
+			modelRegistry: {
+				...canonicalRegistry,
+				getAll: () => canonicalVariantModels,
+			} as unknown as Parameters<typeof resolveCliModel>[0]["modelRegistry"],
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.selector).toBe("claude-sonnet-4-5");
+		expect(result.maxMode).toBe(true);
+		expect(result.model?.provider).toBe("github-copilot");
+	});
+
 	test("resolves --model provider/id without --provider", () => {
 		const registry = {
 			getAll: () => allModels,
@@ -920,5 +939,153 @@ describe("expandRoleAlias", () => {
 		settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
 
 		expect(expandRoleAlias("pi/vision", settings)).toBe("pi/vision");
+	});
+});
+
+describe("Cursor MAX selector suffix", () => {
+	test("parseModelString extracts :max as a separate flag", () => {
+		const result = parseModelString("cursor/gpt-5.5-extra-high:max");
+		expect(result).toEqual({
+			provider: "cursor",
+			id: "gpt-5.5-extra-high",
+			maxMode: true,
+		});
+	});
+
+	test("parseModelString parses :max combined with thinking level (either order)", () => {
+		const a = parseModelString("anthropic/claude-sonnet-4-5:max:high");
+		expect(a).toEqual({
+			provider: "anthropic",
+			id: "claude-sonnet-4-5",
+			thinkingLevel: Effort.High,
+			maxMode: true,
+		});
+		const b = parseModelString("anthropic/claude-sonnet-4-5:high:max");
+		expect(b).toEqual({
+			provider: "anthropic",
+			id: "claude-sonnet-4-5",
+			thinkingLevel: Effort.High,
+			maxMode: true,
+		});
+	});
+
+	test("parseModelString preserves structural colons in ids (not treated as flags)", () => {
+		// `openrouter/qwen/qwen3-coder:exacto` — the `:exacto` is part of the model id,
+		// not a flag. The peeler must stop at the first unrecognized segment.
+		const plain = parseModelString("openrouter/qwen/qwen3-coder:exacto");
+		expect(plain).toEqual({ provider: "openrouter", id: "qwen/qwen3-coder:exacto" });
+		// When a real flag (:max) follows a structural colon, only the flag is stripped.
+		const withMax = parseModelString("openrouter/qwen/qwen3-coder:exacto:max");
+		expect(withMax).toEqual({ provider: "openrouter", id: "qwen/qwen3-coder:exacto", maxMode: true });
+	});
+
+	test("formatModelSelectorValue emits `:max` and `:thinking` together", () => {
+		expect(formatModelSelectorValue("cursor/gpt-5.5-extra-high", undefined, true)).toBe(
+			"cursor/gpt-5.5-extra-high:max",
+		);
+		expect(formatModelSelectorValue("cursor/gpt-5.5-extra-high", undefined, false)).toBe("cursor/gpt-5.5-extra-high");
+		expect(formatModelSelectorValue("anthropic/claude-sonnet-4-5", Effort.High, true)).toBe(
+			"anthropic/claude-sonnet-4-5:max:high",
+		);
+		// Round-trip parse should recover both flags.
+		const formatted = formatModelSelectorValue("anthropic/claude-sonnet-4-5", Effort.High, true);
+		expect(parseModelString(formatted)).toMatchObject({
+			provider: "anthropic",
+			id: "claude-sonnet-4-5",
+			thinkingLevel: Effort.High,
+			maxMode: true,
+		});
+	});
+
+	test("extractExplicitMaxMode walks role aliases and recognizes :max anywhere in the suffix chain", () => {
+		expect(extractExplicitMaxMode(undefined)).toBeUndefined();
+		expect(extractExplicitMaxMode("cursor/gpt-5.5-extra-high")).toBeUndefined();
+		expect(extractExplicitMaxMode("cursor/gpt-5.5-extra-high:max")).toBe(true);
+		expect(extractExplicitMaxMode("anthropic/claude-sonnet-4-5:high:max")).toBe(true);
+		expect(extractExplicitMaxMode("anthropic/claude-sonnet-4-5:max:high")).toBe(true);
+		expect(extractExplicitMaxMode("anthropic/claude-sonnet-4-5:high")).toBeUndefined();
+	});
+
+	test("expands role aliases with :max before resolving the configured model", () => {
+		const settings = Settings.isolated();
+		settings.setModelRole("slow", "anthropic/claude-sonnet-4-5");
+
+		const result = resolveModelRoleValue("pi/slow:max", mockModels, { settings });
+
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.maxMode).toBe(true);
+	});
+
+	test("subagent model override resolution preserves :max for explicit Cursor models", async () => {
+		const cursorModel: Model<"cursor-agent"> = {
+			id: "gpt-5.5-extra-high",
+			name: "GPT-5.5 Extra High",
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxTokens: 64_000,
+			extendedContext: {
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+				baseContextWindow: 272_000,
+				baseMaxTokens: 64_000,
+			},
+		};
+		const registry = {
+			getAvailable: () => [cursorModel],
+			getApiKey: async () => "cursor-key",
+		};
+
+		const result = await resolveModelOverrideWithAuthFallback(
+			["cursor/gpt-5.5-extra-high:max"],
+			undefined,
+			registry as never,
+		);
+
+		expect(result.model?.id).toBe("gpt-5.5-extra-high");
+		expect(result.maxMode).toBe(true);
+	});
+
+	test("resolveCliModel preserves :max for explicit Cursor selectors", () => {
+		const cursorModel: Model<"cursor-agent"> = {
+			id: "gpt-5.5-extra-high",
+			name: "GPT-5.5 Extra High",
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxTokens: 64_000,
+			extendedContext: {
+				contextWindow: 1_000_000,
+				maxTokens: 128_000,
+				baseContextWindow: 272_000,
+				baseMaxTokens: 64_000,
+			},
+		};
+		const registry = {
+			getAll: () => [cursorModel],
+		};
+
+		const result = resolveCliModel({
+			cliModel: "cursor/gpt-5.5-extra-high:max",
+			modelRegistry: registry as never,
+		});
+
+		expect(result.model?.id).toBe("gpt-5.5-extra-high");
+		expect(result.maxMode).toBe(true);
+	});
+
+	test("extractExplicitThinkingSelector survives a trailing :max suffix", () => {
+		// Regression: before the peel helper, only the very last `:<token>` was inspected,
+		// so `:high:max` would yield no thinking level even though one is present.
+		expect(extractExplicitThinkingSelector("anthropic/claude-sonnet-4-5:high:max")).toBe(Effort.High);
+		expect(extractExplicitThinkingSelector("cursor/gpt-5.5-extra-high:max")).toBeUndefined();
 	});
 });

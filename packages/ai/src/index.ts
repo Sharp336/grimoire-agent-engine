@@ -14,6 +14,7 @@ export * from "./providers/anthropic";
 export * from "./providers/anthropic-client";
 export * from "./providers/azure-openai-responses";
 export type * from "./providers/cursor";
+export * from "./providers/cursor-utils";
 export * from "./providers/gitlab-duo";
 export type * from "./providers/google";
 export type * from "./providers/google-gemini-cli";

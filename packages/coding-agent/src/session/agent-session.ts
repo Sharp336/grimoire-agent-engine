@@ -80,6 +80,7 @@ import {
 	Effort,
 	getSupportedEfforts,
 	isContextOverflow,
+	isCursorMaxCapable,
 	isUsageLimitError,
 	modelsAreEqual,
 	parseRateLimitReason,
@@ -106,12 +107,15 @@ import type { Rule } from "../capability/rule";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import { MODEL_ROLE_IDS, type ModelRegistry } from "../config/model-registry";
 import {
+	extractExplicitMaxMode,
 	extractExplicitThinkingSelector,
+	formatModelSelector,
 	formatModelSelectorValue,
 	formatModelString,
 	parseModelString,
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
+	type SelectorFlags,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -443,6 +447,7 @@ export interface ResolvedRoleModel {
 	model: Model;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel: boolean;
+	maxMode?: boolean;
 }
 
 /** The set of resolvable role models plus the index of the currently active
@@ -483,11 +488,10 @@ type RetryFallbackChains = Record<string, string[]>;
 
 type RetryFallbackRevertPolicy = "never" | "cooldown-expiry";
 
-interface RetryFallbackSelector {
+interface RetryFallbackSelector extends SelectorFlags {
 	raw: string;
 	provider: string;
 	id: string;
-	thinkingLevel: ThinkingLevel | undefined;
 }
 
 interface ActiveRetryFallbackState {
@@ -495,6 +499,11 @@ interface ActiveRetryFallbackState {
 	originalSelector: string;
 	originalThinkingLevel: ConfiguredThinkingLevel | undefined;
 	lastAppliedFallbackThinkingLevel: ConfiguredThinkingLevel | undefined;
+}
+
+function hasUsableUsage(message: AssistantMessage): boolean {
+	if (message.stopReason === "aborted" || message.stopReason === "error" || !message.usage) return false;
+	return calculateContextTokens(message.usage) > 0;
 }
 
 function parseRetryFallbackSelector(selector: string): RetryFallbackSelector | undefined {
@@ -507,12 +516,8 @@ function parseRetryFallbackSelector(selector: string): RetryFallbackSelector | u
 		provider: parsed.provider,
 		id: parsed.id,
 		thinkingLevel: parsed.thinkingLevel,
+		maxMode: parsed.maxMode,
 	};
-}
-
-function formatRetryFallbackSelector(model: Model, thinkingLevel: ThinkingLevel | undefined): string {
-	const selector = formatModelString(model);
-	return thinkingLevel ? `${selector}:${thinkingLevel}` : selector;
 }
 
 function formatRetryFallbackBaseSelector(selector: RetryFallbackSelector): string {
@@ -816,6 +821,8 @@ function extractPermissionLocations(
  *  `message_start` dequeue branch; user-message pushes leave it undefined and
  *  rely on the existing text-equality match. */
 type QueuedDisplayEntry = { text: string; tag?: string };
+
+type CursorMaxModeSource = { kind: "explicit"; value: boolean } | { kind: "role"; role: string } | { kind: "preserve" };
 
 export class AgentSession {
 	readonly agent: Agent;
@@ -1830,7 +1837,7 @@ export class AgentSession {
 					if (this.#activeRetryFallback && this.model) {
 						await this.#emitSessionEvent({
 							type: "retry_fallback_succeeded",
-							model: formatRetryFallbackSelector(this.model, this.thinkingLevel),
+							model: formatModelSelector(this.model, this.thinkingLevel, this.agent.getCursorMaxMode()),
 							role: this.#activeRetryFallback.role,
 						});
 					}
@@ -5289,7 +5296,7 @@ export class AgentSession {
 	async setModel(
 		model: Model,
 		role: string = "default",
-		options?: { selector?: string; thinkingLevel?: ThinkingLevel; persist?: boolean },
+		options?: { selector?: string; persist?: boolean } & SelectorFlags,
 	): Promise<void> {
 		const previousEditMode = this.#resolveActiveEditMode();
 		const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
@@ -5299,18 +5306,26 @@ export class AgentSession {
 
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(model);
-		this.sessionManager.appendModelChange(`${model.provider}/${model.id}`, role);
+		const roleModelValue = this.#formatRoleModelValue(
+			role,
+			model,
+			options?.selector,
+			options?.thinkingLevel,
+			options?.maxMode,
+		);
+		this.sessionManager.appendModelChange(roleModelValue, role);
 		if (options?.persist) {
-			this.settings.setModelRole(
-				role,
-				this.#formatRoleModelValue(role, model, options.selector, options.thinkingLevel),
-			);
+			this.settings.setModelRole(role, roleModelValue);
 		}
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 
 		// Re-apply thinking for the newly selected model. Prefer the model's
 		// configured defaultLevel; otherwise preserve the current level (or auto).
 		this.#reapplyThinkingLevel(model.thinking?.defaultLevel);
+		this.#applyCursorMaxMode(
+			model,
+			options?.maxMode !== undefined ? { kind: "explicit", value: options.maxMode } : { kind: "role", role },
+		);
 		await this.#syncAfterModelChange(previousEditMode);
 	}
 
@@ -5319,11 +5334,7 @@ export class AgentSession {
 	 * Validates API key, saves to session log but NOT to settings.
 	 * @throws Error if no API key available for the model
 	 */
-	async setModelTemporary(
-		model: Model,
-		thinkingLevel?: ThinkingLevel,
-		options?: { ephemeral?: boolean },
-	): Promise<void> {
+	async setModelTemporary(model: Model, flags: SelectorFlags & { ephemeral?: boolean } = {}): Promise<void> {
 		const previousEditMode = this.#resolveActiveEditMode();
 		const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 		if (!apiKey) {
@@ -5333,18 +5344,22 @@ export class AgentSession {
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(model);
 		this.sessionManager.appendModelChange(
-			`${model.provider}/${model.id}`,
-			options?.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
+			this.#formatTemporaryModelChangeValue(model, flags.maxMode),
+			flags.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
 		);
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
 
 		// Apply explicit thinking level if given; otherwise prefer the model's
 		// configured defaultLevel; otherwise re-clamp the current level (or auto).
-		if (thinkingLevel !== undefined) {
-			this.setThinkingLevel(thinkingLevel);
+		if (flags.thinkingLevel !== undefined) {
+			this.setThinkingLevel(flags.thinkingLevel);
 		} else {
 			this.#reapplyThinkingLevel(model.thinking?.defaultLevel);
 		}
+		this.#applyCursorMaxMode(
+			model,
+			flags.maxMode !== undefined ? { kind: "explicit", value: flags.maxMode } : { kind: "preserve" },
+		);
 		await this.#syncAfterModelChange(previousEditMode);
 	}
 
@@ -5399,6 +5414,7 @@ export class AgentSession {
 				model: resolved.model,
 				thinkingLevel: resolved.thinkingLevel,
 				explicitThinkingLevel: resolved.explicitThinkingLevel,
+				maxMode: extractExplicitMaxMode(roleModelStr, this.settings),
 			});
 		}
 
@@ -5486,6 +5502,7 @@ export class AgentSession {
 		this.#setModelWithProviderSessionReset(next.model);
 		this.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
 		this.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
+		this.#applyCursorMaxMode(next.model, { kind: "role", role: "default" });
 
 		// Apply the scoped model's configured thinking level, preserving auto.
 		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
@@ -5516,6 +5533,7 @@ export class AgentSession {
 		this.#setModelWithProviderSessionReset(nextModel);
 		this.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
 		this.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
+		this.#applyCursorMaxMode(nextModel, { kind: "role", role: "default" });
 		// Re-apply the current thinking level (or auto) for the newly selected model
 		this.#reapplyThinkingLevel();
 		await this.#syncAfterModelChange(previousEditMode);
@@ -6783,7 +6801,7 @@ export class AgentSession {
 		if (!targetModel) return false;
 
 		try {
-			await this.setModelTemporary(targetModel, undefined, { ephemeral: true });
+			await this.setModelTemporary(targetModel, { ephemeral: true });
 			logger.debug("Context promotion switched model on overflow", {
 				from: `${currentModel.provider}/${currentModel.id}`,
 				to: `${targetModel.provider}/${targetModel.id}`,
@@ -7025,7 +7043,7 @@ export class AgentSession {
 	}
 
 	#getModelKey(model: Model): string {
-		return `${model.provider}/${model.id}`;
+		return formatModelString(model);
 	}
 
 	#formatRoleModelValue(
@@ -7033,16 +7051,56 @@ export class AgentSession {
 		model: Model,
 		selectorOverride?: string,
 		thinkingLevelOverride?: ThinkingLevel,
+		maxModeOverride?: boolean,
 	): string {
-		const modelKey = selectorOverride ?? `${model.provider}/${model.id}`;
-		if (thinkingLevelOverride !== undefined) {
-			return formatModelSelectorValue(modelKey, thinkingLevelOverride);
-		}
+		const modelKey = selectorOverride ?? formatModelString(model);
 		const existingRoleValue = this.settings.getModelRole(role);
-		if (!existingRoleValue) return modelKey;
+		const thinkingLevel =
+			thinkingLevelOverride !== undefined
+				? thinkingLevelOverride
+				: existingRoleValue
+					? extractExplicitThinkingSelector(existingRoleValue, this.settings)
+					: undefined;
+		const supportsMaxMode = isCursorMaxCapable(model);
+		const maxMode = supportsMaxMode
+			? (maxModeOverride ??
+				(existingRoleValue ? extractExplicitMaxMode(existingRoleValue, this.settings) : undefined))
+			: false;
+		return formatModelSelectorValue(modelKey, thinkingLevel, maxMode);
+	}
 
-		const thinkingLevel = extractExplicitThinkingSelector(existingRoleValue, this.settings);
-		return formatModelSelectorValue(modelKey, thinkingLevel);
+	#formatTemporaryModelChangeValue(model: Model, maxModeOverride?: boolean): string {
+		const maxMode = isCursorMaxCapable(model) ? (maxModeOverride ?? this.agent.getCursorMaxMode()) : false;
+		return formatModelSelector(model, undefined, maxMode);
+	}
+
+	/**
+	 * Source-of-truth discriminator for the `source` parameter.
+	 * - `explicit`: caller knows the boolean value (selector flags, retry-fallback, restore).
+	 * - `role`: read the `:max` suffix from the persisted role-value string.
+	 * - `preserve`: keep whatever flag the agent already had (temporary model override).
+	 */
+	#applyCursorMaxMode(model: Model, source: CursorMaxModeSource): void {
+		if (!isCursorMaxCapable(model)) {
+			this.agent.setCursorMaxMode(model, false);
+			return;
+		}
+		let resolved: boolean;
+		switch (source.kind) {
+			case "explicit":
+				resolved = source.value;
+				break;
+			case "role":
+				// Persistent role change without an explicit flag: read from the persisted
+				// role value so cycle / plan-mode toggle / etc. don't silently clear a `:max`
+				// suffix that already lives in settings.
+				resolved = extractExplicitMaxMode(this.settings.getModelRole(source.role), this.settings) === true;
+				break;
+			case "preserve":
+				resolved = this.agent.getCursorMaxMode();
+				break;
+		}
+		this.agent.setCursorMaxMode(model, resolved);
 	}
 	#resolveContextPromotionConfiguredTarget(currentModel: Model, availableModels: Model[]): Model | undefined {
 		const configuredTarget = currentModel.contextPromotionTarget?.trim();
@@ -7949,9 +8007,10 @@ export class AgentSession {
 		const nextThinkingLevel = selector.thinkingLevel ?? currentThinkingLevel;
 
 		this.#setModelWithProviderSessionReset(candidate);
-		this.sessionManager.appendModelChange(`${candidate.provider}/${candidate.id}`, EPHEMERAL_MODEL_CHANGE_ROLE);
+		this.sessionManager.appendModelChange(selector.raw, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.settings.getStorage()?.recordModelUsage(`${candidate.provider}/${candidate.id}`);
 		this.setThinkingLevel(nextThinkingLevel);
+		this.#applyCursorMaxMode(candidate, { kind: "explicit", value: selector.maxMode === true });
 		if (!this.#activeRetryFallback) {
 			this.#activeRetryFallback = {
 				role,
@@ -8004,7 +8063,7 @@ export class AgentSession {
 
 		const currentModel = this.model;
 		if (!currentModel) return;
-		const currentSelector = formatRetryFallbackSelector(currentModel, this.thinkingLevel);
+		const currentSelector = formatModelSelector(currentModel, this.thinkingLevel, this.agent.getCursorMaxMode());
 		if (currentSelector === originalSelector.raw) {
 			if (!this.#isRetryFallbackSelectorSuppressed(originalSelector)) {
 				this.#clearActiveRetryFallback();
@@ -8022,9 +8081,10 @@ export class AgentSession {
 		const thinkingToApply =
 			currentThinkingLevel === lastAppliedFallbackThinkingLevel ? originalThinkingLevel : currentThinkingLevel;
 		this.#setModelWithProviderSessionReset(primaryModel);
-		this.sessionManager.appendModelChange(`${primaryModel.provider}/${primaryModel.id}`, EPHEMERAL_MODEL_CHANGE_ROLE);
+		this.sessionManager.appendModelChange(originalSelector.raw, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.settings.getStorage()?.recordModelUsage(`${primaryModel.provider}/${primaryModel.id}`);
 		this.setThinkingLevel(thinkingToApply);
+		this.#applyCursorMaxMode(primaryModel, { kind: "explicit", value: originalSelector.maxMode === true });
 		this.#clearActiveRetryFallback();
 	}
 
@@ -8136,7 +8196,9 @@ export class AgentSession {
 			}
 		}
 
-		const currentSelector = this.model ? formatRetryFallbackSelector(this.model, this.thinkingLevel) : undefined;
+		const currentSelector = this.model
+			? formatModelSelector(this.model, this.thinkingLevel, this.agent.getCursorMaxMode())
+			: undefined;
 		if (!switchedCredential && currentSelector) {
 			if (retrySettings.modelFallback) {
 				this.#noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
@@ -8934,6 +8996,7 @@ export class AgentSession {
 		const previousPendingNextTurnMessages = [...this.#pendingNextTurnMessages];
 		const previousScheduledHiddenNextTurnGeneration = this.#scheduledHiddenNextTurnGeneration;
 		const previousModel = this.model;
+		const previousCursorMaxMode = this.agent.getCursorMaxMode();
 		const previousThinkingLevel = this.#thinkingLevel;
 		const previousAutoThinking = this.#autoThinking;
 		const previousAutoResolvedLevel = this.#autoResolvedLevel;
@@ -8988,14 +9051,20 @@ export class AgentSession {
 			);
 			if (targetModelStrings.length > 0) {
 				const availableModels = this.#modelRegistry.getAvailable();
+				const matchPreferences = { usageOrder: this.settings.getStorage()?.getModelUsageOrder() };
 				let match: Model | undefined;
+				let restoredMaxMode = false;
 				for (const targetModelStr of targetModelStrings) {
-					const slashIdx = targetModelStr.indexOf("/");
-					if (slashIdx <= 0) continue;
-					const provider = targetModelStr.slice(0, slashIdx);
-					const modelId = targetModelStr.slice(slashIdx + 1);
-					match = availableModels.find(m => m.provider === provider && m.id === modelId);
-					if (match) break;
+					const spec = resolveModelRoleValue(targetModelStr, availableModels, {
+						settings: this.settings,
+						matchPreferences,
+						modelRegistry: this.#modelRegistry,
+					});
+					if (spec.model) {
+						match = spec.model;
+						restoredMaxMode = spec.maxMode === true;
+						break;
+					}
 				}
 				if (match) {
 					const currentModel = this.model;
@@ -9011,6 +9080,7 @@ export class AgentSession {
 						this.agent.setModel(match);
 						this.#syncToolCallBatchCap(match);
 					}
+					this.#applyCursorMaxMode(match, { kind: "explicit", value: restoredMaxMode });
 				}
 			}
 
@@ -9090,9 +9160,10 @@ export class AgentSession {
 			this.#pendingNextTurnMessages = previousPendingNextTurnMessages;
 			this.#scheduledHiddenNextTurnGeneration = previousScheduledHiddenNextTurnGeneration;
 			if (previousModel) {
-				this.agent.setModel(previousModel);
+				this.agent.setCursorMaxMode(previousModel, previousCursorMaxMode);
 				this.#syncToolCallBatchCap(previousModel);
 			} else {
+				this.agent.setCursorMaxMode(undefined, previousCursorMaxMode);
 				this.#syncToolCallBatchCap(undefined);
 			}
 			this.#thinkingLevel = previousThinkingLevel;
@@ -9401,54 +9472,27 @@ export class AgentSession {
 	}
 
 	/**
-	 * Get session statistics.
+	 * Get session statistics. Token totals come from `SessionManager.getUsageStatistics()`,
+	 * which is incrementally maintained on append (with Cursor cumulative-token reconciliation
+	 * already applied). The message walk here is for counts only.
 	 */
 	getSessionStats(): SessionStats {
 		const state = this.state;
-		const userMessages = state.messages.filter(m => m.role === "user").length;
-		const assistantMessages = state.messages.filter(m => m.role === "assistant").length;
-		const toolResults = state.messages.filter(m => m.role === "toolResult").length;
-
+		let userMessages = 0;
+		let assistantMessages = 0;
+		let toolResults = 0;
 		let toolCalls = 0;
-		let totalInput = 0;
-		let totalOutput = 0;
-		let totalCacheRead = 0;
-		let totalCacheWrite = 0;
-		let totalCost = 0;
-
-		let totalPremiumRequests = 0;
-		const getTaskToolUsage = (details: unknown): Usage | undefined => {
-			if (!details || typeof details !== "object") return undefined;
-			const record = details as Record<string, unknown>;
-			const usage = record.usage;
-			if (!usage || typeof usage !== "object") return undefined;
-			return usage as Usage;
-		};
-
 		for (const message of state.messages) {
-			if (message.role === "assistant") {
-				const assistantMsg = message as AssistantMessage;
-				toolCalls += assistantMsg.content.filter(c => c.type === "toolCall").length;
-				totalInput += assistantMsg.usage.input;
-				totalOutput += assistantMsg.usage.output;
-				totalCacheRead += assistantMsg.usage.cacheRead;
-				totalCacheWrite += assistantMsg.usage.cacheWrite;
-				totalPremiumRequests += assistantMsg.usage.premiumRequests ?? 0;
-				totalCost += assistantMsg.usage.cost.total;
-			}
-
-			if (message.role === "toolResult" && message.toolName === "task") {
-				const usage = getTaskToolUsage(message.details);
-				if (usage) {
-					totalInput += usage.input;
-					totalOutput += usage.output;
-					totalCacheRead += usage.cacheRead;
-					totalCacheWrite += usage.cacheWrite;
-					totalPremiumRequests += usage.premiumRequests ?? 0;
-					totalCost += usage.cost.total;
-				}
-			}
+			if (message.role === "user") userMessages++;
+			else if (message.role === "assistant") {
+				assistantMessages++;
+				toolCalls += message.content.filter(c => c.type === "toolCall").length;
+			} else if (message.role === "toolResult") toolResults++;
 		}
+
+		const stats = this.sessionManager.getUsageStatistics();
+		const summed = stats.input + stats.output + stats.cacheRead + stats.cacheWrite;
+		const total = Math.max(summed, stats.latestCursorTotalTokens);
 
 		return {
 			sessionFile: this.sessionFile,
@@ -9459,14 +9503,14 @@ export class AgentSession {
 			toolResults,
 			totalMessages: state.messages.length,
 			tokens: {
-				input: totalInput,
-				output: totalOutput,
-				cacheRead: totalCacheRead,
-				cacheWrite: totalCacheWrite,
-				total: totalInput + totalOutput + totalCacheRead + totalCacheWrite,
+				input: stats.input,
+				output: stats.output,
+				cacheRead: stats.cacheRead,
+				cacheWrite: stats.cacheWrite,
+				total,
 			},
-			cost: totalCost,
-			premiumRequests: totalPremiumRequests,
+			cost: stats.cost,
+			premiumRequests: stats.premiumRequests,
 		};
 	}
 
@@ -9493,18 +9537,16 @@ export class AgentSession {
 			for (let i = branchEntries.length - 1; i > compactionIndex; i--) {
 				const entry = branchEntries[i];
 				if (entry.type === "message" && entry.message.role === "assistant") {
-					const assistant = entry.message;
-					if (assistant.stopReason !== "aborted" && assistant.stopReason !== "error") {
-						const contextTokens = calculateContextTokens(assistant.usage);
-						if (contextTokens > 0) {
-							hasPostCompactionUsage = true;
-						}
+					if (hasUsableUsage(entry.message)) {
+						hasPostCompactionUsage = true;
 						break;
 					}
 				}
 			}
 
-			if (!hasPostCompactionUsage) {
+			const streamMessage = this.agent.state.streamMessage;
+			const hasStreamingUsage = streamMessage?.role === "assistant" && hasUsableUsage(streamMessage);
+			if (!hasPostCompactionUsage && !hasStreamingUsage) {
 				return { tokens: null, contextWindow, percent: null };
 			}
 		}
@@ -9542,16 +9584,21 @@ export class AgentSession {
 	#estimateContextTokens(): {
 		tokens: number;
 	} {
-		const messages = this.messages;
+		const baseMessages = this.messages;
+		const streamMessage = this.agent.state.streamMessage;
+		const tail = streamMessage && baseMessages[baseMessages.length - 1] !== streamMessage ? streamMessage : undefined;
+		const totalLength = baseMessages.length + (tail ? 1 : 0);
+		const messageAt = (i: number): AgentMessage => (tail && i === baseMessages.length ? tail : baseMessages[i]);
 
-		// Find last assistant message with valid usage.
+		// Find last assistant message with provider usage. Cursor split continuations
+		// carry zeroed usage and should be counted as trailing estimated content.
 		let lastUsageIndex: number | null = null;
 		let lastUsage: Usage | undefined;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i];
+		for (let i = totalLength - 1; i >= 0; i--) {
+			const msg = messageAt(i);
 			if (msg.role === "assistant") {
 				const assistantMsg = msg as AssistantMessage;
-				if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
+				if (hasUsableUsage(assistantMsg)) {
 					lastUsage = assistantMsg.usage;
 					lastUsageIndex = i;
 					break;
@@ -9560,25 +9607,20 @@ export class AgentSession {
 		}
 
 		if (!lastUsage || lastUsageIndex === null) {
-			// No usage data - estimate all messages
 			let estimated = 0;
-			for (const message of messages) {
-				estimated += estimateTokens(message);
+			for (let i = 0; i < totalLength; i++) {
+				estimated += estimateTokens(messageAt(i));
 			}
-			return {
-				tokens: estimated,
-			};
+			return { tokens: estimated };
 		}
 
 		const usageTokens = calculatePromptTokens(lastUsage);
 		let trailingTokens = 0;
-		for (let i = lastUsageIndex + 1; i < messages.length; i++) {
-			trailingTokens += estimateTokens(messages[i]);
+		for (let i = lastUsageIndex + 1; i < totalLength; i++) {
+			trailingTokens += estimateTokens(messageAt(i));
 		}
 
-		return {
-			tokens: usageTokens + trailingTokens,
-		};
+		return { tokens: usageTokens + trailingTokens };
 	}
 
 	/**

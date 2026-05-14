@@ -8,7 +8,13 @@ import { isSilentAbort } from "../../session/messages";
 import { resolveImageOptions } from "../../tools/render-utils";
 
 /**
- * Component that renders a complete assistant message
+ * Renders a slice of an assistant message — either the whole message (default) or a segment
+ * of `content[startIndex..endIndex)`. Segments interleave assistant text with tool execution
+ * components when the model emits tool calls mid-message, so chatContainer siblings appear
+ * in the order the model emitted them.
+ *
+ * Footer (usage, error/abort suffix) renders only on the final segment so it lands once at
+ * the end of the message, regardless of how many segments precede it.
  */
 export class AssistantMessageComponent extends Container {
 	#contentContainer: Container;
@@ -27,6 +33,9 @@ export class AssistantMessageComponent extends Container {
 	 * transcript keeps the error in history.
 	 */
 	#errorPinned = false;
+	#startIndex: number;
+	#endIndex: number | undefined;
+	#isFinalSegment: boolean;
 
 	constructor(
 		message?: AssistantMessage,
@@ -34,9 +43,14 @@ export class AssistantMessageComponent extends Container {
 		private readonly onImageUpdate?: () => void,
 		private readonly thinkingRenderers: readonly AssistantThinkingRenderer[] = [],
 		private readonly imageBudget?: ImageBudget,
+		options?: { startIndex?: number; endIndex?: number; isFinalSegment?: boolean },
 	) {
 		super();
 		this.#transcriptBlockFinalized = message !== undefined;
+
+		this.#startIndex = options?.startIndex ?? 0;
+		this.#endIndex = options?.endIndex;
+		this.#isFinalSegment = options?.isFinalSegment ?? true;
 
 		// Container for text/thinking content
 		this.#contentContainer = new Container();
@@ -44,6 +58,21 @@ export class AssistantMessageComponent extends Container {
 
 		if (message) {
 			this.updateContent(message);
+		}
+	}
+
+	setContentRange(startIndex: number, endIndex: number | undefined): void {
+		this.#startIndex = startIndex;
+		this.#endIndex = endIndex;
+		if (this.#lastMessage) {
+			this.updateContent(this.#lastMessage);
+		}
+	}
+
+	setIsFinalSegment(isFinal: boolean): void {
+		this.#isFinalSegment = isFinal;
+		if (this.#lastMessage) {
+			this.updateContent(this.#lastMessage);
 		}
 	}
 
@@ -204,7 +233,10 @@ export class AssistantMessageComponent extends Container {
 		// Clear content container
 		this.#contentContainer.clear();
 
-		const hasVisibleContent = message.content.some(
+		const end = this.#endIndex ?? message.content.length;
+		const slice = message.content.slice(this.#startIndex, end);
+
+		const hasVisibleContent = slice.some(
 			c => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()),
 		);
 
@@ -212,18 +244,25 @@ export class AssistantMessageComponent extends Container {
 			this.#contentContainer.addChild(new Spacer(1));
 		}
 
-		// Render content in order
+		// Render text/thinking blocks within this segment's slice in order.
+		// Tool calls are rendered as siblings of this component in the parent chatContainer.
+		// Keep the thinking ordinal message-global (like the absolute contentIndex passed to
+		// #appendThinkingExtensions) so extension renderers see stable indices across segments.
 		let thinkingIndex = 0;
-		for (let i = 0; i < message.content.length; i++) {
-			const content = message.content[i];
+		for (let j = 0; j < this.#startIndex; j++) {
+			const prior = message.content[j];
+			if (prior.type === "thinking" && prior.thinking.trim()) thinkingIndex += 1;
+		}
+		for (let i = 0; i < slice.length; i++) {
+			const content = slice[i];
 			if (content.type === "text" && content.text.trim()) {
 				// Assistant text messages with no background - trim the text
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				this.#contentContainer.addChild(new Markdown(content.text.trim(), 1, 0, getMarkdownTheme()));
 			} else if (content.type === "thinking" && content.thinking.trim()) {
-				// Add spacing only when another visible assistant content block follows.
-				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
+				// Add spacing only when another visible block follows WITHIN this segment.
+				// A tool call after the segment renders as a sibling below — no extra spacer needed.
+				const hasVisibleContentAfter = slice
 					.slice(i + 1)
 					.some(c => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
@@ -242,7 +281,7 @@ export class AssistantMessageComponent extends Container {
 							italic: true,
 						}),
 					);
-					this.#appendThinkingExtensions(i, thinkingIndex, thinkingText);
+					this.#appendThinkingExtensions(this.#startIndex + i, thinkingIndex, thinkingText);
 					thinkingIndex += 1;
 					if (hasVisibleContentAfter) {
 						this.#contentContainer.addChild(new Spacer(1));
@@ -252,35 +291,30 @@ export class AssistantMessageComponent extends Container {
 		}
 
 		this.#renderToolImages();
-		// Check if aborted - show after partial content
-		// But only if there are no tool calls (tool execution components will show the error)
+		// Footer (abort/error suffix, usage line) is owned by the final segment so it lands once
+		// at the end of the message rather than after each intermediate segment.
+		if (!this.#isFinalSegment) return;
+
+		const appendErrorLine = (line: string): void => {
+			this.#contentContainer.addChild(new Spacer(1));
+			this.#contentContainer.addChild(new Text(theme.fg("error", line), 1, 0));
+		};
+		// Tool calls render their own error UI, so the message-level abort/error suffix is
+		// suppressed when present — except for the stopReason-mismatch case (errorMessage set
+		// with a non-error/non-abort stopReason), which is unusual enough to always surface.
 		const hasToolCalls = message.content.some(c => c.type === "toolCall");
-		if (!hasToolCalls) {
-			if (message.stopReason === "aborted" && !isSilentAbort(message.errorMessage)) {
+		if (message.stopReason === "aborted" && !isSilentAbort(message.errorMessage)) {
+			if (!hasToolCalls) {
 				const abortMessage =
 					message.errorMessage && message.errorMessage !== "Request was aborted"
 						? message.errorMessage
 						: "Operation aborted";
-				if (hasVisibleContent) {
-					this.#contentContainer.addChild(new Spacer(1));
-				} else {
-					this.#contentContainer.addChild(new Spacer(1));
-				}
-				this.#contentContainer.addChild(new Text(theme.fg("error", abortMessage), 1, 0));
-			} else if (message.stopReason === "error" && !this.#errorPinned) {
-				const errorMsg = message.errorMessage || "Unknown error";
-				this.#contentContainer.addChild(new Spacer(1));
-				this.#contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), 1, 0));
+				appendErrorLine(abortMessage);
 			}
-		}
-		if (
-			message.errorMessage &&
-			!isSilentAbort(message.errorMessage) &&
-			message.stopReason !== "aborted" &&
-			message.stopReason !== "error"
-		) {
-			this.#contentContainer.addChild(new Spacer(1));
-			this.#contentContainer.addChild(new Text(theme.fg("error", `Error: ${message.errorMessage}`), 1, 0));
+		} else if (message.stopReason === "error") {
+			if (!hasToolCalls && !this.#errorPinned) appendErrorLine(`Error: ${message.errorMessage || "Unknown error"}`);
+		} else if (message.errorMessage && !isSilentAbort(message.errorMessage)) {
+			appendErrorLine(`Error: ${message.errorMessage}`);
 		}
 
 		// Token usage metadata

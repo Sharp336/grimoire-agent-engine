@@ -86,6 +86,7 @@ describe("executeJs workflow helpers", () => {
 				cacheWrite: 0,
 				premiumRequests: 0,
 				cost: 0,
+				latestCursorTotalTokens: 0,
 			}),
 		});
 		const result = await executeJs(

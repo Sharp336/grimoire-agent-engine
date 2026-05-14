@@ -17,7 +17,7 @@ import {
 import { formatNumber } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS, MODEL_ROLES } from "../../config/model-registry";
-import { resolveModelRoleValue } from "../../config/model-resolver";
+import { extractExplicitMaxMode, resolveModelRoleValue } from "../../config/model-resolver";
 import type { Settings } from "../../config/settings";
 import { type ThemeColor, theme } from "../../modes/theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
@@ -37,6 +37,11 @@ function normalizeSearchText(value: string): string {
 		.replace(/[^a-z0-9]+/g, " ")
 		.trim();
 }
+
+const MAX_MODE_CHOICES: readonly { value: boolean; label: (base: string, extended: string) => string }[] = [
+	{ value: false, label: base => `MAX off  (${base} context, base pricing)` },
+	{ value: true, label: (_, ext) => `MAX on   (${ext} context, premium pricing above base)` },
+];
 
 function compactSearchText(value: string): string {
 	return value.toLowerCase().replace(/[^a-z0-9]+/g, "");
@@ -86,14 +91,15 @@ interface ScopedModelItem {
 interface RoleAssignment {
 	model: Model;
 	thinkingLevel: ConfiguredThinkingLevel;
+	maxMode?: boolean;
 }
 
-type RoleSelectCallback = (
-	model: Model,
-	role: string | null,
-	thinkingLevel?: ConfiguredThinkingLevel,
-	selector?: string,
-) => void;
+interface RoleSelectChoice {
+	thinkingLevel?: ConfiguredThinkingLevel;
+	maxMode?: boolean;
+	selector?: string;
+}
+type RoleSelectCallback = (model: Model, role: string | null, choice: RoleSelectChoice) => void;
 type CancelCallback = () => void;
 interface MenuRoleAction {
 	label: string;
@@ -105,6 +111,10 @@ interface ProviderTabState {
 	label: string;
 	providerId?: string;
 }
+
+/** Which step-2 control to show after a role is picked. */
+type Step2Mode = "thinking" | "max" | "skip";
+
 const ALL_TAB = "ALL";
 const CANONICAL_TAB = "CANONICAL";
 
@@ -164,7 +174,7 @@ export class ModelSelectorComponent extends Container {
 	// Context menu state
 	#isMenuOpen: boolean = false;
 	#menuSelectedIndex: number = 0;
-	#menuStep: "role" | "thinking" = "role";
+	#menuStep: "role" | "step2" = "role";
 	#menuSelectedRole: string | null = null;
 
 	constructor(
@@ -290,6 +300,7 @@ export class ModelSelectorComponent extends Container {
 						resolved.explicitThinkingLevel && resolved.thinkingLevel !== undefined
 							? resolved.thinkingLevel
 							: ThinkingLevel.Inherit,
+					maxMode: extractExplicitMaxMode(roleValue, this.#settings),
 				};
 			}
 		}
@@ -879,8 +890,8 @@ export class ModelSelectorComponent extends Container {
 				if (!tag || !assigned || !modelsAreEqual(assigned.model, item.model)) continue;
 
 				const badge = makeInvertedBadge(tag, color ?? "success");
-				const thinkingLabel = getConfiguredThinkingLevelMetadata(assigned.thinkingLevel).label;
-				roleBadgeTokens.push(`${badge} ${theme.fg("dim", `(${thinkingLabel})`)}`);
+				const detailLabel = formatRoleDetailLabel(assigned);
+				roleBadgeTokens.push(detailLabel ? `${badge} ${theme.fg("dim", `(${detailLabel})`)}` : badge);
 			}
 			// Custom role badges
 			for (const [role, assigned] of Object.entries(this.#roles)) {
@@ -888,8 +899,8 @@ export class ModelSelectorComponent extends Container {
 				const roleInfo = getRoleInfo(role, this.#settings);
 				const badgeLabel = roleInfo.tag ?? roleInfo.name;
 				const badge = makeInvertedBadge(badgeLabel, roleInfo.color ?? "muted");
-				const thinkingLabel = getConfiguredThinkingLevelMetadata(assigned.thinkingLevel).label;
-				roleBadgeTokens.push(`${badge} ${theme.fg("dim", `(${thinkingLabel})`)}`);
+				const detailLabel = formatRoleDetailLabel(assigned);
+				roleBadgeTokens.push(detailLabel ? `${badge} ${theme.fg("dim", `(${detailLabel})`)}` : badge);
 			}
 			const badgeText = roleBadgeTokens.length > 0 ? ` ${roleBadgeTokens.join(" ")}` : "";
 
@@ -981,6 +992,26 @@ export class ModelSelectorComponent extends Container {
 		return foundIndex >= 0 ? foundIndex : 0;
 	}
 
+	/**
+	 * Decide what to show after a role is picked: a thinking-effort list, a MAX
+	 * on/off toggle (Cursor MAX-capable models — thinking is baked into the id),
+	 * or nothing.
+	 */
+	#getStep2Mode(model: Model): Step2Mode {
+		if (model.extendedContext) return "max";
+		return getSupportedEfforts(model).length > 0 ? "thinking" : "skip";
+	}
+
+	#getCurrentRoleMaxMode(role: string): boolean {
+		return this.#roles[role]?.maxMode === true;
+	}
+
+	#getMaxPreselectIndex(role: string): number {
+		const current = this.#getCurrentRoleMaxMode(role);
+		const idx = MAX_MODE_CHOICES.findIndex(c => c.value === current);
+		return idx >= 0 ? idx : 0;
+	}
+
 	#getSelectedItem(): ModelItem | CanonicalModelItem | undefined {
 		return this.#isCanonicalTab()
 			? this.#filteredCanonicalModels[this.#selectedIndex]
@@ -1011,25 +1042,38 @@ export class ModelSelectorComponent extends Container {
 		const selectedItem = this.#getSelectedItem();
 		if (!selectedItem) return;
 
-		const showingThinking = this.#menuStep === "thinking" && this.#menuSelectedRole !== null;
-		const thinkingOptions = showingThinking ? this.#getThinkingLevelsForModel(selectedItem.model) : [];
-		const optionLines = showingThinking
-			? thinkingOptions.map((thinkingLevel, index) => {
-					const prefix = index === this.#menuSelectedIndex ? `  ${theme.nav.cursor} ` : "    ";
-					const label = getConfiguredThinkingLevelMetadata(thinkingLevel).label;
-					return `${prefix}${label}`;
-				})
-			: this.#menuRoleActions.map((action, index) => {
-					const prefix = index === this.#menuSelectedIndex ? `  ${theme.nav.cursor} ` : "    ";
-					return `${prefix}${action.label}`;
-				});
+		const showingStep2 = this.#menuStep === "step2" && this.#menuSelectedRole !== null;
+		const step2Mode: Step2Mode = showingStep2 ? this.#getStep2Mode(selectedItem.model) : "skip";
+		let optionLines: string[];
+		if (showingStep2 && step2Mode === "thinking") {
+			const thinkingOptions = this.#getThinkingLevelsForModel(selectedItem.model);
+			optionLines = thinkingOptions.map((thinkingLevel, index) => {
+				const prefix = index === this.#menuSelectedIndex ? `  ${theme.nav.cursor} ` : "    ";
+				const label = getConfiguredThinkingLevelMetadata(thinkingLevel).label;
+				return `${prefix}${label}`;
+			});
+		} else if (showingStep2 && step2Mode === "max") {
+			const ext = selectedItem.model.extendedContext;
+			const baseContext = formatNumber(selectedItem.model.contextWindow).toLowerCase();
+			const extContext = ext ? formatNumber(ext.contextWindow).toLowerCase() : "";
+			optionLines = MAX_MODE_CHOICES.map((choice, index) => {
+				const prefix = index === this.#menuSelectedIndex ? `  ${theme.nav.cursor} ` : "    ";
+				return `${prefix}${choice.label(baseContext, extContext)}`;
+			});
+		} else {
+			optionLines = this.#menuRoleActions.map((action, index) => {
+				const prefix = index === this.#menuSelectedIndex ? `  ${theme.nav.cursor} ` : "    ";
+				return `${prefix}${action.label}`;
+			});
+		}
 
 		const selectedRoleName = this.#menuSelectedRole ? getRoleInfo(this.#menuSelectedRole, this.#settings).name : "";
+		const stepLabel = step2Mode === "thinking" ? "Thinking" : step2Mode === "max" ? "Cursor MAX mode" : "Action";
 		const headerText =
-			showingThinking && this.#menuSelectedRole
-				? `  Thinking for: ${selectedRoleName} (${selectedItem.id})`
+			showingStep2 && this.#menuSelectedRole
+				? `  ${stepLabel} for: ${selectedRoleName} (${selectedItem.id})`
 				: `  Action for: ${selectedItem.id}`;
-		const hintText = showingThinking ? "  Enter: confirm  Esc: back" : "  Enter: continue  Esc: cancel";
+		const hintText = showingStep2 ? "  Enter: confirm  Esc: back" : "  Enter: continue  Esc: cancel";
 		const menuWidth = Math.max(
 			visibleWidth(headerText),
 			visibleWidth(hintText),
@@ -1038,10 +1082,10 @@ export class ModelSelectorComponent extends Container {
 
 		this.#menuContainer.addChild(new Spacer(1));
 		this.#menuContainer.addChild(new Text(theme.fg("border", theme.boxSharp.horizontal.repeat(menuWidth)), 0, 0));
-		if (showingThinking && this.#menuSelectedRole) {
+		if (showingStep2 && this.#menuSelectedRole) {
 			this.#menuContainer.addChild(
 				new Text(
-					theme.fg("text", `  Thinking for: ${theme.bold(selectedRoleName)} (${theme.bold(selectedItem.id)})`),
+					theme.fg("text", `  ${stepLabel} for: ${theme.bold(selectedRoleName)} (${theme.bold(selectedItem.id)})`),
 					0,
 					0,
 				),
@@ -1115,9 +1159,17 @@ export class ModelSelectorComponent extends Container {
 		const selectedItem = this.#getSelectedItem();
 		if (!selectedItem || this.#isItemDisabled(selectedItem)) return;
 
+		const step2Mode: Step2Mode =
+			this.#menuStep === "step2" && this.#menuSelectedRole !== null
+				? this.#getStep2Mode(selectedItem.model)
+				: "skip";
 		const optionCount =
-			this.#menuStep === "thinking" && this.#menuSelectedRole !== null
-				? this.#getThinkingLevelsForModel(selectedItem.model).length
+			this.#menuStep === "step2" && this.#menuSelectedRole !== null
+				? step2Mode === "thinking"
+					? this.#getThinkingLevelsForModel(selectedItem.model).length
+					: step2Mode === "max"
+						? MAX_MODE_CHOICES.length
+						: 0
 				: this.#menuRoleActions.length;
 		if (optionCount === 0) return;
 
@@ -1137,24 +1189,42 @@ export class ModelSelectorComponent extends Container {
 			if (this.#menuStep === "role") {
 				const action = this.#menuRoleActions[this.#menuSelectedIndex];
 				if (!action) return;
+				const nextStep2Mode = this.#getStep2Mode(selectedItem.model);
+				if (nextStep2Mode === "skip") {
+					// No follow-up choices for this model — commit role with defaults.
+					this.#handleSelect(selectedItem, action.role);
+					this.#closeMenu();
+					return;
+				}
 				this.#menuSelectedRole = action.role;
-				this.#menuStep = "thinking";
-				this.#menuSelectedIndex = this.#getThinkingPreselectIndex(action.role, selectedItem.model);
+				this.#menuStep = "step2";
+				this.#menuSelectedIndex =
+					nextStep2Mode === "thinking"
+						? this.#getThinkingPreselectIndex(action.role, selectedItem.model)
+						: this.#getMaxPreselectIndex(action.role);
 				this.#updateMenu();
 				return;
 			}
 
 			if (!this.#menuSelectedRole) return;
-			const thinkingOptions = this.#getThinkingLevelsForModel(selectedItem.model);
-			const thinkingLevel = thinkingOptions[this.#menuSelectedIndex];
-			if (!thinkingLevel) return;
-			this.#handleSelect(selectedItem, this.#menuSelectedRole, thinkingLevel);
+			if (step2Mode === "thinking") {
+				const thinkingOptions = this.#getThinkingLevelsForModel(selectedItem.model);
+				const thinkingLevel = thinkingOptions[this.#menuSelectedIndex];
+				if (!thinkingLevel) return;
+				this.#handleSelect(selectedItem, this.#menuSelectedRole, { thinkingLevel });
+			} else if (step2Mode === "max") {
+				const choice = MAX_MODE_CHOICES[this.#menuSelectedIndex];
+				if (!choice) return;
+				this.#handleSelect(selectedItem, this.#menuSelectedRole, { maxMode: choice.value });
+			} else {
+				this.#handleSelect(selectedItem, this.#menuSelectedRole);
+			}
 			this.#closeMenu();
 			return;
 		}
 
 		if (getKeybindings().matches(keyData, "tui.select.cancel")) {
-			if (this.#menuStep === "thinking" && this.#menuSelectedRole !== null) {
+			if (this.#menuStep === "step2" && this.#menuSelectedRole !== null) {
 				this.#menuStep = "role";
 				const roleIndex = this.#menuRoleActions.findIndex(action => action.role === this.#menuSelectedRole);
 				this.#menuSelectedRole = null;
@@ -1167,27 +1237,36 @@ export class ModelSelectorComponent extends Container {
 		}
 	}
 
-	#handleSelect(
-		item: ModelItem | CanonicalModelItem,
-		role: string | null,
-		thinkingLevel?: ConfiguredThinkingLevel,
-	): void {
+	#handleSelect(item: ModelItem | CanonicalModelItem, role: string | null, choice?: RoleSelectChoice): void {
 		if (this.#isItemDisabled(item)) {
 			return;
 		}
 		// For temporary role, don't save to settings - just notify caller
 		if (role === null) {
-			this.#onSelectCallback(item.model, null, undefined, item.selector);
+			this.#onSelectCallback(item.model, null, { selector: item.selector, maxMode: choice?.maxMode });
 			return;
 		}
 
-		const selectedThinkingLevel = thinkingLevel ?? this.#getCurrentRoleThinkingLevel(role);
+		const step2Mode = this.#getStep2Mode(item.model);
+		const selectedThinkingLevel =
+			choice?.thinkingLevel ??
+			(step2Mode === "thinking" ? this.#getCurrentRoleThinkingLevel(role) : ThinkingLevel.Inherit);
+		const selectedMaxMode =
+			choice?.maxMode ?? (item.model.extendedContext ? this.#getCurrentRoleMaxMode(role) : false);
 
 		// Update local state for UI
-		this.#roles[role] = { model: item.model, thinkingLevel: selectedThinkingLevel };
+		this.#roles[role] = {
+			model: item.model,
+			thinkingLevel: selectedThinkingLevel,
+			maxMode: selectedMaxMode,
+		};
 
 		// Notify caller (for updating agent state if needed)
-		this.#onSelectCallback(item.model, role, selectedThinkingLevel, item.selector);
+		this.#onSelectCallback(item.model, role, {
+			thinkingLevel: selectedThinkingLevel,
+			selector: item.selector,
+			maxMode: selectedMaxMode,
+		});
 
 		// Update list to show new badges
 		this.#updateList();
@@ -1210,4 +1289,18 @@ function extractVersionNumber(id: string): number {
 	const singleMatch = id.match(/(?:^|[-_])(\d+)/);
 	if (singleMatch) return Number.parseFloat(singleMatch[1]);
 	return 0;
+}
+
+/**
+ * Compose the `(…)` detail shown next to a role badge.
+ * For MAX-capable models (step2 is the MAX toggle, thinking is always Inherit):
+ *   - MAX on  → `"MAX"`
+ *   - MAX off → `""` (caller hides the parenthetical via the `detailLabel ?` guard)
+ * For all other models: always returns the thinking label (e.g. `"inherit"`, `"high"`).
+ */
+function formatRoleDetailLabel(assigned: RoleAssignment): string {
+	if (assigned.model.extendedContext) {
+		return assigned.maxMode ? "MAX" : "";
+	}
+	return getConfiguredThinkingLevelMetadata(assigned.thinkingLevel).label;
 }

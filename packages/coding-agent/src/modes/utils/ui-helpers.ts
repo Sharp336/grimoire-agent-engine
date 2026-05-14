@@ -10,11 +10,7 @@ import { CompactionSummaryMessageComponent } from "../../modes/components/compac
 import { CustomMessageComponent } from "../../modes/components/custom-message";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
-import {
-	ReadToolGroupComponent,
-	readArgsHaveTarget,
-	readArgsTargetInternalUrl,
-} from "../../modes/components/read-tool-group";
+import { ReadToolGroupComponent, readArgsTargetInternalUrl } from "../../modes/components/read-tool-group";
 import { SkillMessageComponent } from "../../modes/components/skill-message";
 import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { UserMessageComponent } from "../../modes/components/user-message";
@@ -29,6 +25,7 @@ import {
 } from "../../session/messages";
 import type { SessionContext } from "../../session/session-manager";
 import { formatBytes, formatDuration } from "../../tools/render-utils";
+import { SegmentedMessageBuilder } from "./segmented-message-builder";
 
 type TextBlock = { type: "text"; text: string };
 interface RenderInitialMessagesOptions {
@@ -332,12 +329,6 @@ export class UiHelpers {
 			}
 			// Assistant messages need special handling for tool calls
 			if (message.role === "assistant") {
-				this.ctx.addMessageToChat(message);
-				const lastChild = this.ctx.chatContainer.children[this.ctx.chatContainer.children.length - 1];
-				const assistantComponent = lastChild instanceof AssistantMessageComponent ? lastChild : undefined;
-				if (assistantComponent) {
-					assistantComponent.setUsageInfo(message.usage);
-				}
 				readGroup = null;
 				const isAbortedSilently = message.stopReason === "aborted" && isSilentAbort(message.errorMessage);
 				const hasErrorStop =
@@ -353,17 +344,31 @@ export class UiHelpers {
 						: message.errorMessage || "Error"
 					: null;
 
-				// Render tool call components
-				for (const content of message.content) {
+				// Interleave assistant segments with tool components so siblings in chatContainer
+				// appear in the same order the model emitted them in message.content. The same
+				// builder backs the streaming path in EventController — see segmented-message-builder.ts.
+				const builder = new SegmentedMessageBuilder(
+					this.ctx.chatContainer,
+					this.ctx.hideThinkingBlock,
+					() => this.ctx.ui.requestRender(),
+					this.ctx.session.extensionRunner?.getAssistantThinkingRenderers(),
+					this.ctx.ui.imageBudget,
+				);
+				builder.startMessage(message);
+
+				for (let i = 0; i < message.content.length; i++) {
+					const content = message.content[i];
 					if (content.type !== "toolCall") {
 						continue;
 					}
 
-					if (
-						content.name === "read" &&
-						readArgsHaveTarget(content.arguments) &&
-						!readArgsTargetInternalUrl(content.arguments)
-					) {
+					// Resetting readGroup forces consecutive reads separated by other content into
+					// separate groups; consecutive reads with no intervening content still re-use
+					// the most recent readGroup we created in this turn.
+					if (builder.getOpenStartIndex() < i) readGroup = null;
+					builder.splitAt(i + 1);
+
+					if (content.name === "read" && !readArgsTargetInternalUrl(content.arguments)) {
 						if (hasErrorStop && errorMessage) {
 							if (!readGroup) {
 								readGroup = new ReadToolGroupComponent({
@@ -384,46 +389,65 @@ export class UiHelpers {
 									? (content.arguments as Record<string, unknown>)
 									: {};
 							readToolCallArgs.set(content.id, normalizedArgs);
-							if (assistantComponent) {
-								readToolCallAssistantComponents.set(content.id, assistantComponent);
+							if (!readGroup) {
+								readGroup = new ReadToolGroupComponent({
+									showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
+								});
+								readGroup.setExpanded(this.ctx.toolOutputExpanded);
+								this.ctx.chatContainer.addChild(readGroup);
 							}
 						}
-						continue;
-					}
-
-					readGroup = null;
-					const tool = this.ctx.session.getToolByName(content.name);
-					const renderArgs =
-						"partialJson" in content
-							? { ...content.arguments, __partialJson: content.partialJson }
-							: content.arguments;
-					const component = new ToolExecutionComponent(
-						content.name,
-						renderArgs,
-						{
-							snapshots: getFileSnapshotStore(this.ctx.session),
-							showImages: settings.get("terminal.showImages"),
-							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
-							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
-						},
-						tool,
-						this.ctx.ui,
-						this.ctx.sessionManager.getCwd(),
-						content.id,
-					);
-					component.setExpanded(this.ctx.toolOutputExpanded);
-					this.ctx.chatContainer.addChild(component);
-
-					if (hasErrorStop && errorMessage) {
-						component.updateResult(
-							{ content: [{ type: "text", text: errorMessage }], isError: true },
-							false,
+					} else {
+						readGroup = null;
+						const tool = this.ctx.session.getToolByName(content.name);
+						const renderArgs =
+							"partialJson" in content
+								? { ...content.arguments, __partialJson: content.partialJson }
+								: content.arguments;
+						const component = new ToolExecutionComponent(
+							content.name,
+							renderArgs,
+							{
+								snapshots: getFileSnapshotStore(this.ctx.session),
+								showImages: settings.get("terminal.showImages"),
+								editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
+								editAllowFuzzy: settings.get("edit.fuzzyMatch"),
+							},
+							tool,
+							this.ctx.ui,
+							this.ctx.sessionManager.getCwd(),
 							content.id,
 						);
-					} else {
-						this.ctx.pendingTools.set(content.id, component);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+
+						if (hasErrorStop && errorMessage) {
+							component.updateResult(
+								{ content: [{ type: "text", text: errorMessage }], isError: true },
+								false,
+								content.id,
+							);
+						} else {
+							this.ctx.pendingTools.set(content.id, component);
+						}
+					}
+
+					builder.attachOpenSegment();
+					// Route any tool-result images to the segment that follows the read tool, matching
+					// the streaming path's behavior.
+					if (content.name === "read" && !(hasErrorStop && errorMessage)) {
+						const openSegment = builder.getOpenSegment();
+						if (openSegment) readToolCallAssistantComponents.set(content.id, openSegment);
 					}
 				}
+
+				// Finalize the trailing segment: it owns the footer (usage, error/abort suffix).
+				// Intermediate segments are attached without rendering during the loop above
+				// (their `splitAt` close skips rendering because #lastMessage is undefined),
+				// so updateClosedContent gives them their first paint here.
+				const trailingSegment = builder.finalize(message);
+				trailingSegment?.setUsageInfo(message.usage);
+				builder.updateClosedContent(message);
 			} else if (message.role === "toolResult") {
 				const pendingReadComponent = this.ctx.pendingTools.get(message.toolCallId);
 				const isReadGroupResult =

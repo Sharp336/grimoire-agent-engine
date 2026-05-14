@@ -440,6 +440,13 @@ export interface SimpleStreamOptions extends StreamOptions {
 	cursorExecHandlers?: CursorExecHandlers;
 	/** Hook to handle tool results from Cursor exec */
 	cursorOnToolResult?: CursorToolResultHandler;
+	/**
+	 * Enable Cursor's MAX mode for the request. Maps to `RequestedModel.max_mode`
+	 * on the cursor-agent wire and unlocks the model's `extendedContext` window
+	 * (typically 1M for GPT-5.4 / GPT-5.5) at the cost of Cursor's premium
+	 * pricing tier above the base window. Ignored by non-cursor providers.
+	 */
+	cursorMaxMode?: boolean;
 	/** Optional tool choice override for compatible providers */
 	toolChoice?: ToolChoice;
 	/** OpenAI service tier for processing priority/cost control. Ignored by non-OpenAI providers. */
@@ -962,4 +969,19 @@ export interface Model<TApi extends Api = any> {
 	 * `options.isOAuth = true` for the underlying provider call.
 	 */
 	isOAuth?: boolean;
+	/**
+	 * Opt-in extended context window for models that gate a larger window behind
+	 * a provider-specific flag (Cursor's MAX mode, etc.). Consumers flip the
+	 * provider's `maxMode` (or equivalent) on `*Options` to use these values
+	 * for that request. `baseContextWindow` / `baseMaxTokens` snapshot the
+	 * no-flag capacity so consumers that project the active values onto
+	 * `contextWindow` / `maxTokens` (e.g. the Agent during MAX-mode toggle) can
+	 * restore them without keeping a shadow cache.
+	 */
+	extendedContext?: {
+		contextWindow: number;
+		maxTokens: number;
+		baseContextWindow: number;
+		baseMaxTokens: number;
+	};
 }

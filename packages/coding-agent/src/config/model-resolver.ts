@@ -8,6 +8,7 @@ import {
 	clampThinkingLevelForModel,
 	DEFAULT_MODEL_PER_PROVIDER,
 	type Effort,
+	isCursorAgent,
 	type KnownProvider,
 	type Model,
 	modelsAreEqual,
@@ -23,6 +24,16 @@ import type { Settings } from "./settings";
 /** Default model IDs for each known provider */
 export const defaultModelPerProvider: Record<KnownProvider, string> = DEFAULT_MODEL_PER_PROVIDER;
 
+/**
+ * Provider-flag suffixes carried alongside a model selector. Today this is `thinkingLevel`
+ * and Cursor's `maxMode`, but new provider flags should be added here rather than threaded
+ * through every interface that names them individually — the bundle is what travels.
+ */
+export interface SelectorFlags {
+	thinkingLevel?: ThinkingLevel;
+	maxMode?: boolean;
+}
+
 export interface ScopedModel {
 	model: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
@@ -32,24 +43,23 @@ export interface ScopedModel {
 /**
  * Parse a model string in "provider/modelId" format.
  * Returns undefined if the format is invalid.
+ *
+ * Trailing `:max` and `:<thinking-level>` flags are stripped from the id and
+ * returned separately. Either flag may appear alone or alongside the other in
+ * any order (e.g. `cursor/gpt-5.5-extra-high:max`, `anthropic/claude:high:max`).
  */
-export function parseModelString(
-	modelStr: string,
-): { provider: string; id: string; thinkingLevel?: ThinkingLevel } | undefined {
+export function parseModelString(modelStr: string): ({ provider: string; id: string } & SelectorFlags) | undefined {
 	const slashIdx = modelStr.indexOf("/");
 	if (slashIdx <= 0) return undefined;
-	const id = modelStr.slice(slashIdx + 1);
 	const provider = modelStr.slice(0, slashIdx);
-	// Strip valid thinking level suffix (e.g., "claude-sonnet-4-6:high" -> id "claude-sonnet-4-6", thinkingLevel "high")
-	const colonIdx = id.lastIndexOf(":");
-	if (colonIdx !== -1) {
-		const suffix = id.slice(colonIdx + 1);
-		const thinkingLevel = parseThinkingLevel(suffix);
-		if (thinkingLevel) {
-			return { provider, id: id.slice(0, colonIdx), thinkingLevel };
-		}
-	}
-	return { provider, id };
+	const id = modelStr.slice(slashIdx + 1);
+	const peeled = peelSelectorFlags(id, -1);
+	return {
+		provider,
+		id: peeled.stripped,
+		...(peeled.thinkingLevel ? { thinkingLevel: peeled.thinkingLevel } : {}),
+		...(peeled.maxMode ? { maxMode: true } : {}),
+	};
 }
 
 /**
@@ -59,8 +69,25 @@ export function formatModelString(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
-export function formatModelSelectorValue(selector: string, thinkingLevel: ThinkingLevel | undefined): string {
-	return thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit ? `${selector}:${thinkingLevel}` : selector;
+const MAX_SELECTOR = "max" as const;
+export function formatModelSelectorValue(
+	selector: string,
+	thinkingLevel: ThinkingLevel | undefined,
+	maxMode?: boolean,
+): string {
+	let result = selector;
+	if (maxMode) result += `:${MAX_SELECTOR}`;
+	if (thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit) result += `:${thinkingLevel}`;
+	return result;
+}
+
+/**
+ * Build a canonical "provider/id[:max][:thinking]" selector for a concrete model.
+ * `maxMode` is honored only when {@link isCursorAgent} matches — non-cursor models
+ * cannot carry the `:max` suffix.
+ */
+export function formatModelSelector(model: Model, thinkingLevel: ThinkingLevel | undefined, maxMode?: boolean): string {
+	return formatModelSelectorValue(formatModelString(model), thinkingLevel, isCursorAgent(model) ? maxMode : false);
 }
 
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
@@ -407,10 +434,8 @@ function tryMatchModel(
 	return pickPreferredModel(topCandidates, context);
 }
 
-export interface ParsedModelResult {
+export interface ParsedModelResult extends SelectorFlags {
 	model: Model<Api> | undefined;
-	/** Thinking level if explicitly specified in pattern, undefined otherwise */
-	thinkingLevel?: ThinkingLevel;
 	warning: string | undefined;
 	explicitThinkingLevel: boolean;
 }
@@ -450,6 +475,11 @@ function parseModelPatternWithContext(
 	const prefix = pattern.substring(0, lastColonIndex);
 	const suffix = pattern.substring(lastColonIndex + 1);
 
+	// :max is a Cursor MAX-mode flag — strip it and recurse without warning.
+	if (suffix === MAX_SELECTOR) {
+		const result = parseModelPatternWithContext(prefix, availableModels, context, options);
+		return result.model ? { ...result, maxMode: true } : result;
+	}
 	const parsedThinkingLevel = parseThinkingLevel(suffix);
 	if (parsedThinkingLevel) {
 		// Valid thinking level - recurse on prefix and use this level
@@ -460,6 +490,7 @@ function parseModelPatternWithContext(
 			return {
 				model: result.model,
 				thinkingLevel: explicitThinkingLevel ? parsedThinkingLevel : undefined,
+				maxMode: result.maxMode,
 				warning: result.warning,
 				explicitThinkingLevel,
 			};
@@ -478,6 +509,7 @@ function parseModelPatternWithContext(
 		return {
 			model: result.model,
 			thinkingLevel: undefined,
+			maxMode: result.maxMode,
 			warning: `Invalid thinking level "${suffix}" in pattern "${pattern}". Using default instead.`,
 			explicitThinkingLevel: false,
 		};
@@ -523,11 +555,8 @@ function resolveConfiguredRolePattern(value: string, settings?: Settings): strin
 	const normalized = value.trim();
 	if (!normalized) return undefined;
 
-	const lastColonIndex = normalized.lastIndexOf(":");
-	const thinkingLevel =
-		lastColonIndex > PREFIX_MODEL_ROLE.length ? parseThinkingLevel(normalized.slice(lastColonIndex + 1)) : undefined;
-	const aliasCandidate = thinkingLevel ? normalized.slice(0, lastColonIndex) : normalized;
-	const role = getModelRoleAlias(aliasCandidate);
+	const peeled = peelSelectorFlags(normalized, PREFIX_MODEL_ROLE.length);
+	const role = getModelRoleAlias(peeled.stripped);
 	if (!role) return [normalized];
 
 	const configured = settings?.getModelRole(role)?.trim();
@@ -537,7 +566,7 @@ function resolveConfiguredRolePattern(value: string, settings?: Settings): strin
 		return undefined;
 	}
 
-	return thinkingLevel ? resolved.map(pattern => `${pattern}:${thinkingLevel}`) : resolved;
+	return resolved.map(pattern => formatModelSelectorValue(pattern, peeled.thinkingLevel, peeled.maxMode));
 }
 
 /**
@@ -591,9 +620,8 @@ export function resolveAgentModelPatterns(options: AgentModelPatternResolutionOp
 /**
  * Resolve a model role value into a concrete model and thinking metadata.
  */
-export interface ResolvedModelRoleValue {
+export interface ResolvedModelRoleValue extends SelectorFlags {
 	model: Model<Api> | undefined;
-	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel: boolean;
 	warning: string | undefined;
 }
@@ -628,6 +656,7 @@ export function resolveModelRoleValue(
 				thinkingLevel: resolved.explicitThinkingLevel
 					? (resolveThinkingLevelForModel(resolved.model, resolved.thinkingLevel) ?? resolved.thinkingLevel)
 					: resolved.thinkingLevel,
+				maxMode: resolved.maxMode,
 				explicitThinkingLevel: resolved.explicitThinkingLevel,
 				warning: resolved.warning,
 			};
@@ -640,10 +669,11 @@ export function resolveModelRoleValue(
 	return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning };
 }
 
-export function extractExplicitThinkingSelector(
+function walkRoleAliasSelectorFlags(
 	value: string | undefined,
-	settings?: Settings,
-): ThinkingLevel | undefined {
+	settings: Settings | undefined,
+	pick: (peeled: { stripped: string } & SelectorFlags) => boolean,
+): ({ stripped: string } & SelectorFlags) | undefined {
 	if (!value) return undefined;
 	const normalized = value.trim();
 	if (!normalized || normalized === DEFAULT_MODEL_ROLE) return undefined;
@@ -652,12 +682,8 @@ export function extractExplicitThinkingSelector(
 	let current = normalized;
 	while (!visited.has(current)) {
 		visited.add(current);
-		const lastColonIndex = current.lastIndexOf(":");
-		const thinkingSelector =
-			lastColonIndex > PREFIX_MODEL_ROLE.length ? parseThinkingLevel(current.slice(lastColonIndex + 1)) : undefined;
-		if (thinkingSelector) {
-			return thinkingSelector;
-		}
+		const peeled = peelSelectorFlags(current, PREFIX_MODEL_ROLE.length);
+		if (pick(peeled)) return peeled;
 		const expanded = expandRoleAlias(current, settings).trim();
 		if (!expanded || expanded === current) break;
 		if (expanded === DEFAULT_MODEL_ROLE) return undefined;
@@ -665,6 +691,57 @@ export function extractExplicitThinkingSelector(
 	}
 
 	return undefined;
+}
+
+export function extractExplicitThinkingSelector(
+	value: string | undefined,
+	settings?: Settings,
+): ThinkingLevel | undefined {
+	return walkRoleAliasSelectorFlags(value, settings, peeled => peeled.thinkingLevel !== undefined)?.thinkingLevel;
+}
+
+/**
+ * Extract Cursor's MAX-mode flag from a stored role selector value, walking role
+ * aliases the same way as {@link extractExplicitThinkingSelector}.
+ */
+export function extractExplicitMaxMode(value: string | undefined, settings?: Settings): boolean | undefined {
+	return walkRoleAliasSelectorFlags(value, settings, peeled => peeled.maxMode === true)?.maxMode;
+}
+
+/**
+ * Peel trailing `:max` and `:<thinking-level>` flag segments from a value, stopping
+ * at the first segment that is neither flag or once `lastColonIndex <= minColonIndex`.
+ *
+ * Used in two modes:
+ * - `parseModelString` passes `minColonIndex = -1` (any colon to the right of the
+ *   provider prefix is fair game).
+ * - `extractExplicitThinkingSelector` / `extractExplicitMaxMode` pass
+ *   `PREFIX_MODEL_ROLE.length` so `pi/<role>` aliases are preserved.
+ */
+function peelSelectorFlags(value: string, minColonIndex: number): { stripped: string } & SelectorFlags {
+	let stripped = value;
+	let thinkingLevel: ThinkingLevel | undefined;
+	let maxMode: boolean | undefined;
+	while (true) {
+		const lastColonIndex = stripped.lastIndexOf(":");
+		if (lastColonIndex <= minColonIndex) break;
+		const suffix = stripped.slice(lastColonIndex + 1);
+		if (suffix === MAX_SELECTOR && maxMode === undefined) {
+			maxMode = true;
+			stripped = stripped.slice(0, lastColonIndex);
+			continue;
+		}
+		if (thinkingLevel === undefined) {
+			const lvl = parseThinkingLevel(suffix);
+			if (lvl) {
+				thinkingLevel = lvl;
+				stripped = stripped.slice(0, lastColonIndex);
+				continue;
+			}
+		}
+		break;
+	}
+	return { stripped, thinkingLevel, maxMode };
 }
 
 /**
@@ -717,18 +794,18 @@ export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
-): { model?: Model<Api>; thinkingLevel?: ThinkingLevel; explicitThinkingLevel: boolean } {
+): { model?: Model<Api>; explicitThinkingLevel: boolean } & SelectorFlags {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
 	const matchPreferences = { usageOrder: settings?.getStorage()?.getModelUsageOrder() };
 	for (const pattern of modelPatterns) {
-		const { model, thinkingLevel, explicitThinkingLevel } = resolveModelRoleValue(pattern, availableModels, {
+		const { model, thinkingLevel, maxMode, explicitThinkingLevel } = resolveModelRoleValue(pattern, availableModels, {
 			settings,
 			matchPreferences,
 			modelRegistry,
 		});
 		if (model) {
-			return { model, thinkingLevel, explicitThinkingLevel };
+			return { model, thinkingLevel, maxMode, explicitThinkingLevel };
 		}
 	}
 	return { explicitThinkingLevel: false };
@@ -760,12 +837,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	parentActiveModelPattern: string | undefined,
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
-): Promise<{
-	model?: Model<Api>;
-	thinkingLevel?: ThinkingLevel;
-	explicitThinkingLevel: boolean;
-	authFallbackUsed: boolean;
-}> {
+): Promise<{ model?: Model<Api>; explicitThinkingLevel: boolean; authFallbackUsed: boolean } & SelectorFlags> {
 	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
 	if (!primary.model || !parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
@@ -988,10 +1060,9 @@ export async function resolveAllowedModels(
 	return available.filter(model => allowed.has(`${model.provider}/${model.id}`));
 }
 
-export interface ResolveCliModelResult {
+export interface ResolveCliModelResult extends SelectorFlags {
 	model: Model<Api> | undefined;
 	selector?: string;
-	thinkingLevel?: ThinkingLevel;
 	warning: string | undefined;
 	error: string | undefined;
 }
@@ -1111,7 +1182,7 @@ export function resolveCliModel(options: {
 	}
 
 	const candidates = provider ? availableModels.filter(model => model.provider === provider) : availableModels;
-	const { model, thinkingLevel, warning } = parseModelPattern(pattern, candidates, preferences, {
+	const { model, thinkingLevel, maxMode, warning } = parseModelPattern(pattern, candidates, preferences, {
 		allowInvalidThinkingSelectorFallback: false,
 		modelRegistry,
 	});
@@ -1129,11 +1200,7 @@ export function resolveCliModel(options: {
 
 	let selector = provider ? formatModelString(model) : undefined;
 	if (!provider) {
-		const lastColonIndex = pattern.lastIndexOf(":");
-		const canonicalCandidate =
-			lastColonIndex !== -1 && parseThinkingLevel(pattern.substring(lastColonIndex + 1))
-				? pattern.substring(0, lastColonIndex)
-				: pattern;
+		const canonicalCandidate = peelSelectorFlags(pattern, -1).stripped;
 		if (!canonicalCandidate.includes("/")) {
 			const canonicalResolved = modelRegistry.resolveCanonicalModel?.(canonicalCandidate, { availableOnly: false });
 			if (canonicalResolved && canonicalResolved.provider === model.provider && canonicalResolved.id === model.id) {
@@ -1146,6 +1213,7 @@ export function resolveCliModel(options: {
 		model,
 		selector,
 		thinkingLevel,
+		maxMode,
 		warning,
 		error: undefined,
 	};

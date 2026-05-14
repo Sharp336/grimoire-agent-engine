@@ -42,6 +42,14 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	modelsDev?: ModelsDevFallback<TApi, TModelsDevPayload>;
 	/** Clock override for deterministic tests. */
 	now?: () => number;
+	/**
+	 * Optional per-model post-process applied to every resolved model regardless
+	 * of source (static, cache, or dynamic). Must be idempotent. Declared with
+	 * method syntax so TypeScript treats it bivariantly — required because
+	 * ModelManagerOptions<TApi> is widened to ModelManagerOptions<Api> in
+	 * ProviderDescriptor.createModelManagerOptions.
+	 */
+	modelPostProcess?(model: Model<TApi>): Model<TApi>;
 }
 
 /**
@@ -133,7 +141,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// Re-running `mergeDynamicModels(static, cache)` would just rebuild the same
 	// objects (~800ms in the steady-state cold-start profile for `omp -p hi`).
 	if (!shouldFetchFromNetwork && cache?.fresh && hasAuthoritativeCache && cacheFingerprintMatches) {
-		return { models: passModelList<TApi>(cache.models), stale: false };
+		const cached = passModelList<TApi>(cache.models);
+		return {
+			models: options.modelPostProcess ? cached.map(m => options.modelPostProcess!(m)) : cached,
+			stale: false,
+		};
 	}
 
 	const [fetchedModelsDevModels, fetchedDynamicModels] = shouldFetchFromNetwork
@@ -147,8 +159,9 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const dynamicModels = fetchedDynamicModels ?? [];
 	const mergedWithCache = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), cacheModels);
 	const mergedModels = mergeDynamicModels(mergedWithCache, dynamicModels);
-	const models =
+	const rawModels =
 		dynamicModelsAuthoritative && dynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels;
+	const models = options.modelPostProcess ? rawModels.map(m => options.modelPostProcess!(m)) : rawModels;
 	const dynamicAuthoritative = !hasDynamicFetcher || dynamicFetchSucceeded || shouldUseFreshCacheAsAuthoritative;
 	if (shouldFetchFromNetwork) {
 		if (dynamicFetchSucceeded) {

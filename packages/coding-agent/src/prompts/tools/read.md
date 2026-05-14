@@ -10,6 +10,14 @@ Read files, directories, archives, SQLite databases, images, documents, internal
 
 - `path` — required. Local path, internal URI (`skill://`, `agent://`, `artifact://`, `memory://`, `rule://`, `local://`, `vault://`, `mcp://`), or URL. Append `:<sel>` for line ranges, raw mode, or special modes (e.g. `src/foo.ts:50-200`, `src/foo.ts:raw`, `db.sqlite:users:42`).
 
+## Required Workflow For Code Inspection
+1. Read the file overview.
+2. Identify folded ranges relevant to the task.
+3. Re-read exact ranges with `path:START-END`.
+4. Only then analyze implementation.
+
+It is preferable to make extra read calls than to infer omitted code.
+
 ## Selectors
 
 Append `:<sel>` to `path`. The bare path falls back to the default mode.
