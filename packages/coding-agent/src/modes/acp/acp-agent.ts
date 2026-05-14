@@ -1847,6 +1847,7 @@ export class AcpAgent implements Agent {
 			this.#sessions.clear();
 			await Promise.all(
 				records.map(async ([sessionId, record]) => {
+					record.promptClosed = true;
 					try {
 						await this.#cancelPromptForClose(record);
 						await this.#disposeSessionRecord(record);
