@@ -37,6 +37,7 @@ export interface SelectorFlags {
 export interface ScopedModel {
 	model: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
+	maxMode?: boolean;
 	explicitThinkingLevel: boolean;
 }
 
@@ -890,21 +891,9 @@ function resolveExactCanonicalScopePattern(
 	pattern: string,
 	modelRegistry: Pick<ModelRegistry, "getCanonicalVariants">,
 	availableModels: Model<Api>[],
-): { models: Model<Api>[]; thinkingLevel?: ThinkingLevel; explicitThinkingLevel: boolean } | undefined {
-	const lastColonIndex = pattern.lastIndexOf(":");
-	let canonicalId = pattern;
-	let thinkingLevel: ThinkingLevel | undefined;
-	let explicitThinkingLevel = false;
-
-	if (lastColonIndex !== -1) {
-		const suffix = pattern.substring(lastColonIndex + 1);
-		const parsedThinkingLevel = parseThinkingLevel(suffix);
-		if (parsedThinkingLevel) {
-			canonicalId = pattern.substring(0, lastColonIndex);
-			thinkingLevel = parsedThinkingLevel;
-			explicitThinkingLevel = true;
-		}
-	}
+): ({ models: Model<Api>[]; explicitThinkingLevel: boolean } & SelectorFlags) | undefined {
+	const { stripped: canonicalId, thinkingLevel, maxMode } = peelSelectorFlags(pattern, -1);
+	const explicitThinkingLevel = thinkingLevel !== undefined;
 
 	const variants = modelRegistry
 		.getCanonicalVariants(canonicalId, { availableOnly: true, candidates: availableModels })
@@ -913,7 +902,7 @@ function resolveExactCanonicalScopePattern(
 		return undefined;
 	}
 
-	return { models: variants, thinkingLevel, explicitThinkingLevel };
+	return { models: variants, thinkingLevel, maxMode, explicitThinkingLevel };
 }
 
 /**
@@ -939,21 +928,9 @@ export async function resolveModelScope(
 	for (const pattern of patterns) {
 		// Check if pattern contains glob characters
 		if (pattern.includes("*") || pattern.includes("?") || pattern.includes("[")) {
-			// Extract optional thinking level suffix (e.g., "provider/*:high")
-			const colonIdx = pattern.lastIndexOf(":");
-			let globPattern = pattern;
-			let thinkingLevel: ThinkingLevel | undefined;
-			let explicitThinkingLevel = false;
-
-			if (colonIdx !== -1) {
-				const suffix = pattern.substring(colonIdx + 1);
-				const parsedThinkingLevel = parseThinkingLevel(suffix);
-				if (parsedThinkingLevel) {
-					thinkingLevel = parsedThinkingLevel;
-					explicitThinkingLevel = true;
-					globPattern = pattern.substring(0, colonIdx);
-				}
-			}
+			// Extract optional `:max` and thinking-level suffixes (e.g. "cursor/*:max:high")
+			const { stripped: globPattern, thinkingLevel, maxMode } = peelSelectorFlags(pattern, -1);
+			const explicitThinkingLevel = thinkingLevel !== undefined;
 
 			// Match against "provider/modelId" format OR just model ID
 			// This allows "*sonnet*" to match without requiring "anthropic/*sonnet*"
@@ -975,6 +952,7 @@ export async function resolveModelScope(
 						thinkingLevel: explicitThinkingLevel
 							? (resolveThinkingLevelForModel(model, thinkingLevel) ?? thinkingLevel)
 							: thinkingLevel,
+						maxMode: isCursorAgent(model) ? maxMode : undefined,
 						explicitThinkingLevel,
 					});
 				}
@@ -992,6 +970,7 @@ export async function resolveModelScope(
 							? (resolveThinkingLevelForModel(model, exactCanonical.thinkingLevel) ??
 								exactCanonical.thinkingLevel)
 							: exactCanonical.thinkingLevel,
+						maxMode: isCursorAgent(model) ? exactCanonical.maxMode : undefined,
 						explicitThinkingLevel: exactCanonical.explicitThinkingLevel,
 					});
 				}
@@ -999,7 +978,7 @@ export async function resolveModelScope(
 			continue;
 		}
 
-		const { model, thinkingLevel, warning, explicitThinkingLevel } = parseModelPatternWithContext(
+		const { model, thinkingLevel, maxMode, warning, explicitThinkingLevel } = parseModelPatternWithContext(
 			pattern,
 			availableModels,
 			context,
@@ -1022,6 +1001,7 @@ export async function resolveModelScope(
 				thinkingLevel: explicitThinkingLevel
 					? (resolveThinkingLevelForModel(model, thinkingLevel) ?? thinkingLevel)
 					: thinkingLevel,
+				maxMode: isCursorAgent(model) ? maxMode : undefined,
 				explicitThinkingLevel,
 			});
 		}

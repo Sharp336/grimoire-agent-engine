@@ -306,7 +306,7 @@ export interface AgentSessionConfig {
 	sessionManager: SessionManager;
 	settings: Settings;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
-	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel; maxMode?: boolean }>;
 	/** Initial session thinking selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Prompt templates for expansion */
@@ -835,7 +835,7 @@ export class AgentSession {
 
 	readonly configWarnings: string[] = [];
 
-	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel; maxMode?: boolean }>;
 	/** Effective, metadata-clamped thinking level applied to the agent (never `auto`). */
 	#thinkingLevel: ThinkingLevel | undefined;
 	/** True when the user configured `auto`; the effective level is resolved per turn. */
@@ -5344,7 +5344,7 @@ export class AgentSession {
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(model);
 		this.sessionManager.appendModelChange(
-			this.#formatTemporaryModelChangeValue(model, flags.maxMode),
+			this.#formatModelChangeValue(model, flags.maxMode),
 			flags.ephemeral ? EPHEMERAL_MODEL_CHANGE_ROLE : "temporary",
 		);
 		this.settings.getStorage()?.recordModelUsage(`${model.provider}/${model.id}`);
@@ -5462,9 +5462,11 @@ export class AgentSession {
 		return { model: next.model, thinkingLevel: this.thinkingLevel, role: next.role };
 	}
 
-	async #getScopedModelsWithApiKey(): Promise<Array<{ model: Model; thinkingLevel?: ThinkingLevel }>> {
+	async #getScopedModelsWithApiKey(): Promise<
+		Array<{ model: Model; thinkingLevel?: ThinkingLevel; maxMode?: boolean }>
+	> {
 		const apiKeysByProvider = new Map<string, string | undefined>();
-		const result: Array<{ model: Model; thinkingLevel?: ThinkingLevel }> = [];
+		const result: Array<{ model: Model; thinkingLevel?: ThinkingLevel; maxMode?: boolean }> = [];
 
 		for (const scoped of this.#scopedModels) {
 			const provider = scoped.model.provider;
@@ -5500,9 +5502,11 @@ export class AgentSession {
 		// Apply model
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(next.model);
-		this.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
+		this.#applyCursorMaxMode(next.model, { kind: "explicit", value: next.maxMode === true });
+		// Record the resolved selector (incl. `:max`) so resume restores MAX mode. Cycling
+		// intentionally does not persist to settings (no setModelRole).
+		this.sessionManager.appendModelChange(this.#formatModelChangeValue(next.model));
 		this.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
-		this.#applyCursorMaxMode(next.model, { kind: "role", role: "default" });
 
 		// Apply the scoped model's configured thinking level, preserving auto.
 		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
@@ -5531,9 +5535,11 @@ export class AgentSession {
 
 		this.#clearActiveRetryFallback();
 		this.#setModelWithProviderSessionReset(nextModel);
-		this.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
-		this.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		this.#applyCursorMaxMode(nextModel, { kind: "role", role: "default" });
+		// Record the resolved selector (incl. `:max`) so resume restores MAX mode. Cycling
+		// intentionally does not persist to settings (no setModelRole).
+		this.sessionManager.appendModelChange(this.#formatModelChangeValue(nextModel));
+		this.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		// Re-apply the current thinking level (or auto) for the newly selected model
 		this.#reapplyThinkingLevel();
 		await this.#syncAfterModelChange(previousEditMode);
@@ -7069,7 +7075,7 @@ export class AgentSession {
 		return formatModelSelectorValue(modelKey, thinkingLevel, maxMode);
 	}
 
-	#formatTemporaryModelChangeValue(model: Model, maxModeOverride?: boolean): string {
+	#formatModelChangeValue(model: Model, maxModeOverride?: boolean): string {
 		const maxMode = isCursorMaxCapable(model) ? (maxModeOverride ?? this.agent.getCursorMaxMode()) : false;
 		return formatModelSelector(model, undefined, maxMode);
 	}

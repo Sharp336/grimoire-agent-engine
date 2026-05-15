@@ -638,6 +638,7 @@ async function buildSessionOptions(
 				: scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase());
 			if (rememberedModel) {
 				options.model = rememberedModel.model;
+				options.cursorMaxMode = rememberedModel.maxMode;
 				// Apply explicit thinking level from remembered role value
 				if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
 					options.thinkingLevel = rememberedSpec.thinkingLevel;
@@ -645,6 +646,12 @@ async function buildSessionOptions(
 			}
 		}
 		if (!options.model) options.model = scopedModels[0].model;
+		if (options.cursorMaxMode === undefined) {
+			const m = options.model;
+			options.cursorMaxMode = m
+				? scopedModels.find(sm => sm.model.provider === m.provider && sm.model.id === m.id)?.maxMode
+				: undefined;
+		}
 	}
 
 	// Thinking level
@@ -671,6 +678,7 @@ async function buildSessionOptions(
 			thinkingLevel: scopedModel.explicitThinkingLevel
 				? (scopedModel.thinkingLevel ?? defaultThinkingLevel)
 				: defaultThinkingLevel,
+			maxMode: scopedModel.maxMode,
 		}));
 	}
 
