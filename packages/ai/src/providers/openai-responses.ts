@@ -10,6 +10,7 @@ import {
 	type AssistantMessage,
 	type CacheRetention,
 	type Context,
+	type FetchImpl,
 	getPriorityPremiumRequests,
 	type MessageAttribution,
 	type Model,
@@ -210,6 +211,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				options?.initiatorOverride,
 				cacheSessionId,
 				options?.onSseEvent,
+				options?.fetch,
 			);
 			const priorityPremiumRequests = getPriorityPremiumRequests(options?.serviceTier, model.provider);
 			const premiumRequestsTotal =
@@ -312,6 +314,7 @@ function createClient(
 	initiatorOverride?: MessageAttribution,
 	sessionId?: string,
 	onSseEvent?: OpenAIResponsesOptions["onSseEvent"],
+	fetchOverride?: FetchImpl,
 ): {
 	client: OpenAI;
 	copilotPremiumRequests: number | undefined;
@@ -349,6 +352,7 @@ function createClient(
 		headers.session_id ??= sessionId;
 		headers["x-client-request-id"] ??= sessionId;
 	}
+	const baseFetch = fetchOverride ?? fetch;
 	return {
 		client: new OpenAI({
 			apiKey,
@@ -356,7 +360,7 @@ function createClient(
 			dangerouslyAllowBrowser: true,
 			maxRetries: 5,
 			defaultHeaders: headers,
-			fetch: onSseEvent ? wrapFetchForSseDebug(fetch, event => onSseEvent(event, model)) : fetch,
+			fetch: onSseEvent ? wrapFetchForSseDebug(baseFetch, event => onSseEvent(event, model)) : baseFetch,
 		}),
 		copilotPremiumRequests,
 		baseUrl,

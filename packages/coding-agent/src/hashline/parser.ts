@@ -86,9 +86,33 @@ function collectPayload(
 	let index = startIndex;
 	while (index < lines.length) {
 		const line = stripTrailingCarriageReturn(lines[index]);
-		if (!line.startsWith(HL_EDIT_SEP)) break;
-		payload.push(line.slice(1));
-		index++;
+		if (line.startsWith(HL_EDIT_SEP)) {
+			payload.push(line.slice(1));
+			index++;
+			continue;
+		}
+		// Silently recover from a missing payload prefix on an otherwise blank
+		// line: if more payload follows (possibly past further blanks), treat
+		// each intervening blank as an empty `${HL_EDIT_SEP}` payload line.
+		// Additionally, when the op explicitly requires payload (`+`/`<`) and
+		// we have not collected any yet, accept the blank(s) themselves as the
+		// empty payload — common typo of forgetting the `${HL_EDIT_SEP}` prefix
+		// when inserting a blank line.
+		if (line.length === 0) {
+			let lookahead = index + 1;
+			while (lookahead < lines.length && stripTrailingCarriageReturn(lines[lookahead]).length === 0) {
+				lookahead++;
+			}
+			const followedByPayload =
+				lookahead < lines.length && stripTrailingCarriageReturn(lines[lookahead]).startsWith(HL_EDIT_SEP);
+			const acceptBareBlank = requirePayload && payload.length === 0;
+			if (followedByPayload || acceptBareBlank) {
+				for (let j = index; j < lookahead; j++) payload.push("");
+				index = lookahead;
+				continue;
+			}
+		}
+		break;
 	}
 	if (payload.length === 0 && requirePayload) {
 		throw new Error(`line ${opLineNum}: + and < operations require at least one ${HL_EDIT_SEP}TEXT payload line.`);

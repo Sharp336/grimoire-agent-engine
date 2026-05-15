@@ -313,9 +313,43 @@ describe("hashline parser — block op syntax", () => {
 		expect(applyDiff(content, diff)).toBe("aaa\n\n# not a header\n+ not an op\n  spaced\nccc");
 	});
 
+	it("treats blank lines inside a payload run as empty payload lines", () => {
+		// Truly blank lines (no leading separator) inside an active payload run
+		// are silently rewritten to empty payload lines as long as more payload
+		// follows. This recovers from a common typo where the model forgets the
+		// separator on what should be a blank inserted line.
+		const diff = [`= ${sameLineRange(tag(2, "bbb"))}`, pl("first"), "", "", pl("after")].join("\n");
+		expect(applyDiff(content, diff)).toBe("aaa\nfirst\n\n\nafter\nccc");
+	});
+
+	it("does not consume trailing blank lines between sections as payload", () => {
+		// Blanks that precede a non-payload op (here, another `=`) end the
+		// payload run cleanly — they're section separators, not payload.
+		const diff = [
+			`= ${sameLineRange(tag(1, "aaa"))}`,
+			pl("AAA"),
+			"",
+			"",
+			`= ${sameLineRange(tag(3, "ccc"))}`,
+			pl("CCC"),
+		].join("\n");
+		expect(applyDiff(content, diff)).toBe("AAA\nbbb\nCCC");
+	});
+
 	it("rejects missing payloads and orphan payload lines", () => {
 		expect(() => parseHashline(`+ ${tag(1, "aaa")}`)).toThrow(/require at least one/);
 		expect(() => parseHashline(pl("orphan"))).toThrow(/payload line has no preceding/);
+	});
+
+	it("leniently treats a bare blank line after + / < as an empty payload", () => {
+		const hash = computeLineHash(5, "aaa");
+		const anchor = { line: 5, hash };
+		expect(parseHashline(`< ${tag(5, "aaa")}\n`)).toEqual([
+			{ kind: "insert", cursor: { kind: "before_anchor", anchor }, text: "", lineNum: 1, index: 0 },
+		]);
+		expect(parseHashline(`+ ${tag(5, "aaa")}\n`)).toEqual([
+			{ kind: "insert", cursor: { kind: "after_anchor", anchor }, text: "", lineNum: 1, index: 0 },
+		]);
 	});
 
 	it("rejects old cursor and equals-inline syntax after cutover", () => {
@@ -398,6 +432,16 @@ describe("splitHashlineInput — @ headers", () => {
 			{ path: "a.ts", diff: `+ BOF\n${pl("a")}` },
 			{ path: "b.ts", diff: `+ EOF\n${pl("b")}` },
 		]);
+	});
+
+	it("silently drops a duplicate header with no operations between them", () => {
+		const input = ["@@ src/foo.ts", "@@ src/foo.ts", `+ BOF`, pl("x")].join("\n");
+		expect(splitHashlineInputs(input)).toEqual([{ path: "src/foo.ts", diff: `+ BOF\n${pl("x")}` }]);
+	});
+
+	it("silently drops a trailing header with no operations", () => {
+		const input = ["@@ a.ts", "+ BOF", pl("a"), "@@ b.ts"].join("\n");
+		expect(splitHashlineInputs(input)).toEqual([{ path: "a.ts", diff: `+ BOF\n${pl("a")}` }]);
 	});
 });
 

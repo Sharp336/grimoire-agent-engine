@@ -119,6 +119,35 @@ export declare class Shell {
 }
 
 /**
+ * Version sentinel — exists solely so the JS loader can prove at load time
+ * that the `.node` file on disk is from the same package release as the
+ * `index.js` ESM wrapper invoking it.
+ *
+ * The `js_name` is bumped by `scripts/release.ts` to match the new
+ * `Cargo.toml` / `package.json` version on every release. The JS loader
+ * computes the expected name from `package.json#version` and refuses to use
+ * a `.node` that doesn't expose it, turning the silent
+ * `<sym> is not a function` crash from a locked-file update (the canonical
+ * Windows `bun install -g` failure mode) into a clear load-time error.
+ *
+ * Bump policy: `__piNativesV{major}_{minor}_{patch}` — non-alphanumerics in
+ * the version string are mapped to `_` to keep it a valid JS identifier.
+ * MUST stay in sync with `VERSION_SENTINEL_EXPORT` in
+ * `packages/natives/native/index.js` (which derives the name from
+ * `package.json#version`).
+ */
+export declare function __piNativesV15_0_2(): void
+
+/**
+ * Apply conservative pre-execution rewrites to a bash command.
+ *
+ * Strips trailing `| head|tail [safe-args]` and redundant trailing `2>&1`
+ * from each top-level pipeline. The full rules and bail conditions live in
+ * `pi_shell::fixup`. Synchronous and cheap (one parse pass over the input).
+ */
+export declare function applyBashFixups(command: string): BashFixupResult
+
+/**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
  * a promise.
  */
@@ -302,6 +331,17 @@ export interface AstReplaceResult {
   limitReached: boolean
   /** Parse or pattern errors when not failing the whole operation. */
   parseErrors?: Array<string>
+}
+
+/**
+ * Result of [`apply_bash_fixups`]: a possibly-rewritten command plus the
+ * substrings that were removed (in source order).
+ */
+export interface BashFixupResult {
+  /** Possibly-rewritten command. Equal to the input when no fixup fired. */
+  command: string
+  /** Substrings removed, in source order — suitable for a user-facing notice. */
+  stripped: Array<string>
 }
 
 /** Clipboard image payload encoded as PNG bytes. */

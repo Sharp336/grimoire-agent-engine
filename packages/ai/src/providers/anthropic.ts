@@ -25,6 +25,7 @@ import type {
 	AssistantMessage,
 	CacheRetention,
 	Context,
+	FetchImpl,
 	ImageContent,
 	Message,
 	Model,
@@ -541,6 +542,7 @@ export type AnthropicClientOptionsArgs = {
 	isOAuth?: boolean;
 	hasTools?: boolean;
 	onSseEvent?: AnthropicOptions["onSseEvent"];
+	fetch?: FetchImpl;
 };
 
 export type AnthropicClientOptionsResult = {
@@ -965,6 +967,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					isOAuth: options?.isOAuth,
 					hasTools: !!context.tools?.length,
 					onSseEvent: options?.onSseEvent,
+					fetch: options?.fetch,
 				});
 				client = created.client;
 				isOAuthToken = created.isOAuthToken;
@@ -1405,7 +1408,12 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	const baseUrl = resolveAnthropicBaseUrl(model, apiKey);
 	const foundryCustomHeaders = resolveAnthropicCustomHeaders(model);
 	const tlsFetchOptions = buildClaudeCodeTlsFetchOptions(model, baseUrl);
-	const debugFetch = onSseEvent ? wrapFetchForSseDebug(fetch, event => onSseEvent(event, model)) : undefined;
+	const baseFetch = args.fetch ?? fetch;
+	const debugFetch = onSseEvent
+		? wrapFetchForSseDebug(baseFetch, event => onSseEvent(event, model))
+		: args.fetch
+			? baseFetch
+			: undefined;
 	if (model.provider === "github-copilot") {
 		const copilotApiKey = parseGitHubCopilotApiKey(apiKey).accessToken;
 		const betaFeatures = [...extraBetas];

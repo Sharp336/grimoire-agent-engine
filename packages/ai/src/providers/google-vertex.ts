@@ -1,6 +1,6 @@
 import { GoogleGenAI } from "@google/genai";
 import { $env } from "@oh-my-pi/pi-utils";
-import type { Context, Model, StreamFunction } from "../types";
+import type { Context, FetchImpl, Model, StreamFunction } from "../types";
 import type { AssistantMessageEventStream } from "../utils/event-stream";
 import { buildGoogleGenerateContentParams, type GoogleSharedStreamOptions, streamGoogleGenAI } from "./google-shared";
 
@@ -25,7 +25,9 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 			const apiKey = resolveApiKey(options);
 			const project = apiKey ? undefined : resolveProject(options);
 			const location = apiKey ? undefined : resolveLocation(options);
-			const client = apiKey ? createClientWithApiKey(model, apiKey) : createClient(model, project!, location!);
+			const client = apiKey
+				? createClientWithApiKey(model, apiKey, options?.fetch)
+				: createClient(model, project!, location!, options?.fetch);
 			const params = buildGoogleGenerateContentParams(model, context, options ?? {});
 			const url = apiKey
 				? `https://aiplatform.googleapis.com/${API_VERSION}/publishers/google/models/${model.id}:streamGenerateContent`
@@ -34,29 +36,45 @@ export const streamGoogleVertex: StreamFunction<"google-vertex"> = (
 		},
 	});
 
-function buildHttpOptions(model: Model<"google-vertex">): { headers?: Record<string, string> } | undefined {
-	if (!model.headers) {
-		return undefined;
+function buildHttpOptions(
+	model: Model<"google-vertex">,
+	fetchOverride: FetchImpl | undefined,
+): { headers?: Record<string, string>; fetch?: FetchImpl } | undefined {
+	const options: { headers?: Record<string, string>; fetch?: FetchImpl } = {};
+	if (model.headers) {
+		options.headers = { ...model.headers };
 	}
-	return { headers: { ...model.headers } };
+	if (fetchOverride) {
+		options.fetch = fetchOverride;
+	}
+	return Object.keys(options).length > 0 ? options : undefined;
 }
 
-function createClient(model: Model<"google-vertex">, project: string, location: string): GoogleGenAI {
+function createClient(
+	model: Model<"google-vertex">,
+	project: string,
+	location: string,
+	fetchOverride: FetchImpl | undefined,
+): GoogleGenAI {
 	return new GoogleGenAI({
 		vertexai: true,
 		project,
 		location,
 		apiVersion: API_VERSION,
-		httpOptions: buildHttpOptions(model),
+		httpOptions: buildHttpOptions(model, fetchOverride),
 	});
 }
 
-function createClientWithApiKey(model: Model<"google-vertex">, apiKey: string): GoogleGenAI {
+function createClientWithApiKey(
+	model: Model<"google-vertex">,
+	apiKey: string,
+	fetchOverride: FetchImpl | undefined,
+): GoogleGenAI {
 	return new GoogleGenAI({
 		vertexai: true,
 		apiKey,
 		apiVersion: API_VERSION,
-		httpOptions: buildHttpOptions(model),
+		httpOptions: buildHttpOptions(model, fetchOverride),
 	});
 }
 

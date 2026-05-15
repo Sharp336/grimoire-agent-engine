@@ -204,6 +204,15 @@ export interface RawSseEvent {
 	raw: string[];
 }
 
+/**
+ * `fetch`-compatible function. Accepts any callable matching the standard
+ * fetch signature; `preconnect` is optional because non-Bun runtimes (browsers,
+ * test mocks) won't expose it.
+ */
+export type FetchImpl = ((input: string | URL | Request, init?: RequestInit) => Promise<Response>) & {
+	preconnect?: typeof globalThis.fetch.preconnect;
+};
+
 export interface StreamOptions {
 	temperature?: number;
 	topP?: number;
@@ -275,6 +284,14 @@ export interface StreamOptions {
 	 * Set to 0 to disable the inter-event idle watchdog for this request.
 	 */
 	streamIdleTimeoutMs?: number;
+	/**
+	 * Optional `fetch` implementation override. Providers route every HTTP
+	 * request — direct calls, SDK clients, and retry helpers — through this
+	 * implementation when set. Defaults to `globalThis.fetch`. Providers that
+	 * do not use `fetch` (Bedrock's AWS SDK transport, Cursor's HTTP/2
+	 * channel) silently ignore the override.
+	 */
+	fetch?: FetchImpl;
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;
 }
@@ -613,7 +630,7 @@ export interface OpenAICompat {
 	requiresThinkingAsText?: boolean;
 	/** Whether tool call IDs must be normalized to Mistral format (exactly 9 alphanumeric chars). Default: auto-detected from URL. */
 	requiresMistralToolIds?: boolean;
-	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "zai" uses thinking: { type: "enabled" }, "qwen" uses top-level enable_thinking, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Default: "openai". */
+	/** Format for reasoning/thinking parameter. "openai" uses reasoning_effort, "openrouter" uses reasoning: { effort }, "zai" uses thinking: { type: "enabled" | "disabled" } (also used by Moonshot Kimi), "qwen" uses top-level enable_thinking, and "qwen-chat-template" uses chat_template_kwargs.enable_thinking. Default: "openai". */
 	thinkingFormat?: "openai" | "openrouter" | "zai" | "qwen" | "qwen-chat-template";
 	/** Which reasoning content field to emit on assistant messages. Default: auto-detected. */
 	reasoningContentField?: "reasoning_content" | "reasoning" | "reasoning_text";

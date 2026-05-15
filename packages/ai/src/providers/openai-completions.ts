@@ -16,6 +16,7 @@ import { getEnvApiKey } from "../stream";
 import {
 	type AssistantMessage,
 	type Context,
+	type FetchImpl,
 	getPriorityPremiumRequests,
 	type Message,
 	type MessageAttribution,
@@ -362,6 +363,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				options?.headers,
 				options?.initiatorOverride,
 				options?.onSseEvent,
+				options?.fetch,
 			);
 			const priorityPremiumRequests = getPriorityPremiumRequests(options?.serviceTier, model.provider);
 			const premiumRequestsTotal =
@@ -778,6 +780,7 @@ async function createClient(
 	extraHeaders?: Record<string, string>,
 	initiatorOverride?: MessageAttribution,
 	onSseEvent?: OpenAICompletionsOptions["onSseEvent"],
+	fetchOverride?: FetchImpl,
 ): Promise<{
 	client: OpenAI;
 	copilotPremiumRequests: number | undefined;
@@ -847,9 +850,10 @@ async function createClient(
 		azureDefaultQuery = { "api-version": apiVersion };
 	}
 	let capturedErrorResponse: CapturedHttpErrorResponse | undefined;
+	const baseFetch = fetchOverride ?? fetch;
 	const wrappedFetch = Object.assign(
 		async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-			const response = await fetch(input, init);
+			const response = await baseFetch(input, init);
 			if (response.ok) {
 				capturedErrorResponse = undefined;
 				return response;
@@ -872,7 +876,7 @@ async function createClient(
 			};
 			return response;
 		},
-		{ preconnect: fetch.preconnect },
+		baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {},
 	);
 	const debugFetch = onSseEvent ? wrapFetchForSseDebug(wrappedFetch, event => onSseEvent(event, model)) : wrappedFetch;
 	return {
@@ -1019,12 +1023,14 @@ function buildParams(
 	}
 
 	if (compat.disableReasoningOnForcedToolChoice && isForcedToolChoice(params.tool_choice)) {
-		// Mirrors anthropic.ts:disableThinkingIfToolChoiceForced — backends like
-		// Kimi 400 with `tool_choice 'specified' is incompatible with thinking
-		// enabled`. Drop reasoning for this turn instead of dropping tool_choice;
-		// the agent still gets the forced tool call, just without thinking.
+		// Backends like Kimi 400 with `tool_choice 'specified' is incompatible
+		// with thinking enabled`. Suppress thinking for this single forced-tool
+		// turn while keeping the tool-selection contract intact.
 		delete params.reasoning_effort;
 		delete params.reasoning;
+		if (compat.thinkingFormat === "zai") {
+			params.thinking = { type: "disabled" };
+		}
 	}
 
 	// OpenRouter provider routing preferences
@@ -1362,7 +1368,9 @@ export function convertMessages(
 			const canUseSyntheticReasoningContent =
 				compat.requiresReasoningContentForToolCalls &&
 				compat.allowsSyntheticReasoningContentForToolCalls &&
-				(compat.thinkingFormat === "openai" || compat.thinkingFormat === "openrouter");
+				(compat.thinkingFormat === "openai" ||
+					compat.thinkingFormat === "openrouter" ||
+					compat.thinkingFormat === "zai");
 			// DeepSeek reasoning models require reasoning_content on ALL assistant turns,
 			// not just tool-call turns. Other providers (Kimi, OpenRouter) only require it
 			// on tool-call turns.
