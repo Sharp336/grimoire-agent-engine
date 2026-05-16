@@ -1,6 +1,15 @@
 import { describe, expect, it } from "bun:test";
-import { enforceStrictSchema, sanitizeSchemaForStrictMode, tryEnforceStrictSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { Type } from "@sinclair/typebox";
+import type { Tool, ToolCall } from "@oh-my-pi/pi-ai/types";
+import {
+	enforceStrictSchema,
+	isJsonSchemaValueValid,
+	isValidJsonSchema,
+	sanitizeSchemaForStrictMode,
+	tryEnforceStrictSchema,
+	zodToWireSchema,
+} from "@oh-my-pi/pi-ai/utils/schema";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
+import * as z from "zod/v4";
 
 describe("sanitizeSchemaForStrictMode", () => {
 	it("infers object type, strips non-structural keywords, and converts const to enum", () => {
@@ -233,12 +242,14 @@ describe("sanitizeSchemaForStrictMode", () => {
 
 describe("enforceStrictSchema", () => {
 	it("converts optional properties to nullable schemas and requires all object keys", () => {
-		const schema = Type.Object({
-			requiredText: Type.String(),
-			optionalCount: Type.Optional(Type.Number()),
-		});
+		const schema = zodToWireSchema(
+			z.object({
+				requiredText: z.string(),
+				optionalCount: z.number().optional(),
+			}),
+		);
 
-		const strict = enforceStrictSchema(schema as unknown as Record<string, unknown>);
+		const strict = enforceStrictSchema(schema);
 		const properties = strict.properties as Record<string, Record<string, unknown>>;
 
 		expect(strict.required).toEqual(["requiredText", "optionalCount"]);
@@ -248,16 +259,18 @@ describe("enforceStrictSchema", () => {
 	});
 
 	it("never emits undefined as a schema type", () => {
-		const schema = Type.Object({
-			questions: Type.Array(
-				Type.Object({
-					id: Type.String(),
-					recommended: Type.Optional(Type.Number()),
-				}),
-			),
-		});
+		const schema = zodToWireSchema(
+			z.object({
+				questions: z.array(
+					z.object({
+						id: z.string(),
+						recommended: z.number().optional(),
+					}),
+				),
+			}),
+		);
 
-		const strict = enforceStrictSchema(schema as unknown as Record<string, unknown>);
+		const strict = enforceStrictSchema(schema);
 		const serialized = JSON.stringify(strict);
 
 		expect(serialized.includes('"undefined"')).toBe(false);
@@ -452,27 +465,29 @@ describe("tryEnforceStrictSchema", () => {
 	});
 
 	it("keeps shared object schemas strict-compatible after adaptation", () => {
-		const sharedTaskSchema = Type.Object({
-			content: Type.String(),
-			status: Type.Optional(Type.String()),
-			notes: Type.Optional(Type.String()),
+		const sharedTaskSchema = z.object({
+			content: z.string(),
+			status: z.string().optional(),
+			notes: z.string().optional(),
 		});
-		const schema = Type.Object({
-			ops: Type.Array(
-				Type.Union([
-					Type.Object({
-						op: Type.Literal("replace"),
-						tasks: Type.Array(sharedTaskSchema),
-					}),
-					Type.Object({
-						op: Type.Literal("update"),
-						tasks: Type.Optional(Type.Array(sharedTaskSchema)),
-					}),
-				]),
-			),
-		});
+		const schema = zodToWireSchema(
+			z.object({
+				ops: z.array(
+					z.union([
+						z.object({
+							op: z.literal("replace"),
+							tasks: z.array(sharedTaskSchema),
+						}),
+						z.object({
+							op: z.literal("update"),
+							tasks: z.array(sharedTaskSchema).optional(),
+						}),
+					]),
+				),
+			}),
+		);
 
-		const result = tryEnforceStrictSchema(schema as unknown as Record<string, unknown>);
+		const result = tryEnforceStrictSchema(schema);
 		const rootProperties = result.schema.properties as Record<string, Record<string, unknown>>;
 		const opBranches = ((rootProperties.ops.items as Record<string, unknown>).anyOf ?? []) as Array<
 			Record<string, unknown>
@@ -490,5 +505,153 @@ describe("tryEnforceStrictSchema", () => {
 		expect(replaceTasks.required).toEqual(["content", "status", "notes"]);
 		expect(updateTasks.additionalProperties).toBe(false);
 		expect(updateTasks.required).toEqual(["content", "status", "notes"]);
+	});
+});
+
+describe("json-schema validator unsupported-keyword regressions", () => {
+	it("rejects values with keys that fail the propertyNames schema", () => {
+		const schema = {
+			type: "object",
+			propertyNames: { type: "string", pattern: "^[a-z]+$" },
+		};
+		expect(isJsonSchemaValueValid(schema, { abc: 1 })).toBe(true);
+		expect(isJsonSchemaValueValid(schema, { "BAD-KEY": 1 })).toBe(false);
+	});
+
+	it("rejects patternProperties mismatches", () => {
+		const schema = {
+			type: "object",
+			patternProperties: { "^id_": { type: "number" } },
+		};
+		expect(isJsonSchemaValueValid(schema, { id_a: 1 })).toBe(true);
+		expect(isJsonSchemaValueValid(schema, { id_a: "not-a-number" })).toBe(false);
+	});
+
+	it("rejects values that violate dependentRequired", () => {
+		const schema = {
+			type: "object",
+			dependentRequired: { credit_card: ["billing_address"] },
+		};
+		expect(isJsonSchemaValueValid(schema, { credit_card: "x", billing_address: "y" })).toBe(true);
+		expect(isJsonSchemaValueValid(schema, { credit_card: "x" })).toBe(false);
+	});
+
+	it("applies then when if matches and rejects missing required fields", () => {
+		const schema = {
+			type: "object",
+			properties: { kind: { type: "string" }, extra: { type: "string" } },
+			if: { properties: { kind: { const: "a" } }, required: ["kind"] },
+			// biome-ignore lint/suspicious/noThenProperty: JSON Schema if/then/else keyword
+			then: { required: ["extra"] },
+		};
+		expect(isJsonSchemaValueValid(schema, { kind: "b" })).toBe(true);
+		expect(isJsonSchemaValueValid(schema, { kind: "a", extra: "ok" })).toBe(true);
+		expect(isJsonSchemaValueValid(schema, { kind: "a" })).toBe(false);
+	});
+
+	it("validates contains against array elements", () => {
+		const schema = { type: "array", contains: { type: "number" } };
+		expect(isJsonSchemaValueValid(schema, ["a", 1])).toBe(true);
+		expect(isJsonSchemaValueValid(schema, ["a", "b"])).toBe(false);
+	});
+
+	it("validates prefixItems by index", () => {
+		const schema = { type: "array", prefixItems: [{ type: "string" }, { type: "number" }] };
+		expect(isJsonSchemaValueValid(schema, ["x", 1])).toBe(true);
+		expect(isJsonSchemaValueValid(schema, [1, "x"])).toBe(false);
+		expect(isJsonSchemaValueValid({ type: "array", items: [{ type: "string" }] }, ["x"])).toBe(false);
+	});
+
+	it("recursively validates nested values through self-referential $ref", () => {
+		const schema = {
+			$ref: "#/definitions/Node",
+			definitions: {
+				Node: {
+					type: "object",
+					properties: {
+						name: { type: "string" },
+						child: { $ref: "#/definitions/Node" },
+					},
+					required: ["name"],
+					additionalProperties: false,
+				},
+			},
+		};
+		// Nested shape conforming — should validate.
+		expect(isJsonSchemaValueValid(schema, { name: "root", child: { name: "leaf" } })).toBe(true);
+		// Nested child violates the inner shape: previously short-circuited to true
+		// because the second occurrence of the $ref was treated as a seen ref.
+		expect(isJsonSchemaValueValid(schema, { name: "root", child: { name: 123 } })).toBe(false);
+		expect(isJsonSchemaValueValid(schema, { name: "root", child: { child: { name: "x" } } })).toBe(false);
+	});
+
+	it("fails primitive $ref chains that exceed the recursion cap instead of accepting invalid values", () => {
+		const definitions: Record<string, unknown> = {};
+		for (let i = 0; i < 66; i += 1) {
+			definitions[`A${i}`] = { $ref: `#/definitions/A${i + 1}` };
+		}
+		definitions.A66 = { type: "number" };
+
+		const schema = { $ref: "#/definitions/A0", definitions };
+		expect(isJsonSchemaValueValid(schema, "not-a-number")).toBe(false);
+	});
+});
+
+describe("meta-validator conditional keywords", () => {
+	it("accepts well-formed if/then/else", () => {
+		expect(
+			isValidJsonSchema({
+				type: "object",
+				if: { properties: { kind: { const: "a" } } },
+				// biome-ignore lint/suspicious/noThenProperty: JSON Schema if/then/else keyword
+				then: { required: ["extra"] },
+				else: { required: ["other"] },
+			}),
+		).toBe(true);
+	});
+
+	it("rejects malformed if (must be a schema, not an array)", () => {
+		expect(isValidJsonSchema({ type: "object", if: [] })).toBe(false);
+	});
+
+	it("rejects malformed then", () => {
+		// biome-ignore lint/suspicious/noThenProperty: JSON Schema if/then/else keyword
+		expect(isValidJsonSchema({ type: "object", then: "not-a-schema" })).toBe(false);
+	});
+
+	it("accepts 2020-12 dependent keywords and rejects obsolete tuple/dependency keywords", () => {
+		expect(
+			isValidJsonSchema({
+				type: "object",
+				dependentRequired: { a: ["b"] },
+				dependentSchemas: { c: { type: "object" } },
+			}),
+		).toBe(true);
+		expect(isValidJsonSchema({ type: "object", dependentRequired: { a: [1] } })).toBe(false);
+		expect(isValidJsonSchema({ type: "object", dependentSchemas: { a: 1 } })).toBe(false);
+		expect(isValidJsonSchema({ type: "object", dependencies: { a: ["b"] } })).toBe(false);
+		expect(isValidJsonSchema({ type: "array", items: [{ type: "string" }] })).toBe(false);
+		expect(isValidJsonSchema({ type: "array", additionalItems: false })).toBe(false);
+	});
+});
+
+describe("Zod root extras preserved through normalize", () => {
+	it("retains a null-valued unknown root key after tool-argument validation so downstream rejection still triggers", () => {
+		const tool: Tool = {
+			name: "simple_tool",
+			description: "",
+			parameters: z.object({ assignment: z.string() }),
+		};
+		const toolCall: ToolCall = {
+			type: "toolCall",
+			id: "call-zod-null-root",
+			name: "simple_tool",
+			arguments: { assignment: "do thing", schema: null },
+		};
+
+		const result = validateToolArguments(tool, toolCall) as Record<string, unknown>;
+		expect(result.assignment).toBe("do thing");
+		expect("schema" in result).toBe(true);
+		expect(result.schema).toBeNull();
 	});
 });

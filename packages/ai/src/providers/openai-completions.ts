@@ -17,7 +17,6 @@ import {
 	type AssistantMessage,
 	type Context,
 	type FetchImpl,
-	getPriorityPremiumRequests,
 	type Message,
 	type MessageAttribution,
 	type Model,
@@ -56,8 +55,9 @@ import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { getKimiCommonHeaders } from "../utils/oauth/kimi";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { callWithCopilotModelRetry } from "../utils/retry";
-import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
+import { adaptSchemaForStrict, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { wrapFetchForSseDebug } from "../utils/sse-debug";
+import { type HealedToolCall, modelMayLeakKimiToolCalls, ToolCallHealer } from "../utils/tool-call-healing";
 import { isForcedToolChoice, mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
 import {
 	buildCopilotDynamicHeaders,
@@ -165,6 +165,53 @@ function hasToolHistory(messages: Message[]): boolean {
 			}
 		}
 	}
+	return false;
+}
+
+/**
+ * Identify "real progress" stream chunks vs. keepalives, role-only preambles,
+ * and empty `{choices:[]}` no-ops emitted by some OpenAI-compatible endpoints.
+ * Without this filter, every keepalive resets `iterateWithIdleTimeout`'s
+ * deadline, so a provider that streams nothing but pings keeps the watchdog
+ * asleep indefinitely — observed against z.ai/GLM via OpenRouter where a
+ * subagent stalled for hours with no error surfaced.
+ *
+ * A chunk counts as progress when it carries terminal usage, a finish reason,
+ * or any model-produced delta (content / tool calls / reasoning / refusal).
+ * Role-only `delta: { role: "assistant" }` preambles do NOT count; we want the
+ * (longer) first-event timeout to keep governing until real output appears.
+ */
+export function isOpenAICompletionsProgressChunk(chunk: unknown): boolean {
+	if (!chunk || typeof chunk !== "object") return false;
+	const record = chunk as {
+		usage?: unknown;
+		choices?: ReadonlyArray<{
+			finish_reason?: unknown;
+			usage?: unknown;
+			delta?: {
+				content?: unknown;
+				tool_calls?: unknown;
+				reasoning?: unknown;
+				reasoning_content?: unknown;
+				reasoning_text?: unknown;
+				refusal?: unknown;
+			};
+		}>;
+	};
+	if (record.usage) return true;
+	const choice = Array.isArray(record.choices) ? record.choices[0] : undefined;
+	if (!choice) return false;
+	if (choice.finish_reason) return true;
+	if (choice.usage) return true;
+	const delta = choice.delta;
+	if (!delta) return false;
+	const content = delta.content;
+	if (typeof content === "string" ? content.length > 0 : Array.isArray(content) && content.length > 0) return true;
+	if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) return true;
+	if (typeof delta.reasoning === "string" && delta.reasoning.length > 0) return true;
+	if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) return true;
+	if (typeof delta.reasoning_text === "string" && delta.reasoning_text.length > 0) return true;
+	if (typeof delta.refusal === "string" && delta.refusal.length > 0) return true;
 	return false;
 }
 
@@ -364,12 +411,9 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				options?.initiatorOverride,
 				options?.onSseEvent,
 				options?.fetch,
+				options?.streamFirstEventTimeoutMs,
 			);
-			const priorityPremiumRequests = getPriorityPremiumRequests(options?.serviceTier, model.provider);
-			const premiumRequestsTotal =
-				copilotPremiumRequests !== undefined || priorityPremiumRequests > 0
-					? (copilotPremiumRequests ?? 0) + priorityPremiumRequests
-					: undefined;
+			const premiumRequestsTotal = copilotPremiumRequests;
 			getCapturedErrorResponse = captureErrorResponse;
 			let appliedToolStrictMode: AppliedToolStrictMode = "mixed";
 			const providerSessionState = getOpenAICompletionsProviderSessionState(
@@ -585,12 +629,44 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				if (stripped && (stripped === flushable || stripped.trim().length > 0)) appendTextDelta(stripped);
 			};
 
+			const kimiHealer = modelMayLeakKimiToolCalls(model.provider, model.id) ? new ToolCallHealer() : undefined;
+			let healedToolCallEmitted = false;
+			const emitHealedToolCall = (call: HealedToolCall): void => {
+				finishCurrentBlock(currentBlock);
+				const block: ToolCall & { partialArgs: string } = {
+					type: "toolCall",
+					id: call.id,
+					name: call.name,
+					arguments: {},
+					partialArgs: call.arguments,
+				};
+				block.arguments = parseStreamingJson(call.arguments);
+				currentBlock = block;
+				output.content.push(block);
+				stream.push({ type: "toolcall_start", contentIndex: blockIndex(block), partial: output });
+				stream.push({
+					type: "toolcall_delta",
+					contentIndex: blockIndex(block),
+					delta: call.arguments,
+					partial: output,
+				});
+				finishCurrentBlock(block);
+				currentBlock = undefined;
+				healedToolCallEmitted = true;
+			};
+			const flushHealedToolCalls = (): void => {
+				if (!kimiHealer) return;
+				const calls = kimiHealer.drainCompleted();
+				for (const call of calls) emitHealedToolCall(call);
+			};
+
 			for await (const chunk of iterateWithIdleTimeout(openaiStream, {
 				watchdog: firstEventWatchdog,
 				idleTimeoutMs,
 				errorMessage: "OpenAI completions stream stalled while waiting for the next event",
 				onIdle: () => requestAbortController.abort(),
 				abortSignal: options?.signal,
+				isProgressItem: isOpenAICompletionsProgressChunk,
 			})) {
 				if (!chunk || typeof chunk !== "object") continue;
 
@@ -630,6 +706,21 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 						} else if (stripDeepseekChatTemplateTokens) {
 							deepseekStripBuffer += normalizedDeltaText;
 							flushDeepseekStripBuffer(false);
+						} else if (kimiHealer) {
+							const hasStructuredToolCalls =
+								Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0;
+							if (hasStructuredToolCalls) {
+								// Same chunk leaks markers AND carries structured tool_calls.
+								// Strip the marker text from visible output, but drop any
+								// synthesized calls so the structured payload stays the
+								// single source of truth (avoids double-dispatch).
+								const clean = kimiHealer.consumeWithoutCalls(normalizedDeltaText);
+								if (clean.length > 0) appendTextDelta(clean);
+							} else {
+								const clean = kimiHealer.feed(normalizedDeltaText);
+								if (clean.length > 0) appendTextDelta(clean);
+								flushHealedToolCalls();
+							}
 						} else {
 							appendTextDelta(normalizedDeltaText);
 						}
@@ -659,7 +750,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 						appendThinkingDelta(delta, foundReasoningField);
 					}
 
-					if (choice?.delta?.tool_calls) {
+					if (choice?.delta?.tool_calls && choice.delta.tool_calls.length > 0) {
 						for (const toolCall of choice.delta.tool_calls) {
 							if (
 								!currentBlock ||
@@ -730,6 +821,19 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				flushDeepseekStripBuffer(true);
 			}
 
+			if (kimiHealer) {
+				const trailing = kimiHealer.flushPending();
+				if (trailing.length > 0) appendTextDelta(trailing);
+				flushHealedToolCalls();
+				if (healedToolCallEmitted && output.stopReason === "stop") {
+					// Hosts that leak Kimi tool tokens often still report
+					// `finish_reason: stop` for the surrounding turn. Promote
+					// only that natural-completion finish — leave `error`,
+					// `length`, `aborted`, etc. untouched.
+					output.stopReason = "toolUse";
+				}
+			}
+
 			finishCurrentBlock(currentBlock);
 
 			const firstEventTimeoutError = abortTracker.getLocalAbortReason();
@@ -781,6 +885,7 @@ async function createClient(
 	initiatorOverride?: MessageAttribution,
 	onSseEvent?: OpenAICompletionsOptions["onSseEvent"],
 	fetchOverride?: FetchImpl,
+	streamFirstEventTimeoutOverride?: number,
 ): Promise<{
 	client: OpenAI;
 	copilotPremiumRequests: number | undefined;
@@ -809,7 +914,7 @@ async function createClient(
 		// SDK UA so traffic is identifiable in upstream provider logs.
 		// https://openrouter.ai/docs/app-attribution
 		headers["User-Agent"] = `Oh-My-Pi/${packageJson.version}`;
-		headers["HTTP-Referer"] = "https://github.com/can1357/oh-my-pi";
+		headers["HTTP-Referer"] = "https://omp.sh/";
 		headers["X-OpenRouter-Title"] = "Oh-My-Pi";
 		headers["X-OpenRouter-Categories"] = "cli-agent";
 		// Always-on response caching: identical requests return cached responses for free.
@@ -879,6 +984,25 @@ async function createClient(
 		baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {},
 	);
 	const debugFetch = onSseEvent ? wrapFetchForSseDebug(wrappedFetch, event => onSseEvent(event, model)) : wrappedFetch;
+	// Bound HTTP request timeout to roughly the first-event watchdog window.
+	// The OpenAI SDK's default is 10 minutes per attempt × `maxRetries`, which
+	// turns a stalled-before-headers fetch into a multi-minute hang invisible
+	// to the agent loop (the iterator watchdog only arms AFTER `create()` returns).
+	// Using the first-event timeout keeps both layers aligned: the SDK gives up
+	// before the agent watchdog would have, surfacing a real error to the catch
+	// in the IIFE.
+	// A caller may raise `StreamOptions.streamFirstEventTimeoutMs` for a slow-
+	// before-headers provider; respect it so the SDK doesn't give up before the
+	// wrapping watchdog arms. An explicit `0` disables the first-event watchdog,
+	// and the SDK treats `timeout: 0` as an immediate timeout, so do not pass a
+	// request timeout in that case.
+	const envSdkTimeoutMs = getStreamFirstEventTimeoutMs(getOpenAIStreamIdleTimeoutMs());
+	const sdkTimeoutMs =
+		streamFirstEventTimeoutOverride === 0
+			? undefined
+			: streamFirstEventTimeoutOverride !== undefined
+				? Math.max(envSdkTimeoutMs ?? 0, streamFirstEventTimeoutOverride)
+				: envSdkTimeoutMs;
 	return {
 		client: new OpenAI({
 			apiKey,
@@ -888,6 +1012,7 @@ async function createClient(
 			defaultHeaders: headers,
 			defaultQuery: azureDefaultQuery,
 			fetch: debugFetch,
+			...(sdkTimeoutMs !== undefined ? { timeout: sdkTimeoutMs } : {}),
 		}),
 		copilotPremiumRequests,
 		baseUrl,
@@ -1570,7 +1695,7 @@ function convertTools(
 ): BuiltOpenAICompletionTools {
 	const adaptedTools = tools.map(tool => {
 		const strict = !NO_STRICT && compat.supportsStrictMode !== false && tool.strict !== false;
-		const baseParameters = tool.parameters as unknown as Record<string, unknown>;
+		const baseParameters = toolWireSchema(tool);
 		const adapted = adaptSchemaForStrict(baseParameters, strict);
 		return {
 			tool,

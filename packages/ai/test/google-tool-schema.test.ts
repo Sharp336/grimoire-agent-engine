@@ -1,8 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { convertTools } from "@oh-my-pi/pi-ai/providers/google-shared";
-import type { Model, Tool } from "@oh-my-pi/pi-ai/types";
-import { sanitizeSchemaForCCA, sanitizeSchemaForGoogle } from "@oh-my-pi/pi-ai/utils/schema";
-import type { TSchema } from "@sinclair/typebox";
+import type { Model, TJsonSchema, Tool } from "@oh-my-pi/pi-ai/types";
+import { prepareSchemaForCCA, sanitizeSchemaForCCA, sanitizeSchemaForGoogle } from "@oh-my-pi/pi-ai/utils/schema";
 
 function createModel(id: string): Model<"google-gemini-cli"> {
 	return {
@@ -48,6 +47,29 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 		});
 	});
 
+	it("strips propertyNames before sending legacy CCA parameters", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				env: {
+					type: "object",
+					propertyNames: { type: "string", pattern: "^[A-Z_]+$" },
+					additionalProperties: { type: "string" },
+				},
+			},
+		} as unknown;
+
+		expect(sanitizeSchemaForCCA(schema)).toEqual({
+			type: "object",
+			properties: {
+				env: {
+					type: "object",
+					properties: {},
+				},
+			},
+		});
+	});
+
 	it("uses sanitized parameters for claude models with deterministic output", () => {
 		const parameters = {
 			type: "object",
@@ -58,7 +80,7 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 				},
 			},
 			required: ["value"],
-		} as unknown as TSchema;
+		} as TJsonSchema;
 		const tools: Tool[] = [{ name: "test_tool", description: "Test tool", parameters }];
 		const model = createModel("claude-sonnet-4-5");
 
@@ -88,7 +110,7 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 				},
 			},
 			required: ["lines"],
-		} as unknown as TSchema;
+		} as TJsonSchema;
 		const tools: Tool[] = [{ name: "test_tool", description: "Test tool", parameters }];
 		const claudeModel = createModel("claude-sonnet-4-5");
 		const geminiModel = createModel("gemini-2.5-pro");
@@ -118,7 +140,7 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 		expect(claudeDeclaration.parametersJsonSchema).toBeUndefined();
 		expect(
 			(geminiDeclaration.parametersJsonSchema as { properties?: Record<string, unknown> })?.properties?.lines,
-		).toEqual(parameters.properties.lines);
+		).toEqual((parameters as { properties: { lines: unknown } }).properties.lines);
 	});
 
 	it("collapses mixed anyOf with shared metadata for edit-style lines fields", () => {
@@ -145,7 +167,7 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 					},
 				},
 			},
-		} as unknown as TSchema;
+		} as TJsonSchema;
 		const tools: Tool[] = [{ name: "edit", description: "Edit tool", parameters }];
 		const model = createModel("claude-sonnet-4-5");
 
@@ -180,7 +202,7 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 					},
 				},
 			},
-		} as unknown as TSchema;
+		} as TJsonSchema;
 		const tools: Tool[] = [{ name: "todo_write", description: "Todo tool", parameters }];
 		const model = createModel("claude-sonnet-4-5");
 
@@ -207,7 +229,7 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 				},
 			},
 			required: ["value"],
-		} as unknown as TSchema;
+		} as TJsonSchema;
 		const tools: Tool[] = [{ name: "test_tool", description: "Test tool", parameters }];
 		const claudeModel = createModel("claude-sonnet-4-5");
 		const geminiModel = createModel("gemini-2.5-pro");
@@ -231,7 +253,7 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 		expect(JSON.stringify(claudeDeclaration.parameters)).not.toContain('"anyOf"');
 		expect(
 			(geminiDeclaration.parametersJsonSchema as { properties?: Record<string, unknown> })?.properties?.value,
-		).toEqual(parameters.properties.value);
+		).toEqual((parameters as { properties: { value: unknown } }).properties.value);
 	});
 
 	it("falls back to minimal object schema when non-null unresolved unions remain for CCA Claude", () => {
@@ -243,7 +265,7 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 				},
 			},
 			required: ["value"],
-		} as unknown as TSchema;
+		} as TJsonSchema;
 		const tools: Tool[] = [{ name: "test_tool", description: "Test tool", parameters }];
 		const claudeModel = createModel("claude-sonnet-4-5");
 
@@ -253,6 +275,22 @@ describe("Cloud Code Assist Claude tool schema conversion", () => {
 		>;
 
 		expect(claudeDeclaration.parameters).toEqual({
+			type: "object",
+			properties: {},
+		});
+	});
+
+	it("falls back when CCA schema meta-validation catches malformed keywords", () => {
+		const parameters = {
+			type: "object",
+			properties: {
+				mode: { type: "string", enum: ["read", "read"] },
+				tags: { type: "array", items: { type: "string" }, uniqueItems: "true" },
+			},
+			required: ["mode"],
+		} as unknown;
+
+		expect(prepareSchemaForCCA(parameters)).toEqual({
 			type: "object",
 			properties: {},
 		});

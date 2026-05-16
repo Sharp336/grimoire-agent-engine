@@ -2,6 +2,7 @@ import {
 	Agent,
 	type AgentEvent,
 	type AgentMessage,
+	type AgentTelemetryConfig,
 	type AgentTool,
 	INTENT_FIELD,
 	type ThinkingLevel,
@@ -244,6 +245,17 @@ export interface CreateAgentSessionOptions {
 
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
+
+	/**
+	 * Opt-in OpenTelemetry instrumentation forwarded to the underlying Agent.
+	 * Passing `{}` enables the loop's GenAI-semantic-convention spans. See
+	 * {@link AgentTelemetryConfig} for the full surface (hooks, content capture,
+	 * cost estimator, agent identity).
+	 *
+	 * Safe to enable without an OTEL SDK registered in the host: the
+	 * `@opentelemetry/api` package returns a no-op tracer in that case.
+	 */
+	telemetry?: AgentTelemetryConfig;
 }
 
 /** Result from createAgentSession */
@@ -920,18 +932,24 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// it. On timeout we forward `undefined` to ToolSession; buildSystemPromptInternal
 	// will re-race the same promise through its own withDeadline path. Background
 	// work continues so caches still warm.
-	const raceWithDeadline = <T>(name: string, work: Promise<T>): Promise<T | undefined> =>
-		Promise.race([
+	const raceWithDeadline = async <T>(name: string, work: Promise<T>): Promise<T | undefined> => {
+		let timedOut = false;
+		const result = await Promise.race([
 			work,
 			Bun.sleep(STARTUP_SCAN_DEADLINE_MS).then(() => {
-				logger.warn("Startup scan exceeded deadline; deferring to system prompt fallback", {
-					name,
-					timeoutMs: STARTUP_SCAN_DEADLINE_MS,
-					cwd,
-				});
+				timedOut = true;
 				return undefined;
 			}),
 		]);
+		if (timedOut) {
+			logger.warn("Startup scan exceeded deadline; deferring to system prompt fallback", {
+				name,
+				timeoutMs: STARTUP_SCAN_DEADLINE_MS,
+				cwd,
+			});
+		}
+		return result;
+	};
 	const [contextFiles, resolvedWorkspaceTree] = await Promise.all([
 		contextFilesPromise,
 		raceWithDeadline("buildWorkspaceTree", workspaceTreePromise),
@@ -1093,6 +1111,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			settings,
 			authStorage,
 			modelRegistry,
+			getTelemetry: () => agent?.telemetry,
 		};
 
 		// Wire process-wide internal URL singletons owned by their real classes.
@@ -1409,6 +1428,17 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
+		const reloadSshTool = async (): Promise<AgentTool | null> => {
+			if (!requestedToolNameSet.has("ssh")) return null;
+			const sshTool = (await loadSshTool({
+				...toolSession,
+				cwd: sessionManager.getCwd(),
+			})) as unknown as AgentTool | null;
+			if (!sshTool) return null;
+			const wrapped = wrapToolWithMetaNotice(sshTool);
+			return (extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped) as AgentTool;
+		};
+
 		let cursorEventEmitter: ((event: AgentEvent) => void) | undefined;
 		const cursorExecHandlers = new CursorExecHandlers({
 			cwd,
@@ -1513,6 +1543,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			(options.toolNames ? [...new Set(options.toolNames.map(name => name.toLowerCase()))] : undefined) ??
 			toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
+		const requestedToolNameSet = new Set(normalizedRequested);
 		// Effective discovery mode: tools.discoveryMode takes precedence; mcp.discoveryMode is back-compat alias.
 		const toolsDiscoveryModeSetting = settings.get("tools.discoveryMode");
 		const effectiveDiscoveryMode: "off" | "mcp-only" | "all" =
@@ -1746,6 +1777,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			},
 			intentTracing: !!intentField,
 			getToolChoice: () => session?.nextToolChoice(),
+			telemetry: options.telemetry,
 		});
 
 		cursorEventEmitter = event => agent.emitExternalEvent(event);
@@ -1754,11 +1786,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (hasExistingSession) {
 			agent.replaceMessages(existingSession.messages);
 		} else {
-			// Save initial model and thinking level for new sessions so they can be restored on resume
+			// Save initial model, thinking level, and service tier for new sessions so they can be restored on resume.
 			if (model) {
 				sessionManager.appendModelChange(`${model.provider}/${model.id}`);
 			}
 			sessionManager.appendThinkingLevelChange(thinkingLevel);
+			if (initialServiceTier) {
+				sessionManager.appendServiceTierChange(initialServiceTier);
+			}
 		}
 
 		session = new AgentSession({
@@ -1787,6 +1822,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			onResponse,
 			convertToLlm: convertToLlmFinal,
 			rebuildSystemPrompt,
+			reloadSshTool,
+			requestedToolNames: requestedToolNameSet,
 			getMcpServerInstructions: mcpManager
 				? () => {
 						const raw = mcpManager.getServerInstructions();

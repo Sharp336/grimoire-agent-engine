@@ -58,7 +58,7 @@ import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse";
 import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { isCopilotTransientModelError } from "../utils/retry";
-import { COMBINATOR_KEYS, NO_STRICT } from "../utils/schema";
+import { COMBINATOR_KEYS, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { notifyRawSseEvent, wrapFetchForSseDebug } from "../utils/sse-debug";
 import {
 	buildCopilotDynamicHeaders,
@@ -2072,7 +2072,29 @@ export function convertAnthropicMessages(
 	return params;
 }
 
-const ANTHROPIC_UNSUPPORTED_TOOL_SCHEMA_FIELDS = new Set(["maxItems", "patternProperties"]);
+/**
+ * JSON Schema keywords Anthropic's tool-schema validator rejects on every node type.
+ * Mirrors the keys that fall through to the description-spill branch in the Anthropic
+ * Python SDK's `lib/_parse/_transform.py::transform_schema`.
+ *
+ * We use `Set` here (not `Record<string, true>`) because membership is probed against
+ * arbitrary user/Zod-derived schema keys: with a literal Record, lookups for prototype
+ * names like `"toString"` would falsely match and silently strip valid properties.
+ */
+const ANTHROPIC_UNSUPPORTED_TOOL_SCHEMA_FIELDS = new Set(["maxItems", "patternProperties", "propertyNames"]);
+/**
+ * JSON Schema keywords Anthropic rejects specifically on `number`/`integer` nodes
+ * ("For 'number' type, properties maximum, minimum are not supported"). These are
+ * still useful hints for the model, so callers demote them into the node's
+ * `description` rather than dropping them outright.
+ */
+const ANTHROPIC_UNSUPPORTED_NUMERIC_FIELDS = [
+	"minimum",
+	"maximum",
+	"exclusiveMinimum",
+	"exclusiveMaximum",
+	"multipleOf",
+] as const;
 const ANTHROPIC_STRICT_TOOL_ALLOWLIST = new Set(["bash", "python", "edit", "find"]);
 const MAX_ANTHROPIC_STRICT_TOOLS = 20;
 const MAX_ANTHROPIC_STRICT_OPTIONAL_PARAMETERS = 24;
@@ -2094,7 +2116,38 @@ function isJsonSchemaObjectNode(schema: Record<string, unknown>): boolean {
 	return false;
 }
 
-function normalizeAnthropicToolSchema(
+/**
+ * Demote unsupported JSON Schema keywords into the node's `description` so the model
+ * still gets the constraint as a natural-language hint after we strip it from the wire
+ * schema. Mirrors the trailing description-spill in the Anthropic Python SDK's
+ * `lib/_parse/_transform.py::transform_schema`, formatted as `{key: value, ...}`.
+ *
+ * `entries` are applied in order and only when the value is not `undefined`; an empty
+ * input is a no-op so callers can pass the same set unconditionally.
+ */
+function spillToDescription(node: Record<string, unknown>, entries: Array<[string, unknown]>): void {
+	const spilled = entries.filter(([, value]) => value !== undefined);
+	if (spilled.length === 0) return;
+	const formatted = `{${spilled.map(([key, value]) => `${key}: ${JSON.stringify(value)}`).join(", ")}}`;
+	const existing = typeof node.description === "string" ? node.description : "";
+	node.description = existing ? `${existing}\n\n${formatted}` : formatted;
+}
+
+/**
+ * Strip `keys` off `node` and spill the removed values into its `description`.
+ */
+function spillKeysToDescription(node: Record<string, unknown>, keys: readonly string[]): void {
+	const entries: Array<[string, unknown]> = [];
+	for (const key of keys) {
+		const value = node[key];
+		if (value === undefined) continue;
+		entries.push([key, value]);
+		delete node[key];
+	}
+	spillToDescription(node, entries);
+}
+
+export function normalizeAnthropicToolSchema(
 	schema: unknown,
 	cache: WeakMap<Record<string, unknown>, Record<string, unknown>> = new WeakMap(),
 ): unknown {
@@ -2103,24 +2156,55 @@ function normalizeAnthropicToolSchema(
 	const cached = cache.get(schema);
 	if (cached) return cached;
 
-	const result = Object.fromEntries(
-		Object.entries(schema).filter(([key]) => !ANTHROPIC_UNSUPPORTED_TOOL_SCHEMA_FIELDS.has(key)),
-	);
+	const result: Record<string, unknown> = {};
 	cache.set(schema, result);
+	const universalSpill: Array<[string, unknown]> = [];
+	for (const key in schema) {
+		if (!Object.hasOwn(schema, key)) continue;
+		const value = schema[key];
+		if (ANTHROPIC_UNSUPPORTED_TOOL_SCHEMA_FIELDS.has(key)) {
+			universalSpill.push([key, value]);
+			continue;
+		}
+		result[key] = value;
+	}
 	if (isJsonSchemaObjectNode(result)) {
+		// `minItems` is meaningless on objects; Anthropic rejects it even for 0/1.
+		if (result.minItems !== undefined) universalSpill.push(["minItems", result.minItems]);
 		delete result.minItems;
 	} else {
 		const minItems = result.minItems;
 		if (typeof minItems === "number" && minItems !== 0 && minItems !== 1) {
+			universalSpill.push(["minItems", minItems]);
 			delete result.minItems;
 		}
 	}
+	spillToDescription(result, universalSpill);
+
+	const nodeType = result.type;
+	const isNumericNode =
+		nodeType === "number" ||
+		nodeType === "integer" ||
+		(Array.isArray(nodeType) && nodeType.some(t => t === "number" || t === "integer"));
+	if (isNumericNode) spillKeysToDescription(result, ANTHROPIC_UNSUPPORTED_NUMERIC_FIELDS);
 
 	const type = result.type;
 	const canBeObject =
 		type === "object" || (Array.isArray(type) && type.includes("object")) || isRecord(result.properties);
 	if (canBeObject) {
-		result.additionalProperties = false;
+		// Preserve explicit open-map declarations: `additionalProperties: true`
+		// and schema values such as `{}` (Zod's
+		// `z.record(z.string(), z.unknown())` output). Only close objects that
+		// left the field unspecified, so we don't silently strip a valid
+		// open-map declaration along with unsupported `patternProperties` /
+		// `propertyNames` keywords. Without this, fields like the resolve tool's
+		// `extra` are flattened to `{ type: "object", additionalProperties: false }`,
+		// which forbids every key and breaks plan approval (`extra: { title }`).
+		if (result.additionalProperties === undefined) {
+			result.additionalProperties = false;
+		} else if (isRecord(result.additionalProperties)) {
+			result.additionalProperties = normalizeAnthropicToolSchema(result.additionalProperties, cache);
+		}
 	}
 
 	if (isRecord(result.properties)) {
@@ -2136,6 +2220,9 @@ function normalizeAnthropicToolSchema(
 		result.items = result.items.map(item => normalizeAnthropicToolSchema(item, cache));
 	} else if (isRecord(result.items)) {
 		result.items = normalizeAnthropicToolSchema(result.items, cache);
+	}
+	if (Array.isArray(result.prefixItems)) {
+		result.prefixItems = result.prefixItems.map(item => normalizeAnthropicToolSchema(item, cache));
 	}
 
 	for (const key of COMBINATOR_KEYS) {
@@ -2219,6 +2306,12 @@ function normalizeAnthropicStrictSchemaNode(
 	const cached = cache.get(schema);
 	if (cached) return cached;
 
+	// Strict tool use only supports closed objects. Open maps stay available on
+	// the non-strict schema plan instead of producing an Anthropic 400.
+	if (isJsonSchemaObjectNode(schema) && schema.additionalProperties !== false) {
+		return undefined;
+	}
+
 	const result: Record<string, unknown> = { ...schema };
 	cache.set(schema, result);
 
@@ -2273,6 +2366,11 @@ function normalizeAnthropicStrictSchemaNode(
 		if (items === undefined) return undefined;
 		result.items = items;
 	}
+	if (Array.isArray(result.prefixItems)) {
+		const prefixItems = normalizeAnthropicStrictSchemaNode(result.prefixItems, budget, cache);
+		if (prefixItems === undefined) return undefined;
+		result.prefixItems = prefixItems;
+	}
 
 	for (const key of COMBINATOR_KEYS) {
 		const variants = result[key];
@@ -2314,7 +2412,7 @@ function normalizeAnthropicStrictSchema(
 }
 
 function buildAnthropicBaseToolInputSchema(tool: Tool): Record<string, unknown> {
-	const jsonSchema = tool.parameters as Record<string, unknown>;
+	const jsonSchema = toolWireSchema(tool);
 	return normalizeAnthropicToolSchema({
 		...jsonSchema,
 		type: "object",

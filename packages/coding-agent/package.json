@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@oh-my-pi/pi-coding-agent",
-	"version": "15.0.2",
+	"version": "15.1.2",
 	"description": "Coding agent CLI with read, bash, edit, write tools and session management",
 	"homepage": "https://omp.sh",
 	"author": "Can Boluk",
@@ -54,10 +54,8 @@
 		"@oh-my-pi/pi-tui": "catalog:",
 		"@oh-my-pi/pi-utils": "catalog:",
 		"@puppeteer/browsers": "catalog:",
-		"@sinclair/typebox": "catalog:",
 		"@types/turndown": "catalog:",
 		"@xterm/headless": "catalog:",
-		"ajv": "catalog:",
 		"chalk": "catalog:",
 		"diff": "catalog:",
 		"fflate": "catalog:",
@@ -472,14 +470,6 @@
 		"./session/*": {
 			"types": "./src/session/*.ts",
 			"import": "./src/session/*.ts"
-		},
-		"./session/compaction": {
-			"types": "./src/session/compaction/index.ts",
-			"import": "./src/session/compaction/index.ts"
-		},
-		"./session/compaction/*": {
-			"types": "./src/session/compaction/*.ts",
-			"import": "./src/session/compaction/*.ts"
 		},
 		"./slash-commands/*": {
 			"types": "./src/slash-commands/*.ts",

@@ -164,9 +164,45 @@ function parseSessionEntriesLenient(bytes: Uint8Array): { entries: SessionEntry[
 	return { entries, read: cursor };
 }
 
+function scanLastServiceTier(bytes: Uint8Array): ServiceTier | undefined {
+	let cursor = 0;
+	let currentServiceTier: ServiceTier | undefined;
+
+	while (cursor < bytes.length) {
+		const { values, error, read, done } = Bun.JSONL.parseChunk(bytes, cursor, bytes.length);
+		for (const value of values as SessionEntry[]) {
+			if (isServiceTierChange(value)) currentServiceTier = value.serviceTier ?? undefined;
+		}
+
+		if (error) {
+			const nextNewline = bytes.indexOf(LF, Math.max(read, cursor));
+			if (nextNewline === -1) break;
+			cursor = nextNewline + 1;
+			continue;
+		}
+
+		if (read <= cursor) break;
+		cursor = read;
+		if (done) break;
+	}
+
+	return currentServiceTier;
+}
 /**
  * Parse a session file and extract all assistant message stats.
  * Uses incremental reading with offset tracking.
+ *
+ * Service-tier carry-over: `currentServiceTier` is a session-scoped piece of
+ * state derived from `service_tier_change` entries that affects whether
+ * subsequent OpenAI assistant replies count as premium requests. Incremental
+ * syncs that resume past the most-recent tier change would otherwise lose
+ * that state and silently record `premiumRequests = 0` for priority traffic
+ * (the coding-agent stopped folding the tier into `usage.premiumRequests`
+ * after 13f59162e — the parser is now the sole source of truth). When
+ * `fromOffset > 0` we therefore scan the bytes preceding `fromOffset`
+ * for the latest service-tier value before parsing the unprocessed tail.
+ * The scan only keeps the current tier and does not materialize prefix
+ * entries, preserving offset-based memory behavior for large sessions.
  */
 export interface ParseSessionResult {
 	stats: MessageStats[];
@@ -174,7 +210,6 @@ export interface ParseSessionResult {
 	userLinks: UserMessageLink[];
 	newOffset: number;
 }
-
 export async function parseSessionFile(sessionPath: string, fromOffset = 0): Promise<ParseSessionResult> {
 	let bytes: Uint8Array;
 	try {
@@ -193,6 +228,9 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const unprocessed = bytes.subarray(start);
 	const { entries, read } = parseSessionEntriesLenient(unprocessed);
 	let currentServiceTier: ServiceTier | undefined;
+	if (start > 0) {
+		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
+	}
 	for (const entry of entries) {
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = entry.serviceTier ?? undefined;

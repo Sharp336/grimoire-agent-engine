@@ -37,6 +37,7 @@ function getSuccessDataSchema(parameters: Record<string, unknown>): Record<strin
 describe("YieldTool", () => {
 	it("accepts success payload with data", async () => {
 		const tool = new YieldTool(createSession());
+		expect(tool.strict).toBe(false);
 		const result = await tool.execute("call-1", { result: { data: { ok: true } } } as never);
 		expect(result.details).toEqual({ data: { ok: true }, status: "success", error: undefined });
 	});
@@ -49,6 +50,7 @@ describe("YieldTool", () => {
 
 	it("accepts arbitrary data when outputSchema is null", async () => {
 		const tool = new YieldTool(createSession({ outputSchema: null }));
+		expect(tool.strict).toBe(false);
 		const result = await tool.execute("call-null", { result: { data: { nested: { x: 1 }, ok: true } } } as never);
 		expect(result.details).toEqual({
 			data: { nested: { x: 1 }, ok: true },
@@ -61,6 +63,7 @@ describe("YieldTool", () => {
 		const tool = new YieldTool(createSession({ outputSchema: true }));
 		const dataSchema = getSuccessDataSchema(tool.parameters as unknown as Record<string, unknown>);
 
+		expect(tool.strict).toBe(false);
 		expect(dataSchema.type).toBeUndefined();
 		const primitiveResult = await tool.execute("call-true-number", { result: { data: 42 } } as never);
 		expect(primitiveResult.details).toEqual({ data: 42, status: "success", error: undefined });
@@ -71,6 +74,26 @@ describe("YieldTool", () => {
 			status: "success",
 			error: undefined,
 		});
+	});
+
+	it("preserves explicit loose object output schemas and disables strict tool mode", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					additionalProperties: true,
+				},
+			}),
+		);
+		const dataSchema = getSuccessDataSchema(tool.parameters as unknown as Record<string, unknown>);
+
+		expect(tool.strict).toBe(false);
+		expect(dataSchema.additionalProperties).toBe(true);
+
+		const result = await tool.execute("call-loose-object", {
+			result: { data: { nested: { x: 1 }, ok: true } },
+		} as never);
+		expect(result.details).toEqual({ data: { nested: { x: 1 }, ok: true }, status: "success", error: undefined });
 	});
 	it("repairs strict schema generation for required-only object output schemas", () => {
 		const tool = new YieldTool(
@@ -234,6 +257,7 @@ describe("YieldTool", () => {
 		const dataSchema = getSuccessDataSchema(tool.parameters as unknown as Record<string, unknown>);
 		const dataSchemaProperties = toRecord(dataSchema.properties);
 
+		expect(tool.strict).toBe(false);
 		expect(dataSchema.type).toBe("object");
 		expect(dataSchemaProperties.value).toBeUndefined();
 		expect(Object.keys(dataSchemaProperties)).toHaveLength(0);
@@ -418,5 +442,48 @@ describe("YieldTool", () => {
 	it("sets lenientArgValidation so agent-loop bypasses validation errors", () => {
 		const tool = new YieldTool(createSession());
 		expect(tool.lenientArgValidation).toBe(true);
+	});
+	it("falls back to loose schema when outputSchema contains unresolved external $ref", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					type: "object",
+					properties: {
+						item: { $ref: "https://example.com/missing-schema.json" },
+					},
+					required: ["item"],
+				},
+			}),
+		);
+		expect(tool.strict).toBe(false);
+		const result = await tool.execute("call-unresolved-ref", {
+			result: { data: { item: { whatever: true }, extra: 1 } },
+		} as never);
+		expect(result.details).toEqual({
+			data: { item: { whatever: true }, extra: 1 },
+			status: "success",
+			error: undefined,
+		});
+	});
+
+	it("does not treat literal $ref fields inside enum values as unresolved schema references", async () => {
+		const tool = new YieldTool(
+			createSession({
+				outputSchema: {
+					enum: [{ $ref: "literal" }],
+				},
+			}),
+		);
+
+		expect(tool.strict).toBe(true);
+		const result = await tool.execute("call-literal-ref-enum", {
+			result: { data: { $ref: "literal" } },
+		} as never);
+		expect(result.details?.data).toEqual({ $ref: "literal" });
+		await expect(
+			tool.execute("call-invalid-literal-ref-enum", {
+				result: { data: { $ref: "different" } },
+			} as never),
+		).rejects.toThrow("Output does not match schema");
 	});
 });

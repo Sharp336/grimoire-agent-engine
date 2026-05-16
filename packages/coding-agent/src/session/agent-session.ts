@@ -24,8 +24,26 @@ import {
 	type AgentMessage,
 	type AgentState,
 	type AgentTool,
+	resolveTelemetry,
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
+import {
+	AUTO_HANDOFF_THRESHOLD_FOCUS,
+	CompactionCancelledError,
+	type CompactionPreparation,
+	type CompactionResult,
+	calculateContextTokens,
+	calculatePromptTokens,
+	collectEntriesForBranchSummary,
+	compact,
+	estimateTokens,
+	generateBranchSummary,
+	generateHandoff,
+	prepareCompaction,
+	type SummaryOptions,
+	shouldCompact,
+} from "@oh-my-pi/pi-agent-core/compaction";
+import { DEFAULT_PRUNE_CONFIG, pruneToolOutputs } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type {
 	AssistantMessage,
 	Context,
@@ -62,6 +80,7 @@ import {
 	Snowflake,
 } from "@oh-my-pi/pi-utils";
 import { type AsyncJob, AsyncJobManager } from "../async";
+import { reset as resetCapabilities } from "../capability";
 import type { Rule } from "../capability/rule";
 import { MODEL_ROLE_IDS, type ModelRegistry } from "../config/model-registry";
 import {
@@ -75,6 +94,7 @@ import {
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
 import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
+import { loadCapability } from "../discovery";
 import { normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
 import {
 	disposeKernelSessionsByOwner,
@@ -126,9 +146,7 @@ import { resolveMemoryBackend } from "../memory-backend";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import type { PlanModeState } from "../plan-mode/state";
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
-import autoHandoffThresholdFocusPrompt from "../prompts/system/auto-handoff-threshold-focus.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
-import handoffDocumentPrompt from "../prompts/system/handoff-document.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
 import planModeActivePrompt from "../prompts/system/plan-mode-active.md" with { type: "text" };
 import planModeReferencePrompt from "../prompts/system/plan-mode-reference.md" with { type: "text" };
@@ -138,6 +156,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import { deobfuscateSessionContext, type SecretObfuscator } from "../secrets/obfuscator";
+import { invalidateHostMetadata } from "../ssh/connection-manager";
 import { resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
 import {
 	buildDiscoverableToolSearchIndex,
@@ -160,21 +179,6 @@ import { extractFileMentions, generateFileMentionMessages } from "../utils/file-
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AuthStorage } from "./auth-storage";
 import type { ClientBridge, ClientBridgePermissionOption, ClientBridgePermissionOutcome } from "./client-bridge";
-import {
-	CompactionCancelledError,
-	type CompactionPreparation,
-	type CompactionResult,
-	calculateContextTokens,
-	calculatePromptTokens,
-	collectEntriesForBranchSummary,
-	compact,
-	estimateTokens,
-	generateBranchSummary,
-	prepareCompaction,
-	type SummaryOptions,
-	shouldCompact,
-} from "./compaction";
-import { DEFAULT_PRUNE_CONFIG, pruneToolOutputs } from "./compaction/pruning";
 import {
 	type BashExecutionMessage,
 	type CompactionSummaryMessage,
@@ -274,6 +278,9 @@ export interface AgentSessionConfig {
 	convertToLlm?: (messages: AgentMessage[]) => Message[] | Promise<Message[]>;
 	/** System prompt builder that can consider tool availability. Returns ordered provider-facing blocks. */
 	rebuildSystemPrompt?: (toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>;
+	/** Rebuild the SSH tool from current capability discovery results. */
+	reloadSshTool?: () => Promise<AgentTool | null>;
+	requestedToolNames?: ReadonlySet<string>;
 	/**
 	 * Optional accessor for live MCP server instructions. Read by the session's
 	 * `rebuildSystemPrompt`-skip optimization to detect server-side instruction
@@ -336,6 +343,17 @@ export interface PromptOptions {
 	skipCompactionCheck?: boolean;
 }
 
+/** Result from a handoff operation. */
+export interface HandoffResult {
+	document: string;
+	savedPath?: string;
+}
+
+export interface SessionHandoffOptions {
+	autoTriggered?: boolean;
+	signal?: AbortSignal;
+}
+
 /** Result from cycleModel() */
 export interface ModelCycleResult {
 	model: Model;
@@ -371,25 +389,12 @@ export interface SessionStats {
 	cost: number;
 }
 
-/** Result from handoff() */
-export interface HandoffResult {
-	document: string;
-	savedPath?: string;
-}
-
-interface HandoffOptions {
-	autoTriggered?: boolean;
-	signal?: AbortSignal;
-}
-
 /** Internal marker for hook messages queued through the agent loop */
 // ============================================================================
 // Constants
 // ============================================================================
 
 /** Standard thinking levels */
-
-const AUTO_HANDOFF_THRESHOLD_FOCUS = prompt.render(autoHandoffThresholdFocusPrompt);
 
 type RetryFallbackChains = Record<string, string[]>;
 
@@ -513,6 +518,15 @@ const noOpUIContext: ExtensionUIContext = {
 	getToolsExpanded: () => false,
 	setToolsExpanded: () => {},
 };
+
+function createHandoffContext(document: string): string {
+	return `<handoff-context>\n${document}\n</handoff-context>\n\nThe above is a handoff document from a previous session. Use this context to continue the work seamlessly.`;
+}
+
+function createHandoffFileName(date = new Date()): string {
+	const fileTimestamp = date.toISOString().replace(/[:.]/g, "-");
+	return `handoff-${fileTimestamp}.md`;
+}
 
 // ============================================================================
 // ACP Permission Gate
@@ -731,6 +745,8 @@ export class AgentSession {
 		| ((toolNames: string[], tools: Map<string, AgentTool>) => Promise<{ systemPrompt: string[] }>)
 		| undefined;
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
+	#reloadSshTool: (() => Promise<AgentTool | null>) | undefined;
+	#requestedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
 	/**
 	 * Signature of the (toolNames, tool descriptions) tuple passed to the most
@@ -863,6 +879,7 @@ export class AgentSession {
 		this.#modelRegistry = config.modelRegistry;
 		this.#validateRetryFallbackChains();
 		this.#toolRegistry = config.toolRegistry ?? new Map();
+		this.#requestedToolNames = config.requestedToolNames;
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#onPayload = config.onPayload;
 		this.rawSseDebugBuffer = config.rawSseDebugBuffer ?? new RawSseDebugBuffer();
@@ -881,6 +898,7 @@ export class AgentSession {
 		this.#convertToLlm = config.convertToLlm ?? convertToLlm;
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = config.getMcpServerInstructions;
+		this.#reloadSshTool = config.reloadSshTool;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
 		this.#mcpDiscoveryEnabled = config.mcpDiscoveryEnabled ?? false;
 		this.#setDiscoverableMCPTools(this.#collectDiscoverableMCPToolsFromRegistry());
@@ -2996,6 +3014,45 @@ export class AgentSession {
 	}
 
 	/**
+	 * Reload the SSH tool from disk-backed capability discovery and make the
+	 * refreshed definition visible to the next model call without restarting.
+	 */
+	async refreshSshTool(options?: { activateIfAvailable?: boolean }): Promise<void> {
+		resetCapabilities();
+		if (!this.#reloadSshTool) return;
+		const previousSshTool = this.#toolRegistry.get("ssh");
+		const previousActiveToolNames = this.getActiveToolNames();
+		const hadSshTool = previousSshTool !== undefined;
+		const wasActive = previousActiveToolNames.includes("ssh");
+		const previousHostNames =
+			previousSshTool && "hostNames" in previousSshTool && Array.isArray(previousSshTool.hostNames)
+				? [...previousSshTool.hostNames]
+				: [];
+		const candidateHostNames = new Set(previousHostNames);
+		const capability = await loadCapability<{ name: string }>("ssh", { cwd: this.sessionManager.getCwd() });
+		for (const host of capability.items) {
+			if (typeof host?.name === "string") {
+				candidateHostNames.add(host.name);
+			}
+		}
+		await invalidateHostMetadata(candidateHostNames);
+		const sshAllowed = this.#requestedToolNames === undefined || this.#requestedToolNames.has("ssh");
+		const refreshedTool = await this.#reloadSshTool();
+		if (refreshedTool) {
+			this.#toolRegistry.set(refreshedTool.name, refreshedTool);
+		} else {
+			this.#toolRegistry.delete("ssh");
+			this.#selectedDiscoveredToolNames.delete("ssh");
+		}
+
+		const nextActive = previousActiveToolNames.filter(name => name !== "ssh" && this.#toolRegistry.has(name));
+		if (refreshedTool && sshAllowed && (wasActive || (options?.activateIfAvailable && !hadSshTool))) {
+			nextActive.push(refreshedTool.name);
+		}
+		await this.#applyActiveToolsByName(nextActive);
+	}
+
+	/**
 	 * Set active tools by name.
 	 * Only tools in the registry can be enabled. Unknown tool names are ignored.
 	 * Also rebuilds the system prompt to reflect the new tool set.
@@ -5003,6 +5060,7 @@ export class AgentSession {
 							promptOverride: compactionPrep.hookPrompt,
 							extraContext: compactionPrep.hookContext,
 							remoteInstructions: this.#baseSystemPrompt.join("\n\n"),
+							convertToLlm,
 						},
 					);
 					summary = result.summary;
@@ -5139,16 +5197,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Generate a handoff document by asking the agent, then start a new session with it.
-	 *
-	 * This prompts the current agent to write a comprehensive handoff document,
-	 * waits for completion, then starts a fresh session with the handoff as context.
+	 * Generate a handoff document with a oneshot LLM call, then start a new session with it.
 	 *
 	 * @param customInstructions Optional focus for the handoff document
 	 * @param options Handoff execution options
 	 * @returns The handoff document text, or undefined if cancelled/failed
 	 */
-	async handoff(customInstructions?: string, options?: HandoffOptions): Promise<HandoffResult | undefined> {
+	async handoff(customInstructions?: string, options?: SessionHandoffOptions): Promise<HandoffResult | undefined> {
 		const entries = this.sessionManager.getBranch();
 		const messageCount = entries.filter(e => e.type === "message").length;
 
@@ -5162,10 +5217,6 @@ export class AgentSession {
 		const handoffAbortController = this.#handoffAbortController;
 		const handoffSignal = handoffAbortController.signal;
 		const sourceSignal = options?.signal;
-		const onHandoffAbort = () => {
-			this.agent.abort();
-		};
-		handoffSignal.addEventListener("abort", onHandoffAbort, { once: true });
 		const onSourceAbort = () => {
 			if (!handoffSignal.aborted) {
 				handoffAbortController.abort();
@@ -5178,71 +5229,37 @@ export class AgentSession {
 			}
 		}
 
-		// Build the handoff prompt
-		const handoffPrompt = prompt.render(handoffDocumentPrompt, {
-			additionalFocus: customInstructions,
-		});
-
-		// Create a promise that resolves when the agent completes
-		let handoffText: string | undefined;
-		const { promise: completionPromise, resolve: resolveCompletion } = Promise.withResolvers<void>();
-		let handoffCancelled = false;
-		let unsubscribe: (() => void) | undefined;
-		const onCompletionAbort = () => {
-			unsubscribe?.();
-			handoffCancelled = true;
-			resolveCompletion();
-		};
-		if (handoffSignal.aborted) {
-			onCompletionAbort();
-		} else {
-			handoffSignal.addEventListener("abort", onCompletionAbort, { once: true });
-		}
-		unsubscribe = this.subscribe(event => {
-			if (event.type === "agent_end") {
-				unsubscribe?.();
-				handoffSignal.removeEventListener("abort", onCompletionAbort);
-				// Extract text from the last assistant message
-				const messages = this.agent.state.messages;
-				for (let i = messages.length - 1; i >= 0; i--) {
-					const msg = messages[i];
-					if (msg.role === "assistant") {
-						const content = (msg as AssistantMessage).content;
-						const textParts = content
-							.filter((c): c is { type: "text"; text: string } => c.type === "text")
-							.map(c => c.text);
-						if (textParts.length > 0) {
-							handoffText = textParts.join("\n");
-							break;
-						}
-					}
-				}
-				resolveCompletion();
-			}
-		});
-
 		try {
-			// Send the prompt and wait for completion
 			if (handoffSignal.aborted) {
 				throw new Error("Handoff cancelled");
 			}
-			this.#beginInFlight();
-			try {
-				this.agent.setSystemPrompt(this.#baseSystemPrompt);
-				await this.#promptAgentWithIdleRetry([
-					{
-						role: "developer",
-						content: [{ type: "text", text: handoffPrompt }],
-						attribution: "agent",
-						timestamp: Date.now(),
-					},
-				]);
-			} finally {
-				this.#endInFlight();
-			}
-			await completionPromise;
 
-			if (handoffCancelled || handoffSignal.aborted) {
+			const model = this.model;
+			if (!model) {
+				throw new Error("No model selected for handoff");
+			}
+			const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
+			if (!apiKey) {
+				throw new Error(`No API key for ${model.provider}`);
+			}
+
+			const handoffText = await generateHandoff(
+				this.agent.state.messages,
+				model,
+				apiKey,
+				{
+					systemPrompt: this.#baseSystemPrompt,
+					tools: this.agent.state.tools,
+					customInstructions,
+					convertToLlm,
+					initiatorOverride: "agent",
+					metadata: this.agent.metadataForProvider(model.provider),
+					telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
+				},
+				handoffSignal,
+			);
+
+			if (handoffSignal.aborted) {
 				throw new Error("Handoff cancelled");
 			}
 			if (!handoffText) {
@@ -5265,15 +5282,14 @@ export class AgentSession {
 			this.#todoReminderCount = 0;
 
 			// Inject the handoff document as a custom message
-			const handoffContent = `<handoff-context>\n${handoffText}\n</handoff-context>\n\nThe above is a handoff document from a previous session. Use this context to continue the work seamlessly.`;
+			const handoffContent = createHandoffContext(handoffText);
 			this.sessionManager.appendCustomMessageEntry("handoff", handoffContent, true, undefined, "agent");
 			await this.sessionManager.ensureOnDisk();
 			let savedPath: string | undefined;
 			if (options?.autoTriggered && this.settings.get("compaction.handoffSaveToDisk")) {
 				const artifactsDir = this.sessionManager.getArtifactsDir();
 				if (artifactsDir) {
-					const fileTimestamp = new Date().toISOString().replace(/[:.]/g, "-");
-					const handoffFilePath = path.join(artifactsDir, `handoff-${fileTimestamp}.md`);
+					const handoffFilePath = path.join(artifactsDir, createHandoffFileName());
 					try {
 						await Bun.write(handoffFilePath, `${handoffText}\n`);
 						savedPath = handoffFilePath;
@@ -5294,10 +5310,12 @@ export class AgentSession {
 			this.#syncTodoPhasesFromBranch();
 
 			return { document: handoffText, savedPath };
+		} catch (error) {
+			if (handoffSignal.aborted || (error instanceof Error && error.name === "AbortError")) {
+				throw new Error("Handoff cancelled");
+			}
+			throw error;
 		} finally {
-			unsubscribe?.();
-			handoffSignal.removeEventListener("abort", onCompletionAbort);
-			handoffSignal.removeEventListener("abort", onHandoffAbort);
 			sourceSignal?.removeEventListener("abort", onSourceAbort);
 			this.#handoffAbortController = undefined;
 		}
@@ -5949,6 +5967,7 @@ export class AgentSession {
 		options?: SummaryOptions,
 	): Promise<CompactionResult> {
 		const candidates = this.#getCompactionModelCandidates(this.#modelRegistry.getAvailable());
+		const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 
 		for (const candidate of candidates) {
 			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
@@ -5958,6 +5977,8 @@ export class AgentSession {
 				return await compact(preparation, candidate, apiKey, customInstructions, signal, {
 					...options,
 					metadata: this.agent.metadataForProvider(candidate.provider),
+					convertToLlm,
+					telemetry,
 				});
 			} catch (error) {
 				if (!this.#isCompactionAuthFailure(error)) {
@@ -6194,6 +6215,7 @@ export class AgentSession {
 			} else {
 				const candidates = this.#getCompactionModelCandidates(availableModels);
 				const retrySettings = this.settings.getGroup("retry");
+				const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 				let compactResult: CompactionResult | undefined;
 				let lastError: unknown;
 
@@ -6210,6 +6232,8 @@ export class AgentSession {
 								remoteInstructions: this.#baseSystemPrompt.join("\n\n"),
 								metadata: this.agent.metadataForProvider(candidate.provider),
 								initiatorOverride: "agent",
+								convertToLlm,
+								telemetry,
 							});
 							break;
 						} catch (error) {
@@ -7813,6 +7837,8 @@ export class AgentSession {
 				customInstructions: options.customInstructions,
 				reserveTokens: branchSummarySettings.reserveTokens,
 				metadata: this.agent.metadataForProvider(model.provider),
+				convertToLlm,
+				telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
 			});
 			this.#branchSummaryAbortController = undefined;
 			if (result.aborted) {

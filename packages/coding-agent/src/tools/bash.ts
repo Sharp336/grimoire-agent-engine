@@ -2,8 +2,8 @@ import * as fs from "node:fs";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { ImageProtocol, TERMINAL, Text } from "@oh-my-pi/pi-tui";
-import { $env, getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
-import { Type } from "@sinclair/typebox";
+import { getProjectDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import * as z from "zod/v4";
 import { AsyncJobManager } from "../async";
 import { type BashResult, executeBash } from "../exec/bash-executor";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
@@ -20,6 +20,7 @@ import type { ToolSession } from ".";
 import { applyBashFixups, formatBashFixupNotice } from "./bash-command-fixup";
 import { type BashInteractiveResult, runInteractiveBashPty } from "./bash-interactive";
 import { checkBashInterception } from "./bash-interceptor";
+import { canUseInteractiveBashPty } from "./bash-pty-selection";
 import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-skill-urls";
 import { formatStyledTruncationWarning, type OutputMeta, stripOutputNotice } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
@@ -44,30 +45,16 @@ async function saveBashOriginalArtifact(session: ToolSession, originalText: stri
 	}
 }
 
-const bashSchemaBase = Type.Object({
-	command: Type.String({ description: "command to execute", examples: ["ls -la", "echo hi"] }),
-	env: Type.Optional(
-		Type.Record(Type.String({ pattern: BASH_ENV_NAME_PATTERN.source }), Type.String(), {
-			description: "extra env vars",
-		}),
-	),
-	timeout: Type.Optional(Type.Number({ description: "timeout in seconds", default: 300 })),
-	cwd: Type.Optional(Type.String({ description: "working directory", examples: ["src/", "/tmp"] })),
-
-	pty: Type.Optional(
-		Type.Boolean({
-			description: "run in pty mode",
-		}),
-	),
+const bashSchemaBase = z.object({
+	command: z.string().describe("command to execute"),
+	env: z.record(z.string().regex(BASH_ENV_NAME_PATTERN), z.string()).optional().describe("extra env vars"),
+	timeout: z.number().default(300).describe("timeout in seconds").optional(),
+	cwd: z.string().describe("working directory").optional(),
+	pty: z.boolean().describe("run in pty mode").optional(),
 });
 
-const bashSchemaWithAsync = Type.Object({
-	...bashSchemaBase.properties,
-	async: Type.Optional(
-		Type.Boolean({
-			description: "run in background",
-		}),
-	),
+const bashSchemaWithAsync = bashSchemaBase.extend({
+	async: z.boolean().describe("run in background").optional(),
 });
 
 type BashToolSchema = typeof bashSchemaBase | typeof bashSchemaWithAsync;
@@ -821,9 +808,9 @@ export class BashTool implements AgentTool<BashToolSchema, BashToolDetails> {
 		// Allocate artifact for truncated output storage
 		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 
-		const usePty = pty && $env.PI_NO_PTY !== "1" && ctx?.hasUI === true && ctx.ui !== undefined;
-		const result: BashResult | BashInteractiveResult = usePty
-			? await runInteractiveBashPty(ctx.ui!, {
+		const interactiveUi = canUseInteractiveBashPty(pty, ctx) ? ctx?.ui : undefined;
+		const result: BashResult | BashInteractiveResult = interactiveUi
+			? await runInteractiveBashPty(interactiveUi, {
 					command,
 					cwd: commandCwd,
 					timeoutMs,

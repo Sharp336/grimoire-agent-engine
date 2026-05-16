@@ -40,7 +40,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump } from "../utils/http-inspector";
 import { getOpenAIStreamIdleTimeoutMs, iterateWithIdleTimeout } from "../utils/idle-iterator";
 import { parseStreamingJson } from "../utils/json-parse";
-import { adaptSchemaForStrict, NO_STRICT } from "../utils/schema";
+import { adaptSchemaForStrict, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { compactGrammarDefinition } from "./grammar";
 import { CODEX_BASE_URL, getCodexAccountId, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "./openai-codex/constants";
 import {
@@ -348,7 +348,7 @@ function updateCodexSessionMetadataFromHeaders(
 	}
 }
 
-function extractCodexWebSocketHandshakeHeaders(socket: WebSocket, openEvent?: Event): Headers | undefined {
+function extractCodexWebSocketHandshakeHeaders(socket: Bun.WebSocket, openEvent?: Event): Headers | undefined {
 	const eventRecord = openEvent as Record<string, unknown> | undefined;
 	const eventResponse = eventRecord?.response as Record<string, unknown> | undefined;
 	const socketRecord = socket as unknown as Record<string, unknown>;
@@ -446,9 +446,6 @@ function applyCodexServiceTierPricing(
 	reqTier: unknown,
 ): void {
 	const resolvedTier = resolveCodexCostServiceTier(resTier, reqTier);
-	if (resolvedTier === "priority") {
-		usage.premiumRequests = (usage.premiumRequests ?? 0) + 1;
-	}
 	const multiplier = getCodexServiceTierCostMultiplier(model, resolvedTier);
 	if (multiplier === 1) return;
 	usage.cost.input *= multiplier;
@@ -1892,7 +1889,7 @@ class CodexWebSocketConnection {
 	#idleTimeoutMs: number;
 	#firstEventTimeoutMs: number;
 	#onHandshakeHeaders?: (headers: Headers) => void;
-	#socket: WebSocket | null = null;
+	#socket: Bun.WebSocket | null = null;
 	#queue: Array<Record<string, unknown> | Error | null> = [];
 	#waiters: Array<() => void> = [];
 	#connectPromise?: Promise<void>;
@@ -1933,7 +1930,10 @@ class CodexWebSocketConnection {
 		}
 		const { promise, resolve, reject } = Promise.withResolvers<void>();
 		this.#connectPromise = promise;
-		const socket = new WebSocket(this.#url, { headers: this.#headers });
+		const socket = new (WebSocket as unknown as new (url: string, opts: Bun.WebSocketOptions) => Bun.WebSocket)(
+			this.#url,
+			{ headers: this.#headers },
+		);
 		socket.binaryType = "nodebuffer";
 		this.#socket = socket;
 		let settled = false;
@@ -2095,7 +2095,7 @@ class CodexWebSocketConnection {
 		}
 	}
 
-	#captureHandshakeHeaders(socket: WebSocket, openEvent?: Event): void {
+	#captureHandshakeHeaders(socket: Bun.WebSocket, openEvent?: Event): void {
 		if (!this.#onHandshakeHeaders) return;
 		const headers = extractCodexWebSocketHandshakeHeaders(socket, openEvent);
 		if (!headers) return;
@@ -2485,7 +2485,7 @@ export function convertOpenAICodexResponsesTools(
 			};
 		}
 		const strict = !!(!NO_STRICT && tool.strict);
-		const baseParameters = tool.parameters as unknown as Record<string, unknown>;
+		const baseParameters = toolWireSchema(tool);
 		const { schema: parameters, strict: effectiveStrict } = adaptSchemaForStrict(baseParameters, strict);
 		return {
 			type: "function",

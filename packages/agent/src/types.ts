@@ -7,14 +7,17 @@ import type {
 	Message,
 	Model,
 	SimpleStreamOptions,
+	Static,
 	streamSimple,
 	TextContent,
 	Tool,
 	ToolChoice,
 	ToolResultMessage,
+	TSchema,
 } from "@oh-my-pi/pi-ai";
-import type { Static, TSchema } from "@sinclair/typebox";
 import type { HarmonyAuditEvent } from "./harmony-leak";
+import type { AgentRunCoverage, AgentRunSummary } from "./run-collector";
+import type { AgentTelemetryConfig } from "./telemetry";
 
 /** Stream function - can return sync or Promise for async config lookup */
 export type StreamFn = (
@@ -201,6 +204,16 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 		context: AfterToolCallContext,
 		signal?: AbortSignal,
 	) => Promise<AfterToolCallResult | undefined> | AfterToolCallResult | undefined;
+	/**
+	 * Opt-in OpenTelemetry instrumentation. Passing `{}` enables the loop's
+	 * GenAI-semantic-convention spans (`invoke_agent`, `chat`, `execute_tool`)
+	 * using the global tracer provider. Leaving this field undefined disables
+	 * the instrumentation entirely — the loop performs zero tracer lookups.
+	 *
+	 * See {@link AgentTelemetryConfig} for the full surface (hooks, content
+	 * capture, cost estimator, agent identity).
+	 */
+	telemetry?: AgentTelemetryConfig;
 }
 
 /**
@@ -416,7 +429,13 @@ export interface AgentContext {
 export type AgentEvent =
 	// Agent lifecycle
 	| { type: "agent_start" }
-	| { type: "agent_end"; messages: AgentMessage[] }
+	| {
+			type: "agent_end";
+			messages: AgentMessage[];
+			/** Present iff `AgentTelemetryConfig` was supplied on this run. */
+			telemetry?: AgentRunSummary;
+			coverage?: AgentRunCoverage;
+	  }
 	// Turn lifecycle - a turn is one assistant response + any tool calls/results
 	| { type: "turn_start" }
 	| { type: "turn_end"; message: AgentMessage; toolResults: ToolResultMessage[] }

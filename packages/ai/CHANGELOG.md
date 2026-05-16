@@ -2,6 +2,74 @@
 
 ## [Unreleased]
 
+## [15.1.2] - 2026-05-15
+### Breaking Changes
+
+- Rejected draft-07 tuple and dependency keywords (`items` arrays, `dependencies`, `additionalItems`) in JSON Schema validation
+
+### Added
+
+- Added `responseHeaders`, `responseStatus`, and `responseRequestId` fields to `MockResponse` so mock providers can provide synthetic `ProviderResponseMetadata`
+- Added `onResponse` metadata emission for mocks that sends lowercased headers and a default status of 200 before streaming when response headers are configured
+- Added recursive strict-mode sanitization for array `prefixItems` entries so tuple schemas now enforce object constraints per item
+
+### Changed
+
+- Normalized legacy draft-07 JSON Schema constructs used in tool parameters (`items` arrays, `additionalItems`, `definitions`, `dependencies`) to draft 2020-12 before OpenAI/Google/CCA sanitization, wire conversion, and argument validation
+- Reworked OpenAI response schema adaptation to rewrite `oneOf` into `anyOf` while preserving existing `anyOf` branches
+- Changed tuple array validation to validate per-index schemas from `prefixItems` and apply `items` only to remaining elements
+
+### Fixed
+
+- Fixed validation of plain JSON Schema tool arguments that omitted a `$schema` URI so draft-07-shaped schemas now pass validation instead of being rejected
+- Fixed tuple-array validation for legacy JSON Schema tool schemas to enforce `additionalItems: false` and per-position constraints after automatic draft upgrade
+- Fixed Anthropic tool schema normalization to recurse into `prefixItems` so unsupported constraints inside tuple items are stripped in the generated input schema
+- Fixed Anthropic tool-schema normalization stripping the body of explicit open `additionalProperties` (e.g. Zod's `z.record(z.string(), z.unknown())` compiling to `additionalProperties: {}`) by unconditionally overwriting it with `false`, which closed record-style fields and prevented models from supplying any key. The coding-agent's `resolve` tool exposes plan-approval titles via such a field, so Kimi K2 (and any other Anthropic-shaped provider) could not pass `extra: { title }`, blocking plan mode entirely ([#1104](https://github.com/can1357/oh-my-pi/issues/1104))
+- Fixed Anthropic strict tool planning to leave tools with open `additionalProperties` maps non-strict instead of sending schemas Anthropic rejects.
+
+## [15.1.0] - 2026-05-15
+
+### Breaking Changes
+
+- Removed TypeBox root exports (`Type`, `Static`, and `TSchema`) from the package entrypoint, so callers importing those symbols from `@oh-my-pi/pi-ai` must migrate to `zod` or `@oh-my-pi/pi-ai/types`
+
+### Added
+
+- Added support for defining tool schemas with Zod (`z.object`, `z.string`, etc.) by allowing `Tool.parameters` to be either Zod schemas or legacy JSON Schema objects and converting them to provider wire format automatically
+- Added package-level schema helpers in the `zod/v4` style by exporting `z` and `ZodType` from the root entrypoint
+- Added a `mock` API provider via `createMockModel` to build `Model<"mock">` instances for fully in-memory, deterministic assistant streams in tests
+- Added `streamMock` and `registerMockApi` so mock responses can be consumed through `stream()` and the global custom API registry without an external model backend
+- Added async/sync response scripting with optional context-based handlers, and new `push()`/`reset()` controls to drive multi-turn mock interactions and inspect per-call invocation state
+- Added support in mock responses for simulating tool calls, usage metadata, custom stop reasons, delayed emissions, and terminal error/aborted outcomes
+
+### Changed
+
+- Changed Azure OpenAI Responses tool schema conversion to sanitize tool parameter schemas and rewrite `oneOf` branches as `anyOf` so tool calls remain compatible with Azure's schema expectations
+- Changed `Static<S>` to extract a schema object’s `static` type when present, improving inferred tool argument types for non-Zod parameter definitions
+- Changed `Static` typing behavior so it now infers argument types from Zod schemas and defaults to `unknown` for non-Zod JSON Schema parameter definitions
+- Restored the default steady-state stream idle timeout to 120s (regressed in 15.0.0). 30s was too aggressive for reasoning models, slow proxies, and tool-call planning gaps, surfacing as repeated `Provider stream stalled while waiting for the next event` errors. Existing `PI_STREAM_IDLE_TIMEOUT_MS` / `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` overrides are unchanged.
+
+### Fixed
+
+- Preserved top-level unknown fields in validated tool-call arguments so extra root properties are retained after schema coercion
+- Fixed coercion for Zod `record` fields by parsing JSON-stringified record arguments into objects
+- Validated legacy draft-07 JSON Schema tool parameters directly instead of converting through Zod, improving support for features like `$ref`, `definitions`, `nullable`, and `uniqueItems`
+- Fixed Cloud Code Assist schema preparation to strip unsupported `propertyNames` and fall back to a minimal tool schema when schema meta-validation detects malformed keywords
+- Fixed OpenAI Completions streaming to avoid treating non-output chunks (including role-only preambles) as progress events so idle-timeout watchdog behavior no longer hangs on no-op streamed chunks
+- Fixed Cloud Code Assist schema compatibility checks by replacing strict AJV meta-schema validation with structural JSON Schema validation to avoid rejecting structurally valid tool schemas
+- Fixed lazy built-in provider streams (`anthropic-messages`, `bedrock-converse-stream`, `cursor-agent`, `google-*`, `ollama-chat`, `openai-*`) prematurely aborting slow first-token responses with `Provider stream stalled while waiting for the next event`. The lazy-stream watchdog wrapper was treating the synthetic `start` event (yielded immediately by every provider before the model emits any tokens) as the first real item, which caused the watchdog to drop from `firstItemTimeoutMs` (100s) to `idleTimeoutMs` (30s) before the upstream model had produced anything. The shared `iterateWithIdleTimeout` now keeps `awaitingFirstItem` true until a real progress item arrives, and the lazy-stream wrapper marks `start` as a non-progress keepalive ([#1073](https://github.com/can1357/oh-my-pi/pull/1073) regression).
+- Heal leaked Kimi K2 chat-template tool-call tokens (`<|tool_calls_section_begin|>` … `<|tool_call_argument_begin|>` … `<|tool_calls_section_end|>`) that some hosts (native `kimi-code` API, OpenRouter, Fireworks, etc.) emit into `delta.content` instead of structured `tool_calls`. The OpenAI-completions stream consumer now strips the markers from visible text, reconstructs the embedded calls as proper `toolCall` content blocks (stream-aware, token-boundary-safe), and promotes `finish_reason: stop` to `toolUse` when calls were healed.
+- Fixed OpenAI-completions Kimi K2 healed-call promotion clobbering non-stop terminal finish reasons (`error`, `length`, `aborted`); promotion now only fires when the prior stop reason is the natural-completion `stop`
+- Fixed OpenAI-completions duplicate Kimi tool calls when a single chunk delivers both leaked markers and a structured `delta.tool_calls`; the healer now strips visible markers but discards its synthesized calls so structured payloads remain the single source of truth
+- Fixed Kimi tool-call healer synthesizing a bogus empty call when assistant text mentions a literal `<|tool_call_end|>` (or `<|tool_call_begin|>` / `<|tool_call_argument_begin|>`) outside an active `<|tool_calls_section_begin|>…<|tool_calls_section_end|>` section; the tokens now survive as text
+- Fixed OpenAI-completions ignoring per-request `StreamOptions.streamFirstEventTimeoutMs` when configuring the underlying OpenAI SDK HTTP timeout, causing slow-before-headers providers to be aborted at the env default before the wrapping watchdog armed
+- Fixed JSON Schema validator silently accepting values that violate `propertyNames`, `patternProperties`, `dependentRequired`, `dependencies`, `if`/`then`/`else`, `contains`, and `prefixItems`; the in-tree validator now enforces these keywords instead of falling through. `unevaluatedProperties`/`unevaluatedItems` remain permissive but log a one-time warning so tool authors are not surprised.
+- Fixed recursive `$ref` schemas being treated as universally valid: the validator previously short-circuited on the second occurrence of any ref it had already seen, so nested values violating the referenced sub-schema passed. Cycle detection now keys on (ref, value-identity) pairs with a depth cap for primitive values, so genuine sub-tree violations are still caught.
+- Fixed JSON Schema meta-validator accepting malformed `if`/`then`/`else` and `dependencies` keywords; each conditional sub-schema is now structurally validated and draft-07 `dependencies` accepts either a schema or a string array of dependent keys.
+- Fixed Zod-emitted wire schemas dropping null-valued unknown root fields before `preserveUnknownRootFields` could snapshot them, so callers like `task.simple` no longer lose a `schema: null` argument and downstream rejection paths fire as intended.
+- Fixed mock provider partial `Usage` to recompute `totalTokens` (and `cost.total` when cost components are supplied) when omitted, instead of reporting 0
+- Fixed mock provider auto-generated tool-call IDs to use a per-instance counter (now reset by `reset()`), so test order no longer affects IDs across `createMockModel()` instances
+
 ## [15.0.2] - 2026-05-15
 ### Fixed
 

@@ -1,5 +1,4 @@
-export type { Static, TSchema } from "@sinclair/typebox";
-export { Type } from "@sinclair/typebox";
+export { type ZodType, z } from "zod/v4";
 export * from "./api-registry";
 export * from "./auth-storage";
 export * from "./model-cache";
@@ -17,6 +16,7 @@ export type * from "./providers/google-gemini-cli";
 export * from "./providers/google-gemini-headers";
 export type * from "./providers/google-vertex";
 export * from "./providers/kimi";
+export * from "./providers/mock";
 export * from "./providers/ollama";
 export * from "./providers/openai-codex-responses";
 export * from "./providers/openai-completions";

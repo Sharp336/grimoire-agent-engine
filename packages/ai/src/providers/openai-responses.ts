@@ -6,21 +6,20 @@ import type {
 	ResponseInput,
 } from "openai/resources/responses/responses";
 import { getEnvApiKey } from "../stream";
-import {
-	type AssistantMessage,
-	type CacheRetention,
-	type Context,
-	type FetchImpl,
-	getPriorityPremiumRequests,
-	type MessageAttribution,
-	type Model,
-	type OpenAICompat,
-	type ProviderSessionState,
-	type ServiceTier,
-	type StreamFunction,
-	type StreamOptions,
-	type Tool,
-	type ToolChoice,
+import type {
+	AssistantMessage,
+	CacheRetention,
+	Context,
+	FetchImpl,
+	MessageAttribution,
+	Model,
+	OpenAICompat,
+	ProviderSessionState,
+	ServiceTier,
+	StreamFunction,
+	StreamOptions,
+	Tool,
+	ToolChoice,
 } from "../types";
 import {
 	createOpenAIResponsesHistoryPayload,
@@ -42,7 +41,7 @@ import {
 import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { callWithCopilotModelRetry } from "../utils/retry";
-import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses } from "../utils/schema";
+import { adaptSchemaForStrict, NO_STRICT, sanitizeSchemaForOpenAIResponses, toolWireSchema } from "../utils/schema";
 import { wrapFetchForSseDebug } from "../utils/sse-debug";
 import { mapToOpenAIResponsesToolChoice, type OpenAIResponsesToolChoice } from "../utils/tool-choice";
 import {
@@ -213,11 +212,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				options?.onSseEvent,
 				options?.fetch,
 			);
-			const priorityPremiumRequests = getPriorityPremiumRequests(options?.serviceTier, model.provider);
-			const premiumRequestsTotal =
-				copilotPremiumRequests !== undefined || priorityPremiumRequests > 0
-					? (copilotPremiumRequests ?? 0) + priorityPremiumRequests
-					: undefined;
+			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			const { params } = buildParams(model, context, options, providerSessionState, baseUrl);
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
@@ -592,7 +587,7 @@ export function convertTools(tools: Tool[], strictMode: boolean, model: Model<"o
 			} as unknown as OpenAITool;
 		}
 		const strict = !NO_STRICT && strictMode && tool.strict !== false;
-		const baseParameters = tool.parameters as unknown as Record<string, unknown>;
+		const baseParameters = toolWireSchema(tool);
 		const responseParameters = sanitizeSchemaForOpenAIResponses(baseParameters);
 		const { schema: parameters, strict: effectiveStrict } = adaptSchemaForStrict(responseParameters, strict);
 		return {

@@ -10,9 +10,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
-import { Type } from "@sinclair/typebox";
-
-class MockAssistantStream extends AssistantMessageEventStream {}
+import * as z from "zod/v4";
 
 let tempDir: TempDir;
 let authStorage: AuthStorage | undefined;
@@ -33,14 +31,14 @@ beforeEach(async () => {
 		name: "bash",
 		label: "Bash",
 		description: "Mock bash tool",
-		parameters: Type.Object({}),
+		parameters: z.object({}),
 		execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
 	};
 	const writeTool: AgentTool = {
 		name: "write",
 		label: "Write",
 		description: "Mock write tool",
-		parameters: Type.Object({}),
+		parameters: z.object({}),
 		execute: async () => ({ content: [{ type: "text" as const, text: "ok" }] }),
 	};
 
@@ -53,7 +51,7 @@ beforeEach(async () => {
 			messages: [],
 		},
 		convertToLlm,
-		streamFn: () => new MockAssistantStream(),
+		streamFn: () => new AssistantMessageEventStream(),
 	});
 
 	session = new AgentSession({

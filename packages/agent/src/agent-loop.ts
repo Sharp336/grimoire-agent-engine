@@ -7,9 +7,12 @@ import {
 	type AssistantMessageEvent,
 	type Context,
 	EventStream,
+	isZodSchema,
 	streamSimple,
 	type ToolResultMessage,
+	type TSchema,
 	validateToolArguments,
+	zodToWireSchema,
 } from "@oh-my-pi/pi-ai";
 import { sanitizeText } from "@oh-my-pi/pi-natives";
 import {
@@ -19,6 +22,23 @@ import {
 	isHarmonyLeakMitigationTarget,
 	signalListLabel,
 } from "./harmony-leak";
+import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
+import {
+	type AgentTelemetry,
+	failChatSpan,
+	finishChatSpan,
+	finishExecuteToolSpan,
+	finishInvokeAgentSpan,
+	fireOnRunEnd,
+	PiGenAIAttr,
+	recordSkippedTool,
+	resolveTelemetry,
+	runInActiveSpan,
+	type Span,
+	startChatSpan,
+	startExecuteToolSpan,
+	startInvokeAgentSpan,
+} from "./telemetry";
 import type {
 	AgentContext,
 	AgentEvent,
@@ -173,6 +193,113 @@ function createAgentStream(): EventStream<AgentEvent, AgentMessage[]> {
 	);
 }
 
+/**
+ * Build the `agent_end` event payload. When telemetry is enabled, snapshots
+ * the run collector so consumers receive {@link AgentRunSummary} +
+ * {@link AgentRunCoverage} alongside the messages without parsing OTEL spans.
+ * When telemetry is unset, returns the bare event for backwards compatibility.
+ */
+function buildAgentEndEvent(
+	messages: AgentMessage[],
+	telemetry: AgentTelemetry | undefined,
+	stepCount: number,
+): Extract<AgentEvent, { type: "agent_end" }> {
+	if (!telemetry) return { type: "agent_end", messages };
+	const snapshot = telemetry.collector.snapshot({ stepCount });
+	if (telemetry.collector.markRunEnded()) {
+		fireOnRunEnd(telemetry, snapshot.summary, snapshot.coverage);
+	}
+	return { type: "agent_end", messages, telemetry: snapshot.summary, coverage: snapshot.coverage };
+}
+
+/**
+ * Detailed-result handle returned by {@link agentLoopDetailed}. Adds the
+ * run-level telemetry/coverage rollup to the existing `AgentMessage[]`
+ * payload without changing the resolved type of `stream.result()`.
+ */
+export interface AgentLoopDetailedResult {
+	readonly messages: AgentMessage[];
+	readonly telemetry: AgentRunSummary | undefined;
+	readonly coverage: AgentRunCoverage | undefined;
+}
+
+/**
+ * Convenience wrapper over {@link agentLoop} that exposes the run-level
+ * summary + coverage alongside the messages. The returned `stream` is the
+ * same `EventStream` callers already consume; `detailed()` awaits the
+ * stream's `agent_end` event and returns the additive fields.
+ *
+ * Existing `stream.result()` semantics are preserved — it still resolves to
+ * `AgentMessage[]`. Use {@link agentLoopDetailed} when you need the rollup;
+ * use {@link agentLoop} when you do not.
+ */
+export function agentLoopDetailed(
+	prompts: AgentMessage[],
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal?: AbortSignal,
+	streamFn?: StreamFn,
+): {
+	readonly stream: EventStream<AgentEvent, AgentMessage[]>;
+	readonly detailed: () => Promise<AgentLoopDetailedResult>;
+} {
+	const capture = createDetailedCapture(config);
+	const stream = agentLoop(prompts, context, capture.config, signal, streamFn);
+	return { stream, detailed: () => capture.detailed(stream) };
+}
+
+/**
+ * Like {@link agentLoopDetailed} but built on top of
+ * {@link agentLoopContinue}.
+ */
+export function agentLoopContinueDetailed(
+	context: AgentContext,
+	config: AgentLoopConfig,
+	signal?: AbortSignal,
+	streamFn?: StreamFn,
+): {
+	readonly stream: EventStream<AgentEvent, AgentMessage[]>;
+	readonly detailed: () => Promise<AgentLoopDetailedResult>;
+} {
+	const capture = createDetailedCapture(config);
+	const stream = agentLoopContinue(context, capture.config, signal, streamFn);
+	return { stream, detailed: () => capture.detailed(stream) };
+}
+
+/**
+ * Wire an `onRunEnd` telemetry hook onto `config` so the detailed helper can
+ * capture the run summary without consuming the event stream. Preserves any
+ * existing `onRunEnd` the caller had set.
+ */
+function createDetailedCapture(config: AgentLoopConfig): {
+	readonly config: AgentLoopConfig;
+	readonly detailed: (stream: EventStream<AgentEvent, AgentMessage[]>) => Promise<AgentLoopDetailedResult>;
+} {
+	let captured: { summary: AgentRunSummary; coverage: AgentRunCoverage } | undefined;
+	const userHook = config.telemetry?.onRunEnd;
+	const wired: AgentLoopConfig = {
+		...config,
+		telemetry: {
+			...(config.telemetry ?? {}),
+			onRunEnd: (summary, coverage) => {
+				captured = { summary, coverage };
+				userHook?.(summary, coverage);
+			},
+		},
+	};
+	return {
+		config: wired,
+		detailed: async stream => {
+			const messages = await stream.result();
+			return {
+				messages,
+				telemetry: captured?.summary,
+				coverage: captured?.coverage,
+			};
+		},
+	};
+}
+
 function normalizeMessagesForProvider(
 	messages: Context["messages"],
 	model: AgentLoopConfig["model"],
@@ -240,10 +367,15 @@ function normalizeTools(tools: AgentContext["tools"], injectIntent: boolean): Co
 	injectIntent = injectIntent && Bun.env.PI_NO_INTENT !== "1";
 	return tools?.map(t => {
 		const intentMode = resolveIntentMode(t.intent);
-		const parameters =
-			injectIntent && intentMode !== "omit"
-				? (injectIntentIntoSchema(t.parameters, intentMode) as typeof t.parameters)
-				: t.parameters;
+		let parameters: TSchema = t.parameters;
+		if (injectIntent && intentMode !== "omit") {
+			if (isZodSchema(parameters)) {
+				const wired = zodToWireSchema(parameters);
+				parameters = injectIntentIntoSchema(wired, intentMode) as TSchema;
+			} else {
+				parameters = injectIntentIntoSchema(parameters, intentMode) as TSchema;
+			}
+		}
 		const description = t.description ?? "";
 		return { ...t, parameters, description };
 	});
@@ -273,6 +405,50 @@ async function runLoop(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
+	streamFn?: StreamFn,
+): Promise<void> {
+	const telemetry = resolveTelemetry(config.telemetry, config.sessionId);
+	const invokeAgentSpan = startInvokeAgentSpan(telemetry, config.model);
+	const stepCounter = { count: 0 };
+	let caughtError: unknown;
+	try {
+		await runInActiveSpan(invokeAgentSpan, () =>
+			runLoopBody(
+				currentContext,
+				newMessages,
+				config,
+				signal,
+				stream,
+				telemetry,
+				invokeAgentSpan,
+				stepCounter,
+				streamFn,
+			),
+		);
+	} catch (err) {
+		caughtError = err;
+		throw err;
+	} finally {
+		finishInvokeAgentSpan(telemetry, invokeAgentSpan, {
+			stepCount: stepCounter.count,
+			errorObject: caughtError,
+		});
+	}
+}
+
+interface StepCounter {
+	count: number;
+}
+
+async function runLoopBody(
+	currentContext: AgentContext,
+	newMessages: AgentMessage[],
+	config: AgentLoopConfig,
+	signal: AbortSignal | undefined,
+	stream: EventStream<AgentEvent, AgentMessage[]>,
+	telemetry: AgentTelemetry | undefined,
+	invokeAgentSpan: Span | undefined,
+	stepCounter: StepCounter,
 	streamFn?: StreamFn,
 ): Promise<void> {
 	let firstTurn = true;
@@ -318,6 +494,9 @@ async function runLoop(
 					config,
 					signal,
 					stream,
+					telemetry,
+					invokeAgentSpan,
+					stepCounter,
 					streamFn,
 					harmonyRetryAttempt,
 				);
@@ -362,9 +541,19 @@ async function runLoop(
 					currentContext.messages.push(result);
 					newMessages.push(result);
 					toolResults.push(result);
+					// The placeholder result above keeps the API's tool_use/tool_result
+					// pairing intact, but no execute_tool span is started for these
+					// calls. Mirror the run-collector entry directly so the run
+					// summary's tool counters and `coverage.toolsInvoked` reflect
+					// what the user actually saw on the wire.
+					recordSkippedTool(telemetry, {
+						toolCallId: toolCall.id,
+						toolName: toolCall.name,
+						status: message.stopReason === "aborted" ? "aborted" : "error",
+					});
 				}
 				stream.push({ type: "turn_end", message, toolResults });
-				stream.push({ type: "agent_end", messages: newMessages });
+				stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count));
 				stream.end(newMessages);
 				return;
 			}
@@ -375,7 +564,15 @@ async function runLoop(
 
 			const toolResults: ToolResultMessage[] = [];
 			if (hasMoreToolCalls) {
-				const executionResult = await executeToolCalls(currentContext, message, signal, stream, config);
+				const executionResult = await executeToolCalls(
+					currentContext,
+					message,
+					signal,
+					stream,
+					config,
+					telemetry,
+					invokeAgentSpan,
+				);
 
 				toolResults.push(...executionResult.toolResults);
 				steeringMessagesFromExecution = executionResult.steeringMessages;
@@ -403,7 +600,7 @@ async function runLoop(
 		break;
 	}
 
-	stream.push({ type: "agent_end", messages: newMessages });
+	stream.push(buildAgentEndEvent(newMessages, telemetry, stepCounter.count));
 	stream.end(newMessages);
 }
 
@@ -433,6 +630,9 @@ async function streamAssistantResponse(
 	config: AgentLoopConfig,
 	signal: AbortSignal | undefined,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
+	telemetry: AgentTelemetry | undefined,
+	invokeAgentSpan: Span | undefined,
+	stepCounter: StepCounter,
 	streamFn?: StreamFn,
 	harmonyRetryAttempt = 0,
 ): Promise<AssistantMessage> {
@@ -474,111 +674,175 @@ async function streamAssistantResponse(
 			? AbortSignal.any([signal, harmonyAbortController.signal])
 			: harmonyAbortController.signal
 		: signal;
-	const response = await streamFunction(config.model, llmContext, {
-		...config,
-		apiKey: resolvedApiKey,
-		metadata: resolvedMetadata,
-		toolChoice: dynamicToolChoice ?? config.toolChoice,
-		reasoning: dynamicReasoning ?? config.reasoning,
-		temperature:
-			harmonyRetryAttempt > 0 && config.temperature !== undefined ? config.temperature + 0.05 : config.temperature,
-		signal: requestSignal,
+	const effectiveTemperature =
+		harmonyRetryAttempt > 0 && config.temperature !== undefined ? config.temperature + 0.05 : config.temperature;
+	const effectiveToolChoice = dynamicToolChoice ?? config.toolChoice;
+	const effectiveReasoning = dynamicReasoning ?? config.reasoning;
+
+	const chatStepNumber = stepCounter.count;
+	stepCounter.count += 1;
+	const chatSpan = startChatSpan(telemetry, config.model, {
+		parent: invokeAgentSpan,
+		stepNumber: chatStepNumber,
+		request: {
+			maxTokens: config.maxTokens,
+			temperature: effectiveTemperature,
+			topP: config.topP,
+			topK: config.topK,
+			presencePenalty: config.presencePenalty,
+			serviceTier: config.serviceTier,
+			reasoningEffort: typeof effectiveReasoning === "string" ? effectiveReasoning : undefined,
+			toolChoice: effectiveToolChoice,
+			tools: llmContext.tools,
+			systemPrompt: llmContext.systemPrompt,
+			messages: llmContext.messages,
+		},
 	});
 
-	let partialMessage: AssistantMessage | null = null;
-	let addedPartial = false;
+	// Wrap the user-supplied onResponse so we always observe response headers
+	// for telemetry (`ChatUsageEvent.headers`, gateway auto-detection) without
+	// stealing them from the configured hook.
+	let capturedHeaders: Readonly<Record<string, string>> | undefined;
+	const userOnResponse = config.onResponse;
+	const captureOnResponse: AgentLoopConfig["onResponse"] = (response, modelInfo) => {
+		capturedHeaders = response.headers;
+		return userOnResponse?.(response, modelInfo);
+	};
 
-	const responseIterator = response[Symbol.asyncIterator]();
-
-	// Set up a single abort race: register the abort listener once for the whole
-	// stream and reuse the same race promise for every iterator.next() instead of
-	// allocating Promise.withResolvers and add/removeEventListener per event.
-	let abortRacePromise: Promise<typeof ABORTED> | undefined;
-	let detachAbortListener: (() => void) | undefined;
-	if (requestSignal) {
-		if (requestSignal.aborted) {
-			return emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
-		}
-		const { promise, resolve } = Promise.withResolvers<typeof ABORTED>();
-		const onAbort = () => resolve(ABORTED);
-		requestSignal.addEventListener("abort", onAbort, { once: true });
-		abortRacePromise = promise;
-		detachAbortListener = () => requestSignal.removeEventListener("abort", onAbort);
-	}
+	const finishChat = async (message: AssistantMessage): Promise<void> => {
+		await finishChatSpan(telemetry, chatSpan, message, {
+			stepNumber: chatStepNumber,
+			serviceTier: config.serviceTier,
+			responseHeaders: capturedHeaders,
+			baseUrl: config.model.baseUrl,
+		});
+	};
 
 	try {
-		while (true) {
-			let next: IteratorResult<AssistantMessageEvent>;
-			if (abortRacePromise) {
-				const result = await Promise.race([responseIterator.next(), abortRacePromise]);
-				if (result === ABORTED) {
-					responseIterator.return?.()?.catch(() => {});
-					return emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
+		return await runInActiveSpan(chatSpan, async () => {
+			const response = await streamFunction(config.model, llmContext, {
+				...config,
+				apiKey: resolvedApiKey,
+				metadata: resolvedMetadata,
+				toolChoice: effectiveToolChoice,
+				reasoning: effectiveReasoning,
+				temperature: effectiveTemperature,
+				signal: requestSignal,
+				onResponse: captureOnResponse,
+			});
+
+			let partialMessage: AssistantMessage | null = null;
+			let addedPartial = false;
+
+			const responseIterator = response[Symbol.asyncIterator]();
+
+			// Set up a single abort race: register the abort listener once for the whole
+			// stream and reuse the same race promise for every iterator.next() instead of
+			// allocating Promise.withResolvers and add/removeEventListener per event.
+			let abortRacePromise: Promise<typeof ABORTED> | undefined;
+			let detachAbortListener: (() => void) | undefined;
+			if (requestSignal) {
+				if (requestSignal.aborted) {
+					const aborted = emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
+					await finishChat(aborted);
+					return aborted;
 				}
-				next = result;
-			} else {
-				next = await responseIterator.next();
+				const { promise, resolve } = Promise.withResolvers<typeof ABORTED>();
+				const onAbort = () => resolve(ABORTED);
+				requestSignal.addEventListener("abort", onAbort, { once: true });
+				abortRacePromise = promise;
+				detachAbortListener = () => requestSignal.removeEventListener("abort", onAbort);
 			}
-			if (requestSignal?.aborted) {
-				return emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
-			}
-			if (next.done) break;
 
-			const event = next.value;
-
-			switch (event.type) {
-				case "start":
-					partialMessage = event.partial;
-					context.messages.push(partialMessage);
-					addedPartial = true;
-					stream.push({ type: "message_start", message: { ...partialMessage } });
-					break;
-
-				case "text_start":
-				case "text_delta":
-				case "text_end":
-				case "thinking_start":
-				case "thinking_delta":
-				case "thinking_end":
-				case "toolcall_start":
-				case "toolcall_delta":
-				case "toolcall_end":
-					if (partialMessage) {
-						partialMessage = event.partial;
-						context.messages[context.messages.length - 1] = partialMessage;
-						config.onAssistantMessageEvent?.(partialMessage, event);
-						if (signal?.aborted) {
-							continue;
+			try {
+				while (true) {
+					let next: IteratorResult<AssistantMessageEvent>;
+					if (abortRacePromise) {
+						const result = await Promise.race([responseIterator.next(), abortRacePromise]);
+						if (result === ABORTED) {
+							responseIterator.return?.()?.catch(() => {});
+							const aborted = emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
+							await finishChat(aborted);
+							return aborted;
 						}
-						stream.push({
-							type: "message_update",
-							assistantMessageEvent: event,
-							message: { ...partialMessage },
-						});
-					}
-					break;
-
-				case "done":
-				case "error": {
-					const finalMessage = await response.result();
-					if (addedPartial) {
-						context.messages[context.messages.length - 1] = finalMessage;
+						next = result;
 					} else {
-						context.messages.push(finalMessage);
+						next = await responseIterator.next();
 					}
-					if (!addedPartial) {
-						stream.push({ type: "message_start", message: { ...finalMessage } });
+					if (requestSignal?.aborted) {
+						const aborted = emitAbortedAssistantMessage(partialMessage, addedPartial, context, config, stream);
+						await finishChat(aborted);
+						return aborted;
 					}
-					stream.push({ type: "message_end", message: finalMessage });
-					return finalMessage;
-				}
-			}
-		}
-	} finally {
-		detachAbortListener?.();
-	}
+					if (next.done) break;
 
-	return await response.result();
+					const event = next.value;
+
+					switch (event.type) {
+						case "start":
+							partialMessage = event.partial;
+							context.messages.push(partialMessage);
+							addedPartial = true;
+							stream.push({ type: "message_start", message: { ...partialMessage } });
+							break;
+
+						case "text_start":
+						case "text_delta":
+						case "text_end":
+						case "thinking_start":
+						case "thinking_delta":
+						case "thinking_end":
+						case "toolcall_start":
+						case "toolcall_delta":
+						case "toolcall_end":
+							if (partialMessage) {
+								partialMessage = event.partial;
+								context.messages[context.messages.length - 1] = partialMessage;
+								config.onAssistantMessageEvent?.(partialMessage, event);
+								if (signal?.aborted) {
+									continue;
+								}
+								stream.push({
+									type: "message_update",
+									assistantMessageEvent: event,
+									message: { ...partialMessage },
+								});
+							}
+							break;
+
+						case "done":
+						case "error": {
+							const finalMessage = await response.result();
+							if (addedPartial) {
+								context.messages[context.messages.length - 1] = finalMessage;
+							} else {
+								context.messages.push(finalMessage);
+							}
+							if (!addedPartial) {
+								stream.push({ type: "message_start", message: { ...finalMessage } });
+							}
+							stream.push({ type: "message_end", message: finalMessage });
+							await finishChat(finalMessage);
+							return finalMessage;
+						}
+					}
+				}
+			} finally {
+				detachAbortListener?.();
+			}
+
+			const trailing = await response.result();
+			await finishChat(trailing);
+			return trailing;
+		});
+	} catch (err) {
+		failChatSpan(telemetry, chatSpan, {
+			errorObject: err,
+			responseHeaders: capturedHeaders,
+			baseUrl: config.model.baseUrl,
+		});
+		throw err;
+	}
 }
 
 function emitAbortedAssistantMessage(
@@ -628,6 +892,8 @@ async function executeToolCalls(
 	signal: AbortSignal | undefined,
 	stream: EventStream<AgentEvent, AgentMessage[]>,
 	config: AgentLoopConfig,
+	telemetry: AgentTelemetry | undefined,
+	invokeAgentSpan: Span | undefined,
 ): Promise<{ toolResults: ToolResultMessage[]; steeringMessages?: AgentMessage[] }> {
 	const tools = currentContext.tools;
 	const {
@@ -733,6 +999,11 @@ async function executeToolCalls(
 
 	const runTool = async (record: (typeof records)[number], index: number): Promise<void> => {
 		if (interruptState.triggered) {
+			// Skip both span emission and the collector orphan record here. The
+			// tail sweep below (after `Promise.allSettled`) is the single path
+			// that handles "no result message was produced" — it calls
+			// `recordSkippedTool` and `emitToolResult` once per record, so any
+			// work we did here would double-count.
 			record.skipped = true;
 			return;
 		}
@@ -765,110 +1036,147 @@ async function executeToolCalls(
 			intent: toolCall.intent,
 		});
 
-		let result: AgentToolResult<any>;
-		let isError = false;
-
-		try {
-			if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
-
-			let effectiveArgs: Record<string, unknown>;
-			try {
-				effectiveArgs = validateToolArguments(tool, { ...toolCall, arguments: argsForExecution });
-			} catch (validationError) {
-				if (tool.lenientArgValidation) {
-					effectiveArgs = argsForExecution;
-				} else {
-					throw validationError;
-				}
-			}
-
-			if (beforeToolCall) {
-				const beforeResult = await beforeToolCall(
-					{
-						assistantMessage,
-						toolCall,
-						args: effectiveArgs,
-						context: currentContext,
-					},
-					toolSignal,
-				);
-				if (beforeResult?.block) {
-					throw new Error(beforeResult.reason || "Tool execution was blocked");
-				}
-			}
-			// Reflect post-hook args so emitted tool results / afterToolCall see what actually executed.
-			record.args = effectiveArgs;
-
-			const toolContext = getToolContext
-				? getToolContext({
-						batchId,
-						index,
-						total: toolCalls.length,
-						toolCalls: toolCallInfos,
-					})
-				: undefined;
-			const rawResult = await tool.execute(
-				toolCall.id,
-				transformToolCallArguments ? transformToolCallArguments(effectiveArgs, toolCall.name) : effectiveArgs,
-				tool.nonAbortable ? undefined : toolSignal,
-				partialResult => {
-					stream.push({
-						type: "tool_execution_update",
-						toolCallId: toolCall.id,
-						toolName: toolCall.name,
-						args: effectiveArgs,
-						partialResult: coerceToolResult(partialResult).result,
-					});
-				},
-				toolContext,
-			);
-			const coerced = coerceToolResult(rawResult);
-			result = coerced.result;
-			if (coerced.malformed || result.isError) isError = true;
-		} catch (e) {
-			result = {
-				content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
-				details: {},
-			};
-			isError = true;
+		const toolSpan = startExecuteToolSpan(telemetry, {
+			tool,
+			toolName: toolCall.name,
+			toolCallId: toolCall.id,
+			args: argsForExecution,
+			parent: invokeAgentSpan,
+		});
+		if (toolSpan && toolCall.intent) {
+			toolSpan.setAttribute(PiGenAIAttr.ToolCallIntent, toolCall.intent);
 		}
 
-		if (afterToolCall) {
+		let result: AgentToolResult<any> = { content: [], details: {} };
+		let isError = false;
+		let caughtError: unknown;
+
+		await runInActiveSpan(toolSpan, async () => {
 			try {
-				const after = await afterToolCall(
-					{
-						assistantMessage,
-						toolCall,
-						args: record.args,
-						result,
-						isError,
-						context: currentContext,
-					},
-					toolSignal,
-				);
-				if (after) {
-					result = {
-						content: after.content ?? result.content,
-						details: after.details ?? result.details,
-						isError: after.isError ?? result.isError,
-					};
-					isError = after.isError ?? isError;
+				if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
+
+				let effectiveArgs: Record<string, unknown>;
+				try {
+					effectiveArgs = validateToolArguments(tool, { ...toolCall, arguments: argsForExecution });
+				} catch (validationError) {
+					if (tool.lenientArgValidation) {
+						effectiveArgs = argsForExecution;
+					} else {
+						throw validationError;
+					}
 				}
+
+				if (beforeToolCall) {
+					const beforeResult = await beforeToolCall(
+						{
+							assistantMessage,
+							toolCall,
+							args: effectiveArgs,
+							context: currentContext,
+						},
+						toolSignal,
+					);
+					if (beforeResult?.block) {
+						throw new ToolCallBlockedError(beforeResult.reason);
+					}
+				}
+				// Reflect post-hook args so emitted tool results / afterToolCall see what actually executed.
+				record.args = effectiveArgs;
+
+				const toolContext = getToolContext
+					? getToolContext({
+							batchId,
+							index,
+							total: toolCalls.length,
+							toolCalls: toolCallInfos,
+						})
+					: undefined;
+				const rawResult = await tool.execute(
+					toolCall.id,
+					transformToolCallArguments ? transformToolCallArguments(effectiveArgs, toolCall.name) : effectiveArgs,
+					tool.nonAbortable ? undefined : toolSignal,
+					partialResult => {
+						stream.push({
+							type: "tool_execution_update",
+							toolCallId: toolCall.id,
+							toolName: toolCall.name,
+							args: effectiveArgs,
+							partialResult: coerceToolResult(partialResult).result,
+						});
+					},
+					toolContext,
+				);
+				const coerced = coerceToolResult(rawResult);
+				result = coerced.result;
+				if (coerced.malformed || result.isError) isError = true;
 			} catch (e) {
+				caughtError = e;
 				result = {
 					content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
 					details: {},
 				};
 				isError = true;
 			}
-		}
 
-		if (interruptState.triggered) {
+			if (afterToolCall) {
+				try {
+					const after = await afterToolCall(
+						{
+							assistantMessage,
+							toolCall,
+							args: record.args,
+							result,
+							isError,
+							context: currentContext,
+						},
+						toolSignal,
+					);
+					if (after) {
+						result = {
+							content: after.content ?? result.content,
+							details: after.details ?? result.details,
+							isError: after.isError ?? result.isError,
+						};
+						isError = after.isError ?? isError;
+					}
+				} catch (e) {
+					caughtError = e;
+					result = {
+						content: [{ type: "text", text: e instanceof Error ? e.message : String(e) }],
+						details: {},
+					};
+					isError = true;
+				}
+			}
+		});
+
+		const interrupted = interruptState.triggered;
+		if (interrupted) {
 			record.skipped = true;
 			emitToolResult(record, createSkippedToolResult(), true);
 		} else {
 			emitToolResult(record, result, isError);
 		}
+
+		const firstTextBlock = result.content?.[0];
+		const errorMessageForSpan =
+			caughtError === undefined && isError && firstTextBlock?.type === "text" ? firstTextBlock.text : undefined;
+		const status = interrupted
+			? "aborted"
+			: caughtError instanceof ToolCallBlockedError
+				? "blocked"
+				: isError
+					? "error"
+					: "ok";
+		finishExecuteToolSpan(telemetry, toolSpan, {
+			result,
+			isError,
+			status,
+			errorMessage: errorMessageForSpan,
+			errorObject: caughtError,
+			toolCallId: toolCall.id,
+			toolName: toolCall.name,
+		});
 
 		await checkSteering();
 	};
@@ -896,6 +1204,11 @@ async function executeToolCalls(
 	for (const record of records) {
 		if (!record.toolResultMessage) {
 			record.skipped = true;
+			recordSkippedTool(telemetry, {
+				toolCallId: record.toolCall.id,
+				toolName: record.toolCall.name,
+				status: "skipped",
+			});
 			emitToolResult(record, createSkippedToolResult(), true);
 		}
 	}

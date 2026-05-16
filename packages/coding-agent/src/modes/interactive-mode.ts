@@ -5,6 +5,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { type Agent, type AgentMessage, type AgentToolResult, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	type AssistantMessage,
 	type ImageContent,
@@ -46,7 +47,6 @@ import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compa
 	type: "text",
 };
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
-import type { CompactionOutcome } from "../session/compaction";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionContext, SessionManager } from "../session/session-manager";
 import { getRecentSessions } from "../session/session-manager";
@@ -1806,13 +1806,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#renderPlanPreview(planContent, { append: true });
 		const choice = await this.showHookSelector(
 			"Plan mode - next step",
-			[
-				"Approve and execute",
-				"Approve and compact context",
-				"Approve and keep context",
-				"Refine plan",
-				"Stay in plan mode",
-			],
+			["Approve and execute", "Approve and compact context", "Approve and keep context", "Refine plan"],
 			{
 				helpText: this.#getPlanReviewHelpText(),
 				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
@@ -1843,16 +1837,6 @@ export class InteractiveMode implements InteractiveModeContext {
 				);
 			}
 			return;
-		}
-		if (choice === "Refine plan") {
-			const refinement = (await this.showHookInput("What should be refined?"))?.trim();
-			if (refinement) {
-				if (this.onInputCallback) {
-					this.onInputCallback(this.startPendingSubmission({ text: refinement }));
-				} else {
-					this.editor.setText(refinement);
-				}
-			}
 		}
 	}
 

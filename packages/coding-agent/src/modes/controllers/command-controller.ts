@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { CompactionCancelledError, type CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	getEnvApiKey,
 	getProviderDetails,
@@ -37,7 +38,6 @@ import { buildHotkeysMarkdown } from "../../modes/utils/hotkeys-markdown";
 import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
-import { CompactionCancelledError, type CompactionOutcome } from "../../session/compaction";
 import type { NewSessionOptions } from "../../session/session-manager";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
@@ -968,6 +968,7 @@ export class CommandController {
 			clearClaudePluginRootsCache(); // re-warms preloadedPluginRoots with new project dir (async)
 			resetCapabilities();
 			await this.ctx.refreshSlashCommandState(resolvedPath);
+			await this.ctx.session.refreshSshTool({ activateIfAvailable: true });
 
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorTopBorder();
@@ -1175,8 +1176,29 @@ export class CommandController {
 			return;
 		}
 
+		if (this.ctx.loadingAnimation) {
+			this.ctx.loadingAnimation.stop();
+			this.ctx.loadingAnimation = undefined;
+		}
+		this.ctx.statusContainer.clear();
+
+		const originalOnEscape = this.ctx.editor.onEscape;
+		this.ctx.editor.onEscape = () => {
+			this.ctx.session.abortHandoff();
+		};
+
+		const handoffLoader = new Loader(
+			this.ctx.ui,
+			spinner => theme.fg("accent", spinner),
+			text => theme.fg("muted", text),
+			"Generating handoff… (esc to cancel)",
+			getSymbolTheme().spinnerFrames,
+		);
+		this.ctx.statusContainer.addChild(handoffLoader);
+		this.ctx.ui.requestRender();
+
 		try {
-			// The agent will visibly generate the handoff document in chat
+			// Handoff generation runs as a oneshot request; the new session is shown after it completes.
 			const result = await this.ctx.session.handoff(customInstructions);
 
 			if (!result) {
@@ -1206,6 +1228,10 @@ export class CommandController {
 			} else {
 				this.ctx.showError(`Handoff failed: ${message}`);
 			}
+		} finally {
+			handoffLoader.stop();
+			this.ctx.statusContainer.clear();
+			this.ctx.editor.onEscape = originalOnEscape;
 		}
 		this.ctx.ui.requestRender();
 	}

@@ -2,6 +2,73 @@
 
 ## [Unreleased]
 
+## [15.1.2] - 2026-05-15
+### Fixed
+
+- Fixed SSH host additions/removals made inside a running session not refreshing the live `ssh` tool. `/ssh add` and `/ssh remove` now update the model-visible host list immediately, while `/reload-plugins` and `/move` refresh SSH discovery for external or project-scope config changes without restart.
+- Fixed loose object output schemas in `YieldTool` so non-strict schemas (for example `additionalProperties: true`) are preserved and accepted instead of being forced into strict mode
+- Fixed unconstrained output schema modes (`outputSchema: true` or absent/non-strict schemas) to run in loose mode for successful results
+- Fixed bash tool calls with `pty: true` hanging indefinitely on Windows by falling back to the non-PTY executor instead of entering the ConPTY-backed interactive path. ([#1103](https://github.com/can1357/oh-my-pi/issues/1103))
+
+### Changed
+
+- Updated MCP and theme schema metadata to reference JSON Schema draft-2020-12
+
+## [15.1.0] - 2026-05-15
+### Breaking Changes
+
+- Changed the extension and hook runtime API by moving schema typing from direct TypeBox imports to `TSchema` from `@oh-my-pi/pi-ai`, requiring callers who use TypeScript imports of `Type` to migrate via provided injected modules
+
+### Added
+
+- Added a cancellable handoff progress indicator in `/handoff` that displays while handoff generation runs and can be aborted with `Esc`
+- Added `apiKey` as a supported provider override field in model config, allowing API-key-only overrides to provide fallback credentials for built-in models
+- Added `supportsMultipleSystemMessages`, `allowsSyntheticReasoningContentForToolCalls`, `disableReasoningOnToolChoice`, and `levels` model-thinking compatibility fields to model configuration schemas
+- Added `zod` to the Extension, Custom Tool, Hook, and Custom Command APIs as `pi.zod` so extension and plugin authors can define tool schemas with Zod without separate imports
+- Added `pi.zod` as a canonical schema API for examples and extension plugins while keeping `typebox` available as legacy compatibility
+- Added a `telemetry` option to `createAgentSession` for passing OpenTelemetry configuration through to the underlying Agent
+
+### Changed
+
+- Changed handoff generation to run as a one-shot handoff request and switch to the new session only after it completes, avoiding an extra assistant handoff turn in chat history
+- Changed `pi.typebox.Type.Composite` to merge all object schemas in the provided list, enabling more than two object inputs
+- Changed `pi.typebox.Type.Record` to validate record keys against the provided key schema instead of forcing string keys
+- Changed `pi.typebox.Type.Array` with `uniqueItems: true` to reject duplicate items while preserving the constraint in wire schemas
+- Changed `pi.typebox.Type.Object` with `additionalProperties: false` to reject unknown properties during parsing
+- Changed `pi.typebox.Type.Enum` in the compatibility shim to preserve numeric TypeScript enum values
+- Changed tool parameter schemas across the agent to use the shared Pi schema pipeline (`TSchema` plus Zod/JSON Schema validation) instead of direct AJV/TypeBox compilation for stricter schema validation compatibility
+- Changed GitHub tool input schema shape to expose operation fields in a flat schema form without legacy `run_watch`-style nesting
+- Changed Python session pooling to remove the previous 4-session retention cap and 5-minute idle-session eviction, so kernels now stay alive for a session until explicitly disposed via `disposeKernelSessionsByOwner` or `disposeAllKernelSessions`
+- Changed kernel cleanup behavior to avoid automatic eviction by idle timeout and capacity pressure, so additional Python sessions are not queued behind retained-session shutdown retries
+- Replaced the bundled `@sinclair/typebox` runtime dependency with an in-repo Zod-backed shim exposed through `pi.typebox.Type.*`. Common builders (`Object`, `String`, `Number`, `Integer`, `Boolean`, `Array`, `Tuple`, `Union`, `Intersect`, `Literal`, `Enum`, `Optional`, `Nullable`, `Record`, `Partial`, `Required`, `Pick`, `Omit`, `Composite`, …) keep their existing call signatures but now return Zod schemas that flow through the same validation/wire pipeline as `pi.zod`. Bare `@sinclair/typebox` imports inside extensions are transparently remapped to the same shim by the runtime plugin shim, so plugins that authored against `import { Type } from "@sinclair/typebox"` keep working unchanged. Plugins that relied on TypeBox-only submodule APIs (`@sinclair/typebox/compiler`, `@sinclair/typebox/value`, `TypeRegistry`, the `Symbol(TypeBox.Kind)` marker) must vendor `@sinclair/typebox` in their own package — only the root import is remapped.
+
+### Deprecated
+
+- Deprecated direct TypeBox-only examples for plugin schemas by updating example documentation to prefer `pi.zod`
+
+### Fixed
+
+- Fixed auto-triggered handoff flow to perform only a single handoff-generation model call instead of an extra prompt cycle
+- Fixed handoff cancellation behavior so a pre-cancelled signal returns `Handoff cancelled` without starting generation and aborting handoff now propagates through the handoff request signal
+- Fixed `create_conventional_analysis` parsing to ignore harmless extra fields and still parse the required conventional fields
+- Fixed BashTool async request validation flow so async execution remains disabled and returns the explicit `Async bash execution is disabled` error
+- Fixed `task.simple` invalid `schema` and `context` argument handling to still reject unsupported fields after tool-argument validation
+- Fixed subagent execution hangs by enforcing `task.maxRuntimeMs` as a wall-clock limit even when inference streaming stalls, so stuck subagents now abort and report runtime-limit exceeded
+- Fixed tool schema compatibility validation by routing TypeBox schemas through shared conversion and Zod-based validation to avoid strict-schema provider mismatches
+- Fixed Python execution cancellation and timeouts by escalating to kernel shutdown if `SIGINT` did not terminate a running cell within 2 seconds, preventing indefinite hangs in queued or stuck sessions
+- Fixed cleanup blocking during long-running executions by forcing a kernel shutdown path when interrupt-based cancellation is ignored
+- Fixed bash output emitting a spurious `[… 0 lines elided (NB) …]` marker (and reordering the artifact link before the command output) when the shell minimizer rewrote a small command's output. After `OutputSink.replace()` swapped the minimized text into the buffer, the subsequent `sink.push("[raw output: artifact://N]\n")` chunk was funneled back into the (now empty) head-retention window while the pre-replace `#totalBytes` still tracked the original raw stream — so `dump()` composed `<head=artifact-link> + <middle-elision marker against stale totals> + <tail=minimized text>` instead of `<minimized text> + <artifact link>`. `replace()` now realigns `#totalBytes`/`#totalLines`/`#sawData`/`#truncated` to the authoritative buffer and disables head retention for the lifetime of the sink, so further pushes append to the tail buffer in order. The bash executor also drops the leading `\n` on the artifact-link push when the minimized text already ends with one so the separator stays single-newline.
+- Fixed legacy plugin extensions failing to load on Windows when they import a bare-specifier dependency from their own `node_modules` (e.g. `import YAML from "yaml"` in `supipowers`). The legacy-pi mirror resolved the dependency to its absolute path and then ran the path through `isUrlLikeSpecifier`, whose `^[A-Za-z][A-Za-z\d+.-]*:` regex matched the Windows drive letter (`C:`) and short-circuited the `pathToFileURL` conversion. The raw path was emitted into the mirrored TS source as `import x from "C:\\Users\\...\\dep\\dist\\index.js"`, where `\n`, `\U`, `\y` and other backslash sequences were eaten by the TS string-literal parser, producing nonsense package specifiers like `C:Usersjames.ompagentextensionssupipowers\node_modulesyamldistindex.js` that Bun's resolver rejected with `Cannot find package …`. `isUrlLikeSpecifier` now rejects `^[A-Za-z]:[\\/]` first, so Windows absolute paths flow through `pathToFileURL` like every other absolute path and reach the mirror as proper `file:///C:/...` URLs.
+- Fixed Python session queued executions silently resurrecting kernels after `disposeAllKernelSessions` or `disposeKernelSessionsByOwner` removed the session: queued work now checks the session is still registered before replacing or executing on a kernel and rejects with cancellation otherwise
+- Fixed Python session disposal treating an unconfirmed `PythonKernel.shutdown()` result as success: sessions whose kernel shutdown returns `{ confirmed: false }` (or rejects) are now retained in the registry and a `warn` is logged so a later dispose can retry instead of orphaning the subprocess
+- Fixed `task.maxRuntimeMs` losing wall-clock aborts that fired during pre-prompt session setup by re-checking the abort signal immediately before issuing the model prompt, so a stalled subagent now exits with the runtime-limit reason instead of hanging through setup races
+- Fixed late `yield` events landing after a wall-clock timeout from flipping a timed-out subagent to a successful exit, so the reported `aborted` flag and exit code now always reflect the runtime-limit breach while yield payloads remain in `extractedToolData`
+- Fixed async-task progress consumer to copy `contextTokens` and `contextWindow` from the completed `SingleResult` onto `AgentProgress`, so UI gauges keep showing per-turn context after a backgrounded task finishes
+- Fixed the status-line `path` segment ignoring `stripWorkPrefix: false` when selecting the folder icon for scratch directories. The icon selection now respects the same gate as the scratch path stripping, so disabling `stripWorkPrefix` keeps the regular `folder` icon even when the project directory is inside a scratch root.
+- Fixed `YieldTool` constructor to fall back to the loose record schema when the session `outputSchema` contains unresolved `$ref` strings (e.g. external or cyclic references that survive dereferencing), instead of installing a validator that would reject every payload with an unresolved-reference error
+- Fixed `pi.typebox.Type.String` dropping `minLength`/`maxLength`/`pattern` constraints when a `format` (e.g. `email`, `url`, `uuid`) was also supplied; length and pattern checks are now applied to the format-specific schema instead of being gated on an `instanceof z.ZodString` check that never matched the format subclasses.
+- Fixed `pi.typebox.Type.Object` stripping unknown properties when constructed without explicit `additionalProperties`. TypeBox preserves extras by default, so the shim now installs `.loose()` for the omitted/`true` cases while keeping `.strict()` for `additionalProperties: false` and `.catchall(schema)` for a schema value.
+
 ## [15.0.2] - 2026-05-15
 
 ### Added
@@ -94,7 +161,7 @@
 - Added `pr://<N>/diff`, `pr://<N>/diff/<i>`, and `pr://<N>/diff/all` internal-URL shapes covering changed-file listings, per-file slices, and the full unified diff. They share one `pr-diff` SQLite cache row with the same TTL knobs as `pr://<N>` views (`github.cache.softTtlSec` / `github.cache.hardTtlSec` / `github.cache.enabled`). Single PR views now advertise the diff entry point via a `Diff: pr://<owner>/<repo>/<N>/diff` note. Cache schema bumped to `user_version = 3`; older rows are dropped on first open to add credential-scoped keys and relax the `kind` CHECK constraint.
 - Added `issue://` / `pr://` internal-URL schemes that share a SQLite-backed cache with the rest of the `github` tool. Single-item reads (`issue://<N>`, `issue://<owner>/<repo>/<N>`) return rendered markdown and within `github.cache.softTtlSec` (default 5 minutes) skip the `gh` round-trip entirely; within `github.cache.hardTtlSec` (default 7 days) the cached row is returned and a background refresh is scheduled. Root and repo-scoped reads (`issue://`, `pr://owner/repo`) issue a live `gh issue list` / `gh pr list` for browsing, supporting `?state=open|closed|all` for issues, `?state=open|closed|merged|all` for PRs, and `?limit=`, `?author=`, `?label=` query params. Rendered output lands in `~/.omp/cache/github-cache.db` (override via `OMP_GITHUB_CACHE_DB`); disable the cache entirely with `github.cache.enabled = false`. Cwd→default-repo lookups (`gh repo view`) are memoized per-process.
 - Added new `Approve and compact context` choice to the ExitPlanMode approval selector. Sits between `Approve and execute` (purge session) and `Approve and keep context` (full transcript) — runs `/compact` on the plan-mode transcript with a planning-specific summarization hint, then dispatches the plan-approved execution turn so it lands on a fresh cache anchor with the summarized rationale carried over. Cancelling the compaction (Esc or any other abort source) defers the execution dispatch and surfaces a warning so the operator can resubmit manually; non-abort failures proceed best-effort.
-- Added `CompactionCancelledError` typed sentinel and `CompactionOutcome` (`"ok" | "cancelled" | "failed"`) return type to `@oh-my-pi/pi-coding-agent/session/compaction`. `CommandController.executeCompaction` and `handleCompactCommand` now return the outcome instead of `void` so callers can discriminate user-driven aborts from generic failures without inspecting error messages.
+- Added `CompactionCancelledError` typed sentinel and `CompactionOutcome` (`"ok" | "cancelled" | "failed"`) return type to `@oh-my-pi/pi-agent-core/compaction`. `CommandController.executeCompaction` and `handleCompactCommand` now return the outcome instead of `void` so callers can discriminate user-driven aborts from generic failures without inspecting error messages.
 - Added a `credential_disabled` extension event so extensions can subscribe via `pi.on("credential_disabled", handler)` and react when `AuthStorage` automatically soft-disables a credential (e.g. OAuth `invalid_grant`). Replaces the current `agent_end` errorMessage regex pattern downstream extensions have to match against. Handler payload is `{ type, provider, disabledCause }`. `createAgentSession()` subscribes the per-session extension runner to the shared `AuthStorage` via `authStorage.onCredentialDisabled(...)` at the very top of session creation — before any startup model probes run — so events fire on every disable regardless of whether the embedder also has a constructor `onCredentialDisabled` handler attached. The SDK forwards through `ExtensionRunner.emitCredentialDisabled(event)`, which buffers events until `runner.initialize(...)` runs in the mode controller and then flushes them through `emit()` so extension handlers see populated UI/runtime context (rather than the constructor's no-op default with `hasUI=false`, an unset model, and no-op runtime actions). On `session.dispose()` the subscription is unsubscribed; the embedder's constructor-attached listener keeps firing through its own permanent subscription. The outer `createAgentSession()` catch also releases the subscription if startup throws before the dispose-wrap is wired, so repeated retries don't accumulate dead listeners.
 - Added `omp acp` subcommand for launching as an ACP (Agent Client Protocol) server over stdio
 - Added explicit `type` discriminators to ACP `initialize` auth methods, including a `terminal` setup method gated on `clientCapabilities.auth.terminal`

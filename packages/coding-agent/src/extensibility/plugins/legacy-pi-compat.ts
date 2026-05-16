@@ -47,6 +47,17 @@ const LEGACY_PI_FILE_PREFIX = "omp-legacy-pi-file:";
 const LEGACY_PI_FILE_NAMESPACE = "omp-legacy-pi-file";
 const resolvedSpecifierFallbacks = new Map<string, string>();
 
+// Extensions that imported `@sinclair/typebox` directly used to resolve against a
+// real `@sinclair/typebox` install. The runtime dep was replaced with the Zod-backed
+// shim under `extensibility/typebox.ts`; plugins still importing the public name
+// are redirected to that shim so existing extensions keep working without code
+// changes. Submodules like `@sinclair/typebox/compiler` are intentionally not
+// remapped — those expose TypeBox-only APIs the shim does not provide and plugins
+// relying on them must vendor `@sinclair/typebox` directly.
+const TYPEBOX_SPECIFIER = "@sinclair/typebox";
+const TYPEBOX_SPECIFIER_FILTER = /^@sinclair\/typebox$/;
+const TYPEBOX_SHIM_PATH = path.resolve(import.meta.dir, "../typebox.ts");
+
 let isLegacyPiSpecifierShimInstalled = false;
 
 function remapLegacyPiSpecifier(specifier: string): string | null {
@@ -99,6 +110,12 @@ const ANY_IMPORT_SPECIFIER_REGEX = /((?:from\s+|import\s*\(\s*)["'])([^"']+)(["'
 
 /** Resolve bare imports against the extension directory before loading mirrored legacy Pi files. */
 function isUrlLikeSpecifier(specifier: string): boolean {
+	// Windows drive-letter paths (e.g. `C:\foo` or `C:/foo`) also match the URL
+	// scheme shape `[A-Za-z][A-Za-z\d+.-]*:`. Treat them as filesystem paths so
+	// `toRewrittenImportSpecifier` converts them to `file://` URLs instead of
+	// emitting raw paths whose `\n`, `\U`, ... get eaten by TS string-literal
+	// escapes inside the mirrored extension file.
+	if (/^[a-zA-Z]:[\\/]/.test(specifier)) return false;
 	return /^[a-zA-Z][a-zA-Z\d+.-]*:/.test(specifier);
 }
 
@@ -116,6 +133,9 @@ function rewriteBareImportsForLegacyExtension(source: string, importerPath: stri
 		// Skip relative, absolute, URL-style, and already-resolved Node specifiers.
 		if (shouldPreserveImportSpecifier(specifier)) {
 			return match;
+		}
+		if (specifier === TYPEBOX_SPECIFIER) {
+			return `${prefix}${toRewrittenImportSpecifier(TYPEBOX_SHIM_PATH)}${suffix}`;
 		}
 		try {
 			const resolved = Bun.resolveSync(specifier, importerDir);
@@ -223,6 +243,10 @@ function resolveLegacyPiSpecifier(args: { path: string }): { path: string } | un
 	};
 }
 
+function resolveTypeBoxSpecifier(): { path: string } {
+	return { path: TYPEBOX_SHIM_PATH };
+}
+
 export function installLegacyPiSpecifierShim(): void {
 	if (isLegacyPiSpecifierShimInstalled) {
 		return;
@@ -236,6 +260,12 @@ export function installLegacyPiSpecifierShim(): void {
 			build.onResolve(
 				{ filter: LEGACY_PI_SPECIFIER_FILTER, namespace: LEGACY_PI_FILE_NAMESPACE },
 				resolveLegacyPiSpecifier,
+			);
+
+			build.onResolve({ filter: TYPEBOX_SPECIFIER_FILTER, namespace: "file" }, resolveTypeBoxSpecifier);
+			build.onResolve(
+				{ filter: TYPEBOX_SPECIFIER_FILTER, namespace: LEGACY_PI_FILE_NAMESPACE },
+				resolveTypeBoxSpecifier,
 			);
 
 			build.onResolve({ filter: /^omp-legacy-pi-file:/, namespace: "file" }, args => ({

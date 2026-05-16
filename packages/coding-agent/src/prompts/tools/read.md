@@ -15,7 +15,7 @@ Read files, directories, archives, SQLite databases, images, documents, internal
 Append `:<sel>` to `path`. The bare path falls back to the default mode.
 
 - _(none)_ — parseable code → structural summary (signatures kept, bodies elided); other files → read from the start (up to {{DEFAULT_LIMIT}} lines).
-- `:50` — read from line 50 onward.
+- `:50` / `:50-` — read from line 50 onward.
 - `:50-200` — lines 50–200 inclusive.
 - `:50+150` — 150 lines starting at line 50.
 - `:20+1` — exactly one line.
@@ -28,7 +28,7 @@ Append `:<sel>` to `path`. The bare path falls back to the default mode.
 
 - Reading a directory path returns a depth-limited dirent listing.
 {{#if IS_HL_MODE}}
-- Reading a file with an explicit selector returns lines prefixed with `line+hash` anchors: `41th|def alpha():`. The 2-char hash is a content fingerprint that `edit` / `apply_patch` consume — copy it verbatim, NEVER fabricate.
+- Reading a file with an explicit selector returns lines prefixed with `line+hash` anchors: `41th|def alpha():`. The 2-char hash is a content fingerprint that `edit` / `apply_patch` consume — copy it verbatim, NEVER fabricate. The pipe character after the hash is a separator, not part of the file content.
 {{else}}
 {{#if IS_LINE_NUMBER_MODE}}
 - Reading a file with an explicit selector returns lines prefixed with line numbers: `41|def alpha():`.

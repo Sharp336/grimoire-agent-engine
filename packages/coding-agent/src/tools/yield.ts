@@ -4,10 +4,16 @@
  * Subagents must call this tool to finish and return structured JSON output.
  */
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { dereferenceJsonSchema, sanitizeSchemaForStrictMode } from "@oh-my-pi/pi-ai/utils/schema";
-import type { Static, TSchema } from "@sinclair/typebox";
-import { Type } from "@sinclair/typebox";
-import Ajv, { type ErrorObject, type ValidateFunction } from "ajv";
+import type { TSchema } from "@oh-my-pi/pi-ai/types";
+import {
+	dereferenceJsonSchema,
+	isValidJsonSchema,
+	type JsonSchemaValidationIssue,
+	type JsonSchemaValidationResult,
+	sanitizeSchemaForStrictMode,
+	tryEnforceStrictSchema,
+	validateJsonSchemaValue,
+} from "@oh-my-pi/pi-ai/utils/schema";
 import { subprocessToolRegistry } from "../task/subprocess-tool-registry";
 import type { ToolSession } from ".";
 import { jtdToJsonSchema, normalizeSchema } from "./jtd-to-json-schema";
@@ -17,8 +23,6 @@ export interface YieldDetails {
 	status: "success" | "aborted";
 	error?: string;
 }
-
-const ajv = new Ajv({ allErrors: true, strict: false, logger: false });
 
 function formatSchema(schema: unknown): string {
 	if (schema === undefined) return "No schema provided.";
@@ -30,14 +34,70 @@ function formatSchema(schema: unknown): string {
 	}
 }
 
-function formatAjvErrors(errors: ErrorObject[] | null | undefined): string {
-	if (!errors || errors.length === 0) return "Unknown schema validation error.";
-	return errors
-		.map(err => {
-			const path = err.instancePath ? `${err.instancePath}: ` : "";
-			return `${path}${err.message ?? "invalid"}`;
+function formatJsonSchemaIssues(issues: ReadonlyArray<JsonSchemaValidationIssue> | undefined): string {
+	if (!issues || issues.length === 0) return "Unknown schema validation error.";
+	return issues
+		.map(issue => {
+			const path = issue.path.length === 0 ? "" : `${issue.path.map(seg => String(seg)).join("/")}: `;
+			return `${path}${issue.message}`;
 		})
 		.join("; ");
+}
+
+function looseRecordSchema(description: string): Record<string, unknown> {
+	return {
+		type: "object",
+		additionalProperties: true,
+		description,
+	};
+}
+
+function hasUnresolvedRefs(schema: unknown): boolean {
+	if (schema == null) return false;
+	if (Array.isArray(schema)) {
+		for (const item of schema) {
+			if (hasUnresolvedRefs(item)) return true;
+		}
+		return false;
+	}
+	if (typeof schema !== "object") return false;
+	const record = schema as Record<string, unknown>;
+	if (typeof record.$ref === "string") return true;
+	for (const key in record) {
+		if (key === "const" || key === "default" || key === "enum" || key === "examples") continue;
+		if (hasUnresolvedRefs(record[key])) return true;
+	}
+	return false;
+}
+
+function wrapYieldParameters(dataSchema: Record<string, unknown>): Record<string, unknown> {
+	return {
+		type: "object",
+		additionalProperties: false,
+		description: "submit data or error",
+		properties: {
+			result: {
+				anyOf: [
+					{
+						type: "object",
+						additionalProperties: false,
+						description: "task succeeded",
+						properties: { data: dataSchema },
+						required: ["data"],
+					},
+					{
+						type: "object",
+						additionalProperties: false,
+						properties: {
+							error: { type: "string", description: "error message" },
+						},
+						required: ["error"],
+					},
+				],
+			},
+		},
+		required: ["result"],
+	};
 }
 
 export class YieldTool implements AgentTool<TSchema, YieldDetails> {
@@ -52,33 +112,15 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 	readonly intent = "omit" as const;
 	lenientArgValidation = true;
 
-	readonly #validate?: ValidateFunction;
+	readonly #validate?: (value: unknown) => JsonSchemaValidationResult;
 	#schemaValidationFailures = 0;
 
 	constructor(session: ToolSession) {
-		const createParameters = (dataSchema: TSchema): TSchema =>
-			Type.Object(
-				{
-					result: Type.Union([
-						Type.Object({ data: dataSchema }, { description: "task succeeded" }),
-						Type.Object({
-							error: Type.String({ description: "error message" }),
-						}),
-					]),
-				},
-				{
-					additionalProperties: false,
-					description: "submit data or error",
-				},
-			) as TSchema;
-
-		let validate: ValidateFunction | undefined;
-		let dataSchema: TSchema;
+		let validate: ((value: unknown) => JsonSchemaValidationResult) | undefined;
 		let parameters: TSchema;
 
 		try {
 			const schemaResult = normalizeSchema(session.outputSchema);
-			// Convert JTD to JSON Schema if needed (auto-detected)
 			const normalizedSchema =
 				schemaResult.normalized !== undefined ? jtdToJsonSchema(schemaResult.normalized) : undefined;
 			let schemaError = schemaResult.error;
@@ -88,10 +130,10 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			}
 
 			if (normalizedSchema !== undefined && normalizedSchema !== false && !schemaError) {
-				try {
-					validate = ajv.compile(normalizedSchema as Record<string, unknown> | boolean);
-				} catch (err) {
-					schemaError = err instanceof Error ? err.message : String(err);
+				if (!isValidJsonSchema(normalizedSchema)) {
+					schemaError = "invalid JSON schema";
+				} else {
+					validate = value => validateJsonSchemaValue(normalizedSchema, value);
 				}
 			}
 
@@ -99,37 +141,50 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			const schemaDescription = schemaError
 				? `Structured JSON output (output schema invalid; accepting unconstrained object): ${schemaError}`
 				: `Structured output matching the schema:\n${schemaHint}`;
-			const sanitizedSchema =
+			let sanitizedSchema: Record<string, unknown> | undefined;
+			if (
 				!schemaError &&
 				normalizedSchema != null &&
 				typeof normalizedSchema === "object" &&
 				!Array.isArray(normalizedSchema)
-					? sanitizeSchemaForStrictMode(normalizedSchema as Record<string, unknown>)
-					: !schemaError && normalizedSchema === true
-						? {}
-						: undefined;
+			) {
+				const normalizedRecord = normalizedSchema as Record<string, unknown>;
+				const strictProbe = tryEnforceStrictSchema(normalizedRecord);
+				if (strictProbe.strict) {
+					sanitizedSchema = sanitizeSchemaForStrictMode(normalizedRecord);
+				} else {
+					sanitizedSchema = normalizedRecord;
+					this.strict = false;
+				}
+			} else if (!schemaError && normalizedSchema === true) {
+				sanitizedSchema = {};
+				this.strict = false;
+			}
 
+			let dataSchema: Record<string, unknown>;
 			if (sanitizedSchema !== undefined) {
 				const resolved = dereferenceJsonSchema({
 					...sanitizedSchema,
 					description: schemaDescription,
-				});
-				dataSchema = Type.Unsafe(resolved as Record<string, unknown>);
+				}) as Record<string, unknown>;
+				if (hasUnresolvedRefs(resolved)) {
+					throw new Error("schema contains unresolved $ref after dereferencing");
+				}
+				dataSchema = resolved;
 			} else {
-				dataSchema = Type.Record(Type.String(), Type.Any(), {
-					description: schemaError ? schemaDescription : "Structured JSON output (no schema specified)",
-				});
+				this.strict = false;
+				dataSchema = looseRecordSchema(
+					schemaError ? schemaDescription : "Structured JSON output (no schema specified)",
+				);
 			}
-			parameters = createParameters(dataSchema);
+			parameters = wrapYieldParameters(dataSchema);
 			JSON.stringify(parameters);
-			// Verify the final parameters compile with AJV (catches unresolved $ref, etc.)
-			ajv.compile(parameters as Record<string, unknown>);
+			if (!isValidJsonSchema(parameters)) throw new Error("yield parameters schema is invalid");
 		} catch (err) {
 			const errorMsg = err instanceof Error ? err.message : String(err);
-			dataSchema = Type.Record(Type.String(), Type.Any(), {
-				description: `Structured JSON output (schema processing failed: ${errorMsg})`,
-			});
-			parameters = createParameters(dataSchema);
+			parameters = wrapYieldParameters(
+				looseRecordSchema(`Structured JSON output (schema processing failed: ${errorMsg})`),
+			);
 			validate = undefined;
 			this.strict = false;
 		}
@@ -140,7 +195,7 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 
 	async execute(
 		_toolCallId: string,
-		params: Static<TSchema>,
+		params: unknown,
 		_signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<YieldDetails>,
 		_context?: AgentToolContext,
@@ -170,12 +225,15 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 			if (data === undefined || data === null) {
 				throw new Error("data is required when yield indicates success");
 			}
-			if (this.#validate && !this.#validate(data)) {
-				this.#schemaValidationFailures++;
-				if (this.#schemaValidationFailures <= 1) {
-					throw new Error(`Output does not match schema: ${formatAjvErrors(this.#validate.errors)}`);
+			if (this.#validate) {
+				const parsed = this.#validate(data);
+				if (!parsed.success) {
+					this.#schemaValidationFailures++;
+					if (this.#schemaValidationFailures <= 1) {
+						throw new Error(`Output does not match schema: ${formatJsonSchemaIssues(parsed.issues)}`);
+					}
+					schemaValidationOverridden = true;
 				}
-				schemaValidationOverridden = true;
 			}
 		}
 

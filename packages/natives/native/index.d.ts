@@ -136,7 +136,7 @@ export declare class Shell {
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV15_0_2(): void
+export declare function __piNativesV15_1_2(): void
 
 /**
  * Apply conservative pre-execution rewrites to a bash command.
@@ -1137,6 +1137,11 @@ export interface PtyStartOptions {
   cols?: number
   /** PTY row count. */
   rows?: number
+  /**
+   * Shell binary to use (e.g. "sh", "bash", or an absolute path).
+   * Defaults to "sh" if not provided.
+   */
+  shell?: string
 }
 
 /**
