@@ -10,7 +10,7 @@ import {
 	type UsageLimit,
 	type UsageReport,
 } from "@oh-my-pi/pi-ai";
-import { Loader, Markdown, padding, Spacer, Text, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Loader, Markdown, padding, Spacer, Text, visibleWidth, TERMINAL, ImageProtocol } from "@oh-my-pi/pi-tui";
 import { formatDuration, Snowflake, setProjectDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { reset as resetCapabilities } from "../../capability";
@@ -880,6 +880,14 @@ export class CommandController {
 		this.ctx.updateEditorTopBorder();
 		this.ctx.updateEditorBorderColor();
 		this.ctx.ui.requestRender();
+
+		// Clear terminal-rendered images before removing components.
+		// Kitty protocol images float above the character grid and persist
+		// after text is cleared; send an explicit "delete all" command.
+		// This affects Kitty, Ghostty, WezTerm and other Kitty-compatible terminals.
+		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
+			this.ctx.ui.terminal.write("\x1b_Ga=d\x1b\\");
+		}
 
 		this.ctx.chatContainer.clear();
 		this.ctx.pendingMessagesContainer.clear();
