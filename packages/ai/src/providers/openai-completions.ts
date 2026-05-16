@@ -1424,10 +1424,22 @@ export function convertMessages(
 			// Filter out empty text blocks to avoid API validation errors
 			const nonEmptyTextBlocks = textBlocks.filter(b => b.text && b.text.trim().length > 0);
 			if (nonEmptyTextBlocks.length > 0) {
-				// Always send assistant content as a plain string. Some OpenAI-compatible
-				// backends mirror array-of-text-block payloads back to the model literally,
-				// causing recursive nested content in subsequent turns.
-				assistantMsg.content = nonEmptyTextBlocks.map(b => b.text.toWellFormed()).join("");
+				if (compat.requiresThinkingAsText) {
+					// Keep as array when thinking blocks need to be prepended
+					assistantMsg.content = nonEmptyTextBlocks.map(b => ({
+						type: "text" as const,
+						text: b.text.toWellFormed(),
+					}));
+				} else {
+					// Always send assistant content as a plain string. Some OpenAI-compatible
+					// backends mirror array-of-text-block payloads back to the model literally,
+					// causing recursive nested content in subsequent turns.
+					assistantMsg.content = nonEmptyTextBlocks.map(b => b.text.toWellFormed()).join("");
+				}
+			} else if (compat.requiresThinkingAsText) {
+				// No text blocks but thinking exists — initialize as empty array so
+				// the thinking handler can prepend to it instead of falling through.
+				assistantMsg.content = [];
 			}
 
 			// Handle thinking blocks
@@ -1438,9 +1450,11 @@ export function convertMessages(
 				if (compat.requiresThinkingAsText) {
 					// Convert thinking blocks to plain text (no tags to avoid model mimicking them)
 					const thinkingText = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n\n");
-					const textContent = assistantMsg.content as Array<{ type: "text"; text: string }> | null;
-					if (textContent) {
-						textContent.unshift({ type: "text", text: thinkingText });
+					if (Array.isArray(assistantMsg.content)) {
+						assistantMsg.content.unshift({ type: "text", text: thinkingText });
+					} else if (typeof assistantMsg.content === "string" && assistantMsg.content.length > 0) {
+						// Prepend thinking to existing string content
+						assistantMsg.content = `${thinkingText}\n\n${assistantMsg.content}`;
 					} else {
 						assistantMsg.content = [{ type: "text", text: thinkingText }];
 					}

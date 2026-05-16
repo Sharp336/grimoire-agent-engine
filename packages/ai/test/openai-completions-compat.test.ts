@@ -145,6 +145,196 @@ describe("openai-completions compatibility", () => {
 		]);
 	});
 
+	it("serializes assistant text content as array when requiresThinkingAsText is true", () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+		};
+		const compat = {
+			supportsStore: true,
+			supportsDeveloperRole: true,
+			supportsMultipleSystemMessages: true,
+			supportsReasoningEffort: true,
+			reasoningEffortMap: {},
+			supportsUsageInStreaming: true,
+			supportsToolChoice: true,
+			disableReasoningOnForcedToolChoice: false,
+			disableReasoningOnToolChoice: false,
+			maxTokensField: "max_completion_tokens",
+			requiresToolResultName: false,
+			requiresAssistantAfterToolResult: false,
+			requiresThinkingAsText: true,
+			requiresMistralToolIds: false,
+			thinkingFormat: "openai",
+			reasoningContentField: "reasoning_content",
+			requiresReasoningContentForToolCalls: false,
+			allowsSyntheticReasoningContentForToolCalls: true,
+			requiresAssistantContentForToolCalls: false,
+			openRouterRouting: {},
+			vercelGatewayRouting: {},
+			extraBody: {},
+			supportsStrictMode: true,
+			toolStrictMode: "none",
+		} satisfies Required<OpenAICompat>;
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "text", text: "hello" },
+				{ type: "text", text: " world" },
+			],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const messages = convertMessages(model, { messages: [assistantMessage] }, compat);
+		const assistant = messages.find(message => message.role === "assistant");
+		expect(assistant).toBeDefined();
+		if (!assistant || assistant.role !== "assistant") {
+			throw new Error("assistant message missing");
+		}
+		expect(Array.isArray(assistant.content)).toBe(true);
+		const contentArray = assistant.content as Array<{ type: string; text: string }>;
+		expect(contentArray).toHaveLength(2);
+		expect(contentArray[0]).toEqual({ type: "text", text: "hello" });
+		expect(contentArray[1]).toEqual({ type: "text", text: " world" });
+	});
+
+	it("prepends thinking block to array content when requiresThinkingAsText is true with no text blocks", () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+		};
+		const compat = {
+			supportsStore: true,
+			supportsDeveloperRole: true,
+			supportsMultipleSystemMessages: true,
+			supportsReasoningEffort: true,
+			reasoningEffortMap: {},
+			supportsUsageInStreaming: true,
+			supportsToolChoice: true,
+			disableReasoningOnForcedToolChoice: false,
+			disableReasoningOnToolChoice: false,
+			maxTokensField: "max_completion_tokens",
+			requiresToolResultName: false,
+			requiresAssistantAfterToolResult: false,
+			requiresThinkingAsText: true,
+			requiresMistralToolIds: false,
+			thinkingFormat: "openai",
+			reasoningContentField: "reasoning_content",
+			requiresReasoningContentForToolCalls: false,
+			allowsSyntheticReasoningContentForToolCalls: true,
+			requiresAssistantContentForToolCalls: false,
+			openRouterRouting: {},
+			vercelGatewayRouting: {},
+			extraBody: {},
+			supportsStrictMode: true,
+			toolStrictMode: "none",
+		} satisfies Required<OpenAICompat>;
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [{ type: "thinking", thinking: "let me think about this" }],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const messages = convertMessages(model, { messages: [assistantMessage] }, compat);
+		const assistant = messages.find(message => message.role === "assistant");
+		expect(assistant).toBeDefined();
+		if (!assistant || assistant.role !== "assistant") {
+			throw new Error("assistant message missing");
+		}
+		expect(Array.isArray(assistant.content)).toBe(true);
+		const contentArray = assistant.content as Array<{ type: string; text: string }>;
+		expect(contentArray).toHaveLength(1);
+		expect(contentArray[0]).toEqual({ type: "text", text: "let me think about this" });
+	});
+
+	it("prepends thinking block before text blocks when requiresThinkingAsText is true with both", () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+		};
+		const compat = {
+			supportsStore: true,
+			supportsDeveloperRole: true,
+			supportsMultipleSystemMessages: true,
+			supportsReasoningEffort: true,
+			reasoningEffortMap: {},
+			supportsUsageInStreaming: true,
+			supportsToolChoice: true,
+			disableReasoningOnForcedToolChoice: false,
+			disableReasoningOnToolChoice: false,
+			maxTokensField: "max_completion_tokens",
+			requiresToolResultName: false,
+			requiresAssistantAfterToolResult: false,
+			requiresThinkingAsText: true,
+			requiresMistralToolIds: false,
+			thinkingFormat: "openai",
+			reasoningContentField: "reasoning_content",
+			requiresReasoningContentForToolCalls: false,
+			allowsSyntheticReasoningContentForToolCalls: true,
+			requiresAssistantContentForToolCalls: false,
+			openRouterRouting: {},
+			vercelGatewayRouting: {},
+			extraBody: {},
+			supportsStrictMode: true,
+			toolStrictMode: "none",
+		} satisfies Required<OpenAICompat>;
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "reasoning here" },
+				{ type: "text", text: "final answer" },
+			],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "stop",
+			timestamp: Date.now(),
+		};
+		const messages = convertMessages(model, { messages: [assistantMessage] }, compat);
+		const assistant = messages.find(message => message.role === "assistant");
+		expect(assistant).toBeDefined();
+		if (!assistant || assistant.role !== "assistant") {
+			throw new Error("assistant message missing");
+		}
+		expect(Array.isArray(assistant.content)).toBe(true);
+		const contentArray = assistant.content as Array<{ type: string; text: string }>;
+		expect(contentArray).toHaveLength(2);
+		// Thinking should be prepended at index 0
+		expect(contentArray[0]).toEqual({ type: "text", text: "reasoning here" });
+		// Original text block shifts to index 1
+		expect(contentArray[1]).toEqual({ type: "text", text: "final answer" });
+	});
+
 	it("uses developer messages for reasoning chat models only when the target supports them", () => {
 		const model: Model<"openai-completions"> = {
 			...getBundledModel("openai", "gpt-4o-mini"),
