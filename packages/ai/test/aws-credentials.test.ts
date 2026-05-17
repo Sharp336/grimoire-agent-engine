@@ -10,18 +10,6 @@ import { clearAwsCredentialCache, resolveAwsCredentials } from "../src/providers
 // JSON envelope on stdout. The chain falls through env (cleared) and into the
 // profile reader, which spawns the script.
 
-interface SavedEnv {
-	AWS_PROFILE?: string;
-	AWS_REGION?: string;
-	AWS_DEFAULT_REGION?: string;
-	AWS_ACCESS_KEY_ID?: string;
-	AWS_SECRET_ACCESS_KEY?: string;
-	AWS_SESSION_TOKEN?: string;
-	AWS_SHARED_CREDENTIALS_FILE?: string;
-	AWS_CONFIG_FILE?: string;
-	AWS_EC2_METADATA_DISABLED?: string;
-}
-
 const ENV_KEYS = [
 	"AWS_PROFILE",
 	"AWS_REGION",
@@ -33,6 +21,8 @@ const ENV_KEYS = [
 	"AWS_CONFIG_FILE",
 	"AWS_EC2_METADATA_DISABLED",
 ] as const;
+
+type SavedEnv = Partial<Record<(typeof ENV_KEYS)[number], string>>;
 
 let savedEnv: SavedEnv = {};
 let tmpDir: string;

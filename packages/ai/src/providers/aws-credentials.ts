@@ -256,7 +256,8 @@ async function readProcessCredentials(
 	if (argv.length === 0) {
 		throw new Error(`credential_process for profile '${profile}' is empty`);
 	}
-	const [bin, ...args] = argv as [string, ...string[]];
+	const bin = argv[0] as string;
+	const args = argv.slice(1);
 
 	let stdout: string;
 	try {
@@ -264,8 +265,6 @@ async function readProcessCredentials(
 			// AWS SDKs cap process credential output at 1 MiB.
 			maxBuffer: 1024 * 1024,
 			windowsHide: true,
-			// Propagates AbortSignal aborts to the child via SIGTERM (Node default),
-			// matching the cancellation behavior of the SSO/IMDS branches.
 			signal,
 		});
 		stdout = result.stdout;
