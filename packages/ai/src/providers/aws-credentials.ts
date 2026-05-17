@@ -188,12 +188,18 @@ interface CredentialProcessOutput {
 
 /**
  * Tokenize a `credential_process` command line. Mirrors what botocore /
- * the AWS CLI accept: whitespace-separated argv, with single- or
- * double-quoted segments. Single quotes are literal. Inside double quotes,
- * backslash only escapes `\\` and `\"` (POSIX shell semantics) — every other
- * `\X` passes through as a literal `\X`, so Windows paths like
- * `"C:\Path\To\creds.cmd"` survive intact. Good enough for the patterns the
- * AWS docs sanction (e.g. `/usr/local/bin/aws-vault exec foo --json`).
+ * the AWS CLI accept (POSIX `shlex.split`): whitespace-separated argv with
+ * single- or double-quoted segments.
+ *
+ *  - Single quotes are literal (no escapes inside).
+ *  - Inside double quotes: `\\` and `\"` escape; every other `\X` passes
+ *    through as a literal `\X`, so Windows paths like
+ *    `"C:\Path\To\creds.cmd"` survive intact.
+ *  - Outside quotes: `\<char>` consumes both and emits a literal `<char>`,
+ *    so `arg\ with\ spaces` becomes a single token `arg with spaces`.
+ *
+ * POSIX-only: Windows command lines are handed straight to cmd.exe and
+ * never reach this function. A trailing `\` (or unbalanced quote) throws.
  */
 function tokenizeCredentialProcess(cmd: string): string[] {
 	const tokens: string[] = [];
@@ -221,6 +227,15 @@ function tokenizeCredentialProcess(cmd: string): string[] {
 			}
 			current += ch;
 			i++;
+			continue;
+		}
+		if (ch === "\\") {
+			if (i + 1 >= cmd.length) {
+				throw new Error(`credential_process command ends with a stray backslash: ${cmd}`);
+			}
+			current += cmd[i + 1] as string;
+			hasContent = true;
+			i += 2;
 			continue;
 		}
 		if (ch === '"' || ch === "'") {
@@ -269,9 +284,6 @@ async function readProcessCredentials(
 	const baseOpts = { maxBuffer: 1024 * 1024, windowsHide: true, signal } as const;
 	let stdout: string;
 	try {
-		// On Windows we hand cmd.exe the original command line; we deliberately
-		// don't run our POSIX tokenizer first, since it would reject configs
-		// (e.g. caret escapes) that cmd.exe parses fine.
 		if (useShell) {
 			const result = await execFileAsync(commandLine, { ...baseOpts, shell: true });
 			stdout = result.stdout;

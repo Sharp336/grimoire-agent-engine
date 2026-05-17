@@ -231,6 +231,32 @@ describe("aws-credentials credential_process", () => {
 		expect(creds.secretAccessKey).toBe("SK");
 	});
 
+	test("treats `\\ ` outside quotes as an escaped literal space (POSIX shell)", async () => {
+		// Without backslash-escape support outside quotes, `arg\ with\ spaces`
+		// would split into three argv entries. POSIX shells (and shlex.split,
+		// which botocore uses) treat `\<char>` outside quotes as a literal
+		// `<char>`, so the helper should receive a single token.
+		const scriptPath = path.join(tmpDir, "echo-arg.mjs");
+		fs.writeFileSync(
+			scriptPath,
+			`const arg = process.argv[2];\nprocess.stdout.write(JSON.stringify({Version:1,AccessKeyId:arg,SecretAccessKey:"SK"}));\n`,
+			"utf8",
+		);
+		writeConfig("escaped-spaces", `${process.execPath} ${scriptPath} arg\\ with\\ spaces`);
+
+		const creds = await resolveAwsCredentials({ profile: "escaped-spaces" });
+		expect(creds.accessKeyId).toBe("arg with spaces");
+		expect(creds.secretAccessKey).toBe("SK");
+	});
+
+	test("rejects a credential_process command line ending in a stray backslash", async () => {
+		writeConfig("trailing-backslash", `${process.execPath} foo\\`);
+
+		await expect(resolveAwsCredentials({ profile: "trailing-backslash" })).rejects.toThrow(
+			/ends with a stray backslash/,
+		);
+	});
+
 	test.skipIf(process.platform !== "win32")(
 		"runs Windows .cmd helpers through cmd.exe (execFile would refuse them)",
 		async () => {
