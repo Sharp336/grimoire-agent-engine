@@ -108,7 +108,6 @@ export type KnownProvider =
 	| "kimi-code"
 	| "minimax-code"
 	| "minimax-code-cn"
-	| "mimo-code"
 	| "github-copilot"
 	| "fireworks"
 	| "firepass"

@@ -141,11 +141,6 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 		available: true,
 	},
 	{
-		id: "mimo-code",
-		name: "Xiaomi MiMo Coding Plan",
-		available: true,
-	},
-	{
 		id: "opencode-zen",
 		name: "OpenCode Zen",
 		available: true,
