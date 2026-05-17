@@ -182,4 +182,40 @@ describe("aws-credentials credential_process", () => {
 		expect(creds.accessKeyId).toBe("AKIAFROMENV");
 		expect(creds.secretAccessKey).toBe("env-secret");
 	});
+
+	test("preserves backslashes inside double-quoted args (Windows-path tokenization)", async () => {
+		// Reproduces the shape AWS docs document for Windows:
+		//   credential_process = "C:\Tools\creds.cmd" --path "C:\x\y"
+		// The earlier tokenizer ate every backslash inside `"..."`, which would
+		// have turned `C:\x\y` into `C:xy`. The script echoes its argv[1] back
+		// inside the AccessKeyId so we can assert byte-exact preservation.
+		const scriptPath = path.join(tmpDir, "echo-arg.mjs");
+		fs.writeFileSync(
+			scriptPath,
+			`const arg = process.argv[2];\nprocess.stdout.write(JSON.stringify({Version:1,AccessKeyId:arg,SecretAccessKey:"SK"}));\n`,
+			"utf8",
+		);
+		const argWithBackslashes = "C:\\Path\\To\\creds.cmd";
+		writeConfig("windows-args", `"${process.execPath}" "${scriptPath}" "${argWithBackslashes}"`);
+
+		const creds = await resolveAwsCredentials({ profile: "windows-args" });
+		expect(creds.accessKeyId).toBe(argWithBackslashes);
+		expect(creds.secretAccessKey).toBe("SK");
+	});
+
+	test("AbortSignal cancels a hanging credential_process", async () => {
+		// Sleep forever — long enough that the only way the promise resolves is
+		// via the AbortSignal we hand to resolveAwsCredentials.
+		const scriptPath = path.join(tmpDir, "hang.mjs");
+		fs.writeFileSync(scriptPath, "setTimeout(() => {}, 60_000);\n", "utf8");
+		writeConfig("hanging-process", `${process.execPath} ${scriptPath}`);
+
+		const ac = new AbortController();
+		const pending = resolveAwsCredentials({ profile: "hanging-process", signal: ac.signal });
+		// Give the child a tick to actually spawn before aborting.
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		ac.abort();
+
+		await expect(pending).rejects.toThrow(/credential_process for profile 'hanging-process' failed/);
+	});
 });

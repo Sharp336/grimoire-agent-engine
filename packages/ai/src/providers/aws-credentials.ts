@@ -166,7 +166,7 @@ async function readProfileCredentials(
 	}
 
 	if (merged.credential_process) {
-		return readProcessCredentials(merged.credential_process, profile);
+		return readProcessCredentials(merged.credential_process, profile, signal);
 	}
 
 	if (merged.sso_account_id && merged.sso_role_name) {
@@ -189,8 +189,10 @@ interface CredentialProcessOutput {
 /**
  * Tokenize a `credential_process` command line. Mirrors what botocore /
  * the AWS CLI accept: whitespace-separated argv, with single- or
- * double-quoted segments. Backslash escapes inside double quotes pass
- * through, single quotes are literal. Good enough for the patterns the
+ * double-quoted segments. Single quotes are literal. Inside double quotes,
+ * backslash only escapes `\\` and `\"` (POSIX shell semantics) — every other
+ * `\X` passes through as a literal `\X`, so Windows paths like
+ * `"C:\Path\To\creds.cmd"` survive intact. Good enough for the patterns the
  * AWS docs sanction (e.g. `/usr/local/bin/aws-vault exec foo --json`).
  */
 function tokenizeCredentialProcess(cmd: string): string[] {
@@ -209,9 +211,13 @@ function tokenizeCredentialProcess(cmd: string): string[] {
 			}
 			if (ch === "\\" && quote === '"' && i + 1 < cmd.length) {
 				const next = cmd[i + 1] as string;
-				current += next;
-				i += 2;
-				continue;
+				if (next === "\\" || next === '"') {
+					current += next;
+					i += 2;
+					continue;
+				}
+				// Not an escape sequence — keep the backslash literal so
+				// Windows paths inside double quotes round-trip correctly.
 			}
 			current += ch;
 			i++;
@@ -241,7 +247,11 @@ function tokenizeCredentialProcess(cmd: string): string[] {
 	return tokens;
 }
 
-async function readProcessCredentials(commandLine: string, profile: string): Promise<ResolvedCredentials> {
+async function readProcessCredentials(
+	commandLine: string,
+	profile: string,
+	signal: AbortSignal | undefined,
+): Promise<ResolvedCredentials> {
 	const argv = tokenizeCredentialProcess(commandLine);
 	if (argv.length === 0) {
 		throw new Error(`credential_process for profile '${profile}' is empty`);
@@ -254,6 +264,9 @@ async function readProcessCredentials(commandLine: string, profile: string): Pro
 			// AWS SDKs cap process credential output at 1 MiB.
 			maxBuffer: 1024 * 1024,
 			windowsHide: true,
+			// Propagates AbortSignal aborts to the child via SIGTERM (Node default),
+			// matching the cancellation behavior of the SSO/IMDS branches.
+			signal,
 		});
 		stdout = result.stdout;
 	} catch (err) {
