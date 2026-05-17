@@ -258,15 +258,32 @@ async function readProcessCredentials(
 	}
 	const bin = argv[0] as string;
 	const args = argv.slice(1);
+	// Node refuses to launch `.bat` / `.cmd` directly via execFile on Windows
+	// (they need cmd.exe), so route those through the shell. AWS docs include
+	// `.cmd` examples, so this branch is part of the documented contract.
+	// We hand cmd.exe the original (still-quoted) command line rather than
+	// our parsed argv: with shell: true Node concatenates argv with spaces
+	// and passes a single string to the shell, so any quoting we stripped
+	// would be lost and paths with spaces would break. The command line
+	// comes from a local config file we already trust to spawn arbitrary
+	// code, so shell interpretation is acceptable here.
+	const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(bin);
 
 	let stdout: string;
 	try {
-		const result = await execFileAsync(bin, args, {
-			// AWS SDKs cap process credential output at 1 MiB.
-			maxBuffer: 1024 * 1024,
-			windowsHide: true,
-			signal,
-		});
+		const result = useShell
+			? await execFileAsync(commandLine, {
+					maxBuffer: 1024 * 1024,
+					windowsHide: true,
+					signal,
+					shell: true,
+				})
+			: await execFileAsync(bin, args, {
+					// AWS SDKs cap process credential output at 1 MiB.
+					maxBuffer: 1024 * 1024,
+					windowsHide: true,
+					signal,
+				});
 		stdout = result.stdout;
 	} catch (err) {
 		const detail = err instanceof Error ? err.message : String(err);

@@ -193,6 +193,24 @@ describe("aws-credentials credential_process", () => {
 		expect(creds.secretAccessKey).toBe("SK");
 	});
 
+	test.skipIf(process.platform !== "win32")(
+		"runs Windows .cmd helpers through cmd.exe (execFile would refuse them)",
+		async () => {
+			// Node's execFile cannot launch .cmd / .bat directly on Windows, but the
+			// AWS docs include .cmd examples, so the resolver must route those
+			// through the shell. We write a tiny .cmd that prints the JSON envelope
+			// and assert it's invoked successfully.
+			const cmdPath = path.join(tmpDir, "creds.cmd");
+			const payload = '{"Version":1,"AccessKeyId":"AKIACMD","SecretAccessKey":"cmd-secret"}';
+			fs.writeFileSync(cmdPath, `@echo off\r\necho ${payload}\r\n`, "utf8");
+			writeConfig("windows-cmd", `"${cmdPath}"`);
+
+			const creds = await resolveAwsCredentials({ profile: "windows-cmd" });
+			expect(creds.accessKeyId).toBe("AKIACMD");
+			expect(creds.secretAccessKey).toBe("cmd-secret");
+		},
+	);
+
 	test("AbortSignal cancels a hanging credential_process", async () => {
 		// Sleep forever — long enough that the only way the promise resolves is
 		// via the AbortSignal we hand to resolveAwsCredentials.
