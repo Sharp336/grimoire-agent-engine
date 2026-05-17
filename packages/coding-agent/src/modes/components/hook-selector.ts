@@ -14,6 +14,7 @@ import {
 	type TUI,
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { matchesAppExternalEditor, matchesSelectCancel } from "../../modes/utils/keybinding-matchers";
@@ -31,13 +32,52 @@ export interface HookSelectorOptions {
 	onRight?: () => void;
 	onExternalEditor?: () => void;
 	helpText?: string;
+	/**
+	 * Upper bound on detail-pane rows in the outline picker. When > 0 the
+	 * OutlinedList draws a separator + up to N wrapped rows below the list,
+	 * sized dynamically to the focused option's actual wrap count. Set to 0
+	 * (default) to disable the detail pane entirely.
+	 *
+	 * Callers (typically the extension UI controller) should derive this from
+	 * available terminal rows so the picker cannot push the controls hint
+	 * off-screen even when focused on the longest option.
+	 */
+	maxDetailRows?: number;
 }
+
+/** Minimum useful detail cap. Below this the pane wastes a separator row for almost no payload. */
+const MIN_DETAIL_ROWS = 2;
 
 class OutlinedList extends Container {
 	#lines: string[] = [];
+	#detailLabel: string | undefined;
+	#maxDetailRows = 0;
 
 	setLines(lines: string[]): void {
 		this.#lines = lines;
+		this.invalidate();
+	}
+
+	/**
+	 * Set the focused option's full text for the detail pane. Pass `undefined`
+	 * (or an empty string) to suppress the pane. The render path also requires
+	 * `setMaxDetailRows(n >= MIN_DETAIL_ROWS)` for the pane to appear.
+	 */
+	setDetailLabel(label: string | undefined): void {
+		this.#detailLabel = label;
+		this.invalidate();
+	}
+
+	/**
+	 * Upper bound on detail-content rows (excludes the separator row). The
+	 * detail pane is rendered at `min(actualWrapCount, maxDetailRows)` rows —
+	 * short focused options shrink the pane, long ones grow it up to this cap.
+	 * Set 0 to disable the pane entirely.
+	 */
+	setMaxDetailRows(rows: number): void {
+		const next = Math.max(0, Math.trunc(rows));
+		if (next === this.#maxDetailRows) return;
+		this.#maxDetailRows = next;
 		this.invalidate();
 	}
 
@@ -45,13 +85,52 @@ class OutlinedList extends Container {
 		const borderColor = (text: string) => theme.fg("border", text);
 		const horizontal = borderColor(theme.boxSharp.horizontal.repeat(Math.max(1, width)));
 		const innerWidth = Math.max(1, width - 2);
-		const content = this.#lines.map(line => {
+		const fitInside = (line: string): string => {
 			const normalized = replaceTabs(line);
 			const fitted = truncateToWidth(normalized, innerWidth);
 			const pad = Math.max(0, innerWidth - visibleWidth(fitted));
 			return `${borderColor(theme.boxSharp.vertical)}${fitted}${padding(pad)}${borderColor(theme.boxSharp.vertical)}`;
-		});
-		return [horizontal, ...content, horizontal];
+		};
+		const content = this.#lines.map(fitInside);
+		const detailRows = this.#renderDetail(innerWidth);
+		if (detailRows.length === 0) {
+			return [horizontal, ...content, horizontal];
+		}
+		return [horizontal, ...content, horizontal, ...detailRows.map(fitInside), horizontal];
+	}
+
+	/**
+	 * Build the variable-height detail rows for the focused option. Returns an
+	 * empty array when the pane is disabled (no cap, no label, or label wraps
+	 * to zero lines), in which case the caller skips the separator entirely so
+	 * single-line focused options don't draw an empty pane.
+	 *
+	 * Each row is left-inset by 1 column; the caller pads the right with the
+	 * vertical-border wrapper.
+	 */
+	#renderDetail(innerWidth: number): string[] {
+		if (this.#maxDetailRows < MIN_DETAIL_ROWS) return [];
+		const source = this.#detailLabel ?? "";
+		if (source.length === 0) return [];
+		const detailWidth = Math.max(1, innerWidth - 2); // 1-col inset on each side
+		const wrapped = wrapTextWithAnsi(replaceTabs(source), detailWidth);
+		// Skip the pane when the focused option already fits on the list row — the
+		// detail copy would be redundant and would waste a separator row.
+		if (wrapped.length <= 1) return [];
+		const visibleCount = Math.min(wrapped.length, this.#maxDetailRows);
+		const rows: string[] = [];
+		for (let i = 0; i < visibleCount; i++) {
+			let line = wrapped[i] ?? "";
+			const isLastVisible = i === visibleCount - 1;
+			const overflowed = wrapped.length > visibleCount;
+			if (isLastVisible && overflowed) {
+				// Join the remainder with single spaces and let truncateToWidth append the ellipsis.
+				const remainder = wrapped.slice(i).join(" ");
+				line = truncateToWidth(remainder, detailWidth);
+			}
+			rows.push(` ${line}`);
+		}
+		return rows;
 	}
 }
 
@@ -115,6 +194,9 @@ export class HookSelectorComponent extends Container {
 
 		if (opts?.outline) {
 			this.#outlinedList = new OutlinedList();
+			if (opts.maxDetailRows && opts.maxDetailRows >= 2) {
+				this.#outlinedList.setMaxDetailRows(opts.maxDetailRows);
+			}
 			this.addChild(this.#outlinedList);
 		} else {
 			this.#listContainer = new Container();
@@ -152,6 +234,15 @@ export class HookSelectorComponent extends Container {
 		}
 		if (this.#outlinedList) {
 			this.#outlinedList.setLines(lines);
+			// Pass the raw focused option (with checkbox/recommended suffix, without
+			// the cursor prefix) through inline-markdown rendering so its detail
+			// representation matches the list-row rendering one-for-one.
+			const focused = this.#options[this.#selectedIndex];
+			this.#outlinedList.setDetailLabel(
+				focused === undefined
+					? undefined
+					: renderInlineMarkdown(focused, getMarkdownTheme(), t => theme.fg("text", t)),
+			);
 			return;
 		}
 		this.#listContainer?.clear();

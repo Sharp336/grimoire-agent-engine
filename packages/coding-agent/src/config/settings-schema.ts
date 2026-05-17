@@ -984,6 +984,16 @@ export const SETTINGS_SCHEMA = {
 		ui: { tab: "interaction", label: "Ask Notification", description: "Notify when ask tool is waiting for input" },
 	},
 
+	"ask.detailPane": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			label: "Ask Detail Pane",
+			description: "Show the focused option's full text below the option list when it doesn't fit on one row",
+		},
+	},
+
 	// Speech-to-text
 	"stt.enabled": {
 		type: "boolean",
