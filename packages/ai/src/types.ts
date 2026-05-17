@@ -140,6 +140,7 @@ export type KnownProvider =
 	| "together"
 	| "venice"
 	| "vllm"
+	| "skvaider"
 	| "xiaomi"
 	| "zenmux"
 	| "upb"

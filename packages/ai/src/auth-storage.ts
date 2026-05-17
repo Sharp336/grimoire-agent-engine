@@ -1492,6 +1492,12 @@ export class AuthStorage {
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
+			case "skvaider": {
+				const { loginSkvaider } = await import("./utils/oauth/skvaider");
+				const apiKey = await loginSkvaider(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
 			case "parallel": {
 				const { loginParallel } = await import("./utils/oauth/parallel");
 				const apiKey = await loginParallel(ctrl);

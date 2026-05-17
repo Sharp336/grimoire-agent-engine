@@ -47,6 +47,7 @@ export type OAuthProvider =
 	| "venice"
 	| "vercel-ai-gateway"
 	| "vllm"
+	| "skvaider"
 	| "xiaomi"
 	| "zenmux"
 	| "upb"

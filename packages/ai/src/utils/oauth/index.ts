@@ -221,6 +221,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 		available: true,
 	},
 	{
+		id: "skvaider",
+		name: "Skvaider (Flying Circus AI gateway)",
+		available: true,
+	},
+	{
 		id: "cloudflare-ai-gateway",
 		name: "Cloudflare AI Gateway",
 		available: true,
@@ -349,6 +354,7 @@ export async function refreshOAuthToken(
 		case "qwen-portal":
 		case "zenmux":
 		case "vllm":
+		case "skvaider":
 			// API keys / static bearer tokens don't expire, return as-is
 			newCredentials = credentials;
 			break;
