@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added `credential_process` support to AWS credential resolution. Profiles in `~/.aws/config` (or `~/.aws/credentials`) configured as `credential_process = <cmd>` now spawn the configured command and parse its `Version: 1` JSON output (`AccessKeyId`, `SecretAccessKey`, optional `SessionToken` and `Expiration`), matching the AWS CLI / SDK contract. Profiles using brokers like `aws-vault` or custom session-token helpers no longer fall through to "Unable to resolve AWS credentials".
 
 ## [15.1.3] - 2026-05-17
 ### Breaking Changes

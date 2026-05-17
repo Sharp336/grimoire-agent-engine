@@ -4,8 +4,11 @@
  * Chain (first hit wins):
  *  1. Static credentials from the environment
  *     (`AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` [+ `AWS_SESSION_TOKEN`]).
- *  2. Profile in `~/.aws/credentials` (and `~/.aws/config` for SSO):
+ *  2. Profile in `~/.aws/credentials` (and `~/.aws/config` for SSO / process):
  *      - static `aws_access_key_id` / `aws_secret_access_key` / `aws_session_token`
+ *      - `credential_process = <cmd>` — spawn the command, read JSON
+ *        (`{Version:1, AccessKeyId, SecretAccessKey, SessionToken?, Expiration?}`)
+ *        from stdout (matches the AWS CLI / SDK contract).
  *      - SSO profile referencing a cached token in `~/.aws/sso/cache/*.json`,
  *        which we exchange for short-lived role credentials via
  *        `https://portal.sso.{region}.amazonaws.com/federation/credentials`.
@@ -16,11 +19,15 @@
  * 60 s before `Expiration` to absorb clock skew.
  */
 
+import { execFile } from "node:child_process";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { promisify } from "node:util";
 import { $env, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import type { AwsCredentials } from "./aws-sigv4";
+
+const execFileAsync = promisify(execFile);
 
 export interface ResolvedCredentials extends AwsCredentials {
 	/** Absolute expiration timestamp in ms. `undefined` for non-expiring static creds. */
@@ -158,11 +165,129 @@ async function readProfileCredentials(
 		return out;
 	}
 
+	if (merged.credential_process) {
+		return readProcessCredentials(merged.credential_process, profile);
+	}
+
 	if (merged.sso_account_id && merged.sso_role_name) {
 		return readSsoCredentials(merged, configIni, region, signal);
 	}
 
 	return undefined;
+}
+
+// ---------- credential_process ----------
+
+interface CredentialProcessOutput {
+	Version?: number;
+	AccessKeyId?: string;
+	SecretAccessKey?: string;
+	SessionToken?: string;
+	Expiration?: string;
+}
+
+/**
+ * Tokenize a `credential_process` command line. Mirrors what botocore /
+ * the AWS CLI accept: whitespace-separated argv, with single- or
+ * double-quoted segments. Backslash escapes inside double quotes pass
+ * through, single quotes are literal. Good enough for the patterns the
+ * AWS docs sanction (e.g. `/usr/local/bin/aws-vault exec foo --json`).
+ */
+function tokenizeCredentialProcess(cmd: string): string[] {
+	const tokens: string[] = [];
+	let current = "";
+	let quote: '"' | "'" | undefined;
+	let i = 0;
+	let hasContent = false;
+	while (i < cmd.length) {
+		const ch = cmd[i] as string;
+		if (quote) {
+			if (ch === quote) {
+				quote = undefined;
+				i++;
+				continue;
+			}
+			if (ch === "\\" && quote === '"' && i + 1 < cmd.length) {
+				const next = cmd[i + 1] as string;
+				current += next;
+				i += 2;
+				continue;
+			}
+			current += ch;
+			i++;
+			continue;
+		}
+		if (ch === '"' || ch === "'") {
+			quote = ch as '"' | "'";
+			hasContent = true;
+			i++;
+			continue;
+		}
+		if (ch === " " || ch === "\t") {
+			if (hasContent) {
+				tokens.push(current);
+				current = "";
+				hasContent = false;
+			}
+			i++;
+			continue;
+		}
+		current += ch;
+		hasContent = true;
+		i++;
+	}
+	if (quote) throw new Error(`credential_process command has unbalanced ${quote} quote: ${cmd}`);
+	if (hasContent) tokens.push(current);
+	return tokens;
+}
+
+async function readProcessCredentials(commandLine: string, profile: string): Promise<ResolvedCredentials> {
+	const argv = tokenizeCredentialProcess(commandLine);
+	if (argv.length === 0) {
+		throw new Error(`credential_process for profile '${profile}' is empty`);
+	}
+	const [bin, ...args] = argv as [string, ...string[]];
+
+	let stdout: string;
+	try {
+		const result = await execFileAsync(bin, args, {
+			// AWS SDKs cap process credential output at 1 MiB.
+			maxBuffer: 1024 * 1024,
+			windowsHide: true,
+		});
+		stdout = result.stdout;
+	} catch (err) {
+		const detail = err instanceof Error ? err.message : String(err);
+		throw new Error(`credential_process for profile '${profile}' failed: ${detail}`);
+	}
+
+	let parsed: CredentialProcessOutput;
+	try {
+		parsed = JSON.parse(stdout) as CredentialProcessOutput;
+	} catch (err) {
+		const detail = err instanceof Error ? err.message : String(err);
+		throw new Error(`credential_process for profile '${profile}' returned invalid JSON: ${detail}`);
+	}
+
+	if (parsed.Version !== 1) {
+		throw new Error(
+			`credential_process for profile '${profile}' returned unsupported Version ${parsed.Version ?? "(missing)"}; expected 1`,
+		);
+	}
+	if (!parsed.AccessKeyId || !parsed.SecretAccessKey) {
+		throw new Error(`credential_process for profile '${profile}' returned no AccessKeyId/SecretAccessKey`);
+	}
+
+	const out: ResolvedCredentials = {
+		accessKeyId: parsed.AccessKeyId,
+		secretAccessKey: parsed.SecretAccessKey,
+	};
+	if (parsed.SessionToken) out.sessionToken = parsed.SessionToken;
+	if (parsed.Expiration) {
+		const exp = Date.parse(parsed.Expiration);
+		if (!Number.isNaN(exp)) out.expiresAt = exp;
+	}
+	return out;
 }
 
 interface SsoCachedToken {
