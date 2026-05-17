@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Changed the outlined `ask` tool selector to render a detail pane below the option list, inside the same outline border, showing the focused option's full wrapped text. The pane is sized dynamically to the focused option (skipped entirely when the option already fits on one row, otherwise expanded to fit its actual wrap count), bounded by roughly half the terminal height so the controls hint stays on screen. Long option labels are no longer hidden behind `…`.
+- Changed the outlined `ask` tool selector to render a detail pane below the option list, inside the same outline border, showing the focused option's full wrapped text. The pane is sized dynamically to the focused option (skipped entirely when the option already fits on one row, otherwise expanded to fit its actual wrap count), bounded by the terminal's remaining viewport after reserving a navigable option list so the controls hint stays on screen. Long option labels are no longer hidden behind `…`.
 - Added `ask.detailPane` setting (default `true`, exposed in `/settings` → Interaction) to toggle the new ask-tool detail pane.
 
 ### Fixed

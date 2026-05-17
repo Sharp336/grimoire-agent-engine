@@ -50,7 +50,7 @@ describe("HookSelectorComponent", () => {
 		expect(countHorizontals(lines, width)).toBe(4);
 	});
 
-	it("grows the detail pane to fit the focused option without truncation when cap allows", () => {
+	it("grows the detail pane to fit the focused option without truncation when viewport budget allows", () => {
 		const longOption =
 			"Very long option: This option is intentionally oversized to exercise wrapping, overflow handling, selection rendering, and any truncation behavior in the ask tool UI. It should be long enough to span multiple terminal columns and potentially multiple lines so the recent changes are visible under realistic stress conditions.";
 		const options = ["Short proceed (Recommended)", longOption, "Other (type your own)"];
@@ -63,7 +63,7 @@ describe("HookSelectorComponent", () => {
 			{
 				outline: true,
 				initialIndex: 1,
-				maxDetailRows: 20, // generous cap so the option fits in full
+				maxDetailRows: 20, // generous viewport budget so the option fits in full
 			},
 		);
 		const lines = component.render(width);
@@ -101,7 +101,7 @@ describe("HookSelectorComponent", () => {
 		// Only outer DynamicBorders + OutlinedList top/bottom = 4 horizontals when pane is hidden.
 		expect(countHorizontals(linesShort, width)).toBe(4);
 
-		// Focused on long option: detail pane appears, capped at maxDetailRows.
+		// Focused on long option: detail pane appears, bounded by maxDetailRows.
 		const focusedLong = new HookSelectorComponent(
 			"Q",
 			options,
@@ -122,8 +122,8 @@ describe("HookSelectorComponent", () => {
 		}
 	});
 
-	it("truncates with an ellipsis when the focused option exceeds the cap", () => {
-		// 80-cols of unbreakable text repeated → wraps to many rows; cap forces overflow.
+	it("truncates with an ellipsis when the focused option exceeds the viewport budget", () => {
+		// 80-cols of unbreakable text repeated → wraps to many rows; viewport budget forces overflow.
 		const overflowing = "longword".repeat(40); // 320 chars, no spaces
 		const options = [overflowing];
 		const component = new HookSelectorComponent(
@@ -195,6 +195,14 @@ describe("HookSelectorComponent", () => {
 		// The whole picker — chrome + list + (separator + detail if any) — must
 		// fit within the terminal so the controls hint and bottom border survive.
 		expect(lines.length).toBeLessThanOrEqual(terminalRows);
+	});
+
+	it("lets the detail budget grow beyond the previous fixed twenty-row ceiling on tall terminals", () => {
+		const terminalRows = 80;
+		const layout = computeOutlinePickerLayout(terminalRows);
+		expect(layout.maxDetailRows).toBeGreaterThan(20);
+		expect(layout.maxVisible + layout.maxDetailRows).toBe(terminalRows - 12);
+		expect(layout.maxVisible).toBeGreaterThanOrEqual(4);
 	});
 
 	it("reproduces the reviewer's 24-row scenario without overflowing", () => {
