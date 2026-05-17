@@ -1148,6 +1148,21 @@ export class AgentSession {
 		return { running, recent };
 	}
 
+	async drainAsyncJobDeliveriesForAcp(options?: { timeoutMs?: number }): Promise<boolean> {
+		const manager = AsyncJobManager.instance();
+		if (!manager) return false;
+		const filter = this.#agentId ? { ownerId: this.#agentId } : undefined;
+		if (!manager.hasPendingDeliveries(filter)) return false;
+		const drained = await manager.drainDeliveries({ timeoutMs: options?.timeoutMs, filter });
+		if (!drained) {
+			logger.warn("Async job completion deliveries still pending after ACP prompt drain", {
+				...manager.getDeliveryState(filter),
+			});
+			return false;
+		}
+		return true;
+	}
+
 	/**
 	 * Cancel async jobs registered by *this* agent only. Used by lifecycle
 	 * transitions (newSession, switchSession, handoff, dispose) so a subagent
