@@ -133,6 +133,43 @@ describe("aws-credentials credential_process", () => {
 		await expect(resolveAwsCredentials({ profile: "bad-version" })).rejects.toThrow(/unsupported Version/i);
 	});
 
+	test("rejects malformed Expiration values (would otherwise cache as non-expiring)", async () => {
+		// Without this guard, an unparseable Expiration would silently become
+		// `undefined` and the cache would treat the credentials as eternal —
+		// requests would later fail with expired-token errors and the helper
+		// would never be re-invoked.
+		const script = writeProcessScript({
+			Version: 1,
+			AccessKeyId: "AKIA",
+			SecretAccessKey: "secret",
+			Expiration: "not-a-real-timestamp",
+		});
+		writeConfig("bad-expiration", `${process.execPath} ${script}`);
+
+		await expect(resolveAwsCredentials({ profile: "bad-expiration" })).rejects.toThrow(/invalid Expiration/i);
+	});
+
+	test("rejects empty Expiration string (still a malformed envelope)", async () => {
+		const script = writeProcessScript({
+			Version: 1,
+			AccessKeyId: "AKIA",
+			SecretAccessKey: "secret",
+			Expiration: "",
+		});
+		writeConfig("empty-expiration", `${process.execPath} ${script}`);
+
+		await expect(resolveAwsCredentials({ profile: "empty-expiration" })).rejects.toThrow(/invalid Expiration/i);
+	});
+
+	test("rejects responses missing AccessKeyId or SecretAccessKey", async () => {
+		const script = writeProcessScript({ Version: 1, AccessKeyId: "AKIA" });
+		writeConfig("missing-secret", `${process.execPath} ${script}`);
+
+		await expect(resolveAwsCredentials({ profile: "missing-secret" })).rejects.toThrow(
+			/no AccessKeyId\/SecretAccessKey/,
+		);
+	});
+
 	test("surfaces non-zero exit status from the process", async () => {
 		const script = writeFailingScript(7, "boom\n");
 		writeConfig("failing-process", `${process.execPath} ${script}`);

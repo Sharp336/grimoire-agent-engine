@@ -252,41 +252,38 @@ async function readProcessCredentials(
 	profile: string,
 	signal: AbortSignal | undefined,
 ): Promise<ResolvedCredentials> {
-	const argv = tokenizeCredentialProcess(commandLine);
-	if (argv.length === 0) {
-		throw new Error(`credential_process for profile '${profile}' is empty`);
-	}
-	const bin = argv[0] as string;
-	const args = argv.slice(1);
 	// On Windows, always go through cmd.exe. Node's execFile cannot launch
 	// `.bat` / `.cmd` files directly (CVE-2024-27980 hardening as of Node
 	// 18.20.2), and a bare-name `bin` like `aws-vault` may resolve through
 	// PATHEXT to a `.cmd` shim — something only the shell does, not Win32
 	// CreateProcess. botocore's reference implementation also uses `shell=True`
-	// on Windows for the same reasons. We pass the original (still-quoted)
-	// command line rather than our split argv because `shell: true` joins
-	// argv with single spaces before re-parsing in the shell, which would
-	// drop the quoting we already stripped (paths with spaces would break).
-	// The command line comes from a local config file we already trust to
-	// spawn arbitrary code, so shell interpretation is acceptable here.
+	// on Windows for the same reasons. We hand cmd.exe the original command
+	// line (instead of reconstituting it from our split argv) so it can apply
+	// its own quoting rules, including caret escapes that our POSIX-flavored
+	// tokenizer doesn't model. The command line comes from a local config
+	// file we already trust to spawn arbitrary code, so shell interpretation
+	// is acceptable here.
 	const useShell = process.platform === "win32";
 
+	// AWS SDKs cap process credential output at 1 MiB.
+	const baseOpts = { maxBuffer: 1024 * 1024, windowsHide: true, signal } as const;
 	let stdout: string;
 	try {
-		const result = useShell
-			? await execFileAsync(commandLine, {
-					maxBuffer: 1024 * 1024,
-					windowsHide: true,
-					signal,
-					shell: true,
-				})
-			: await execFileAsync(bin, args, {
-					// AWS SDKs cap process credential output at 1 MiB.
-					maxBuffer: 1024 * 1024,
-					windowsHide: true,
-					signal,
-				});
-		stdout = result.stdout;
+		// On Windows we hand cmd.exe the original command line; we deliberately
+		// don't run our POSIX tokenizer first, since it would reject configs
+		// (e.g. caret escapes) that cmd.exe parses fine.
+		if (useShell) {
+			const result = await execFileAsync(commandLine, { ...baseOpts, shell: true });
+			stdout = result.stdout;
+		} else {
+			const argv = tokenizeCredentialProcess(commandLine);
+			if (argv.length === 0) {
+				throw new Error(`credential_process for profile '${profile}' is empty`);
+			}
+			const [bin, ...args] = argv as [string, ...string[]];
+			const result = await execFileAsync(bin, args, baseOpts);
+			stdout = result.stdout;
+		}
 	} catch (err) {
 		const detail = err instanceof Error ? err.message : String(err);
 		throw new Error(`credential_process for profile '${profile}' failed: ${detail}`);
@@ -314,9 +311,19 @@ async function readProcessCredentials(
 		secretAccessKey: parsed.SecretAccessKey,
 	};
 	if (parsed.SessionToken) out.sessionToken = parsed.SessionToken;
-	if (parsed.Expiration) {
-		const exp = Date.parse(parsed.Expiration);
-		if (!Number.isNaN(exp)) out.expiresAt = exp;
+	// AWS treats omitted Expiration as "non-expiring credentials". A *present*
+	// but unparseable value is a malformed envelope: silently dropping it would
+	// cache temporary creds forever (the resolver caches with `expiresAt ??
+	// Infinity`), so the helper would never be re-invoked even after the real
+	// credentials expired. Fail fast instead.
+	if (parsed.Expiration !== undefined && parsed.Expiration !== null) {
+		const exp = typeof parsed.Expiration === "string" ? Date.parse(parsed.Expiration) : Number.NaN;
+		if (!Number.isFinite(exp)) {
+			throw new Error(
+				`credential_process for profile '${profile}' returned invalid Expiration: ${JSON.stringify(parsed.Expiration)}`,
+			);
+		}
+		out.expiresAt = exp;
 	}
 	return out;
 }
