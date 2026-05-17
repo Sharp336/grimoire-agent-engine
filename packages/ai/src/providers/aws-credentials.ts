@@ -258,16 +258,18 @@ async function readProcessCredentials(
 	}
 	const bin = argv[0] as string;
 	const args = argv.slice(1);
-	// Node refuses to launch `.bat` / `.cmd` directly via execFile on Windows
-	// (they need cmd.exe), so route those through the shell. AWS docs include
-	// `.cmd` examples, so this branch is part of the documented contract.
-	// We hand cmd.exe the original (still-quoted) command line rather than
-	// our parsed argv: with shell: true Node concatenates argv with spaces
-	// and passes a single string to the shell, so any quoting we stripped
-	// would be lost and paths with spaces would break. The command line
-	// comes from a local config file we already trust to spawn arbitrary
-	// code, so shell interpretation is acceptable here.
-	const useShell = process.platform === "win32" && /\.(cmd|bat)$/i.test(bin);
+	// On Windows, always go through cmd.exe. Node's execFile cannot launch
+	// `.bat` / `.cmd` files directly (CVE-2024-27980 hardening as of Node
+	// 18.20.2), and a bare-name `bin` like `aws-vault` may resolve through
+	// PATHEXT to a `.cmd` shim — something only the shell does, not Win32
+	// CreateProcess. botocore's reference implementation also uses `shell=True`
+	// on Windows for the same reasons. We pass the original (still-quoted)
+	// command line rather than our split argv because `shell: true` joins
+	// argv with single spaces before re-parsing in the shell, which would
+	// drop the quoting we already stripped (paths with spaces would break).
+	// The command line comes from a local config file we already trust to
+	// spawn arbitrary code, so shell interpretation is acceptable here.
+	const useShell = process.platform === "win32";
 
 	let stdout: string;
 	try {

@@ -211,6 +211,34 @@ describe("aws-credentials credential_process", () => {
 		},
 	);
 
+	test.skipIf(process.platform !== "win32")(
+		"resolves bare-name Windows helpers via PATHEXT (.cmd shim)",
+		async () => {
+			// Real-world Windows entries often look like
+			//   credential_process = aws-vault exec foo --json
+			// where `aws-vault` has no extension and resolves to `aws-vault.cmd`
+			// (or .exe) through PATH + PATHEXT. That's a shell behavior — Win32
+			// CreateProcess wouldn't find it — so the resolver must use the shell
+			// even when the first token has no extension.
+			const helperName = "omp-test-creds";
+			const helperPath = path.join(tmpDir, `${helperName}.cmd`);
+			const payload = '{"Version":1,"AccessKeyId":"AKIABARE","SecretAccessKey":"bare-secret"}';
+			fs.writeFileSync(helperPath, `@echo off\r\necho ${payload}\r\n`, "utf8");
+
+			const originalPath = process.env.PATH;
+			process.env.PATH = `${tmpDir};${originalPath ?? ""}`;
+			try {
+				writeConfig("windows-bare", helperName);
+				const creds = await resolveAwsCredentials({ profile: "windows-bare" });
+				expect(creds.accessKeyId).toBe("AKIABARE");
+				expect(creds.secretAccessKey).toBe("bare-secret");
+			} finally {
+				if (originalPath === undefined) delete process.env.PATH;
+				else process.env.PATH = originalPath;
+			}
+		},
+	);
+
 	test("AbortSignal cancels a hanging credential_process", async () => {
 		// Sleep forever — long enough that the only way the promise resolves is
 		// via the AbortSignal we hand to resolveAwsCredentials.
