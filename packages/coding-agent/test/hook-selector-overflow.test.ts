@@ -1,5 +1,8 @@
 import { beforeAll, describe, expect, it } from "bun:test";
-import { HookSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/hook-selector";
+import {
+	computeOutlinePickerLayout,
+	HookSelectorComponent,
+} from "@oh-my-pi/pi-coding-agent/modes/components/hook-selector";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
 
@@ -141,5 +144,63 @@ describe("HookSelectorComponent", () => {
 		}
 		const allText = lines.map(line => Bun.stripANSI(line)).join("\n");
 		expect(allText).toContain("…");
+	});
+
+	it.each([
+		// [terminalRows, expect pane on/off]
+		[24, true],
+		[30, true],
+		[40, true],
+		[60, true],
+		[80, true],
+		// Below the joint-min threshold (MIN_LIST_ROWS + MIN_DETAIL_PANE_ROWS + PICKER_CHROME_ROWS),
+		// the helper disables the pane rather than overflow. We don't assert
+		// "fits in N rows" below 16 rows — the legacy non-outline path also
+		// floors maxVisible at 4 and overflows tiny terminals (pre-existing).
+		[16, false],
+	])("renders within %i terminal rows when focused on the worst-case option", (terminalRows, paneExpected) => {
+		const layout = computeOutlinePickerLayout(terminalRows);
+		if (paneExpected) {
+			expect(layout.maxDetailRows).toBeGreaterThan(0);
+		} else {
+			expect(layout.maxDetailRows).toBe(0);
+		}
+
+		const width = 80;
+		const detailWidth = Math.max(1, width - 4); // matches OutlinedList: borders + 1-col inset each side
+		// Worst-case focused option: wraps to exactly `maxDetailRows` lines so the
+		// pane uses its full reservation. Use 'X' so wrapTextWithAnsi can't split
+		// on whitespace and pads each row toward `detailWidth`.
+		const worstCaseRows = Math.max(layout.maxDetailRows, 1);
+		const worstCase = "X".repeat(detailWidth * worstCaseRows);
+		const options: string[] = [];
+		// Fill list with enough options to exercise the maxVisible cap.
+		for (let i = 0; i < layout.maxVisible + 2; i++) options.push(`Short option ${i}`);
+		const worstIndex = options.length;
+		options.push(worstCase);
+
+		const component = new HookSelectorComponent(
+			"Title",
+			options,
+			() => {},
+			() => {},
+			{
+				outline: true,
+				initialIndex: worstIndex,
+				maxVisible: layout.maxVisible,
+				maxDetailRows: layout.maxDetailRows,
+			},
+		);
+		const lines = component.render(width);
+		// The whole picker — chrome + list + (separator + detail if any) — must
+		// fit within the terminal so the controls hint and bottom border survive.
+		expect(lines.length).toBeLessThanOrEqual(terminalRows);
+	});
+
+	it("reproduces the reviewer's 24-row scenario without overflowing", () => {
+		// Pre-fix: maxDetailRows=12, maxVisible floored at 4 → ~28 rows on a 24-row terminal.
+		// Post-fix: joint sizing keeps the worst-case total <= 24.
+		const layout = computeOutlinePickerLayout(24);
+		expect(layout.maxVisible + layout.maxDetailRows).toBeLessThanOrEqual(12);
 	});
 });

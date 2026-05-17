@@ -48,6 +48,59 @@ export interface HookSelectorOptions {
 /** Minimum useful detail cap. Below this the pane wastes a separator row for almost no payload. */
 const MIN_DETAIL_ROWS = 2;
 
+// Layout-budget constants. The picker draws (top to bottom):
+//   DynamicBorder · Spacer · Markdown title · Spacer ·
+//   OutlinedList { top─ · N list rows · [separator─ · M detail rows] · bottom─ } ·
+//   Spacer · controls hint · Spacer · DynamicBorder
+// Non-list, non-detail rows therefore total: 2 borders + 4 spacers + hint = 7,
+// plus the Markdown title (1-2 lines for typical questions; budget 2), plus
+// the OutlinedList's own non-content rows (top + separator + bottom = 3 in
+// detail mode, 2 without — over-budget by 1 in the non-detail branch, which
+// gives a row of headroom). That sums to `PICKER_CHROME_ROWS` in detail mode.
+const PICKER_CHROME_ROWS = 12;
+/** Hard floor for the list window so the picker is always navigable. */
+const MIN_LIST_ROWS = 4;
+/** Hard ceiling for the list window — anything more starts to dominate big terminals. */
+const MAX_LIST_ROWS = 15;
+/** Smallest useful detail payload (separator + 3 wrapped lines is enough to convey context). */
+const MIN_DETAIL_PANE_ROWS = 3;
+/** Hard ceiling for the detail pane so it can't dominate very tall terminals. */
+const MAX_DETAIL_PANE_ROWS = 20;
+
+/** Layout result for the outline-mode picker; both values are intended to be clamped, non-negative integers. */
+export interface OutlinePickerLayout {
+	/** List window size; floored so the list is always navigable. */
+	maxVisible: number;
+	/** Detail-pane cap; 0 disables the pane entirely when the terminal can't fit it. */
+	maxDetailRows: number;
+}
+
+/**
+ * Joint sizing of the outline picker's list window and detail pane against
+ * the terminal's vertical budget. Guarantees that the worst-case rendered
+ * height (focused option fully filling the detail cap) fits within
+ * `terminalRows`, so the controls hint and bottom border can't be pushed
+ * off-screen on small terminals.
+ *
+ * When the budget can't accommodate both `MIN_LIST_ROWS` and
+ * `MIN_DETAIL_PANE_ROWS`, the detail pane is disabled (`maxDetailRows: 0`)
+ * and the full budget goes to the list — long options fall back to the
+ * pre-detail-pane truncated rendering, which is the best we can do on a
+ * terminal that small.
+ */
+export function computeOutlinePickerLayout(terminalRows: number | undefined): OutlinePickerLayout {
+	const rows = Math.max(MIN_LIST_ROWS, terminalRows ?? 24);
+	const budget = rows - PICKER_CHROME_ROWS;
+	if (budget < MIN_LIST_ROWS + MIN_DETAIL_PANE_ROWS) {
+		// Not enough room to host both. Keep the list, drop the detail pane.
+		const maxVisible = Math.max(MIN_LIST_ROWS, Math.min(MAX_LIST_ROWS, budget));
+		return { maxVisible, maxDetailRows: 0 };
+	}
+	const maxDetailRows = Math.min(MAX_DETAIL_PANE_ROWS, budget - MIN_LIST_ROWS);
+	const maxVisible = Math.max(MIN_LIST_ROWS, Math.min(MAX_LIST_ROWS, budget - maxDetailRows));
+	return { maxVisible, maxDetailRows };
+}
+
 class OutlinedList extends Container {
 	#lines: string[] = [];
 	#detailLabel: string | undefined;

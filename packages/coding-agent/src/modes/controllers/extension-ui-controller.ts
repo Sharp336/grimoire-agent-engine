@@ -19,29 +19,12 @@ import type {
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { HookEditorComponent } from "../../modes/components/hook-editor";
 import { HookInputComponent } from "../../modes/components/hook-input";
-import { HookSelectorComponent } from "../../modes/components/hook-selector";
+import { computeOutlinePickerLayout, HookSelectorComponent } from "../../modes/components/hook-selector";
 import { getAvailableThemesWithPaths, getThemeByName, setTheme, type Theme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
 import { setSessionTerminalTitle, setTerminalTitle } from "../../utils/title-generator";
 
 const MAX_WIDGET_LINES = 10;
-
-/**
- * Decide how many detail-pane rows the outline picker may use, given the
- * terminal's vertical budget. The pane is sized dynamically by the focused
- * option's actual wrap count at render time; this cap is the worst-case
- * upper bound used to keep the picker from pushing the controls hint or the
- * bottom border off-screen on small terminals.
- *
- * Floor 3 keeps the pane useful (1 line of text = better shown inline in the
- * list anyway). Ceiling 20 prevents the pane from dominating very tall
- * terminals. Otherwise we take half the terminal so list and detail get
- * comparable budgets.
- */
-function computeOutlineMaxDetailRows(terminalRows: number | undefined): number {
-	const rows = Math.max(10, terminalRows ?? 24);
-	return Math.max(3, Math.min(20, Math.floor(rows / 2)));
-}
 
 export class ExtensionUiController {
 	#extensionTerminalInputUnsubscribers = new Set<() => void>();
@@ -606,14 +589,17 @@ export class ExtensionUiController {
 			() => this.hideHookSelector(),
 			dialogOptions?.signal,
 		);
-		const detailPaneEnabled = this.ctx.settings.get("ask.detailPane");
-		const maxDetailRows =
-			dialogOptions?.outline && detailPaneEnabled ? computeOutlineMaxDetailRows(this.ctx.ui.terminal.rows) : 0;
-		// Worst-case detail occupies the cap + 1 separator row. Subtract from
-		// the list window so a long-option focus cannot push the controls hint
-		// or bottom border off-screen on small terminals.
-		const detailReserve = maxDetailRows > 0 ? maxDetailRows + 1 : 0;
-		const maxVisible = Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12 - detailReserve));
+		// Joint sizing of list + detail against the terminal's row budget — the
+		// helper guarantees that worst-case detail (focused option fully filling
+		// the cap) plus the list window fits within `terminal.rows`. When the
+		// detail pane is disabled (setting off, non-outline picker, or terminal
+		// too small) the helper still returns a valid `maxVisible`.
+		const detailPaneEnabled = dialogOptions?.outline === true && this.ctx.settings.get("ask.detailPane");
+		const layout = computeOutlinePickerLayout(this.ctx.ui.terminal.rows);
+		const maxDetailRows = detailPaneEnabled ? layout.maxDetailRows : 0;
+		const maxVisible = detailPaneEnabled
+			? layout.maxVisible
+			: Math.max(4, Math.min(15, this.ctx.ui.terminal.rows - 12));
 		this.ctx.hookSelector = new HookSelectorComponent(
 			title,
 			options,
