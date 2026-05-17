@@ -95,9 +95,9 @@ describe("aws-credentials credential_process", () => {
 			SessionToken: "session-from-process",
 			Expiration: "2099-01-01T00:00:00Z",
 		});
-		writeConfig("quarry-omp", `${process.execPath} ${script}`);
+		writeConfig("custom-aws-auth-tool", `${process.execPath} ${script}`);
 
-		const creds = await resolveAwsCredentials({ profile: "quarry-omp" });
+		const creds = await resolveAwsCredentials({ profile: "custom-aws-auth-tool" });
 
 		expect(creds.accessKeyId).toBe("AKIAPROCESS");
 		expect(creds.secretAccessKey).toBe("secret-from-process");
