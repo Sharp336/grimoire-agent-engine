@@ -865,7 +865,121 @@ export function normalizeSchemaForMCP(value: unknown): unknown {
  * would not survive).
  */
 export function sanitizeSchemaForOpenAIResponses(schema: JsonObject): JsonObject {
-	return rewriteOneOfToAnyOf(schema) as JsonObject;
+	return rewriteOneOfToAnyOf(ensureObjectProperties(schema)) as JsonObject;
+}
+
+const OPENAI_SCHEMA_MAP_KEYS = new Set([
+	"$defs",
+	"definitions",
+	"dependencies",
+	"dependentSchemas",
+	"patternProperties",
+	"properties",
+]);
+const OPENAI_SCHEMA_ARRAY_KEYS = new Set(["allOf", "anyOf", "oneOf", "prefixItems"]);
+const OPENAI_SCHEMA_VALUE_KEYS = new Set([
+	"additionalItems",
+	"additionalProperties",
+	"contains",
+	"else",
+	"contentSchema",
+	"if",
+	"items",
+	"not",
+	"propertyNames",
+	"then",
+	"unevaluatedItems",
+	"unevaluatedProperties",
+]);
+
+/**
+ * Ensure every JSON Schema node with `type: "object"` has a `properties` field.
+ * OpenAI's Responses and Codex APIs reject object schemas that lack
+ * `properties` — even `{ "type": "object" }` is invalid without it.
+ *
+ * Traversal is schema-aware: it follows schema-valued keywords but does not walk
+ * literal payload containers such as `enum`, `const`, `default`, or `examples`.
+ */
+export function ensureObjectProperties(value: unknown): unknown {
+	return ensureObjectPropertiesImpl(value, new WeakMap(), new WeakSet());
+}
+
+function ensureObjectPropertiesImpl(
+	value: unknown,
+	cache: WeakMap<object, unknown>,
+	visiting: WeakSet<object>,
+): unknown {
+	if (!isJsonObject(value) && !Array.isArray(value)) {
+		return value;
+	}
+
+	if (visiting.has(value)) {
+		return {};
+	}
+	const cached = cache.get(value);
+	if (cached !== undefined) {
+		return cached;
+	}
+
+	visiting.add(value);
+	if (Array.isArray(value)) {
+		let changed = false;
+		const mapped = value.map(item => {
+			const next = ensureObjectPropertiesImpl(item, cache, visiting);
+			if (next !== item) changed = true;
+			return next;
+		});
+		const result = changed ? mapped : value;
+		cache.set(value, result);
+		visiting.delete(value);
+		return result;
+	}
+
+	let changed = false;
+	const result: Record<string, unknown> = {};
+	for (const [key, child] of Object.entries(value)) {
+		const next = normalizeOpenAISchemaChild(key, child, cache, visiting);
+		if (next !== child) changed = true;
+		result[key] = next;
+	}
+
+	if (result.type === "object" && !outHasOwn(result, "properties")) {
+		changed = true;
+		result.properties = {};
+	}
+
+	const normalized = changed ? result : value;
+	cache.set(value, normalized);
+	visiting.delete(value);
+	return normalized;
+}
+
+function normalizeOpenAISchemaChild(
+	key: string,
+	child: unknown,
+	cache: WeakMap<object, unknown>,
+	visiting: WeakSet<object>,
+): unknown {
+	if (OPENAI_SCHEMA_MAP_KEYS.has(key) && isJsonObject(child)) {
+		let changed = false;
+		const mapped: Record<string, unknown> = {};
+		for (const [name, schema] of Object.entries(child)) {
+			const next = ensureObjectPropertiesImpl(schema, cache, visiting);
+			if (next !== schema) changed = true;
+			mapped[name] = next;
+		}
+		return changed ? mapped : child;
+	}
+
+	if (OPENAI_SCHEMA_ARRAY_KEYS.has(key) && Array.isArray(child)) {
+		return ensureObjectPropertiesImpl(child, cache, visiting);
+	}
+
+	if (OPENAI_SCHEMA_VALUE_KEYS.has(key) && (isJsonObject(child) || Array.isArray(child))) {
+		return ensureObjectPropertiesImpl(child, cache, visiting);
+	}
+
+	return child;
 }
 
 /**

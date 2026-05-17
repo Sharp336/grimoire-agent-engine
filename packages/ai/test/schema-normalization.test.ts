@@ -4,6 +4,7 @@ import { convertTools } from "@oh-my-pi/pi-ai/providers/google-shared";
 import type { Context, Model, TJsonSchema, Tool } from "@oh-my-pi/pi-ai/types";
 import {
 	enforceStrictSchema,
+	ensureObjectProperties,
 	mergeCompatibleEnumSchemas,
 	normalizeSchemaForCCA,
 	normalizeSchemaForGoogle,
@@ -726,5 +727,97 @@ describe("circular schema safety", () => {
 
 		expect(() => normalizeSchemaForGoogle(circular)).not.toThrow();
 		expect(() => sanitizeSchemaForStrictMode(circular)).not.toThrow();
+	});
+});
+
+// ---------------------------------------------------------------------------
+// ensureObjectProperties
+// ---------------------------------------------------------------------------
+
+describe("ensureObjectProperties", () => {
+	it("adds properties:{} to root and nested object schemas", () => {
+		const normalized = ensureObjectProperties({
+			type: "object",
+			properties: {
+				address: { type: "object" },
+				tags: {
+					type: "array",
+					items: { type: "object" },
+				},
+			},
+		}) as Record<string, unknown>;
+
+		const properties = normalized.properties as Record<string, Record<string, unknown>>;
+		expect(normalized.properties).toBeDefined();
+		expect(properties.address).toEqual({ type: "object", properties: {} });
+		expect(properties.tags.items).toEqual({ type: "object", properties: {} });
+	});
+
+	it("adds properties:{} to object schemas inside combinators", () => {
+		const normalized = ensureObjectProperties({
+			anyOf: [{ type: "string" }, { type: "object" }],
+			oneOf: [{ type: "object" }],
+			allOf: [{ type: "object" }],
+		}) as Record<string, Record<string, unknown>[]>;
+
+		expect(normalized.anyOf[1]).toEqual({ type: "object", properties: {} });
+		expect(normalized.oneOf[0]).toEqual({ type: "object", properties: {} });
+		expect(normalized.allOf[0]).toEqual({ type: "object", properties: {} });
+	});
+
+	it("does not rewrite object literals in enum values", () => {
+		const schema = {
+			type: "object",
+			properties: {
+				mode: {
+					enum: [{ type: "object" }],
+				},
+			},
+		};
+
+		const normalized = ensureObjectProperties(schema) as Record<string, unknown>;
+		const properties = normalized.properties as Record<string, Record<string, unknown>>;
+		expect(properties.mode.enum).toEqual([{ type: "object" }]);
+	});
+
+	it("normalizes schema-valued dependencies and additionalItems", () => {
+		const normalized = ensureObjectProperties({
+			type: "array",
+			additionalItems: { type: "object" },
+			dependencies: {
+				payload: { type: "object" },
+				name: ["payload"],
+			},
+		}) as Record<string, unknown>;
+
+		const dependencies = normalized.dependencies as Record<string, unknown>;
+		expect(normalized.additionalItems).toEqual({ type: "object", properties: {} });
+		expect(dependencies.payload).toEqual({ type: "object", properties: {} });
+		expect(dependencies.name).toEqual(["payload"]);
+	});
+
+	it("normalizes schema-valued contentSchema", () => {
+		const normalized = ensureObjectProperties({
+			type: "string",
+			contentSchema: { type: "object" },
+		}) as Record<string, unknown>;
+
+		expect(normalized.contentSchema).toEqual({ type: "object", properties: {} });
+	});
+
+	it("does not overflow on circular object schemas", () => {
+		const circular: Record<string, unknown> = {
+			type: "object",
+			properties: {},
+		};
+		(circular.properties as Record<string, unknown>).self = circular;
+
+		expect(() => ensureObjectProperties(circular)).not.toThrow();
+		expect(ensureObjectProperties(circular)).toEqual({
+			type: "object",
+			properties: {
+				self: {},
+			},
+		});
 	});
 });
