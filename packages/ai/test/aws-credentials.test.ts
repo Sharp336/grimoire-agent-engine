@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearAwsCredentialCache, resolveAwsCredentials } from "../src/providers/aws-credentials";
+import { withEnv } from "./helpers";
 
 // These tests cover the `credential_process` branch of the AWS credential
 // resolver. We point AWS_CONFIG_FILE / AWS_SHARED_CREDENTIALS_FILE at a
@@ -225,17 +226,12 @@ describe("aws-credentials credential_process", () => {
 			const payload = '{"Version":1,"AccessKeyId":"AKIABARE","SecretAccessKey":"bare-secret"}';
 			fs.writeFileSync(helperPath, `@echo off\r\necho ${payload}\r\n`, "utf8");
 
-			const originalPath = process.env.PATH;
-			process.env.PATH = `${tmpDir};${originalPath ?? ""}`;
-			try {
+			await withEnv({ PATH: `${tmpDir};${process.env.PATH ?? ""}` }, async () => {
 				writeConfig("windows-bare", helperName);
 				const creds = await resolveAwsCredentials({ profile: "windows-bare" });
 				expect(creds.accessKeyId).toBe("AKIABARE");
 				expect(creds.secretAccessKey).toBe("bare-secret");
-			} finally {
-				if (originalPath === undefined) delete process.env.PATH;
-				else process.env.PATH = originalPath;
-			}
+			});
 		},
 	);
 
