@@ -11,6 +11,7 @@ import {
 import { toFireworksPublicModelId } from "../utils/fireworks-model-id";
 import { getGitHubCopilotBaseUrl, OPENCODE_HEADERS, parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { createBundledReferenceMap, createReferenceResolver } from "./bundled-references";
+import { classifyCloudflareAiGatewayBackend, normalizeCloudflareAiGatewayBase } from "./cloudflare-ai-gateway-routing";
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
@@ -445,38 +446,6 @@ function createSimpleOpenAICompletionsOptions(
 					mapModel: (entry, defaults) => {
 						const reference = references.get(defaults.id);
 						return mapWithBundledReference(entry, defaults, reference);
-					},
-				}),
-		}),
-	};
-}
-
-function createSimpleAnthropicProviderOptions(
-	providerId: Parameters<typeof getBundledModels>[0],
-	defaultBaseUrlFallback: string,
-	config?: SimpleProviderConfig,
-): ModelManagerOptions<"anthropic-messages"> {
-	const apiKey = config?.apiKey;
-	const baseUrl = normalizeAnthropicBaseUrl(config?.baseUrl, defaultBaseUrlFallback);
-	const discoveryBaseUrl = toAnthropicDiscoveryBaseUrl(baseUrl);
-	const references = createBundledReferenceMap<"anthropic-messages">(providerId);
-	return {
-		providerId,
-		...(apiKey && {
-			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels({
-					api: "anthropic-messages",
-					provider: providerId,
-					baseUrl: discoveryBaseUrl,
-					headers: buildAnthropicDiscoveryHeaders(apiKey),
-					mapModel: (entry, defaults) => {
-						const reference = references.get(defaults.id);
-						const model = mapWithBundledReference(entry, defaults, reference);
-						return {
-							...model,
-							name: toModelName(entry.display_name, model.name),
-							baseUrl,
-						};
 					},
 				}),
 		}),
@@ -1363,14 +1332,57 @@ export interface CloudflareAiGatewayModelManagerConfig {
 	baseUrl?: string;
 }
 
+const CLOUDFLARE_AI_GATEWAY_DEFAULT_BASE = "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>";
+
 export function cloudflareAiGatewayModelManagerOptions(
 	config?: CloudflareAiGatewayModelManagerConfig,
-): ModelManagerOptions<"anthropic-messages"> {
-	return createSimpleAnthropicProviderOptions(
-		"cloudflare-ai-gateway",
-		"https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
-		config,
-	);
+): ModelManagerOptions<Api> {
+	const apiKey = config?.apiKey;
+	const configuredBase = config?.baseUrl
+		? normalizeCloudflareAiGatewayBase(config.baseUrl)
+		: CLOUDFLARE_AI_GATEWAY_DEFAULT_BASE;
+
+	const bundled = getBundledModels("cloudflare-ai-gateway");
+	const staticModels: Model<Api>[] = bundled.map(model => {
+		const backend = classifyCloudflareAiGatewayBackend(model.id);
+		return {
+			...model,
+			api: backend.api,
+			baseUrl: `${configuredBase}${backend.pathSuffix}`,
+		} as Model<Api>;
+	});
+
+	// Lifted once outside the per-model mapModel callback to avoid rebuilding
+	// the reference map on every discovered model.
+	const anthropicReferences = createBundledReferenceMap<"anthropic-messages">("cloudflare-ai-gateway");
+
+	return {
+		providerId: "cloudflare-ai-gateway",
+		staticModels,
+		// Dynamic discovery is restricted to the Anthropic backend (the only route
+		// where the existing /v1/models endpoint works). Non-Anthropic backends rely
+		// on bundled refs in v1; per-backend discovery is a deferred follow-up.
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "anthropic-messages",
+					provider: "cloudflare-ai-gateway",
+					baseUrl: toAnthropicDiscoveryBaseUrl(`${configuredBase}/anthropic`),
+					headers: buildAnthropicDiscoveryHeaders(apiKey),
+					mapModel: (entry, defaults) => {
+						// CF /v1/models may return bare or already-prefixed ids; canonicalize before lookup.
+						const prefixedId = defaults.id.startsWith("anthropic/") ? defaults.id : `anthropic/${defaults.id}`;
+						const reference = anthropicReferences.get(prefixedId);
+						const mapped = mapWithBundledReference(entry, defaults, reference);
+						return {
+							...mapped,
+							id: prefixedId,
+							baseUrl: `${configuredBase}/anthropic`,
+						};
+					},
+				}),
+		}),
+	};
 }
 
 // ---------------------------------------------------------------------------

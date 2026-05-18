@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as tls from "node:tls";
+import Anthropic from "@anthropic-ai/sdk";
 import { Effort } from "@oh-my-pi/pi-ai";
 import {
 	applyClaudeToolPrefix,
@@ -784,8 +785,8 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(options.apiKey).toBeNull();
 		expect(options.authToken).toBeNull();
 		expect(options.defaultHeaders["cf-aig-authorization"]).toBe("Bearer cf-gateway-token");
-		expect(options.defaultHeaders.Authorization).toBeUndefined();
-		expect(options.defaultHeaders["X-Api-Key"]).toBeUndefined();
+		expect(options.defaultHeaders.Authorization).toBeNull();
+		expect(options.defaultHeaders["X-Api-Key"]).toBeNull();
 	});
 
 	it("keeps Cloudflare gateway auth authoritative over caller-supplied auth headers", () => {
@@ -806,8 +807,43 @@ describe("Anthropic request fingerprint alignment", () => {
 		});
 
 		expect(options.defaultHeaders["cf-aig-authorization"]).toBe("Bearer cf-gateway-token");
-		expect(options.defaultHeaders.Authorization).toBeUndefined();
-		expect(options.defaultHeaders["X-Api-Key"]).toBeUndefined();
+		expect(options.defaultHeaders.Authorization).toBeNull();
+		expect(options.defaultHeaders["X-Api-Key"]).toBeNull();
+	});
+
+	it("constructs a usable Anthropic SDK client for Cloudflare AI Gateway", async () => {
+		// SDK ≥0.94 throws "Could not resolve authentication method" if X-Api-Key
+		// and Authorization are merely absent rather than explicitly null.
+		const options = buildAnthropicClientOptions({
+			model: CLOUDFLARE_ANTHROPIC_MODEL,
+			apiKey: "cf-gateway-token",
+			extraBetas: [],
+			stream: true,
+			interleavedThinking: false,
+			dynamicHeaders: {},
+		});
+
+		let fetchCalled = false;
+		const fakeFetch = async (): Promise<Response> => {
+			fetchCalled = true;
+			throw new Error("FAKE_FETCH_STOPPED");
+		};
+		const client = new Anthropic({ ...options, fetch: fakeFetch, maxRetries: 0 });
+
+		let caught: unknown;
+		try {
+			await client.messages.create({
+				model: "claude-sonnet-4-5",
+				max_tokens: 1,
+				messages: [{ role: "user", content: "x" }],
+			});
+		} catch (error) {
+			caught = error;
+		}
+
+		const message = caught instanceof Error ? caught.message : String(caught);
+		expect(message).not.toContain("Could not resolve authentication method");
+		expect(fetchCalled).toBe(true);
 	});
 
 	it("applies Claude Code TLS profile for direct Anthropic transport", () => {

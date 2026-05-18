@@ -12,6 +12,10 @@ import type {
 import packageJson from "../../package.json" with { type: "json" };
 import type { Effort } from "../model-thinking";
 import { calculateCost } from "../models";
+import {
+	resolveCloudflareAiGatewayBaseUrl,
+	toCloudflareGatewayWireModelId,
+} from "../provider-models/cloudflare-ai-gateway-routing";
 import { getEnvApiKey } from "../stream";
 import {
 	type AssistantMessage,
@@ -905,7 +909,7 @@ async function createClient(
 	}
 	const rawApiKey = apiKey;
 
-	let headers = { ...model.headers };
+	let headers: Record<string, string | null> = { ...model.headers };
 	if (model.provider === "openrouter") {
 		// App attribution — opts the agent into OpenRouter's public rankings and per-app
 		// analytics. `HTTP-Referer` is the unique app identifier; without it nothing is
@@ -929,9 +933,15 @@ async function createClient(
 		headers = { ...getKimiCommonHeaders(), ...headers };
 	}
 	let copilotPremiumRequests: number | undefined;
-
 	let baseUrl = model.baseUrl;
-	if (model.provider === "github-copilot") {
+	if (model.provider === "cloudflare-ai-gateway") {
+		baseUrl = resolveCloudflareAiGatewayBaseUrl(model);
+		// null = explicit-omit per the OpenAI SDK's validateHeaders; without it the
+		// SDK auto-sets Authorization: Bearer <apiKey>, leaking the CF token upstream.
+		headers["cf-aig-authorization"] = `Bearer ${apiKey}`;
+		headers.Authorization = null;
+		apiKey = "x-not-used"; // satisfy OpenAI SDK constructor; never sent
+	} else if (model.provider === "github-copilot") {
 		apiKey = parseGitHubCopilotApiKey(rawApiKey).accessToken;
 		const hasImages = hasCopilotVisionInput(context.messages);
 		const copilot = buildCopilotDynamicHeaders({
@@ -1017,13 +1027,23 @@ async function createClient(
 		}),
 		copilotPremiumRequests,
 		baseUrl,
-		requestHeaders: headers,
+		requestHeaders: Object.fromEntries(Object.entries(headers).filter(([, v]) => v !== null)) as Record<
+			string,
+			string
+		>,
 		getCapturedErrorResponse: () => capturedErrorResponse,
 		clearCapturedErrorResponse: () => {
 			capturedErrorResponse = undefined;
 		},
 	};
 }
+
+// Some providers prefix model ids in the bundle for disambiguation; the upstream
+// service only knows the bare id. Add an entry when adding a new prefixed-id provider.
+const WIRE_MODEL_ID_REWRITERS: Partial<Record<Model["provider"], (id: string) => string>> = {
+	fireworks: toFireworksWireModelId,
+	"cloudflare-ai-gateway": toCloudflareGatewayWireModelId,
+};
 
 function buildParams(
 	model: Model<"openai-completions">,
@@ -1043,7 +1063,7 @@ function buildParams(
 	const isKimi = model.id.includes("moonshotai/kimi");
 	const effectiveMaxTokens = options?.maxTokens ?? (isKimi ? model.maxTokens : undefined);
 
-	const requestModelId = model.provider === "fireworks" ? toFireworksWireModelId(model.id) : model.id;
+	const requestModelId = WIRE_MODEL_ID_REWRITERS[model.provider]?.(model.id) ?? model.id;
 	const params: OpenAICompletionsParams = {
 		model: requestModelId,
 		messages,

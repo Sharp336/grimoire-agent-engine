@@ -1,6 +1,11 @@
 # Changelog
 
 ## [Unreleased]
+
+### Added
+
+- Added Cloudflare AI Gateway multi-backend routing with backend classification (`anthropic/`, `openai/`, `workers-ai/`), request-time base URL resolution, and wire model ID rewriting so gateway models hit the correct upstream API sub-path with the bare model identifier
+- Updated `buildAnthropicClientOptions` to null-out `X-Api-Key` and `Authorization` headers when routing through Cloudflare AI Gateway, satisfying Anthropic SDK >=0.94 `validateHeaders` while auth rides `cf-aig-authorization`
 ### Changed
 
 - Updated auth-gateway format and pi-native request handling to invalidate the failed API key and retry the provider request with a replacement key when authentication fails

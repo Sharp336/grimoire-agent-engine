@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { rewriteCopilotError } from "../src/utils/http-inspector";
+import { redactHeaders, rewriteCopilotError } from "../src/utils/http-inspector";
 
 function errorWithStatus(status: number): Error {
 	const err = new Error(`${status} Unauthorized`);
@@ -55,5 +55,37 @@ describe("rewriteCopilotError", () => {
 		(err as unknown as { status: number; code: string }).status = 400;
 		(err as unknown as { status: number; code: string }).code = "invalid_request_body";
 		expect(rewriteCopilotError("orig", err, "github-copilot")).toBe("orig");
+	});
+});
+
+describe("redactHeaders", () => {
+	it("redacts cf-aig-authorization header (Cloudflare AI Gateway bearer token)", () => {
+		const result = redactHeaders({
+			"cf-aig-authorization": "Bearer secret-cf-token",
+			"content-type": "application/json",
+		});
+		expect(result?.["cf-aig-authorization"]).toBe("[redacted]");
+		expect(result?.["content-type"]).toBe("application/json");
+	});
+
+	it("redacts cf-aig-authorization regardless of header key casing", () => {
+		const result = redactHeaders({
+			"CF-AIG-Authorization": "Bearer secret-cf-token",
+		});
+		expect(result?.["CF-AIG-Authorization"]).toBe("[redacted]");
+	});
+
+	it("redacts authorization header", () => {
+		const result = redactHeaders({ Authorization: "Bearer sk-secret" });
+		expect(result?.Authorization).toBe("[redacted]");
+	});
+
+	it("redacts x-api-key header", () => {
+		const result = redactHeaders({ "x-api-key": "sk-secret" });
+		expect(result?.["x-api-key"]).toBe("[redacted]");
+	});
+
+	it("returns undefined for undefined input", () => {
+		expect(redactHeaders(undefined)).toBeUndefined();
 	});
 });

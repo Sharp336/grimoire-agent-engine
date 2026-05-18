@@ -67,12 +67,15 @@ export function hasCopilotVisionInput(messages: Message[]): boolean {
  * Resolve an explicitly configured Copilot initiator header, if present.
  * Handles case-insensitive X-Initiator keys and returns the last valid value.
  */
-export function getCopilotInitiatorOverride(headers: Record<string, string> | undefined): CopilotInitiator | undefined {
+export function getCopilotInitiatorOverride(
+	headers: Record<string, string | null> | undefined,
+): CopilotInitiator | undefined {
 	if (!headers) return undefined;
 
 	let override: CopilotInitiator | undefined;
 	for (const [key, value] of Object.entries(headers)) {
 		if (key.toLowerCase() !== "x-initiator") continue;
+		if (value === null) continue;
 		const normalized = value.trim().toLowerCase();
 		if (normalized === "user" || normalized === "agent") {
 			override = normalized;
@@ -113,7 +116,7 @@ export function buildCopilotDynamicHeaders(params: {
 	messages: unknown[];
 	hasImages: boolean;
 	premiumMultiplier?: number;
-	headers?: Record<string, string>;
+	headers?: Record<string, string | null>;
 	initiatorOverride?: CopilotInitiator;
 	planTier?: string;
 }): CopilotDynamicHeaders {

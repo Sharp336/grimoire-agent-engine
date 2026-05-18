@@ -19,6 +19,7 @@ import {
 	linkOpenAIPromotionTargets,
 } from "../src/model-thinking";
 import prevModelsJson from "../src/models.json" with { type: "json" };
+import { classifyCloudflareAiGatewayBackend } from "../src/provider-models/cloudflare-ai-gateway-routing";
 import {
 	allowsUnauthenticatedCatalogDiscovery,
 	type CatalogDiscoveryConfig,
@@ -181,6 +182,33 @@ function applyPremiumMultiplierOverrides(models: readonly Model[]): Model[] {
 }
 function hasBillableCost(cost: Model["cost"]): boolean {
 	return cost.input !== 0 || cost.output !== 0 || cost.cacheRead !== 0 || cost.cacheWrite !== 0;
+}
+
+const CLOUDFLARE_AI_GATEWAY_BUNDLE_BASE = "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>";
+
+/**
+ * Corrects the `api` and `baseUrl` fields for every Cloudflare AI Gateway model
+ * entry so that non-Anthropic backends (openai, workers-ai, google-ai-studio)
+ * are not incorrectly bundled with `api=anthropic-messages` and a `/anthropic`
+ * base URL. The runtime already applies the same correction at load time; this
+ * keeps the bundled data honest so freshly regenerated bundles match reality.
+ */
+function applyCloudflareAiGatewayBackendFields(models: readonly Model[]): Model[] {
+	return models.map(model => {
+		if (model.provider !== "cloudflare-ai-gateway") {
+			return model;
+		}
+		const backend = classifyCloudflareAiGatewayBackend(model.id);
+		const expectedBaseUrl = `${CLOUDFLARE_AI_GATEWAY_BUNDLE_BASE}${backend.pathSuffix}`;
+		if (model.api === backend.api && model.baseUrl === expectedBaseUrl) {
+			return model;
+		}
+		return {
+			...model,
+			api: backend.api,
+			baseUrl: expectedBaseUrl,
+		} as Model;
+	});
 }
 
 function applyCodexPricingFallback(models: readonly Model[]): Model[] {
@@ -366,6 +394,7 @@ async function generateModels() {
 	allModels = applyGlobalModelsDevFallback(allModels, modelsDevModels);
 	allModels = applyPremiumMultiplierOverrides(allModels);
 	allModels = applyCodexPricingFallback(allModels);
+	allModels = applyCloudflareAiGatewayBackendFields(allModels);
 	applyGeneratedModelPolicies(allModels);
 	linkOpenAIPromotionTargets(allModels);
 

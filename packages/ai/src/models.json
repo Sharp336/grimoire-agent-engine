@@ -3515,9 +3515,9 @@
 		"openai/gpt-4": {
 			"id": "openai/gpt-4",
 			"name": "GPT-4",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": false,
 			"input": [
 				"text"
@@ -3534,9 +3534,9 @@
 		"openai/gpt-4-turbo": {
 			"id": "openai/gpt-4-turbo",
 			"name": "GPT-4 Turbo",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": false,
 			"input": [
 				"text",
@@ -3554,9 +3554,9 @@
 		"openai/gpt-4o": {
 			"id": "openai/gpt-4o",
 			"name": "GPT-4o",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": false,
 			"input": [
 				"text",
@@ -3574,9 +3574,9 @@
 		"openai/gpt-4o-mini": {
 			"id": "openai/gpt-4o-mini",
 			"name": "GPT-4o mini",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": false,
 			"input": [
 				"text",
@@ -3594,9 +3594,9 @@
 		"openai/gpt-5.1": {
 			"id": "openai/gpt-5.1",
 			"name": "GPT-5.1",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3619,9 +3619,9 @@
 		"openai/gpt-5.1-codex": {
 			"id": "openai/gpt-5.1-codex",
 			"name": "GPT-5.1 Codex",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3644,9 +3644,9 @@
 		"openai/gpt-5.2": {
 			"id": "openai/gpt-5.2",
 			"name": "GPT-5.2",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3669,9 +3669,9 @@
 		"openai/gpt-5.2-codex": {
 			"id": "openai/gpt-5.2-codex",
 			"name": "GPT-5.2 Codex",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3694,9 +3694,9 @@
 		"openai/gpt-5.3-codex": {
 			"id": "openai/gpt-5.3-codex",
 			"name": "GPT-5.3 Codex",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3719,9 +3719,9 @@
 		"openai/gpt-5.4": {
 			"id": "openai/gpt-5.4",
 			"name": "GPT-5.4",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3744,9 +3744,9 @@
 		"openai/gpt-5.5": {
 			"id": "openai/gpt-5.5",
 			"name": "GPT-5.5",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3769,9 +3769,9 @@
 		"openai/o1": {
 			"id": "openai/o1",
 			"name": "o1",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3794,9 +3794,9 @@
 		"openai/o3": {
 			"id": "openai/o3",
 			"name": "o3",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3819,9 +3819,9 @@
 		"openai/o3-mini": {
 			"id": "openai/o3-mini",
 			"name": "o3-mini",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text"
@@ -3843,9 +3843,9 @@
 		"openai/o3-pro": {
 			"id": "openai/o3-pro",
 			"name": "o3-pro",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3868,9 +3868,9 @@
 		"openai/o4-mini": {
 			"id": "openai/o4-mini",
 			"name": "o4-mini",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/openai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3893,9 +3893,9 @@
 		"workers-ai/@cf/moonshotai/kimi-k2.5": {
 			"id": "workers-ai/@cf/moonshotai/kimi-k2.5",
 			"name": "Kimi K2.5",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/workers-ai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3918,9 +3918,9 @@
 		"workers-ai/@cf/moonshotai/kimi-k2.6": {
 			"id": "workers-ai/@cf/moonshotai/kimi-k2.6",
 			"name": "Kimi K2.6",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/workers-ai/v1",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -3943,9 +3943,9 @@
 		"workers-ai/@cf/nvidia/nemotron-3-120b-a12b": {
 			"id": "workers-ai/@cf/nvidia/nemotron-3-120b-a12b",
 			"name": "Nemotron 3 Super 120B",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/workers-ai/v1",
 			"reasoning": true,
 			"input": [
 				"text"
@@ -3967,9 +3967,9 @@
 		"workers-ai/@cf/zai-org/glm-4.7-flash": {
 			"id": "workers-ai/@cf/zai-org/glm-4.7-flash",
 			"name": "GLM-4.7-Flash",
-			"api": "anthropic-messages",
+			"api": "openai-completions",
 			"provider": "cloudflare-ai-gateway",
-			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/anthropic",
+			"baseUrl": "https://gateway.ai.cloudflare.com/v1/<account>/<gateway>/workers-ai/v1",
 			"reasoning": true,
 			"input": [
 				"text"

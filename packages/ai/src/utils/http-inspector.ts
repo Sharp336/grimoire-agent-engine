@@ -24,7 +24,15 @@ type ErrorWithStatus = {
 	status?: unknown;
 };
 
-const SENSITIVE_HEADERS = ["authorization", "x-api-key", "api-key", "cookie", "set-cookie", "proxy-authorization"];
+const SENSITIVE_HEADERS = [
+	"authorization",
+	"x-api-key",
+	"api-key",
+	"cookie",
+	"set-cookie",
+	"proxy-authorization",
+	"cf-aig-authorization",
+];
 
 export async function appendRawHttpRequestDumpFor400(
 	message: string,
@@ -105,7 +113,7 @@ function sanitizeDump(dump: RawHttpRequestDump): RawHttpRequestDump {
 	};
 }
 
-function redactHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
+export function redactHeaders(headers: Record<string, string> | undefined): Record<string, string> | undefined {
 	if (!headers) {
 		return undefined;
 	}

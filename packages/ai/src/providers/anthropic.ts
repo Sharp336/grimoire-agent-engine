@@ -20,6 +20,10 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { hasOpus47ApiRestrictions, mapEffortToAnthropicAdaptiveEffort } from "../model-thinking";
 import { calculateCost } from "../models";
+import {
+	resolveCloudflareAiGatewayBaseUrl,
+	toCloudflareGatewayWireModelId,
+} from "../provider-models/cloudflare-ai-gateway-routing";
 import { getEnvApiKey, OUTPUT_FALLBACK_BUFFER } from "../stream";
 import type {
 	Api,
@@ -557,7 +561,9 @@ export type AnthropicClientOptionsResult = {
 	baseURL?: string;
 	maxRetries: number;
 	dangerouslyAllowBrowser: boolean;
-	defaultHeaders: Record<string, string>;
+	// `null` signals "explicitly omit" to the Anthropic SDK — required by
+	// validateHeaders for proxies that auth via their own header.
+	defaultHeaders: Record<string, string | null>;
 	logLevel: AnthropicSdkClientOptions["logLevel"];
 	fetch?: AnthropicSdkClientOptions["fetch"];
 	fetchOptions?: AnthropicSdkClientOptions["fetchOptions"];
@@ -583,6 +589,9 @@ function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">, apiKey?: st
 	}
 	if (model.provider === "anthropic") {
 		return normalizeAnthropicBaseUrl(model.baseUrl) ?? "https://api.anthropic.com";
+	}
+	if (model.provider === "cloudflare-ai-gateway") {
+		return normalizeAnthropicBaseUrl(resolveCloudflareAiGatewayBaseUrl(model));
 	}
 	return normalizeAnthropicBaseUrl(model.baseUrl);
 }
@@ -1482,7 +1491,12 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 			baseURL: baseUrl,
 			maxRetries: 5,
 			dangerouslyAllowBrowser: true,
-			defaultHeaders,
+			// Null entries satisfy SDK ≥0.94 validateHeaders; auth rides cf-aig-authorization.
+			defaultHeaders: {
+				...defaultHeaders,
+				"X-Api-Key": null,
+				Authorization: null,
+			},
 			logLevel: ANTHROPIC_SDK_LOG_LEVEL,
 			...(debugFetch ? { fetch: debugFetch } : {}),
 		};
@@ -1774,8 +1788,9 @@ function buildParams(
 	disableStrictTools = false,
 ): MessageCreateParamsStreaming {
 	const { cacheControl } = getCacheControl(model, baseUrl, options?.cacheRetention);
+	const wireModelId = model.provider === "cloudflare-ai-gateway" ? toCloudflareGatewayWireModelId(model.id) : model.id;
 	const params: AnthropicSamplingParams = {
-		model: model.id,
+		model: wireModelId,
 		messages: convertAnthropicMessages(context.messages, model, isOAuthToken),
 		max_tokens: options?.maxTokens || (model.maxTokens / 3) | 0,
 		stream: true,
