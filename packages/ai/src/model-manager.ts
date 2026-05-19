@@ -36,6 +36,14 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** Optional dynamic endpoint fetcher. */
 	fetchDynamicModels?: () => Promise<readonly Model<TApi>[] | null>;
+	/**
+	 * When true, a successful dynamic fetch is the authoritative model list:
+	 * static/bundled models that are absent from the live response are pruned.
+	 * Use for providers (e.g. GitHub Copilot) where the live /models endpoint
+	 * reflects per-account entitlements and org policy, so bundled models that
+	 * are not returned should never appear in the UI.
+	 */
+	dynamicIsAuthoritative?: boolean;
 	/** Optional models.dev fallback hook. */
 	modelsDev?: ModelsDevFallback<TApi, TModelsDevPayload>;
 	/** Clock override for deterministic tests. */
@@ -146,12 +154,26 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const dynamicFetchSucceeded = fetchedDynamicModels !== null;
 	const cacheModels = dynamicFetchSucceeded ? [] : normalizeModelList<TApi>(cache?.models ?? []);
 	const dynamicModels = fetchedDynamicModels ?? [];
-	const mergedWithCache = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), cacheModels);
+	// When the live fetch succeeded and the provider marks it as authoritative,
+	// restrict the base catalog to only IDs present in the live response.
+	// This enforces per-account entitlements and org policy: bundled models that
+	// GitHub Copilot (or any similar provider) did not return are silently pruned
+	// rather than surfaced as seemingly usable options that immediately 400.
+	const dynamicModelIds =
+		dynamicFetchSucceeded && options.dynamicIsAuthoritative
+			? new Set(dynamicModels.map(m => m.id))
+			: null;
+	const baseForMerge = dynamicModelIds
+		? mergeModelSources(staticModels, modelsDevModels).filter(m => dynamicModelIds.has(m.id))
+		: mergeModelSources(staticModels, modelsDevModels);
+	const mergedWithCache = mergeDynamicModels(baseForMerge, cacheModels);
 	const models = mergeDynamicModels(mergedWithCache, dynamicModels);
 	const dynamicAuthoritative = !hasDynamicFetcher || dynamicFetchSucceeded || shouldUseFreshCacheAsAuthoritative;
 	if (shouldFetchFromNetwork) {
 		if (dynamicFetchSucceeded) {
-			const snapshotModels = mergeDynamicModels(mergeModelSources(staticModels, modelsDevModels), dynamicModels);
+			// Write only the models that survived the authoritative filter so the
+			// cache fast-path also returns the correct set on next cold start.
+			const snapshotModels = mergeDynamicModels(baseForMerge, dynamicModels);
 			writeModelCache(options.providerId, now(), snapshotModels, true, staticFingerprint, dbPath);
 		} else {
 			// Dynamic fetch failed — update cache with a non-authoritative snapshot so

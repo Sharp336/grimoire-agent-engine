@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed GitHub Copilot surfacing models that are blocked by org policy or disabled in the user's Copilot settings. The `/models` endpoint omits policy-blocked models from its response entirely, but they were reintroduced via the bundled `models.json` fallback during the static+dynamic merge. Two changes address this: (1) `githubCopilotModelManagerOptions` now passes a `filterModel` callback to `fetchOpenAICompatibleModels` that drops entries where `model_picker_enabled` is `false` or `policy.state` is not `"enabled"`, screening out legacy/deprecated models and personal-policy-disabled entries; (2) a new `dynamicIsAuthoritative` flag on `ModelManagerOptions`, set to `true` for `github-copilot`, causes `resolveProviderModels` to restrict the base catalog to only IDs returned by the live response when the fetch succeeds — so bundled-only models (e.g. `claude-opus-4.7`, `gpt-5.5`) are pruned rather than silently re-added on top of the API result. The cache write path is also updated so the corrected set is persisted on the first successful refresh.
+
 ## [15.1.7] - 2026-05-19
 ### Added
 

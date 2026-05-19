@@ -1593,6 +1593,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 	const resolveReference = createReferenceResolver(providerRefs);
 	return {
 		providerId: "github-copilot",
+		dynamicIsAuthoritative: true,
 		...(apiKey && {
 			fetchDynamicModels: () =>
 				fetchOpenAICompatibleModels<Api>({
@@ -1678,6 +1679,20 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 									}
 								: {}),
 						};
+				},
+					filterModel: (entry: OpenAICompatibleModelRecord): boolean => {
+						// Only surface models the user has access to. GitHub Copilot omits
+						// org-policy-blocked models from the response entirely, but the
+						// model_picker_enabled flag additionally screens out legacy/deprecated
+						// entries (gpt-3.5-turbo, gpt-4-*, embedding models, router IDs) and
+						// personal-policy-disabled models (policy.state !== "enabled").
+						if (entry.model_picker_enabled === false) return false;
+						const policy = entry.policy;
+						if (typeof policy === "object" && policy !== null) {
+							const state = (policy as Record<string, unknown>).state;
+							if (typeof state === "string" && state !== "enabled") return false;
+						}
+						return true;
 					},
 				}),
 		}),
