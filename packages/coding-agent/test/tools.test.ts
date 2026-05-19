@@ -793,9 +793,7 @@ describe("Coding Agent Tools", () => {
 			expect(defaultOutput).not.toContain("附件.txt");
 
 			const gbkReadTool = wrapToolWithMetaNotice(
-				new ReadTool(
-					createTestToolSession(testDir, Settings.isolated({ "read.archive.filenameEncoding": "gbk" })),
-				),
+				new ReadTool(createTestToolSession(testDir, Settings.isolated({ "read.archive.filenameEncoding": "gbk" }))),
 			);
 			const configuredList = await gbkReadTool.execute("test-call-zip-gbk-configured-list", { path: archivePath });
 			expect(getTextOutput(configuredList)).toContain("附件.txt");
