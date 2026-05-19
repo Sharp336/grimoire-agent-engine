@@ -264,7 +264,6 @@ function createRawNameZipArchive(entries: RawZipFixtureEntry[]): Buffer {
 	return Buffer.concat([...localParts, centralDirectory, endOfCentralDirectory]);
 }
 
-
 let artifactCounter = 0;
 function createTestToolSession(
 	cwd: string,
@@ -773,14 +772,13 @@ describe("Coding Agent Tools", () => {
 			const archivePath = path.join(testDir, "cp437.zip");
 			fs.writeFileSync(
 				archivePath,
-				createRawNameZipArchive([
-					{ rawPath: Buffer.from([0x82, 0x2e, 0x74, 0x78, 0x74]), content: "cp437\n" },
-				]),
+				createRawNameZipArchive([{ rawPath: Buffer.from([0x82, 0x2e, 0x74, 0x78, 0x74]), content: "cp437\n" }]),
 			);
 
 			const result = await readTool.execute("test-call-zip-cp437", { path: archivePath });
 			expect(getTextOutput(result)).toContain("é.txt");
 		});
+
 
 		it("should reject ZIP64 entries that require extended size metadata", async () => {
 			const archivePath = path.join(testDir, "zip64-sentinel.zip");
@@ -800,7 +798,9 @@ describe("Coding Agent Tools", () => {
 			const archivePath = path.join(testDir, "unsupported-method.zip");
 			fs.writeFileSync(
 				archivePath,
-				createRawNameZipArchive([{ rawPath: Buffer.from("unsupported.txt", "ascii"), content: "unsupported\n", method: 99 }]),
+				createRawNameZipArchive([
+					{ rawPath: Buffer.from("unsupported.txt", "ascii"), content: "unsupported\n", method: 99 },
+				]),
 			);
 
 			await expect(
