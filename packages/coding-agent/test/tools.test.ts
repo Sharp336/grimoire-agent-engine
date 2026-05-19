@@ -804,6 +804,31 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(configuredFile)).toBe("gbk\n");
 		});
 
+		it("should decode Shift JIS ZIP entry names with explicit fallback encoding", async () => {
+			const archivePath = path.join(testDir, "shift-jis-fallback.zip");
+			fs.writeFileSync(
+				archivePath,
+				createRawNameZipArchive([
+					{ rawPath: Buffer.from([0x93, 0xfa, 0x96, 0x7b, 0x2e, 0x74, 0x78, 0x74]), content: "shift-jis\n" },
+				]),
+			);
+
+			const shiftJisReadTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, Settings.isolated({ "read.archive.filenameEncoding": "shift_jis" })),
+				),
+			);
+			const configuredList = await shiftJisReadTool.execute("test-call-zip-shift-jis-configured-list", {
+				path: archivePath,
+			});
+			expect(getTextOutput(configuredList)).toContain("日本.txt");
+
+			const configuredFile = await shiftJisReadTool.execute("test-call-zip-shift-jis-configured-file", {
+				path: `${archivePath}:日本.txt:raw`,
+			});
+			expect(getTextOutput(configuredFile)).toBe("shift-jis\n");
+		});
+
 		it("should prefer UTF-8 flags and Unicode path extra fields over fallback encoding", async () => {
 			const archivePath = path.join(testDir, "fallback-priority.zip");
 			fs.writeFileSync(
