@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type Model, type OpenAICompat, type ThinkingConfig, writeModelCache } from "@oh-my-pi/pi-ai";
-import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth, ModelRegistry, resolveProviderEnvBaseUrl } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { hookFetch, Snowflake } from "@oh-my-pi/pi-utils";
@@ -2233,5 +2233,34 @@ describe("ModelRegistry", () => {
 		const registry = new ModelRegistry(authStorage, modelsJsonPath);
 
 		expect(registry.find("ollama-cloud", "deepseek-v4-pro")?.maxTokens).toBe(384_000);
+	});
+});
+
+describe("resolveProviderEnvBaseUrl", () => {
+	test("returns env URL for litellm", () => {
+		expect(resolveProviderEnvBaseUrl("litellm", { LITELLM_BASE_URL: "http://my-server:9000/v1" })).toBe(
+			"http://my-server:9000/v1",
+		);
+	});
+
+	test("returns env URL for vllm", () => {
+		expect(resolveProviderEnvBaseUrl("vllm", { VLLM_BASE_URL: "http://my-vllm:8000/v1" })).toBe(
+			"http://my-vllm:8000/v1",
+		);
+	});
+
+	test("returns undefined for unknown provider", () => {
+		expect(resolveProviderEnvBaseUrl("openai", {})).toBeUndefined();
+	});
+
+	test("ignores empty-string env vars", () => {
+		expect(resolveProviderEnvBaseUrl("litellm", { LITELLM_BASE_URL: "" })).toBeUndefined();
+		expect(resolveProviderEnvBaseUrl("litellm", { LITELLM_BASE_URL: "   " })).toBeUndefined();
+	});
+
+	test("trims whitespace from env URL", () => {
+		expect(resolveProviderEnvBaseUrl("vllm", { VLLM_BASE_URL: "  http://my-vllm:8000/v1  " })).toBe(
+			"http://my-vllm:8000/v1",
+		);
 	});
 });

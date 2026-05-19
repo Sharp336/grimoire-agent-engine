@@ -55,6 +55,21 @@ export type { CanonicalModelIndex, CanonicalModelRecord, CanonicalModelVariant, 
 
 export const kNoAuth = "N/A";
 
+export function resolveProviderEnvBaseUrl(
+	provider: string,
+	env: Record<string, string | undefined> = Bun.env,
+): string | undefined {
+	switch (provider) {
+		case "litellm":
+			return env.LITELLM_BASE_URL?.trim() || undefined;
+		case "vllm":
+			return env.VLLM_BASE_URL?.trim() || undefined;
+		case "lm-studio":
+			return env.LM_STUDIO_BASE_URL?.trim() || undefined;
+		default:
+			return undefined;
+	}
+}
 export function isAuthenticated(apiKey: string | undefined | null): apiKey is string {
 	return Boolean(apiKey) && apiKey !== kNoAuth;
 }
@@ -862,8 +877,10 @@ export class ModelRegistry {
 			const providerOverride = overrides.get(provider);
 
 			return models.map(m => {
-				if (!providerOverride) return m;
-				const withTransportOverride = this.#applyProviderTransportOverride(m, providerOverride);
+				const envUrl = resolveProviderEnvBaseUrl(provider);
+				const rebased = envUrl ? { ...m, baseUrl: envUrl } : m;
+				if (!providerOverride) return rebased;
+				const withTransportOverride = this.#applyProviderTransportOverride(rebased, providerOverride);
 				return {
 					...withTransportOverride,
 					compat: mergeCompat(m.compat, providerOverride.compat),
@@ -957,13 +974,16 @@ export class ModelRegistry {
 			const models = cache.models.map(model =>
 				model.provider === descriptor.providerId ? model : { ...model, provider: descriptor.providerId },
 			);
+			const envUrl = resolveProviderEnvBaseUrl(descriptor.providerId);
 			const providerOverride = this.#providerOverrides.get(descriptor.providerId);
+
 			const withTransport = providerOverride
 				? models.map(model => this.#applyProviderTransportOverride(model, providerOverride))
 				: models;
+			const withEnvUrl = envUrl ? withTransport.map(model => ({ ...model, baseUrl: envUrl })) : withTransport;
 			const withCompat = providerOverride?.compat
-				? withTransport.map(model => ({ ...model, compat: mergeCompat(model.compat, providerOverride.compat) }))
-				: withTransport;
+				? withEnvUrl.map(model => ({ ...model, compat: mergeCompat(model.compat, providerOverride.compat) }))
+				: withEnvUrl;
 			cachedModels.push(...this.#applyProviderModelOverrides(descriptor.providerId, withCompat));
 		}
 		return cachedModels;

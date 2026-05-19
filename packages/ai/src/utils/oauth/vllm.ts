@@ -25,7 +25,7 @@ export async function loginVllm(options: OAuthController): Promise<string> {
 	}
 	options.onAuth?.({
 		url: AUTH_URL,
-		instructions: `Paste your vLLM API key if your server requires auth. Leave empty for local no-auth mode (default base URL: ${DEFAULT_LOCAL_BASE_URL}).`,
+		instructions: `Paste your vLLM API key if your server requires auth. Leave empty for local no-auth mode (default base URL: ${DEFAULT_LOCAL_BASE_URL}; override with VLLM_BASE_URL env var).`,
 	});
 	const apiKey = await options.onPrompt({
 		message: "Paste your vLLM API key (optional for local no-auth)",

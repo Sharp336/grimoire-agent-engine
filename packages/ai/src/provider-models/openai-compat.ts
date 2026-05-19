@@ -1188,8 +1188,8 @@ export interface LmStudioModelManagerConfig {
 export function lmStudioModelManagerOptions(
 	config?: LmStudioModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? Bun.env.LM_STUDIO_BASE_URL ?? "http://127.0.0.1:1234/v1";
+	const apiKey = config?.apiKey ?? (Bun.env.LM_STUDIO_API_KEY?.trim() || undefined);
+	const baseUrl = config?.baseUrl ?? (Bun.env.LM_STUDIO_BASE_URL?.trim() || "http://127.0.0.1:1234/v1");
 	const references = createBundledReferenceMap<"openai-completions">("lm-studio" as any);
 	return {
 		providerId: "lm-studio",
@@ -1458,8 +1458,8 @@ export interface LiteLLMModelManagerConfig {
 export function litellmModelManagerOptions(
 	config?: LiteLLMModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? "http://localhost:4000/v1";
+	const apiKey = config?.apiKey ?? (Bun.env.LITELLM_API_KEY?.trim() || undefined);
+	const baseUrl = config?.baseUrl ?? (Bun.env.LITELLM_BASE_URL?.trim() || "http://localhost:4000/v1");
 	const references = createBundledReferenceMap<"openai-completions">("litellm");
 	return {
 		providerId: "litellm",
@@ -1487,8 +1487,8 @@ export interface VllmModelManagerConfig {
 }
 
 export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelManagerOptions<"openai-completions"> {
-	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? "http://127.0.0.1:8000/v1";
+	const apiKey = config?.apiKey ?? (Bun.env.VLLM_API_KEY?.trim() || undefined);
+	const baseUrl = config?.baseUrl ?? (Bun.env.VLLM_BASE_URL?.trim() || "http://127.0.0.1:8000/v1");
 	const references = createBundledReferenceMap<"openai-completions">("vllm" as Parameters<typeof getBundledModels>[0]);
 	return {
 		providerId: "vllm",
