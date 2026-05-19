@@ -769,6 +769,43 @@ describe("agentLoopContinue with AgentMessage", () => {
 		}
 	});
 
+	it("runs beforeToolCall before emitting tool_execution_start", async () => {
+		const toolSchema = z.object({ value: z.string() });
+		const events: string[] = [];
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "echo",
+			label: "Echo",
+			description: "Echo tool",
+			parameters: toolSchema,
+			async execute() {
+				return { content: [{ type: "text", text: "ok" }] };
+			},
+		};
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [tool] };
+		const mock = createMockModel({
+			responses: [
+				{ content: [{ type: "toolCall", id: "tool-1", name: "echo", arguments: { value: "hello" } }] },
+				{ content: ["done"] },
+			],
+		});
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			beforeToolCall: async () => {
+				events.push("before");
+				return undefined;
+			},
+		};
+
+		const stream = agentLoop([createUserMessage("echo something")], context, config, undefined, mock.stream);
+		for await (const event of stream) {
+			if (event.type === "tool_execution_start") events.push("start");
+			if (event.type === "tool_execution_end") events.push("end");
+		}
+
+		expect(events).toEqual(["before", "start", "end"]);
+	});
+
 	it("passes beforeToolCall args mutations into tool.execute without revalidation", async () => {
 		const toolSchema = z.object({ value: z.string() });
 		const executed: Array<string | number> = [];

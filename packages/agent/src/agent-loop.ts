@@ -1028,14 +1028,6 @@ async function executeToolCalls(
 			}
 		}
 		record.args = argsForExecution;
-		record.started = true;
-		stream.push({
-			type: "tool_execution_start",
-			toolCallId: toolCall.id,
-			toolName: toolCall.name,
-			args: argsForExecution,
-			intent: toolCall.intent,
-		});
 
 		const toolSpan = startExecuteToolSpan(telemetry, {
 			tool,
@@ -1083,6 +1075,14 @@ async function executeToolCalls(
 				}
 				// Reflect post-hook args so emitted tool results / afterToolCall see what actually executed.
 				record.args = effectiveArgs;
+				stream.push({
+					type: "tool_execution_start",
+					toolCallId: toolCall.id,
+					toolName: toolCall.name,
+					args: effectiveArgs,
+					intent: toolCall.intent,
+				});
+				record.started = true;
 
 				const toolContext = getToolContext
 					? getToolContext({

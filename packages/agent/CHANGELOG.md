@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+
+- Delayed `tool_execution_start` until after `beforeToolCall` hooks so permission gates can authorize before clients render a running tool call.
 
 ## [15.2.3] - 2026-05-22
 ### Added

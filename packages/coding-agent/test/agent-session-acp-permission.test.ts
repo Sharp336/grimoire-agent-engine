@@ -538,6 +538,62 @@ it("bash permission requests include execute metadata and command content", asyn
 	expect(bashTool.executeCalls).toBe(1);
 });
 
+it("requests bash permission before emitting tool execution start", async () => {
+	const bashTool = makeFakeTool("bash");
+	const events: string[] = [];
+	const bridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(toolCall, _options, _signal) {
+			events.push(`permission:${toolCall.toolCallId}`);
+			return { outcome: "selected", optionId: "allow_once", kind: "allow_once" };
+		},
+	};
+	const mock = createMockModel({
+		responses: [
+			{
+				content: [
+					{
+						type: "toolCall",
+						id: "call-bash-before-start",
+						name: "bash",
+						arguments: { command: "echo hi" },
+					},
+				],
+			},
+			{ content: ["done"] },
+		],
+	});
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+	const agent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: { model: mock.model, systemPrompt: ["Test"], tools: [bashTool], messages: [] },
+		convertToLlm,
+		streamFn: mock.stream,
+	});
+	agent.beforeToolCall = () => {
+		events.push("before");
+	};
+	session = new AgentSession({
+		agent,
+		sessionManager: SessionManager.inMemory(tempDir.path()),
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		modelRegistry: { getApiKey: () => "test-key" } as never,
+		toolRegistry: new Map([[bashTool.name, bashTool]]),
+	});
+	session.setClientBridge(bridge);
+	session.subscribe(event => {
+		if (event.type === "tool_execution_start" && event.toolCallId === "call-bash-before-start") {
+			events.push(`start:${event.toolCallId}`);
+		}
+	});
+
+	await session.prompt("run bash");
+
+	expect(events).toEqual(["before", "permission:call-bash-before-start", "start:call-bash-before-start"]);
+	expect(bashTool.executeCalls).toBe(1);
+});
+
 it("ordinary edit calls still bypass ACP permission after rejecting edit moves forever", async () => {
 	const editTool = makeFakeTool("edit");
 	const bridge = makeBridge({ outcome: "selected", optionId: "reject_always", kind: "reject_always" });
