@@ -1,4 +1,3 @@
-import { inflateSync } from "fflate";
 import { ToolError } from "./tool-errors";
 
 export type ArchiveFormat = "zip" | "tar" | "tar.gz";
@@ -35,6 +34,7 @@ interface ZipStorage {
 	compressedSize: number;
 	uncompressedSize: number;
 	localHeaderOffset: number;
+	crc32: number;
 }
 
 type EntryStorage = TarStorage | ZipStorage;
@@ -56,6 +56,7 @@ interface ZipCentralDirectoryRecord {
 	compressedSize: number;
 	uncompressedSize: number;
 	localHeaderOffset: number;
+	crc32: number;
 }
 
 interface ZipEndOfCentralDirectory {
@@ -429,6 +430,7 @@ function parseZipCentralDirectory(bytes: Uint8Array): ZipCentralDirectoryRecord[
 		const extraFieldLength = readUint16LE(bytes, offset + 30);
 		const fileCommentLength = readUint16LE(bytes, offset + 32);
 		const localHeaderOffset = readUint32LE(bytes, offset + 42);
+		const expectedCrc32 = readUint32LE(bytes, offset + 16);
 
 		if (
 			compressedSize === ZIP64_32_BIT_SENTINEL ||
@@ -452,6 +454,7 @@ function parseZipCentralDirectory(bytes: Uint8Array): ZipCentralDirectoryRecord[
 			compressedSize,
 			uncompressedSize,
 			localHeaderOffset,
+			crc32: expectedCrc32,
 		});
 		offset = nextOffset;
 	}
@@ -501,7 +504,7 @@ function decodeZipEntryPath(record: ZipCentralDirectoryRecord): string | undefin
 	return readUnicodePathExtraField(record.extraFields, record.rawName) ?? decodeCp437(record.rawName);
 }
 
-function readZipEntryBytes(storage: ZipStorage): Uint8Array {
+async function readZipEntryBytes(storage: ZipStorage): Promise<Uint8Array> {
 	const { archiveBytes, localHeaderOffset } = storage;
 	assertZipRange(archiveBytes, localHeaderOffset, 30);
 	if (readUint32LE(archiveBytes, localHeaderOffset) !== ZIP_LOCAL_FILE_HEADER_SIGNATURE) {
@@ -514,16 +517,24 @@ function readZipEntryBytes(storage: ZipStorage): Uint8Array {
 	assertZipRange(archiveBytes, compressedOffset, storage.compressedSize);
 	const compressed = archiveBytes.subarray(compressedOffset, compressedOffset + storage.compressedSize);
 
-	if (storage.compressionMethod === 0) return compressed;
-	if (storage.compressionMethod === 8) {
+	let bytes: Uint8Array;
+	if (storage.compressionMethod === 0) {
+		bytes = compressed;
+	} else if (storage.compressionMethod === 8) {
 		try {
-			return inflateSync(compressed, { out: new Uint8Array(storage.uncompressedSize) });
+			const { inflateSync } = await import("fflate");
+			bytes = inflateSync(compressed, { out: new Uint8Array(storage.uncompressedSize) });
 		} catch (error) {
 			throw new ToolError(error instanceof Error ? error.message : String(error));
 		}
+	} else {
+		throw new ToolError(`Unsupported ZIP compression method: ${storage.compressionMethod}`);
 	}
 
-	throw new ToolError(`Unsupported ZIP compression method: ${storage.compressionMethod}`);
+	if (crc32(bytes) !== storage.crc32) {
+		throw new ToolError("ZIP entry CRC mismatch");
+	}
+	return bytes;
 }
 
 async function readZipEntries(bytes: Uint8Array): Promise<ArchiveIndexEntry[]> {
@@ -549,6 +560,7 @@ async function readZipEntries(bytes: Uint8Array): Promise<ArchiveIndexEntry[]> {
 						compressedSize: record.compressedSize,
 						uncompressedSize: record.uncompressedSize,
 						localHeaderOffset: record.localHeaderOffset,
+						crc32: record.crc32,
 					},
 		});
 	}
@@ -672,7 +684,7 @@ export class ArchiveReader {
 			throw new ToolError(`Archive file '${normalizedPath}' has no readable storage`);
 		}
 
-		const bytes = entry.storage.type === "tar" ? await entry.storage.file.bytes() : readZipEntryBytes(entry.storage);
+		const bytes = entry.storage.type === "tar" ? await entry.storage.file.bytes() : await readZipEntryBytes(entry.storage);
 
 		return {
 			path: entry.path,

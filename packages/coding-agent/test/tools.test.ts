@@ -186,6 +186,7 @@ interface RawZipFixtureEntry {
 	unicodePathCrc?: number;
 	method?: number;
 	forceZip64SizeSentinel?: boolean;
+	corruptPayload?: boolean;
 }
 
 function createUnicodePathExtraField(rawPath: Uint8Array, unicodePath: string, crcOverride?: number): Buffer {
@@ -222,6 +223,8 @@ function createRawNameZipArchive(entries: RawZipFixtureEntry[]): Buffer {
 		localHeader.writeUInt16LE(flag, 6);
 		const method = entry.method ?? 8;
 		const compressed = method === 0 ? content : zlib.deflateRawSync(content);
+		const payload = entry.corruptPayload ? Buffer.from(compressed) : compressed;
+		if (entry.corruptPayload && payload.length > 0) payload[0] ^= 0xff;
 		const storedCompressedSize = entry.forceZip64SizeSentinel ? 0xffffffff : compressed.length;
 		const storedUncompressedSize = entry.forceZip64SizeSentinel ? 0xffffffff : content.length;
 		localHeader.writeUInt16LE(method, 8);
@@ -231,7 +234,7 @@ function createRawNameZipArchive(entries: RawZipFixtureEntry[]): Buffer {
 		localHeader.writeUInt16LE(pathBuffer.length, 26);
 		localHeader.writeUInt16LE(extra.length, 28);
 
-		localParts.push(localHeader, pathBuffer, extra, compressed);
+		localParts.push(localHeader, pathBuffer, extra, payload);
 
 		const centralHeader = Buffer.alloc(46, 0);
 		centralHeader.writeUInt32LE(0x02014b50, 0);
@@ -247,7 +250,7 @@ function createRawNameZipArchive(entries: RawZipFixtureEntry[]): Buffer {
 		centralHeader.writeUInt32LE(localOffset, 42);
 
 		centralParts.push(centralHeader, pathBuffer, extra);
-		localOffset += localHeader.length + pathBuffer.length + extra.length + compressed.length;
+		localOffset += localHeader.length + pathBuffer.length + extra.length + payload.length;
 	}
 
 	const centralDirectory = Buffer.concat(centralParts);
@@ -803,6 +806,20 @@ describe("Coding Agent Tools", () => {
 			await expect(
 				readTool.execute("test-call-zip-unsupported-method", { path: `${archivePath}:unsupported.txt:raw` }),
 			).rejects.toThrow(/Unsupported ZIP compression method: 99/);
+		});
+
+		it("should reject corrupted ZIP entry payloads", async () => {
+			const archivePath = path.join(testDir, "corrupt-payload.zip");
+			fs.writeFileSync(
+				archivePath,
+				createRawNameZipArchive([
+					{ rawPath: Buffer.from("stored.txt", "ascii"), content: "clean\n", method: 0, corruptPayload: true },
+				]),
+			);
+
+			await expect(
+				readTool.execute("test-call-zip-corrupt-payload", { path: `${archivePath}:stored.txt:raw` }),
+			).rejects.toThrow(/ZIP entry CRC mismatch/);
 		});
 
 		for (const archiveCase of [
