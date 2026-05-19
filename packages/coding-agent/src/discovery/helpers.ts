@@ -432,6 +432,7 @@ export async function loadFilesFromDir<T>(
 			gitignore: true,
 			hidden: false,
 			fileType: FileType.File,
+			recursive,
 		});
 		matches = result.matches;
 	} catch {
