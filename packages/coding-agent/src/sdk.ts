@@ -101,6 +101,7 @@ import {
 import { AgentSession } from "./session/agent-session";
 import { resolveAuthBrokerConfig } from "./session/auth-broker-config";
 import { AuthBrokerClient, AuthStorage, RemoteAuthCredentialStore } from "./session/auth-storage";
+import type { ToolPermissionDelegate } from "./session/client-bridge";
 import { type CustomMessage, convertToLlm } from "./session/messages";
 import { SessionManager } from "./session/session-manager";
 import { closeAllConnections } from "./ssh/connection-manager";
@@ -317,6 +318,8 @@ export interface CreateAgentSessionOptions {
 	agentRegistry?: AgentRegistry;
 	/** Parent task ID prefix for nested artifact naming (e.g., "6-Extensions") */
 	parentTaskPrefix?: string;
+	/** Parent/root permission policy for delegated sessions. */
+	permissionDelegate?: ToolPermissionDelegate;
 
 	/** Session manager. Default: session stored under the configured agentDir sessions root */
 	sessionManager?: SessionManager;
@@ -1967,6 +1970,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			agentId: resolvedAgentId,
 			agentRegistry,
 			providerSessionId: options.providerSessionId,
+			permissionDelegate: options.permissionDelegate,
 		});
 		hasSession = true;
 		if (asyncJobManager) {

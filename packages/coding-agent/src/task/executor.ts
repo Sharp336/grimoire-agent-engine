@@ -29,6 +29,7 @@ import { createAgentSession, discoverAuthStorage } from "../sdk";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import type { AuthStorage } from "../session/auth-storage";
+import type { ToolPermissionDelegate } from "../session/client-bridge";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import type { ContextFileEntry } from "../tools";
@@ -190,6 +191,8 @@ export interface ExecutorOptions {
 	 * transition explicitly.
 	 */
 	parentTelemetry?: AgentTelemetryConfig;
+	/** Parent/root permission policy for delegated sessions. */
+	permissionDelegate?: ToolPermissionDelegate;
 }
 
 function parseStringifiedJson(value: unknown): unknown {
@@ -1244,6 +1247,19 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					mcpManager: options.mcpManager,
 					customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
 					localProtocolOptions: options.localProtocolOptions,
+					permissionDelegate: options.permissionDelegate
+						? {
+								requestPermission: (toolCall, permissionOptions, permissionSignal) =>
+									options.permissionDelegate!.requestPermission(
+										{
+											...toolCall,
+											title: `${agent.name}: ${toolCall.title}`,
+										},
+										permissionOptions,
+										permissionSignal,
+									),
+							}
+						: undefined,
 					telemetry: subagentTelemetry,
 				}),
 			);

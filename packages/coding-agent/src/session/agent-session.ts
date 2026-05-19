@@ -184,7 +184,12 @@ import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AuthStorage } from "./auth-storage";
-import type { ClientBridge, ClientBridgePermissionOption, ClientBridgePermissionOutcome } from "./client-bridge";
+import type {
+	ClientBridge,
+	ClientBridgePermissionOption,
+	ClientBridgePermissionOutcome,
+	ToolPermissionDelegate,
+} from "./client-bridge";
 import {
 	type BashExecutionMessage,
 	type CompactionSummaryMessage,
@@ -329,6 +334,8 @@ export interface AgentSessionConfig {
 	 * so that credential sticky selection is consistent with the session's streaming calls.
 	 */
 	providerSessionId?: string;
+	/** Parent/root permission policy for subagent sessions without a full client bridge. */
+	permissionDelegate?: ToolPermissionDelegate;
 }
 
 /** Options for AgentSession.prompt() */
@@ -1077,6 +1084,13 @@ export class AgentSession {
 			this.sessionManager.getSessionFile(),
 			this.#getConfiguredDefaultSelectedMCPToolNames(),
 		);
+		if (config.permissionDelegate) {
+			this.#clientBridge = {
+				capabilities: { requestPermission: true },
+				requestPermission: config.permissionDelegate.requestPermission,
+			};
+			this.#rewrapActiveToolsForPermission();
+		}
 		this.#ttsrManager = config.ttsrManager;
 		this.#obfuscator = config.obfuscator;
 		this.#agentId = config.agentId;
@@ -3721,6 +3735,18 @@ export class AgentSession {
 	setClientBridge(bridge: ClientBridge | undefined): void {
 		this.#clientBridge = bridge;
 		this.#acpPermissionDecisions.clear();
+		this.#rewrapActiveToolsForPermission();
+	}
+
+	getPermissionDelegate(): ToolPermissionDelegate | undefined {
+		const bridge = this.#clientBridge;
+		if (!bridge?.capabilities.requestPermission || !bridge.requestPermission) return undefined;
+		return {
+			requestPermission: (toolCall, options, signal) => bridge.requestPermission!(toolCall, options, signal),
+		};
+	}
+
+	#rewrapActiveToolsForPermission(): void {
 		const activeToolNames = this.getActiveToolNames();
 		const activeTools = activeToolNames
 			.map(name => this.#toolRegistry.get(name))

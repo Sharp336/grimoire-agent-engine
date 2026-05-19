@@ -642,6 +642,137 @@ it("setClientBridge wraps tools that were already active", async () => {
 	expect(bashTool.executeCalls).toBe(1);
 });
 
+it("permission delegates wrap initial active tools before tool filtering", async () => {
+	const bashTool = makeFakeTool("bash");
+	const requests: ClientBridgePermissionToolCall[] = [];
+	const parentBridge: ClientBridge = {
+		capabilities: { requestPermission: true },
+		async requestPermission(toolCall, _options, _signal) {
+			requests.push(toolCall);
+			return { outcome: "selected", optionId: "allow_once", kind: "allow_once" };
+		},
+	};
+	const parent = await createSession([], parentBridge);
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+	const childAgent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: { model, systemPrompt: ["Test"], tools: [bashTool], messages: [] },
+		convertToLlm,
+		streamFn: () => new AssistantMessageEventStream(),
+	});
+	session = new AgentSession({
+		agent: childAgent,
+		sessionManager: SessionManager.inMemory(tempDir.path()),
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		modelRegistry: {} as never,
+		toolRegistry: new Map([[bashTool.name, bashTool]]),
+		permissionDelegate: parent.getPermissionDelegate(),
+	});
+
+	const initialBash = session.agent.state.tools.find(t => t.name === "bash");
+	expect(initialBash).toBeDefined();
+	await initialBash!.execute(
+		"call-initial-delegated-bash",
+		{ command: "echo initial" },
+		undefined,
+		undefined as never,
+		undefined as never,
+	);
+
+	expect(requests.map(request => request.toolCallId)).toEqual(["call-initial-delegated-bash"]);
+	expect(bashTool.executeCalls).toBe(1);
+	await parent.dispose();
+});
+
+it("permission delegates wrap active tools without exposing full client capabilities", async () => {
+	const bashTool = makeFakeTool("bash");
+	const requests: ClientBridgePermissionToolCall[] = [];
+	const parentBridge: ClientBridge = {
+		capabilities: { requestPermission: true, readTextFile: true, writeTextFile: true, terminal: true },
+		async requestPermission(toolCall, _options, _signal) {
+			requests.push(toolCall);
+			return { outcome: "selected", optionId: "allow_once", kind: "allow_once" };
+		},
+		async readTextFile() {
+			return "parent fs should not be exposed";
+		},
+		async writeTextFile() {},
+	};
+	const parent = await createSession([], parentBridge);
+	session = await createSession([bashTool]);
+	const delegate = parent.getPermissionDelegate();
+	expect(delegate).toBeDefined();
+
+	session = new AgentSession({
+		agent: session.agent,
+		sessionManager: session.sessionManager,
+		settings: session.settings,
+		modelRegistry: {} as never,
+		toolRegistry: new Map([[bashTool.name, bashTool]]),
+		permissionDelegate: delegate,
+	});
+
+	expect(session.clientBridge?.capabilities).toEqual({ requestPermission: true });
+	expect(session.clientBridge?.readTextFile).toBeUndefined();
+	expect(session.clientBridge?.writeTextFile).toBeUndefined();
+	expect(session.clientBridge?.createTerminal).toBeUndefined();
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(t => t.name === "bash");
+	expect(wrappedBash).toBeDefined();
+
+	await wrappedBash!.execute(
+		"call-delegated-bash",
+		{ command: "echo delegated" },
+		undefined,
+		undefined as never,
+		undefined as never,
+	);
+
+	expect(requests.map(request => request.toolCallId)).toEqual(["call-delegated-bash"]);
+	expect(bashTool.executeCalls).toBe(1);
+	await parent.dispose();
+});
+
+it("permission delegates fail closed when the parent rejects", async () => {
+	const bashTool = makeFakeTool("bash");
+	const parentBridge = makeBridge({ outcome: "selected", optionId: "reject_once", kind: "reject_once" });
+	const parent = await createSession([], parentBridge);
+	const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+	if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
+	const childAgent = new Agent({
+		getApiKey: () => "test-key",
+		initialState: { model, systemPrompt: ["Test"], tools: [bashTool], messages: [] },
+		convertToLlm,
+		streamFn: () => new AssistantMessageEventStream(),
+	});
+	session = new AgentSession({
+		agent: childAgent,
+		sessionManager: SessionManager.inMemory(tempDir.path()),
+		settings: Settings.isolated({ "compaction.enabled": false }),
+		modelRegistry: {} as never,
+		toolRegistry: new Map([[bashTool.name, bashTool]]),
+		permissionDelegate: parent.getPermissionDelegate(),
+	});
+
+	await session.setActiveToolsByName(["bash"]);
+	const wrappedBash = session.agent.state.tools.find(t => t.name === "bash");
+	expect(wrappedBash).toBeDefined();
+
+	await expect(
+		wrappedBash!.execute(
+			"call-rejected-delegated-bash",
+			{ command: "echo no" },
+			undefined,
+			undefined as never,
+			undefined as never,
+		),
+	).rejects.toThrow(/rejected by user/);
+	expect(bashTool.executeCalls).toBe(0);
+	await parent.dispose();
+});
+
 it("aborting an open permission request rejects without executing the tool", async () => {
 	const bashTool = makeFakeTool("bash");
 	const pending = Promise.withResolvers<ClientBridgePermissionOutcome>();

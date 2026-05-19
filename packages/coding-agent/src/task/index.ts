@@ -40,6 +40,7 @@ import {
 // Import review tools for side effects (registers subagent tool handlers)
 import "../tools/review";
 import type { LocalProtocolOptions } from "../internal-urls";
+import type { ClientBridge, ToolPermissionDelegate } from "../session/client-bridge";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
 import { discoverAgents, getAgent } from "./discovery";
@@ -68,6 +69,14 @@ function renderSubagentUserPrompt(assignment: string, simpleMode: TaskSimpleMode
 		assignment: assignment.trim(),
 		independentMode: simpleMode === "independent",
 	});
+}
+
+function createSubagentPermissionDelegate(bridge: ClientBridge): ToolPermissionDelegate {
+	return {
+		requestPermission(toolCall, options, signal) {
+			return bridge.requestPermission!(toolCall, options, signal);
+		},
+	};
 }
 function createUsageTotals(): Usage {
 	return {
@@ -860,6 +869,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			emitProgress();
 
 			const runTask = async (task: (typeof tasksWithUniqueIds)[number], index: number) => {
+				const parentPermissionDelegate = this.session.getClientBridge?.()?.requestPermission
+					? createSubagentPermissionDelegate(this.session.getClientBridge()!)
+					: undefined;
 				if (!isIsolated) {
 					return runSubprocess({
 						cwd: this.session.cwd,
@@ -900,6 +912,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						parentArtifactManager,
 						parentHindsightSessionState: this.session.getHindsightSessionState?.(),
 						parentTelemetry: this.session.getTelemetry?.(),
+						permissionDelegate: parentPermissionDelegate,
 					});
 				}
 
@@ -954,6 +967,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						parentArtifactManager,
 						parentHindsightSessionState: this.session.getHindsightSessionState?.(),
 						parentTelemetry: this.session.getTelemetry?.(),
+						permissionDelegate: parentPermissionDelegate,
 					});
 					if (mergeMode === "branch" && result.exitCode === 0) {
 						try {

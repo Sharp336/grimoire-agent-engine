@@ -43,6 +43,14 @@ export type ClientBridgePermissionOutcome =
 	| { outcome: "cancelled" }
 	| { outcome: "selected"; optionId: string; kind?: ClientBridgePermissionOptionKind };
 
+export interface ToolPermissionDelegate {
+	requestPermission(
+		toolCall: ClientBridgePermissionToolCall,
+		options: ClientBridgePermissionOption[],
+		signal?: AbortSignal,
+	): Promise<ClientBridgePermissionOutcome>;
+}
+
 export interface ClientBridgeTerminalExitStatus {
 	exitCode?: number | null;
 	signal?: string | null;
