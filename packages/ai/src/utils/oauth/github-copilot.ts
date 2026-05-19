@@ -379,7 +379,11 @@ export async function loginGitHubCopilot(options: {
 	// With opencode OAuth, the GitHub token is used directly for all API requests.
 	// Fetch the user's numeric GitHub ID as a stable dedup key so re-logins
 	// replace the existing credential row rather than accumulating new ones.
-	const accountId = await fetchGitHubUserId(githubAccessToken, domain);
+	// Prefix with the domain so github.com user ID 12345 and a GHES instance's
+	// user ID 12345 produce distinct identity keys — GHES assigns sequential IDs
+	// from 1, so bare numeric IDs are not globally unique across hosts.
+	const rawUserId = await fetchGitHubUserId(githubAccessToken, domain);
+	const accountId = rawUserId ? `${domain}:${rawUserId}` : undefined;
 	const credentials: OAuthCredentials = {
 		refresh: githubAccessToken,
 		access: githubAccessToken,
