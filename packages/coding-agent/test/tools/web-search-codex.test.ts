@@ -216,26 +216,64 @@ describe("searchCodex model selection", () => {
 
 	it("uses the built-in default model when PI_CODEX_WEB_SEARCH_MODEL is unset", async () => {
 		delete process.env.PI_CODEX_WEB_SEARCH_MODEL;
-		using _hook = mockCodexFetch("gpt-5-codex-mini");
+		using _hook = mockCodexFetch("gpt-5.4");
 
 		const result = await searchCodex({ query: "default codex model" });
 
 		expect(capturedRequest).not.toBeNull();
 		expect(capturedRequest?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
-		expect(capturedRequest?.body?.model).toBe("gpt-5-codex-mini");
-		expect(result.model).toBe("gpt-5-codex-mini");
+		expect(capturedRequest?.body?.model).toBe("gpt-5.4");
+		expect(result.model).toBe("gpt-5.4");
 		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
 	});
 
 	it("falls back to the default model when PI_CODEX_WEB_SEARCH_MODEL is blank", async () => {
 		process.env.PI_CODEX_WEB_SEARCH_MODEL = "   ";
-		using _hook = mockCodexFetch("gpt-5-codex-mini");
+		using _hook = mockCodexFetch("gpt-5.4");
 
 		const result = await searchCodex({ query: "blank codex model" });
 
 		expect(capturedRequest).not.toBeNull();
-		expect(capturedRequest?.body?.model).toBe("gpt-5-codex-mini");
-		expect(result.model).toBe("gpt-5-codex-mini");
+		expect(capturedRequest?.body?.model).toBe("gpt-5.4");
+		expect(result.model).toBe("gpt-5.4");
+	});
+
+	it("tries the next default candidate when a Codex model is unsupported", async () => {
+		delete process.env.PI_CODEX_WEB_SEARCH_MODEL;
+		const requestedModels: string[] = [];
+		vi.spyOn(AgentStorage, "open").mockResolvedValue({
+			listAuthCredentials: () => [
+				{
+					id: 1,
+					credential: {
+						type: "oauth",
+						access: "test-access-token",
+						expires: Date.now() + 600_000,
+						accountId: "acct-test",
+					},
+				},
+			],
+		} as unknown as AgentStorage);
+		using _hook = hookFetch((_url, init) => {
+			const body = init?.body ? (JSON.parse(init.body as string) as Record<string, unknown>) : {};
+			const model = String(body.model);
+			requestedModels.push(model);
+			if (model === "gpt-5.4") {
+				return new Response(JSON.stringify({ detail: "The 'gpt-5.4' model is not supported for this account." }), {
+					status: 400,
+				});
+			}
+			return new Response(makeSseResponse(model), {
+				status: 200,
+				headers: { "Content-Type": "text/event-stream" },
+			});
+		});
+
+		const result = await searchCodex({ query: "fallback codex model" });
+
+		expect(requestedModels).toEqual(["gpt-5.4", "gpt-5.5"]);
+		expect(result.model).toBe("gpt-5.5");
+		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
 	});
 
 	it("uses PI_CODEX_WEB_SEARCH_MODEL when provided", async () => {

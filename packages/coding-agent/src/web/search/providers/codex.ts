@@ -18,10 +18,10 @@ import { SearchProvider } from "./base";
 
 const CODEX_BASE_URL = "https://chatgpt.com/backend-api";
 const CODEX_RESPONSES_PATH = "/codex/responses";
-const FALLBACK_MODEL = "gpt-5-codex-mini";
+const FALLBACK_MODEL = "gpt-5.4";
 const DEFAULT_MODEL_PREFERENCES = [
-	"gpt-5-codex-mini",
 	"gpt-5.4",
+	"gpt-5.5",
 	"gpt-5.3-codex",
 	"gpt-5.2-codex",
 	"gpt-5.1-codex",
@@ -31,16 +31,23 @@ const JWT_CLAIM_PATH = "https://api.openai.com/auth";
 const DEFAULT_INSTRUCTIONS =
 	"You are a helpful assistant with web search capabilities. Search the web to answer the user's question accurately and cite your sources.";
 
-function getModel(): string {
+function getModelCandidates(): string[] {
 	const configuredModel = $env.PI_CODEX_WEB_SEARCH_MODEL?.trim();
-	if (configuredModel) return configuredModel;
+	if (configuredModel) return [configuredModel];
 
 	const bundledModels = getBundledModels("openai-codex");
 	const bundledIds = new Set(bundledModels.map(model => model.id));
-	const preferred = DEFAULT_MODEL_PREFERENCES.find(modelId => bundledIds.has(modelId));
-	if (preferred) return preferred;
+	const candidates = DEFAULT_MODEL_PREFERENCES.filter(modelId => bundledIds.has(modelId));
+	if (candidates.length > 0) return candidates;
+
 	const nonMini = bundledModels.find(model => !model.id.includes("mini") && !model.id.includes("spark"));
-	return nonMini?.id ?? bundledModels[0]?.id ?? FALLBACK_MODEL;
+	return [nonMini?.id ?? bundledModels[0]?.id ?? FALLBACK_MODEL];
+}
+
+function isUnsupportedCodexModelError(error: unknown): boolean {
+	if (!(error instanceof SearchProviderError)) return false;
+	const message = error.message.toLowerCase();
+	return error.status === 400 && message.includes("model") && message.includes("not supported");
 }
 
 export interface CodexSearchParams {
@@ -100,6 +107,14 @@ interface CodexResponse {
 	model?: string;
 	status?: string;
 	usage?: CodexUsage;
+}
+
+interface CodexSearchResult {
+	answer: string;
+	sources: SearchSource[];
+	model: string;
+	requestId: string;
+	usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
 }
 
 function isImagePlaceholderAnswer(text: string): boolean {
@@ -300,21 +315,14 @@ function buildCodexHeaders(accessToken: string, accountId: string): Record<strin
 async function callCodexSearch(
 	auth: { accessToken: string; accountId: string },
 	query: string,
+	model: string,
 	options: { signal?: AbortSignal; systemPrompt?: string; searchContextSize?: "low" | "medium" | "high" },
-): Promise<{
-	answer: string;
-	sources: SearchSource[];
-	model: string;
-	requestId: string;
-	usage?: { inputTokens: number; outputTokens: number; totalTokens: number };
-}> {
+): Promise<CodexSearchResult> {
 	const url = `${CODEX_BASE_URL}${CODEX_RESPONSES_PATH}`;
 	const headers = buildCodexHeaders(auth.accessToken, auth.accountId);
 
-	const requestedModel = getModel();
-
 	const body: Record<string, unknown> = {
-		model: requestedModel,
+		model,
 		stream: true,
 		store: false,
 		input: [
@@ -354,7 +362,7 @@ async function callCodexSearch(
 	const answerParts: string[] = [];
 	const streamedAnswerParts: string[] = [];
 	const sources: SearchSource[] = [];
-	let model = requestedModel;
+	let responseModel = model;
 	let requestId = "";
 	let usage: { inputTokens: number; outputTokens: number; totalTokens: number } | undefined;
 
@@ -401,7 +409,7 @@ async function callCodexSearch(
 		} else if (eventType === "response.completed" || eventType === "response.done") {
 			const resp = (rawEvent as { response?: CodexResponse }).response;
 			if (resp) {
-				if (resp.model) model = resp.model;
+				if (resp.model) responseModel = resp.model;
 				if (resp.id) requestId = resp.id;
 				if (resp.usage) {
 					const cachedTokens = resp.usage.input_tokens_details?.cached_tokens ?? 0;
@@ -446,7 +454,7 @@ async function callCodexSearch(
 	return {
 		answer,
 		sources,
-		model,
+		model: responseModel,
 		requestId,
 		usage,
 	};
@@ -467,10 +475,28 @@ export async function searchCodex(params: CodexSearchParams): Promise<SearchResp
 		);
 	}
 
-	const result = await callCodexSearch(auth, params.query, {
-		systemPrompt: params.system_prompt,
-		searchContextSize: params.search_context_size ?? "high",
-	});
+	const modelCandidates = getModelCandidates();
+	let result: CodexSearchResult | undefined;
+	let lastUnsupportedModelError: unknown;
+
+	for (const model of modelCandidates) {
+		try {
+			result = await callCodexSearch(auth, params.query, model, {
+				systemPrompt: params.system_prompt,
+				searchContextSize: params.search_context_size ?? "high",
+			});
+			break;
+		} catch (error) {
+			if (modelCandidates.length <= 1 || !isUnsupportedCodexModelError(error)) {
+				throw error;
+			}
+			lastUnsupportedModelError = error;
+		}
+	}
+
+	if (!result) {
+		throw lastUnsupportedModelError;
+	}
 
 	let sources = result.sources;
 

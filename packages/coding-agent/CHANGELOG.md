@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex web search default model selection to avoid account-incompatible mini models and retry the next built-in candidate when Codex rejects a default model as unsupported.
+
 ## [15.1.7] - 2026-05-19
 
 ### Fixed
