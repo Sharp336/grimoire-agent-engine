@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed failed DAP launches leaving stop-event waiters that could surface as unhandled rejections.
+
 ## [15.1.6] - 2026-05-19
 
 ### Fixed

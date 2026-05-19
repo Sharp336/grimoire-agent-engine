@@ -1081,11 +1081,15 @@ export class DapSessionManager {
 			session.client.waitForEvent("exited", undefined, signal, timeoutMs),
 		];
 		// Promise.race leaves the losing waiters pending; their timeouts would
-		// otherwise surface as unhandled rejections once they fire.
+		// otherwise surface as unhandled rejections once they fire. The returned
+		// race can also be abandoned when launch/attach fails before the initial
+		// stop capture is awaited, so consume it at creation time too.
 		for (const p of promises) {
 			p.catch(() => {});
 		}
-		return Promise.race(promises);
+		const outcome = Promise.race(promises);
+		outcome.catch(() => {});
+		return outcome;
 	}
 
 	/**
