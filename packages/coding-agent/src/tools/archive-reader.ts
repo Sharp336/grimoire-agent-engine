@@ -1,5 +1,4 @@
 import { ToolError } from "./tool-errors";
-import { inflateZipEntry } from "./zip-inflate";
 
 export type ArchiveFormat = "zip" | "tar" | "tar.gz";
 
@@ -420,7 +419,7 @@ async function readZipEntryBytes(storage: ZipStorage): Promise<Uint8Array> {
 		bytes = compressed;
 	} else if (storage.compressionMethod === 8) {
 		try {
-			bytes = inflateZipEntry(compressed, storage.uncompressedSize);
+			bytes = Bun.inflateSync(compressed as Uint8Array<ArrayBuffer>, { windowBits: -15 });
 		} catch (error) {
 			throw new ToolError(error instanceof Error ? error.message : String(error));
 		}
