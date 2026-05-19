@@ -20,14 +20,19 @@ export function sliceWithWidth(line: string, startCol: number, length: number, s
 export function truncateToWidth(
 	text: string,
 	maxWidth: number,
-	ellipsisKind?: Ellipsis | null,
+	ellipsisKind?: Ellipsis | string | null,
 	pad?: boolean | null,
 ): string {
-	// Guard nullish napi inputs: napi-rs 3 on the Windows prebuilt rejects
-	// `null` for `Option<u8>` (Ellipsis) / `Option<bool>` (pad) (issue #848),
-	// and `maxWidth` is a required `u32` that throws on `null`/`undefined`
-	// everywhere. Pass concrete defaults that mirror the Rust `unwrap_or`s.
+	// Guard napi inputs: legacy custom renderers may pass a literal ellipsis
+	// string (often "") while the native addon now expects the Ellipsis enum.
 	const safeWidth = Number.isFinite(maxWidth) ? Math.max(0, Math.trunc(maxWidth)) : 0;
+	if (typeof ellipsisKind === "string") {
+		const suffixWidth = visibleWidthRaw(ellipsisKind);
+		const textWidth = Math.max(0, safeWidth - suffixWidth);
+		const truncated = nativeTruncateToWidth(text, textWidth, Ellipsis.Omit, false, getDefaultTabWidth());
+		return truncated === text ? text : truncated + ellipsisKind;
+	}
+
 	return nativeTruncateToWidth(text, safeWidth, ellipsisKind ?? Ellipsis.Unicode, pad ?? false, getDefaultTabWidth());
 }
 
