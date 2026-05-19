@@ -122,7 +122,7 @@ URL selectors are parsed separately in `packages/coding-agent/src/tools/fetch.ts
 - `openArchive()` reads the whole archive into memory, then:
   - tar/tgz uses `new Bun.Archive(bytes)`
   - zip parses central directory metadata for entry names and uses `fflate.inflateSync()` for deflate payloads
-- ZIP entry names decode in this order: UTF-8 flag, valid Info-ZIP Unicode Path extra field (`0x7075`), then CP437.
+- ZIP entry names decode in this order: UTF-8 flag, valid Info-ZIP Unicode Path extra field (`0x7075`), explicit `read.archive.filenameEncoding` fallback when configured, then CP437.
 - Archive paths normalize `/`, drop `.` segments, and reject `..` after filename decoding.
 - Directory reads list immediate children; files show `name` plus ` (size)` when size > 0.
 - Directory listing default limit is `500` entries in `#readArchiveDirectory()`.

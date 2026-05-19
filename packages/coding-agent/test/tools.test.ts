@@ -779,6 +779,64 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result)).toContain("é.txt");
 		});
 
+		it("should only decode legacy ZIP entry names with explicit fallback encoding", async () => {
+			const archivePath = path.join(testDir, "gbk-fallback.zip");
+			fs.writeFileSync(
+				archivePath,
+				createRawNameZipArchive([
+					{ rawPath: Buffer.from([0xb8, 0xbd, 0xbc, 0xfe, 0x2e, 0x74, 0x78, 0x74]), content: "gbk\n" },
+				]),
+			);
+
+			const defaultResult = await readTool.execute("test-call-zip-gbk-default", { path: archivePath });
+			const defaultOutput = getTextOutput(defaultResult);
+			expect(defaultOutput).not.toContain("附件.txt");
+
+			const gbkReadTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, Settings.isolated({ "read.archive.filenameEncoding": "gbk" })),
+				),
+			);
+			const configuredList = await gbkReadTool.execute("test-call-zip-gbk-configured-list", { path: archivePath });
+			expect(getTextOutput(configuredList)).toContain("附件.txt");
+
+			const configuredFile = await gbkReadTool.execute("test-call-zip-gbk-configured-file", {
+				path: `${archivePath}:附件.txt:raw`,
+			});
+			expect(getTextOutput(configuredFile)).toBe("gbk\n");
+		});
+
+		it("should prefer UTF-8 flags and Unicode path extra fields over fallback encoding", async () => {
+			const archivePath = path.join(testDir, "fallback-priority.zip");
+			fs.writeFileSync(
+				archivePath,
+				createRawNameZipArchive([
+					{
+						rawPath: Buffer.from("utf8-路径.txt", "utf-8"),
+						flag: 0x0800,
+						content: "utf8\n",
+					},
+					{
+						rawPath: Buffer.from([0xb8, 0xbd, 0xbc, 0xfe, 0x2e, 0x74, 0x78, 0x74]),
+						unicodePath: "unicode-附件.txt",
+						content: "unicode\n",
+					},
+				]),
+			);
+
+			const gbkReadTool = wrapToolWithMetaNotice(
+				new ReadTool(
+					createTestToolSession(testDir, Settings.isolated({ "read.archive.filenameEncoding": "windows-1252" })),
+				),
+			);
+			const output = getTextOutput(
+				await gbkReadTool.execute("test-call-zip-fallback-priority", { path: archivePath }),
+			);
+
+			expect(output).toContain("utf8-路径.txt");
+			expect(output).toContain("unicode-附件.txt");
+			expect(output).not.toContain("utf8-è·¯å¾„.txt");
+		});
 		it("should reject ZIP64 entries that require extended size metadata", async () => {
 			const archivePath = path.join(testDir, "zip64-sentinel.zip");
 			fs.writeFileSync(

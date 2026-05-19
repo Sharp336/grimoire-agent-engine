@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Added
+- Added an explicit Read tool fallback encoding option for legacy ZIP entry names.
+
 ### Fixed
 - Fixed ZIP archive entry names with Unicode path extra fields rendering as mojibake in the Read tool.
 

@@ -1570,6 +1570,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"read.archive.filenameEncoding": {
+		type: "enum",
+		values: [
+			"none",
+			"gbk",
+			"gb18030",
+			"shift_jis",
+			"windows-31j",
+			"big5",
+			"euc-kr",
+			"euc-jp",
+			"ibm866",
+			"windows-1252",
+			"windows-1253",
+			"windows-1255",
+			"windows-1257",
+		] as const,
+		default: "none",
+	},
+
 	"read.summarize.enabled": {
 		type: "boolean",
 		default: true,

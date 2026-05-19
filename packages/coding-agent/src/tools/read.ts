@@ -1101,7 +1101,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		throwIfAborted(signal);
-		const archive = await openArchive(resolvedArchivePath.absolutePath);
+		const archive = await openArchive(resolvedArchivePath.absolutePath, {
+			zipFilenameEncoding: this.session.settings.get("read.archive.filenameEncoding"),
+		});
 		throwIfAborted(signal);
 
 		const details: ReadToolDetails = {
