@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed GitHub Copilot requests intermittently failing with `400 model_not_available_for_integrator: copilot-language-server` on newer models (e.g. `claude-sonnet-4.6`, `gpt-5.5`). All Copilot chat/completions/responses requests now include `Copilot-Integration-Id: vscode-chat` via a new `COPILOT_REQUEST_HEADERS` constant. The header is intentionally excluded from auth-flow requests (device code, token polling). This fixes the root cause identified in ([#773](https://github.com/can1357/oh-my-pi/issues/773)).
+- Fixed GitHub Copilot credentials accumulating a new database row on every `/login` instead of updating the existing one. `loginGitHubCopilot` now fetches the user's stable numeric GitHub ID via `GET /user` and attaches it as `accountId`, giving the credential dedup system an identity key to match on.
+
 ## [15.1.7] - 2026-05-19
 ### Added
 

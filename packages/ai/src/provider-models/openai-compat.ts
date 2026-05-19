@@ -9,7 +9,7 @@ import {
 	type OpenAICompatibleModelRecord,
 } from "../utils/discovery/openai-compatible";
 import { toFireworksPublicModelId } from "../utils/fireworks-model-id";
-import { getGitHubCopilotBaseUrl, OPENCODE_HEADERS, parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
+import { COPILOT_REQUEST_HEADERS, getGitHubCopilotBaseUrl, OPENCODE_HEADERS, parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { createBundledReferenceMap, createReferenceResolver } from "./bundled-references";
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
@@ -1600,7 +1600,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					provider: "github-copilot",
 					baseUrl,
 					apiKey,
-					headers: OPENCODE_HEADERS,
+					headers: COPILOT_REQUEST_HEADERS,
 					mapModel: (
 						entry: OpenAICompatibleModelRecord,
 						defaults: Model<Api>,
@@ -1648,7 +1648,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 								name,
 								contextWindow,
 								maxTokens,
-								headers: { ...OPENCODE_HEADERS, ...(providerRefs.get(defaults.id)?.headers ?? {}) },
+								headers: { ...COPILOT_REQUEST_HEADERS, ...(providerRefs.get(defaults.id)?.headers ?? {}) },
 								...(api === "openai-completions"
 									? {
 											compat: {
@@ -1667,7 +1667,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 							name,
 							contextWindow,
 							maxTokens,
-							headers: { ...OPENCODE_HEADERS },
+							headers: { ...COPILOT_REQUEST_HEADERS },
 							...(api === "openai-completions"
 								? {
 										compat: {
@@ -2178,7 +2178,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	openAiCompletionsDescriptor("github-copilot", "github-copilot", COPILOT_BASE_URL, {
 		defaultContextWindow: 128000,
 		defaultMaxTokens: 8192,
-		headers: { ...OPENCODE_HEADERS },
+		headers: { ...COPILOT_REQUEST_HEADERS },
 		filterModel: filterActiveToolCallModels,
 		resolveApi: (modelId, raw) =>
 			resolveApiByRules(modelId, raw, COPILOT_API_RESOLUTION_RULES, COPILOT_DEFAULT_RESOLUTION),

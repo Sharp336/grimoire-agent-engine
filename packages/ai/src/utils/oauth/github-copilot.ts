@@ -13,6 +13,16 @@ export const OPENCODE_HEADERS = {
 	"User-Agent": COPILOT_USER_AGENT,
 } as const;
 
+/**
+ * Headers sent on every Copilot API request (chat, completions, responses).
+ * Identifies the integration so Copilot routes to the correct model set.
+ * Not used on auth flows (device code, token poll).
+ */
+export const COPILOT_REQUEST_HEADERS = {
+	...OPENCODE_HEADERS,
+	"Copilot-Integration-Id": "vscode-chat",
+} as const;
+
 const INITIAL_POLL_INTERVAL_MULTIPLIER = 1.2;
 const SLOW_DOWN_POLL_INTERVAL_MULTIPLIER = 1.4;
 type DeviceCodeResponse = {
@@ -113,6 +123,25 @@ async function fetchJson(url: string, init: RequestInit): Promise<unknown> {
 		throw new Error(`${response.status} ${response.statusText}: ${text}`);
 	}
 	return response.json();
+}
+
+/**
+ * Fetch the GitHub user's numeric ID to use as a stable dedup identity key.
+ * Silently returns undefined on failure — missing accountId is non-fatal,
+ * it just means dedup falls back to accumulating rows until the user re-logins
+ * enough times to trigger a manual cleanup.
+ */
+async function fetchGitHubUserId(token: string, domain: string): Promise<string | undefined> {
+	const apiBase = isPublicGitHubHost(domain) ? "https://api.github.com" : `https://${domain}/api/v3`;
+	try {
+		const data = await fetchJson(`${apiBase}/user`, {
+			headers: { Authorization: `token ${token}`, ...OPENCODE_HEADERS },
+		});
+		const id = (data as Record<string, unknown>).id;
+		return typeof id === "number" ? String(id) : undefined;
+	} catch {
+		return undefined;
+	}
 }
 
 async function startDeviceFlow(domain: string): Promise<DeviceCodeResponse> {
@@ -347,12 +376,16 @@ export async function loginGitHubCopilot(options: {
 		options.pollIntervalScaleMs,
 	);
 
-	// With opencode OAuth, the GitHub token is used directly for all API requests
+	// With opencode OAuth, the GitHub token is used directly for all API requests.
+	// Fetch the user's numeric GitHub ID as a stable dedup key so re-logins
+	// replace the existing credential row rather than accumulating new ones.
+	const accountId = await fetchGitHubUserId(githubAccessToken, domain);
 	const credentials: OAuthCredentials = {
 		refresh: githubAccessToken,
 		access: githubAccessToken,
 		expires: FAR_FUTURE_MS,
 		enterpriseUrl: enterpriseDomain ?? undefined,
+		...(accountId && { accountId }),
 	};
 
 	// Enable all models after successful login
