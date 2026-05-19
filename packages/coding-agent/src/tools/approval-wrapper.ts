@@ -38,18 +38,22 @@ export class ApprovalToolWrapper<TParameters extends TSchema = TSchema, TDetails
 		context?: AgentToolContext,
 	) {
 		const autoApprove = context?.autoApprove ?? false;
-		if (!autoApprove) {
+		const hasUI = context?.hasUI ?? false;
+
+		// Skip approval checks if:
+		// 1. autoApprove flag is set (--auto-approve / --yolo)
+		// 2. No UI available (headless/internal sessions are trusted)
+		if (!autoApprove && hasUI) {
 			const settings: Settings | undefined = context?.settings;
 			const userPolicies: Record<string, ApprovalPolicy> = settings?.get("tools.approval") ?? {};
 			const approvalCheck = requiresApproval(this.tool.name, params, userPolicies);
 
 			if (approvalCheck.required) {
-				if (!context?.hasUI || !context.ui) {
+				if (!context.ui) {
+					// This should not happen (hasUI is true but ui is undefined),
+					// but fail closed if it does
 					throw new Error(
-						`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
-							`Options:\n` +
-							`  1. Use --auto-approve flag\n` +
-							`  2. Add to config: tools.approval.${this.tool.name}: allow`,
+						`Tool "${this.tool.name}" requires approval but UI context is unavailable.`,
 					);
 				}
 

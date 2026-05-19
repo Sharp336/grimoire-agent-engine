@@ -57,10 +57,30 @@ tools:
 
 ### Resolution Order
 
-1. User config for specific tool (`tools.approval.<toolName>`)
-2. Built-in default for the tool (see `DEFAULT_APPROVAL_POLICIES`)
-3. External tool default (`prompt`)
-4. System-wide fallback (`prompt`)
+Policy resolution follows this precedence (first match wins):
+
+1. **Overriding exceptions** (safety rules with `override: true`)
+   - Example: Critical bash patterns force `prompt` even if user sets `bash: allow`
+2. **User config for specific tool** (`tools.approval.<toolName>`)
+3. **Non-overriding exceptions** (performance optimizations)
+   - Example: LSP read-only actions auto-allowed even with `lsp: prompt`
+4. **Built-in default for tool** (see `DEFAULT_APPROVAL_POLICIES` in code)
+5. **User's `_default` override** (`tools.approval._default`)
+6. **System-wide fallback** (`prompt`)
+
+### Unknown/External Tools
+
+Tools not in the built-in registry (MCP tools, custom extensions) fall back to:
+1. User's `_default` policy if set
+2. System default (`prompt`)
+
+Example:
+```yaml
+tools:
+  approval:
+    _default: allow  # Auto-approve all unknown tools
+    risky-mcp-tool: prompt  # Override specific tool
+```
 
 ### Critical Pattern Override
 
@@ -77,14 +97,21 @@ These patterns force confirmation even if `tools.approval.bash: allow` is set.
 
 ## Non-Interactive Mode
 
-When approval is required but no UI is available (e.g., RPC mode, `--mode json`), the tool throws:
+When running without a UI (headless sessions, internal tool invocations, SDK usage without UI context):
 
+- **Approval is automatically skipped** (tools are auto-allowed)
+- This prevents breaking internal/background workflows
+- For user-facing workflows without UI, use `--auto-approve`:
+
+```bash
+# CLI automation mode
+omp --auto-approve --no-session -p "Run tests"
+
+# SDK usage
+await session.prompt("Fix errors", { autoApprove: true });
 ```
-Tool "bash" requires approval but no interactive UI available.
-Options:
-  1. Use --auto-approve flag
-  2. Add to config: tools.approval.bash: allow
-```
+
+**Security note**: Headless sessions are considered trusted. If you need approval enforcement in headless mode, implement it at the orchestration layer (e.g., CI/CD approval gates).
 
 ## Automated Workflows
 

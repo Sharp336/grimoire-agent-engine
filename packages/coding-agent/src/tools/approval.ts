@@ -11,6 +11,14 @@
 export type ApprovalPolicy = "allow" | "deny" | "prompt";
 
 /**
+ * Type guard for ApprovalPolicy values.
+ * Use this to validate user config at runtime.
+ */
+export function isApprovalPolicy(value: unknown): value is ApprovalPolicy {
+	return value === "allow" || value === "deny" || value === "prompt";
+}
+
+/**
  * Action-based exception rule.
  * Allows fine-grained control over tool behavior based on input parameters.
  */
@@ -56,7 +64,7 @@ export const DEFAULT_APPROVAL_POLICIES: Record<string, ApprovalPolicy> = {
 	task: "prompt",
 	eval: "prompt",
 	ssh: "prompt",
-	hindsight_retain: "prompt", // Writes to hindsight store
+	retain: "prompt", // Writes to hindsight store
 	checkpoint: "prompt", // Creates snapshots
 	rewind: "prompt", // Restores snapshots
 
@@ -165,7 +173,16 @@ export function getApprovalPolicy(
 
 	// 2. Check user config for specific tool
 	if (toolName in userConfig) {
-		return { policy: userConfig[toolName] };
+		const userPolicy = userConfig[toolName];
+		if (!isApprovalPolicy(userPolicy)) {
+			// Invalid value: fail closed with warning
+			console.warn(
+				`Invalid approval policy "${userPolicy}" for tool "${toolName}". ` +
+				`Expected "allow", "deny", or "prompt". Defaulting to "prompt".`,
+			);
+			return { policy: "prompt", reason: "Invalid policy value in config" };
+		}
+		return { policy: userPolicy };
 	}
 
 	// 3. Check non-overriding exceptions (performance optimizations)
@@ -182,7 +199,15 @@ export function getApprovalPolicy(
 
 	// 5. Check user's _default override
 	if ("_default" in userConfig) {
-		return { policy: userConfig._default };
+		const defaultPolicy = userConfig._default;
+		if (!isApprovalPolicy(defaultPolicy)) {
+			console.warn(
+				`Invalid approval policy "${defaultPolicy}" for _default. ` +
+				`Expected "allow", "deny", or "prompt". Defaulting to "prompt".`,
+			);
+			return { policy: "prompt", reason: "Invalid _default policy in config" };
+		}
+		return { policy: defaultPolicy };
 	}
 
 	// 6. System-wide fallback
@@ -215,8 +240,16 @@ export function requiresApproval(
 		return { required: true, reason };
 	}
 
-	// Allow
-	return { required: false };
+	// Allow - only remaining valid case after validation
+	if (policy === "allow") {
+		return { required: false };
+	}
+
+	// This should never happen due to validation in getApprovalPolicy,
+	// but fail closed if it somehow does
+	console.warn(`Unexpected approval policy "${policy}" for tool "${toolName}". Failing closed.`);
+	return { required: true, reason: "Unexpected policy value" };
+}
 }
 
 /**

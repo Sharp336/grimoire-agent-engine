@@ -366,3 +366,95 @@ describe("approval policy integration", () => {
 		expect(customResult.required).toBe(false);
 	});
 });
+
+describe("invalid config value handling", () => {
+	it("fails closed for invalid policy values (typo)", () => {
+		const userConfig: Record<string, any> = {
+			bash: "prmopt", // Typo - invalid value
+		};
+
+		// Should warn and default to "prompt"
+		const result = getApprovalPolicy("bash", { command: "ls" }, userConfig);
+		expect(result.policy).toBe("prompt");
+		expect(result.reason).toContain("Invalid policy value");
+	});
+
+	it("fails closed for invalid _default value", () => {
+		const userConfig: Record<string, any> = {
+			_default: "aloww", // Typo - invalid value
+		};
+
+		// Should warn and default to "prompt"
+		const result = getApprovalPolicy("unknown-tool", {}, userConfig);
+		expect(result.policy).toBe("prompt");
+		expect(result.reason).toContain("Invalid _default policy");
+	});
+
+	it("treats empty string as invalid and fails closed", () => {
+		const userConfig: Record<string, any> = {
+			bash: "",
+		};
+
+		const result = getApprovalPolicy("bash", { command: "ls" }, userConfig);
+		expect(result.policy).toBe("prompt");
+		expect(result.reason).toContain("Invalid policy value");
+	});
+
+	it("treats null as invalid and fails closed", () => {
+		const userConfig: Record<string, any> = {
+			bash: null,
+		};
+
+		const result = getApprovalPolicy("bash", { command: "ls" }, userConfig);
+		expect(result.policy).toBe("prompt");
+		expect(result.reason).toContain("Invalid policy value");
+	});
+
+	it("treats numbers as invalid and fails closed", () => {
+		const userConfig: Record<string, any> = {
+			bash: 1,
+		};
+
+		const result = getApprovalPolicy("bash", { command: "ls" }, userConfig);
+		expect(result.policy).toBe("prompt");
+		expect(result.reason).toContain("Invalid policy value");
+	});
+
+	it("treats objects as invalid and fails closed", () => {
+		const userConfig: Record<string, any> = {
+			bash: { allow: true },
+		};
+
+		const result = getApprovalPolicy("bash", { command: "ls" }, userConfig);
+		expect(result.policy).toBe("prompt");
+		expect(result.reason).toContain("Invalid policy value");
+	});
+
+	it("requiresApproval fails closed on invalid values", () => {
+		const userConfig: Record<string, any> = {
+			bash: "maybe", // Invalid value
+		};
+
+		// Should require approval (fail closed)
+		const result = requiresApproval("bash", { command: "ls" }, userConfig);
+		expect(result.required).toBe(true);
+		expect(result.reason).toContain("Invalid policy value");
+	});
+
+	it("valid values still work correctly after validation", () => {
+		const userConfig: Record<string, ApprovalPolicy> = {
+			bash: "allow",
+			write: "prompt",
+			edit: "deny",
+		};
+
+		const bashResult = getApprovalPolicy("bash", { command: "ls" }, userConfig);
+		expect(bashResult.policy).toBe("allow");
+
+		const writeResult = getApprovalPolicy("write", { path: "test.txt" }, userConfig);
+		expect(writeResult.policy).toBe("prompt");
+
+		const editResult = getApprovalPolicy("edit", { input: "@test.txt" }, userConfig);
+		expect(editResult.policy).toBe("deny");
+	});
+});

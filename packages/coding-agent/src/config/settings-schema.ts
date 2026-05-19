@@ -1674,7 +1674,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Tool Approval Policies",
 			description:
-				"Per-tool approval policies. Set to 'allow' to auto-approve, 'prompt' to require confirmation, or 'deny' to block. Use '_default' for fallback policy for unknown tools.",
+				"Per-tool approval policies (security-sensitive). Valid values: 'allow' (auto-approve), 'prompt' (require confirmation), 'deny' (block). Use '_default' key for fallback policy for unknown tools. Invalid values will be treated as 'prompt' with a warning.",
 		},
 	},
 
