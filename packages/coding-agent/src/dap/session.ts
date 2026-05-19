@@ -105,18 +105,9 @@ function toErrorMessage(value: unknown): string {
 	return String(value);
 }
 
-interface DapStartRequestFailure {
-	rejected: boolean;
-	error?: unknown;
-}
-
-function trackDapStartRequest<T>(promise: Promise<T>, failure: DapStartRequestFailure): Promise<T> {
-	return promise.catch(error => {
-		failure.rejected = true;
-		failure.error = error;
-		throw error;
-	});
-}
+const HANDSHAKE_PRIMARY_ERROR_WINDOW_MS = 50;
+const PRIMARY_REQUEST_OK = Symbol("primary-request-ok");
+const PRIMARY_REQUEST_PENDING = Symbol("primary-request-pending");
 
 function combineDapStartErrors(command: "launch" | "attach", startError: unknown, configurationError: unknown): Error {
 	const startMessage = toErrorMessage(startError);
@@ -129,16 +120,25 @@ function combineDapStartErrors(command: "launch" | "attach", startError: unknown
 	);
 }
 
-async function throwPreferredDapStartError(
+async function preferPrimaryRequestError(
 	command: "launch" | "attach",
-	startFailure: DapStartRequestFailure,
-	configurationError: unknown,
+	primaryRequest: Promise<unknown>,
+	secondaryError: unknown,
+	windowMs: number = HANDSHAKE_PRIMARY_ERROR_WINDOW_MS,
 ): Promise<never> {
-	await Promise.resolve();
-	if (startFailure.rejected) {
-		throw combineDapStartErrors(command, startFailure.error, configurationError);
+	const pending = timers.setTimeout(windowMs, PRIMARY_REQUEST_PENDING, { ref: false });
+	const result = await Promise.race([
+		primaryRequest.then(
+			() => PRIMARY_REQUEST_OK,
+			error => error,
+		),
+		pending,
+	]);
+	if (result !== PRIMARY_REQUEST_OK && result !== PRIMARY_REQUEST_PENDING) {
+		throw combineDapStartErrors(command, result, secondaryError);
 	}
-	throw configurationError;
+	if (secondaryError instanceof Error) throw secondaryError;
+	throw new Error(String(secondaryError));
 }
 function normalizePath(filePath: string): string {
 	return path.resolve(filePath);
@@ -244,11 +244,7 @@ export class DapSessionManager {
 			// DAP spec: many adapters do not respond to launch until after
 			// configurationDone. Fire launch, complete the config handshake,
 			// then await the launch response.
-			const launchFailure: DapStartRequestFailure = { rejected: false };
-			const launchPromise = trackDapStartRequest(
-				client.sendRequest("launch", launchArguments, signal, timeoutMs),
-				launchFailure,
-			);
+			const launchPromise = client.sendRequest("launch", launchArguments, signal, timeoutMs);
 			// Mark handled so a fast error response doesn't become an unhandled
 			// rejection while we await the config handshake. The actual error
 			// still propagates when we await launchPromise below.
@@ -256,7 +252,7 @@ export class DapSessionManager {
 			try {
 				await this.#completeConfigurationHandshake(session, signal, timeoutMs);
 			} catch (error) {
-				await throwPreferredDapStartError("launch", launchFailure, error);
+				await preferPrimaryRequestError("launch", launchPromise, error);
 			}
 			await launchPromise;
 			// Try to capture initial stopped state (e.g. stopOnEntry).
@@ -305,16 +301,12 @@ export class DapSessionManager {
 				signal,
 				Math.min(timeoutMs, STOP_CAPTURE_TIMEOUT_MS),
 			);
-			const attachFailure: DapStartRequestFailure = { rejected: false };
-			const attachPromise = trackDapStartRequest(
-				client.sendRequest("attach", attachArguments, signal, timeoutMs),
-				attachFailure,
-			);
+			const attachPromise = client.sendRequest("attach", attachArguments, signal, timeoutMs);
 			attachPromise.catch(() => {});
 			try {
 				await this.#completeConfigurationHandshake(session, signal, timeoutMs);
 			} catch (error) {
-				await throwPreferredDapStartError("attach", attachFailure, error);
+				await preferPrimaryRequestError("attach", attachPromise, error);
 			}
 			await attachPromise;
 			try {
