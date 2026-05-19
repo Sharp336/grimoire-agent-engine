@@ -59,14 +59,17 @@ tools:
 
 Policy resolution follows this precedence (first match wins):
 
-1. **Overriding exceptions** (safety rules with `override: true`)
+1. **Explicit user deny** (`tools.approval.<toolName>: deny`)
+   - Absolute block - cannot be overridden by any exception
+   - Example: `bash: deny` blocks ALL bash commands, even safe ones
+2. **Overriding exceptions** (safety rules with `override: true`)
    - Example: Critical bash patterns force `prompt` even if user sets `bash: allow`
-2. **User config for specific tool** (`tools.approval.<toolName>`)
-3. **Non-overriding exceptions** (performance optimizations)
+3. **User config for specific tool** (`tools.approval.<toolName>: allow|prompt`)
+4. **Non-overriding exceptions** (performance optimizations)
    - Example: LSP read-only actions auto-allowed even with `lsp: prompt`
-4. **Built-in default for tool** (see `DEFAULT_APPROVAL_POLICIES` in code)
-5. **User's `_default` override** (`tools.approval._default`)
-6. **System-wide fallback** (`prompt`)
+5. **Built-in default for tool** (see `DEFAULT_APPROVAL_POLICIES` in code)
+6. **User's `_default` override** (`tools.approval._default`)
+7. **System-wide fallback** (`prompt`)
 
 ### Unknown/External Tools
 
@@ -84,7 +87,7 @@ tools:
 
 ### Critical Pattern Override
 
-Dangerous bash patterns **always** prompt, regardless of policy:
+Dangerous bash patterns **always** prompt when set to `allow`, regardless of policy:
 
 ```bash
 rm -rf /
@@ -94,6 +97,8 @@ chmod -R 777 /
 ```
 
 These patterns force confirmation even if `tools.approval.bash: allow` is set.
+
+**Important**: If you set `bash: deny`, ALL bash commands are blocked, including safe ones. Explicit `deny` is absolute and cannot be overridden by any exception.
 
 ## Non-Interactive Mode
 

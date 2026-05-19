@@ -156,14 +156,27 @@ describe("getApprovalPolicy", () => {
 		expect(result.policy).toBe("deny");
 	});
 
-	it("applies overriding exceptions before user config", () => {
+	it("applies overriding exceptions before user config (allow)", () => {
 		const userConfig: Record<string, ApprovalPolicy> = {
 			bash: "allow", // User allows bash
 		};
-		// But critical pattern should override
+		// But critical pattern should override allow
 		const result = getApprovalPolicy("bash", { command: "rm -rf /" }, userConfig);
 		expect(result.policy).toBe("prompt");
 		expect(result.reason).toContain("Critical pattern");
+	});
+
+	it("respects explicit deny even for critical bash patterns", () => {
+		const userConfig: Record<string, ApprovalPolicy> = {
+			bash: "deny", // User explicitly denies ALL bash
+		};
+		// Explicit deny is absolute - even for safe commands
+		const safeResult = getApprovalPolicy("bash", { command: "ls -la" }, userConfig);
+		expect(safeResult.policy).toBe("deny");
+
+		// Explicit deny is absolute - even for critical patterns
+		const dangerousResult = getApprovalPolicy("bash", { command: "rm -rf /" }, userConfig);
+		expect(dangerousResult.policy).toBe("deny");
 	});
 
 	it("applies non-overriding exceptions after user config", () => {

@@ -8,6 +8,8 @@
  * - CLI override (--auto-approve bypasses all prompts)
  */
 
+import { logger } from "@oh-my-pi/pi-utils";
+
 export type ApprovalPolicy = "allow" | "deny" | "prompt";
 
 /**
@@ -151,19 +153,37 @@ export const ACTION_EXCEPTIONS: Record<string, ActionException[]> = {
  * Resolve approval policy for a tool.
  *
  * Resolution order:
- * 1. Action exceptions with override=true (safety rules)
- * 2. User config for specific tool
- * 3. Action exceptions with override=false (performance optimizations)
- * 4. Built-in default for tool
- * 5. User's _default override
- * 6. System _default (prompt)
+ * 1. Explicit user deny (absolute - cannot be overridden)
+ * 2. Action exceptions with override=true (safety rules)
+ * 3. User config for specific tool (allow/prompt)
+ * 4. Action exceptions with override=false (performance optimizations)
+ * 5. Built-in default for tool
+ * 6. User's _default override
+ * 7. System _default (prompt)
  */
 export function getApprovalPolicy(
 	toolName: string,
 	input: unknown,
 	userConfig: Record<string, ApprovalPolicy> = {},
 ): { policy: ApprovalPolicy; reason?: string } {
-	// 1. Check overriding exceptions first (safety rules)
+	// 1. Check for explicit user deny first - this is absolute and cannot be overridden
+	if (toolName in userConfig) {
+		const userPolicy = userConfig[toolName];
+		if (!isApprovalPolicy(userPolicy)) {
+			// Invalid value: fail closed with warning
+			logger.warn(
+				`Invalid approval policy "${userPolicy}" for tool "${toolName}". ` +
+				`Expected "allow", "deny", or "prompt". Defaulting to "prompt".`,
+			);
+			return { policy: "prompt", reason: "Invalid policy value in config" };
+		}
+		// Explicit deny is absolute - honor it even for critical patterns
+		if (userPolicy === "deny") {
+			return { policy: "deny" };
+		}
+	}
+
+	// 2. Check overriding exceptions (safety rules)
 	const exceptions = ACTION_EXCEPTIONS[toolName] ?? [];
 	for (const exception of exceptions) {
 		if (exception.override && exception.matches(input)) {
@@ -171,37 +191,30 @@ export function getApprovalPolicy(
 		}
 	}
 
-	// 2. Check user config for specific tool
+	// 3. Check user config for specific tool (allow/prompt - deny already handled above)
 	if (toolName in userConfig) {
 		const userPolicy = userConfig[toolName];
-		if (!isApprovalPolicy(userPolicy)) {
-			// Invalid value: fail closed with warning
-			console.warn(
-				`Invalid approval policy "${userPolicy}" for tool "${toolName}". ` +
-				`Expected "allow", "deny", or "prompt". Defaulting to "prompt".`,
-			);
-			return { policy: "prompt", reason: "Invalid policy value in config" };
-		}
-		return { policy: userPolicy };
+		// Already validated above, and deny already returned
+		return { policy: userPolicy as ApprovalPolicy };
 	}
 
-	// 3. Check non-overriding exceptions (performance optimizations)
+	// 4. Check non-overriding exceptions (performance optimizations)
 	for (const exception of exceptions) {
 		if (!exception.override && exception.matches(input)) {
 			return { policy: exception.policy, reason: exception.reason };
 		}
 	}
 
-	// 4. Check built-in default for tool
+	// 5. Check built-in default for tool
 	if (toolName in DEFAULT_APPROVAL_POLICIES) {
 		return { policy: DEFAULT_APPROVAL_POLICIES[toolName] };
 	}
 
-	// 5. Check user's _default override
+	// 6. Check user's _default override
 	if ("_default" in userConfig) {
 		const defaultPolicy = userConfig._default;
 		if (!isApprovalPolicy(defaultPolicy)) {
-			console.warn(
+			logger.warn(
 				`Invalid approval policy "${defaultPolicy}" for _default. ` +
 				`Expected "allow", "deny", or "prompt". Defaulting to "prompt".`,
 			);
@@ -210,7 +223,7 @@ export function getApprovalPolicy(
 		return { policy: defaultPolicy };
 	}
 
-	// 6. System-wide fallback
+	// 7. System-wide fallback
 	return { policy: DEFAULT_APPROVAL_POLICIES._default };
 }
 
@@ -247,7 +260,7 @@ export function requiresApproval(
 
 	// This should never happen due to validation in getApprovalPolicy,
 	// but fail closed if it somehow does
-	console.warn(`Unexpected approval policy "${policy}" for tool "${toolName}". Failing closed.`);
+	logger.warn(`Unexpected approval policy "${policy}" for tool "${toolName}". Failing closed.`);
 	return { required: true, reason: "Unexpected policy value" };
 }
 }
