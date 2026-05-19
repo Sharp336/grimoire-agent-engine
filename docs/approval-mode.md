@@ -1,145 +1,220 @@
 # Tool Approval Policies
 
-Per-tool approval policies allow fine-grained control over which tools require user confirmation before execution.
+Control which tools require your confirmation before running.
 
-## Overview
+## Why This Exists
 
-By default:
-- **Read-only tools** (read, find, search, ast_grep, web_search) are auto-allowed
-- **Destructive tools** (bash, write, edit, ast_edit, debug, browser, eval) require approval
-- **External/custom tools** (MCP, extensions) require approval
-- **LSP tool** requires approval by default, but read-only actions (diagnostics, hover, references) are exempted
-- **Critical bash patterns** always prompt, even if bash is allowlisted (safety override)
+By default, the coding agent can run destructive commands (bash, file edits, etc.) without asking. This feature lets you:
+- **Require confirmation** for dangerous operations
+- **Auto-allow** trusted tools to speed up workflows
+- **Block** specific tools entirely
 
-### Action-Based Exceptions
-
-Some tools have **action-based exceptions** that apply policy based on specific inputs:
-
-**LSP Tool** (performance optimization):
-- Default policy: `prompt`
-- Exception: read-only actions → auto-allowed
-- Result: `diagnostics`, `hover`, `references` don't prompt; `rename`, `code_actions` do prompt
-
-**Bash Tool** (safety override):
-- Default policy: `prompt`
-- Exception: critical patterns → force prompt (overrides user config)
-- Result: `rm -rf /`, `sudo rm`, fork bombs always prompt, even with `bash: allow`
-
-## Quick Start
-
-### Bypass all approvals for automation
+## Quick Examples
 
 ```bash
+# Bypass all approvals (automation mode)
 omp --auto-approve -p "Fix all TypeScript errors"
-omp --yolo -p "Refactor the auth module"
+
+# Configure specific tools (interactive mode only)
+omp config set tools.approval.bash allow     # Never ask for bash
+omp config set tools.approval.write prompt   # Always ask for writes  
+omp config set tools.approval.browser deny   # Block browser (in interactive mode)
 ```
 
-### Configure per-tool policies
-
-Add to `~/.omp/agent/config.yml` or `.omp/config.yml`:
+Or edit `~/.omp/agent/config.yml`:
 
 ```yaml
 tools:
   approval:
-    bash: allow        # Never prompt for bash
-    write: prompt      # Always prompt for write (default)
-    edit: allow        # Never prompt for edit
-    custom-tool: deny  # Block a custom tool entirely
+    bash: allow        # Trust all bash commands
+    write: prompt      # Ask before writing files
+    browser: deny      # Block browser in interactive mode
 ```
 
-## Configuration
+**Note:** These policies only apply in interactive mode. With `--auto-approve` / `--yolo` or in headless mode, all tools execute regardless of policy.
 
-### Policy Values
+## Policy Values
 
-- `allow` — Auto-approve (never prompt)
-- `deny` — Block the tool entirely (throws error)
-- `prompt` — Require user confirmation (default for destructive tools)
+| Value | Behavior (Interactive Mode) | Behavior (--yolo / Headless) |
+|-------|----------|----------|
+| `allow` | Never prompt, always run | Same - always run |
+| `prompt` | Ask for confirmation each time | Bypassed - auto-executes |
+| `deny` | Block entirely, throw error | Bypassed - executes anyway |
 
-### Resolution Order
+**Key insight:** Approval policies only work in interactive mode (with UI, without `--auto-approve`). In automation/headless mode, all policies are ignored.
 
-Policy resolution follows this precedence (first match wins):
+## Built-in Defaults
 
-1. **Explicit user deny** (`tools.approval.<toolName>: deny`)
-   - Absolute block - cannot be overridden by any exception
-   - Example: `bash: deny` blocks ALL bash commands, even safe ones
-2. **Overriding exceptions** (safety rules with `override: true`)
-   - Example: Critical bash patterns force `prompt` even if user sets `bash: allow`
-3. **User config for specific tool** (`tools.approval.<toolName>: allow|prompt`)
-4. **Non-overriding exceptions** (performance optimizations)
-   - Example: LSP read-only actions auto-allowed even with `lsp: prompt`
-5. **Built-in default for tool** (see `DEFAULT_APPROVAL_POLICIES` in code)
-6. **User's `_default` override** (`tools.approval._default`)
-7. **System-wide fallback** (`prompt`)
+Tools have sensible defaults so you don't need to configure everything:
 
-### Unknown/External Tools
+| Tool Type | Default | Examples |
+|-----------|---------|----------|
+| **Read-only** | `allow` | read, find, search, web_search |
+| **Destructive** | `prompt` | bash, write, edit, debug, browser |
+| **External** | `prompt` | MCP tools, custom extensions |
 
-Tools not in the built-in registry (MCP tools, custom extensions) fall back to:
-1. User's `_default` policy if set
-2. System default (`prompt`)
+## How Approval Decisions Are Made
 
-Example:
+When a tool is about to run, the system checks policies in this order (first match wins):
+
+### 1. Your Explicit Blocks (Interactive Mode Only)
+**In interactive mode, if you set a tool to `deny`, it's completely blocked.**
+
 ```yaml
 tools:
   approval:
-    _default: allow  # Auto-approve all unknown tools
-    risky-mcp-tool: prompt  # Override specific tool
+    bash: deny  # Blocks ALL bash in interactive mode
 ```
 
-### Critical Pattern Override
+Even safe commands like `ls` are blocked. Even dangerous patterns that would normally just prompt are blocked.
 
-Dangerous bash patterns **always** prompt when set to `allow`, regardless of policy:
+**Important:** Deny policies only work in interactive mode (with UI, without `--auto-approve`). In headless or `--yolo` mode, deny is bypassed and tools execute anyway.
 
-```bash
-rm -rf /
-sudo rm -rf
-:(){ :|:& };:
-chmod -R 777 /
+---
+
+### 2. Built-in Safety Rules (Interactive Mode Only)
+**When running interactively with UI, dangerous bash patterns require confirmation**, even if you allowlisted bash.
+
+Example: Critical bash patterns like `rm -rf /`, `sudo rm`, fork bombs.
+
+```yaml
+tools:
+  approval:
+    bash: allow  # You trust bash in general
 ```
 
-These patterns force confirmation even if `tools.approval.bash: allow` is set.
+**But** if the agent tries `rm -rf /` in interactive mode, you still get a prompt. Safety rules override `allow` (but not `deny`).
 
-**Important**: If you set `bash: deny`, ALL bash commands are blocked, including safe ones. Explicit `deny` is absolute and cannot be overridden by any exception.
+**Important:** Safety rules are **completely bypassed** when:
+- Using `--auto-approve` / `--yolo` flags (automation mode)
+- Running in headless/non-UI mode (API usage, background jobs)
 
-## Non-Interactive Mode
+If you need safety enforcement in automation or headless mode, implement it via hooks (see "Security Considerations" section).
 
-When running without a UI (headless sessions, internal tool invocations, SDK usage without UI context):
+---
 
-- **Approval is automatically skipped** (tools are auto-allowed)
-- This prevents breaking internal/background workflows
-- For user-facing workflows without UI, use `--auto-approve`:
+### 3. Your Tool-Specific Settings
+**Your config for individual tools.**
+
+```yaml
+tools:
+  approval:
+    bash: allow     # Trust bash (except safety rules above)
+    write: prompt   # Always ask before writes
+```
+
+---
+
+### 4. Smart Auto-Allows
+**Some operations are so harmless and frequent, they're auto-allowed even if you set the tool to `prompt`.**
+
+Example: LSP read-only operations (hover tooltips, diagnostics, find references).
+
+```yaml
+tools:
+  approval:
+    lsp: prompt  # You want approval for LSP in general
+```
+
+**But** hovering over a variable or checking diagnostics won't prompt. Those operations:
+- Are read-only (can't break anything)
+- Fire constantly (dozens per minute while coding)
+- Would make the UI unusable if they prompted
+
+However, LSP renames and code actions **will** still prompt because they modify code.
+
+---
+
+### 5. Built-in Tool Defaults
+**If you haven't configured a tool, use its built-in default** (see table above).
+
+Example: You haven't configured `bash`, so it uses its default (`prompt`).
+
+---
+
+### 6. Your Global Default
+**Set a fallback for all unknown/external tools.**
+
+```yaml
+tools:
+  approval:
+    _default: allow  # Trust everything by default
+    risky-mcp-tool: prompt  # Override specific external tool
+```
+
+This is useful for MCP tools or custom extensions where you don't want to configure each one individually.
+
+---
+
+### 7. System Fallback (Last Resort)
+**If nothing else matched, default to `prompt`** (safe choice).
+
+## Special Cases
+
+### Critical Bash Patterns
+
+In **interactive mode** (UI available, without `--auto-approve`), these patterns **always prompt** even when bash is set to `allow`:
 
 ```bash
-# CLI automation mode
+rm -rf /           # Root deletion
+sudo rm -rf        # Root deletion with sudo
+:(){ :|:& };:      # Fork bomb
+chmod -R 777 /     # Dangerous permissions
+curl ... | bash    # Pipe to shell execution
+```
+
+**Why?** These can destroy your system. The agent forces confirmation as a safety net.
+
+**Important caveats:**
+- If you set `bash: deny` in interactive mode, it's blocked with an error
+- If you use `--auto-approve` / `--yolo`, **even deny policies are bypassed** - everything executes
+- In headless/non-UI mode, **even deny policies are bypassed** - everything executes
+
+**For automation safety:** If you need pattern blocking in `--auto-approve` or headless mode, implement it via hooks (see examples in `docs/hooks.md`).
+
+### LSP Read-Only Operations
+
+These **never prompt** even with `lsp: prompt`:
+
+- `diagnostics` — Error checking
+- `hover` — Tooltip info
+- `references` — Find usages
+- `definition` — Jump to definition
+- `implementation` — Find implementations
+
+**Why?** These fire constantly (dozens per minute while coding). Prompting would make the editor unusable.
+
+**Operations that DO prompt:**
+- `rename` — Modifies code
+- `code_actions` — May modify code
+- `format` — Modifies formatting
+
+### Headless/Non-Interactive Mode
+
+**When running without a UI** (API usage, background jobs, CI/CD):
+- Approval is **completely bypassed** (functionally identical to `--auto-approve`)
+- All tools execute without prompting, including:
+  - Tools set to `prompt` → execute without asking
+  - Tools set to `deny` → execute anyway (deny NOT enforced)
+  - Critical bash patterns like `rm -rf /` → execute without confirmation
+- Prevents breaking automated workflows
+
+**For user-facing automation**, use `--auto-approve`:
+
+```bash
+# CLI automation (bypasses approval even in interactive terminal)
 omp --auto-approve --no-session -p "Run tests"
+omp --yolo -p "Update dependencies"  # Same as --auto-approve
 
 # SDK usage
 await session.prompt("Fix errors", { autoApprove: true });
 ```
 
-**Security note**: Headless sessions are considered trusted. If you need approval enforcement in headless mode, implement it at the orchestration layer (e.g., CI/CD approval gates).
+**Security note:** Headless mode and `--auto-approve` are **functionally identical** - both skip the entire approval system via the same code path. Neither mode enforces any policies (allow, prompt, or deny). If you need safety checks in automation, implement them via hooks (see \"Security Considerations\" section).
 
-## Automated Workflows
+## Configuration Examples
 
-For CI/CD or scripted workflows, use `--auto-approve`:
-
-```bash
-# GitHub Actions
-omp --auto-approve --no-session -p "Run tests and fix linting"
-
-# Cron job
-omp --yolo -p "Update dependencies and commit"
-```
-
-## Security Considerations
-
-- **Trust your prompts**: `--auto-approve` bypasses all safety checks
-- **Review allowlists**: Regularly audit `tools.approval` config
-- **Critical patterns**: Cannot be disabled (this is intentional)
-- **External tools**: Require approval by default (no built-in allowlist)
-
-## Examples
-
-### Allow bash and write for local development
+### Local Development (Permissive)
 
 ```yaml
 # .omp/config.yml (project-local)
@@ -147,76 +222,150 @@ tools:
   approval:
     bash: allow
     write: allow
+    edit: allow
+    # Still protected by critical pattern safety rules
 ```
 
-### Deny browser tool in shared environments
+### Shared/Production Environment (Restrictive)
 
 ```yaml
 # ~/.omp/agent/config.yml (user-global)
 tools:
   approval:
-    browser: deny
+    bash: prompt      # Always ask
+    browser: deny     # Never allow automation
+    write: prompt     # Confirm file changes
 ```
 
-### Selective automation
+### Automation Workflow
+
+```yaml
+# For CI/CD, use --auto-approve instead of config
+# (safer than permanently allowlisting in config)
+```
 
 ```bash
-# Auto-approve for known-safe operations
-omp --auto-approve --tools read,find,grep -p "Analyze codebase"
+# GitHub Actions
+omp --auto-approve --no-session -p "Run tests and fix linting"
 
-# Manual approval for destructive changes
-omp -p "Refactor authentication module"
+# Cron job  
+omp --yolo -p "Update dependencies"
 ```
 
-## Migration from Extensions
+### External Tools (MCP/Extensions)
 
-If you previously used a custom extension for approval (e.g., `confirm-destructive.ts`), you can:
+```yaml
+tools:
+  approval:
+    _default: prompt        # Unknown tools require approval
+    github-mcp: allow       # Trust specific MCP server
+    database-tool: deny     # Block specific extension
+```
 
-1. **Remove the extension** — built-in approval supersedes it
-2. **Migrate allowlists** — convert extension config to `tools.approval.*`
-3. **Test behavior** — verify prompts appear as expected
+## Migrating from Custom Extensions
 
-Example migration:
+If you used custom approval extensions (like `confirm-destructive.ts`), you can remove them:
 
+**Old way** (extension):
 ```typescript
-// Old extension: ~/.omp/agent/extensions/confirm-destructive.ts
+// ~/.omp/agent/extensions/confirm-destructive.ts
 const ALLOWED_TOOLS = ["read", "find", "search"];
+// ...custom logic...
+```
 
-// New config: ~/.omp/agent/config.yml
+**New way** (built-in config):
+```yaml
+# ~/.omp/agent/config.yml
 tools:
   approval:
     bash: prompt
     write: prompt
-    edit: prompt
-    # read/find/search already auto-allowed by default
+    # read/find/search already allowed by default
 ```
 
 ## Troubleshooting
 
 ### "Tool requires approval but no UI available"
 
-**Problem**: Running in non-interactive mode (RPC, JSON, headless)
+**Cause:** Running in non-interactive mode (RPC, JSON, headless)
 
-**Solution**:
-- Add `--auto-approve` flag, or
-- Set `tools.approval.<tool>: allow` in config
+**Fix:** Add `--auto-approve` flag or set `tools.approval.<tool>: allow`
 
-### Prompts appear for read-only tools
+### Prompts for harmless operations
 
-**Problem**: Custom or MCP tools may not be recognized as read-only
+**Cause:** External/MCP tool not recognized as read-only
 
-**Solution**:
+**Fix:**
 ```yaml
 tools:
   approval:
-    custom-readonly-tool: allow
+    my-readonly-tool: allow
 ```
 
-### Critical pattern bypass attempt
+### Critical patterns still prompt despite allowlist
 
-**Problem**: `rm -rf /` prompts even though bash is allowlisted
+**This is intentional.** Safety rules override `allow` for patterns like `rm -rf /`.
 
-**Behavior**: **This is intentional**. Critical patterns cannot be auto-approved.
+**To bypass:** Use `--auto-approve` flag (accepts responsibility for all commands)
+
+### Tool blocked unexpectedly
+
+**Check:** Did you set the tool to `deny`? This completely blocks it.
+
+**Fix:** Change to `prompt` or `allow`
+
+## Security Considerations
+
+### What Bypasses Safety Checks
+
+**ALL approval enforcement is completely bypassed when:**
+1. Using `--auto-approve` or `--yolo` flags
+2. Running in headless/non-UI mode (API usage, background jobs, RPC, CLI utilities)
+
+**In these modes:**
+- Critical pattern detection disabled (`rm -rf /` executes without prompt)
+- Prompt policies treated as allow (everything auto-executes)
+- **Deny policies are NOT enforced** (even explicitly denied tools execute)
+
+**`--yolo` means YOLO** - zero safety checks, total trust mode.
+
+### Automation Safety
+
+If you need safety checks in automation or headless mode:
+
+```typescript
+// Hook example: ~/.omp/agent/extensions/safety-check.ts
+import type { HookAPI } from "@oh-my-pi/pi-coding-agent";
+
+export default function (pi: HookAPI) {
+  pi.on("tool_call", async (event) => {
+    if (event.toolName !== "bash") return;
+    const cmd = String(event.input.command ?? "");
+    
+    if (/rm\s+-rf\s+\//.test(cmd)) {
+      return { block: true, reason: "safety-check: rm -rf / blocked" };
+    }
+  });
+}
+```
+
+Hooks run in **all modes** (interactive, headless, auto-approve), giving you universal enforcement.
+
+### Best Practices
+
+- **`--auto-approve` is for trusted workflows only** — use with caution
+- **Review your allowlists regularly** — tools you trusted 6 months ago might be risky now
+- **Critical patterns only protect interactive mode** — don't rely on them for automation
+- **External tools (MCP, extensions) default to prompt** — you must explicitly trust them
+- **For CI/CD safety:** Implement blocking via hooks, not approval policies
+
+## Summary: How to Think About It
+
+1. **Start with defaults**: Most tools have sensible defaults (read-only → allow, destructive → prompt)
+2. **Allowlist trusted tools**: Set frequently-used tools to `allow` for your workflow
+3. **Safety nets in interactive mode only**: Critical bash patterns prompt in interactive mode (but not with `--auto-approve` or headless)
+4. **Deny only works in interactive mode**: Setting `deny` blocks in interactive sessions, but is bypassed in `--auto-approve` or headless
+5. **Automation is zero-trust bypass**: `--auto-approve` and headless mode skip ALL checks (even deny); use hooks for enforcement
 
 ## See Also
 
