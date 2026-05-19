@@ -16,6 +16,7 @@
 ### Changed
 
 - Changed `/fast` to be a single provider-agnostic toggle: enabling the command sets `serviceTier: "priority"` for every provider, and the anthropic-messages provider translates `priority` into `speed: "fast"` plus the `fast-mode-2026-02-01` beta. Anthropic fast mode is currently supported on Claude Opus 4.6 and 4.7; the server rejects other models, which triggers the provider's auto-fallback (request retried without the priority signal, `providerSessionState.fastModeDisabled` persisted for the rest of the session). The session listens for the `"priority"` marker in `AssistantMessage.disabledFeatures`, syncs `/fast` off, and emits a warning notice. Re-running `/fast on` clears the per-session disable so the next request actually re-tries priority.
+- Changed debug launch directory-program validation to run after adapter selection so Delve debug package directories remain valid while file/executable adapters reject directory targets.
 
 ## [15.1.6] - 2026-05-19
 

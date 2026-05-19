@@ -7,7 +7,7 @@ import type {
 	RenderResultOptions,
 } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { isEnoent, prompt } from "@oh-my-pi/pi-utils";
+import { prompt } from "@oh-my-pi/pi-utils";
 import * as z from "zod/v4";
 import {
 	type DapBreakpointRecord,
@@ -21,6 +21,7 @@ import {
 	type DapFunctionBreakpointRecord,
 	type DapInstructionBreakpointRecord,
 	type DapModule,
+	type DapResolvedAdapter,
 	type DapScope,
 	type DapSessionSummary,
 	type DapSource,
@@ -470,20 +471,41 @@ function getConfiguredAdapters(cwd: string): string {
 	const adapters = getAvailableAdapters(cwd).map(adapter => adapter.name);
 	return adapters.length > 0 ? adapters.join(", ") : "none";
 }
-async function validateLaunchProgram(program: string, cwd: string): Promise<void> {
-	let isDirectory: boolean;
+
+function hasPathSeparator(input: string): boolean {
+	return input.includes("/") || input.includes("\\");
+}
+
+function adapterAcceptsDirectoryProgram(adapter: DapResolvedAdapter): boolean {
+	return adapter.name === "dlv" && adapter.launchDefaults.mode === "debug";
+}
+
+async function assertLaunchProgramIsNotDirectory(
+	program: string,
+	cwd: string,
+	originalProgram: string,
+	adapter: DapResolvedAdapter,
+): Promise<void> {
+	let stats: { isDirectory(): boolean };
 	try {
-		isDirectory = (await fs.stat(program)).isDirectory();
-	} catch (error) {
-		if (isEnoent(error)) return;
-		throw error;
+		stats = await fs.stat(program);
+	} catch {
+		return;
 	}
-	if (!isDirectory) return;
+	if (!stats.isDirectory() || adapterAcceptsDirectoryProgram(adapter)) return;
 
 	const displayPath = formatPathRelativeToCwd(program, cwd, { trailingSlash: true });
-	throw new ToolError(
-		`launch program resolves to a directory: ${displayPath}. Pass an executable file path, or for Python use adapter "debugpy" with program set to the .py file.`,
+	const hints = [
+		`program resolved to a directory: ${displayPath}`,
+		"The selected debug adapter expects program to be the debug target file path, not a shell command.",
+	];
+	if (!hasPathSeparator(originalProgram) && originalProgram.toLowerCase() === "python") {
+		hints.push('For Python scripts, set program to the .py file and use adapter="debugpy".');
+	}
+	hints.push(
+		`If you intended to debug an executable named ${JSON.stringify(originalProgram)}, pass its absolute executable path.`,
 	);
+	throw new ToolError(hints.join("\n"));
 }
 
 interface DebugRenderArgs extends Partial<DebugParams> {}
@@ -644,13 +666,13 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 				}
 				const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
 				const program = resolveToCwd(params.program, commandCwd);
-				await validateLaunchProgram(program, commandCwd);
 				const adapter = selectLaunchAdapter(program, commandCwd, params.adapter);
 				if (!adapter) {
 					throw new ToolError(
 						`No debugger adapter available. Installed adapters: ${getConfiguredAdapters(commandCwd)}`,
 					);
 				}
+				await assertLaunchProgramIsNotDirectory(program, commandCwd, params.program, adapter);
 				const snapshot = await dapSessionManager.launch(
 					{ adapter, program, args: params.args, cwd: commandCwd },
 					combinedSignal,

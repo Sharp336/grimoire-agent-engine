@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
 import { DapClient } from "../../src/dap/client";
+import * as dapConfig from "../../src/dap/config";
 import { DapSessionManager } from "../../src/dap/session";
 import type { DapCapabilities, DapClientState, DapEventMessage, DapResolvedAdapter } from "../../src/dap/types";
 import type { ToolSession } from "../../src/tools";
@@ -185,10 +186,11 @@ describe("DAP launch failure handling", () => {
 });
 
 describe("DebugTool launch validation", () => {
-	it("rejects directory-valued launch programs before adapter selection", async () => {
+	it("rejects directory-valued launch programs after selecting an adapter that requires a file target", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-program-"));
 		try {
 			await fs.mkdir(path.join(cwd, "python"));
+			spyOn(dapConfig, "selectLaunchAdapter").mockReturnValue(TEST_ADAPTER);
 			const session: ToolSession = {
 				cwd,
 				hasUI: false,
@@ -199,7 +201,7 @@ describe("DebugTool launch validation", () => {
 			const tool = new DebugTool(session);
 
 			await expect(tool.execute("call", { action: "launch", program: "python" })).rejects.toThrow(
-				/launch program resolves to a directory.*python/,
+				/program resolved to a directory.*python/,
 			);
 		} finally {
 			await fs.rm(cwd, { recursive: true, force: true });
