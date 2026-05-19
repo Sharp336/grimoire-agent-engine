@@ -11,6 +11,7 @@ import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
+import { isCursorAgent } from "@oh-my-pi/pi-ai";
 import {
 	$env,
 	getProjectDir,
@@ -604,12 +605,12 @@ async function buildSessionOptions(
 			}
 		} else if (resolved.model) {
 			options.model = resolved.model;
-			options.cursorMaxMode = resolved.maxMode;
+			options.cursorMaxMode = isCursorAgent(resolved.model) ? resolved.maxMode : undefined;
 			activeSettings.overrideModelRoles({
 				default: formatModelSelectorValue(
 					resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
 					undefined,
-					resolved.maxMode,
+					isCursorAgent(resolved.model) ? resolved.maxMode : undefined,
 				),
 			});
 			if (!parsed.thinking && resolved.thinkingLevel) {
