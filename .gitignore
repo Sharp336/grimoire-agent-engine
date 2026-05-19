@@ -63,6 +63,7 @@ python/omp-rpc/src/omp_rpc.egg-info/
 .wt/
 CPU*.md
 packages/coding-agent/binaries/
+packages/web-ui/
 
 # robomp runtime state
 python/robomp/data/
@@ -70,3 +71,7 @@ python/robomp/.cache/
 python/robomp/src/robomp/static/
 python/robomp/web/dist/
 python/robomp/.env
+
+# Local tooling state
+.nucleus/
+.local-cache/

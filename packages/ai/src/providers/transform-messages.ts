@@ -48,13 +48,19 @@ export function transformMessages<TApi extends Api>(
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
 ): Message[] {
 	// Pre-pass: inject synthetic tool_call blocks for orphan tool_result messages.
+	// Only active when `normalizeToolCallId` is provided, which signals a
+	// cross-provider replay (e.g. cursor-agent → Anthropic). Without it, orphans
+	// fall through to the existing second-pass drop path (line ~246), which
+	// preserves their text payload as a user-level note instead.
 	// Some providers (e.g. Cursor's cursor-agent API) execute native tools via exec
 	// handlers without emitting tool_call blocks in the assistant message — the
 	// assistant message only carries text/thinking. When the resulting conversation
 	// is replayed against a provider that requires tool_use/tool_result pairing
 	// (Anthropic, Google, OpenAI Responses, ...), those orphan tool_result blocks
 	// either fail validation (invalid id format) or are rejected as unpaired.
-	messages = injectSyntheticToolCallsForOrphans(messages, model, normalizeToolCallId);
+	if (normalizeToolCallId) {
+		messages = injectSyntheticToolCallsForOrphans(messages, model, normalizeToolCallId);
+	}
 
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();

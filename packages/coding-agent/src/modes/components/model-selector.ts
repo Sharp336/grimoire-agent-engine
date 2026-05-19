@@ -70,6 +70,7 @@ interface ModelItem {
 	id: string;
 	model: Model;
 	selector: string;
+	maxMode?: boolean;
 }
 
 interface CanonicalModelItem {
@@ -86,6 +87,7 @@ interface CanonicalModelItem {
 interface ScopedModelItem {
 	model: Model;
 	thinkingLevel?: string;
+	maxMode?: boolean;
 }
 
 interface RoleAssignment {
@@ -409,6 +411,7 @@ export class ModelSelectorComponent extends Container {
 				id: scoped.model.id,
 				model: scoped.model,
 				selector: `${scoped.model.provider}/${scoped.model.id}`,
+				maxMode: scoped.maxMode,
 			}));
 		} else {
 			const loadError = this.#modelRegistry.getError();
@@ -1243,7 +1246,31 @@ export class ModelSelectorComponent extends Container {
 		}
 		// For temporary role, don't save to settings - just notify caller
 		if (role === null) {
-			this.#onSelectCallback(item.model, null, { selector: item.selector, maxMode: choice?.maxMode });
+			// Derive effective MAX mode: step-2 choice > item flag (scoped ModelItem) > scoped-list
+			// fallback (CanonicalModelItem or item with no flag). When the scoped list has the same
+			// Cursor model with multiple flag variants (e.g. cursor/x:max AND cursor/x), the lookup
+			// is ambiguous — fall back to false (base mode) rather than picking arbitrarily.
+			let effectiveMaxMode = choice?.maxMode ?? (item as ModelItem).maxMode;
+			if (effectiveMaxMode === undefined && item.model.extendedContext) {
+				const scopedMatches = this.#scopedModels.filter(
+					sm => sm.model.provider === item.model.provider && sm.model.id === item.model.id,
+				);
+				if (scopedMatches.length > 0) {
+					// Only apply the scoped fallback when at least one entry carries an explicit maxMode.
+					// Entries with maxMode === undefined have no opinion and leave the session state
+					// unchanged (undefined = preserve), which is the correct behaviour for Ctrl-P
+					// cycling without an explicit MAX step.
+					// When explicit opinions differ across entries, the selection is ambiguous — default
+					// to false (base mode) rather than picking arbitrarily.
+					const withExplicit = scopedMatches.filter(sm => sm.maxMode !== undefined);
+					if (withExplicit.length > 0) {
+						const allSame = withExplicit.every(sm => sm.maxMode === withExplicit[0].maxMode);
+						effectiveMaxMode = allSame ? withExplicit[0].maxMode! : false;
+					}
+				}
+				// No scoped matches (or all have no opinion): leave as undefined ("preserve current MAX state").
+			}
+			this.#onSelectCallback(item.model, null, { selector: item.selector, maxMode: effectiveMaxMode });
 			return;
 		}
 

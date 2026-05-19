@@ -525,7 +525,7 @@ export class EventController {
 				silentlyAborted || ttsrSilenced
 					? { ...this.ctx.streamingMessage, stopReason: "stop" as const }
 					: this.ctx.streamingMessage;
-			this.#segmentBuilder?.finalize(renderableMessage);
+			const finalizedSegment = this.#segmentBuilder?.finalize(renderableMessage);
 			// Re-render closed segments too so any in-place text growth lands before message_end.
 			// Closed segments use the real streaming message (not renderableMessage) because the
 			// stopReason-cleared variant is only meaningful for the trailing segment's footer.
@@ -547,8 +547,9 @@ export class EventController {
 				}
 			}
 			this.#lastAssistantComponent = this.ctx.streamingComponent;
-			this.#lastAssistantComponent.setUsageInfo(event.message.usage);
-			this.#lastAssistantComponent.markTranscriptBlockFinalized();
+			const finalizedAssistant = finalizedSegment ?? this.#lastAssistantComponent;
+			finalizedAssistant.setUsageInfo(event.message.usage);
+			finalizedAssistant.markTranscriptBlockFinalized();
 			this.ctx.streamingComponent = undefined;
 			this.ctx.streamingMessage = undefined;
 			// Pin a turn-ending provider error (e.g. Anthropic content-filter block)
@@ -560,8 +561,8 @@ export class EventController {
 				event.message.errorMessage &&
 				!isSilentAbort(event.message.errorMessage)
 			) {
-				this.#lastAssistantComponent?.setErrorPinned(true);
-				this.#pinnedErrorComponent = this.#lastAssistantComponent;
+				finalizedAssistant.setErrorPinned(true);
+				this.#pinnedErrorComponent = finalizedAssistant;
 				this.ctx.showPinnedError(event.message.errorMessage);
 			}
 			this.ctx.statusLine.invalidate();

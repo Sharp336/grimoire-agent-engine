@@ -1210,9 +1210,11 @@ export class Agent {
 			}
 		}
 
-		// If no text or split point is 0 or at/past end, don't split
-		if (fullText.length === 0 || splitPoint <= 0 || splitPoint >= fullText.length) {
-			// Emit assistant message first, then tool results (original behavior but with buffered results)
+		// If no text, or all tools fired after all text, emit in original order (no split needed).
+		// splitPoint === 0 (tool-first) falls through to the general split path below, which
+		// produces an empty preamble → tool results → full-text continuation — correct ordering.
+		if (fullText.length === 0 || splitPoint >= fullText.length) {
+			// Emit assistant message first, then tool results
 			this.#state.streamMessage = null;
 			this.appendMessage(assistantMessage);
 			this.#emit({ type: "message_end", message: assistantMessage });
