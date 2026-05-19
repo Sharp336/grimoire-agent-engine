@@ -1,4 +1,5 @@
 import { ToolError } from "./tool-errors";
+import { inflateZipEntry } from "./zip-inflate";
 
 export type ArchiveFormat = "zip" | "tar" | "tar.gz";
 
@@ -21,6 +22,11 @@ export interface ArchiveDirectoryEntry extends ArchiveNode {
 export interface ExtractedArchiveFile extends ArchiveNode {
 	bytes: Uint8Array;
 }
+
+export interface ArchiveReaderOptions {
+	zipFilenameEncoding?: string;
+}
+
 
 interface TarStorage {
 	type: "tar";
@@ -492,7 +498,7 @@ function decodeCp437(bytes: Uint8Array): string {
 	return result;
 }
 
-function decodeZipEntryPath(record: ZipCentralDirectoryRecord): string | undefined {
+function decodeZipEntryPath(record: ZipCentralDirectoryRecord, fallbackEncoding?: string): string | undefined {
 	if ((record.generalPurposeBitFlag & ZIP_UTF8_FILENAME_FLAG) !== 0) {
 		try {
 			return decodeUtf8(record.rawName);
@@ -501,7 +507,22 @@ function decodeZipEntryPath(record: ZipCentralDirectoryRecord): string | undefin
 		}
 	}
 
-	return readUnicodePathExtraField(record.extraFields, record.rawName) ?? decodeCp437(record.rawName);
+	const unicodePath = readUnicodePathExtraField(record.extraFields, record.rawName);
+	if (unicodePath !== undefined) return unicodePath;
+
+	if (fallbackEncoding && fallbackEncoding !== "none") {
+		try {
+			return new TextDecoder(fallbackEncoding as "utf-8", { fatal: true }).decode(record.rawName);
+		} catch (error) {
+			throw new ToolError(
+				error instanceof Error
+					? `Failed to decode ZIP entry name with '${fallbackEncoding}': ${error.message}`
+					: `Failed to decode ZIP entry name with '${fallbackEncoding}': ${String(error)}`,
+			);
+		}
+	}
+
+	return decodeCp437(record.rawName);
 }
 
 async function readZipEntryBytes(storage: ZipStorage): Promise<Uint8Array> {
@@ -522,8 +543,7 @@ async function readZipEntryBytes(storage: ZipStorage): Promise<Uint8Array> {
 		bytes = compressed;
 	} else if (storage.compressionMethod === 8) {
 		try {
-			const { inflateSync } = await import("fflate");
-			bytes = inflateSync(compressed, { out: new Uint8Array(storage.uncompressedSize) });
+			bytes = inflateZipEntry(compressed, storage.uncompressedSize);
 		} catch (error) {
 			throw new ToolError(error instanceof Error ? error.message : String(error));
 		}
@@ -537,11 +557,11 @@ async function readZipEntryBytes(storage: ZipStorage): Promise<Uint8Array> {
 	return bytes;
 }
 
-async function readZipEntries(bytes: Uint8Array): Promise<ArchiveIndexEntry[]> {
+async function readZipEntries(bytes: Uint8Array, options: ArchiveReaderOptions = {}): Promise<ArchiveIndexEntry[]> {
 	const records = parseZipCentralDirectory(bytes);
 	const entries: ArchiveIndexEntry[] = [];
 	for (const record of records) {
-		const decodedPath = decodeZipEntryPath(record);
+		const decodedPath = decodeZipEntryPath(record, options.zipFilenameEncoding);
 		if (!decodedPath) continue;
 		const normalizedPath = normalizeArchiveEntryPath(decodedPath);
 		if (!normalizedPath) continue;
@@ -696,13 +716,13 @@ export class ArchiveReader {
 	}
 }
 
-export async function openArchive(filePath: string): Promise<ArchiveReader> {
+export async function openArchive(filePath: string, options: ArchiveReaderOptions = {}): Promise<ArchiveReader> {
 	const format = getArchiveFormatFromPath(filePath);
 	if (!format) {
 		throw new ToolError(`Unsupported archive format: ${filePath}`);
 	}
 
 	const bytes = await Bun.file(filePath).bytes();
-	const entries = format === "zip" ? await readZipEntries(bytes) : await readTarEntries(bytes);
+	const entries = format === "zip" ? await readZipEntries(bytes, options) : await readTarEntries(bytes);
 	return new ArchiveReader(format, entries);
 }
