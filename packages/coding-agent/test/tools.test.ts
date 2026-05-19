@@ -779,7 +779,6 @@ describe("Coding Agent Tools", () => {
 			expect(getTextOutput(result)).toContain("é.txt");
 		});
 
-
 		it("should reject ZIP64 entries that require extended size metadata", async () => {
 			const archivePath = path.join(testDir, "zip64-sentinel.zip");
 			fs.writeFileSync(
