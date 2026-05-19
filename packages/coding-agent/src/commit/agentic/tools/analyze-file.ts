@@ -81,7 +81,8 @@ export function createAnalyzeFileTool(options: {
 				schema: JSON.stringify(analyzeFileOutputSchema),
 				tasks,
 			};
-			return taskTool.execute(toolCallId, taskParams, signal, onUpdate);
+			// Pass toolSession as context so approval wrapper has access to hasUI
+			return taskTool.execute(toolCallId, taskParams, signal, onUpdate, toolSession);
 		},
 	};
 }

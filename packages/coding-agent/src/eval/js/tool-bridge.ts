@@ -87,7 +87,8 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 	const normalizedArgs = normalizeArgs(args);
 	const toolCallId = `js-${name}-${crypto.randomUUID()}`;
 	try {
-		const result = await tool.execute(toolCallId, normalizedArgs, options.signal);
+		// Pass session context to ensure approval wrapper has access to hasUI
+		const result = await tool.execute(toolCallId, normalizedArgs, options.signal, undefined, options.session);
 		const textBlocks = result.content.filter(
 			(content): content is { type: "text"; text: string } =>
 				content.type === "text" && typeof content.text === "string",

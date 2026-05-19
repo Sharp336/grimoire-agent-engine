@@ -1353,13 +1353,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		} else if (!toolRegistry.has("resolve")) {
 			const resolveTool = await logger.time("createTools:resolve:session", HIDDEN_TOOLS.resolve, toolSession);
 			if (resolveTool) {
-				toolRegistry.set(resolveTool.name, wrapToolWithMetaNotice(resolveTool));
-			}
-		}
-
-		let cursorEventEmitter: ((event: AgentEvent) => void) | undefined;
-		const cursorExecHandlers = new CursorExecHandlers({
-			cwd,
+			// Wrap with approval before adding to registry (resolve is injected late, after the main approval pass)
+			const wrappedResolve = new ApprovalToolWrapper(wrapToolWithMetaNotice(resolveTool));
+			toolRegistry.set(resolveTool.name, wrappedResolve);
 			tools: toolRegistry,
 			getToolContext: () => toolContextStore.getContext(),
 			emitEvent: event => cursorEventEmitter?.(event),

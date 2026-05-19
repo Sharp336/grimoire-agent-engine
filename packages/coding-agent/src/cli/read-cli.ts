@@ -37,7 +37,8 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 	const tool = wrapToolWithMetaNotice(new ReadTool(session));
 
 	try {
-		const result = await tool.execute("omp-read", { path: cmd.path });
+		// Pass session as context so approval wrapper has access to hasUI
+		const result = await tool.execute("omp-read", { path: cmd.path }, undefined, undefined, session);
 
 		for (const block of result.content) {
 			if (block.type === "text") {
