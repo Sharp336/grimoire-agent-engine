@@ -178,6 +178,90 @@ function createZipArchive(entries: ArchiveFixtureEntry[]): Buffer {
 	return Buffer.concat([...localParts, centralDirectory, endOfCentralDirectory]);
 }
 
+interface RawZipFixtureEntry {
+	rawPath: Buffer;
+	content: string;
+	flag?: number;
+	unicodePath?: string;
+	unicodePathCrc?: number;
+	method?: number;
+	forceZip64SizeSentinel?: boolean;
+}
+
+function createUnicodePathExtraField(rawPath: Uint8Array, unicodePath: string, crcOverride?: number): Buffer {
+	const unicodePathBuffer = Buffer.from(unicodePath, "utf-8");
+	const data = Buffer.alloc(5 + unicodePathBuffer.length, 0);
+	data[0] = 1;
+	data.writeUInt32LE(crcOverride ?? crc32(rawPath), 1);
+	unicodePathBuffer.copy(data, 5);
+
+	const field = Buffer.alloc(4 + data.length, 0);
+	field.writeUInt16LE(0x7075, 0);
+	field.writeUInt16LE(data.length, 2);
+	data.copy(field, 4);
+	return field;
+}
+
+function createRawNameZipArchive(entries: RawZipFixtureEntry[]): Buffer {
+	const localParts: Buffer[] = [];
+	const centralParts: Buffer[] = [];
+	let localOffset = 0;
+
+	for (const entry of entries) {
+		const pathBuffer = Buffer.from(entry.rawPath);
+		const content = Buffer.from(entry.content, "utf-8");
+		const checksum = crc32(content);
+		const extra = entry.unicodePath
+			? createUnicodePathExtraField(pathBuffer, entry.unicodePath, entry.unicodePathCrc)
+			: Buffer.alloc(0);
+		const flag = entry.flag ?? 0;
+
+		const localHeader = Buffer.alloc(30, 0);
+		localHeader.writeUInt32LE(0x04034b50, 0);
+		localHeader.writeUInt16LE(20, 4);
+		localHeader.writeUInt16LE(flag, 6);
+		const method = entry.method ?? 8;
+		const compressed = method === 0 ? content : zlib.deflateRawSync(content);
+		const storedCompressedSize = entry.forceZip64SizeSentinel ? 0xffffffff : compressed.length;
+		const storedUncompressedSize = entry.forceZip64SizeSentinel ? 0xffffffff : content.length;
+		localHeader.writeUInt16LE(method, 8);
+		localHeader.writeUInt32LE(checksum, 14);
+		localHeader.writeUInt32LE(storedCompressedSize, 18);
+		localHeader.writeUInt32LE(storedUncompressedSize, 22);
+		localHeader.writeUInt16LE(pathBuffer.length, 26);
+		localHeader.writeUInt16LE(extra.length, 28);
+
+		localParts.push(localHeader, pathBuffer, extra, compressed);
+
+		const centralHeader = Buffer.alloc(46, 0);
+		centralHeader.writeUInt32LE(0x02014b50, 0);
+		centralHeader.writeUInt16LE(20, 4);
+		centralHeader.writeUInt16LE(20, 6);
+		centralHeader.writeUInt16LE(flag, 8);
+		centralHeader.writeUInt16LE(method, 10);
+		centralHeader.writeUInt32LE(checksum, 16);
+		centralHeader.writeUInt32LE(storedCompressedSize, 20);
+		centralHeader.writeUInt32LE(storedUncompressedSize, 24);
+		centralHeader.writeUInt16LE(pathBuffer.length, 28);
+		centralHeader.writeUInt16LE(extra.length, 30);
+		centralHeader.writeUInt32LE(localOffset, 42);
+
+		centralParts.push(centralHeader, pathBuffer, extra);
+		localOffset += localHeader.length + pathBuffer.length + extra.length + compressed.length;
+	}
+
+	const centralDirectory = Buffer.concat(centralParts);
+	const endOfCentralDirectory = Buffer.alloc(22, 0);
+	endOfCentralDirectory.writeUInt32LE(0x06054b50, 0);
+	endOfCentralDirectory.writeUInt16LE(entries.length, 8);
+	endOfCentralDirectory.writeUInt16LE(entries.length, 10);
+	endOfCentralDirectory.writeUInt32LE(centralDirectory.length, 12);
+	endOfCentralDirectory.writeUInt32LE(localOffset, 16);
+
+	return Buffer.concat([...localParts, centralDirectory, endOfCentralDirectory]);
+}
+
+
 let artifactCounter = 0;
 function createTestToolSession(
 	cwd: string,
@@ -616,6 +700,109 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("index.ts");
 			expect(output).toContain("util.ts");
 			expect(result.details?.isDirectory).toBe(true);
+		});
+
+		it("should use ZIP Unicode path extra fields for legacy encoded entry names", async () => {
+			const archivePath = path.join(testDir, "legacy-unicode-path.zip");
+			fs.writeFileSync(
+				archivePath,
+				createRawNameZipArchive([
+					{
+						rawPath: Buffer.from([
+							...Buffer.from("03-CRAIC2026", "ascii"),
+							0xb1,
+							0xc8,
+							0xc8,
+							0xfc,
+							0xb9,
+							0xe6,
+							0xd4,
+							0xf2,
+							0xbc,
+							0xb0,
+							0xb8,
+							0xbd,
+							0xbc,
+							0xfe,
+							0x2f,
+							0xb8,
+							0xbd,
+							0xbc,
+							0xfe,
+							...Buffer.from(".txt", "ascii"),
+						]),
+						unicodePath: "03-CRAIC2026比赛规则及附件/附件.txt",
+						content: "ok\n",
+					},
+				]),
+			);
+
+			const rootResult = await readTool.execute("test-call-zip-unicode-path-root", { path: archivePath });
+			expect(getTextOutput(rootResult)).toContain("03-CRAIC2026比赛规则及附件/");
+
+			const fileResult = await readTool.execute("test-call-zip-unicode-path-file", {
+				path: `${archivePath}:03-CRAIC2026比赛规则及附件/附件.txt:raw`,
+			});
+			expect(getTextOutput(fileResult)).toBe("ok\n");
+		});
+
+		it("should ignore stale ZIP Unicode path extra fields", async () => {
+			const archivePath = path.join(testDir, "stale-unicode-path.zip");
+			fs.writeFileSync(
+				archivePath,
+				createRawNameZipArchive([
+					{
+						rawPath: Buffer.from("safe.txt", "ascii"),
+						unicodePath: "evil.txt",
+						unicodePathCrc: 0,
+						content: "safe\n",
+					},
+				]),
+			);
+
+			const result = await readTool.execute("test-call-zip-stale-unicode-path", { path: archivePath });
+			const output = getTextOutput(result);
+			expect(output).toContain("safe.txt");
+			expect(output).not.toContain("evil.txt");
+		});
+
+		it("should decode legacy ZIP entry names with CP437 fallback", async () => {
+			const archivePath = path.join(testDir, "cp437.zip");
+			fs.writeFileSync(
+				archivePath,
+				createRawNameZipArchive([
+					{ rawPath: Buffer.from([0x82, 0x2e, 0x74, 0x78, 0x74]), content: "cp437\n" },
+				]),
+			);
+
+			const result = await readTool.execute("test-call-zip-cp437", { path: archivePath });
+			expect(getTextOutput(result)).toContain("é.txt");
+		});
+
+		it("should reject ZIP64 entries that require extended size metadata", async () => {
+			const archivePath = path.join(testDir, "zip64-sentinel.zip");
+			fs.writeFileSync(
+				archivePath,
+				createRawNameZipArchive([
+					{ rawPath: Buffer.from("zip64.txt", "ascii"), content: "zip64\n", forceZip64SizeSentinel: true },
+				]),
+			);
+
+			await expect(readTool.execute("test-call-zip64-sentinel", { path: archivePath })).rejects.toThrow(
+				/ZIP64 archives are not supported/,
+			);
+		});
+
+		it("should reject unsupported ZIP compression methods when reading entries", async () => {
+			const archivePath = path.join(testDir, "unsupported-method.zip");
+			fs.writeFileSync(
+				archivePath,
+				createRawNameZipArchive([{ rawPath: Buffer.from("unsupported.txt", "ascii"), content: "unsupported\n", method: 99 }]),
+			);
+
+			await expect(
+				readTool.execute("test-call-zip-unsupported-method", { path: `${archivePath}:unsupported.txt:raw` }),
+			).rejects.toThrow(/Unsupported ZIP compression method: 99/);
 		});
 
 		for (const archiveCase of [

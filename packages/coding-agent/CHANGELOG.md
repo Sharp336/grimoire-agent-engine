@@ -3,6 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
+- Fixed ZIP archive entry names with Unicode path extra fields rendering as mojibake in the Read tool.
 
 - Fixed ACP command and custom tool-call notifications to carry the original tool arguments in replayed and final updates, so command text is preserved and raw input is no longer wrapped
 - Fixed ACP async-job draining to be scoped by session owner so `getAsyncJobSnapshot` and `drainAsyncJobDeliveriesForAcp` no longer consume or expose jobs from other sessions

@@ -50,7 +50,7 @@ Reading an image path returns metadata (mime, bytes, dimensions, channels, alpha
 
 # Archives
 
-Supports `.tar`, `.tar.gz`, `.tgz`, `.zip`. Use `archive.ext:path/inside/archive` to read a member, and append a normal selector to the inner path: `archive.zip:dir/file.ts:50-60`.
+Supports `.tar`, `.tar.gz`, `.tgz`, `.zip`. ZIP entry names are decoded from central directory metadata using UTF-8 flag, valid Info-ZIP Unicode Path extra field (`0x7075`), then CP437. Use `archive.ext:path/inside/archive` to read a member, and append a normal selector to the inner path: `archive.zip:dir/file.ts:50-60`.
 
 # SQLite
 
