@@ -150,6 +150,7 @@ Side-channel artifacts outside the model tool result:
 - **Adapter selection**
   - `launch`: explicit `adapter` wins; otherwise `selectLaunchAdapter()` ranks available adapters by extension match, root-marker match, then native-debugger preference (`gdb`, `lldb-dap`) for extensionless binaries.
   - `attach`: explicit `adapter` wins; otherwise remote `port` prefers `debugpy`, then native debuggers, then first available adapter.
+  - Python scripts should pass the script path as `program` and force `adapter: "debugpy"` when auto-selection is ambiguous. Do not pass `program: "python"`; `program` is the debug target path, not a shell command.
 - **Transport**
   - stdio adapters: direct `stdin`/`stdout` framing.
   - socket adapters: Unix domain socket on Linux; TCP callback on macOS/other.
@@ -262,6 +263,7 @@ Side-channel artifacts outside the model tool result:
   - `DAP event <event> timed out after <ms>ms`
   - `DAP adapter <name> is not running`
   - `DAP adapter exited (code N): <stderr>` or `DAP adapter exited unexpectedly (code N)`
+    - For `debugpy`, `ModuleNotFoundError: No module named 'debugpy'` adds an install hint: `python -m pip install debugpy`.
   - adapter response `message` when a DAP request fails
 - `continue` / `step_*` are intentionally non-fatal when the target stays running past the timeout: they return `details.timedOut = true` and `state: "running"` instead of throwing.
 - `terminate` suppresses adapter errors while sending `terminate`/`disconnect`; it still disposes the client and returns the last summary when possible.

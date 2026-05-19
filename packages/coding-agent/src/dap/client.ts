@@ -68,6 +68,15 @@ function toErrorMessage(value: unknown): string {
 	return String(value);
 }
 
+function formatAdapterExitError(adapterName: string, exitCode: number | null, stderr: string): string {
+	const base = stderr
+		? `DAP adapter exited (code ${exitCode}): ${stderr}`
+		: `DAP adapter exited unexpectedly (code ${exitCode})`;
+	if (adapterName === "debugpy" && /No module named ['"]debugpy['"]/.test(stderr)) {
+		return `${base}\n\ndebugpy is not installed for the Python interpreter used by the debug adapter. Install it with: python -m pip install debugpy`;
+	}
+	return base;
+}
 export class DapClient {
 	readonly adapter: DapResolvedAdapter;
 	readonly cwd: string;
@@ -537,11 +546,7 @@ export class DapClient {
 		this.#disposed = true;
 		const stderr = this.proc.peekStderr().trim();
 		const exitCode = this.proc.exitCode;
-		const error = new Error(
-			stderr
-				? `DAP adapter exited (code ${exitCode}): ${stderr}`
-				: `DAP adapter exited unexpectedly (code ${exitCode})`,
-		);
+		const error = new Error(formatAdapterExitError(this.adapter.name, exitCode, stderr));
 		this.#rejectPendingRequests(error);
 	}
 

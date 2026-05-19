@@ -144,6 +144,20 @@ function normalizePath(filePath: string): string {
 	return path.resolve(filePath);
 }
 
+function formatDebugpyMissingModuleError(adapter: DapResolvedAdapter, error: unknown): Error {
+	if (
+		adapter.name === "debugpy" &&
+		error instanceof Error &&
+		/No module named ['"]debugpy['"]/.test(error.message) &&
+		!error.message.includes("python -m pip install debugpy")
+	) {
+		return new Error(
+			`${error.message}\n\ndebugpy is not installed for the Python interpreter used by the debug adapter. Install it with: python -m pip install debugpy`,
+		);
+	}
+	return error instanceof Error ? error : new Error(String(error));
+}
+
 function truncateOutput(session: DapSession, output: string): void {
 	if (!output) return;
 	session.output += output;
@@ -274,7 +288,7 @@ export class DapSessionManager {
 			return buildSummary(session);
 		} catch (error) {
 			await this.#disposeSession(session);
-			throw error;
+			throw formatDebugpyMissingModuleError(options.adapter, error);
 		}
 	}
 
@@ -330,7 +344,7 @@ export class DapSessionManager {
 			return buildSummary(session);
 		} catch (error) {
 			await this.#disposeSession(session);
-			throw error;
+			throw formatDebugpyMissingModuleError(options.adapter, error);
 		}
 	}
 
