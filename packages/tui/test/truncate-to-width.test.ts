@@ -44,6 +44,8 @@ describe("truncateToWidth", () => {
 	it("accepts legacy string ellipsis values without throwing", () => {
 		expect(truncateToWidth("abcdef", 3, "")).toBe("abc");
 		expect(truncateToWidth("abcdef", 4, "...")).toBe("a...");
+		expect(visibleWidth(truncateToWidth("abcdef", 2, "..."))).toBeLessThanOrEqual(2);
+		expect(visibleWidth(truncateToWidth("abcdef", 6, "...", true))).toBe(6);
 	});
 });
 

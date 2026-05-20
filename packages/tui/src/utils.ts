@@ -27,10 +27,15 @@ export function truncateToWidth(
 	// string (often "") while the native addon now expects the Ellipsis enum.
 	const safeWidth = Number.isFinite(maxWidth) ? Math.max(0, Math.trunc(maxWidth)) : 0;
 	if (typeof ellipsisKind === "string") {
-		const suffixWidth = visibleWidthRaw(ellipsisKind);
-		const textWidth = Math.max(0, safeWidth - suffixWidth);
+		if (visibleWidthRaw(text) <= safeWidth) {
+			return nativeTruncateToWidth(text, safeWidth, Ellipsis.Omit, pad ?? false, getDefaultTabWidth());
+		}
+
+		const suffix = nativeTruncateToWidth(ellipsisKind, safeWidth, Ellipsis.Omit, false, getDefaultTabWidth());
+		const textWidth = Math.max(0, safeWidth - visibleWidthRaw(suffix));
 		const truncated = nativeTruncateToWidth(text, textWidth, Ellipsis.Omit, false, getDefaultTabWidth());
-		return truncated === text ? text : truncated + ellipsisKind;
+		const result = truncated + suffix;
+		return pad ? result + padding(Math.max(0, safeWidth - visibleWidthRaw(result))) : result;
 	}
 
 	return nativeTruncateToWidth(text, safeWidth, ellipsisKind ?? Ellipsis.Unicode, pad ?? false, getDefaultTabWidth());
