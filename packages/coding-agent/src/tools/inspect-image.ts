@@ -59,11 +59,6 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 		_onUpdate?: AgentToolUpdateCallback<InspectImageToolDetails>,
 		_context?: AgentToolContext,
 	): Promise<AgentToolResult<InspectImageToolDetails>> {
-		if (this.session.settings.get("images.blockImages")) {
-			throw new ToolError(
-				"Image submission is disabled by settings (images.blockImages=true). Disable it to use inspect_image.",
-			);
-		}
 
 		const modelRegistry = this.session.modelRegistry;
 		if (!modelRegistry) {

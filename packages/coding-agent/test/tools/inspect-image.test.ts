@@ -206,19 +206,6 @@ describe("InspectImageTool", () => {
 		);
 	});
 
-	it("fails when images.blockImages is enabled", async () => {
-		const imagePath = path.join(testDir, "screen.png");
-		fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
-
-		const stub = createCompleteSimpleForbiddenStub();
-		const settings = Settings.isolated({ "images.blockImages": true });
-		const tool = new InspectImageTool(createSession(testDir, visionModel, "test-key", settings), stub.fn);
-
-		await expect(tool.execute("call-blocked", { path: imagePath, question: "What is visible?" })).rejects.toThrow(
-			/Image submission is disabled/i,
-		);
-		expect(stub.calls).toHaveLength(0);
-	});
 
 	it("falls back to pi/default when vision role is unset", async () => {
 		const imagePath = path.join(testDir, "screen.png");
