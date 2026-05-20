@@ -10,6 +10,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
+import { t } from "../../i18n";
 import { theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../modes/utils/keybinding-matchers";
 import type { HistoryEntry, HistoryStorage } from "../../session/history-storage";
@@ -37,7 +38,7 @@ class HistoryResultsList implements Component {
 		const lines: string[] = [];
 
 		if (this.#results.length === 0) {
-			lines.push(theme.fg("muted", "  No matching history"));
+			lines.push(theme.fg("muted", `  ${t("historySearch.empty")}`));
 			return lines;
 		}
 
@@ -100,7 +101,7 @@ export class HistorySearchComponent extends Container {
 		this.#resultsList = new HistoryResultsList();
 
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.bold("Search History (Ctrl+R)"), 1, 0));
+		this.addChild(new Text(theme.bold(t("historySearch.title")), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
@@ -108,7 +109,7 @@ export class HistorySearchComponent extends Container {
 		this.addChild(new Spacer(1));
 		this.addChild(this.#resultsList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("muted", "up/down navigate  enter select  esc cancel"), 1, 0));
+		this.addChild(new Text(theme.fg("muted", t("historySearch.help")), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 

@@ -1,4 +1,5 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
+import { t } from "../i18n";
 import { TASK_SIMPLE_MODES } from "../task/simple-mode";
 import { getThinkingLevelMetadata } from "../thinking";
 import { EDIT_MODES } from "../utils/edit-mode";
@@ -48,15 +49,15 @@ export const SETTING_TABS: SettingTab[] = [
 
 /** Tab display metadata - icon is a symbol key from theme.ts (tab.*) */
 export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${string}` }> = {
-	appearance: { label: "Appearance", icon: "tab.appearance" },
-	model: { label: "Model", icon: "tab.model" },
-	interaction: { label: "Interaction", icon: "tab.interaction" },
-	context: { label: "Context", icon: "tab.context" },
-	memory: { label: "Memory", icon: "tab.memory" },
-	editing: { label: "Editing", icon: "tab.editing" },
-	tools: { label: "Tools", icon: "tab.tools" },
-	tasks: { label: "Tasks", icon: "tab.tasks" },
-	providers: { label: "Providers", icon: "tab.providers" },
+	appearance: { label: t("settings.tabs.appearance"), icon: "tab.appearance" },
+	model: { label: t("settings.tabs.model"), icon: "tab.model" },
+	interaction: { label: t("settings.tabs.interaction"), icon: "tab.interaction" },
+	context: { label: t("settings.tabs.context"), icon: "tab.context" },
+	memory: { label: t("settings.tabs.memory"), icon: "tab.memory" },
+	editing: { label: t("settings.tabs.editing"), icon: "tab.editing" },
+	tools: { label: t("settings.tabs.tools"), icon: "tab.tools" },
+	tasks: { label: t("settings.tabs.tasks"), icon: "tab.tasks" },
+	providers: { label: t("settings.tabs.providers"), icon: "tab.providers" },
 };
 
 /** Status line segment identifiers */
