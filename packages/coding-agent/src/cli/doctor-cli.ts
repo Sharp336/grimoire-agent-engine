@@ -175,6 +175,21 @@ export function renderDoctorReport(state: AutoUpdateState | undefined): string {
 		lines.push(`  ${line}`);
 	}
 
+	// Conflict-specific extra hint: if a slim-dev-tree.sh exists, the user's
+	// dev tree is almost certainly stuck because legacy notification commits
+	// can't replay onto a newer upstream. Suggest the prepared one-liner
+	// (G1: no interactive git surgery) before the manual rebase fallback.
+	if (state.next_recommendation === "resolve-conflict") {
+		const slim = path.join(process.env.HOME ?? "", ".omp", "patches", "slim-dev-tree.sh");
+		if (fs.existsSync(slim)) {
+			lines.push("");
+			lines.push(chalk.bold("이 환경 전용 빠른 해결"));
+			lines.push(`  ${chalk.cyan(slim)}                  ${chalk.dim("# dry-run, 변경 없이 plan만")}`);
+			lines.push(`  ${chalk.cyan(`${slim} --execute`)}        ${chalk.dim("# 14개 알림 commit drop + force-push to fork")}`);
+			lines.push(chalk.dim("  (실행 전 ext가 잘 도는지 한 번 새 omp 세션에서 확인)"));
+		}
+	}
+
 	return lines.join("\n");
 }
 

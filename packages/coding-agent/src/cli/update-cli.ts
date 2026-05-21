@@ -15,6 +15,45 @@ import { theme } from "../modes/theme/theme";
 const REPO = "can1357/oh-my-pi";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
 
+/**
+ * Optional post-update hook: invoke `~/.local/bin/omp-relink` (or whatever
+ * `$OMP_RELINK` points to) when present.
+ *
+ * Dev-tree contributors keep a `bun link` symlink chain pointing
+ * `~/node_modules/@oh-my-pi/{pi-tui, pi-coding-agent}` at a working tree
+ * (e.g. `/Users/leo/Developer/oh-my-pi`). `bun install -g`, which the
+ * update path above runs, unconditionally replaces those symlinks with
+ * fresh registry directories — silently losing every uncommitted dev-tree
+ * change. The relink helper rebuilds the symlinks; we just need to call
+ * it once after a successful install.
+ *
+ * For non-contributors the script doesn't exist and this function is a
+ * silent no-op, so it adds zero observable behavior to `omp update`.
+ *
+ * Survives the Phase 2 slim-down: this helper was originally introduced as
+ * part of commit 3ce89f370 (notification work + auto-relink) but its
+ * non-notification half is required for the Phase 4 `runUpdateCommand`
+ * dev-tree branch to behave correctly. Re-introduced verbatim post-slim.
+ */
+export async function runDevTreeRelinkIfPresent(): Promise<void> {
+	const home = Bun.env.HOME ?? "";
+	const relinkPath = Bun.env.OMP_RELINK ?? (home ? path.join(home, ".local", "bin", "omp-relink") : "");
+	if (!relinkPath) return;
+	let stat: fs.Stats;
+	try {
+		stat = fs.statSync(relinkPath);
+	} catch {
+		// File missing (or unreadable) — no relink configured. Silent skip.
+		return;
+	}
+	// Need at least one executable bit set (owner / group / other).
+	if (!stat.isFile() || (stat.mode & 0o111) === 0) return;
+	console.log(chalk.dim(`Running ${path.basename(relinkPath)}…`));
+	// `.nothrow()` so a relink failure doesn't poison the upgrade success
+	// state — the install itself succeeded; relink is bonus.
+	await $`${relinkPath}`.nothrow();
+}
+
 interface ReleaseInfo {
 	tag: string;
 	version: string;
