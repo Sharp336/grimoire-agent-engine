@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getBundledModel } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -20,7 +21,12 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 	afterEach(() => {
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			try {
+				fs.rmSync(tempDir, { recursive: true, force: true });
+			} catch {
+				// Windows sometimes holds onto SQLite handles briefly after AgentSession
+				// disposal; leaving the temp dir behind is harmless for these tests.
+			}
 		}
 	});
 
@@ -87,6 +93,27 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 		expect(session.model).toBeUndefined();
 		expect(modelFallbackMessage).toBe('Model "missing-provider/missing-model" not found');
+	});
+
+	test("does not silently strip an invalid thinking suffix when deferred", async () => {
+		const { session, modelFallbackMessage } = await createAgentSession(
+			buildSessionOptions("runtime-provider/runtime-model:bogus"),
+		);
+
+		expect(session.model).toBeUndefined();
+		expect(modelFallbackMessage).toBe('Model "runtime-provider/runtime-model:bogus" not found');
+	});
+
+	test("applies an explicit thinking suffix when deferred --model resolves", async () => {
+		// Default level differs from the suffix so the assertion fails if the suffix is dropped.
+		const settings = Settings.isolated({ defaultThinkingLevel: "off" });
+		const { session } = await createAgentSession({
+			...buildSessionOptions("runtime-provider/runtime-reasoning-model:high"),
+			settings,
+		});
+
+		expect(session.model?.id).toBe("runtime-reasoning-model");
+		expect(session.thinkingLevel).toBe(ThinkingLevel.High);
 	});
 
 	test("does not apply default role thinking override when modelPattern is explicit", async () => {

@@ -104,6 +104,45 @@ describe("AgentSession context usage", () => {
 		expect(stats.input).toBe(24_700);
 	});
 
+	it("scopes getSessionStats() to the active branch, ignoring abandoned-branch usage in SessionManager", () => {
+		const bundled = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!bundled) throw new Error("Expected bundled model");
+		const activeTurn = createAssistantMessage(bundled, 100, 200);
+		const abandonedTurn = createAssistantMessage(bundled, 999, 888);
+
+		const sessionManager = SessionManager.inMemory();
+		// Both turns hit the session-wide accumulator
+		sessionManager.appendMessage(abandonedTurn);
+		sessionManager.appendMessage(activeTurn);
+
+		// Only activeTurn lives on the active branch
+		const agent = new Agent({
+			initialState: {
+				model: bundled,
+				systemPrompt: [],
+				tools: [],
+				messages: [activeTurn],
+			},
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry: {} as never,
+		});
+		sessions.push(session);
+
+		const stats = session.getSessionStats();
+
+		expect(stats.tokens.input).toBe(100);
+		expect(stats.tokens.output).toBe(200);
+		expect(stats.assistantMessages).toBe(1);
+		// The session-wide accumulator still carries the abandoned turn.
+		const sessionWide = sessionManager.getUsageStatistics();
+		expect(sessionWide.input).toBe(100 + 999);
+		expect(sessionWide.output).toBe(200 + 888);
+	});
+
 	it("includes live streaming assistant usage before message_end", () => {
 		const cursorModel: Model<"cursor-agent"> = {
 			id: "gpt-5.5-extra-high",

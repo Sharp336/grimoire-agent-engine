@@ -1632,13 +1632,30 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const matchPreferences = {
 				usageOrder: settings.getStorage()?.getModelUsageOrder(),
 			};
-			const { model: resolved, maxMode: resolvedMaxMode } = parseModelPattern(
-				options.modelPattern,
-				availableModels,
-				matchPreferences,
-				{ modelRegistry },
-			);
-			if (!acceptResolvedModel(resolved, resolvedMaxMode)) {
+			const {
+				model: resolved,
+				maxMode: resolvedMaxMode,
+				thinkingLevel: resolvedThinkingLevel,
+				explicitThinkingLevel: resolvedExplicitThinkingLevel,
+			} = parseModelPattern(options.modelPattern, availableModels, matchPreferences, {
+				allowInvalidThinkingSelectorFallback: false,
+				modelRegistry,
+			});
+			if (acceptResolvedModel(resolved, resolvedMaxMode)) {
+				// An explicit `:level` suffix on the deferred --model is user intent and must
+				// win over the model's default level. `thinkingLevel` is already non-undefined
+				// here (pickInitialThinkingLevel falls back to the default), so gate on whether
+				// the user gave a more-explicit signal (--thinking flag or restored session
+				// entry) rather than on `thinkingLevel === undefined`.
+				const hasExplicitThinkingInput =
+					options.thinkingLevel !== undefined || (hasExistingSession && hasThinkingEntry);
+				if (!hasExplicitThinkingInput && resolvedExplicitThinkingLevel) {
+					thinkingLevel = resolvedThinkingLevel;
+				}
+				if (resolved) {
+					thinkingLevel = resolveThinkingLevelForModel(resolved, thinkingLevel);
+				}
+			} else {
 				modelFallbackMessage = `Model "${options.modelPattern}" not found`;
 			}
 		}

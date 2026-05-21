@@ -84,6 +84,7 @@ import {
 	isUsageLimitError,
 	modelsAreEqual,
 	parseRateLimitReason,
+	reconcileCursorCumulativeTokens,
 	resolveServiceTier,
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
@@ -9478,9 +9479,12 @@ export class AgentSession {
 	}
 
 	/**
-	 * Get session statistics. Token totals come from `SessionManager.getUsageStatistics()`,
-	 * which is incrementally maintained on append (with Cursor cumulative-token reconciliation
-	 * already applied). The message walk here is for counts only.
+	 * Get session statistics for the active branch only. Token totals are
+	 * accumulated over `state.messages` (post-compaction, branch-local) and
+	 * reconciled against Cursor's cumulative counter when any assistant turn
+	 * in this branch used `cursor-agent`. This deliberately diverges from
+	 * `SessionManager.getUsageStatistics()`, which aggregates over every
+	 * persisted entry including abandoned branches after fork/rewind.
 	 */
 	getSessionStats(): SessionStats {
 		const state = this.state;
@@ -9488,17 +9492,59 @@ export class AgentSession {
 		let assistantMessages = 0;
 		let toolResults = 0;
 		let toolCalls = 0;
+		let totalInput = 0;
+		let totalOutput = 0;
+		let totalCacheRead = 0;
+		let totalCacheWrite = 0;
+		let totalPremiumRequests = 0;
+		let totalCost = 0;
+		let latestCursorTotalTokens = 0;
 		for (const message of state.messages) {
-			if (message.role === "user") userMessages++;
-			else if (message.role === "assistant") {
+			if (message.role === "user") {
+				userMessages++;
+			} else if (message.role === "assistant") {
 				assistantMessages++;
 				toolCalls += message.content.filter(c => c.type === "toolCall").length;
-			} else if (message.role === "toolResult") toolResults++;
+				totalInput += message.usage.input;
+				totalOutput += message.usage.output;
+				totalCacheRead += message.usage.cacheRead;
+				totalCacheWrite += message.usage.cacheWrite;
+				totalPremiumRequests += message.usage.premiumRequests ?? 0;
+				totalCost += message.usage.cost.total;
+				if (message.api === "cursor-agent") {
+					latestCursorTotalTokens = Math.max(latestCursorTotalTokens, message.usage.totalTokens ?? 0);
+				}
+			} else if (message.role === "toolResult") {
+				toolResults++;
+				if (message.toolName === "task") {
+					const details = message.details;
+					const usage =
+						details && typeof details === "object" && "usage" in details
+							? ((details as { usage?: Usage }).usage ?? undefined)
+							: undefined;
+					if (usage && typeof usage === "object") {
+						totalInput += usage.input;
+						totalOutput += usage.output;
+						totalCacheRead += usage.cacheRead;
+						totalCacheWrite += usage.cacheWrite;
+						totalPremiumRequests += usage.premiumRequests ?? 0;
+						totalCost += usage.cost.total;
+					}
+				}
+			}
 		}
 
-		const stats = this.sessionManager.getUsageStatistics();
-		const summed = stats.input + stats.output + stats.cacheRead + stats.cacheWrite;
-		const total = Math.max(summed, stats.latestCursorTotalTokens);
+		if (latestCursorTotalTokens > 0) {
+			const reconciled = reconcileCursorCumulativeTokens({
+				totalInput,
+				totalOutput,
+				totalCacheRead,
+				totalCacheWrite,
+				latestCursorTotalTokens,
+			});
+			totalInput = reconciled.totalInput;
+		}
+		const total = totalInput + totalOutput + totalCacheRead + totalCacheWrite;
 
 		return {
 			sessionFile: this.sessionFile,
@@ -9509,14 +9555,14 @@ export class AgentSession {
 			toolResults,
 			totalMessages: state.messages.length,
 			tokens: {
-				input: stats.input,
-				output: stats.output,
-				cacheRead: stats.cacheRead,
-				cacheWrite: stats.cacheWrite,
+				input: totalInput,
+				output: totalOutput,
+				cacheRead: totalCacheRead,
+				cacheWrite: totalCacheWrite,
 				total,
 			},
-			cost: stats.cost,
-			premiumRequests: stats.premiumRequests,
+			cost: totalCost,
+			premiumRequests: totalPremiumRequests,
 		};
 	}
 
