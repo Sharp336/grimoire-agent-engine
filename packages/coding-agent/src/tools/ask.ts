@@ -185,6 +185,7 @@ async function askSingleQuestion(
 			timeout,
 			signal,
 			outline: true,
+			wrap: true,
 			onTimeout,
 			helpText,
 			onLeft: navigation?.allowBack

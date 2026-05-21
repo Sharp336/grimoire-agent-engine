@@ -14,6 +14,7 @@ import {
 	type TUI,
 	truncateToWidth,
 	visibleWidth,
+	wrapTextWithAnsi,
 } from "@oh-my-pi/pi-tui";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { matchesAppExternalEditor, matchesSelectCancel } from "../../modes/utils/keybinding-matchers";
@@ -31,13 +32,22 @@ export interface HookSelectorOptions {
 	onRight?: () => void;
 	onExternalEditor?: () => void;
 	helpText?: string;
+	/** When true, wrap long option labels instead of truncating. */
+	wrap?: boolean;
+}
+
+interface OutlinedListItem {
+	prefix: string;
+	label: string;
 }
 
 class OutlinedList extends Container {
-	#lines: string[] = [];
+	#items: OutlinedListItem[] = [];
+	#wrap: boolean = false;
 
-	setLines(lines: string[]): void {
-		this.#lines = lines;
+	setItems(items: OutlinedListItem[], wrap?: boolean): void {
+		this.#items = items;
+		this.#wrap = wrap ?? false;
 		this.invalidate();
 	}
 
@@ -45,12 +55,34 @@ class OutlinedList extends Container {
 		const borderColor = (text: string) => theme.fg("border", text);
 		const horizontal = borderColor(theme.boxSharp.horizontal.repeat(Math.max(1, width)));
 		const innerWidth = Math.max(1, width - 2);
-		const content = this.#lines.map(line => {
-			const normalized = replaceTabs(line);
-			const fitted = truncateToWidth(normalized, innerWidth);
-			const pad = Math.max(0, innerWidth - visibleWidth(fitted));
-			return `${borderColor(theme.boxSharp.vertical)}${fitted}${padding(pad)}${borderColor(theme.boxSharp.vertical)}`;
-		});
+		const content: string[] = [];
+
+		for (const item of this.#items) {
+			const prefixWidth = visibleWidth(item.prefix);
+			const labelWidth = Math.max(1, innerWidth - prefixWidth);
+
+			if (this.#wrap && visibleWidth(item.label) > labelWidth) {
+				const wrappedLines = wrapTextWithAnsi(item.label, labelWidth);
+				const indent = padding(prefixWidth);
+
+				for (let i = 0; i < wrappedLines.length; i++) {
+					const linePrefix = i === 0 ? item.prefix : indent;
+					const fitted = `${linePrefix}${wrappedLines[i]}`;
+					const pad = Math.max(0, innerWidth - visibleWidth(fitted));
+					content.push(
+						`${borderColor(theme.boxSharp.vertical)}${fitted}${padding(pad)}${borderColor(theme.boxSharp.vertical)}`,
+					);
+				}
+			} else {
+				const normalized = replaceTabs(`${item.prefix}${item.label}`);
+				const fitted = truncateToWidth(normalized, innerWidth);
+				const pad = Math.max(0, innerWidth - visibleWidth(fitted));
+				content.push(
+					`${borderColor(theme.boxSharp.vertical)}${fitted}${padding(pad)}${borderColor(theme.boxSharp.vertical)}`,
+				);
+			}
+		}
+
 		return [horizontal, ...content, horizontal];
 	}
 }
@@ -69,6 +101,7 @@ export class HookSelectorComponent extends Container {
 	#onLeftCallback: (() => void) | undefined;
 	#onRightCallback: (() => void) | undefined;
 	#onExternalEditorCallback: (() => void) | undefined;
+	#wrap: boolean;
 	constructor(
 		title: string,
 		options: string[],
@@ -87,6 +120,7 @@ export class HookSelectorComponent extends Container {
 		this.#onLeftCallback = opts?.onLeft;
 		this.#onRightCallback = opts?.onRight;
 		this.#onExternalEditorCallback = opts?.onExternalEditor;
+		this.#wrap = opts?.wrap ?? false;
 
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
@@ -130,7 +164,7 @@ export class HookSelectorComponent extends Container {
 	}
 
 	#updateList(): void {
-		const lines: string[] = [];
+		const items: OutlinedListItem[] = [];
 		const startIndex = Math.max(
 			0,
 			Math.min(this.#selectedIndex - Math.floor(this.#maxVisible / 2), this.#options.length - this.#maxVisible),
@@ -144,19 +178,19 @@ export class HookSelectorComponent extends Container {
 				? renderInlineMarkdown(this.#options[i], mdTheme, t => theme.fg("accent", t))
 				: renderInlineMarkdown(this.#options[i], mdTheme, t => theme.fg("text", t));
 			const prefix = isSelected ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
-			lines.push(prefix + label);
+			items.push({ prefix, label });
 		}
 
 		if (startIndex > 0 || endIndex < this.#options.length) {
-			lines.push(theme.fg("dim", `  (${this.#selectedIndex + 1}/${this.#options.length})`));
+			items.push({ prefix: "", label: theme.fg("dim", `  (${this.#selectedIndex + 1}/${this.#options.length})`) });
 		}
 		if (this.#outlinedList) {
-			this.#outlinedList.setLines(lines);
+			this.#outlinedList.setItems(items, this.#wrap);
 			return;
 		}
 		this.#listContainer?.clear();
-		for (const line of lines) {
-			this.#listContainer?.addChild(new Text(line, 1, 0));
+		for (const item of items) {
+			this.#listContainer?.addChild(new Text(item.prefix + item.label, 1, 0));
 		}
 	}
 

@@ -110,6 +110,8 @@ export interface ExtensionUIDialogOptions {
 	onExternalEditor?: () => void;
 	/** Optional footer hint text rendered by interactive selector */
 	helpText?: string;
+	/** When true, wrap long option labels instead of truncating. */
+	wrap?: boolean;
 }
 
 /** Raw terminal input listener for extensions. */

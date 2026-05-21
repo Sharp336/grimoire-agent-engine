@@ -623,6 +623,7 @@ export class ExtensionUiController {
 				onTimeout: dialogOptions?.onTimeout,
 				tui: this.ctx.ui,
 				outline: dialogOptions?.outline,
+				wrap: dialogOptions?.wrap,
 				maxVisible,
 			},
 		);

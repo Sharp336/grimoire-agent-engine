@@ -1,7 +1,7 @@
 import { getKeybindings } from "../keybindings";
 import type { SymbolTheme } from "../symbols";
 import type { Component } from "../tui";
-import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth } from "../utils";
+import { Ellipsis, padding, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "../utils";
 
 const DEFAULT_PRIMARY_COLUMN_WIDTH = 32;
 const PRIMARY_COLUMN_GAP = 2;
@@ -45,6 +45,8 @@ export interface SelectListLayoutOptions {
 	minPrimaryColumnWidth?: number;
 	maxPrimaryColumnWidth?: number;
 	truncatePrimary?: (context: SelectListTruncatePrimaryContext) => string;
+	/** When true, wrap long labels onto continuation lines instead of truncating. */
+	wrap?: boolean;
 }
 
 export class SelectList implements Component {
@@ -102,8 +104,12 @@ export class SelectList implements Component {
 			if (!item) continue;
 
 			const isSelected = i === this.#selectedIndex;
-			const descriptionText = item.description ? sanitizeSingleLine(item.description) : undefined;
-			lines.push(this.#renderItem(item, isSelected, width, descriptionText, primaryColumnWidth));
+			if (this.layout.wrap) {
+				lines.push(...this.#renderItemWrapped(item, isSelected, width));
+			} else {
+				const descriptionText = item.description ? sanitizeSingleLine(item.description) : undefined;
+				lines.push(this.#renderItem(item, isSelected, width, descriptionText, primaryColumnWidth));
+			}
 		}
 
 		// Add scroll indicators if needed
@@ -229,6 +235,29 @@ export class SelectList implements Component {
 			: truncateToWidth(displayValue, maxWidth, Ellipsis.Omit);
 
 		return truncateToWidth(truncatedValue, maxWidth, Ellipsis.Omit);
+	}
+
+	#renderItemWrapped(item: SelectItem, isSelected: boolean, width: number): string[] {
+		const prefix = isSelected
+			? `${this.theme.symbols.cursor} `
+			: padding(visibleWidth(this.theme.symbols.cursor) + 1);
+		const prefixWidth = visibleWidth(prefix);
+		const contentWidth = Math.max(1, width - prefixWidth - 2);
+		const displayValue = this.#getDisplayValue(item);
+
+		if (visibleWidth(displayValue) <= contentWidth) {
+			const line = `${prefix}${displayValue}`;
+			return isSelected ? [this.theme.selectedText(line)] : [line];
+		}
+
+		const wrappedLines = wrapTextWithAnsi(displayValue, contentWidth);
+		const indent = padding(prefixWidth);
+
+		return wrappedLines.map((wl, idx) => {
+			const linePrefix = idx === 0 ? prefix : indent;
+			const line = `${linePrefix}${wl}`;
+			return isSelected ? this.theme.selectedText(line) : line;
+		});
 	}
 
 	#getDisplayValue(item: SelectItem): string {
