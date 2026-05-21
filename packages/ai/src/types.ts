@@ -132,6 +132,7 @@ export type KnownProvider =
 	| "moonshot"
 	| "nvidia"
 	| "nanogpt"
+	| "nearai"
 	| "ollama"
 	| "ollama-cloud"
 	| "qianfan"

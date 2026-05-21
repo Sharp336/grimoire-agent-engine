@@ -140,10 +140,15 @@ function inheritModelsDevLimit(value: number, referenceValue: number, unspecifie
 	return value === unspecifiedValue ? referenceValue : value;
 }
 
+const GLOBAL_MODELS_DEV_FALLBACK_EXCLUDED_PROVIDERS = new Set(["nearai"]);
+
 function applyGlobalModelsDevFallback(models: readonly Model[], modelsDevModels: readonly Model[]): Model[] {
 	const providerScopedKeys = new Set(modelsDevModels.map(model => `${model.provider}/${model.id}`));
 	const globalReferences = createGlobalModelsDevReferenceMap(modelsDevModels);
 	return models.map(model => {
+		if (GLOBAL_MODELS_DEV_FALLBACK_EXCLUDED_PROVIDERS.has(model.provider)) {
+			return model;
+		}
 		if (providerScopedKeys.has(`${model.provider}/${model.id}`)) {
 			return model;
 		}

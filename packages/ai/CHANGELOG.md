@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added NEAR AI Cloud as an OpenAI-compatible provider with `NEARAI_API_KEY` auth, dynamic model discovery from the public NEAR AI Cloud catalog, and `/login nearai` API-key onboarding.
+
 ## [15.2.0] - 2026-05-21
 
 ### Fixed

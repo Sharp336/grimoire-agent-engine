@@ -1565,7 +1565,110 @@ export function nanoGptModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
-// 24. GitHub Copilot
+// 24. NEAR AI Cloud
+// ---------------------------------------------------------------------------
+
+export interface NearAiModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+const NEAR_AI_DEFAULT_BASE_URL = "https://cloud-api.near.ai/v1";
+const NEAR_AI_DEFAULT_MAX_TOKENS = 8192;
+const NEAR_AI_COMPAT: Model<"openai-completions">["compat"] = {
+	supportsStore: false,
+	supportsDeveloperRole: false,
+	supportsReasoningEffort: false,
+	supportsStrictMode: false,
+	maxTokensField: "max_tokens",
+	supportsUsageInStreaming: false,
+};
+
+function readStringArray(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
+function nearAiCostPerMillion(value: unknown): number {
+	if (!isRecord(value)) {
+		return 0;
+	}
+	if (typeof value.currency === "string" && value.currency !== "USD") {
+		return 0;
+	}
+	const amount = toNumber(value.amount);
+	if (amount === undefined) {
+		return 0;
+	}
+	const scale = toNumber(value.scale) ?? 9;
+	return Number((amount * 10 ** (6 - scale)).toPrecision(12));
+}
+
+function mapNearAiCatalogModel(raw: unknown, baseUrl: string): Model<"openai-completions"> | null {
+	if (!isRecord(raw) || typeof raw.modelId !== "string") {
+		return null;
+	}
+	const id = raw.modelId;
+	if (id === "openai/privacy-filter" || /reranker/i.test(id)) {
+		return null;
+	}
+	const metadata = isRecord(raw.metadata) ? raw.metadata : {};
+	const architecture = isRecord(metadata.architecture) ? metadata.architecture : {};
+	const inputModalities = readStringArray(architecture.inputModalities);
+	const outputModalities = readStringArray(architecture.outputModalities);
+	if (!inputModalities.includes("text") || inputModalities.includes("audio") || !outputModalities.includes("text")) {
+		return null;
+	}
+	const contextWindow = toPositiveNumber(metadata.contextLength, UNK_CONTEXT_WINDOW);
+	return {
+		id,
+		name: toModelName(metadata.modelDisplayName, id),
+		api: "openai-completions",
+		provider: "nearai",
+		baseUrl,
+		reasoning: false,
+		input: inputModalities.includes("image") ? ["text", "image"] : ["text"],
+		cost: {
+			input: nearAiCostPerMillion(raw.inputCostPerToken),
+			output: nearAiCostPerMillion(raw.outputCostPerToken),
+			cacheRead: nearAiCostPerMillion(raw.cacheReadCostPerToken),
+			cacheWrite: 0,
+		},
+		contextWindow,
+		maxTokens: Math.min(contextWindow, NEAR_AI_DEFAULT_MAX_TOKENS),
+		compat: { ...NEAR_AI_COMPAT },
+	};
+}
+
+async function fetchNearAiCatalogModels(baseUrl: string): Promise<Model<"openai-completions">[] | null> {
+	const response = await fetch(`${baseUrl.replace(/\/$/, "")}/model/list`, {
+		method: "GET",
+		headers: { Accept: "application/json" },
+	});
+	if (!response.ok) {
+		return null;
+	}
+	const payload = await response.json();
+	if (!isRecord(payload) || !Array.isArray(payload.models)) {
+		return [];
+	}
+	const models = payload.models
+		.map(entry => mapNearAiCatalogModel(entry, baseUrl))
+		.filter((model): model is Model<"openai-completions"> => model !== null);
+	return models.sort((left, right) => left.id.localeCompare(right.id));
+}
+
+export function nearAiModelManagerOptions(
+	config?: NearAiModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const baseUrl = config?.baseUrl ?? NEAR_AI_DEFAULT_BASE_URL;
+	return {
+		providerId: "nearai",
+		fetchDynamicModels: () => fetchNearAiCatalogModels(baseUrl),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 25. GitHub Copilot
 // ---------------------------------------------------------------------------
 
 export interface GithubCopilotModelManagerConfig {

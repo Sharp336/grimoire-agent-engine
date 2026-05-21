@@ -152,6 +152,7 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	moonshot: "MOONSHOT_API_KEY",
 	nvidia: "NVIDIA_API_KEY",
 	nanogpt: "NANO_GPT_API_KEY",
+	nearai: "NEARAI_API_KEY",
 	"lm-studio": "LM_STUDIO_API_KEY",
 	ollama: "OLLAMA_API_KEY",
 	"ollama-cloud": "OLLAMA_CLOUD_API_KEY",

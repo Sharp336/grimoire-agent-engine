@@ -52,6 +52,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 	const isCerebras = provider === "cerebras" || baseUrl.includes("cerebras.ai");
 	const isZai = provider === "zai" || baseUrl.includes("api.z.ai");
 	const isKilo = provider === "kilo" || baseUrl.includes("api.kilo.ai");
+	const isNearAI = provider === "nearai" || baseUrl.includes("cloud-api.near.ai");
 	const isKimiModel = model.id.includes("moonshotai/kimi") || /(^|\/)kimi[-.]/i.test(model.id);
 	const isMoonshotKimi =
 		isKimiModel &&
@@ -93,6 +94,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		isAlibaba ||
 		isZai ||
 		isKilo ||
+		isNearAI ||
 		isQwen ||
 		provider === "opencode-zen" ||
 		provider === "opencode-go" ||
@@ -104,7 +106,8 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		baseUrl.includes("mistral.ai") ||
 		baseUrl.includes("chutes.ai") ||
 		baseUrl.includes("fireworks.ai") ||
-		isDirectDeepseekApi;
+		isDirectDeepseekApi ||
+		isNearAI;
 	const isGrok = provider === "xai" || baseUrl.includes("api.x.ai");
 	const isMistral = provider === "mistral" || baseUrl.includes("mistral.ai");
 
@@ -177,7 +180,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		supportsStore: !isNonStandard,
 		supportsDeveloperRole: !isNonStandard,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
-		supportsReasoningEffort: !isGrok && !isZai,
+		supportsReasoningEffort: !isGrok && !isZai && !isNearAI,
 		reasoningEffortMap,
 		supportsUsageInStreaming: !isCerebras,
 		disableReasoningOnForcedToolChoice: isKimiModel || isAnthropicModel,
@@ -215,7 +218,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,
-		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
+		supportsStrictMode: !isNearAI && detectStrictModeSupport(provider, baseUrl),
 		extraBody: isDirectDeepseekReasoning ? { thinking: { type: "enabled" } } : undefined,
 		toolStrictMode: isCerebras ? "all_strict" : "mixed",
 	};

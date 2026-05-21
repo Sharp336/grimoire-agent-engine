@@ -9,6 +9,8 @@ import type {
 	OAuthProviderInterface,
 } from "./types";
 
+export { loginNearAI } from "./nearai";
+
 const builtInOAuthProviders: OAuthProviderInfo[] = [
 	{
 		id: "anthropic",
@@ -161,6 +163,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 		available: true,
 	},
 	{
+		id: "nearai",
+		name: "NEAR AI Cloud",
+		available: true,
+	},
+	{
 		id: "parallel",
 		name: "Parallel",
 		available: true,
@@ -309,6 +316,7 @@ export async function refreshOAuthToken(
 		case "firepass":
 		case "nvidia":
 		case "nanogpt":
+		case "nearai":
 		case "synthetic":
 		case "together":
 		case "litellm":

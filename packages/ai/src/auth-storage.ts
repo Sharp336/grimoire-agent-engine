@@ -1423,6 +1423,12 @@ export class AuthStorage {
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
+			case "nearai": {
+				const { loginNearAI } = await import("./utils/oauth/nearai");
+				const apiKey = await loginNearAI(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
 			case "litellm": {
 				const { loginLiteLLM } = await import("./utils/oauth/litellm");
 				const apiKey = await loginLiteLLM(ctrl);
