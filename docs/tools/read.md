@@ -186,6 +186,7 @@ URL selectors are parsed separately in `packages/coding-agent/src/tools/fetch.ts
 ### Images
 - Image detection is metadata-based (`readImageMetadata()`).
 - Max accepted image size is `20 MiB` (`MAX_IMAGE_INPUT_BYTES`, re-exported as `MAX_IMAGE_SIZE`). Larger files throw.
+- The model-facing prompt directs agents to use `read` first for image discovery, then `inspect_image` for OCR, screenshot debugging, UI analysis, or other visual questions.
 - If `inspect_image.enabled` is true, `read` returns metadata only (MIME, bytes, dimensions, channels, alpha) plus a suggestion to call `inspect_image`.
 - Otherwise it calls `loadImageInput()` and returns:
   - a text note from the image loader

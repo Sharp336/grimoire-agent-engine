@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Updated the `read` tool prompt to route OCR, screenshot debugging, UI analysis, and visual questions to `inspect_image`, while keeping `read` as the first step for image discovery and URL content. ([#1256](https://github.com/can1357/oh-my-pi/issues/1256))
+
 ## [15.2.1] - 2026-05-21
 
 ### Fixed

@@ -46,7 +46,9 @@ Extracts text from PDF, Word, PowerPoint, Excel, RTF, and EPUB. Notebooks (`.ipy
 
 # Images
 
-Reading an image path returns metadata (mime, bytes, dimensions, channels, alpha). For actual visual analysis, call `inspect_image` with the path and a question describing what to inspect.
+- For image discovery, use `read` first: it gives metadata/guidance and may attach the image depending on settings.
+- For actual image understanding, OCR, screenshots, UI debugging, or visual questions, use `inspect_image` with a specific question. NEVER infer visual content from `read` metadata.
+- For web pages, use `read` for URL content and `browser`/`tab.observe()` for dynamic interaction. NEVER use browser screenshots just to inspect page text or state.
 
 # Archives
 
