@@ -161,6 +161,7 @@ async function executeSearch(
 				details: { response },
 			};
 		} catch (error) {
+			signal?.throwIfAborted();
 			lastError = error;
 		}
 	}

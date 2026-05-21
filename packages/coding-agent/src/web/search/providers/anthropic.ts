@@ -114,11 +114,16 @@ async function callSearch(
 		body.system = systemBlocks;
 	}
 
+	const hardTimeout = AbortSignal.timeout(30_000);
+	const effectiveSignal = signal
+		? AbortSignal.any([signal, hardTimeout])
+		: hardTimeout;
+
 	const response = await fetch(url, {
 		method: "POST",
 		headers,
 		body: JSON.stringify(body),
-		signal,
+		signal: effectiveSignal,
 	});
 
 	if (!response.ok) {
