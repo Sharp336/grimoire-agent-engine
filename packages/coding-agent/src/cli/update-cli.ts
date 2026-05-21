@@ -110,6 +110,79 @@ function resolveUpdateMethod(ompPath: string, bunBinDir: string | undefined): "b
 export function resolveUpdateMethodForTest(ompPath: string, bunBinDir: string | undefined): "bun" | "binary" {
 	return resolveUpdateMethod(ompPath, bunBinDir);
 }
+
+/**
+ * Detect whether the resolved `omp` binary's symlink chain escapes the bun
+ * global install tree — i.e. the package directory has been redirected to a
+ * dev tree (typically by `bun link` or `~/.local/bin/omp-relink`).
+ *
+ * Returns the realpath of the resolved `omp` script when dev-tree mode is in
+ * effect, or `undefined` for the normal registry-installed case (and for any
+ * case where we can't determine the layout — we never assume dev-tree on
+ * uncertainty).
+ *
+ * We rely on the bun convention that the global install root sits at
+ * `<bunBinDir>/../install/global/node_modules`. For a registry install the
+ * realpath of `omp` lives somewhere under that root; for a dev-tree relink
+ * the package directory itself is a symlink that escapes the root.
+ */
+function detectDevTree(ompPath: string, bunBinDir: string | undefined): { realPath: string } | undefined {
+	if (!bunBinDir) return undefined;
+	const realOmp = tryRealpath(ompPath);
+	if (!realOmp) return undefined;
+	const installRoot = tryRealpath(path.resolve(bunBinDir, "..", "install", "global", "node_modules"));
+	if (!installRoot) return undefined;
+	if (isPathInDirectoryLexical(realOmp, installRoot)) return undefined;
+	return { realPath: realOmp };
+}
+
+export function detectDevTreeForTest(
+	ompPath: string,
+	bunBinDir: string | undefined,
+): { realPath: string } | undefined {
+	return detectDevTree(ompPath, bunBinDir);
+}
+
+/**
+ * Print a multi-line note explaining that an `omp update` invocation is
+ * running against a dev-tree relink and therefore won't change what new
+ * sessions actually load.
+ */
+function printDevTreeNote(devTreeRealPath: string, latestVersion: string): void {
+	console.log(
+		chalk.yellow(
+			`Note: ${APP_NAME} resolves through a dev-tree symlink, not the npm package.`,
+		),
+	);
+	console.log(chalk.dim(`  Resolves to:        ${devTreeRealPath}`));
+	console.log(chalk.dim(`  Dev-tree version:   ${VERSION}`));
+	console.log(chalk.dim(`  Registry latest:    ${latestVersion}`));
+	console.log(
+		chalk.dim(
+			`  ${PACKAGE}@${latestVersion} will be installed into the bun global tree, but the`,
+		),
+	);
+	console.log(
+		chalk.dim(
+			`  relink helper ($OMP_RELINK / ~/.local/bin/omp-relink) restores the dev tree`,
+		),
+	);
+	console.log(
+		chalk.dim(
+			`  immediately afterwards. New sessions will keep loading the dev-tree version`,
+		),
+	);
+	console.log(
+		chalk.dim(
+			`  (${VERSION}). To pick up the registry release, update the dev tree (e.g. git`,
+		),
+	);
+	console.log(
+		chalk.dim(
+			`  pull / rebase) or remove the relink helper.`,
+		),
+	);
+}
 async function resolveUpdateTarget(): Promise<UpdateTarget> {
 	const bunBinDir = await getBunGlobalBinDir();
 	const ompPath = resolveOmpPath();
@@ -364,6 +437,22 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 		console.log(chalk.yellow(`Forcing reinstall of ${release.version}`));
 	}
 
+	// Dev-tree detection: when the resolved `omp` realpath escapes the bun
+	// install root, the package directory has been redirected to a working
+	// tree. The install will still run, but the relink helper restores the
+	// dev tree afterwards — so the user's *next* session will keep loading
+	// the dev-tree version, not the registry release. We surface this up
+	// front so the install's success message isn't read as "new sessions
+	// will be on ${release.version}".
+	const ompPathForDetection = resolveOmpPath();
+	const bunBinDirForDetection = await getBunGlobalBinDir();
+	const devTree = ompPathForDetection
+		? detectDevTree(ompPathForDetection, bunBinDirForDetection)
+		: undefined;
+	if (devTree) {
+		printDevTreeNote(devTree.realPath, release.version);
+	}
+
 	if (opts.check) {
 		// Just check, don't install
 		return;
@@ -380,6 +469,20 @@ export async function runUpdateCommand(opts: { force: boolean; check: boolean })
 	} catch (err) {
 		console.error(chalk.red(`Update failed: ${err}`));
 		process.exit(1);
+	}
+
+	// Dev-tree relink runs only after a successful install — no-op for
+	// end users who don't have an `omp-relink` helper on disk.
+	await runDevTreeRelinkIfPresent();
+
+	if (devTree) {
+		// Repeat the dev-tree summary at the end so it's the last thing the
+		// user sees, not buried above the install/relink output.
+		console.log(
+			chalk.yellow(
+				`Reminder: dev-tree relink restored ${devTree.realPath}; new sessions will continue to load ${VERSION} until the dev tree is updated.`,
+			),
+		);
 	}
 }
 

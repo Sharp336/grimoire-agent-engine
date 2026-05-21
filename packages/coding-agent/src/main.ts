@@ -24,6 +24,7 @@ import type { Args } from "./cli/args";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { runListModelsCommand } from "./cli/list-models";
+import { computeUpdateNotice, readLastSeenVersion, writeLastSeenVersion } from "./cli/last-seen-version";
 import { selectSession } from "./cli/session-picker";
 import { findConfigFile } from "./config";
 import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
@@ -282,6 +283,24 @@ async function runInteractiveMode(
 		.catch(() => {});
 
 	mode.renderInitialMessages();
+
+	// One-line "omp updated: A → B" notice (Seed seed_0ca7e1143ac1, Phase 4).
+	// The auto-update launchd job silently advances the dev tree; users would
+	// otherwise have no signal that a real upstream version landed. We persist
+	// the last seen version and surface the diff exactly once, on the first
+	// new session after a version change. No notice on first install.
+	try {
+		const notice = computeUpdateNotice(readLastSeenVersion(), VERSION);
+		if (notice) {
+			mode.showStatus(notice);
+		}
+		writeLastSeenVersion(VERSION);
+	} catch (err) {
+		// Never let a state-file glitch block the session — silent skip.
+		logger.debug("last-seen-version notice skipped", {
+			error: err instanceof Error ? err.message : String(err),
+		});
+	}
 
 	for (const notify of notifs) {
 		if (!notify) {
