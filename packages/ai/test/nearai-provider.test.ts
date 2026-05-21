@@ -144,6 +144,7 @@ describe("nearai provider support", () => {
 		expect(compat.supportsStore).toBe(false);
 		expect(compat.supportsDeveloperRole).toBe(false);
 		expect(compat.supportsReasoningEffort).toBe(false);
+		expect(compat.supportsUsageInStreaming).toBe(false);
 		expect(compat.supportsStrictMode).toBe(false);
 		expect(compat.maxTokensField).toBe("max_tokens");
 	});

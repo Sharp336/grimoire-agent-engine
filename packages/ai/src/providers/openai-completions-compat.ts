@@ -182,7 +182,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
 		supportsReasoningEffort: !isGrok && !isZai && !isNearAI,
 		reasoningEffortMap,
-		supportsUsageInStreaming: !isCerebras,
+		supportsUsageInStreaming: !isCerebras && !isNearAI,
 		disableReasoningOnForcedToolChoice: isKimiModel || isAnthropicModel,
 		disableReasoningOnToolChoice: isDeepseekFamily && Boolean(model.reasoning) && !isOpenRouter,
 		supportsToolChoice: !isDirectDeepseekReasoning,
