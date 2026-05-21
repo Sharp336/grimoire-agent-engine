@@ -1547,6 +1547,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.session.setActiveToolsByName(previousTools);
 		}
 		this.session.setPlanReferencePath(options.finalPlanFilePath);
+		this.sessionManager.appendModeChange("none", { approvedPlanFilePath: options.finalPlanFilePath });
 
 		if (compactOutcome === "cancelled") {
 			// Explicit abort: honor it. `executeCompaction` already surfaced

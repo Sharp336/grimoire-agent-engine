@@ -69,10 +69,21 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "plan",
 		description: "Toggle plan mode (agent plans before executing)",
+		subcommands: [{ name: "show", description: "Show the current plan file path" }],
 		inlineHint: "[prompt]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
-			await runtime.ctx.handlePlanModeCommand(command.args || undefined);
+			const subcommand = parseSubcommand(command.args);
+			if (subcommand.verb === "show") {
+				const reference = await runtime.ctx.session.getPlanReference();
+				if (reference) {
+					runtime.ctx.showStatus(`Current plan: ${reference.planFilePath}`);
+				} else {
+					runtime.ctx.showWarning("No current plan file.");
+				}
+			} else {
+				await runtime.ctx.handlePlanModeCommand(command.args || undefined);
+			}
 			runtime.ctx.editor.setText("");
 		},
 	},

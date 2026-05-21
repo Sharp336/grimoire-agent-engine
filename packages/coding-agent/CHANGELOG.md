@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed approved plan execution losing its plan reference after compaction. Approved plan paths are now re-injected after history rewrites, retained in per-turn system instructions for recovery, persisted in session metadata, and visible through `/plan show`. ([#1246](https://github.com/can1357/oh-my-pi/issues/1246))
+
 ## [15.1.9] - 2026-05-21
 
 ### Fixed

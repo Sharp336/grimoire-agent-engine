@@ -36,3 +36,5 @@ You MUST use this format (sections can be omitted if not applicable):
 You MUST output only the structured summary; you NEVER include extra text.
 
 Sections MUST be kept concise. You MUST preserve exact file paths, function names, error messages, and relevant tool outputs or command results. You MUST include repository state changes (branch, uncommitted changes) if mentioned.
+
+Approved plan files are recovery-critical. If the conversation references an approved plan file via `local://...` or a session local/artifacts path, you MUST include the exact plan file path in `## Critical Context` so the executor can read it after compaction.

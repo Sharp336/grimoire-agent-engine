@@ -149,6 +149,7 @@ import {
 import { resolveMemoryBackend } from "../memory-backend";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import type { PlanModeState } from "../plan-mode/state";
+import approvedPlanExecutionPrompt from "../prompts/system/approved-plan-execution.md" with { type: "text" };
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import ircIncomingTemplate from "../prompts/system/irc-incoming.md" with { type: "text" };
@@ -371,6 +372,16 @@ export interface RoleModelCycleResult {
 	model: Model;
 	thinkingLevel: ThinkingLevel | undefined;
 	role: string;
+}
+
+/** Active approved-plan reference restored from session metadata. */
+export interface PlanReference {
+	/** Agent-readable plan file path, usually a `local://` URL. */
+	planFilePath: string;
+	/** Absolute filesystem path backing the plan reference. */
+	resolvedPlanPath: string;
+	/** Current approved plan file contents. */
+	planContent: string;
 }
 
 /** Session statistics for /session command */
@@ -771,6 +782,7 @@ export class AgentSession {
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
 	#planReferencePath = "local://PLAN.md";
+	#planReferenceActive = false;
 	#clientBridge: ClientBridge | undefined;
 	#allowAcpAgentInitiatedTurns = false;
 	/** Per-session memory of allow_always / reject_always decisions for gated tools. */
@@ -1081,6 +1093,7 @@ export class AgentSession {
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
 		this.#syncTodoPhasesFromBranch();
+		this.#restorePlanReferenceFromSession();
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
 			setState: state => {
@@ -3366,19 +3379,20 @@ export class AgentSession {
 	}
 
 	async #buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+		const baseSystemPrompt = this.#buildPlanExecutionSystemPrompt(this.#baseSystemPrompt);
 		const backend = resolveMemoryBackend(this.settings);
-		if (!backend.beforeAgentStartPrompt) return this.#baseSystemPrompt;
+		if (!backend.beforeAgentStartPrompt) return baseSystemPrompt;
 
 		try {
 			const injected = await backend.beforeAgentStartPrompt(this, promptText);
-			if (!injected) return this.#baseSystemPrompt;
-			return [...this.#baseSystemPrompt, injected];
+			if (!injected) return baseSystemPrompt;
+			return [...baseSystemPrompt, injected];
 		} catch (err) {
 			logger.debug("Memory backend beforeAgentStartPrompt failed", {
 				backend: backend.id,
 				error: String(err),
 			});
-			return this.#baseSystemPrompt;
+			return baseSystemPrompt;
 		}
 	}
 
@@ -3674,6 +3688,7 @@ export class AgentSession {
 		this.#planModeState = state;
 		if (state?.enabled) {
 			this.#planReferenceSent = false;
+			this.#planReferenceActive = false;
 			this.#planReferencePath = state.planFilePath;
 		}
 	}
@@ -3696,6 +3711,25 @@ export class AgentSession {
 
 	setPlanReferencePath(path: string): void {
 		this.#planReferencePath = path;
+		this.#planReferenceSent = false;
+		this.#planReferenceActive = true;
+	}
+
+	/** Return the active plan reference and current contents for recovery commands. */
+	async getPlanReference(): Promise<PlanReference | undefined> {
+		const planFilePath = this.#currentPlanReferencePath();
+		if (!planFilePath) return undefined;
+		const resolvedPlanPath = this.#resolvePlanReferencePath(planFilePath);
+		try {
+			return {
+				planFilePath,
+				resolvedPlanPath,
+				planContent: await Bun.file(resolvedPlanPath).text(),
+			};
+		} catch (error) {
+			if (isEnoent(error)) return undefined;
+			throw error;
+		}
 	}
 
 	get clientBridge(): ClientBridge | undefined {
@@ -3789,6 +3823,44 @@ export class AgentSession {
 		this.#mcpPromptCommands = commands;
 	}
 
+	#restorePlanReferenceFromSession(): void {
+		this.#planReferenceSent = false;
+		this.#planReferencePath = "local://PLAN.md";
+		this.#planReferenceActive = false;
+		const sessionContext = this.sessionManager.buildSessionContext();
+		const approvedPlanFilePath = sessionContext.modeData?.approvedPlanFilePath;
+		if (typeof approvedPlanFilePath !== "string" || approvedPlanFilePath.length === 0) return;
+		this.#planReferencePath = approvedPlanFilePath;
+		this.#planReferenceActive = true;
+	}
+
+	#currentPlanReferencePath(): string | undefined {
+		if (this.#planModeState?.enabled) return this.#planModeState.planFilePath;
+		return this.#planReferenceActive ? this.#planReferencePath : undefined;
+	}
+
+	#resolvePlanReferencePath(planFilePath: string): string {
+		return planFilePath.startsWith("local:")
+			? resolveLocalUrlToPath(normalizeLocalScheme(planFilePath), this.#localProtocolOptions())
+			: resolveToCwd(planFilePath, this.sessionManager.getCwd());
+	}
+
+	#buildPlanExecutionSystemPrompt(baseSystemPrompt: string[]): string[] {
+		if (!this.#planReferenceActive) return baseSystemPrompt;
+		return [
+			...baseSystemPrompt,
+			prompt.render(approvedPlanExecutionPrompt, {
+				planFilePath: this.#planReferencePath,
+			}),
+		];
+	}
+
+	#markPlanReferenceNeedsInjection(): void {
+		if (this.#planReferenceActive) {
+			this.#planReferenceSent = false;
+		}
+	}
+
 	// =========================================================================
 	// Prompting
 	// =========================================================================
@@ -3800,10 +3872,11 @@ export class AgentSession {
 	 */
 	async #buildPlanReferenceMessage(): Promise<CustomMessage | null> {
 		if (this.#planModeState?.enabled) return null;
+		if (!this.#planReferenceActive) return null;
 		if (this.#planReferenceSent) return null;
 
 		const planFilePath = this.#planReferencePath;
-		const resolvedPlanPath = resolveLocalUrlToPath(planFilePath, this.#localProtocolOptions());
+		const resolvedPlanPath = this.#resolvePlanReferencePath(planFilePath);
 		let planContent: string;
 		try {
 			planContent = await Bun.file(resolvedPlanPath).text();
@@ -4816,6 +4889,7 @@ export class AgentSession {
 		this.#todoReminderCount = 0;
 		this.#planReferenceSent = false;
 		this.#planReferencePath = "local://PLAN.md";
+		this.#planReferenceActive = false;
 		this.#reconnectToAgent();
 
 		// Emit session_switch event with reason "new" to hooks
@@ -5371,7 +5445,7 @@ export class AgentSession {
 						{
 							promptOverride: compactionPrep.hookPrompt,
 							extraContext: compactionPrep.hookContext,
-							remoteInstructions: this.#baseSystemPrompt.join("\n\n"),
+							remoteInstructions: this.#buildPlanExecutionSystemPrompt(this.#baseSystemPrompt).join("\n\n"),
 							convertToLlm,
 						},
 					);
@@ -5409,6 +5483,7 @@ export class AgentSession {
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#syncTodoPhasesFromBranch();
+			this.#markPlanReferenceNeedsInjection();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 
 			// Get the saved compaction entry for the hook
@@ -6541,7 +6616,7 @@ export class AgentSession {
 							compactResult = await compact(preparation, candidate, apiKey, undefined, autoCompactionSignal, {
 								promptOverride: compactionPrep.hookPrompt,
 								extraContext: compactionPrep.hookContext,
-								remoteInstructions: this.#baseSystemPrompt.join("\n\n"),
+								remoteInstructions: this.#buildPlanExecutionSystemPrompt(this.#baseSystemPrompt).join("\n\n"),
 								metadata: this.agent.metadataForProvider(candidate.provider),
 								initiatorOverride: "agent",
 								convertToLlm,
@@ -6647,6 +6722,7 @@ export class AgentSession {
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#syncTodoPhasesFromBranch();
+			this.#markPlanReferenceNeedsInjection();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 
 			// Get the saved compaction entry for the hook
@@ -7891,6 +7967,7 @@ export class AgentSession {
 				});
 			}
 
+			this.#restorePlanReferenceFromSession();
 			this.agent.replaceMessages(sessionContext.messages);
 			this.#syncTodoPhasesFromBranch();
 			if (switchingToDifferentSession) {
