@@ -674,17 +674,13 @@ describe("Coding Agent Tools", () => {
 				new ReadTool(createTestToolSession(testDir, Settings.isolated({ "inspect_image.enabled": false }))),
 			);
 			const result = await legacyReadTool.execute("test-call-img-1", { path: testFile });
+			const output = getTextOutput(result);
 
 			expect(result.content[0]?.type).toBe("text");
-			expect(getTextOutput(result)).toContain("Read image file [image/png]");
-
-			const imageBlock = result.content.find(
-				(c): c is { type: "image"; mimeType: string; data: string } => c.type === "image",
-			);
-			expect(imageBlock).toBeDefined();
-			expect(imageBlock?.mimeType).toBe("image/png");
-			expect(typeof imageBlock?.data).toBe("string");
-			expect((imageBlock?.data ?? "").length).toBeGreaterThan(0);
+			expect(output).toContain("Image metadata:");
+			expect(output).toContain("MIME: image/png");
+			expect(output).toContain(`path="${path.basename(testFile)}"`);
+			expect(result.content.some(c => c.type === "image")).toBe(false);
 		});
 
 		it("returns metadata guidance (no image blocks) when inspect_image is enabled", async () => {

@@ -34,8 +34,7 @@ describe("blockImages setting", () => {
 			fs.rmSync(testDir, { recursive: true, force: true });
 		});
 
-		it("should include image blocks when inspect_image is disabled", async () => {
-			// Create test image
+		it("returns metadata without image blocks when reading images", async () => {
 			const imagePath = path.join(testDir, "test.png");
 			fs.writeFileSync(imagePath, Buffer.from(TINY_PNG_BASE64, "base64"));
 
@@ -44,10 +43,13 @@ describe("blockImages setting", () => {
 			);
 			const result = await tool.execute("test-1", { path: imagePath });
 
-			// Should have text note + image content
-			expect(result.content.length).toBeGreaterThanOrEqual(1);
-			const hasImage = result.content.some(c => c.type === "image");
-			expect(hasImage).toBe(true);
+			expect(result.content).toHaveLength(1);
+			expect(result.content[0].type).toBe("text");
+			expect(result.content.some(c => c.type === "image")).toBe(false);
+			const textContent = result.content[0] as { type: "text"; text: string };
+			expect(textContent.text).toContain("Image metadata:");
+			expect(textContent.text).toContain("- MIME: image/png");
+			expect(textContent.text).toContain("If you want to analyze the image, call inspect_image");
 		});
 
 		it("should read text files normally", async () => {

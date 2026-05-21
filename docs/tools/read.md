@@ -46,7 +46,7 @@ URL selectors are parsed separately in `packages/coding-agent/src/tools/fetch.ts
 
 ## Outputs
 - Single-shot `AgentToolResult` built through `toolResult()` in `packages/coding-agent/src/tools/tool-result.ts`.
-- `content` is usually one text block. Image reads may return `[text, image]`.
+- `content` is usually one text block. Local image reads return one metadata text block; URL image reads may still return `[text, image]` through the fetch pipeline.
 - `details` is path-dependent. `ReadToolDetails` may include:
   - `kind: "file" | "url"` (URL path uses `kind: "url"`; file reads usually omit `kind`)
   - `isDirectory`
@@ -81,7 +81,7 @@ URL selectors are parsed separately in `packages/coding-agent/src/tools/fetch.ts
    - If the path does not exist, `findUniqueSuffixMatch()` does a workspace glob-based unique suffix lookup (skipped for remote mounts).
 7. Directories go through `#readDirectory()`.
 8. Non-directories branch by content type:
-   - image metadata / inline image
+   - image metadata
    - editable notebook text
    - markit-converted document
    - structural summary for parseable code/prose
@@ -185,12 +185,9 @@ URL selectors are parsed separately in `packages/coding-agent/src/tools/fetch.ts
 
 ### Images
 - Image detection is metadata-based (`readImageMetadata()`).
-- Max accepted image size is `20 MiB` (`MAX_IMAGE_INPUT_BYTES`, re-exported as `MAX_IMAGE_SIZE`). Larger files throw.
-- If `inspect_image.enabled` is true, `read` returns metadata only (MIME, bytes, dimensions, channels, alpha) plus a suggestion to call `inspect_image`.
-- Otherwise it calls `loadImageInput()` and returns:
-  - a text note from the image loader
-  - an inline image block
-- Unsupported/undecodable image formats throw a `ToolError`.
+- Local image reads return metadata only (MIME, bytes, dimensions, channels, alpha) plus a suggestion to call `inspect_image` with a specific question when visual analysis is needed.
+- The local image path does not call `loadImageInput()` and does not emit inline image blocks, regardless of `inspect_image.enabled`.
+- Files with image extensions but unsupported/non-image bytes fall through to normal text/document handling.
 
 ### Internal URLs
 - `read` does not resolve these itself; it delegates to `session.internalRouter.resolve()`.
@@ -258,7 +255,7 @@ Notes: ...
 - File streaming chunk size: `8 * 1024` bytes (`READ_CHUNK_SIZE`).
 - Local streamed byte budget for line reads: `max(DEFAULT_MAX_BYTES, maxLinesToCollect * 512)`.
 - Structural summaries only run when file size `<= 2 MiB` and line count `<= 20_000`.
-- Image input max: `20 MiB`.
+- Inline fetched URL image source bytes cap: `20 MiB`.
 - Directory tree caps for local directories: depth `2`, per-directory children `12`.
 - Archive directory default list cap: `500` entries.
 - SQLite:
@@ -270,7 +267,6 @@ Notes: ...
   - busy timeout `3000` ms
 - URL read result shown to the model is truncated to `300` lines and `50 KiB` in `executeReadUrl()`; full cached output can be attached as an artifact.
 - Inline fetched URL images:
-  - source bytes cap `20 MiB`
   - post-resize inline output cap `300 KiB`
 - Unique suffix auto-resolution glob timeout: `5000` ms.
 - File-read cache holds `30` paths per session.
@@ -285,7 +281,7 @@ Notes: ...
 - Out-of-bounds line reads do not throw. They return explanatory text with a suggestion such as `Use :1 ...` or `Use :<last line> ...`.
 - Binary archive entries do not throw; they return a text notice.
 - Document conversion failure returns a text notice.
-- Image oversize/unsupported/invalid cases throw.
+- Inline fetched URL image oversize/unsupported/invalid cases throw.
 - SQLite parser rejects unsupported parameter combinations early; DB/runtime errors are caught and rethrown as `ToolError(message)`.
 - URL fetch failure does not throw when HTTP fetch succeeds but `response.ok === false`; it returns a failed URL read with `method: "failed"` and explanatory notes.
 

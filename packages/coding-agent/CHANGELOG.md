@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed local image reads to return metadata guidance only instead of attaching image blocks, directing visual analysis to `inspect_image` with an explicit question. ([#1256](https://github.com/can1357/oh-my-pi/issues/1256))
+
 ## [15.2.1] - 2026-05-21
 
 ### Fixed

@@ -30,7 +30,6 @@ import {
 import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine, tryResolveInternalUrlSync } from "../tui";
 import { CachedOutputBlock } from "../tui/output-block";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import { ImageInputTooLargeError, loadImageInput, MAX_IMAGE_INPUT_BYTES } from "../utils/image-loading";
 import { convertFileWithMarkit } from "../utils/markit";
 import { buildDirectoryTree, type DirectoryTree } from "../workspace-tree";
 import { type ArchiveReader, openArchive, parseArchivePathCandidates } from "./archive-reader";
@@ -421,8 +420,6 @@ async function streamLinesFromFile(
 	};
 }
 
-// Maximum image file size (20MB) - larger images will be rejected to prevent OOM during serialization
-const MAX_IMAGE_SIZE = MAX_IMAGE_INPUT_BYTES;
 const GLOB_TIMEOUT_MS = 5000;
 
 function isNotFoundError(error: unknown): boolean {
@@ -682,18 +679,14 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	readonly nonAbortable = true;
 	readonly strict = true;
 
-	readonly #autoResizeImages: boolean;
 	readonly #defaultLimit: number;
-	readonly #inspectImageEnabled: boolean;
 
 	constructor(private readonly session: ToolSession) {
 		const displayMode = resolveFileDisplayMode(session);
-		this.#autoResizeImages = session.settings.get("images.autoResize");
 		this.#defaultLimit = Math.max(
 			1,
 			Math.min(session.settings.get("read.defaultLimit") ?? DEFAULT_MAX_LINES, DEFAULT_MAX_LINES),
 		);
-		this.#inspectImageEnabled = session.settings.get("inspect_image.enabled");
 		this.description = prompt.render(readDescription, {
 			DEFAULT_LIMIT: String(this.#defaultLimit),
 			DEFAULT_MAX_LINES: String(DEFAULT_MAX_LINES),
@@ -1597,63 +1590,31 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			| undefined;
 
 		if (mimeType) {
-			if (this.#inspectImageEnabled) {
-				const metadata = imageMetadata;
-				const outputMime = metadata?.mimeType ?? mimeType;
-				const outputBytes = fileSize;
-				const metadataLines = [
-					"Image metadata:",
-					`- MIME: ${outputMime}`,
-					`- Bytes: ${outputBytes} (${formatBytes(outputBytes)})`,
-					metadata?.width !== undefined && metadata.height !== undefined
-						? `- Dimensions: ${metadata.width}x${metadata.height}`
-						: "- Dimensions: unknown",
-					metadata?.channels !== undefined ? `- Channels: ${metadata.channels}` : "- Channels: unknown",
-					metadata?.hasAlpha === true
-						? "- Alpha: yes"
-						: metadata?.hasAlpha === false
-							? "- Alpha: no"
-							: "- Alpha: unknown",
-					"",
-					`If you want to analyze the image, call inspect_image with path="${formatPathRelativeToCwd(
-						absolutePath,
-						this.session.cwd,
-					)}" and a question describing what to inspect and the desired output format.`,
-				];
-				content = [{ type: "text", text: metadataLines.join("\n") }];
-				details = {};
-				sourcePath = absolutePath;
-			} else {
-				if (fileSize > MAX_IMAGE_SIZE) {
-					const sizeStr = formatBytes(fileSize);
-					const maxStr = formatBytes(MAX_IMAGE_SIZE);
-					throw new ToolError(`Image file too large: ${sizeStr} exceeds ${maxStr} limit.`);
-				}
-				try {
-					const imageInput = await loadImageInput({
-						path: readPath,
-						cwd: this.session.cwd,
-						autoResize: this.#autoResizeImages,
-						maxBytes: MAX_IMAGE_SIZE,
-						resolvedPath: absolutePath,
-						detectedMimeType: mimeType,
-					});
-					if (!imageInput) {
-						throw new ToolError(`Read image file [${mimeType}] failed: unsupported image format.`);
-					}
-					content = [
-						{ type: "text", text: imageInput.textNote },
-						{ type: "image", data: imageInput.data, mimeType: imageInput.mimeType },
-					];
-					details = {};
-					sourcePath = imageInput.resolvedPath;
-				} catch (error) {
-					if (error instanceof ImageInputTooLargeError) {
-						throw new ToolError(error.message);
-					}
-					throw error;
-				}
-			}
+			const metadata = imageMetadata;
+			const outputMime = metadata?.mimeType ?? mimeType;
+			const outputBytes = fileSize;
+			const metadataLines = [
+				"Image metadata:",
+				`- MIME: ${outputMime}`,
+				`- Bytes: ${outputBytes} (${formatBytes(outputBytes)})`,
+				metadata?.width !== undefined && metadata.height !== undefined
+					? `- Dimensions: ${metadata.width}x${metadata.height}`
+					: "- Dimensions: unknown",
+				metadata?.channels !== undefined ? `- Channels: ${metadata.channels}` : "- Channels: unknown",
+				metadata?.hasAlpha === true
+					? "- Alpha: yes"
+					: metadata?.hasAlpha === false
+						? "- Alpha: no"
+						: "- Alpha: unknown",
+				"",
+				`If you want to analyze the image, call inspect_image with path="${formatPathRelativeToCwd(
+					absolutePath,
+					this.session.cwd,
+				)}" and a question describing what to inspect and the desired output format.`,
+			];
+			content = [{ type: "text", text: metadataLines.join("\n") }];
+			details = {};
+			sourcePath = absolutePath;
 		} else if (isNotebookPath(absolutePath) && !isRawSelector(parsed)) {
 			const notebookText = await readEditableNotebookText(absolutePath, localReadPath);
 			if (isMultiRange(parsed) && parsed.kind === "lines") {
