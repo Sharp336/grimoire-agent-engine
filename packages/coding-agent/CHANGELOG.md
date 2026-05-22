@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+## [15.2.3] - 2026-05-22
+### Breaking Changes
+
+- Changed PR and task-isolation worktree directory layout to hash-based `~/.omp/wt/<identifier>-<path-hash>` style paths, replacing the previous nested encoded-repo layout
+
+### Added
+
+- Added `omp worktree` command (alias `wt`) to list and manage agent-managed worktrees under `~/.omp/wt`
+- Added `omp worktree clear` to remove orphaned worktree directories, with `--all` to include live PR-checkouts, `--dry-run` for preview, and `--json` reporting
+- Added machine-readable JSON output to `omp worktree list` for scripted inspection
+- Added `display.shimmer` appearance setting with `classic`, `kitt` (Knight Rider K.I.T.T. scanner), and `disabled` modes
+
+### Changed
+
+- Changed the welcome intro animation to a 3-second eased gradient sweep with a diagonal shine highlight across the logo
+- Changed background job completion follow-ups to batch multiple finished jobs into a single `async-result` message, showing each completed job and its result in one place
+- Changed MCP notification follow-ups to combine multiple resource updates into a single consolidated message and suppress duplicate server/uri entries
+- Updated PR checkout to reuse `hashPath`-based worktree roots when creating and scanning worktrees for cleanup
+- Updated `worktree` cleanup logic to gracefully prune parent git metadata after removing worktree directories
+- Reworked working-message shimmer animation for 60fps rendering: ANSI sequences are coalesced per same-tier run instead of emitted per code point, palettes compile once and cache per active theme, and the band position is now fractional so motion is smooth at any frame rate
+- Switched MCP health-check and "Connecting to…" spinners from hard-coded ASCII (`|/-\`) to `theme.spinnerFrames` so they pick up the active symbol preset (braille on unicode/nerd, ASCII when explicitly themed)
+
+### Fixed
+
+- Fixed PR checkout failures when the default worktree path was already registered or occupied by stale leftovers by automatically selecting suffixed alternatives (`-2`, `-3`, etc.)
+- Fixed Memory tab in the settings UI not revealing or hiding the Hindsight-only rows (`Hindsight API URL`, `Hindsight Bank ID`, `Hindsight Scoping`, etc.) when `Memory Backend` was switched via the inline submenu. The selector now rebuilds its item list after every change so condition-gated rows appear/disappear immediately instead of requiring a tab switch
+
+## [15.2.2] - 2026-05-22
+
+### Fixed
+
+- Fixed `RULES.md` not being injected. The documented sticky-rules file at `~/.omp/agent/RULES.md` and `<repo>/.omp/RULES.md` was never read by any discovery provider; only `.omp/rules/*.md` was scanned. The native provider now loads both as always-apply rules so they re-attach every turn as documented ([#1266](https://github.com/can1357/oh-my-pi/issues/1266)).
+
 ## [15.2.1] - 2026-05-21
 
 ### Fixed
