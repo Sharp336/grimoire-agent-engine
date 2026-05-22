@@ -191,8 +191,19 @@ export abstract class OAuthCallbackFlow {
 			}
 		});
 
+		// `error_description` (and `error`) are reflected from the query string
+		// when the provider rejects the request. JSON.stringify does not escape
+		// `</`, so a stray `</script>` in either field would break out of the
+		// embedding <script id="server-state" type="application/json"> block
+		// in oauth.html. Escape `<` → `<` (and ` `/` ` for good
+		// measure, which are valid in JSON strings but illegal in JS source).
+		const stateJson = JSON.stringify(resultState)
+			.replace(/</g, "\\u003c")
+			.replace(/ /g, "\\u2028")
+			.replace(/ /g, "\\u2029");
+
 		return new Response(
-			(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", JSON.stringify(resultState)),
+			(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", () => stateJson),
 			{
 				status: resultState.ok ? 200 : 500,
 				headers: { "Content-Type": "text/html" },
