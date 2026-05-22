@@ -1378,6 +1378,12 @@ export class AuthStorage {
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
+			case "deepseek": {
+				const { loginDeepSeek } = await import("./utils/oauth/deepseek");
+				const apiKey = await loginDeepSeek(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
 			case "fireworks": {
 				const { loginFireworks } = await import("./utils/oauth/fireworks");
 				const apiKey = await loginFireworks(ctrl);

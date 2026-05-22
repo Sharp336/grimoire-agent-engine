@@ -12,6 +12,7 @@ export type OAuthProvider =
 	| "alibaba-coding-plan"
 	| "anthropic"
 	| "cerebras"
+	| "deepseek"
 	| "cloudflare-ai-gateway"
 	| "cursor"
 	| "fireworks"
