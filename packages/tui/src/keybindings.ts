@@ -27,6 +27,15 @@ export interface Keybindings {
 	"tui.editor.yank": true;
 	"tui.editor.yankPop": true;
 	"tui.editor.undo": true;
+	// Text selection
+	"tui.editor.selectLeft": true;
+	"tui.editor.selectRight": true;
+	"tui.editor.selectUp": true;
+	"tui.editor.selectDown": true;
+	"tui.editor.selectWordLeft": true;
+	"tui.editor.selectWordRight": true;
+	"tui.editor.selectLineStart": true;
+	"tui.editor.selectLineEnd": true;
 	// Generic input actions
 	"tui.input.newLine": true;
 	"tui.input.submit": true;
@@ -118,6 +127,20 @@ export const TUI_KEYBINDINGS = {
 	"tui.editor.yank": { defaultKeys: "ctrl+y", description: "Yank" },
 	"tui.editor.yankPop": { defaultKeys: "alt+y", description: "Yank pop" },
 	"tui.editor.undo": { defaultKeys: ["ctrl+-", "ctrl+_"], description: "Undo" },
+	"tui.editor.selectLeft": { defaultKeys: "shift+left", description: "Extend selection left" },
+	"tui.editor.selectRight": { defaultKeys: "shift+right", description: "Extend selection right" },
+	"tui.editor.selectUp": { defaultKeys: "shift+up", description: "Extend selection up" },
+	"tui.editor.selectDown": { defaultKeys: "shift+down", description: "Extend selection down" },
+	"tui.editor.selectWordLeft": {
+		defaultKeys: "shift+ctrl+left",
+		description: "Extend selection word left",
+	},
+	"tui.editor.selectWordRight": {
+		defaultKeys: "shift+ctrl+right",
+		description: "Extend selection word right",
+	},
+	"tui.editor.selectLineStart": { defaultKeys: "shift+home", description: "Extend selection to line start" },
+	"tui.editor.selectLineEnd": { defaultKeys: "shift+end", description: "Extend selection to line end" },
 	"tui.input.newLine": { defaultKeys: "shift+enter", description: "Insert newline" },
 	"tui.input.submit": { defaultKeys: "enter", description: "Submit input" },
 	"tui.input.tab": { defaultKeys: "tab", description: "Tab / autocomplete" },
