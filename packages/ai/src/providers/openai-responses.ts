@@ -391,10 +391,19 @@ function buildParams(
 	const messages: ResponseInput = [...conversationMessages];
 
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
+	// Developer role (reasoning models on api.openai.com / Azure / Copilot) must
+	// go in the input array. For all other endpoints, mirror the Codex variant:
+	// first prompt → canonical `instructions`, extras → input[{role:"system"}].
+	const needsDeveloperRole = model.reasoning && supportsDeveloperRole(resolvedBaseUrl ?? model);
 	if (systemPrompts.length > 0) {
-		const role: "developer" | "system" =
-			model.reasoning && supportsDeveloperRole(resolvedBaseUrl ?? model) ? "developer" : "system";
-		messages.unshift(...systemPrompts.map(systemPrompt => ({ role, content: systemPrompt })));
+		if (needsDeveloperRole) {
+			messages.unshift(...systemPrompts.map(p => ({ role: "developer", content: p })));
+		} else {
+			const extras = systemPrompts.slice(1);
+			if (extras.length > 0) {
+				messages.unshift(...extras.map(p => ({ role: "system", content: p })));
+			}
+		}
 	}
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
@@ -407,6 +416,7 @@ function buildParams(
 		prompt_cache_retention: promptCacheKey ? getPromptCacheRetention(model.baseUrl, cacheRetention) : undefined,
 		store: false,
 		stream_options: model.provider === "openai" ? { include_obfuscation: false } : undefined,
+		...(systemPrompts.length > 0 && !needsDeveloperRole && { instructions: systemPrompts[0] }),
 	};
 
 	applyCommonResponsesSamplingParams(params, options, model.provider);
