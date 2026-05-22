@@ -4,22 +4,32 @@
  * Handles `omp setup <component>` to install dependencies for optional features.
  */
 import * as path from "node:path";
+import * as readline from "node:readline";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+import {
+	getCodexCliAuthPath,
+	loginOpenAICodexDeviceCode,
+	readCodexCliCredentials,
+} from "@oh-my-pi/pi-ai/utils/oauth/openai-codex";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/utils/oauth/types";
 import { $which, APP_NAME, getPythonEnvDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import chalk from "chalk";
 import { theme } from "../modes/theme/theme";
 
-export type SetupComponent = "python" | "stt";
+export type SetupComponent = "python" | "stt" | "codex";
 
 export interface SetupCommandArgs {
 	component: SetupComponent;
 	flags: {
 		json?: boolean;
 		check?: boolean;
+		device?: boolean;
+		fromCodex?: boolean;
 	};
 }
 
-const VALID_COMPONENTS: SetupComponent[] = ["python", "stt"];
+const VALID_COMPONENTS: SetupComponent[] = ["python", "stt", "codex"];
 
 const MANAGED_PYTHON_ENV = getPythonEnvDir();
 
@@ -52,6 +62,10 @@ export function parseSetupArgs(args: string[]): SetupCommandArgs | undefined {
 			flags.json = true;
 		} else if (arg === "--check" || arg === "-c") {
 			flags.check = true;
+		} else if (arg === "--device") {
+			flags.device = true;
+		} else if (arg === "--from-codex") {
+			flags.fromCodex = true;
 		}
 	}
 
@@ -111,6 +125,9 @@ async function checkPythonSetup(): Promise<PythonCheckResult> {
  */
 export async function runSetupCommand(cmd: SetupCommandArgs): Promise<void> {
 	switch (cmd.component) {
+		case "codex":
+			await handleCodexSetup(cmd.flags);
+			break;
 		case "python":
 			await handlePythonSetup(cmd.flags);
 			break;
@@ -118,6 +135,120 @@ export async function runSetupCommand(cmd: SetupCommandArgs): Promise<void> {
 			await handleSttSetup(cmd.flags);
 			break;
 	}
+}
+
+interface CodexCheckResult {
+	stored: boolean;
+	codexCliAvailable: boolean;
+	codexCliAuthPath: string;
+}
+
+async function checkCodexSetup(): Promise<CodexCheckResult> {
+	const store = await SqliteAuthCredentialStore.open();
+	try {
+		const authStorage = new AuthStorage(store);
+		await authStorage.reload();
+		const codexCliAuthPath = getCodexCliAuthPath();
+		const codexCliAvailable = Boolean(await readCodexCliCredentials());
+		return {
+			stored: authStorage.hasAuth("openai-codex"),
+			codexCliAvailable,
+			codexCliAuthPath,
+		};
+	} finally {
+		store.close();
+	}
+}
+
+async function persistCodexCredentials(credentials: OAuthCredentials | null): Promise<void> {
+	if (!credentials) return;
+	const store = await SqliteAuthCredentialStore.open();
+	try {
+		const authStorage = new AuthStorage(store);
+		await authStorage.reload();
+		await authStorage.set("openai-codex", { type: "oauth", ...credentials });
+	} finally {
+		store.close();
+	}
+}
+
+async function promptYesNo(message: string, defaultValue: boolean): Promise<boolean> {
+	if (!process.stdin.isTTY) return defaultValue;
+	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+	const { promise, resolve } = Promise.withResolvers<boolean>();
+	const suffix = defaultValue ? "[Y/n]" : "[y/N]";
+	rl.question(`${message} ${suffix}: `, answer => {
+		rl.close();
+		const normalized = answer.trim().toLowerCase();
+		if (!normalized) {
+			resolve(defaultValue);
+			return;
+		}
+		resolve(normalized === "y" || normalized === "yes");
+	});
+	return promise;
+}
+
+async function handleCodexSetup(flags: {
+	json?: boolean;
+	check?: boolean;
+	device?: boolean;
+	fromCodex?: boolean;
+}): Promise<void> {
+	const check = await checkCodexSetup();
+	if (flags.json) {
+		console.log(JSON.stringify(check, null, 2));
+		if (!check.stored && !check.codexCliAvailable) process.exit(1);
+		return;
+	}
+
+	if (flags.check) {
+		if (check.stored) {
+			console.log(chalk.green(`${theme.status.success} OpenAI Codex credentials are stored`));
+			return;
+		}
+		if (check.codexCliAvailable) {
+			console.log(
+				chalk.green(`${theme.status.success} Codex CLI credentials are available at ${check.codexCliAuthPath}`),
+			);
+			return;
+		}
+		console.error(chalk.red(`${theme.status.error} OpenAI Codex credentials not found`));
+		console.error(chalk.dim(`Run '${APP_NAME} setup codex' or sign in with Codex CLI first.`));
+		process.exit(1);
+	}
+
+	if (flags.fromCodex || !flags.device) {
+		const imported = await readCodexCliCredentials();
+		if (imported) {
+			if (flags.fromCodex || (await promptYesNo("Found Codex CLI credentials. Import them?", false))) {
+				await persistCodexCredentials(imported);
+				console.log(chalk.green(`${theme.status.success} Imported Codex CLI credentials`));
+				console.log(chalk.dim(`Source: ${getCodexCliAuthPath()}`));
+				return;
+			}
+		}
+		if (flags.fromCodex) {
+			console.error(chalk.red(`${theme.status.error} No valid Codex CLI credentials found`));
+			console.error(chalk.dim(`Expected: ${getCodexCliAuthPath()}`));
+			process.exit(1);
+		}
+	}
+
+	console.log(chalk.dim("Signing in to OpenAI Codex with device-code OAuth..."));
+	const credentials = await loginOpenAICodexDeviceCode({
+		onAuth(info) {
+			console.log(`\nOpen this URL in your browser:\n${info.url}`);
+			if (info.instructions) console.log(info.instructions);
+			console.log();
+		},
+		onProgress(message) {
+			console.log(message);
+		},
+		onPrompt: async () => "",
+	});
+	await persistCodexCredentials(credentials);
+	console.log(chalk.green(`${theme.status.success} OpenAI Codex credentials saved`));
 }
 
 async function handlePythonSetup(flags: { json?: boolean; check?: boolean }): Promise<void> {
@@ -213,14 +344,20 @@ ${chalk.bold("Usage:")}
   ${APP_NAME} setup <component> [options]
 
 ${chalk.bold("Components:")}
+  codex    Import Codex CLI credentials or run OpenAI Codex device-code login
   python    Verify a Python 3 interpreter is reachable for code execution
   stt       Install speech-to-text dependencies (openai-whisper, recording tools)
 
 ${chalk.bold("Options:")}
   -c, --check   Check if dependencies are installed without installing
+  --device      For codex: force a fresh OpenAI Codex device-code login
+  --from-codex  For codex: import existing Codex CLI credentials only
   --json        Output status as JSON
 
 ${chalk.bold("Examples:")}
+  ${APP_NAME} setup codex            Import Codex CLI auth if present, otherwise start device-code login
+  ${APP_NAME} setup codex --device   Start a fresh OpenAI Codex device-code login
+  ${APP_NAME} setup codex --from-codex Import credentials from ~/.codex/auth.json
   ${APP_NAME} setup python           Install Python execution dependencies
   ${APP_NAME} setup stt              Install speech-to-text dependencies
   ${APP_NAME} setup stt --check      Check if STT dependencies are available

@@ -247,6 +247,34 @@ Roles route work by intent. `default` for normal turns. `smol` for cheap subagen
 
 Auth tags below: `oauth` signs in with your provider account, `plan` routes through a coding-plan subscription, `local` runs against a local server with the key optional.
 
+### Codex OAuth quickstart
+
+Use OpenAI Codex via OAuth with one setup command:
+
+```bash
+omp setup codex
+```
+
+What this does:
+
+- If Codex CLI auth already exists at `~/.codex/auth.json`, OMP can import it.
+- Otherwise it starts OpenAI Codex device-code login and stores credentials in OMP auth storage.
+
+Useful flags:
+
+```bash
+omp setup codex --from-codex   # import only from ~/.codex/auth.json
+omp setup codex --device       # force fresh device-code login
+omp setup codex --check        # verify stored/importable Codex credentials
+```
+
+Model switching:
+
+- In-session: `/model`
+- Cycle configured role models: `Ctrl+P`
+
+Full guide: [`docs/codex-oauth.md`](docs/codex-oauth.md)
+
 ### Frontier APIs
 
 Direct APIs and gateways. Mix providers per role.
