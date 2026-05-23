@@ -274,22 +274,30 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 	const warnings: string[] = [];
 	const { enableUser, enableProject } = readClaudeCommandToggles();
 
+	// Build colon-separated namespace from subdirectory path.
+	// e.g., opsx/apply.md → opsx:apply (matching Claude Code behavior).
+	const deriveCmdName = (filePath: string, commandsDir: string): string => {
+		const fileDir = path.dirname(filePath);
+		const cmdBase = path.basename(filePath, ".md");
+		const rel = path.relative(commandsDir, fileDir);
+		if (!rel || rel === ".") return cmdBase;
+		return `${rel.replace(/[\\/]/g, ":")}:${cmdBase}`;
+	};
+
 	if (enableUser) {
 		const userBase = getUserClaude(ctx);
 		const userCommandsDir = path.join(userBase, "commands");
 
 		const userResult = await loadFilesFromDir<SlashCommand>(ctx, userCommandsDir, PROVIDER_ID, "user", {
 			extensions: ["md"],
-			transform: (name, content, path, source) => {
-				const cmdName = name.replace(/\.md$/, "");
-				return {
-					name: cmdName,
-					path,
-					content,
-					level: "user",
-					_source: source,
-				};
-			},
+			recursive: true,
+			transform: (_name, content, filePath, source) => ({
+				name: deriveCmdName(filePath, userCommandsDir),
+				path: filePath,
+				content,
+				level: "user" as const,
+				_source: source,
+			}),
 		});
 
 		items.push(...userResult.items);
@@ -301,16 +309,14 @@ async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashComm
 
 		const projectResult = await loadFilesFromDir<SlashCommand>(ctx, projectCommandsDir, PROVIDER_ID, "project", {
 			extensions: ["md"],
-			transform: (name, content, path, source) => {
-				const cmdName = name.replace(/\.md$/, "");
-				return {
-					name: cmdName,
-					path,
-					content,
-					level: "project",
-					_source: source,
-				};
-			},
+			recursive: true,
+			transform: (_name, content, filePath, source) => ({
+				name: deriveCmdName(filePath, projectCommandsDir),
+				path: filePath,
+				content,
+				level: "project" as const,
+				_source: source,
+			}),
 		});
 
 		items.push(...projectResult.items);
