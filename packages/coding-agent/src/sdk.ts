@@ -1653,7 +1653,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					thinkingLevel = resolvedThinkingLevel;
 				}
 				if (resolved) {
-					thinkingLevel = resolveThinkingLevelForModel(resolved, thinkingLevel);
+					autoThinking = thinkingLevel === AUTO_THINKING;
+					effectiveThinkingLevel = thinkingLevel === AUTO_THINKING ? undefined : thinkingLevel;
+					effectiveThinkingLevel = resolveThinkingLevelForModel(resolved, effectiveThinkingLevel);
 				}
 			} else {
 				modelFallbackMessage = `Model "${options.modelPattern}" not found`;

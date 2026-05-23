@@ -19,7 +19,7 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
-import { resolveAgentModelPatterns } from "../config/model-resolver";
+import { parseModelString, resolveAgentModelPatterns } from "../config/model-resolver";
 import { MCPManager } from "../mcp/manager";
 import type { Theme } from "../modes/theme/theme";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
@@ -687,6 +687,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const agentModelOverrides = this.session.settings.get("task.agentModelOverrides");
 		const settingsModelOverride = agentModelOverrides[agentName];
 		const parentActiveModelPattern = this.session.getActiveModelString?.();
+		// The parent's active selector encodes its Cursor MAX state as a `:max`
+		// suffix; carry it so a subagent that inherits the parent model (no explicit
+		// model pattern) also inherits MAX rather than falling back to base.
+		const parentCursorMaxMode = parentActiveModelPattern
+			? parseModelString(parentActiveModelPattern)?.maxMode
+			: undefined;
 		const modelOverride = resolveAgentModelPatterns({
 			settingsOverride: settingsModelOverride,
 			agentModel: effectiveAgent.model,
@@ -954,6 +960,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						taskDepth,
 						modelOverride,
 						parentActiveModelPattern,
+						cursorMaxMode: parentCursorMaxMode,
 						thinkingLevel: thinkingLevelOverride,
 						outputSchema: effectiveOutputSchema,
 						sessionFile,
@@ -1012,6 +1019,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						taskDepth,
 						modelOverride,
 						parentActiveModelPattern,
+						cursorMaxMode: parentCursorMaxMode,
 						thinkingLevel: thinkingLevelOverride,
 						outputSchema: effectiveOutputSchema,
 						sessionFile,

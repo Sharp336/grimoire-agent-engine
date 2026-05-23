@@ -23,7 +23,16 @@ function goalState(extra: Partial<GoalModeState["goal"]>): GoalModeState {
 }
 
 function usage(output: number): UsageStatistics {
-	return { input: 0, output, cacheRead: 0, cacheWrite: 0, premiumRequests: 0, cost: 0, latestCursorTotalTokens: 0 };
+	return {
+		input: 0,
+		output,
+		cacheRead: 0,
+		cacheWrite: 0,
+		premiumRequests: 0,
+		cost: 0,
+		latestCursorTotalTokens: 0,
+		cursorSummedTokens: 0,
+	};
 }
 
 describe("runEvalBudget", () => {
