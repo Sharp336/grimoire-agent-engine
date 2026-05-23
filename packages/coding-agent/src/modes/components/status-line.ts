@@ -561,6 +561,7 @@ export class StatusLineComponent implements Component {
 			premiumRequests: 0,
 			cost: 0,
 			latestCursorTotalTokens: 0,
+			cursorSummedTokens: 0,
 		};
 		const usageStats = {
 			...aggregateUsageStats,

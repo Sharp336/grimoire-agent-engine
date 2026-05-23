@@ -23,19 +23,22 @@ export function applyCursorTokenDelta(output: AssistantMessage, deltaTokens: num
 }
 
 /**
- * Cursor reports a single cumulative `totalTokens` that already includes prior
- * turns; the per-message input/output/cache splits do not always sum to it.
- * Synthesize phantom input tokens so the aggregate reconciles for display.
+ * Cursor reports a single cumulative `totalTokens` per conversation that already
+ * includes prior turns; its per-message input/output/cache splits do not sum to
+ * it. Synthesize phantom input tokens to cover the gap between Cursor's cumulative
+ * counter and the tokens summed from `cursor-agent` messages **only**.
+ *
+ * `cursorSummedTokens` is the sum of input+output+cacheRead+cacheWrite over the
+ * Cursor-agent assistant messages — not the global total. Anchoring the phantom on
+ * the Cursor-only sum keeps the aggregate reconciled for display without folding
+ * Cursor's cumulative counter onto unrelated non-Cursor usage in a mixed-provider
+ * session (which previously inflated the displayed input token count).
  */
 export function reconcileCursorCumulativeTokens(totals: {
 	totalInput: number;
-	totalOutput: number;
-	totalCacheRead: number;
-	totalCacheWrite: number;
+	cursorSummedTokens: number;
 	latestCursorTotalTokens: number;
-}): { totalInput: number; totalTokens: number } {
-	const summedTokens = totals.totalInput + totals.totalOutput + totals.totalCacheRead + totals.totalCacheWrite;
-	const totalTokens = Math.max(summedTokens, totals.latestCursorTotalTokens);
-	const totalInput = totalTokens > summedTokens ? totals.totalInput + (totalTokens - summedTokens) : totals.totalInput;
-	return { totalInput, totalTokens };
+}): { totalInput: number } {
+	const cursorPhantom = Math.max(0, totals.latestCursorTotalTokens - totals.cursorSummedTokens);
+	return { totalInput: totals.totalInput + cursorPhantom };
 }

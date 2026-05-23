@@ -1548,6 +1548,14 @@ export interface UsageStatistics {
 	 * context-usage) agree on the cumulative total without re-walking messages.
 	 */
 	latestCursorTotalTokens: number;
+	/**
+	 * Sum of input+output+cacheRead+cacheWrite over `cursor-agent` assistant
+	 * messages only. The reconciled `input` carries a phantom equal to
+	 * `latestCursorTotalTokens - cursorSummedTokens`; isolating the Cursor sum
+	 * keeps a mixed-provider session from folding Cursor's cumulative counter
+	 * onto unrelated non-Cursor usage.
+	 */
+	cursorSummedTokens: number;
 }
 
 function getTaskToolUsage(details: unknown): Usage | undefined {
@@ -1559,6 +1567,12 @@ function getTaskToolUsage(details: unknown): Usage | undefined {
 }
 
 function addUsageToStatistics(stats: UsageStatistics, usage: Usage, api?: string): void {
+	// `stats.input` is stored reconciled (raw input + Cursor phantom). Strip the
+	// current phantom to recover the raw input, fold in this usage, then re-apply
+	// the phantom computed from Cursor-agent messages only — so non-Cursor input
+	// is never inflated by Cursor's cumulative counter in a mixed-provider session.
+	const oldCursorPhantom = Math.max(0, stats.latestCursorTotalTokens - stats.cursorSummedTokens);
+	stats.input -= oldCursorPhantom;
 	stats.input += usage.input;
 	stats.output += usage.output;
 	stats.cacheRead += usage.cacheRead;
@@ -1566,15 +1580,14 @@ function addUsageToStatistics(stats: UsageStatistics, usage: Usage, api?: string
 	stats.premiumRequests += usage.premiumRequests ?? 0;
 	stats.cost += usage.cost.total;
 	if (api === "cursor-agent") {
+		stats.cursorSummedTokens += usage.input + usage.output + usage.cacheRead + usage.cacheWrite;
 		stats.latestCursorTotalTokens = Math.max(stats.latestCursorTotalTokens, usage.totalTokens ?? 0);
-		stats.input = reconcileCursorCumulativeTokens({
-			totalInput: stats.input,
-			totalOutput: stats.output,
-			totalCacheRead: stats.cacheRead,
-			totalCacheWrite: stats.cacheWrite,
-			latestCursorTotalTokens: stats.latestCursorTotalTokens,
-		}).totalInput;
 	}
+	stats.input = reconcileCursorCumulativeTokens({
+		totalInput: stats.input,
+		cursorSummedTokens: stats.cursorSummedTokens,
+		latestCursorTotalTokens: stats.latestCursorTotalTokens,
+	}).totalInput;
 }
 
 function extractTextFromContent(content: Message["content"]): string {
@@ -1972,6 +1985,7 @@ export class SessionManager {
 		premiumRequests: 0,
 		cost: 0,
 		latestCursorTotalTokens: 0,
+		cursorSummedTokens: 0,
 	} satisfies UsageStatistics;
 	/** Per-turn output-token budget set by a `+Nk` directive (total null when none this turn). */
 	#turnBudget: { total: number | null; hard: boolean } = { total: null, hard: false };
@@ -2309,6 +2323,7 @@ export class SessionManager {
 			premiumRequests: 0,
 			cost: 0,
 			latestCursorTotalTokens: 0,
+			cursorSummedTokens: 0,
 		};
 		this.#inMemoryArtifacts = null;
 		this.#inMemoryArtifactCounter = 0;
@@ -2333,6 +2348,7 @@ export class SessionManager {
 			premiumRequests: 0,
 			cost: 0,
 			latestCursorTotalTokens: 0,
+			cursorSummedTokens: 0,
 		};
 		for (const entry of this.#fileEntries) {
 			if (entry.type === "session") continue;

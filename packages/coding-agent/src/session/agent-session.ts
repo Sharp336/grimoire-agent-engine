@@ -9499,6 +9499,7 @@ export class AgentSession {
 		let totalPremiumRequests = 0;
 		let totalCost = 0;
 		let latestCursorTotalTokens = 0;
+		let cursorSummedTokens = 0;
 		for (const message of state.messages) {
 			if (message.role === "user") {
 				userMessages++;
@@ -9513,6 +9514,8 @@ export class AgentSession {
 				totalCost += message.usage.cost.total;
 				if (message.api === "cursor-agent") {
 					latestCursorTotalTokens = Math.max(latestCursorTotalTokens, message.usage.totalTokens ?? 0);
+					cursorSummedTokens +=
+						message.usage.input + message.usage.output + message.usage.cacheRead + message.usage.cacheWrite;
 				}
 			} else if (message.role === "toolResult") {
 				toolResults++;
@@ -9537,9 +9540,7 @@ export class AgentSession {
 		if (latestCursorTotalTokens > 0) {
 			const reconciled = reconcileCursorCumulativeTokens({
 				totalInput,
-				totalOutput,
-				totalCacheRead,
-				totalCacheWrite,
+				cursorSummedTokens,
 				latestCursorTotalTokens,
 			});
 			totalInput = reconciled.totalInput;
