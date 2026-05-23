@@ -10,7 +10,11 @@ import { CompactionSummaryMessageComponent } from "../../modes/components/compac
 import { CustomMessageComponent } from "../../modes/components/custom-message";
 import { DynamicBorder } from "../../modes/components/dynamic-border";
 import { EvalExecutionComponent } from "../../modes/components/eval-execution";
-import { ReadToolGroupComponent, readArgsTargetInternalUrl } from "../../modes/components/read-tool-group";
+import {
+	ReadToolGroupComponent,
+	readArgsHaveTarget,
+	readArgsTargetInternalUrl,
+} from "../../modes/components/read-tool-group";
 import { SkillMessageComponent } from "../../modes/components/skill-message";
 import { ToolExecutionComponent } from "../../modes/components/tool-execution";
 import { UserMessageComponent } from "../../modes/components/user-message";
@@ -368,7 +372,11 @@ export class UiHelpers {
 					if (builder.getOpenStartIndex() < i) readGroup = null;
 					builder.splitAt(i + 1);
 
-					if (content.name === "read" && !readArgsTargetInternalUrl(content.arguments)) {
+					if (
+						content.name === "read" &&
+						readArgsHaveTarget(content.arguments) &&
+						!readArgsTargetInternalUrl(content.arguments)
+					) {
 						if (hasErrorStop && errorMessage) {
 							if (!readGroup) {
 								readGroup = new ReadToolGroupComponent({
