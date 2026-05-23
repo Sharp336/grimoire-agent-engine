@@ -560,6 +560,7 @@ export class StatusLineComponent implements Component {
 			cacheWrite: 0,
 			premiumRequests: 0,
 			cost: 0,
+			latestCursorTotalTokens: 0,
 		};
 		const usageStats = {
 			...aggregateUsageStats,
