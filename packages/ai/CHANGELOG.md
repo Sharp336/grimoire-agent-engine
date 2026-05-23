@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed generated OpenAI Codex model policies preserving stale 272K context metadata for GPT-5.5 when Codex discovery reports a larger per-account context window.
+
 ## [15.2.4] - 2026-05-22
 
 ### Fixed

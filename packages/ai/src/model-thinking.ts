@@ -176,25 +176,28 @@ export function applyGeneratedModelPolicies(models: ApiModel<Api>[]): void {
  * When a model's context is exhausted, the agent can promote to a sibling
  * model with a larger context window on the same provider:
  * - `codex-spark` variants promote to `gpt-5.5`.
- * - `gpt-5.5` (270K input) promotes to `gpt-5.4` (1M input).
+ * - `gpt-5.5` promotes to `gpt-5.4` only when discovery reports `gpt-5.4`
+ *   as a larger-context sibling.
  */
 export function linkOpenAIPromotionTargets(models: ApiModel<Api>[]): void {
 	for (const candidate of models) {
 		const parsedCandidate = parseKnownModel(candidate.id);
 		if (parsedCandidate.family !== "openai") continue;
-		let targetId: string | undefined;
 		if (parsedCandidate.variant === "codex-spark") {
-			targetId = "gpt-5.5";
-		} else if (parsedCandidate.variant === "base" && semverEqual(parsedCandidate.version, "5.5")) {
-			targetId = "gpt-5.4";
-		} else {
+			const fallback = models.find(
+				model => model.provider === candidate.provider && model.api === candidate.api && model.id === "gpt-5.5",
+			);
+			if (!fallback) continue;
+			candidate.contextPromotionTarget = `${fallback.provider}/${fallback.id}`;
 			continue;
 		}
-		const fallback = models.find(
-			model => model.provider === candidate.provider && model.api === candidate.api && model.id === targetId,
-		);
-		if (!fallback) continue;
-		candidate.contextPromotionTarget = `${fallback.provider}/${fallback.id}`;
+		if (parsedCandidate.variant === "base" && semverEqual(parsedCandidate.version, "5.5")) {
+			const fallback = models.find(
+				model => model.provider === candidate.provider && model.api === candidate.api && model.id === "gpt-5.4",
+			);
+			if (!fallback || fallback.contextWindow <= candidate.contextWindow) continue;
+			candidate.contextPromotionTarget = `${fallback.provider}/${fallback.id}`;
+		}
 	}
 }
 
@@ -404,9 +407,11 @@ function inferGeneratedApplyPatchToolType(
 }
 
 function applyOpenAICatalogPolicy(model: ApiModel<Api>, parsedModel: OpenAIModel): void {
-	// Codex models: 400K figure includes output budget; input window is 272K.
+	// Codex model discovery is authoritative for prompt budgets. Older Codex
+	// catalogs omitted per-account context windows, so keep 272K only as a
+	// conservative floor instead of overwriting newly-discovered larger windows.
 	if (parsedModel.variant.startsWith("codex") && parsedModel.variant !== "codex-spark") {
-		model.contextWindow = 272000;
+		model.contextWindow = Math.max(model.contextWindow, 272000);
 		return;
 	}
 	// GPT-5.4 mini/nano use plain OpenAI IDs on the Codex transport, but Codex still
