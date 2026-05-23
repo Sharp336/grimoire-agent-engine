@@ -273,12 +273,18 @@ interface EditorState {
 	lines: string[];
 	cursorLine: number;
 	cursorCol: number;
+	selStartLine: number; // -1 = no selection
+	selStartCol: number;
+	selEndLine: number;
+	selEndCol: number;
 }
 
 interface LayoutLine {
 	text: string;
 	hasCursor: boolean;
 	cursorPos?: number;
+	selStart?: number; // selection start within text (string index), undefined if none
+	selEnd?: number;   // selection end within text
 }
 
 export interface EditorTheme {
@@ -313,6 +319,10 @@ export class Editor implements Component, Focusable {
 		lines: [""],
 		cursorLine: 0,
 		cursorCol: 0,
+		selStartLine: -1,
+		selStartCol: 0,
+		selEndLine: 0,
+		selEndCol: 0,
 	};
 
 	/** Focusable interface - set by TUI when focus changes */
@@ -516,6 +526,7 @@ export class Editor implements Component, Focusable {
 	}
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
 	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
+		this.#clearSelection();
 		this.#undoStack.length = 0;
 		const lines = sanitizeLoadedText(text).split("\n");
 		this.#state.lines = lines.length === 0 ? [""] : lines;
@@ -732,6 +743,23 @@ export class Editor implements Component, Focusable {
 			let displayText = layoutLine.text;
 			let displayWidth = visibleWidth(layoutLine.text);
 			let cursorInPadding = false;
+
+			// Apply selection reverse-video highlighting before cursor handling
+			if (layoutLine.selStart !== undefined && layoutLine.selEnd !== undefined && layoutLine.selStart < layoutLine.selEnd) {
+				const pre = displayText.slice(0, layoutLine.selStart);
+				const sel = displayText.slice(layoutLine.selStart, layoutLine.selEnd);
+				const post = displayText.slice(layoutLine.selEnd);
+				displayText = pre + "\x1b[7m" + sel + "\x1b[0m" + post;
+				// Adjust cursorPos for the inserted ANSI bytes (\x1b[7m = 4 chars, \x1b[0m = 4 chars)
+				if (layoutLine.cursorPos !== undefined) {
+					if (layoutLine.cursorPos > layoutLine.selStart) {
+						layoutLine.cursorPos += 4;
+					}
+					if (layoutLine.cursorPos > layoutLine.selEnd + 4) {
+						layoutLine.cursorPos += 4;
+					}
+				}
+			}
 			const showPromptGutter = promptGutter !== undefined && visibleIndex === 0;
 			const gutterText =
 				promptGutter === undefined ? "" : showPromptGutter ? promptGutter.firstLine : promptGutter.continuation;
@@ -890,6 +918,7 @@ export class Editor implements Component, Focusable {
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
+		const shiftHeld = data.startsWith("\x1b[") && (data.includes(";2") || data.includes(":2"));
 
 		// Handle character jump mode (awaiting next character to jump to)
 		if (this.#jumpMode !== null) {
@@ -925,9 +954,8 @@ export class Editor implements Component, Focusable {
 
 		// Handle special key combinations first
 
-		// Ctrl+C is reserved by parent components for app-level handling.
-		// Do not consume arbitrary user-bound "copy" keys here, since the editor
-		// has no copy implementation and would make those keys disappear.
+		// Ctrl+C is reserved by parent components for app-level handling
+		// (clear/cancel or copy-to-clipboard, depending on selection state).
 		if (matchesKey(data, "ctrl+c")) {
 			return;
 		}
@@ -1095,13 +1123,16 @@ export class Editor implements Component, Focusable {
 		else if (matchesKey(data, "alt+y")) {
 			this.#yankPop();
 		}
-		// Ctrl+A - Move to start of line
-		else if (matchesKey(data, "ctrl+a")) {
-			this.#moveToLineStart();
+		// Select All (Ctrl+A via keybinding or raw \x01)
+		else if (kb.matches(data, "tui.editor.selectAll") || data === "\u0001") {
+			this.#state.selStartLine = 0;
+			this.#state.selStartCol = 0;
+			this.#state.selEndLine = this.#state.lines.length - 1;
+			this.#state.selEndCol = (this.#state.lines[this.#state.selEndLine] || "").length;
 		}
 		// Ctrl+E - Move to end of line
 		else if (matchesKey(data, "ctrl+e")) {
-			this.#moveToLineEnd();
+			this.#withShiftAwareMove(() => this.#moveToLineEnd(), shiftHeld);
 		}
 		// Alt+Enter - special handler if callback exists, otherwise new line
 		else if (matchesKey(data, "alt+enter")) {
@@ -1174,10 +1205,24 @@ export class Editor implements Component, Focusable {
 			this.#handleBackspace();
 		}
 		// Line navigation shortcuts (Home/End keys)
-		else if (kb.matches(data, "tui.editor.cursorLineStart")) {
-			this.#moveToLineStart();
-		} else if (kb.matches(data, "tui.editor.cursorLineEnd")) {
-			this.#moveToLineEnd();
+		else if (kb.matches(data, "tui.editor.cursorLineStart") || (shiftHeld && data.endsWith("H"))) {
+			if (!shiftHeld && this.#hasSelection()) {
+				const sel = this.#getNormalizedSelection()!;
+				this.#state.cursorLine = sel.startLine;
+				this.#setCursorCol(sel.startCol);
+				this.#clearSelection();
+			} else {
+				this.#withShiftAwareMove(() => this.#moveToLineStart(), shiftHeld);
+			}
+		} else if (kb.matches(data, "tui.editor.cursorLineEnd") || (shiftHeld && data.endsWith("F"))) {
+			if (!shiftHeld && this.#hasSelection()) {
+				const sel = this.#getNormalizedSelection()!;
+				this.#state.cursorLine = sel.endLine;
+				this.#setCursorCol(sel.endCol);
+				this.#clearSelection();
+			} else {
+				this.#withShiftAwareMove(() => this.#moveToLineEnd(), shiftHeld);
+			}
 		}
 		// Page navigation (PageUp/PageDown)
 		else if (kb.matches(data, "tui.editor.pageUp")) {
@@ -1203,41 +1248,65 @@ export class Editor implements Component, Focusable {
 		else if (kb.matches(data, "tui.editor.cursorWordLeft")) {
 			// Word left
 			this.#resetKillSequence();
-			this.#moveWordBackwards();
+			this.#withShiftAwareMove(() => this.#moveWordBackwards(), shiftHeld);
 		} else if (kb.matches(data, "tui.editor.cursorWordRight")) {
 			// Word right
 			this.#resetKillSequence();
-			this.#moveWordForwards();
+			this.#withShiftAwareMove(() => this.#moveWordForwards(), shiftHeld);
 		}
 		// Arrow keys
-		else if (kb.matches(data, "tui.editor.cursorUp")) {
-			// Up - history navigation or cursor movement
-			if (this.#isEditorEmpty()) {
+		else if (kb.matches(data, "tui.editor.cursorUp") || (shiftHeld && data.endsWith("A"))) {
+			// Up - collapse selection to start boundary when unshifted
+			if (!shiftHeld && this.#hasSelection()) {
+				const sel = this.#getNormalizedSelection()!;
+				this.#state.cursorLine = sel.startLine;
+				this.#setCursorCol(sel.startCol);
+				this.#clearSelection();
+			} else if (this.#isEditorEmpty()) {
 				this.#navigateHistory(-1); // Start browsing history
 			} else if (this.#historyIndex > -1 && this.#isOnFirstVisualLine()) {
 				this.#navigateHistory(-1); // Navigate to older history entry
 			} else if (this.#isOnFirstVisualLine()) {
 				// Already at top - jump to start of line
-				this.#moveToLineStart();
+				this.#withShiftAwareMove(() => this.#moveToLineStart(), shiftHeld);
 			} else {
-				this.#moveCursor(-1, 0); // Cursor movement (within text or history entry)
+				this.#withShiftAwareMove(() => this.#moveCursor(-1, 0), shiftHeld); // Cursor movement (within text or history entry)
 			}
-		} else if (kb.matches(data, "tui.editor.cursorDown")) {
-			// Down - history navigation or cursor movement
-			if (this.#historyIndex > -1 && this.#isOnLastVisualLine()) {
+		} else if (kb.matches(data, "tui.editor.cursorDown") || (shiftHeld && data.endsWith("B"))) {
+			// Down - collapse selection to end boundary when unshifted
+			if (!shiftHeld && this.#hasSelection()) {
+				const sel = this.#getNormalizedSelection()!;
+				this.#state.cursorLine = sel.endLine;
+				this.#setCursorCol(sel.endCol);
+				this.#clearSelection();
+			} else if (this.#historyIndex > -1 && this.#isOnLastVisualLine()) {
 				this.#navigateHistory(1); // Navigate to newer history entry or clear
 			} else if (this.#isOnLastVisualLine()) {
 				// Already at bottom - jump to end of line
-				this.#moveToLineEnd();
+				this.#withShiftAwareMove(() => this.#moveToLineEnd(), shiftHeld);
 			} else {
-				this.#moveCursor(1, 0); // Cursor movement (within text or history entry)
+				this.#withShiftAwareMove(() => this.#moveCursor(1, 0), shiftHeld); // Cursor movement (within text or history entry)
 			}
-		} else if (kb.matches(data, "tui.editor.cursorRight")) {
-			// Right
-			this.#moveCursor(0, 1);
-		} else if (kb.matches(data, "tui.editor.cursorLeft")) {
-			// Left
-			this.#moveCursor(0, -1);
+		} else if (kb.matches(data, "tui.editor.cursorRight") || (shiftHeld && data.endsWith("C"))) {
+			// Right - collapse selection to end boundary when unshifted
+			if (!shiftHeld && this.#hasSelection()) {
+				const sel = this.#getNormalizedSelection()!;
+				this.#state.cursorLine = sel.endLine;
+				this.#setCursorCol(sel.endCol);
+				this.#clearSelection();
+			} else {
+				this.#withShiftAwareMove(() => this.#moveCursor(0, 1), shiftHeld);
+			}
+		} else if (kb.matches(data, "tui.editor.cursorLeft") || (shiftHeld && data.endsWith("D"))) {
+			// Left - collapse selection to start boundary when unshifted
+			if (!shiftHeld && this.#hasSelection()) {
+				const sel = this.#getNormalizedSelection()!;
+				this.#state.cursorLine = sel.startLine;
+				this.#setCursorCol(sel.startCol);
+				this.#clearSelection();
+			} else {
+				this.#withShiftAwareMove(() => this.#moveCursor(0, -1), shiftHeld);
+			}
 		}
 		// Shift+Space - insert regular space (Kitty protocol sends escape sequence)
 		else if (matchesKey(data, "shift+space")) {
@@ -1279,17 +1348,39 @@ export class Editor implements Component, Focusable {
 
 			if (lineVisibleWidth <= contentWidth) {
 				// Line fits in one layout line
+				// Compute selection for this line
+				let lineSelStart: number | undefined;
+				let lineSelEnd: number | undefined;
+				const sel = this.#getNormalizedSelection();
+				if (sel && i >= sel.startLine && i <= sel.endLine) {
+					const docStart = i === sel.startLine ? sel.startCol : 0;
+					const docEnd = i === sel.endLine ? sel.endCol : (line || "").length;
+					if (docStart < docEnd) {
+						lineSelStart = docStart;
+						lineSelEnd = docEnd;
+					}
+				}
 				if (isCurrentLine) {
-					layoutLines.push({
+					const ll: LayoutLine = {
 						text: line,
 						hasCursor: true,
 						cursorPos: this.#state.cursorCol,
-					});
+					};
+					if (lineSelStart !== undefined) {
+						ll.selStart = lineSelStart;
+						ll.selEnd = lineSelEnd;
+					}
+					layoutLines.push(ll);
 				} else {
-					layoutLines.push({
+					const ll: LayoutLine = {
 						text: line,
 						hasCursor: false,
-					});
+					};
+					if (lineSelStart !== undefined) {
+						ll.selStart = lineSelStart;
+						ll.selEnd = lineSelEnd;
+					}
+					layoutLines.push(ll);
 				}
 			} else {
 				// Line needs wrapping - use word-aware wrapping
@@ -1327,17 +1418,44 @@ export class Editor implements Component, Focusable {
 						}
 					}
 
+					// Compute selection range for this chunk
+					let chunkSelStart: number | undefined;
+					let chunkSelEnd: number | undefined;
+					const sel = this.#getNormalizedSelection();
+					if (sel && i >= sel.startLine && i <= sel.endLine) {
+						const docStart = i === sel.startLine ? sel.startCol : 0;
+						const docEnd = i === sel.endLine ? sel.endCol : (line || "").length;
+						const chunkStart = chunk.startIndex;
+						const chunkEnd = chunk.endIndex;
+						if (docStart < chunkEnd && docEnd > chunkStart) {
+							const selStartDoc = Math.max(docStart, chunkStart);
+							const selEndDoc = Math.min(docEnd, chunkEnd);
+							chunkSelStart = selStartDoc - chunkStart;
+							chunkSelEnd = selEndDoc - chunkStart;
+						}
+					}
+
 					if (hasCursorInChunk) {
-						layoutLines.push({
+						const ll: LayoutLine = {
 							text: chunk.text,
 							hasCursor: true,
 							cursorPos: adjustedCursorPos,
-						});
+						};
+						if (chunkSelStart !== undefined) {
+							ll.selStart = chunkSelStart;
+							ll.selEnd = chunkSelEnd;
+						}
+						layoutLines.push(ll);
 					} else {
-						layoutLines.push({
+						const ll: LayoutLine = {
 							text: chunk.text,
 							hasCursor: false,
-						});
+						};
+						if (chunkSelStart !== undefined) {
+							ll.selStart = chunkSelStart;
+							ll.selEnd = chunkSelEnd;
+						}
+						layoutLines.push(ll);
 					}
 				}
 			}
@@ -1481,6 +1599,9 @@ export class Editor implements Component, Focusable {
 	#insertCharacter(char: string): void {
 		this.#exitHistoryForEditing();
 		this.#resetKillSequence();
+		if (this.#hasSelection()) {
+			this.#deleteSelectedText();
+		}
 		this.#recordUndoState();
 
 		const line = this.#state.lines[this.#state.cursorLine] || "";
@@ -1677,7 +1798,7 @@ export class Editor implements Component, Focusable {
 
 		const result = this.#expandPasteMarkers(this.#state.lines.join("\n")).trim();
 
-		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0 };
+		this.#state = { lines: [""], cursorLine: 0, cursorCol: 0, selStartLine: -1, selStartCol: 0, selEndLine: 0, selEndCol: 0 };
 		this.#pastes.clear();
 		this.#pasteCounter = 0;
 		this.#historyIndex = -1;
@@ -1691,6 +1812,10 @@ export class Editor implements Component, Focusable {
 	#handleBackspace(): void {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
+		if (this.#hasSelection()) {
+			this.#deleteSelectedText();
+			return;
+		}
 		this.#recordUndoState();
 
 		if (this.#state.cursorCol > 0) {
@@ -1836,6 +1961,80 @@ export class Editor implements Component, Focusable {
 		this.#resetKillSequence();
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 		this.#setCursorCol(currentLine.length);
+	}
+
+	#hasSelection(): boolean {
+		return this.#state.selStartLine !== -1;
+	}
+
+	/** Public accessor for parent components to check selection state. */
+	get hasSelection(): boolean {
+		return this.#hasSelection();
+	}
+
+	/** Get the currently selected text, or empty string if no selection. */
+	getSelectedText(): string {
+		const sel = this.#getNormalizedSelection();
+		if (!sel) return "";
+		const { startLine, startCol, endLine, endCol } = sel;
+		if (startLine === endLine) {
+			return (this.#state.lines[startLine] || "").slice(startCol, endCol);
+		}
+		const parts: string[] = [];
+		parts.push((this.#state.lines[startLine] || "").slice(startCol));
+		for (let i = startLine + 1; i < endLine; i++) {
+			parts.push(this.#state.lines[i] || "");
+		}
+		parts.push((this.#state.lines[endLine] || "").slice(0, endCol));
+		return parts.join("\n");
+	}
+	#clearSelection(): void {
+		this.#state.selStartLine = -1;
+	}
+
+	#getNormalizedSelection(): { startLine: number; startCol: number; endLine: number; endCol: number } | null {
+		if (!this.#hasSelection()) return null;
+		const s = this.#state;
+		if (s.selStartLine < s.selEndLine || (s.selStartLine === s.selEndLine && s.selStartCol <= s.selEndCol)) {
+			return { startLine: s.selStartLine, startCol: s.selStartCol, endLine: s.selEndLine, endCol: s.selEndCol };
+		}
+		return { startLine: s.selEndLine, startCol: s.selEndCol, endLine: s.selStartLine, endCol: s.selStartCol };
+	}
+
+	#deleteSelectedText(): void {
+		const sel = this.#getNormalizedSelection();
+		if (!sel) return;
+		const { startLine, startCol, endLine, endCol } = sel;
+		this.#recordUndoState();
+		if (startLine === endLine) {
+			const line = this.#state.lines[startLine] || "";
+			this.#state.lines[startLine] = line.slice(0, startCol) + line.slice(endCol);
+		} else {
+			const firstLine = this.#state.lines[startLine] || "";
+			const lastLine = this.#state.lines[endLine] || "";
+			this.#state.lines[startLine] = firstLine.slice(0, startCol) + lastLine.slice(endCol);
+			this.#state.lines.splice(startLine + 1, endLine - startLine);
+		}
+		this.#state.cursorLine = startLine;
+		this.#setCursorCol(startCol);
+		this.#clearSelection();
+		if (this.onChange) {
+			this.onChange(this.getText());
+		}
+	}
+
+	#withShiftAwareMove(fn: () => void, shift: boolean): void {
+		if (shift && !this.#hasSelection()) {
+			this.#state.selStartLine = this.#state.cursorLine;
+			this.#state.selStartCol = this.#state.cursorCol;
+		}
+		fn();
+		if (shift) {
+			this.#state.selEndLine = this.#state.cursorLine;
+			this.#state.selEndCol = this.#state.cursorCol;
+		} else {
+			this.#clearSelection();
+		}
 	}
 
 	#moveToMessageStart(): void {
@@ -2168,6 +2367,10 @@ export class Editor implements Component, Focusable {
 	#handleForwardDelete(): void {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
+		if (this.#hasSelection()) {
+			this.#deleteSelectedText();
+			return;
+		}
 		this.#recordUndoState();
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";

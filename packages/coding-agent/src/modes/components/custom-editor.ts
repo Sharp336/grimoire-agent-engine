@@ -1,3 +1,4 @@
+import { copyToClipboard } from "../../utils/clipboard";
 import { Editor, type KeyId, matchesKey, parseKittySequence } from "@oh-my-pi/pi-tui";
 import type { AppKeybinding } from "../../config/keybindings";
 
@@ -191,9 +192,17 @@ export class CustomEditor extends Editor {
 			}
 		}
 
-		// Intercept configured clear shortcut
+		// Intercept configured clear shortcut.
+		// When the editor has an active selection, copy to clipboard instead of clearing.
 		if (this.#matchesAction(data, "app.clear") && this.onClear) {
-			this.onClear();
+			if (this.hasSelection) {
+				const selectedText = this.getSelectedText();
+				if (selectedText) {
+					void copyToClipboard(selectedText);
+				}
+			} else {
+				this.onClear();
+			}
 			return;
 		}
 

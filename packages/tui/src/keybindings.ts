@@ -14,6 +14,7 @@ export interface Keybindings {
 	"tui.editor.cursorWordRight": true;
 	"tui.editor.cursorLineStart": true;
 	"tui.editor.cursorLineEnd": true;
+	"tui.editor.selectAll": true;
 	"tui.editor.jumpForward": true;
 	"tui.editor.jumpBackward": true;
 	"tui.editor.pageUp": true;
@@ -74,12 +75,16 @@ export const TUI_KEYBINDINGS = {
 		description: "Move cursor word right",
 	},
 	"tui.editor.cursorLineStart": {
-		defaultKeys: ["home", "ctrl+a"],
+		defaultKeys: "home",
 		description: "Move to line start",
 	},
 	"tui.editor.cursorLineEnd": {
 		defaultKeys: ["end", "ctrl+e"],
 		description: "Move to line end",
+	},
+	"tui.editor.selectAll": {
+		defaultKeys: "ctrl+a",
+		description: "Select all",
 	},
 	"tui.editor.jumpForward": {
 		defaultKeys: "ctrl+]",
