@@ -180,14 +180,14 @@ describe("- with payload treated as replacement", () => {
 // Fix 3: Stale hash returns corrected input
 // ============================================================
 describe("stale hash correction returns corrected input", () => {
-	it("returns correctedInput when cache is partial and content changed", async () => {
+	it("returns correctedInput when cache is full and content changed", async () => {
 		await withTempDir(async tempDir => {
 			const filePath = path.join(tempDir, "a.ts");
 			const v0Lines = Array.from({ length: 10 }, (_, idx) => `L${idx + 1}`);
 			await Bun.write(filePath, `${v0Lines.join("\n")}\n`);
 			const session = makeSession(tempDir);
-			// Partial cache — only first 3 lines.
-			getFileReadCache(session).recordContiguous(filePath, 1, v0Lines.slice(0, 3));
+			// Full cache — shiftMap will be available for accurate remapping.
+			getFileReadCache(session).recordFullFile(filePath, v0Lines.join("\n"));
 
 			// External change to line 6 content.
 			const v1Lines = [...v0Lines];
@@ -216,7 +216,6 @@ describe("stale hash correction returns corrected input", () => {
 		});
 	});
 });
-
 // ============================================================
 // Fix 4: No tier 3 (function should not exist)
 // ============================================================

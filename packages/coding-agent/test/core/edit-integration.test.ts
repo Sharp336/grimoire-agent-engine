@@ -181,14 +181,14 @@ describe("edit recovery integration", () => {
 		});
 	});
 
-	it("partial snapshot rejected — returns correctedInput, disk unchanged", async () => {
+	it("full cache snapshot — returns correctedInput with accurate hash, disk unchanged", async () => {
 		await withTempDir(async td => {
 			const fp = path.join(td, "a.ts");
 			const v0 = ["L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"];
 			await Bun.write(fp, `${v0.join("\n")}\n`);
 
 			const session = makeSession(td);
-			getFileReadCache(session).recordContiguous(fp, 1, v0.slice(0, 3));
+			getFileReadCache(session).recordFullFile(fp, v0.join("\n"));
 
 			const v1 = [...v0];
 			v1[5] = "L6-CHANGED";
@@ -209,12 +209,15 @@ describe("edit recovery integration", () => {
 		});
 	});
 
-	it("no cache — returns correctedInput with fixed anchors", async () => {
+	it("full cache — returns correctedInput with fixed anchors", async () => {
 		await withTempDir(async td => {
 			const fp = path.join(td, "a.ts");
-			await Bun.write(fp, "hello\nworld\nfoo\nbar\n");
+			const content = "hello\nworld\nfoo\nbar";
+			await Bun.write(fp, `${content}\n`);
 
 			const session = makeSession(td);
+			getFileReadCache(session).recordFullFile(fp, content);
+
 			const wrongHash = "xx";
 			const input = `§a.ts\n≔3${wrongHash}..3${wrongHash}\n${pl("REPLACED")}\n`;
 			const result = await executeHashlineSingle(makeOptions(td, input, session));
@@ -256,14 +259,18 @@ describe("edit recovery integration", () => {
 	it("repeated failures on same path both produce correctedInput", async () => {
 		await withTempDir(async td => {
 			const fp = path.join(td, "a.ts");
-			await Bun.write(fp, "alpha\nbeta\ngamma\n");
+			const content = "alpha\nbeta\ngamma";
+			await Bun.write(fp, `${content}\n`);
 
 			const session = makeSession(td);
+			getFileReadCache(session).recordFullFile(fp, content);
 			const input = `§a.ts\n≔${sameLineRange(tag(2, "WRONG-CONTENT"))}\n${pl("BAD-EDIT")}\n`;
 
 			const r1 = await executeHashlineSingle(makeOptions(td, input, session));
 			expect(typeof r1.details?.correctedInput).toBe("string");
 
+			// Re-seed cache after first call may have updated it
+			getFileReadCache(session).recordFullFile(fp, content);
 			const r2 = await executeHashlineSingle(makeOptions(td, input, session));
 			expect(typeof r2.details?.correctedInput).toBe("string");
 
@@ -1372,5 +1379,168 @@ describe("performance / no‑deadlock checks", () => {
 		expect(lines[3]).toBe("mid-after");
 		expect(lines[4]).toBe("three");
 		expect(lines[5]).toBe("post");
+	});
+});
+
+// ============================================================
+// Bug 1 regression: no shiftMap → no silent remap (force re-read)
+// ============================================================
+describe("Bug 1: no shiftMap prevents silent wrong remap", () => {
+	it("no cache → correctedInput has stale anchors (not remapped to wrong line)", async () => {
+		await withTempDir(async td => {
+			const fp = path.join(td, "a.ts");
+			const v0 = "line1\nline2\nline3\nline4\nline5";
+			await Bun.write(fp, `${v0}\n`);
+			const session = makeSession(td);
+
+			// File changed externally (line inserted at top) — no cache entry
+			const v1 = "new-top\nline1\nline2\nline3\nline4\nline5";
+			await Bun.write(fp, `${v1}\n`);
+
+			// Stale anchor referencing line 3 ("line3" in v0, now shifted to line 4 in v1)
+			const staleAnchor = tag(3, "line3");
+			const input = `§a.ts\n≔${staleAnchor}..${staleAnchor}\n${pl("REPLACED")}\n`;
+			const result = await executeHashlineSingle(makeOptions(td, input, session));
+
+			// Without a cached fullContent (shiftMap), the error must NOT silently
+			// remap the anchor to the content now at line 3 ("line2").  The correctedInput
+			// retains the original stale anchor — forcing a re-read.
+			expect(result.isError).toBe(true);
+			const corrected = result.details?.correctedInput ?? "";
+			// Should NOT contain a hash for "line2" (which is now at line 3)
+			const wrongHash = computeLineHash(3, "line2");
+			expect(corrected).not.toContain(`3${wrongHash}`);
+		});
+	});
+
+	it("partial cache → correctedInput has stale anchors", async () => {
+		await withTempDir(async td => {
+			const fp = path.join(td, "a.ts");
+			const v0 = "alpha\nbeta\ngamma\ndelta";
+			await Bun.write(fp, `${v0}\n`);
+			const session = makeSession(td);
+
+			// Partial cache — no fullContent → shiftMap will be undefined
+			const cache = getFileReadCache(session);
+			cache.recordContiguous(fp, 1, v0.split("\n"));
+			cache.invalidateFullContent(fp);
+
+			// File changed externally (line prepended)
+			const v1 = "extra\nalpha\nbeta\ngamma\ndelta";
+			await Bun.write(fp, `${v1}\n`);
+
+			// Stale anchor for "gamma" (was line 3, now line 4)
+			const staleAnchor = tag(3, "gamma");
+			const input = `§a.ts\n≔${staleAnchor}..${staleAnchor}\n${pl("REPLACED")}\n`;
+			const result = await executeHashlineSingle(makeOptions(td, input, session));
+
+			expect(result.isError).toBe(true);
+			// Must NOT remap to content now at line 3 ("beta")
+			const wrongHash = computeLineHash(3, "beta");
+			expect(result.details?.correctedInput ?? "").not.toContain(`3${wrongHash}`);
+		});
+	});
+
+	it("full cache with shifted lines → auto-shift applies edit correctly", async () => {
+		await withTempDir(async td => {
+			const fp = path.join(td, "a.ts");
+			const v0 = "alpha\nbeta\ngamma\ndelta";
+			await Bun.write(fp, `${v0}\n`);
+			const session = makeSession(td);
+
+			// Full cache with v0 content
+			getFileReadCache(session).recordFullFile(fp, v0);
+
+			// File changed externally (line inserted at top)
+			const v1 = "extra\nalpha\nbeta\ngamma\ndelta";
+			await Bun.write(fp, `${v1}\n`);
+
+			// Stale anchor for "gamma" (was line 3, now line 4)
+			const staleAnchor = tag(3, "gamma");
+			const input = `§a.ts\n≔${staleAnchor}..${staleAnchor}\n${pl("REPLACED")}\n`;
+			const result = await executeHashlineSingle(makeOptions(td, input, session));
+
+			// With a full cache, shift recovery works → edit applied via auto-shift
+			expect(result.isError).toBeFalsy();
+			expect(result.details?.diff).toBeTruthy();
+			const disk = await readFile(fp);
+			expect(disk).toContain("REPLACED");
+		});
+	});
+});
+
+// ============================================================
+// Bug 2 regression: corrected retry excludes already-applied sections
+// ============================================================
+describe("Bug 2: multi-section corrected block excludes applied sections", () => {
+	it("writethrough modifies b.ts after a.ts applied → correctedInput excludes a.ts", async () => {
+		await withTempDir(async td => {
+			const fpA = path.join(td, "a.ts");
+			const fpB = path.join(td, "b.ts");
+			const fpC = path.join(td, "c.ts");
+			await Bun.write(fpA, "aaa\nbbb\nccc\n");
+			await Bun.write(fpB, "b1\nb2\nb3\n");
+			await Bun.write(fpC, "c1\nc2\nc3\n");
+
+			const session = makeSession(td);
+			getFileReadCache(session).recordFullFile(fpA, "aaa\nbbb\nccc");
+			getFileReadCache(session).recordFullFile(fpB, "b1\nb2\nb3");
+			getFileReadCache(session).recordFullFile(fpC, "c1\nc2\nc3");
+
+			const input = [
+				`§a.ts`,
+				`≔${tag(2, "bbb")}..${tag(2, "bbb")}`,
+				pl("BBB"),
+				`§b.ts`,
+				`≔${tag(2, "b2")}..${tag(2, "b2")}`,
+				pl("b2-new"),
+				`§c.ts`,
+				`≔${tag(2, "c2")}..${tag(2, "c2")}`,
+				pl("c2-new"),
+			].join("\n");
+
+			const opts = makeOptions(td, input, session);
+			// Custom writethrough: modify b.ts when writing a.ts
+			opts.writethrough = async (dst, content) => {
+				await Bun.write(dst, content);
+				if (dst === fpA) {
+					await Bun.write(fpB, "b1\nb2-modified-out-of-band\nb3\n");
+				}
+				return undefined;
+			};
+
+			const result = await executeHashlineSingle(opts);
+
+			expect(result.isError).toBe(true);
+
+			// correctedInput must NOT contain §a.ts — only §b.ts and §c.ts
+			const corrected = result.details?.correctedInput ?? "";
+			expect(corrected).not.toContain("§a.ts");
+			expect(corrected).toContain("§b.ts");
+			expect(corrected).toContain("§c.ts");
+
+			// perFileResults: first entry is a.ts (success), rest are error/skipped
+			const pfr = result.details?.perFileResults ?? [];
+			expect(pfr.length).toBe(3);
+
+			// a.ts was applied successfully
+			expect(pfr[0].path).toContain("a.ts");
+			expect(pfr[0].isError).toBeFalsy();
+			expect(pfr[0].diff).toBeTruthy();
+
+			// b.ts is the failed section
+			expect(pfr[1].path).toContain("b.ts");
+			expect(pfr[1].isError).toBe(true);
+
+			// c.ts was skipped
+			expect(pfr[2].path).toContain("c.ts");
+			expect(pfr[2].isError).toBe(true);
+			expect(pfr[2].displayErrorText).toContain("Skipped");
+
+			// Verify disk: a.ts was written, c.ts was NOT written (aborted)
+			expect(await readFile(fpA)).toContain("BBB");
+			const cContent = await Bun.file(fpC).text();
+			expect(cContent).toBe("c1\nc2\nc3\n");
+		});
 	});
 });

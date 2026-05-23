@@ -346,14 +346,19 @@ function applyHashlineEditsWithRecovery(
 				origHash = edit.cursor.anchor.hash;
 			}
 			if (origLine !== undefined && origHash !== undefined) {
-				const newLine = shiftMap ? shiftMap.get(origLine) : origLine;
+				// Without a shiftMap (no cached fullContent), we cannot safely remap
+				// anchors — the line may have shifted to a different position.  Skip
+				// remapping entirely so the error propagates without a corrected block,
+				// forcing the caller to re-read the file for fresh anchors.
+				if (!shiftMap) continue;
+				const newLine = shiftMap.get(origLine);
 				if (newLine !== undefined) {
+					// Line shifted to a new position — remap with current content hash.
 					const actualHash = computeLineHash(newLine, currentLines[newLine - 1] ?? "");
 					customRemaps.set(`${origLine}${origHash}`, `${newLine}${actualHash}`);
 				} else if (
-					shiftMap &&
-					(origLine > currentLines.length ||
-						Array.from(shiftMap.entries()).some(([k, v]) => v === origLine && k !== origLine))
+					origLine > currentLines.length ||
+					Array.from(shiftMap.entries()).some(([k, v]) => v === origLine && k !== origLine)
 				) {
 					// Line was truly deleted (file shrank or another line shifted into this position).
 					// Leave anchor unmapped so retries fail and force a re-read.
@@ -604,34 +609,58 @@ export async function executeHashlineSingle(
 		}
 	} catch (err) {
 		if (err instanceof HashlineMismatchError) {
-			const correctedSections = sections.map(section => {
+			// Only include the failed section and sections not yet attempted.
+			// Already-applied sections must be excluded so the corrected block
+			// does not replay them and duplicate insert/append edits.
+			const failedIndex = sections.findIndex(s => s.path === activePath);
+			const remainingSections = sections.slice(failedIndex);
+
+			const correctedSections = remainingSections.map(section => {
 				const body = section.path === activePath ? buildCorrectedEdit(err.remaps, section.diff) : section.diff;
 				return `§${section.path}\n${body}`;
 			});
 			const combinedCorrectedInput = correctedSections.join("\n\n");
 			const text = `${err.message}\n\nCorrected edit block:\n${combinedCorrectedInput}\n\nUse this corrected edit or re-read the files for fresh anchors.`;
+
+			// Build perFileResults: already-applied sections show their real results,
+			// remaining sections show error/skipped status.
+			const appliedResults = results.map(({ path: resultPath, result }) => {
+				const details = getEditDetails(result);
+				return {
+					path: resultPath,
+					diff: details.diff,
+					firstChangedLine: details.firstChangedLine,
+					diagnostics: details.diagnostics,
+					op: details.op,
+					isError: result.isError,
+					errorText: details.errorText,
+					displayErrorText: details.displayErrorText,
+				};
+			});
+			const remainingResults = remainingSections.map(section => {
+				const isFailed = section.path === activePath;
+				return {
+					path: section.path,
+					diff: "",
+					op: "update" as const,
+					isError: true,
+					errorText: isFailed ? err.message : undefined,
+					displayErrorText: isFailed
+						? err.displayMessage
+						: "Skipped: batch aborted due to a mismatch in a preceding section",
+					correctedInput: isFailed
+						? `§${section.path}\n${buildCorrectedEdit(err.remaps, section.diff)}`
+						: undefined,
+				};
+			});
+
 			return {
 				isError: true,
 				content: [{ type: "text", text }],
 				details: {
 					diff: "",
 					correctedInput: combinedCorrectedInput,
-					perFileResults: sections.map(section => {
-						const isFailed = section.path === activePath;
-						return {
-							path: section.path,
-							diff: "",
-							op: "update",
-							isError: true,
-							errorText: isFailed ? err.message : undefined,
-							displayErrorText: isFailed
-								? err.displayMessage
-								: "Skipped: batch aborted due to a mismatch in a preceding section",
-							correctedInput: isFailed
-								? `§${section.path}\n${buildCorrectedEdit(err.remaps, section.diff)}`
-								: undefined,
-						};
-					}),
+					perFileResults: [...appliedResults, ...remainingResults],
 				},
 			};
 		}
