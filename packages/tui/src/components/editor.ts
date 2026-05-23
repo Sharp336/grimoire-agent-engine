@@ -918,7 +918,19 @@ export class Editor implements Component, Focusable {
 
 	handleInput(data: string): void {
 		const kb = getKeybindings();
-		const shiftHeld = data.startsWith("\x1b[") && (data.includes(";2") || data.includes(":2"));
+		const shiftHeld = ((): boolean => {
+			if (!data.startsWith("\x1b[")) return false;
+			// Kitty protocol: \x1b[...:MOD..., Shift=bit 0 (value 1)
+			const colonM = data.match(/:(\d+)/);
+			if (colonM) return (parseInt(colonM[1]!, 10) & 1) !== 0;
+			// xterm modifyOtherKeys: \x1b[...;MOD LETTER, Shift is 2/4/6/8
+			const semiM = data.match(/;(\d+)[A-Za-z~]/);
+			if (semiM) {
+				const mod = parseInt(semiM[1]!, 10);
+				return mod >= 2 && mod % 2 === 0;
+			}
+			return false;
+		})();
 
 		// Handle character jump mode (awaiting next character to jump to)
 		if (this.#jumpMode !== null) {
@@ -1244,12 +1256,14 @@ export class Editor implements Component, Focusable {
 		else if (kb.matches(data, "tui.editor.deleteCharForward") || matchesKey(data, "shift+delete")) {
 			this.#handleForwardDelete();
 		}
-		// Word navigation (Option/Alt + Arrow or Ctrl + Arrow)
-		else if (kb.matches(data, "tui.editor.cursorWordLeft")) {
+		// Word navigation (Option/Alt + Arrow or Ctrl + Arrow).
+		// Explicit shift+ctrl/alt+arrow variants for selection extension
+		// since kb.matches won't match modified keys against base bindings.
+		else if (kb.matches(data, "tui.editor.cursorWordLeft") || matchesKey(data, "shift+ctrl+left") || matchesKey(data, "shift+alt+left")) {
 			// Word left
 			this.#resetKillSequence();
 			this.#withShiftAwareMove(() => this.#moveWordBackwards(), shiftHeld);
-		} else if (kb.matches(data, "tui.editor.cursorWordRight")) {
+		} else if (kb.matches(data, "tui.editor.cursorWordRight") || matchesKey(data, "shift+ctrl+right") || matchesKey(data, "shift+alt+right")) {
 			// Word right
 			this.#resetKillSequence();
 			this.#withShiftAwareMove(() => this.#moveWordForwards(), shiftHeld);
