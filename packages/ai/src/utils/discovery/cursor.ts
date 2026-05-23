@@ -310,27 +310,41 @@ export function applyCursorDiscoveredModelPolicy(model: Model<"cursor-agent">): 
 	if (!isCursorMaxCapableModel(model)) {
 		return model;
 	}
+	// Derive the base (no-MAX) window. Only correct the two values we know are
+	// wrong: the generic discovery default, and stale static/cache entries that
+	// advertised the 1M MAX window as the normal context window. Any other
+	// explicit window is preserved as the real base so a future Cursor variant
+	// shipping a different base isn't silently clobbered to 272k.
+	const baseContextWindow =
+		model.contextWindow === DEFAULT_CONTEXT_WINDOW ||
+		model.contextWindow === CURSOR_ONE_MILLION_EXTENDED_CONTEXT_WINDOW
+			? CURSOR_ONE_MILLION_BASE_CONTEXT_WINDOW
+			: model.contextWindow;
+	const baseMaxTokens =
+		model.maxTokens === DEFAULT_MAX_TOKENS || model.maxTokens === CURSOR_ONE_MILLION_EXTENDED_MAX_TOKENS
+			? CURSOR_ONE_MILLION_BASE_MAX_TOKENS
+			: model.maxTokens;
 	// Already correctly decorated — return the same reference so repeated calls
 	// (e.g. `#applyRuntimeProviderOverrides` on every registry mutation, or
 	// `modelPostProcess` on every resolveProviderModels call) don't allocate.
 	if (
-		model.contextWindow === CURSOR_ONE_MILLION_BASE_CONTEXT_WINDOW &&
-		model.maxTokens === CURSOR_ONE_MILLION_BASE_MAX_TOKENS &&
-		model.extendedContext !== undefined
+		model.contextWindow === baseContextWindow &&
+		model.maxTokens === baseMaxTokens &&
+		model.extendedContext !== undefined &&
+		model.extendedContext.baseContextWindow === baseContextWindow &&
+		model.extendedContext.baseMaxTokens === baseMaxTokens
 	) {
 		return model;
 	}
 	return {
 		...model,
-		// Base window without MAX mode. Clamp stale static/cache entries that used
-		// to advertise the 1M MAX window as the normal context window.
-		contextWindow: CURSOR_ONE_MILLION_BASE_CONTEXT_WINDOW,
-		maxTokens: CURSOR_ONE_MILLION_BASE_MAX_TOKENS,
+		contextWindow: baseContextWindow,
+		maxTokens: baseMaxTokens,
 		extendedContext: {
 			contextWindow: CURSOR_ONE_MILLION_EXTENDED_CONTEXT_WINDOW,
 			maxTokens: CURSOR_ONE_MILLION_EXTENDED_MAX_TOKENS,
-			baseContextWindow: CURSOR_ONE_MILLION_BASE_CONTEXT_WINDOW,
-			baseMaxTokens: CURSOR_ONE_MILLION_BASE_MAX_TOKENS,
+			baseContextWindow,
+			baseMaxTokens,
 		},
 	};
 }
