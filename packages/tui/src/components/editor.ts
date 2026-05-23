@@ -1978,7 +1978,9 @@ export class Editor implements Component, Focusable {
 	}
 
 	#hasSelection(): boolean {
-		return this.#state.selStartLine !== -1;
+		if (this.#state.selStartLine === -1) return false;
+		// Collapsed selection (anchor == caret) is not a real selection
+		return this.#state.selStartLine !== this.#state.selEndLine || this.#state.selStartCol !== this.#state.selEndCol;
 	}
 
 	/** Public accessor for parent components to check selection state. */
