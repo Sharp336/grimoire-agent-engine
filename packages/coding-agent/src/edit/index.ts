@@ -286,6 +286,8 @@ export class EditTool implements AgentTool<TInput> {
 	readonly #editMode?: EditMode;
 	readonly #vimTool: VimTool;
 	readonly #pendingDeferredFetches = new Map<string, AbortController>();
+	/** Tracks consecutive edit failures per path across the session. Reset on success. */
+	readonly #consecutiveFailures = new Map<string, number>();
 
 	constructor(private readonly session: ToolSession) {
 		const {
@@ -413,7 +415,7 @@ export class EditTool implements AgentTool<TInput> {
 			hashline: {
 				description: () => prompt.render(hashlineDescription),
 				parameters: hashlineEditParamsSchema,
-				execute: (
+				execute: async (
 					tool: EditTool,
 					params: EditParams,
 					signal: AbortSignal | undefined,
@@ -421,7 +423,7 @@ export class EditTool implements AgentTool<TInput> {
 					_onUpdate?: (partialResult: AgentToolResult<EditToolDetails, TInput>) => void,
 				) => {
 					const { input, path } = params as HashlineParams & { path?: string };
-					return executeHashlineSingle({
+					const result = await executeHashlineSingle({
 						session: tool.session,
 						input,
 						path,
@@ -430,6 +432,56 @@ export class EditTool implements AgentTool<TInput> {
 						writethrough: tool.#writethrough,
 						beginDeferredDiagnosticsForPath: p => tool.#beginDeferredDiagnosticsForPath(p),
 					});
+
+					const perFileResults = result.details?.perFileResults;
+					const hasFailure = result.details?.correctedInput || perFileResults?.some(r => r.correctedInput);
+					if (hasFailure) {
+						// Failure — increment consecutive failure count per affected path
+						if (perFileResults?.length) {
+							for (const r of perFileResults) {
+								if (r.correctedInput) {
+									const p = r.path ?? "unknown";
+									const failures = (tool.#consecutiveFailures.get(p) ?? 0) + 1;
+									tool.#consecutiveFailures.set(p, failures);
+								}
+							}
+						} else {
+							const p = result.details?.path ?? path ?? "unknown";
+							const failures = (tool.#consecutiveFailures.get(p) ?? 0) + 1;
+							tool.#consecutiveFailures.set(p, failures);
+						}
+
+						// Append escalation message if threshold reached for any path
+						let escalationMsg = "";
+						const failedPaths = perFileResults?.filter(r => r.correctedInput).map(r => r.path ?? "unknown") ?? [
+							result.details?.path ?? path ?? "unknown",
+						];
+						const maxFailures = Math.max(...failedPaths.map(p => tool.#consecutiveFailures.get(p) ?? 0), 0);
+						if (maxFailures >= 3) {
+							escalationMsg =
+								"\n\nThe edit tool has rejected anchors for this file 3 times. Consider using patch mode or re-reading the file to get completely fresh anchors.";
+						} else if (maxFailures >= 2) {
+							escalationMsg =
+								"\n\nThe edit tool has rejected anchors for this file twice. Run `read` on the file to get fresh anchors before editing.";
+						}
+
+						if (escalationMsg) {
+							const text = result.content?.[0]?.type === "text" ? result.content[0].text : "";
+							result.content = [{ type: "text", text: text + escalationMsg }];
+						}
+					} else {
+						// Success — reset failure count for all paths in the result
+						if (perFileResults?.length) {
+							for (const r of perFileResults) {
+								if (r.path) tool.#consecutiveFailures.delete(r.path);
+							}
+						} else {
+							const p = result.details?.path ?? path;
+							if (p) tool.#consecutiveFailures.delete(p);
+						}
+					}
+
+					return result;
 				},
 			},
 			replace: {

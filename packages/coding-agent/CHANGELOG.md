@@ -61,6 +61,22 @@
 - Fixed `RULES.md` not being injected. The documented sticky-rules file at `~/.omp/agent/RULES.md` and `<repo>/.omp/RULES.md` was never read by any discovery provider; only `.omp/rules/*.md` was scanned. The native provider now loads both as always-apply rules so they re-attach every turn as documented ([#1266](https://github.com/can1357/oh-my-pi/issues/1266)).
 
 ## [15.2.1] - 2026-05-21
+### Added
+
+- Added tiered stale-anchor recovery for hashline edit tool: direct apply (fast path), and anchor pre-shift via structured diff when the file changed structurally since the last read. When recovery is impossible, corrected anchors are returned inline so the model can retry without re-reading.
+- Added bare line-number anchor resolution from the read cache so stale-anchor detection works even when the model writes bare line numbers (`+ 5`) instead of full anchors (`+ 5ab`).
+- Added coherent input feedback: `HashlineMismatchError` now includes `Corrected anchors: 3ab → 3cd` and `buildCorrectedEdit()` rewrites the input string with corrected hashes for direct retry.
+- Added `FileReadSnapshot.fullContent` / `.isPartial` fields and `FileReadCache.recordFullFile()` to distinguish full-file reads from partial snapshots, enabling the pre-shift recovery to reject partial snapshots.
+- Added comprehensive test suites for recovery logic (`hashline-anchor-recovery.test.ts`), integration scenarios (`edit-integration.test.ts`), targeted fix verification (`edit-fix-verification.test.ts`), and apply-edge-case coverage (`edit-apply.test.ts`).
+
+### Changed
+
+- Changed parser to accept bare line-number anchors (`5`, `42`) alongside full `5ab` anchors.
+- Changed parser: `- A..B ~payload` is now treated as a replacement (equivalent to `= A..B`), not an error.
+- Changed parser: `= A..B` with no payload now throws (use `- A..B` to delete instead).
+- Changed parser `collectPayload()` to preserve trailing whitespace in payload lines (removed `trimEnd()`).
+- Changed stale-anchor recovery from auto-applying via 3-way merge (`recovery.ts`) to returning corrected anchors inline, letting the model retry explicitly rather than risking silent wrong-content merges.
+- Updated hashline prompt to reflect correct rejection behavior and remove stale instructions about `|TEXT` body copying.
 
 ### Fixed
 

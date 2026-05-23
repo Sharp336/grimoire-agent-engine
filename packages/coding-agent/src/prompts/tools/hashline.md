@@ -120,11 +120,13 @@ const DEBUG = false;
 </anti-pattern>
 
 <critical>
-- Copy anchors verbatim (line number + 2-char hash); NEVER include the `|TEXT` body.
-- NEVER write unified diff syntax. Headers are `§PATH`; ops are `»`/`«`/`≔`.
+- Always copy anchors exactly from tool output, but NEVER include line content after the `|TEXT` body in the op line.
+- NEVER write standard unified diff syntax (`---`/`+++`/`@@`/`-`/`+`). Use this tool's native syntax: `§PATH` headers and `»`/`«`/`≔` ops.
 - `≔A..B` deletes the range when no payload follows. To keep a blank line, include one explicit empty payload line.
 - `≔A..B` with payload writes exactly that payload. Edge line matches just outside? Widen, or it duplicates.
 - Multiple ops are cheap. SHOULD prefer two narrow ops over one wide `≔`.
   - Before `≔A..B`, mentally delete A..B. Splits an unclosed bracket/brace/string from above, or orphans a closer inside? You're bisecting a construct.
 - NEVER use this tool to reformat code (indentation, whitespace, line wrapping, style). Run the project's formatter instead.
+- If your edit is rejected, use the corrected anchors provided in the error message. Do not re-use the stale anchors from your previous attempt.
+- After a successful edit to a file, re-read the file before editing it again in the same turn.
 </critical>

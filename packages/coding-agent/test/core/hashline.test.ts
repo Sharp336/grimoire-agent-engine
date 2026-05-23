@@ -5,8 +5,10 @@ import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	applyHashlineEdits,
+	BEGIN_PATCH_MARKER,
 	buildCompactHashlineDiffPreview,
 	computeLineHash,
+	END_PATCH_MARKER,
 	type ExecuteHashlineSingleOptions,
 	executeHashlineSingle,
 	FileReadCache,
@@ -18,9 +20,9 @@ import {
 	hashlineEditParamsSchema,
 	parseHashline,
 	parseHashlineWithWarnings,
+	RANGE_INTERIOR_HASH,
 	splitHashlineInput,
 	splitHashlineInputs,
-	tryRecoverHashlineWithCache,
 } from "@oh-my-pi/pi-coding-agent/edit";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
@@ -119,7 +121,6 @@ describe("hashline parser — block op syntax", () => {
 		const diff = `≔${sameLineRange(tag(2, "bbb"))}\n\n`;
 		expect(applyDiff(content, diff)).toBe("aaa\n\nccc");
 	});
-
 	it("replaces one line or an inclusive range with payload lines", () => {
 		const single = [`≔${tag(2, "bbb")}`, pl("BBB")].join("\n");
 		expect(applyDiff(content, single)).toBe("aaa\nBBB\nccc");
@@ -339,7 +340,7 @@ describe("hashline parser — block op syntax", () => {
 	});
 
 	it("rejects missing payloads and orphan payload lines", () => {
-		expect(() => parseHashline(`»${tag(1, "aaa")}`)).toThrow(/require at least one/);
+		expect(() => parseHashline(`»${tag(1, "aaa")}`)).toThrow(/require at least one verbatim payload line/);
 		expect(() => parseHashline(pl("orphan"))).toThrow(/payload line has no preceding/);
 	});
 
@@ -493,9 +494,9 @@ describe("hashline executor", () => {
 				pl("BBB"),
 			].join("\n");
 
-			await expect(executeHashlineSingle(hashlineExecuteOptions(tempDir, input))).rejects.toThrow(
-				/anchor(s)? do(es)? not match the current file/,
-			);
+			const result = await executeHashlineSingle(hashlineExecuteOptions(tempDir, input));
+			expect(result.isError).toBe(true);
+			expect(result.details?.correctedInput).toBeTruthy();
 			expect(await Bun.file(aPath).text()).toBe("aaa\n");
 			expect(await Bun.file(bPath).text()).toBe("bbb\n");
 		});
@@ -559,6 +560,380 @@ describe("hashline executor", () => {
 	});
 });
 
+describe("bare line number anchors", () => {
+	it("accepts bare line number in parseHashline (empty hash)", () => {
+		const input = `» 5\n${pl("hello")}`;
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(warnings).toEqual([]);
+		expect(edits).toHaveLength(1);
+		expect(edits[0].kind).toBe("insert");
+		if (edits[0].kind === "insert") {
+			expect(edits[0].cursor.kind).toBe("after_anchor");
+			if (edits[0].cursor.kind === "after_anchor") {
+				expect(edits[0].cursor.anchor.line).toBe(5);
+				expect(edits[0].cursor.anchor.hash).toBe("");
+			}
+		}
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("hello");
+	});
+
+	it("accepts bare line number in delete op (empty hash)", () => {
+		const input = "≔3..5";
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(warnings).toEqual([]);
+		expect(edits).toHaveLength(3);
+		expect(edits[0].kind === "delete" ? edits[0].anchor.hash : undefined).toBe("");
+		expect(edits[1].kind === "delete" ? edits[1].anchor.hash : undefined).toBe(RANGE_INTERIOR_HASH);
+		expect(edits[2].kind === "delete" ? edits[2].anchor.hash : undefined).toBe("");
+	});
+
+	it("bare line anchor rejected by applyHashlineEdits (no cache)", () => {
+		const edits = [
+			{
+				kind: "insert" as const,
+				cursor: { kind: "after_anchor" as const, anchor: { line: 2, hash: "" } },
+				text: "replacement",
+				lineNum: 1,
+				index: 0,
+			},
+		];
+		expect(() => applyHashlineEdits("line1\nline2\nline3", edits)).toThrow(
+			/bare line number with no cached snapshot/i,
+		);
+	});
+
+	it("bare line anchor works after hash resolution via computeLineHash", () => {
+		const content = "alpha\nbeta\ngamma\n";
+		const lines = content.split("\n");
+		const hash2 = computeLineHash(2, lines[1] ?? "");
+		const edits = [
+			{
+				kind: "insert" as const,
+				cursor: { kind: "after_anchor" as const, anchor: { line: 2, hash: hash2 } },
+				text: "inserted",
+				lineNum: 1,
+				index: 0,
+			},
+		];
+		const result = applyHashlineEdits(content, edits);
+		expect(result.lines).toBe("alpha\nbeta\ninserted\ngamma\n");
+	});
+
+	it("bare delete range anchor works after hash resolution", () => {
+		const content = "a\nb\nc\nd\n";
+		const lines = content.split("\n");
+		const hash1 = computeLineHash(1, lines[0] ?? "");
+		const hash3 = computeLineHash(3, lines[2] ?? "");
+		const edits = [
+			{ kind: "delete" as const, anchor: { line: 1, hash: hash1 }, lineNum: 1, index: 0 },
+			{ kind: "delete" as const, anchor: { line: 2, hash: RANGE_INTERIOR_HASH }, lineNum: 1, index: 1 },
+			{ kind: "delete" as const, anchor: { line: 3, hash: hash3 }, lineNum: 1, index: 2 },
+		];
+		const result = applyHashlineEdits(content, edits);
+		expect(result.lines).toBe("d\n");
+	});
+
+	it("bare anchor with out-of-bounds line throws from applyHashlineEdits", () => {
+		const edits = [
+			{
+				kind: "insert" as const,
+				cursor: { kind: "before_anchor" as const, anchor: { line: 999, hash: "aa" } },
+				text: "x",
+				lineNum: 1,
+				index: 0,
+			},
+		];
+		expect(() => applyHashlineEdits("short", edits)).toThrow(/does not exist/i);
+	});
+});
+
+describe("malformed op lines", () => {
+	it("+ with no anchor throws", () => {
+		const input = "+";
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/payload line has no preceding/i);
+	});
+
+	it("+ with only whitespace after throws", () => {
+		const input = "+   ";
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/payload line has no preceding/i);
+	});
+
+	it("= with invalid anchor format throws", () => {
+		const input = "≔abc..def";
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/expected a full anchor/i);
+	});
+
+	it("- with no anchor throws", () => {
+		const input = "≔";
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/unrecognized op/i);
+	});
+
+	it("< with no anchor throws", () => {
+		const input = "<";
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/payload line has no preceding/i);
+	});
+
+	it("blank lines between ops are silently skipped", () => {
+		const input = `» 5ab\n${pl("a")}\n\n\n≔10cd..12cd`;
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(warnings).toEqual([]);
+		expect(edits).toHaveLength(6);
+	});
+
+	it("whitespace-only lines between ops are silently skipped", () => {
+		const input = `» 5ab\n${pl("a")}\n   \n\t\n≔10cd..12cd`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits).toHaveLength(6);
+	});
+
+	it("invalid op character throws", () => {
+		const input = "% 5ab";
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/payload line has no preceding/i);
+	});
+
+	it("* op is unrecognized and throws", () => {
+		const input = "* 5ab";
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/payload line has no preceding/i);
+	});
+});
+
+describe("payload edge cases", () => {
+	it("multiple ~ lines after single + op are all collected", () => {
+		const input = `» 5ab\n${pl("a")}\n${pl("b")}\n${pl("c")}`;
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(warnings).toEqual([]);
+		expect(edits).toHaveLength(3);
+		expect(edits.map(e => (e.kind === "insert" ? e.text : ""))).toEqual(["a", "b", "c"]);
+	});
+
+	it("empty payload after » is rejected", () => {
+		const input = `» 5ab\n`;
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/require at least one verbatim payload line/);
+	});
+
+	it("- A..B with ~ lines is treated as replacement", () => {
+		const input = `≔ 3ab..5cd\n${pl("new1")}\n${pl("new2")}`;
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(warnings).toEqual([]);
+		expect(edits).toHaveLength(5);
+		expect(edits[0].kind).toBe("insert");
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("new1");
+		expect(edits[1].kind).toBe("insert");
+		expect(edits[1].kind === "insert" ? edits[1].text : undefined).toBe("new2");
+		expect(edits[2].kind).toBe("delete");
+		expect(edits[3].kind).toBe("delete");
+		expect(edits[4].kind).toBe("delete");
+	});
+
+	it("- A..B with no ~ lines is a plain delete", () => {
+		const input = "≔3ab..5cd";
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(warnings).toEqual([]);
+		expect(edits).toHaveLength(3);
+		for (const e of edits) expect(e.kind).toBe("delete");
+	});
+
+	it("multiple consecutive bare blank lines after + are collected as empty payloads", () => {
+		const input = `» 5ab\n\n\n\n${pl("after")}`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits).toHaveLength(4);
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("");
+		expect(edits[1].kind === "insert" ? edits[1].text : undefined).toBe("");
+		expect(edits[2].kind === "insert" ? edits[2].text : undefined).toBe("");
+		expect(edits[3].kind === "insert" ? edits[3].text : undefined).toBe("after");
+	});
+});
+
+describe("range syntax", () => {
+	it("= 5..5 single-line range is valid (replaces one line)", () => {
+		const input = `≔ 5ab..5ab\n${pl("new")}`;
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(warnings).toEqual([]);
+		expect(edits).toHaveLength(2);
+		expect(edits[0].kind).toBe("insert");
+		expect(edits[1].kind).toBe("delete");
+	});
+
+	it("- 10..5 inverted range throws error", () => {
+		const input = "≔10ab..5cd";
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/ends before it starts/i);
+	});
+
+	it("= 1..99999 out-of-bounds range is accepted by parser (errors at apply time)", () => {
+		const input = `≔ 1ab..99999cd\n${pl("oof")}`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits.length).toBeGreaterThan(0);
+	});
+
+	it("»EOF inserts at end", () => {
+		const input = `» EOF\n${pl("tail")}`;
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(warnings).toEqual([]);
+		expect(edits).toHaveLength(1);
+		expect(edits[0].kind).toBe("insert");
+		if (edits[0].kind === "insert") {
+			expect(edits[0].cursor.kind).toBe("eof");
+		}
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("tail");
+	});
+
+	it("«BOF inserts at beginning", () => {
+		const input = `« BOF\n${pl("head")}`;
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(warnings).toEqual([]);
+		expect(edits).toHaveLength(1);
+		expect(edits[0].kind).toBe("insert");
+		if (edits[0].kind === "insert") {
+			expect(edits[0].cursor.kind).toBe("bof");
+		}
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("head");
+	});
+
+	it("range with three segments (multiple ..) throws", () => {
+		const input = "≔5ab..7cd..9ef";
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/range must include exactly two full anchors/i);
+	});
+
+	it("range with .. at start only (empty left) throws", () => {
+		const input = "≔..5ab";
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/range must include exactly two full anchors/i);
+	});
+
+	it("range with .. at end only (empty right) throws", () => {
+		const input = "≔5ab..";
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/range must include exactly two full anchors/i);
+	});
+
+	it("= with same line but different hashes throws", () => {
+		const input = `≔ 5ab..5cd\n${pl("x")}`;
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/uses two different hashes for the same line/i);
+	});
+});
+
+describe("special characters in payload", () => {
+	it("tabs in payload are preserved", () => {
+		const tabText = "\t\tindented";
+		const input = `» 5ab\n${pl(tabText)}`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("\t\tindented");
+	});
+
+	it("leading whitespace in payload is preserved", () => {
+		const input = `» 5ab\n${pl("  indented")}`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("  indented");
+	});
+
+	it("trailing whitespace in payload is stripped", () => {
+		const input = `» 5ab\n${pl("trail   ")}`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("trail   ");
+	});
+
+	it("unicode characters in payload are preserved", () => {
+		const input = `» 5ab\n${pl("hello 🎉 世界 привет")}`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("hello 🎉 世界 привет");
+	});
+
+	it("CJK characters in payload are preserved", () => {
+		const input = `» 5ab\n${pl("これはテストです")}`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("これはテストです");
+	});
+
+	it("RTL characters in payload are preserved", () => {
+		const input = `» 5ab\n${pl("مرحبا بالعالم")}`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("مرحبا بالعالم");
+	});
+
+	it("payload starting with the same char as HL_EDIT_SEP is escaped via double separator", () => {
+		const input = `» 5ab\n${pl("~x")}`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("~x");
+	});
+
+	it("backslash in payload is preserved verbatim", () => {
+		const input = `» 5ab\n${pl("C:\\\\path\\to\\file")}`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("C:\\\\path\\to\\file");
+	});
+
+	it("angle brackets in payload are preserved", () => {
+		const input = `» 5ab\n${pl("<div>content</div>")}`;
+		const { edits } = parseHashlineWithWarnings(input);
+		expect(edits[0].kind === "insert" ? edits[0].text : undefined).toBe("<div>content</div>");
+	});
+});
+
+describe("empty / missing input", () => {
+	it("empty string produces zero edits and no warnings", () => {
+		const { edits, warnings } = parseHashlineWithWarnings("");
+		expect(edits).toEqual([]);
+		expect(warnings).toEqual([]);
+	});
+
+	it("whitespace-only string produces zero edits and no warnings", () => {
+		const { edits, warnings } = parseHashlineWithWarnings("   \n  \n\t  \n");
+		expect(edits).toEqual([]);
+		expect(warnings).toEqual([]);
+	});
+
+	it("just newlines produces zero edits and no warnings", () => {
+		const { edits, warnings } = parseHashlineWithWarnings("\n\n\n");
+		expect(edits).toEqual([]);
+		expect(warnings).toEqual([]);
+	});
+
+	it("string with only a patch envelope marker produces zero edits", () => {
+		const input = `${BEGIN_PATCH_MARKER}\n${END_PATCH_MARKER}`;
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(edits).toEqual([]);
+		expect(warnings).toEqual([]);
+	});
+
+	it("string with only begin marker (no ops, no end) produces zero edits", () => {
+		const input = `${BEGIN_PATCH_MARKER}\n`;
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(edits).toEqual([]);
+		expect(warnings).toEqual([]);
+	});
+});
+
+describe("CRLF and line ending handling", () => {
+	it("CRLF line endings are normalized", () => {
+		const input = `» 5ab\r\n${pl("x")}\r\n≔3cd..3cd`;
+		const { edits, warnings } = parseHashlineWithWarnings(input);
+		expect(warnings).toEqual([]);
+		expect(edits).toHaveLength(2);
+	});
+});
+
+describe("error message clarity", () => {
+	it("reports the correct line number in error", () => {
+		expect(() => parseHashlineWithWarnings("»5ab\ncontent\n»  ")).toThrow(/line 3/i);
+	});
+
+	it("error includes the raw offending text", () => {
+		try {
+			parseHashlineWithWarnings("+++garbage+++");
+		} catch (e: unknown) {
+			const msg = (e as Error).message;
+			expect(msg).toContain("++garbage+++");
+		}
+	});
+
+	it("error for missing payload after » mentions the payload requirement", () => {
+		const input = `»5ab`;
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/require at least one verbatim payload line/i);
+	});
+
+	it("error for missing payload after « mentions the payload requirement", () => {
+		const input = `«5ab`;
+		expect(() => parseHashlineWithWarnings(input)).toThrow(/require at least one verbatim payload line/i);
+	});
+});
 describe("hashlineEditParamsSchema — extra-field tolerance", () => {
 	it("accepts extra `path` field alongside `input`", () => {
 		expect(hashlineEditParamsSchema.safeParse({ path: "x.ts", input: `§x.ts\n»BOF\n${pl("x")}` }).success).toBe(true);
@@ -620,7 +995,7 @@ describe("hashline — anchor-stale recovery via read snapshot cache", () => {
 
 			const session = makeHashlineSession(tempDir);
 			// Simulate the read tool having shown V0 to the model in this session.
-			getFileReadCache(session).recordContiguous(filePath, 1, v0Lines);
+			getFileReadCache(session).recordFullFile(filePath, v0Lines.join("\n"));
 
 			// External actor (linter, subagent, user) prepends 7 lines. Anchors
 			// authored against V0 no longer match V1, so the model's edit cannot
@@ -643,11 +1018,11 @@ describe("hashline — anchor-stale recovery via read snapshot cache", () => {
 			expect(finalLines).toContain("L8");
 
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-			expect(text).toMatch(/Recovered from stale anchors using a previous read snapshot/);
+			expect(text).toMatch(/Auto-shifted \d+ anchor\(s\)/);
 		});
 	});
 
-	it("falls back to mismatch error when the cache does not cover the failing anchor", async () => {
+	it("returns correctedInput when cache is partial and anchor hash is stale", async () => {
 		await withTempDir(async tempDir => {
 			const filePath = path.join(tempDir, "a.ts");
 			const v0Lines = Array.from({ length: 10 }, (_, idx) => `L${idx + 1}`);
@@ -660,36 +1035,19 @@ describe("hashline — anchor-stale recovery via read snapshot cache", () => {
 			const v1Lines = [...v0Lines];
 			v1Lines[5] = "L6-CHANGED";
 			await Bun.write(filePath, `${v1Lines.join("\n")}\n`);
-
 			const input = `§a.ts\n≔${sameLineRange(tag(6, "L6"))}\n${pl("L6-MODEL")}\n`;
-			await expect(
-				executeHashlineSingle(hashlineExecuteOptions(tempDir, input, undefined, session)),
-			).rejects.toThrow(HashlineMismatchError);
-			// Disk content unchanged.
-			expect(await Bun.file(filePath).text()).toBe(`${v1Lines.join("\n")}\n`);
+
+			const result = await executeHashlineSingle(hashlineExecuteOptions(tempDir, input, undefined, session));
+			// Tier-3 auto-apply is removed; the edit is not applied silently.
+			// Instead, correctedInput is returned so the model can re-read and retry.
+			const finalLines = (await Bun.file(filePath).text()).replace(/\n$/, "").split("\n");
+			expect(finalLines).not.toContain("L6-MODEL");
+			expect(finalLines).toContain("L6-CHANGED");
+			expect(result.details?.correctedInput).toBeTruthy();
+			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+			expect(text).toMatch(/Corrected edit block/);
 		});
 	});
-
-	it("returns null from tryRecoverHashlineWithCache when applyPatch cannot land", () => {
-		const cache = new FileReadCache();
-		const fakePath = "/tmp/__hashline-recovery-applypatch__.ts";
-		cache.recordContiguous(fakePath, 1, ["alpha", "beta", "gamma", "delta", "epsilon"]);
-
-		// Live file is completely different — patch context cannot match even
-		// with fuzz tolerance.
-		const currentText = "totally\nunrelated\ncontent\nhere\nnow\n";
-		const edits = parseHashline(`≔${sameLineRange(tag(2, "beta"))}\n${pl("BETA-MODEL")}`);
-
-		const recovered = tryRecoverHashlineWithCache({
-			cache,
-			absolutePath: fakePath,
-			currentText,
-			edits,
-			options: {},
-		});
-		expect(recovered).toBeNull();
-	});
-
 	it("isolates caches across sessions", () => {
 		const a = new FileReadCache();
 		const b = new FileReadCache();
@@ -736,7 +1094,7 @@ describe("hashline — anchor-stale recovery via read snapshot cache", () => {
 			expect(finalLines).toContain("GAMMA");
 			expect(finalLines).not.toContain("gamma");
 			const text = result.content[0]?.type === "text" ? result.content[0].text : "";
-			expect(text).toMatch(/Recovered from stale anchors using a previous read snapshot/);
+			expect(text).toMatch(/Auto-shifted \d+ anchor\(s\)/);
 		});
 	});
 
@@ -771,6 +1129,132 @@ describe("hashline — anchor-stale recovery via read snapshot cache", () => {
 		expect(cache.get("/tmp/file-1.ts")).toBeNull();
 		expect(cache.get("/tmp/file-2.ts")).not.toBeNull();
 		expect(cache.get("/tmp/file-31.ts")).not.toBeNull();
+	});
+
+	it("multi-section preflight failures and combined correctedInput generation", async () => {
+		await withTempDir(async tempDir => {
+			const aPath = path.join(tempDir, "a.ts");
+			const bPath = path.join(tempDir, "b.ts");
+			await Bun.write(aPath, "a1\na2\na3\n");
+			await Bun.write(bPath, "b1\nb2\nb3\n");
+
+			const session = makeHashlineSession(tempDir);
+			getFileReadCache(session).recordFullFile(aPath, "a1\na2\na3");
+			getFileReadCache(session).recordFullFile(bPath, "b1\nb2\nb3");
+
+			// We deliberately use the wrong hashes for both files to trigger mismatch
+			const input = [
+				`§a.ts`,
+				`≔ ${sameLineRange(mistag(2, "a2"))}`,
+				pl("a2-new"),
+				`§b.ts`,
+				`≔ ${sameLineRange(mistag(2, "b2"))}`,
+				pl("b2-new"),
+			].join("\n");
+
+			const result = await executeHashlineSingle(hashlineExecuteOptions(tempDir, input, undefined, session));
+
+			expect(result.isError).toBe(true);
+			expect(result.details?.correctedInput).toBeDefined();
+
+			const corrected = result.details?.correctedInput ?? "";
+			expect(corrected).toContain("§a.ts");
+			expect(corrected).toContain("§b.ts");
+			// Corrected input should contain the actual hashes
+			expect(corrected).toContain(tag(2, "a2"));
+			expect(corrected).toContain(tag(2, "b2"));
+			expect(corrected).not.toContain("zz"); // mistag uses "zz" as fake hash
+			expect(corrected).not.toContain("yy");
+
+			expect(result.details?.perFileResults).toBeDefined();
+			const perFile = result.details?.perFileResults;
+			expect(perFile).toHaveLength(2);
+			expect(perFile?.[0].path).toBe("a.ts");
+			expect(perFile?.[0].isError).toBe(true);
+			expect(perFile?.[0].errorText).toContain("Edit rejected");
+			expect(perFile?.[0].displayErrorText).toContain("Edit rejected");
+			expect(perFile?.[1].path).toBe("b.ts");
+			expect(perFile?.[1].isError).toBe(true);
+			expect(perFile?.[1].errorText).toContain("Edit rejected");
+			expect(perFile?.[1].displayErrorText).toContain("Edit rejected");
+		});
+	});
+
+	it("shifted bare anchors being successfully corrected back to original inputs", async () => {
+		await withTempDir(async tempDir => {
+			const filePath = path.join(tempDir, "a.ts");
+			await Bun.write(filePath, "HEADER\na1\na2\n");
+
+			const session = makeHashlineSession(tempDir);
+			getFileReadCache(session).recordFullFile(filePath, "a1\na2\na3");
+
+			// Edit 1: bare anchor = 2..2 (points to a2 in cached, which shifts to 3 on disk)
+			// Edit 2: targets 3zz (points to a3 in cached, which is deleted on disk)
+			const input = [`§a.ts`, `≔ 2..2`, pl("a2-new"), `≔ ${sameLineRange(mistag(3, "a3"))}`, pl("a3-new")].join(
+				"\n",
+			);
+
+			const result = await executeHashlineSingle(hashlineExecuteOptions(tempDir, input, undefined, session));
+
+			expect(result.isError).toBe(true);
+			const corrected = result.details?.correctedInput ?? "";
+
+			// Edit 1 (= 2..2) should be corrected and shifted to target line 3 with correct hash of "a2"
+			const expectedAnchor1 = tag(3, "a2");
+			expect(corrected).toContain(`≔ ${expectedAnchor1}..${expectedAnchor1}`);
+		});
+	});
+
+	it("aborts subsequent writes and returns corrected input if a file changes between preflight and apply", async () => {
+		await withTempDir(async tempDir => {
+			const aPath = path.join(tempDir, "a.ts");
+			const bPath = path.join(tempDir, "b.ts");
+			const cPath = path.join(tempDir, "c.ts");
+			await Bun.write(aPath, "a1\na2\na3\n");
+			await Bun.write(bPath, "b1\nb2\nb3\n");
+			await Bun.write(cPath, "c1\nc2\nc3\n");
+
+			const session = makeHashlineSession(tempDir);
+			getFileReadCache(session).recordFullFile(aPath, "a1\na2\na3");
+			getFileReadCache(session).recordFullFile(bPath, "b1\nb2\nb3");
+			getFileReadCache(session).recordFullFile(cPath, "c1\nc2\nc3");
+
+			const input = [
+				`§a.ts`,
+				`≔ ${sameLineRange(tag(2, "a2"))}`,
+				pl("a2-new"),
+				`§b.ts`,
+				`≔ ${sameLineRange(tag(2, "b2"))}`,
+				pl("b2-new"),
+				`§c.ts`,
+				`≔ ${sameLineRange(tag(2, "c2"))}`,
+				pl("c2-new"),
+			].join("\n");
+
+			const options = hashlineExecuteOptions(tempDir, input, undefined, session);
+			options.writethrough = async (absolutePath, content, _signal, _fileHandle, _batchRequest) => {
+				await Bun.write(absolutePath, content);
+				// When writing a.ts, modify b.ts to make its anchors stale
+				if (absolutePath === aPath) {
+					await Bun.write(bPath, "b1\nb2-modified-out-of-band\nb3\n");
+				}
+				return { summary: "success", messages: [], errored: false };
+			};
+
+			const result = await executeHashlineSingle(options);
+
+			expect(result.isError).toBe(true);
+			expect(result.details?.correctedInput).toBeDefined();
+
+			const corrected = result.details?.correctedInput ?? "";
+			expect(corrected).toContain("§b.ts");
+			// The mismatched anchor on b.ts should be corrected using the modified file's actual hash
+			expect(corrected).toContain(tag(2, "b2-modified-out-of-band"));
+
+			// Verify that c.ts was NOT written (aborted execution)
+			const cContent = await Bun.file(cPath).text();
+			expect(cContent).toBe("c1\nc2\nc3\n");
+		});
 	});
 });
 

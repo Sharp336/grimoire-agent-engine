@@ -146,4 +146,42 @@ describe("editToolRenderer", () => {
 		expect(rendered).toContain("packages/coding-agent/src/edit/renderer.ts");
 		expect(rendered).not.toContain(" …");
 	});
+	it("shows rejection text and suppresses preview diff when correctedInput is present", async () => {
+		const uiTheme = await getUiTheme();
+
+		// Simulate a stale-anchor rejection: non-error result with empty diff,
+		// correctedInput set, and a precomputed preview diff in renderContext.
+		const component = editToolRenderer.renderResult(
+			{
+				content: [
+					{
+						type: "text",
+						text: "Edit rejected: 1 line has changed since the last read (marked *).\nThe edit was NOT applied. Corrected anchors: 3xx → 3yz\nRe-read the file or use the corrected anchors in your next edit call.\n\nCorrected edit block:\n@@ a/b/c.ts\n= 3yz..3yz\n|// fixed content",
+					},
+				],
+				details: {
+					diff: "",
+					path: "a/b/c.ts",
+					op: "update",
+					correctedInput: "@@ a/b/c.ts\n= 3yz..3yz\n|// fixed content",
+				},
+			},
+			{
+				expanded: false,
+				isPartial: false,
+				renderContext: {
+					editMode: "hashline",
+					editDiffPreview: { diff: "+1|// preview diff that should NOT appear", firstChangedLine: undefined },
+				},
+			},
+			uiTheme,
+		);
+
+		const rendered = Bun.stripANSI(component.render(160).join("\n"));
+		// Rejection message from content must appear
+		expect(rendered).toContain("Edit rejected");
+		expect(rendered).toContain("NOT applied");
+		// Preview diff must NOT leak through
+		expect(rendered).not.toContain("preview diff that should NOT appear");
+	});
 });

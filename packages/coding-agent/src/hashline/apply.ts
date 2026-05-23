@@ -41,18 +41,29 @@ function getHashlineEditAnchors(edit: HashlineEdit): Anchor[] {
 	if (edit.cursor.kind === "after_anchor") return [edit.cursor.anchor];
 	return [];
 }
+export interface AnchorValidationResult {
+	mismatches: HashMismatch[];
+}
 
 /**
- * Verify every anchor's hash. Any mismatch is reported as a `HashMismatch`;
- * there is no auto-rebase. Callers are expected to surface mismatches as
+ * Verify every anchor's hash. Returns mismatches.
+ * There is no auto-rebase. Callers are expected to surface mismatches as
  * `HashlineMismatchError` so the model re-reads and re-anchors.
  */
-function validateHashlineAnchors(edits: HashlineEdit[], fileLines: string[]): HashMismatch[] {
+export function validateHashlineAnchors(edits: HashlineEdit[], fileLines: string[]): AnchorValidationResult {
 	const mismatches: HashMismatch[] = [];
 	for (const edit of edits) {
 		for (const anchor of getHashlineEditAnchors(edit)) {
 			if (anchor.line < 1 || anchor.line > fileLines.length) {
 				throw new Error(`Line ${anchor.line} does not exist (file has ${fileLines.length} lines)`);
+			}
+			// Bare line-number anchors (empty hash) must be resolved upstream via
+			// the read cache before reaching validation. If one slipped through,
+			// the caller forgot to call resolveBareAnchors().
+			if (anchor.hash === "") {
+				throw new Error(
+					`Line ${anchor.line}: bare line number with no cached snapshot. Re-read the file to get valid anchors.`,
+				);
 			}
 			if (anchor.hash === RANGE_INTERIOR_HASH) continue;
 
@@ -62,7 +73,7 @@ function validateHashlineAnchors(edits: HashlineEdit[], fileLines: string[]): Ha
 			mismatches.push({ line: anchor.line, expected: anchor.hash, actual: actualHash });
 		}
 	}
-	return mismatches;
+	return { mismatches };
 }
 
 function insertAtStart(fileLines: string[], lineOrigins: HashlineLineOrigin[], lines: string[]): void {
@@ -653,7 +664,7 @@ export function applyHashlineEdits(
 		if (firstChangedLine === undefined || line < firstChangedLine) firstChangedLine = line;
 	};
 
-	const mismatches = validateHashlineAnchors(edits, fileLines);
+	const { mismatches } = validateHashlineAnchors(edits, fileLines);
 	if (mismatches.length > 0) throw new HashlineMismatchError(mismatches, fileLines);
 
 	const normalizedEdits = absorbReplacementBoundaryDuplicates(edits, fileLines, warnings, options);

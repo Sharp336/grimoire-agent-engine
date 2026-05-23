@@ -63,10 +63,13 @@ export class HashlineMismatchError extends Error {
 	}
 
 	private static rejectionHeader(mismatches: HashMismatch[]): string[] {
-		const noun = mismatches.length > 1 ? "anchors do" : "anchor does";
+		const noun = mismatches.length > 1 ? "lines have" : "line has";
+		const corrections = mismatches.map(m => `${m.line}${m.expected} → ${m.line}${m.actual}`);
+		const correctionLine = corrections.length > 0 ? `Corrected anchors: ${corrections.join(", ")}` : "";
 		return [
-			`Edit rejected: ${mismatches.length} ${noun} not match the current file (marked *).`,
-			"The edit was NOT applied, please use the updated file content shown below, and issue another edit tool-call.",
+			`Edit rejected: ${mismatches.length} ${noun} changed since the last read (marked *).`,
+			`The edit was NOT applied. ${correctionLine}`,
+			"Re-read the file or use the corrected anchors in your next edit call.",
 		];
 	}
 

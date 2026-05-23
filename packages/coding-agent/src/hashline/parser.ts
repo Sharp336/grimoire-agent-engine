@@ -13,15 +13,19 @@ import type { Anchor, HashlineCursor, HashlineEdit } from "./types";
 const LID_CAPTURE_RE = new RegExp(`^${HL_HASH_CAPTURE_RE_RAW}$`);
 const regexEscape = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
+const BARE_LINE_RE = /^([1-9]\d*)$/;
+
 function parseLid(raw: string, lineNum: number): Anchor {
 	const match = LID_CAPTURE_RE.exec(raw);
-	if (!match) {
-		throw new Error(
-			`line ${lineNum}: expected a full anchor such as ${describeAnchorExamples("119")}; ` +
-				`got ${JSON.stringify(raw)}.`,
-		);
-	}
-	return { line: Number.parseInt(match[1], 10), hash: match[2] };
+	if (match) return { line: Number.parseInt(match[1], 10), hash: match[2] };
+	// Accept bare line number (no hash) — hash resolved from file content
+	// during validation so the edit isn't rejected with a confusing error.
+	const bareMatch = BARE_LINE_RE.exec(raw);
+	if (bareMatch) return { line: Number.parseInt(bareMatch[1], 10), hash: "" };
+	throw new Error(
+		`line ${lineNum}: expected a full anchor such as ${describeAnchorExamples("119")}; ` +
+			`got ${JSON.stringify(raw)}.`,
+	);
 }
 
 interface ParsedRange {

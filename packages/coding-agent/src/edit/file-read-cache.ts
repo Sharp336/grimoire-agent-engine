@@ -23,6 +23,10 @@ const MAX_PATHS_PER_SESSION = 30;
 export interface FileReadSnapshot {
 	/** 1-indexed line number → exact line content as observed by `read`/`search`. */
 	lines: Map<number, string>;
+	/** Complete file content at the time of snapshot (set for full-file reads). */
+	fullContent?: string;
+	/** True when the snapshot was obtained from a partial read with offset/limit. */
+	isPartial?: boolean;
 	recordedAt: number;
 }
 
@@ -38,14 +42,39 @@ export class FileReadCache {
 	recordContiguous(absPath: string, startLine: number, lines: readonly string[]): void {
 		if (lines.length === 0) return;
 		const entries: Array<readonly [number, string]> = lines.map((line, idx) => [startLine + idx, line] as const);
-		this.#record(absPath, entries);
+		this.#record(absPath, entries, { isPartial: true });
+	}
+
+	/** Record the complete content of a file from a full read (startLine === 1, no offset/limit). */
+	recordFullFile(absPath: string, fullContent: string): void {
+		// Normalize to LF — CRLF line endings in the raw content would make every
+		// line appear "modified" when compared against the normalized text used
+		// in hashline recovery (computeLineShiftMap), defeating Tier-2 pre-shift.
+		const normalized = fullContent.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+		const lines = normalized.split("\n");
+		const entries: Array<readonly [number, string]> = lines.map((line, idx) => [idx + 1, line] as const);
+		this.#snapshots.set(absPath, {
+			lines: new Map(entries),
+			fullContent: normalized,
+			isPartial: false,
+			recordedAt: Date.now(),
+		});
 	}
 
 	/** Record sparse `(lineNumber, content)` pairs (e.g. `search` matches plus context). */
 	recordSparse(absPath: string, entries: Iterable<readonly [number, string]>): void {
 		const arr = Array.from(entries);
 		if (arr.length === 0) return;
-		this.#record(absPath, arr);
+		this.#record(absPath, arr, { isPartial: true });
+	}
+
+	/** Drop the full-file content for a path while keeping sparse line data. */
+	invalidateFullContent(absPath: string): void {
+		const existing = this.#snapshots.get(absPath);
+		if (existing) {
+			existing.fullContent = undefined;
+			existing.isPartial = true;
+		}
 	}
 
 	/** Drop the snapshot for a single path. */
@@ -58,21 +87,34 @@ export class FileReadCache {
 		this.#snapshots.clear();
 	}
 
-	#record(absPath: string, entries: ReadonlyArray<readonly [number, string]>): void {
+	#record(absPath: string, entries: ReadonlyArray<readonly [number, string]>, opts?: { isPartial?: boolean }): void {
 		const existing = this.#snapshots.get(absPath);
 		if (existing && hasConflict(existing.lines, entries)) {
 			// File content has changed since we last recorded. Drop the stale
 			// snapshot and start fresh with whatever we just observed.
-			this.#snapshots.set(absPath, { lines: new Map(entries), recordedAt: Date.now() });
+			this.#snapshots.set(absPath, {
+				lines: new Map(entries),
+				isPartial: opts?.isPartial ?? existing.isPartial,
+				recordedAt: Date.now(),
+			});
 			return;
 		}
 		if (existing) {
 			for (const [lineNum, content] of entries) existing.lines.set(lineNum, content);
 			existing.recordedAt = Date.now();
+			if (existing.fullContent) {
+				existing.isPartial = false;
+			} else if (opts?.isPartial === true) {
+				existing.isPartial = true;
+			}
 			// `get` above already touched LRU recency for this key.
 			return;
 		}
-		this.#snapshots.set(absPath, { lines: new Map(entries), recordedAt: Date.now() });
+		this.#snapshots.set(absPath, {
+			lines: new Map(entries),
+			isPartial: opts?.isPartial,
+			recordedAt: Date.now(),
+		});
 	}
 }
 

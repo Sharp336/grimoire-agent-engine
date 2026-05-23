@@ -2,6 +2,8 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { AuthStorage, getBundledModel } from "@oh-my-pi/pi-ai";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { Skill } from "@oh-my-pi/pi-coding-agent/sdk";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -24,8 +26,10 @@ describe("createAgentSession skills option", () => {
 	let skillsDir: string;
 	let tempHomeDir = "";
 	let originalHome: string | undefined;
+	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
 
-	beforeEach(() => {
+	beforeEach(async () => {
 		tempDir = path.join(os.tmpdir(), `pi-sdk-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
 		// Create skill in .omp/skills/ for native project-level discovery
 		skillsDir = path.join(tempDir, ".omp", "skills", "test-skill");
@@ -35,6 +39,9 @@ describe("createAgentSession skills option", () => {
 		process.env.HOME = tempHomeDir;
 		const nativeUserSkillsDir = path.join(tempHomeDir, ".omp", "agent", "skills");
 		fs.mkdirSync(nativeUserSkillsDir, { recursive: true });
+
+		authStorage = await AuthStorage.create(path.join(tempDir, "auth.db"));
+		modelRegistry = new ModelRegistry(authStorage);
 
 		// Create a test skill in the pi skills directory
 		fs.writeFileSync(
@@ -67,14 +74,34 @@ Loaded via symbolic link.
 		fs.symlinkSync(externalSkillDir, path.join(path.dirname(skillsDir), "symlinked-skill-link"), "dir");
 	});
 
-	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
+	afterEach(() => {
+		if (authStorage) {
+			authStorage.close();
+		}
+		cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome }))();
+	});
 
 	it("should discover skills by default and expose them on session.skills", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
+			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
 			settings: createIsolatedSkillsSettings(),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			workspaceTree: {
+				rootPath: tempDir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			enableMCP: false,
+			enableLsp: false,
 		});
 
 		// Skills should be discovered and exposed on the session
@@ -86,8 +113,23 @@ Loaded via symbolic link.
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
+			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
 			settings: createIsolatedSkillsSettings(),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			workspaceTree: {
+				rootPath: tempDir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			enableMCP: false,
+			enableLsp: false,
 		});
 
 		expect(session.skills.some((s: Skill) => s.name === "symlinked-skill")).toBe(true);
@@ -101,8 +143,23 @@ Loaded via symbolic link.
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
+			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
 			settings: createIsolatedSkillsSettings(),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			workspaceTree: {
+				rootPath: tempDir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			enableMCP: false,
+			enableLsp: false,
 		});
 
 		expect(session.skills.some((s: Skill) => s.name === "test-skill")).toBe(true);
@@ -111,9 +168,24 @@ Loaded via symbolic link.
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
+			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
 			skills: [], // Explicitly empty - like --no-skills
 			settings: createIsolatedSkillsSettings(),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			workspaceTree: {
+				rootPath: tempDir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			enableMCP: false,
+			enableLsp: false,
 		});
 
 		// session.skills should be empty
@@ -134,9 +206,24 @@ Loaded via symbolic link.
 		const { session } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
+			modelRegistry,
 			sessionManager: SessionManager.inMemory(),
 			skills: [customSkill],
 			settings: createIsolatedSkillsSettings(),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			workspaceTree: {
+				rootPath: tempDir,
+				rendered: "",
+				truncated: false,
+				totalLines: 0,
+				agentsMdFiles: [],
+			},
+			enableMCP: false,
+			enableLsp: false,
 		});
 
 		// session.skills should contain only the provided skill

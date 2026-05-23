@@ -61,6 +61,8 @@ export interface EditToolPerFileResult {
 	oldText?: string;
 	/** Source-of-truth content after the edit; `undefined` for delete operations. */
 	newText?: string;
+	/** Corrected edit block for stale anchors (set when a HashlineMismatchError occurred) */
+	correctedInput?: string;
 }
 
 export interface EditToolDetails {
@@ -74,6 +76,8 @@ export interface EditToolDetails {
 	op?: Operation;
 	/** New path after move/rename (patch mode only) */
 	move?: string;
+	/** Corrected edit block for stale anchors (set when a HashlineMismatchError occurred) */
+	correctedInput?: string;
 	/** Structured output metadata */
 	meta?: OutputMeta;
 	/** Per-file results (multi-file edits) */
@@ -84,6 +88,10 @@ export interface EditToolDetails {
 	oldText?: string;
 	/** Source-of-truth content after the edit; `undefined` for delete operations. */
 	newText?: string;
+	/** Error message if execution failed */
+	errorText?: string;
+	/** TUI-friendly error message if execution failed */
+	displayErrorText?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -585,7 +593,7 @@ function renderSingleFileResult(
 
 			const header = renderStatusLine(
 				{
-					icon: isError ? "error" : "success",
+					icon: isError ? "error" : details?.correctedInput && !details?.diff ? "warning" : "success",
 					title: getOperationTitle(op),
 					description,
 				},
@@ -598,9 +606,14 @@ function renderSingleFileResult(
 				if (errorText) {
 					text += `\n\n${uiTheme.fg("error", replaceTabs(errorText, rawPath))}`;
 				}
+			} else if (details?.correctedInput && !details?.diff) {
+				const rejectionText = result.content?.find(c => c.type === "text")?.text ?? "";
+				if (rejectionText) {
+					text += `\n\n${uiTheme.fg("warning", replaceTabs(rejectionText, rawPath))}`;
+				}
 			} else if (details?.diff) {
 				text += renderDiffSection(details.diff, rawPath, expanded, uiTheme, renderDiffFn);
-			} else if (editDiffPreview) {
+			} else if (editDiffPreview && !details?.correctedInput) {
 				if ("error" in editDiffPreview) {
 					text += `\n\n${uiTheme.fg("error", replaceTabs(editDiffPreview.error, rawPath))}`;
 				} else if (editDiffPreview.diff) {
@@ -632,7 +645,17 @@ function renderMultiFileResult(
 	uiTheme: Theme,
 ): Component {
 	const fileComponents = perFileResults.map(fileResult =>
-		renderSingleFileResult({ content: [], details: fileResult, isError: fileResult.isError }, options, uiTheme),
+		renderSingleFileResult(
+			{
+				content: fileResult.correctedInput
+					? [{ type: "text" as const, text: fileResult.displayErrorText ?? fileResult.errorText ?? "" }]
+					: [],
+				details: fileResult,
+				isError: fileResult.isError,
+			},
+			options,
+			uiTheme,
+		),
 	);
 	const remaining = Math.max(0, totalFiles - perFileResults.length);
 

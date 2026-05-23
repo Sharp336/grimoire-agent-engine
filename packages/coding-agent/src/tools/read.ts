@@ -1847,7 +1847,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					};
 
 					if (collectedLines.length > 0 && !firstLineExceedsLimit) {
-						getFileReadCache(this.session).recordContiguous(absolutePath, startLineDisplay, collectedLines);
+						const cache = getFileReadCache(this.session);
+						if (startLineDisplay === 1 && collectedLines.length >= totalFileLines && columnTruncated === 0) {
+							cache.recordFullFile(absolutePath, collectedLines.join("\n"));
+						} else {
+							cache.recordContiguous(absolutePath, startLineDisplay, collectedLines);
+						}
 					}
 
 					const shouldAddHashLines = !rawSelector && displayMode.hashLines;
