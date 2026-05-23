@@ -37,4 +37,26 @@ describe("usage insights", () => {
 		expect(insights.some(insight => insight.headline.includes(">150k context"))).toBe(true);
 		expect(insights.some(insight => insight.headline.includes(">100k uncached prompts"))).toBe(true);
 	});
+	test("dedup key distinguishes different sessions at same timestamp", () => {
+		const left = _test.buildMessageDedupKey({
+			sessionId: "session-a",
+			timestamp: 123,
+			cost: 1,
+			input: 100,
+			output: 50,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+		const right = _test.buildMessageDedupKey({
+			sessionId: "session-b",
+			timestamp: 123,
+			cost: 1,
+			input: 100,
+			output: 50,
+			cacheRead: 0,
+			cacheWrite: 0,
+		});
+
+		expect(left).not.toBe(right);
+	});
 });

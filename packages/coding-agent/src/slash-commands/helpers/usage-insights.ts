@@ -111,6 +111,17 @@ function parseSessionLine(
 		},
 	};
 }
+function buildMessageDedupKey(message: RawMessage): string {
+	return [
+		message.sessionId,
+		message.timestamp,
+		message.cost,
+		message.input,
+		message.output,
+		message.cacheRead,
+		message.cacheWrite,
+	].join(":");
+}
 
 async function collectSessionFiles(dir: string, files: string[], signal?: AbortSignal): Promise<void> {
 	try {
@@ -151,7 +162,7 @@ async function parseSessionFile(
 				const message = parsed?.message;
 				if (!message) continue;
 				message.sessionId = sessionId;
-				const hash = `${message.timestamp}:${message.input + message.output + message.cacheRead + message.cacheWrite}`;
+				const hash = buildMessageDedupKey(message);
 				if (seenHashes.has(hash)) continue;
 				seenHashes.add(hash);
 				messages.push(message);
@@ -359,4 +370,4 @@ export async function buildUsageInsightsText(signal?: AbortSignal): Promise<stri
 	return rendered ? lines.join("\n") : "";
 }
 
-export const _test = { computeInsights };
+export const _test = { buildMessageDedupKey, computeInsights };

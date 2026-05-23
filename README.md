@@ -259,6 +259,17 @@ Subscription-routed. `/login` attaches the session.
 
 Cursor `oauth` · GitHub Copilot `oauth` · GitLab Duo · Kimi Code `plan` · Moonshot · MiniMax Coding Plan `plan` · MiniMax Coding Plan CN `plan` · Alibaba Coding Plan `plan` · Qwen Portal · Z.AI / GLM Coding Plan `plan` · Xiaomi MiMo · Qianfan · NanoGPT · Venice · Kilo · ZenMux · OpenCode Go · OpenCode Zen
 
+For `/usage` quota scraping on OpenCode Go, set `OPENCODE_GO_WORKSPACE_ID` and `OPENCODE_GO_AUTH_COOKIE`, or write:
+
+```json
+{
+  "workspaceId": "your-workspace-id",
+  "authCookie": "your-auth-cookie"
+}
+```
+
+to `~/.config/opencode/opencode-quota/opencode-go.json`.
+
 ### Run it yourself
 
 OpenAI-compatible `/v1/models`. Local instances skip the key.
