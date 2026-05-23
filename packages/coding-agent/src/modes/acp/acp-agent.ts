@@ -1750,8 +1750,18 @@ export class AcpAgent implements Agent {
 		};
 	}
 
+	/**
+	 * Raw (un-reconciled) input for a usage snapshot. `UsageStatistics.input`
+	 * carries a phantom equal to Cursor's cumulative-token gap; diffing it across
+	 * turns would attribute the whole cumulative jump to a single turn's input.
+	 * Strip the phantom so per-turn input reflects the real per-turn input.
+	 */
+	#rawInput(stats: UsageStatistics): number {
+		return stats.input - Math.max(0, stats.latestCursorTotalTokens - stats.cursorSummedTokens);
+	}
+
 	#buildTurnUsage(previous: UsageStatistics, current: UsageStatistics): Usage | undefined {
-		const inputTokens = Math.max(0, current.input - previous.input);
+		const inputTokens = Math.max(0, this.#rawInput(current) - this.#rawInput(previous));
 		const outputTokens = Math.max(0, current.output - previous.output);
 		const cachedReadTokens = Math.max(0, current.cacheRead - previous.cacheRead);
 		const cachedWriteTokens = Math.max(0, current.cacheWrite - previous.cacheWrite);
