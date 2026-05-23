@@ -26,7 +26,9 @@ import { googleGeminiCliUsageProvider } from "./usage/gemini";
 import { githubCopilotUsageProvider } from "./usage/github-copilot";
 import { antigravityUsageProvider } from "./usage/google-antigravity";
 import { kimiUsageProvider } from "./usage/kimi";
+import { minimaxCodeCnUsageProvider, minimaxCodeUsageProvider } from "./usage/minimax-code";
 import { codexRankingStrategy, openaiCodexUsageProvider } from "./usage/openai-codex";
+import { opencodeGoUsageProvider } from "./usage/opencode-go";
 import { zaiUsageProvider } from "./usage/zai";
 import { getOAuthApiKey, getOAuthProvider, refreshOAuthToken } from "./utils/oauth";
 import { loginOpenAICodexDevice } from "./utils/oauth/openai-codex";
@@ -326,6 +328,9 @@ const DEFAULT_USAGE_PROVIDERS: UsageProvider[] = [
 	claudeUsageProvider,
 	zaiUsageProvider,
 	githubCopilotUsageProvider,
+	minimaxCodeUsageProvider,
+	minimaxCodeCnUsageProvider,
+	opencodeGoUsageProvider,
 ];
 
 const DEFAULT_USAGE_PROVIDER_MAP = new Map<Provider, UsageProvider>(
@@ -1828,6 +1833,12 @@ export class AuthStorage {
 				const runtimeKey = this.#runtimeOverrides.get(providerId);
 				const envKey = getEnvApiKey(providerId);
 				const apiKey = runtimeKey ?? envKey;
+				if (providerId === "opencode-go") {
+					const request = this.#buildUsageRequest(provider, { type: "api_key", apiKey }, baseUrl);
+					if (providerImpl.supports && !providerImpl.supports(request)) continue;
+					requests.push(request);
+					continue;
+				}
 				if (!apiKey) continue;
 				const request = this.#buildUsageRequest(provider, { type: "api_key", apiKey }, baseUrl);
 				if (providerImpl.supports && !providerImpl.supports(request)) continue;

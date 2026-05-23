@@ -39,6 +39,7 @@ import { buildToolsMarkdown } from "../../modes/utils/tools-markdown";
 import type { AsyncJobSnapshotItem } from "../../session/agent-session";
 import type { AuthStorage } from "../../session/auth-storage";
 import type { NewSessionOptions } from "../../session/session-manager";
+import { buildUsageInsightsText } from "../../slash-commands/helpers/usage-insights";
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs } from "../../tools/render-utils";
@@ -509,7 +510,9 @@ export class CommandController {
 		}
 
 		const availableWidth = Math.max(40, (this.ctx.ui.terminal.columns ?? 100) - 2);
-		const output = renderUsageReports(usageReports, theme, Date.now(), availableWidth);
+		const usageText = renderUsageReports(usageReports, theme, Date.now(), availableWidth);
+		const insightsText = await buildUsageInsightsText();
+		const output = insightsText ? `${usageText}\n${insightsText}` : usageText;
 		this.ctx.chatContainer.addChild(new Spacer(1));
 		this.ctx.chatContainer.addChild(new Text(output, 1, 0));
 		this.ctx.ui.requestRender();
@@ -1477,16 +1480,11 @@ function renderUsageBar(limit: UsageLimit, uiTheme: typeof theme, barWidth: numb
 		return uiTheme.fg("dim", "·".repeat(barWidth));
 	}
 	const clamped = Math.min(Math.max(fraction, 0), 1);
-	const exact = clamped * barWidth;
-	const fullCells = Math.floor(exact);
-	const remainder = exact - fullCells;
-	let partial = "";
-	if (remainder >= 2 / 3) partial = "▓";
-	else if (remainder >= 1 / 3) partial = "▒";
-	const leading = "█".repeat(fullCells) + partial;
-	const empty = "░".repeat(Math.max(0, barWidth - fullCells - (partial ? 1 : 0)));
+	const filledCells = Math.round(clamped * barWidth);
+	const leading = "█".repeat(filledCells);
+	const empty = " ".repeat(Math.max(0, barWidth - filledCells));
 	const color = resolveStatusColor(limit.status);
-	return `${uiTheme.fg(color, leading)}${uiTheme.fg("dim", empty)}`;
+	return `${uiTheme.fg(color, leading)}${empty}`;
 }
 
 /**

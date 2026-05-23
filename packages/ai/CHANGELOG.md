@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `/usage` quota providers for MiniMax Coding Plan, MiniMax Coding Plan CN, and OpenCode Go. MiniMax quota counts are normalized from provider APIs, and OpenCode Go usage is scraped from the authenticated workspace dashboard.
+
 ## [15.2.4] - 2026-05-22
 
 ### Fixed
