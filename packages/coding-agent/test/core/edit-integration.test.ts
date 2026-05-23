@@ -1544,3 +1544,47 @@ describe("Bug 2: multi-section corrected block excludes applied sections", () =>
 		});
 	});
 });
+
+describe("same-path section boundary preservation", () => {
+	it("rejects duplicate-path section with stray non-op line (not silently absorbed as payload)", async () => {
+		await withTempDir(async td => {
+			const filePath = path.join(td, "a.ts");
+			await Bun.write(filePath, "aaa\nbbb\nccc\n");
+			const session = makeSession(td);
+			getFileReadCache(session).recordFullFile(filePath, "aaa\nbbb\nccc");
+
+			const staleTag = tag(2, "bbb");
+			// Two sections for same path. Second section starts with "stray text"
+			// which is not a valid op — should cause a parser error, not be
+			// silently treated as payload for the preceding op.
+			const input = [`§a.ts`, `≔${staleTag}..${staleTag}`, pl("BBB"), `§a.ts`, `stray text that is not an op`].join(
+				"\n",
+			);
+
+			await expect(executeHashlineSingle(makeOptions(td, input, session))).rejects.toThrow(
+				/unrecognized op|payload line has no preceding/,
+			);
+		});
+	});
+
+	it("accepts duplicate-path sections when both have valid ops", async () => {
+		await withTempDir(async td => {
+			const filePath = path.join(td, "a.ts");
+			const lines = ["L1", "L2", "L3", "L4", "L5"];
+			await Bun.write(filePath, `${lines.join("\n")}\n`);
+			const session = makeSession(td);
+			getFileReadCache(session).recordFullFile(filePath, lines.join("\n"));
+
+			const tag2 = tag(2, "L2");
+			const tag4 = tag(4, "L4");
+			const input = [`§a.ts`, `≔${tag2}..${tag2}`, pl("L2-NEW"), `§a.ts`, `≔${tag4}..${tag4}`, pl("L4-NEW")].join(
+				"\n",
+			);
+
+			// This should succeed — both sections have valid ops and merge correctly.
+			await executeHashlineSingle(makeOptions(td, input, session));
+			const result = await Bun.file(filePath).text();
+			expect(result).toBe("L1\nL2-NEW\nL3\nL4-NEW\nL5\n");
+		});
+	});
+});

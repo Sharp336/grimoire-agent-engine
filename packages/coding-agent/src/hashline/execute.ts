@@ -700,8 +700,19 @@ export async function executeHashlineSingle(
  * file snapshot must be applied as one batch; otherwise the first sub-edit
  * shifts line numbers out from under the second's anchors and validation fails.
  * Path order is preserved by first occurrence.
+ *
+ * Each section's diff is pre-parsed individually before merging so that
+ * malformed content at the start of a later section is caught as a parser
+ * error rather than silently absorbed as payload for the previous op.
  */
 function mergeSamePathSections(sections: HashlineInputSection[]): HashlineInputSection[] {
+	// Pre-parse every section to surface errors *before* concatenation.
+	// Without this, a non-op line at the start of a later same-path section
+	// silently becomes payload for the preceding op (the § boundary that
+	// terminated collectPayload was stripped by splitHashlineInputs).
+	for (const section of sections) {
+		parseHashlineWithWarnings(section.diff);
+	}
 	const byPath = new Map<string, string[]>();
 	for (const section of sections) {
 		const existing = byPath.get(section.path);
