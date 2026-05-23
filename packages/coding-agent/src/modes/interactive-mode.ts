@@ -338,8 +338,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	#goalTurnHadToolCalls = false;
 	#goalContinuationTurnInFlight = false;
 	#goalSuppressNextContinuation = false;
-	#planModePreviousModelState: { model: Model; thinkingLevel?: ThinkingLevel } | undefined;
-	#pendingModelSwitch: { model: Model; thinkingLevel?: ThinkingLevel } | undefined;
+	#planModePreviousModelState: { model: Model; thinkingLevel?: ThinkingLevel; maxMode?: boolean } | undefined;
+	#pendingModelSwitch: { model: Model; thinkingLevel?: ThinkingLevel; maxMode?: boolean } | undefined;
 	#planModeHasEntered = false;
 	#planReviewContainer: Container | undefined;
 	readonly lspServers: LspStartupServerInfo[] | undefined = undefined;
@@ -1352,16 +1352,27 @@ export class InteractiveMode implements InteractiveModeContext {
 		const planThinkingLevel = resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined;
 
 		this.#planModePreviousModelState = currentModel
-			? { model: currentModel, thinkingLevel: this.session.thinkingLevel }
+			? {
+					model: currentModel,
+					thinkingLevel: this.session.thinkingLevel,
+					maxMode: this.session.agent.getCursorMaxMode(),
+				}
 			: undefined;
 
 		if (!sameModel) {
 			if (this.session.isStreaming) {
-				this.#pendingModelSwitch = { model: resolved.model, thinkingLevel: planThinkingLevel };
+				this.#pendingModelSwitch = {
+					model: resolved.model,
+					thinkingLevel: planThinkingLevel,
+					maxMode: resolved.maxMode,
+				};
 				return;
 			}
 			try {
-				await this.session.setModelTemporary(resolved.model, { thinkingLevel: planThinkingLevel });
+				await this.session.setModelTemporary(resolved.model, {
+					thinkingLevel: planThinkingLevel,
+					maxMode: resolved.maxMode,
+				});
 			} catch (error) {
 				this.showWarning(
 					`Failed to switch to plan model for plan mode: ${error instanceof Error ? error.message : String(error)}`,
@@ -1378,7 +1389,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!pending) return;
 		this.#pendingModelSwitch = undefined;
 		try {
-			await this.session.setModelTemporary(pending.model, { thinkingLevel: pending.thinkingLevel });
+			await this.session.setModelTemporary(pending.model, {
+				thinkingLevel: pending.thinkingLevel,
+				maxMode: pending.maxMode,
+			});
 		} catch (error) {
 			this.showWarning(
 				`Failed to switch model after streaming: ${error instanceof Error ? error.message : String(error)}`,
@@ -1565,9 +1579,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				// break conversation continuity.
 				this.session.setThinkingLevel(prev.thinkingLevel);
 			} else if (this.session.isStreaming) {
-				this.#pendingModelSwitch = { model: prev.model, thinkingLevel: prev.thinkingLevel };
+				this.#pendingModelSwitch = { model: prev.model, thinkingLevel: prev.thinkingLevel, maxMode: prev.maxMode };
 			} else {
-				await this.session.setModelTemporary(prev.model, { thinkingLevel: prev.thinkingLevel });
+				await this.session.setModelTemporary(prev.model, {
+					thinkingLevel: prev.thinkingLevel,
+					maxMode: prev.maxMode,
+				});
 			}
 			// If #applyPlanModeModel queued a deferred switch to the plan-role model
 			// (because the session was streaming on entry), drop it now: we are
