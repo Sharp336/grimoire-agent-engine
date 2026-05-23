@@ -12,7 +12,6 @@ type ConfigurableEditorAction = Extract<
 	| "app.model.cycleBackward"
 	| "app.model.select"
 	| "app.model.selectTemporary"
-	| "app.tools.expand"
 	| "app.thinking.toggle"
 	| "app.editor.external"
 	| "app.history.search"
@@ -31,7 +30,6 @@ const DEFAULT_ACTION_KEYS: Record<ConfigurableEditorAction, KeyId[]> = {
 	"app.model.cycleBackward": ["shift+ctrl+p"],
 	"app.model.select": ["ctrl+l"],
 	"app.model.selectTemporary": ["alt+p"],
-	"app.tools.expand": ["ctrl+o"],
 	"app.thinking.toggle": ["ctrl+t"],
 	"app.editor.external": ["ctrl+g"],
 	"app.history.search": ["ctrl+r"],
@@ -52,7 +50,6 @@ export class CustomEditor extends Editor {
 	onCycleModelForward?: () => void;
 	onCycleModelBackward?: () => void;
 	onSelectModel?: () => void;
-	onExpandTools?: () => void;
 	onToggleThinking?: () => void;
 	onExternalEditor?: () => void;
 	onHistorySearch?: () => void;
@@ -155,12 +152,6 @@ export class CustomEditor extends Editor {
 		// Intercept configured history search shortcut
 		if (this.#matchesAction(data, "app.history.search") && this.onHistorySearch) {
 			this.onHistorySearch();
-			return;
-		}
-
-		// Intercept configured tool output expansion shortcut
-		if (this.#matchesAction(data, "app.tools.expand") && this.onExpandTools) {
-			this.onExpandTools();
 			return;
 		}
 

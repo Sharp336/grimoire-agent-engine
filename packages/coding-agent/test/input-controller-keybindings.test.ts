@@ -17,7 +17,6 @@ type FakeEditor = {
 	onShowHotkeys?: () => void;
 	onPasteImage?: () => Promise<boolean>;
 	onCopyPrompt?: () => void;
-	onExpandTools?: () => void;
 	onToggleThinking?: () => void;
 	onExternalEditor?: () => void;
 	onDequeue?: () => void;
@@ -40,6 +39,7 @@ async function createContext() {
 	const showModelSelector = vi.fn();
 	const prompt = vi.fn(async () => {});
 	const updatePendingMessagesDisplay = vi.fn();
+	const uiAddInputListener = vi.fn();
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
@@ -54,7 +54,7 @@ async function createContext() {
 	};
 	const ctx = {
 		editor: editor as unknown as InteractiveModeContext["editor"],
-		ui: { requestRender: vi.fn() } as unknown as InteractiveModeContext["ui"],
+		ui: { requestRender: vi.fn(), addInputListener: uiAddInputListener } as unknown as InteractiveModeContext["ui"],
 		loadingAnimation: undefined,
 		autoCompactionLoader: undefined,
 		retryLoader: undefined,
@@ -134,6 +134,30 @@ async function createContext() {
 }
 
 describe("InputController keybinding setup", () => {
+	it("registers app.tools.expand as a global input listener on UI", async () => {
+		const { InputController, ctx } = await createContext();
+		const controller = new InputController(ctx);
+		// Mock toggleToolOutputExpansion to check if it's called
+		const toggleSpy = vi.spyOn(controller, "toggleToolOutputExpansion").mockImplementation(() => {});
+		// Mock keybindings.matches to match ctrl+o
+		ctx.keybindings.matches = (data: string, action: string) => data === "ctrl+o" && action === "app.tools.expand";
+
+		controller.setupKeyHandlers();
+
+		expect(ctx.ui.addInputListener).toHaveBeenCalled();
+		const listener = (ctx.ui.addInputListener as any).mock.calls[0][0];
+
+		// Trigger with non-matching key
+		const noMatch = listener("ctrl+p");
+		expect(noMatch).toBeUndefined();
+		expect(toggleSpy).not.toHaveBeenCalled();
+
+		// Trigger with matching key
+		const match = listener("ctrl+o");
+		expect(match).toEqual({ consume: true });
+		expect(toggleSpy).toHaveBeenCalled();
+	});
+
 	it("registers temporary and persisted model selector actions separately", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
 		const controller = new InputController(ctx);
