@@ -755,7 +755,7 @@ export class Editor implements Component, Focusable {
 					if (layoutLine.cursorPos > layoutLine.selStart) {
 						layoutLine.cursorPos += 4;
 					}
-					if (layoutLine.cursorPos > layoutLine.selEnd + 4) {
+					if (layoutLine.cursorPos >= layoutLine.selEnd + 4) {
 						layoutLine.cursorPos += 4;
 					}
 				}

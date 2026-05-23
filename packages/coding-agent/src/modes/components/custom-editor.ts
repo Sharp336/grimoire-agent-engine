@@ -195,11 +195,9 @@ export class CustomEditor extends Editor {
 		// Intercept configured clear shortcut.
 		// When the editor has an active selection, copy to clipboard instead of clearing.
 		if (this.#matchesAction(data, "app.clear") && this.onClear) {
-			if (this.hasSelection) {
-				const selectedText = this.getSelectedText();
-				if (selectedText) {
-					void copyToClipboard(selectedText);
-				}
+			const selectedText = this.hasSelection ? this.getSelectedText() : "";
+			if (selectedText) {
+				void copyToClipboard(selectedText);
 			} else {
 				this.onClear();
 			}
