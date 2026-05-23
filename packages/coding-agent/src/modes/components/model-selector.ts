@@ -733,6 +733,11 @@ export class ModelSelectorComponent extends Container {
 			: this.#filteredModels[this.#selectedIndex];
 	}
 
+	#isAssignedToRole(item: ModelItem | CanonicalModelItem, role: string): boolean {
+		const assigned = this.#roles[role];
+		return !!assigned && modelsAreEqual(assigned.model, item.model);
+	}
+
 	#openMenu(): void {
 		if (!this.#getSelectedItem()) return;
 
@@ -888,6 +893,13 @@ export class ModelSelectorComponent extends Container {
 			if (this.#menuStep === "role") {
 				const action = this.#menuRoleActions[this.#menuSelectedIndex];
 				if (!action) return;
+				if (action.role === "default" && this.#isAssignedToRole(selectedItem, "default")) {
+					// Re-selecting the already-default model as DEFAULT should not
+					// ask the user to choose its thinking level again.
+					this.#handleSelect(selectedItem, action.role);
+					this.#closeMenu();
+					return;
+				}
 				this.#menuSelectedRole = action.role;
 				this.#menuStep = "thinking";
 				this.#menuSelectedIndex = this.#getThinkingPreselectIndex(action.role, selectedItem.model);

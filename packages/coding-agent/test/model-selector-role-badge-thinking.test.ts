@@ -17,7 +17,11 @@ function normalizeRenderedText(text: string): string {
 	);
 }
 
-function createSelector(model: Model, settings: Settings): ModelSelectorComponent {
+function createSelector(
+	model: Model,
+	settings: Settings,
+	onSelect: ConstructorParameters<typeof ModelSelectorComponent>[5] = () => {},
+): ModelSelectorComponent {
 	const modelRegistry = {
 		getAll: () => [model],
 		getDiscoverableProviders: () => [],
@@ -34,7 +38,7 @@ function createSelector(model: Model, settings: Settings): ModelSelectorComponen
 		settings,
 		modelRegistry,
 		[{ model, thinkingLevel: "off" }],
-		() => {},
+		onSelect,
 		() => {},
 	);
 }
@@ -60,11 +64,13 @@ describe("ModelSelector role badge thinking display", () => {
 		installTestTheme();
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected bundled model anthropic/claude-sonnet-4-5");
+		const defaultModel = getBundledModel("anthropic", "claude-opus-4-5");
+		if (!defaultModel) throw new Error("Expected bundled model anthropic/claude-opus-4-5");
 
 		const settings = Settings.isolated({
 			cycleOrder: ["smol", "custom-fast", "default"],
 			modelRoles: {
-				default: `${model.provider}/${model.id}`,
+				default: `${defaultModel.provider}/${defaultModel.id}`,
 				"custom-fast": `${model.provider}/${model.id}:low`,
 				smol: `${model.provider}/${model.id}`,
 			},
@@ -86,5 +92,49 @@ describe("ModelSelector role badge thinking display", () => {
 		const menuRendered = normalizeRenderedText(selector.render(220).join("\n"));
 		expect(menuRendered).toContain("Set as custom-fast");
 		expect(menuRendered).toContain("Set as SMOL (Quick)");
+	});
+
+	test("re-selecting the default model keeps the role menu available", async () => {
+		installTestTheme();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled model anthropic/claude-sonnet-4-5");
+
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: `${model.provider}/${model.id}:high`,
+			},
+		});
+		const onSelect = vi.fn();
+		const selector = createSelector(model, settings, onSelect);
+		await Bun.sleep(0);
+
+		selector.handleInput("\n");
+
+		expect(onSelect).not.toHaveBeenCalled();
+		const menuRendered = normalizeRenderedText(selector.render(220).join("\n"));
+		expect(menuRendered).toContain("Action for:");
+		expect(menuRendered).toContain("Set as SMOL");
+	});
+
+	test("choosing DEFAULT for the default model confirms without opening thinking", async () => {
+		installTestTheme();
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled model anthropic/claude-sonnet-4-5");
+
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: `${model.provider}/${model.id}:high`,
+			},
+		});
+		const onSelect = vi.fn();
+		const selector = createSelector(model, settings, onSelect);
+		await Bun.sleep(0);
+
+		selector.handleInput("\n");
+		selector.handleInput("\n");
+
+		expect(onSelect).toHaveBeenCalledTimes(1);
+		expect(onSelect.mock.calls[0]?.[1]).toBe("default");
+		expect(normalizeRenderedText(selector.render(220).join("\n"))).not.toContain("Thinking for:");
 	});
 });
