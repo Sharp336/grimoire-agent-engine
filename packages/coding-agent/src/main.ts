@@ -649,9 +649,18 @@ async function buildSessionOptions(
 		if (!options.model) options.model = scopedModels[0].model;
 		if (options.cursorMaxMode === undefined) {
 			const m = options.model;
-			options.cursorMaxMode = m
-				? scopedModels.find(sm => sm.model.provider === m.provider && sm.model.id === m.id)?.maxMode
-				: undefined;
+			// Multiple scoped entries can name the same model with conflicting :max
+			// variants (e.g. `cursor/x:max` and `cursor/x`). Only honor an explicit
+			// flag, and when explicit opinions disagree default to false (base mode)
+			// rather than picking whichever sorts first — matches the model selector.
+			const matches = m ? scopedModels.filter(sm => sm.model.provider === m.provider && sm.model.id === m.id) : [];
+			const withExplicit = matches.filter(sm => sm.maxMode !== undefined);
+			options.cursorMaxMode =
+				withExplicit.length > 0
+					? withExplicit.every(sm => sm.maxMode === withExplicit[0].maxMode)
+						? withExplicit[0].maxMode
+						: false
+					: undefined;
 		}
 	}
 
