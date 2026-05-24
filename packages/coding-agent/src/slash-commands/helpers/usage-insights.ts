@@ -87,8 +87,14 @@ function parseSessionLine(
 	}
 	if (entry.type !== "message") return undefined;
 	const message = asRecord(entry.message);
-	if (!message || message.role !== "assistant") return undefined;
-	const usage = asRecord(message.usage);
+	if (!message) return undefined;
+
+	const usage =
+		message.role === "assistant"
+			? asRecord(message.usage)
+			: message.role === "toolResult" && message.toolName === "task"
+				? asRecord(asRecord(message.details)?.usage)
+				: undefined;
 	if (!usage) return undefined;
 
 	const input = asNumber(usage.input);
@@ -370,4 +376,4 @@ export async function buildUsageInsightsText(signal?: AbortSignal): Promise<stri
 	return rendered ? lines.join("\n") : "";
 }
 
-export const _test = { buildMessageDedupKey, computeInsights };
+export const _test = { buildMessageDedupKey, computeInsights, parseSessionLine };

@@ -59,4 +59,36 @@ describe("usage insights", () => {
 
 		expect(left).not.toBe(right);
 	});
+	test("parses task toolResult usage into insight messages", () => {
+		const parsed = _test.parseSessionLine(
+			JSON.stringify({
+				type: "message",
+				timestamp: "2026-05-24T00:00:00.000Z",
+				message: {
+					role: "toolResult",
+					toolName: "task",
+					details: {
+						usage: {
+							input: 10,
+							output: 20,
+							cacheRead: 30,
+							cacheWrite: 40,
+							cost: { total: 1.25 },
+						},
+					},
+				},
+			}),
+			"session-1",
+		);
+
+		expect(parsed?.message).toEqual({
+			sessionId: "session-1",
+			timestamp: Date.parse("2026-05-24T00:00:00.000Z"),
+			cost: 1.25,
+			input: 10,
+			output: 20,
+			cacheRead: 30,
+			cacheWrite: 40,
+		});
+	});
 });
