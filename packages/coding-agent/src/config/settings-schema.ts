@@ -2603,6 +2603,32 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"providers.openaiHostedWebSearch": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			label: "OpenAI Hosted Search",
+			description: "Expose OpenAI Responses web_search on first-party GPT requests",
+		},
+	},
+
+	"providers.openaiWebSearchContextSize": {
+		type: "enum",
+		values: ["low", "medium", "high"] as const,
+		default: "medium",
+		ui: {
+			tab: "providers",
+			label: "OpenAI Search Context",
+			description: "Search context size for OpenAI hosted web_search",
+			options: [
+				{ value: "low", label: "Low", description: "Use fewer search tokens" },
+				{ value: "medium", label: "Medium", description: "Use OpenAI's balanced search context" },
+				{ value: "high", label: "High", description: "Use more search context when available" },
+			],
+		},
+	},
+
 	"providers.parallelFetch": {
 		type: "boolean",
 		default: true,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `openaiHostedTools` passthrough on `AgentOptions` so callers can expose OpenAI Responses hosted web search through the agent loop without replacing the stream function ([#1341](https://github.com/can1357/oh-my-pi/issues/1341)).
+
 ## [15.2.3] - 2026-05-22
 ### Added
 

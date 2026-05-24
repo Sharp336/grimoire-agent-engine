@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added OpenAI Responses hosted `web_search` options for first-party GPT requests. The auth-gateway `/v1/responses` parser now preserves hosted `web_search` entries as stream options instead of dropping them while still keeping local function tools separate ([#1341](https://github.com/can1357/oh-my-pi/issues/1341)).
+
 ## [15.2.4] - 2026-05-22
 
 ### Fixed

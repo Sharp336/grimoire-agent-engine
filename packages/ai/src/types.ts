@@ -158,7 +158,8 @@ export type ToolChoice =
 	| "required"
 	| { type: "function"; name: string }
 	| { type: "function"; function: { name: string } }
-	| { type: "tool"; name: string };
+	| { type: "tool"; name: string }
+	| OpenAIHostedToolChoice;
 
 // Base options all providers share
 export type CacheRetention = "none" | "short" | "long";
@@ -404,6 +405,31 @@ export interface SimpleStreamOptions extends StreamOptions {
 	syntheticApiFormat?: "openai" | "anthropic";
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
+	/** OpenAI Responses hosted tools to expose on first-party GPT requests. */
+	openaiHostedTools?: OpenAIHostedToolsOptions;
+}
+
+export type OpenAIHostedToolToggle<T> = boolean | T;
+
+export type OpenAIHostedToolChoiceType = "web_search" | "web_search_preview";
+
+export interface OpenAIHostedToolChoice {
+	type: OpenAIHostedToolChoiceType;
+}
+
+export interface OpenAIHostedWebSearchOptions {
+	enabled?: boolean;
+	searchContextSize?: "low" | "medium" | "high";
+	externalWebAccess?: boolean;
+	returnTokenBudget?: "default" | "unlimited";
+	filters?: {
+		allowedDomains?: string[];
+		blockedDomains?: string[];
+	};
+}
+
+export interface OpenAIHostedToolsOptions {
+	webSearch?: OpenAIHostedToolToggle<OpenAIHostedWebSearchOptions>;
 }
 
 // Generic StreamFunction with typed options

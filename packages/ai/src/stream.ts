@@ -692,8 +692,9 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"openai-responses">({
 				...base,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
-				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
+				toolChoice: options?.toolChoice,
 				serviceTier: options?.serviceTier,
+				openaiHostedTools: options?.openaiHostedTools,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,
 			});
 
@@ -710,7 +711,8 @@ function mapOptionsForApi<TApi extends Api>(
 			return castApi<"openai-codex-responses">({
 				...base,
 				reasoning: resolveOpenAiReasoningEffort(model, options),
-				toolChoice: mapOpenAiToolChoice(options?.toolChoice),
+				toolChoice: options?.toolChoice,
+				openaiHostedTools: options?.openaiHostedTools,
 				serviceTier: options?.serviceTier,
 				preferWebsockets: options?.preferWebsockets,
 				reasoningSummary: options?.hideThinkingSummary ? null : undefined,

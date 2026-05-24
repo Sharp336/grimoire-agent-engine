@@ -48,6 +48,9 @@ function refreshToolChoiceForActiveTools(
 	if (!toolChoice || typeof toolChoice === "string") {
 		return toolChoice;
 	}
+	if (toolChoice.type !== "tool" && toolChoice.type !== "function") {
+		return toolChoice;
+	}
 
 	const toolName =
 		toolChoice.type === "tool"
@@ -106,6 +109,9 @@ export interface AgentOptions {
 
 	/** Hint that websocket transport should be preferred when supported by the provider implementation. */
 	preferWebsockets?: boolean;
+
+	/** OpenAI Responses hosted tools exposed on first-party GPT requests. */
+	openaiHostedTools?: SimpleStreamOptions["openaiHostedTools"];
 
 	/**
 	 * Custom stream function (for proxy backends, etc.). Default uses streamSimple.
@@ -282,6 +288,7 @@ export class Agent {
 	#resolveRunningPrompt?: () => void;
 	#kimiApiFormat?: "openai" | "anthropic";
 	#preferWebsockets?: boolean;
+	#openaiHostedTools?: SimpleStreamOptions["openaiHostedTools"];
 	#transformToolCallArguments?: (args: Record<string, unknown>, toolName: string) => Record<string, unknown>;
 	#intentTracing: boolean;
 	#getToolChoice?: () => ToolChoice | undefined;
@@ -338,6 +345,7 @@ export class Agent {
 		this.#cursorOnToolResult = opts.cursorOnToolResult;
 		this.#kimiApiFormat = opts.kimiApiFormat;
 		this.#preferWebsockets = opts.preferWebsockets;
+		this.#openaiHostedTools = opts.openaiHostedTools;
 		this.#transformToolCallArguments = opts.transformToolCallArguments;
 		this.#intentTracing = opts.intentTracing === true;
 		this.#getToolChoice = opts.getToolChoice;
@@ -907,6 +915,7 @@ export class Agent {
 			maxRetryDelayMs: this.#maxRetryDelayMs,
 			kimiApiFormat: this.#kimiApiFormat,
 			preferWebsockets: this.#preferWebsockets,
+			openaiHostedTools: this.#openaiHostedTools,
 			convertToLlm: this.#convertToLlm,
 			transformContext: this.#transformContext,
 			onPayload: this.#onPayload,

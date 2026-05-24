@@ -1,6 +1,9 @@
 import { describe, expect, it } from "bun:test";
 import { getBundledModel } from "@oh-my-pi/pi-ai/models";
-import { streamOpenAICodexResponses } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	type OpenAICodexResponsesOptions,
+	streamOpenAICodexResponses,
+} from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { createOpenAIResponsesHistoryPayload, truncateResponseItemId } from "../src/utils";
@@ -193,11 +196,16 @@ function captureResponsesPayload(
 	return promise;
 }
 
-function captureCodexPayload(model: Model<"openai-codex-responses">, context: Context): Promise<unknown> {
+function captureCodexPayload(
+	model: Model<"openai-codex-responses">,
+	context: Context,
+	options?: Omit<OpenAICodexResponsesOptions, "apiKey" | "signal" | "onPayload">,
+): Promise<unknown> {
 	const { promise, resolve } = Promise.withResolvers<unknown>();
 	streamOpenAICodexResponses(model, context, {
 		apiKey: createCodexToken("acc_test"),
 		signal: createAbortedSignal(),
+		...options,
 		onPayload: payload => resolve(payload),
 	});
 	return promise;
@@ -320,6 +328,116 @@ describe("OpenAI responses history payload", () => {
 			{ role: "user", content: [{ type: "input_text", text: "hi" }] },
 		]);
 		expect(payload.prompt_cache_key).toBe("session-abc");
+	});
+
+	it("adds OpenAI hosted web_search to first-party Responses requests", async () => {
+		const model = {
+			...getOpenAIReasoningModel("openai", "gpt-5-mini"),
+			baseUrl: "",
+		};
+		const payload = (await captureResponsesPayload(
+			model,
+			{
+				messages: [{ role: "user", content: "search docs", timestamp: Date.now() }],
+				tools: [
+					{
+						name: "lookup",
+						description: "Look up local data",
+						parameters: {
+							type: "object",
+							properties: { query: { type: "string" } },
+							required: ["query"],
+							additionalProperties: false,
+						},
+					},
+				],
+			},
+			undefined,
+			{
+				openaiHostedTools: {
+					webSearch: {
+						searchContextSize: "high",
+						externalWebAccess: false,
+						returnTokenBudget: "unlimited",
+						filters: { allowedDomains: ["openai.com"] },
+					},
+				},
+			},
+		)) as { tools?: Array<Record<string, unknown>> };
+
+		const tools = payload.tools ?? [];
+		expect(tools.some(tool => tool.type === "function" && tool.name === "lookup")).toBe(true);
+		expect(tools.find(tool => tool.type === "web_search")).toEqual({
+			type: "web_search",
+			search_context_size: "high",
+			external_web_access: false,
+			return_token_budget: "unlimited",
+			filters: { allowed_domains: ["openai.com"] },
+		});
+	});
+
+	it("does not send OpenAI hosted web_search to OpenAI-compatible Responses base URLs", async () => {
+		const model = {
+			...getOpenAIReasoningModel("openai", "gpt-5-mini"),
+			baseUrl: "https://proxy.example.com/v1",
+		};
+		const payload = (await captureResponsesPayload(
+			model,
+			{ messages: [{ role: "user", content: "search docs", timestamp: Date.now() }] },
+			undefined,
+			{ openaiHostedTools: { webSearch: true } },
+		)) as { tools?: unknown };
+
+		expect(payload.tools).toBeUndefined();
+	});
+
+	it("preserves hosted Responses tool_choice when the hosted tool is available", async () => {
+		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const payload = (await captureResponsesPayload(
+			model,
+			{ messages: [{ role: "user", content: "search docs", timestamp: Date.now() }] },
+			undefined,
+			{
+				openaiHostedTools: { webSearch: true },
+				toolChoice: { type: "web_search" },
+			},
+		)) as { tool_choice?: unknown };
+
+		expect(payload.tool_choice).toEqual({ type: "web_search" });
+	});
+
+	it("omits named function tool_choice when only hosted tools are available", async () => {
+		const model = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const payload = (await captureResponsesPayload(
+			model,
+			{ messages: [{ role: "user", content: "search docs", timestamp: Date.now() }] },
+			undefined,
+			{
+				openaiHostedTools: { webSearch: true },
+				toolChoice: { type: "tool", name: "lookup" },
+			},
+		)) as { tool_choice?: unknown };
+
+		expect(payload.tool_choice).toBeUndefined();
+	});
+
+	it("adds OpenAI hosted web_search to Codex subscription Responses requests", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.2") as Model<"openai-codex-responses">;
+		const payload = (await captureCodexPayload(
+			model,
+			{
+				systemPrompt: ["stable instructions"],
+				messages: [{ role: "user", content: "search docs", timestamp: Date.now() }],
+			},
+			{
+				openaiHostedTools: { webSearch: true },
+				toolChoice: { type: "web_search" },
+				preferWebsockets: false,
+			},
+		)) as { tools?: Array<Record<string, unknown>>; tool_choice?: unknown };
+
+		expect(payload.tools).toEqual([{ type: "web_search" }]);
+		expect(payload.tool_choice).toEqual({ type: "web_search" });
 	});
 
 	it("falls back to system instructions for OpenAI-compatible endpoints without developer-role support", async () => {

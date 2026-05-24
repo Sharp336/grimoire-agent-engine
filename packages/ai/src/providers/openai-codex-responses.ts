@@ -28,6 +28,8 @@ import {
 	type Context,
 	type FetchImpl,
 	type Model,
+	type OpenAIHostedToolChoice,
+	type OpenAIHostedToolsOptions,
 	type ProviderSessionState,
 	resolveServiceTier,
 	type ServiceTier,
@@ -78,6 +80,7 @@ export interface OpenAICodexResponsesOptions extends StreamOptions {
 	include?: string[];
 	codexMode?: boolean;
 	toolChoice?: ToolChoice;
+	openaiHostedTools?: OpenAIHostedToolsOptions;
 	preferWebsockets?: boolean;
 	serviceTier?: ServiceTier;
 }
@@ -97,6 +100,8 @@ const CODEX_PROVIDER_SESSION_STATE_KEY = "openai-codex-responses";
 const X_CODEX_TURN_STATE_HEADER = "x-codex-turn-state";
 const X_MODELS_ETAG_HEADER = "x-models-etag";
 const X_REASONING_INCLUDED_HEADER = "x-reasoning-included";
+type CodexNamedToolChoice = { type: "function" | "custom"; name: string };
+type CodexToolChoicePayload = string | OpenAIHostedToolChoice | CodexNamedToolChoice;
 /** Connection-level websocket failures that should immediately fall back to SSE without retrying. */
 const CODEX_WEBSOCKET_FATAL_PATTERNS = ["websocket error:", "websocket closed before open", "connection timeout"];
 /** Max total time to spend retrying 429s with server-provided delays (5 minutes). */
@@ -379,11 +384,12 @@ export function normalizeCodexToolChoice(
 	choice: ToolChoice | undefined,
 	tools: Tool[] = [],
 	model?: Model<"openai-codex-responses">,
-): string | Record<string, unknown> | undefined {
+): CodexToolChoicePayload | undefined {
 	if (!choice) return undefined;
 	if (typeof choice === "string") return choice;
+	if (isOpenAIHostedToolChoice(choice)) return normalizeOpenAIHostedToolChoice(choice);
 	const allowFreeform = model ? supportsFreeformApplyPatchCodex(model) : false;
-	const mapName = (name: string): Record<string, string> => {
+	const mapName = (name: string): CodexNamedToolChoice => {
 		const customTool = allowFreeform
 			? tools.find(tool => tool.customFormat && (tool.name === name || tool.customWireName === name))
 			: undefined;
@@ -403,6 +409,22 @@ export function normalizeCodexToolChoice(
 		return mapName(choice.name);
 	}
 	return undefined;
+}
+
+function normalizeOpenAIHostedToolChoice(choice: OpenAIHostedToolChoice): OpenAIHostedToolChoice {
+	if (choice.type === "web_search_preview") return { ...choice, type: "web_search" };
+	return choice;
+}
+
+function isOpenAIHostedToolChoice(choice: ToolChoice): choice is OpenAIHostedToolChoice {
+	if (typeof choice !== "object") return false;
+	switch (choice.type) {
+		case "web_search":
+		case "web_search_preview":
+			return true;
+		default:
+			return false;
+	}
 }
 
 function createEmptyUsage(): AssistantMessage["usage"] {
@@ -594,11 +616,14 @@ async function buildTransformedCodexRequestBody(
 	if (resolvedServiceTier === "flex" || resolvedServiceTier === "scale" || resolvedServiceTier === "priority") {
 		params.service_tier = resolvedServiceTier;
 	}
-	if (context.tools && context.tools.length > 0) {
-		params.tools = convertOpenAICodexResponsesTools(context.tools, model);
+	const localTools =
+		context.tools && context.tools.length > 0 ? convertOpenAICodexResponsesTools(context.tools, model) : [];
+	const hostedTools = buildOpenAICodexHostedTools(options?.openaiHostedTools);
+	if (localTools.length > 0 || hostedTools.length > 0) {
+		params.tools = [...localTools, ...hostedTools];
 		if (options?.toolChoice) {
-			const toolChoice = normalizeCodexToolChoice(options.toolChoice, context.tools, model);
-			if (toolChoice) {
+			const toolChoice = normalizeCodexToolChoice(options.toolChoice, context.tools ?? [], model);
+			if (shouldSendCodexToolChoice(toolChoice, localTools, hostedTools)) {
 				params.tool_choice = toolChoice;
 			}
 		}
@@ -2475,6 +2500,63 @@ type CodexToolPayload =
 			description: string;
 			format: { type: "grammar"; syntax: "lark" | "regex"; definition: string };
 	  };
+
+type CodexHostedToolPayload = Record<string, unknown> & { type: string };
+
+function hostedToggleEnabled<T extends { enabled?: boolean }>(value: boolean | T | undefined): value is true | T {
+	if (value === undefined || value === false) return false;
+	if (value === true) return true;
+	return value.enabled !== false;
+}
+
+function hostedToolConfig<T extends { enabled?: boolean }>(value: boolean | T | undefined): T | undefined {
+	return typeof value === "object" && hostedToggleEnabled(value) ? value : undefined;
+}
+
+function buildOpenAICodexHostedTools(hosted: OpenAIHostedToolsOptions | undefined): CodexHostedToolPayload[] {
+	if (!hosted) return [];
+
+	const tools: CodexHostedToolPayload[] = [];
+	if (hostedToggleEnabled(hosted.webSearch)) {
+		const webSearch = hostedToolConfig(hosted.webSearch);
+		const tool: CodexHostedToolPayload = { type: "web_search" };
+		if (webSearch?.searchContextSize) tool.search_context_size = webSearch.searchContextSize;
+		if (webSearch?.externalWebAccess !== undefined) tool.external_web_access = webSearch.externalWebAccess;
+		if (webSearch?.returnTokenBudget) tool.return_token_budget = webSearch.returnTokenBudget;
+		const allowedDomains = webSearch?.filters?.allowedDomains?.filter(domain => domain.length > 0);
+		const blockedDomains = webSearch?.filters?.blockedDomains?.filter(domain => domain.length > 0);
+		if (allowedDomains?.length || blockedDomains?.length) {
+			tool.filters = {
+				...(allowedDomains?.length ? { allowed_domains: allowedDomains } : {}),
+				...(blockedDomains?.length ? { blocked_domains: blockedDomains } : {}),
+			};
+		}
+		tools.push(tool);
+	}
+
+	return tools;
+}
+
+function shouldSendCodexToolChoice(
+	choice: CodexToolChoicePayload | undefined,
+	localTools: CodexToolPayload[],
+	hostedTools: CodexHostedToolPayload[],
+): boolean {
+	if (!choice) return false;
+	if (typeof choice === "string") return true;
+	if (isCodexNamedToolChoice(choice)) {
+		return localTools.some(tool => tool.type === choice.type && tool.name === choice.name);
+	}
+	return hostedTools.some(tool => hostedToolChoiceMatches(choice, tool));
+}
+
+function isCodexNamedToolChoice(choice: OpenAIHostedToolChoice | CodexNamedToolChoice): choice is CodexNamedToolChoice {
+	return choice.type === "function" || choice.type === "custom";
+}
+
+function hostedToolChoiceMatches(choice: OpenAIHostedToolChoice, tool: CodexHostedToolPayload): boolean {
+	return tool.type === choice.type;
+}
 
 /** @internal Exported for tests. */
 export function convertOpenAICodexResponsesTools(

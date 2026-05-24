@@ -24,12 +24,21 @@ import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
 import { streamSimple } from "../stream";
-import type { Api, AssistantMessageEventStream, Context, Model, SimpleStreamOptions } from "../types";
+import type {
+	Api,
+	AssistantMessageEventStream,
+	Context,
+	Model,
+	OpenAIHostedToolChoice,
+	SimpleStreamOptions,
+	ToolChoice,
+} from "../types";
 import { parseBind } from "../utils/parse-bind";
 import { captureRequestHeaders, corsHeaders, isAuthorized, json, resolvePeer, withCors } from "./http";
 import type {
 	AuthGatewayServerHandle,
 	AuthGatewayServerOptions,
+	AuthGatewayToolChoice,
 	AuthGatewayFormatModule as FormatModule,
 	AuthGatewayParsedRequest as ParsedFormatRequest,
 } from "./types";
@@ -113,6 +122,23 @@ function deriveSessionId(modelId: string, context: Context): string {
 	return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20, 32)}`;
 }
 
+function isAuthGatewayHostedToolChoice(
+	choice: Exclude<AuthGatewayToolChoice, string>,
+): choice is OpenAIHostedToolChoice {
+	return "type" in choice;
+}
+
+function supportsAuthGatewayHostedTools(api: Api): boolean {
+	return api === "openai-responses" || api === "openai-codex-responses";
+}
+
+/** @internal Exported for regression tests. */
+export function mapAuthGatewayToolChoice(choice: AuthGatewayToolChoice, api: Api): ToolChoice {
+	if (typeof choice === "string") return choice;
+	if (isAuthGatewayHostedToolChoice(choice)) return supportsAuthGatewayHostedTools(api) ? choice : "auto";
+	return { type: "tool", name: choice.name };
+}
+
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
 	const opts: SimpleStreamOptions = { signal };
 	const { options } = parsed;
@@ -132,9 +158,9 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.repetitionPenalty !== undefined) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
 	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
-	if (options.toolChoice !== undefined) {
-		opts.toolChoice =
-			typeof options.toolChoice === "object" ? { type: "tool", name: options.toolChoice.name } : options.toolChoice;
+	if (options.toolChoice !== undefined) opts.toolChoice = mapAuthGatewayToolChoice(options.toolChoice, api);
+	if (options.openaiHostedTools !== undefined && supportsAuthGatewayHostedTools(api)) {
+		opts.openaiHostedTools = options.openaiHostedTools;
 	}
 	if (options.reasoning !== undefined) opts.reasoning = options.reasoning;
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;

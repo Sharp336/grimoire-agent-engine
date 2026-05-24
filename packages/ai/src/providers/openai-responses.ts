@@ -14,6 +14,7 @@ import type {
 	MessageAttribution,
 	Model,
 	OpenAICompat,
+	OpenAIHostedToolsOptions,
 	ProviderSessionState,
 	ServiceTier,
 	StreamFunction,
@@ -91,6 +92,7 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	reasoningSummary?: "auto" | "detailed" | "concise" | null;
 	serviceTier?: ServiceTier;
 	toolChoice?: ToolChoice;
+	openaiHostedTools?: OpenAIHostedToolsOptions;
 	/**
 	 * Enforce strict tool call/result pairing when building Responses API inputs.
 	 * Azure OpenAI and GitHub Copilot Responses paths require tool results to match prior tool calls.
@@ -173,6 +175,8 @@ type OpenAIResponsesSamplingParams = ResponseCreateParamsStreaming & {
 	repetition_penalty?: number;
 	stream_options?: { include_obfuscation?: boolean };
 };
+
+type OpenAIHostedToolWire = Record<string, unknown>;
 
 /**
  * Generate function for OpenAI Responses API
@@ -372,6 +376,67 @@ function getOpenAIResponsesCacheSessionId(
 		: normalizeOpenAIResponsesPromptCacheKey(options?.sessionId);
 }
 
+function supportsOpenAIHostedTools(model: Model<"openai-responses">, resolvedBaseUrl: string | undefined): boolean {
+	const baseUrl = resolvedBaseUrl ?? model.baseUrl;
+	return model.provider === "openai" && (!baseUrl || baseUrl.toLowerCase().includes("api.openai.com"));
+}
+
+function hostedToggleEnabled<T extends { enabled?: boolean }>(value: boolean | T | undefined): value is true | T {
+	if (value === undefined || value === false) return false;
+	if (value === true) return true;
+	return value.enabled !== false;
+}
+
+function hostedToolConfig<T extends { enabled?: boolean }>(value: boolean | T | undefined): T | undefined {
+	return typeof value === "object" && hostedToggleEnabled(value) ? value : undefined;
+}
+
+function buildOpenAIHostedTools(
+	model: Model<"openai-responses">,
+	options: OpenAIResponsesOptions | undefined,
+	resolvedBaseUrl: string | undefined,
+): OpenAIHostedToolWire[] {
+	if (!supportsOpenAIHostedTools(model, resolvedBaseUrl)) return [];
+	const hosted = options?.openaiHostedTools;
+	if (!hosted) return [];
+
+	const tools: OpenAIHostedToolWire[] = [];
+	if (hostedToggleEnabled(hosted.webSearch)) {
+		const webSearch = hostedToolConfig(hosted.webSearch);
+		const tool: OpenAIHostedToolWire = { type: "web_search" };
+		if (webSearch?.searchContextSize) tool.search_context_size = webSearch.searchContextSize;
+		if (webSearch?.externalWebAccess !== undefined) tool.external_web_access = webSearch.externalWebAccess;
+		if (webSearch?.returnTokenBudget) tool.return_token_budget = webSearch.returnTokenBudget;
+		const allowedDomains = webSearch?.filters?.allowedDomains?.filter(domain => domain.length > 0);
+		const blockedDomains = webSearch?.filters?.blockedDomains?.filter(domain => domain.length > 0);
+		if (allowedDomains?.length || blockedDomains?.length) {
+			tool.filters = {
+				...(allowedDomains?.length ? { allowed_domains: allowedDomains } : {}),
+				...(blockedDomains?.length ? { blocked_domains: blockedDomains } : {}),
+			};
+		}
+		tools.push(tool);
+	}
+
+	return tools;
+}
+
+function shouldSendOpenAIResponsesToolChoice(
+	choice: OpenAIResponsesToolChoice,
+	localTools: OpenAITool[],
+	hostedTools: OpenAIHostedToolWire[],
+): boolean {
+	if (!choice) return false;
+	if (typeof choice === "string") return true;
+	if (choice.type === "function" || choice.type === "custom") {
+		return localTools.some(tool => {
+			const candidate = tool as { type?: string; name?: unknown };
+			return candidate.type === choice.type && candidate.name === choice.name;
+		});
+	}
+	return hostedTools.some(tool => tool.type === choice.type);
+}
+
 function buildParams(
 	model: Model<"openai-responses">,
 	context: Context,
@@ -415,10 +480,15 @@ function buildParams(
 	// TODO: openai responses has no top-level `frequency_penalty` field as of the current SDK;
 	// `StreamOptions.frequencyPenalty` is intentionally dropped for this provider.
 
-	if (context.tools) {
-		params.tools = convertTools(context.tools, supportsStrictMode(model), model);
+	const localTools = context.tools ? convertTools(context.tools, supportsStrictMode(model), model) : [];
+	const hostedTools = buildOpenAIHostedTools(model, options, resolvedBaseUrl);
+	if (localTools.length > 0 || hostedTools.length > 0) {
+		params.tools = [...localTools, ...(hostedTools as unknown as OpenAITool[])];
 		if (options?.toolChoice) {
-			params.tool_choice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, context.tools, model);
+			const toolChoice = mapOpenAIResponsesToolChoiceForTools(options.toolChoice, context.tools ?? [], model);
+			if (shouldSendOpenAIResponsesToolChoice(toolChoice, localTools, hostedTools)) {
+				params.tool_choice = toolChoice as OpenAIResponsesSamplingParams["tool_choice"];
+			}
 		}
 		// The apply_patch spec §1 marks only `apply_patch` itself as
 		// `supports_parallel_tool_calls = false`. OpenAI's Responses API

@@ -1,7 +1,7 @@
 /**
  * Utility functions for mapping unified ToolChoice to provider-specific formats.
  */
-import type { ToolChoice } from "../types";
+import type { OpenAIHostedToolChoice, ToolChoice } from "../types";
 
 /** OpenAI Completions API tool choice format */
 export type OpenAICompletionsToolChoice =
@@ -18,6 +18,7 @@ export type OpenAIResponsesToolChoice =
 	| "required"
 	| { type: "function"; name: string }
 	| { type: "custom"; name: string }
+	| OpenAIHostedToolChoice
 	| undefined;
 
 /** Anthropic-compatible tool choice format */
@@ -36,6 +37,22 @@ function extractFunctionName(choice: ToolChoice): string | undefined {
 		if ("name" in choice) return choice.name;
 	}
 	return undefined;
+}
+
+function normalizeOpenAIHostedToolChoice(choice: OpenAIHostedToolChoice): OpenAIHostedToolChoice {
+	if (choice.type === "web_search_preview") return { ...choice, type: "web_search" };
+	return choice;
+}
+
+function isOpenAIHostedToolChoice(choice: ToolChoice): choice is OpenAIHostedToolChoice {
+	if (typeof choice !== "object") return false;
+	switch (choice.type) {
+		case "web_search":
+		case "web_search_preview":
+			return true;
+		default:
+			return false;
+	}
 }
 
 /**
@@ -78,6 +95,7 @@ export function mapToOpenAIResponsesToolChoice(choice?: ToolChoice): OpenAIRespo
 		if (choice === "auto" || choice === "none" || choice === "required") return choice;
 		return undefined;
 	}
+	if (isOpenAIHostedToolChoice(choice)) return normalizeOpenAIHostedToolChoice(choice);
 	const name = extractFunctionName(choice);
 	return name ? { type: "function", name } : undefined;
 }

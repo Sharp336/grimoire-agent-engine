@@ -11,6 +11,7 @@ import {
 	type CredentialDisabledEvent,
 	type Message,
 	type Model,
+	type OpenAIHostedToolsOptions,
 	type SimpleStreamOptions,
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
@@ -757,6 +758,20 @@ function buildMCPPromptCommands(manager: MCPManager): LoadedCustomCommand[] {
 	}
 	return commands;
 }
+
+function buildOpenAIHostedToolsOptions(settings: Settings): OpenAIHostedToolsOptions | undefined {
+	const hosted: OpenAIHostedToolsOptions = {};
+
+	if (settings.get("providers.openaiHostedWebSearch")) {
+		hosted.webSearch = {
+			enabled: true,
+			searchContextSize: settings.get("providers.openaiWebSearchContextSize"),
+		};
+	}
+
+	return Object.keys(hosted).length > 0 ? hosted : undefined;
+}
+
 /**
  * Create an AgentSession with the specified options.
  *
@@ -1827,6 +1842,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const preferOpenAICodexWebsockets =
 			openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
 		const serviceTierSetting = settings.get("serviceTier");
+		const openaiHostedTools = buildOpenAIHostedToolsOptions(settings);
 
 		const initialServiceTier = hasServiceTierEntry
 			? existingSession.serviceTier
@@ -1860,6 +1876,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			hideThinkingSummary: settings.get("hideThinkingBlock"),
 			kimiApiFormat: settings.get("providers.kimiApiFormat") ?? "anthropic",
 			preferWebsockets: preferOpenAICodexWebsockets,
+			openaiHostedTools,
 			getToolContext: tc => toolContextStore.getContext(tc),
 			getApiKey: async provider => {
 				// Read agent.sessionId at call time so credential selection stays aligned

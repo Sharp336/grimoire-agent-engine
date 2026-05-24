@@ -1,5 +1,13 @@
 import type { Effort } from "../model-thinking";
-import type { AssistantMessage, AssistantMessageEventStream, CacheRetention, Context, ServiceTier } from "../types";
+import type {
+	AssistantMessage,
+	AssistantMessageEventStream,
+	CacheRetention,
+	Context,
+	OpenAIHostedToolChoice,
+	OpenAIHostedToolsOptions,
+	ServiceTier,
+} from "../types";
 
 /**
  * Wire types for the omp auth-gateway.
@@ -15,7 +23,7 @@ import type { AssistantMessage, AssistantMessageEventStream, CacheRetention, Con
 /** Default bind. Loopback-only — front with reverse proxy for remote access. */
 export const DEFAULT_AUTH_GATEWAY_BIND = "127.0.0.1:4000";
 
-export type AuthGatewayToolChoice = "auto" | "none" | "required" | { name: string };
+export type AuthGatewayToolChoice = "auto" | "none" | "required" | { name: string } | OpenAIHostedToolChoice;
 
 export interface AuthGatewayParsedRequestOptions {
 	// ── Sampling ──────────────────────────────────────────────────────────
@@ -44,6 +52,8 @@ export interface AuthGatewayParsedRequestOptions {
 	toolChoice?: AuthGatewayToolChoice;
 	/** OpenAI `parallel_tool_calls`. */
 	parallelToolCalls?: boolean;
+	/** OpenAI Responses hosted tools accepted on the public `/v1/responses` shape. */
+	openaiHostedTools?: OpenAIHostedToolsOptions;
 
 	// ── Reasoning ─────────────────────────────────────────────────────────
 	/** Effort-level reasoning request (OpenAI Responses / Chat `reasoning_effort`). */

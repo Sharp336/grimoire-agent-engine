@@ -123,7 +123,7 @@ function getNamedToolChoiceName(toolChoice: ToolChoice | undefined): string | un
 	if ("function" in toolChoice) {
 		return toolChoice.function.name;
 	}
-	return toolChoice.name;
+	return "name" in toolChoice ? toolChoice.name : undefined;
 }
 
 function selectToolsForToolChoice(tools: Tool[] | undefined, toolChoice: ToolChoice | undefined): Tool[] | undefined {

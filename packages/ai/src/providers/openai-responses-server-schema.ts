@@ -191,6 +191,7 @@ const builtinToolSchema = z
 // ─── Tool choice ────────────────────────────────────────────────────────────
 
 const hostedToolType = z.enum([
+	"web_search",
 	"web_search_preview",
 	"file_search",
 	"computer_use_preview",
@@ -217,7 +218,8 @@ export const toolChoiceSchema = z.union([
 		type: z.literal("custom"),
 		name: z.string().min(1),
 	}),
-	// Hosted-tool selection (no extra fields).
+	// Hosted selections are accepted for Responses API compatibility; the
+	// walker only bridges web_search and keeps older non-web choices as auto.
 	z.object({
 		type: hostedToolType,
 	}),

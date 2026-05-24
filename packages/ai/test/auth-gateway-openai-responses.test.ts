@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { mapAuthGatewayToolChoice } from "../src/auth-gateway/server";
 import { Effort } from "../src/model-thinking";
 import { encodeResponse, encodeStream, parseRequest } from "../src/providers/openai-responses-server";
 import type { AssistantMessage } from "../src/types";
@@ -160,6 +161,58 @@ describe("openai-responses parseRequest", () => {
 		expect(parsed.options.extra).toBeUndefined();
 	});
 
+	it("bridges hosted web_search entries into OpenAI Responses stream options", () => {
+		const parsed = parseRequest({
+			model: "gpt-5-mini",
+			input: "search docs",
+			tool_choice: { type: "web_search" },
+			tools: [
+				{
+					type: "web_search",
+					search_context_size: "high",
+					external_web_access: false,
+					return_token_budget: "unlimited",
+					filters: { allowed_domains: ["openai.com"], blocked_domains: ["example.com"] },
+				},
+			],
+		});
+
+		expect(parsed.context.tools).toBeUndefined();
+		expect(parsed.options.toolChoice).toEqual({ type: "web_search" });
+		const hosted = parsed.options.openaiHostedTools;
+		if (!hosted) throw new Error("expected hosted tools");
+		if (!hosted.webSearch || typeof hosted.webSearch !== "object") throw new Error("expected web_search options");
+
+		expect(hosted.webSearch).toMatchObject({
+			enabled: true,
+			searchContextSize: "high",
+			externalWebAccess: false,
+			returnTokenBudget: "unlimited",
+			filters: { allowedDomains: ["openai.com"], blockedDomains: ["example.com"] },
+		});
+	});
+
+	it("keeps non-web hosted tool_choice values accepted as auto for compatibility", () => {
+		const hostedTypes = [
+			"file_search",
+			"computer_use_preview",
+			"code_interpreter",
+			"image_generation",
+			"mcp",
+		] as const;
+
+		for (const type of hostedTypes) {
+			const parsed = parseRequest({
+				model: "gpt-5-mini",
+				input: "hosted tool choice",
+				tool_choice: { type },
+			});
+
+			expect(parsed.options.toolChoice).toBe("auto");
+			expect(parsed.options.openaiHostedTools).toBeUndefined();
+		}
+	});
+
 	it("accepts a bare string input and rejects a missing model", () => {
 		const parsed = parseRequest({ model: "m", input: "hi" });
 		expect(parsed.context.messages).toHaveLength(1);
@@ -220,6 +273,19 @@ describe("openai-responses parseRequest", () => {
 			thinkingSignature: JSON.stringify(reasoningItem),
 			itemId: "rs_x",
 		});
+	});
+});
+
+describe("auth-gateway Responses tool_choice mapping", () => {
+	it("only forwards hosted web_search choices to OpenAI Responses backends", () => {
+		const hostedChoice = { type: "web_search" } as const;
+
+		expect(mapAuthGatewayToolChoice(hostedChoice, "openai-responses")).toEqual(hostedChoice);
+		expect(mapAuthGatewayToolChoice(hostedChoice, "openai-codex-responses")).toEqual(hostedChoice);
+		expect(mapAuthGatewayToolChoice(hostedChoice, "ollama-chat")).toBe("auto");
+		expect(mapAuthGatewayToolChoice(hostedChoice, "google-generative-ai")).toBe("auto");
+		expect(mapAuthGatewayToolChoice({ name: "lookup" }, "ollama-chat")).toEqual({ type: "tool", name: "lookup" });
+		expect(mapAuthGatewayToolChoice("required", "ollama-chat")).toBe("required");
 	});
 });
 

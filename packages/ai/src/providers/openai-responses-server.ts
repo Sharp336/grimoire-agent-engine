@@ -17,6 +17,8 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	Message,
+	OpenAIHostedToolChoice,
+	OpenAIHostedToolsOptions,
 	TextContent,
 	ThinkingContent,
 	Tool,
@@ -161,6 +163,16 @@ function outputTextOf(blocks: OpenAIResponsesOutputContent[] | string | undefine
 	return out;
 }
 
+type ParsedWebSearchToolChoice = {
+	type: "web_search_preview" | "web_search";
+};
+
+type ParsedLegacyHostedToolChoice = {
+	type: "file_search" | "computer_use_preview" | "code_interpreter" | "image_generation" | "mcp";
+};
+
+type ParsedHostedToolChoice = ParsedWebSearchToolChoice | ParsedLegacyHostedToolChoice;
+
 // The schema accepts a much wider tool_choice union than the SDK type so the
 // walker narrows against the local schema shape.
 type ParsedToolChoice =
@@ -169,16 +181,17 @@ type ParsedToolChoice =
 	| "required"
 	| { type: "function"; name: string }
 	| { type: "custom"; name: string }
-	| {
-			type:
-				| "web_search_preview"
-				| "file_search"
-				| "computer_use_preview"
-				| "code_interpreter"
-				| "image_generation"
-				| "mcp";
-	  }
+	| ParsedHostedToolChoice
 	| { type: "allowed_tools"; mode: "auto" | "required"; tools: Array<{ type: string; name?: string }> };
+
+function isParsedWebSearchToolChoice(value: ParsedHostedToolChoice): value is ParsedWebSearchToolChoice {
+	return value.type === "web_search" || value.type === "web_search_preview";
+}
+
+function normalizeParsedWebSearchToolChoice(value: ParsedWebSearchToolChoice): OpenAIHostedToolChoice {
+	if (value.type === "web_search_preview") return { type: "web_search" };
+	return value;
+}
 
 function mapToolChoice(value: ParsedToolChoice | undefined): ParsedRequest["options"]["toolChoice"] {
 	if (value === undefined) return undefined;
@@ -188,8 +201,13 @@ function mapToolChoice(value: ParsedToolChoice | undefined): ParsedRequest["opti
 		// pi-ai shape: pi-ai's dispatcher matches `Tool.name` AND `customWireName`,
 		// so passing the wire name works for either.
 		if (value.type === "function" || value.type === "custom") return { name: value.name };
-		// Hosted tools + allowed_tools — we don't surface these to pi-ai; fall
-		// back to letting the model pick a tool freely.
+		if (value.type !== "allowed_tools" && isParsedWebSearchToolChoice(value)) {
+			return normalizeParsedWebSearchToolChoice(value);
+		}
+		// `allowed_tools` has no pi-ai equivalent yet; fall back to letting the
+		// model pick from the full available tool set. Older non-web hosted
+		// choices keep this compatibility behavior instead of failing schema
+		// validation.
 		return "auto";
 	}
 	return undefined;
@@ -211,6 +229,50 @@ function buildTools(tools: Array<OpenAIResponsesTool | { type: string }> | undef
 		out.push(tool);
 	}
 	return out.length > 0 ? out : undefined;
+}
+
+function buildOpenAIHostedToolsFromWire(
+	tools: Array<OpenAIResponsesTool | { type: string }> | undefined,
+): OpenAIHostedToolsOptions | undefined {
+	if (!tools) return undefined;
+	const hosted: OpenAIHostedToolsOptions = {};
+	for (const raw of tools) {
+		const tool = raw as Record<string, unknown>;
+		switch (tool.type) {
+			case "web_search":
+			case "web_search_preview": {
+				const filters = tool.filters as Record<string, unknown> | undefined;
+				hosted.webSearch = {
+					enabled: true,
+					searchContextSize:
+						tool.search_context_size === "low" ||
+						tool.search_context_size === "medium" ||
+						tool.search_context_size === "high"
+							? tool.search_context_size
+							: undefined,
+					externalWebAccess: typeof tool.external_web_access === "boolean" ? tool.external_web_access : undefined,
+					returnTokenBudget:
+						tool.return_token_budget === "default" || tool.return_token_budget === "unlimited"
+							? tool.return_token_budget
+							: undefined,
+					filters:
+						filters && typeof filters === "object"
+							? {
+									allowedDomains: Array.isArray(filters.allowed_domains)
+										? filters.allowed_domains.filter((domain): domain is string => typeof domain === "string")
+										: undefined,
+									blockedDomains: Array.isArray(filters.blocked_domains)
+										? filters.blocked_domains.filter((domain): domain is string => typeof domain === "string")
+										: undefined,
+								}
+							: undefined,
+				};
+				break;
+			}
+		}
+	}
+
+	return Object.keys(hosted).length > 0 ? hosted : undefined;
 }
 
 function ensureAssistantPlaceholder(messages: Message[], modelId: string, now: number): AssistantMessage {
@@ -424,6 +486,8 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	}
 	const toolChoice = mapToolChoice(data.tool_choice as ParsedToolChoice | undefined);
 	if (toolChoice !== undefined) options.toolChoice = toolChoice;
+	const openaiHostedTools = buildOpenAIHostedToolsFromWire(data.tools);
+	if (openaiHostedTools) options.openaiHostedTools = openaiHostedTools;
 	if (data.reasoning?.effort && isReasoningEffort(data.reasoning.effort)) {
 		options.reasoning = data.reasoning.effort;
 	}
