@@ -421,6 +421,17 @@ describe("hashline parser — block op syntax", () => {
 		expect(applyDiff(content, `»BOF|HEAD`)).toBe("HEAD\naaa\nbbb\nccc");
 		expect(applyDiff(content, `»EOF|TAIL`)).toBe("aaa\nbbb\nccc\nTAIL");
 	});
+
+	it('normalizes dash-separated range anchors from read collapsed output (e.g. "29ej-92rk")', () => {
+		// read's formatMergedBraceLine emits `START-END|content` for collapsed ranges.
+		// The model sometimes copies this dash form instead of the canonical `..` separator.
+		const anchor2 = tag(2, "bbb");
+		const anchor3 = tag(3, "ccc");
+		// Single-line replace via dash form should work like `≔anchor`
+		expect(applyDiff(content, `≔${anchor2}-${anchor2}\n${pl("BBB")}`)).toBe("aaa\nBBB\nccc");
+		// Multi-line range via dash form should work like `≔A..B`
+		expect(applyDiff(content, `≔${anchor2}-${anchor3}\n${pl("BBB")}\n${pl("CCC")}`)).toBe("aaa\nBBB\nCCC");
+	});
 });
 
 describe("hashline — stale anchors", () => {

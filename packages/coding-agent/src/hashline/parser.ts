@@ -5,6 +5,7 @@ import {
 	HL_BODY_SEP_RE_RAW,
 	HL_FILE_PREFIX,
 	HL_HASH_CAPTURE_RE_RAW,
+	HL_HASH_RE_RAW,
 	HL_OP_CHARS,
 	HL_OP_INSERT_AFTER,
 	HL_OP_INSERT_BEFORE,
@@ -18,6 +19,8 @@ import type { Anchor, HashlineCursor, HashlineEdit } from "./types";
 //   - an optional trailing `|TEXT` body (or anything after the hash) so users
 //     can paste a full `LINE+HASH|TEXT` line verbatim.
 const LID_CAPTURE_RE = new RegExp(`^\\s*[>+\\-*]*\\s*${HL_HASH_CAPTURE_RE_RAW}(?:\\|.*)?\\s*$`);
+/** Matches two anchors joined by a dash, as emitted by read's collapsed-range output (e.g. "29ej-92rk"). */
+const DASH_RANGE_RE = new RegExp(`^(${HL_HASH_RE_RAW})-(${HL_HASH_RE_RAW})$`);
 const regexEscape = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 function parseLid(raw: string, lineNum: number): Anchor {
@@ -37,6 +40,9 @@ interface ParsedRange {
 }
 
 function parseRange(raw: string, lineNum: number): ParsedRange {
+	// Normalize dash-separated anchors from read's collapsed-range output (e.g. "29ej-92rk") to the canonical ".." form.
+	const dashMatch = DASH_RANGE_RE.exec(raw);
+	if (dashMatch) raw = `${dashMatch[1]}..${dashMatch[2]}`;
 	if (!raw.includes("..")) {
 		const start = parseLid(raw, lineNum);
 		return { start, end: { ...start } };
