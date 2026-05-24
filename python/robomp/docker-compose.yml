@@ -143,7 +143,11 @@ services:
 networks:
   # External-facing bridge: webhook ingress (8080) and the orchestrator's
   # outbound path to the host LLM gateway via extra_hosts.
-  default: {}
+  default:
+    enable_ipv6: true
+    ipam:
+      config:
+        - subnet: 2a01:4f8:1c19:3f6d:1::/80
   # Orchestrator <-> gh-proxy only. internal: true means no egress and no
   # ingress from outside the compose project.
   robomp_internal:
