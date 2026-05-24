@@ -108,8 +108,7 @@ The automatic paths are intentionally different:
 - **Threshold maintenance**
   - Trigger: successful, non-error assistant message whose adjusted context tokens exceed `resolveThresholdTokens(...)`.
   - Tool-output pruning can reduce the measured token count before threshold comparison.
-  - Context promotion is tried before compaction.
-  - If promotion is unavailable, auto maintenance runs with `reason: "threshold"` and `willRetry: false`.
+  - Context promotion is not used on the threshold path; threshold maintenance preserves the selected model and runs auto maintenance with `reason: "threshold"` and `willRetry: false`.
   - With `compaction.strategy: "handoff"`, threshold maintenance starts a new handoff session instead of writing a compaction entry; if handoff returns no document without aborting, it falls back to context-full compaction.
   - On success, if `compaction.autoContinue !== false`, schedules an agent-authored developer auto-continue prompt from `prompts/system/auto-continue.md`.
 

@@ -5588,13 +5588,13 @@ export class AgentSession {
 	}
 
 	/**
-	 * Check if context maintenance or promotion is needed and run it.
+	 * Check if context maintenance or overflow promotion is needed and run it.
 	 * Called after agent_end and before prompt submission.
 	 *
-	 * Three cases (in order):
-	 * 1. Overflow + promotion: promote to larger model, retry without maintenance
+	 * Three cases:
+	 * 1. Overflow + promotion target: promote to larger model, retry without maintenance
 	 * 2. Overflow + no promotion target: run context maintenance, auto-retry on same model
-	 * 3. Threshold: Context over threshold, run context maintenance (no auto-retry)
+	 * 3. Threshold: run context maintenance on the selected model (no promotion, no auto-retry)
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
@@ -5643,7 +5643,7 @@ export class AgentSession {
 		const compactionSettings = this.settings.getGroup("compaction");
 		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
 
-		// Case 2: Threshold - turn succeeded but context is getting large
+		// Case 3: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
 		if (assistantMessage.stopReason === "error") return;
 		const pruneResult = await this.#pruneToolOutputs();
@@ -5652,11 +5652,7 @@ export class AgentSession {
 			contextTokens = Math.max(0, contextTokens - pruneResult.tokensSaved);
 		}
 		if (shouldCompact(contextTokens, contextWindow, compactionSettings)) {
-			// Try promotion first — if a larger model is available, switch instead of compacting
-			const promoted = await this.#tryContextPromotion(assistantMessage);
-			if (!promoted) {
-				await this.#runAutoCompaction("threshold", false);
-			}
+			await this.#runAutoCompaction("threshold", false);
 		}
 	}
 	#assistantEndedWithSuccessfulYield(assistantMessage: AssistantMessage): boolean {

@@ -176,6 +176,69 @@ describe("AgentSession context promotion", () => {
 		expect(session.model?.provider).toBe(codexModel.provider);
 		expect(session.model?.id).toBe(codexModel.id);
 	});
+
+	it("runs threshold compaction instead of context promotion", async () => {
+		const sparkModel = modelRegistry.find("openai-codex", "gpt-5.3-codex-spark");
+		const promotedModel = modelRegistry.find("openai-codex", "gpt-5.5");
+		if (!sparkModel || !promotedModel) {
+			throw new Error("Expected codex spark and promoted codex models to exist");
+		}
+
+		const settings = Settings.isolated({
+			"compaction.enabled": true,
+			"compaction.autoContinue": false,
+			"contextPromotion.enabled": true,
+		});
+
+		const agent = new Agent({
+			initialState: {
+				model: sparkModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+		});
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		let thresholdCompactionStarted = false;
+		let thresholdCompactionEnded = false;
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_start" && event.reason === "threshold") {
+				thresholdCompactionStarted = true;
+			}
+			if (event.type === "auto_compaction_end") {
+				thresholdCompactionEnded = true;
+			}
+		});
+
+		const thresholdMessage: AssistantMessage = {
+			...createAssistantMessage(sparkModel),
+			usage: {
+				input: sparkModel.contextWindow,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: sparkModel.contextWindow,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+		};
+		session.agent.emitExternalEvent({ type: "message_end", message: thresholdMessage });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [thresholdMessage] });
+
+		await waitFor(() => thresholdCompactionEnded);
+
+		expect(thresholdCompactionStarted).toBe(true);
+		expect(session.model?.provider).toBe(sparkModel.provider);
+		expect(session.model?.id).toBe(sparkModel.id);
+		expect(session.model?.id).not.toBe(promotedModel.id);
+	});
+
 	it("clears codex provider session state on manual setModel switch away from codex", async () => {
 		const codexModel = modelRegistry.find("openai-codex", "gpt-5.3-codex");
 		const nonCodexModel = modelRegistry.getAll().find(model => model.api !== "openai-codex-responses");

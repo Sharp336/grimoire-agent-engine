@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed clipboard image paste (Ctrl+V) silently failing on WSL2 by routing image reads through a `powershell.exe` bridge when WSL interop is detected, since `arboard` returns `ContentNotAvailable` under WSLg ([#1280](https://github.com/can1357/oh-my-pi/issues/1280))
+- Fixed threshold auto-compaction being preempted by context promotion, which could silently switch long Codex sessions from the selected model before compaction ran ([#1329](https://github.com/can1357/oh-my-pi/issues/1329)).
 
 ## [15.2.4] - 2026-05-22
 ### Breaking Changes
