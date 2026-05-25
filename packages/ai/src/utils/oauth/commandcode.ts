@@ -9,9 +9,10 @@ import type { OAuthController } from "./types";
 
 const STUDIO_AUTH_URL = "https://commandcode.ai/studio/auth/cli";
 const CALLBACK_PATH = "/callback";
+const CALLBACK_HOST = "127.0.0.1";
 const START_PORT = 5959;
 const PORT_RANGE = 10;
-const AUTH_TIMEOUT_MS = 5 * 60_000;
+const AUTH_TIMEOUT_MS = 15_000;
 const ALLOWED_ORIGINS = new Set(["https://commandcode.ai", "https://staging.commandcode.ai", "http://localhost:3000"]);
 
 export interface CommandCodeAuthCallback {
@@ -64,7 +65,7 @@ function startServerOnPort(
 ): Bun.Server<undefined> {
 	let server: Bun.Server<undefined>;
 	server = Bun.serve({
-		hostname: "127.0.0.1",
+		hostname: CALLBACK_HOST,
 		port,
 		fetch: async request => {
 			const url = new URL(request.url);
@@ -184,10 +185,10 @@ export async function loginCommandCode(ctrl: OAuthController, options: CommandCo
 		return promptForApiKey(ctrl);
 	}
 	const state = crypto.randomUUID();
-	const callbackUrl = `http://localhost:${server.port}${CALLBACK_PATH}`;
+	const callbackUrl = `http://${CALLBACK_HOST}:${server.port}${CALLBACK_PATH}`;
 	const authUrl = `${STUDIO_AUTH_URL}?callback=${encodeURIComponent(callbackUrl)}&state=${encodeURIComponent(state)}`;
 	ctrl.onAuth?.({ url: authUrl, instructions: "Sign in to Command Code in your browser to create an API key." });
-	ctrl.onProgress?.("Waiting for Command Code browser authentication...");
+	ctrl.onProgress?.("Waiting for automatic Command Code transfer; manual paste will be offered if it fails...");
 	try {
 		const callback = await waitForCallback(server, ctrl, options.authTimeoutMs ?? AUTH_TIMEOUT_MS);
 		if (callback.state !== state) throw new Error("Command Code authentication state mismatch");

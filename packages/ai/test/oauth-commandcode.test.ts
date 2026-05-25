@@ -24,6 +24,7 @@ describe("Command Code browser-assisted login", () => {
 		const url = new URL(authUrl);
 		const callback = new URL(url.searchParams.get("callback") ?? "");
 		const state = url.searchParams.get("state") ?? "";
+		expect(callback.hostname).toBe("127.0.0.1");
 		const response = await fetch(callback, {
 			method: "POST",
 			headers: { "Content-Type": "application/json", Origin: "https://commandcode.ai" },
