@@ -6,6 +6,7 @@
 import type { ModelManagerOptions } from "../model-manager";
 import type { Api, KnownProvider } from "../types";
 import type { OAuthProvider } from "../utils/oauth/types";
+import { commandCodeModelManagerOptions } from "./commandcode";
 import { googleModelManagerOptions } from "./google";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
@@ -161,6 +162,7 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		config => deepseekModelManagerOptions(config),
 		catalog("DeepSeek", ["DEEPSEEK_API_KEY"]),
 	),
+	descriptor("commandcode", "deepseek/deepseek-v4-flash", config => commandCodeModelManagerOptions(config)),
 	descriptor("mistral", "devstral-medium-latest", config => mistralModelManagerOptions(config)),
 	catalogDescriptor(
 		"nvidia",

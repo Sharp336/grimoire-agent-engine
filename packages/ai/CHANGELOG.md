@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added native Command Code support with browser-assisted `/login`, `COMMANDCODE_API_KEY` discovery, bundled Command Code models, and proprietary `/alpha/generate` streaming transport.
+
 ## [15.3.0] - 2026-05-25
 
 ### Added

@@ -826,6 +826,11 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai", "gpt-5.4")?.contextWindow).toBe(1_000_000);
 		});
 
+		test("built-in Command Code gpt-5.4 keeps its gateway context window", () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			expect(registry.find("commandcode", "gpt-5.4")?.contextWindow).toBe(400_000);
+		});
+
 		test("custom gpt-5.4 replacement keeps the hardcoded context window when contextWindow is omitted", () => {
 			writeRawModelsJson({
 				openai: {

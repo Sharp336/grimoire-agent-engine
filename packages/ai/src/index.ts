@@ -12,6 +12,7 @@ export * from "./provider-details";
 export * from "./provider-models";
 export * from "./providers/anthropic";
 export * from "./providers/azure-openai-responses";
+export * from "./providers/commandcode";
 export type * from "./providers/cursor";
 export * from "./providers/gitlab-duo";
 export type * from "./providers/google";

@@ -11,6 +11,7 @@ import {
 } from "./model-thinking";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
+import { streamCommandCode } from "./providers/commandcode";
 import type { CursorOptions } from "./providers/cursor";
 import { isGitLabDuoModel, streamGitLabDuo } from "./providers/gitlab-duo";
 import type { GoogleOptions } from "./providers/google";
@@ -96,6 +97,7 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	"opencode-zen": "OPENCODE_API_KEY",
 	cursor: "CURSOR_ACCESS_TOKEN",
 	deepseek: "DEEPSEEK_API_KEY",
+	commandcode: "COMMANDCODE_API_KEY",
 	"openai-codex": "OPENAI_CODEX_OAUTH_TOKEN",
 	"azure-openai-responses": "AZURE_OPENAI_API_KEY",
 	exa: "EXA_API_KEY",
@@ -261,6 +263,9 @@ export function stream<TApi extends Api>(
 
 		case "cursor-agent":
 			return streamCursor(model as Model<"cursor-agent">, context, providerOptions as CursorOptions);
+
+		case "commandcode":
+			return streamCommandCode(model as Model<"commandcode">, context, providerOptions);
 
 		default:
 			throw new Error(`Unhandled API: ${api}`);
@@ -857,6 +862,9 @@ function mapOptionsForApi<TApi extends Api>(
 				onToolResult,
 			});
 		}
+
+		case "commandcode":
+			return castApi<"commandcode">(base);
 
 		default:
 			throw new Error(`Unhandled API in mapOptionsForApi: ${model.api}`);

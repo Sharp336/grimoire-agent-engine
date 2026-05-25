@@ -61,6 +61,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 		available: true,
 	},
 	{
+		id: "commandcode",
+		name: "Command Code",
+		available: true,
+	},
+	{
 		id: "fireworks",
 		name: "Fireworks",
 		available: true,
