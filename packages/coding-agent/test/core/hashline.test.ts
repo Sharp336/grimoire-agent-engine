@@ -431,6 +431,8 @@ describe("hashline parser — block op syntax", () => {
 		expect(applyDiff(content, `≔${anchor2}-${anchor2}\n${pl("BBB")}`)).toBe("aaa\nBBB\nccc");
 		// Multi-line range via dash form should work like `≔A..B`
 		expect(applyDiff(content, `≔${anchor2}-${anchor3}\n${pl("BBB")}\n${pl("CCC")}`)).toBe("aaa\nBBB\nCCC");
+		// The read tool's collapsed output includes a trailing `|TEXT` body after the end anchor.
+		expect(applyDiff(content, `≔${anchor2}-${anchor3}|collapsed body\n${pl("BBB")}`)).toBe("aaa\nBBB");
 	});
 });
 

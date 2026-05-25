@@ -19,8 +19,8 @@ import type { Anchor, HashlineCursor, HashlineEdit } from "./types";
 //   - an optional trailing `|TEXT` body (or anything after the hash) so users
 //     can paste a full `LINE+HASH|TEXT` line verbatim.
 const LID_CAPTURE_RE = new RegExp(`^\\s*[>+\\-*]*\\s*${HL_HASH_CAPTURE_RE_RAW}(?:\\|.*)?\\s*$`);
-/** Matches two anchors joined by a dash, as emitted by read's collapsed-range output (e.g. "29ej-92rk"). */
-const DASH_RANGE_RE = new RegExp(`^(${HL_HASH_RE_RAW})-(${HL_HASH_RE_RAW})$`);
+/** Matches two anchors joined by a dash, as emitted by read's collapsed-range output (e.g. "29ej-92rk|..."). */
+const DASH_RANGE_RE = new RegExp(`^(${HL_HASH_RE_RAW})-(${HL_HASH_RE_RAW}(?:\\|.*)?)$`);
 const regexEscape = (str: string): string => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
 function parseLid(raw: string, lineNum: number): Anchor {
@@ -112,7 +112,7 @@ const INSERT_BEFORE_OP_RE = new RegExp(
 const INSERT_AFTER_OP_RE = new RegExp(
 	`^${regexEscape(HL_OP_INSERT_AFTER)}\\s*([^|\\s]+)(?:${HL_BODY_SEP_RE_RAW}(.*))?\\s*$`,
 );
-const REPLACE_OP_RE = new RegExp(`^${regexEscape(HL_OP_REPLACE)}\\s*([^\\s+<\\-=]\\S*)\\s*$`);
+const REPLACE_OP_RE = new RegExp(`^${regexEscape(HL_OP_REPLACE)}\\s*([^\\s+<\\-=][^\\r\\n]*)\\s*$`);
 
 function isEnvelopeOrAbortMarkerLine(line: string): boolean {
 	const trimmed = line.trimEnd();
