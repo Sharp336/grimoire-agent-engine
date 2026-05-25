@@ -1,11 +1,21 @@
-import { describe, expect, it, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { toolRenderers } from "@oh-my-pi/pi-coding-agent/tools/renderers";
 import type { TUI } from "@oh-my-pi/pi-tui";
+
+beforeAll(async () => {
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true });
+});
+
+afterAll(() => {
+	resetSettingsForTest();
+});
 
 async function getUiTheme() {
 	await themeModule.initTheme(false, undefined, undefined, "dark", "light");
