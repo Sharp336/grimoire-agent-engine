@@ -2,6 +2,7 @@ import type { ZodType, z } from "zod/v4";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
+import type { CommandCodeOptions } from "./providers/commandcode";
 import type { CursorOptions } from "./providers/cursor";
 import type {
 	DeleteArgs,
@@ -42,7 +43,8 @@ export type KnownApi =
 	| "google-gemini-cli"
 	| "google-vertex"
 	| "ollama-chat"
-	| "cursor-agent";
+	| "cursor-agent"
+	| "commandcode";
 export type Api = KnownApi | (string & {});
 export interface ApiOptionsMap {
 	"anthropic-messages": AnthropicOptions;
@@ -56,6 +58,7 @@ export interface ApiOptionsMap {
 	"google-vertex": GoogleVertexOptions;
 	"ollama-chat": OllamaChatOptions;
 	"cursor-agent": CursorOptions;
+	commandcode: CommandCodeOptions;
 }
 // Compile-time exhaustiveness check - this will fail if ApiOptionsMap doesn't have all KnownApi keys
 type _CheckExhaustive =
@@ -114,6 +117,7 @@ export type KnownProvider =
 	| "gitlab-duo"
 	| "cursor"
 	| "deepseek"
+	| "commandcode"
 	| "xai"
 	| "xai-oauth"
 	| "groq"

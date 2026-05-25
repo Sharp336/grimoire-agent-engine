@@ -19,6 +19,7 @@ import {
 	linkOpenAIPromotionTargets,
 } from "../src/model-thinking";
 import prevModelsJson from "../src/models.json" with { type: "json" };
+import { COMMAND_CODE_MODELS } from "../src/provider-models/commandcode";
 import {
 	allowsUnauthenticatedCatalogDiscovery,
 	type CatalogDiscoveryConfig,
@@ -146,6 +147,11 @@ function applyGlobalModelsDevFallback(models: readonly Model[], modelsDevModels:
 	const providerScopedKeys = new Set(modelsDevModels.map(model => `${model.provider}/${model.id}`));
 	const globalReferences = createGlobalModelsDevReferenceMap(modelsDevModels);
 	return models.map(model => {
+		// Command Code exposes gateway-specific model metadata through its own catalog.
+		// Same-id models from other providers must not override those limits.
+		if (model.provider === "commandcode") {
+			return model;
+		}
 		if (providerScopedKeys.has(`${model.provider}/${model.id}`)) {
 			return model;
 		}
@@ -320,7 +326,7 @@ async function generateModels() {
 	const gitLabDuoModels = getGitLabDuoModels();
 	// Combine models (models.dev has priority)
 	let allModels = applyGlobalModelsDevFallback(
-		[...modelsDevModels, ...catalogProviderModels, ...gitLabDuoModels],
+		[...modelsDevModels, ...catalogProviderModels, ...gitLabDuoModels, ...COMMAND_CODE_MODELS],
 		modelsDevModels,
 	);
 

@@ -795,7 +795,12 @@ function resolveCustomModelReference(modelId: string): Model<Api> | undefined {
 }
 
 function applyStandaloneCustomModelPolicies(model: CustomModelOverlay): CustomModelOverlay {
-	if (model.id !== "gpt-5.4" || model.provider === "github-copilot" || model.contextWindow !== undefined) {
+	if (
+		model.id !== "gpt-5.4" ||
+		model.provider === "github-copilot" ||
+		model.provider === "commandcode" ||
+		model.contextWindow !== undefined
+	) {
 		return model;
 	}
 	return { ...model, contextWindow: 1_000_000 };
@@ -2054,7 +2059,7 @@ export class ModelRegistry {
 	}
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
 		return models.map(model => {
-			if (model.id !== "gpt-5.4" || model.provider === "github-copilot") {
+			if (model.id !== "gpt-5.4" || model.provider === "github-copilot" || model.provider === "commandcode") {
 				return model;
 			}
 			const overrides = this.#modelOverrides.get(model.provider)?.get(model.id);

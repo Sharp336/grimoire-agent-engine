@@ -859,6 +859,11 @@ describe("ModelRegistry", () => {
 			expect(registry.find("openai", "gpt-5.4")?.contextWindow).toBe(1_000_000);
 		});
 
+		test("built-in Command Code gpt-5.4 keeps its gateway context window", () => {
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			expect(registry.find("commandcode", "gpt-5.4")?.contextWindow).toBe(400_000);
+		});
+
 		test("custom gpt-5.4 replacement keeps the hardcoded context window when contextWindow is omitted", () => {
 			writeRawModelsJson({
 				openai: {
@@ -889,6 +894,23 @@ describe("ModelRegistry", () => {
 			const model = registry.find("my-proxy", "gpt-5.4");
 			expect(model?.contextWindow).toBe(1_000_000);
 			expect(model?.baseUrl).toBe("https://my-proxy.example.com/v1");
+		});
+
+		test("custom Command Code API gpt-5.4 keeps its gateway context window when contextWindow is omitted", () => {
+			writeRawModelsJson({
+				"commandcode-proxy": {
+					baseUrl: "https://api.commandcode.ai",
+					apiKey: "TEST_KEY",
+					api: "commandcode",
+					models: [{ id: "gpt-5.4" }],
+				},
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const model = registry.find("commandcode-proxy", "gpt-5.4");
+			expect(model?.contextWindow).toBe(400_000);
+			expect(model?.maxTokens).toBe(128_000);
+			expect(model?.baseUrl).toBe("https://api.commandcode.ai");
 		});
 
 		test("custom gpt-5.4 replacement preserves its explicit context window", () => {

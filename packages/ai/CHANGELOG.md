@@ -314,6 +314,7 @@
 - Changed `RemoteAuthCredentialStore` to prefer SSE snapshot streaming and automatically fall back to long-polling when a broker returns 404 for `/v1/snapshot/stream`
 - Changed snapshot write-refresh flow so `RemoteAuthCredentialStore` skips immediate `/v1/snapshot` refreshes when SSE streaming is active
 - Changed broker SSE stream behavior to keep connections open with periodic keepalives and an increased server idle timeout
+- Added native Command Code support with browser-assisted `/login`, `COMMANDCODE_API_KEY` discovery, bundled Command Code models, and proprietary `/alpha/generate` streaming transport.
 
 ## [15.3.0] - 2026-05-25
 

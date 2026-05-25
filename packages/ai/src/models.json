@@ -4244,6 +4244,478 @@
 			}
 		}
 	},
+	"commandcode": {
+		"claude-haiku-4-5-20251001": {
+			"id": "claude-haiku-4-5-20251001",
+			"name": "Claude Haiku 4.5 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1,
+				"output": 5,
+				"cacheRead": 0.1,
+				"cacheWrite": 2
+			},
+			"contextWindow": 200000,
+			"maxTokens": 64000
+		},
+		"claude-opus-4-7": {
+			"id": "claude-opus-4-7",
+			"name": "Claude Opus 4.7 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 5,
+				"output": 25,
+				"cacheRead": 0.5,
+				"cacheWrite": 10
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 64000,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"claude-sonnet-4-6": {
+			"id": "claude-sonnet-4-6",
+			"name": "Claude Sonnet 4.6 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 3,
+				"output": 15,
+				"cacheRead": 0.3,
+				"cacheWrite": 6
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 64000,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"deepseek/deepseek-v4-flash": {
+			"id": "deepseek/deepseek-v4-flash",
+			"name": "DeepSeek V4 Flash (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 384000,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"deepseek/deepseek-v4-pro": {
+			"id": "deepseek/deepseek-v4-pro",
+			"name": "DeepSeek V4 Pro (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 384000,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"google/gemini-3.1-flash-lite": {
+			"id": "google/gemini-3.1-flash-lite",
+			"name": "Gemini 3.1 Flash Lite (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"google/gemini-3.5-flash": {
+			"id": "google/gemini-3.5-flash",
+			"name": "Gemini 3.5 Flash (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"gpt-5.3-codex": {
+			"id": "gpt-5.3-codex",
+			"name": "GPT-5.3 Codex (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 2,
+				"output": 8,
+				"cacheRead": 0.5,
+				"cacheWrite": 0
+			},
+			"contextWindow": 272000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "low",
+				"maxLevel": "xhigh"
+			}
+		},
+		"gpt-5.4": {
+			"id": "gpt-5.4",
+			"name": "GPT-5.4 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 2.5,
+				"output": 15,
+				"cacheRead": 0.25,
+				"cacheWrite": 0
+			},
+			"contextWindow": 400000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "low",
+				"maxLevel": "xhigh"
+			}
+		},
+		"gpt-5.4-mini": {
+			"id": "gpt-5.4-mini",
+			"name": "GPT-5.4 Mini (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.75,
+				"output": 4.5,
+				"cacheRead": 0.075,
+				"cacheWrite": 0
+			},
+			"contextWindow": 400000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "low",
+				"maxLevel": "xhigh"
+			}
+		},
+		"gpt-5.5": {
+			"id": "gpt-5.5",
+			"name": "GPT-5.5 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 5,
+				"output": 30,
+				"cacheRead": 0.5,
+				"cacheWrite": 0
+			},
+			"contextWindow": 256000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "low",
+				"maxLevel": "xhigh"
+			},
+			"contextPromotionTarget": "commandcode/gpt-5.4"
+		},
+		"MiniMaxAI/MiniMax-M2.5": {
+			"id": "MiniMaxAI/MiniMax-M2.5",
+			"name": "MiniMax M2.5 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.5,
+				"output": 2,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 200000,
+			"maxTokens": 65536
+		},
+		"MiniMaxAI/MiniMax-M2.7": {
+			"id": "MiniMaxAI/MiniMax-M2.7",
+			"name": "MiniMax M2.7 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 65536
+		},
+		"moonshotai/Kimi-K2.5": {
+			"id": "moonshotai/Kimi-K2.5",
+			"name": "Kimi K2.5 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.6,
+				"output": 3,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 256000,
+			"maxTokens": 65536
+		},
+		"moonshotai/Kimi-K2.6": {
+			"id": "moonshotai/Kimi-K2.6",
+			"name": "Kimi K2.6 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.95,
+				"output": 4,
+				"cacheRead": 0.16,
+				"cacheWrite": 0
+			},
+			"contextWindow": 256000,
+			"maxTokens": 65536
+		},
+		"Qwen/Qwen3.6-Max-Preview": {
+			"id": "Qwen/Qwen3.6-Max-Preview",
+			"name": "Qwen 3.6 Max Preview (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"Qwen/Qwen3.6-Plus": {
+			"id": "Qwen/Qwen3.6-Plus",
+			"name": "Qwen 3.6 Plus (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"Qwen/Qwen3.7-Max": {
+			"id": "Qwen/Qwen3.7-Max",
+			"name": "Qwen 3.7 Max (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"stepfun/Step-3.5-Flash": {
+			"id": "stepfun/Step-3.5-Flash",
+			"name": "Step 3.5 Flash (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"zai-org/GLM-5": {
+			"id": "zai-org/GLM-5",
+			"name": "GLM-5 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.95,
+				"output": 3.15,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 200000,
+			"maxTokens": 65536
+		},
+		"zai-org/GLM-5.1": {
+			"id": "zai-org/GLM-5.1",
+			"name": "GLM-5.1 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 200000,
+			"maxTokens": 65536
+		}
+	},
 	"cursor": {
 		"claude-4.5-opus-high": {
 			"id": "claude-4.5-opus-high",

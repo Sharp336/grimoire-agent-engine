@@ -63,6 +63,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 		available: true,
 	},
 	{
+		id: "commandcode",
+		name: "Command Code",
+		available: true,
+	},
+	{
 		id: "xai-oauth",
 		name: "xAI Grok OAuth (SuperGrok Subscription)",
 		available: true,

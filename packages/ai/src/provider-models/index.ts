@@ -1,3 +1,4 @@
+export * from "./commandcode";
 export * from "./descriptors";
 export * from "./google";
 export * from "./ollama";
