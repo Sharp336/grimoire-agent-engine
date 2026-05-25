@@ -195,12 +195,12 @@ export abstract class OAuthCallbackFlow {
 		// when the provider rejects the request. JSON.stringify does not escape
 		// `</`, so a stray `</script>` in either field would break out of the
 		// embedding <script id="server-state" type="application/json"> block
-		// in oauth.html. Escape `<` → `<` (and ` `/` ` for good
+		// in oauth.html. Escape `<` → `<` (and `\u2028`/`\u2029` for good
 		// measure, which are valid in JSON strings but illegal in JS source).
 		const stateJson = JSON.stringify(resultState)
 			.replace(/</g, "\\u003c")
-			.replace(/ /g, "\\u2028")
-			.replace(/ /g, "\\u2029");
+			.replace(/\u2028/g, "\\u2028")
+			.replace(/\u2029/g, "\\u2029");
 
 		return new Response(
 			(templateHtml as unknown as string).replaceAll("__OAUTH_STATE__", () => stateJson),
