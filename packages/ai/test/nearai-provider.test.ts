@@ -107,7 +107,7 @@ describe("nearai provider support", () => {
 
 		const models = await options.fetchDynamicModels?.();
 		expect(global.fetch).toHaveBeenCalledWith(
-			"https://cloud-api.near.ai/v1/model/list",
+			"https://cloud-api.near.ai/v1/models",
 			expect.objectContaining({ method: "GET" }),
 		);
 		expect(models?.map(model => model.id)).toEqual(["Qwen/Qwen3-VL-30B-A3B-Instruct", "zai-org/GLM-5.1-FP8"]);
