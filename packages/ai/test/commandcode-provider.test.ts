@@ -37,6 +37,7 @@ describe("Command Code native provider", () => {
 		const bundled = getBundledModel("commandcode", "deepseek/deepseek-v4-flash");
 		expect(bundled?.api).toBe("commandcode");
 		expect(bundled?.baseUrl).toBe("https://api.commandcode.ai");
+		expect(bundled?.maxTokens).toBe(200_000);
 		const bundledCodex = getBundledModel("commandcode", "gpt-5.3-codex");
 		expect(bundledCodex?.name).toBe("GPT-5.3 Codex (Command Code)");
 		expect(bundledCodex?.contextWindow).toBe(272_000);
