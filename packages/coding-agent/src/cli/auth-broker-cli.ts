@@ -75,12 +75,13 @@ const ACTIONS: readonly AuthBrokerAction[] = [
 ];
 
 /** Callback ports baked from the per-provider OAuth flow modules. */
-const CALLBACK_PORTS: Record<string, number> = {
-	anthropic: 54545,
-	"openai-codex": 1455,
-	"google-gemini-cli": 8085,
-	"google-antigravity": 51121,
-	"gitlab-duo": 8080,
+const CALLBACK_PORTS: Record<string, readonly number[]> = {
+	anthropic: [54545],
+	"openai-codex": [1455],
+	"google-gemini-cli": [8085],
+	"google-antigravity": [51121],
+	"gitlab-duo": [8080],
+	commandcode: Array.from({ length: 10 }, (_, index) => 5959 + index),
 };
 
 function getTokenFilePath(): string {
@@ -311,15 +312,14 @@ async function pickProviderInteractively(providers: readonly OAuthProviderInfo[]
 }
 
 async function runRemoteLogin(provider: string, via: string, dryRun: boolean): Promise<void> {
-	const port = CALLBACK_PORTS[provider];
-	if (port === undefined) {
+	const ports = CALLBACK_PORTS[provider];
+	if (ports === undefined) {
 		throw new Error(
 			`No known OAuth callback port for '${provider}'. Use device-code flow on the broker host directly.`,
 		);
 	}
 	const sshArgs = [
-		"-L",
-		`${port}:127.0.0.1:${port}`,
+		...ports.flatMap(port => ["-L", `${port}:127.0.0.1:${port}`]),
 		"-o",
 		"ExitOnForwardFailure=yes",
 		via,
