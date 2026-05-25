@@ -389,11 +389,10 @@ def clone(
     token: str | None,
     safe_directory: Path | None = None,
 ) -> None:
-    """Fresh `git clone --filter=blob:none` into `target`."""
+    """Fresh `git clone` into `target`."""
     target.parent.mkdir(parents=True, exist_ok=True)
     args = [
         "clone",
-        "--filter=blob:none",
         "--no-tags",
         "--branch",
         default_branch,
