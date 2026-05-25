@@ -1640,7 +1640,7 @@ function mapNearAiCatalogModel(raw: unknown, baseUrl: string): Model<"openai-com
 }
 
 async function fetchNearAiCatalogModels(baseUrl: string): Promise<Model<"openai-completions">[] | null> {
-	const response = await fetch(`${baseUrl.replace(/\/$/, "")}/models`, {
+	const response = await fetch(`${baseUrl.replace(/\/$/, "")}/model/list`, {
 		method: "GET",
 		headers: { Accept: "application/json" },
 	});
