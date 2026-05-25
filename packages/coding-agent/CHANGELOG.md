@@ -2,6 +2,31 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed clipboard image paste (Ctrl+V) silently failing on WSL2 by routing image reads through a `powershell.exe` bridge when WSL interop is detected, since `arboard` returns `ContentNotAvailable` under WSLg ([#1280](https://github.com/can1357/oh-my-pi/issues/1280))
+
+## [15.2.4] - 2026-05-22
+### Breaking Changes
+
+- Replaced the legacy `@@` header and `+`/`<`/`=`/`-` hashline syntax with the new `§PATH` header and `«`/`»`/`≔` operation format, so existing hashline scripts and prompts using old symbols must be updated
+
+### Added
+
+- Added one-anchor `≔ANCHOR` shorthand equivalent to `≔ANCHOR..ANCHOR` for single-line replace/delete
+
+### Changed
+
+- Changed `≔A..B` so an omitted payload now deletes the range, and added an explicit empty payload line to keep a literal blank replacement line
+
+### Removed
+
+- Removed the `hsep` prompt helper and `PI_HL_SEP` payload-prefix configuration because hashline payloads are no longer line-prefixed
+
+### Fixed
+
+- Fixed hashline payload handling in parser and streaming preview to preserve blank lines as actual payload text until the next op, file header, or envelope marker
+
 ## [15.2.3] - 2026-05-22
 ### Breaking Changes
 
