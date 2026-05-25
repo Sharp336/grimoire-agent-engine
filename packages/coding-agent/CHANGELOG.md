@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+## [15.3.2] - 2026-05-25
+### Added
+
+- Added inline `|TEXT` payload support to `»` and `«` hashline insert operations, allowing single-line inserts on the op line and still supporting additional payload lines
+- Added support for using inline payloads with BOF/EOF inserts so `|TEXT` is treated as inserted content at file boundaries
+- Added live nested-`task` rendering: while a subagent is mid-flight, the parent UI now surfaces both completed nested `task` sub-calls and the in-flight nested snapshot (forwarded from `tool_execution_update`), matching the finished-result tree
+- Added `omp auth-gateway check` (and matching `GET /v1/credentials/check` endpoint) — probes each broker-supplied credential against its provider's auth-verifying usage endpoint and prints per-credential health, so when a multi-account pool starts returning 401s you can identify which row in the broker is the bad one. The existing `/v1/usage` endpoint silently drops failed credentials, which is the wrong shape for diagnosing auth — the new endpoint captures errors and surfaces the credential's id, provider, type, email/accountId, and the upstream error string. CLI groups results per-provider, exits non-zero when any credential failed, and supports `--json` for scripting. The probe also exercises OAuth refresh on expired tokens, so a working refresh + working access reports as `ok` and a revoked refresh token reports as `oauth refresh failed: …` instead of being masked by the cached expired access token.
+
+### Fixed
+
+- Fixed parsing of inline `|TEXT` payloads containing whitespace on `»` and `«` inserts, which previously failed with unrecognized-op errors
+- Fixed anchored insert handling so an inline `|TEXT` body matching the anchor line is treated as anchor decoration and no longer inserted as a duplicate
+
 ## [15.3.0] - 2026-05-25
 
 ### Added
@@ -9,7 +22,10 @@
 - Added `OMP_NO_WEBP` environment variable to disable WebP encoding in image resize, fixing HTTP 400 errors when attaching browser snapshots to vision models running on local llama.cpp (which uses STB library that lacks WebP support)
 - Fixed loop mode submitting the next prompt while a background async-job delivery turn (idle flush) was still pending, which could cause the job result to be silently dropped and make the session appear to keep firing while work was ongoing ([#1294](https://github.com/can1357/oh-my-pi/issues/1294))
 - Fixed clipboard image paste (Ctrl+V) silently failing on WSL2 by routing image reads through a `powershell.exe` bridge when WSL interop is detected, since `arboard` returns `ContentNotAvailable` under WSLg ([#1280](https://github.com/can1357/oh-my-pi/issues/1280))
-- Fixed Claude Code slash command discovery to support subdirectory namespacing (`opsx/apply.md` → `/opsx:apply`), matching Claude Code's `buildNamespace()` convention
+- Fixed `bash` tool timeout and ESC cancellation getting stuck when native shell cleanup stalls; the JavaScript-side deadline now returns the tool result on schedule while native cleanup continues in the background ([#1347](https://github.com/can1357/oh-my-pi/issues/1347))
+- Fixed reviewer agent always failing JTD validation with `findings.0.priority: expected number, received string` whenever `report_finding` surfaced a finding; the tool's `"P0"`-`"P3"` priority is now coerced to its numeric ordinal before populating the auto-injected `findings[]` ([#1350](https://github.com/can1357/oh-my-pi/issues/1350))
+- Fixed config-only marketplace LSP plugins such as `csharp-lsp` not registering servers with the CLI when the plugin cache has only marketplace metadata and no package code ([#1352](https://github.com/can1357/oh-my-pi/issues/1352)).
+- Fixed JTD-to-JSON-Schema conversion treating user-named properties as nested JTD forms when their keys collided with JTD keywords like `ref`, which broke the built-in explore agent's output validator with `schema_violation: files.0.ref: must not be present` ([#1345](https://github.com/can1357/oh-my-pi/issues/1345))
 - Fixed extension `ctx.ui.notify()` messages emitted during `session_start` being cleared before the first interactive render ([#1316](https://github.com/can1357/oh-my-pi/issues/1316)).
 - Fixed append-only context mode not being recomputed after model switches — the mode was frozen at session construction time using the initial model's provider, so `provider.appendOnlyContext=auto` left append-only enabled after switching away from DeepSeek (or disabled after switching to DeepSeek) for the rest of the session
 

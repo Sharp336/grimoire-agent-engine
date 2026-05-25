@@ -34,6 +34,7 @@ import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import type { ContextFileEntry } from "../tools";
 import { jtdToJsonSchema, normalizeSchema } from "../tools/jtd-to-json-schema";
+import { type ReportFindingDetails, toReviewFinding } from "../tools/review";
 import { ToolAbortError } from "../tools/tool-errors";
 import type { EventBus } from "../utils/event-bus";
 import { buildNamedToolChoice } from "../utils/tool-choice";
@@ -49,6 +50,7 @@ import {
 	TASK_SUBAGENT_EVENT_CHANNEL,
 	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
 	TASK_SUBAGENT_PROGRESS_CHANNEL,
+	type TaskToolDetails,
 } from "./types";
 
 const MCP_CALL_TIMEOUT_MS = 60_000;
@@ -909,6 +911,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				if (intent) {
 					progress.lastIntent = intent;
 				}
+				// Reset any prior in-flight task snapshot so we don't show stale
+				// nested progress when the agent enters a fresh `task` call.
+				if (event.toolName === "task") {
+					progress.inflightTaskDetails = undefined;
+				}
 				break;
 			}
 
@@ -927,6 +934,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				progress.currentTool = undefined;
 				progress.currentToolArgs = undefined;
 				progress.currentToolStartMs = undefined;
+				// The finalized TaskToolDetails will be captured below into
+				// `extractedToolData.task`; drop the in-flight snapshot so the
+				// renderer doesn't double-count it against the final entry.
+				if (event.toolName === "task") {
+					progress.inflightTaskDetails = undefined;
+				}
 
 				// Check for registered subagent tool handler
 				const handler = subprocessToolRegistry.getHandler(event.toolName);
@@ -976,6 +989,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					}
 				}
 				flushProgress = true;
+				break;
+			}
+
+			case "tool_execution_update": {
+				// Surface nested-subagent progress mid-flight. The child task
+				// tool emits incremental `onUpdate` calls carrying its current
+				// `TaskToolDetails` (results + progress); we stash the latest
+				// snapshot so the parent UI can render the in-flight subtree
+				// without waiting for the call to finish.
+				if (event.toolName === "task") {
+					const partial = (event as { partialResult?: { details?: unknown } }).partialResult;
+					const details = partial && typeof partial === "object" ? partial.details : undefined;
+					if (details && typeof details === "object" && "results" in (details as TaskToolDetails)) {
+						progress.inflightTaskDetails = details as TaskToolDetails;
+						flushProgress = true;
+					}
+				}
 				break;
 			}
 
@@ -1295,22 +1325,25 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			}
 
 			const extensionRunner = session.extensionRunner;
+			const pendingExtensionMessages: Promise<void>[] = [];
 			if (extensionRunner) {
 				extensionRunner.initialize(
 					{
 						sendMessage: (message, options) => {
-							session.sendCustomMessage(message, options).catch(e => {
+							const sendPromise = session.sendCustomMessage(message, options).catch(e => {
 								logger.error("Extension sendMessage failed", {
 									error: e instanceof Error ? e.message : String(e),
 								});
 							});
+							pendingExtensionMessages.push(sendPromise);
 						},
 						sendUserMessage: (content, options) => {
-							session.sendUserMessage(content, options).catch(e => {
+							const sendPromise = session.sendUserMessage(content, options).catch(e => {
 								logger.error("Extension sendUserMessage failed", {
 									error: e instanceof Error ? e.message : String(e),
 								});
 							});
+							pendingExtensionMessages.push(sendPromise);
 						},
 						appendEntry: (customType, data) => {
 							session.sessionManager.appendCustomEntry(customType, data);
@@ -1346,6 +1379,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					logger.error("Extension error", { path: err.extensionPath, error: err.error });
 				});
 				await awaitAbortable(extensionRunner.emit({ type: "session_start" }));
+				while (pendingExtensionMessages.length > 0) {
+					await awaitAbortable(Promise.all(pendingExtensionMessages.splice(0)));
+				}
 			}
 
 			const MAX_YIELD_RETRIES = 3;
@@ -1518,7 +1554,8 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// Use final output if available, otherwise accumulated output
 	let rawOutput = finalOutputChunks.length > 0 ? finalOutputChunks.join("") : outputChunks.join("");
 	const yieldItems = progress.extractedToolData?.yield as YieldItem[] | undefined;
-	const reportFindings = progress.extractedToolData?.report_finding as ReviewFinding[] | undefined;
+	const reportFindingDetails = progress.extractedToolData?.report_finding as ReportFindingDetails[] | undefined;
+	const reportFindings: ReviewFinding[] | undefined = reportFindingDetails?.map(toReviewFinding);
 	const finalized = finalizeSubprocessOutput({
 		rawOutput,
 		exitCode,
