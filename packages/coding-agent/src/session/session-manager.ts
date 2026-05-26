@@ -299,6 +299,23 @@ function createSessionId(): string {
 	return Bun.randomUUIDv7();
 }
 
+function padTimestampSegment(value: number, width: number): string {
+	return value.toString().padStart(width, "0");
+}
+
+function createSessionTimestampParts(date = new Date()): { timestamp: string; fileTimestamp: string } {
+	const timestamp = date.toISOString();
+	const timezoneOffsetMinutes = date.getTimezoneOffset();
+	const localDate = new Date(date.getTime() - timezoneOffsetMinutes * 60_000);
+	const timezoneOffsetTotalMinutes = -timezoneOffsetMinutes;
+	const timezoneSign = timezoneOffsetTotalMinutes >= 0 ? "+" : "-";
+	const absoluteOffsetMinutes = Math.abs(timezoneOffsetTotalMinutes);
+	const offsetHours = padTimestampSegment(Math.floor(absoluteOffsetMinutes / 60), 2);
+	const offsetMinutes = padTimestampSegment(absoluteOffsetMinutes % 60, 2);
+	const fileTimestamp = `${padTimestampSegment(localDate.getUTCFullYear(), 4)}-${padTimestampSegment(localDate.getUTCMonth() + 1, 2)}-${padTimestampSegment(localDate.getUTCDate(), 2)}T${padTimestampSegment(localDate.getUTCHours(), 2)}-${padTimestampSegment(localDate.getUTCMinutes(), 2)}-${padTimestampSegment(localDate.getUTCSeconds(), 2)}-${padTimestampSegment(localDate.getUTCMilliseconds(), 3)}${timezoneSign}${offsetHours}-${offsetMinutes}`;
+	return { timestamp, fileTimestamp };
+}
+
 /** Generate a unique short ID (8 hex chars, collision-checked) */
 function generateId(byId: { has(id: string): boolean }): string {
 	for (let i = 0; i < 100; i++) {
@@ -1942,8 +1959,7 @@ export class SessionManager {
 
 		// Create new session ID and header
 		this.#sessionId = createSessionId();
-		const timestamp = new Date().toISOString();
-		const fileTimestamp = timestamp.replace(/[:.]/g, "-");
+		const { timestamp, fileTimestamp } = createSessionTimestampParts();
 		this.#sessionFile = path.join(this.getSessionDir(), `${fileTimestamp}_${this.#sessionId}.jsonl`);
 
 		// Update the header with new ID but keep all entries
@@ -2075,7 +2091,7 @@ export class SessionManager {
 		this.#sessionId = createSessionId();
 		this.#sessionName = undefined;
 		this.#titleSource = undefined;
-		const timestamp = new Date().toISOString();
+		const { timestamp, fileTimestamp } = createSessionTimestampParts();
 		const header: SessionHeader = {
 			type: "session",
 			version: CURRENT_SESSION_VERSION,
@@ -2096,7 +2112,6 @@ export class SessionManager {
 		this.#inMemoryArtifactCounter = 0;
 
 		if (this.persist) {
-			const fileTimestamp = timestamp.replace(/[:.]/g, "-");
 			this.#sessionFile = path.join(this.getSessionDir(), `${fileTimestamp}_${this.#sessionId}.jsonl`);
 			writeTerminalBreadcrumb(this.cwd, this.#sessionFile);
 		}
@@ -3113,8 +3128,7 @@ export class SessionManager {
 		const pathWithoutLabels = branchPath.filter(e => e.type !== "label");
 
 		const newSessionId = createSessionId();
-		const timestamp = new Date().toISOString();
-		const fileTimestamp = timestamp.replace(/[:.]/g, "-");
+		const { timestamp, fileTimestamp } = createSessionTimestampParts();
 		const newSessionFile = path.join(this.getSessionDir(), `${fileTimestamp}_${newSessionId}.jsonl`);
 
 		const header: SessionHeader = {
