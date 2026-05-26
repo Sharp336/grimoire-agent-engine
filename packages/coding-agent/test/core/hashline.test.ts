@@ -433,6 +433,10 @@ describe("hashline parser — block op syntax", () => {
 		expect(applyDiff(content, `≔${anchor2}-${anchor3}\n${pl("BBB")}\n${pl("CCC")}`)).toBe("aaa\nBBB\nCCC");
 		// The read tool's collapsed output includes a trailing `|TEXT` body after the end anchor.
 		expect(applyDiff(content, `≔${anchor2}-${anchor3}|collapsed body\n${pl("BBB")}`)).toBe("aaa\nBBB");
+		// read's formatMergedBraceLine emits `HEAD .. TAIL` inside the body when collapsing
+		// multi-line brace pairs. The dash-range parser must not be fooled by the literal `..`.
+		expect(applyDiff(content, `≔${anchor2}-${anchor3}|bbb .. ccc\n${pl("BBB")}`)).toBe("aaa\nBBB");
+		expect(applyDiff(content, `≔${anchor2}-${anchor2}|head .. tail\n${pl("BBB")}`)).toBe("aaa\nBBB\nccc");
 	});
 });
 

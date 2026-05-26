@@ -40,9 +40,23 @@ interface ParsedRange {
 }
 
 function parseRange(raw: string, lineNum: number): ParsedRange {
-	// Normalize dash-separated anchors from read's collapsed-range output (e.g. "29ej-92rk") to the canonical ".." form.
+	// read's collapsed-range output emits dash-separated anchors (e.g. "29ej-92rk|HEAD .. TAIL").
+	// Parse those directly: parseLid strips the trailing `|TEXT` body, and bypassing the
+	// `..` split avoids aliasing when `..` appears literally inside the collapsed body.
 	const dashMatch = DASH_RANGE_RE.exec(raw);
-	if (dashMatch) raw = `${dashMatch[1]}..${dashMatch[2]}`;
+	if (dashMatch) {
+		const start = parseLid(dashMatch[1], lineNum);
+		const end = parseLid(dashMatch[2], lineNum);
+		if (end.line < start.line) {
+			throw new Error(`line ${lineNum}: range ${dashMatch[1]}-${dashMatch[2]} ends before it starts.`);
+		}
+		if (end.line === start.line && end.hash !== start.hash) {
+			throw new Error(
+				`line ${lineNum}: range ${dashMatch[1]}-${dashMatch[2]} uses two different hashes for the same line.`,
+			);
+		}
+		return { start, end };
+	}
 	if (!raw.includes("..")) {
 		const start = parseLid(raw, lineNum);
 		return { start, end: { ...start } };
@@ -112,7 +126,7 @@ const INSERT_BEFORE_OP_RE = new RegExp(
 const INSERT_AFTER_OP_RE = new RegExp(
 	`^${regexEscape(HL_OP_INSERT_AFTER)}\\s*([^|\\s]+)(?:${HL_BODY_SEP_RE_RAW}(.*))?\\s*$`,
 );
-const REPLACE_OP_RE = new RegExp(`^${regexEscape(HL_OP_REPLACE)}\\s*([^\\s+<\\-=][^\\r\\n]*)\\s*$`);
+const REPLACE_OP_RE = new RegExp(`^${regexEscape(HL_OP_REPLACE)}\\s*([^\\s+<\\-=][^\\r\\n]*?)\\s*$`);
 
 function isEnvelopeOrAbortMarkerLine(line: string): boolean {
 	const trimmed = line.trimEnd();
