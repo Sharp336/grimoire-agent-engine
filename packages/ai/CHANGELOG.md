@@ -5,6 +5,9 @@
 ### Added
 
 - Added `zhipu-coding-plan` provider for Zhipu (智谱) BigModel's domestic coding-plan SKU at `https://open.bigmodel.cn/api/coding/paas/v4`, with dynamic model discovery (`ZHIPU_API_KEY`), zai-format thinking, `reasoning_content` field, and OAuth login flow ([#1340](https://github.com/can1357/oh-my-pi/issues/1340)).
+### Fixed
+
+- Fixed Xiaomi MiMo Token Plan `tp-` keys issued for the CN cluster still failing with 401 by trying the official CN, SGP, and AMS token-plan endpoints in order while preserving explicit `baseUrl` overrides ([#772](https://github.com/can1357/oh-my-pi/issues/772)).
 
 ### Removed
 
