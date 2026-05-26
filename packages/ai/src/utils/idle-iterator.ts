@@ -3,10 +3,10 @@ import { $env } from "@oh-my-pi/pi-utils";
 const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 120_000;
 const DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_MS = 100_000;
 
-function normalizeIdleTimeoutMs(value: string | undefined, fallback: number): number | undefined {
-	if (value === undefined) return fallback;
+function normalizeOptionalTimeoutMs(value: string | undefined): number | undefined {
+	if (value === undefined) return undefined;
 	const parsed = Number(value);
-	if (!Number.isFinite(parsed)) return fallback;
+	if (!Number.isFinite(parsed)) return undefined;
 	if (parsed <= 0) return undefined;
 	return Math.trunc(parsed);
 }
@@ -15,46 +15,37 @@ function normalizeIdleTimeoutMs(value: string | undefined, fallback: number): nu
  * Returns the idle timeout used for provider streaming transports.
  *
  * `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS` is accepted as a backward-compatible alias.
- * Set `PI_STREAM_IDLE_TIMEOUT_MS=0` to disable the watchdog.
+ * Leave unset, or set `PI_STREAM_IDLE_TIMEOUT_MS=0`, to disable the watchdog.
  *
- * Providers that legitimately stream much slower than the global default can pass
- * `fallbackMs` to widen the floor used when neither env var nor caller option is set.
- * Caller options still take precedence; env overrides still trump the fallback.
+ * The optional fallback parameter is kept for provider call-site compatibility, but
+ * Pi-style streaming no longer arms silence watchdogs by default.
  */
-export function getStreamIdleTimeoutMs(fallbackMs: number = DEFAULT_STREAM_IDLE_TIMEOUT_MS): number | undefined {
-	return normalizeIdleTimeoutMs($env.PI_STREAM_IDLE_TIMEOUT_MS ?? $env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS, fallbackMs);
+export function getStreamIdleTimeoutMs(_fallbackMs: number = DEFAULT_STREAM_IDLE_TIMEOUT_MS): number | undefined {
+	return normalizeOptionalTimeoutMs($env.PI_STREAM_IDLE_TIMEOUT_MS ?? $env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS);
 }
 
 /**
  * Returns the idle timeout used for OpenAI-family streaming transports.
  *
- * Set `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS=0` to disable the watchdog.
+ * Leave unset, or set `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS=0`, to disable the watchdog.
  */
 export function getOpenAIStreamIdleTimeoutMs(): number | undefined {
-	return normalizeIdleTimeoutMs(
-		$env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS ?? $env.PI_STREAM_IDLE_TIMEOUT_MS,
-		DEFAULT_STREAM_IDLE_TIMEOUT_MS,
-	);
+	return normalizeOptionalTimeoutMs($env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS ?? $env.PI_STREAM_IDLE_TIMEOUT_MS);
 }
 
 /**
  * Returns the timeout used while waiting for the first stream event.
- * The first token can legitimately take longer than later inter-event gaps,
- * so the default never undershoots the steady-state idle timeout.
  *
- * Set `PI_STREAM_FIRST_EVENT_TIMEOUT_MS=0` to disable the watchdog.
+ * Leave unset, or set `PI_STREAM_FIRST_EVENT_TIMEOUT_MS=0`, to disable the watchdog.
  *
- * Providers whose first response can legitimately take longer (heavy reasoning,
- * slow cold-start proxies) can pass `fallbackMs` to widen the floor used when
- * neither env var nor caller option is set. Caller options still take precedence;
- * env overrides still trump the fallback.
+ * The idle/fallback parameters are kept for provider call-site compatibility, but
+ * Pi-style streaming no longer treats silence before first output as failure by default.
  */
 export function getStreamFirstEventTimeoutMs(
-	idleTimeoutMs?: number,
-	fallbackMs: number = DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_MS,
+	_idleTimeoutMs?: number,
+	_fallbackMs: number = DEFAULT_STREAM_FIRST_EVENT_TIMEOUT_MS,
 ): number | undefined {
-	const fallback = idleTimeoutMs === undefined ? fallbackMs : Math.max(fallbackMs, idleTimeoutMs);
-	return normalizeIdleTimeoutMs($env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS, fallback);
+	return normalizeOptionalTimeoutMs($env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS);
 }
 
 export type Watchdog = NodeJS.Timeout | undefined;

@@ -13,6 +13,7 @@
 
 - Changed OAuth selection in `AuthStorage` to treat credentials as stale when they are within 60 seconds of expiry and rotate them preemptively
 - Changed Google Gemini CLI, Google Gemini usage, Antigravity usage, and Kimi usage flows to stop refreshing OAuth tokens directly and rely on `AuthStorage` for token rotation
+- Changed provider stream watchdog defaults to Pi-style waiting: first-event and idle watchdogs stay disabled unless explicitly enabled through stream options or `PI_STREAM_*_TIMEOUT_MS` env vars, so slow-but-valid providers are no longer treated as failed just because they are silent before first output.
 
 ### Removed
 

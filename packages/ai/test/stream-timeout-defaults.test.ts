@@ -2,12 +2,11 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { getStreamFirstEventTimeoutMs, getStreamIdleTimeoutMs } from "../src/utils/idle-iterator";
 
 /**
- * Per-provider fallback overrides on the stream-watchdog helpers.
+ * Stream watchdog defaults.
  *
- * These are the gear that lets `google-gemini-cli` widen its first-event floor
- * beyond the 100s global default without forcing every other provider to wait
- * just as long. Tests pin the precedence contract callers depend on:
- * caller option > env var > per-provider fallback > base default.
+ * OMP follows Pi-style streaming by default: provider silence alone is not
+ * treated as failure. Watchdogs are only armed when explicitly requested by env
+ * or per-request StreamOptions.
  */
 
 const ENV_KEYS = [
@@ -37,11 +36,11 @@ afterEach(() => {
 });
 
 describe("getStreamIdleTimeoutMs(fallbackMs)", () => {
-	it("returns the per-provider fallback when env vars are unset", () => {
-		expect(getStreamIdleTimeoutMs(300_000)).toBe(300_000);
+	it("does not arm an idle watchdog when env vars are unset", () => {
+		expect(getStreamIdleTimeoutMs(300_000)).toBeUndefined();
 	});
 
-	it("lets PI_STREAM_IDLE_TIMEOUT_MS override the per-provider fallback", () => {
+	it("lets PI_STREAM_IDLE_TIMEOUT_MS explicitly enable the watchdog", () => {
 		Bun.env.PI_STREAM_IDLE_TIMEOUT_MS = "42";
 		expect(getStreamIdleTimeoutMs(300_000)).toBe(42);
 	});
@@ -53,19 +52,19 @@ describe("getStreamIdleTimeoutMs(fallbackMs)", () => {
 });
 
 describe("getStreamFirstEventTimeoutMs(idleTimeoutMs, fallbackMs)", () => {
-	it("returns the per-provider fallback when env unset and idle timeout is undefined", () => {
-		expect(getStreamFirstEventTimeoutMs(undefined, 300_000)).toBe(300_000);
+	it("does not arm a first-event watchdog when env is unset", () => {
+		expect(getStreamFirstEventTimeoutMs(undefined, 300_000)).toBeUndefined();
 	});
 
-	it("floors the first-event timeout at the per-provider fallback even when idle is shorter", () => {
-		expect(getStreamFirstEventTimeoutMs(50_000, 300_000)).toBe(300_000);
+	it("does not inherit a timeout from the idle watchdog by default", () => {
+		expect(getStreamFirstEventTimeoutMs(50_000, 300_000)).toBeUndefined();
 	});
 
-	it("never undershoots the steady-state idle timeout", () => {
-		expect(getStreamFirstEventTimeoutMs(500_000, 300_000)).toBe(500_000);
+	it("does not use the per-provider fallback as a default timeout", () => {
+		expect(getStreamFirstEventTimeoutMs(500_000, 300_000)).toBeUndefined();
 	});
 
-	it("lets PI_STREAM_FIRST_EVENT_TIMEOUT_MS override the per-provider fallback", () => {
+	it("lets PI_STREAM_FIRST_EVENT_TIMEOUT_MS explicitly enable the watchdog", () => {
 		Bun.env.PI_STREAM_FIRST_EVENT_TIMEOUT_MS = "42";
 		expect(getStreamFirstEventTimeoutMs(undefined, 300_000)).toBe(42);
 	});
@@ -75,7 +74,7 @@ describe("getStreamFirstEventTimeoutMs(idleTimeoutMs, fallbackMs)", () => {
 		expect(getStreamFirstEventTimeoutMs(undefined, 300_000)).toBeUndefined();
 	});
 
-	it("falls back to the 100s global default when no fallback or env is provided", () => {
-		expect(getStreamFirstEventTimeoutMs()).toBe(100_000);
+	it("does not arm a global first-event watchdog when no fallback or env is provided", () => {
+		expect(getStreamFirstEventTimeoutMs()).toBeUndefined();
 	});
 });
