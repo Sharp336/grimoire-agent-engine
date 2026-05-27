@@ -2052,9 +2052,11 @@ const OPENCODE_ZEN_API_RESOLUTION = createOpenCodeApiResolution("https://opencod
 // return its `Page Not Found` HTML (issue #887). Override the resolver so
 // regenerating models.json keeps the correct routing.
 const OPENCODE_GO_API_RESOLUTION = createOpenCodeApiResolution("https://opencode.ai/zen/go", {
+	"minimax-m2.5": "openai-completions",
 	"minimax-m2.7": "openai-completions",
 	"qwen3.5-plus": "openai-completions",
 	"qwen3.6-plus": "openai-completions",
+	"qwen3.7-max": "openai-completions",
 });
 
 const COPILOT_BASE_URL = "https://api.githubcopilot.com";
