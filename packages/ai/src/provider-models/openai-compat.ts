@@ -1851,7 +1851,6 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 // ---------------------------------------------------------------------------
 // 22.5 9Router
 // ---------------------------------------------------------------------------
-
 export interface NineRouterModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -1860,11 +1859,11 @@ export interface NineRouterModelManagerConfig {
 export function nineRouterModelManagerOptions(
 	config?: NineRouterModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	return createSimpleOpenAICompletionsOptions(
-		"9router" as Parameters<typeof getBundledModels>[0],
-		"http://localhost:20128/v1",
-		config,
-	);
+	const baseUrl = config?.baseUrl ?? Bun.env.NINEROUTER_BASE_URL ?? "http://localhost:20128/v1";
+	return createSimpleOpenAICompletionsOptions("9router" as Parameters<typeof getBundledModels>[0], baseUrl, {
+		...config,
+		baseUrl,
+	});
 }
 
 // ---------------------------------------------------------------------------
