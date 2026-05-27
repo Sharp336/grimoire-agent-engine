@@ -280,6 +280,7 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		"gpt-4o",
 		config => nineRouterModelManagerOptions(config),
 		catalog("9Router", ["NINEROUTER_API_KEY"], { allowUnauthenticated: true }),
+		{ allowUnauthenticated: true },
 	),
 	catalogDescriptor(
 		"moonshot",
