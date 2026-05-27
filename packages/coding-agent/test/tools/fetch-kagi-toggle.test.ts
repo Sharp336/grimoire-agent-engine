@@ -5,6 +5,7 @@ import * as path from "node:path";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
+import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
 import * as imageResize from "@oh-my-pi/pi-coding-agent/utils/image-resize";
 import * as toolsManager from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
 import * as scrapers from "@oh-my-pi/pi-coding-agent/web/scrapers/types";
@@ -20,6 +21,16 @@ const withMissingSystemPython = () => {
 		},
 	};
 };
+
+function waitForSignalAbort<T = Response>(signal: AbortSignal): Promise<T> {
+	const deferred = Promise.withResolvers<T>();
+	if (signal.aborted) {
+		deferred.reject(signal.reason);
+		return deferred.promise;
+	}
+	signal.addEventListener("abort", () => deferred.reject(signal.reason), { once: true });
+	return deferred.promise;
+}
 
 describe("read tool URL selector shorthands", () => {
 	let testDir: string;
@@ -121,6 +132,7 @@ describe("read tool URL handling", () => {
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		vi.restoreAllMocks();
 		delete process.env.PARALLEL_API_KEY;
 		fs.rmSync(testDir, { recursive: true, force: true });
@@ -477,6 +489,7 @@ describe("read tool URL handling", () => {
 		});
 		using hook = hookFetch(() => new Response("blocked", { status: 500, statusText: "Blocked" }));
 		vi.spyOn(toolsManager, "ensureTool").mockResolvedValue(undefined);
+		vi.spyOn(ptree, "exec").mockResolvedValue({ ok: false, stdout: "" } as never);
 		vi.spyOn(natives, "htmlToMarkdown").mockResolvedValue(renderedMarkdown);
 
 		const result = await tool.execute("fetch-deep-page", { path: pageUrl });
@@ -650,6 +663,143 @@ describe("read tool URL handling", () => {
 		expect(ensureToolSpy).not.toHaveBeenCalled();
 		expect(htmlToMarkdownSpy).not.toHaveBeenCalled();
 		void parallelExtractHook;
+	});
+
+	it("continues to trafilatura when remote reader steps hit their hard timeouts", async () => {
+		vi.useFakeTimers();
+		process.env.PARALLEL_API_KEY = "test-parallel-key";
+		const session = createSession();
+		const tool = new ReadTool(session);
+		const pageUrl = "https://example.com/reader-timeout";
+		const pageHtml = "<html><body><main><h1>Reader timeout fallback</h1></main></body></html>";
+		const renderedMarkdown = `# Reader timeout fallback\n\n${"Trafilatura renderer content after remote readers timed out. ".repeat(4)}`;
+		const parallelStarted = Promise.withResolvers<AbortSignal>();
+		const jinaStarted = Promise.withResolvers<AbortSignal>();
+		const trafilaturaStarted = Promise.withResolvers<AbortSignal>();
+		vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => {
+			if (requestedUrl === pageUrl) {
+				return {
+					ok: true,
+					status: 200,
+					contentType: "text/html",
+					finalUrl: pageUrl,
+					content: pageHtml,
+				};
+			}
+
+			return {
+				ok: false,
+				status: 404,
+				contentType: "text/plain",
+				finalUrl: requestedUrl,
+				content: "",
+			};
+		});
+		vi.spyOn(toolsManager, "ensureTool").mockResolvedValue("/usr/bin/trafilatura");
+		vi.spyOn(ptree, "exec").mockImplementation(async (_command, options) => {
+			const signal = options?.signal;
+			if (!(signal instanceof AbortSignal)) {
+				throw new Error("trafilatura did not receive an AbortSignal");
+			}
+			trafilaturaStarted.resolve(signal);
+			const deferred = Promise.withResolvers<{ ok: true; stdout: string }>();
+			const timer = setTimeout(() => deferred.resolve({ ok: true, stdout: renderedMarkdown }), 8_000);
+			signal.addEventListener(
+				"abort",
+				() => {
+					clearTimeout(timer);
+					deferred.reject(signal.reason);
+				},
+				{ once: true },
+			);
+			return (await deferred.promise) as never;
+		});
+		const htmlToMarkdownSpy = vi.spyOn(natives, "htmlToMarkdown");
+		using remoteReaderHook = hookFetch(async (input, init) => {
+			const requestedUrl = String(input);
+			const signal = init?.signal;
+			if (!(signal instanceof AbortSignal)) {
+				throw new Error("remote reader fetch did not receive an AbortSignal");
+			}
+			if (requestedUrl === "https://api.parallel.ai/v1beta/extract") {
+				parallelStarted.resolve(signal);
+				return await waitForSignalAbort(signal);
+			}
+			if (requestedUrl.startsWith(`https://r.jina.ai/${pageUrl}`)) {
+				jinaStarted.resolve(signal);
+				return await waitForSignalAbort(signal);
+			}
+
+			return new Response("blocked", { status: 500, statusText: "Blocked" });
+		});
+
+		const resultPromise = tool.execute("fetch-remote-reader-timeout", { path: pageUrl });
+		const parallelSignal = await parallelStarted.promise;
+		expect(parallelSignal.aborted).toBe(false);
+		vi.advanceTimersByTime(7_500);
+
+		const jinaSignal = await jinaStarted.promise;
+		expect(jinaSignal.aborted).toBe(false);
+		vi.advanceTimersByTime(7_500);
+
+		const trafilaturaSignal = await trafilaturaStarted.promise;
+		expect(trafilaturaSignal.aborted).toBe(false);
+		vi.advanceTimersByTime(8_000);
+
+		const result = await resultPromise;
+		const textBlock = result.content.find(content => content.type === "text");
+
+		expect(result.details?.method).toBe("trafilatura");
+		expect(textBlock?.type).toBe("text");
+		expect(textBlock?.text).toContain("Reader timeout fallback");
+		expect(htmlToMarkdownSpy).not.toHaveBeenCalled();
+		void remoteReaderHook;
+	});
+
+	it("does not swallow caller cancellation while a reader renderer is pending", async () => {
+		const session = createSession();
+		const tool = new ReadTool(session);
+		const pageUrl = "https://example.com/reader-user-abort";
+		const controller = new AbortController();
+		const jinaStarted = Promise.withResolvers<AbortSignal>();
+		vi.spyOn(scrapers, "loadPage").mockImplementation(async requestedUrl => {
+			if (requestedUrl === pageUrl) {
+				return {
+					ok: true,
+					status: 200,
+					contentType: "text/html",
+					finalUrl: pageUrl,
+					content: "<html><body><main><h1>Abort</h1></main></body></html>",
+				};
+			}
+
+			return {
+				ok: false,
+				status: 404,
+				contentType: "text/plain",
+				finalUrl: requestedUrl,
+				content: "",
+			};
+		});
+		using jinaHook = hookFetch(async (input, init) => {
+			const requestedUrl = String(input);
+			if (!requestedUrl.startsWith(`https://r.jina.ai/${pageUrl}`)) {
+				return new Response("blocked", { status: 500, statusText: "Blocked" });
+			}
+			const signal = init?.signal;
+			if (!(signal instanceof AbortSignal)) {
+				throw new Error("Jina fetch did not receive an AbortSignal");
+			}
+			jinaStarted.resolve(signal);
+			return await waitForSignalAbort(signal);
+		});
+
+		const resultPromise = tool.execute("fetch-jina-user-abort", { path: pageUrl }, controller.signal);
+		await jinaStarted.promise;
+		controller.abort(new ToolAbortError());
+
+		await expect(resultPromise).rejects.toBeInstanceOf(ToolAbortError);
+		void jinaHook;
 	});
 
 	it("reuses cached output for repeated plain URL reads", async () => {

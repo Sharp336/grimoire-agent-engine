@@ -17,6 +17,10 @@
 - Changed read to return verbatim contents for files shorter than `read.summarize.minTotalLines` instead of summarizing them
 - Changed `search` path line-range filtering to include only matches and context lines that fall inside the requested ranges
 
+### Fixed
+
+- Fixed `read` URL reader-mode rendering so stalled Parallel or Jina reader requests only consume a 7.5s hard timeout before local trafilatura/lynx fallbacks are tried, while caller cancellation and the overall 30s read budget still abort the tool.
+
 ## [15.5.3] - 2026-05-27
 ### Breaking Changes
 

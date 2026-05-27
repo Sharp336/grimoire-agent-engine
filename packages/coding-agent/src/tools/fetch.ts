@@ -24,7 +24,7 @@ import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
 import { formatExpandHint, getDomain, replaceTabs } from "./render-utils";
-import { ToolAbortError, ToolError } from "./tool-errors";
+import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
 
@@ -33,6 +33,7 @@ import { clampTimeout } from "./tool-timeouts";
 // =============================================================================
 
 const FETCH_DEFAULT_MAX_LINES = 300;
+const READ_REMOTE_RENDERER_HARD_TIMEOUT_MS = 7_500;
 // Convertible document types handled by markit.
 const CONVERTIBLE_MIMES = new Set([
 	"application/pdf",
@@ -546,18 +547,20 @@ async function renderHtmlToText(
 	userSignal: AbortSignal | undefined,
 	storage: AgentStorage | null,
 ): Promise<{ content: string; ok: boolean; method: string }> {
-	const signal = ptree.combineSignals(userSignal, timeout * 1000);
+	const renderSignal = ptree.combineSignals(userSignal, timeout * 1000);
+	const createRemoteRendererSignal = () => ptree.combineSignals(renderSignal, READ_REMOTE_RENDERER_HARD_TIMEOUT_MS);
 	const execOptions = {
 		mode: "group" as const,
 		allowNonZero: true,
 		allowAbort: true,
 		stderr: "full" as const,
-		signal,
+		signal: renderSignal,
 	};
 
 	// Try Parallel extract first when credentials are configured
 	if (settings.get("providers.parallelFetch") && findParallelApiKey(storage)) {
 		try {
+			const signal = createRemoteRendererSignal();
 			const parallelResult = await extractWithParallel(
 				[url],
 				{
@@ -577,12 +580,13 @@ async function renderHtmlToText(
 			}
 		} catch {
 			// Parallel extract failed, continue to next method
-			signal?.throwIfAborted();
+			throwIfAborted(renderSignal);
 		}
 	}
 
 	// Try jina first (reader API)
 	try {
+		const signal = createRemoteRendererSignal();
 		const jinaUrl = `https://r.jina.ai/${url}`;
 		const response = await fetch(jinaUrl, {
 			headers: { Accept: "text/markdown" },
@@ -596,11 +600,11 @@ async function renderHtmlToText(
 		}
 	} catch {
 		// Jina failed, continue to next method
-		signal?.throwIfAborted();
+		throwIfAborted(renderSignal);
 	}
 
 	// Try trafilatura (auto-install via uv/pip)
-	const trafilatura = await ensureTool("trafilatura", { signal, silent: true });
+	const trafilatura = await ensureTool("trafilatura", { signal: renderSignal, silent: true });
 	if (trafilatura) {
 		const result = await ptree.exec([trafilatura, "-u", url, "--output-format", "markdown"], execOptions);
 		if (result.ok && result.stdout.trim().length > 100) {
@@ -625,7 +629,7 @@ async function renderHtmlToText(
 		}
 	} catch {
 		// Native converter failed, continue to next method
-		signal?.throwIfAborted();
+		throwIfAborted(renderSignal);
 	}
 	return { content: "", ok: false, method: "none" };
 }
