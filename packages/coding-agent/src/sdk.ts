@@ -51,6 +51,7 @@ import "./discovery";
 import { resolveConfigValue } from "./config/resolve-config-value";
 import { initializeWithSettings } from "./discovery";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
+import { defaultEvalSessionId } from "./eval/session-id";
 import { TtsrManager } from "./export/ttsr";
 import {
 	type CustomCommandsLoadResult,
@@ -59,7 +60,6 @@ import {
 } from "./extensibility/custom-commands";
 import { discoverAndLoadCustomTools } from "./extensibility/custom-tools";
 import type { CustomTool, CustomToolContext, CustomToolSessionEvent } from "./extensibility/custom-tools/types";
-import { CustomToolAdapter } from "./extensibility/custom-tools/wrapper";
 import {
 	discoverAndLoadExtensions,
 	type ExtensionContext,
@@ -84,11 +84,7 @@ import type { HindsightSessionState } from "./hindsight/state";
 import { LocalProtocolHandler, type LocalProtocolOptions } from "./internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "./lsp/startup-events";
 import { discoverAndLoadMCPTools, MCPManager, type MCPToolsLoadResult } from "./mcp";
-import {
-	collectDiscoverableMCPTools,
-	formatDiscoverableMCPToolServerSummary,
-	selectDiscoverableMCPToolNamesByServer,
-} from "./mcp/discoverable-tool-metadata";
+
 import { resolveMemoryBackend } from "./memory-backend";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import { AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
@@ -117,6 +113,9 @@ import { parseThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } f
 import {
 	collectDiscoverableTools,
 	type DiscoverableTool,
+	filterBySource,
+	formatDiscoverableToolServerSummary,
+	selectDiscoverableToolNamesByServer,
 	summarizeDiscoverableTools,
 } from "./tool-discovery/tool-index";
 import {
@@ -318,6 +317,8 @@ export interface CreateAgentSessionOptions {
 	agentRegistry?: AgentRegistry;
 	/** Parent task ID prefix for nested artifact naming (e.g., "6-Extensions") */
 	parentTaskPrefix?: string;
+	/** Inherited eval executor session id for subagents sharing parent eval state. */
+	parentEvalSessionId?: string;
 
 	/** Session manager. Default: session stored under the configured agentDir sessions root */
 	sessionManager?: SessionManager;
@@ -341,6 +342,9 @@ export interface CreateAgentSessionOptions {
 	 * `@opentelemetry/api` package returns a no-op tracer in that case.
 	 */
 	telemetry?: AgentTelemetryConfig;
+
+	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
+	autoApprove?: boolean;
 }
 
 /** Result from createAgentSession */
@@ -833,7 +837,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// buffer — so we can't rely on it to catch startup events for the extension runner.
 	const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
 	let credentialDisabledTarget: ExtensionRunner | undefined;
-	let unsubscribeCredentialDisabled: (() => void) | undefined = authStorage.onCredentialDisabled(event => {
+	const unsubscribeCredentialDisabled: (() => void) | undefined = authStorage.onCredentialDisabled(event => {
 		if (credentialDisabledTarget) {
 			// Discard return: any handler error is routed through runner.onError listeners.
 			void credentialDisabledTarget.emitCredentialDisabled(event);
@@ -1177,6 +1181,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
+			getEvalSessionId: () =>
+				session?.getEvalSessionId() ?? options.parentEvalSessionId ?? defaultEvalSessionId(toolSession),
 			assertEvalExecutionAllowed: () => session?.assertEvalExecutionAllowed(),
 			trackEvalExecution: (execution, abortController) =>
 				session ? session.trackEvalExecution(execution, abortController) : execution,
@@ -1196,8 +1202,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getTodoPhases: () => session.getTodoPhases(),
 			setTodoPhases: phases => session.setTodoPhases(phases),
 			isMCPDiscoveryEnabled: () => session.isMCPDiscoveryEnabled(),
-			getDiscoverableMCPTools: () => session.getDiscoverableMCPTools(),
-			getDiscoverableMCPSearchIndex: () => session.getDiscoverableMCPSearchIndex(),
 			getSelectedMCPToolNames: () => session.getSelectedMCPToolNames(),
 			activateDiscoveredMCPTools: toolNames => session.activateDiscoveredMCPTools(toolNames),
 			// Generic tool discovery (unified — covers built-in + MCP + extension)
@@ -1453,29 +1457,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 
-		let extensionRunner: ExtensionRunner | undefined;
-		if (extensionsResult.extensions.length > 0) {
-			extensionRunner = new ExtensionRunner(
-				extensionsResult.extensions,
-				extensionsResult.runtime,
-				cwd,
-				sessionManager,
-				modelRegistry,
-			);
-		}
+		// The runner is created unconditionally — even with zero extensions loaded — because the
+		// `ExtensionToolWrapper` installed below is the only place the per-tool approval gate runs.
+		// A conditional runner means the approval system silently disappears for users with no
+		// extensions, contradicting non-yolo `tools.approvalMode` settings without feedback.
+		// (Today `createAutoresearchExtension` is unconditionally pushed below, so this scenario
+		// is unreachable; the unconditional construction makes that invariant explicit instead of
+		// implicit, so a future change to make autoresearch optional cannot silently re-open the hole.)
+		const extensionRunner: ExtensionRunner = new ExtensionRunner(
+			extensionsResult.extensions,
+			extensionsResult.runtime,
+			cwd,
+			sessionManager,
+			modelRegistry,
+		);
 
-		if (extensionRunner) {
-			credentialDisabledTarget = extensionRunner;
-			for (const event of startupCredentialDisabledEvents.splice(0)) {
-				// Discard return: any handler error is routed through runner.onError listeners.
-				void extensionRunner.emitCredentialDisabled(event);
-			}
-		} else {
-			// No runner to forward to; release our subscription. The embedder's own
-			// onCredentialDisabled (if any) keeps firing through its own subscription.
-			startupCredentialDisabledEvents.length = 0;
-			unsubscribeCredentialDisabled?.();
-			unsubscribeCredentialDisabled = undefined;
+		credentialDisabledTarget = extensionRunner;
+		for (const event of startupCredentialDisabledEvents.splice(0)) {
+			// Discard return: any handler error is routed through runner.onError listeners.
+			void extensionRunner.emitCredentialDisabled(event);
 		}
 
 		const getSessionContext = () => ({
@@ -1488,38 +1488,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				session.abort();
 			},
 			settings,
+			autoApprove: options.autoApprove ?? false,
 		});
 		const toolContextStore = new ToolContextStore(getSessionContext);
 
-		const registeredTools = extensionRunner?.getAllRegisteredTools() ?? [];
-		let wrappedExtensionTools: Tool[];
-
-		if (extensionRunner) {
-			// With extension runner: convert CustomTools to ToolDefinitions and wrap all together
-			const allCustomTools = [
-				...registeredTools,
-				...(options.customTools?.map(tool => {
-					const definition = isCustomTool(tool) ? customToolToDefinition(tool) : tool;
-					return { definition, extensionPath: "<sdk>" };
-				}) ?? []),
-			];
-			wrappedExtensionTools = wrapRegisteredTools(allCustomTools, extensionRunner);
-		} else {
-			// Without extension runner: wrap CustomTools directly with CustomToolAdapter
-			// ToolDefinition items require ExtensionContext and cannot be used without a runner
-			const customToolContext = (): CustomToolContext => ({
-				sessionManager,
-				modelRegistry,
-				model: agent?.state.model,
-				isIdle: () => !session?.isStreaming,
-				hasQueuedMessages: () => (session?.queuedMessageCount ?? 0) > 0,
-				abort: () => session?.abort(),
-				settings,
-			});
-			wrappedExtensionTools = (options.customTools ?? [])
-				.filter(isCustomTool)
-				.map(tool => CustomToolAdapter.wrap(tool, customToolContext));
-		}
+		const registeredTools = extensionRunner.getAllRegisteredTools();
+		const allCustomTools = [
+			...registeredTools,
+			...(options.customTools?.map(tool => {
+				const definition = isCustomTool(tool) ? customToolToDefinition(tool) : tool;
+				return { definition, extensionPath: "<sdk>" };
+			}) ?? []),
+		];
+		const wrappedExtensionTools: Tool[] = wrapRegisteredTools(allCustomTools, extensionRunner);
 
 		// All built-in tools are active (conditional tools like git/ask return null from factory if disabled)
 		const toolRegistry = new Map<string, Tool>();
@@ -1535,10 +1516,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		for (const tool of wrappedExtensionTools) {
 			toolRegistry.set(tool.name, tool);
 		}
-		if (extensionRunner) {
-			for (const tool of toolRegistry.values()) {
-				toolRegistry.set(tool.name, new ExtensionToolWrapper(tool, extensionRunner));
-			}
+		// Wrap every tool with `ExtensionToolWrapper` so the per-tool approval gate runs on every
+		// call site, regardless of whether any user extensions are loaded. See the runner-construction
+		// comment above for the safety invariant this enforces.
+		for (const tool of toolRegistry.values()) {
+			toolRegistry.set(tool.name, new ExtensionToolWrapper(tool, extensionRunner));
 		}
 		if (model?.provider === "cursor") {
 			toolRegistry.delete("edit");
@@ -1562,7 +1544,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			})) as unknown as AgentTool | null;
 			if (!sshTool) return null;
 			const wrapped = wrapToolWithMetaNotice(sshTool);
-			return (extensionRunner ? new ExtensionToolWrapper(wrapped, extensionRunner) : wrapped) as AgentTool;
+			return new ExtensionToolWrapper(wrapped, extensionRunner) as AgentTool;
 		};
 
 		let cursorEventEmitter: ((event: AgentEvent) => void) | undefined;
@@ -1581,7 +1563,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			tools: Map<string, AgentTool>,
 		): Promise<BuildSystemPromptResult> => {
 			toolContextStore.setToolNames(toolNames);
-			const discoverableMCPTools = mcpDiscoveryEnabled ? collectDiscoverableMCPTools(tools.values()) : [];
+			const discoverableMCPTools: DiscoverableTool[] = mcpDiscoveryEnabled
+				? filterBySource(collectDiscoverableTools(tools.values()), "mcp")
+				: [];
 			const activeToolNames = new Set(toolNames);
 			const discoverableBuiltinTools: DiscoverableTool[] =
 				effectiveDiscoveryMode === "all"
@@ -1592,18 +1576,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							{ source: "builtin" },
 						)
 					: [];
-			const discoverableToolsForDesc: DiscoverableTool[] = [
-				...discoverableBuiltinTools,
-				...discoverableMCPTools.map(t => ({
-					name: t.name,
-					label: t.label,
-					summary: t.description,
-					source: "mcp" as const,
-					serverName: t.serverName,
-					mcpToolName: t.mcpToolName,
-					schemaKeys: t.schemaKeys,
-				})),
-			];
+			const discoverableToolsForDesc: DiscoverableTool[] = [...discoverableBuiltinTools, ...discoverableMCPTools];
 			const discoverableToolSummary = summarizeDiscoverableTools(discoverableToolsForDesc);
 			const hasDiscoverableTools =
 				mcpDiscoveryEnabled && toolNames.includes("search_tool_bm25") && discoverableToolsForDesc.length > 0;
@@ -1647,7 +1620,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				repeatToolDescriptions,
 				intentField,
 				mcpDiscoveryMode: hasDiscoverableTools,
-				mcpDiscoveryServerSummaries: discoverableToolSummary.servers.map(formatDiscoverableMCPToolServerSummary),
+				mcpDiscoveryServerSummaries: discoverableToolSummary.servers.map(formatDiscoverableToolServerSummary),
 				eagerTasks,
 				secretsEnabled,
 				workspaceTree: workspaceTreePromise,
@@ -1665,9 +1638,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 
 		const toolNamesFromRegistry = Array.from(toolRegistry.keys());
-		const requestedToolNames =
-			(options.toolNames ? [...new Set(options.toolNames.map(name => name.toLowerCase()))] : undefined) ??
-			toolNamesFromRegistry;
+		const explicitlyRequestedToolNames = options.toolNames
+			? [...new Set(options.toolNames.map(name => name.toLowerCase()))]
+			: undefined;
+		// When `requireYieldTool` is set, the subagent's prompts and idle-reminders demand a
+		// `yield` call to terminate. The tool registry already includes `yield` (see
+		// `createTools`), but an explicit `toolNames` list would otherwise drop it from the
+		// active set — leaving the model unable to satisfy the contract. Mirror the same
+		// invariant `parseAgentFields` enforces on frontmatter `tools`.
+		if (
+			options.requireYieldTool === true &&
+			explicitlyRequestedToolNames &&
+			!explicitlyRequestedToolNames.includes("yield")
+		) {
+			explicitlyRequestedToolNames.push("yield");
+		}
+		const requestedToolNames = explicitlyRequestedToolNames ?? toolNamesFromRegistry;
 		const normalizedRequested = requestedToolNames.filter(name => toolRegistry.has(name));
 		const requestedToolNameSet = new Set(normalizedRequested);
 		// Effective discovery mode: tools.discoveryMode takes precedence; mcp.discoveryMode is back-compat alias.
@@ -1693,8 +1679,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			(settings.get("mcp.discoveryDefaultServers") ?? []).map(serverName => serverName.trim()).filter(Boolean),
 		);
 		const discoveryDefaultServerToolNames = mcpDiscoveryEnabled
-			? selectDiscoverableMCPToolNamesByServer(
-					collectDiscoverableMCPTools(toolRegistry.values()),
+			? selectDiscoverableToolNamesByServer(
+					filterBySource(collectDiscoverableTools(toolRegistry.values()), "mcp"),
 					discoveryDefaultServers,
 				)
 			: [];
@@ -1818,21 +1804,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			if (!obfuscator?.hasSecrets()) return converted;
 			return obfuscateMessages(obfuscator, converted);
 		};
-		const transformContext = extensionRunner
-			? async (messages: AgentMessage[], _signal?: AbortSignal) => {
-					return await extensionRunner.emitContext(messages);
-				}
-			: undefined;
-		const onPayload = extensionRunner
-			? async (payload: unknown, _model?: Model) => {
-					return await extensionRunner.emitBeforeProviderRequest(payload);
-				}
-			: undefined;
-		const onResponse: SimpleStreamOptions["onResponse"] | undefined = extensionRunner
-			? async (response, model) => {
-					await extensionRunner.emitAfterProviderResponse(response, model);
-				}
-			: undefined;
+		const transformContext = async (messages: AgentMessage[], _signal?: AbortSignal) => {
+			return await extensionRunner.emitContext(messages);
+		};
+		const onPayload = async (payload: unknown, _model?: Model) => {
+			return await extensionRunner.emitBeforeProviderRequest(payload);
+		};
+		const onResponse: SimpleStreamOptions["onResponse"] = async (response, model) => {
+			await extensionRunner.emitAfterProviderResponse(response, model);
+		};
 
 		const setToolUIContext = (uiContext: ExtensionUIContext, hasUI: boolean) => {
 			toolContextStore.setUIContext(uiContext, hasUI);
@@ -1994,6 +1974,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			agentId: resolvedAgentId,
 			agentRegistry,
 			providerSessionId: options.providerSessionId,
+			parentEvalSessionId: options.parentEvalSessionId,
 		});
 		hasSession = true;
 		if (asyncJobManager) {

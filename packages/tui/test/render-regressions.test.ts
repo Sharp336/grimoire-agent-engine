@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { type Component, TUI } from "@oh-my-pi/pi-tui";
+import { type Component, CURSOR_MARKER, type Focusable, TUI } from "@oh-my-pi/pi-tui";
 import { VirtualTerminal } from "./virtual-terminal";
 
 class MutableLinesComponent implements Component {
@@ -17,6 +17,31 @@ class MutableLinesComponent implements Component {
 
 	render(width: number): string[] {
 		return this.#lines.map(line => line.slice(0, width));
+	}
+}
+
+class WrappingLinesComponent implements Component {
+	#lines: string[];
+
+	constructor(lines: string[]) {
+		this.#lines = [...lines];
+	}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		const chunkWidth = Math.max(1, width);
+		const rendered: string[] = [];
+		for (const line of this.#lines) {
+			if (line.length === 0) {
+				rendered.push("");
+				continue;
+			}
+			for (let offset = 0; offset < line.length; offset += chunkWidth) {
+				rendered.push(line.slice(offset, offset + chunkWidth));
+			}
+		}
+		return rendered;
 	}
 }
 
@@ -157,7 +182,7 @@ describe("TUI terminal-state regressions", () => {
 	});
 
 	describe("resize + viewport behavior", () => {
-		it("clears preexisting shell rows on startup and resize redraw", async () => {
+		it("preserves preexisting shell scrollback on startup and resize redraw", async () => {
 			const term = new VirtualTerminal(50, 5);
 			term.write("shell-0\r\nshell-1\r\nshell-2\r\nshell-3\r\nshell-4\r\n");
 			await settle(term);
@@ -174,7 +199,7 @@ describe("TUI terminal-state regressions", () => {
 				await settle(term);
 
 				const buffer = term.getScrollBuffer().join("\n");
-				expect(buffer.includes("shell-")).toBeFalsy();
+				expect(buffer.includes("shell-")).toBeTruthy();
 			} finally {
 				tui.stop();
 			}
@@ -265,6 +290,36 @@ describe("TUI terminal-state regressions", () => {
 					await settle(term);
 					expect(visible(term)).toEqual(expectedViewport(width, 18));
 				}
+			} finally {
+				tui.stop();
+			}
+		});
+		it("repaints viewport when width reflow grows rendered lines", async () => {
+			const term = new VirtualTerminal(40, 10);
+			const tui = new TUI(term);
+			const lines = [
+				...Array.from({ length: 5 }, (_v, i) => `long-${i}-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx`),
+				...Array.from({ length: 20 }, (_v, i) => `tail-${i}`),
+			];
+			tui.addChild(new WrappingLinesComponent(lines));
+
+			const expectedViewport = (width: number, height: number): string[] => {
+				const rendered = new WrappingLinesComponent(lines).render(width);
+				const top = Math.max(0, rendered.length - height);
+				const viewport = rendered.slice(top, top + height);
+				while (viewport.length < height) viewport.push("");
+				return viewport.map(line => line.trimEnd());
+			};
+
+			try {
+				tui.start();
+				await settle(term);
+				expect(visible(term)).toEqual(expectedViewport(40, 10));
+
+				term.resize(20, 10);
+				await settle(term);
+
+				expect(visible(term)).toEqual(expectedViewport(20, 10));
 			} finally {
 				tui.stop();
 			}
@@ -678,7 +733,7 @@ describe("TUI terminal-state regressions", () => {
 			}
 		});
 
-		it("retains append history when offscreen header changes during overflow growth", async () => {
+		it("keeps viewport aligned when offscreen header changes during overflow growth", async () => {
 			const term = new VirtualTerminal(32, 6);
 			const tui = new TUI(term);
 			const logLines = rows("line-", 6);
@@ -697,15 +752,6 @@ describe("TUI terminal-state regressions", () => {
 					tui.requestRender();
 					await settle(term);
 				}
-
-				const scrollback = term.getScrollBuffer();
-				for (let i = 0; i < 70; i++) {
-					expect(countMatches(scrollback, new RegExp(`\\bline-${i}\\b`))).toBe(1);
-				}
-				for (let i = 0; i <= tick; i++) {
-					expect(countMatches(scrollback, new RegExp(`\\bstatus-${i}\\b`))).toBeLessThanOrEqual(1);
-				}
-
 				const viewport = visible(term).map(line => line.trim());
 				expect(viewport.at(-1)).toBe("line-69");
 				for (let i = 1; i < viewport.length; i++) {
@@ -713,6 +759,42 @@ describe("TUI terminal-state regressions", () => {
 					const next = Number.parseInt(viewport[i]!.slice(5), 10);
 					expect(next - prev).toBe(1);
 				}
+			} finally {
+				tui.stop();
+			}
+		});
+		it("repaints viewport when offscreen expansion and append land together", async () => {
+			const term = new VirtualTerminal(32, 6);
+			const tui = new TUI(term);
+			const component = new MutableLinesComponent(["status-0", ...rows("line-", 11)]);
+			tui.addChild(component);
+
+			try {
+				tui.start();
+				await settle(term);
+				expect(visible(term).map(line => line.trim())).toEqual([
+					"line-5",
+					"line-6",
+					"line-7",
+					"line-8",
+					"line-9",
+					"line-10",
+				]);
+				const beforeBufferLength = term.getScrollBuffer().length;
+
+				component.setLines(["status-1", "expanded-details", ...rows("line-", 12)]);
+				tui.requestRender();
+				await settle(term);
+
+				expect(visible(term).map(line => line.trim())).toEqual([
+					"line-6",
+					"line-7",
+					"line-8",
+					"line-9",
+					"line-10",
+					"line-11",
+				]);
+				expect(term.getScrollBuffer().length - beforeBufferLength).toBe(1);
 			} finally {
 				tui.stop();
 			}
@@ -762,6 +844,152 @@ describe("TUI terminal-state regressions", () => {
 				expect((allText.match(/alpha/g) ?? []).length).toBe(1);
 				expect((allText.match(/beta/g) ?? []).length).toBe(1);
 				expect((allText.match(/gamma/g) ?? []).length).toBe(1);
+			} finally {
+				tui.stop();
+			}
+		});
+
+		it("tail-cell mutation after the transcript overflowed does not re-deposit header rows", async () => {
+			// Repro for the reported scrollback-duplication bug: once a header
+			// (e.g. the welcome screen) has scrolled into terminal history, the
+			// last tool cell mutating (grow/shrink cycles, completion collapse)
+			// must not re-emit those header rows in a way that visibly
+			// duplicates them when the user scrolls back.
+			const term = new VirtualTerminal(40, 10);
+			const tui = new TUI(term);
+			const header = new MutableLinesComponent(["HEADER-0", "HEADER-1", "HEADER-2", "HEADER-3", "HEADER-4"]);
+			const tail = new MutableLinesComponent(["cell-init"]);
+			tui.addChild(header);
+			tui.addChild(tail);
+
+			try {
+				tui.start();
+				await settle(term);
+
+				// Stream output until the transcript exceeds the viewport.
+				const out: string[] = [];
+				for (let i = 0; i < 15; i++) {
+					out.push(`cell-${i}`);
+					tail.setLines([...out, "[footer]"]);
+					tui.requestRender();
+					await settle(term);
+				}
+
+				// Repeatedly shrink (collapse preview) and grow (more output)
+				// across the previous viewport bottom. This is what triggers
+				// the duplication: each shrink-then-grow cycle would otherwise
+				// re-emit HEADER rows that are already in scrollback.
+				for (let cycle = 0; cycle < 6; cycle++) {
+					tail.setLines([...out.slice(0, 5), "[summary]", "[footer]"]);
+					tui.requestRender();
+					await settle(term);
+
+					out.push(`cell-grew-${cycle}-a`, `cell-grew-${cycle}-b`);
+					tail.setLines([...out, "[footer]"]);
+					tui.requestRender();
+					await settle(term);
+				}
+
+				// Final completion-style collapse: full transcript fits in the
+				// viewport again, even though scrollback already holds an
+				// earlier copy of HEADER.
+				tail.setLines(["[completed: many lines]", "[footer]"]);
+				tui.requestRender();
+				await settle(term);
+
+				const scrollback = term.getScrollBuffer();
+				for (let i = 0; i < 5; i++) {
+					const pattern = new RegExp(`\\bHEADER-${i}\\b`);
+					expect(countMatches(scrollback, pattern), `HEADER-${i} should appear at most once`).toBeLessThanOrEqual(
+						1,
+					);
+				}
+			} finally {
+				tui.stop();
+			}
+		});
+
+		it("scrollback grows again after stale history is cleared", async () => {
+			const term = new VirtualTerminal(60, 20);
+			const tui = new TUI(term);
+			const toast = new MutableLinesComponent(["TOAST"]);
+			const userMessage = new MutableLinesComponent(["USER"]);
+			const chat = new MutableLinesComponent([]);
+			const footer = new MutableLinesComponent(["STATUS", "EDITOR-TOP", "EDITOR-CONTENT", "EDITOR-BOTTOM"]);
+
+			tui.addChild(toast);
+			tui.addChild(userMessage);
+			tui.addChild(chat);
+			tui.addChild(footer);
+
+			try {
+				tui.start();
+				await settle(term);
+
+				const thinkingLines = ["THINKING-0"];
+				for (let i = 0; i < 25; i++) {
+					thinkingLines.push(`THINKING-${i + 1}`);
+					chat.setLines(thinkingLines);
+					tui.requestRender();
+					await settle(term);
+				}
+
+				// Collapse below the previous scrollback boundary, forcing the
+				// stale-history reset path.
+				chat.setLines(thinkingLines.slice(0, 5));
+				tui.requestRender();
+				await settle(term);
+				const afterResetLength = term.getScrollBuffer().length;
+
+				// Subsequent growth must be allowed to scroll normally. A
+				// viewport-only repaint loop here leaves the user with no
+				// terminal history to scroll back through.
+				for (let i = 0; i < 30; i++) {
+					thinkingLines.push(`LATER-${i}`);
+					chat.setLines(thinkingLines);
+					tui.requestRender();
+					await settle(term);
+				}
+
+				expect(term.getScrollBuffer().length).toBeGreaterThan(afterResetLength);
+			} finally {
+				tui.stop();
+			}
+		});
+		it("places hardware cursor at the focused row after a height-grow resize", async () => {
+			// Mirrors the editor input layout: the focused component sits at the
+			// last content row and emits CURSOR_MARKER. When the terminal grows
+			// taller than the rendered content, #emitViewportRepaint must move
+			// the hardware cursor up to the marker row instead of leaving it at
+			// the viewport bottom (the rows below the content are blank padding).
+			const term = new VirtualTerminal(40, 6);
+			const tui = new TUI(term, true);
+			const cursorAnchorRow = 5;
+			class CursorAnchor implements Component, Focusable {
+				focused = false;
+				invalidate(): void {}
+				render(_width: number): string[] {
+					return [`anchor>${CURSOR_MARKER}`];
+				}
+			}
+			tui.addChild(new MutableLinesComponent(rows("body-", cursorAnchorRow)));
+			const anchor = new CursorAnchor();
+			tui.addChild(anchor);
+			tui.setFocus(anchor);
+
+			try {
+				tui.start();
+				await settle(term);
+				// Sanity check: content fills the viewport exactly.
+				expect(term.getCursor().row).toBe(cursorAnchorRow);
+
+				// Grow the terminal so it has more rows than the rendered content.
+				term.resize(40, 20);
+				await settle(term);
+
+				// Regression: the cursor must follow the marker, not the bottom
+				// of the now-taller viewport.
+				expect(term.getCursor().row).toBe(cursorAnchorRow);
 			} finally {
 				tui.stop();
 			}

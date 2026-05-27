@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+## [15.5.0] - 2026-05-26
+### Added
+
+- Added `approval` support to `AgentTool` declarations with the new `ToolTier` and `ToolApproval` APIs, allowing tools to declare capability tiers (`read`, `write`, or `exec`) and optional override/reason metadata for approval gating
+- Added `formatApprovalDetails` on `AgentTool` to append custom detail text or lines to approval prompts
+- Added exported `ToolTier` and `ToolApproval` type aliases for tool approval declarations
+
+### Fixed
+
+- Fixed chat-request telemetry storing the raw scoped `serviceTier` value (`"openai-only"`/`"claude-only"`) in `OpenAIAttr.RequestServiceTier` instead of the resolved wire value (`"priority"`). Dashboards and alerts filtering on the concrete tier name (`service_tier == "priority"`) were broken by the scoped placeholder; `buildChatRequestAttributes` now runs the tier through `resolveServiceTier(serviceTier, provider)` before recording, keeping the `shouldSendServiceTier` gate intact so non-OpenAI providers continue to omit the attribute entirely.
+
 ## [15.3.0] - 2026-05-25
 ### Fixed
 

@@ -27,6 +27,7 @@ import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" wit
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
+import { truncateForPrompt } from "../tools/approval";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import {
 	type AgentDefinition,
@@ -214,6 +215,24 @@ function validateTaskModeParams(simpleMode: TaskSimpleMode, params: TaskParams):
  */
 export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetails, Theme> {
 	readonly name = "task";
+	readonly approval = "exec" as const;
+	readonly formatApprovalDetails = (args: unknown): string[] => {
+		const params = args as Partial<TaskParams>;
+		const lines: string[] = [];
+		if (typeof params.agent === "string") {
+			lines.push(`Agent: ${truncateForPrompt(params.agent)}`);
+		}
+		const tasks = Array.isArray(params.tasks) ? params.tasks : [];
+		const firstTask = tasks[0];
+		if (firstTask) {
+			lines.push(`Task: ${truncateForPrompt(firstTask.id)}`);
+			lines.push(`Assignment:\n${truncateForPrompt(firstTask.assignment)}`);
+			if (tasks.length > 1) {
+				lines.push(`+${tasks.length - 1} more task${tasks.length === 2 ? "" : "s"}`);
+			}
+		}
+		return lines;
+	};
 	readonly label = "Task";
 	readonly summary = "Spawn a subagent to complete a parallel task";
 	readonly strict = true;
@@ -558,6 +577,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const commitStyle = this.session.settings.get("task.isolation.commits");
 		const maxConcurrency = this.session.settings.get("task.maxConcurrency");
 		const taskDepth = this.session.taskDepth ?? 0;
+		const subagentLspEnabled = (this.session.enableLsp ?? true) && this.session.settings.get("task.enableLsp");
 
 		if (isolationMode === "none" && "isolated" in params) {
 			return {
@@ -843,6 +863,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				file => path.basename(file.path).toLowerCase() !== "agents.md",
 			);
 			const promptTemplates = this.session.promptTemplates;
+			const parentEvalSessionId = this.session.getEvalSessionId?.() ?? undefined;
 
 			// Initialize progress for all tasks
 			for (let i = 0; i < tasksWithUniqueIds.length; i++) {
@@ -872,7 +893,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				if (!isIsolated) {
 					return runSubprocess({
 						cwd: this.session.cwd,
-						agent,
+						agent: effectiveAgent,
 						task: renderSubagentUserPrompt(task.assignment, simpleMode),
 						assignment: task.assignment.trim(),
 						context: sharedContext,
@@ -888,7 +909,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						persistArtifacts: !!artifactsDir,
 						artifactsDir: effectiveArtifactsDir,
 						contextFile: contextFilePath,
-						enableLsp: false,
+						enableLsp: subagentLspEnabled,
 						signal,
 						eventBus: this.session.eventBus,
 						onProgress: progress => {
@@ -910,6 +931,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						parentArtifactManager,
 						parentHindsightSessionState: this.session.getHindsightSessionState?.(),
 						parentTelemetry: this.session.getTelemetry?.(),
+						parentEvalSessionId,
 					});
 				}
 
@@ -927,7 +949,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					const result = await runSubprocess({
 						cwd: this.session.cwd,
 						worktree: isolationDir,
-						agent,
+						agent: effectiveAgent,
 						task: renderSubagentUserPrompt(task.assignment, simpleMode),
 						assignment: task.assignment.trim(),
 						context: sharedContext,
@@ -943,7 +965,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						persistArtifacts: !!artifactsDir,
 						artifactsDir: effectiveArtifactsDir,
 						contextFile: contextFilePath,
-						enableLsp: false,
+						enableLsp: subagentLspEnabled,
 						signal,
 						eventBus: this.session.eventBus,
 						onProgress: progress => {
@@ -965,6 +987,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						parentArtifactManager,
 						parentHindsightSessionState: this.session.getHindsightSessionState?.(),
 						parentTelemetry: this.session.getTelemetry?.(),
+						parentEvalSessionId,
 					});
 					if (mergeMode === "branch" && result.exitCode === 0) {
 						try {

@@ -46,6 +46,8 @@ export interface Args {
 	noRules?: boolean;
 	listModels?: string | true;
 	noTitle?: boolean;
+	autoApprove?: boolean;
+	approvalMode?: "always-ask" | "write" | "yolo";
 	messages: string[];
 	fileArgs: string[];
 	/** Unknown flags (potentially extension flags) - map of flag name to value */
@@ -172,6 +174,18 @@ export function parseArgs(args: string[], extensionFlags?: Map<string, { type: "
 			result.noRules = true;
 		} else if (arg === "--no-title") {
 			result.noTitle = true;
+		} else if (arg === "--auto-approve" || arg === "--yolo") {
+			result.autoApprove = true;
+		} else if (arg === "--approval-mode" && i + 1 < args.length) {
+			const mode = args[++i];
+			if (mode === "always-ask" || mode === "write" || mode === "yolo") {
+				result.approvalMode = mode;
+			} else {
+				logger.warn("Invalid value passed to --approval-mode", {
+					value: mode,
+					validValues: ["always-ask", "write", "yolo"],
+				});
+			}
 		} else if (arg === "--skills" && i + 1 < args.length) {
 			// Comma-separated glob patterns for skill filtering
 			result.skills = args[++i].split(",").map(s => s.trim());
