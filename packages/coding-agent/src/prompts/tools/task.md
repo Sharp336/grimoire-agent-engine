@@ -17,6 +17,7 @@
 {{#if batchEnabled}}
 - `context`: shared background prepended to every assignment — goal, constraints, shared contract (see context-fmt); REQUIRED, session-specific only
 - `tasks`: tasks to spawn — one subagent per item, all in parallel:
+  - `agent`: optional agent type override for this item; defaults to the top-level `agent`
   - `assignment`: complete self-contained instructions; one-liners and missing acceptance criteria are PROHIBITED
   - `id`: stable agent id, CamelCase, ≤32 chars; generated when omitted
   - `description`: UI label only — subagent never sees it

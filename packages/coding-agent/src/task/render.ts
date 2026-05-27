@@ -20,6 +20,7 @@ import {
 	formatStatusIcon,
 	replaceTabs,
 	type ToolUIStatus,
+	TRUNCATE_LENGTHS,
 	truncateToWidth,
 } from "../tools/render-utils";
 import {
@@ -177,6 +178,34 @@ export function formatTaskId(id: string): string {
 	// (e.g. "Anna.Bob"). Render the hierarchy with a ">" breadcrumb.
 	const segments = id.split(".");
 	return segments.length < 2 ? id : segments.join(">");
+}
+
+function formatAgentName(agent: string | undefined): string {
+	return agent ? truncateToWidth(replaceTabs(agent), TRUNCATE_LENGTHS.SHORT) : "";
+}
+
+const MIXED_AGENT_BATCH_LIMIT = 3;
+
+function formatCallAgentBatch(args: TaskParams): string {
+	const tasks = Array.isArray(args.tasks) ? args.tasks : [];
+	if (tasks.length === 0) return formatAgentName(args.agent);
+	const counts = new Map<string, number>();
+	for (const task of tasks) {
+		if (!task) continue;
+		const agent = task.agent ?? args.agent;
+		if (!agent) continue;
+		counts.set(agent, (counts.get(agent) ?? 0) + 1);
+	}
+	if (counts.size === 0) return formatAgentName(args.agent);
+	if (counts.size === 1) return formatAgentName(Array.from(counts.keys())[0] ?? args.agent);
+	const entries = Array.from(counts);
+	const visible = entries
+		.slice(0, MIXED_AGENT_BATCH_LIMIT)
+		.map(([agent, count]) => `${formatAgentName(agent)}×${count}`);
+	if (entries.length > MIXED_AGENT_BATCH_LIMIT) {
+		visible.push(formatMoreItems(entries.length - MIXED_AGENT_BATCH_LIMIT, "agent"));
+	}
+	return truncateToWidth(`mixed (${visible.join(", ")})`, TRUNCATE_LENGTHS.LINE);
 }
 
 const MISSING_YIELD_WARNING_PREFIX = "SYSTEM WARNING: Subagent exited without calling yield tool";
@@ -545,7 +574,7 @@ function renderTaskCallLines(args: Partial<TaskParams> | undefined, theme: Theme
 		}
 		lines.push(line);
 	}
-	lines.push(...renderTaskItemLines(args.tasks, theme));
+	lines.push(...renderTaskItemLines(args.tasks, theme, args.agent));
 	return lines;
 }
 
@@ -561,11 +590,14 @@ const COLLAPSED_AGENT_LIMIT = 4;
  * over time and trailing entries may be partially parsed — every field access
  * is defensive.
  */
-function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): string[] {
+function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme, defaultAgent?: string): string[] {
 	if (!Array.isArray(tasks) || tasks.length === 0) return [];
 
 	const bullet = theme.fg("dim", "•");
 	const cap = Math.min(tasks.length, COLLAPSED_AGENT_LIMIT);
+	const defaultAgentName = typeof defaultAgent === "string" ? defaultAgent.trim() : "";
+	const hasPerTaskAgent = tasks.some(task => typeof task?.agent === "string" && task.agent.trim().length > 0);
+	const showAgent = hasPerTaskAgent || defaultAgentName.length === 0;
 	const lines: string[] = [];
 	for (let i = 0; i < cap; i++) {
 		const task = tasks[i] as Partial<TaskItem> | undefined;
@@ -575,6 +607,13 @@ function renderTaskItemLines(tasks: TaskItem[] | undefined, theme: Theme): strin
 		const desc = typeof task?.description === "string" ? task.description.trim() : "";
 		if (desc) {
 			line += `: ${theme.fg("muted", truncateToWidth(replaceTabs(desc), 64))}`;
+		}
+		if (showAgent) {
+			const taskAgent = typeof task?.agent === "string" ? task.agent.trim() : "";
+			const agentLabel = formatAgentName(taskAgent || defaultAgentName);
+			if (agentLabel) {
+				line += theme.fg("dim", ` [${agentLabel}]`);
+			}
 		}
 		if (task?.isolated === true) {
 			line += theme.fg("dim", " [isolated]");
@@ -644,7 +683,11 @@ export function renderCall(args: TaskParams, options: TaskRenderOptions, theme: 
 	// pending/hourglass icon would misread the call as something the turn
 	// waits on.
 	const header = renderStatusLine(
-		{ iconOverride: theme.styledSymbol("tool.task", "accent"), title: "Task", description: args.agent },
+		{
+			iconOverride: theme.styledSymbol("tool.task", "accent"),
+			title: "Task",
+			description: formatCallAgentBatch(args),
+		},
 		theme,
 	);
 	const assignmentSection = createAssignmentSectionRenderer(args, theme);
@@ -755,6 +798,7 @@ function renderAgentProgress(
 	} else if (progress.status === "completed") {
 		statusLine = appendAgentStats(statusLine, { ...progress, showResolvedModelBadge: showBadge }, theme);
 	}
+	statusLine += `${theme.sep.dot}${theme.fg("dim", formatAgentName(progress.agent))}`;
 
 	lines.push(statusLine);
 
@@ -1051,6 +1095,7 @@ function renderAgentResult(
 		theme,
 	);
 	statusLine += `${theme.sep.dot}${theme.fg("dim", formatDuration(result.durationMs))}`;
+	statusLine += `${theme.sep.dot}${theme.fg("dim", formatAgentName(result.agent))}`;
 
 	if (result.truncated) {
 		statusLine += ` ${theme.fg("warning", "[truncated]")}`;

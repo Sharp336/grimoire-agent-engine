@@ -55,6 +55,47 @@ describe("task renderer: streaming call preview", () => {
 		expect(out).toContain("task");
 	});
 
+	it("uses task agent overrides in the header and task row before the default agent streams", () => {
+		const args = {
+			tasks: [{ id: "Research", agent: "librarian", assignment: "Read external docs." }],
+		} as unknown as TaskParams;
+		const out = render(args);
+		const lines = out.split("\n");
+		const firstLine = lines[0] ?? "";
+		const row = lines.find(line => line.includes("Research")) ?? "";
+
+		expect(firstLine).toContain("librarian");
+		expect(firstLine).not.toContain("undefined");
+		expect(row).toContain("librarian");
+		expect(row).not.toContain("undefined");
+	});
+
+	it("summarizes mixed effective task agents in the header", () => {
+		const args = {
+			agent: "explore",
+			context: "# Goal\nDispatch mixed agents.",
+			tasks: [
+				{ id: "Scout", description: "Scout code", assignment: "Inspect local code." },
+				{
+					id: "Research",
+					description: "Research docs",
+					assignment: "Read external docs.",
+					agent: "librarian",
+				},
+			],
+		} as unknown as TaskParams;
+		const out = render(args);
+		const lines = out.split("\n");
+		const firstLine = lines[0] ?? "";
+		const scoutLine = lines.find(line => line.includes("Scout")) ?? "";
+		const researchLine = lines.find(line => line.includes("Research")) ?? "";
+
+		expect(firstLine).toContain("mixed (explore×1, librarian×1)");
+		expect(out).not.toContain("undefined");
+		expect(scoutLine).toContain("explore");
+		expect(researchLine).toContain("librarian");
+	});
+
 	it("always renders the full assignment markdown, collapsed or expanded", () => {
 		const assignmentLines = Array.from({ length: 6 }, (_, i) => `Step ${i + 1}: do the thing.`);
 		const args: TaskParams = {
