@@ -291,6 +291,18 @@ export function mergeDiscoveredModel<TApi extends Api>(
 	return model;
 }
 
+function isPlainXiaomiV1BaseUrl(baseUrl: string): boolean {
+	try {
+		const url = new URL(baseUrl);
+		return (
+			(url.hostname === "xiaomimimo.com" || url.hostname.endsWith(".xiaomimimo.com")) &&
+			url.pathname.replace(/\/+$/, "") === "/v1"
+		);
+	} catch {
+		return false;
+	}
+}
+
 function isAuthoritativeProjectCatalogModel(model: Model<Api>): boolean {
 	return (
 		model.provider === "google-vertex" &&
@@ -901,8 +913,8 @@ export class ModelRegistry {
 		this.#addImplicitDiscoverableProviders(configuredProviders);
 		let builtInModels = this.#applyHardcodedModelPolicies(this.#loadBuiltInModels(overrides));
 		const cachedStandardResult = this.#loadCachedStandardProviderModels();
-		const cachedStandardModels = this.#applyHardcodedModelPolicies(cachedStandardResult.models);
-		const cachedDiscoveries = this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels());
+		const cachedStandardModels = cachedStandardResult.models;
+		const cachedDiscoveries = this.#loadCachedDiscoverableModels();
 		// Only drop bundled fallback models when the cached project-catalog row is
 		// itself fresh AND authoritative. A stale or non-authoritative snapshot
 		// (e.g. after ADC discovery failure rewrote the row with authoritative=0)
@@ -1044,7 +1056,9 @@ export class ModelRegistry {
 			const withCompat = providerOverride?.compat
 				? withTransport.map(model => ({ ...model, compat: mergeCompat(model.compat, providerOverride.compat) }))
 				: withTransport;
-			cachedModels.push(...this.#applyProviderModelOverrides(descriptor.providerId, withCompat));
+			cachedModels.push(
+				...this.#applyCachedModelPolicies(this.#applyProviderModelOverrides(descriptor.providerId, withCompat)),
+			);
 		}
 		return { models: cachedModels, authoritativeFreshProviders };
 	}
@@ -1070,14 +1084,15 @@ export class ModelRegistry {
 					this.#applyProviderCompat(providerConfig.compat, cache.models),
 				),
 			);
-			cachedModels.push(...models);
+			const cachedPolicyModels = this.#applyCachedModelPolicies(models);
+			cachedModels.push(...cachedPolicyModels);
 			this.#providerDiscoveryStates.set(providerConfig.provider, {
 				provider: providerConfig.provider,
 				status: "cached",
 				optional: providerConfig.optional ?? false,
 				stale: !cache.fresh || !cache.authoritative,
 				fetchedAt: cache.updatedAt,
-				models: models.map(model => model.id),
+				models: cachedPolicyModels.map(model => model.id),
 			});
 		}
 		return cachedModels;
@@ -1830,6 +1845,19 @@ export class ModelRegistry {
 				...overrides,
 			});
 		});
+	}
+	#applyCachedModelPolicies(models: Model<Api>[]): Model<Api>[] {
+		const withCacheFixups = models.map(model => {
+			if (
+				model.provider === "xiaomi" &&
+				model.api === "anthropic-messages" &&
+				isPlainXiaomiV1BaseUrl(model.baseUrl)
+			) {
+				return { ...model, api: "openai-completions" };
+			}
+			return model;
+		});
+		return this.#applyHardcodedModelPolicies(withCacheFixups);
 	}
 
 	#rebuildCanonicalIndex(): void {

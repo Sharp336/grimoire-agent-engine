@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { Effort } from "../src/model-thinking";
 import { getBundledModel } from "../src/models";
 import { convertMessages, detectCompat, streamOpenAICompletions } from "../src/providers/openai-completions";
 import { resolveOpenAICompat } from "../src/providers/openai-completions-compat";
@@ -31,6 +32,13 @@ function getNestedBoolean(value: unknown, key: string): boolean | undefined {
 	if (!obj) return undefined;
 	const property = Reflect.get(obj, key);
 	return typeof property === "boolean" ? property : undefined;
+}
+
+function getNestedString(value: unknown, key: string): string | undefined {
+	const obj = toObject(value);
+	if (!obj) return undefined;
+	const property = Reflect.get(obj, key);
+	return typeof property === "string" ? property : undefined;
 }
 
 function createSseResponse(events: unknown[]): Response {
@@ -121,6 +129,74 @@ describe("openai-completions compatibility", () => {
 		}
 		expect(typeof assistant.content).toBe("string");
 		expect(assistant.content).toBe("hello world");
+	});
+
+	it("treats Xiaomi MiMo as nonstandard and replays reasoning_content for tool calls", () => {
+		const model: Model<"openai-completions"> = {
+			id: "mimo-v2.5",
+			name: "MiMo-V2.5",
+			api: "openai-completions",
+			provider: "xiaomi",
+			baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 131072,
+			thinking: { mode: "budget", minLevel: Effort.Minimal, maxLevel: Effort.XHigh },
+		};
+
+		const compat = detectCompat(model);
+
+		expect(compat.supportsStore).toBe(false);
+		expect(compat.supportsReasoningEffort).toBe(false);
+		expect(compat.thinkingFormat).toBe("xiaomi");
+		expect(compat.requiresReasoningContentForToolCalls).toBe(true);
+		expect(compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
+		expect(compat.requiresAssistantContentForToolCalls).toBe(false);
+	});
+
+	it("injects Xiaomi reasoning_content on replayed assistant tool-call turns", () => {
+		const model: Model<"openai-completions"> = {
+			id: "mimo-v2.5",
+			name: "MiMo-V2.5",
+			api: "openai-completions",
+			provider: "xiaomi",
+			baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 131072,
+			thinking: { mode: "budget", minLevel: Effort.Minimal, maxLevel: Effort.XHigh },
+		};
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "Need to inspect the file.", thinkingSignature: "reasoning_content" },
+				{ type: "toolCall", id: "call_1", name: "read", arguments: { filePath: "README.md" } },
+			],
+			api: model.api,
+			provider: model.provider,
+			model: model.id,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+
+		const messages = convertMessages(model, { messages: [assistantMessage] }, detectCompat(model));
+		const assistant = messages.find(message => message.role === "assistant");
+
+		expect(assistant).toBeDefined();
+		expect(assistant ? Reflect.get(assistant, "reasoning_content") : undefined).toBe("Need to inspect the file.");
+		expect(assistant && "content" in assistant ? assistant.content : undefined).toBe("");
 	});
 
 	it("preserves multiple system prompts as leading system messages for chat completions", () => {
@@ -417,6 +493,62 @@ describe("openai-completions compatibility", () => {
 		const payload = await promise;
 		const chatTemplateArgs = getNestedObject(payload, "chat_template_kwargs");
 		expect(getNestedBoolean(chatTemplateArgs, "enable_thinking")).toBe(true);
+	});
+
+	it("maps Xiaomi reasoning into top-level thinking enabled", async () => {
+		const model: Model<"openai-completions"> = {
+			id: "mimo-v2.5-pro",
+			name: "MiMo-V2.5-Pro",
+			api: "openai-completions",
+			provider: "xiaomi",
+			baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 131072,
+			thinking: { mode: "budget", minLevel: Effort.Minimal, maxLevel: Effort.XHigh },
+		};
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			reasoning: "high",
+			signal: createAbortedSignal(),
+			onPayload: payload => resolve(payload),
+		});
+
+		const payload = await promise;
+		const thinking = getNestedObject(payload, "thinking");
+		expect(getNestedString(thinking, "type")).toBe("enabled");
+		expect(Object.hasOwn(toObject(payload) ?? {}, "reasoning_effort")).toBe(false);
+	});
+
+	it("maps Xiaomi disabled reasoning into top-level thinking disabled", async () => {
+		const model: Model<"openai-completions"> = {
+			id: "mimo-v2.5-pro",
+			name: "MiMo-V2.5-Pro",
+			api: "openai-completions",
+			provider: "xiaomi",
+			baseUrl: "https://token-plan-cn.xiaomimimo.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1048576,
+			maxTokens: 131072,
+			thinking: { mode: "budget", minLevel: Effort.Minimal, maxLevel: Effort.XHigh },
+		};
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			disableReasoning: true,
+			signal: createAbortedSignal(),
+			onPayload: payload => resolve(payload),
+		});
+
+		const payload = await promise;
+		const thinking = getNestedObject(payload, "thinking");
+		expect(getNestedString(thinking, "type")).toBe("disabled");
+		expect(Object.hasOwn(toObject(payload) ?? {}, "reasoning_effort")).toBe(false);
 	});
 
 	it("treats finish_reason end as stop", async () => {

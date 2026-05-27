@@ -1142,6 +1142,10 @@ function buildParams(
 		// Must explicitly disable since z.ai defaults to thinking enabled.
 		const enabled = options?.reasoning && !options?.disableReasoning;
 		params.thinking = { type: enabled ? "enabled" : "disabled" };
+	} else if (supportsReasoningParams && compat.thinkingFormat === "xiaomi" && model.reasoning) {
+		// Xiaomi MiMo's OpenAI-compatible API uses binary top-level thinking.
+		const enabled = options?.reasoning && !options?.disableReasoning;
+		params.thinking = { type: enabled ? "enabled" : "disabled" };
 	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen" && model.reasoning) {
 		// Qwen uses top-level enable_thinking: boolean
 		params.enable_thinking = !!options?.reasoning && !options?.disableReasoning;
@@ -1204,7 +1208,7 @@ function buildParams(
 		// turn while keeping the tool-selection contract intact.
 		delete params.reasoning_effort;
 		delete params.reasoning;
-		if (compat.thinkingFormat === "zai") {
+		if (compat.thinkingFormat === "zai" || compat.thinkingFormat === "xiaomi") {
 			params.thinking = { type: "disabled" };
 		}
 	}
@@ -1546,7 +1550,8 @@ export function convertMessages(
 				compat.allowsSyntheticReasoningContentForToolCalls &&
 				(compat.thinkingFormat === "openai" ||
 					compat.thinkingFormat === "openrouter" ||
-					compat.thinkingFormat === "zai");
+					compat.thinkingFormat === "zai" ||
+					compat.thinkingFormat === "xiaomi");
 			// DeepSeek reasoning models require reasoning_content on ALL assistant turns,
 			// not just tool-call turns. Other providers (Kimi, OpenRouter) only require it
 			// on tool-call turns.

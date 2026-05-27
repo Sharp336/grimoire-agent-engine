@@ -53,6 +53,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 	const isZai = provider === "zai" || baseUrl.includes("api.z.ai");
 	const isZhipu = provider === "zhipu-coding-plan" || baseUrl.includes("open.bigmodel.cn");
 	const isKilo = provider === "kilo" || baseUrl.includes("api.kilo.ai");
+	const isXiaomi = provider === "xiaomi" || baseUrl.includes("xiaomimimo.com");
 	const isKimiModel = model.id.includes("moonshotai/kimi") || /(^|\/)kimi[-.]/i.test(model.id);
 	const isMoonshotKimi =
 		isKimiModel &&
@@ -100,6 +101,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		isZai ||
 		isZhipu ||
 		isKilo ||
+		isXiaomi ||
 		isQwen ||
 		provider === "opencode-zen" ||
 		provider === "opencode-go" ||
@@ -197,7 +199,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		// OpenAI's reasoning-API surface.
 		supportsDeveloperRole: isOpenAIHost || isAzureHost,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
-		supportsReasoningEffort: !isGrok && !isZai && !isZhipu,
+		supportsReasoningEffort: !isGrok && !isZai && !isZhipu && !isXiaomi,
 		reasoningEffortMap,
 		supportsUsageInStreaming: !isCerebras,
 		disableReasoningOnForcedToolChoice: isKimiModel || isAnthropicModel,
@@ -211,11 +213,13 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		thinkingFormat:
 			isZai || isZhipu || isMoonshotKimi
 				? "zai"
-				: provider === "openrouter" || baseUrl.includes("openrouter.ai")
-					? "openrouter"
-					: isAlibaba || isQwen
-						? "qwen"
-						: "openai",
+				: isXiaomi
+					? "xiaomi"
+					: provider === "openrouter" || baseUrl.includes("openrouter.ai")
+						? "openrouter"
+						: isAlibaba || isQwen
+							? "qwen"
+							: "openai",
 		reasoningContentField: "reasoning_content",
 		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
 		//   - Kimi: documented invariant on its native API.
@@ -229,11 +233,12 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		// client-sent `reasoning_content`, so exclude only that Kimi-on-OpenCode path.
 		requiresReasoningContentForToolCalls:
 			(isKimiModel && !isOpenCodeProvider) ||
+			(isXiaomi && Boolean(model.reasoning)) ||
 			(isDeepseekFamily && Boolean(model.reasoning)) ||
 			((provider === "openrouter" || baseUrl.includes("openrouter.ai")) && Boolean(model.reasoning)),
 		// DeepSeek V4 rejects synthetic reasoning_content placeholders (".") on tool-call turns.
 		// Kimi and OpenRouter accept them when actual reasoning is unavailable.
-		allowsSyntheticReasoningContentForToolCalls: !isDeepseekFamily || !model.reasoning,
+		allowsSyntheticReasoningContentForToolCalls: !(isDeepseekFamily || isXiaomi) || !model.reasoning,
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,

@@ -160,6 +160,8 @@ function mapWithBundledReference<TApi extends Api>(
 		...reference,
 		id: defaults.id,
 		name,
+		api: defaults.api,
+		provider: defaults.provider,
 		baseUrl: defaults.baseUrl,
 		contextWindow: toPositiveNumber(entry.context_length, reference.contextWindow),
 		maxTokens: toPositiveNumber(entry.max_completion_tokens, reference.maxTokens),
@@ -1486,10 +1488,39 @@ export function xiaomiModelManagerOptions(
 	const defaultBaseUrl = "https://api.xiaomimimo.com/v1";
 	const isTokenPlanKey = apiKey?.startsWith("tp-") === true;
 	const configuredBaseUrl = config?.baseUrl?.trim() || undefined;
-	const isStandardXiaomiBaseUrl =
-		configuredBaseUrl === defaultBaseUrl || configuredBaseUrl === "https://api.xiaomimimo.com/anthropic";
+	const isStandardXiaomiBaseUrl = (baseUrl: string | undefined) => {
+		if (!baseUrl) return false;
+		try {
+			const url = new URL(baseUrl);
+			if (url.protocol !== "https:" || url.host !== "api.xiaomimimo.com" || url.search || url.hash) {
+				return false;
+			}
+			const pathname = url.pathname.replace(/\/+$/, "");
+			return pathname === "/v1" || pathname === "/anthropic" || pathname === "/anthropic/v1";
+		} catch {
+			return false;
+		}
+	};
+	const isOfficialTokenPlanBaseUrl = (baseUrl: string | undefined) => {
+		if (!baseUrl) return false;
+		try {
+			const url = new URL(baseUrl);
+			if (url.protocol !== "https:" || url.search || url.hash) {
+				return false;
+			}
+			const pathname = url.pathname.replace(/\/+$/, "");
+			return (
+				(pathname === "/v1" || pathname === "/anthropic" || pathname === "/anthropic/v1") &&
+				TOKEN_PLAN_BASE_URLS.some(candidate => new URL(candidate).host === url.host)
+			);
+		} catch {
+			return false;
+		}
+	};
 	const discoveryBaseUrls = isTokenPlanKey
-		? configuredBaseUrl && !isStandardXiaomiBaseUrl
+		? configuredBaseUrl &&
+			!isStandardXiaomiBaseUrl(configuredBaseUrl) &&
+			!isOfficialTokenPlanBaseUrl(configuredBaseUrl)
 			? [configuredBaseUrl]
 			: TOKEN_PLAN_BASE_URLS
 		: [configuredBaseUrl ?? defaultBaseUrl];

@@ -16,6 +16,11 @@
 - Changed `omp auth-broker login` to drive the per-provider OAuth/API-key flow in-process via `AuthStorage.login()` instead of spawning the `pi-ai` CLI subprocess. The pi-ai bin is being removed; the same login surface now lives entirely inside `omp`.
 - Changed default per-line truncation cap for search/grep output (`DEFAULT_MAX_COLUMN`) from `1024` to `512` characters.
 
+### Fixed
+
+- Fixed cached model rows so hardcoded metadata policies such as the non-Copilot `gpt-5.4` context window still apply after process restart.
+- Fixed stale Xiaomi MiMo Token Plan model caches that recorded plain `/v1` endpoints with Anthropic transport metadata by forcing those entries back to OpenAI-compatible chat completions at load time, while preserving nested Anthropic endpoints such as `/anthropic/v1`.
+
 ## [15.4.3] - 2026-05-26
 
 ### Fixed

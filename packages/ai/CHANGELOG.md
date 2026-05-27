@@ -7,7 +7,10 @@
 - Added `zhipu-coding-plan` provider for Zhipu (智谱) BigModel's domestic coding-plan SKU at `https://open.bigmodel.cn/api/coding/paas/v4`, with dynamic model discovery (`ZHIPU_API_KEY`), zai-format thinking, `reasoning_content` field, and OAuth login flow ([#1340](https://github.com/can1357/oh-my-pi/issues/1340)).
 ### Fixed
 
-- Fixed Xiaomi MiMo Token Plan `tp-` keys issued for the CN cluster still failing with 401 by trying the official CN, SGP, and AMS token-plan endpoints in order while preserving explicit `baseUrl` overrides ([#772](https://github.com/can1357/oh-my-pi/issues/772)).
+- Fixed Xiaomi MiMo OpenAI-compatible reasoning requests to send the provider's top-level `thinking: { type: "enabled" }` control instead of dropping thinking when OpenAI `reasoning_effort` is unsupported.
+- Fixed Xiaomi MiMo Token Plan refreshes from cached official regional hosts, including Anthropic regional URLs, so TP-key discovery still falls back across CN, SGP, and AMS instead of pinning to the stale cached region.
+- Fixed Xiaomi MiMo Token Plan discovered models inheriting the bundled Anthropic transport metadata, which sent TP-key chat requests through the wrong API shape and left sessions stuck waiting for output.
+- Fixed Xiaomi MiMo Token Plan `tp-` keys issued for the CN cluster still failing with 401 by trying the official CN, SGP, and AMS token-plan endpoints in order, including when the configured standard Xiaomi base URL has a trailing slash or Anthropic `/v1` path, while preserving explicit `baseUrl` overrides ([#772](https://github.com/can1357/oh-my-pi/issues/772)).
 
 ### Removed
 
