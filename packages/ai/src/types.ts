@@ -815,6 +815,8 @@ export interface AnthropicCompat {
 	supportsEagerToolInputStreaming?: boolean;
 	/** Whether long prompt-cache retention (`ttl: "1h"`) is supported. Default: true for canonical Anthropic API. */
 	supportsLongCacheRetention?: boolean;
+	/** When true, non-Anthropic endpoints use `x-api-key` header instead of `Authorization: Bearer`. Default: false. */
+	useApiKeyHeader?: boolean;
 }
 
 /**

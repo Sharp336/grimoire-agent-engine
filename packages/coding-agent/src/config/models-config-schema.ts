@@ -43,6 +43,8 @@ export const OpenAICompatSchema = z.object({
 	extraBody: z.record(z.string(), z.unknown()).optional(),
 	supportsStrictMode: z.boolean().optional(),
 	toolStrictMode: z.enum(["all_strict", "none"]).optional(),
+	/** When true, anthropic-messages non-Anthropic endpoints use `x-api-key` header instead of `Authorization: Bearer`. */
+	useApiKeyHeader: z.boolean().optional(),
 });
 
 const EffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);

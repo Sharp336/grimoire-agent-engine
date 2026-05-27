@@ -83,6 +83,8 @@ export type AnthropicHeaderOptions = {
 	stream?: boolean;
 	modelHeaders?: Record<string, string>;
 	isCloudflareAiGateway?: boolean;
+	/** When true, use `x-api-key` header instead of `Authorization: Bearer` for non-Anthropic endpoints. */
+	useApiKeyHeader?: boolean;
 };
 
 export function normalizeAnthropicBaseUrl(baseUrl?: string): string | undefined {
@@ -186,6 +188,15 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			"User-Agent": userAgent,
 		};
 	} else if (!isAnthropicApiBaseUrl(options.baseUrl)) {
+		if (options.useApiKeyHeader) {
+			return {
+				...modelHeaders,
+				Accept: acceptHeader,
+				...sharedHeaders,
+				"Anthropic-Beta": betaHeader,
+				"X-Api-Key": options.apiKey,
+			};
+		}
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
@@ -869,6 +880,7 @@ function getAnthropicCompat(
 		disableAdaptiveThinking: model.compat?.disableAdaptiveThinking ?? false,
 		supportsEagerToolInputStreaming: model.compat?.supportsEagerToolInputStreaming ?? true,
 		supportsLongCacheRetention: model.compat?.supportsLongCacheRetention ?? true,
+		useApiKeyHeader: model.compat?.useApiKeyHeader ?? false,
 	};
 }
 
@@ -1613,6 +1625,7 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 		stream,
 		modelHeaders: mergeHeaders(model.headers, foundryCustomHeaders, headers, dynamicHeaders),
 		isCloudflareAiGateway: model.provider === "cloudflare-ai-gateway",
+		useApiKeyHeader: compat.useApiKeyHeader,
 	});
 
 	if (model.provider === "cloudflare-ai-gateway") {
