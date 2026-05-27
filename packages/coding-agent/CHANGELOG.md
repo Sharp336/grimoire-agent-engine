@@ -17,6 +17,10 @@
 - Changed read to return verbatim contents for files shorter than `read.summarize.minTotalLines` instead of summarizing them
 - Changed `search` path line-range filtering to include only matches and context lines that fall inside the requested ranges
 
+### Fixed
+
+- Fixed plan mode losing the hidden `resolve` tool when sessions were created with an explicit non-deferrable tool list, leaving agents unable to submit completed plans for approval ([#1428](https://github.com/can1357/oh-my-pi/issues/1428))
+
 ## [15.5.3] - 2026-05-27
 ### Breaking Changes
 

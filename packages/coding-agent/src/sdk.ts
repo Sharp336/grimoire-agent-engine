@@ -1527,9 +1527,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 
 		const hasDeferrableTools = Array.from(toolRegistry.values()).some(tool => tool.deferrable === true);
-		if (!hasDeferrableTools) {
-			toolRegistry.delete("resolve");
-		} else if (!toolRegistry.has("resolve")) {
+		// `resolve` is not only the apply/discard companion for deferrable tools. Plan mode
+		// also activates it on demand through a standing resolve handler. Keep it registered
+		// even when no deferrable tool is active, otherwise plan-mode sessions can instruct the
+		// model to call `resolve` while `InteractiveMode.#enterPlanMode()` has no tool to add.
+		if (!toolRegistry.has("resolve")) {
 			const resolveTool = await logger.time("createTools:resolve:session", HIDDEN_TOOLS.resolve, toolSession);
 			if (resolveTool) {
 				toolRegistry.set(resolveTool.name, wrapToolWithMetaNotice(resolveTool));
@@ -1668,7 +1670,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const defaultInactiveToolNames = new Set(
 			registeredTools.filter(tool => tool.definition.defaultInactive).map(tool => tool.definition.name),
 		);
-		const requestedActiveToolNames = normalizedRequested.filter(name => name !== "goal");
+		const resolveExplicitlyRequested = explicitlyRequestedToolNames?.includes("resolve") ?? false;
+		const requestedActiveToolNames = normalizedRequested.filter(
+			name => name !== "goal" && (name !== "resolve" || hasDeferrableTools || resolveExplicitlyRequested),
+		);
 		const initialRequestedActiveToolNames = options.toolNames
 			? requestedActiveToolNames
 			: requestedActiveToolNames.filter(name => !defaultInactiveToolNames.has(name));

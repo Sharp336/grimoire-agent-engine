@@ -140,4 +140,37 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			await session.dispose();
 		}
 	});
+
+	it("keeps resolve registered for explicit tool lists without making it active", async () => {
+		const tempDir = path.join(os.tmpdir(), `pi-sdk-tool-activation-${Snowflake.next()}`);
+		tempDirs.push(tempDir);
+		fs.mkdirSync(tempDir, { recursive: true });
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated(),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			toolNames: ["read", "search", "find", "web_search"],
+		});
+
+		try {
+			expect(session.getToolByName("resolve")).toBeDefined();
+			expect(session.getAllToolNames()).toContain("resolve");
+			expect(session.getActiveToolNames()).not.toContain("resolve");
+
+			await session.setActiveToolsByName([...session.getActiveToolNames(), "resolve"]);
+			expect(session.getActiveToolNames()).toContain("resolve");
+		} finally {
+			await session.dispose();
+		}
+	});
 });
