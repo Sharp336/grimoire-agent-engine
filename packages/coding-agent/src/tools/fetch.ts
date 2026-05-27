@@ -570,12 +570,13 @@ const REMOTE_READER_MAX_MS = 10_000;
 
 /**
  * Render HTML to markdown using Parallel, jina, trafilatura, lynx, then the
- * in-process native converter. The overall `timeout` budget bounds the call,
- * but remote reader requests are additionally capped at `REMOTE_READER_MAX_MS`
- * so that a hung remote endpoint cannot prevent local fallbacks from running.
- * Only a real `userSignal` cancellation aborts the chain — remote per-attempt
- * timeouts and the overall reader-mode timeout still allow later renderers
- * (especially the purely-local native converter) to be tried.
+ * in-process native converter. The overall `timeout` budget is the hard ceiling
+ * for the whole call (`overallSignal`); each remote reader attempt is further
+ * capped at `REMOTE_READER_MAX_MS` AND tied to `overallSignal`, so sequential
+ * remote stalls can never collectively exceed the reader-mode budget. Only a
+ * real `userSignal` cancellation aborts the chain — remote per-attempt timeouts
+ * and the overall reader-mode timeout still allow later renderers (especially
+ * the purely-local native converter) to be tried.
  */
 export async function renderHtmlToText(
 	url: string,
@@ -604,7 +605,7 @@ export async function renderHtmlToText(
 					objective: "Extract the main content",
 					excerpts: true,
 					fullContent: false,
-					signal: ptree.combineSignals(userSignal, remoteBudgetMs),
+					signal: ptree.combineSignals(overallSignal, remoteBudgetMs),
 				},
 				storage,
 			);
@@ -627,7 +628,7 @@ export async function renderHtmlToText(
 		const jinaUrl = `https://r.jina.ai/${url}`;
 		const response = await fetch(jinaUrl, {
 			headers: { Accept: "text/markdown" },
-			signal: ptree.combineSignals(userSignal, remoteBudgetMs),
+			signal: ptree.combineSignals(overallSignal, remoteBudgetMs),
 		});
 		if (response.ok) {
 			const content = await response.text();
