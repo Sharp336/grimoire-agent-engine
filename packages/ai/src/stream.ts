@@ -187,6 +187,7 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	venice: "VENICE_API_KEY",
 	vllm: "VLLM_API_KEY",
 	xiaomi: "XIAOMI_API_KEY",
+	"9router": "NINEROUTER_API_KEY",
 };
 
 /**
