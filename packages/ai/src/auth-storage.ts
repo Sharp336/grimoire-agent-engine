@@ -1643,6 +1643,12 @@ export class AuthStorage {
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
+			case "9router": {
+				const { login9Router } = await import("./utils/oauth/9router");
+				const apiKey = await login9Router(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
 			case "parallel": {
 				const { loginParallel } = await import("./utils/oauth/parallel");
 				const apiKey = await loginParallel(ctrl);

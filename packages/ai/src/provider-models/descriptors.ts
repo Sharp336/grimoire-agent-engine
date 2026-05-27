@@ -26,6 +26,7 @@ import {
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
+	nineRouterModelManagerOptions,
 	nvidiaModelManagerOptions,
 	ollamaModelManagerOptions,
 	openaiModelManagerOptions,
@@ -273,6 +274,12 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		"gpt-oss-20b",
 		config => vllmModelManagerOptions(config),
 		catalog("vLLM", ["VLLM_API_KEY"], { allowUnauthenticated: true }),
+	),
+	catalogDescriptor(
+		"9router",
+		"gpt-4o",
+		config => nineRouterModelManagerOptions(config),
+		catalog("9Router", ["NINEROUTER_API_KEY"], { allowUnauthenticated: true }),
 	),
 	catalogDescriptor(
 		"moonshot",

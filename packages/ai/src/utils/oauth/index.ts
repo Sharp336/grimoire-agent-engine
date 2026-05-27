@@ -221,6 +221,11 @@ const builtInOAuthProviders: OAuthProviderInfo[] = [
 		available: true,
 	},
 	{
+		id: "9router",
+		name: "9Router (Local AI Router)",
+		available: true,
+	},
+	{
 		id: "cloudflare-ai-gateway",
 		name: "Cloudflare AI Gateway",
 		available: true,

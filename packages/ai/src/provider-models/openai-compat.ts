@@ -1849,6 +1849,25 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// 22.5 9Router
+// ---------------------------------------------------------------------------
+
+export interface NineRouterModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+export function nineRouterModelManagerOptions(
+	config?: NineRouterModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createSimpleOpenAICompletionsOptions(
+		"9router" as Parameters<typeof getBundledModels>[0],
+		"http://localhost:20128/v1",
+		config,
+	);
+}
+
+// ---------------------------------------------------------------------------
 // 23. NanoGPT
 // ---------------------------------------------------------------------------
 
