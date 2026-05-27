@@ -2,11 +2,26 @@
 
 ## [Unreleased]
 
+## [15.5.0] - 2026-05-26
+
+### Fixed
+
+- Fixed `@` file mention autocomplete stalling for seconds when the query references something outside the project root (e.g. `@../`, `@~/`, `@/abs/`). `CombinedAutocompleteProvider` now short-circuits to plain immediate-directory prefix listing in those cases instead of dispatching a recursive `fuzzyFind` walk over a sibling directory full of unrelated projects. Inside-cwd queries keep the existing fuzzy-then-prefix behavior. ([#1395](https://github.com/can1357/oh-my-pi/issues/1395))
+- Gated the Hangul Compatibility Jamo width correction (U+3131..U+318E → 1 cell, originally landed in 15.0.1 for the IME / hardware-cursor displacement bug) behind `process.platform === "darwin"` in the TS path and `cfg!(target_os = "macos")` in the `pi-natives` Rust path. macOS terminals (Ghostty / Terminal.app / iTerm2) render jamo as 1 cell despite UAX#11 classifying them as Wide, but WezTerm and most Linux terminals honor UAX#11 and render them as 2 cells. The unconditional correction therefore desynced the TUI's column bookkeeping from the terminal's actual rendering off-darwin, producing corrupted layout and broken Korean input on Linux. On non-darwin the helpers now defer entirely to `Bun.stringWidth` / `UnicodeWidthStr` (also a small perf win on the multi-char-grapheme path). ([#1410](https://github.com/can1357/oh-my-pi/issues/1410))
+
+## [15.4.0] - 2026-05-26
+
+### Fixed
+
+- Fixed terminal scrollback gaining duplicate copies of the welcome screen (and any other header content) when the bottom tool cell mutated across the previous viewport boundary. Once a row scrolls into terminal history it cannot be retracted, so a subsequent shrink that would re-expose that row in the repainted viewport now clears stale scrollback and replays the transcript, then suppresses one immediate suffix-scroll frame so live status/editor chrome is not deposited twice. Multiplexer panes ignore `\x1b[3J`, so the recovery is gated on `!isMultiplexerSession()`.
+- Fixed the IME / hardware cursor sticking to the bottom of the terminal after a resize that grew the viewport taller than the rendered transcript. `#emitViewportRepaint` always writes one row per screen line (padding empty rows past the content), so the post-write hardware cursor sits at screen row `height - 1`. The bookkeeping previously clamped the tracked cursor row to `lines.length - 1`, making `#cursorControlSequence`'s relative `rowDelta` underestimate the upward move by `(height - lines.length)` rows and pinning the cursor at the viewport bottom even though the focused component's `CURSOR_MARKER` was on a content row.
+
 ## [15.3.2] - 2026-05-25
 
 ### Fixed
 
 - Fixed `matchesKey(data, "ctrl+m")` (and the other named-key collisions: `ctrl+h`/`ctrl+i`/`ctrl+j`/`ctrl+[`) returning true for the bare `\r`/`\x08`/`\t`/`\n`/`\x1b` byte terminals send for Enter/Backspace/Tab/Escape in legacy mode. Binding a command to `Ctrl+M` no longer fires when the user presses Enter — the named key wins, and `ctrl+<colliding-letter>` matches only when the terminal disambiguates via the Kitty keyboard protocol or `modifyOtherKeys`. ([#1354](https://github.com/can1357/oh-my-pi/issues/1354))
+- Fixed full TUI redraws clearing terminal scrollback with `CSI 3 J`, preserving manual scrollback inspection while active sessions continue updating. ([#1295](https://github.com/can1357/oh-my-pi/issues/1295))
 
 ## [15.2.3] - 2026-05-22
 ### Added

@@ -395,11 +395,47 @@ const USAGE_FAILURE_BACKOFF_MS = 10_000;
 const DEFAULT_USAGE_REQUEST_TIMEOUT_MS = 10_000;
 const DEFAULT_OAUTH_REFRESH_TIMEOUT_MS = 10_000;
 /**
+ * Refresh OAuth access tokens this many ms before their stated expiry. The
+ * skew exists so callers downstream of {@link AuthStorage} (stream providers,
+ * usage probes, web_search) never observe a credential that is expired or
+ * about to expire mid-request — there's a single rotation point and everyone
+ * downstream trusts the token they receive.
+ *
+ * Set to 60s: comfortably absorbs request RTT + a clock-skew window without
+ * triggering a refresh on every request. Provider token endpoints typically
+ * mint access tokens with 30-60min lifetimes, so refreshing 60s early changes
+ * the rotation cadence by <4%.
+ */
+const OAUTH_REFRESH_SKEW_MS = 60_000;
+/**
  * Cap on the buffered credential_disabled backlog held while no handler is attached.
  * In practice the backlog is 0–N where N ≈ active providers (≤ ~20). The cap exists so
  * pathological detach-without-reattach loops can't grow memory unboundedly.
  */
 const MAX_PENDING_DISABLED_EVENTS = 32;
+
+/**
+ * Classify an OAuth refresh error as a definitive credential failure (the
+ * refresh token is dead — re-login required) versus a transient blip
+ * (network/5xx — retry next sweep).
+ *
+ * Anchored at module scope so all three refresh sites — in-stream
+ * {@link AuthStorage.getApiKey}, the usage probe in
+ * {@link AuthStorage.fetchUsageReports}, and the auth-broker background
+ * refresher — disable rows on the same criteria. A drifting classifier
+ * between sites would let stale last-good usage reports surface indefinitely
+ * while streaming requests correctly tear the row down.
+ */
+const OAUTH_DEFINITIVE_FAILURE_REGEX =
+	/invalid_grant|invalid_token|revoked|unauthorized|expired.*refresh|refresh.*expired/i;
+const OAUTH_TRANSIENT_FAILURE_REGEX = /timeout|network|fetch failed|ECONNREFUSED/i;
+const OAUTH_HTTP_AUTH_REGEX = /\b(401|403)\b/;
+
+export function isDefinitiveOAuthFailure(errorMsg: string): boolean {
+	if (OAUTH_DEFINITIVE_FAILURE_REGEX.test(errorMsg)) return true;
+	if (OAUTH_HTTP_AUTH_REGEX.test(errorMsg) && !OAUTH_TRANSIENT_FAILURE_REGEX.test(errorMsg)) return true;
+	return false;
+}
 
 type UsageCacheEntry<T> = {
 	value: T;
@@ -429,6 +465,23 @@ type AuthApiKeyOptions = {
 	 */
 	signal?: AbortSignal;
 };
+type OAuthResolutionResult = { apiKey: string; credential: OAuthCredential };
+
+/**
+ * Refreshed OAuth access plus identity metadata returned by
+ * {@link AuthStorage.getOAuthAccess}. Callers that authenticate via a bearer
+ * AND need the credential's identity (Codex `chatgpt-account-id`, Google
+ * `projectId`, GitHub `enterpriseUrl`) consume this shape directly; the
+ * refresh slot is deliberately omitted because rotating refresh tokens never
+ * leave {@link AuthStorage}.
+ */
+export interface OAuthAccess {
+	accessToken: string;
+	accountId?: string;
+	email?: string;
+	projectId?: string;
+	enterpriseUrl?: string;
+}
 export interface InvalidateCredentialMatchingOptions {
 	signal?: AbortSignal;
 	sessionId?: string;
@@ -1467,6 +1520,12 @@ export class AuthStorage {
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
+			case "zhipu-coding-plan": {
+				const { loginZhipuCodingPlan } = await import("./utils/oauth/zhipu");
+				const apiKey = await loginZhipuCodingPlan(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
 			case "qianfan": {
 				const { loginQianfan } = await import("./utils/oauth/qianfan");
 				const apiKey = await loginQianfan(ctrl);
@@ -1780,7 +1839,7 @@ export class AuthStorage {
 		if (
 			request.credential.type === "oauth" &&
 			request.credential.expiresAt !== undefined &&
-			Date.now() >= request.credential.expiresAt
+			Date.now() + OAUTH_REFRESH_SKEW_MS >= request.credential.expiresAt
 		) {
 			const refreshableCredential = this.#buildRefreshableOauthCredential(request.credential);
 			if (refreshableCredential) {
@@ -1802,9 +1861,50 @@ export class AuthStorage {
 						credential: refreshedCredential,
 					};
 				} catch (error) {
+					const errorMsg = String(error);
+					// Definitive failure (invalid_grant / 401 not from a network blip) means
+					// the refresh token itself is dead — probing with the original credential
+					// will 401, the catch below will return null, and #fetchUsageCached's
+					// last-good fallback will surface yesterday's report indefinitely
+					// (including its already-elapsed `resetsAt`). CAS-disable the row and
+					// clear the cache so the credential drops out of the report instead of
+					// freezing in place until the user notices and re-logs in.
+					if (isDefinitiveOAuthFailure(errorMsg)) {
+						const credentialId = this.#findStoredCredentialIdForUsageCredential(
+							request.provider,
+							request.credential,
+						);
+						if (credentialId !== undefined) {
+							const entries = this.#getStoredCredentials(request.provider);
+							const index = entries.findIndex(entry => entry.id === credentialId);
+							if (index !== -1) {
+								const disabled = this.#tryDisableCredentialAtIfMatches(
+									request.provider,
+									index,
+									refreshableCredential,
+									`oauth refresh failed during usage probe: ${errorMsg}`,
+								);
+								if (disabled) {
+									this.#usageLogger?.warn(
+										"Usage credential refresh failed definitively; credential disabled",
+										{ provider: request.provider, credentialId, error: errorMsg },
+									);
+									// Neutralize last-good for this cache key: write a null
+									// entry with an immediately-elapsed expiry so a future
+									// getStale lookup (e.g. on re-login under the same
+									// account identity) can't replay the stale report.
+									this.#usageCache.set(this.#buildUsageReportCacheKey(request), {
+										value: null,
+										expiresAt: 0,
+									});
+									return null;
+								}
+							}
+						}
+					}
 					this.#usageLogger?.debug("Usage credential refresh failed, using original credential", {
 						provider: request.provider,
-						error: String(error),
+						error: errorMsg,
 					});
 				}
 			}
@@ -2501,15 +2601,19 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Resolves an OAuth API key, trying credentials in priority order.
+	 * Resolves an OAuth credential, trying credentials in priority order.
 	 * Skips blocked credentials and checks usage limits for providers with usage data.
 	 * Falls back to earliest-unblocking credential if all are blocked.
+	 *
+	 * Returns both the API key bytes for outbound requests AND the refreshed
+	 * {@link OAuthCredential} so callers needing identity metadata (account id,
+	 * project id, etc.) do not have to dereference the snapshot themselves.
 	 */
-	async #resolveOAuthApiKey(
+	async #resolveOAuthSelection(
 		provider: string,
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
-	): Promise<string | undefined> {
+	): Promise<OAuthResolutionResult | undefined> {
 		const credentials = this.#getCredentialsForProvider(provider)
 			.map((credential, index) => ({ credential, index }))
 			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
@@ -2550,9 +2654,9 @@ export class AuthStorage {
 		}
 		await Promise.all(
 			candidates.map(async candidate => {
-				if (Date.now() < candidate.selection.credential.expires) return;
+				if (Date.now() + OAUTH_REFRESH_SKEW_MS < candidate.selection.credential.expires) return;
 				const latestCredential = this.#getCredentialsForProvider(provider)[candidate.selection.index];
-				if (latestCredential?.type === "oauth" && Date.now() < latestCredential.expires) {
+				if (latestCredential?.type === "oauth" && Date.now() + OAUTH_REFRESH_SKEW_MS < latestCredential.expires) {
 					candidate.selection.credential = latestCredential;
 					return;
 				}
@@ -2583,14 +2687,21 @@ export class AuthStorage {
 		const fallback = candidates[0];
 
 		for (const candidate of candidates) {
-			const apiKey = await this.#tryOAuthCredential(provider, candidate.selection, providerKey, sessionId, options, {
-				checkUsage,
-				allowBlocked: false,
-				prefetchedUsage: candidate.usage,
-				usagePrechecked: candidate.usageChecked,
-				enforceProRequirement,
-			});
-			if (apiKey) return apiKey;
+			const resolved = await this.#tryOAuthCredential(
+				provider,
+				candidate.selection,
+				providerKey,
+				sessionId,
+				options,
+				{
+					checkUsage,
+					allowBlocked: false,
+					prefetchedUsage: candidate.usage,
+					usagePrechecked: candidate.usageChecked,
+					enforceProRequirement,
+				},
+			);
+			if (resolved) return resolved;
 		}
 
 		if (fallback && this.#isCredentialBlocked(providerKey, fallback.selection.index)) {
@@ -2616,7 +2727,7 @@ export class AuthStorage {
 			const existing = this.#oauthCredentialRefreshInFlight.get(credentialId);
 			if (existing) return raceCredentialRefreshWithSignal(existing, signal);
 		}
-		if (Date.now() < credential.expires) return credential;
+		if (Date.now() + OAUTH_REFRESH_SKEW_MS < credential.expires) return credential;
 		if (credentialId === undefined) {
 			return this.#refreshOAuthCredentialUnshared(provider, credential, undefined, signal);
 		}
@@ -2719,7 +2830,7 @@ export class AuthStorage {
 			usagePrechecked?: boolean;
 			enforceProRequirement?: boolean;
 		},
-	): Promise<string | undefined> {
+	): Promise<OAuthResolutionResult | undefined> {
 		const {
 			checkUsage,
 			allowBlocked,
@@ -2780,8 +2891,19 @@ export class AuthStorage {
 					: refreshedCredentials.access;
 				result = { newCredentials: refreshedCredentials, apiKey };
 			} else {
+				// Refresh first through the broker-aware single-flighted machinery
+				// so transient failures surface as network errors (5-min temp block)
+				// instead of `getOAuthApiKey`'s "expired" precondition error, which
+				// the definitive-failure regex below would otherwise classify as
+				// auth failure and soft-disable a still-valid credential.
+				const refreshedCredentials = await this.#refreshOAuthCredential(
+					provider,
+					selection.credential,
+					this.#getStoredCredentials(provider)[selection.index]?.id,
+					options?.signal,
+				);
 				const oauthCreds: Record<string, OAuthCredentials> = {
-					[provider]: selection.credential,
+					[provider]: refreshedCredentials,
 				};
 				result = await getOAuthApiKey(provider as OAuthProvider, oauthCreds);
 			}
@@ -2820,14 +2942,12 @@ export class AuthStorage {
 				}
 			}
 			this.#recordSessionCredential(provider, sessionId, "oauth", selection.index);
-			return result.apiKey;
+			return { apiKey: result.apiKey, credential: updated };
 		} catch (error) {
 			const errorMsg = String(error);
 			// Only remove credentials for definitive auth failures
 			// Keep credentials for transient errors (network, 5xx) and block temporarily
-			const isDefinitiveFailure =
-				/invalid_grant|invalid_token|revoked|unauthorized|expired.*refresh|refresh.*expired/i.test(errorMsg) ||
-				(/\b(401|403)\b/.test(errorMsg) && !/timeout|network|fetch failed|ECONNREFUSED/i.test(errorMsg));
+			const isDefinitiveFailure = isDefinitiveOAuthFailure(errorMsg);
 
 			logger.warn("OAuth token refresh failed", {
 				provider,
@@ -2855,7 +2975,7 @@ export class AuthStorage {
 							credentialId,
 						});
 						await this.reload();
-						return this.getApiKey(provider, sessionId, options);
+						return this.#resolveOAuthSelection(provider, sessionId, options);
 					}
 				}
 				// Permanently disable invalid credentials with an explicit cause for inspection/debugging.
@@ -2874,10 +2994,10 @@ export class AuthStorage {
 						index: selection.index,
 					});
 					await this.reload();
-					return this.getApiKey(provider, sessionId, options);
+					return this.#resolveOAuthSelection(provider, sessionId, options);
 				}
 				if (this.#getCredentialsForProvider(provider).some(credential => credential.type === "oauth")) {
-					return this.getApiKey(provider, sessionId, options);
+					return this.#resolveOAuthSelection(provider, sessionId, options);
 				}
 			} else {
 				// Block temporarily for transient failures (5 minutes)
@@ -2964,9 +3084,9 @@ export class AuthStorage {
 			return this.#configValueResolver(apiKeySelection.credential.key);
 		}
 
-		const oauthKey = await this.#resolveOAuthApiKey(provider, sessionId, options);
-		if (oauthKey) {
-			return oauthKey;
+		const oauthResolved = await this.#resolveOAuthSelection(provider, sessionId, options);
+		if (oauthResolved) {
+			return oauthResolved.apiKey;
 		}
 
 		// Fall back to environment variable or custom resolver. If we reach here after
@@ -2979,6 +3099,44 @@ export class AuthStorage {
 
 		// Fall back to custom resolver (e.g., models.json custom providers)
 		return this.#fallbackResolver?.(provider) ?? undefined;
+	}
+
+	/**
+	 * Resolve the OAuth credential for `provider`, refreshing through the same
+	 * pipeline as {@link AuthStorage.getApiKey} but returning the refreshed
+	 * {@link OAuthAccess} (raw access token + identity metadata) instead of
+	 * the API-key bytes.
+	 *
+	 * Use this when the caller needs to inject identity headers alongside the
+	 * bearer (Codex `chatgpt-account-id`, Google `project`, GitHub
+	 * `enterpriseUrl`). For pure "give me the bytes for `Authorization`"
+	 * scenarios, prefer {@link AuthStorage.getApiKey}.
+	 *
+	 * Returns `undefined` when no OAuth credential is available, the
+	 * credential fails to refresh, or runtime/config overrides have replaced
+	 * OAuth with an explicit API key.
+	 */
+	async getOAuthAccess(
+		provider: string,
+		sessionId?: string,
+		options?: AuthApiKeyOptions,
+	): Promise<OAuthAccess | undefined> {
+		// Runtime / config overrides intentionally short-circuit OAuth: when the
+		// user has pinned an API key, they expect the OAuth identity to be
+		// suppressed (same contract as `getOAuthAccountId`).
+		if (this.#runtimeOverrides.has(provider) || this.#configOverrides.has(provider)) {
+			return undefined;
+		}
+		const resolved = await this.#resolveOAuthSelection(provider, sessionId, options);
+		if (!resolved) return undefined;
+		const { credential } = resolved;
+		return {
+			accessToken: credential.access,
+			accountId: credential.accountId,
+			email: credential.email,
+			projectId: credential.projectId,
+			enterpriseUrl: credential.enterpriseUrl,
+		};
 	}
 
 	#extractStructuredApiKeyToken(apiKey: string): string | undefined {

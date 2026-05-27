@@ -1,12 +1,12 @@
 import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { stripHashlinePrefixes } from "@oh-my-pi/hashline";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import * as z from "zod/v4";
-import { stripHashlinePrefixes } from "../edit";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { InternalUrlRouter } from "../internal-urls";
 import { parseInternalUrl } from "../internal-urls/parse";
@@ -16,6 +16,7 @@ import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, truncateToWidth } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
+import { truncateForPrompt } from "./approval";
 import { parseArchivePathCandidates } from "./archive-reader";
 import { assertEditableFile } from "./auto-generated-guard";
 import {
@@ -27,7 +28,7 @@ import {
 } from "./conflict-detect";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 import { type OutputMeta, outputMeta } from "./output-meta";
-import { formatPathRelativeToCwd } from "./path-utils";
+import { formatPathRelativeToCwd, isInternalUrlPath } from "./path-utils";
 import { enforcePlanModeWrite, resolvePlanPath } from "./plan-mode-guard";
 import {
 	formatDiagnostics,
@@ -74,8 +75,8 @@ export interface WriteToolDetails {
 /**
  * Strip hashline display prefixes from write content.
  *
- * Only active when hashline edit mode is enabled — the model sees `LINE+ID|`
- * prefixes in read output and sometimes copies them into write content.
+ * Only active when hashline edit mode is enabled — the model sees `¶PATH#HASH`
+ * headers plus `LINE:` prefixes in read output and sometimes copies them into write content.
  */
 function stripWriteContent(session: ToolSession, content: string): { text: string; stripped: boolean } {
 	if (!resolveFileDisplayMode(session).hashLines) {
@@ -184,6 +185,16 @@ function parseSqliteWriteTarget(subPath: string, queryString: string): { table: 
  */
 export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails> {
 	readonly name = "write";
+	readonly approval = (args: unknown) => {
+		const rawPath = (args as Partial<WriteParams>).path;
+		return typeof rawPath === "string" && isInternalUrlPath(rawPath) ? "read" : "write";
+	};
+	readonly formatApprovalDetails = (args: unknown): string[] => {
+		const params = args as Partial<WriteParams>;
+		const targetPath = typeof params.path === "string" ? params.path : "(missing)";
+		const content = typeof params.content === "string" ? params.content : "";
+		return [`Path: ${truncateForPrompt(targetPath)}`, `Content:\n${truncateForPrompt(content)}`];
+	};
 	readonly label = "Write";
 	readonly description: string;
 	readonly parameters = writeSchema;
@@ -476,7 +487,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const batchRequest = getLspBatchRequest(context?.toolCall);
 		const diagnostics = await this.#writethrough(absolutePath, newContent, signal, undefined, batchRequest);
 		invalidateFsScanAfterWrite(absolutePath);
-		this.session.fileReadCache?.invalidate(absolutePath);
+		this.session.fileSnapshotStore?.invalidate(absolutePath);
 		this.session.conflictHistory?.invalidate(entry.id);
 
 		const range =
@@ -598,7 +609,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 
 			const diagnostics = await this.#writethrough(absolutePath, text, signal, undefined, batchRequest);
 			invalidateFsScanAfterWrite(absolutePath);
-			this.session.fileReadCache?.invalidate(absolutePath);
+			this.session.fileSnapshotStore?.invalidate(absolutePath);
 			for (const entry of fileEntries) history.invalidate(entry.id);
 			succeededFiles.push({ displayPath: sample.displayPath, count: fileEntries.length });
 			totalResolvedIds += fileEntries.length;
@@ -658,7 +669,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<WriteToolDetails>> {
 		return untilAborted(signal, async () => {
-			// Strip hashline display prefixes (LINE+ID|) if the model copied them from read output
+			// Strip hashline display prefixes (¶PATH#HASH + LINE:) if the model copied them from read output
 			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
 			const internalRouter = InternalUrlRouter.instance();
 			if (internalRouter.canHandle(path)) {

@@ -1,5 +1,5 @@
 import { $env, extractHttpStatusFromError, structuredCloneJSON } from "@oh-my-pi/pi-utils";
-import OpenAI from "openai";
+import OpenAI, { APIConnectionTimeoutError as OpenAIConnectionTimeoutError } from "openai";
 import type {
 	Tool as OpenAITool,
 	ResponseCreateParamsStreaming,
@@ -33,7 +33,6 @@ import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { finalizeErrorMessage, type RawHttpRequestDump, rewriteCopilotError } from "../utils/http-inspector";
 import {
-	createWatchdog,
 	getOpenAIStreamIdleTimeoutMs,
 	getStreamFirstEventTimeoutMs,
 	iterateWithIdleTimeout,
@@ -59,6 +58,7 @@ import {
 	convertResponsesAssistantMessage,
 	convertResponsesInputContent,
 	createInitialResponsesAssistantMessage,
+	isOpenAIResponsesProgressEvent,
 	normalizeResponsesToolCallIdForTransform,
 	processResponsesStream,
 	repairOrphanResponsesToolOutputs,
@@ -102,32 +102,6 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 const OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX = "openai-responses:";
 const OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE =
 	"OpenAI responses stream timed out while waiting for the first event";
-
-const OPENAI_RESPONSES_PROGRESS_EVENT_TYPES = new Set([
-	"response.created",
-	"response.output_item.added",
-	"response.reasoning_summary_part.added",
-	"response.reasoning_summary_text.delta",
-	"response.reasoning_summary_part.done",
-	"response.reasoning_text.delta",
-	"response.content_part.added",
-	"response.output_text.delta",
-	"response.refusal.delta",
-	"response.function_call_arguments.delta",
-	"response.function_call_arguments.done",
-	"response.custom_tool_call_input.delta",
-	"response.custom_tool_call_input.done",
-	"response.output_item.done",
-	"response.completed",
-	"response.failed",
-	"error",
-]);
-
-function isOpenAIResponsesProgressEvent(event: unknown): boolean {
-	if (!event || typeof event !== "object") return false;
-	const type = (event as { type?: unknown }).type;
-	return typeof type === "string" && OPENAI_RESPONSES_PROGRESS_EVENT_TYPES.has(type);
-}
 
 interface OpenAIResponsesProviderSessionState extends ProviderSessionState {
 	nativeHistoryReplayWarmed: boolean;
@@ -201,8 +175,10 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 		const { requestAbortController, requestSignal } = abortTracker;
 
 		try {
-			// Keep request headers and prompt-cache routing on the same session-derived value.
-			const cacheSessionId = getOpenAIResponsesCacheSessionId(options);
+			// Keep request routing on `sessionId` while allowing callers to pin a
+			// stable prompt-cache key independently. Side-channel calls use this to
+			// avoid perturbing provider conversation state without cold-starting the cache.
+			const routingSessionId = getOpenAIResponsesRoutingSessionId(options);
 			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
 			const { client, copilotPremiumRequests, baseUrl } = createClient(
 				model,
@@ -210,7 +186,7 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 				apiKey,
 				options?.headers,
 				options?.initiatorOverride,
-				cacheSessionId,
+				routingSessionId,
 				options?.onSseEvent,
 				options?.fetch,
 			);
@@ -218,6 +194,9 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			const { params } = buildParams(model, context, options, providerSessionState, baseUrl);
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getOpenAIStreamIdleTimeoutMs();
+			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
+			const requestTimeoutMs =
+				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
 			options?.onPayload?.(params);
 			rawRequestDump = {
 				provider: model.provider,
@@ -229,17 +208,33 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 			};
 			const openaiStream = await callWithCopilotModelRetry(
 				async () => {
-					const { data, response, request_id } = await client.responses
-						.create(params, { signal: requestSignal })
-						.withResponse();
-					await notifyProviderResponse(options, response, model, request_id);
-					return data;
+					const requestOptions =
+						requestTimeoutMs === undefined
+							? { signal: requestSignal }
+							: { signal: requestSignal, timeout: requestTimeoutMs };
+					let requestTimeout: NodeJS.Timeout | undefined;
+					if (requestTimeoutMs !== undefined) {
+						requestTimeout = setTimeout(
+							() => abortTracker.abortLocally(firstEventTimeoutAbortError),
+							requestTimeoutMs,
+						);
+					}
+					try {
+						const { data, response, request_id } = await client.responses
+							.create(params, requestOptions)
+							.withResponse();
+						await notifyProviderResponse(options, response, model, request_id);
+						return data;
+					} catch (error) {
+						if (error instanceof OpenAIConnectionTimeoutError && !abortTracker.wasCallerAbort()) {
+							throw firstEventTimeoutAbortError;
+						}
+						throw error;
+					} finally {
+						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
+					}
 				},
 				{ provider: model.provider, signal: requestSignal },
-			);
-			const firstEventWatchdog = createWatchdog(
-				options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs),
-				() => abortTracker.abortLocally(firstEventTimeoutAbortError),
 			);
 			if (premiumRequestsTotal !== undefined) output.usage.premiumRequests = premiumRequestsTotal;
 			stream.push({ type: "start", partial: output });
@@ -248,8 +243,10 @@ export const streamOpenAIResponses: StreamFunction<"openai-responses"> = (
 			await processResponsesStream(
 				iterateWithIdleTimeout(openaiStream, {
 					idleTimeoutMs,
-					watchdog: firstEventWatchdog,
+					firstItemTimeoutMs: firstEventTimeoutMs,
+					firstItemErrorMessage: OPENAI_RESPONSES_FIRST_EVENT_TIMEOUT_MESSAGE,
 					errorMessage: "OpenAI responses stream stalled while waiting for the next event",
+					onFirstItemTimeout: () => abortTracker.abortLocally(firstEventTimeoutAbortError),
 					onIdle: () => requestAbortController.abort(),
 					abortSignal: options?.signal,
 					isProgressItem: isOpenAIResponsesProgressEvent,
@@ -365,12 +362,18 @@ function createClient(
 	};
 }
 
-function getOpenAIResponsesCacheSessionId(
+function getOpenAIResponsesPromptCacheKey(
+	options: Pick<OpenAIResponsesOptions, "cacheRetention" | "promptCacheKey" | "sessionId"> | undefined,
+): string | undefined {
+	if (resolveCacheRetention(options?.cacheRetention) === "none") return undefined;
+	return normalizeOpenAIResponsesPromptCacheKey(options?.promptCacheKey ?? options?.sessionId);
+}
+
+function getOpenAIResponsesRoutingSessionId(
 	options: Pick<OpenAIResponsesOptions, "cacheRetention" | "sessionId"> | undefined,
 ): string | undefined {
-	return resolveCacheRetention(options?.cacheRetention) === "none"
-		? undefined
-		: normalizeOpenAIResponsesPromptCacheKey(options?.sessionId);
+	if (resolveCacheRetention(options?.cacheRetention) === "none") return undefined;
+	return normalizeOpenAIResponsesPromptCacheKey(options?.sessionId);
 }
 
 function buildParams(
@@ -410,7 +413,7 @@ function buildParams(
 	}
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
-	const promptCacheKey = getOpenAIResponsesCacheSessionId(options);
+	const promptCacheKey = getOpenAIResponsesPromptCacheKey(options);
 	const params: OpenAIResponsesSamplingParams = {
 		model: model.id,
 		input: messages,

@@ -1,3 +1,4 @@
+import type { InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import type { AgentTelemetryConfig, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ToolChoice } from "@oh-my-pi/pi-ai";
 import { $env, $flag, logger } from "@oh-my-pi/pi-utils";
@@ -91,7 +92,6 @@ export * from "./search";
 export * from "./search-tool-bm25";
 export * from "./ssh";
 export * from "./todo-write";
-export * from "./vim";
 export * from "./write";
 export * from "./yield";
 
@@ -104,7 +104,6 @@ export type ContextFileEntry = {
 	depth?: number;
 };
 
-export type { DiscoverableMCPTool } from "../mcp/discoverable-tool-metadata";
 export type {
 	DiscoverableTool,
 	DiscoverableToolSearchIndex,
@@ -140,6 +139,8 @@ export interface ToolSession {
 	requireYieldTool?: boolean;
 	/** Task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/** Get shared eval executor session ID. Subagents inherit this to share JS/Python state. */
+	getEvalSessionId?: () => string | null;
 	/** Get session file */
 	getSessionFile: () => string | null;
 	/** Get eval kernel owner ID for session-scoped retained-kernel cleanup. */
@@ -194,12 +195,6 @@ export interface ToolSession {
 	setTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Whether MCP tool discovery is active for this session. */
 	isMCPDiscoveryEnabled?: () => boolean;
-	/** Get hidden-but-discoverable MCP tools for search_tool_bm25 prompts and fallbacks.
-	 * @deprecated Use getDiscoverableTools with source filter instead. */
-	getDiscoverableMCPTools?: () => import("../mcp/discoverable-tool-metadata").DiscoverableMCPTool[];
-	/** Get the cached discoverable MCP search index for search_tool_bm25 execution.
-	 * @deprecated Use getDiscoverableToolSearchIndex instead. */
-	getDiscoverableMCPSearchIndex?: () => import("../tool-discovery/tool-index").DiscoverableMCPSearchIndex;
 	/** Get MCP tools activated by prior search_tool_bm25 calls. */
 	getSelectedMCPToolNames?: () => string[];
 	/** Merge MCP tool selections into the active session tool set. */
@@ -236,11 +231,11 @@ export interface ToolSession {
 	/** Set or clear active checkpoint state. */
 	setCheckpointState?: (state: CheckpointState | null) => void;
 
-	/** Per-session cache of file contents as last shown to the model by
-	 *  `read`/`search`. Used by hashline anchor-stale recovery to reconstruct
-	 *  the version the model authored anchors against when the file changed
-	 *  out-of-band. Lazily initialized by `getFileReadCache`. */
-	fileReadCache?: import("../edit/file-read-cache").FileReadCache;
+	/** Per-session snapshot store of file contents as last shown to the model
+	 *  by `read`/`search`. Used by hashline anchor-stale recovery to
+	 *  reconstruct the version the model authored anchors against when the
+	 *  file changed out-of-band. Lazily initialized by `getFileSnapshotStore`. */
+	fileSnapshotStore?: InMemorySnapshotStore;
 
 	/** Per-session log of unresolved git merge conflict regions surfaced by
 	 *  `read`. Each entry gets a stable id N referenced by `write conflict://N`

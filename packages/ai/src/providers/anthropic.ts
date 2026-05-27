@@ -2,7 +2,10 @@ import * as nodeCrypto from "node:crypto";
 import * as fs from "node:fs";
 import { scheduler } from "node:timers/promises";
 import * as tls from "node:tls";
-import Anthropic, { type ClientOptions as AnthropicSdkClientOptions } from "@anthropic-ai/sdk";
+import Anthropic, {
+	APIConnectionTimeoutError as AnthropicConnectionTimeoutError,
+	type ClientOptions as AnthropicSdkClientOptions,
+} from "@anthropic-ai/sdk";
 import type {
 	ContentBlockParam,
 	MessageCreateParamsStreaming,
@@ -1088,34 +1091,57 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				| TextContent
 				| (ToolCall & { partialJson: string })
 			) & { index: number };
-			const blocks = output.content as Block[];
 			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getStreamIdleTimeoutMs();
 			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
+			const requestTimeoutMs =
+				firstEventTimeoutMs !== undefined && firstEventTimeoutMs > 0 ? firstEventTimeoutMs : undefined;
+			const blocks = output.content as Block[];
 			stream.push({ type: "start", partial: output });
 			// Retry loop for transient errors from the stream.
 			// Provider-level transport/rate-limit failures: only before any streamed content starts.
 			// Malformed envelopes/JSON: only before replay-unsafe text/tool events are visible on this stream.
 			let providerRetryAttempt = 0;
+			const firstEventTimeoutAbortError = new Error("Anthropic stream timed out while waiting for the first event");
+			const idleTimeoutAbortError = new Error("Anthropic stream stalled while waiting for the next event");
 			while (true) {
 				activeAbortTracker = createAbortSourceTracker(options?.signal);
-				const firstEventTimeoutAbortError = new Error(
-					"Anthropic stream timed out while waiting for the first event",
-				);
-				const idleTimeoutAbortError = new Error("Anthropic stream stalled while waiting for the next event");
 				const { requestSignal } = activeAbortTracker;
-				const anthropicRequest = client.messages.create({ ...params, stream: true }, { signal: requestSignal });
+				const requestOptions =
+					requestTimeoutMs === undefined
+						? { signal: requestSignal }
+						: { signal: requestSignal, timeout: requestTimeoutMs };
+				const anthropicRequest = client.messages.create({ ...params, stream: true }, requestOptions);
 				let streamedReplayUnsafeContent = false;
 
 				try {
-					const {
-						events: anthropicStream,
-						response,
-						requestId,
-					} = await getAnthropicStreamResponse(
-						anthropicRequest,
-						requestSignal,
-						options?.client ? event => options?.onSseEvent?.(event, model) : undefined,
-					);
+					let requestTimeout: NodeJS.Timeout | undefined;
+					if (requestTimeoutMs !== undefined) {
+						requestTimeout = setTimeout(
+							() => activeAbortTracker.abortLocally(firstEventTimeoutAbortError),
+							requestTimeoutMs,
+						);
+					}
+					let anthropicStream: AsyncIterable<RawMessageStreamEvent>;
+					let response: Response;
+					let requestId: string | null;
+					try {
+						({
+							events: anthropicStream,
+							response,
+							requestId,
+						} = await getAnthropicStreamResponse(
+							anthropicRequest,
+							requestSignal,
+							options?.client ? event => options?.onSseEvent?.(event, model) : undefined,
+						));
+					} catch (error) {
+						if (error instanceof AnthropicConnectionTimeoutError && !activeAbortTracker.wasCallerAbort()) {
+							throw firstEventTimeoutAbortError;
+						}
+						throw error;
+					} finally {
+						if (requestTimeout !== undefined) clearTimeout(requestTimeout);
+					}
 					await notifyProviderResponse(options, response, model, requestId);
 					let sawEvent = false;
 					let sawMessageStart = false;
@@ -1287,8 +1313,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 								}
 							}
 						} else if (event.type === "message_delta") {
-							if (event.delta.stop_reason) {
-								output.stopReason = mapStopReason(event.delta.stop_reason);
+							const rawStopReason = event.delta.stop_reason as string | null | undefined;
+							if (rawStopReason) {
+								output.stopReason = mapStopReason(rawStopReason);
 								sawTerminalEnvelope = true;
 							}
 							const stopDetails = event.delta.stop_details;
@@ -1297,6 +1324,16 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 								const category = stopDetails.category;
 								const label = category ? `Refusal (${category})` : "Refusal";
 								output.errorMessage = explanation ? `${label}: ${explanation}` : label;
+							} else if (output.stopReason === "error" && !output.errorMessage) {
+								// Anthropic flagged an error-class stop (refusal / sensitive) without
+								// populating stop_details. Surface the raw reason instead of falling
+								// through to the generic "unknown error" string when we throw below.
+								output.errorMessage =
+									rawStopReason === "refusal"
+										? "Refusal (no details provided)"
+										: rawStopReason === "sensitive"
+											? "Content flagged by safety filters"
+											: `Anthropic stream ended with stop_reason: ${rawStopReason ?? "unknown"}`;
 							}
 							if (event.usage.input_tokens != null) {
 								output.usage.input = event.usage.input_tokens;

@@ -6,7 +6,7 @@
 import type { ModelManagerOptions } from "../model-manager";
 import type { Api, KnownProvider } from "../types";
 import type { OAuthProvider } from "../utils/oauth/types";
-import { googleModelManagerOptions } from "./google";
+import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
 	alibabaCodingPlanModelManagerOptions,
@@ -42,6 +42,7 @@ import {
 	xaiModelManagerOptions,
 	xiaomiModelManagerOptions,
 	zenmuxModelManagerOptions,
+	zhipuCodingPlanModelManagerOptions,
 } from "./openai-compat";
 import { cursorModelManagerOptions, zaiModelManagerOptions } from "./special";
 
@@ -153,6 +154,17 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		config => fireworksModelManagerOptions(config),
 		catalog("Fireworks", ["FIREWORKS_API_KEY"]),
 	),
+	// Fire Pass does not expose a /v1/models endpoint — the API returns HTTP 403
+	// on any catalog-discovery request, so dynamic model listing is not feasible.
+	//
+	// The single model `kimi-k2.6-turbo` is seeded via the `prevModelsJson`
+	// fallback in `generate-models.ts`, which preserves entries from the previous
+	// catalog snapshot when a provider does not surface them dynamically.
+	//
+	// IMPORTANT: Do NOT delete the firepass section from models.json. No
+	// descriptor here produces that entry dynamically — removing it from
+	// models.json would permanently drop the model from the catalog with no
+	// automated mechanism to restore it.
 	descriptor("firepass", "kimi-k2.6-turbo", config => firepassModelManagerOptions(config)),
 	descriptor("xai", "grok-4-fast-non-reasoning", config => xaiModelManagerOptions(config)),
 	catalogDescriptor(
@@ -281,8 +293,17 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = [
 		catalog("ZenMux", ["ZENMUX_API_KEY"]),
 	),
 	catalogDescriptor("zai", "glm-5.1", config => zaiModelManagerOptions(config), catalog("zAI", ["ZAI_API_KEY"])),
+	catalogDescriptor(
+		"zhipu-coding-plan",
+		"glm-5.1",
+		config => zhipuCodingPlanModelManagerOptions(config),
+		catalog("Zhipu Coding Plan", ["ZHIPU_API_KEY"]),
+	),
 	descriptor("github-copilot", "gpt-4o", config => githubCopilotModelManagerOptions(config)),
 	descriptor("google", "gemini-2.5-pro", config => googleModelManagerOptions(config)),
+	descriptor("google-vertex", "gemini-3-pro-preview", config => googleVertexModelManagerOptions(config), {
+		allowUnauthenticated: true,
+	}),
 	catalogDescriptor(
 		"cursor",
 		"claude-sonnet-4-6",

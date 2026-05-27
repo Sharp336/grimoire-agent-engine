@@ -4,7 +4,8 @@
  * Uses brush-core via native bindings for shell execution.
  */
 import * as fs from "node:fs/promises";
-import { executeShell, type MinimizerOptions, Shell } from "@oh-my-pi/pi-natives";
+import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
+import { executeShell, type MinimizerOptions, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
 import { OutputSink } from "../session/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
@@ -196,7 +197,10 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 					},
 				);
 
-		const winner = await Promise.race([
+		const ey = new ExponentialYield();
+		const winner = await ey.race<
+			{ kind: "result"; result: ShellRunResult } | { kind: "timeout" } | { kind: "abort" }
+		>([
 			runPromise.then(result => ({ kind: "result" as const, result })),
 			timeoutDeferred.promise.then(kind => ({ kind })),
 			abortDeferred.promise.then(kind => ({ kind })),

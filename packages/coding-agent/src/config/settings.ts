@@ -100,7 +100,6 @@ function setByPath(obj: RawSettings, segments: string[], value: unknown): void {
 }
 
 const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
-
 type PathScopedStringArrayEntry = {
 	path?: unknown;
 	paths?: unknown;
@@ -218,6 +217,8 @@ export class Settings {
 			for (const [key, value] of Object.entries(options.overrides)) {
 				setByPath(this.#overrides, key.split("."), value);
 			}
+
+			this.#overrides = this.#migrateRawSettings(this.#overrides);
 		}
 	}
 
@@ -408,7 +409,7 @@ export class Settings {
 
 	/**
 	 * Get the edit variant for a specific model.
-	 * Returns "patch", "replace", "hashline", "vim", "apply_patch", or null (use global default).
+	 * Returns "patch", "replace", "hashline", "apply_patch", or null (use global default).
 	 */
 	getEditVariantForModel(model: string | undefined): EditMode | null {
 		if (!model) return null;
@@ -643,22 +644,22 @@ export class Settings {
 			}
 		}
 
-		// edit.mode: removed "atom" variant is now "hashline"
+		// edit.mode: removed "atom" and "vim" variants map back to "hashline"
 		const editObj = raw.edit as Record<string, unknown> | undefined;
 		if (editObj) {
-			if (editObj.mode === "atom") {
+			if (editObj.mode === "atom" || editObj.mode === "vim") {
 				editObj.mode = "hashline";
 			}
 			const modelVariants = editObj.modelVariants as Record<string, unknown> | undefined;
 			if (modelVariants && typeof modelVariants === "object" && !Array.isArray(modelVariants)) {
 				for (const [pattern, variant] of Object.entries(modelVariants)) {
-					if (variant === "atom") {
+					if (variant === "atom" || variant === "vim") {
 						modelVariants[pattern] = "hashline";
 					}
 				}
 			}
 		}
-		if (raw["edit.mode"] === "atom") {
+		if (raw["edit.mode"] === "atom" || raw["edit.mode"] === "vim") {
 			raw["edit.mode"] = "hashline";
 		}
 

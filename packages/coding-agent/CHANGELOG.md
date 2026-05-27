@@ -2,6 +2,237 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Removed the package root `hashline` export so imports from the top-level entrypoint can no longer access `hashline` helpers directly
+
+### Added
+
+- Added `read.summarize.minTotalLines` setting (default 100) to set the minimum file length that triggers read summarization
+- Added `<file>:<lines>` support to `search` `paths`, allowing file-scoped constraints such as `:N-M`, `:N+K`, and comma-separated ranges
+
+### Changed
+
+- Changed multi-section hashline `edit` execution to defer LSP diagnostics flushing until the final section is written
+- Changed read to return verbatim contents for files shorter than `read.summarize.minTotalLines` instead of summarizing them
+- Changed `search` path line-range filtering to include only matches and context lines that fall inside the requested ranges
+
+## [15.5.3] - 2026-05-27
+### Breaking Changes
+
+- Disallowed inline payload on hashline `↑`, `↓`, and `:` operations (including BOF/EOF inserts), requiring payload text to be supplied on standalone `+` continuation rows
+
+### Changed
+
+- Warned when legacy inline `LINE:TEXT` lines are accepted as payload continuations only when inside a pending multi-line `A-B:` replacement
+
+## [15.5.2] - 2026-05-26
+### Breaking Changes
+
+- Changed the hashline patch format so payload continuation lines now require a leading `+`, rejecting unprefixed multiline payload rows that were previously accepted as fallback payload text
+
+### Changed
+
+- Changed hashline payload parsing so blank lines are only preserved when prefixed with `+`, so blank separator lines between operations are ignored unless explicitly marked
+- Changed payload escaping so a line beginning with `+` is now represented as `++...` while the leading marker is stripped before writing
+- Changed the default `task.simple` mode from `default` to `schema-free`, so task-call `schema` inputs are disabled by default while shared `context` and user prompt/session-defined output schemas remain available
+- Changed `tools.approvalMode: yolo` to auto-approve tool calls even when a tool marks `override: true`; user `tools.approval.<tool>` policies (`allow`/`prompt`/`deny`) now remain the only controls for yolo mode.
+- Changed the hashline edit executor to coalesce two consecutive `A-B:` ops on the identical range last-wins (the model painted a before/after pair) and append a warning, instead of throwing `anchor line X is already targeted by the :/! op on line Y`. Other overlap shapes (different ranges, `A-B:`+`!`, `!`+`!`) still throw.
+
+### Fixed
+
+- Fixed nested replace parsing so line-anchored `N:` rows inside a pending `A-B:` replacement now trigger overlap errors instead of being silently folded into the replacement payload
+
+## [15.5.1] - 2026-05-26
+
+### Breaking Changes
+
+- Removed the `href`, `hrefr`, and `hline` Handlebars prompt helpers along with the shared hashline anchor state; none were referenced by any built-in or user prompt template
+
+## [15.5.0] - 2026-05-26
+
+### Added
+
+- Added per-tool approval declarations so each built-in, custom, or extension tool can declare its capability tier and approval prompt details.
+- Added `OMP_MCP_TIMEOUT_MS` environment variable to override MCP client request timeout for every server (in milliseconds); set to `0` to disable client-side timeouts. Invalid (negative or non-numeric) values are ignored with a warning and fall back to the per-server timeout or default 30s ([#1415](https://github.com/can1357/oh-my-pi/pull/1415)).
+- Added `omp auth-broker list` (with `--json` for machine-readable output) to enumerate supported OAuth providers, replacing `bunx @oh-my-pi/pi-ai list`.
+- Added interactive provider selection to `omp auth-broker login` and `omp auth-broker logout` when invoked without a provider argument (replacing the equivalent `bunx @oh-my-pi/pi-ai login`/`logout` flows). The logout picker is sourced from stored credentials so it only lists providers the user is actually signed in to.
+- Added directory matches to the `find` tool: glob searches now return directories alongside files, with directory hits emitted with a trailing `/` marker. `find` for `**/tests` no longer requires a follow-up `read` to surface a directory hit; tool prompt and output docs were updated to reflect that paths may be either kind.
+- Added the RFC 8414 §3.1 path-ful issuer form (`/.well-known/oauth-authorization-server<issuer-path>`) as a third candidate in MCP OAuth discovery, after origin-root and path-prefixed well-known URLs, so deployments that publish authorization-server metadata at the path-ful location resolve correctly. Single-segment authorization URLs (e.g. `https://gateway/my-service`) are now treated as the gateway prefix instead of being dropped back to the origin root.
+
+### Changed
+
+- Changed tool-approval prompts to use an explicit `Approve`/`Deny` selector and surface the denial reason as contextual help text instead of a bare confirm/cancel toggle.
+- Changed approval safety overrides to prompt even in `yolo` / `--auto-approve` sessions, so critical tool-declared patterns no longer run unattended.
+- Changed `omp auth-broker login` to drive the per-provider OAuth/API-key flow in-process via `AuthStorage.login()` instead of spawning the `pi-ai` CLI subprocess. The `pi-ai` bin is being removed; the same login surface now lives entirely inside `omp`.
+- Changed the default per-line truncation cap for search/grep output (`DEFAULT_MAX_COLUMN`) from `1024` to `512` characters to keep wide minified single-line bundles from blowing out the model's context.
+- Changed `edit.hashlineAutoDropPureInsertDuplicates` to also fire on `A-B:payload` replacement ops when a single non-structural boundary payload line duplicates the line immediately above the deleted range (prefix) or immediately below it (suffix). Catches the common mistake of `A-B:foo` where the user meant `A-B!` but typed a payload that happens to match adjacent context. The existing 2+-line block absorb and balance-validated structural single-line absorb already covered the multi-line and structural-delimiter cases; this closes the single-line non-structural gap.
+
+### Fixed
+
+- Fixed the agent loop and bash executor busy-spinning when scheduler waits returned early. napi `uv_async_send` callbacks can wake the event loop after only ~1–2 ms even when the caller asked for a longer sleep, so `yieldIfDue()` now compensates by retrying `Bun.sleep()` until the requested wall-clock duration has elapsed, and the bash executor wraps its `runPromise`/timeout/abort race in an `ExponentialYield` (20 ms → 10 s) so long-running commands stop hot-looping on the race. Yields are additionally throttled by a module-level 50 ms gate, and losing timers in the race are aborted via `AbortSignal` so they don't keep firing after a winner is selected ([#1396](https://github.com/can1357/oh-my-pi/pull/1396) by [@hezhiyang2000](https://github.com/hezhiyang2000), closes [#1384](https://github.com/can1357/oh-my-pi/issues/1384)).
+- Fixed streaming edit previews going blank for inline-payload ops. `LINE↓payload` / `A-B:payload` are valid single-line writes, but the natural-order preview was skipping the entire op token until a newline arrived — so the first character the model typed after the sigil only appeared after the next line ended, and the renderer would fall back to rendering the raw `A-B: bla bla bla` input. Inline-body content on `op-insert` and `op-replace` tokens is now emitted as a `+payload` line on the same op tick.
+- Fixed `/usage` and the status-line reset countdown rendering stale negative deltas after a Codex window had elapsed: Codex keeps reporting the prior window's `reset_at` until a new request opens a fresh window, which turned the `resets in …` suffix into a meaningless negative duration. `formatDuration` now clamps non-positive, NaN, and infinite inputs to `0ms`, and both renderers suppress the `resets in …` suffix entirely once `resetsAt <= now`.
+- Fixed auto-handoff race at the context threshold: when `compaction.strategy = handoff` fired at `agent_end` with an active checkpoint or incomplete todos, the deferred handoff post-prompt task and the rewind/todo-completion path both scheduled work concurrently, so a fresh `agent.continue()` streamed a new assistant turn alongside the handoff LLM call (visible as the "Auto-handoff" loader plus an assistant message still streaming, with the chat container then rebuilt mid-stream). `#checkCompaction` now reports whether it deferred a handoff and the `agent_end` handler short-circuits the rewind/todo passes; `#scheduleAgentContinue` also skips when `isCompacting || isGeneratingHandoff`. The pre-prompt `#checkCompaction` call now forces inline execution (`allowDefer = false`) so the new turn cannot begin until the maintenance settles.
+- Fixed `/exit` and Ctrl+C-double-tap hanging when a deferred handoff was mid-flight: `AgentSession.dispose()` now aborts retry/compaction (auto-compaction + handoff) and the agent stream before draining `#cancelPostPromptTasks`, so the post-prompt task awaiting `generateHandoff` rejects and `Promise.allSettled` can resolve. Tool work (bash/eval/python) is intentionally still left for the existing dispose paths so shared kernels continue to survive across session dispose.
+
+## [15.4.3] - 2026-05-26
+
+### Fixed
+
+- Fixed Google Vertex cached project discovery replacing the bundled fallback catalog so `/models` does not keep showing outdated Gemini entries after authoritative Vertex discovery, while keeping the bundled fallback in place when the cached snapshot is stale or non-authoritative (e.g. after an ADC discovery failure) ([#1412](https://github.com/can1357/oh-my-pi/issues/1412)).
+
+## [15.4.2] - 2026-05-26
+
+### Fixed
+
+- Fixed plan-mode subagents being unable to terminate because `yield` was registered but missing from the active tool set when `requireYieldTool` was combined with an explicit `toolNames` list ([#1408](https://github.com/can1357/oh-my-pi/issues/1408))
+
+## [15.4.1] - 2026-05-26
+
+### Breaking Changes
+- The `vim` edit mode option is no longer available; configurations using `edit.mode: vim` will be automatically mapped to `hashline` mode
+- Hashline payload semantics are now strictly inline-first: the first payload line is whatever follows the sigil on the op line itself, and subsequent lines append after it. A newline immediately after `↑`/`↓`/`:` is no longer a free separator — it produces a blank first payload line. Use `LINE↓content` for a one-line insert, `LINE↓firstline\nsecondline` for two lines; bare `LINE↓` / `LINE↑` / `LINE:` (no inline payload) still insert/replace with one blank line as before.
+
+### Added
+- Added `irc.timeoutMs` setting to configure IRC message timeout duration with a default of 120 seconds
+- Added timeout enforcement for IRC send operations to prevent indefinite hangs when recipients are unresponsive
+- Added evaluator state inheritance for `task`-spawned subagents so JavaScript and Python variables are visible between a parent agent and its child sessions
+- Added `hashline-per` edit mode to restore the legacy per-line hashline dialect alongside the default file-hash dialect
+- Added file-hash computation and validation for hashline sections to detect stale edits
+- Added file-read snapshot caching with multi-snapshot ring per path for recovery from agent's own writes
+- Added delete operation (`!`) support to hashline grammar for explicit line deletion
+- Added structural bracket/brace balance warnings when deleting lines with unclosed constructs
+- Added file-hash computation and validation for hashline sections to detect stale edits
+- Added file-read snapshot caching with multi-snapshot ring per path for recovery from agent's own writes
+- Added delete operation (`!`) support to hashline grammar for explicit line deletion
+- Added structural bracket/brace balance warnings when deleting lines with unclosed constructs
+- Added resource metadata URL (RFC 9728) support to OAuth discovery for chaining authorization server resolution from protected-resource metadata ([1407](https://github.com/can1357/oh-my-pi/pull/1407) by [@faizhasim](https://github.com/faizhasim))
+- Added path-prefixed well-known URL fallback in OAuth discovery to support authorization servers behind gateways with sub-path routing ([1407](https://github.com/can1357/oh-my-pi/pull/1407) by [@faizhasim](https://github.com/faizhasim))
+- Added relative URL resolution for `Mcp-Auth-Server` header values against the server URL ([1407](https://github.com/can1357/oh-my-pi/pull/1407) by [@faizhasim](https://github.com/faizhasim))
+
+### Changed
+
+- Changed Python shared eval sessions to be keyed by `sessionId` and `cwd` so code state no longer leaks across different directories when reusing a session
+- Changed shared JavaScript and Python startup to deduplicate concurrent first-time session initialization so parallel first calls share one warm session
+- Changed shared JavaScript and Python execution output handling so interleaved async runs keep their `display` output scoped to the originating run
+- Changed Python tool bridge to use per-run identifiers alongside session IDs for correct routing of tool responses and output in concurrent evaluations
+- Changed JavaScript and Python `eval` execution to allow overlapping asynchronous cells on the same session ID to run concurrently instead of being strictly queued
+- Updated the edit mode option set to support `replace`, `patch`, `hashline`, and `apply_patch` variants
+- Bare `A:` / `A-B:` (no payload, no inline body) now replaces the line/range with a single blank line, symmetric with bare `A↑` / `A↓` inserting a blank line; previously rejected as ambiguous
+- Simplified hashline anchor format from `LINE+HASH` to bare `LINE` numbers in edit operations
+- Updated hashline file headers to include 4-hex file hash: `¶PATH#HASH` format for anchored edits
+- Changed hashline line separator from `|` to `:` in editable output (e.g., `42:content` instead of `42ab|content`)
+- Removed per-line hash validation; file-level hash now validates entire section integrity
+- Updated read/search output to emit file-hash headers (`¶PATH#HASH`) followed by numbered lines for hashline mode
+- Modified hashline grammar to accept optional file hash in headers and removed hash requirements from line anchors
+- Changed hashline diff preview format to use `LINE:content` instead of `LINE+HASH|content`
+- Updated prompt documentation to reflect new `¶PATH#HASH` header and bare line-number syntax
+- Bare `A:` / `A-B:` (no payload, no inline body) now replaces the line/range with a single blank line, symmetric with bare `A↑` / `A↓` inserting a blank line; previously rejected as ambiguous
+- Simplified hashline anchor format from `LINE+HASH` to bare `LINE` numbers in edit operations
+- Updated hashline file headers to include 4-hex file hash: `¶PATH#HASH` format for anchored edits
+- Changed hashline line separator from `|` to `:` in editable output (e.g., `42:content` instead of `42ab|content`)
+- Removed per-line hash validation; file-level hash now validates entire section integrity
+- Updated read/search output to emit file-hash headers (`¶PATH#HASH`) followed by numbered lines for hashline mode
+- Modified hashline grammar to accept optional file hash in headers and removed hash requirements from line anchors
+- Changed hashline diff preview format to use `LINE:content` instead of `LINE+HASH|content`
+- Updated prompt documentation to reflect new `¶PATH#HASH` header and bare line-number syntax
+- Updated `discoverOAuthEndpoints` to accept `resourceMetadataUrl` parameter and prioritize the resource-metadata chain ([1407](https://github.com/can1357/oh-my-pi/pull/1407) by [@faizhasim](https://github.com/faizhasim))
+- Updated `parseMcpAuthServerUrl` and `extractMcpAuthServerUrl` to accept optional `serverUrl` for relative URL resolution ([1407](https://github.com/can1357/oh-my-pi/pull/1407) by [@faizhasim](https://github.com/faizhasim))
+- Updated `MCPOAuthFlow.#resolveRegistrationEndpoint` to try origin-root well-known first, then fall back to path-prefixed well-known ([1407](https://github.com/can1357/oh-my-pi/pull/1407) by [@faizhasim](https://github.com/faizhasim))
+
+### Removed
+- Removed the `installH2Fetch()` activation from CLI startup; HTTPS fetches now use Bun's default transport
+- Removed the `vim` edit mode along with the `VimTool` module, prompt, and supporting buffer/engine/renderer stack
+- Removed per-line hash anchors (2-letter bigram hashes) from hashline format
+- Removed `RANGE_INTERIOR_HASH` constant; multi-line ranges no longer use `**` filler
+- Removed `HashMismatch` type and hash mismatch error reporting; replaced with file-level validation
+- Removed per-line hash anchors (2-letter bigram hashes) from hashline format
+- Removed `RANGE_INTERIOR_HASH` constant; multi-line ranges no longer use `**` filler
+- Removed `HashMismatch` type and hash mismatch error reporting; replaced with file-level validation
+
+### Fixed
+
+- Fixed missing `await` on `#tryWellKnownForRegistration` call in `#resolveRegistrationEndpoint` that caused path-prefixed well-known fallback to never actually execute, returning the unresolved Promise object instead of the registration endpoint ([1407](https://github.com/can1357/oh-my-pi/pull/1407) by [@faizhasim](https://github.com/faizhasim))
+- Fixed JavaScript module reloading to refresh local re-exports when transitive dependency files are edited
+- Fixed Python tool calls in warm kernels to initialize once bridge environment variables appear after startup and to return a clear `tool bridge is unavailable` error when missing
+- Fixed IRC `send` handling to preserve recipient incoming messages when auto-reply timeouts instead of dropping them
+- Fixed Python session disposal to cancel all concurrent active executions in a shared kernel
+- Fixed JavaScript `eval` imports to preserve module-level singletons across re-imports of unchanged local files and reload them only after edits
+- Fixed concurrent Python evaluator tool calls to use per-run identifiers so tool responses and output are routed to the correct execution
+- Fixed the `search` tool argument validation to accept a single string `paths` value as a one-path search.
+## [15.4.0] - 2026-05-26
+
+### Breaking Changes
+
+- Replaced the hashline patch format from `§`, `«`, `»`, `≔`, and `..` to `¶`, `↑`, `↓`, `→` with range separators written as `A-B`, requiring users to migrate hashline edit inputs
+
+### Added
+
+- Added resolved subagent model badge to the task widget status line showing `<provider>/<id>` (with optional `:<thinkingLevel>` suffix when thinking is set explicitly), opt-in via `task.showResolvedModelBadge` Appearance setting (default off)
+- Added `codex` and `gemini` to the web search provider settings so users can configure OpenAI and Gemini web search directly from provider selection
+- Added OpenAI (`codex`) and Gemini web search options with updated setup descriptions for `omp /login openai-codex` and Gemini OAuth login
+- Added pretty-printing for wide JSON `data:` payloads in the raw provider-stream debug viewer so streamed event bodies expand across multiple `data:` lines instead of getting clipped by the per-line truncator, and updated the viewer header to read `raw provider stream (SSE + WS)` now that Codex WebSocket frames also flow through the buffer
+- Added per-tool approval policies with a `--auto-approve` (alias `--yolo`) CLI flag to bypass confirmation prompts for automation. Each tool call resolves a policy of `allow` / `deny` / `prompt` via a six-level lookup: overriding action exceptions, validated user config, non-overriding action exceptions, built-in defaults, validated user `_default`, and a system `prompt` fallback.
+- Added `tools.approval.<toolName>: allow | deny | prompt` user config support via the settings schema. Invalid values (non-strings, unknown literals) are now ignored and fall through to the built-in default instead of being silently honoured — preventing a typo from locking the user out of a tool or bypassing approval for one.
+- Added action-based exception registry covering LSP read-only actions (`diagnostics`/`definition`/`references`/etc. → `allow`), DAP debug inspection actions (`threads`/`stack_trace`/`variables`/`scopes`/`read_memory`/etc. → `allow`), and critical bash patterns (`rm -rf /`, `sudo rm`, fork bombs, `chmod -R 777 /`, `chown -R user /`, `curl ... | bash`, `bash <(curl ...)`, writes to `/etc/passwd|shadow|sudoers`, `shutdown`/`reboot`/`halt`/`init 0`/`kill -9 1`, `nc -e`/`nc -c` reverse shells → always `prompt`, even when bash is user-allowed).
+- Added approval check in `ExtensionToolWrapper.execute()` ahead of extension `tool_call` handlers, with an actionable error in non-interactive sessions (`--auto-approve` / `tools.approval.<tool>: allow` guidance).
+- Added MCP-tool labelling and bash/ssh command truncation in the approval prompt so `mcp__<server>__<tool>` calls are tagged as MCP server tools and a heredoc-sized command body doesn't blow out the confirmation dialog.
+- Added `docs/approval-mode.md` user guide and a 57-case unit suite covering the resolution order, every critical-bash pattern (with benign-keyword negatives to lock false-positives out), user-config validation, and prompt formatting.
+- Added `tools.approvalMode` global setting (Interaction tab in `/settings`) with values `auto` | `prompt` | `custom`. Defaults to `auto` so the agent runs every tool call without interruption — matching the `--auto-approve` / `--yolo` CLI flag. `prompt` uses built-in per-tool defaults only (read/find/search auto-allow; bash/edit/write/eval/ssh require confirmation; `tools.approval.<tool>` config is ignored). `custom` makes the `tools.approval.<tool>` config the source of truth — your settings win over built-in defaults, which fall back only for tools you haven't configured. CLI `--auto-approve` always wins. Critical safety patterns (e.g. `rm -rf /`, `curl … | bash`, fork bombs) keep prompting even when the tool is user-allowed.
+- Extended `CRITICAL_BASH_PATTERNS` to cover `source <(curl …)` / `. <(curl …)` and `eval "$(curl …)"` / `eval $(curl …)` / ``eval `curl …` `` (all common remote-fetch-then-execute shapes that the original `bash <(curl …)` regex missed), `chmod -R` symbolic modes (`u+x`, `u+rwx,o+w`) targeting filesystem root, and `tee` / `tee -a` writes to `/etc/{passwd,shadow,sudoers}`. Benign forms (`source ./local.sh`, `find . -name foo`, `chmod -R u+x ./build`, `tee /var/log/app.log`, `eval "$VAR"`) are pinned negative in the suite so future expansion can't regress false-positive rate.
+- Extended `formatApprovalPrompt` with payload previews for `eval` (language + first cell's code), `task` (agent + first task's id + assignment), `ast_edit` (first op's pattern / replacement / paths), `browser` (action + tab + url + code), and `write` content (alongside path). Previously these all rendered as bare `Allow tool: <name>` lines, giving the user no signal about what they were authorizing.
+- Decoupled the per-tool approval gate from extension-loading state: `ExtensionRunner` and the `ExtensionToolWrapper` per-tool gate are now constructed unconditionally in `createAgentSession`, regardless of whether any extensions are loaded. Previously the runner was created only when `extensionsResult.extensions.length > 0`, which silently disabled the entire approval system if no extensions (including `createAutoresearchExtension`) were loaded; a regression test in `approval-mode.test.ts` now locks the invariant.
+
+### Fixed
+
+- Fixed `isMcpToolName` over-matching any tool name containing `__` (an extension legally named `my__feature` or `pkg__util__do` was getting falsely labelled `Origin: MCP server tool` in the approval prompt). Restricted to the canonical `mcp__` prefix only.
+
+### Changed
+
+- Updated hashline operation syntax to support inline payload text on the same op line for insert and replace (`ANCHOR↑/↓/...→`) while still accepting payload lines that follow
+- Updated hashline anchor parsing so copied `|TEXT` decorations remain cosmetic and payload must be provided on or after the operator
+- Unified subagent output-schema validation into a single shared module (`tools/output-schema-validator.ts`) used by both the in-process `yield` tool (validates before the subagent yields) and the executor's post-mortem `finalizeSubprocessOutput` path (validates after subprocess exit). Previously each side ran its own `normalizeSchema` → `jtdToJsonSchema` → `validateJsonSchemaValue` chain in parallel, which was semantically equivalent but invited drift: a future tweak on one side could silently disagree with the other and cause yields that pass in-tool to fail post-mortem (or vice versa). The unification preserves both call sites' existing behavior (yield throws an actionable per-issue error for the model; executor produces a `schema_violation` outcome with the first issue and missing-required fields) by exposing two output formatters (`formatAllValidationIssues` for retries, `formatValidationIssueHeadline` for headlines).
+- Changed web search provider credential lookup to use the shared `AuthStorage` pipeline (`getApiKey`/`getOAuthAccess`) for API-key and OAuth auth instead of direct `AgentStorage` access
+- Changed the `codex` web search provider display label from `Codex` to `OpenAI`
+- Updated `anthropic` and `openai`/`gemini` web search option descriptions to reflect their native `web_search`/OAuth requirements
+
+### Fixed
+
+- Fixed hashline inline payload parsing so same-line payloads containing whitespace, including tab-indented text, are preserved instead of being rejected
+- Fixed Bun HTTP/2 transport errors (`HTTP2StreamReset`, `HTTP2RefusedStream`, and `HTTP2EnhanceYourCalm`) to be treated as transient so the assistant now retries automatically instead of stopping on these recoverable failures
+- Fixed web search OAuth-backed providers (including Codex and Gemini) to use broker-managed token retrieval and account metadata, avoiding direct token-store refresh behavior that could cause search authentication failures
+- Updated Tavily missing-credential feedback to prompt users to configure an API-key provider setting instead of referencing `agent.db` directly
+- Refreshed expired OpenAI Codex OAuth tokens during `web_search` execution and persisted the updated credentials so searches continue working after token expiry
+- Fixed the browser tool's existing-tab re-navigation path (`tab-supervisor.acquireTab`) still defaulting to `waitUntil: "networkidle2"` while the new-tab worker switched to `"load"`. Identical `acquireTab({url})` calls behaved differently depending on whether the named tab was fresh or being reused — fresh tabs returned quickly, second invocations hung on dev servers with persistent WebSocket / HMR connections. Both paths now agree on `"load"`.
+- Fixed the `patch` tool's post-write verification `ToolError` embedding the absolute `resolvedPath` in its user-facing message; the outer composer in `executeSinglePathEntries` then prepended `Error editing ${path}: …`, double-embedding the path and leaking `$HOME` into the TUI. The error message now uses the caller-supplied relative `path` (matching the success branches); `resolvedPath` is retained only in the structured `context` metadata for log correlation.
+- Fixed `splitInternalUrlSel` keeping `mcp://` resource URIs fully opaque, including selector-shaped suffixes like `:raw`, `:1-50`, and `/:raw`. `McpProtocolHandler` resolves resources by verbatim URI match (`r.uri === uri`), so peeling before resource lookup can make valid server-defined resource IDs unreachable. MCP read-selector support now requires a future resolver-aware path that can try the exact URI before interpreting any suffix as a selector; non-MCP internal URL selectors are unchanged.
+- Fixed three correctness issues in the `find` tool. (1) `onMatch` guard checked the outer task `signal?.aborted` instead of `combinedSignal.aborted` (which also includes the per-call timeout signal), so late matches accumulated past the timeout. (2) Timeout-drained partial results were emitted in insertion order while the normal path sorts by mtime descending; callers relying on "most recently modified first" got an inconsistent ordering when the call timed out. The timeout drain now tracks per-entry mtime in a parallel array and applies the same comparator. (3) `validateFindPathInputs` now skips backslash-escaped commas (`\,`) when checking for top-level commas, matching `search.ts:containsTopLevelComma`.
+- Fixed `throwPreferredDapStartError` using a single `await Promise.resolve()` (one microtask) to let a concurrent launch/attach rejection settle before deciding which error to surface. That worked for synchronous-rejection test fakes but not real adapter I/O: the launch failure arrives via socket and lands several ticks after the `configurationDone` failure. `DapStartRequestFailure` now carries a `settled?: Promise<void>` that resolves when the underlying request settles either way, and `throwPreferredDapStartError` races against it with a 50 ms ceiling. The preferred error message (the underlying launch/attach failure rather than the cascade) now surfaces under real I/O.
+- Fixed `adapter: "debugpy"` over-promising in the `debug` tool. `resolveAdapter("debugpy", cwd)` only checks for `python` in `PATH`; it does not verify that the `debugpy` module is importable. Both failure modes — `python` missing and `debugpy` module missing — used to collapse onto a generic `"No suitable debug adapter found"` error. The launch/attach action now throws a targeted `ToolError` naming `python` when `resolveAdapter` returns null for an explicit `adapter: "debugpy"`, and the `DapSessionManager` spawn-catch detects `"No module named debugpy"` in adapter stderr and surfaces a `pip install debugpy` hint. The Python debug tool documentation lists the install hint so the prompt and runtime diagnostics agree.
+- Fixed the LSP symbol-resolver `BARE_IDENTIFIER_RE` (`/^[A-Za-z_][\w]*$/`) rejecting `$`-prefixed identifiers (`$store`, `$count`, RxJS observables, Svelte stores, Angular signals). Without the word-boundary check, searching for `$store` on a line containing `bar$store` returned the offset inside the compound identifier rather than the standalone occurrence, feeding a wrong column to the LSP server. Pattern now `/^[$A-Za-z_][\w$]*$/`; the companion `IDENTIFIER_CHAR_RE` already contained `$`.
+- Fixed `applyWorkspaceEdit` writing all text edits before walking `documentChanges` for resource operations. LSP §3.16.2 requires clients to apply `documentChanges` in declared order, so any server emitting `{kind: "create", uri: X}` followed by a `TextDocumentEdit` for `X` (e.g. "Extract to new file" code actions, some rename responses) broke: the edit ran against a non-existent file, then the create happened. `applyWorkspaceEdit` now walks `documentChanges` once in declared order; per-URI text edits are coalesced into a pending Map and flushed immediately before any subsequent resource op for the same URI. Legacy `changes`-map-only payloads are unchanged. Folder-level `rename`/`delete` ops now flush every pending URI under the affected subtree (not just the exact target) so child-file edits queued before a parent-folder move land at the original location instead of dangling against a non-existent path on the final flush. Rename ops additionally flush pending edits queued against `renameOp.newUri` (and its descendants) **before** `fs.rename` runs, so edits intended for the pre-rename target file are applied before the rename clobbers or replaces it (relevant under `options.overwrite`/`options.ignoreIfExists`). When a `WorkspaceEdit` payload supplies both `changes` and `documentChanges`, the `documentChanges` arm is now used exclusively per LSP §3.16.2 ("if documentChanges are supplied … servers should use them in preference to changes"); previously the two were merged.
+
+### Fixed
+
+- Fixed built-in `explore` agent failing every invocation with `schema_violation: files.0.ref: must not be present` on releases prior to 15.3.2 by renaming the `files[].ref` property to `files[].path` in the agent's output schema; `ref` is a JTD-reserved keyword (RFC 8927) and collides with JSON Type Definition's schema-reference form, so the converter previously dropped it from the generated JSON Schema. Defense-in-depth alongside the 15.3.2 converter fix ([#1379](https://github.com/can1357/oh-my-pi/issues/1379)).
+- Increased the `yield` tool's schema-validation retry budget from 1 to 3 so subagents whose first structured-output attempt mismatches the declared output schema get up to three retries before the parent's post-mortem `schema_violation` check hard-fails the task. The tool now also surfaces remaining retry attempts and an explicit "call yield again with the corrected shape" directive in each rejection message, giving the model the context it needs to converge — particularly helpful for models like GLM that tend to invent per-element field names instead of following the declared schema.
+- Fixed CLI PDF file arguments being decoded as raw bytes for local vision models; `.pdf` and other supported document files now go through the same Markit conversion path as the `read` tool before entering the prompt ([#1401](https://github.com/can1357/oh-my-pi/issues/1401)).
+- Fixed the `bash` tool hanging until the 305 s hard timeout when a command writes a file via heredoc on Windows (bodies > ~4 KiB) or macOS (bodies > 16-64 KiB). Root cause was in the embedded brush shell; see `@oh-my-pi/pi-natives` changelog for the underlying fix.
+
+### Fixed
+
+- Fixed `/review` custom prompt orchestration text to use static prompt templates and consistently instruct reviewer task delegation.
+- Fixed `/review` custom-instructions submission on terminals that cannot distinguish Ctrl+Enter by using prompt-style input where Enter submits and Shift+Enter inserts a newline.
+- Fixed hook editor submissions sending large-paste placeholders such as `[paste #1 +27 lines]` instead of the pasted content.
+- Added per-tool approval policies with a `--auto-approve` (alias `--yolo`) CLI flag to bypass confirmation prompts for automation. Each tool call resolves a policy of `allow` / `deny` / `prompt` via a six-level lookup: overriding action exceptions, validated user config, non-overriding action exceptions, built-in defaults, validated user `_default`, and a system `prompt` fallback.
+- Added `tools.approval.<toolName>: allow | deny | prompt` user config support via the settings schema. Invalid values (non-strings, unknown literals) are now ignored and fall through to the built-in default instead of being silently honoured — preventing a typo from locking the user out of a tool or bypassing approval for one.
+- Added action-based exception registry covering LSP read-only actions (`diagnostics`/`definition`/`references`/etc. → `allow`), DAP debug inspection actions (`threads`/`stack_trace`/`variables`/`scopes`/`read_memory`/etc. → `allow`), and critical bash patterns (`rm -rf /`, `sudo rm`, fork bombs, `chmod -R 777 /`, `chown -R user /`, `curl ... | bash`, `bash <(curl ...)`, writes to `/etc/passwd|shadow|sudoers`, `shutdown`/`reboot`/`halt`/`init 0`/`kill -9 1`, `nc -e`/`nc -c` reverse shells → always `prompt`, even when bash is user-allowed).
+- Added approval check in `ExtensionToolWrapper.execute()` ahead of extension `tool_call` handlers, with an actionable error in non-interactive sessions (`--auto-approve` / `tools.approval.<tool>: allow` guidance).
+- Added MCP-tool labelling and bash/ssh command truncation in the approval prompt so `mcp__<server>__<tool>` calls are tagged as MCP server tools and a heredoc-sized command body doesn't blow out the confirmation dialog.
+- Added `docs/approval-mode.md` user guide and a 57-case unit suite covering the resolution order, every critical-bash pattern (with benign-keyword negatives to lock false-positives out), user-config validation, and prompt formatting.
+- Added `tools.approvalMode` global setting (Interaction tab in `/settings`) with values `auto` | `prompt` | `custom`. Defaults to `auto` so the agent runs every tool call without interruption — matching the `--auto-approve` / `--yolo` CLI flag. `prompt` uses built-in per-tool defaults only (read/find/search auto-allow; bash/edit/write/eval/ssh require confirmation; `tools.approval.<tool>` config is ignored). `custom` makes the `tools.approval.<tool>` config the source of truth — your settings win over built-in defaults, which fall back only for tools you haven't configured. CLI `--auto-approve` always wins. Critical safety patterns (e.g. `rm -rf /`, `curl … | bash`, fork bombs) keep prompting even when the tool is user-allowed.
+
 ## [15.3.2] - 2026-05-25
 ### Added
 

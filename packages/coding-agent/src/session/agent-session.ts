@@ -108,6 +108,7 @@ import {
 	executePython as executePythonCommand,
 	type PythonResult,
 } from "../eval/py/executor";
+import { defaultEvalSessionId } from "../eval/session-id";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
 import { exportSessionToHtml } from "../export/html";
 import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
@@ -141,14 +142,6 @@ import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
-import {
-	buildDiscoverableMCPSearchIndex,
-	collectDiscoverableMCPTools,
-	type DiscoverableMCPSearchIndex,
-	type DiscoverableMCPTool,
-	isMCPToolName,
-	selectDiscoverableMCPToolNamesByServer,
-} from "../mcp/discoverable-tool-metadata";
 import { resolveMemoryBackend } from "../memory-backend";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import type { PlanModeState } from "../plan-mode/state";
@@ -171,6 +164,9 @@ import {
 	collectDiscoverableTools,
 	type DiscoverableTool,
 	type DiscoverableToolSearchIndex,
+	filterBySource,
+	isMCPToolName,
+	selectDiscoverableToolNamesByServer,
 } from "../tool-discovery/tool-index";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import type { CheckpointState } from "../tools/checkpoint";
@@ -312,6 +308,8 @@ export interface AgentSessionConfig {
 	ttsrManager?: TtsrManager;
 	/** Secret obfuscator for deobfuscating streaming edit content */
 	obfuscator?: SecretObfuscator;
+	/** Inherited eval executor session id from a parent agent. */
+	parentEvalSessionId?: string;
 	/** Logical owner for retained Python kernels created by this session. */
 	evalKernelOwnerId?: string;
 	/**
@@ -808,6 +806,7 @@ export class AgentSession {
 	// Python execution state
 	#evalAbortControllers = new Set<AbortController>();
 	#evalKernelOwnerId: string;
+	#parentEvalSessionId: string | undefined;
 	/**
 	 * AsyncJobManager owned by this session (top-level only). Subagents leave
 	 * this undefined and **MUST NOT** dispose the global instance on teardown.
@@ -865,8 +864,7 @@ export class AgentSession {
 	 */
 	#lastAppliedToolSignature: string | undefined;
 	#mcpDiscoveryEnabled = false;
-	#discoverableMCPTools = new Map<string, DiscoverableMCPTool>();
-	#discoverableMCPSearchIndex: DiscoverableMCPSearchIndex | null = null;
+	#discoverableMCPTools = new Map<string, DiscoverableTool>();
 	#selectedMCPToolNames = new Set<string>();
 	// Generic tool discovery (covers built-in + MCP + extension when tools.discoveryMode === "all")
 	#discoverableToolSearchIndex: DiscoverableToolSearchIndex | null = null;
@@ -900,7 +898,7 @@ export class AgentSession {
 	 *  combined with `Date.now()` so tags stay unique even across rapid
 	 *  same-tick enqueues. */
 	#customDisplayTagCounter = 0;
-	#postPromptTasks = new Set<Promise<void>>();
+	#postPromptTasks = new Set<Promise<unknown>>();
 	#postPromptTasksPromise: Promise<void> | undefined = undefined;
 	#postPromptTasksResolve: (() => void) | undefined = undefined;
 	#postPromptTasksAbortController = new AbortController();
@@ -997,6 +995,7 @@ export class AgentSession {
 		this.settings = config.settings;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
+		this.#parentEvalSessionId = config.parentEvalSessionId;
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
 		this.#scopedModels = config.scopedModels ?? [];
 		this.#thinkingLevel = config.thinkingLevel;
@@ -1787,10 +1786,17 @@ export class AgentSession {
 
 			const compactionTask = this.#checkCompaction(msg);
 			this.#trackPostPromptTask(compactionTask);
-			await compactionTask;
+			const compactionDeferredHandoff = await compactionTask;
 			// Check for incomplete todos only after a final assistant stop, not intermediate tool-use turns.
 			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
 			if (hasToolCalls) {
+				return;
+			}
+			// When checkCompaction scheduled a deferred handoff, skip the rewind/todo passes:
+			// any reminder we append here would race the handoff's session reset, and
+			// #scheduleAgentContinue would start a fresh streaming turn alongside the handoff
+			// LLM call (visible as "Auto-handoff" loader + an assistant message still streaming).
+			if (compactionDeferredHandoff) {
 				return;
 			}
 			if (msg.stopReason !== "error" && msg.stopReason !== "aborted") {
@@ -1841,7 +1847,7 @@ export class AgentSession {
 		this.#postPromptTasksPromise = undefined;
 	}
 
-	#trackPostPromptTask(task: Promise<void>): void {
+	#trackPostPromptTask(task: Promise<unknown>): void {
 		this.#postPromptTasks.add(task);
 		this.#ensurePostPromptTasksPromise();
 		void task
@@ -1890,8 +1896,17 @@ export class AgentSession {
 	}): void {
 		this.#schedulePostPromptTask(
 			async () => {
+				// Defense in depth: if compaction/handoff slipped onto the post-prompt queue
+				// alongside us (e.g. via a scheduler we don't own), refuse to start a fresh
+				// streaming turn — agent.continue() here would race the handoff's session
+				// reset. The first-class fix is in #checkCompaction/the agent_end handler,
+				// but this guard catches anything that bypasses that path.
+				if (this.isCompacting || this.isGeneratingHandoff) {
+					options?.onSkip?.();
+					return;
+				}
 				if (options?.shouldContinue && !options.shouldContinue()) {
-					options.onSkip?.();
+					options?.onSkip?.();
 					return;
 				}
 				try {
@@ -2757,6 +2772,21 @@ export class AgentSession {
 		} catch (error) {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
+		// Abort post-prompt work so the drain below can complete. Without this, a
+		// deferred-handoff task that has already advanced into
+		// `await this.handoff(...) → generateHandoff(...)` keeps awaiting a live LLM stream
+		// — Promise.allSettled() in #cancelPostPromptTasks then waits forever, freezing
+		// /exit and Ctrl+C-double-tap. The post-prompt task's own AbortSignal does not
+		// propagate into the inner handoff/compaction controllers, so we abort them
+		// explicitly. agent.abort() is needed for an agent.continue() that may have
+		// raced the deferred handoff (its streaming loop is awaited by the wrapper IIFE).
+		//
+		// Tool work (bash/eval/python) is NOT aborted here — those have their own
+		// dispose paths and shared kernels are contractually allowed to survive a
+		// session's dispose.
+		this.abortRetry();
+		this.abortCompaction();
+		this.agent.abort();
 		await this.#cancelPostPromptTasks();
 		// Cancel jobs this agent registered so a subagent's teardown doesn't
 		// leak its background bash/task work into the parent's manager. Only
@@ -2876,11 +2906,12 @@ export class AgentSession {
 		return this.#retryAttempt;
 	}
 
-	#collectDiscoverableMCPToolsFromRegistry(): Map<string, DiscoverableMCPTool> {
-		return new Map(collectDiscoverableMCPTools(this.#toolRegistry.values()).map(tool => [tool.name, tool] as const));
+	#collectDiscoverableMCPToolsFromRegistry(): Map<string, DiscoverableTool> {
+		const mcpTools = filterBySource(collectDiscoverableTools(this.#toolRegistry.values()), "mcp");
+		return new Map(mcpTools.map(tool => [tool.name, tool] as const));
 	}
 
-	#setDiscoverableMCPTools(discoverableMCPTools: Map<string, DiscoverableMCPTool>): void {
+	#setDiscoverableMCPTools(discoverableMCPTools: Map<string, DiscoverableTool>): void {
 		this.#discoverableMCPTools = discoverableMCPTools;
 		this.#invalidateDiscoveryCaches();
 	}
@@ -2889,7 +2920,6 @@ export class AgentSession {
 	 *  affect which tools should be discoverable: registry mutations (refreshMCPTools,
 	 *  refreshRpcHostTools) or active-tool mutations (#applyActiveToolsByName). */
 	#invalidateDiscoveryCaches(): void {
-		this.#discoverableMCPSearchIndex = null;
 		this.#discoverableToolSearchIndex = null;
 	}
 
@@ -2900,7 +2930,7 @@ export class AgentSession {
 	#getConfiguredDefaultSelectedMCPToolNames(): string[] {
 		return this.#filterSelectableMCPToolNames([
 			...this.#defaultSelectedMCPToolNames,
-			...selectDiscoverableMCPToolNamesByServer(
+			...selectDiscoverableToolNamesByServer(
 				this.#discoverableMCPTools.values(),
 				this.#defaultSelectedMCPServerNames,
 			),
@@ -2993,28 +3023,6 @@ export class AgentSession {
 		return this.#mcpDiscoveryEnabled;
 	}
 
-	/** @deprecated Use {@link getDiscoverableTools} with `{ source: "mcp" }` instead.
-	 *  Preserves the legacy `description`-bearing MCP shape for back-compat callers. */
-	getDiscoverableMCPTools(): DiscoverableMCPTool[] {
-		return Array.from(this.#discoverableMCPTools.values()).map(t => ({
-			name: t.name,
-			label: t.label,
-			description: t.description,
-			serverName: t.serverName,
-			mcpToolName: t.mcpToolName,
-			schemaKeys: t.schemaKeys,
-		}));
-	}
-
-	/** @deprecated Use {@link getDiscoverableToolSearchIndex} instead.
-	 *  Returns the legacy MCP search index whose documents expose `tool.description`. */
-	getDiscoverableMCPSearchIndex(): DiscoverableMCPSearchIndex {
-		if (!this.#discoverableMCPSearchIndex) {
-			this.#discoverableMCPSearchIndex = buildDiscoverableMCPSearchIndex(this.#discoverableMCPTools.values());
-		}
-		return this.#discoverableMCPSearchIndex;
-	}
-
 	getSelectedMCPToolNames(): string[] {
 		if (!this.#mcpDiscoveryEnabled) {
 			return this.getActiveToolNames().filter(name => isMCPToolName(name) && this.#toolRegistry.has(name));
@@ -3062,17 +3070,7 @@ export class AgentSession {
 		// For "mcp-only" mode we only return MCP tools.
 		const mode = this.#resolveEffectiveDiscoveryMode();
 		const activeNames = new Set(this.getActiveToolNames());
-		const mcpTools: DiscoverableTool[] = Array.from(this.#discoverableMCPTools.values())
-			.filter(t => !activeNames.has(t.name))
-			.map(t => ({
-				name: t.name,
-				label: t.label,
-				summary: t.description,
-				source: "mcp" as const,
-				serverName: t.serverName,
-				mcpToolName: t.mcpToolName,
-				schemaKeys: t.schemaKeys,
-			}));
+		const mcpTools = Array.from(this.#discoverableMCPTools.values()).filter(t => !activeNames.has(t.name));
 		const builtinTools: DiscoverableTool[] = mode === "all" ? this.#collectDiscoverableBuiltinTools() : [];
 		const allTools = [...builtinTools, ...mcpTools];
 		return filter?.source ? allTools.filter(t => t.source === filter.source) : allTools;
@@ -3693,6 +3691,13 @@ export class AgentSession {
 	get sessionId(): string {
 		return this.#providerSessionId ?? this.sessionManager.getSessionId();
 	}
+	getEvalSessionId(): string | null {
+		if (this.#parentEvalSessionId !== undefined) return this.#parentEvalSessionId;
+		return defaultEvalSessionId({
+			cwd: this.sessionManager.getCwd(),
+			getSessionFile: () => this.sessionManager.getSessionFile() ?? null,
+		});
+	}
 
 	/** Current session display name, if set */
 	get sessionName(): string | undefined {
@@ -4076,10 +4081,13 @@ export class AgentSession {
 				);
 			}
 
-			// Check if we need to compact before sending (catches aborted responses)
+			// Check if we need to compact before sending (catches aborted responses). Run
+			// inline (allowDefer=false) so the handoff/maintenance fully settles before this
+			// prompt's agent loop starts — otherwise a deferred handoff would fire on the
+			// next microtask alongside the new turn.
 			const lastAssistant = this.#findLastAssistantMessage();
 			if (lastAssistant && !options?.skipCompactionCheck) {
-				await this.#checkCompaction(lastAssistant, false);
+				await this.#checkCompaction(lastAssistant, false, false);
 			}
 
 			// Build messages array (session context, eager todo prelude, then active prompt message)
@@ -4225,7 +4233,6 @@ export class AgentSession {
 				void this.dispose();
 				process.exit(0);
 			},
-			hasQueuedMessages: () => this.queuedMessageCount > 0,
 			getContextUsage: () => this.getContextUsage(),
 			waitForIdle: () => this.waitForIdle(),
 			newSession: async options => {
@@ -5629,10 +5636,23 @@ export class AgentSession {
 	 *
 	 * @param assistantMessage The assistant message to check
 	 * @param skipAbortedCheck If false, include aborted messages (for pre-prompt check). Default: true
+	 * @param allowDefer If true, threshold-driven handoff strategy may schedule itself as a
+	 *   deferred post-prompt task instead of running inline. Callers running inside the
+	 *   `agent_end` handler set this to true so `session.prompt()` resolves cleanly; callers
+	 *   on the pre-prompt path (where the next agent turn is about to start) set it to false
+	 *   to avoid racing the deferred handoff against the new turn.
+	 * @returns true when a deferred handoff was scheduled. Callers MUST then skip any
+	 *   subsequent `#scheduleAgentContinue` / reminder appends for this turn — the
+	 *   handoff will replace session state and a concurrent `agent.continue()` would
+	 *   stream into the soon-to-be-discarded session.
 	 */
-	async #checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<void> {
+	async #checkCompaction(
+		assistantMessage: AssistantMessage,
+		skipAbortedCheck = true,
+		allowDefer = true,
+	): Promise<boolean> {
 		// Skip if message was aborted (user cancelled) - unless skipAbortedCheck is false
-		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return;
+		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return false;
 		const contextWindow = this.model?.contextWindow ?? 0;
 		const generation = this.#promptGeneration;
 		// Skip overflow check if the message came from a different model.
@@ -5661,22 +5681,22 @@ export class AgentSession {
 			if (promoted) {
 				// Retry on the promoted (larger) model without compacting
 				this.#scheduleAgentContinue({ delayMs: 100, generation });
-				return;
+				return false;
 			}
 
 			// No promotion target available fall through to compaction
 			const compactionSettings = this.settings.getGroup("compaction");
 			if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
-				await this.#runAutoCompaction("overflow", true);
+				await this.#runAutoCompaction("overflow", true, false, allowDefer);
 			}
-			return;
+			return false;
 		}
 		const compactionSettings = this.settings.getGroup("compaction");
-		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return;
+		if (!compactionSettings.enabled || compactionSettings.strategy === "off") return false;
 
 		// Case 2: Threshold - turn succeeded but context is getting large
 		// Skip if this was an error (non-overflow errors don't have usage data)
-		if (assistantMessage.stopReason === "error") return;
+		if (assistantMessage.stopReason === "error") return false;
 		const pruneResult = await this.#pruneToolOutputs();
 		let contextTokens = calculateContextTokens(assistantMessage.usage);
 		if (pruneResult) {
@@ -5686,9 +5706,10 @@ export class AgentSession {
 			// Try promotion first — if a larger model is available, switch instead of compacting
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (!promoted) {
-				await this.#runAutoCompaction("threshold", false);
+				return await this.#runAutoCompaction("threshold", false, false, allowDefer);
 			}
 		}
+		return false;
 	}
 	#assistantEndedWithSuccessfulYield(assistantMessage: AssistantMessage): boolean {
 		const toolCallId = this.#lastSuccessfulYieldToolCallId;
@@ -6379,17 +6400,34 @@ export class AgentSession {
 
 	/**
 	 * Internal: Run auto-compaction with events.
+	 *
+	 * @param allowDefer If true (default), threshold-driven handoff strategy is allowed to
+	 *   schedule itself as a deferred post-prompt task and return `true` immediately. The
+	 *   caller MUST treat that as "compaction will happen async — do not also schedule
+	 *   `agent.continue()` for this turn", otherwise the deferred handoff races a fresh
+	 *   streaming turn (the symptom: "Auto-handoff" loader + assistant message still
+	 *   streaming). Callers on a path that is about to start a new agent turn (e.g.
+	 *   the pre-prompt check in `#promptWithMessage`) pass `false` to force inline
+	 *   execution so the handoff completes before the new turn begins.
+	 * @returns true when a deferred handoff was scheduled. Inline runs always return false.
 	 */
 	async #runAutoCompaction(
 		reason: "overflow" | "threshold" | "idle",
 		willRetry: boolean,
 		deferred = false,
-	): Promise<void> {
+		allowDefer = true,
+	): Promise<boolean> {
 		const compactionSettings = this.settings.getGroup("compaction");
-		if (compactionSettings.strategy === "off") return;
-		if (reason !== "idle" && !compactionSettings.enabled) return;
+		if (compactionSettings.strategy === "off") return false;
+		if (reason !== "idle" && !compactionSettings.enabled) return false;
 		const generation = this.#promptGeneration;
-		if (!deferred && reason !== "overflow" && reason !== "idle" && compactionSettings.strategy === "handoff") {
+		if (
+			!deferred &&
+			allowDefer &&
+			reason !== "overflow" &&
+			reason !== "idle" &&
+			compactionSettings.strategy === "handoff"
+		) {
 			this.#schedulePostPromptTask(
 				async signal => {
 					await Promise.resolve();
@@ -6398,7 +6436,7 @@ export class AgentSession {
 				},
 				{ generation },
 			);
-			return;
+			return true;
 		}
 
 		let action: "context-full" | "handoff" =
@@ -6427,7 +6465,7 @@ export class AgentSession {
 							aborted: true,
 							willRetry: false,
 						});
-						return;
+						return false;
 					}
 					logger.warn("Auto-handoff returned no document; falling back to context-full maintenance", {
 						reason,
@@ -6445,7 +6483,7 @@ export class AgentSession {
 					if (!autoCompactionSignal.aborted && reason !== "idle" && compactionSettings.autoContinue !== false) {
 						this.#scheduleAutoContinuePrompt(generation);
 					}
-					return;
+					return false;
 				}
 			}
 
@@ -6458,7 +6496,7 @@ export class AgentSession {
 					willRetry: false,
 					skipped: true,
 				});
-				return;
+				return false;
 			}
 
 			const availableModels = this.#modelRegistry.getAvailable();
@@ -6471,7 +6509,7 @@ export class AgentSession {
 					willRetry: false,
 					skipped: true,
 				});
-				return;
+				return false;
 			}
 
 			const pathEntries = this.sessionManager.getBranch();
@@ -6493,7 +6531,7 @@ export class AgentSession {
 						shouldContinue: () => this.agent.hasQueuedMessages(),
 					});
 				}
-				return;
+				return false;
 			}
 
 			let hookCompaction: CompactionResult | undefined;
@@ -6517,7 +6555,7 @@ export class AgentSession {
 						aborted: true,
 						willRetry: false,
 					});
-					return;
+					return false;
 				}
 
 				if (hookResult?.compaction) {
@@ -6648,7 +6686,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
-				return;
+				return false;
 			}
 
 			this.sessionManager.appendCompaction(
@@ -6719,7 +6757,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
-				return;
+				return false;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			await this.#emitSessionEvent({
@@ -6738,6 +6776,7 @@ export class AgentSession {
 				this.#autoCompactionAbortController = undefined;
 			}
 		}
+		return false;
 	}
 
 	/**
@@ -6789,10 +6828,11 @@ export class AgentSession {
 	#isTransientTransportErrorMessage(errorMessage: string): boolean {
 		// Match: overloaded_error, provider returned error, rate limit, 429, 500, 502, 503, 504,
 		// service unavailable, provider-suggested retry, network/connection/socket errors, fetch failed,
-		// terminated, retry delay exceeded
+		// terminated, retry delay exceeded, Bun HTTP/2 stream resets (RST_STREAM / REFUSED_STREAM /
+		// ENHANCE_YOUR_CALM, surfaced verbatim from src/http/h2_client/dispatch.zig)
 		return (
 			isUnexpectedSocketCloseMessage(errorMessage) ||
-			/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response/i.test(
+			/overloaded|provider.?returned.?error|rate.?limit|too many requests|429|500|502|503|504|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|other side closed|fetch failed|upstream.?connect|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)/i.test(
 				errorMessage,
 			)
 		);
@@ -7429,9 +7469,13 @@ export class AgentSession {
 				}
 			}
 
-			// Use the same session ID as eval's Python backend for kernel sharing
-			const sessionFile = this.sessionManager.getSessionFile();
-			const sessionId = sessionFile ? `session:${sessionFile}:cwd:${cwd}` : `cwd:${cwd}`;
+			// Use the same session ID as eval's Python backend for kernel sharing.
+			const sessionId =
+				this.getEvalSessionId() ??
+				defaultEvalSessionId({
+					cwd,
+					getSessionFile: () => this.sessionManager.getSessionFile() ?? null,
+				});
 			const result = await executePythonCommand(code, {
 				cwd,
 				sessionId,
@@ -7570,11 +7614,11 @@ export class AgentSession {
 	 * Generate an ephemeral reply to a background message (e.g. an IRC ping from
 	 * another agent) using this session's current model + system prompt + history.
 	 *
-	 * The reply is computed via a side-channel `streamSimple` call (analogous to
-	 * `/btw`) so it never blocks on the recipient's in-flight tool calls.  After
-	 * the reply is generated, both the incoming question and the auto-reply are
-	 * queued for injection into the recipient's persisted history so the model
-	 * sees the exchange on its next turn.  Injection happens immediately when the
+	 * The incoming message is queued for injection into the recipient's persisted
+	 * history immediately so timeouts/abort still preserve delivery. The reply is
+	 * computed via a side-channel `streamSimple` call (analogous to `/btw`) so it
+	 * never blocks on the recipient's in-flight tool calls. When a reply is
+	 * generated, it is queued separately. Injection happens immediately when the
 	 * session is idle, otherwise it is deferred until streaming ends.
 	 */
 	async respondAsBackground(args: {
@@ -7603,8 +7647,8 @@ export class AgentSession {
 			timestamp: incomingTimestamp,
 		});
 
+		this.#queueBackgroundExchangeInjection([incomingRecord]);
 		if (!awaitReply) {
-			this.#queueBackgroundExchangeInjection([incomingRecord]);
 			return { replyText: null };
 		}
 
@@ -7634,7 +7678,7 @@ export class AgentSession {
 			kind: "reply",
 			timestamp: replyRecord.timestamp,
 		});
-		this.#queueBackgroundExchangeInjection([incomingRecord, replyRecord]);
+		this.#queueBackgroundExchangeInjection([replyRecord]);
 
 		return { replyText };
 	}
@@ -7716,10 +7760,17 @@ export class AgentSession {
 			// removes the surface entirely.
 			tools: [],
 		};
+		const cacheSessionId = this.sessionId;
 		const options = this.prepareSimpleStreamOptions(
 			{
 				apiKey,
-				sessionId: this.sessionId,
+				// Side-channel turns must not share OpenAI/Codex append-only
+				// conversation state with the main agent turn: IRC and /btw can run
+				// while the main turn is mid-tool-call. Keep the prompt-cache key
+				// stable, but give provider routing a unique request lineage.
+				sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
+				promptCacheKey: cacheSessionId,
+				preferWebsockets: false,
 				reasoning: toReasoningEffort(this.thinkingLevel),
 				hideThinkingSummary: this.agent.hideThinkingSummary,
 				serviceTier: this.serviceTier,

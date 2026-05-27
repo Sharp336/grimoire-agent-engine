@@ -894,8 +894,6 @@ export class CommandController {
 		this.ctx.statusLine.setSessionStartTime(Date.now());
 		this.ctx.updateEditorTopBorder();
 		this.ctx.updateEditorBorderColor();
-		this.ctx.ui.requestRender();
-
 		this.ctx.chatContainer.clear();
 		this.ctx.pendingMessagesContainer.clear();
 		this.ctx.compactionQueuedMessages = [];
@@ -906,7 +904,7 @@ export class CommandController {
 		this.ctx.chatContainer.addChild(new Spacer(1));
 		this.ctx.chatContainer.addChild(new Text(`${theme.fg("accent", `${theme.status.success} ${label}`)}`, 1, 1));
 		await this.ctx.reloadTodos();
-		this.ctx.ui.requestRender();
+		this.ctx.ui.requestRender(true, { clearScrollback: true });
 	}
 
 	async handleClearCommand(): Promise<void> {
@@ -1370,10 +1368,12 @@ function formatUnlimitedReportLabel(report: UsageReport, index: number): string 
 }
 
 function formatResetShort(limit: UsageLimit, nowMs: number): string | undefined {
-	if (limit.window?.resetsAt !== undefined) {
-		return formatDuration(limit.window.resetsAt - nowMs);
-	}
-	return undefined;
+	const resetsAt = limit.window?.resetsAt;
+	if (resetsAt === undefined) return undefined;
+	// Codex returns the prior window's reset_at until a new request opens a fresh window —
+	// rendering a negative delta is meaningless, so drop the suffix in that case.
+	if (resetsAt <= nowMs) return undefined;
+	return formatDuration(resetsAt - nowMs);
 }
 
 function formatAccountHeaderRow(
