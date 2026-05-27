@@ -173,6 +173,12 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 		};
 	}
 
+	// When useApiKeyHeader is set for non-Anthropic proxies, always send
+	// x-api-key regardless of OAuth status — the upstream endpoint expects it.
+	const preferApiKeyHeader =
+		options.useApiKeyHeader && !isAnthropicApiBaseUrl(options.baseUrl);
+	const apiKeyHeader = { "X-Api-Key": options.apiKey };
+
 	if (oauthToken) {
 		const incomingUserAgent = getHeaderCaseInsensitive(options.modelHeaders, "User-Agent");
 		const userAgent = isClaudeCodeClientUserAgent(incomingUserAgent)
@@ -182,21 +188,24 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			...modelHeaders,
 			...claudeCodeHeaders,
 			Accept: acceptHeader,
-			Authorization: `Bearer ${options.apiKey}`,
 			...sharedHeaders,
 			"Anthropic-Beta": betaHeader,
 			"User-Agent": userAgent,
+			...(preferApiKeyHeader ? apiKeyHeader : { Authorization: `Bearer ${options.apiKey}` }),
 		};
-	} else if (!isAnthropicApiBaseUrl(options.baseUrl)) {
-		if (options.useApiKeyHeader) {
-			return {
-				...modelHeaders,
-				Accept: acceptHeader,
-				...sharedHeaders,
-				"Anthropic-Beta": betaHeader,
-				"X-Api-Key": options.apiKey,
-			};
-		}
+	}
+
+	if (preferApiKeyHeader) {
+		return {
+			...modelHeaders,
+			Accept: acceptHeader,
+			...sharedHeaders,
+			"Anthropic-Beta": betaHeader,
+			...apiKeyHeader,
+		};
+	}
+
+	if (!isAnthropicApiBaseUrl(options.baseUrl)) {
 		return {
 			...modelHeaders,
 			Accept: acceptHeader,
@@ -204,15 +213,15 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 			...sharedHeaders,
 			"Anthropic-Beta": betaHeader,
 		};
-	} else {
-		return {
-			...modelHeaders,
-			Accept: acceptHeader,
-			...sharedHeaders,
-			"Anthropic-Beta": betaHeader,
-			"X-Api-Key": options.apiKey,
-		};
 	}
+
+	return {
+		...modelHeaders,
+		Accept: acceptHeader,
+		...sharedHeaders,
+		"Anthropic-Beta": betaHeader,
+		...apiKeyHeader,
+	};
 }
 
 type AnthropicCacheControl = { type: "ephemeral"; ttl?: "1h" | "5m" };
