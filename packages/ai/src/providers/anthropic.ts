@@ -1652,9 +1652,9 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 	}
 
 	return {
-		isOAuthToken: oauthToken,
-		apiKey: oauthToken ? null : apiKey,
-		authToken: oauthToken ? apiKey : undefined,
+		isOAuthToken: oauthToken && !compat.useApiKeyHeader,
+		apiKey: oauthToken && !compat.useApiKeyHeader ? null : apiKey,
+		authToken: oauthToken && !compat.useApiKeyHeader ? apiKey : undefined,
 		baseURL: baseUrl,
 		maxRetries: 5,
 		dangerouslyAllowBrowser: true,
