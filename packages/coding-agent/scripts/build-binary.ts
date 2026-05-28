@@ -67,6 +67,10 @@ async function main(): Promise<void> {
 					// `legacy-pi-compat.ts` resolves to at runtime.
 					"./src/extensibility/typebox.ts",
 					"./src/extensibility/legacy-pi-ai-shim.ts",
+					"./src/extensibility/legacy-pi-coding-agent-shim.ts",
+					"./src/extensibility/legacy-pi-tui-shim.ts",
+					"./src/extensibility/legacy-pi-agent-core-shim.ts",
+					"./src/extensibility/legacy-pi-utils-shim.ts",
 					"--outfile",
 					"dist/omp",
 				],
