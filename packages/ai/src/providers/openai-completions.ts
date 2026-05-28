@@ -57,6 +57,11 @@ import { notifyProviderResponse } from "../utils/provider-response";
 import { callWithCopilotModelRetry } from "../utils/retry";
 import { adaptSchemaForStrict, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { wrapFetchForSseDebug } from "../utils/sse-debug";
+import {
+	DsmlToolCallHealer,
+	type HealedDsmlToolCall,
+	modelMayLeakDsmlToolCalls,
+} from "../utils/dsml-tool-call-healing";
 import { type HealedToolCall, modelMayLeakKimiToolCalls, ToolCallHealer } from "../utils/tool-call-healing";
 import { isForcedToolChoice, mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
 import {
@@ -702,6 +707,36 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				const calls = kimiHealer.drainCompleted();
 				for (const call of calls) emitHealedToolCall(call);
 			};
+			const dsmlHealer = modelMayLeakDsmlToolCalls(model.provider, model.id)
+				? new DsmlToolCallHealer()
+				: undefined;
+			const emitHealedDsmlToolCall = (call: HealedDsmlToolCall): void => {
+				finishCurrentBlock(currentBlock);
+				const block: ToolCall & { partialArgs: string } = {
+					type: "toolCall",
+					id: call.id,
+					name: call.name,
+					arguments: parseStreamingJson(call.arguments),
+					partialArgs: call.arguments,
+				};
+				currentBlock = block;
+				output.content.push(block);
+				stream.push({ type: "toolcall_start", contentIndex: blockIndex(block), partial: output });
+				stream.push({
+					type: "toolcall_delta",
+					contentIndex: blockIndex(block),
+					delta: call.arguments,
+					partial: output,
+				});
+				finishCurrentBlock(block);
+				currentBlock = undefined;
+				healedToolCallEmitted = true;
+			};
+			const flushHealedDsmlToolCalls = (): void => {
+				if (!dsmlHealer) return;
+				const calls = dsmlHealer.drainCompleted();
+				for (const call of calls) emitHealedDsmlToolCall(call);
+			};
 
 			for await (const chunk of iterateWithIdleTimeout(openaiStream, {
 				idleTimeoutMs,
@@ -745,11 +780,25 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 					const normalizedDeltaText = normalizeStreamingContentText(choice.delta.content);
 					if (normalizedDeltaText.length > 0) {
 						if (!firstTokenTime) firstTokenTime = Date.now();
-						if (parseMiniMaxThinkTags) {
-							taggedTextBuffer += normalizedDeltaText;
+						// Step 1 — DSML envelope healer: extracts structured tool calls and
+						// returns the visible-text remainder. Runs even when other healers
+						// are active so the envelope is removed before downstream stripping.
+						let processedText = normalizedDeltaText;
+						if (dsmlHealer) {
+							const hasStructuredToolCalls =
+								Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0;
+							processedText = hasStructuredToolCalls
+								? dsmlHealer.consumeWithoutCalls(normalizedDeltaText)
+								: dsmlHealer.feed(normalizedDeltaText);
+							if (!hasStructuredToolCalls) flushHealedDsmlToolCalls();
+						}
+						if (processedText.length === 0) {
+							// Healer consumed the chunk entirely (e.g. inside an envelope).
+						} else if (parseMiniMaxThinkTags) {
+							taggedTextBuffer += processedText;
 							flushTaggedTextBuffer();
 						} else if (stripDeepseekChatTemplateTokens) {
-							deepseekStripBuffer += normalizedDeltaText;
+							deepseekStripBuffer += processedText;
 							flushDeepseekStripBuffer(false);
 						} else if (kimiHealer) {
 							const hasStructuredToolCalls =
@@ -759,15 +808,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 								// Strip the marker text from visible output, but drop any
 								// synthesized calls so the structured payload stays the
 								// single source of truth (avoids double-dispatch).
-								const clean = kimiHealer.consumeWithoutCalls(normalizedDeltaText);
+								const clean = kimiHealer.consumeWithoutCalls(processedText);
 								if (clean.length > 0) appendTextDelta(clean);
 							} else {
-								const clean = kimiHealer.feed(normalizedDeltaText);
+								const clean = kimiHealer.feed(processedText);
 								if (clean.length > 0) appendTextDelta(clean);
 								flushHealedToolCalls();
 							}
 						} else {
-							appendTextDelta(normalizedDeltaText);
+							appendTextDelta(processedText);
 						}
 					}
 
@@ -875,6 +924,17 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 					// `finish_reason: stop` for the surrounding turn. Promote
 					// only that natural-completion finish — leave `error`,
 					// `length`, `aborted`, etc. untouched.
+					output.stopReason = "toolUse";
+				}
+			}
+			if (dsmlHealer) {
+				const trailing = dsmlHealer.flushPending();
+				if (trailing.length > 0) appendTextDelta(trailing);
+				flushHealedDsmlToolCalls();
+				if (healedToolCallEmitted && output.stopReason === "stop") {
+					// Envelope leak typically coincides with `finish_reason:"stop"`
+					// because the host treats the XML as plain text. Promote only
+					// natural-completion finishes; leave error/length/aborted alone.
 					output.stopReason = "toolUse";
 				}
 			}

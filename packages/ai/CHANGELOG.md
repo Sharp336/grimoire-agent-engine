@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed DeepSeek V4 Pro leaking the full DSML chat-template tool-call envelope (`<｜DSML｜tool_calls><｜DSML｜invoke name="…">…</｜DSML｜tool_calls>`) into `chunk.message.content` on Ollama Cloud and into `delta.content` on the direct DeepSeek API / NVIDIA NIM / OpenRouter / Fireworks / OpenCode Zen. A new streaming envelope healer (`packages/ai/src/utils/dsml-tool-call-healing.ts`) parses the envelope into structured `tool_calls`, suppresses the leaked text, and promotes `done_reason: "stop"` to `"toolUse"` so the agent loop dispatches the healed call instead of ending the turn ([#1462](https://github.com/can1357/oh-my-pi/issues/1462))
+
 ## [15.5.7] - 2026-05-27
 ### Added
 - `SimpleStreamOptions.openrouterVariant` (`"nitro"`, `"floor"`, `"online"`, `"exacto"`, …) — when set, appends `:<variant>` to OpenRouter model IDs at request time, leaving ids that already carry an explicit `:suffix` untouched. Plumbed through `openai-completions` and the pi-native gateway forwarder.
