@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Regenerated `models.json` from upstream catalogs, adding Claude Opus 4.8 across Anthropic, Amazon Bedrock (+EU), Google Vertex, OpenRouter, and GitHub Copilot. Entries inherit adaptive thinking with the `xhigh` effort level via the existing semver-gated policies (no engine changes required).
+
 ## [15.5.8] - 2026-05-28
 
 ### Added
