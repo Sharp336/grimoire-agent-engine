@@ -2,6 +2,59 @@
 
 ## [Unreleased]
 
+## [15.5.7] - 2026-05-27
+### Added
+- `SimpleStreamOptions.openrouterVariant` (`"nitro"`, `"floor"`, `"online"`, `"exacto"`, …) — when set, appends `:<variant>` to OpenRouter model IDs at request time, leaving ids that already carry an explicit `:suffix` untouched. Plumbed through `openai-completions` and the pi-native gateway forwarder.
+
+- xAI Grok OAuth (SuperGrok Subscription) provider in `/login`. Loopback PKCE flow on `127.0.0.1:56121`; the token unlocks Grok-4.x chat. Ported from NousResearch/hermes-agent (MIT).
+- OpenRouter provider in `/login`. API-key paste flow validated against `https://openrouter.ai/api/v1/auth/key` (the `/models` endpoint is public and cannot validate auth). The pasted key is stored under the existing `openrouter` provider id used by `OPENROUTER_API_KEY`.
+- `XAI_OAUTH_TOKEN` environment variable accepted as a headless fallback for the xAI Grok OAuth provider.
+
+### Changed
+
+- `OpenAIResponsesOptions` gains four optional, provider-agnostic fields that adapter wrappers can use to compose provider-specific behavior on top of the generic transport: `includeEncryptedReasoning` (gates `include: ["reasoning.encrypted_content"]`; default `true`, preserves current behavior), `filterReasoningHistory` (strips replayed `type: "reasoning"` items from conversation history; default `false`), `headers` (merged onto the client's default headers), and `extraBody` (merged into the request payload).
+- The existing `XAI_API_KEY` path is unchanged — it continues to use the OpenAI-completions transport.
+
+### Fixed
+
+- Fixed OpenRouter DeepSeek V4 tool-call follow-up requests replaying normalized `reasoning` as-is instead of DeepSeek's required `reasoning_content`, which caused HTTP 400 errors in thinking mode. ([#1445](https://github.com/can1357/oh-my-pi/issues/1445))
+
+## [15.5.6] - 2026-05-27
+### Added
+
+- Added `PI_CODEX_WEBSOCKET_MAX_IDLE_REUSE_MS` to control how long an idle Codex WebSocket stays eligible for reuse, with `0` disabling the check
+
+### Fixed
+
+- Fixed reused Codex WebSocket connections that had gone silent without activity to be dropped and replaced with a fresh handshake after the idle-reuse threshold, preventing stalled next requests
+- Fixed stale response frames left in the websocket queue from a completed turn so subsequent requests no longer process terminal frames from the previous response
+- Fixed websocket dead-socket detection to fail a stale connection when no inbound traffic or pong is observed after a ping timeout, improving recovery on runtimes that do not emit pong events
+
+## [15.5.5] - 2026-05-27
+
+### Added
+
+- Added `PI_CODEX_WEBSOCKET_PING_INTERVAL_MS` to configure the interval for Codex WebSocket protocol ping heartbeats
+- Added `PI_CODEX_WEBSOCKET_PONG_TIMEOUT_MS` to configure the Codex WebSocket pong timeout used to detect unresponsive connections
+- Added `PI_CODEX_WEBSOCKET_MESSAGE_QUEUE_CAPACITY` to configure the maximum buffered Codex WebSocket inbound queue size before transport fallback
+
+### Changed
+
+- Improved Codex WebSocket timeout diagnostics to include last event type and time since last progress event
+- Enhanced Codex WebSocket error classification to recognize ping, pong, send, and queue-overflow failures as retryable
+
+### Fixed
+
+- Fixed Codex WebSocket send failures by wrapping socket.send() in try-catch and surfacing errors as retryable transport errors
+- Fixed Codex WebSocket inbound queue overflow by adding capacity bounds and triggering fallback to SSE when exceeded
+- Fixed Codex WebSocket pong timeout detection by tracking pong events and failing the connection when no pong is received within the configured timeout
+- Fixed Anthropic streaming to suppress hallucinated meta-prompt thinking blocks (the recent "I don't see any current rewritten thinking..." regression). When the marker phrase `rewritten thinking` appears in a streamed thinking summary the block is collapsed to a plain `Thinking...` placeholder and its signature is dropped so subsequent turns can't re-anchor on the garbled chain.
+- Fixed Codex WebSocket silent stalls by adding protocol pings, inbound queue bounding, clearer idle-timeout diagnostics, and SDK retry clamping for first-event timeouts.
+
+### Fixed
+
+- Fixed Synthetic model discovery to treat the provider `/models` response as authoritative so deprecated bundled IDs are pruned from the runtime cache, and changed Synthetic login validation to avoid probing a specific model ([#1417](https://github.com/can1357/oh-my-pi/issues/1417)).
+
 ## [15.5.0] - 2026-05-26
 ### Added
 

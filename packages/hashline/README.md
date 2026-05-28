@@ -25,7 +25,9 @@ await fs.writeText(
 );
 
 const patcher = new Patcher({ fs });
-const patch = Patch.parse(`¶hello.ts\n1:\n+const greeting = "hello";`);
+const patch = Patch.parse(String.raw`¶hello.ts
+1:
+|const greeting = "hello";`);
 const result = await patcher.apply(patch);
 
 console.log(result.sections[0].op); // "update"
@@ -45,13 +47,11 @@ session-aware recovery).
 
 Inside a hunk:
 
-|Op|Meaning|
-|---|---|
-|`LINE↑`|Insert before LINE (or `BOF↑` for the beginning of file)|
-|`LINE↓`|Insert after LINE (or `EOF↓` for the end of file)|
-|`A-B:`|Replace lines A..B (single-anchor `A:` is sugar for `A-A:`)|
-|`A-B!`|Delete lines A..B (single-anchor `A!` is sugar for `A-A!`)|
-|`+TEXT`|Payload continuation. The `+` prefix is stripped|
+- `A-B:` — anchor lines A..B (single-anchor `A:` is sugar for `A-A:`).
+- `BOF:` / `EOF:` — virtual anchors at the beginning/end of file.
+- `|TEXT` — replace-bucket payload. A non-empty replace bucket replaces A..B.
+- `↑TEXT` — insert before A (`BOF:` treats `↑`/`↓` equivalently).
+- `↓TEXT` — insert after B (`EOF:` treats `↑`/`↓` equivalently).
 
 ## Abstractions
 
