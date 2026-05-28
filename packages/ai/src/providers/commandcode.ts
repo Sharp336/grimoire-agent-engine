@@ -22,6 +22,7 @@ import { isRecord, normalizeSystemPrompts, toNumber } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { toolWireSchema } from "../utils/schema/wire";
+import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
 export interface CommandCodeOptions extends StreamOptions {}
 
@@ -92,12 +93,27 @@ function pairedToolCallIds(messages: readonly Message[]): Set<string> {
 	return new Set(Array.from(calls).filter(id => results.has(id)));
 }
 
+function toCommandCodeUserContent(message: Message & { role: "user" | "developer" }): unknown {
+	if (typeof message.content === "string") return message.content;
+	const content = [];
+	let omittedImages = false;
+	for (const part of message.content) {
+		if (part.type === "text") {
+			content.push({ type: "text", text: part.text });
+		} else if (part.type === "image") {
+			omittedImages = true;
+		}
+	}
+	if (omittedImages) content.push({ type: "text", text: NON_VISION_IMAGE_PLACEHOLDER });
+	return content.length > 0 ? content : "";
+}
+
 function toCommandCodeMessages(messages: readonly Message[]): unknown[] {
 	const pairedIds = pairedToolCallIds(messages);
 	const converted: unknown[] = [];
 	for (const message of messages) {
 		if (message.role === "user" || message.role === "developer") {
-			converted.push({ role: "user", content: message.content });
+			converted.push({ role: "user", content: toCommandCodeUserContent(message) });
 			continue;
 		}
 		if (message.role === "assistant") {

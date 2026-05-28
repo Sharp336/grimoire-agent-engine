@@ -152,6 +152,47 @@ describe("Command Code native provider", () => {
 		expect(params?.max_tokens).toBe(65_536);
 	});
 
+	it("omits image blocks from user messages for Command Code", async () => {
+		const model = COMMAND_CODE_MODELS.find(item => item.id === "Qwen/Qwen3.7-Max") as Model<"commandcode">;
+		let requestBody: Record<string, unknown> | undefined;
+		const stream = streamCommandCode(
+			model,
+			{
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "Describe this screenshot" },
+							{ type: "image", data: "base64-image", mimeType: "image/png" },
+						],
+						timestamp: Date.now(),
+					},
+				],
+				tools: [],
+			},
+			{
+				apiKey: "test-key",
+				fetch: async (_input, init) => {
+					requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+					return ndjsonResponse([{ type: "finish", finishReason: "stop" }]);
+				},
+			},
+		);
+
+		await stream.result();
+
+		const params = requestBody?.params as Record<string, unknown> | undefined;
+		expect(params?.messages).toEqual([
+			{
+				role: "user",
+				content: [
+					{ type: "text", text: "Describe this screenshot" },
+					{ type: "text", text: "[image omitted: model does not support vision]" },
+				],
+			},
+		]);
+	});
+
 	it("translates Command Code tool calls and finish reason", async () => {
 		const model = COMMAND_CODE_MODELS[0] as Model<"commandcode">;
 		const stream = streamCommandCode(
