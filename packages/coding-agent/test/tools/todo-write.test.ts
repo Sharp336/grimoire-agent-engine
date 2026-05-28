@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { validateToolArguments } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { type TodoPhase, TodoWriteTool } from "@oh-my-pi/pi-coding-agent/tools";
@@ -200,5 +201,61 @@ describe("TodoWriteTool ops operations", () => {
 		const result = await tool.execute("call-2", { ops: [{ op: "drop", phase: "Work" }] });
 		const tasks = result.details?.phases[0]?.tasks ?? [];
 		expect(tasks.map(task => task.status)).toEqual(["abandoned", "abandoned"]);
+	});
+});
+
+describe("TodoWriteTool compatibility payloads", () => {
+	it("accepts TodoWrite-style todos snapshots from tool-call validation", () => {
+		const tool = new TodoWriteTool(createSession());
+		const args = validateToolArguments(tool, {
+			type: "toolCall",
+			id: "call-1",
+			name: "todo_write",
+			arguments: {
+				todos: [
+					{ content: "Investigate failure", status: "completed", activeForm: "Investigating failure" },
+					{ content: "Patch compatibility", status: "in_progress", activeForm: "Patching compatibility" },
+				],
+			},
+		});
+
+		expect(args).toEqual({
+			todos: [
+				{ content: "Investigate failure", status: "completed", activeForm: "Investigating failure" },
+				{ content: "Patch compatibility", status: "in_progress", activeForm: "Patching compatibility" },
+			],
+		});
+	});
+
+	it("applies TodoWrite-style todos snapshots while preserving known phases", async () => {
+		const tool = new TodoWriteTool(
+			createSession([
+				{
+					name: "Diagnosis",
+					tasks: [
+						{ content: "Investigate failure", status: "in_progress" },
+						{ content: "Old task", status: "pending" },
+					],
+				},
+			]),
+		);
+
+		const result = await tool.execute("call-1", {
+			todos: [
+				{ content: "Investigate failure", status: "completed", activeForm: "Investigating failure" },
+				{ content: "Patch compatibility", status: "pending", activeForm: "Patching compatibility" },
+			],
+		});
+
+		expect(result.details?.phases).toEqual([
+			{
+				name: "Diagnosis",
+				tasks: [{ content: "Investigate failure", status: "completed" }],
+			},
+			{
+				name: "Tasks",
+				tasks: [{ content: "Patch compatibility", status: "in_progress" }],
+			},
+		]);
 	});
 });

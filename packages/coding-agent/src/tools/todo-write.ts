@@ -53,6 +53,16 @@ const InitListEntry = z.object({
 	items: z.array(z.string().describe("task content")).min(1).describe("tasks for this phase"),
 });
 
+const TodoSnapshotEntry = z.object({
+	content: z.string().describe("task content"),
+	status: z
+		.enum(["pending", "in_progress", "completed", "abandoned"] as const)
+		.optional()
+		.describe("task status"),
+	activeForm: z.string().optional().describe("active task wording from TodoWrite-compatible clients"),
+	id: z.string().optional().describe("ignored client-local task identifier"),
+});
+
 const TodoOpEntry = z.object({
 	op: TodoOp,
 	list: z.array(InitListEntry).optional().describe("phased task list (init)"),
@@ -64,12 +74,17 @@ const TodoOpEntry = z.object({
 
 const todoWriteSchema = z
 	.object({
-		ops: z.array(TodoOpEntry).min(1).describe("ordered todo operations"),
+		ops: z.array(TodoOpEntry).min(1).optional().describe("ordered todo operations"),
+		todos: z
+			.array(TodoSnapshotEntry)
+			.optional()
+			.describe("compatibility snapshot accepted from TodoWrite-style clients; prefer ops"),
 	})
 	.describe("apply ordered todo operations");
 
 type TodoWriteParams = z.infer<typeof todoWriteSchema>;
-type TodoOpEntryValue = TodoWriteParams["ops"][number];
+type TodoOpEntryValue = z.infer<typeof TodoOpEntry>;
+type TodoSnapshotEntryValue = z.infer<typeof TodoSnapshotEntry>;
 
 // =============================================================================
 // State helpers
@@ -288,20 +303,68 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 	}
 }
 
+function statusFromSnapshot(status: TodoSnapshotEntryValue["status"]): TodoStatus {
+	return status ?? "pending";
+}
+
+function applyTodoSnapshot(previousPhases: TodoPhase[], todos: TodoSnapshotEntryValue[]): TodoPhase[] {
+	const remainingContents = new Set(todos.map(todo => todo.content));
+	const phaseByTask = new Map<string, string>();
+	for (const phase of previousPhases) {
+		for (const task of phase.tasks) {
+			phaseByTask.set(task.content, phase.name);
+		}
+	}
+
+	const nextPhases: TodoPhase[] = [];
+	const phaseLookup = new Map<string, TodoPhase>();
+	const ensurePhase = (name: string): TodoPhase => {
+		let phase = phaseLookup.get(name);
+		if (phase) return phase;
+		phase = { name, tasks: [] };
+		phaseLookup.set(name, phase);
+		nextPhases.push(phase);
+		return phase;
+	};
+
+	for (const previous of previousPhases) {
+		if (previous.tasks.some(task => remainingContents.has(task.content))) {
+			ensurePhase(previous.name);
+		}
+	}
+	for (const todo of todos) {
+		const phaseName = phaseByTask.get(todo.content) ?? "Tasks";
+		ensurePhase(phaseName).tasks.push({
+			content: todo.content,
+			status: statusFromSnapshot(todo.status),
+		});
+	}
+
+	normalizeInProgressTask(nextPhases);
+	return nextPhases;
+}
+
 function applyParams(phases: TodoPhase[], params: TodoWriteParams): { phases: TodoPhase[]; errors: string[] } {
 	const errors: string[] = [];
-	let next = phases;
-	for (const entry of params.ops) {
-		next = applyEntry(next, entry, errors);
+	if (params.ops) {
+		let next = phases;
+		for (const entry of params.ops) {
+			next = applyEntry(next, entry, errors);
+		}
+		normalizeInProgressTask(next);
+		return { phases: next, errors };
 	}
-	normalizeInProgressTask(next);
-	return { phases: next, errors };
+	if (params.todos) {
+		return { phases: applyTodoSnapshot(phases, params.todos), errors };
+	}
+	errors.push("Missing ops for todo_write operation");
+	return { phases, errors };
 }
 
 /** Apply an array of `todo_write`-style ops to existing phases. Used by /todo slash command. */
 export function applyOpsToPhases(
 	currentPhases: TodoPhase[],
-	ops: TodoWriteParams["ops"],
+	ops: TodoOpEntryValue[],
 ): { phases: TodoPhase[]; errors: string[] } {
 	return applyParams(clonePhases(currentPhases), { ops });
 }

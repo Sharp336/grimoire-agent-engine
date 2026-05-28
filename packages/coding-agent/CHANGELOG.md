@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `todo_write` failures from providers that emit TodoWrite-style `{ todos: [...] }` snapshots instead of the `ops` DSL by accepting the snapshot shape and translating it into the session's phased todo state. ([#1488](https://github.com/can1357/oh-my-pi/issues/1488))
+
 ## [15.5.10] - 2026-05-28
 
 ### Added
