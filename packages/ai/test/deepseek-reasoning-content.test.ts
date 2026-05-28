@@ -415,6 +415,71 @@ describe("DeepSeek reasoning_content tool-call replay", () => {
 			expect((assistant as { content: unknown }).content).toBe("");
 		});
 
+		it("sets reasoning_content to empty string for OpenCode Go Kimi K2.6 tool-call turns", () => {
+			const model = getBundledModel("opencode-go", "kimi-k2.6") as Model<"openai-completions">;
+			const compat = detectCompat(model);
+			expect(compat.requiresReasoningContentForToolCalls).toBe(true);
+			expect(compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
+
+			const msg = assistantToolCall(model, [
+				{
+					type: "toolCall",
+					id: "call_kimi_k26",
+					name: "read",
+					arguments: { path: "package.json" },
+				} as ToolCall,
+			]);
+			const messages = convertMessages(model, { messages: [msg] }, compat);
+			const assistant = messages.find(m => m.role === "assistant");
+			expect(assistant).toBeDefined();
+			expect(Reflect.get(assistant as object, "reasoning_content")).toBe("");
+			expect((assistant as { content: unknown }).content).toBe(".");
+		});
+
+		it("drops alternate reasoning field when normalizing to reasoning_content for OpenCode Go Kimi", () => {
+			const model = getBundledModel("opencode-go", "kimi-k2.6") as Model<"openai-completions">;
+			const compat = detectCompat(model);
+			expect(compat.requiresReasoningContentForToolCalls).toBe(true);
+			expect(compat.allowsSyntheticReasoningContentForToolCalls).toBe(false);
+
+			const msg: AssistantMessage = {
+				role: "assistant",
+				content: [
+					{
+						type: "thinking",
+						thinking: "I should read the file.",
+						thinkingSignature: "reasoning",
+					} as ThinkingContent,
+					{
+						type: "toolCall",
+						id: "call_kimi_k26",
+						name: "read",
+						arguments: { path: "package.json" },
+					} as ToolCall,
+				],
+				api: model.api,
+				provider: model.provider,
+				model: model.id,
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				timestamp: Date.now(),
+			};
+			const messages = convertMessages(model, { messages: [msg] }, compat);
+			const assistant = messages.find(m => m.role === "assistant");
+			expect(assistant).toBeDefined();
+			// Must normalize to reasoning_content — the gateway-required field
+			expect(Reflect.get(assistant as object, "reasoning_content")).toBe("I should read the file.");
+			// Must NOT leak the alternate reasoning field that was only used as a source
+			expect(Reflect.get(assistant as object, "reasoning")).toBeUndefined();
+		});
+
 		it("sets content to empty string (not null) when reasoning_content is present", () => {
 			const model = deepseekModel({
 				provider: "nvidia",
