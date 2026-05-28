@@ -378,9 +378,7 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 		let activeThinkingIndex: number | undefined;
 		let activeTextIndex: number | undefined;
 		const activeToolIndices = new Set<number>();
-		const dsmlHealer = modelMayLeakDsmlToolCalls(model.provider, model.id)
-			? new DsmlToolCallHealer()
-			: undefined;
+		const dsmlHealer = modelMayLeakDsmlToolCalls(model.provider, model.id) ? new DsmlToolCallHealer() : undefined;
 		let dsmlHealedEmitted = false;
 
 		const endActiveTextBlock = (): void => {

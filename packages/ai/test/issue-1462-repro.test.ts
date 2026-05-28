@@ -1,12 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { getBundledModel } from "../src/models";
 import { streamOpenAICompletions } from "../src/providers/openai-completions";
 import { stream } from "../src/stream";
 import type { Context, Model, ToolCall } from "../src/types";
-import {
-	DsmlToolCallHealer,
-	modelMayLeakDsmlToolCalls,
-} from "../src/utils/dsml-tool-call-healing";
+import { DsmlToolCallHealer, modelMayLeakDsmlToolCalls } from "../src/utils/dsml-tool-call-healing";
 
 const originalFetch = global.fetch;
 
@@ -100,14 +96,9 @@ describe("DSML envelope healer (unit)", () => {
 
 	it("strips the envelope from surrounding prose without losing the prose", () => {
 		const healer = new DsmlToolCallHealer();
-		const leaked =
-			"Sure, running it now:\n" +
-			REPORTED_LEAK +
-			"\nThat should give us the package list.";
+		const leaked = `Sure, running it now:\n${REPORTED_LEAK}\nThat should give us the package list.`;
 		const clean = healer.feed(leaked) + healer.flushPending();
-		expect(clean).toBe(
-			"Sure, running it now:\n\nThat should give us the package list.",
-		);
+		expect(clean).toBe("Sure, running it now:\n\nThat should give us the package list.");
 		expect(healer.drainCompleted()).toHaveLength(1);
 	});
 
@@ -135,10 +126,7 @@ describe("DSML envelope healer (unit)", () => {
 		healer.feed(xml);
 		const calls = healer.drainCompleted();
 		expect(calls.map(c => c.name)).toEqual(["read", "read"]);
-		expect(calls.map(c => JSON.parse(c.arguments))).toEqual([
-			{ path: "a.ts" },
-			{ path: "b.ts" },
-		]);
+		expect(calls.map(c => JSON.parse(c.arguments))).toEqual([{ path: "a.ts" }, { path: "b.ts" }]);
 		expect(calls[0].id).not.toBe(calls[1].id);
 	});
 
@@ -305,7 +293,18 @@ function deepseekChunk(delta: SseChoiceDelta, finish: SseChunk["choices"][0]["fi
 
 describe("openai-completions provider — DSML envelope on direct DeepSeek API", () => {
 	it("heals the envelope into a structured tool call and suppresses leaked text", async () => {
-		const model = getBundledModel("deepseek", "deepseek-v4-pro");
+		const model: Model<"openai-completions"> = {
+			id: "deepseek-v4-pro",
+			name: "DeepSeek V4 Pro",
+			api: "openai-completions",
+			provider: "deepseek",
+			baseUrl: "https://api.deepseek.com",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 131_072,
+			maxTokens: 8_192,
+		};
 		global.fetch = mockOpenAIFetch([
 			deepseekChunk({ content: "I'll check.\n" }),
 			deepseekChunk({ content: REPORTED_LEAK }),

@@ -29,15 +29,15 @@ import { parseJsonWithRepair } from "./json-parse";
 /** Both fullwidth (U+FF5C) and ASCII pipes are observed in the wild. */
 const PIPE = "[｜|]";
 
-const TC_OPEN_RE = new RegExp(String.raw`<${PIPE}DSML${PIPE}tool_calls>`, "y");
-const TC_CLOSE_RE = new RegExp(String.raw`</${PIPE}DSML${PIPE}tool_calls>`, "y");
-const INVOKE_OPEN_RE = new RegExp(String.raw`<${PIPE}DSML${PIPE}invoke\s+name="([^"]*)"\s*>`, "y");
-const INVOKE_CLOSE_RE = new RegExp(String.raw`</${PIPE}DSML${PIPE}invoke>`, "y");
+const TC_OPEN_RE = new RegExp(`<${PIPE}DSML${PIPE}tool_calls>`, "y");
+const TC_CLOSE_RE = new RegExp(`</${PIPE}DSML${PIPE}tool_calls>`, "y");
+const INVOKE_OPEN_RE = new RegExp(`<${PIPE}DSML${PIPE}invoke\\s+name="([^"]*)"\\s*>`, "y");
+const INVOKE_CLOSE_RE = new RegExp(`</${PIPE}DSML${PIPE}invoke>`, "y");
 const PARAM_OPEN_RE = new RegExp(
-	String.raw`<${PIPE}DSML${PIPE}parameter\s+name="([^"]*)"(?:\s+string="(true|false)")?\s*>`,
+	`<${PIPE}DSML${PIPE}parameter\\s+name="([^"]*)"(?:\\s+string="(true|false)")?\\s*>`,
 	"y",
 );
-const PARAM_CLOSE_RE = new RegExp(String.raw`</${PIPE}DSML${PIPE}parameter>`, "y");
+const PARAM_CLOSE_RE = new RegExp(`</${PIPE}DSML${PIPE}parameter>`, "y");
 
 /** Cap held-back buffer length so a stray `<` in normal prose can't grow it unboundedly. */
 const MAX_PARTIAL_HOLD = 256;
@@ -221,7 +221,6 @@ export class DsmlToolCallHealer {
 					continue;
 				}
 				state.value += ch;
-				continue;
 			}
 			// section / invoke: swallow inter-tag whitespace and stray text.
 		}
@@ -274,8 +273,6 @@ export class DsmlToolCallHealer {
 		});
 	}
 }
-
-
 
 function coerceParamValue(raw: string, isString: boolean): unknown {
 	if (isString) return raw;

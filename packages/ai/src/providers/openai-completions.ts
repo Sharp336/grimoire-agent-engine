@@ -37,6 +37,11 @@ import {
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { createAbortSourceTracker } from "../utils/abort";
+import {
+	DsmlToolCallHealer,
+	type HealedDsmlToolCall,
+	modelMayLeakDsmlToolCalls,
+} from "../utils/dsml-tool-call-healing";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { toFirepassWireModelId, toFireworksWireModelId } from "../utils/fireworks-model-id";
 import {
@@ -57,11 +62,6 @@ import { notifyProviderResponse } from "../utils/provider-response";
 import { callWithCopilotModelRetry } from "../utils/retry";
 import { adaptSchemaForStrict, NO_STRICT, toolWireSchema } from "../utils/schema";
 import { wrapFetchForSseDebug } from "../utils/sse-debug";
-import {
-	DsmlToolCallHealer,
-	type HealedDsmlToolCall,
-	modelMayLeakDsmlToolCalls,
-} from "../utils/dsml-tool-call-healing";
 import { type HealedToolCall, modelMayLeakKimiToolCalls, ToolCallHealer } from "../utils/tool-call-healing";
 import { isForcedToolChoice, mapToOpenAICompletionsToolChoice } from "../utils/tool-choice";
 import {
@@ -707,9 +707,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				const calls = kimiHealer.drainCompleted();
 				for (const call of calls) emitHealedToolCall(call);
 			};
-			const dsmlHealer = modelMayLeakDsmlToolCalls(model.provider, model.id)
-				? new DsmlToolCallHealer()
-				: undefined;
+			const dsmlHealer = modelMayLeakDsmlToolCalls(model.provider, model.id) ? new DsmlToolCallHealer() : undefined;
 			const emitHealedDsmlToolCall = (call: HealedDsmlToolCall): void => {
 				finishCurrentBlock(currentBlock);
 				const block: ToolCall & { partialArgs: string } = {
