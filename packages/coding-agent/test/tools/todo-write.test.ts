@@ -258,4 +258,38 @@ describe("TodoWriteTool compatibility payloads", () => {
 			},
 		]);
 	});
+
+	it("preserves notes when a TodoWrite-style snapshot updates an existing task", async () => {
+		const tool = new TodoWriteTool(
+			createSession([
+				{
+					name: "Diagnosis",
+					tasks: [
+						{
+							content: "Investigate failure",
+							status: "in_progress",
+							notes: ["stack trace shows lookup miss", "follow-up: confirm with telemetry"],
+						},
+					],
+				},
+			]),
+		);
+
+		const result = await tool.execute("call-1", {
+			todos: [{ content: "Investigate failure", status: "completed", activeForm: "Investigating failure" }],
+		});
+
+		expect(result.details?.phases).toEqual([
+			{
+				name: "Diagnosis",
+				tasks: [
+					{
+						content: "Investigate failure",
+						status: "completed",
+						notes: ["stack trace shows lookup miss", "follow-up: confirm with telemetry"],
+					},
+				],
+			},
+		]);
+	});
 });

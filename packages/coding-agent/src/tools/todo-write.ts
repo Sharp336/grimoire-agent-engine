@@ -309,10 +309,10 @@ function statusFromSnapshot(status: TodoSnapshotEntryValue["status"]): TodoStatu
 
 function applyTodoSnapshot(previousPhases: TodoPhase[], todos: TodoSnapshotEntryValue[]): TodoPhase[] {
 	const remainingContents = new Set(todos.map(todo => todo.content));
-	const phaseByTask = new Map<string, string>();
+	const existingByContent = new Map<string, { phaseName: string; task: TodoItem }>();
 	for (const phase of previousPhases) {
 		for (const task of phase.tasks) {
-			phaseByTask.set(task.content, phase.name);
+			existingByContent.set(task.content, { phaseName: phase.name, task });
 		}
 	}
 
@@ -333,11 +333,18 @@ function applyTodoSnapshot(previousPhases: TodoPhase[], todos: TodoSnapshotEntry
 		}
 	}
 	for (const todo of todos) {
-		const phaseName = phaseByTask.get(todo.content) ?? "Tasks";
-		ensurePhase(phaseName).tasks.push({
+		const existing = existingByContent.get(todo.content);
+		const phaseName = existing?.phaseName ?? "Tasks";
+		const next: TodoItem = {
 			content: todo.content,
 			status: statusFromSnapshot(todo.status),
-		});
+		};
+		// Snapshots have no notes channel — carry over any prior notes so `note`
+		// ops, `/todo edit`, and Markdown imports survive a compatibility snapshot.
+		if (existing?.task.notes && existing.task.notes.length > 0) {
+			next.notes = [...existing.task.notes];
+		}
+		ensurePhase(phaseName).tasks.push(next);
 	}
 
 	normalizeInProgressTask(nextPhases);
