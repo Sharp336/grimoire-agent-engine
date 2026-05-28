@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed DeepSeek tool calls failing on NanoGPT (e.g. `nanogpt/deepseek/deepseek-v4-pro` with reasoning enabled) by routing tool-bearing DeepSeek requests through NanoGPT's `:tools` model route and adding `nanogpt` to the DSML leak allowlist so streamed `<｜DSML｜tool_calls>...</｜DSML｜tool_calls>` envelopes are healed into structured tool calls instead of being passed through as visible text. ([#1488](https://github.com/can1357/oh-my-pi/issues/1488))
+- Fixed OpenAI-compatible streamed parallel tool calls losing indexed argument deltas by tracking active tool-call blocks by the provider's `tool_calls[].index`; this keeps parallel NanoGPT `read` calls from merging or dropping their `path` arguments. ([#1488](https://github.com/can1357/oh-my-pi/issues/1488))
 
 ## [15.5.8] - 2026-05-28
 
