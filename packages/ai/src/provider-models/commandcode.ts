@@ -1,10 +1,8 @@
 /**
  * Static Command Code model catalog.
  *
- * Command Code exposes its model catalog through its CLI/provider metadata
- * rather than a model-list endpoint. This catalog is synchronized from the
- * MIT-licensed provider source at github.com/ninehills/pi-commandcode-provider
- * (models.json, revision 960d0d1f2388d039c8e8cd8f610723c2425ca92b).
+ * Synced from https://api.commandcode.ai/provider/v1/models, Command Code docs,
+ * and the MIT-licensed reference providers.
  */
 import type { ModelManagerOptions } from "../model-manager";
 import type { Model } from "../types";
@@ -19,10 +17,22 @@ const COST_BY_MODEL: Record<string, Model<"commandcode">["cost"]> = {
 	"gpt-5.4": { input: 2.5, output: 15, cacheRead: 0.25, cacheWrite: 0 },
 	"gpt-5.3-codex": { input: 2, output: 8, cacheRead: 0.5, cacheWrite: 0 },
 	"gpt-5.4-mini": { input: 0.75, output: 4.5, cacheRead: 0.075, cacheWrite: 0 },
+	"google/gemini-3.5-flash": { input: 1.5, output: 9, cacheRead: 0.15, cacheWrite: 0 },
+	"google/gemini-3.1-flash-lite": { input: 0.25, output: 1.5, cacheRead: 0.03, cacheWrite: 0 },
 	"moonshotai/Kimi-K2.6": { input: 0.95, output: 4, cacheRead: 0.16, cacheWrite: 0 },
-	"moonshotai/Kimi-K2.5": { input: 0.6, output: 3, cacheRead: 0, cacheWrite: 0 },
-	"zai-org/GLM-5": { input: 0.95, output: 3.15, cacheRead: 0, cacheWrite: 0 },
-	"MiniMaxAI/MiniMax-M2.5": { input: 0.5, output: 2, cacheRead: 0, cacheWrite: 0 },
+	"moonshotai/Kimi-K2.5": { input: 0.6, output: 3, cacheRead: 0.1, cacheWrite: 0 },
+	"zai-org/GLM-5.1": { input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+	"zai-org/GLM-5": { input: 1, output: 3.2, cacheRead: 0.2, cacheWrite: 0 },
+	"MiniMaxAI/MiniMax-M2.7": { input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
+	"MiniMaxAI/MiniMax-M2.5": { input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0 },
+	"deepseek/deepseek-v4-pro": { input: 0.435, output: 0.87, cacheRead: 0.003625, cacheWrite: 0 },
+	"deepseek/deepseek-v4-flash": { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
+	"Qwen/Qwen3.6-Max-Preview": { input: 1.3, output: 7.8, cacheRead: 0.26, cacheWrite: 1.63 },
+	"Qwen/Qwen3.6-Plus": { input: 0.5, output: 3, cacheRead: 0.1, cacheWrite: 0 },
+	"Qwen/Qwen3.7-Max": { input: 1.25, output: 3.75, cacheRead: 0.25, cacheWrite: 1.56 },
+	"stepfun/Step-3.5-Flash": { input: 0.1, output: 0.3, cacheRead: 0.02, cacheWrite: 0 },
+	"xiaomi/mimo-v2.5-pro": { input: 0.435, output: 0.87, cacheRead: 0.0036, cacheWrite: 0 },
+	"xiaomi/mimo-v2.5": { input: 0.14, output: 0.28, cacheRead: 0.0028, cacheWrite: 0 },
 };
 
 function model(
@@ -69,6 +79,8 @@ export const COMMAND_CODE_MODELS: readonly Model<"commandcode">[] = [
 	model("Qwen/Qwen3.6-Plus", "Qwen 3.6 Plus", true, 1_000_000, 65_536),
 	model("Qwen/Qwen3.7-Max", "Qwen 3.7 Max", true, 1_000_000, 65_536),
 	model("stepfun/Step-3.5-Flash", "Step 3.5 Flash", true, 1_000_000, 65_536),
+	model("xiaomi/mimo-v2.5-pro", "MiMo V2.5 Pro", true, 1_000_000, 65_536),
+	model("xiaomi/mimo-v2.5", "MiMo V2.5", true, 1_000_000, 65_536),
 	model("google/gemini-3.5-flash", "Gemini 3.5 Flash", true, 1_000_000, 65_536),
 	model("google/gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite", true, 1_000_000, 65_536),
 ];

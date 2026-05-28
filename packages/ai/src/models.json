@@ -4323,9 +4323,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 0.14,
+				"output": 0.28,
+				"cacheRead": 0.0028,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
@@ -4347,9 +4347,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 0.435,
+				"output": 0.87,
+				"cacheRead": 0.003625,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
@@ -4371,9 +4371,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 0.25,
+				"output": 1.5,
+				"cacheRead": 0.03,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
@@ -4395,9 +4395,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 1.5,
+				"output": 9,
+				"cacheRead": 0.15,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
@@ -4516,9 +4516,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.5,
-				"output": 2,
-				"cacheRead": 0,
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.03,
 				"cacheWrite": 0
 			},
 			"contextWindow": 200000,
@@ -4535,9 +4535,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.06,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -4556,7 +4556,7 @@
 			"cost": {
 				"input": 0.6,
 				"output": 3,
-				"cacheRead": 0,
+				"cacheRead": 0.1,
 				"cacheWrite": 0
 			},
 			"contextWindow": 256000,
@@ -4592,10 +4592,10 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 1.3,
+				"output": 7.8,
+				"cacheRead": 0.26,
+				"cacheWrite": 1.63
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 65536,
@@ -4616,9 +4616,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 0.5,
+				"output": 3,
+				"cacheRead": 0.1,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
@@ -4640,10 +4640,10 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
-				"cacheWrite": 0
+				"input": 1.25,
+				"output": 3.75,
+				"cacheRead": 0.25,
+				"cacheWrite": 1.56
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 65536,
@@ -4664,9 +4664,57 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 0.1,
+				"output": 0.3,
+				"cacheRead": 0.02,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"xiaomi/mimo-v2.5": {
+			"id": "xiaomi/mimo-v2.5",
+			"name": "MiMo V2.5 (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.14,
+				"output": 0.28,
+				"cacheRead": 0.0028,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"xiaomi/mimo-v2.5-pro": {
+			"id": "xiaomi/mimo-v2.5-pro",
+			"name": "MiMo V2.5 Pro (Command Code)",
+			"api": "commandcode",
+			"provider": "commandcode",
+			"baseUrl": "https://api.commandcode.ai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.435,
+				"output": 0.87,
+				"cacheRead": 0.0036,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
@@ -4688,9 +4736,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.95,
-				"output": 3.15,
-				"cacheRead": 0,
+				"input": 1,
+				"output": 3.2,
+				"cacheRead": 0.2,
 				"cacheWrite": 0
 			},
 			"contextWindow": 200000,
@@ -4707,9 +4755,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0,
-				"output": 0,
-				"cacheRead": 0,
+				"input": 1.4,
+				"output": 4.4,
+				"cacheRead": 0.26,
 				"cacheWrite": 0
 			},
 			"contextWindow": 200000,

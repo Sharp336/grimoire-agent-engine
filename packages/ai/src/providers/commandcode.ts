@@ -26,6 +26,8 @@ import { toolWireSchema } from "../utils/schema/wire";
 export interface CommandCodeOptions extends StreamOptions {}
 
 const DEFAULT_BASE_URL = "https://api.commandcode.ai";
+const COMMAND_CODE_CLI_VERSION = "0.27.2";
+const COMMAND_CODE_MAX_OUTPUT_TOKENS = 200_000;
 
 type CommandCodeEvent = {
 	type?: string;
@@ -174,6 +176,7 @@ function buildRequest(
 	context: Context,
 	options: CommandCodeOptions,
 ): Record<string, unknown> {
+	const maxTokens = Math.min(options.maxTokens ?? model.maxTokens, model.maxTokens, COMMAND_CODE_MAX_OUTPUT_TOKENS);
 	return {
 		config: {
 			workingDir: process.cwd(),
@@ -195,7 +198,7 @@ function buildRequest(
 			messages: toCommandCodeMessages(context.messages),
 			tools: toCommandCodeTools(context.tools),
 			system: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
-			max_tokens: options.maxTokens ?? model.maxTokens,
+			max_tokens: maxTokens,
 			stream: true,
 		},
 	};
@@ -254,7 +257,7 @@ export const streamCommandCode: StreamFunction<"commandcode"> = (
 				headers: {
 					"Content-Type": "application/json",
 					Authorization: `Bearer ${apiKey}`,
-					"x-command-code-version": "0.24.1",
+					"x-command-code-version": COMMAND_CODE_CLI_VERSION,
 					"x-cli-environment": "production",
 					"x-project-slug": "omp",
 					"x-taste-learning": "false",

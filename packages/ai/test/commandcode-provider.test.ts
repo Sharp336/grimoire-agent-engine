@@ -38,6 +38,7 @@ describe("Command Code native provider", () => {
 		expect(bundled?.api).toBe("commandcode");
 		expect(bundled?.baseUrl).toBe("https://api.commandcode.ai");
 		expect(bundled?.maxTokens).toBe(200_000);
+		expect(getBundledModel("commandcode", "xiaomi/mimo-v2.5-pro")?.name).toBe("MiMo V2.5 Pro (Command Code)");
 		const bundledCodex = getBundledModel("commandcode", "gpt-5.3-codex");
 		expect(bundledCodex?.name).toBe("GPT-5.3 Codex (Command Code)");
 		expect(bundledCodex?.contextWindow).toBe(272_000);
@@ -49,6 +50,7 @@ describe("Command Code native provider", () => {
 		const model = COMMAND_CODE_MODELS.find(item => item.id === "deepseek/deepseek-v4-flash") as Model<"commandcode">;
 		let requestBody: Record<string, unknown> | undefined;
 		const authHeaders: Array<string | null> = [];
+		const versionHeaders: Array<string | null> = [];
 		const context: Context = {
 			systemPrompt: ["system one", "system two"],
 			messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
@@ -59,7 +61,9 @@ describe("Command Code native provider", () => {
 			maxTokens: 123,
 			sessionId: "session-test",
 			fetch: async (_input, init) => {
-				authHeaders.push(new Headers(init?.headers).get("Authorization"));
+				const headers = new Headers(init?.headers);
+				authHeaders.push(headers.get("Authorization"));
+				versionHeaders.push(headers.get("x-command-code-version"));
 				requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
 				return ndjsonResponse(
 					[
@@ -86,6 +90,7 @@ describe("Command Code native provider", () => {
 		const result = await stream.result();
 
 		expect(authHeaders[0]).toBe("Bearer test-key");
+		expect(versionHeaders[0]).toBe("0.27.2");
 		const params = requestBody?.params as Record<string, unknown> | undefined;
 		expect(params?.model).toBe("deepseek/deepseek-v4-flash");
 		expect(params?.system).toBe("system one\n\nsystem two");
@@ -123,6 +128,28 @@ describe("Command Code native provider", () => {
 
 		const params = requestBody?.params as Record<string, unknown> | undefined;
 		expect(params?.max_tokens).toBe(200_000);
+	});
+
+	it("caps requested maxTokens to the selected model output limit", async () => {
+		const model = COMMAND_CODE_MODELS.find(item => item.id === "Qwen/Qwen3.7-Max") as Model<"commandcode">;
+		let requestBody: Record<string, unknown> | undefined;
+		const stream = streamCommandCode(
+			model,
+			{ messages: [{ role: "user", content: "hello", timestamp: Date.now() }], tools: [] },
+			{
+				apiKey: "test-key",
+				maxTokens: 500_000,
+				fetch: async (_input, init) => {
+					requestBody = JSON.parse(String(init?.body)) as Record<string, unknown>;
+					return ndjsonResponse([{ type: "finish", finishReason: "stop" }]);
+				},
+			},
+		);
+
+		await stream.result();
+
+		const params = requestBody?.params as Record<string, unknown> | undefined;
+		expect(params?.max_tokens).toBe(65_536);
 	});
 
 	it("translates Command Code tool calls and finish reason", async () => {
