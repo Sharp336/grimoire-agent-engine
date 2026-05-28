@@ -1,8 +1,29 @@
 # Changelog
 
+## [Unreleased]
+
+## [15.5.5] - 2026-05-27
+
+### Breaking Changes
+
+- Redesigned hashline syntax around range anchors (`A-B:`, `A:`, `BOF:`, `EOF:`) and per-line payload sigils (`|`, `↑`, `↓`). Old op-line insert syntax and `\` payload continuations are no longer supported.
+
+### Added
+
+- Added `parsePatchStreaming(diff)` and `PatchSection.applyPartialTo(text, options)` for incremental diff previews. Both tolerate a trailing in-flight op (no payload yet, or a per-token parse error mid-stream) instead of throwing or emitting a phantom empty-payload edit.
+- Added `Executor.endStreaming()` — sibling of `end()` that drops a pending op with no accumulated payload rather than flushing it.
+
+### Fixed
+
+- Parser now skips markdown-style `# ...` lines when they directly precede a hashline operation, making model-generated explanatory rows in prompt examples non-blocking.
+
+### Removed
+
+- Removed legacy deletion semantics that treated bare `A-B:` as a blank-line replacement; a bare range anchor now deletes the range.
+
 All notable changes to this package will be documented in this file.
 
-## [Unreleased]
+## [15.5.4] - 2026-05-27
 ### Added
 
 - Added a high-level `Patcher` API with all-or-nothing `apply` and staged `prepare`/`commit` flows for multi-file patch updates
@@ -12,4 +33,10 @@ All notable changes to this package will be documented in this file.
 - Added automatic line-ending and BOM normalization on read, with original encoding shape restored on write
 - Added follow-up helpers `buildCompactDiffPreview` and `streamHashLines` for compact diff previews and chunked streaming of numbered lines
 - Added stale-file-hash recovery that replays edits against snapshots and merges results onto current file content when direct hash validation fails
-- Initial standalone release. Extracted from `@oh-my-pi/pi-coding-agent` with a
+- Initial standalone release. Extracted from `@oh-my-pi/pi-coding-agent`.
+
+### Fixed
+
+- Fixed repeated patch application mutating cached `after_anchor` edits between target snapshots
+- Fixed multi-section patching to preflight write policies and reject duplicate canonical targets before any section is committed
+- Fixed mixed line-ending restoration to preserve the first newline style instead of rewriting ties to LF

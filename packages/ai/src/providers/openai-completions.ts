@@ -220,6 +220,15 @@ export interface OpenAICompletionsOptions extends StreamOptions {
 	/** Force-disable reasoning where supported, or request the lowest effort on generic effort endpoints. */
 	disableReasoning?: boolean;
 	serviceTier?: ServiceTier;
+	/**
+	 * Routing-variant suffix appended to OpenRouter model IDs when none is
+	 * already present (`anthropic/claude-haiku-latest` → `…:nitro`). Common
+	 * values: `"nitro"`, `"floor"`, `"online"`, `"exacto"`. Ignored when the
+	 * resolved `model.id` already contains a colon-suffix after the last
+	 * provider segment (explicit `:nitro` in the selector or a catalog entry
+	 * with the variant baked in).
+	 */
+	openrouterVariant?: string;
 }
 
 type OpenAICompletionsParams = OpenAI.Chat.Completions.ChatCompletionCreateParamsStreaming & {
@@ -274,6 +283,24 @@ function getOpenAICompletionsProviderSessionState(
 
 function isOpenRouterAnthropicModel(model: Model<"openai-completions">): boolean {
 	return model.provider === "openrouter" && model.id.toLowerCase().startsWith("anthropic/");
+}
+
+/**
+ * Append an OpenRouter routing-variant suffix (e.g. `:nitro`, `:floor`, `:online`, `:exacto`)
+ * to a model id when no explicit variant is already present. A variant is considered
+ * "already present" when `modelId` contains a colon after the last `/` separator —
+ * which covers both user-typed selectors (`anthropic/claude-haiku:nitro`) and catalog
+ * entries that bake the variant in (`deepseek/deepseek-v3.1-terminus:exacto`).
+ *
+ * Exported for unit testing.
+ */
+export function applyOpenRouterRoutingVariant(modelId: string, variant: string | undefined): string {
+	if (!variant) return modelId;
+	const lastSlash = modelId.lastIndexOf("/");
+	const lastColon = modelId.lastIndexOf(":");
+	// Existing `:suffix` after the last path segment — leave the id untouched.
+	if (lastColon > lastSlash) return modelId;
+	return `${modelId}:${variant}`;
 }
 
 function isCompiledGrammarTooLargeStrictError(
@@ -1050,7 +1077,9 @@ function buildParams(
 			? toFireworksWireModelId(model.id)
 			: model.provider === "firepass"
 				? toFirepassWireModelId(model.id)
-				: model.id;
+				: model.provider === "openrouter"
+					? applyOpenRouterRoutingVariant(model.id, options?.openrouterVariant)
+					: model.id;
 	const params: OpenAICompletionsParams = {
 		model: requestModelId,
 		messages,
@@ -1507,12 +1536,13 @@ export function convertMessages(
 				}
 			}
 
-			if (compat.thinkingFormat === "openai" && compat.requiresReasoningContentForToolCalls) {
+			if (compat.requiresReasoningContentForToolCalls) {
 				const streamedReasoningField = nonEmptyThinkingBlocks[0]?.thinkingSignature;
 				const reasoningField =
-					streamedReasoningField === "reasoning_content" ||
-					streamedReasoningField === "reasoning" ||
-					streamedReasoningField === "reasoning_text"
+					compat.allowsSyntheticReasoningContentForToolCalls &&
+					(streamedReasoningField === "reasoning_content" ||
+						streamedReasoningField === "reasoning" ||
+						streamedReasoningField === "reasoning_text")
 						? streamedReasoningField
 						: (compat.reasoningContentField ?? "reasoning_content");
 				const reasoningContent = (assistantMsg as any)[reasoningField];
@@ -1547,9 +1577,9 @@ export function convertMessages(
 				(compat.thinkingFormat === "openai" ||
 					compat.thinkingFormat === "openrouter" ||
 					compat.thinkingFormat === "zai");
-			// DeepSeek reasoning models require reasoning_content on ALL assistant turns,
-			// not just tool-call turns. Other providers (Kimi, OpenRouter) only require it
-			// on tool-call turns.
+			// DeepSeek-compatible reasoning models require reasoning_content on all
+			// assistant turns. Providers that allow placeholders only need it on
+			// tool-call turns.
 			const needsReasoningOnAllTurns =
 				compat.requiresReasoningContentForToolCalls && !compat.allowsSyntheticReasoningContentForToolCalls;
 			const needsReasoningField = needsReasoningOnAllTurns || toolCalls.length > 0;
@@ -1576,7 +1606,8 @@ export function convertMessages(
 					const signature = allThinkingBlocks[0].thinkingSignature;
 					const recognizedFields = ["reasoning_content", "reasoning", "reasoning_text"];
 					if (signature && recognizedFields.includes(signature)) {
-						(assistantMsg as any)[signature] = allThinkingBlocks.map(b => b.thinking).join("\n");
+						const reasoningField = compat.reasoningContentField ?? "reasoning_content";
+						(assistantMsg as any)[reasoningField] = allThinkingBlocks.map(b => b.thinking).join("\n");
 						hasReasoningField = true;
 					}
 				}

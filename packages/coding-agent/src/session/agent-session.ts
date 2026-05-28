@@ -17,6 +17,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
+import { isPromise } from "node:util/types";
 import {
 	type AfterToolCallContext,
 	type AfterToolCallResult,
@@ -1307,10 +1308,25 @@ export class AgentSession {
 
 	/** Emit an event to all listeners */
 	#emit(event: AgentSessionEvent): void {
-		// Copy array before iteration to avoid mutation during iteration
+		// Copy array before iteration to avoid mutation during iteration.
 		const listeners = [...this.#eventListeners];
 		for (const l of listeners) {
-			l(event);
+			try {
+				const result = l(event) as unknown;
+				// Listener may be an async function whose returned Promise we don't await;
+				// attach a catch so a rejection does not become an unhandled rejection.
+				if (isPromise(result)) {
+					result.catch(err => {
+						logger.warn("AgentSession listener rejected", {
+							error: err instanceof Error ? err.message : String(err),
+						});
+					});
+				}
+			} catch (err) {
+				logger.warn("AgentSession listener threw", {
+					error: err instanceof Error ? err.message : String(err),
+				});
+			}
 		}
 	}
 
@@ -3615,9 +3631,17 @@ export class AgentSession {
 		const sessionOnResponse = this.#onResponse;
 		const sessionMetadata = this.agent.metadataForProvider(provider);
 		const sessionOnSseEvent = this.#onSseEvent;
-		if (!sessionOnPayload && !sessionOnResponse && !sessionMetadata && !sessionOnSseEvent) return options;
+		const openrouterRoutingPreset =
+			provider === "openrouter" ? this.settings.get("providers.openrouterVariant") : "default";
+		const openrouterVariant =
+			openrouterRoutingPreset !== "default" && options.openrouterVariant === undefined
+				? openrouterRoutingPreset
+				: undefined;
+		if (!sessionOnPayload && !sessionOnResponse && !sessionMetadata && !sessionOnSseEvent && !openrouterVariant)
+			return options;
 
-		const preparedOptions: SimpleStreamOptions = { ...options };
+		const preparedOptions: SimpleStreamOptions =
+			openrouterVariant === undefined ? { ...options } : { ...options, openrouterVariant };
 
 		// Stamp session metadata (e.g. user_id={session_id}) onto direct-call requests so
 		// they share the same session bucket as Agent.prompt-routed requests on Anthropic
@@ -3740,6 +3764,10 @@ export class AgentSession {
 
 	setPlanReferencePath(path: string): void {
 		this.#planReferencePath = path;
+	}
+
+	getPlanReferencePath(): string {
+		return this.#planReferencePath;
 	}
 
 	get clientBridge(): ClientBridge | undefined {
@@ -5559,6 +5587,11 @@ export class AgentSession {
 					initiatorOverride: "agent",
 					metadata: this.agent.metadataForProvider(model.provider),
 					telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
+					// Honor the user's /model thinking selection on the handoff
+					// path. Clamped per-model inside generateHandoff via
+					// resolveCompactionEffort so unsupported-effort models don't
+					// trip requireSupportedEffort.
+					thinkingLevel: this.thinkingLevel,
 				},
 				handoffSignal,
 			);
@@ -6329,6 +6362,11 @@ export class AgentSession {
 					metadata: this.agent.metadataForProvider(candidate.provider),
 					convertToLlm,
 					telemetry,
+					// Honor the user's /model thinking selection (incl. `off`) on
+					// the manual `/compact` path. Clamped per-model inside compact()
+					// via resolveCompactionEffort so unsupported-effort models
+					// (xai-oauth/grok-build) don't trip requireSupportedEffort.
+					thinkingLevel: this.thinkingLevel,
 				});
 			} catch (error) {
 				if (!this.#isCompactionAuthFailure(error)) {
@@ -6601,6 +6639,11 @@ export class AgentSession {
 								initiatorOverride: "agent",
 								convertToLlm,
 								telemetry,
+								// Honor the user's /model thinking selection on the
+								// auto-compaction path — the most-fired compaction
+								// site. Clamped per-model inside compact() via
+								// resolveCompactionEffort.
+								thinkingLevel: this.thinkingLevel,
 							});
 							break;
 						} catch (error) {

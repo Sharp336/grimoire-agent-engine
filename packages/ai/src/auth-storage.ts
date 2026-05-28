@@ -1281,6 +1281,25 @@ export class AuthStorage {
 	}
 
 	/**
+	 * True iff a dedicated, non-env credential source is configured for this
+	 * provider — i.e. anything in the cascade EXCEPT `getEnvApiKey(provider)`.
+	 *
+	 * Mirrors `hasAuth` minus the env-fallback leg. Useful for callers that
+	 * need to distinguish "the user explicitly configured this provider"
+	 * from "an env var happens to alias this provider via the cross-provider
+	 * fallback map" (see e.g. `xai-oauth → XAI_OAUTH_TOKEN || XAI_API_KEY` in
+	 * `stream.ts`). Without that distinction, an `XAI_API_KEY`-only setup
+	 * silently satisfies xai-oauth and routes around `providers.xai.baseUrl`.
+	 */
+	hasNonEnvCredential(provider: string): boolean {
+		if (this.#runtimeOverrides.has(provider)) return true;
+		if (this.#configOverrides.has(provider)) return true;
+		if (this.#getCredentialsForProvider(provider).length > 0) return true;
+		if (this.#fallbackResolver?.(provider)) return true;
+		return false;
+	}
+
+	/**
 	 * Check if OAuth credentials are configured for a provider.
 	 */
 	hasOAuth(provider: string): boolean {
@@ -1373,6 +1392,14 @@ export class AuthStorage {
 			case "anthropic": {
 				const { loginAnthropic } = await import("./utils/oauth/anthropic");
 				credentials = await loginAnthropic({
+					...ctrl,
+					onManualCodeInput: ctrl.onManualCodeInput ?? manualCodeInput,
+				});
+				break;
+			}
+			case "xai-oauth": {
+				const { loginXAIOAuth } = await import("./utils/oauth/xai-oauth");
+				credentials = await loginXAIOAuth({
 					...ctrl,
 					onManualCodeInput: ctrl.onManualCodeInput ?? manualCodeInput,
 				});
@@ -1583,6 +1610,12 @@ export class AuthStorage {
 			case "nanogpt": {
 				const { loginNanoGPT } = await import("./utils/oauth/nanogpt");
 				const apiKey = await loginNanoGPT(ctrl);
+				await saveApiKeyCredential(apiKey);
+				return;
+			}
+			case "openrouter": {
+				const { loginOpenRouter } = await import("./utils/oauth/openrouter");
+				const apiKey = await loginOpenRouter(ctrl);
 				await saveApiKeyCredential(apiKey);
 				return;
 			}
