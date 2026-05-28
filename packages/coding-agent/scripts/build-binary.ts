@@ -71,6 +71,7 @@ async function main(): Promise<void> {
 					"./src/extensibility/legacy-pi-tui-shim.ts",
 					"./src/extensibility/legacy-pi-agent-core-shim.ts",
 					"./src/extensibility/legacy-pi-utils-shim.ts",
+					"./src/extensibility/legacy-pi-natives-shim.ts",
 					"--outfile",
 					"dist/omp",
 				],

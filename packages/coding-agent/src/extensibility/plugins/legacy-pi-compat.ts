@@ -94,12 +94,16 @@ const LEGACY_PI_AGENT_CORE_SHIM_PATH = isCompiledBinary()
 const LEGACY_PI_UTILS_SHIM_PATH = isCompiledBinary()
 	? "/$bunfs/root/packages/coding-agent/src/extensibility/legacy-pi-utils-shim.js"
 	: path.resolve(import.meta.dir, "../legacy-pi-utils-shim.ts");
+const LEGACY_PI_NATIVES_SHIM_PATH = isCompiledBinary()
+	? "/$bunfs/root/packages/coding-agent/src/extensibility/legacy-pi-natives-shim.js"
+	: path.resolve(import.meta.dir, "../legacy-pi-natives-shim.ts");
 const LEGACY_PI_PACKAGE_ROOT_OVERRIDES: Record<string, string> = {
 	[`${CANONICAL_PI_SCOPE}/pi-ai`]: LEGACY_PI_AI_SHIM_PATH,
 	[`${CANONICAL_PI_SCOPE}/pi-coding-agent`]: LEGACY_PI_CODING_AGENT_SHIM_PATH,
 	[`${CANONICAL_PI_SCOPE}/pi-tui`]: LEGACY_PI_TUI_SHIM_PATH,
 	[`${CANONICAL_PI_SCOPE}/pi-agent-core`]: LEGACY_PI_AGENT_CORE_SHIM_PATH,
 	[`${CANONICAL_PI_SCOPE}/pi-utils`]: LEGACY_PI_UTILS_SHIM_PATH,
+	[`${CANONICAL_PI_SCOPE}/pi-natives`]: LEGACY_PI_NATIVES_SHIM_PATH,
 };
 
 let isLegacyPiSpecifierShimInstalled = false;
@@ -314,13 +318,18 @@ function resolveLegacyPiSpecifier(args: { path: string; importer: string }): { p
 	} catch {
 		// Fallback for compiled binary mode: the bundled packages live inside
 		// /$bunfs/root and aren't reachable by filesystem resolution. Try the
-		// remapped canonical specifier against the importing file's directory,
-		// which resolves to the plugin's installed peer dep (e.g., @oh-my-pi/*).
+		// remapped canonical specifier first (plugin installed @oh-my-pi/* as peer
+		// dep), then the original specifier (plugin installed @earendil-works/* or
+		// @mariozechner/* directly).
 		const importerDir = path.dirname(args.importer);
 		try {
 			return { path: Bun.resolveSync(remappedSpecifier, importerDir) };
 		} catch {
-			return undefined;
+			try {
+				return { path: Bun.resolveSync(args.path, importerDir) };
+			} catch {
+				return undefined;
+			}
 		}
 	}
 }
