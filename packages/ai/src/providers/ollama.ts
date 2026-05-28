@@ -510,11 +510,17 @@ export const streamOllama: StreamFunction<"ollama-chat"> = (
 				const structuredCalls = chunk.message?.tool_calls?.length ? chunk.message.tool_calls : undefined;
 				if (chunkContent) {
 					if (dsmlHealer) {
-						const cleaned = structuredCalls
-							? dsmlHealer.consumeWithoutCalls(chunkContent)
-							: dsmlHealer.feed(chunkContent);
-						appendVisibleText(cleaned);
-						drainHealedDsmlCalls();
+						if (structuredCalls) {
+							appendVisibleText(dsmlHealer.consumeWithoutCalls(chunkContent));
+						} else {
+							for (const event of dsmlHealer.feedEvents(chunkContent)) {
+								if (event.type === "text") {
+									appendVisibleText(event.text);
+								} else {
+									emitHealedDsmlToolCall(event.call);
+								}
+							}
+						}
 					} else {
 						appendVisibleText(chunkContent);
 					}

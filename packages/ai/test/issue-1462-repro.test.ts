@@ -102,6 +102,20 @@ describe("DSML envelope healer (unit)", () => {
 		expect(healer.drainCompleted()).toHaveLength(1);
 	});
 
+	it("preserves prose/tool-call/prose order for a single mixed chunk", () => {
+		const healer = new DsmlToolCallHealer();
+		const events = healer.feedEvents(`Before\n${REPORTED_LEAK}\nAfter`);
+		expect(events.map(event => event.type)).toEqual(["text", "toolCall", "text"]);
+
+		const [before, call, after] = events;
+		if (before?.type !== "text" || call?.type !== "toolCall" || after?.type !== "text") {
+			throw new Error("DSML healer emitted unexpected event order");
+		}
+		expect(before.text).toBe("Before\n");
+		expect(call.call.name).toBe("bash");
+		expect(after.text).toBe("\nAfter");
+	});
+
 	it("drops partial calls when the stream ends mid-envelope", () => {
 		const healer = new DsmlToolCallHealer();
 		const truncated = REPORTED_LEAK.slice(0, REPORTED_LEAK.length - 30);
@@ -163,7 +177,7 @@ describe("Ollama provider — DSML envelope leaked on deepseek-v4-pro", () => {
 				},
 				{
 					model: "deepseek-v4-pro",
-					message: { role: "assistant", content: REPORTED_LEAK },
+					message: { role: "assistant", content: `${REPORTED_LEAK}\nThat should give us the package list.` },
 					done: false,
 				},
 				{
@@ -198,11 +212,18 @@ describe("Ollama provider — DSML envelope leaked on deepseek-v4-pro", () => {
 		expect(args.timeout).toBe(15);
 		expect(String(args.command)).toContain("docker run");
 
+		const [prefix, healedCall, suffix] = result.content;
+		if (prefix?.type !== "text" || healedCall?.type !== "toolCall" || suffix?.type !== "text") {
+			throw new Error("Ollama DSML healing emitted unexpected content order");
+		}
+		expect(prefix.text).toBe(" 精神精神\n\n");
+		expect(healedCall.name).toBe("bash");
+		expect(suffix.text).toBe("\nThat should give us the package list.");
+
 		// `done_reason:"stop"` must be promoted: the agent loop depends on
 		// `toolUse` to dispatch the call instead of ending the turn.
 		expect(result.stopReason).toBe("toolUse");
 	});
-
 	it("does not run the healer when the model is not DeepSeek", async () => {
 		const ollamaGptOss: Model<"ollama-chat"> = {
 			...deepseekCloudModel,
@@ -307,7 +328,7 @@ describe("openai-completions provider — DSML envelope on direct DeepSeek API",
 		};
 		global.fetch = mockOpenAIFetch([
 			deepseekChunk({ content: "I'll check.\n" }),
-			deepseekChunk({ content: REPORTED_LEAK }),
+			deepseekChunk({ content: `${REPORTED_LEAK}\nThat should give us the package list.` }),
 			deepseekChunk({}, "stop"),
 			"[DONE]",
 		]);
@@ -332,6 +353,14 @@ describe("openai-completions provider — DSML envelope on direct DeepSeek API",
 		const args = toolCalls[0].arguments as Record<string, unknown>;
 		expect(args._i).toBe("Check Fedora 42 available packages");
 		expect(args.timeout).toBe(15);
+
+		const [prefix, healedCall, suffix] = result.content;
+		if (prefix?.type !== "text" || healedCall?.type !== "toolCall" || suffix?.type !== "text") {
+			throw new Error("OpenAI DSML healing emitted unexpected content order");
+		}
+		expect(prefix.text).toBe("I'll check.\n");
+		expect(healedCall.name).toBe("bash");
+		expect(suffix.text).toBe("\nThat should give us the package list.");
 
 		// finish_reason:"stop" must be promoted so the agent loop dispatches.
 		expect(result.stopReason).toBe("toolUse");

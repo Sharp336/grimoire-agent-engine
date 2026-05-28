@@ -51,6 +51,11 @@ export interface HealedDsmlToolCall {
 	readonly arguments: string;
 }
 
+/** Ordered output produced while stripping a DSML envelope from streamed text. */
+export type DsmlToolCallHealerEvent =
+	| { readonly type: "text"; readonly text: string }
+	| { readonly type: "toolCall"; readonly call: HealedDsmlToolCall };
+
 type State =
 	| { kind: "idle" }
 	| { kind: "section" }
@@ -86,10 +91,26 @@ export class DsmlToolCallHealer {
 	 * until the next {@link feed} call or {@link flushPending}.
 	 */
 	feed(text: string): string {
-		if (text.length === 0) return "";
+		let clean = "";
+		for (const event of this.feedEvents(text)) {
+			if (event.type === "text") {
+				clean += event.text;
+			} else {
+				this.#completed.push(event.call);
+			}
+		}
+		return clean;
+	}
+
+	/**
+	 * Feed a chunk of streamed text. Returns visible text and healed tool calls
+	 * in the order they appeared in the stream.
+	 */
+	feedEvents(text: string): DsmlToolCallHealerEvent[] {
+		if (text.length === 0) return [];
 		this.#compact();
 		this.#buffer += text;
-		return this.#consume();
+		return this.#consumeEvents();
 	}
 
 	/**
@@ -99,8 +120,10 @@ export class DsmlToolCallHealer {
 	 * output, but the structured payload remains the single source of truth.
 	 */
 	consumeWithoutCalls(text: string): string {
-		const clean = this.feed(text);
-		if (this.#completed.length > 0) this.#completed.length = 0;
+		let clean = "";
+		for (const event of this.feedEvents(text)) {
+			if (event.type === "text") clean += event.text;
+		}
 		return clean;
 	}
 
@@ -144,8 +167,15 @@ export class DsmlToolCallHealer {
 		this.#offset = 0;
 	}
 
-	#consume(): string {
+	#consumeEvents(): DsmlToolCallHealerEvent[] {
+		const events: DsmlToolCallHealerEvent[] = [];
 		let clean = "";
+		const flushClean = (): void => {
+			if (clean.length === 0) return;
+			events.push({ type: "text", text: clean });
+			clean = "";
+		};
+
 		while (this.#offset < this.#buffer.length) {
 			const state = this.#state;
 
@@ -172,7 +202,9 @@ export class DsmlToolCallHealer {
 				}
 			} else if (state.kind === "invoke") {
 				if (this.#tryMatch(INVOKE_CLOSE_RE)) {
-					this.#finalizeCall(state.name, state.args);
+					const call = this.#finalizeCall(state.name, state.args);
+					flushClean();
+					events.push({ type: "toolCall", call });
 					this.#state = { kind: "section" };
 					continue;
 				}
@@ -224,7 +256,8 @@ export class DsmlToolCallHealer {
 			}
 			// section / invoke: swallow inter-tag whitespace and stray text.
 		}
-		return clean;
+		flushClean();
+		return events;
 	}
 
 	#tryMatch(pattern: RegExp): boolean {
@@ -264,13 +297,12 @@ export class DsmlToolCallHealer {
 		return true;
 	}
 
-	#finalizeCall(name: string, args: Record<string, unknown>): void {
-		const id = generateHealedDsmlCallId();
-		this.#completed.push({
-			id,
+	#finalizeCall(name: string, args: Record<string, unknown>): HealedDsmlToolCall {
+		return {
+			id: generateHealedDsmlCallId(),
 			name: name.trim(),
 			arguments: JSON.stringify(args),
-		});
+		};
 	}
 }
 

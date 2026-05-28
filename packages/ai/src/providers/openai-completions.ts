@@ -778,43 +778,48 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 					const normalizedDeltaText = normalizeStreamingContentText(choice.delta.content);
 					if (normalizedDeltaText.length > 0) {
 						if (!firstTokenTime) firstTokenTime = Date.now();
-						// Step 1 — DSML envelope healer: extracts structured tool calls and
-						// returns the visible-text remainder. Runs even when other healers
-						// are active so the envelope is removed before downstream stripping.
-						let processedText = normalizedDeltaText;
-						if (dsmlHealer) {
-							const hasStructuredToolCalls =
-								Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0;
-							processedText = hasStructuredToolCalls
-								? dsmlHealer.consumeWithoutCalls(normalizedDeltaText)
-								: dsmlHealer.feed(normalizedDeltaText);
-							if (!hasStructuredToolCalls) flushHealedDsmlToolCalls();
-						}
-						if (processedText.length === 0) {
-							// Healer consumed the chunk entirely (e.g. inside an envelope).
-						} else if (parseMiniMaxThinkTags) {
-							taggedTextBuffer += processedText;
-							flushTaggedTextBuffer();
-						} else if (stripDeepseekChatTemplateTokens) {
-							deepseekStripBuffer += processedText;
-							flushDeepseekStripBuffer(false);
-						} else if (kimiHealer) {
-							const hasStructuredToolCalls =
-								Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0;
-							if (hasStructuredToolCalls) {
-								// Same chunk leaks markers AND carries structured tool_calls.
-								// Strip the marker text from visible output, but drop any
-								// synthesized calls so the structured payload stays the
-								// single source of truth (avoids double-dispatch).
-								const clean = kimiHealer.consumeWithoutCalls(processedText);
-								if (clean.length > 0) appendTextDelta(clean);
+						const hasStructuredDeltaToolCalls =
+							Array.isArray(choice.delta.tool_calls) && choice.delta.tool_calls.length > 0;
+						const appendProcessedText = (processedText: string): void => {
+							if (processedText.length === 0) {
+								// Healer consumed the chunk entirely (e.g. inside an envelope).
+							} else if (parseMiniMaxThinkTags) {
+								taggedTextBuffer += processedText;
+								flushTaggedTextBuffer();
+							} else if (stripDeepseekChatTemplateTokens) {
+								deepseekStripBuffer += processedText;
+								flushDeepseekStripBuffer(false);
+							} else if (kimiHealer) {
+								if (hasStructuredDeltaToolCalls) {
+									// Same chunk leaks markers AND carries structured tool_calls.
+									// Strip the marker text from visible output, but drop any
+									// synthesized calls so the structured payload stays the
+									// single source of truth (avoids double-dispatch).
+									const clean = kimiHealer.consumeWithoutCalls(processedText);
+									if (clean.length > 0) appendTextDelta(clean);
+								} else {
+									const clean = kimiHealer.feed(processedText);
+									if (clean.length > 0) appendTextDelta(clean);
+									flushHealedToolCalls();
+								}
 							} else {
-								const clean = kimiHealer.feed(processedText);
-								if (clean.length > 0) appendTextDelta(clean);
-								flushHealedToolCalls();
+								appendTextDelta(processedText);
+							}
+						};
+
+						if (dsmlHealer && !hasStructuredDeltaToolCalls) {
+							for (const event of dsmlHealer.feedEvents(normalizedDeltaText)) {
+								if (event.type === "text") {
+									appendProcessedText(event.text);
+								} else {
+									emitHealedDsmlToolCall(event.call);
+								}
 							}
 						} else {
-							appendTextDelta(processedText);
+							const processedText = dsmlHealer
+								? dsmlHealer.consumeWithoutCalls(normalizedDeltaText)
+								: normalizedDeltaText;
+							appendProcessedText(processedText);
 						}
 					}
 
