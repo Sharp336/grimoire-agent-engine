@@ -45,47 +45,6 @@ describe("Command Code browser-assisted login", () => {
 		expect(await loginPromise).toBe("user_browser_key");
 	});
 
-	it("uses a forced callback port from the remote-login environment", async () => {
-		const originalPort = Bun.env.OMP_COMMANDCODE_CALLBACK_PORT;
-		const probe = await startCommandCodeAuthServer({ startPort: 0 });
-		const port = probe.port;
-		probe.server.stop(true);
-		await Bun.sleep(1);
-
-		try {
-			Bun.env.OMP_COMMANDCODE_CALLBACK_PORT = String(port);
-			let authUrl = "";
-			const loginPromise = loginCommandCode({
-				onAuth: info => {
-					authUrl = info.url;
-				},
-				onPrompt: async () => {
-					throw new Error("manual prompt should not be used");
-				},
-			});
-
-			const url = new URL(await waitUntilAuthUrl(() => authUrl));
-			const callback = new URL(url.searchParams.get("callback") ?? "");
-			const state = url.searchParams.get("state") ?? "";
-			expect(callback.port).toBe(String(port));
-
-			const response = await fetch(callback, {
-				method: "POST",
-				headers: { "Content-Type": "application/json", Origin: "https://commandcode.ai" },
-				body: JSON.stringify({ apiKey: "user_forced_port_key", state }),
-			});
-
-			expect(response.status).toBe(200);
-			expect(await loginPromise).toBe("user_forced_port_key");
-		} finally {
-			if (originalPort === undefined) {
-				delete Bun.env.OMP_COMMANDCODE_CALLBACK_PORT;
-			} else {
-				Bun.env.OMP_COMMANDCODE_CALLBACK_PORT = originalPort;
-			}
-		}
-	});
-
 	it("falls back to sanitized manual key input when callback transfer times out", async () => {
 		const key = await loginCommandCode(
 			{ onPrompt: async () => "\u001b[200~ user_manual_key\n\u001b[201~" },

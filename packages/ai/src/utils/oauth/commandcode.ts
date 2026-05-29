@@ -12,7 +12,6 @@ const CALLBACK_PATH = "/callback";
 const CALLBACK_HOST = "127.0.0.1";
 const START_PORT = 5959;
 const PORT_RANGE = 10;
-const CALLBACK_PORT_ENV = "OMP_COMMANDCODE_CALLBACK_PORT";
 const AUTH_TIMEOUT_MS = 15_000;
 const ALLOWED_ORIGINS = new Set(["https://commandcode.ai", "https://staging.commandcode.ai", "http://localhost:3000"]);
 
@@ -30,7 +29,6 @@ export interface CommandCodeAuthServer {
 export interface CommandCodeAuthServerOptions {
 	startPort?: number;
 	portRange?: number;
-	allowEphemeralFallback?: boolean;
 }
 
 export interface CommandCodeLoginOptions {
@@ -123,7 +121,7 @@ export async function startCommandCodeAuthServer(
 	const startPort = options.startPort ?? START_PORT;
 	const portRange = options.portRange ?? PORT_RANGE;
 	const attempts = startPort === 0 ? [0] : Array.from({ length: portRange }, (_, index) => startPort + index);
-	const ports = options.allowEphemeralFallback === false || attempts.includes(0) ? attempts : [...attempts, 0];
+	const ports = attempts.includes(0) ? attempts : [...attempts, 0];
 	for (const port of ports) {
 		try {
 			const server = startServerOnPort(port, resolve, reject);
@@ -139,26 +137,6 @@ export async function startCommandCodeAuthServer(
 		}
 	}
 	throw new Error("Unable to start Command Code callback server");
-}
-
-function readForcedCallbackPort(): number | undefined {
-	const raw = Bun.env[CALLBACK_PORT_ENV];
-	if (!raw) return undefined;
-	const port = Number.parseInt(raw, 10);
-	if (!Number.isInteger(port) || port <= 0 || port > 65_535) return undefined;
-	return port;
-}
-
-function startLoginAuthServer(): Promise<CommandCodeAuthServer> {
-	const forcedPort = readForcedCallbackPort();
-	if (forcedPort !== undefined) {
-		return startCommandCodeAuthServer({
-			startPort: forcedPort,
-			portRange: 1,
-			allowEphemeralFallback: false,
-		});
-	}
-	return startCommandCodeAuthServer();
 }
 
 export function sanitizeCommandCodeApiKey(input: string): string {
@@ -203,7 +181,7 @@ export async function loginCommandCode(ctrl: OAuthController, options: CommandCo
 	if (ctrl.signal?.aborted) throw new Error("Login cancelled");
 	let server: CommandCodeAuthServer;
 	try {
-		server = await (options.startAuthServer ?? startLoginAuthServer)();
+		server = await (options.startAuthServer ?? startCommandCodeAuthServer)();
 	} catch {
 		return promptForApiKey(ctrl);
 	}

@@ -75,16 +75,13 @@ const ACTIONS: readonly AuthBrokerAction[] = [
 ];
 
 /** Callback ports baked from the per-provider OAuth flow modules. */
-const CALLBACK_PORTS: Record<string, readonly number[]> = {
-	anthropic: [54545],
-	"openai-codex": [1455],
-	"google-gemini-cli": [8085],
-	"google-antigravity": [51121],
-	"gitlab-duo": [8080],
-	commandcode: Array.from({ length: 10 }, (_, index) => 5959 + index),
+const CALLBACK_PORTS: Record<string, number> = {
+	anthropic: 54545,
+	"openai-codex": 1455,
+	"google-gemini-cli": 8085,
+	"google-antigravity": 51121,
+	"gitlab-duo": 8080,
 };
-
-const COMMAND_CODE_CALLBACK_PORT_ENV = "OMP_COMMANDCODE_CALLBACK_PORT";
 
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker.token");
@@ -314,20 +311,19 @@ async function pickProviderInteractively(providers: readonly OAuthProviderInfo[]
 }
 
 async function runRemoteLogin(provider: string, via: string, dryRun: boolean): Promise<void> {
-	const ports = CALLBACK_PORTS[provider];
-	if (ports === undefined) {
+	const port = CALLBACK_PORTS[provider];
+	if (port === undefined) {
 		throw new Error(
 			`No known OAuth callback port for '${provider}'. Use device-code flow on the broker host directly.`,
 		);
 	}
-	const forwardedPorts = await selectForwardedCallbackPorts(provider, ports);
-	const remoteCommand = remoteLoginCommand(provider, forwardedPorts);
 	const sshArgs = [
-		...forwardedPorts.flatMap(port => ["-L", `${port}:127.0.0.1:${port}`]),
+		"-L",
+		`${port}:127.0.0.1:${port}`,
 		"-o",
 		"ExitOnForwardFailure=yes",
 		via,
-		remoteCommand,
+		`${APP_NAME} auth-broker login ${provider}`,
 	];
 	if (dryRun) {
 		process.stdout.write(`ssh ${sshArgs.map(a => (a.includes(" ") ? `'${a}'` : a)).join(" ")}\n`);
@@ -347,39 +343,6 @@ async function runRemoteLogin(provider: string, via: string, dryRun: boolean): P
 	if (exitCode !== 0) {
 		throw new Error(`ssh exited with code ${exitCode}`);
 	}
-}
-
-async function selectForwardedCallbackPorts(provider: string, ports: readonly number[]): Promise<readonly number[]> {
-	if (provider !== "commandcode") return ports;
-	for (const port of ports) {
-		if (await canBindLoopbackPort(port)) return [port];
-	}
-	throw new Error(`No available local callback port for '${provider}' in ${ports[0]}-${ports[ports.length - 1]}`);
-}
-
-async function canBindLoopbackPort(port: number): Promise<boolean> {
-	let server: Bun.Server<undefined> | undefined;
-	try {
-		server = Bun.serve({
-			hostname: "127.0.0.1",
-			port,
-			fetch: () => new Response(null, { status: 204 }),
-		});
-		return true;
-	} catch (error) {
-		const code = error instanceof Error && "code" in error ? error.code : undefined;
-		if (code === "EADDRINUSE") return false;
-		throw error;
-	} finally {
-		server?.stop(true);
-	}
-}
-
-function remoteLoginCommand(provider: string, forwardedPorts: readonly number[]): string {
-	const base = `${APP_NAME} auth-broker login ${provider}`;
-	if (provider !== "commandcode") return base;
-	const port = forwardedPorts[0];
-	return `${COMMAND_CODE_CALLBACK_PORT_ENV}=${port} ${base}`;
 }
 
 async function runLogout(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
