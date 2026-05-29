@@ -191,6 +191,51 @@ describe("model scope enforcement", () => {
 		});
 	});
 
+	it("keeps OpenRouter route-suffix scope clones available without broadening to the base model", async () => {
+		const baseModel: Model = {
+			id: "z-ai/glm-4.7",
+			name: "GLM 4.7",
+			api: "anthropic-messages",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			thinking: {
+				mode: "budget",
+				minLevel: Effort.Minimal,
+				maxLevel: Effort.High,
+			},
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0.1, cacheWrite: 1 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		};
+		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
+		vi.spyOn(modelRegistry, "getAvailable").mockImplementation(() => [baseModel]);
+		vi.spyOn(modelRegistry, "getAll").mockImplementation(() => [baseModel]);
+
+		const result = await createAgentSession({
+			cwd: tempDir.path(),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({}),
+			sessionManager: SessionManager.inMemory(),
+			modelScopePatterns: ["openrouter/z-ai/glm-4.7-20251222:nitro"],
+			preferScopedModelOrder: true,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+		session = result.session;
+
+		expect(session.model ? modelKey(session.model) : undefined).toBe("openrouter/z-ai/glm-4.7-20251222:nitro");
+		expect(session.getAvailableModels().map(modelKey)).toEqual(["openrouter/z-ai/glm-4.7-20251222:nitro"]);
+		await expect(session.setModel(baseModel)).rejects.toThrow("outside active model scope");
+	});
+
 	it("restores saved scoped models after deferred CLI scope credentials are applied", async () => {
 		const firstScopedModel = requireModel("openai", "gpt-4o-mini");
 		const savedModel = requireModel("openai", "gpt-5");

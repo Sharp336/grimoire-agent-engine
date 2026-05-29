@@ -33,6 +33,52 @@ export interface ModelScopeEntry {
 	model: Model<Api>;
 }
 
+function getModelKey(model: Model<Api>): string {
+	return `${model.provider}/${model.id}`;
+}
+
+interface ResolvedScopedModel<T extends Model<Api>> {
+	model: T;
+	key: string;
+	candidateIndex: number;
+	scopeIndex: number;
+}
+
+function findScopedModelCandidateIndex<T extends Model<Api>>(
+	models: readonly T[],
+	scoped: ModelScopeEntry,
+	resolved: T,
+): number {
+	const exactIndex = models.findIndex(candidate => modelsAreEqual(candidate, resolved));
+	if (exactIndex !== -1) return exactIndex;
+
+	return models.findIndex(candidate => {
+		const resolvedFromCandidate = resolveProviderModelReference(scoped.model.provider, scoped.model.id, [candidate]);
+		return modelsAreEqual(resolvedFromCandidate, resolved);
+	});
+}
+
+function resolveScopedModels<T extends Model<Api>>(
+	models: readonly T[],
+	scopedModels: readonly ModelScopeEntry[],
+): ResolvedScopedModel<T>[] {
+	const resolved: ResolvedScopedModel<T>[] = [];
+	for (let scopeIndex = 0; scopeIndex < scopedModels.length; scopeIndex += 1) {
+		const scoped = scopedModels[scopeIndex];
+		const model = resolveProviderModelReference(scoped.model.provider, scoped.model.id, models);
+		if (!model) continue;
+		const candidateIndex = findScopedModelCandidateIndex(models, scoped, model);
+		if (candidateIndex === -1) continue;
+		resolved.push({
+			model,
+			key: getModelKey(model),
+			candidateIndex,
+			scopeIndex,
+		});
+	}
+	return resolved;
+}
+
 export function isModelInScope(model: Model<Api>, scopedModels: readonly ModelScopeEntry[] | undefined): boolean {
 	if (scopedModels === undefined) return true;
 	return scopedModels.some(scoped => modelsAreEqual(scoped.model, model));
@@ -43,7 +89,18 @@ export function filterModelsByScope<T extends Model<Api>>(
 	scopedModels: readonly ModelScopeEntry[] | undefined,
 ): T[] {
 	if (scopedModels === undefined) return [...models];
-	return models.filter(model => isModelInScope(model, scopedModels));
+	const result: T[] = [];
+	const seen = new Set<string>();
+	const resolved = resolveScopedModels(models, scopedModels).sort((a, b) => {
+		if (a.candidateIndex !== b.candidateIndex) return a.candidateIndex - b.candidateIndex;
+		return a.scopeIndex - b.scopeIndex;
+	});
+	for (const entry of resolved) {
+		if (seen.has(entry.key)) continue;
+		seen.add(entry.key);
+		result.push(entry.model);
+	}
+	return result;
 }
 
 export function filterModelsByScopeOrder<T extends Model<Api>>(
@@ -51,19 +108,12 @@ export function filterModelsByScopeOrder<T extends Model<Api>>(
 	scopedModels: readonly ModelScopeEntry[] | undefined,
 ): T[] {
 	if (scopedModels === undefined) return [...models];
-	const candidatesByKey = new Map<string, T>();
-	for (const model of models) {
-		candidatesByKey.set(`${model.provider}/${model.id}`, model);
-	}
 	const result: T[] = [];
 	const seen = new Set<string>();
-	for (const scoped of scopedModels) {
-		const key = `${scoped.model.provider}/${scoped.model.id}`;
-		if (seen.has(key)) continue;
-		const candidate = candidatesByKey.get(key);
-		if (!candidate) continue;
-		seen.add(key);
-		result.push(candidate);
+	for (const entry of resolveScopedModels(models, scopedModels)) {
+		if (seen.has(entry.key)) continue;
+		seen.add(entry.key);
+		result.push(entry.model);
 	}
 	return result;
 }
@@ -101,7 +151,7 @@ export function parseModelString(
  * Format a model as "provider/modelId" string.
  */
 export function formatModelString(model: Model<Api>): string {
-	return `${model.provider}/${model.id}`;
+	return getModelKey(model);
 }
 
 export function formatModelSelectorValue(selector: string, thinkingLevel: ThinkingLevel | undefined): string {
@@ -162,7 +212,7 @@ function getOpenRouterFallbackModelIds(modelId: string): string[] {
 	return orderedCandidates;
 }
 
-function cloneModelWithRequestedId(model: Model<Api>, requestedId: string): Model<Api> {
+function cloneModelWithRequestedId<T extends Model<Api>>(model: T, requestedId: string): T {
 	return {
 		...model,
 		id: requestedId,
@@ -171,15 +221,15 @@ function cloneModelWithRequestedId(model: Model<Api>, requestedId: string): Mode
 }
 
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");
-type ModelsWithProviderIndex = readonly Model<Api>[] & {
-	[kProviderModelIndex]?: Map<string, Model<Api> | null>;
+type ModelsWithProviderIndex<T extends Model<Api>> = readonly T[] & {
+	[kProviderModelIndex]?: Map<string, T | null>;
 };
 
-function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
-	const tagged = availableModels as ModelsWithProviderIndex;
+function getProviderModelIndex<T extends Model<Api>>(availableModels: readonly T[]): Map<string, T | null> {
+	const tagged = availableModels as ModelsWithProviderIndex<T>;
 	const cached = tagged[kProviderModelIndex];
 	if (cached) return cached;
-	const index = new Map<string, Model<Api> | null>();
+	const index = new Map<string, T | null>();
 	for (const m of availableModels) {
 		const key = `${m.provider.toLowerCase()}\u0000${m.id.toLowerCase()}`;
 		if (index.has(key)) {
@@ -192,11 +242,11 @@ function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<stri
 	return index;
 }
 
-export function resolveProviderModelReference(
+export function resolveProviderModelReference<T extends Model<Api>>(
 	provider: string,
 	modelId: string,
-	availableModels: readonly Model<Api>[],
-): Model<Api> | undefined {
+	availableModels: readonly T[],
+): T | undefined {
 	const normalizedProvider = provider.trim().toLowerCase();
 	const normalizedModelId = modelId.trim().toLowerCase();
 	if (!normalizedProvider || !normalizedModelId) {

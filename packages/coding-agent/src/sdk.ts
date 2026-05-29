@@ -1143,8 +1143,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (thinkingLevel === undefined) {
 		thinkingLevel = settings.get("defaultThinkingLevel");
 	}
+	const toEffectiveThinkingLevel = (level: ConfiguredThinkingLevel | undefined): ThinkingLevel | undefined =>
+		level === AUTO_THINKING ? undefined : level;
 	let autoThinking = thinkingLevel === AUTO_THINKING;
-	let effectiveThinkingLevel: ThinkingLevel | undefined = autoThinking ? undefined : thinkingLevel;
+	let effectiveThinkingLevel: ThinkingLevel | undefined = toEffectiveThinkingLevel(thinkingLevel);
 	const applySelectedModelThinking = (selectedModel: Model): void => {
 		if (!preserveRequestedThinking) {
 			const scopedModel = getActiveScopedModels()?.find(
@@ -1158,7 +1160,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 		}
 		autoThinking = thinkingLevel === AUTO_THINKING;
-		effectiveThinkingLevel = autoThinking ? undefined : thinkingLevel;
+		effectiveThinkingLevel = toEffectiveThinkingLevel(thinkingLevel);
 		effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
 			autoThinking
 				? resolveProvisionalAutoLevel(selectedModel)

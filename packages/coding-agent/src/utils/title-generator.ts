@@ -152,7 +152,16 @@ export async function generateSessionTitle(
 ): Promise<string | null> {
 	const tinyModel = settings.get("providers.tinyModel");
 	if (tinyModel === ONLINE_TINY_TITLE_MODEL_KEY) {
-		return generateTitleOnline(firstMessage, registry, settings, sessionId, currentModel, metadataResolver, undefined, availableModels);
+		return generateTitleOnline(
+			firstMessage,
+			registry,
+			settings,
+			sessionId,
+			currentModel,
+			metadataResolver,
+			undefined,
+			availableModels,
+		);
 	}
 
 	const onlineAbortController = new AbortController();

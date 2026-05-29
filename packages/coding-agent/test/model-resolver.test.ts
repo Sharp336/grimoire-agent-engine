@@ -2,6 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import {
 	expandRoleAlias,
+	filterModelsByScope,
+	filterModelsByScopeOrder,
 	parseModelPattern,
 	parseModelString,
 	resolveAgentModelPatterns,
@@ -787,6 +789,10 @@ describe("resolveCliModel", () => {
 });
 
 describe("resolveModelScope", () => {
+	function modelKeys(models: readonly Model[]): string[] {
+		return models.map(model => `${model.provider}/${model.id}`);
+	}
+
 	test("expands exact canonical ids into all concrete variants", async () => {
 		const scoped = await resolveModelScope(["claude-sonnet-4-5"], {
 			getAvailable: () => canonicalVariantModels,
@@ -830,6 +836,41 @@ describe("resolveModelScope", () => {
 		} as unknown as Parameters<typeof resolveModelScope>[1]);
 
 		expect(scoped.map(entry => `${entry.model.provider}/${entry.model.id}`)).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
+
+	test("keeps OpenRouter route-suffix clones in scope filters", async () => {
+		const scoped = await resolveModelScope(["openrouter/z-ai/glm-4.7-20251222:nitro"], {
+			getAvailable: () => allModels,
+			getCanonicalVariants: () => [],
+		} as unknown as Parameters<typeof resolveModelScope>[1]);
+
+		expect(scoped.map(entry => `${entry.model.provider}/${entry.model.id}`)).toEqual([
+			"openrouter/z-ai/glm-4.7-20251222:nitro",
+		]);
+		expect(modelKeys(filterModelsByScopeOrder(allModels, scoped))).toEqual([
+			"openrouter/z-ai/glm-4.7-20251222:nitro",
+		]);
+		expect(modelKeys(filterModelsByScope(allModels, scoped))).toEqual(["openrouter/z-ai/glm-4.7-20251222:nitro"]);
+		expect(modelKeys(filterModelsByScopeOrder(allModels, scoped))).not.toContain("openrouter/z-ai/glm-4.7");
+	});
+
+	test("keeps distinct OpenRouter route-suffix clones backed by one catalog model", async () => {
+		const scoped = await resolveModelScope(
+			[
+				"openrouter/z-ai/glm-4.7-20251222:nitro",
+				"openrouter/z-ai/glm-4.7-20251222:floor",
+				"openrouter/z-ai/glm-4.7-20251222:nitro",
+			],
+			{
+				getAvailable: () => allModels,
+				getCanonicalVariants: () => [],
+			} as unknown as Parameters<typeof resolveModelScope>[1],
+		);
+
+		const expectedModels = ["openrouter/z-ai/glm-4.7-20251222:nitro", "openrouter/z-ai/glm-4.7-20251222:floor"];
+		expect(scoped.map(entry => `${entry.model.provider}/${entry.model.id}`)).toEqual(expectedModels);
+		expect(modelKeys(filterModelsByScopeOrder(allModels, scoped))).toEqual(expectedModels);
+		expect(modelKeys(filterModelsByScope(allModels, scoped))).toEqual(expectedModels);
 	});
 });
 
