@@ -408,6 +408,20 @@ function applyGeneratedModelPolicy(model: ApiModel<Api>): void {
 	}
 	if (
 		model.api === "openai-completions" &&
+		model.reasoning &&
+		(model.provider === "opencode-go" || model.provider === "opencode-zen") &&
+		(model.id.toLowerCase().includes("kimi") || model.name.toLowerCase().includes("kimi"))
+	) {
+		model.compat = {
+			...(model.compat ?? {}),
+			reasoningContentField: "reasoning_content",
+			requiresReasoningContentForToolCalls: true,
+			allowsSyntheticReasoningContentForToolCalls: false,
+			requiresAssistantContentForToolCalls: true,
+		};
+	}
+	if (
+		model.api === "openai-completions" &&
 		model.provider === "opencode-go" &&
 		(model.id === "deepseek-v4-flash" || model.id === "deepseek-v4-pro")
 	) {

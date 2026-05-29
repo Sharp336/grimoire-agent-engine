@@ -60946,6 +60946,12 @@
 				"mode": "effort",
 				"minLevel": "minimal",
 				"maxLevel": "xhigh"
+			},
+			"compat": {
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"allowsSyntheticReasoningContentForToolCalls": false,
+				"requiresAssistantContentForToolCalls": true
 			}
 		},
 		"kimi-k2.6": {
@@ -60971,6 +60977,12 @@
 				"mode": "effort",
 				"minLevel": "minimal",
 				"maxLevel": "xhigh"
+			},
+			"compat": {
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"allowsSyntheticReasoningContentForToolCalls": false,
+				"requiresAssistantContentForToolCalls": true
 			}
 		},
 		"mimo-v2-omni": {
@@ -62209,6 +62221,12 @@
 				"mode": "effort",
 				"minLevel": "minimal",
 				"maxLevel": "xhigh"
+			},
+			"compat": {
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"allowsSyntheticReasoningContentForToolCalls": false,
+				"requiresAssistantContentForToolCalls": true
 			}
 		},
 		"kimi-k2.5": {
@@ -62234,6 +62252,12 @@
 				"mode": "effort",
 				"minLevel": "minimal",
 				"maxLevel": "xhigh"
+			},
+			"compat": {
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"allowsSyntheticReasoningContentForToolCalls": false,
+				"requiresAssistantContentForToolCalls": true
 			}
 		},
 		"kimi-k2.6": {
@@ -62259,6 +62283,12 @@
 				"mode": "effort",
 				"minLevel": "minimal",
 				"maxLevel": "xhigh"
+			},
+			"compat": {
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"allowsSyntheticReasoningContentForToolCalls": false,
+				"requiresAssistantContentForToolCalls": true
 			}
 		},
 		"ling-2.6-flash-free": {

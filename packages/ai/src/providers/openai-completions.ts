@@ -1533,8 +1533,10 @@ export function convertMessages(
 					const reasoningText = (assistantMsg as any).reasoning_text;
 					if (reasoning && reasoningField !== "reasoning") {
 						(assistantMsg as any)[reasoningField] = reasoning;
+						delete (assistantMsg as any).reasoning;
 					} else if (reasoningText && reasoningField !== "reasoning_text") {
 						(assistantMsg as any)[reasoningField] = reasoningText;
+						delete (assistantMsg as any).reasoning_text;
 					} else if (nonEmptyThinkingBlocks.length > 0) {
 						(assistantMsg as any)[reasoningField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
 					}

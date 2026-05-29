@@ -105,6 +105,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		provider === "opencode-go" ||
 		baseUrl.includes("opencode.ai");
 	const isOpenCodeProvider = provider === "opencode-go" || provider === "opencode-zen";
+	const kimiRequiresReasoningContent = isKimiModel && (!isOpenCodeProvider || Boolean(model.reasoning));
 
 	const useMaxTokens =
 		provider === "mistral" ||
@@ -218,22 +219,24 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 						: "openai",
 		reasoningContentField: "reasoning_content",
 		// Backends that 400 follow-up requests when prior assistant tool-call turns lack `reasoning_content`:
-		//   - Kimi: documented invariant on its native API.
+		//   - Kimi: documented invariant on native and OpenCode Go/Zen gateways.
 		//   - DeepSeek-family reasoning models, including aliased OpenCode Zen models
 		//     like `big-pickle`, validate exact thinking-mode replay.
 		//   - Any reasoning-capable model reached through OpenRouter can enforce this
 		//     server-side whenever the request is in thinking mode. We can't translate
 		//     Anthropic's redacted/encrypted reasoning into provider-native plaintext,
 		//     so cross-provider continuations rely on a placeholder.
-		// OpenCode Kimi aliases handle reasoning content internally and reject
-		// client-sent `reasoning_content`, so exclude only that Kimi-on-OpenCode path.
 		requiresReasoningContentForToolCalls:
-			(isKimiModel && !isOpenCodeProvider) ||
+			kimiRequiresReasoningContent ||
 			(isDeepseekFamily && Boolean(model.reasoning)) ||
 			((provider === "openrouter" || baseUrl.includes("openrouter.ai")) && Boolean(model.reasoning)),
-		// DeepSeek V4 rejects synthetic reasoning_content placeholders (".") on tool-call turns.
-		// Kimi and OpenRouter accept them when actual reasoning is unavailable.
-		allowsSyntheticReasoningContentForToolCalls: !isDeepseekFamily || !model.reasoning,
+		// DeepSeek V4 and OpenCode-hosted Kimi reject synthetic reasoning_content
+		// placeholders (".") on tool-call turns. Native Kimi and OpenRouter accept
+		// them when actual reasoning is unavailable.
+		allowsSyntheticReasoningContentForToolCalls: !(
+			(isDeepseekFamily && model.reasoning) ||
+			(isKimiModel && isOpenCodeProvider && model.reasoning)
+		),
 		requiresAssistantContentForToolCalls: isKimiModel || isDirectDeepseekReasoning,
 		openRouterRouting: undefined,
 		vercelGatewayRouting: undefined,
