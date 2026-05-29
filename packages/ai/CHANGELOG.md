@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+## [15.5.11] - 2026-05-29
+
+### Added
+
+- Added mid-conversation `system` message support for Anthropic Messages by upgrading eligible `developer` turns to `role: "system"` on first-party Claude API with Claude Opus 4.8+ and newer
+- Added `supportsMidConversationSystem` to Anthropic compatibility settings so consumers can opt in to or disable mid-conversation `system` role handling per model
+- Added `anthropic.claude-opus-4-8` model metadata in the model registry for Bedrock Converse streaming with effort-based thinking support through `xhigh`
+
+### Changed
+
+- Changed Anthropic adaptive-thinking effort mapping for Opus 4.7+ on the Messages API to use the model's full five-tier scale: user-facing efforts now shift up one notch (`minimal→low`, `low→medium`, `medium→high`, `high→xhigh`, `xhigh→max`) so the top tier reaches the genuine `max` level and `high` lands on Anthropic's recommended `xhigh` coding/agentic default. Older adaptive models (Opus 4.6) and Bedrock Converse keep the four-tier legacy mapping where `xhigh` aliases to `max`.
+
+### Fixed
+
+- Fixed OpenCode Zen `400 thinking is enabled but reasoning_content is missing in assistant tool call message` for every model behind `opencode-go`/`opencode-zen` (Kimi K2.x, DeepSeek V4 Pro/Flash, GLM-5.x, Qwen3.x, MiMo, MiniMax) by reactivating `requiresReasoningContentForToolCalls` and pinning the wire field to `reasoning_content` for any opencode request in thinking mode. The static compat default still omits the field for thinking-disabled turns to preserve the `Extra inputs are not permitted` guard from #1071; forced-tool turns also stay off because the existing `disableReasoningOnForcedToolChoice` guard strips thinking from the wire body. ([#1484](https://github.com/can1357/oh-my-pi/issues/1484))
+
 ## [15.5.8] - 2026-05-28
 
 ### Added

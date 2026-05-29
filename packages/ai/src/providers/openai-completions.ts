@@ -997,6 +997,39 @@ function buildParams(
 	toolStrictModeOverride?: ToolStrictModeOverride,
 ): { params: OpenAICompletionsParams; toolStrictMode: AppliedToolStrictMode } {
 	const compat = getCompat(model, resolvedBaseUrl);
+	// Opencode Zen's gateway (https://opencode.ai/zen/go/v1) gates
+	// `reasoning_content` on the request's thinking state for every model it
+	// fronts (Kimi K2.x, DeepSeek V4, GLM-5.x, Qwen3.x, MiMo, MiniMax, …): it
+	// 400s with `Extra inputs are not permitted` when thinking is off but the
+	// field is supplied (#1071), and 400s with `thinking is enabled but
+	// reasoning_content is missing in assistant tool call message at index N`
+	// (#1484) when thinking is on and the field is absent. `detectOpenAICompat`
+	// only set `requiresReasoningContentForToolCalls` for the DeepSeek family
+	// (and previously for Kimi until #1071 carved out opencode); reactivate it
+	// per request for every opencode model whenever this turn is in thinking
+	// mode so prior tool-call turns replay reasoning_content. Forced-tool
+	// turns are excluded because the later `disableReasoningOnForcedToolChoice`
+	// guard at the bottom of `buildParams` strips thinking from the wire body
+	// for Kimi-style models — keeping the replay on under those conditions
+	// would resurrect the #1071 failure.
+	//
+	// `allowsSyntheticReasoningContentForToolCalls` is forced to `false` on
+	// the same path: the gateway specifically requires `reasoning_content`,
+	// and the default synthetic-friendly behavior would echo whichever field
+	// the upstream streamed (e.g. `reasoning` for many opencode turns),
+	// landing the replay in the wrong key and re-triggering the 400.
+	const isOpenCodeProvider = model.provider === "opencode-go" || model.provider === "opencode-zen";
+	const thinkingEnabledForRequest =
+		Boolean(options?.reasoning) && !options?.disableReasoning && Boolean(model.reasoning);
+	const forcedToolChoiceSuppressesThinking =
+		compat.disableReasoningOnForcedToolChoice &&
+		isForcedToolChoice(mapToOpenAICompletionsToolChoice(options?.toolChoice));
+	if (isOpenCodeProvider && thinkingEnabledForRequest && !forcedToolChoiceSuppressesThinking) {
+		compat.requiresReasoningContentForToolCalls = true;
+		compat.allowsSyntheticReasoningContentForToolCalls = false;
+		compat.reasoningContentField = "reasoning_content";
+	}
+	const isKimiModelId = model.id.includes("moonshotai/kimi") || /(^|\/)kimi[-.]/i.test(model.id);
 	const messages = convertMessages(model, context, compat);
 	maybeAddOpenRouterAnthropicCacheControl(model, messages);
 	const supportsReasoningParams = model.provider !== "github-copilot";
@@ -1009,8 +1042,7 @@ function buildParams(
 	// before the final answer. Always send max_tokens — match the same
 	// Kimi-family regex used by the compat detector.
 	// Note: Direct kimi-code provider is handled by the dedicated Kimi provider in kimi.ts.
-	const isKimi = model.id.includes("moonshotai/kimi") || /(^|\/)kimi[-.]/i.test(model.id);
-	const effectiveMaxTokens = options?.maxTokens ?? (isKimi ? model.maxTokens : undefined);
+	const effectiveMaxTokens = options?.maxTokens ?? (isKimiModelId ? model.maxTokens : undefined);
 
 	const requestModelId =
 		model.provider === "fireworks"
@@ -1465,13 +1497,23 @@ export function convertMessages(
 						assistantMsg.content = [{ type: "text", text: thinkingText }];
 					}
 				} else if (compat.requiresReasoningContentForToolCalls) {
-					// Use the signature from the first thinking block if available, but only for
-					// recognized OpenAI-compat reasoning field names. Opaque signatures from other
-					// providers (Anthropic encrypted, OpenAI Responses JSON) are not valid property names.
+					// Use the streamed signature when the backend accepts whichever
+					// recognized field name was emitted (allowsSynthetic=true). Backends
+					// like opencode-kimi-with-thinking and DeepSeek demand the exact
+					// configured `reasoningContentField` instead, so honor that here
+					// rather than echoing the upstream field name.
 					const signature = nonEmptyThinkingBlocks[0].thinkingSignature;
 					const recognizedFields = ["reasoning_content", "reasoning", "reasoning_text"];
-					if (signature && recognizedFields.includes(signature)) {
-						(assistantMsg as any)[signature] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
+					const wireField =
+						compat.allowsSyntheticReasoningContentForToolCalls &&
+						signature &&
+						recognizedFields.includes(signature)
+							? signature
+							: signature && recognizedFields.includes(signature)
+								? (compat.reasoningContentField ?? "reasoning_content")
+								: undefined;
+					if (wireField) {
+						(assistantMsg as any)[wireField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
 					}
 				}
 			}
