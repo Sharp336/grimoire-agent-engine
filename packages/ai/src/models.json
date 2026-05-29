@@ -508,6 +508,31 @@
 				"maxLevel": "xhigh"
 			}
 		},
+		"au.anthropic.claude-opus-4-8": {
+			"id": "au.anthropic.claude-opus-4-8",
+			"name": "Claude Opus 4.8 (AU)",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 5,
+				"output": 25,
+				"cacheRead": 0.5,
+				"cacheWrite": 6.25
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "anthropic-adaptive",
+				"minLevel": "minimal",
+				"maxLevel": "xhigh"
+			}
+		},
 		"au.anthropic.claude-sonnet-4-5-20250929-v1:0": {
 			"id": "au.anthropic.claude-sonnet-4-5-20250929-v1:0",
 			"name": "Claude Sonnet 4.5 (AU)",
