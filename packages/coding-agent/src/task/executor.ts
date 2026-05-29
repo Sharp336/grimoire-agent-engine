@@ -4,9 +4,10 @@
  * Runs each subagent on the main thread and forwards AgentEvents for progress tracking.
  */
 
-import path from "node:path";
+import * as path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentTelemetryConfig, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import type { Model } from "@oh-my-pi/pi-ai";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { ModelRegistry } from "../config/model-registry";
 import { resolveModelOverrideWithAuthFallback } from "../config/model-resolver";
@@ -156,6 +157,8 @@ export interface ExecutorOptions {
 	 * if the resolved subagent model has no working credentials. See #985.
 	 */
 	parentActiveModelPattern?: string;
+	/** Parent session model scope; subagents must not resolve outside it. */
+	scopedModels?: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	thinkingLevel?: ThinkingLevel;
 	outputSchema?: unknown;
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
@@ -1141,20 +1144,23 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
 				authFallbackUsed,
+				fallbackReason,
 			} = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
 					modelPatterns,
 					options.parentActiveModelPattern,
 					modelRegistry,
 					settings,
+					options.scopedModels,
 				),
 			);
-			if (authFallbackUsed && model) {
-				logger.warn("Subagent model has no working credentials; falling back to parent session model", {
+			if ((authFallbackUsed || fallbackReason === "scope") && model) {
+				logger.warn("Subagent model resolved through parent session fallback", {
 					requested: modelPatterns,
 					parentModel: options.parentActiveModelPattern,
 					resolvedProvider: model.provider,
 					resolvedModel: model.id,
+					reason: fallbackReason ?? "auth",
 				});
 			}
 			if (model?.contextWindow && model.contextWindow > 0) {
@@ -1218,6 +1224,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					modelRegistry,
 					settings: subagentSettings,
 					model,
+					scopedModels: options.scopedModels,
 					thinkingLevel: effectiveThinkingLevel,
 					toolNames,
 					outputSchema,

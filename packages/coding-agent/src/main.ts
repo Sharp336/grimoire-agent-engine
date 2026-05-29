@@ -515,6 +515,7 @@ function discoverAppendSystemPromptFile(): string | undefined {
 async function buildSessionOptions(
 	parsed: Args,
 	scopedModels: ScopedModel[],
+	explicitModelScopeConfigured: boolean,
 	sessionManager: SessionManager | undefined,
 	modelRegistry: ModelRegistry,
 	activeSettings: Settings,
@@ -571,7 +572,7 @@ async function buildSessionOptions(
 				options.thinkingLevel = resolved.thinkingLevel;
 			}
 		}
-	} else if (scopedModels.length > 0 && !parsed.continue && !parsed.resume) {
+	} else if (!explicitModelScopeConfigured && scopedModels.length > 0 && !parsed.continue && !parsed.resume) {
 		const remembered = activeSettings.getModelRole("default");
 		if (remembered) {
 			const rememberedSpec = resolveModelRoleValue(
@@ -608,14 +609,20 @@ async function buildSessionOptions(
 	} else if (
 		scopedModels.length > 0 &&
 		scopedModels[0].explicitThinkingLevel === true &&
+		!explicitModelScopeConfigured &&
 		!parsed.continue &&
 		!parsed.resume
 	) {
 		options.thinkingLevel = scopedModels[0].thinkingLevel;
 	}
 
-	// Scoped models for Ctrl+P cycling - fill in default thinking levels when not explicit
-	if (scopedModels.length > 0) {
+	// CLI scope patterns are resolved inside the session so extension-registered
+	// models can join the allow-list after extension startup.
+	if (explicitModelScopeConfigured) {
+		options.modelScopePatterns = parsed.models ?? [];
+		options.preferScopedModelOrder = !parsed.model && !parsed.continue && !parsed.resume;
+	} else if (scopedModels.length > 0) {
+		// Scoped models for Ctrl+P cycling - fill in default thinking levels when not explicit.
 		// `auto` is a session-level concept only; per-scoped-model (Ctrl+P) thinking
 		// overrides stay concrete, so coerce the auto default to "unset" here.
 		const defaultThinkingLevelSetting = activeSettings.get("defaultThinkingLevel");
@@ -823,17 +830,19 @@ export async function runRootCommand(
 	);
 
 	let scopedModels: ScopedModel[] = [];
-	const modelPatterns = parsedArgs.models ?? settingsInstance.get("enabledModels");
+	const modelPatterns = parsedArgs.models ?? [];
+	const explicitModelScopeConfigured = modelPatterns.length > 0;
 	const modelMatchPreferences = {
 		usageOrder: settingsInstance.getStorage()?.getModelUsageOrder(),
 	};
-	if (modelPatterns && modelPatterns.length > 0) {
+	if (explicitModelScopeConfigured) {
 		scopedModels = await logger.time(
 			"resolveModelScope",
 			resolveModelScope,
 			modelPatterns,
 			modelRegistry,
 			modelMatchPreferences,
+			{ warnOnNoMatch: false },
 		);
 	}
 
@@ -896,6 +905,7 @@ export async function runRootCommand(
 		buildSessionOptions,
 		parsedArgs,
 		scopedModels,
+		explicitModelScopeConfigured,
 		sessionManager,
 		modelRegistry,
 		settingsInstance,
@@ -907,7 +917,7 @@ export async function runRootCommand(
 
 	// Handle CLI --api-key as runtime override (not persisted)
 	if (parsedArgs.apiKey) {
-		if (!sessionOptions.model && !sessionOptions.modelPattern) {
+		if (!sessionOptions.model && !sessionOptions.modelPattern && !sessionOptions.modelScopePatterns) {
 			process.stderr.write(
 				`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
 			);
@@ -915,6 +925,8 @@ export async function runRootCommand(
 		}
 		if (sessionOptions.model) {
 			authStorage.setRuntimeApiKey(sessionOptions.model.provider, parsedArgs.apiKey);
+		} else if (sessionOptions.modelScopePatterns) {
+			sessionOptions.modelScopeApiKey = parsedArgs.apiKey;
 		}
 	}
 
@@ -1008,15 +1020,16 @@ export async function runRootCommand(
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 			const changelogMarkdown = await logger.time("main:getChangelogForDisplay", getChangelogForDisplay, parsedArgs);
 
-			const scopedModelsForDisplay = sessionOptions.scopedModels ?? scopedModels;
-			if (scopedModelsForDisplay.length > 0) {
-				const modelList = scopedModelsForDisplay
-					.map(scopedModel => {
-						const thinkingStr = !scopedModel.thinkingLevel ? `:${scopedModel.thinkingLevel}` : "";
-						return `${scopedModel.model.id}${thinkingStr}`;
-					})
-					.join(", ");
-				process.stdout.write(`${chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Ctrl+P to cycle)")}`)}\n`);
+			const scopedModelsForDisplay = session.scopedModels;
+			if (session.hasModelScope) {
+				const modelList =
+					scopedModelsForDisplay
+						.map(scopedModel => {
+							const thinkingStr = scopedModel.thinkingLevel ? `:${scopedModel.thinkingLevel}` : "";
+							return `${scopedModel.model.id}${thinkingStr}`;
+						})
+						.join(", ") || "no models";
+				process.stdout.write(`${chalk.dim(`Model scope: ${modelList} ${chalk.gray("(Ctrl+P cycles scope)")}`)}\n`);
 			}
 
 			if ($env.PI_TIMING) {

@@ -41,11 +41,16 @@ import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
 import { bucketRules } from "./capability/rule-buckets";
 import { ModelRegistry } from "./config/model-registry";
 import {
+	filterModelsByScopeOrder,
+	formatModelScope,
 	formatModelString,
+	isModelInScope,
 	parseModelPattern,
 	parseModelString,
 	resolveAllowedModels,
 	resolveModelRoleValue,
+	resolveModelScopeSync,
+	type ScopedModel,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { Settings, type SkillsSettings } from "./config/settings";
@@ -262,8 +267,14 @@ export interface CreateAgentSessionOptions {
 	modelPattern?: string;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
-	/** Models available for cycling (Ctrl+P in interactive mode) */
-	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** Models allowed for this session; Ctrl+P cycles within this set. */
+	scopedModels?: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** Raw model scope patterns to resolve after extensions load. */
+	modelScopePatterns?: readonly string[];
+	/** Runtime API key supplied with a CLI model scope. @internal */
+	modelScopeApiKey?: string;
+	/** Prefer the first resolved scoped model after extension registration. */
+	preferScopedModelOrder?: boolean;
 
 	/** System prompt blocks. Array replaces default, function receives default blocks and returns final blocks. */
 	systemPrompt?: string[] | ((defaultPrompt: string[]) => string[]);
@@ -969,6 +980,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		modelApiKeyAvailability.set(availabilityKey, hasKey);
 		return hasKey;
 	};
+	const configuredScopedModels = options.scopedModels;
+	const configuredModelScopePatterns = options.modelScopePatterns;
+	const preferScopedModelOrder = options.preferScopedModelOrder === true;
 
 	// Load and create secret obfuscator early so resumed session state and prompt warnings
 	// reflect actual loaded secrets, not just the setting toggle.
@@ -996,9 +1010,62 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const modelMatchPreferences = {
 		usageOrder: settings.getStorage()?.getModelUsageOrder(),
 	};
-	const allowedModels = await logger.time("resolveAllowedModels", () =>
-		resolveAllowedModels(modelRegistry, settings, modelMatchPreferences),
-	);
+	const mapScopedModels = (
+		scopedModels: readonly ScopedModel[],
+	): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> => {
+		const defaultThinkingLevelSetting = settings.get("defaultThinkingLevel");
+		const defaultThinkingLevel =
+			defaultThinkingLevelSetting === AUTO_THINKING ? undefined : defaultThinkingLevelSetting;
+		return scopedModels.map(scopedModel => ({
+			model: scopedModel.model,
+			thinkingLevel: scopedModel.explicitThinkingLevel
+				? (scopedModel.thinkingLevel ?? defaultThinkingLevel)
+				: defaultThinkingLevel,
+		}));
+	};
+	const resolveScopedModelPatterns = (
+		patterns: readonly string[] | undefined,
+	): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined => {
+		if (!patterns || patterns.length === 0) return undefined;
+		return mapScopedModels(
+			resolveModelScopeSync([...patterns], modelRegistry, modelMatchPreferences, { warnOnNoMatch: false }),
+		);
+	};
+	const resolveScopedModelPatternsFromAllModels = (
+		patterns: readonly string[] | undefined,
+	): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined => {
+		if (!patterns || patterns.length === 0) return undefined;
+		const scopeRegistry = {
+			getAvailable: () => modelRegistry.getAll(),
+			getCanonicalVariants: (canonicalId: string, options?: Parameters<ModelRegistry["getCanonicalVariants"]>[1]) =>
+				modelRegistry.getCanonicalVariants(canonicalId, options),
+		};
+		return mapScopedModels(
+			resolveModelScopeSync([...patterns], scopeRegistry, modelMatchPreferences, { warnOnNoMatch: false }),
+		);
+	};
+	const getSettingsScopedModels = (): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined =>
+		resolveScopedModelPatterns(settings.get("enabledModels"));
+	const getPatternScopedModels = (): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined =>
+		resolveScopedModelPatterns(configuredModelScopePatterns);
+	const getSettingsScopedModelsFromAllModels = ():
+		| ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>
+		| undefined => resolveScopedModelPatternsFromAllModels(settings.get("enabledModels"));
+	const getPatternScopedModelsFromAllModels = ():
+		| ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>
+		| undefined => resolveScopedModelPatternsFromAllModels(configuredModelScopePatterns);
+	const getActiveScopedModels = () => configuredScopedModels ?? getPatternScopedModels() ?? getSettingsScopedModels();
+	const getActiveScopedModelsFromAllModels = () =>
+		configuredScopedModels ?? getPatternScopedModelsFromAllModels() ?? getSettingsScopedModelsFromAllModels();
+	const hasModelScope = () => getActiveScopedModels() !== undefined;
+	const getAvailableModelsInScope = () =>
+		filterModelsByScopeOrder(modelRegistry.getAvailable(), getActiveScopedModels());
+	const getAllModelsInScope = () => filterModelsByScopeOrder(modelRegistry.getAll(), getActiveScopedModels());
+	const resolveSessionAllowedModels = async (): Promise<Model[]> => {
+		if (hasModelScope()) return getAvailableModelsInScope();
+		return await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+	};
+	const allowedModels = await logger.time("resolveAllowedModels", resolveSessionAllowedModels);
 	const defaultRoleSpec = logger.time("resolveDefaultModelRole", () =>
 		resolveModelRoleValue(settings.getModelRole("default"), allowedModels, {
 			settings,
@@ -1008,27 +1075,38 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	);
 	let model = options.model;
 	let modelFallbackMessage: string | undefined;
+	if (model && !isModelInScope(model, getActiveScopedModelsFromAllModels())) {
+		modelFallbackMessage = `Model ${formatModelString(model)} is outside active model scope (${formatModelScope(getActiveScopedModelsFromAllModels())})`;
+		model = undefined;
+	}
 	// If session has data, try to restore model from it.
 	// Skip restore when an explicit model was requested.
 	const defaultModelStr = existingSession.models.default;
-	if (!hasExplicitModel && !model && hasExistingSession && defaultModelStr) {
-		await logger.time("restoreSessionModel", async () => {
-			const parsedModel = parseModelString(defaultModelStr);
-			if (parsedModel) {
-				const restoredModel = modelRegistry.find(parsedModel.provider, parsedModel.id);
-				if (restoredModel && (await hasModelApiKey(restoredModel))) {
-					model = restoredModel;
-				}
+	const shouldRestoreSessionModel = (): boolean =>
+		!hasExplicitModel && !preferScopedModelOrder && !model && hasExistingSession && defaultModelStr !== undefined;
+	const tryRestoreSessionModel = async (candidateModels: readonly Model[]): Promise<boolean> => {
+		if (!defaultModelStr) return false;
+		const parsedModel = parseModelString(defaultModelStr);
+		if (parsedModel) {
+			const restoredModel = candidateModels.find(
+				candidate => candidate.provider === parsedModel.provider && candidate.id === parsedModel.id,
+			);
+			if (restoredModel && (await hasModelApiKey(restoredModel))) {
+				model = restoredModel;
+				modelFallbackMessage = undefined;
+				return true;
 			}
-			if (!model) {
-				modelFallbackMessage = `Could not restore model ${defaultModelStr}`;
-			}
-		});
+		}
+		modelFallbackMessage = `Could not restore model ${defaultModelStr}`;
+		return false;
+	};
+	if (shouldRestoreSessionModel()) {
+		await logger.time("restoreSessionModel", tryRestoreSessionModel, allowedModels);
 	}
 
 	// If still no model, try settings default.
 	// Skip settings fallback when an explicit model was requested.
-	if (!hasExplicitModel && !model && defaultRoleSpec.model) {
+	if (!hasExplicitModel && !preferScopedModelOrder && !model && defaultRoleSpec.model) {
 		const settingsDefaultModel = defaultRoleSpec.model;
 		logger.time("resolveSettingsDefaultModel", () => {
 			// defaultRoleSpec.model already comes from modelRegistry.getAvailable(),
@@ -1040,13 +1118,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const taskDepth = options.taskDepth ?? 0;
 
 	let thinkingLevel = options.thinkingLevel;
+	const preserveRequestedThinking = options.thinkingLevel !== undefined || (hasExistingSession && hasThinkingEntry);
 
 	// If session has data and includes a thinking entry, restore it
 	if (thinkingLevel === undefined && hasExistingSession && hasThinkingEntry) {
 		thinkingLevel = parseThinkingLevel(existingSession.thinkingLevel);
 	}
 
-	if (thinkingLevel === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
+	if (
+		thinkingLevel === undefined &&
+		!hasExplicitModel &&
+		!preferScopedModelOrder &&
+		!hasThinkingEntry &&
+		defaultRoleSpec.explicitThinkingLevel
+	) {
 		thinkingLevel = defaultRoleSpec.thinkingLevel;
 	}
 
@@ -1058,18 +1143,31 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	if (thinkingLevel === undefined) {
 		thinkingLevel = settings.get("defaultThinkingLevel");
 	}
-	const autoThinking = thinkingLevel === AUTO_THINKING;
-	// Concrete level the agent/session start with. With `auto` this is the
-	// provisional level shown until the first per-turn classification resolves;
-	// `auto` itself stays a session-only concept handled by AgentSession.
-	let effectiveThinkingLevel: ThinkingLevel | undefined = thinkingLevel === AUTO_THINKING ? undefined : thinkingLevel;
-	if (model) {
-		const resolvedModel = model;
+	let autoThinking = thinkingLevel === AUTO_THINKING;
+	let effectiveThinkingLevel: ThinkingLevel | undefined = autoThinking ? undefined : thinkingLevel;
+	const applySelectedModelThinking = (selectedModel: Model): void => {
+		if (!preserveRequestedThinking) {
+			const scopedModel = getActiveScopedModels()?.find(
+				scoped =>
+					scoped.model.provider === selectedModel.provider &&
+					scoped.model.id === selectedModel.id &&
+					scoped.thinkingLevel !== undefined,
+			);
+			if (scopedModel) {
+				thinkingLevel = scopedModel.thinkingLevel;
+			}
+		}
+		autoThinking = thinkingLevel === AUTO_THINKING;
+		effectiveThinkingLevel = autoThinking ? undefined : thinkingLevel;
 		effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
 			autoThinking
-				? resolveProvisionalAutoLevel(resolvedModel)
-				: resolveThinkingLevelForModel(resolvedModel, effectiveThinkingLevel),
+				? resolveProvisionalAutoLevel(selectedModel)
+				: resolveThinkingLevelForModel(selectedModel, effectiveThinkingLevel),
 		);
+	};
+	if (model) {
+		const resolvedModel = model;
+		applySelectedModelThinking(resolvedModel);
 		// Fire-and-forget TLS+H2 handshake to the model's host so it overlaps
 		// with the rest of session setup (extension/skill load, tool registry,
 		// system prompt build). Without this, the first `fetch(...)` pays the
@@ -1238,6 +1336,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
+			getAvailableModels: () => session?.getAvailableModels() ?? getAvailableModelsInScope(),
+			getScopedModels: () =>
+				session ? (session.hasModelScope ? session.scopedModels : undefined) : getActiveScopedModels(),
 			getPlanModeState: () => session?.getPlanModeState(),
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
@@ -1367,12 +1468,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// to mirror the AsyncJobManager ownership rule.
 		if (mcpManager && !options.parentTaskPrefix) MCPManager.setInstance(mcpManager);
 
-		// Add image tools when the active model or configured image providers can generate images.
-		const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
-		if (imageGenTools.length > 0) {
-			customTools.push(...(imageGenTools as unknown as CustomTool[]));
-		}
-
 		if (settings.get("tts.enabled")) {
 			customTools.push(ttsTool as unknown as CustomTool);
 		}
@@ -1444,9 +1539,53 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			extensionsResult.runtime.pendingProviderRegistrations = [];
 		}
 
+		if (options.modelScopeApiKey && configuredModelScopePatterns !== undefined) {
+			const scopedModelsForApiKey = resolveScopedModelPatternsFromAllModels(configuredModelScopePatterns) ?? [];
+			const providers = [...new Set(scopedModelsForApiKey.map(scopedModel => scopedModel.model.provider))].sort();
+			const provider = providers[0];
+			if (!provider) {
+				throw new Error(
+					"--api-key with --models requires a single resolvable provider; no provider could be resolved from the model scope.",
+				);
+			}
+			if (providers.length > 1) {
+				throw new Error(
+					`--api-key with --models requires a single provider; scope resolved multiple providers: ${providers.join(", ")}.`,
+				);
+			}
+			authStorage.setRuntimeApiKey(provider, options.modelScopeApiKey);
+			modelApiKeyAvailability.clear();
+		}
+
+		if (shouldRestoreSessionModel()) {
+			if (
+				await logger.time(
+					"restoreSessionModel:deferred",
+					tryRestoreSessionModel,
+					await resolveSessionAllowedModels(),
+				)
+			) {
+				const restoredModel = model;
+				if (restoredModel) {
+					applySelectedModelThinking(restoredModel);
+				}
+			}
+		}
+
+		if (!model && preferScopedModelOrder) {
+			for (const scopedModel of getActiveScopedModels() ?? []) {
+				if (await hasModelApiKey(scopedModel.model)) {
+					model = scopedModel.model;
+					applySelectedModelThinking(model);
+					modelFallbackMessage = undefined;
+					break;
+				}
+			}
+		}
+
 		// Resolve deferred --model pattern now that extension models are registered.
 		if (!model && options.modelPattern) {
-			const availableModels = modelRegistry.getAll();
+			const availableModels = hasModelScope() ? getAllModelsInScope() : modelRegistry.getAll();
 			const matchPreferences = {
 				usageOrder: settings.getStorage()?.getModelUsageOrder(),
 			};
@@ -1455,22 +1594,26 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			});
 			if (resolved) {
 				model = resolved;
+				applySelectedModelThinking(resolved);
 				modelFallbackMessage = undefined;
 			} else {
-				modelFallbackMessage = `Model "${options.modelPattern}" not found`;
+				modelFallbackMessage = hasModelScope()
+					? `Model "${options.modelPattern}" not found in active model scope (${formatModelScope(getActiveScopedModels())})`
+					: `Model "${options.modelPattern}" not found`;
 			}
 		}
 
 		// Fall back to first available model with a valid API key, honoring the
 		// path-scoped `enabledModels` allow-list when configured. Skip when the
 		// user explicitly requested a model via --model that wasn't found.
-		if (!model && !options.modelPattern) {
+		if (!model && !hasExplicitModel) {
 			// Re-resolve the allowed set: extension factories above may have
 			// registered providers/models that weren't visible at startup.
-			const fallbackCandidates = await resolveAllowedModels(modelRegistry, settings, modelMatchPreferences);
+			const fallbackCandidates = await resolveSessionAllowedModels();
 			for (const candidate of fallbackCandidates) {
 				if (await hasModelApiKey(candidate)) {
 					model = candidate;
+					applySelectedModelThinking(candidate);
 					break;
 				}
 			}
@@ -1480,11 +1623,26 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				}
 			} else {
 				const patterns = settings.get("enabledModels");
-				modelFallbackMessage =
-					patterns && patterns.length > 0
+				modelFallbackMessage = hasModelScope()
+					? `No model available in active model scope (${formatModelScope(getActiveScopedModels())}) with usable credentials. Adjust --models or configure credentials for an in-scope provider.`
+					: patterns && patterns.length > 0
 						? `No model available matching enabledModels (${patterns.join(", ")}) with usable credentials. Configure auth for an allowed provider or adjust enabledModels.`
 						: "No models available. Use /login or set an API key environment variable. Then use /model to select a model.";
 			}
+		}
+
+		// Add image tools after deferred model selection so model-backed image
+		// providers see the same active model the session starts with.
+		const imageGenTools = await logger.time("getImageGenTools", () => getImageGenTools(modelRegistry, model));
+		if (imageGenTools.length > 0) {
+			const loadedImageTools = await loadExtensionFromFactory(
+				createCustomToolsExtension(imageGenTools as unknown as CustomTool[]),
+				cwd,
+				eventBus,
+				extensionsResult.runtime,
+				"<image-tools>",
+			);
+			extensionsResult.extensions.push(loadedImageTools);
 		}
 
 		// Discover custom commands (TypeScript slash commands)
@@ -2010,7 +2168,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// AsyncJobManager on teardown; subagents inherit the parent's and
 			// **MUST NOT** tear it down.
 			ownedAsyncJobManager: asyncJobManager,
-			scopedModels: options.scopedModels,
+			scopedModels: configuredScopedModels,
+			modelScopePatterns: configuredModelScopePatterns,
 			promptTemplates,
 			slashCommands,
 			extensionRunner,

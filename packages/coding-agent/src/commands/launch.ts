@@ -72,7 +72,7 @@ export default class Index extends Command {
 			description: "Don't save session (ephemeral)",
 		}),
 		models: Flags.string({
-			description: "Comma-separated model patterns for Ctrl+P cycling",
+			description: "Comma-separated model patterns allowed for this session; Ctrl+P cycles within the scope",
 		}),
 		"no-tools": Flags.boolean({
 			description: "Disable all built-in tools",
@@ -145,7 +145,7 @@ export default class Index extends Command {
 		`# Non-interactive mode (process and exit)\n  ${APP_NAME} -p "List all .ts files in src/"`,
 		`# Continue previous session\n  ${APP_NAME} --continue "What did we discuss?"`,
 		`# Use different model (fuzzy matching)\n  ${APP_NAME} --model opus "Help me refactor this code"`,
-		`# Limit model cycling to specific models\n  ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o`,
+		`# Restrict the session to specific models\n  ${APP_NAME} --models claude-sonnet,claude-haiku,gpt-4o`,
 		`# Export a session file to HTML\n  ${APP_NAME} --export ~/.omp/agent/sessions/--path--/session.jsonl`,
 	];
 

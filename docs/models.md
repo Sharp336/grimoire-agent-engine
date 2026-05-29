@@ -372,7 +372,7 @@ So a model can exist in registry but not be selectable until auth is available.
 - exact canonical model id
 - exact model id (provider inferred)
 - fuzzy/substring matching
-- glob scope patterns in `--models` (e.g. `openai/*`, `*sonnet*`)
+- glob allow-list patterns in `--models` (e.g. `openai/*`, `*sonnet*`)
 - optional `:thinkingLevel` suffix (`off|minimal|low|medium|high|xhigh`)
 
 `--provider` is legacy; `--model` is preferred.
@@ -386,7 +386,9 @@ Resolution precedence for exact selectors:
 
 ### Initial model selection priority
 
-`findInitialModel(...)` uses this order:
+When `--models` or `enabledModels` defines a scope, model resolution is limited to that scope. Explicit `--model`, restored session models, role aliases, subagents, retry fallbacks, compaction fallbacks, context promotion, and model picker/RPC/ACP switches cannot select models outside it.
+
+`findInitialModel(...)` uses this order within the active scope:
 
 1. explicit CLI provider+model
 2. first scoped model (if not resuming)
@@ -422,6 +424,7 @@ For `enabledModels` and CLI `--models`:
 - exact canonical ids expand to all concrete variants in that canonical group
 - explicit `provider/modelId` entries stay exact
 - globs and fuzzy matches still operate on concrete models
+- matching models form a session allow-list, not only a cycling/menu list
 
 Global `enabledModels` and `disabledProviders` entries may also be scoped to a path prefix:
 

@@ -800,6 +800,37 @@ describe("resolveModelScope", () => {
 			"github-copilot/anthropic/claude-sonnet-4.5",
 		]);
 	});
+
+	test("keeps provider-qualified glob scopes within that provider", async () => {
+		const scoped = await resolveModelScope(["openai/*"], {
+			getAvailable: () => allModels,
+			getCanonicalVariants: () => [],
+		} as unknown as Parameters<typeof resolveModelScope>[1]);
+
+		expect(scoped.map(entry => `${entry.model.provider}/${entry.model.id}`)).toEqual(["openai/gpt-4o"]);
+	});
+
+	test("keeps slash glob scopes on provider/model strings even when the provider segment has globs", async () => {
+		const scoped = await resolveModelScope(["open*/gpt*"], {
+			getAvailable: () => allModels,
+			getCanonicalVariants: () => [],
+		} as unknown as Parameters<typeof resolveModelScope>[1]);
+
+		expect(scoped.map(entry => `${entry.model.provider}/${entry.model.id}`)).toEqual([
+			"openai/gpt-4o",
+			"openai-codex/gpt-5.3-codex",
+			"openai-codex/gpt-5.3-codex-spark",
+		]);
+	});
+
+	test("keeps unqualified glob scopes matching bare model IDs", async () => {
+		const scoped = await resolveModelScope(["*sonnet*"], {
+			getAvailable: () => allModels,
+			getCanonicalVariants: () => [],
+		} as unknown as Parameters<typeof resolveModelScope>[1]);
+
+		expect(scoped.map(entry => `${entry.model.provider}/${entry.model.id}`)).toEqual(["anthropic/claude-sonnet-4-5"]);
+	});
 });
 
 describe("parseModelString", () => {

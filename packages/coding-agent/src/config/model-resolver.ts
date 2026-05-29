@@ -29,6 +29,51 @@ export interface ScopedModel {
 	explicitThinkingLevel: boolean;
 }
 
+export interface ModelScopeEntry {
+	model: Model<Api>;
+}
+
+export function isModelInScope(model: Model<Api>, scopedModels: readonly ModelScopeEntry[] | undefined): boolean {
+	if (scopedModels === undefined) return true;
+	return scopedModels.some(scoped => modelsAreEqual(scoped.model, model));
+}
+
+export function filterModelsByScope<T extends Model<Api>>(
+	models: readonly T[],
+	scopedModels: readonly ModelScopeEntry[] | undefined,
+): T[] {
+	if (scopedModels === undefined) return [...models];
+	return models.filter(model => isModelInScope(model, scopedModels));
+}
+
+export function filterModelsByScopeOrder<T extends Model<Api>>(
+	models: readonly T[],
+	scopedModels: readonly ModelScopeEntry[] | undefined,
+): T[] {
+	if (scopedModels === undefined) return [...models];
+	const candidatesByKey = new Map<string, T>();
+	for (const model of models) {
+		candidatesByKey.set(`${model.provider}/${model.id}`, model);
+	}
+	const result: T[] = [];
+	const seen = new Set<string>();
+	for (const scoped of scopedModels) {
+		const key = `${scoped.model.provider}/${scoped.model.id}`;
+		if (seen.has(key)) continue;
+		const candidate = candidatesByKey.get(key);
+		if (!candidate) continue;
+		seen.add(key);
+		result.push(candidate);
+	}
+	return result;
+}
+
+export function formatModelScope(scopedModels: readonly ModelScopeEntry[] | undefined): string {
+	if (scopedModels === undefined) return "all available models";
+	if (scopedModels.length === 0) return "no models";
+	return scopedModels.map(scoped => formatModelString(scoped.model)).join(", ");
+}
+
 /**
  * Parse a model string in "provider/modelId" format.
  * Returns undefined if the format is invalid.
@@ -61,6 +106,14 @@ export function formatModelString(model: Model<Api>): string {
 
 export function formatModelSelectorValue(selector: string, thinkingLevel: ThinkingLevel | undefined): string {
 	return thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit ? `${selector}:${thinkingLevel}` : selector;
+}
+
+function containsGlobCharacters(pattern: string): boolean {
+	return pattern.includes("*") || pattern.includes("?") || pattern.includes("[");
+}
+
+function shouldMatchBareModelIdForGlob(pattern: string): boolean {
+	return !pattern.includes("/");
 }
 
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {
@@ -181,6 +234,10 @@ export interface ModelMatchPreferences {
 	usageOrder?: string[];
 	/** Providers to deprioritize when no recent usage is available. */
 	deprioritizeProviders?: string[];
+}
+
+export interface ResolveModelScopeOptions {
+	warnOnNoMatch?: boolean;
 }
 
 export type CanonicalModelRegistry = Partial<
@@ -717,9 +774,10 @@ export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
+	scopedModels?: readonly ModelScopeEntry[],
 ): { model?: Model<Api>; thinkingLevel?: ThinkingLevel; explicitThinkingLevel: boolean } {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
-	const availableModels = modelRegistry.getAvailable();
+	const availableModels = filterModelsByScope(modelRegistry.getAvailable(), scopedModels);
 	const matchPreferences = { usageOrder: settings?.getStorage()?.getModelUsageOrder() };
 	for (const pattern of modelPatterns) {
 		const { model, thinkingLevel, explicitThinkingLevel } = resolveModelRoleValue(pattern, availableModels, {
@@ -760,14 +818,35 @@ export async function resolveModelOverrideWithAuthFallback(
 	parentActiveModelPattern: string | undefined,
 	modelRegistry: ModelLookupRegistry & Pick<ModelRegistry, "getApiKey">,
 	settings?: Settings,
+	scopedModels?: readonly ModelScopeEntry[],
 ): Promise<{
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel: boolean;
 	authFallbackUsed: boolean;
+	fallbackReason?: "auth" | "scope";
 }> {
-	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
-	if (!primary.model || !parentActiveModelPattern) {
+	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings, scopedModels);
+	if (!primary.model) {
+		if (scopedModels === undefined || !parentActiveModelPattern) {
+			return { ...primary, authFallbackUsed: false };
+		}
+		const unscopedPrimary = resolveModelOverride(modelPatterns, modelRegistry, settings);
+		if (!unscopedPrimary.model) {
+			return { ...primary, authFallbackUsed: false };
+		}
+		const fallback = resolveModelOverride([parentActiveModelPattern], modelRegistry, settings, scopedModels);
+		if (!fallback.model) {
+			return { ...primary, authFallbackUsed: false };
+		}
+		const fallbackKey = await modelRegistry.getApiKey(fallback.model);
+		if (fallbackKey !== kNoAuth && !isAuthenticated(fallbackKey)) {
+			return { ...primary, authFallbackUsed: false };
+		}
+		return { ...fallback, authFallbackUsed: false, fallbackReason: "scope" };
+	}
+
+	if (!parentActiveModelPattern) {
 		return { ...primary, authFallbackUsed: false };
 	}
 
@@ -776,7 +855,7 @@ export async function resolveModelOverrideWithAuthFallback(
 		return { ...primary, authFallbackUsed: false };
 	}
 
-	const fallback = resolveModelOverride([parentActiveModelPattern], modelRegistry, settings);
+	const fallback = resolveModelOverride([parentActiveModelPattern], modelRegistry, settings, scopedModels);
 	if (!fallback.model) {
 		return { ...primary, authFallbackUsed: false };
 	}
@@ -784,11 +863,11 @@ export async function resolveModelOverrideWithAuthFallback(
 		return { ...primary, authFallbackUsed: false };
 	}
 	const fallbackKey = await modelRegistry.getApiKey(fallback.model);
-	if (!isAuthenticated(fallbackKey)) {
+	if (fallbackKey !== kNoAuth && !isAuthenticated(fallbackKey)) {
 		return { ...primary, authFallbackUsed: false };
 	}
 
-	return { ...fallback, authFallbackUsed: true };
+	return { ...fallback, authFallbackUsed: true, fallbackReason: "auth" };
 }
 
 /**
@@ -855,18 +934,20 @@ function resolveExactCanonicalScopePattern(
  * The algorithm tries to match the full pattern first, then progressively
  * strips colon-suffixes to find a match.
  */
-export async function resolveModelScope(
+export function resolveModelScopeSync(
 	patterns: string[],
 	modelRegistry: Pick<ModelRegistry, "getAvailable" | "getCanonicalVariants">,
 	preferences?: ModelMatchPreferences,
-): Promise<ScopedModel[]> {
+	options?: ResolveModelScopeOptions,
+): ScopedModel[] {
 	const availableModels = modelRegistry.getAvailable();
 	const context = buildPreferenceContext(availableModels, preferences);
 	const scopedModels: ScopedModel[] = [];
+	const warnOnNoMatch = options?.warnOnNoMatch !== false;
 
 	for (const pattern of patterns) {
 		// Check if pattern contains glob characters
-		if (pattern.includes("*") || pattern.includes("?") || pattern.includes("[")) {
+		if (containsGlobCharacters(pattern)) {
 			// Extract optional thinking level suffix (e.g., "provider/*:high")
 			const colonIdx = pattern.lastIndexOf(":");
 			let globPattern = pattern;
@@ -883,16 +964,20 @@ export async function resolveModelScope(
 				}
 			}
 
-			// Match against "provider/modelId" format OR just model ID
-			// This allows "*sonnet*" to match without requiring "anthropic/*sonnet*"
+			const glob = new Bun.Glob(globPattern.toLowerCase());
+			const matchModelId = shouldMatchBareModelIdForGlob(globPattern);
+
+			// Slash globs match only "provider/modelId".
+			// Unqualified globs still match bare IDs, so "*sonnet*" works without "anthropic/*sonnet*".
 			const matchingModels = availableModels.filter(m => {
 				const fullId = `${m.provider}/${m.id}`;
-				const glob = new Bun.Glob(globPattern.toLowerCase());
-				return glob.match(fullId.toLowerCase()) || glob.match(m.id.toLowerCase());
+				return glob.match(fullId.toLowerCase()) || (matchModelId && glob.match(m.id.toLowerCase()));
 			});
 
 			if (matchingModels.length === 0) {
-				logger.warn(`No models match pattern "${pattern}"`);
+				if (warnOnNoMatch) {
+					logger.warn(`No models match pattern "${pattern}"`);
+				}
 				continue;
 			}
 
@@ -935,11 +1020,15 @@ export async function resolveModelScope(
 		);
 
 		if (warning) {
-			logger.warn(warning);
+			if (warnOnNoMatch) {
+				logger.warn(warning);
+			}
 		}
 
 		if (!model) {
-			logger.warn(`No models match pattern "${pattern}"`);
+			if (warnOnNoMatch) {
+				logger.warn(`No models match pattern "${pattern}"`);
+			}
 			continue;
 		}
 
@@ -956,6 +1045,15 @@ export async function resolveModelScope(
 	}
 
 	return scopedModels;
+}
+
+export async function resolveModelScope(
+	patterns: string[],
+	modelRegistry: Pick<ModelRegistry, "getAvailable" | "getCanonicalVariants">,
+	preferences?: ModelMatchPreferences,
+	options?: ResolveModelScopeOptions,
+): Promise<ScopedModel[]> {
+	return resolveModelScopeSync(patterns, modelRegistry, preferences, options);
 }
 
 /**
@@ -980,7 +1078,7 @@ export async function resolveAllowedModels(
 	if (!patterns || patterns.length === 0) {
 		return available;
 	}
-	const scoped = await resolveModelScope(patterns, modelRegistry, preferences);
+	const scoped = resolveModelScopeSync(patterns, modelRegistry, preferences);
 	if (scoped.length === 0) {
 		return [];
 	}

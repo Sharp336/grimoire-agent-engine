@@ -165,6 +165,8 @@ When no explicit `model`/`modelPattern` is provided:
 2. settings default model role (`default`)
 3. first available model with valid auth
 
+When `scopedModels` is provided, restore/default/fallback resolution and later model switches are limited to that list.
+
 If restore fails, `modelFallbackMessage` explains fallback.
 
 ### Auth priority

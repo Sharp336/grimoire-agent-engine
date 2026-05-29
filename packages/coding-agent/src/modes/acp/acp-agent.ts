@@ -48,7 +48,7 @@ import { disableProvider, enableProvider, reset as resetCapabilities } from "../
 import { Settings } from "../../config/settings";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import type { ExtensionUIContext, ExtensionUIDialogOptions } from "../../extensibility/extensions";
-import { runExtensionCompact } from "../../extensibility/extensions/compact-handler";
+import { runExtensionCompact, runExtensionSetModel } from "../../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../../extensibility/extensions/get-commands-handler";
 import { buildSkillPromptMessage, getSkillSlashCommandName } from "../../extensibility/skills";
 import { loadSlashCommands } from "../../extensibility/slash-commands";
@@ -1907,14 +1907,7 @@ export class AcpAgent implements Agent {
 				getAllTools: () => record.session.getAllToolNames(),
 				setActiveTools: toolNames => record.session.setActiveToolsByName(toolNames),
 				getCommands: () => getSessionSlashCommands(record.session),
-				setModel: async model => {
-					const apiKey = await record.session.modelRegistry.getApiKey(model);
-					if (!apiKey) {
-						return false;
-					}
-					await record.session.setModel(model);
-					return true;
-				},
+				setModel: model => runExtensionSetModel(record.session, model),
 				getThinkingLevel: () => record.session.thinkingLevel,
 				setThinkingLevel: level => record.session.setThinkingLevel(level),
 				getSessionName: () => record.session.sessionManager.getSessionName(),

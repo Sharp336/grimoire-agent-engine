@@ -100,11 +100,15 @@ import type { Rule } from "../capability/rule";
 import { MODEL_ROLE_IDS, type ModelRegistry } from "../config/model-registry";
 import {
 	extractExplicitThinkingSelector,
+	filterModelsByScopeOrder,
+	formatModelScope,
 	formatModelSelectorValue,
 	formatModelString,
+	isModelInScope,
 	parseModelString,
 	type ResolvedModelRoleValue,
 	resolveModelRoleValue,
+	resolveModelScopeSync,
 } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
 import type { Settings, SkillsSettings } from "../config/settings";
@@ -288,8 +292,10 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
-	/** Models to cycle through with Ctrl+P (from --models flag) */
-	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** Models allowed for this session; Ctrl+P cycles within this set. */
+	scopedModels?: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	/** Raw model scope patterns resolved against the current registry. */
+	modelScopePatterns?: readonly string[];
 	/** Initial session thinking selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Prompt templates for expansion */
@@ -807,7 +813,8 @@ export class AgentSession {
 
 	readonly configWarnings: string[] = [];
 
-	#scopedModels: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
+	#scopedModels: ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined;
+	#modelScopePatterns: readonly string[] | undefined;
 	/** Effective, metadata-clamped thinking level applied to the agent (never `auto`). */
 	#thinkingLevel: ThinkingLevel | undefined;
 	/** True when the user configured `auto`; the effective level is resolved per turn. */
@@ -1071,7 +1078,8 @@ export class AgentSession {
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
 		this.#parentEvalSessionId = config.parentEvalSessionId;
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
-		this.#scopedModels = config.scopedModels ?? [];
+		this.#scopedModels = config.scopedModels;
+		this.#modelScopePatterns = config.modelScopePatterns;
 		if (config.thinkingLevel === AUTO_THINKING) {
 			// `auto` is session-level: keep the flag and show a provisional concrete
 			// level (the agent's initial effort was already set by the caller) until
@@ -3846,9 +3854,60 @@ export class AgentSession {
 		return this.sessionManager.getSessionName();
 	}
 
-	/** Scoped models for cycling (from --models flag) */
+	/** Scoped models for cycling and selection (from --models/enabledModels) */
 	get scopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> {
-		return this.#scopedModels;
+		return this.#getActiveScopedModels() ?? [];
+	}
+
+	get hasModelScope(): boolean {
+		return this.#getActiveScopedModels() !== undefined;
+	}
+
+	#resolveScopedModelPatterns(
+		patterns: readonly string[] | undefined,
+	): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined {
+		if (!patterns || patterns.length === 0) return undefined;
+		const defaultThinkingLevelSetting = this.settings.get("defaultThinkingLevel");
+		const defaultThinkingLevel =
+			defaultThinkingLevelSetting === AUTO_THINKING ? undefined : defaultThinkingLevelSetting;
+		return resolveModelScopeSync(
+			[...patterns],
+			this.#modelRegistry,
+			{ usageOrder: this.settings.getStorage()?.getModelUsageOrder() },
+			{ warnOnNoMatch: false },
+		).map(scopedModel => ({
+			model: scopedModel.model,
+			thinkingLevel: scopedModel.explicitThinkingLevel
+				? (scopedModel.thinkingLevel ?? defaultThinkingLevel)
+				: defaultThinkingLevel,
+		}));
+	}
+
+	#getSettingsScopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined {
+		return this.#resolveScopedModelPatterns(this.settings.get("enabledModels"));
+	}
+
+	#getPatternScopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined {
+		return this.#resolveScopedModelPatterns(this.#modelScopePatterns);
+	}
+
+	#getActiveScopedModels(): ReadonlyArray<{ model: Model; thinkingLevel?: ThinkingLevel }> | undefined {
+		return this.#scopedModels ?? this.#getPatternScopedModels() ?? this.#getSettingsScopedModels();
+	}
+
+	#isModelInScope(model: Model): boolean {
+		return isModelInScope(model, this.#getActiveScopedModels());
+	}
+
+	#assertModelInScope(model: Model): void {
+		if (this.#isModelInScope(model)) return;
+		throw new Error(
+			`Model ${formatModelString(model)} is outside active model scope (${formatModelScope(this.#getActiveScopedModels())}).`,
+		);
+	}
+
+	#getAvailableModelsInScope(): Model[] {
+		return filterModelsByScopeOrder(this.#modelRegistry.getAvailable(), this.#getActiveScopedModels());
 	}
 
 	/** Prompt templates */
@@ -3947,7 +4006,7 @@ export class AgentSession {
 	}
 
 	resolveRoleModel(role: string): Model | undefined {
-		return this.#resolveRoleModelFull(role, this.#modelRegistry.getAvailable(), this.model).model;
+		return this.#resolveRoleModelFull(role, this.#getAvailableModelsInScope(), this.model).model;
 	}
 
 	/**
@@ -3956,7 +4015,7 @@ export class AgentSession {
 	 * from role configuration (e.g., "anthropic/claude-sonnet-4-5:xhigh").
 	 */
 	resolveRoleModelWithThinking(role: string): ResolvedModelRoleValue {
-		return this.#resolveRoleModelFull(role, this.#modelRegistry.getAvailable(), this.model);
+		return this.#resolveRoleModelFull(role, this.#getAvailableModelsInScope(), this.model);
 	}
 
 	get promptTemplates(): ReadonlyArray<PromptTemplate> {
@@ -5122,6 +5181,7 @@ export class AgentSession {
 		role: string = "default",
 		options?: { selector?: string; thinkingLevel?: ThinkingLevel; persist?: boolean },
 	): Promise<void> {
+		this.#assertModelInScope(model);
 		const previousEditMode = this.#resolveActiveEditMode();
 		const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 		if (!apiKey) {
@@ -5151,6 +5211,7 @@ export class AgentSession {
 	 * @throws Error if no API key available for the model
 	 */
 	async setModelTemporary(model: Model, thinkingLevel?: ThinkingLevel): Promise<void> {
+		this.#assertModelInScope(model);
 		const previousEditMode = this.#resolveActiveEditMode();
 		const apiKey = await this.#modelRegistry.getApiKey(model, this.sessionId);
 		if (!apiKey) {
@@ -5179,7 +5240,7 @@ export class AgentSession {
 	 * @returns The new model info, or undefined if only one model available
 	 */
 	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		if (this.#scopedModels.length > 0) {
+		if (this.#getActiveScopedModels() !== undefined) {
 			return this.#cycleScopedModel(direction);
 		}
 		return this.#cycleAvailableModel(direction);
@@ -5196,7 +5257,7 @@ export class AgentSession {
 	 * still guard on `models.length`).
 	 */
 	getRoleModelCycle(roleOrder: readonly string[]): RoleModelCycle | undefined {
-		const availableModels = this.#modelRegistry.getAvailable();
+		const availableModels = this.#getAvailableModelsInScope();
 		if (availableModels.length === 0) return undefined;
 
 		const currentModel = this.model;
@@ -5274,7 +5335,7 @@ export class AgentSession {
 		const apiKeysByProvider = new Map<string, string | undefined>();
 		const result: Array<{ model: Model; thinkingLevel?: ThinkingLevel }> = [];
 
-		for (const scoped of this.#scopedModels) {
+		for (const scoped of this.#getActiveScopedModels() ?? []) {
 			const provider = scoped.model.provider;
 			let apiKey: string | undefined;
 			if (apiKeysByProvider.has(provider)) {
@@ -5320,7 +5381,7 @@ export class AgentSession {
 
 	async #cycleAvailableModel(direction: "forward" | "backward"): Promise<ModelCycleResult | undefined> {
 		const previousEditMode = this.#resolveActiveEditMode();
-		const availableModels = this.#modelRegistry.getAvailable();
+		const availableModels = this.#getAvailableModelsInScope();
 		if (availableModels.length <= 1) return undefined;
 
 		const currentModel = this.model;
@@ -5348,10 +5409,10 @@ export class AgentSession {
 	}
 
 	/**
-	 * Get all available models with valid API keys.
+	 * Get all available models with valid API keys, filtered by active model scope.
 	 */
 	getAvailableModels(): Model[] {
-		return this.#modelRegistry.getAvailable();
+		return this.#getAvailableModelsInScope();
 	}
 
 	// =========================================================================
@@ -6490,7 +6551,7 @@ export class AgentSession {
 	}
 
 	async #resolveContextPromotionTarget(currentModel: Model, contextWindow: number): Promise<Model | undefined> {
-		const availableModels = this.#modelRegistry.getAvailable();
+		const availableModels = this.#getAvailableModelsInScope();
 		if (availableModels.length === 0) return undefined;
 
 		const candidate = this.#resolveContextPromotionConfiguredTarget(currentModel, availableModels);
@@ -6834,7 +6895,7 @@ export class AgentSession {
 		signal: AbortSignal,
 		options?: SummaryOptions,
 	): Promise<CompactionResult> {
-		const candidates = this.#getCompactionModelCandidates(this.#modelRegistry.getAvailable());
+		const candidates = this.#getCompactionModelCandidates(this.#getAvailableModelsInScope());
 		const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 
 		for (const candidate of candidates) {
@@ -7037,7 +7098,7 @@ export class AgentSession {
 				return false;
 			}
 
-			const availableModels = this.#modelRegistry.getAvailable();
+			const availableModels = this.#getAvailableModelsInScope();
 			if (availableModels.length === 0) {
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
@@ -7627,6 +7688,7 @@ export class AgentSession {
 		if (!candidate) {
 			throw new Error(`Retry fallback model not found: ${selector.raw}`);
 		}
+		this.#assertModelInScope(candidate);
 		const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
 		if (!apiKey) {
 			throw new Error(`No API key for retry fallback ${selector.raw}`);
@@ -7667,6 +7729,7 @@ export class AgentSession {
 			if (this.#isRetryFallbackSelectorSuppressed(selector)) continue;
 			const candidate = this.#modelRegistry.find(selector.provider, selector.id);
 			if (!candidate) continue;
+			if (!this.#isModelInScope(candidate)) continue;
 			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
 			if (!apiKey) continue;
 			await this.#applyRetryFallbackCandidate(role, selector, currentSelector);
@@ -7704,6 +7767,10 @@ export class AgentSession {
 
 		const primaryModel = this.#modelRegistry.find(originalSelector.provider, originalSelector.id);
 		if (!primaryModel) return;
+		if (!this.#isModelInScope(primaryModel)) {
+			this.#clearActiveRetryFallback();
+			return;
+		}
 		const apiKey = await this.#modelRegistry.getApiKey(primaryModel, this.sessionId);
 		if (!apiKey) return;
 
@@ -8675,7 +8742,7 @@ export class AgentSession {
 				if (slashIdx > 0) {
 					const provider = defaultModelStr.slice(0, slashIdx);
 					const modelId = defaultModelStr.slice(slashIdx + 1);
-					const availableModels = this.#modelRegistry.getAvailable();
+					const availableModels = this.#getAvailableModelsInScope();
 					const match = availableModels.find(m => m.provider === provider && m.id === modelId);
 					if (match) {
 						const currentModel = this.model;

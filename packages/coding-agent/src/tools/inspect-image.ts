@@ -66,7 +66,7 @@ export class InspectImageTool implements AgentTool<typeof inspectImageSchema, In
 			throw new ToolError("Model registry is unavailable for inspect_image.");
 		}
 
-		const availableModels = modelRegistry.getAvailable();
+		const availableModels = this.session.getAvailableModels?.() ?? modelRegistry.getAvailable();
 		if (availableModels.length === 0) {
 			throw new ToolError("No models available for inspect_image.");
 		}

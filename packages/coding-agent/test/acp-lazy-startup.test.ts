@@ -13,7 +13,9 @@ import {
 import type { Model } from "@oh-my-pi/pi-ai";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { Settings } from "../src/config/settings";
+import { runRootCommand } from "../src/main";
 import { createAcpConnection } from "../src/modes/acp/acp-mode";
+import { createAgentSession } from "../src/sdk";
 import type { AgentSession } from "../src/session/agent-session";
 import { AuthStorage } from "../src/session/auth-storage";
 import { SessionManager } from "../src/session/session-manager";
@@ -234,8 +236,6 @@ describe("ACP lazy startup", () => {
 		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
 		try {
 			const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
-			const { runRootCommand } = await import("../src/main");
-			const { createAgentSession } = await import("../src/sdk");
 			let session: AgentSession | undefined;
 
 			const stopped = runRootCommand(
@@ -277,6 +277,271 @@ describe("ACP lazy startup", () => {
 			}
 			expect(session.model.provider).toBe("runtime-provider");
 			expect(await session.modelRegistry.getApiKey(session.model)).toBe("cli-runtime-key");
+			await session.dispose();
+		} finally {
+			authStorage.close();
+		}
+	}, 15_000);
+
+	it("applies CLI runtime API keys after ACP CLI scopes resolve extension models", async () => {
+		using tempDir = TempDir.createSync("@omp-acp-lazy-scope-api-key-");
+		const cwd = tempDir.path();
+
+		await Bun.write(
+			path.join(cwd, "runtime-provider.ts"),
+			`export default function(pi) {
+	pi.registerProvider("runtime-provider", {
+		baseUrl: "https://runtime.example.com/v1",
+		apiKey: "extension-key",
+		api: "openai-completions",
+		models: [{
+			id: "runtime-model",
+			name: "Runtime Model",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 8192,
+		}],
+	});
+}
+`,
+		);
+
+		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
+		try {
+			const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+			let session: AgentSession | undefined;
+
+			const stopped = runRootCommand(
+				{
+					mode: "acp",
+					apiKey: "cli-runtime-key",
+					messages: [],
+					fileArgs: [],
+					unknownFlags: new Map(),
+					noSkills: true,
+					noRules: true,
+					noTools: true,
+					noLsp: true,
+					sessionDir: cwd,
+					extensions: [path.join(cwd, "runtime-provider.ts")],
+					models: ["runtime-provider/runtime-model"],
+				},
+				[],
+				{
+					discoverAuthStorage: async () => authStorage,
+					createAgentSession,
+					settings,
+					runAcpMode: async createAcpSession => {
+						session = await createAcpSession(cwd);
+						throw new Error("stop test ACP mode");
+					},
+				},
+			);
+			await expect(stopped).rejects.toThrow("stop test ACP mode");
+
+			if (!session?.model) {
+				throw new Error("Expected extension-scoped model to resolve");
+			}
+			expect(session.model.provider).toBe("runtime-provider");
+			expect(session.model.id).toBe("runtime-model");
+			expect(await session.modelRegistry.getApiKey(session.model)).toBe("cli-runtime-key");
+			await session.dispose();
+		} finally {
+			authStorage.close();
+		}
+	}, 15_000);
+
+	it("applies CLI runtime API keys before resolving CLI model scopes", async () => {
+		using tempDir = TempDir.createSync("@omp-acp-model-scope-api-key-");
+		const cwd = tempDir.path();
+		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
+		try {
+			const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+			let session: AgentSession | undefined;
+
+			const stopped = runRootCommand(
+				{
+					mode: "acp",
+					apiKey: "cli-runtime-key",
+					messages: [],
+					fileArgs: [],
+					unknownFlags: new Map(),
+					noSkills: true,
+					noRules: true,
+					noTools: true,
+					noLsp: true,
+					sessionDir: cwd,
+					models: ["openai/gpt-4o-mini"],
+				},
+				[],
+				{
+					discoverAuthStorage: async () => authStorage,
+					createAgentSession,
+					settings,
+					runAcpMode: async createAcpSession => {
+						session = await createAcpSession(cwd);
+						throw new Error("stop test ACP mode");
+					},
+				},
+			);
+			await expect(stopped).rejects.toThrow("stop test ACP mode");
+
+			if (!session?.model) {
+				throw new Error("Expected CLI-scoped model to resolve");
+			}
+			expect(session.model.provider).toBe("openai");
+			expect(session.model.id).toBe("gpt-4o-mini");
+			expect(await session.modelRegistry.getApiKey(session.model)).toBe("cli-runtime-key");
+			await session.dispose();
+		} finally {
+			authStorage.close();
+		}
+	}, 15_000);
+
+	it("resolves settings enabledModels after ACP cwd cloning and extension registration", async () => {
+		using tempDir = TempDir.createSync("@omp-acp-enabled-models-extension-");
+		const cwd = tempDir.path();
+
+		await Bun.write(
+			path.join(cwd, "runtime-provider.ts"),
+			`export default function(pi) {
+		pi.registerProvider("runtime-provider", {
+			baseUrl: "https://runtime.example.com/v1",
+			apiKey: "extension-key",
+			api: "openai-completions",
+			models: [{
+				id: "runtime-model",
+				name: "Runtime Model",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+			}],
+		});
+	}
+	`,
+		);
+
+		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
+		try {
+			const settings = Settings.isolated({
+				"marketplace.autoUpdate": "off",
+				enabledModels: [{ path: cwd, models: ["runtime-provider/runtime-model"] }],
+			});
+			let session: AgentSession | undefined;
+
+			const stopped = runRootCommand(
+				{
+					mode: "acp",
+					messages: [],
+					fileArgs: [],
+					unknownFlags: new Map(),
+					noSkills: true,
+					noRules: true,
+					noTools: true,
+					noLsp: true,
+					sessionDir: cwd,
+					extensions: [path.join(cwd, "runtime-provider.ts")],
+				},
+				[],
+				{
+					discoverAuthStorage: async () => authStorage,
+					createAgentSession,
+					settings,
+					runAcpMode: async createAcpSession => {
+						session = await createAcpSession(cwd);
+						throw new Error("stop test ACP mode");
+					},
+				},
+			);
+			await expect(stopped).rejects.toThrow("stop test ACP mode");
+
+			if (!session?.model) {
+				throw new Error("Expected extension-scoped model to resolve");
+			}
+			expect(session.model.provider).toBe("runtime-provider");
+			expect(session.model.id).toBe("runtime-model");
+			expect(session.hasModelScope).toBe(true);
+			expect(session.scopedModels.map(model => `${model.model.provider}/${model.model.id}`)).toEqual([
+				"runtime-provider/runtime-model",
+			]);
+			await session.dispose();
+		} finally {
+			authStorage.close();
+		}
+	}, 15_000);
+
+	it("resolves CLI model scopes after ACP extension registration", async () => {
+		using tempDir = TempDir.createSync("@omp-acp-cli-model-scope-extension-");
+		const cwd = tempDir.path();
+
+		await Bun.write(
+			path.join(cwd, "runtime-provider.ts"),
+			`export default function(pi) {
+		pi.registerProvider("runtime-provider", {
+			baseUrl: "https://runtime.example.com/v1",
+			apiKey: "extension-key",
+			api: "openai-completions",
+			models: [{
+				id: "runtime-model",
+				name: "Runtime Model",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128000,
+				maxTokens: 8192,
+			}],
+		});
+	}
+	`,
+		);
+
+		const authStorage = await AuthStorage.create(path.join(cwd, "auth.db"));
+		try {
+			authStorage.setRuntimeApiKey("openai", "openai-test-key");
+			const settings = Settings.isolated({ "marketplace.autoUpdate": "off" });
+			let session: AgentSession | undefined;
+
+			const stopped = runRootCommand(
+				{
+					mode: "acp",
+					messages: [],
+					fileArgs: [],
+					unknownFlags: new Map(),
+					noSkills: true,
+					noRules: true,
+					noTools: true,
+					noLsp: true,
+					sessionDir: cwd,
+					extensions: [path.join(cwd, "runtime-provider.ts")],
+					models: ["runtime-provider/runtime-model", "openai/gpt-4o-mini"],
+				},
+				[],
+				{
+					discoverAuthStorage: async () => authStorage,
+					createAgentSession,
+					settings,
+					runAcpMode: async createAcpSession => {
+						session = await createAcpSession(cwd);
+						throw new Error("stop test ACP mode");
+					},
+				},
+			);
+			await expect(stopped).rejects.toThrow("stop test ACP mode");
+
+			if (!session?.model) {
+				throw new Error("Expected extension-scoped model to resolve");
+			}
+			expect(session.model.provider).toBe("runtime-provider");
+			expect(session.model.id).toBe("runtime-model");
+			expect(session.hasModelScope).toBe(true);
+			expect(session.scopedModels.map(model => `${model.model.provider}/${model.model.id}`)).toEqual([
+				"runtime-provider/runtime-model",
+				"openai/gpt-4o-mini",
+			]);
 			await session.dispose();
 		} finally {
 			authStorage.close();

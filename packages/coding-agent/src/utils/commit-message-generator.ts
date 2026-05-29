@@ -39,8 +39,9 @@ function filterDiffNoise(diff: string): string {
 function getSmolModelCandidates(
 	registry: ModelRegistry,
 	settings: Settings,
+	availableModelsOverride?: readonly Model<Api>[],
 ): Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }> {
-	const availableModels = registry.getAvailable();
+	const availableModels = availableModelsOverride ? [...availableModelsOverride] : registry.getAvailable();
 	if (availableModels.length === 0) return [];
 
 	const candidates: Array<{ model: Model<Api>; thinkingLevel?: ThinkingLevel }> = [];
@@ -80,8 +81,9 @@ export async function generateCommitMessage(
 	registry: ModelRegistry,
 	settings: Settings,
 	sessionId?: string,
+	availableModels?: readonly Model<Api>[],
 ): Promise<string | null> {
-	const candidates = getSmolModelCandidates(registry, settings);
+	const candidates = getSmolModelCandidates(registry, settings, availableModels);
 	if (candidates.length === 0) {
 		logger.debug("commit-msg-generator: no smol model found");
 		return null;

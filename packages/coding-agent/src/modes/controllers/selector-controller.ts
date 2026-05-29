@@ -459,7 +459,7 @@ export class SelectorController {
 					done();
 					this.ctx.ui.requestRender();
 				},
-				options,
+				{ ...options, scopeConfigured: this.ctx.session.hasModelScope },
 			);
 			return { component: selector, focus: selector };
 		});

@@ -39,8 +39,13 @@ const setTitleTool: Tool = {
 	},
 };
 
-function getTitleModel(registry: ModelRegistry, settings: Settings, currentModel?: Model<Api>): Model<Api> | undefined {
-	const availableModels = registry.getAvailable();
+function getTitleModel(
+	registry: ModelRegistry,
+	settings: Settings,
+	currentModel?: Model<Api>,
+	availableModelsOverride?: readonly Model<Api>[],
+): Model<Api> | undefined {
+	const availableModels = availableModelsOverride ? [...availableModelsOverride] : registry.getAvailable();
 	if (availableModels.length === 0) return undefined;
 
 	const titleModel = resolveRoleSelection(["commit", "smol"], settings, availableModels, registry)?.model;
@@ -143,10 +148,11 @@ export async function generateSessionTitle(
 	sessionId?: string,
 	currentModel?: Model<Api>,
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
+	availableModels?: readonly Model<Api>[],
 ): Promise<string | null> {
 	const tinyModel = settings.get("providers.tinyModel");
 	if (tinyModel === ONLINE_TINY_TITLE_MODEL_KEY) {
-		return generateTitleOnline(firstMessage, registry, settings, sessionId, currentModel, metadataResolver);
+		return generateTitleOnline(firstMessage, registry, settings, sessionId, currentModel, metadataResolver, undefined, availableModels);
 	}
 
 	const onlineAbortController = new AbortController();
@@ -163,6 +169,7 @@ export async function generateSessionTitle(
 			currentModel,
 			metadataResolver,
 			onlineAbortController.signal,
+			availableModels,
 		);
 
 	return raceFirstNonNull(localTitle, startOnline, TITLE_LOCAL_FALLBACK_DELAY_MS, () => {
@@ -178,8 +185,9 @@ export async function generateTitleOnline(
 	currentModel?: Model<Api>,
 	metadataResolver?: (provider: string) => Record<string, unknown> | undefined,
 	signal?: AbortSignal,
+	availableModels?: readonly Model<Api>[],
 ): Promise<string | null> {
-	const model = getTitleModel(registry, settings, currentModel);
+	const model = getTitleModel(registry, settings, currentModel, availableModels);
 	if (!model) {
 		logger.debug("title-generator: no title model found");
 		return null;
