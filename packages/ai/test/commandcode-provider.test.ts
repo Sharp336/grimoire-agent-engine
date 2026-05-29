@@ -3,7 +3,7 @@ import { getBundledModel } from "../src/models";
 import { COMMAND_CODE_MODELS } from "../src/provider-models/commandcode";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { streamCommandCode } from "../src/providers/commandcode";
-import { completeSimple, getEnvApiKey } from "../src/stream";
+import { getEnvApiKey } from "../src/stream";
 import type { Context, Model } from "../src/types";
 import { getOAuthProviders } from "../src/utils/oauth";
 
@@ -156,7 +156,7 @@ describe("Command Code native provider", () => {
 		const model = COMMAND_CODE_MODELS.find(item => item.id === "deepseek/deepseek-v4-flash") as Model<"commandcode">;
 		let requestBody: Record<string, unknown> | undefined;
 
-		const result = await completeSimple(
+		const stream = streamCommandCode(
 			model,
 			{
 				messages: [{ role: "user", content: "summarize without tools", timestamp: Date.now() }],
@@ -167,12 +167,14 @@ describe("Command Code native provider", () => {
 				toolChoice: "none",
 				onPayload: payload => {
 					requestBody = payload as Record<string, unknown>;
-					throw new Error("stop before network");
 				},
+				fetch: async () => ndjsonResponse([{ type: "finish", finishReason: "stop" }]),
 			},
 		);
 
-		expect(result.stopReason).toBe("error");
+		const result = await stream.result();
+
+		expect(result.stopReason).toBe("stop");
 		const params = requestBody?.params as Record<string, unknown> | undefined;
 		expect(params?.tools).toEqual([]);
 	});

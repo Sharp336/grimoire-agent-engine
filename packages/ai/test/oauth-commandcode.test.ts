@@ -5,6 +5,17 @@ import {
 	startCommandCodeAuthServer,
 } from "../src/utils/oauth/commandcode";
 
+async function waitUntilAuthUrl(getUrl: () => string, timeoutMs = 1_000): Promise<string> {
+	const deadline = Date.now() + timeoutMs;
+	let url = getUrl();
+	while (!url) {
+		if (Date.now() > deadline) throw new Error("Timed out waiting for Command Code auth URL");
+		await Bun.sleep(1);
+		url = getUrl();
+	}
+	return url;
+}
+
 describe("Command Code browser-assisted login", () => {
 	it("accepts the browser callback and returns its API key", async () => {
 		let authUrl = "";
@@ -20,8 +31,7 @@ describe("Command Code browser-assisted login", () => {
 			{ startAuthServer: () => startCommandCodeAuthServer({ startPort: 0 }) },
 		);
 
-		while (!authUrl) await Bun.sleep(1);
-		const url = new URL(authUrl);
+		const url = new URL(await waitUntilAuthUrl(() => authUrl));
 		const callback = new URL(url.searchParams.get("callback") ?? "");
 		const state = url.searchParams.get("state") ?? "";
 		expect(callback.hostname).toBe("127.0.0.1");
@@ -54,8 +64,7 @@ describe("Command Code browser-assisted login", () => {
 				},
 			});
 
-			while (!authUrl) await Bun.sleep(1);
-			const url = new URL(authUrl);
+			const url = new URL(await waitUntilAuthUrl(() => authUrl));
 			const callback = new URL(url.searchParams.get("callback") ?? "");
 			const state = url.searchParams.get("state") ?? "";
 			expect(callback.port).toBe(String(port));

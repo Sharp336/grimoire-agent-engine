@@ -5,6 +5,7 @@
  * OpenAI-compatible API. The request and event shapes here are based on the
  * MIT-licensed community provider at github.com/ninehills/pi-commandcode-provider.
  */
+import * as path from "node:path";
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import { calculateCost } from "../models";
 import { getEnvApiKey } from "../stream";
@@ -199,7 +200,7 @@ function buildRequest(
 	const tools = options.toolChoice === "none" ? [] : toCommandCodeTools(context.tools);
 	return {
 		config: {
-			workingDir: process.cwd(),
+			workingDir: path.basename(process.cwd()) || ".",
 			date: new Date().toISOString().split("T")[0],
 			environment: `${process.platform}-${process.arch}, Bun ${Bun.version}`,
 			structure: [],
