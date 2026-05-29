@@ -3,7 +3,7 @@ import { getBundledModel } from "../src/models";
 import { COMMAND_CODE_MODELS } from "../src/provider-models/commandcode";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
 import { streamCommandCode } from "../src/providers/commandcode";
-import { getEnvApiKey } from "../src/stream";
+import { completeSimple, getEnvApiKey } from "../src/stream";
 import type { Context, Model } from "../src/types";
 import { getOAuthProviders } from "../src/utils/oauth";
 
@@ -150,6 +150,31 @@ describe("Command Code native provider", () => {
 
 		const params = requestBody?.params as Record<string, unknown> | undefined;
 		expect(params?.max_tokens).toBe(65_536);
+	});
+
+	it('omits tools when toolChoice is "none"', async () => {
+		const model = COMMAND_CODE_MODELS.find(item => item.id === "deepseek/deepseek-v4-flash") as Model<"commandcode">;
+		let requestBody: Record<string, unknown> | undefined;
+
+		const result = await completeSimple(
+			model,
+			{
+				messages: [{ role: "user", content: "summarize without tools", timestamp: Date.now() }],
+				tools: [{ name: "read", description: "Read a file", parameters: { type: "object", properties: {} } }],
+			},
+			{
+				apiKey: "test-key",
+				toolChoice: "none",
+				onPayload: payload => {
+					requestBody = payload as Record<string, unknown>;
+					throw new Error("stop before network");
+				},
+			},
+		);
+
+		expect(result.stopReason).toBe("error");
+		const params = requestBody?.params as Record<string, unknown> | undefined;
+		expect(params?.tools).toEqual([]);
 	});
 
 	it("omits image blocks from user messages for Command Code", async () => {

@@ -1035,7 +1035,10 @@ function mapOptionsForApi<TApi extends Api>(
 		}
 
 		case "commandcode":
-			return castApi<"commandcode">(base);
+			return castApi<"commandcode">({
+				...base,
+				toolChoice: options?.toolChoice,
+			});
 
 		default:
 			throw new Error(`Unhandled API in mapOptionsForApi: ${model.api}`);

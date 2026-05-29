@@ -17,6 +17,7 @@ import type {
 	StreamOptions,
 	Tool,
 	ToolCall,
+	ToolChoice,
 } from "../types";
 import { isRecord, normalizeSystemPrompts, toNumber } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -24,7 +25,9 @@ import { notifyProviderResponse } from "../utils/provider-response";
 import { toolWireSchema } from "../utils/schema/wire";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
 
-export interface CommandCodeOptions extends StreamOptions {}
+export interface CommandCodeOptions extends StreamOptions {
+	toolChoice?: ToolChoice;
+}
 
 const DEFAULT_BASE_URL = "https://api.commandcode.ai";
 const COMMAND_CODE_CLI_VERSION = "0.27.2";
@@ -193,6 +196,7 @@ function buildRequest(
 	options: CommandCodeOptions,
 ): Record<string, unknown> {
 	const maxTokens = Math.min(options.maxTokens ?? model.maxTokens, model.maxTokens, COMMAND_CODE_MAX_OUTPUT_TOKENS);
+	const tools = options.toolChoice === "none" ? [] : toCommandCodeTools(context.tools);
 	return {
 		config: {
 			workingDir: process.cwd(),
@@ -212,7 +216,7 @@ function buildRequest(
 		params: {
 			model: model.id,
 			messages: toCommandCodeMessages(context.messages),
-			tools: toCommandCodeTools(context.tools),
+			tools,
 			system: normalizeSystemPrompts(context.systemPrompt).join("\n\n"),
 			max_tokens: maxTokens,
 			stream: true,
