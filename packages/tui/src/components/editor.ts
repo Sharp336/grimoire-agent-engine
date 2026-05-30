@@ -765,7 +765,7 @@ export class Editor implements Component, Focusable {
 				displayText = pre + "\x1b[7m" + sel + "\x1b[0m" + post;
 				// Adjust cursorPos for the inserted ANSI bytes (\x1b[7m = 4 chars, \x1b[0m = 4 chars)
 				if (layoutLine.cursorPos !== undefined) {
-					if (layoutLine.cursorPos > layoutLine.selStart) {
+					if (layoutLine.cursorPos >= layoutLine.selStart) {
 						layoutLine.cursorPos += 4;
 					}
 					if (layoutLine.cursorPos >= layoutLine.selEnd + 4) {
@@ -1799,6 +1799,9 @@ export class Editor implements Component, Focusable {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
 		this.#recordUndoState();
+		if (this.#hasSelection()) {
+			this.#withUndoSuspended(() => this.#deleteSelectedText());
+		}
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
 
@@ -2169,6 +2172,9 @@ export class Editor implements Component, Focusable {
 		this.#historyIndex = -1;
 		this.#resetKillSequence();
 		this.#recordUndoState();
+		if (this.#hasSelection()) {
+			this.#withUndoSuspended(() => this.#deleteSelectedText());
+		}
 
 		const normalized = text.replace(/\r\n?/g, "\n");
 		const lines = normalized.split("\n");
@@ -2341,6 +2347,10 @@ export class Editor implements Component, Focusable {
 
 	#deleteWordBackwards(): void {
 		this.#historyIndex = -1; // Exit history browsing mode
+		if (this.#hasSelection()) {
+			this.#deleteSelectedText();
+			return;
+		}
 		this.#recordUndoState();
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
@@ -2375,6 +2385,10 @@ export class Editor implements Component, Focusable {
 
 	#deleteWordForwards(): void {
 		this.#historyIndex = -1; // Exit history browsing mode
+		if (this.#hasSelection()) {
+			this.#deleteSelectedText();
+			return;
+		}
 		this.#recordUndoState();
 
 		const currentLine = this.#state.lines[this.#state.cursorLine] || "";
