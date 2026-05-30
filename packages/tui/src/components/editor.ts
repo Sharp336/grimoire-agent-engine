@@ -2349,7 +2349,9 @@ export class Editor implements Component, Focusable {
 	#deleteWordBackwards(): void {
 		this.#historyIndex = -1; // Exit history browsing mode
 		if (this.#hasSelection()) {
+			const text = this.getSelectedText();
 			this.#deleteSelectedText();
+			this.#recordKill(text, "backward");
 			return;
 		}
 		this.#recordUndoState();
@@ -2387,7 +2389,9 @@ export class Editor implements Component, Focusable {
 	#deleteWordForwards(): void {
 		this.#historyIndex = -1; // Exit history browsing mode
 		if (this.#hasSelection()) {
+			const text = this.getSelectedText();
 			this.#deleteSelectedText();
+			this.#recordKill(text, "forward");
 			return;
 		}
 		this.#recordUndoState();
