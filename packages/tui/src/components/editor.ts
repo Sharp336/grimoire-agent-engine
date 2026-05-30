@@ -1626,10 +1626,10 @@ export class Editor implements Component, Focusable {
 	#insertCharacter(char: string): void {
 		this.#exitHistoryForEditing();
 		this.#resetKillSequence();
-		if (this.#hasSelection()) {
-			this.#deleteSelectedText();
-		}
 		this.#recordUndoState();
+		if (this.#hasSelection()) {
+			this.#withUndoSuspended(() => this.#deleteSelectedText());
+		}
 
 		const line = this.#state.lines[this.#state.cursorLine] || "";
 
@@ -1716,6 +1716,9 @@ export class Editor implements Component, Focusable {
 		this.#historyIndex = -1; // Exit history browsing mode
 		this.#resetKillSequence();
 		this.#recordUndoState();
+		if (this.#hasSelection()) {
+			this.#withUndoSuspended(() => this.#deleteSelectedText());
+		}
 
 		this.#withUndoSuspended(() => {
 			// Some terminals (e.g. tmux popups with extended-keys-format=csi-u) re-encode
