@@ -45,6 +45,7 @@ import {
 } from "./providers/register-builtins";
 import { isSyntheticModel, streamSynthetic } from "./providers/synthetic";
 import { streamXAIResponses } from "./providers/xai-responses";
+import { isUsageLimitError } from "./rate-limit-utils";
 import type {
 	Api,
 	AssistantMessage,
@@ -60,6 +61,7 @@ import type {
 } from "./types";
 import { AssistantMessageEventStream } from "./utils/event-stream";
 import { isFoundryEnabled } from "./utils/foundry";
+import { withRequestDebugFetch } from "./utils/request-debug";
 
 let cachedVertexAdcCredentialsExists: boolean | null = null;
 
@@ -76,23 +78,98 @@ function hasVertexAdcCredentials(): boolean {
 	}
 	return cachedVertexAdcCredentialsExists;
 }
-function isGoogleVertexOpenAIModel(model: Model<Api>): boolean {
+function isGoogleVertexAuthenticatedModel(model: Model<Api>): boolean {
 	return (
 		model.provider === "google-vertex" &&
-		model.api === "openai-completions" &&
-		model.baseUrl.includes("/endpoints/openapi")
+		((model.api === "openai-completions" && model.baseUrl.includes("/endpoints/openapi")) ||
+			(model.api === "anthropic-messages" && model.baseUrl.includes(":streamRawPredict")))
 	);
 }
 
-function createVertexOpenAIFetch(options: StreamOptions | undefined): FetchImpl {
+function createVertexAuthenticatedFetch(options: StreamOptions | undefined): FetchImpl {
 	const baseFetch = options?.fetch ?? fetch;
 	const vertexFetch = async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
 		const token = await getVertexAccessToken({ signal: options?.signal, fetch: baseFetch });
 		const headers = new Headers(init?.headers);
 		headers.set("Authorization", `Bearer ${token}`);
-		return baseFetch(input, { ...init, headers });
+		const rewritten = resolveVertexRequest(input);
+		const url = rewritten instanceof Request ? rewritten.url : rewritten.toString();
+		if (isVertexAnthropicRawPredict(url)) {
+			const bodyText = await readVertexRequestBody(rewritten, init);
+			const transformed = transformVertexAnthropicBody(bodyText);
+			return baseFetch(url, {
+				...init,
+				method: init?.method ?? (rewritten instanceof Request ? rewritten.method : "POST"),
+				headers,
+				body: transformed,
+			});
+		}
+		return baseFetch(rewritten, { ...init, headers });
 	};
 	return Object.assign(vertexFetch, baseFetch.preconnect ? { preconnect: baseFetch.preconnect } : {});
+}
+
+function isVertexAnthropicRawPredict(url: string): boolean {
+	return url.includes(":streamRawPredict") || url.includes(":rawPredict");
+}
+
+async function readVertexRequestBody(input: string | URL | Request, init: RequestInit | undefined): Promise<string> {
+	if (input instanceof Request) return input.clone().text();
+	const body = init?.body;
+	if (typeof body === "string") return body;
+	if (body instanceof Uint8Array) return new TextDecoder().decode(body);
+	if (body instanceof ArrayBuffer) return new TextDecoder().decode(body);
+	return "";
+}
+
+// Vertex Claude rejects the standard Anthropic body shape: the `model` field
+// is encoded in the URL path and `anthropic_version: "vertex-2023-10-16"` is
+// required in the JSON body instead of the `anthropic-version` HTTP header.
+function transformVertexAnthropicBody(bodyText: string): string {
+	if (!bodyText) return bodyText;
+	try {
+		const payload = JSON.parse(bodyText) as Record<string, unknown>;
+		delete payload.model;
+		payload.anthropic_version = "vertex-2023-10-16";
+		return JSON.stringify(payload);
+	} catch {
+		return bodyText;
+	}
+}
+
+function resolveVertexRequest(input: string | URL | Request): string | URL | Request {
+	const project = $env.GOOGLE_CLOUD_PROJECT || $env.GCP_PROJECT || $env.GCLOUD_PROJECT;
+	const location = $env.GOOGLE_VERTEX_LOCATION || $env.GOOGLE_CLOUD_LOCATION || $env.VERTEX_LOCATION;
+	if (!project || !location) return input;
+
+	const rewriteUrl = (url: string): string => {
+		const hasPlaceholder =
+			url.includes("{project}") ||
+			url.includes("{location}") ||
+			url.includes("%7Bproject%7D") ||
+			url.includes("%7Blocation%7D");
+		const host = location === "global" ? "aiplatform.googleapis.com" : `${location}-aiplatform.googleapis.com`;
+		const rewritten = hasPlaceholder
+			? url
+					.replace("https://{location}-aiplatform.googleapis.com", `https://${host}`)
+					.replace("https://%7Blocation%7D-aiplatform.googleapis.com", `https://${host}`)
+					.replaceAll("{project}", encodeURIComponent(project))
+					.replaceAll("%7Bproject%7D", encodeURIComponent(project))
+					.replaceAll("{location}", encodeURIComponent(location))
+					.replaceAll("%7Blocation%7D", encodeURIComponent(location))
+			: url;
+		return rewritten.replace(":streamRawPredict/v1/messages", ":streamRawPredict");
+	};
+
+	if (input instanceof Request) {
+		const rewrittenUrl = rewriteUrl(input.url);
+		return rewrittenUrl === input.url ? input : new Request(rewrittenUrl, input);
+	}
+	if (input instanceof URL) {
+		const rewrittenUrl = rewriteUrl(input.toString());
+		return rewrittenUrl === input.toString() ? input : new URL(rewrittenUrl);
+	}
+	return rewriteUrl(input);
 }
 
 type KeyResolver = string | (() => string | undefined);
@@ -107,6 +184,8 @@ const serviceProviderMap: Record<string, KeyResolver> = {
 	"xai-oauth": () => $pickenv("XAI_OAUTH_TOKEN", "XAI_API_KEY"),
 	fireworks: "FIREWORKS_API_KEY",
 	firepass: "FIREPASS_API_KEY",
+	"wafer-pass": "WAFER_PASS_API_KEY",
+	"wafer-serverless": "WAFER_SERVERLESS_API_KEY",
 	openrouter: "OPENROUTER_API_KEY",
 	kilo: "KILO_API_KEY",
 	"vercel-ai-gateway": "AI_GATEWAY_API_KEY",
@@ -217,38 +296,50 @@ export function stream<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
+	const requestOptions = withRequestDebugFetch(options as StreamOptions | undefined) as
+		| OptionsForApi<TApi>
+		| undefined;
+
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
-		return customApiProvider.stream(model, context, options as StreamOptions);
+		return customApiProvider.stream(model, context, requestOptions as StreamOptions);
 	}
 
 	if (isGitLabDuoModel(model)) {
-		const apiKey = (options as StreamOptions | undefined)?.apiKey || getEnvApiKey(model.provider);
+		const apiKey = (requestOptions as StreamOptions | undefined)?.apiKey || getEnvApiKey(model.provider);
 		if (!apiKey) {
 			throw new Error(`No API key for provider: ${model.provider}`);
 		}
 		return streamGitLabDuo(model, context, {
-			...(options as SimpleStreamOptions | undefined),
+			...(requestOptions as SimpleStreamOptions | undefined),
 			apiKey,
 		});
 	}
 
 	// Vertex AI uses Application Default Credentials, not API keys
 	if (model.api === "google-vertex") {
-		return streamGoogleVertex(model as Model<"google-vertex">, context, options as GoogleVertexOptions);
+		return streamGoogleVertex(model as Model<"google-vertex">, context, requestOptions as GoogleVertexOptions);
 	} else if (model.api === "bedrock-converse-stream") {
 		// Bedrock doesn't have any API keys instead it sources credentials from standard AWS env variables or from given AWS profile.
-		return streamBedrock(model as Model<"bedrock-converse-stream">, context, (options || {}) as BedrockOptions);
+		return streamBedrock(
+			model as Model<"bedrock-converse-stream">,
+			context,
+			(requestOptions || {}) as BedrockOptions,
+		);
 	}
 
-	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	const apiKey = requestOptions?.apiKey || getEnvApiKey(model.provider);
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
-	const providerOptions = isGoogleVertexOpenAIModel(model)
-		? { ...options, apiKey: "vertex-adc", fetch: createVertexOpenAIFetch(options as StreamOptions | undefined) }
-		: { ...options, apiKey };
+	const providerOptions = isGoogleVertexAuthenticatedModel(model)
+		? {
+				...requestOptions,
+				apiKey: "vertex-adc",
+				fetch: createVertexAuthenticatedFetch(requestOptions as StreamOptions | undefined),
+			}
+		: { ...requestOptions, apiKey };
 
 	const api: Api = model.api;
 	switch (api) {
@@ -318,6 +409,18 @@ function extractStatusFromAssistantError(message: AssistantMessage): number | un
 	return extractHttpStatusFromError({ message: message.errorMessage });
 }
 
+function isRetryableUpstreamError(error: unknown, status: number | undefined, message: string | undefined): boolean {
+	// 401 means the credential is bad. Usage-limit phrasing (Codex's
+	// "You have hit your ChatGPT usage limit", Anthropic's "usage_limit_reached",
+	// Google's "resource_exhausted") means this account is parked but a
+	// sibling credential can usually pick the request up. Both are
+	// rotatable via `onAuthError` — the auth-gateway maps the former to
+	// `invalidateCredentialMatching` and the latter to `markUsageLimitReached`.
+	if (status === 401) return true;
+	void error;
+	return !!message && isUsageLimitError(message);
+}
+
 function createAssistantAuthError(message: AssistantMessage): Error & { status?: number } {
 	const error: Error & { status?: number } = new Error(message.errorMessage ?? "Provider authentication failed");
 	const status = extractStatusFromAssistantError(message);
@@ -336,10 +439,13 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const retryApiKey = options?.onAuthError ? (options.apiKey ?? getEnvApiKey(model.provider)) : undefined;
+	const requestOptions = withRequestDebugFetch(options);
+	const retryApiKey = requestOptions?.onAuthError
+		? (requestOptions.apiKey ?? getEnvApiKey(model.provider))
+		: undefined;
 	if (retryApiKey) {
 		const outer = new AssistantMessageEventStream();
-		const onAuthError = options!.onAuthError!;
+		const onAuthError = requestOptions!.onAuthError!;
 		const runAttempt = async (apiKey: string, captureAuthFailure: boolean): Promise<AuthRetryFailure | undefined> => {
 			const bufferedEvents: AssistantMessageEvent[] = [];
 			let emittedReplayUnsafeEvent = false;
@@ -349,7 +455,7 @@ export function streamSimple<TApi extends Api>(
 			};
 
 			try {
-				const inner = streamSimple(model, context, { ...options, apiKey, onAuthError: undefined });
+				const inner = streamSimple(model, context, { ...requestOptions, apiKey, onAuthError: undefined });
 				for await (const event of inner) {
 					if (!emittedReplayUnsafeEvent && event.type === "start") {
 						bufferedEvents.push(event);
@@ -359,7 +465,11 @@ export function streamSimple<TApi extends Api>(
 						!emittedReplayUnsafeEvent &&
 						captureAuthFailure &&
 						event.type === "error" &&
-						extractStatusFromAssistantError(event.error) === 401
+						isRetryableUpstreamError(
+							event.error,
+							extractStatusFromAssistantError(event.error),
+							event.error.errorMessage,
+						)
 					) {
 						return { error: createAssistantAuthError(event.error), bufferedEvents, terminalEvent: event };
 					}
@@ -371,7 +481,15 @@ export function streamSimple<TApi extends Api>(
 				flushBuffered();
 				if (!outer.done) outer.end(await inner.result());
 			} catch (error) {
-				if (!emittedReplayUnsafeEvent && captureAuthFailure && extractHttpStatusFromError(error) === 401) {
+				if (
+					!emittedReplayUnsafeEvent &&
+					captureAuthFailure &&
+					isRetryableUpstreamError(
+						error,
+						extractHttpStatusFromError(error),
+						error instanceof Error ? error.message : undefined,
+					)
+				) {
 					return { error, bufferedEvents };
 				}
 				flushBuffered();
@@ -413,26 +531,26 @@ export function streamSimple<TApi extends Api>(
 	// extension-registered APIs can't accidentally override a configured
 	// pi-native transport.
 	if (model.transport === "pi-native") {
-		return streamPiNative(model, context, options);
+		return streamPiNative(model, context, requestOptions);
 	}
 
 	// Check custom API registry (extension-provided APIs)
 	const customApiProvider = getCustomApi(model.api);
 	if (customApiProvider) {
-		return customApiProvider.streamSimple(model, context, options);
+		return customApiProvider.streamSimple(model, context, requestOptions);
 	}
 
 	// Vertex AI uses Application Default Credentials, not API keys
 	if (model.api === "google-vertex") {
-		const providerOptions = mapOptionsForApi(model, options, undefined);
+		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
 		return stream(model, context, providerOptions);
 	} else if (model.api === "bedrock-converse-stream") {
 		// Bedrock doesn't have any API keys instead it sources credentials from standard AWS env variables or from given AWS profile.
-		const providerOptions = mapOptionsForApi(model, options, undefined);
+		const providerOptions = mapOptionsForApi(model, requestOptions, undefined);
 		return stream(model, context, providerOptions);
 	}
 
-	const apiKey = options?.apiKey || getEnvApiKey(model.provider);
+	const apiKey = requestOptions?.apiKey || getEnvApiKey(model.provider);
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
@@ -440,7 +558,7 @@ export function streamSimple<TApi extends Api>(
 	// GitLab Duo - wraps Anthropic/OpenAI behind GitLab AI Gateway direct access tokens
 	if (isGitLabDuoModel(model)) {
 		return streamGitLabDuo(model, context, {
-			...options,
+			...requestOptions,
 			apiKey,
 		});
 	}
@@ -449,9 +567,9 @@ export function streamSimple<TApi extends Api>(
 	if (isKimiModel(model)) {
 		// Pass raw SimpleStreamOptions - streamKimi handles mapping internally
 		return streamKimi(model as Model<"openai-completions">, context, {
-			...options,
+			...requestOptions,
 			apiKey,
-			format: options?.kimiApiFormat ?? "anthropic",
+			format: requestOptions?.kimiApiFormat ?? "anthropic",
 		});
 	}
 
@@ -459,13 +577,12 @@ export function streamSimple<TApi extends Api>(
 	if (isSyntheticModel(model)) {
 		// Pass raw SimpleStreamOptions - streamSynthetic handles mapping internally
 		return streamSynthetic(model as Model<"openai-completions">, context, {
-			...options,
+			...requestOptions,
 			apiKey,
-			format: options?.syntheticApiFormat ?? "openai", // Default to OpenAI format
+			format: requestOptions?.syntheticApiFormat ?? "openai", // Default to OpenAI format
 		});
 	}
-
-	const providerOptions = mapOptionsForApi(model, options, apiKey);
+	const providerOptions = mapOptionsForApi(model, requestOptions, apiKey);
 	return stream(model, context, providerOptions);
 }
 
@@ -610,6 +727,7 @@ function mapOptionsForApi<TApi extends Api>(
 		onResponse: options?.onResponse,
 		onSseEvent: options?.onSseEvent,
 		execHandlers: options?.execHandlers,
+		fetch: options?.fetch,
 	};
 
 	switch (model.api) {

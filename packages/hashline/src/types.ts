@@ -19,9 +19,9 @@ export type Cursor =
 /**
  * A single low-level edit produced by the parser and consumed by the applier.
  * Multi-line replacements decompose to one `insert` per replacement line plus
- * one `delete` per consumed line. Replacement inserts are tagged so the applier
- * can distinguish "insert above this deleted line" from "new content for this
- * deleted line" when a source block carries both buckets.
+ * one `delete` per consumed line. Replacement payloads are tagged so the
+ * applier can distinguish literal insertion from new content for a deleted
+ * line.
  */
 export type Edit =
 	| {
@@ -40,18 +40,8 @@ export interface ApplyResult {
 	text: string;
 	/** First line number (1-indexed) that changed, or `undefined` for a no-op apply. */
 	firstChangedLine?: number;
-	/** Diagnostic warnings collected by the applier (auto-absorb, boundary checks, …). */
+	/** Diagnostic warnings collected by the parser, patcher, or recovery. */
 	warnings?: string[];
-}
-
-/** Optional knobs forwarded to {@link Edit} application. */
-export interface ApplyOptions {
-	/**
-	 * When `true`, pure-insert and single-line replacement-boundary duplicates
-	 * are dropped opportunistically. Default `false`: only multi-line block
-	 * duplicates and structural-boundary single lines are absorbed.
-	 */
-	autoDropPureInsertDuplicates?: boolean;
 }
 
 /** A parsed `[A..B]` line range. */

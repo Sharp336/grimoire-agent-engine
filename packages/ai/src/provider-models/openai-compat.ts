@@ -870,7 +870,7 @@ export function zhipuCodingPlanModelManagerOptions(
 	config?: ZhipuCodingPlanModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? "https://open.bigmodel.cn/api/paas/v4";
+	const baseUrl = config?.baseUrl ?? "https://open.bigmodel.cn/api/coding/paas/v4";
 	return {
 		providerId: "zhipu-coding-plan",
 		...(apiKey && {
@@ -1038,6 +1038,163 @@ export function firepassModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 7.7 Wafer (Pass + Serverless)
+// ---------------------------------------------------------------------------
+
+export interface WaferModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+}
+
+const WAFER_DEFAULT_BASE_URL = "https://pass.wafer.ai/v1";
+const WAFER_MAX_TOKENS_CAP = 65536;
+
+/**
+ * Shared mapper for Wafer's `/v1/models` records.
+ *
+ * Wafer wraps each entry with a `wafer` envelope describing tier, capabilities,
+ * and cents-per-million pricing. The mapper folds that metadata into the
+ * canonical `Model<"openai-completions">` shape and applies zai-family thinking
+ * compat when the entry advertises reasoning support (GLM-family on the Pass
+ * SKU). Cents-per-million → dollars-per-million via /100.
+ */
+interface WaferRecord {
+	context_length?: unknown;
+	tier?: unknown;
+	provider?: unknown;
+	capabilities?: { vision?: unknown; reasoning?: unknown; tools?: unknown };
+	pricing?: {
+		input_cents_per_million?: unknown;
+		output_cents_per_million?: unknown;
+		cache_read_cents_per_million?: unknown;
+	};
+	display_name?: unknown;
+}
+
+function readWaferRecord(entry: OpenAICompatibleModelRecord): WaferRecord | undefined {
+	const raw = (entry as { wafer?: unknown }).wafer;
+	return raw && typeof raw === "object" ? (raw as WaferRecord) : undefined;
+}
+
+function mapWaferModel(
+	providerId: "wafer-pass" | "wafer-serverless",
+	baseUrl: string,
+	entry: OpenAICompatibleModelRecord,
+	defaults: Model<"openai-completions">,
+): Model<"openai-completions"> {
+	const wafer = readWaferRecord(entry);
+	const capabilities = wafer?.capabilities ?? {};
+	const reasoning = capabilities.reasoning === true;
+	const vision = capabilities.vision === true;
+	const contextWindow = toPositiveNumber(
+		wafer?.context_length,
+		toPositiveNumber((entry as { max_model_len?: unknown }).max_model_len, defaults.contextWindow),
+	);
+	const maxTokens = Math.min(contextWindow, WAFER_MAX_TOKENS_CAP);
+	const pricing = wafer?.pricing ?? {};
+	// Wafer's `/v1/models` exposes pricing through `*_cents_per_million` fields,
+	// but the values are an internal wholesale unit, not literal cents — across
+	// every published Serverless model on wafer.ai the user-facing rate equals
+	// `cents × 125 / 10000` (i.e. wholesale × 1.25 / 100; GLM-5.1's `120` →
+	// $1.50/M, Kimi-K2.6's `88` → $1.10/M, etc.). The multiply-first form keeps
+	// the result a finite dyadic for every observed value.
+	// For the Pass SKU the per-token rate is bundled in the flat-rate
+	// subscription, so we follow the convention shared with
+	// `kimi-code`/`firepass`/`alibaba-coding-plan` and seed every Pass model with
+	// `cost: 0` regardless of what the upstream envelope says.
+	const isPassSku = providerId === "wafer-pass";
+	const cost = isPassSku
+		? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }
+		: {
+				input: (toPositiveNumber(pricing.input_cents_per_million, 0) * 125) / 10000,
+				output: (toPositiveNumber(pricing.output_cents_per_million, 0) * 125) / 10000,
+				cacheRead: (toPositiveNumber(pricing.cache_read_cents_per_million, 0) * 125) / 10000,
+				cacheWrite: 0,
+			};
+	const name = toModelName(wafer?.display_name, defaults.name);
+	const base: Model<"openai-completions"> = {
+		...defaults,
+		id: defaults.id,
+		name,
+		api: "openai-completions",
+		provider: providerId,
+		baseUrl,
+		reasoning,
+		input: vision ? (["text", "image"] as const) : ["text"],
+		cost,
+		contextWindow,
+		maxTokens,
+	};
+	if (reasoning) {
+		// Wafer's `wafer.provider` envelope tells us which upstream backend serves
+		// the model. Each upstream accepts a different thinking-control parameter
+		// on the wire — Wafer passes the body through, so we must mirror the
+		// upstream's native shape:
+		//   - zai (GLM) and moonshotai (Kimi) → `thinking: { type: "enabled" | "disabled" }`
+		//   - qwen (Alibaba) → top-level `enable_thinking: boolean`
+		//   - deepseek → `reasoning_effort` (DeepSeek effort map; the model always
+		//     reasons when invoked, replay of `reasoning_content` is required on
+		//     tool-call turns — both handled by `detectOpenAICompat` from the id).
+		// For unknown upstreams we omit `thinkingFormat` and let the per-id
+		// detection in `detectOpenAICompat` pick a safe default.
+		const upstream = typeof wafer?.provider === "string" ? wafer.provider : undefined;
+		const thinkingFormat: "zai" | "qwen" | undefined =
+			upstream === "zai" || upstream === "moonshotai" ? "zai" : upstream === "qwen" ? "qwen" : undefined;
+		return {
+			...base,
+			compat: {
+				...(thinkingFormat ? { thinkingFormat } : {}),
+				reasoningContentField: "reasoning_content",
+				supportsDeveloperRole: false,
+			},
+		};
+	}
+	return {
+		...base,
+		compat: { supportsDeveloperRole: false },
+	};
+}
+
+function createWaferOptions(
+	providerId: "wafer-pass" | "wafer-serverless",
+	config: WaferModelManagerConfig | undefined,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? WAFER_DEFAULT_BASE_URL;
+	const passOnly = providerId === "wafer-pass";
+	return {
+		providerId,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: providerId,
+					baseUrl,
+					apiKey,
+					filterModel: entry => {
+						if (!passOnly) return true;
+						const wafer = readWaferRecord(entry);
+						return wafer?.tier === "pass_included";
+					},
+					mapModel: (entry, defaults) => mapWaferModel(providerId, baseUrl, entry, defaults),
+				}),
+		}),
+	};
+}
+
+export function waferPassModelManagerOptions(
+	config?: WaferModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createWaferOptions("wafer-pass", config);
+}
+
+export function waferServerlessModelManagerOptions(
+	config?: WaferModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	return createWaferOptions("wafer-serverless", config);
+}
+
+// ---------------------------------------------------------------------------
 // 7. Mistral
 // ---------------------------------------------------------------------------
 
@@ -1061,37 +1218,62 @@ export interface OpenCodeModelManagerConfig {
 	baseUrl?: string;
 }
 
+function normalizeOpenCodeBasePath(baseUrl: string | undefined, fallbackBasePath: string): string {
+	const value = normalizeAnthropicBaseUrl(baseUrl, fallbackBasePath);
+	return value.endsWith("/v1") ? value.slice(0, -3) : value;
+}
+
+function openCodeBaseUrlForApi(api: Api, basePath: string): string {
+	return api === "anthropic-messages" ? basePath : `${basePath}/v1`;
+}
+
 function openCodeModelManagerOptions(
 	providerId: "opencode-go" | "opencode-zen",
-	defaultBaseUrl: string,
+	defaultBasePath: string,
 	config?: OpenCodeModelManagerConfig,
-): ModelManagerOptions<"openai-completions"> {
+): ModelManagerOptions<Api> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? defaultBaseUrl;
+	const basePath = normalizeOpenCodeBasePath(config?.baseUrl, defaultBasePath);
+	const discoveryBaseUrl = openCodeBaseUrlForApi("openai-completions", basePath);
+	const references = createBundledReferenceMap<Api>(providerId);
 	return {
 		providerId,
 		...(apiKey && {
 			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels({
+				fetchOpenAICompatibleModels<Api>({
 					api: "openai-completions",
 					provider: providerId,
-					baseUrl,
+					baseUrl: discoveryBaseUrl,
 					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id);
+						const name = toModelName(entry.name, reference?.name ?? defaults.name);
+						if (!reference) {
+							return {
+								...defaults,
+								name,
+							};
+						}
+						return {
+							...reference,
+							id: defaults.id,
+							name,
+							baseUrl: openCodeBaseUrlForApi(reference.api, basePath),
+							contextWindow: toPositiveNumber(entry.context_length, reference.contextWindow),
+							maxTokens: toPositiveNumber(entry.max_completion_tokens, reference.maxTokens),
+						};
+					},
 				}),
 		}),
 	};
 }
 
-export function opencodeZenModelManagerOptions(
-	config?: OpenCodeModelManagerConfig,
-): ModelManagerOptions<"openai-completions"> {
-	return openCodeModelManagerOptions("opencode-zen", "https://opencode.ai/zen/v1", config);
+export function opencodeZenModelManagerOptions(config?: OpenCodeModelManagerConfig): ModelManagerOptions<Api> {
+	return openCodeModelManagerOptions("opencode-zen", "https://opencode.ai/zen", config);
 }
 
-export function opencodeGoModelManagerOptions(
-	config?: OpenCodeModelManagerConfig,
-): ModelManagerOptions<"openai-completions"> {
-	return openCodeModelManagerOptions("opencode-go", "https://opencode.ai/zen/go/v1", config);
+export function opencodeGoModelManagerOptions(config?: OpenCodeModelManagerConfig): ModelManagerOptions<Api> {
+	return openCodeModelManagerOptions("opencode-go", "https://opencode.ai/zen/go", config);
 }
 
 // ---------------------------------------------------------------------------
@@ -2360,6 +2542,25 @@ function anthropicMessagesDescriptor(
 	return simpleModelsDevDescriptor(modelsDevKey, providerId, "anthropic-messages", baseUrl, options);
 }
 
+const GOOGLE_VERTEX_BASE_URL = "https://{location}-aiplatform.googleapis.com";
+const GOOGLE_VERTEX_OPENAI_BASE_URL =
+	"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/endpoints/openapi";
+const GOOGLE_VERTEX_ANTHROPIC_BASE_URL =
+	"https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/{model}:streamRawPredict";
+
+function resolveGoogleVertexApi(modelId: string, raw: ModelsDevModel): { api: Api; baseUrl: string } {
+	if (raw.provider?.npm === "@ai-sdk/google-vertex/anthropic") {
+		return {
+			api: "anthropic-messages",
+			baseUrl: GOOGLE_VERTEX_ANTHROPIC_BASE_URL.replace("{model}", modelId),
+		};
+	}
+	if (modelId.includes("/") || raw.provider?.npm === "@ai-sdk/openai-compatible") {
+		return { api: "openai-completions", baseUrl: GOOGLE_VERTEX_OPENAI_BASE_URL };
+	}
+	return { api: "google-vertex", baseUrl: GOOGLE_VERTEX_BASE_URL };
+}
+
 const MODELS_DEV_PROVIDER_DESCRIPTORS_BEDROCK: readonly ModelsDevProviderDescriptor[] = [
 	// --- Amazon Bedrock ---
 	{
@@ -2467,9 +2668,16 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 	// --- zAI ---
 	anthropicMessagesDescriptor("zai-coding-plan", "zai", "https://api.z.ai/api/anthropic"),
 	// --- Xiaomi ---
-	anthropicMessagesDescriptor("xiaomi", "xiaomi", "https://api.xiaomimimo.com/anthropic", {
+	openAiCompletionsDescriptor("xiaomi", "xiaomi", "https://api.xiaomimimo.com/v1", {
 		defaultContextWindow: 262144,
 		defaultMaxTokens: 8192,
+		compat: {
+			supportsStore: false,
+			thinkingFormat: "zai",
+			reasoningContentField: "reasoning_content",
+			requiresReasoningContentForToolCalls: true,
+			allowsSyntheticReasoningContentForToolCalls: false,
+		},
 	}),
 	// --- MiniMax Coding Plan ---
 	openAiCompletionsDescriptor("minimax-coding-plan", "minimax-code", "https://api.minimax.io/v1", {
@@ -2500,13 +2708,18 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS: readonly ModelsDevProviderDe
 		},
 	),
 	// --- Zhipu Coding Plan ---
-	openAiCompletionsDescriptor("zhipu-coding-plan", "zhipu-coding-plan", "https://open.bigmodel.cn/api/paas/v4", {
-		compat: {
-			thinkingFormat: "zai",
-			reasoningContentField: "reasoning_content",
-			supportsDeveloperRole: false,
+	openAiCompletionsDescriptor(
+		"zhipu-coding-plan",
+		"zhipu-coding-plan",
+		"https://open.bigmodel.cn/api/coding/paas/v4",
+		{
+			compat: {
+				thinkingFormat: "zai",
+				reasoningContentField: "reasoning_content",
+				supportsDeveloperRole: false,
+			},
 		},
-	}),
+	),
 ];
 
 const filterActiveToolCallModels = (_id: string, m: ModelsDevModel): boolean => {
@@ -2514,6 +2727,13 @@ const filterActiveToolCallModels = (_id: string, m: ModelsDevModel): boolean => 
 	if (m.status === "deprecated") return false;
 	return true;
 };
+
+const MODELS_DEV_PROVIDER_DESCRIPTORS_GOOGLE_VERTEX: readonly ModelsDevProviderDescriptor[] = [
+	simpleModelsDevDescriptor("google-vertex", "google-vertex", "google-vertex", GOOGLE_VERTEX_BASE_URL, {
+		filterModel: filterActiveToolCallModels,
+		resolveApi: resolveGoogleVertexApi,
+	}),
+];
 
 const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDescriptor[] = [
 	// --- Cloudflare AI Gateway ---
@@ -2592,6 +2812,7 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 /** All provider descriptors for models.dev data mapping in generate-models.ts. */
 export const MODELS_DEV_PROVIDER_DESCRIPTORS: readonly ModelsDevProviderDescriptor[] = [
 	...MODELS_DEV_PROVIDER_DESCRIPTORS_BEDROCK,
+	...MODELS_DEV_PROVIDER_DESCRIPTORS_GOOGLE_VERTEX,
 	...MODELS_DEV_PROVIDER_DESCRIPTORS_CORE,
 	...MODELS_DEV_PROVIDER_DESCRIPTORS_CODING_PLANS,
 	...MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED,

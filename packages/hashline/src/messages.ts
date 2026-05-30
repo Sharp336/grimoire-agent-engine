@@ -17,28 +17,34 @@ export const END_PATCH_MARKER = "*** End Patch";
 /**
  * Recovery sentinel emitted by an agent loop when a contaminated tool-call
  * stream is truncated mid-call. Behaves like {@link END_PATCH_MARKER} for
- * parsing — terminates the line loop — and additionally surfaces a warning
- * so the caller knows to re-issue any remaining edits.
+ * parsing — terminates the line loop — and does not surface a warning.
  */
 export const ABORT_MARKER = "*** Abort";
 
-/** Warning text appended to the tool result when {@link ABORT_MARKER} terminates parsing. */
-export const ABORT_WARNING =
-	"Tool stream truncated mid-call due to detected output corruption. Applied ops above are valid. Re-issue any remaining edits.";
-
-/**
- * Warning text appended when two consecutive blocks target the exact same
- * concrete range. The second block wins; the first block is discarded.
- */
+/** Warning text appended when two consecutive hunks target the exact same concrete range. */
 export const REPLACE_PAIR_COALESCED_WARNING =
-	"Detected two identical-range hashline blocks; kept only the second block. Issue ONE block per range — payload is the final desired content, never both old and new.";
+	"Detected two identical-range hashline hunks; kept only the second hunk. Issue ONE `replace N..M:` hunk per range — payload is the final desired content, never both old and new.";
 
-/** Error text prefix emitted when an anchor line carries inline payload. */
-export const INLINE_PAYLOAD_REJECTED_PREFIX = "Inline payload on the anchor line is rejected.";
+/** Warning text appended when an empty bodyless hunk is followed by an overlapping concrete hunk. */
+export const REPLACE_PAIR_COALESCED_OVERLAP_WARNING =
+	"Detected an overlapping bare hashline hunk immediately followed by a concrete hunk; dropped the earlier bare hunk. Issue ONE `replace N..M:` hunk per range — payload is the final desired content, never both old and new.";
 
-/** Error text emitted when `|` replacement payload targets BOF/EOF. */
-export const VIRTUAL_REPLACE_REJECTED_MESSAGE =
-	"BOF:/EOF: anchors are virtual positions and cannot use `|` replacement payload. Use `↑` or `↓` payload lines.";
+/** Warning text appended when bare body rows are auto-converted to literal rows. */
+export const BARE_BODY_AUTO_PIPED_WARNING =
+	"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines; pasting raw code as payload is not a portable shape.";
+
+/** Error text emitted when a hunk body contains a unified-diff-style `-` row. */
+export const MINUS_ROW_REJECTED =
+	"`-` rows are not valid; hashline ranges already name the lines being changed. To insert a literal line starting with `-`, write `+-…`.";
+
+/** Error text emitted when a replace hunk has no body. */
+export const EMPTY_REPLACE = "`replace N..M:` needs at least one `+TEXT` body row. To delete lines, use `delete N..M`.";
+
+/** Error text emitted when a delete hunk receives a body row. */
+export const DELETE_TAKES_NO_BODY = "`delete N..M` does not take body rows. Remove the body, or use `replace N..M:`.";
+
+/** Error text emitted when an insert hunk has no body. */
+export const EMPTY_INSERT = "`insert` needs at least one `+TEXT` body row.";
 
 /** Warning text emitted by `Recovery` when an external write fits a cached snapshot. */
 export const RECOVERY_EXTERNAL_WARNING =
