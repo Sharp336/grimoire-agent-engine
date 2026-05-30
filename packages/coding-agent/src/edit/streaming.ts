@@ -20,6 +20,7 @@ import {
 	END_PATCH_MARKER,
 	type PatchSection as HashlineInputSection,
 	Patch as HashlinePatch,
+	type SnapshotStore,
 } from "@oh-my-pi/hashline";
 import type { Theme } from "../modes/theme/theme";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
@@ -39,9 +40,9 @@ export interface PerFileDiffPreview {
 export interface StreamingDiffContext {
 	cwd: string;
 	signal: AbortSignal;
+	snapshots: SnapshotStore;
 	fuzzyThreshold?: number;
 	allowFuzzy?: boolean;
-	hashlineAutoDropPureInsertDuplicates?: boolean;
 	/**
 	 * True while the tool's arguments are still streaming in. Strategies that
 	 * accept free-form text input (apply_patch, hashline) trim the trailing
@@ -325,9 +326,7 @@ const hashlineStrategy: EditStreamingStrategy<HashlineArgs> = {
 			// to parse; suppress until the next chunk arrives. Once args are
 			// complete, surface the error so the model sees what went wrong.
 			if (ctx.isStreaming) return null;
-			const result = await computeHashlineDiff({ input }, ctx.cwd, {
-				autoDropPureInsertDuplicates: ctx.hashlineAutoDropPureInsertDuplicates,
-			});
+			const result = await computeHashlineDiff({ input }, ctx.cwd, ctx.snapshots);
 			ctx.signal.throwIfAborted();
 			return [toPerFilePreview("", result)];
 		}
@@ -346,8 +345,7 @@ const hashlineStrategy: EditStreamingStrategy<HashlineArgs> = {
 		for (let i = 0; i < sectionsToProcess.length; i++) {
 			ctx.signal.throwIfAborted();
 			const section = sectionsToProcess[i];
-			const result = await computeHashlineSectionDiff(section, ctx.cwd, {
-				autoDropPureInsertDuplicates: ctx.hashlineAutoDropPureInsertDuplicates,
+			const result = await computeHashlineSectionDiff(section, ctx.cwd, ctx.snapshots, {
 				streaming: ctx.isStreaming,
 			});
 			ctx.signal.throwIfAborted();
