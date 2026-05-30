@@ -1160,7 +1160,8 @@ export class Editor implements Component, Focusable {
 		else if (matchesKey(data, "alt+y")) {
 			this.#yankPop();
 		}
-		// Select All (Ctrl+A via keybinding or raw \x01)
+		// Select All (Ctrl+A). kb.matches handles Kitty protocol; raw \x01
+		// byte handles terminals that send Ctrl+A as the ASCII control char.
 		else if (kb.matches(data, "tui.editor.selectAll") || data === "\u0001") {
 			this.#state.selStartLine = 0;
 			this.#state.selStartCol = 0;
