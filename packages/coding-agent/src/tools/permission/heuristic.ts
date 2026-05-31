@@ -171,6 +171,12 @@ function unquote(s: string): string {
 	return s.replace(/^["']|["']$/g, "");
 }
 
+/** The shell-effective word: strip surrounding quotes + a leading backslash so a
+ *  disguised relocator (`\cd`, `'cd'`, `"cd"`) or quoted target is seen as-run. */
+function dequoteWord(token: string): string {
+	return unquote(token).replace(/^\\/, "");
+}
+
 /**
  * Prove-or-block predicate for the bash tool. Returns `allow` ONLY for a flat,
  * statically-analyzable command that provably stays in the workspace and carries
@@ -232,9 +238,9 @@ function proveBashSafe(
 		const seg = segments[i]!.trim();
 		if (!seg) continue;
 		const tokens = stripCommandPrefix(seg.split(/\s+/));
-		const head = tokens[0] ?? "";
+		const head = dequoteWord(tokens[0] ?? "");
 		if (RELOCATORS.has(head)) {
-			const target = tokens[1] ?? "";
+			const target = dequoteWord(tokens[1] ?? "");
 			// A literal `cd` in the FIRST segment runs unconditionally before anything
 			// else, so its destination is statically provable: outside the workspace →
 			// a proven escape (deny); inside → a proven relocation we keep analyzing

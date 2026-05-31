@@ -72,6 +72,9 @@ describe("classifyHeuristic — bash provable-safe (allow)", () => {
 	it("proves a wrapped leading literal in-workspace cd (builtin cd src && tsc)", () => {
 		expect(decide("bash", { command: "builtin cd src && tsc" })).toBe("allow");
 	});
+	it('proves a quoted leading literal in-workspace cd target (cd "src" && tsc)', () => {
+		expect(decide("bash", { command: 'cd "src" && tsc' })).toBe("allow");
+	});
 });
 
 describe("classifyHeuristic — bash proven dangerous / out-of-workspace (deny)", () => {
@@ -107,6 +110,12 @@ describe("classifyHeuristic — bash proven dangerous / out-of-workspace (deny)"
 	});
 	it("denies a wrapped leading literal cd that escapes the workspace (builtin cd /etc)", () => {
 		expect(decide("bash", { command: "builtin cd /etc && rm x" })).toBe("deny");
+	});
+	it('denies a double-quoted cd target that escapes the workspace (cd "/etc")', () => {
+		expect(decide("bash", { command: 'cd "/etc" && x' })).toBe("deny");
+	});
+	it("denies a single-quoted cd target that escapes the workspace (cd '/etc')", () => {
+		expect(decide("bash", { command: "cd '/etc' && x" })).toBe("deny");
 	});
 });
 
@@ -177,6 +186,18 @@ describe("classifyHeuristic — bash unprovable constructs (uncertain)", () => {
 	});
 	it("flags a wrapped pushd; the wrapper must not let pushd pass (builtin pushd /tmp)", () => {
 		expect(decide("bash", { command: "builtin pushd /tmp" })).toBe("uncertain");
+	});
+	it("flags a single-quoted disguised cd head (\\'cd\\' $HOME && touch .bashrc)", () => {
+		expect(decide("bash", { command: "'cd' $HOME && touch .bashrc" })).toBe("uncertain");
+	});
+	it('flags a double-quoted disguised cd head ("cd" $HOME && touch x)', () => {
+		expect(decide("bash", { command: '"cd" $HOME && touch x' })).toBe("uncertain");
+	});
+	it("flags a backslash-disguised cd head (\\cd $HOME && touch x)", () => {
+		expect(decide("bash", { command: "\\cd $HOME && touch x" })).toBe("uncertain");
+	});
+	it('flags a quoted dynamic cd target (cd "$HOME" && x)', () => {
+		expect(decide("bash", { command: 'cd "$HOME" && x' })).toBe("uncertain");
 	});
 });
 
