@@ -9,6 +9,7 @@ import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } 
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import * as git from "../../utils/git";
+import * as jj from "../../utils/jj";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../utils/session-color";
 import { sanitizeStatusText } from "../shared";
 import { computeNonMessageTokens } from "../utils/context-usage";
@@ -143,8 +144,10 @@ function tokensForMessage(msg: AgentMessage): number {
 
 export class StatusLineComponent implements Component {
 	#settings: StatusLineSettings = {};
+	#cachedVcsKind: "git" | "jj" | null | undefined = undefined;
 	#cachedBranch: string | null | undefined = undefined;
 	#cachedBranchRepoId: string | null | undefined = undefined;
+	#vcsLabelInFlight = false;
 	#gitWatcher: fs.FSWatcher | null = null;
 	#onBranchChange: (() => void) | null = null;
 	#autoCompactEnabled: boolean = true;
@@ -240,20 +243,22 @@ export class StatusLineComponent implements Component {
 
 	watchBranch(onBranchChange: () => void): void {
 		this.#onBranchChange = onBranchChange;
-		this.#setupGitWatcher();
+		this.#setupVcsWatcher();
 	}
 
-	#setupGitWatcher(): void {
+	#setupVcsWatcher(): void {
 		if (this.#gitWatcher) {
 			this.#gitWatcher.close();
 			this.#gitWatcher = null;
 		}
 
-		const gitHeadPath = git.repo.resolveSync(getProjectDir())?.headPath ?? null;
-		if (!gitHeadPath) return;
+		const projectDir = getProjectDir();
+		const watchPath =
+			jj.resolveSync(projectDir)?.workingCopyPath ?? git.repo.resolveSync(projectDir)?.headPath ?? null;
+		if (!watchPath) return;
 
 		try {
-			this.#gitWatcher = fs.watch(gitHeadPath, () => {
+			this.#gitWatcher = fs.watch(watchPath, () => {
 				this.#invalidateGitCaches();
 				if (this.#onBranchChange) {
 					this.#onBranchChange();
@@ -276,17 +281,63 @@ export class StatusLineComponent implements Component {
 	}
 
 	#invalidateGitCaches(): void {
+		this.#cachedVcsKind = undefined;
 		this.#cachedBranch = undefined;
 		this.#cachedBranchRepoId = undefined;
 		this.#cachedPrContext = undefined;
 	}
-	#getCurrentBranch(): string | null {
-		const head = git.head.resolveSync(getProjectDir());
-		const gitHeadPath = head?.headPath ?? null;
-		if (this.#cachedBranch !== undefined && this.#cachedBranchRepoId === gitHeadPath) {
-			return this.#cachedBranch;
+
+	#formatJjLabel(workingCopy: jj.JjWorkingCopy | null): string | null {
+		if (!workingCopy) return null;
+		return workingCopy.bookmarks[0] ?? workingCopy.changeId;
+	}
+
+	#getCurrentVcs(): { kind: "git" | "jj"; label: string | null; repoId: string | null } | null {
+		const projectDir = getProjectDir();
+		const jjRepo = jj.available() ? jj.resolveSync(projectDir) : null;
+		if (jjRepo) {
+			const repoId = jjRepo.workingCopyPath;
+			if (this.#cachedVcsKind === "jj" && this.#cachedBranch !== undefined && this.#cachedBranchRepoId === repoId) {
+				return { kind: "jj", label: this.#cachedBranch, repoId };
+			}
+			this.#cachedVcsKind = "jj";
+			this.#cachedBranchRepoId = repoId;
+			this.#cachedBranch = null;
+			if (!this.#vcsLabelInFlight) {
+				this.#vcsLabelInFlight = true;
+				void jj
+					.workingCopy(projectDir)
+					.then(workingCopy => {
+						if (this.#cachedVcsKind === "jj" && this.#cachedBranchRepoId === repoId) {
+							this.#cachedBranch = this.#formatJjLabel(workingCopy);
+						}
+					})
+					.catch(() => {
+						if (this.#cachedVcsKind === "jj" && this.#cachedBranchRepoId === repoId) {
+							this.#cachedBranch = null;
+						}
+					})
+					.finally(() => {
+						this.#vcsLabelInFlight = false;
+						if (this.#onBranchChange) {
+							this.#onBranchChange();
+						}
+					});
+			}
+			return { kind: "jj", label: this.#cachedBranch, repoId };
 		}
 
+		const head = git.head.resolveSync(projectDir);
+		const gitHeadPath = head?.headPath ?? null;
+		if (
+			this.#cachedVcsKind === "git" &&
+			this.#cachedBranch !== undefined &&
+			this.#cachedBranchRepoId === gitHeadPath
+		) {
+			return { kind: "git", label: this.#cachedBranch, repoId: gitHeadPath };
+		}
+
+		this.#cachedVcsKind = head ? "git" : null;
 		this.#cachedBranchRepoId = gitHeadPath;
 		if (!head) {
 			this.#cachedBranch = null;
@@ -294,8 +345,7 @@ export class StatusLineComponent implements Component {
 		}
 
 		this.#cachedBranch = head.kind === "ref" ? (head.branchName ?? head.ref) : "detached";
-
-		return this.#cachedBranch ?? null;
+		return { kind: "git", label: this.#cachedBranch, repoId: gitHeadPath };
 	}
 
 	#isDefaultBranch(branch: string): boolean {
@@ -320,10 +370,12 @@ export class StatusLineComponent implements Component {
 		}
 
 		this.#gitStatusInFlight = true;
+		const projectDir = getProjectDir();
+		const useJj = Boolean(jj.available() && jj.resolveSync(projectDir));
 
 		(async () => {
 			try {
-				this.#cachedGitStatus = await git.status.summary(getProjectDir());
+				this.#cachedGitStatus = useJj ? await jj.status.summary(projectDir) : await git.status.summary(projectDir);
 			} catch {
 				this.#cachedGitStatus = null;
 			} finally {
@@ -336,8 +388,14 @@ export class StatusLineComponent implements Component {
 	}
 
 	#lookupPr(): { number: number; url: string } | null {
-		const branch = this.#getCurrentBranch();
-		const currentContext = branch ? createPrCacheContext(branch, this.#cachedBranchRepoId ?? null) : null;
+		const vcs = this.#getCurrentVcs();
+		const branch = vcs?.kind === "git" ? vcs.label : null;
+		const currentContext = branch ? createPrCacheContext(branch, vcs?.repoId ?? null) : null;
+		if (!branch) {
+			this.#cachedPr = null;
+			this.#cachedPrContext = undefined;
+			return null;
+		}
 
 		if (canReuseCachedPr(this.#cachedPr, this.#cachedPrContext, currentContext)) {
 			return this.#cachedPr ?? null;
@@ -357,9 +415,10 @@ export class StatusLineComponent implements Component {
 		(async () => {
 			// Helper: only write cache if branch/repo context hasn't changed since launch
 			const setCachedPr = (value: { number: number; url: string } | null) => {
-				const latestBranch = this.#getCurrentBranch();
+				const latestVcs = this.#getCurrentVcs();
+				const latestBranch = latestVcs?.kind === "git" ? latestVcs.label : null;
 				const latestContext = latestBranch
-					? createPrCacheContext(latestBranch, this.#cachedBranchRepoId ?? null)
+					? createPrCacheContext(latestBranch, latestVcs?.repoId ?? null)
 					: undefined;
 				if (lookupContext && isSamePrCacheContext(latestContext, lookupContext)) {
 					this.#cachedPr = value;
@@ -585,8 +644,8 @@ export class StatusLineComponent implements Component {
 			autoCompactEnabled: this.#autoCompactEnabled,
 			subagentCount: this.#subagentCount,
 			sessionStartTime: this.#sessionStartTime,
-			git: {
-				branch: this.#getCurrentBranch(),
+			vcs: {
+				...(this.#getCurrentVcs() ?? { kind: "git" as const, label: null, repoId: null }),
 				status: this.#getGitStatus(),
 				pr: this.#lookupPr(),
 			},

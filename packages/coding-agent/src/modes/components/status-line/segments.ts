@@ -217,8 +217,8 @@ const pathSegment: StatusLineSegment = {
 const gitSegment: StatusLineSegment = {
 	id: "git",
 	render(ctx) {
-		const { branch, status } = ctx.git;
-		if (!branch && !status) return { content: "", visible: false };
+		const { kind, label, status } = ctx.vcs;
+		if (!label && !status) return { content: "", visible: false };
 
 		const opts = ctx.options.git ?? {};
 		const gitStatus = status;
@@ -226,8 +226,8 @@ const gitSegment: StatusLineSegment = {
 
 		const showBranch = opts.showBranch !== false;
 		let content = "";
-		if (showBranch && branch) {
-			content = withIcon(theme.icon.branch, branch);
+		if (showBranch && label) {
+			content = withIcon(kind === "jj" ? "jj" : theme.icon.branch, label);
 		}
 
 		// Add status indicators
@@ -262,7 +262,7 @@ const gitSegment: StatusLineSegment = {
 const prSegment: StatusLineSegment = {
 	id: "pr",
 	render(ctx) {
-		const { pr } = ctx.git;
+		const { pr } = ctx.vcs;
 		if (!pr) return { content: "", visible: false };
 
 		const label = withIcon(theme.icon.pr, `#${pr.number}`);

@@ -16,6 +16,8 @@ export type {
 
 export type RGB = readonly [number, number, number];
 
+export type VcsKind = "git" | "jj";
+
 export interface SegmentContext {
 	session: AgentSession;
 	width: number;
@@ -46,8 +48,9 @@ export interface SegmentContext {
 	autoCompactEnabled: boolean;
 	subagentCount: number;
 	sessionStartTime: number;
-	git: {
-		branch: string | null;
+	vcs: {
+		kind: VcsKind;
+		label: string | null;
 		status: { staged: number; unstaged: number; untracked: number } | null;
 		pr: { number: number; url: string } | null;
 	};

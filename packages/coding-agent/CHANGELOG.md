@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Jujutsu status-line support for colocated `.jj` repositories, showing the active bookmark/change id and jj dirty/untracked counts instead of the underlying git branch.
+
 ## [15.7.4] - 2026-05-31
 
 ### Removed
