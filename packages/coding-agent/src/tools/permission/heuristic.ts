@@ -179,7 +179,12 @@ function unquote(s: string): string {
  * control flow, shell re-entry, here-doc, background, non-leading / dynamic `cd`,
  * tool chdir flags). First firing rule wins.
  */
-function proveBashSafe(rawCommand: string, rawCwdArg: string | undefined, ctx: HeuristicContext): HeuristicVerdict {
+function proveBashSafe(
+	rawCommand: string,
+	rawCwdArg: string | undefined,
+	ctx: HeuristicContext,
+	callerEnv: Record<string, unknown> = {},
+): HeuristicVerdict {
 	if (rawCommand.trim() === "") return ALLOW;
 
 	// STEP 0: a safety-critical pattern (rm -rf /, fork bomb, curl|bash, mkfs, …) is
@@ -282,6 +287,18 @@ function proveBashSafe(rawCommand: string, rawCwdArg: string | undefined, ctx: H
 		}
 	}
 
+	// STEP 4.6: a caller-supplied env value that resolves outside the workspace is
+	// unprovable → uncertain. BashTool.execute passes `env` into the shell and the
+	// command can reference it ($OUT) with no path-shaped token of its own, so the
+	// command-only scan above cannot see it. A benign value (a flag, a word) resolves
+	// under the effective cwd and is no risk; a path value that escapes does.
+	for (const value of Object.values(callerEnv)) {
+		if (typeof value !== "string") continue;
+		if (riskyPathReason(resolveTargetPath(value, effectiveCwd), ctx)) {
+			return uncertain(`Cannot prove bash env value stays in workspace: ${value}`);
+		}
+	}
+
 	// STEP 5: proven safe.
 	return ALLOW;
 }
@@ -305,7 +322,8 @@ export function classifyHeuristic(toolName: string, args: unknown, ctx: Heuristi
 		case "bash": {
 			const command = typeof record.command === "string" ? record.command : "";
 			const rawCwd = typeof record.cwd === "string" && record.cwd.length > 0 ? record.cwd : undefined;
-			return proveBashSafe(command, rawCwd, ctx);
+			const env = asRecord(record.env); // {} when absent
+			return proveBashSafe(command, rawCwd, ctx, env);
 		}
 		case "eval": {
 			const cells = Array.isArray(record.cells) ? record.cells : [];

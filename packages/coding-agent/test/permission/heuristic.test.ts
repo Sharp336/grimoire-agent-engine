@@ -233,6 +233,27 @@ describe("classifyHeuristic — bash path arguments outside the workspace (uncer
 	});
 });
 
+describe("classifyHeuristic — bash caller env paths (uncertain)", () => {
+	it("escalates when an env value resolves to an absolute path outside the workspace", () => {
+		expect(decide("bash", { command: 'touch "$OUT"', env: { OUT: "/etc/omp-test" } })).toBe("uncertain");
+	});
+	it("escalates a risky env value even when the command itself is benign", () => {
+		expect(decide("bash", { command: "echo hi", env: { OUT: "/etc/passwd" } })).toBe("uncertain");
+	});
+	it("escalates a relative env value that escapes the workspace", () => {
+		expect(decide("bash", { command: "echo hi", env: { OUT: "../../escape" } })).toBe("uncertain");
+	});
+	it("allows an in-workspace relative env value", () => {
+		expect(decide("bash", { command: 'echo "$OUT"', env: { OUT: "build/out.txt" } })).toBe("allow");
+	});
+	it("allows non-path env values", () => {
+		expect(decide("bash", { command: "ls", env: { CI: "1", NODE_ENV: "test" } })).toBe("allow");
+	});
+	it("allows a command with no env field (unchanged)", () => {
+		expect(decide("bash", { command: "ls" })).toBe("allow");
+	});
+});
+
 describe("classifyHeuristic — eval", () => {
 	it("denies eval cells containing destructive code", () => {
 		expect(decide("eval", { cells: [{ language: "py", code: 'os.system("rm -rf /tmp/x")' }] })).toBe("deny");
