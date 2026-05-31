@@ -200,10 +200,9 @@ export class CustomEditor extends Editor {
 			return;
 		}
 
-		// Intercept configured exit shortcut. Always consume the shortcut so it
-		// never reaches the parent handler; firing onExit is the controller's
-		// chance to snapshot the current text as a draft before shutting down.
-		if (this.#matchesAction(data, "app.exit")) {
+		// Ctrl+D exits only from a completely empty prompt. Otherwise it must
+		// fall through to the editor's Emacs-style forward delete binding.
+		if (this.#matchesAction(data, "app.exit") && this.getText() === "") {
 			this.onExit?.();
 			return;
 		}
