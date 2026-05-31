@@ -275,12 +275,39 @@ describe("classifyHeuristic — bash caller env paths (uncertain)", () => {
 	});
 });
 
+describe("classifyHeuristic — bash internal-URL targets (uncertain)", () => {
+	it("escalates an internal-URL redirection target in the command", () => {
+		expect(decide("bash", { command: "echo x > local:///scratch.txt" })).toBe("uncertain");
+	});
+	it("escalates an internal-URL argument in the command", () => {
+		expect(decide("bash", { command: "cat skill://some-skill/SKILL.md" })).toBe("uncertain");
+	});
+	it("escalates an internal-URL cwd", () => {
+		expect(decide("bash", { command: "touch x", cwd: "local:///evil" })).toBe("uncertain");
+	});
+	it("escalates an internal-URL env value", () => {
+		expect(decide("bash", { command: 'cat "$OUT"', env: { OUT: "local:///x" } })).toBe("uncertain");
+	});
+	it("still allows an in-workspace redirection target", () => {
+		expect(decide("bash", { command: "echo x > ./out.txt" })).toBe("allow");
+	});
+});
+
 describe("classifyHeuristic — eval", () => {
 	it("denies eval cells containing destructive code", () => {
 		expect(decide("eval", { cells: [{ language: "py", code: 'os.system("rm -rf /tmp/x")' }] })).toBe("deny");
 	});
-	it("allows ordinary eval cells", () => {
-		expect(decide("eval", { cells: [{ language: "js", code: "const x = 1 + 2;" }] })).toBe("allow");
+	it("treats ordinary eval cells as uncertain (arbitrary code is unprovable)", () => {
+		expect(decide("eval", { cells: [{ language: "js", code: "const x = 1 + 2;" }] })).toBe("uncertain");
+	});
+	it("treats filesystem-write payloads the denylist misses as uncertain", () => {
+		expect(decide("eval", { cells: [{ language: "py", code: "open('/etc/omp-test','w').write('x')" }] })).toBe(
+			"uncertain",
+		);
+		expect(decide("eval", { cells: [{ language: "js", code: "await Bun.write('/etc/x','x')" }] })).toBe("uncertain");
+	});
+	it("treats eval with no cells as uncertain", () => {
+		expect(decide("eval", { cells: [] })).toBe("uncertain");
 	});
 });
 
