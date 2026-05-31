@@ -1263,7 +1263,7 @@ export async function clone(url: string, targetDir: string, options: CloneOption
 
 	const args = ["clone", ...(options.sha ? [] : ["--depth", "1"])];
 	if (options.ref) args.push("--branch", options.ref, "--single-branch");
-	else args.push("--single-branch");
+	else if (!options.sha) args.push("--single-branch");
 	args.push(url, absoluteTarget);
 
 	try {
