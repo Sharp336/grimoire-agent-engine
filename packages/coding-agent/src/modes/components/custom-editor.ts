@@ -1,7 +1,8 @@
 import { addKeyAliases, canonicalKeyId, Editor, type KeyId, parseKey, parseKittySequence } from "@oh-my-pi/pi-tui";
 import type { AppKeybinding } from "../../config/keybindings";
+import { isSettingsInitialized, settings } from "../../config/settings";
 import { imageReferenceHyperlink, PLACEHOLDER_REGEX, renderPlaceholders } from "../image-references";
-import { highlightMagicKeywords } from "../magic-keywords";
+import { highlightMagicKeywords, type MagicKeywordOptions } from "../magic-keywords";
 import { theme } from "../theme/theme";
 
 type ConfigurableEditorAction = Extract<
@@ -70,6 +71,10 @@ export function extractBracketedImagePastePath(data: string): string | undefined
 	return pasted;
 }
 
+function getMagicKeywordOptions(): MagicKeywordOptions {
+	return { workflowEnabled: isSettingsInitialized() && settings.get("modes.workflow.enabled") };
+}
+
 /**
  * Custom editor that handles configurable app-level shortcuts for coding-agent.
  */
@@ -80,12 +85,12 @@ export class CustomEditor extends Editor {
 	 *  instead of corrupting `[Paste #1, +30 lines]` into plain text. */
 	override atomicTokenPattern = PLACEHOLDER_REGEX;
 
-	/** Gradient-highlight the "ultrathink" / "orchestrate" / "workflowz" keywords as the user types
-	 *  them, skipping any occurrence inside code spans, fenced blocks, or XML sections. Also make
+	/** Gradient-highlight active magic keywords as the user types, skipping any
+	 *  occurrence inside code spans, fenced blocks, or XML sections. Also make
 	 *  pasted image placeholders visually distinct and hyperlink them once their blob file exists. */
 	decorateText = (text: string): string =>
 		renderPlaceholders(text, {
-			renderText: value => highlightMagicKeywords(value),
+			renderText: value => highlightMagicKeywords(value, undefined, getMagicKeywordOptions()),
 			renderReference: (value, kind, index) =>
 				kind === "image"
 					? imageReferenceHyperlink(value, index, this.imageLinks, label =>

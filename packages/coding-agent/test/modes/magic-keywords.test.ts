@@ -8,23 +8,31 @@ beforeAll(async () => {
 });
 
 describe("highlightMagicKeywords", () => {
-	it("paints every magic keyword in a single prose pass, preserving visible text", () => {
-		const input = "first ultrathink then orchestrate the workflowz";
+	it("paints default-enabled magic keywords in a single prose pass, preserving visible text", () => {
+		const input = "first ultrathink then orchestrate the workflow";
 		const decorated = highlightMagicKeywords(input);
 		expect(decorated).not.toBe(input);
 		expect(decorated).toContain("\x1b[38");
 		expect(Bun.stripANSI(decorated)).toBe(input);
-		// Each keyword is gradient-painted character-by-character, so none survives as a
-		// contiguous run in the decorated output.
-		for (const keyword of ["ultrathink", "orchestrate", "workflowz"]) {
+		for (const keyword of ["ultrathink", "orchestrate"]) {
 			expect(decorated).not.toContain(keyword);
 			expect(Bun.stripANSI(decorated)).toContain(keyword);
 		}
+		expect(decorated).toContain("workflow");
+	});
+
+	it("paints workflow only when the workflow mode is enabled", () => {
+		const input = "/workflow audit";
+		expect(highlightMagicKeywords(input)).toBe(input);
+		const decorated = highlightMagicKeywords(input, undefined, { workflowEnabled: true });
+		expect(decorated).not.toBe(input);
+		expect(Bun.stripANSI(decorated)).toBe(input);
+		expect(decorated).not.toContain("/workflow");
 	});
 
 	it("never paints keywords inside code spans, fenced blocks, or XML sections", () => {
-		const input = "`ultrathink`\n```\norchestrate\n```\n<x>workflowz</x>";
-		expect(highlightMagicKeywords(input)).toBe(input);
+		const input = "`ultrathink`\n```\norchestrate\n```\n<x>/workflow</x>";
+		expect(highlightMagicKeywords(input, undefined, { workflowEnabled: true })).toBe(input);
 	});
 
 	it("paints only the prose occurrence when the keyword also appears in code", () => {

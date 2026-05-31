@@ -4361,7 +4361,7 @@ export class AgentSession {
 				timestamp,
 			});
 		}
-		if (containsWorkflow(text)) {
+		if (this.settings.get("modes.workflow.enabled") && containsWorkflow(text)) {
 			keywordNotices.push({
 				role: "custom",
 				customType: "workflow-notice",

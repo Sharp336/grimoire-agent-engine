@@ -275,6 +275,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Automatically resume the most recent session in the current directory",
 		},
 	},
+	"modes.workflow.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			label: "Workflow mode",
+			description:
+				"Enable the /workflow mode that injects eval/subagent orchestration guidance. Disabled by default to avoid accidental fan-out from normal prose.",
+		},
+	},
 
 	// macOS power assertions (caffeinate flags). No-op on other platforms.
 	"power.preventIdleSleep": {

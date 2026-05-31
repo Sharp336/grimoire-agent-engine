@@ -1,4 +1,5 @@
 import { beforeAll, describe, expect, it } from "bun:test";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { containsWorkflow, highlightWorkflow, WORKFLOW_NOTICE } from "@oh-my-pi/pi-coding-agent/modes/workflow";
 
@@ -7,50 +8,63 @@ beforeAll(() => {
 	initTheme();
 });
 
-describe("workflow keyword detection", () => {
-	it("matches the lowercase trigger word delimited by whitespace", () => {
-		expect(containsWorkflow("workflowz")).toBe(true);
-		expect(containsWorkflow("please workflowz this rollout")).toBe(true);
-		expect(containsWorkflow("design the workflowz")).toBe(true);
-		expect(containsWorkflow("run these workflowz")).toBe(true);
+describe("workflow command detection", () => {
+	it("matches only the explicit /workflow command prefix", () => {
+		expect(containsWorkflow("/workflow")).toBe(true);
+		expect(containsWorkflow("/workflow audit src/session")).toBe(true);
+		expect(containsWorkflow("  /workflow audit src/session")).toBe(true);
 	});
 
-	it("ignores old triggers, casing, inflections, punctuation-adjacent, and path-embedded forms", () => {
+	it("ignores prose mentions, casing, inflections, punctuation-adjacent, and path-embedded forms", () => {
 		expect(containsWorkflow("workflow")).toBe(false);
-		expect(containsWorkflow("workflows")).toBe(false);
-		expect(containsWorkflow("Workflowz")).toBe(false);
-		expect(containsWorkflow("WORKFLOWZ")).toBe(false);
-		expect(containsWorkflow("workflowzed the build")).toBe(false);
-		expect(containsWorkflow("reworkflowz everything")).toBe(false);
-		// A path/extension is not whitespace, so the word never triggers.
-		expect(containsWorkflow("packages/coding-agent/test/modes/workflowz.test.ts")).toBe(false);
-		expect(containsWorkflow("do it. workflowz.")).toBe(false);
+		expect(containsWorkflow("please workflow this rollout")).toBe(false);
+		expect(containsWorkflow("run these workflows")).toBe(false);
+		expect(containsWorkflow("design the workflow")).toBe(false);
+		expect(containsWorkflow("why is the workflow keyword active?")).toBe(false);
+		expect(containsWorkflow("/Workflow")).toBe(false);
+		expect(containsWorkflow("/workflowed the build")).toBe(false);
+		expect(containsWorkflow("reworkflow everything")).toBe(false);
+		expect(containsWorkflow("packages/coding-agent/test/modes/workflow.test.ts")).toBe(false);
+		expect(containsWorkflow("do it. /workflow")).toBe(false);
 		expect(containsWorkflow("nothing to see here")).toBe(false);
+	});
+
+	it("ignores /workflow inside code spans, fenced blocks, and XML sections", () => {
+		expect(containsWorkflow("`/workflow audit`")).toBe(false);
+		expect(containsWorkflow("```\n/workflow audit\n```")).toBe(false);
+		expect(containsWorkflow("<x>/workflow audit</x>")).toBe(false);
 	});
 });
 
 describe("workflow keyword highlighting", () => {
-	it("decorates the keyword with zero-width escapes, preserving visible text", () => {
-		const input = "please workflowz this";
+	it("decorates the command prefix with zero-width escapes, preserving visible text", () => {
+		const input = "/workflow audit this";
 		const decorated = highlightWorkflow(input);
 		expect(decorated).not.toBe(input);
 		expect(decorated).toContain("\x1b");
 		expect(Bun.stripANSI(decorated)).toBe(input);
 	});
 
-	it("leaves text without the standalone keyword untouched", () => {
-		// Probe hits the substring but the whitespace boundary fails — no decoration.
-		expect(highlightWorkflow("workflowzed builds")).toBe("workflowzed builds");
-		expect(highlightWorkflow("Workflowz this")).toBe("Workflowz this");
-		const filePath = "packages/coding-agent/test/modes/workflowz.test.ts";
+	it("leaves text without the command prefix untouched", () => {
+		expect(highlightWorkflow("workflowed builds")).toBe("workflowed builds");
+		expect(highlightWorkflow("Workflow this")).toBe("Workflow this");
+		expect(highlightWorkflow("please workflow this")).toBe("please workflow this");
+		expect(highlightWorkflow("do it. /workflow")).toBe("do it. /workflow");
+		const filePath = "packages/coding-agent/test/modes/workflow.test.ts";
 		expect(highlightWorkflow(filePath)).toBe(filePath);
+	});
+});
+
+describe("workflow mode setting", () => {
+	it("is disabled by default", () => {
+		expect(Settings.isolated().get("modes.workflow.enabled")).toBe(false);
 	});
 });
 
 describe("workflow notice", () => {
 	it("is a non-empty system notice carrying the eval-fan-out contract", () => {
 		expect(WORKFLOW_NOTICE.length).toBeGreaterThan(0);
-		expect(WORKFLOW_NOTICE).toContain("**workflowz** keyword");
+		expect(WORKFLOW_NOTICE).toContain("explicitly requested `/workflow`");
 		expect(WORKFLOW_NOTICE).toContain("parallel(");
 	});
 });
