@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
+import { classifyRiskyPath } from "../tools/permission/risky-paths";
 import { ToolError } from "../tools/tool-errors";
 import type {
 	CreateFile,
@@ -121,10 +122,51 @@ export async function applyTextEdits(filePath: string, edits: TextEdit[]): Promi
 // =============================================================================
 
 /**
+ * Collect every raw URI a WorkspaceEdit would touch, across both shapes:
+ * `changes` map keys and `documentChanges` text-edit/create/rename/delete URIs.
+ * Used to validate targets before any filesystem mutation.
+ */
+function collectEditTargets(edit: WorkspaceEdit): string[] {
+	const uris: string[] = [];
+	if (edit.changes) {
+		for (const uri in edit.changes) uris.push(uri);
+	}
+	if (edit.documentChanges) {
+		for (const change of edit.documentChanges) {
+			if ("textDocument" in change && change.textDocument) {
+				uris.push(change.textDocument.uri);
+			} else if ("kind" in change && change.kind) {
+				if (change.kind === "create") {
+					uris.push((change as CreateFile).uri);
+				} else if (change.kind === "rename") {
+					const renameOp = change as RenameFile;
+					uris.push(renameOp.oldUri, renameOp.newUri);
+				} else if (change.kind === "delete") {
+					uris.push((change as DeleteFile).uri);
+				}
+			}
+		}
+	}
+	return uris;
+}
+
+/**
  * Apply a workspace edit (collection of file changes).
  * Returns array of applied change descriptions.
  */
 export async function applyWorkspaceEdit(edit: WorkspaceEdit, cwd: string): Promise<string[]> {
+	// Validate every target URI against the workspace root BEFORE any filesystem
+	// mutation. A language server can return create/rename/delete/text-edit URIs for
+	// paths outside the workspace (e.g. /etc/...) which would otherwise be written
+	// directly, bypassing the permission heuristic. Reject the whole edit if any
+	// target escapes — no partial application.
+	for (const uri of collectEditTargets(edit)) {
+		const p = uriToFile(uri);
+		if (classifyRiskyPath(p, cwd)) {
+			throw new ToolError(`LSP edit targets a path outside the workspace: ${p}`);
+		}
+	}
+
 	const applied: string[] = [];
 
 	if (edit.documentChanges) {
