@@ -207,6 +207,8 @@ function proveBashSafe(
 	let effectiveCwd = root;
 	const hasExplicitCwd = typeof rawCwdArg === "string" && rawCwdArg.length > 0;
 	if (hasExplicitCwd) {
+		if (isInternalUrlPath(rawCwdArg as string))
+			return uncertain(`Cannot prove bash internal-URL cwd stays in workspace: ${rawCwdArg}`);
 		const resolved = realpathOrSelf(resolveTargetPath(rawCwdArg as string, root));
 		if (!isPathInside(resolved, realRoot)) {
 			return deny(`Refusing to run bash outside the workspace root: ${resolved}`);
@@ -288,7 +290,10 @@ function proveBashSafe(
 	// effective cwd; containment is checked against the workspace root.
 	for (const token of commandForAnalysis.split(/\s+/)) {
 		const candidate = bashPathArgument(token);
-		if (candidate && riskyPathReason(resolveTargetPath(candidate, effectiveCwd), ctx)) {
+		if (!candidate) continue;
+		if (isInternalUrlPath(candidate))
+			return uncertain(`Cannot prove bash internal-URL target stays in workspace: ${candidate}`);
+		if (riskyPathReason(resolveTargetPath(candidate, effectiveCwd), ctx)) {
 			return uncertain(`Cannot prove bash path argument stays in workspace: ${candidate}`);
 		}
 	}
@@ -300,6 +305,8 @@ function proveBashSafe(
 	// under the effective cwd and is no risk; a path value that escapes does.
 	for (const value of Object.values(callerEnv)) {
 		if (typeof value !== "string") continue;
+		if (isInternalUrlPath(value))
+			return uncertain(`Cannot prove bash env internal-URL value stays in workspace: ${value}`);
 		if (riskyPathReason(resolveTargetPath(value, effectiveCwd), ctx)) {
 			return uncertain(`Cannot prove bash env value stays in workspace: ${value}`);
 		}

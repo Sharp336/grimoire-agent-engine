@@ -275,6 +275,30 @@ describe("classifyHeuristic — bash caller env paths (uncertain)", () => {
 	});
 });
 
+describe("classifyHeuristic — bash internal-URL targets (uncertain)", () => {
+	it("flags an internal-URL redirection target in the command (local://)", () => {
+		expect(decide("bash", { command: "echo x > local:///scratch.txt" })).toBe("uncertain");
+	});
+	it("flags an internal-URL path argument in the command (skill://)", () => {
+		expect(decide("bash", { command: "cat skill://some-skill/SKILL.md" })).toBe("uncertain");
+	});
+	it("flags an internal-URL cwd argument", () => {
+		expect(decide("bash", { command: "touch x", cwd: "local:///evil" })).toBe("uncertain");
+	});
+	it("flags an internal-URL env value", () => {
+		expect(decide("bash", { command: 'cat "$OUT"', env: { OUT: "local:///x" } })).toBe("uncertain");
+	});
+	it("allows an in-workspace redirection target (regression)", () => {
+		expect(decide("bash", { command: "echo x > ./out.txt" })).toBe("allow");
+	});
+	it("allows an in-workspace path argument (regression)", () => {
+		expect(decide("bash", { command: "cat src/a.ts" })).toBe("allow");
+	});
+	it("allows an in-workspace cwd argument (regression)", () => {
+		expect(decide("bash", { command: "ls", cwd: "src" })).toBe("allow");
+	});
+});
+
 describe("classifyHeuristic — eval", () => {
 	it("denies eval cells containing destructive code", () => {
 		expect(decide("eval", { cells: [{ language: "py", code: 'os.system("rm -rf /tmp/x")' }] })).toBe("deny");
