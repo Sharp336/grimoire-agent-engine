@@ -1261,7 +1261,7 @@ export async function clone(url: string, targetDir: string, options: CloneOption
 	const absoluteTarget = path.resolve(targetDir);
 	await fs.promises.mkdir(path.dirname(absoluteTarget), { recursive: true });
 
-	const args = ["clone", "--depth", "1"];
+	const args = ["clone", ...(options.sha ? [] : ["--depth", "1"])];
 	if (options.ref) args.push("--branch", options.ref, "--single-branch");
 	else args.push("--single-branch");
 	args.push(url, absoluteTarget);
