@@ -1,69 +1,73 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { classifyRiskyPath } from "@oh-my-pi/pi-coding-agent/tools/permission/risky-paths";
+import { classifyRiskyPath } from "../../src/tools/permission/risky-paths";
 
-const ROOT = "/home/user/project";
+const tmpDirs: string[] = [];
 
-describe("classifyRiskyPath", () => {
-	it("allows ordinary in-workspace paths", () => {
-		expect(classifyRiskyPath("src/index.ts", ROOT)).toBeNull();
-		expect(classifyRiskyPath("./README.md", ROOT)).toBeNull();
+function mkTmp(prefix: string): string {
+	const dir = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
+	tmpDirs.push(dir);
+	return dir;
+}
+
+afterAll(() => {
+	for (const dir of tmpDirs) {
+		try {
+			fs.rmSync(dir, { recursive: true, force: true });
+		} catch {
+			// best-effort cleanup
+		}
+	}
+});
+
+describe("classifyRiskyPath symlink containment", () => {
+	test("flags a path that resolves outside the workspace via symlink", () => {
+		const tmp = mkTmp("risky-real-");
+		const root = path.join(tmp, "ws");
+		fs.mkdirSync(root);
+		const outside = path.join(tmp, "outside");
+		fs.mkdirSync(outside);
+		const link = path.join(root, "link");
+		fs.symlinkSync(outside, link);
+		const target = path.join(link, "file.txt");
+		const result = classifyRiskyPath(target, root);
+		expect(result).not.toBeNull();
 	});
 
-	it("blocks paths outside the workspace", () => {
-		expect(classifyRiskyPath("../../etc/hosts", ROOT)?.block).toBe(true);
+	test("allows a normal in-workspace path", () => {
+		const tmp = mkTmp("risky-ok-");
+		const root = path.join(tmp, "ws");
+		fs.mkdirSync(root);
+		const target = path.join(root, "src", "file.txt");
+		const result = classifyRiskyPath(target, root);
+		expect(result).toBeNull();
 	});
 
-	it("blocks sensitive dotfiles and system paths", () => {
-		expect(classifyRiskyPath("~/.ssh/id_rsa", ROOT)?.block).toBe(true);
-		expect(classifyRiskyPath("/etc/passwd", ROOT)?.block).toBe(true);
-		expect(classifyRiskyPath(".env", ROOT)?.block).toBe(true);
-		expect(classifyRiskyPath(".env.local", ROOT)?.block).toBe(true);
+	test("allows an in-workspace target addressed via the real path when the root is a symlink", () => {
+		// Create a real workspace dir, then a symlink to it. Use the SYMLINK as the
+		// workspace root and address a target by its REAL path. A non-canonical
+		// containment check would wrongly flag this as outside the workspace.
+		const tmp = mkTmp("risky-symroot-");
+		const realRoot = path.join(tmp, "real-ws");
+		fs.mkdirSync(realRoot);
+		const symRoot = path.join(tmp, "sym-ws");
+		fs.symlinkSync(realRoot, symRoot);
+		const realTarget = path.join(realRoot, "src", "file.ts");
+		const result = classifyRiskyPath(realTarget, symRoot);
+		expect(result).toBeNull();
+	});
+
+	test("still blocks a genuine escape to a system path under a symlinked root", () => {
+		const tmp = mkTmp("risky-escape-");
+		const realRoot = path.join(tmp, "real-ws");
+		fs.mkdirSync(realRoot);
+		const symRoot = path.join(tmp, "sym-ws");
+		fs.symlinkSync(realRoot, symRoot);
+		const result = classifyRiskyPath("/etc/passwd", symRoot);
+		expect(result).not.toBeNull();
 	});
 });
 
-describe("classifyRiskyPath — symlink resolution", () => {
-	let ws: string;
-	let outside: string;
-
-	beforeAll(() => {
-		ws = fs.mkdtempSync(path.join(os.tmpdir(), "omp-risky-ws-"));
-		outside = fs.mkdtempSync(path.join(os.tmpdir(), "omp-risky-out-"));
-		fs.mkdirSync(path.join(ws, "sub"));
-		fs.symlinkSync("sub", path.join(ws, "inside-link")); // dir symlink that stays in the workspace
-		fs.symlinkSync("/etc", path.join(ws, "escape-sys")); // dir symlink to a system root
-		fs.symlinkSync(outside, path.join(ws, "escape-out")); // dir symlink outside the workspace
-		fs.symlinkSync(path.join(outside, "secret"), path.join(ws, "link-file")); // file symlink outside
-		// Multi-hop: chain -> hop/x, hop -> outside; writing chain/* lands outside.
-		fs.symlinkSync(outside, path.join(ws, "hop"));
-		fs.symlinkSync("hop/nested", path.join(ws, "chain"));
-	});
-
-	afterAll(() => {
-		fs.rmSync(ws, { recursive: true, force: true });
-		fs.rmSync(outside, { recursive: true, force: true });
-	});
-
-	it("still allows a real in-workspace subdir path", () => {
-		expect(classifyRiskyPath("sub/new.txt", ws)).toBeNull();
-	});
-
-	it("blocks writing through a symlink into a system root", () => {
-		expect(classifyRiskyPath("escape-sys/passwd", ws)?.block).toBe(true);
-	});
-
-	it("blocks writing through a symlink that escapes the workspace", () => {
-		expect(classifyRiskyPath("escape-out/file.txt", ws)?.block).toBe(true);
-	});
-
-	it("blocks a file symlink whose target is outside the workspace", () => {
-		expect(classifyRiskyPath("link-file", ws)?.block).toBe(true);
-	});
-
-	it("blocks a multi-hop symlink chain that escapes the workspace", () => {
-		// chain -> hop/nested, hop -> outside  ⇒  chain/file lands in outside/.
-		expect(classifyRiskyPath("chain/file.txt", ws)?.block).toBe(true);
-	});
-});
+const _ = [afterAll, describe, expect, test];

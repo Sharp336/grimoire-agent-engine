@@ -136,16 +136,17 @@ function resolveWritePath(target: string): string {
  */
 export function classifyRiskyPath(targetPath: string, workspaceRoot: string): RiskyPathBlock | null {
 	const resolved = resolveTargetPath(targetPath, workspaceRoot);
-	const root = path.resolve(workspaceRoot);
+	// Canonicalize the root once so a workspace that itself lives under a symlink
+	// (e.g. macOS /tmp -> /private/tmp) doesn't make a legitimate in-workspace
+	// target addressed by its real path look like an escape.
+	const root = realpathOrSelf(path.resolve(workspaceRoot));
 	const home = os.homedir();
 
-	const lexical = classifyResolvedPath(resolved, root, home);
-	if (lexical) return lexical;
-
-	// Re-check after following symlinks. The root is canonicalized too, so a
-	// workspace that itself lives under a symlink (e.g. macOS /tmp -> /private/tmp)
-	// doesn't make legitimate in-workspace writes look like escapes.
+	// Resolve where the write would actually land (following symlinks, including
+	// dangling ones), then run a single containment/denylist check against the
+	// canonical root. This collapses the former lexical-then-realpath two-phase
+	// dance: a symlink escaping the workspace still resolves outside and blocks,
+	// while a real-path target under a symlinked root resolves inside and passes.
 	const real = resolveWritePath(resolved);
-	if (real === resolved) return null;
-	return classifyResolvedPath(real, realpathOrSelf(root), home);
+	return classifyResolvedPath(real, root, home);
 }
