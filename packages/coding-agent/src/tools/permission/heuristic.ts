@@ -65,6 +65,20 @@ const SAFE_LSP_REQUEST_METHODS: ReadonlySet<string> = new Set([
 /** Commands that change the working directory the rest of the line runs in. */
 const RELOCATORS: ReadonlySet<string> = new Set(["cd", "pushd", "popd", "chdir", "chroot"]);
 
+/** Leading `VAR=value` inline-assignment token. */
+const ENV_ASSIGNMENT = /^[A-Za-z_]\w*=/;
+/** Shell wrappers that pass through to the real command (`builtin cd …`, `command cd …`). */
+const COMMAND_WRAPPERS: ReadonlySet<string> = new Set(["builtin", "command"]);
+/**
+ * Drop leading inline assignments + `builtin`/`command` wrappers so a wrapped
+ * relocator (`builtin cd …`, `X=1 cd …`) is still recognized by RELOCATORS.
+ */
+function stripCommandPrefix(tokens: string[]): string[] {
+	let i = 0;
+	while (i < tokens.length && (ENV_ASSIGNMENT.test(tokens[i]!) || COMMAND_WRAPPERS.has(tokens[i]!))) i++;
+	return tokens.slice(i);
+}
+
 /** Compound / control-flow keywords whose cwd cannot be tracked by flat segmentation. */
 const CONTROL_FLOW = /(?:^|[;&|\n\r({]\s*)(?:if|then|elif|else|fi|for|while|until|do|done|case|esac|select|function)\b/;
 
@@ -212,8 +226,8 @@ function proveBashSafe(rawCommand: string, rawCwdArg: string | undefined, ctx: H
 	for (let i = 0; i < segments.length; i++) {
 		const seg = segments[i]!.trim();
 		if (!seg) continue;
-		const tokens = seg.split(/\s+/);
-		const head = tokens[0]!;
+		const tokens = stripCommandPrefix(seg.split(/\s+/));
+		const head = tokens[0] ?? "";
 		if (RELOCATORS.has(head)) {
 			const target = tokens[1] ?? "";
 			// A literal `cd` in the FIRST segment runs unconditionally before anything

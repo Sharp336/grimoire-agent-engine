@@ -63,6 +63,15 @@ describe("classifyHeuristic — bash provable-safe (allow)", () => {
 	it("allows exec, whose target arguments stay statically visible (not opaque re-entry)", () => {
 		expect(decide("bash", { command: "exec make build" })).toBe("allow");
 	});
+	it("keeps an assignment prefix on a benign command provable (FOO=bar make)", () => {
+		expect(decide("bash", { command: "FOO=bar make" })).toBe("allow");
+	});
+	it("keeps a builtin wrapper on a benign command provable (builtin echo hi)", () => {
+		expect(decide("bash", { command: "builtin echo hi" })).toBe("allow");
+	});
+	it("proves a wrapped leading literal in-workspace cd (builtin cd src && tsc)", () => {
+		expect(decide("bash", { command: "builtin cd src && tsc" })).toBe("allow");
+	});
 });
 
 describe("classifyHeuristic — bash proven dangerous / out-of-workspace (deny)", () => {
@@ -95,6 +104,9 @@ describe("classifyHeuristic — bash proven dangerous / out-of-workspace (deny)"
 	});
 	it("denies a fork bomb even though it uses compound syntax (critical is terminal)", () => {
 		expect(decide("bash", { command: ":(){ :|:& };:" })).toBe("deny");
+	});
+	it("denies a wrapped leading literal cd that escapes the workspace (builtin cd /etc)", () => {
+		expect(decide("bash", { command: "builtin cd /etc && rm x" })).toBe("deny");
 	});
 });
 
@@ -153,6 +165,18 @@ describe("classifyHeuristic — bash unprovable constructs (uncertain)", () => {
 	});
 	it("flags a background detach (trailing &)", () => {
 		expect(decide("bash", { command: "sleep 5 &" })).toBe("uncertain");
+	});
+	it("flags a builtin-wrapped dynamic cd (builtin cd $HOME && touch escaped)", () => {
+		expect(decide("bash", { command: "builtin cd $HOME && touch escaped" })).toBe("uncertain");
+	});
+	it("flags an assignment-prefixed dynamic cd (X=1 cd $HOME && touch escaped)", () => {
+		expect(decide("bash", { command: "X=1 cd $HOME && touch escaped" })).toBe("uncertain");
+	});
+	it('flags a command-wrapped dynamic cd (command cd "$DIR" && touch escaped)', () => {
+		expect(decide("bash", { command: 'command cd "$DIR" && touch escaped' })).toBe("uncertain");
+	});
+	it("flags a wrapped pushd; the wrapper must not let pushd pass (builtin pushd /tmp)", () => {
+		expect(decide("bash", { command: "builtin pushd /tmp" })).toBe("uncertain");
 	});
 });
 
