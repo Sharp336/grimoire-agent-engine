@@ -346,7 +346,7 @@ export function classifyHeuristic(toolName: string, args: unknown, ctx: Heuristi
 					return deny("Detected a potentially destructive command in eval cell code.");
 				}
 			}
-			return ALLOW;
+			return uncertain("eval runs arbitrary unsandboxed code and cannot be statically proven workspace-safe");
 		}
 		case "write":
 		case "edit":
