@@ -45,6 +45,25 @@ class WrappingLinesComponent implements Component {
 	}
 }
 
+class FocusedInputComponent implements Component, Focusable {
+	focused = false;
+	#onInput: () => void;
+
+	constructor(onInput: () => void) {
+		this.#onInput = onInput;
+	}
+
+	handleInput(): void {
+		this.#onInput();
+	}
+
+	invalidate(): void {}
+
+	render(): string[] {
+		return [this.focused ? `prompt>${CURSOR_MARKER}` : "prompt>"];
+	}
+}
+
 class UnknownViewportTerminal extends VirtualTerminal {
 	isNativeViewportAtBottom(): undefined {
 		return undefined;
@@ -928,6 +947,40 @@ describe("TUI terminal-state regressions", () => {
 			}
 		});
 
+		it("does not duplicate the viewport-top row when an offscreen edit repeats the tail", async () => {
+			// 6 rows over height 4: scrollback ["E0","E1"], viewport ["a","b","c","d"].
+			const term = new VirtualTerminal(32, 4);
+			const tui = new TUI(term);
+			const component = new MutableLinesComponent(["E0", "E1", "a", "b", "c", "d"]);
+			tui.addChild(component);
+
+			try {
+				tui.start();
+				await settle(term);
+				expect(term.isNativeViewportAtBottom()).toBe(true);
+				expect(visible(term).map(line => line.trim())).toEqual(["a", "b", "c", "d"]);
+
+				// An offscreen edit (E0 -> E0x, above the viewport top) lands together
+				// with a tail append whose rows make the prior last line "d" recur one
+				// row early. The append-tail heuristic then mis-locates the tail and,
+				// before the fix, scrolled an extra row into history — duplicating the
+				// viewport-top row "b" just above the viewport.
+				component.setLines(["E0x", "E1", "a", "b", "d", "e", "f"]);
+				tui.requestRender();
+				await settle(term);
+
+				expect(visible(term).map(line => line.trim())).toEqual(["b", "d", "e", "f"]);
+				const buffer = term.getScrollBuffer().map(line => line.trimEnd());
+				for (const line of ["E0x", "E1", "a", "b", "d", "e", "f"]) {
+					expect(buffer.filter(row => row === line).length, `${line} should appear exactly once`).toBe(1);
+				}
+				// The offscreen edit must be reflected in history, not left stale.
+				expect(buffer).not.toContain("E0");
+			} finally {
+				tui.stop();
+			}
+		});
+
 		it("removes collapsed ctrl-o markers from scrollback after offscreen expansion", async () => {
 			const term = new VirtualTerminal(48, 6);
 			const tui = new TUI(term);
@@ -1149,6 +1202,39 @@ describe("TUI terminal-state regressions", () => {
 			}
 		});
 
+		it("keeps the unknown Windows viewport guard on ordinary focused input", async () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+			const term = new UnknownViewportTerminal(32, 5);
+			const tui = new TUI(term);
+			const transcript = new MutableLinesComponent(rows("line-", 12));
+			const input = new FocusedInputComponent(() => {
+				transcript.setLines([...rows("line-", 6), "typed-token", ...rows("line-", 12).slice(6)]);
+			});
+			tui.addChild(transcript);
+			tui.addChild(input);
+			tui.setFocus(input);
+
+			try {
+				tui.start();
+				await settle(term);
+				term.scrollLines(-2);
+				const before = term.getBufferPosition();
+				const beforeViewport = visible(term).map(line => line.trim());
+				expect(before.viewportY).toBeGreaterThan(0);
+
+				term.sendInput("x");
+				await settle(term);
+
+				const after = term.getBufferPosition();
+				expect(after.viewportY).toBe(before.viewportY);
+				expect(visible(term).map(line => line.trim())).toEqual(beforeViewport);
+				expect(term.getScrollBuffer().join("\n")).not.toContain("typed-token");
+			} finally {
+				Object.defineProperty(process, "platform", { configurable: true, value: originalPlatform });
+				tui.stop();
+			}
+		});
 		it("renders streaming row inserts on WSL Windows Terminal even when viewport probe is unavailable", async () => {
 			const originalPlatform = process.platform;
 			Object.defineProperty(process, "platform", { configurable: true, value: "linux" });

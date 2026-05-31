@@ -84,6 +84,18 @@ export interface Focusable {
 export interface RenderRequestOptions {
 	/** Clear terminal scrollback for intentional transcript replacement. */
 	clearScrollback?: boolean;
+	/**
+	 * Bypass the unknown-Windows-viewport deferral for this render so the
+	 * caller's intentional live UI mutation reaches the terminal even when
+	 * `Terminal#isNativeViewportAtBottom()` cannot answer.
+	 *
+	 * Use only for renders driven by direct user interaction (autocomplete
+	 * updates, IME, etc.). Any background/offscreen transcript change that
+	 * coalesces into the same frame WILL also bypass the deferral and reach
+	 * native scrollback — that is the trade-off, and the reason ordinary
+	 * `requestRender()` calls must continue to omit this flag.
+	 */
+	allowUnknownViewportMutation?: boolean;
 }
 
 /** Options for deferred native scrollback rebuild checkpoints. */
@@ -316,6 +328,7 @@ export class TUI extends Container {
 	#nativeScrollbackDirty = false;
 	#fullRedrawCount = 0;
 	#clearScrollbackOnNextRender = false;
+	#allowUnknownViewportMutationOnNextRender = false;
 	#hasEverRendered = false;
 	#stopped = false;
 
@@ -670,6 +683,7 @@ export class TUI extends Container {
 	}
 
 	requestRender(force = false, options?: RenderRequestOptions): void {
+		this.#allowUnknownViewportMutationOnNextRender ||= options?.allowUnknownViewportMutation === true;
 		if (force) {
 			this.#prepareForcedRender(options?.clearScrollback === true);
 			this.#renderRequested = true;
@@ -1138,11 +1152,19 @@ export class TUI extends Container {
 		const prevHardwareCursorRow = this.#hardwareCursorRow;
 		const widthChanged = this.#previousWidth > 0 && this.#previousWidth !== width;
 		const heightChanged = this.#previousHeight > 0 && this.#previousHeight !== height;
+		const allowUnknownViewportMutation = this.#allowUnknownViewportMutationOnNextRender;
+		this.#allowUnknownViewportMutationOnNextRender = false;
 
 		// 3. Classify intent.
-		const intent = this.#planRender(lines, widthChanged, heightChanged, prevViewportTop, height);
+		const intent = this.#planRender(
+			lines,
+			widthChanged,
+			heightChanged,
+			prevViewportTop,
+			height,
+			allowUnknownViewportMutation,
+		);
 		this.#logRedraw(intent, lines.length, height);
-
 		// 4. Execute.
 		switch (intent.kind) {
 			case "noop":
@@ -1219,6 +1241,7 @@ export class TUI extends Container {
 		heightChanged: boolean,
 		prevViewportTop: number,
 		height: number,
+		allowUnknownViewportMutation: boolean,
 	): RenderIntent {
 		// Initial paint after start(): scrollback must keep its prior shell
 		// content, but the viewport must be cleared so stale rows do not bleed
@@ -1253,14 +1276,14 @@ export class TUI extends Container {
 			!isMultiplexerSession()
 		) {
 			if (widthChanged || heightChanged) {
-				if (this.#nativeViewportIsScrolled(this.#readNativeViewportAtBottom())) {
+				if (this.#nativeViewportIsScrolled(this.#readNativeViewportAtBottom(), allowUnknownViewportMutation)) {
 					this.#markNativeScrollbackDirty();
 					return { kind: "deferredShrink", paddedLength: this.#previousLines.length };
 				}
 				return { kind: "historyRebuild" };
 			}
 			this.#markNativeScrollbackDirty();
-			if (this.#nativeViewportIsScrolled(this.#readNativeViewportAtBottom())) {
+			if (this.#nativeViewportIsScrolled(this.#readNativeViewportAtBottom(), allowUnknownViewportMutation)) {
 				return { kind: "deferredShrink", paddedLength: this.#previousLines.length };
 			}
 			return { kind: "viewportRepaint" };
@@ -1292,7 +1315,7 @@ export class TUI extends Container {
 		// through to the diff path so the append handler scrolls them into history.
 		if (widthChanged) {
 			if (diff.firstChanged < prevViewportTop) {
-				if (this.#nativeViewportIsScrolled(this.#readNativeViewportAtBottom())) {
+				if (this.#nativeViewportIsScrolled(this.#readNativeViewportAtBottom(), allowUnknownViewportMutation)) {
 					this.#markNativeScrollbackDirty();
 					return { kind: "viewportRepaint" };
 				}
@@ -1307,15 +1330,19 @@ export class TUI extends Container {
 		const structuralMutation = newLines.length !== this.#previousLines.length || diff.firstChanged < prevViewportTop;
 		if (!pureAppend && structuralMutation && !isMultiplexerSession()) {
 			const nativeViewportAtBottom = this.#readNativeViewportAtBottom();
-			if (this.#nativeViewportIsScrolled(nativeViewportAtBottom)) {
+			if (this.#nativeViewportIsScrolled(nativeViewportAtBottom, allowUnknownViewportMutation)) {
 				this.#markNativeScrollbackDirty();
 				return { kind: "deferredMutation" };
 			}
-			// Expanding a collapsed offscreen cell inserts rows before an unchanged
-			// suffix. A viewport-only repaint makes the live bottom look correct but
-			// leaves native scrollback holding the old collapsed rows; scrolling up then
-			// shows a splice of stale history and the new tail. Pure tail appends with an
-			// offscreen status/header tick are still handled by the append-tail path.
+			// The append-tail path can only scroll a clean pure-tail append over an
+			// offscreen edit into history: the rows it pushes must equal the net
+			// growth, i.e. `#findAppendedTailStart` must land on `previousLines.length`
+			// (`tailAppendCount === addedCount`). Any mismatch is structurally
+			// ambiguous — more added than the matched tail means offscreen rows were
+			// inserted (a collapsed cell expanding); fewer means the previous last
+			// line repeats earlier so the tail is mis-located. Under-counting splices
+			// stale history; over-counting scrolls an extra row and duplicates the
+			// line at the viewport top. Rebuild whenever the replay checkpoint allows.
 			if (
 				contentGrew &&
 				diff.firstChanged < prevViewportTop &&
@@ -1324,7 +1351,7 @@ export class TUI extends Container {
 				const appendedTailStart = diff.appendedLines ? this.#findAppendedTailStart(newLines) : newLines.length;
 				const tailAppendCount = newLines.length - appendedTailStart;
 				const addedCount = newLines.length - this.#previousLines.length;
-				if (addedCount > tailAppendCount) {
+				if (addedCount !== tailAppendCount) {
 					return { kind: "historyRebuild" };
 				}
 			}
@@ -1349,10 +1376,17 @@ export class TUI extends Container {
 		}
 
 		// Offscreen edit: viewport repaint corrects shifted rows when the native
-		// viewport is at the tail. Scrolled native-history cases are deferred above.
+		// viewport is at the tail. The append-tail prefix is only safe at the clean
+		// boundary (`#findAppendedTailStart === previousLines.length`); the guard above
+		// rebuilds the ambiguous cases when replay is possible. When it was not (no
+		// viewport proof), repaint visible rows only and mark history dirty so the next
+		// checkpoint rebuilds — scrolling a mis-located tail would splice stale rows or
+		// duplicate the viewport-top row into scrollback.
 		if (diff.firstChanged < prevViewportTop) {
-			const appendFrom = diff.appendedLines ? this.#findAppendedTailStart(newLines) : undefined;
-			return { kind: "viewportRepaint", appendFrom };
+			const cleanTailAppend =
+				diff.appendedLines && this.#findAppendedTailStart(newLines) === this.#previousLines.length;
+			if (diff.appendedLines && !cleanTailAppend) this.#markNativeScrollbackDirty();
+			return { kind: "viewportRepaint", appendFrom: cleanTailAppend ? this.#previousLines.length : undefined };
 		}
 
 		return {
@@ -1430,8 +1464,14 @@ export class TUI extends Container {
 		return this.terminal.isNativeViewportAtBottom?.();
 	}
 
-	#nativeViewportIsScrolled(nativeViewportAtBottom: boolean | undefined): boolean {
-		return nativeViewportAtBottom === false || (nativeViewportAtBottom === undefined && process.platform === "win32");
+	#nativeViewportIsScrolled(
+		nativeViewportAtBottom: boolean | undefined,
+		allowUnknownViewportMutation = false,
+	): boolean {
+		return (
+			nativeViewportAtBottom === false ||
+			(nativeViewportAtBottom === undefined && process.platform === "win32" && !allowUnknownViewportMutation)
+		);
 	}
 
 	#nativeViewportIsAtBottom(nativeViewportAtBottom: boolean | undefined): boolean {

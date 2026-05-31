@@ -1,7 +1,20 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { TASK_SIMPLE_MODES } from "../task/simple-mode";
-import { getThinkingLevelMetadata } from "../thinking";
+import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
 import {
+	TINY_MODEL_DEVICE_DEFAULT,
+	TINY_MODEL_DEVICE_SETTING_OPTIONS,
+	TINY_MODEL_DEVICE_SETTING_VALUES,
+} from "../tiny/device";
+import {
+	TINY_MODEL_DTYPE_DEFAULT,
+	TINY_MODEL_DTYPE_SETTING_OPTIONS,
+	TINY_MODEL_DTYPE_SETTING_VALUES,
+} from "../tiny/dtype";
+import {
+	AUTO_THINKING_MODEL_OPTIONS,
+	AUTO_THINKING_MODEL_VALUES,
+	ONLINE_AUTO_THINKING_MODEL_KEY,
 	ONLINE_MEMORY_MODEL_KEY,
 	ONLINE_TINY_TITLE_MODEL_KEY,
 	TINY_MEMORY_MODEL_OPTIONS,
@@ -243,6 +256,7 @@ export const SETTINGS_SCHEMA = {
 	// General settings (no UI)
 	// ────────────────────────────────────────────────────────────────────────
 	lastChangelogVersion: { type: "string", default: undefined },
+	setupVersion: { type: "number", default: 0 },
 
 	// Auth broker — credentials proxied through a remote `omp auth-broker serve`
 	// host. Hidden from the UI; populate via env vars or hand-edited config.yml.
@@ -660,13 +674,16 @@ export const SETTINGS_SCHEMA = {
 	// Reasoning and prompts
 	defaultThinkingLevel: {
 		type: "enum",
-		values: THINKING_EFFORTS,
+		values: [...THINKING_EFFORTS, AUTO_THINKING],
 		default: "high",
 		ui: {
 			tab: "model",
 			label: "Thinking Level",
 			description: "Reasoning depth for thinking-capable models",
-			options: [...THINKING_EFFORTS.map(getThinkingLevelMetadata)],
+			options: [
+				getConfiguredThinkingLevelMetadata(AUTO_THINKING),
+				...THINKING_EFFORTS.map(getThinkingLevelMetadata),
+			],
 		},
 	},
 
@@ -996,6 +1013,16 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			label: "Quiet Startup",
 			description: "Skip welcome screen and startup status messages",
+		},
+	},
+
+	"startup.setupWizard": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			label: "Setup Wizard",
+			description: "Show newly added onboarding steps once per setup version",
 		},
 	},
 
@@ -1694,6 +1721,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"ttsr.builtinRules": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			label: "Builtin Rules",
+			description: "Load the default rules shipped with the agent (override individually with ttsr.disabledRules)",
+		},
+	},
+
+	"ttsr.disabledRules": {
+		type: "array",
+		default: [] as string[],
+		ui: {
+			tab: "context",
+			label: "Disabled Rules",
+			description: "Rule names to ignore entirely (applies to bundled defaults and your own rules)",
+		},
+	},
+
 	// ────────────────────────────────────────────────────────────────────────
 	// Editing
 	// ────────────────────────────────────────────────────────────────────────
@@ -2031,7 +2078,7 @@ export const SETTINGS_SCHEMA = {
 					value: "write",
 					label: "Write",
 					description:
-						"Auto-approve read-only and write tools; require confirmation for exec tools such as bash, eval, browser, task, recipe, and ssh.",
+						"Auto-approve read-only and write tools; require confirmation for exec tools such as bash, eval, browser, task, and ssh.",
 				},
 				{
 					value: "heuristic",
@@ -2241,16 +2288,6 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Text-to-Speech",
 			description: "Enable the tts tool for xAI Grok Voice speech synthesis",
-		},
-	},
-	"recipe.enabled": {
-		type: "boolean",
-		default: true,
-		ui: {
-			tab: "tools",
-			label: "Recipe",
-			description:
-				"Enable the recipe tool when a justfile / package.json / Cargo.toml / Makefile / Taskfile is present",
 		},
 	},
 
@@ -2955,6 +2992,30 @@ export const SETTINGS_SCHEMA = {
 			options: TINY_TITLE_MODEL_OPTIONS,
 		},
 	},
+	"providers.tinyModelDevice": {
+		type: "enum",
+		values: TINY_MODEL_DEVICE_SETTING_VALUES,
+		default: TINY_MODEL_DEVICE_DEFAULT,
+		ui: {
+			tab: "providers",
+			label: "Tiny Model Device",
+			description:
+				"ONNX execution provider for local tiny models (titles + memory). Default uses CPU-only inference. The PI_TINY_DEVICE env var overrides this.",
+			options: TINY_MODEL_DEVICE_SETTING_OPTIONS,
+		},
+	},
+	"providers.tinyModelDtype": {
+		type: "enum",
+		values: TINY_MODEL_DTYPE_SETTING_VALUES,
+		default: TINY_MODEL_DTYPE_DEFAULT,
+		ui: {
+			tab: "providers",
+			label: "Tiny Model Precision",
+			description:
+				"ONNX quantization/precision for local tiny models. Default uses each model's shipped dtype (q4); lower precision is faster, higher is more faithful. The PI_TINY_DTYPE env var overrides this.",
+			options: TINY_MODEL_DTYPE_SETTING_OPTIONS,
+		},
+	},
 	"providers.memoryModel": {
 		type: "enum",
 		values: TINY_MEMORY_MODEL_VALUES,
@@ -2966,6 +3027,20 @@ export const SETTINGS_SCHEMA = {
 				"Mnemosyne LLM for fact extraction + consolidation: online (smol/remote) by default, or a local on-device model",
 			condition: "mnemosyneActive",
 			options: TINY_MEMORY_MODEL_OPTIONS,
+		},
+	},
+
+	"providers.autoThinkingModel": {
+		type: "enum",
+		values: AUTO_THINKING_MODEL_VALUES,
+		default: ONLINE_AUTO_THINKING_MODEL_KEY,
+		ui: {
+			tab: "model",
+			label: "Auto Thinking Model",
+			description:
+				"Difficulty classifier for the `auto` thinking level: online smol by default, or a local on-device model",
+			condition: "autoThinkingActive",
+			options: AUTO_THINKING_MODEL_OPTIONS,
 		},
 	},
 
@@ -3338,6 +3413,10 @@ export interface TtsrSettings {
 	interruptMode: "never" | "prose-only" | "tool-only" | "always";
 	repeatMode: "once" | "after-gap";
 	repeatGap: number;
+	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
+	builtinRules?: boolean;
+	/** Bucketing-only (read by bucketRules, not the TtsrManager). */
+	disabledRules?: string[];
 }
 
 export interface ExaSettings {

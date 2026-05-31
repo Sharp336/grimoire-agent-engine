@@ -2,6 +2,90 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `agent()` eval options `agent_type`/`agentType`, `model`, `context`, and `label`, and returned structured JSON when `schema` is provided in JS and Python eval cells
+- Added `agent()` to the `eval` runtime so JS and Python cells can spawn one subagent through the existing task executor; JS eval also gained bounded `parallel()` and `pipeline()` helpers for orchestrating subagent calls.
+- Added search support for virtual internal URLs (including `omp://` roots) by resolving and scanning in-memory internal resources as search targets alongside filesystem paths
+- Added expansion of virtual internal URL search targets so `search` can match multiple internal documents when given `omp://`
+- Added `/omfg <complaint>` slash command that drafts a TTSR rule from a complaint, validates it against the current conversation, saves it to project or `~/.omp/agent/rules`, and registers it live.
+
+### Changed
+
+- Changed Shift+Ctrl+P to cycle role models backward instead of cycling forward without persisting.
+- Changed empty prompt input so `?` inserts a literal question mark instead of opening `/hotkeys`; use `/hotkeys` explicitly for the shortcut reference.
+- Changed `search` output to preserve full virtual and internal URL paths in grouped results and `details.files` instead of collapsing them to file basenames
+- Changed `/omfg` to run up to three generation attempts with validation feedback and only prompt saving when no draft matches assistant history
+- Changed `/omfg` to show a live draft panel with generation/validation/saving status and allow canceling an active rule request with `Esc`
+- Changed keybindings config to use `~/.omp/agent/keybindings.yml`, with automatic migration from legacy `keybindings.json` and continued support for `keybindings.yaml`.
+
+### Fixed
+
+- Fixed `agent()` in eval to enforce plan-mode, spawn allowlist, and disabled-agent checks before launching subagents
+- Fixed recursive `agent()` calls from eval by enforcing the existing max subagent depth limit
+- Fixed runtime model switches (Ctrl+P cycling, `--model`, `/model`, model picker selections, and programmatic changes) so they no longer overwrite the persisted `modelRoles.default`; only the model picker's explicit "Set as default" action and settings changes persist the default.
+- Fixed `search` to honor line-range suffixes on virtual internal URL targets so matches outside the requested ranges are no longer returned
+- Fixed `search` to handle internal URLs without source files without incorrectly reporting `Path not found`, returning matches from virtual content instead
+- Fixed `/omfg` parsing to tolerate fenced or noisy model output, normalize generated rule names, and reject invalid regex conditions before saving
+- Fixed auto-thinking sessions to persist the concrete resolved effort after classification, so resuming the session restores that level instead of returning to pending `auto`.
+- Fixed extension-registered CLI flags (e.g. `--spawn-peer <value>`) leaking into the initial prompt: argv is re-parsed once the extension flag set is known so flag values are consumed instead of becoming messages or being misread as `@file` arguments. Registered flags shadow same-named built-ins, so a colliding flag (e.g. plan-mode's `--plan`) is parsed with the extension's semantics rather than being consumed by the built-in branch (which would otherwise eat the following message and corrupt the built-in field). Extension flags and `@file` arguments are now resolved before the session is created, so an unreadable initial `@file` exits without leaving a junk session/terminal breadcrumb behind. ([#1503](https://github.com/can1357/oh-my-pi/pull/1503))
+
+## [15.7.2] - 2026-05-31
+### Added
+
+- Added `providers.autoThinkingModel` setting so users can choose the `auto` thinking classifier backend (online smol or local tiny-memory model)
+- Added an `auto` thinking level that classifies each real user turn and resolves to a concrete low-through-xhigh effort, with online smol classification by default and an opt-in local on-device classifier.
+
+### Changed
+
+- Updated the interactive thinking selectors in model/model-role pickers and ACP thinking options to include `auto` as a selectable level
+- Updated footer and status-line rendering to show `auto` while auto-thinking is being resolved and `auto → <level>` once it resolves
+- Changed the local tiny-model device default to CPU on every platform; explicit `providers.tinyModelDevice` / `PI_TINY_DEVICE` values still opt into accelerated ONNX providers.
+
+### Fixed
+
+- Prevented auto-thinking classification from running on non-user synthetic turns and non-reasoning models, keeping the session on its provisional concrete effort
+- Added a bounded auto-thinking classification path that falls back to the provisional effort on failures/timeouts so prompts continue without interruption
+- Bypassed auto classifier for `ultrathink` prompts and resolved directly to the highest supported auto effort
+- Fixed the JavaScript `eval` kernel crashing the whole process with a segfault (`SIGTRAP`, `getImportedModule` on a null record) when imported code reached a local module whose relative-import graph contains a cycle — e.g. `await import("…/edit/streaming.ts")`, or any workspace path with cyclic re-exports. The `LocalModuleLoader` linked and evaluated each local module individually inside the recursive `vm.SourceTextModule` linker callback, which re-entered Bun's `node:vm` module linker mid-instantiation and detonated JSC on the first cycle. The loader now constructs the entire local module graph first and drives a single `link()` + `evaluate()` from the graph root, so cyclic graphs instantiate in one pass; external (`node_modules`) modules stay eagerly loaded since they carry no imports and cannot form a cycle.
+- Fixed the streaming `edit` preview rendering a blank box for hashline edits whose payload sits on the trailing in-flight line (the common single-op `replace`/`insert` case). The preview path trimmed that still-typing line before diffing, so a single-payload op collapsed to a "No changes" result — shown as an empty box — for almost the entire stream. Hashline previews now feed the raw in-flight text through `applyPartialTo`, whose streaming-tolerant parser drops a payload-less trailing op and projects a partially-typed payload line as it grows, so the diff appears and fills in live. Transient errors from the actively-typed trailing section are also suppressed while streaming (regardless of section count) so a mid-typed op can't wipe an already-good preview frame; real errors still surface once args are complete.
+- Fixed hashline edit previews to accept live content-hash matches and session snapshot recovery, so `search`/`read`-anchored edits no longer flash stale "re-read" errors before applying successfully.
+
+## [15.7.0] - 2026-05-31
+
+### Added
+
+- Added a `Web search` setup tab that lets users choose the preferred `providers.webSearch` provider during onboarding
+- Added manual authorization-code/redirect URL prompts for OAuth providers that require non-callback login in the setup wizard
+- Added an `omp completions <bash|zsh|fish>` command that prints a shell completion script generated from the live command/flag metadata, so completions never drift from the actual CLI. Subcommands, flags, and enum values complete statically; `--model`/`--smol`/`--slow`/`--plan` resolve against the bundled model catalog and `--resume` against on-disk sessions via a hidden `__complete` helper.
+- Added a `/switch` slash command that opens the temporary model selector for the current session, mirroring the `alt+p` keybinding.
+- Added `replace block N:` and `delete block N` operators to the `edit` tool: they resolve the syntactic block beginning on line N via tree-sitter (native `blockRangeAt`) and replace or delete its full line span, so a construct can be rewritten or removed without counting its closing line. Unresolvable blocks (unsupported language, blank/closing-delimiter line, or a parse error) are rejected with guidance to use an explicit `replace N..M:` / `delete N..M` range.
+- Added an animated pending border for `bash` and `eval` execution blocks: while a command/cell is running, a single dark segment glides clockwise around the block's outer edge (top → right → bottom → left), replacing the previous static accent border. Motion is eased per edge (decelerating into each corner) and timed against a fixed lap duration mapped onto the live perimeter, so streaming a new output line or resizing the terminal nudges the segment proportionally instead of resetting its position. Driven by the existing spinner cadence and gated on the `display.shimmer` setting (no motion when `disabled`).
+- Added `providers.tinyModelDevice` and `providers.tinyModelDtype` settings (Providers tab) controlling local tiny-model acceleration for session titles and Mnemosyne memory tasks. `providers.tinyModelDevice` selects the ONNX execution provider (`default` keeps the platform pick — DirectML on Windows, CUDA on Linux x64, CPU elsewhere); `providers.tinyModelDtype` selects quantization/precision (`default` keeps each model's shipped `q4`, e.g. `fp16` trades speed for fidelity). The `PI_TINY_DEVICE` / `PI_TINY_DTYPE` env vars override the matching setting. Also added `PI_TINY_DTYPE` as the env counterpart to `PI_TINY_DEVICE`; an unrecognized device/precision fails loudly at worker startup instead of silently loading a different one.
+- Added a bundled set of default rules shipped with the agent (TypeScript/Rust convention rules registered as TTSR conditions). They load via the new lowest-priority `builtin-defaults` discovery provider, so any user/project/tool rule of the same name overrides the bundled copy. Disable the whole set with `ttsr.builtinRules: false`, or drop individual rules (bundled or your own) by name via `ttsr.disabledRules`.
+
+### Changed
+
+- Changed setup onboarding to a tabbed `Set up your providers` scene with dedicated `Sign in` and `Web search` panels
+- Changed the glyph mode picker to preselect the currently configured symbol preset instead of always defaulting to Unicode and to show live glyph samples in the picker rows
+- Changed OAuth sign-in flow in the setup wizard so users can authenticate multiple providers before leaving with Escape
+- Changed the plan-approval model-tier slider and the `ctrl+p`/`alt+p` role-cycle status to share one status-line-style chip track: each tier renders in its own role color and the active tier is filled as a powerline chip with a luminance-matched label. The role-cycle status now shows only the chip track — the resolved model and thinking level already live on the status line — instead of the verbose `Switched to <role>: <model> (cycle: …)` line.
+- Changed the in-flight `bash` tool-call preview to render as a full bordered block as soon as the call appears, instead of a one-line `Bash: $ …` status that only expanded into a block once the command produced its first output chunk. Silent commands (e.g. `sleep 30`) now show the framed command block — with the animated pending border — for their whole runtime.
+- Changed local tiny-model inference to request a worker-safe accelerated ONNX execution provider where available (DirectML on Windows, CUDA on Linux x64), with CPU retry if acceleration cannot initialize. `PI_TINY_DEVICE=cpu` restores CPU-only behavior; `PI_TINY_DEVICE=metal` is accepted as a WebGPU alias but guarded back to CPU in the production macOS worker because WebGPU currently hard-crashes Bun on worker teardown.
+
+### Fixed
+
+- Used the native block resolver for hashline operations so `replace block` edits now derive block ranges from file-aware parsing
+- Fixed OAuth login handling to cancel cleanly when users press Esc or Ctrl+C during authentication
+- Fixed the `read` tool description advertising `inspect_image` ("for visual analysis, call `inspect_image`") even when the `inspect_image` tool was disabled, which left the model hunting for a tool absent from its function list. The image section is now gated on `inspect_image.enabled`: when disabled it instead states that reading an image path returns the decoded image inline.
+- Fixed session-title generation latching onto literal text inside fenced code blocks — a pasted UI mockup containing "Welcome to Claude Code v2.1.158" titled the session "Setup Screen for Claude Code v2.1.158" instead of capturing the actual request. The first user message now has fenced code blocks stripped before titling (both the online `pi/smol` and local on-device model paths share the same preprocessing), with a fallback to the original message when stripping would leave too little to title from (e.g. a message that is essentially just a code block).
+- Fixed slash-command autocomplete repaint requests so Windows Terminal sessions with unknown native viewport state keep updating the input box and candidate list. ([#1550](https://github.com/can1357/oh-my-pi/issues/1550))
+- Fixed Python `eval` failing the whole session when the managed `~/.omp/python-env` interpreter exists on disk but no longer runs (e.g. a stale `uv`-managed Python that was removed or upgraded). Availability resolution now enumerates every candidate — active/project venv, the managed env, then the system interpreter — and probes each in priority order, falling through to the first that actually executes instead of failing fast on the first resolved path. The kernel spawns whichever interpreter the probe selected, so a working system Python takes over transparently.
+
+### Removed
+
+- Removed the `recipe` tool and its `recipe.enabled` setting. Task-runner targets (just/package.json/Cargo/make/Taskfile) are invoked directly through `bash`.
+
 ## [15.6.0] - 2026-05-30
 ### Added
 
@@ -51,6 +135,9 @@
 - Fixed the bash (and `recipe`) tool result footer not rendering for failed commands. A non-zero exit threw a `ToolError`, which dropped the result details, so the styled `⟨Wall … | Timeout …⟩` footer was replaced by the raw `Wall time: … seconds` / `Command exited with code N` lines. Non-zero exits now resolve as a non-throwing error result that keeps `wallTimeMs`/`timeoutSeconds`/`exitCode`, and the footer shows `⟨Wall … | Timeout … | Exit: N⟩` with the textual notices folded out of the output pane. Aborts, timeouts, and missing-exit-status still throw as before.
 - Fixed selector-style UI components to honor `tui.select.up` and `tui.select.down` keybindings instead of hard-coding raw Up/Down arrow bytes ([#1535](https://github.com/can1357/oh-my-pi/issues/1535)).
 
+### Added
+
+- `omp plugin install` now accepts GitHub/GitLab/Bitbucket shorthand (`github:user/repo`, `gitlab:user/repo`, …) and full git URLs (`https://github.com/user/repo`, `git@github.com:user/repo`, …) in addition to npm specs and marketplace refs.
 ## [15.5.15] - 2026-05-30
 ### Changed
 
@@ -241,12 +328,23 @@
 
 - Added `read.summarize.minTotalLines` setting (default 100) to set the minimum file length that triggers read summarization
 - Added `<file>:<lines>` support to `search` `paths`, allowing file-scoped constraints such as `:N-M`, `:N+K`, and comma-separated ranges
+- Added `ModelRegistry.create(authStorage, modelsPath?)` async factory that runs the JSON → YAML migration step on `models.{yml,yaml}` asynchronously ahead of the sync constructor's bundled-model load. The sync `new ModelRegistry(...)` constructor still works (tests rely on it); production boot paths now use the factory so the migration's I/O lands off the event-loop hot path.
+- Added `ConfigFile.tryLoadAsync()`, `ConfigFile.loadAsync()`, `ConfigFile.loadOrDefaultAsync()`, `ConfigFile.getMtimeMsAsync()`, and `ConfigFile.warmup(file)` so the rest of the codebase can migrate config reads off the sync path.
 
 ### Changed
 
 - Changed multi-section hashline `edit` execution to defer LSP diagnostics flushing until the final section is written
 - Changed read to return verbatim contents for files shorter than `read.summarize.minTotalLines` instead of summarizing them
 - Changed `search` path line-range filtering to include only matches and context lines that fall inside the requested ranges
+- Changed `MemorySessionStorage`'s mirror to a chunks-based representation. `writeLineSync` now appends to a `string[]` in O(1) (previously read the whole file and concatenated, giving O(N²) growth per session). `statSync` reports true UTF-8 byte length instead of character count. `readTextPrefix` walks chunks until the byte budget is exhausted instead of materialising the full mirror.
+- Changed `ToolExecutionComponent.updateArgs` to drop the per-delta `structuredClone` of streaming tool arguments. Callers (`event-controller.ts`, `ui-helpers.ts`) already spread their input into a fresh object on each delta, so cloning here was dead work on the rendering hot path. Added a reference-equality short-circuit so repeat calls with the same args object skip the preview-diff and display refresh.
+- Changed `ConfigFile`'s constructor to defer the JSON → YAML migration until first `tryLoad`/`tryLoadAsync` and to cache (jsonPath, ymlPath) pairs already migrated this process, so `relocate()` / repeated loads do not re-run the migration.
+- Changed all production `new ModelRegistry(...)` call sites (`main.ts`, `sdk.ts`, `task/executor.ts`, `commit/pipeline.ts`, `commit/agentic/index.ts`, the SDK example) to `await ModelRegistry.create(...)`.
+
+### Fixed
+
+- Fixed a race in `withFileLock` where a contender losing the `mkdir` race could wipe the winner's freshly-created lock directory before the winner finished writing its info file. Every lock now carries a per-process UUID token; `releaseLock(path, expectedToken)` verifies ownership before `fs.rm`, and `isLockStale` no longer returns `true` for a dir whose info file is absent but whose mtime is still inside the staleness window (or whose dir vanished mid-check).
+- Fixed `formatErrorMessage` not sanitising tabs or truncating oversized error strings before painting them through the theme. Errors that embedded raw file content (apply_patch failures, hashline mismatches, etc.) could break terminal alignment via raw `\t` chars or overflow the line width.
 
 ### Fixed
 

@@ -1,7 +1,7 @@
 {
 	"type": "module",
 	"name": "@oh-my-pi/pi-mnemosyne",
-	"version": "15.6.0",
+	"version": "15.7.2",
 	"description": "Local SQLite memory engine for Oh My Pi agents",
 	"homepage": "https://omp.sh",
 	"author": "Can Boluk",
@@ -34,13 +34,16 @@
 		"check": "biome check . && bun run check:types",
 		"check:types": "tsgo -p tsconfig.json --noEmit",
 		"lint": "biome lint .",
-		"test": "bun test",
+		"test": "bun test --parallel",
 		"fix": "biome check --write --unsafe .",
 		"fmt": "biome format --write ."
 	},
 	"dependencies": {
 		"@oh-my-pi/pi-ai": "catalog:",
-		"fastembed": "catalog:"
+		"@oh-my-pi/pi-utils": "catalog:",
+		"fastembed": "catalog:",
+		"lru-cache": "catalog:",
+		"onnxruntime-node": "catalog:"
 	},
 	"devDependencies": {
 		"@types/bun": "catalog:"

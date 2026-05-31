@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "bun:test";
+import { getFastembedCacheDir } from "@oh-my-pi/pi-utils";
 import "./setup";
+import packageJson from "../package.json" with { type: "json" };
 import {
 	available,
 	embed,
@@ -73,10 +75,19 @@ afterEach(() => {
 	resetEmbeddingProviderForTests();
 });
 
+/** Wrap a synchronous matrix function as the `AsyncIterable<number[][]>` a provider now returns. */
+function streamRows(
+	rows: (texts: readonly string[]) => number[][],
+): (texts: readonly string[]) => AsyncGenerator<number[][]> {
+	return async function* (texts) {
+		yield rows(texts);
+	};
+}
+
 describe("optional embeddings", () => {
 	it("falls back cleanly when embeddings are disabled", async () => {
 		await withEnv({ MNEMOSYNE_NO_EMBEDDINGS: "1" }, async () => {
-			setEmbeddingProviderForTests({ embed: () => [[1, 2, 3]], available: () => true });
+			setEmbeddingProviderForTests({ embed: streamRows(() => [[1, 2, 3]]), available: () => true });
 
 			expect(await available()).toBe(false);
 			expect(await embedQuery("hello")).toBeNull();
@@ -88,16 +99,16 @@ describe("optional embeddings", () => {
 		await withEnv({ MNEMOSYNE_NO_EMBEDDINGS: undefined }, async () => {
 			let calls = 0;
 			setEmbeddingProviderForTests({
-				embed(texts) {
+				embed: streamRows(texts => {
 					calls += 1;
 					return texts.map(text => [text.length, text.charCodeAt(0) || 0]);
-				},
+				}),
 				available: () => true,
 			});
 
 			expect(await available()).toBe(true);
-			expect(await embedQuery("cache me")).toEqual([8, 99]);
-			expect(await embedQuery("cache me")).toEqual([8, 99]);
+			expect(await embedQuery("cache me")).toEqual(new Float32Array([8, 99]));
+			expect(await embedQuery("cache me")).toEqual(new Float32Array([8, 99]));
 			expect(calls).toBe(1);
 		});
 	});
@@ -121,6 +132,13 @@ describe("optional embeddings", () => {
 			port: 0,
 			fetch: async request => {
 				requests += 1;
+				expect(request.headers.get("content-type")).toBe("application/json");
+				expect(request.headers.get("user-agent")).toBe(`Oh-My-Pi/${packageJson.version}`);
+				expect(request.headers.get("http-referer")).toBe("https://omp.sh/");
+				expect(request.headers.get("x-openrouter-title")).toBe("Oh-My-Pi");
+				expect(request.headers.get("x-openrouter-categories")).toBe("cli-agent");
+				expect(request.headers.get("x-title")).toBeNull();
+				expect(request.headers.get("authorization")).toBeNull();
 				expect(new URL(request.url).pathname).toBe("/embeddings");
 				const payload = (await request.json()) as { model: string; input: string[] };
 				expect(payload.model).toBe("openai/text-embedding-3-small");
@@ -142,10 +160,7 @@ describe("optional embeddings", () => {
 				},
 				async () => {
 					expect(await available()).toBe(true);
-					expect(await embed(["hi", "world"])).toEqual([
-						[2, 1],
-						[5, 2],
-					]);
+					expect(await embed(["hi", "world"])).toEqual([new Float32Array([2, 1]), new Float32Array([5, 2])]);
 					expect(getEmbeddingApiCallCountForTests()).toBe(1);
 				},
 			);
@@ -154,61 +169,28 @@ describe("optional embeddings", () => {
 			server.stop(true);
 		}
 	});
-	it("normalizes Float32Array embeddings to number[][]", async () => {
+	it("flattens async batches into one matrix", async () => {
 		await withEnv({ MNEMOSYNE_NO_EMBEDDINGS: undefined }, async () => {
 			setEmbeddingProviderForTests({
-				embed(texts) {
-					// Simulate fastembed output: Array of Float32Array rows
-					return texts.map(text => new Float32Array([text.length, text.charCodeAt(0) || 0, 42]));
-				},
-				available: () => true,
-			});
-			expect(await embed(["a", "bc"])).toEqual([
-				[1, 97, 42],
-				[2, 98, 42],
-			]);
-		});
-	});
-	it("normalizes async Float32Array batches to number[][]", async () => {
-		await withEnv({ MNEMOSYNE_NO_EMBEDDINGS: undefined }, async () => {
-			setEmbeddingProviderForTests({
-				embed(texts) {
-					// Simulate fastembed AsyncGenerator<Array<Float32Array>>
-					return (async function* () {
-						// Yield batches
-						for (let i = 0; i < texts.length; i += 2) {
-							const batch = texts.slice(i, i + 2);
-							yield batch.map(
-								text => new Float32Array([text.length, text.charCodeAt(0) || 0]),
-							) as Float32Array[];
-						}
-					})();
+				// fastembed-shaped: an async generator yielding batches of rows.
+				embed: async function* (texts) {
+					for (let i = 0; i < texts.length; i += 2) {
+						yield texts.slice(i, i + 2).map(text => [text.length, text.charCodeAt(0) || 0]);
+					}
 				},
 				available: () => true,
 			});
 			expect(await embed(["hi", "world", "test"])).toEqual([
-				[2, 104],
-				[5, 119],
-				[4, 116],
+				new Float32Array([2, 104]),
+				new Float32Array([5, 119]),
+				new Float32Array([4, 116]),
 			]);
-		});
-	});
-	it("rejects non-numeric embedding objects", async () => {
-		await withEnv({ MNEMOSYNE_NO_EMBEDDINGS: undefined }, async () => {
-			setEmbeddingProviderForTests({
-				embed() {
-					// Return objects with length property but not actual arrays
-					return [{ length: 3, 0: 1, 1: 2, 2: 3 }] as unknown as number[][];
-				},
-				available: () => true,
-			});
-			expect(await embed(["test"])).toBeNull();
 		});
 	});
 
 	it("lets constructor-scoped noEmbeddings override enabled providers", async () => {
 		setEmbeddingProviderForTests({
-			embed: texts => texts.map(() => [1, 2, 3]),
+			embed: streamRows(texts => texts.map(() => [1, 2, 3])),
 			available: () => true,
 		});
 		const memory = new Mnemosyne({ noEmbeddings: true });
@@ -223,12 +205,12 @@ describe("optional embeddings", () => {
 	it("uses a constructor-scoped embedding provider", async () => {
 		const memory = new Mnemosyne({
 			embeddings: {
-				provider: texts => texts.map(text => [text.length, text.charCodeAt(0) || 0]),
+				provider: streamRows(texts => texts.map(text => [text.length, text.charCodeAt(0) || 0])),
 			},
 		});
 		try {
 			const result = await withMnemosyneRuntimeOptions(memory.runtimeOptions, () => embedQuery("cache me"));
-			expect(result).toEqual([8, 99]);
+			expect(result).toEqual(new Float32Array([8, 99]));
 		} finally {
 			memory.close();
 		}
@@ -248,19 +230,21 @@ describe("optional embeddings", () => {
 			},
 			async () => {
 				let initCalls = 0;
-				setLocalModelInitializerForTests(async () => {
+				const observedCacheDirs: Array<string | undefined> = [];
+				setLocalModelInitializerForTests(async options => {
 					initCalls += 1;
+					observedCacheDirs.push(options.cacheDir);
 					if (initCalls === 1) throw new Error("transient init failure");
 					return {
-						embed(texts) {
-							return texts.map(text => [text.length, text.charCodeAt(0) || 0]);
-						},
+						embed: streamRows(texts => texts.map(text => [text.length, text.charCodeAt(0) || 0])),
 					};
 				});
 
 				expect(await embed(["first"])).toBeNull();
-				expect(await embed(["second"])).toEqual([[6, 115]]);
+				expect(await embed(["second"])).toEqual([new Float32Array([6, 115])]);
 				expect(initCalls).toBe(2);
+				expect(observedCacheDirs).toEqual([getFastembedCacheDir(), getFastembedCacheDir()]);
+				expect(observedCacheDirs.some(cacheDir => cacheDir?.includes(".hermes") ?? false)).toBe(false);
 			},
 		);
 	});

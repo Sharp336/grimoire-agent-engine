@@ -14,8 +14,16 @@ export type MnemosyneLlmCompletion = (
 	opts?: MnemosyneLlmCompleteOptions,
 ) => string | null | Promise<string | null>;
 
+/**
+ * What an embedding provider's `embed` returns: the embedding matrix streamed as async batches,
+ * matching fastembed's `embed()` (`AsyncGenerator<number[][]>`). Each yielded batch is a list of
+ * rows; each row is one number per dimension. Yield the whole matrix as a single batch when not
+ * streaming: `async *embed(texts) { yield texts.map(embedOne); }`.
+ */
+export type EmbeddingOutput = AsyncIterable<number[][]>;
+
 export interface MnemosyneEmbeddingProvider {
-	embed(texts: readonly string[]): unknown | Promise<unknown>;
+	embed(texts: readonly string[]): EmbeddingOutput | Promise<EmbeddingOutput>;
 	available?(): boolean | Promise<boolean>;
 }
 
@@ -24,7 +32,7 @@ export interface MnemosyneEmbeddingRuntimeOptions {
 	model?: string;
 	apiUrl?: string;
 	apiKey?: string;
-	provider?: MnemosyneEmbeddingProvider | ((texts: readonly string[]) => unknown | Promise<unknown>);
+	provider?: MnemosyneEmbeddingProvider | ((texts: readonly string[]) => EmbeddingOutput | Promise<EmbeddingOutput>);
 }
 
 export interface MnemosyneLlmRuntimeOptions {
@@ -83,7 +91,10 @@ export function getMnemosyneRuntimeOptions(): ResolvedMnemosyneRuntimeOptions | 
 }
 
 export function resolveEmbeddingProvider(
-	provider: MnemosyneEmbeddingProvider | ((texts: readonly string[]) => unknown | Promise<unknown>) | undefined,
+	provider:
+		| MnemosyneEmbeddingProvider
+		| ((texts: readonly string[]) => EmbeddingOutput | Promise<EmbeddingOutput>)
+		| undefined,
 ): MnemosyneEmbeddingProvider | undefined {
 	if (provider === undefined) {
 		return undefined;

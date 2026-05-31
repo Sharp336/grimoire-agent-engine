@@ -2,7 +2,7 @@ import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { formatHashlineHeader, InMemorySnapshotStore } from "@oh-my-pi/hashline";
+import { computeFileHash, formatHashlineHeader, InMemorySnapshotStore } from "@oh-my-pi/hashline";
 import { dropIncompleteLastEdit, EDIT_MODE_STRATEGIES } from "@oh-my-pi/pi-coding-agent/edit";
 
 describe("dropIncompleteLastEdit", () => {
@@ -94,6 +94,95 @@ describe("hashline streaming preview (multi-section)", () => {
 			expect(p.diff).toBeTruthy();
 			expect(p.error).toBeUndefined();
 		}
+	});
+});
+
+describe("hashline streaming preview (single-op trailing payload)", () => {
+	const strategy = EDIT_MODE_STRATEGIES.hashline;
+	const text = "const a = 1;\nconst b = 2;\nconst c = 3;\n";
+	let tmpDir: string;
+	let file: string;
+	let snapshots: InMemorySnapshotStore;
+	let header: string;
+
+	beforeEach(async () => {
+		tmpDir = await fs.mkdtemp(path.join(os.tmpdir(), "hashline-stream-single-"));
+		file = path.join(tmpDir, "a.ts");
+		await Bun.write(file, text);
+		snapshots = new InMemorySnapshotStore();
+		header = formatHashlineHeader("a.ts", snapshots.record(file, text));
+	});
+
+	afterEach(async () => {
+		await fs.rm(tmpDir, { recursive: true, force: true });
+	});
+
+	const ctx = (cwd: string, isStreaming = true) => ({
+		cwd,
+		signal: new AbortController().signal,
+		snapshots,
+		isStreaming,
+	});
+
+	test("renders a live diff while the sole payload line is still being typed", async () => {
+		// The `+` payload has no trailing newline — the common single-op case
+		// the trailing-line trim used to erase, collapsing the preview to a
+		// "No changes" error that rendered as a blank box for the whole stream.
+		const input = `${header}\nreplace 2..2:\n+const b = 22`;
+		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir) as never);
+		expect(previews).toHaveLength(1);
+		expect(previews?.[0]?.error).toBeUndefined();
+		expect(previews?.[0]?.diff).toContain("const b = 22");
+	});
+
+	test("does not surface stale hash errors while streaming", async () => {
+		const input = "¶a.ts#FFFF\nreplace 2..2:\n+const b = 22";
+		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir) as never);
+		expect(previews).toHaveLength(1);
+		expect(previews?.[0]?.error).toBeUndefined();
+		expect(previews?.[0]?.diff).toContain("const b = 22");
+	});
+
+	test("final preview accepts a live content hash even when the snapshot store has no history", async () => {
+		const liveHeader = formatHashlineHeader("a.ts", computeFileHash(text));
+		const input = `${liveHeader}\nreplace 2..2:\n+const b = 22\n`;
+		const previews = await strategy.computeDiffPreview(
+			{ input } as never,
+			{
+				cwd: tmpDir,
+				signal: new AbortController().signal,
+				snapshots: new InMemorySnapshotStore(),
+				isStreaming: false,
+			} as never,
+		);
+		expect(previews).toHaveLength(1);
+		expect(previews?.[0]?.error).toBeUndefined();
+		expect(previews?.[0]?.diff).toContain("const b = 22");
+	});
+
+	test("final preview recovers a stale tag from snapshot history", async () => {
+		await Bun.write(file, `// external\n${text}`);
+		const input = `${header}\nreplace 2..2:\n+const b = 22\n`;
+		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir, false) as never);
+		expect(previews).toHaveLength(1);
+		expect(previews?.[0]?.error).toBeUndefined();
+		expect(previews?.[0]?.diff).toContain("const b = 22");
+	});
+
+	test("surfaces stale hash errors once streaming is complete", async () => {
+		const input = "¶a.ts#FFFF\nreplace 2..2:\n+const b = 22\n";
+		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir, false) as never);
+		expect(previews).toHaveLength(1);
+		expect(previews?.[0]?.error).toContain("not from this session");
+	});
+
+	test("yields no preview (not an error) before the first payload byte arrives", async () => {
+		// Op header typed, payload still empty: applyPartialTo drops the
+		// payload-less op so nothing changes yet. The preview must report null
+		// (preserving any prior frame), never a 'No changes' error that wipes it.
+		const input = `${header}\nreplace 2..2:\n`;
+		const previews = await strategy.computeDiffPreview({ input } as never, ctx(tmpDir) as never);
+		expect(previews).toBeNull();
 	});
 });
 

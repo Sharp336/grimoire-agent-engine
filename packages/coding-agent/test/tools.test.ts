@@ -711,6 +711,19 @@ describe("Coding Agent Tools", () => {
 			expect(result.content.some(c => c.type === "image")).toBe(false);
 		});
 
+		it("omits inspect_image from the description when the tool is disabled", () => {
+			const enabled = new ReadTool(
+				createTestToolSession(testDir, Settings.isolated({ "inspect_image.enabled": true })),
+			);
+			const disabled = new ReadTool(
+				createTestToolSession(testDir, Settings.isolated({ "inspect_image.enabled": false })),
+			);
+
+			expect(enabled.description).toContain("inspect_image");
+			expect(disabled.description).not.toContain("inspect_image");
+			expect(disabled.description).toContain("inline");
+		});
+
 		it("should treat files with image extension but non-image content as text", async () => {
 			const testFile = path.join(testDir, "not-an-image.png");
 			fs.writeFileSync(testFile, "definitely not a png");
@@ -1095,7 +1108,7 @@ function b() {
 			const updates: string[] = [];
 			const result = await bashTool.execute(
 				"test-call-8-stream",
-				{ command: "for i in 1 2 3; do echo $i; sleep 0.05; done" },
+				{ command: "for i in 1 2 3; do echo $i; sleep 0.2; done" },
 				undefined,
 				update => {
 					const text = update.content?.find(c => c.type === "text")?.text ?? "";
@@ -1154,7 +1167,7 @@ function b() {
 						testDir,
 						Settings.isolated({
 							"bash.autoBackground.enabled": true,
-							"bash.autoBackground.thresholdMs": 50,
+							"bash.autoBackground.thresholdMs": 2_000,
 						}),
 						{
 							getSessionId: () => "test-session",

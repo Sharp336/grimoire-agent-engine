@@ -58,6 +58,10 @@ export type TodoPhase = {
 	tasks: TodoItem[];
 };
 
+export interface InteractiveModeInitOptions {
+	suppressWelcomeIntro?: boolean;
+}
+
 export interface InteractiveModeContext {
 	// UI access
 	ui: TUI;
@@ -66,6 +70,7 @@ export interface InteractiveModeContext {
 	statusContainer: Container;
 	todoContainer: Container;
 	btwContainer: Container;
+	omfgContainer: Container;
 	editor: CustomEditor;
 	editorContainer: Container;
 	hookWidgetContainerAbove: Container;
@@ -129,7 +134,8 @@ export interface InteractiveModeContext {
 	todoPhases: TodoPhase[];
 
 	// Lifecycle
-	init(): Promise<void>;
+	init(options?: InteractiveModeInitOptions): Promise<void>;
+	playWelcomeIntro(): void;
 	shutdown(): Promise<void>;
 	checkShutdownRequested(): Promise<void>;
 
@@ -262,8 +268,11 @@ export interface InteractiveModeContext {
 	handleBtwCommand(question: string): Promise<void>;
 	hasActiveBtw(): boolean;
 	handleBtwEscape(): boolean;
+	handleOmfgCommand(complaint: string): Promise<void>;
+	hasActiveOmfg(): boolean;
+	handleOmfgEscape(): boolean;
 	cycleThinkingLevel(): void;
-	cycleRoleModel(options?: { temporary?: boolean }): Promise<void>;
+	cycleRoleModel(direction?: "forward" | "backward"): Promise<void>;
 	toggleToolOutputExpansion(): void;
 	setToolsExpanded(expanded: boolean): void;
 	toggleThinkingBlockVisibility(): void;

@@ -28,6 +28,11 @@ export const VERSION: string = version;
 /** Minimum Bun version */
 export const MIN_BUN_VERSION: string = engines.bun.replace(/[^0-9.]/g, "");
 
+try {
+	delete process.env.MallocStackLogging;
+	delete process.env.MallocStackLoggingNoCompact;
+} catch {}
+
 // =============================================================================
 // Project directory
 // =============================================================================
@@ -341,6 +346,11 @@ export function getGithubCacheDbPath(): string {
 	const override = process.env.OMP_GITHUB_CACHE_DB;
 	if (override) return override;
 	return dirs.rootSubdir(path.join("cache", "github-cache.db"), "cache");
+}
+
+/** Get the local FastEmbed model cache directory (~/.omp/cache/fastembed). */
+export function getFastembedCacheDir(): string {
+	return dirs.rootSubdir(path.join("cache", "fastembed"), "cache");
 }
 
 /** Get the natives directory (~/.omp/natives). */

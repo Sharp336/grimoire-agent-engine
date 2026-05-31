@@ -161,6 +161,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "switch",
+		description: "Switch model for this session (same as alt+p)",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showModelSelector({ temporaryOnly: true });
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "fast",
 		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
 		acpDescription: "Toggle fast mode",
@@ -854,6 +862,17 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			const question = command.text.slice(`/${command.name}`.length).trim();
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleBtwCommand(question);
+		},
+	},
+	{
+		name: "omfg",
+		description: "Forge a TTSR rule from a complaint to stop a recurring behavior",
+		inlineHint: "<complaint>",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			const complaint = command.text.slice(`/${command.name}`.length).trim();
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.handleOmfgCommand(complaint);
 		},
 	},
 	{
