@@ -20,6 +20,20 @@ class MutableLinesComponent implements Component {
 	}
 }
 
+class FixedLinesComponent implements Component {
+	#lines: string[];
+
+	constructor(lines: string[]) {
+		this.#lines = [...lines];
+	}
+
+	invalidate(): void {}
+
+	render(): string[] {
+		return [...this.#lines];
+	}
+}
+
 class WrappingLinesComponent implements Component {
 	#lines: string[];
 
@@ -801,6 +815,27 @@ describe("TUI terminal-state regressions", () => {
 			}
 		});
 
+		it("coalesced forced renders do not replay the transcript into scrollback", async () => {
+			const term = new VirtualTerminal(32, 5);
+			const tui = new TUI(term);
+			const component = new MutableLinesComponent(rows("line-", 20));
+			tui.addChild(component);
+
+			try {
+				tui.start();
+				await settle(term);
+				const before = term.getScrollBuffer().map(line => line.trimEnd());
+
+				tui.requestRender(true);
+				tui.requestRender(true);
+				await settle(term);
+
+				expect(term.getScrollBuffer().map(line => line.trimEnd())).toEqual(before);
+			} finally {
+				tui.stop();
+			}
+		});
+
 		it("appending lines during aggressive resize does not duplicate history rows", async () => {
 			const term = new VirtualTerminal(80, 18);
 			const tui = new TUI(term);
@@ -835,6 +870,35 @@ describe("TUI terminal-state regressions", () => {
 				tui.stop();
 			}
 		}, 15_000);
+
+		it("rebuilds native scrollback on a width resize for width-independent rows", async () => {
+			const term = new VirtualTerminal(10, 3);
+			const tui = new TUI(term);
+			const lines = ["a00-alpha", "b01-bravo", "c02-charlie", "d03-delta", "e04-echo", "f05-foxtrot"];
+			const component = new FixedLinesComponent(lines);
+			tui.addChild(component);
+
+			try {
+				tui.start();
+				await settle(term);
+
+				term.resize(3, 3);
+				tui.requestRender();
+				await settle(term);
+
+				expect(term.getScrollBuffer().map(line => line.trimEnd())).toEqual([
+					"a00",
+					"b01",
+					"c02",
+					"d03",
+					"e04",
+					"f05",
+				]);
+				expect(tui.refreshNativeScrollbackIfDirty()).toBe(false);
+			} finally {
+				tui.stop();
+			}
+		});
 
 		it("rebuilds native scrollback on a width resize without duplicating rows", async () => {
 			// A width resize makes the terminal reflow its own committed scrollback

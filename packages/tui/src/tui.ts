@@ -707,7 +707,7 @@ export class TUI extends Container {
 		this.#clearScrollbackOnNextRender ||= clearScrollback;
 		const droppedLines = this.#previousLines.length > 0;
 		this.#previousLines = [];
-		this.#previousLinesDroppedForForcedRender = droppedLines;
+		this.#previousLinesDroppedForForcedRender ||= droppedLines;
 		this.#previousWidth = -1; // -1 triggers widthChanged, forcing a full clear
 		this.#previousHeight = -1; // -1 triggers heightChanged, forcing a full clear
 		this.#cursorRow = 0;
@@ -1327,10 +1327,25 @@ export class TUI extends Container {
 		}
 
 		if (diff.firstChanged === -1) {
-			// Content unchanged. Width change still alters wrapping geometry;
-			// height change shifts the visible window. Either needs a repaint
-			// (outside hostile environments).
-			if (widthChanged) return { kind: "viewportRepaint" };
+			// Content unchanged. Width changes still reflow native terminal
+			// scrollback even when component rows are width-independent. If TUI has
+			// already pushed rows above the viewport, replay them at the new width
+			// when safe; otherwise repaint only the viewport so preexisting shell
+			// scrollback is preserved.
+			if (widthChanged) {
+				const nativeViewportAtBottom = this.#readNativeViewportAtBottom();
+				if (
+					this.#scrollbackHighWater > 0 &&
+					!isMultiplexerSession() &&
+					this.#canReplayNativeScrollbackAtCheckpoint(nativeViewportAtBottom, allowUnknownViewportMutation)
+				) {
+					return { kind: "historyRebuild" };
+				}
+				if (this.#nativeViewportIsScrolled(nativeViewportAtBottom, allowUnknownViewportMutation)) {
+					this.#markNativeScrollbackDirty();
+				}
+				return { kind: "viewportRepaint" };
+			}
 			if (heightChanged && !isTermuxSession() && !isMultiplexerSession()) return { kind: "viewportRepaint" };
 			return { kind: "noop" };
 		}
