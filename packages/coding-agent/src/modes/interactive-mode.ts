@@ -1053,7 +1053,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	#renderTodoList(): void {
 		this.todoContainer.clear();
 		const phases = this.todoPhases.filter(phase => phase.tasks.length > 0);
-		if (phases.length === 0) return;
+		const hasOpenTasks = phases.some(phase =>
+			phase.tasks.some(task => task.status === "pending" || task.status === "in_progress"),
+		);
+		if (phases.length === 0 || !hasOpenTasks) return;
 		const indent = "  ";
 		const hook = theme.tree.hook;
 		const lines = ["", indent + theme.bold(theme.fg("accent", "Todos"))];
