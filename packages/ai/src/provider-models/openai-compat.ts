@@ -1664,9 +1664,9 @@ export function kimiCodeModelManagerOptions(
 							...defaults,
 							name: typeof entry.display_name === "string" ? entry.display_name : defaults.name,
 							reasoning: entry.supports_reasoning === true || id.includes("thinking"),
-							input: entry.supports_image_in === true || id.includes("k2.5") ? ["text", "image"] : ["text"],
-							contextWindow: typeof entry.context_length === "number" ? entry.context_length : 262144,
-							maxTokens: 32000,
+						input: entry.supports_image_in === true || /k2\.[56]/.test(id) ? ["text", "image"] : ["text"],
+						contextWindow: typeof entry.context_length === "number" ? entry.context_length : 262144,
+						maxTokens: typeof entry.max_completion_tokens === "number" ? entry.max_completion_tokens : 32000,
 							compat: {
 								thinkingFormat: "zai",
 								reasoningContentField: "reasoning_content",
@@ -1840,7 +1840,7 @@ export function moonshotModelManagerOptions(
 						const model = mapWithBundledReference(entry, defaults, reference);
 						const id = model.id.toLowerCase();
 						const isThinking = id.includes("thinking");
-						const isVision = id.includes("vision") || id.includes("vl") || id.includes("k2.5");
+						const isVision = id.includes("vision") || id.includes("vl") || /k2\.[56]/.test(id);
 						return {
 							...model,
 							reasoning: isThinking || model.reasoning,
@@ -2790,6 +2790,30 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 	// --- MiniMax (Anthropic) ---
 	anthropicMessagesDescriptor("minimax", "minimax", "https://api.minimax.io/anthropic"),
 	anthropicMessagesDescriptor("minimax-cn", "minimax-cn", "https://api.minimaxi.com/anthropic"),
+	// --- Moonshot (models.dev "moonshotai") ---
+	openAiCompletionsDescriptor("moonshotai", "moonshot", "https://api.moonshot.ai/v1", {
+		compat: {
+			thinkingFormat: "zai",
+			reasoningContentField: "reasoning_content",
+		},
+	}),
+	// --- Kimi Code (models.dev "kimi-for-coding") ---
+	openAiCompletionsDescriptor("kimi-for-coding", "kimi-code", "https://api.kimi.com/coding/v1", {
+		compat: {
+			thinkingFormat: "zai",
+			reasoningContentField: "reasoning_content",
+			supportsDeveloperRole: false,
+		},
+		transformModel: (model, modelId) => {
+			// models.dev uses abbreviated IDs (k2p5, k2p6); map to actual API IDs
+			const idMap: Record<string, string> = {
+				k2p5: "kimi-k2.5",
+				k2p6: "kimi-k2.6",
+			};
+			const mappedId = idMap[modelId] ?? modelId;
+			return { ...model, id: mappedId };
+		},
+	}),
 	// --- Qwen Portal ---
 	openAiCompletionsDescriptor("qwen-portal", "qwen-portal", "https://portal.qwen.ai/v1", {
 		defaultContextWindow: 128000,
