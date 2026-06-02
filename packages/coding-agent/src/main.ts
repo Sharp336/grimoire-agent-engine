@@ -703,6 +703,33 @@ async function buildSessionOptions(
 		options.additionalExtensionPaths = [];
 	}
 
+	// ── Langfuse telemetry: session propagation + tag enrichment ──
+	const langfuseEnabled = activeSettings.get("observability.langfuse.enabled");
+	let langfuseTelemetry: import("./langfuse").LangfuseTelemetryAdapter | undefined = undefined;
+	if (langfuseEnabled) {
+		try {
+			const { getLangfuseClient, buildLangfuseTelemetryConfig } = await import("./langfuse");
+			const client = await getLangfuseClient();
+			if (client) {
+				langfuseTelemetry = buildLangfuseTelemetryConfig(client, {
+					conversationId: sessionManager?.getSessionId(),
+				});
+			}
+		} catch {
+			// langfuse package not installed — silently skip telemetry
+		}
+	}
+
+	options.telemetry = {
+		conversationId: sessionManager?.getSessionId(),
+		agent: { name: "omp", id: "omp-main" },
+		attributes: {
+			source: "omp",
+			platform: parsed.mode || "cli",
+		},
+		...langfuseTelemetry,
+	};
+
 	return { options };
 }
 

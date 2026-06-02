@@ -3226,6 +3226,17 @@ export const SETTINGS_SCHEMA = {
 	"thinkingBudgets.high": { type: "number", default: 16384 },
 
 	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
+
+	// Observability
+	"observability.langfuse.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			label: "Langfuse Telemetry",
+			description: "Send agent telemetry to Langfuse observability platform",
+		},
+	},
 } as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -3443,6 +3454,14 @@ export interface ShellMinimizerSettings {
 	maxCaptureBytes: number;
 }
 
+export interface LangfuseSettings {
+	enabled: boolean;
+}
+
+export interface ObservabilitySettings {
+	langfuse: LangfuseSettings;
+}
+
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
@@ -3461,6 +3480,7 @@ export interface GroupTypeMap {
 	modelTags: ModelTagsSettings;
 	cycleOrder: string[];
 	shellMinimizer: ShellMinimizerSettings;
+	observability: ObservabilitySettings;
 }
 
 export type GroupPrefix = keyof GroupTypeMap;
