@@ -167,6 +167,28 @@ function isMultiplexerSession(): boolean {
 }
 
 /**
+ * Detect terminals that reset the visible viewport to the TOP of the scrollback
+ * when they erase it via ED3 (`\x1b[3J`). On these hosts the eager native
+ * scrollback rebuild that runs during streaming — which clears scrollback and
+ * repaints — yanks a scrolled-up reader to the top instead of (tolerably)
+ * snapping to the tail. The renderer cannot probe the viewport position on POSIX
+ * (`isNativeViewportAtBottom()` is `undefined`), so for these terminals the eager
+ * rebuild must defer to the next checkpoint instead of clearing scrollback live.
+ * Keyed on the same env markers `TERMINAL_ID` (terminal-capabilities.ts) uses for
+ * WezTerm, kitty, ghostty, and alacritty. Issue #1635 fixed the same yank for
+ * Windows Terminal; this is the POSIX counterpart.
+ */
+function isNativeScrollbackClearHostile(): boolean {
+	return Boolean(
+		Bun.env.WEZTERM_PANE ||
+			Bun.env.KITTY_WINDOW_ID ||
+			Bun.env.GHOSTTY_RESOURCES_DIR ||
+			Bun.env.ALACRITTY_WINDOW_ID ||
+			Bun.env.ALACRITTY_SOCKET,
+	);
+}
+
+/**
  * Options for overlay positioning and sizing.
  * Values can be absolute numbers or percentage strings (e.g., "50%").
  */
@@ -1181,7 +1203,8 @@ export class TUI extends Container {
 		const widthChanged = this.#previousWidth > 0 && this.#previousWidth !== width;
 		const heightChanged = this.#previousHeight > 0 && this.#previousHeight !== height;
 		const allowUnknownViewportMutation =
-			this.#allowUnknownViewportMutationOnNextRender || this.#eagerNativeScrollbackRebuild;
+			this.#allowUnknownViewportMutationOnNextRender ||
+			(this.#eagerNativeScrollbackRebuild && !isNativeScrollbackClearHostile());
 		this.#allowUnknownViewportMutationOnNextRender = false;
 
 		// 3. Classify intent.

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed scrolled-up readers being yanked to the **top** of scrollback on POSIX terminals that reset the viewport on ED3 (`\x1b[3J`) — WezTerm, kitty, ghostty, alacritty — while a foreground tool or the assistant was streaming. `setEagerNativeScrollbackRebuild` (the active-tool/streaming opt-in added in 15.7.3) promotes an unknown viewport back into a destructive `historyRebuild`; on these terminals erasing scrollback snaps the viewport to the top rather than tolerably to the tail, so #1635's POSIX deferral was still bypassed for them. The eager flag is no longer promoted for these terminals (`isNativeScrollbackClearHostile`), so streaming offscreen edits defer to a non-destructive viewport repaint and reconcile native scrollback at the next prompt-submit checkpoint (where input has pinned the terminal to the bottom). Other POSIX terminals keep the eager rebuild; explicit autocomplete/IME opt-ins, resize, and checkpoint replays are unchanged. ([#1682](https://github.com/can1357/oh-my-pi/issues/1682)) Companion to the Windows Terminal fix in [#1635](https://github.com/can1357/oh-my-pi/issues/1635).
+
 ## [15.7.6] - 2026-06-01
 
 ### Fixed

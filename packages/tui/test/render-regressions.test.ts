@@ -125,6 +125,21 @@ async function withEnvPatch<T>(patch: Record<string, string | undefined>, run: (
 	}
 }
 
+// Multiplexers plus terminals that reset the viewport to scrollback-top on ED3
+// (`\x1b[3J`). Eager-rebuild tests that assert the destructive rebuild path must
+// clear these so they stay deterministic when the suite is run from a hostile
+// terminal (e.g. WezTerm/kitty), where the rebuild now defers instead.
+const NON_HOSTILE_TERMINAL_ENV: Record<string, string | undefined> = {
+	TMUX: undefined,
+	STY: undefined,
+	ZELLIJ: undefined,
+	WEZTERM_PANE: undefined,
+	KITTY_WINDOW_ID: undefined,
+	GHOSTTY_RESOURCES_DIR: undefined,
+	ALACRITTY_WINDOW_ID: undefined,
+	ALACRITTY_SOCKET: undefined,
+};
+
 describe("TUI terminal-state regressions", () => {
 	let monotonicNow = 0;
 	// Keep TUI's 16ms render throttle deterministic without sleeping a real frame per render.
@@ -1815,7 +1830,7 @@ describe("TUI terminal-state regressions", () => {
 			const originalPlatform = process.platform;
 			Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
 			try {
-				await withEnvPatch({ TMUX: undefined, STY: undefined, ZELLIJ: undefined }, async () => {
+				await withEnvPatch(NON_HOSTILE_TERMINAL_ENV, async () => {
 					const term = new UnknownViewportTerminal(40, 5, 200);
 					const tui = new TUI(term);
 					const component = new MutableLinesComponent(rows("row-", 16));
