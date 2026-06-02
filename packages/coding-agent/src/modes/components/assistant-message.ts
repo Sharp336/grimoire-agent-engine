@@ -1,8 +1,18 @@
-import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
-import { Container, Image, type ImageBudget, ImageProtocol, Markdown, Spacer, TERMINAL, Text } from "@oh-my-pi/pi-tui";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import type { AssistantMessage, ImageContent, ThinkingContent, Usage } from "@oh-my-pi/pi-ai";
+import {
+	type Component,
+	Container,
+	Image,
+	type ImageBudget,
+	ImageProtocol,
+	Markdown,
+	Spacer,
+	TERMINAL,
+	Text,
+} from "@oh-my-pi/pi-tui";
+import { formatNumber, logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
-import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
+import type { AssistantThinkingRenderer, AssistantThinkingRenderResult } from "../../extensibility/extensions/types";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { resolveAbortLabel, shouldRenderAbortReason } from "../../session/messages";
 import { getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
@@ -15,6 +25,24 @@ import { getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../to
  * the persisted session.
  */
 const MAX_TRANSCRIPT_ERROR_LINES = 8;
+
+interface ThinkingExtensionComponents {
+	append: Component[];
+	replace?: Component;
+}
+
+function isComponent(result: AssistantThinkingRenderResult): result is Component {
+	return typeof result === "object" && result !== null && typeof (result as Component).render === "function";
+}
+
+function isStructuredThinkingResult(
+	result: AssistantThinkingRenderResult,
+): result is { type: "append" | "replace"; component: Component } {
+	if (typeof result !== "object" || result === null || isComponent(result)) return false;
+	const candidate = result as { type?: unknown; component?: unknown };
+	if (!isComponent(candidate.component as AssistantThinkingRenderResult)) return false;
+	return candidate.type === "append" || candidate.type === "replace";
+}
 
 /**
  * Component that renders a complete assistant message
@@ -207,11 +235,30 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	#appendThinkingExtensions(contentIndex: number, thinkingIndex: number, text: string): void {
+	#renderThinkingExtensions(
+		message: AssistantMessage,
+		content: ThinkingContent,
+		contentIndex: number,
+		thinkingIndex: number,
+		text: string,
+	): ThinkingExtensionComponents {
+		const append: Component[] = [];
+		let replacement: Component | undefined;
 		for (const renderer of this.thinkingRenderers) {
 			try {
-				const component = renderer(
+				const result: AssistantThinkingRenderResult = renderer(
 					{
+						message: {
+							timestamp: message.timestamp,
+							responseId: message.responseId,
+							api: message.api,
+							provider: message.provider,
+							model: message.model,
+						},
+						content: {
+							itemId: content.itemId,
+							thinkingSignature: content.thinkingSignature,
+						},
 						contentIndex,
 						thinkingIndex,
 						text,
@@ -219,13 +266,39 @@ export class AssistantMessageComponent extends Container {
 					},
 					theme,
 				);
-				if (component) {
-					this.#contentContainer.addChild(component);
+				if (!result) continue;
+				if (isComponent(result)) {
+					append.push(result);
+					continue;
 				}
-			} catch {
-				// Ignore extension renderer failures and keep the original thinking block visible.
+				if (!isStructuredThinkingResult(result)) {
+					logger.warn("Assistant thinking renderer returned an invalid result", {
+						contentIndex,
+						thinkingIndex,
+					});
+					continue;
+				}
+				if (result.type === "replace") {
+					if (replacement) {
+						logger.warn("Assistant thinking replacement renderer ignored because one is already active", {
+							contentIndex,
+							thinkingIndex,
+						});
+						continue;
+					}
+					replacement = result.component;
+					continue;
+				}
+				append.push(result.component);
+			} catch (error) {
+				logger.warn("Assistant thinking renderer failed", {
+					contentIndex,
+					thinkingIndex,
+					error: error instanceof Error ? error.message : String(error),
+				});
 			}
 		}
+		return { append, replace: replacement };
 	}
 
 	updateContent(message: AssistantMessage, opts?: { transient?: boolean }): void {
@@ -264,14 +337,27 @@ export class AssistantMessageComponent extends Container {
 					.some(c => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
 				const thinkingText = content.thinking.trim();
-				// Thinking traces in thinkingText color, italic
-				const thinkingMarkdown = new Markdown(thinkingText, 1, 0, getMarkdownTheme(), {
-					color: (text: string) => theme.fg("thinkingText", text),
-					italic: true,
-				});
-				thinkingMarkdown.transientRenderCache = this.#lastUpdateTransient;
-				this.#contentContainer.addChild(thinkingMarkdown);
-				this.#appendThinkingExtensions(i, thinkingIndex, thinkingText);
+				const thinkingComponents = this.#renderThinkingExtensions(
+					message,
+					content,
+					i,
+					thinkingIndex,
+					thinkingText,
+				);
+				if (thinkingComponents.replace) {
+					this.#contentContainer.addChild(thinkingComponents.replace);
+				} else {
+					// Thinking traces in thinkingText color, italic
+					const thinkingMarkdown = new Markdown(thinkingText, 1, 0, getMarkdownTheme(), {
+						color: (text: string) => theme.fg("thinkingText", text),
+						italic: true,
+					});
+					thinkingMarkdown.transientRenderCache = this.#lastUpdateTransient;
+					this.#contentContainer.addChild(thinkingMarkdown);
+				}
+				for (const component of thinkingComponents.append) {
+					this.#contentContainer.addChild(component);
+				}
 				thinkingIndex += 1;
 				if (hasVisibleContentAfter) {
 					this.#contentContainer.addChild(new Spacer(1));
