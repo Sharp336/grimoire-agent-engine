@@ -142,10 +142,14 @@ class SessionList implements Component {
 			const cursor = isSelected ? theme.fg("accent", cursorSymbol) : padding(cursorWidth);
 			const maxWidth = width - cursorWidth; // Account for cursor width
 
+			const isFork = !!session.parentSessionPath;
+			const forkPrefix = isFork ? "↳ " : "";
+			const contentMaxWidth = maxWidth - visibleWidth(forkPrefix);
+
 			if (session.title) {
 				// Has title: show title on first line, dimmed first message on second line
-				const truncatedTitle = truncateToWidth(session.title, maxWidth);
-				const titleLine = cursor + (isSelected ? theme.bold(truncatedTitle) : truncatedTitle);
+				const truncatedTitle = truncateToWidth(session.title, contentMaxWidth);
+				const titleLine = cursor + forkPrefix + (isSelected ? theme.bold(truncatedTitle) : truncatedTitle);
 				lines.push(titleLine);
 
 				// Second line: dimmed first message preview
@@ -153,14 +157,15 @@ class SessionList implements Component {
 				lines.push(`  ${theme.fg("dim", truncatedPreview)}`);
 			} else {
 				// No title: show first message as main line
-				const truncatedMsg = truncateToWidth(normalizedMessage, maxWidth);
-				const messageLine = cursor + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
+				const truncatedMsg = truncateToWidth(normalizedMessage, contentMaxWidth);
+				const messageLine = cursor + forkPrefix + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
 				lines.push(messageLine);
 			}
 
-			// Metadata line: date + file size
+			// Metadata line: date + fork indicator + file size
 			const modified = formatDate(session.modified);
-			const metadata = `  ${modified} ${theme.sep.dot} ${formatBytes(session.size)}`;
+			const forkTag = isFork ? ` ${theme.sep.dot} ${theme.fg("accent", "forked")}` : "";
+			const metadata = `  ${modified}${forkTag} ${theme.sep.dot} ${formatBytes(session.size)}`;
 			const metadataLine = theme.fg("dim", truncateToWidth(metadata, width));
 
 			lines.push(metadataLine);

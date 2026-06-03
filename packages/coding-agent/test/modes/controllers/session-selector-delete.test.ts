@@ -91,3 +91,83 @@ describe("SessionSelectorComponent delete confirmation", () => {
 		expect(rendered).toContain("Beta");
 	});
 });
+
+function createForkedSession(id: string, title: string, parentSessionPath: string): SessionInfo {
+	const base = createSession(id, title);
+	return { ...base, parentSessionPath };
+}
+
+describe("SessionSelectorComponent fork indicator", () => {
+	it("shows fork prefix and forked tag for child sessions", () => {
+		const sessions = [
+			createSession("root", "Root Session"),
+			createForkedSession("fork-a", "Root Session", "/tmp/root.jsonl"),
+		];
+		const selector = new SessionSelectorComponent(
+			sessions,
+			() => {},
+			() => {},
+			() => {},
+		);
+		const rendered = renderText(selector);
+		expect(rendered).toContain("↳");
+		expect(rendered).toContain("forked");
+		const lines = rendered.split("\n");
+		const forkLines = lines.filter(l => l.includes("↳"));
+		expect(forkLines.length).toBe(1);
+	});
+
+	it("does not show fork indicator for root sessions", () => {
+		const sessions = [createSession("root", "Clean Session")];
+		const selector = new SessionSelectorComponent(
+			sessions,
+			() => {},
+			() => {},
+			() => {},
+		);
+		const rendered = renderText(selector);
+		expect(rendered).not.toContain("↳");
+		expect(rendered).not.toContain("forked");
+	});
+
+	it("shows fork indicator for untitled child sessions", () => {
+		const sessions = [
+			createSession("root", "Root"),
+			{
+				...createSession("fork-b", "Forked child"),
+				parentSessionPath: "/tmp/root.jsonl",
+			},
+		];
+		sessions[1] = { ...sessions[1], title: undefined };
+		const selector = new SessionSelectorComponent(
+			sessions,
+			() => {},
+			() => {},
+			() => {},
+		);
+		const rendered = renderText(selector);
+		expect(rendered).toContain("↳");
+		expect(rendered).toContain("forked");
+	});
+
+	it("truncates forked session titles to stay within display width", () => {
+		const longTitle = "A".repeat(200);
+		const sessions = [createForkedSession("fork-long", longTitle, "/tmp/root.jsonl")];
+		const selector = new SessionSelectorComponent(
+			sessions,
+			() => {},
+			() => {},
+			() => {},
+		);
+		const width = 60;
+		const rendered = selector.render(width).join("\n");
+		// Each visible line should not exceed the display width
+		const stripped = rendered.replace(/\x1b\[[0-9;]*m/g, "");
+		for (const line of stripped.split("\n")) {
+			if (line.trim().length > 0) {
+				expect(line.length).toBeLessThanOrEqual(width + 10);
+			}
+		}
+		expect(rendered).toContain("↳");
+	});
+});
