@@ -2606,6 +2606,62 @@ describe("TUI terminal-state regressions", () => {
 			}
 		});
 
+		it("keeps a scrolled-up reader anchored while assistant-style streaming inserts arrive on native Windows Terminal", async () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, "platform", { configurable: true, value: "win32" });
+			try {
+				await withEnvPatch(
+					{ WT_SESSION: "wt-test", TMUX: undefined, STY: undefined, ZELLIJ: undefined },
+					async () => {
+						const term = new UnknownViewportTerminal(32, 5, 200);
+						const tui = new TUI(term);
+						const transcript = new MutableLinesComponent(rows("seed-", 12));
+						const footer = new MutableLinesComponent(["prompt>"]);
+						tui.addChild(transcript);
+						tui.addChild(footer);
+						try {
+							tui.start();
+							await settle(term);
+
+							term.scrollLines(-4);
+							const before = term.getBufferPosition();
+							const anchored = visible(term).map(line => line.trim());
+							expect(before.viewportY).toBeGreaterThan(0);
+							expect(before.viewportY).toBeLessThan(before.baseY);
+
+							for (let i = 0; i < 4; i++) {
+								const writes: string[] = [];
+								const realWrite = term.write.bind(term);
+								(term as unknown as { write: (data: string) => void }).write = data => {
+									writes.push(data);
+									realWrite(data);
+								};
+								transcript.setLines([...rows("seed-", 12), ...rows("token-", i + 1)]);
+								tui.requestRender();
+								await settle(term);
+								(term as unknown as { write: (data: string) => void }).write = realWrite;
+
+								const after = term.getBufferPosition();
+								expect(after.viewportY).toBe(before.viewportY);
+								expect(visible(term).map(line => line.trim())).toEqual(anchored);
+								expect(writes.join("")).not.toContain("\x1b[H");
+								expect(writes.join("")).not.toContain("\x1b[3J");
+							}
+
+							expect(tui.refreshNativeScrollbackIfDirty()).toBe(false);
+							term.scrollLines(999);
+							expect(tui.refreshNativeScrollbackIfDirty({ allowUnknownViewport: true })).toBe(true);
+							await settle(term);
+							expect(term.getScrollBuffer().join("\n")).toContain("token-3");
+						} finally {
+							tui.stop();
+						}
+					},
+				);
+			} finally {
+				Object.defineProperty(process, "platform", { configurable: true, value: originalPlatform });
+			}
+		});
 		it("refreshes deferred native scrollback when the native viewport reaches bottom", async () => {
 			const term = new VirtualTerminal(32, 5);
 			const tui = new TUI(term);

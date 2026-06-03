@@ -1610,13 +1610,20 @@ export class TUI extends Container {
 			if (this.#nativeViewportIsScrolled(nativeViewportAtBottom, allowUnknownViewportMutation)) {
 				this.#markNativeScrollbackDirty();
 				// See the matching comment on the pure-append branch above: confirmed
-				// scrolled stays a no-op; unknown viewport repaints the visible window
-				// so slash-command transitions and offscreen chrome edits paint on the
-				// same frame instead of stalling until the next prompt submit.
+				// scrolled stays a no-op so the reader keeps their place.
 				if (this.#nativeViewportIsKnownScrolled(nativeViewportAtBottom)) {
 					return { kind: "deferredMutation" };
 				}
-				return { kind: "viewportRepaint" };
+				// Native Windows Terminal cannot prove whether the host viewport is
+				// scrolled, but structural mutations that begin within the logical
+				// tail viewport (assistant rows streaming above a fixed prompt/footer,
+				// slash-command chrome growing in place) do not need a full
+				// `viewportRepaint`. Let the narrower diff/offscreen handlers below
+				// decide; this preserves a scrolled-up WT reader instead of homing to
+				// row 0 and rewriting the whole host viewport on every frame.
+				if (!(process.platform === "win32" && diff.firstChanged >= prevViewportTop)) {
+					return { kind: "viewportRepaint" };
+				}
 			}
 			// The append-tail path can only scroll a clean pure-tail append over an
 			// offscreen edit into history: the rows it pushes must equal the net
