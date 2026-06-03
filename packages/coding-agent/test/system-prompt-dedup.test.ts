@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	buildSystemPrompt,
 	loadProjectContextFiles,
@@ -25,7 +26,12 @@ describe("SYSTEM.md prompt assembly", () => {
 		process.env.HOME = tempHomeDir;
 	});
 
-	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
+	afterEach(
+		cleanupTempHome(() => {
+			resetSettingsForTest();
+			return { tempDir, tempHomeDir, originalHome };
+		}),
+	);
 
 	it("renders SYSTEM.md exactly once when it is used as the custom base prompt", async () => {
 		const projectDir = path.join(tempDir, "project");
@@ -104,6 +110,24 @@ describe("SYSTEM.md prompt assembly", () => {
 		expect(discoveredFiles[0]?.path).toBe(path.join(appDir, "AGENTS.md"));
 	});
 
+	it("honors contextFiles.resolveAtRefs when loading discovered context entries", async () => {
+		const projectDir = path.join(tempDir, "project");
+		fs.mkdirSync(projectDir, { recursive: true });
+		fs.writeFileSync(path.join(projectDir, "AGENTS.md"), "@rules.md");
+		fs.writeFileSync(path.join(projectDir, "rules.md"), "expanded rules");
+
+		resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			cwd: projectDir,
+			overrides: { "contextFiles.resolveAtRefs": false },
+		});
+
+		const contextFiles = await loadProjectContextFiles({ cwd: projectDir });
+		const agentsFile = contextFiles.find(file => file.path === path.join(projectDir, "AGENTS.md"));
+
+		expect(agentsFile?.content).toBe("@rules.md");
+	});
 	it("keeps distinct context entries when their contents differ", async () => {
 		const farPath = path.join(tempDir, "far", "AGENTS.md");
 		const nearPath = path.join(tempDir, "near", "CLAUDE.md");
