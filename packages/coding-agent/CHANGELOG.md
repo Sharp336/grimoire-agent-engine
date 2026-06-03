@@ -165,6 +165,7 @@
 ### Added
 
 - Added a bundled TypeScript rule that warns against leaving `@deprecated` compatibility shims behind instead of finishing a refactor.
+- Added `@file.ext` reference resolution in context files (CLAUDE.md, AGENTS.md, etc.). Lines matching `@path/to/file.ext` are automatically replaced with the referenced file's content, resolved relative to the context file's directory. References are contained within the project root (paths that escape or are absolute are rejected), recursive with depth and cycle limits, and controlled by the `contextFiles.resolveAtRefs` setting (default: enabled). Closes [#375](https://github.com/can1357/oh-my-pi/issues/375)
 
 ### Fixed
 

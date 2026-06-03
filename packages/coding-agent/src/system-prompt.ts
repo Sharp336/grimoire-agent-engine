@@ -229,6 +229,8 @@ export async function resolvePromptInput(input: string | undefined, description:
 export interface LoadContextFilesOptions {
 	/** Working directory to start walking up from. Default: getProjectDir() */
 	cwd?: string;
+	/** Whether to resolve @-file references in context file content. Default: true */
+	resolveAtRefs?: boolean;
 }
 
 function dedupeExactContextFiles(
@@ -272,7 +274,8 @@ export async function loadProjectContextFiles(
 		const depthB = b.depth ?? -1;
 		return depthB - depthA;
 	});
-	return resolveAtRefs(dedupeExactContextFiles(files));
+	const resolved = options.resolveAtRefs !== false ? await resolveAtRefs(files) : files;
+	return dedupeExactContextFiles(resolved);
 }
 
 /**

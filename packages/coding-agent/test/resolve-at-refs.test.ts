@@ -15,6 +15,8 @@ describe("resolveAtRefs", () => {
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-home-"));
 		originalHome = process.env.HOME;
 		process.env.HOME = tempHomeDir;
+		// Initialize a .git directory so findRepoRoot can discover the project root
+		fs.mkdirSync(path.join(tempDir, ".git"), { recursive: true });
 	});
 
 	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
@@ -26,7 +28,7 @@ describe("resolveAtRefs", () => {
 		const agentsMd = `# Project\n\nSee package details:\n@package.json\n\nEnd.`;
 		const agentsMdPath = path.join(tempDir, "AGENTS.md");
 
-		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }]);
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
 
 		expect(result[0].content).toContain('"name": "my-project"');
 		expect(result[0].content).toContain('"version": "1.0.0"');
@@ -41,13 +43,13 @@ describe("resolveAtRefs", () => {
 		const agentsMd = `Settings:\n@config.yaml`;
 		const agentsMdPath = path.join(subDir, "AGENTS.md");
 
-		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }]);
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
 
 		expect(result[0].content).toContain("key: value");
 		expect(result[0].content).not.toContain("@config.yaml");
 	});
 
-	it("handles parent directory references with ../", async () => {
+	it("handles parent directory references with ../ within root", async () => {
 		const subDir = path.join(tempDir, "deep");
 		fs.mkdirSync(subDir, { recursive: true });
 		fs.writeFileSync(path.join(tempDir, "root.conf"), "root: true\n");
@@ -55,16 +57,34 @@ describe("resolveAtRefs", () => {
 		const agentsMd = `Root config:\n@../root.conf`;
 		const agentsMdPath = path.join(subDir, "AGENTS.md");
 
-		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }]);
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
 
 		expect(result[0].content).toContain("root: true");
+	});
+
+	it("rejects absolute path @-references", async () => {
+		const agentsMd = `@/etc/hosts.conf`;
+		const agentsMdPath = path.join(tempDir, "AGENTS.md");
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
+		expect(result[0].content).toContain("absolute paths are not allowed");
+	});
+
+	it("rejects references that traverse above the root", async () => {
+		fs.writeFileSync(path.join(tempDir, "..", "escape.txt"), "escaped\n");
+
+		const agentsMd = `@../escape.txt`;
+		const agentsMdPath = path.join(tempDir, "AGENTS.md");
+
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
+
+		expect(result[0].content).toContain("escapes project root");
 	});
 
 	it("leaves non-matching lines untouched", async () => {
 		const agentsMd = `# Header\n\nSome text with @username in a sentence.\nNot a ref: email@example.com\n\nParagraph about things.`;
 		const agentsMdPath = path.join(tempDir, "AGENTS.md");
 
-		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }]);
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
 
 		expect(result[0].content).toBe(agentsMd);
 	});
@@ -73,7 +93,7 @@ describe("resolveAtRefs", () => {
 		const agentsMd = `@nonexistent.file.txt`;
 		const agentsMdPath = path.join(tempDir, "AGENTS.md");
 
-		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }]);
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
 
 		expect(result[0].content).toContain("<!-- @nonexistent.file.txt: file not found -->");
 	});
@@ -88,7 +108,9 @@ describe("resolveAtRefs", () => {
 		fs.writeFileSync(aPath, `A start\n@b.md\nA end`);
 		fs.writeFileSync(bPath, `B start\n@a.md\nB end`);
 
-		const result = await resolveAtRefs([{ path: aPath, content: fs.readFileSync(aPath, "utf-8") }]);
+		const result = await resolveAtRefs([{ path: aPath, content: fs.readFileSync(aPath, "utf-8") }], {
+			rootDir: tempDir,
+		});
 
 		expect(result[0].content).toContain("A start");
 		expect(result[0].content).toContain("B start");
@@ -106,14 +128,14 @@ describe("resolveAtRefs", () => {
 
 		const chain0Path = path.join(deepDir, "chain0.txt");
 
-		// With maxDepth=3, should stop at chain3
+		// With maxDepth=3, chain3.txt content is still resolved but it contains @chain4.txt
 		const result = await resolveAtRefs([{ path: chain0Path, content: fs.readFileSync(chain0Path, "utf-8") }], {
 			maxDepth: 3,
+			rootDir: tempDir,
 		});
 
 		expect(result[0].content).toContain("depth 0");
 		expect(result[0].content).toContain("depth 2");
-		// chain3.txt content is still resolved (the reference to it is within depth 3)
 		expect(result[0].content).toContain("@chain4.txt");
 	});
 
@@ -124,7 +146,7 @@ describe("resolveAtRefs", () => {
 		const agentsMd = `Header\n@alpha.txt\nBetween\n@beta.txt\nFooter`;
 		const agentsMdPath = path.join(tempDir, "AGENTS.md");
 
-		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }]);
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
 
 		expect(result[0].content).toContain("alpha content");
 		expect(result[0].content).toContain("beta content");
@@ -138,7 +160,7 @@ describe("resolveAtRefs", () => {
 		const agentsMd = `@noext\n@has.txt`;
 		const agentsMdPath = path.join(tempDir, "AGENTS.md");
 
-		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }]);
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
 
 		// @noext should be left as-is (no dot extension)
 		expect(result[0].content).toContain("@noext");
@@ -150,7 +172,7 @@ describe("resolveAtRefs", () => {
 		const agentsMd = `See @package.json for details.`;
 		const agentsMdPath = path.join(tempDir, "AGENTS.md");
 
-		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }]);
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
 
 		// Inline @-ref is NOT matched by our pattern (must be alone on the line)
 		expect(result[0].content).toBe(agentsMd);
@@ -161,13 +183,15 @@ describe("resolveAtRefs", () => {
 		const agentsMd = `@trail.txt   `;
 		const agentsMdPath = path.join(tempDir, "AGENTS.md");
 
-		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }]);
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
 
 		expect(result[0].content).toContain("trailed");
 	});
 
 	it("preserves depth field in returned objects", async () => {
-		const result = await resolveAtRefs([{ path: "/some/path/AGENTS.md", content: "no refs", depth: 2 }]);
+		const result = await resolveAtRefs([{ path: "/some/path/AGENTS.md", content: "no refs", depth: 2 }], {
+			rootDir: "/some",
+		});
 
 		expect(result[0].depth).toBe(2);
 	});
