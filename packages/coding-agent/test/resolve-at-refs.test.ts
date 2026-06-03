@@ -246,4 +246,16 @@ describe("resolveAtRefs", () => {
 		expect(result[0].content).toContain("project rules");
 		expect(result[1].content).toContain("user rules");
 	});
+
+	it("allows refs when the containment root itself is a symlink", async () => {
+		fs.writeFileSync(path.join(tempDir, "rules.md"), "rules through symlink root\n");
+		const linkRoot = path.join(tempHomeDir, "repo-link");
+		fs.symlinkSync(tempDir, linkRoot, "dir");
+
+		const result = await resolveAtRefs([{ path: path.join(linkRoot, "AGENTS.md"), content: "@rules.md" }], {
+			rootDir: linkRoot,
+		});
+
+		expect(result[0].content).toContain("rules through symlink root");
+	});
 });

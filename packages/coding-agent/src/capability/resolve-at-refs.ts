@@ -59,10 +59,19 @@ function isWithin(absPath: string, root: string): boolean {
 	return normalized.startsWith(normalizedRoot + path.sep) || normalized === normalizedRoot;
 }
 
+async function realpathOrSelf(filePath: string): Promise<string> {
+	try {
+		return await fs.promises.realpath(filePath);
+	} catch {
+		return filePath;
+	}
+}
+
 async function resolveContent(
 	content: string,
 	filePath: string,
 	rootDir: string,
+	realRootDir: string,
 	seen: Set<string>,
 	depth: number,
 	maxDepth: number,
@@ -106,7 +115,7 @@ async function resolveContent(
 			resolved.push(`<!-- @${refPath}: file not found -->`);
 			continue;
 		}
-		if (!isWithin(realRefPath, rootDir)) {
+		if (!isWithin(realRefPath, realRootDir)) {
 			resolved.push(`<!-- @${refPath}: escapes project root -->`);
 			continue;
 		}
@@ -125,7 +134,15 @@ async function resolveContent(
 
 		// Recursively resolve references in the included file
 		seen.add(realRefPath);
-		const innerResolved = await resolveContent(refContent, absRefPath, rootDir, seen, depth + 1, maxDepth);
+		const innerResolved = await resolveContent(
+			refContent,
+			absRefPath,
+			rootDir,
+			realRootDir,
+			seen,
+			depth + 1,
+			maxDepth,
+		);
 		seen.delete(realRefPath);
 
 		resolved.push(innerResolved);
@@ -159,8 +176,9 @@ export async function resolveAtRefs(
 			options.rootDir ??
 			(await findRepoRoot(path.dirname(path.resolve(file.path)))) ??
 			path.dirname(path.resolve(file.path));
+		const realFileRootDir = await realpathOrSelf(fileRootDir);
 		const seen = new Set<string>([path.resolve(file.path)]);
-		const newContent = await resolveContent(file.content, file.path, fileRootDir, seen, 0, maxDepth);
+		const newContent = await resolveContent(file.content, file.path, fileRootDir, realFileRootDir, seen, 0, maxDepth);
 		resolved.push({
 			path: file.path,
 			content: newContent,
