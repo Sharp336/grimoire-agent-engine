@@ -10,6 +10,7 @@ import { contextFileCapability } from "./capability/context-file";
 import { resolveAtRefs } from "./capability/resolve-at-refs";
 import { systemPromptCapability } from "./capability/system-prompt";
 import type { SkillsSettings } from "./config/settings";
+import { settings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
@@ -453,7 +454,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	});
 	const contextFilesPromise = providedContextFiles
 		? Promise.resolve(providedContextFiles)
-		: logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
+		: logger.time("loadProjectContextFiles", loadProjectContextFiles, {
+				cwd: resolvedCwd,
+				resolveAtRefs: settings.get("contextFiles.resolveAtRefs") ?? true,
+			});
 	const workspaceTreePromise =
 		providedWorkspaceTree !== undefined
 			? Promise.resolve(providedWorkspaceTree)

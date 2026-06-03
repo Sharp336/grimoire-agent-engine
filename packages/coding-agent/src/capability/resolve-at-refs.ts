@@ -25,8 +25,9 @@ export interface ResolveAtRefsOptions {
 	/**
 	 * Boundary directory for path containment.
 	 * Resolved refs that escape this root are rejected.
-	 * Defaults to the repo root discovered from the first file's path,
-	 * falling back to its directory.
+	 * When unset, each context file's containment root is independently
+	 * discovered from its own path (repo root → directory fallback),
+	 * so user-level files are not rejected by a project-level boundary.
 	 */
 	rootDir?: string;
 }
@@ -149,22 +150,17 @@ export async function resolveAtRefs(
 	options: ResolveAtRefsOptions = {},
 ): Promise<Array<{ path: string; content: string; depth?: number }>> {
 	const maxDepth = options.maxDepth ?? 5;
-
-	// Determine rootDir: explicit option → repo root from first file → first file's directory
-	let rootDir = options.rootDir;
-	if (!rootDir && files.length > 0) {
-		const discovered = await findRepoRoot(path.dirname(path.resolve(files[0].path)));
-		rootDir = discovered ?? path.dirname(path.resolve(files[0].path));
-	}
-	if (!rootDir) {
-		rootDir = process.cwd();
-	}
-
 	const resolved: Array<{ path: string; content: string; depth?: number }> = [];
-
 	for (const file of files) {
+		// Each context file gets its own containment root.
+		// User-level files (e.g. ~/.omp/AGENTS.md) use their own repo root
+		// so their @-refs aren't rejected by a project-level boundary.
+		const fileRootDir =
+			options.rootDir ??
+			(await findRepoRoot(path.dirname(path.resolve(file.path)))) ??
+			path.dirname(path.resolve(file.path));
 		const seen = new Set<string>([path.resolve(file.path)]);
-		const newContent = await resolveContent(file.content, file.path, rootDir, seen, 0, maxDepth);
+		const newContent = await resolveContent(file.content, file.path, fileRootDir, seen, 0, maxDepth);
 		resolved.push({
 			path: file.path,
 			content: newContent,

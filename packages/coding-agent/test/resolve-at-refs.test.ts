@@ -232,4 +232,18 @@ describe("resolveAtRefs", () => {
 
 		expect(result[0].content).toContain("real content");
 	});
+
+	it("uses an independent containment root for each context file", async () => {
+		fs.mkdirSync(path.join(tempHomeDir, ".git"), { recursive: true });
+		fs.writeFileSync(path.join(tempDir, "rules.md"), "project rules\n");
+		fs.writeFileSync(path.join(tempHomeDir, "rules.md"), "user rules\n");
+
+		const result = await resolveAtRefs([
+			{ path: path.join(tempDir, "AGENTS.md"), content: "@rules.md", depth: 1 },
+			{ path: path.join(tempHomeDir, "AGENTS.md"), content: "@rules.md" },
+		]);
+
+		expect(result[0].content).toContain("project rules");
+		expect(result[1].content).toContain("user rules");
+	});
 });
