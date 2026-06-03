@@ -7,6 +7,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { $env, getGpuCachePath, getProjectDir, hasFsCode, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { contextFileCapability } from "./capability/context-file";
+import { resolveAtRefs } from "./capability/resolve-at-refs";
 import { systemPromptCapability } from "./capability/system-prompt";
 import type { SkillsSettings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
@@ -271,8 +272,7 @@ export async function loadProjectContextFiles(
 		const depthB = b.depth ?? -1;
 		return depthB - depthA;
 	});
-
-	return dedupeExactContextFiles(files);
+	return resolveAtRefs(dedupeExactContextFiles(files));
 }
 
 /**
