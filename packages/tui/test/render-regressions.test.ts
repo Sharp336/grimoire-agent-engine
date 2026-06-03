@@ -2313,6 +2313,71 @@ describe("TUI terminal-state regressions", () => {
 				Object.defineProperty(process, "platform", { configurable: true, value: originalPlatform });
 			}
 		});
+
+		it("defers eager offscreen rebuilds under WSL Windows Terminal", async () => {
+			const originalPlatform = process.platform;
+			Object.defineProperty(process, "platform", { configurable: true, value: "linux" });
+			try {
+				await withEnvPatch(
+					{
+						TMUX: undefined,
+						STY: undefined,
+						ZELLIJ: undefined,
+						WT_SESSION: "wt-test",
+						WSL_DISTRO_NAME: "Ubuntu",
+						WSL_INTEROP: undefined,
+						WEZTERM_PANE: undefined,
+						KITTY_WINDOW_ID: undefined,
+						GHOSTTY_RESOURCES_DIR: undefined,
+						ALACRITTY_WINDOW_ID: undefined,
+						TERM_PROGRAM: undefined,
+					},
+					async () => {
+						const term = new UnknownViewportTerminal(40, 5, 200);
+						const tui = new TUI(term);
+						const component = new MutableLinesComponent(rows("row-", 16));
+						tui.addChild(component);
+						const savedTerminalRisk = TERMINAL.eagerEraseScrollbackRisk;
+						mutableTerminalInfo.eagerEraseScrollbackRisk = false;
+						try {
+							tui.start();
+							await settle(term);
+							tui.setEagerNativeScrollbackRebuild(true);
+							term.scrollLines(-4);
+							const before = term.getBufferPosition();
+							const anchored = visible(term).map(line => line.trim());
+							expect(before.viewportY).toBeLessThan(before.baseY);
+
+							component.setLines(["HEADER-EDITED", ...rows("row-", 16).slice(1), ...rows("tail-", 4)]);
+							const writes: string[] = [];
+							const realWrite = term.write.bind(term);
+							(term as unknown as { write: (data: string) => void }).write = data => {
+								writes.push(data);
+								realWrite(data);
+							};
+							tui.requestRender();
+							await settle(term);
+
+							const after = term.getBufferPosition();
+							expect(after.viewportY).toBe(before.viewportY);
+							expect(visible(term).map(line => line.trim())).toEqual(anchored);
+							expect(writes.join("")).not.toContain("\x1b[3J");
+							expect(tui.refreshNativeScrollbackIfDirty()).toBe(false);
+
+							term.scrollLines(999);
+							expect(tui.refreshNativeScrollbackIfDirty({ allowUnknownViewport: true })).toBe(true);
+							await settle(term);
+							expect(term.getScrollBuffer().join("\n")).toContain("HEADER-EDITED");
+						} finally {
+							mutableTerminalInfo.eagerEraseScrollbackRisk = savedTerminalRisk;
+							tui.stop();
+						}
+					},
+				);
+			} finally {
+				Object.defineProperty(process, "platform", { configurable: true, value: originalPlatform });
+			}
+		});
 		it("rebuilds offscreen edits into clean scrollback while eager rebuild is enabled (active tool)", async () => {
 			// The streaming-text default defers offscreen edits on POSIX (no yank, but a
 			// growing/re-laying-out tool result leaves stale duplicated rows above the

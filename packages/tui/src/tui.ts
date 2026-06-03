@@ -173,6 +173,12 @@ function isMultiplexerSession(): boolean {
 	return Boolean(Bun.env.TMUX || Bun.env.STY || Bun.env.ZELLIJ);
 }
 
+function isWindowsSubsystemForLinuxWindowsTerminal(): boolean {
+	return Boolean(
+		process.platform === "linux" && Bun.env.WT_SESSION && (Bun.env.WSL_DISTRO_NAME || Bun.env.WSL_INTEROP),
+	);
+}
+
 /**
  * Options for overlay positioning and sizing.
  * Values can be absolute numbers or percentage strings (e.g., "50%").
@@ -413,11 +419,11 @@ export class TUI extends Container {
 	 * is actively re-rendering — e.g. a tool whose result is still streaming and
 	 * re-laying-out rows that have already scrolled into history. A terminal that
 	 * reports a *known*-scrolled viewport still defers, as does native Windows
-	 * (the viewport is never observable there and ConPTY hosts erase host
-	 * scrollback on ED3 — #1635/#1746); only the unknown POSIX case is forced to
-	 * rebuild. POSIX hosts known to disturb scrolled readers on xterm ED3
-	 * (`CSI 3 J`, erase saved lines) also defer the eager opt-in; checkpoint and
-	 * direct user-input rebuilds are unaffected.
+	 * and WSL inside Windows Terminal (the viewport is never observable there and
+	 * ConPTY hosts erase host scrollback on ED3 — #1635/#1746); only the unknown
+	 * POSIX case is forced to rebuild. POSIX hosts known to disturb scrolled
+	 * readers on xterm ED3 (`CSI 3 J`, erase saved lines) also defer the eager
+	 * opt-in; checkpoint and direct user-input rebuilds are unaffected.
 	 *
 	 * Disabling does not take effect until the next frame has been classified:
 	 * the event batch that ends a foreground stream both removes its UI rows
@@ -1265,7 +1271,9 @@ export class TUI extends Container {
 			(this.#previousHeight > 0 && this.#previousHeight !== height) ||
 			(resizeEventOccurred && this.#previousHeight > 0);
 		const eagerEraseScrollbackRisk = process.platform !== "win32" && TERMINAL.eagerEraseScrollbackRisk;
-		const eagerRebuildAllowed = this.#eagerNativeScrollbackRebuild && !eagerEraseScrollbackRisk;
+		const wslWindowsTerminal = isWindowsSubsystemForLinuxWindowsTerminal();
+		const eagerRebuildAllowed =
+			this.#eagerNativeScrollbackRebuild && !eagerEraseScrollbackRisk && !wslWindowsTerminal;
 		const allowUnknownViewportMutation = this.#allowUnknownViewportMutationOnNextRender || eagerRebuildAllowed;
 		this.#allowUnknownViewportMutationOnNextRender = false;
 
@@ -1839,10 +1847,9 @@ export class TUI extends Container {
 		nativeViewportAtBottom: boolean | undefined,
 		allowUnknownViewport: boolean,
 	): boolean {
-		return (
-			nativeViewportAtBottom === true ||
-			(nativeViewportAtBottom === undefined && (allowUnknownViewport || process.platform !== "win32"))
-		);
+		const unknownViewportReplayAllowed =
+			allowUnknownViewport || (process.platform !== "win32" && !isWindowsSubsystemForLinuxWindowsTerminal());
+		return nativeViewportAtBottom === true || (nativeViewportAtBottom === undefined && unknownViewportReplayAllowed);
 	}
 
 	/**
