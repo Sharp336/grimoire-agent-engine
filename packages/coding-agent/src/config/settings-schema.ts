@@ -1150,15 +1150,16 @@ export const SETTINGS_SCHEMA = {
 			label: "Auto-Promote Context",
 			description: "Promote to a larger-context model on context overflow instead of compacting",
 		},
-		"contextFiles.resolveAtRefs": {
-			type: "boolean",
-			default: true,
-			ui: {
-				tab: "context",
-				label: "Resolve @-file References",
-				description:
-					"Resolve @file.ext references in context files (CLAUDE.md, AGENTS.md, etc.) by inlining the referenced file content",
-			},
+	},
+	// Context file @-ref resolution
+	"contextFiles.resolveAtRefs": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			label: "Resolve @-file References",
+			description:
+				"Resolve @file.ext references in context files (CLAUDE.md, AGENTS.md, etc.) by inlining the referenced file content",
 		},
 	},
 

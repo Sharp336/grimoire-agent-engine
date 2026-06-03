@@ -65,7 +65,9 @@ describe("resolveAtRefs", () => {
 	it("rejects absolute path @-references", async () => {
 		const agentsMd = `@/etc/hosts.conf`;
 		const agentsMdPath = path.join(tempDir, "AGENTS.md");
+
 		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
+
 		expect(result[0].content).toContain("absolute paths are not allowed");
 	});
 
@@ -174,7 +176,6 @@ describe("resolveAtRefs", () => {
 
 		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
 
-		// Inline @-ref is NOT matched by our pattern (must be alone on the line)
 		expect(result[0].content).toBe(agentsMd);
 	});
 
@@ -194,5 +195,41 @@ describe("resolveAtRefs", () => {
 		});
 
 		expect(result[0].depth).toBe(2);
+	});
+
+	it("rejects symlinks that escape the project root", async () => {
+		const outsideDir = path.join(os.tmpdir(), "pi-atrefs-outside");
+		fs.mkdirSync(outsideDir, { recursive: true });
+		fs.writeFileSync(path.join(outsideDir, "secret.txt"), "secret data\n");
+
+		// Create a symlink inside the project that points outside the root
+		const linkPath = path.join(tempDir, "link.txt");
+		fs.symlinkSync(path.join(outsideDir, "secret.txt"), linkPath);
+
+		const agentsMd = `@link.txt`;
+		const agentsMdPath = path.join(tempDir, "AGENTS.md");
+
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
+
+		expect(result[0].content).toContain("escapes project root");
+
+		// Cleanup
+		fs.unlinkSync(path.join(outsideDir, "secret.txt"));
+		fs.rmdirSync(outsideDir);
+	});
+
+	it("allows symlinks that stay within the project root", async () => {
+		fs.writeFileSync(path.join(tempDir, "real.txt"), "real content\n");
+
+		// Create a symlink inside the project that points to another file in the project
+		const linkPath = path.join(tempDir, "link.txt");
+		fs.symlinkSync(path.join(tempDir, "real.txt"), linkPath);
+
+		const agentsMd = `@link.txt`;
+		const agentsMdPath = path.join(tempDir, "AGENTS.md");
+
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: agentsMd }], { rootDir: tempDir });
+
+		expect(result[0].content).toContain("real content");
 	});
 });

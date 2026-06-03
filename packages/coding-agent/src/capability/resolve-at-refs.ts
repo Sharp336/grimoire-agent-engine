@@ -8,12 +8,14 @@
  * Pattern: a line that is exactly `@path/to/file.ext` (must contain a `.`)
  * — resolved relative to the context file's directory.
  * — contained within the context file's repo root (or cwd fallback).
+ * — symlinks resolved before containment check to prevent traversal.
  * — recursive with depth limit and cycle detection.
  * — controlled by the `contextFiles.resolveAtRefs` setting (default: enabled).
  *
  * See: https://github.com/can1357/oh-my-pi/issues/375
  */
 
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { findRepoRoot, readFile } from "./fs";
 
@@ -93,8 +95,23 @@ async function resolveContent(
 			continue;
 		}
 
+		// Symlink containment: resolve the real path and check again.
+		// A repo-local symlink pointing outside the project root would
+		// pass the lexical check above but still read an out-of-root file.
+		let realRefPath: string;
+		try {
+			realRefPath = await fs.promises.realpath(absRefPath);
+		} catch {
+			resolved.push(`<!-- @${refPath}: file not found -->`);
+			continue;
+		}
+		if (!isWithin(realRefPath, rootDir)) {
+			resolved.push(`<!-- @${refPath}: escapes project root -->`);
+			continue;
+		}
+
 		// Cycle detection
-		if (seen.has(absRefPath)) {
+		if (seen.has(realRefPath)) {
 			resolved.push(`<!-- @${refPath}: circular reference skipped -->`);
 			continue;
 		}
@@ -106,9 +123,9 @@ async function resolveContent(
 		}
 
 		// Recursively resolve references in the included file
-		seen.add(absRefPath);
+		seen.add(realRefPath);
 		const innerResolved = await resolveContent(refContent, absRefPath, rootDir, seen, depth + 1, maxDepth);
-		seen.delete(absRefPath);
+		seen.delete(realRefPath);
 
 		resolved.push(innerResolved);
 	}
