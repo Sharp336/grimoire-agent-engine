@@ -85,7 +85,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 	const numstat = await git.diff.numstat(cwd, { cached: true });
 	const scopeCandidates = extractScopeCandidates(numstat).scopeCandidates;
 	const recentCommits = await git.log.subjects(cwd, RECENT_COMMITS_COUNT);
-	const contextFiles = await loadProjectContextFiles({ cwd });
+	const contextFiles = await loadProjectContextFiles({ cwd, settings });
 	const formattedContextFiles = contextFiles.map(file => ({
 		path: path.relative(cwd, file.path),
 		content: file.content,

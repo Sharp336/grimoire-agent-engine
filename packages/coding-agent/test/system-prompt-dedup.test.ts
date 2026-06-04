@@ -128,6 +128,26 @@ describe("SYSTEM.md prompt assembly", () => {
 
 		expect(agentsFile?.content).toBe("@rules.md");
 	});
+
+	it("prefers provided settings when loading discovered context entries", async () => {
+		const projectDir = path.join(tempDir, "project");
+		fs.mkdirSync(projectDir, { recursive: true });
+		fs.writeFileSync(path.join(projectDir, "AGENTS.md"), "@rules.md");
+		fs.writeFileSync(path.join(projectDir, "rules.md"), "expanded rules");
+
+		resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			cwd: projectDir,
+			overrides: { "contextFiles.resolveAtRefs": true },
+		});
+		const isolatedSettings = Settings.isolated({ "contextFiles.resolveAtRefs": false });
+
+		const contextFiles = await loadProjectContextFiles({ cwd: projectDir, settings: isolatedSettings });
+		const agentsFile = contextFiles.find(file => file.path === path.join(projectDir, "AGENTS.md"));
+
+		expect(agentsFile?.content).toBe("@rules.md");
+	});
 	it("keeps distinct context entries when their contents differ", async () => {
 		const farPath = path.join(tempDir, "far", "AGENTS.md");
 		const nearPath = path.join(tempDir, "near", "CLAUDE.md");

@@ -63,7 +63,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<void> {
 	}
 	const [changelogBoundaries, contextFiles, numstat, diff] = await Promise.all([
 		args.noChangelog ? [] : detectChangelogBoundaries(cwd, stagedFiles),
-		discoverContextFiles(cwd),
+		discoverContextFiles(cwd, undefined, settings),
 		git.diff.numstat(cwd, { cached: true }),
 		git.diff(cwd, { cached: true }),
 	]);

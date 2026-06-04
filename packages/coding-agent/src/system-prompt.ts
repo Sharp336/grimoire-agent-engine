@@ -9,8 +9,7 @@ import { $ } from "bun";
 import { contextFileCapability } from "./capability/context-file";
 import { resolveAtRefs } from "./capability/resolve-at-refs";
 import { systemPromptCapability } from "./capability/system-prompt";
-import type { SkillsSettings } from "./config/settings";
-import { isSettingsInitialized, settings } from "./config/settings";
+import { isSettingsInitialized, type Settings, type SkillsSettings, settings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
@@ -230,8 +229,10 @@ export async function resolvePromptInput(input: string | undefined, description:
 export interface LoadContextFilesOptions {
 	/** Working directory to start walking up from. Default: getProjectDir() */
 	cwd?: string;
-	/** Whether to resolve @-file references in context file content. Default: contextFiles.resolveAtRefs setting, then true */
+	/** Whether to resolve @-file references in context file content. Default: settings, then true. */
 	resolveAtRefs?: boolean;
+	/** Active settings instance. Used by SDK/embedder sessions with isolated settings. */
+	settings?: Pick<Settings, "get">;
 }
 
 function dedupeExactContextFiles(
@@ -246,8 +247,12 @@ function dedupeExactContextFiles(
 	return contextFiles.filter((file, index) => lastIndexByContent.get(file.content) === index);
 }
 
-function shouldResolveContextAtRefs(option: boolean | undefined): boolean {
+function shouldResolveContextAtRefs(
+	option: boolean | undefined,
+	activeSettings: Pick<Settings, "get"> | undefined,
+): boolean {
 	if (option !== undefined) return option;
+	if (activeSettings) return activeSettings.get("contextFiles.resolveAtRefs") ?? true;
 	if (!isSettingsInitialized()) return true;
 	return settings.get("contextFiles.resolveAtRefs") ?? true;
 }
@@ -281,7 +286,7 @@ export async function loadProjectContextFiles(
 		const depthB = b.depth ?? -1;
 		return depthB - depthA;
 	});
-	const shouldResolveAtRefs = shouldResolveContextAtRefs(options.resolveAtRefs);
+	const shouldResolveAtRefs = shouldResolveContextAtRefs(options.resolveAtRefs, options.settings);
 	const resolved = shouldResolveAtRefs ? await resolveAtRefs(files) : files;
 	return dedupeExactContextFiles(resolved);
 }
@@ -376,6 +381,8 @@ export interface BuildSystemPromptOptions {
 	memoryRootEnabled?: boolean;
 	/** Active model identifier (e.g. "anthropic/claude-opus-4") surfaced to the agent. */
 	model?: string;
+	/** Active settings instance. Used when loading context files without preloaded context. */
+	settings?: Pick<Settings, "get">;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -410,6 +417,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		workspaceTree: providedWorkspaceTree,
 		memoryRootEnabled = false,
 		model,
+		settings: activeSettings,
 	} = options;
 	const resolvedCwd = cwd ?? getProjectDir();
 
@@ -463,6 +471,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		? Promise.resolve(providedContextFiles)
 		: logger.time("loadProjectContextFiles", loadProjectContextFiles, {
 				cwd: resolvedCwd,
+				settings: activeSettings,
 			});
 	const workspaceTreePromise =
 		providedWorkspaceTree !== undefined
