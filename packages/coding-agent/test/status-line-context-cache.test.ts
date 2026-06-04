@@ -256,4 +256,60 @@ describe("StatusLineComponent incremental context breakdown cache", () => {
 		expect(rendered).toContain("mem");
 		expect(rendered).toContain(theme.status.success);
 	});
+
+	it("renders Hindsight pending status while the background probe is in flight", async () => {
+		const session = makeSession({ messages: [userMessage("hi")] });
+		const probe = Promise.withResolvers<{ results: unknown[] }>();
+		const state = {
+			bankId: "test-bank",
+			client: {
+				listMemories: () => probe.promise,
+			},
+		} as unknown as HindsightSessionState;
+		(session as { getHindsightSessionState: () => HindsightSessionState | undefined }).getHindsightSessionState =
+			() => state;
+		const comp = new StatusLineComponent(session);
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["hindsight"],
+			rightSegments: [],
+			separator: "pipe",
+		});
+
+		comp.refreshHindsightInBackground();
+
+		const rendered = comp.getTopBorder(120).content;
+		expect(rendered).toContain("mem");
+		expect(rendered).toContain(theme.status.pending);
+
+		probe.resolve({ results: [] });
+		await Bun.sleep(0);
+	});
+
+	it("renders generic Hindsight error status after a failed background probe", async () => {
+		const session = makeSession({ messages: [userMessage("hi")] });
+		const state = {
+			bankId: "test-bank",
+			client: {
+				listMemories: () => Promise.reject(new Error("secret-token-timeout")),
+			},
+		} as unknown as HindsightSessionState;
+		(session as { getHindsightSessionState: () => HindsightSessionState | undefined }).getHindsightSessionState =
+			() => state;
+		const comp = new StatusLineComponent(session);
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["hindsight"],
+			rightSegments: [],
+			separator: "pipe",
+		});
+
+		comp.refreshHindsightInBackground();
+		await Bun.sleep(0);
+
+		const rendered = comp.getTopBorder(120).content;
+		expect(rendered).toContain("mem");
+		expect(rendered).toContain(theme.status.error);
+		expect(rendered).not.toContain("secret-token-timeout");
+	});
 });

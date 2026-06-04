@@ -50,7 +50,6 @@ export type HindsightConnectionState = "pending" | "ok" | "error";
 export interface HindsightStatus {
 	state: HindsightConnectionState;
 	bankId: string;
-	error?: string;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -521,9 +520,7 @@ export class StatusLineComponent implements Component {
 	 * the Hindsight server on every render.
 	 */
 	refreshHindsightInBackground(): void {
-		const state = (
-			this.session as { getHindsightSessionState?: AgentSession["getHindsightSessionState"] }
-		).getHindsightSessionState?.();
+		const state = this.session.getHindsightSessionState();
 		const primary = state?.aliasOf ?? state;
 		if (!primary) {
 			this.#cachedHindsight = null;
@@ -542,19 +539,22 @@ export class StatusLineComponent implements Component {
 		if (this.#hindsightFetchedAt > 0 && now - this.#hindsightFetchedAt < 5 * 60_000) return;
 
 		this.#hindsightInFlight = true;
+		const probeState = primary;
+		const cacheProbeResult = (status: HindsightConnectionState) => {
+			const latestState = this.session.getHindsightSessionState();
+			const latestPrimary = latestState?.aliasOf ?? latestState;
+			if (latestPrimary !== probeState || latestPrimary?.bankId !== bankId) return;
+			this.#cachedHindsight = { state: status, bankId };
+			this.#hindsightFetchedAt = Date.now();
+		};
+
 		void primary.client
 			.listMemories(bankId, { limit: 1 })
 			.then(() => {
-				this.#cachedHindsight = { state: "ok", bankId };
-				this.#hindsightFetchedAt = Date.now();
+				cacheProbeResult("ok");
 			})
-			.catch(error => {
-				this.#cachedHindsight = {
-					state: "error",
-					bankId,
-					error: error instanceof Error ? error.message : String(error),
-				};
-				this.#hindsightFetchedAt = Date.now();
+			.catch(() => {
+				cacheProbeResult("error");
 			})
 			.finally(() => {
 				this.#hindsightInFlight = false;
