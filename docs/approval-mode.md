@@ -38,7 +38,7 @@ tools:
     mcp__filesystem__delete: deny
 ```
 
-For `bash`, `tools.approval.bash` may be either a scalar policy for every bash call or a command-glob map. Bash command globs match the full command string; `*` matches any sequence and `?` matches one character. If more than one entry matches, the later entry wins. Object-form policies are only supported for `bash`.
+For `bash`, `tools.approval.bash` may be either a scalar policy for every bash call or a command-glob map. Bash command globs match the full command string; `*` matches any sequence and `?` matches one character. When multiple command-glob entries match the same command, the entry whose key appears **last** in the YAML mapping wins — i.e. the bottom-most matching key in `tools.approval.bash` determines the policy. This last-key-wins rule relies on YAML key insertion order, which all supported config loaders preserve. Object-form policies are only supported for `bash`.
 
 Resolution per tool call:
 

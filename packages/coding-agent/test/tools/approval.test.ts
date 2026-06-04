@@ -94,6 +94,57 @@ describe("resolveApproval override and user policy", () => {
 		);
 	});
 
+	it("matchedPattern is set for glob-matched bash policies", () => {
+		const bash = tool("bash", "exec");
+		const result = resolveApproval(bash, { command: "echo secret.txt" }, "yolo", {
+			bash: { "echo secret*": "deny" },
+		});
+		expect(result).toMatchObject({ policy: "deny", matchedPattern: "echo secret*" });
+	});
+
+	it("matchedPattern is undefined for plain (non-glob) user policies", () => {
+		const bash = tool("bash", "exec");
+		const result = resolveApproval(bash, {}, "yolo", { bash: "deny" });
+		expect(result.policy).toBe("deny");
+		expect(result.matchedPattern).toBeUndefined();
+	});
+
+	it("deny error message omits exact glob pattern when matched", () => {
+		const bash = tool("bash", "exec");
+		expect(() =>
+			requiresApproval(bash, { command: "echo secret.txt" }, "yolo", {
+				bash: { "echo secret*": "deny" },
+			}),
+		).toThrow(
+			'Tool "bash" is blocked by user policy.\n' +
+				'To allow: remove or update the matching pattern in "tools.approval.bash" config.',
+		);
+	});
+
+	it("deny error message is plain for non-glob deny", () => {
+		const bash = tool("bash", "exec");
+		expect(() => requiresApproval(bash, {}, "yolo", { bash: "deny" })).toThrow(
+			'Tool "bash" is blocked by user policy.\n' + 'To allow: remove "tools.approval.bash: deny" from config.',
+		);
+	});
+
+	it("deny error fix message differs for glob vs plain", () => {
+		const bash = tool("bash", "exec");
+		expect(() =>
+			requiresApproval(bash, { command: "rm -rf /" }, "write", {
+				bash: { "rm *": "deny" },
+			}),
+		).toThrow('remove or update the matching pattern in "tools.approval.bash" config.');
+	});
+
+	it("matchedPattern uses last matching glob", () => {
+		const bash = tool("bash", "exec");
+		const result = resolveApproval(bash, { command: "echo ok" }, "yolo", {
+			bash: { "echo *": "allow", "echo ok": "deny" },
+		});
+		expect(result).toMatchObject({ policy: "deny", matchedPattern: "echo ok" });
+	});
+
 	it("valid user policy overrides mode and tier when no tool override is active", () => {
 		const writeTool = tool("write", "write");
 		expect(resolveApproval(writeTool, {}, "always-ask", { write: "allow" }).policy).toBe("allow");
@@ -157,6 +208,7 @@ describe("resolveApproval override and user policy", () => {
 		expect(resolveApproval(critical, { command: "rm -rf /" }, "write", { bash: { "rm *": "deny" } })).toMatchObject({
 			policy: "deny",
 			override: true,
+			matchedPattern: "rm *",
 		});
 		expect(resolveApproval(critical, { command: "rm -rf /" }, "yolo", { bash: { "rm *": "prompt" } })).toMatchObject({
 			policy: "prompt",
@@ -166,9 +218,16 @@ describe("resolveApproval override and user policy", () => {
 
 	it("handles empty command and empty pattern correctly", () => {
 		const bash = tool("bash", "exec");
-		expect(resolveApproval(bash, { command: "" }, "yolo", { bash: { "": "deny" } }).policy).toBe("deny");
+		expect(resolveApproval(bash, { command: "" }, "yolo", { bash: { "": "deny" } })).toMatchObject({
+			policy: "deny",
+			matchedPattern: "",
+		});
 		expect(resolveApproval(bash, { command: "" }, "yolo", { bash: { "echo *": "deny" } }).policy).toBe("allow");
 		expect(resolveApproval(bash, { command: "echo hi" }, "yolo", { bash: { "": "deny" } }).policy).toBe("allow");
+		expect(() => requiresApproval(bash, { command: "" }, "yolo", { bash: { "": "deny" } })).toThrow(
+			'Tool "bash" is blocked by user policy.\n' +
+				'To allow: remove or update the matching pattern in "tools.approval.bash" config.',
+		);
 	});
 
 	it("skips invalid map entries and non-string pattern values", () => {

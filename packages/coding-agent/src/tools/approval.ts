@@ -20,6 +20,7 @@ export interface ResolvedApproval {
 	tier: ToolTier;
 	reason?: string;
 	override: boolean;
+	matchedPattern?: string;
 }
 
 const POLICY_VALUES: ReadonlySet<ApprovalPolicy> = new Set(["allow", "deny", "prompt"]);
@@ -50,7 +51,14 @@ function escapeRegExpChar(char: string): string {
 	return /[\\^$+?.()|[\]{}]/.test(char) ? `\\${char}` : char;
 }
 
-function globMatches(pattern: string, value: string): boolean {
+const globMatcherCache = new Map<string, RegExp>();
+
+function getGlobMatcher(pattern: string): RegExp {
+	let matcher = globMatcherCache.get(pattern);
+	if (matcher) {
+		return matcher;
+	}
+
 	let source = "^";
 	for (const char of pattern) {
 		if (char === "*") {
@@ -62,7 +70,13 @@ function globMatches(pattern: string, value: string): boolean {
 		}
 	}
 	source += "$";
-	return new RegExp(source).test(value);
+	matcher = new RegExp(source);
+	globMatcherCache.set(pattern, matcher);
+	return matcher;
+}
+
+function globMatches(pattern: string, value: string): boolean {
+	return getGlobMatcher(pattern).test(value);
 }
 
 function getBashCommand(args: unknown): string {
@@ -70,19 +84,23 @@ function getBashCommand(args: unknown): string {
 	const command = (args as Record<string, unknown>).command;
 	return typeof command === "string" ? command : "";
 }
+interface UserPolicyResult {
+	policy: ApprovalPolicy;
+	pattern?: string;
+}
 
-function resolveUserPolicy(tool: ApprovalSubject, args: unknown, value: unknown): ApprovalPolicy | undefined {
+function resolveUserPolicy(tool: ApprovalSubject, args: unknown, value: unknown): UserPolicyResult | undefined {
 	const policy = normalizePolicy(value);
 	if (policy || tool.name !== "bash" || !value || typeof value !== "object" || Array.isArray(value)) {
-		return policy;
+		return policy ? { policy } : undefined;
 	}
 
-	let matched: ApprovalPolicy | undefined;
+	let matched: UserPolicyResult | undefined;
 	const command = getBashCommand(args);
 	for (const [pattern, candidate] of Object.entries(value as Record<string, unknown>)) {
 		const patternPolicy = normalizePolicy(candidate);
 		if (patternPolicy && globMatches(pattern, command)) {
-			matched = patternPolicy;
+			matched = { policy: patternPolicy, pattern };
 		}
 	}
 	return matched;
@@ -139,17 +157,30 @@ export function resolveApproval(
 	userConfig: Record<string, unknown> = {},
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args);
-	const userPolicy = Object.hasOwn(userConfig, tool.name)
+	const userResult = Object.hasOwn(userConfig, tool.name)
 		? resolveUserPolicy(tool, args, userConfig[tool.name])
 		: undefined;
+	const userPolicy = userResult?.policy;
+	const matchedPattern = userResult?.pattern;
+	const hasMatchedPattern = matchedPattern !== undefined;
 
 	if (mode === "yolo") {
-		return { policy: userPolicy ?? "allow", tier: decision.tier, override: false };
+		return {
+			policy: userPolicy ?? "allow",
+			tier: decision.tier,
+			override: false,
+			...(hasMatchedPattern ? { matchedPattern } : {}),
+		};
 	}
 
 	if (decision.override) {
 		if (userPolicy === "deny") {
-			return { policy: "deny", tier: decision.tier, override: true };
+			return {
+				policy: "deny",
+				tier: decision.tier,
+				override: true,
+				...(hasMatchedPattern ? { matchedPattern } : {}),
+			};
 		}
 		return {
 			policy: "prompt",
@@ -160,7 +191,12 @@ export function resolveApproval(
 	}
 
 	if (userPolicy) {
-		return { policy: userPolicy, tier: decision.tier, override: false };
+		return {
+			policy: userPolicy,
+			tier: decision.tier,
+			override: false,
+			...(hasMatchedPattern ? { matchedPattern } : {}),
+		};
 	}
 
 	if (modeApprovesTier(mode, decision.tier)) {
@@ -187,13 +223,14 @@ export function requiresApproval(
 	mode: ApprovalMode,
 	userConfig: Record<string, unknown> = {},
 ): { required: boolean; reason?: string } {
-	const { policy, reason } = resolveApproval(tool, args, mode, userConfig);
+	const { policy, reason, matchedPattern } = resolveApproval(tool, args, mode, userConfig);
 
 	if (policy === "deny") {
-		throw new Error(
-			`Tool "${tool.name}" is blocked by user policy.\n` +
-				`To allow: remove "tools.approval.${tool.name}: deny" from config.`,
-		);
+		const fix =
+			matchedPattern !== undefined
+				? `To allow: remove or update the matching pattern in "tools.approval.${tool.name}" config.`
+				: `To allow: remove "tools.approval.${tool.name}: deny" from config.`;
+		throw new Error(`Tool "${tool.name}" is blocked by user policy.\n${fix}`);
 	}
 
 	if (policy === "prompt") return { required: true, reason };
