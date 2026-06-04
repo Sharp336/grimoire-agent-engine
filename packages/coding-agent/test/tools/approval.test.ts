@@ -111,6 +111,14 @@ describe("resolveApproval override and user policy", () => {
 		expect(result).toMatchObject({ policy: "deny", matchedPattern: "rm *" });
 	});
 
+	it("does not let leading cd wrapper policies override normalized executable denies", () => {
+		const bash = tool("bash", "exec");
+		const result = resolveApproval(bash, { command: "cd /tmp && rm file" }, "yolo", {
+			bash: { "rm *": "deny", "cd *": "allow" },
+		});
+		expect(result).toMatchObject({ policy: "deny", matchedPattern: "rm *" });
+	});
+
 	it("does not extract leading cd when cwd is explicitly provided", () => {
 		const bash = tool("bash", "exec");
 		const result = resolveApproval(bash, { command: "cd /tmp && rm file", cwd: "/workspace" }, "yolo", {

@@ -38,12 +38,12 @@ tools:
     mcp__filesystem__delete: deny
 ```
 
-For `bash`, `tools.approval.bash` may be either a scalar policy for every bash call or a command-glob map. Bash command globs match the full command string; `*` matches any sequence and `?` matches one character. When multiple command-glob entries match the same command, the entry whose key appears **last** in the YAML mapping wins — i.e. the bottom-most matching key in `tools.approval.bash` determines the policy. This last-key-wins rule relies on YAML key insertion order, which all supported config loaders preserve. Object-form policies are only supported for `bash`.
+For `bash`, `tools.approval.bash` may be either a scalar policy for every bash call or a command-glob map. Bash command globs match the full command string; `*` matches any sequence and `?` matches one character. When a command is normalized before execution, for example by extracting a leading `cd ... &&`, the normalized executable command takes precedence over the raw wrapper command. Within the same command form, when multiple command-glob entries match, the entry whose key appears **last** in the YAML mapping wins — i.e. the bottom-most matching key in `tools.approval.bash` determines the policy. This last-key-wins rule relies on YAML key insertion order, which all supported config loaders preserve. Object-form policies are only supported for `bash`.
 
 Resolution per tool call:
 
 1. Compute the tool's approval decision from `tool.approval(args)`; omitted means `exec`.
-2. Normalize `tools.approval.<tool>` if present; invalid values are ignored. For `bash`, object-form command-glob maps are matched against the full command string.
+2. Normalize `tools.approval.<tool>` if present; invalid values are ignored. For `bash`, object-form command-glob maps are matched against the full command string and any normalized executable command.
 3. In `yolo` mode, the user policy is used when present; otherwise the call is allowed. Safety `override` reasons do not force a prompt in `yolo`.
 4. In non-yolo modes, if the tool sets `override: true`, `deny` is blocked and all other cases prompt, even if user policy says `allow`.
 5. Otherwise, a valid user policy wins.

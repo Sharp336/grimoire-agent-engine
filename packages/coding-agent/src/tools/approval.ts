@@ -114,11 +114,15 @@ function resolveUserPolicy(
 
 	let matched: UserPolicyResult | undefined;
 	const commands = getBashCommands(args, options);
-	for (const [pattern, candidate] of Object.entries(value as Record<string, unknown>)) {
-		const patternPolicy = normalizePolicy(candidate);
-		if (patternPolicy && commands.some(command => globMatches(pattern, command))) {
-			matched = { policy: patternPolicy, pattern };
+	for (const command of commands) {
+		let commandMatch: UserPolicyResult | undefined;
+		for (const [pattern, candidate] of Object.entries(value as Record<string, unknown>)) {
+			const patternPolicy = normalizePolicy(candidate);
+			if (patternPolicy && globMatches(pattern, command)) {
+				commandMatch = { policy: patternPolicy, pattern };
+			}
 		}
+		matched = commandMatch ?? matched;
 	}
 	return matched;
 }
