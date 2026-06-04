@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the TUI `Settings → Plugins` panel showing "No plugins installed" when only marketplace plugins were installed. The panel now lists npm and marketplace plugins together (marketplace entries tagged `[mkt]` with scope and shadow indicator), with a read-only marketplace detail view (version, install path, dates, enable/disable toggle). The empty-state now mentions both install commands.
+
 ## [15.9.0] - 2026-06-04
 
 ### Breaking Changes

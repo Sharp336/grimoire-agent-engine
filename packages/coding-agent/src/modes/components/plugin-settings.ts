@@ -2,10 +2,11 @@
  * Plugin settings UI components.
  *
  * Provides a hierarchical settings interface:
- * - Plugin list (shows all installed plugins)
- *   - Plugin detail (enable/disable, features, config)
+ * - Plugin list (shows all installed plugins — npm + marketplace)
+ *   - npm plugin detail (enable/disable, features, config)
  *     - Feature toggles
  *     - Config value editor
+ *   - Marketplace plugin detail (enable/disable + read-only metadata)
  */
 import {
 	Container,
@@ -17,7 +18,16 @@ import {
 	Spacer,
 	Text,
 } from "@oh-my-pi/pi-tui";
+import { clearPluginRootsAndCaches, resolveOrDefaultProjectRegistryPath } from "../../discovery/helpers";
 import { PluginManager } from "../../extensibility/plugins/manager";
+import {
+	getInstalledPluginsRegistryPath,
+	getMarketplacesCacheDir,
+	getMarketplacesRegistryPath,
+	getPluginsCacheDir,
+	MarketplaceManager,
+} from "../../extensibility/plugins/marketplace";
+import type { InstalledPluginSummary } from "../../extensibility/plugins/marketplace/types";
 import type { InstalledPlugin, PluginSettingSchema } from "../../extensibility/plugins/types";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { DynamicBorder } from "./dynamic-border";
@@ -41,20 +51,32 @@ export function handleInputOrEscape(
 // Plugin List Component
 // =============================================================================
 
+/** A single entry in the plugin list — either an npm plugin or a marketplace plugin. */
+export type PluginListEntry =
+	| { kind: "npm"; plugin: InstalledPlugin }
+	| { kind: "marketplace"; plugin: InstalledPluginSummary };
+
 export interface PluginListCallbacks {
-	onPluginSelect: (plugin: InstalledPlugin) => void;
+	onPluginSelect: (entry: PluginListEntry) => void;
 	onCancel: () => void;
 }
 
+const MARKETPLACE_BADGE = "[mkt]";
+
+/** Stable key for an entry — used to recover the entry from a `SelectItem.value`. */
+function entryKey(entry: PluginListEntry): string {
+	return entry.kind === "npm" ? `npm:${entry.plugin.name}` : `mkt:${entry.plugin.id}:${entry.plugin.scope}`;
+}
+
 /**
- * Shows list of installed plugins with enable/disable status.
- * Selecting a plugin opens its detail view.
+ * Shows list of installed plugins with enable/disable status. Selecting a plugin
+ * opens its detail view. Marketplace plugins are tagged with a `[mkt]` badge.
  */
 export class PluginListComponent extends Container {
 	readonly #selectList: SelectList;
 
 	constructor(
-		private readonly plugins: InstalledPlugin[],
+		private readonly entries: PluginListEntry[],
 		callbacks: PluginListCallbacks,
 	) {
 		super();
@@ -64,10 +86,13 @@ export class PluginListComponent extends Container {
 		this.addChild(new Text(theme.bold(theme.fg("accent", "  Plugins")), 0, 0));
 		this.addChild(new Spacer(1));
 
-		if (plugins.length === 0) {
+		if (entries.length === 0) {
 			this.addChild(new Text(theme.fg("muted", "  No plugins installed"), 0, 0));
 			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("dim", "  Install with: omp plugin install <package>"), 0, 0));
+			this.addChild(new Text(theme.fg("dim", "  Install npm plugin:        omp plugin install <package>"), 0, 0));
+			this.addChild(
+				new Text(theme.fg("dim", "  Install marketplace plugin: omp plugin install <name>@<marketplace>"), 0, 0),
+			);
 			this.addChild(new Spacer(1));
 			this.addChild(new DynamicBorder());
 
@@ -77,31 +102,51 @@ export class PluginListComponent extends Container {
 			return;
 		}
 
-		const items: SelectItem[] = plugins.map(p => {
-			const status = p.enabled
-				? theme.fg("success", theme.status.enabled)
-				: theme.fg("muted", theme.status.disabled);
-			const featureCount = p.manifest.features ? Object.keys(p.manifest.features).length : 0;
-			const enabledCount = p.enabledFeatures?.length ?? featureCount;
+		const items: SelectItem[] = entries.map(entry => {
+			if (entry.kind === "npm") {
+				const p = entry.plugin;
+				const status = p.enabled
+					? theme.fg("success", theme.status.enabled)
+					: theme.fg("muted", theme.status.disabled);
+				const featureCount = p.manifest.features ? Object.keys(p.manifest.features).length : 0;
+				const enabledCount = p.enabledFeatures?.length ?? featureCount;
 
-			let details = `v${p.version}`;
-			if (featureCount > 0) {
-				details += ` ${theme.sep.dot} ${enabledCount}/${featureCount} features`;
+				let details = `v${p.version}`;
+				if (featureCount > 0) {
+					details += ` ${theme.sep.dot} ${enabledCount}/${featureCount} features`;
+				}
+
+				return {
+					value: entryKey(entry),
+					label: `${status} ${p.name}`,
+					description: details,
+				};
 			}
 
+			// Marketplace entry — represented by its first registry entry (the canonical install).
+			const m = entry.plugin;
+			const first = m.entries[0];
+			const isEnabled = first?.enabled !== false;
+			const status = isEnabled
+				? theme.fg("success", theme.status.enabled)
+				: theme.fg("muted", theme.status.disabled);
+			const badge = theme.fg("muted", MARKETPLACE_BADGE);
+			const scope = theme.fg("dim", `[${m.scope}]`);
+			const shadowed = m.shadowedBy ? ` ${theme.fg("muted", "(shadowed by project)")}` : "";
+
 			return {
-				value: p.name,
-				label: `${status} ${p.name}`,
-				description: details,
+				value: entryKey(entry),
+				label: `${status} ${badge} ${m.id} ${scope}${shadowed}`,
+				description: first ? `v${first.version}` : "",
 			};
 		});
 
 		this.#selectList = new SelectList(items, Math.min(items.length, 8), getSelectListTheme());
 
 		this.#selectList.onSelect = item => {
-			const plugin = this.plugins.find(p => p.name === item.value);
-			if (plugin) {
-				callbacks.onPluginSelect(plugin);
+			const entry = this.entries.find(e => entryKey(e) === item.value);
+			if (entry) {
+				callbacks.onPluginSelect(entry);
 			}
 		};
 
@@ -297,6 +342,106 @@ export class PluginDetailComponent extends Container {
 }
 
 // =============================================================================
+// Marketplace Plugin Detail Component (read-only metadata + enable toggle)
+// =============================================================================
+
+export interface MarketplacePluginDetailCallbacks {
+	/** Called when the user toggles enabled state. */
+	onEnabledChange: (enabled: boolean) => void;
+	/** Called when the user presses Esc to leave the detail view. */
+	onBack: () => void;
+}
+
+/**
+ * Detail view for a marketplace-installed plugin. Marketplace plugins don't
+ * expose npm-plugin features/config schemas in the registry, so this view is
+ * deliberately minimal: a single Enabled toggle plus read-only install metadata.
+ */
+export class MarketplacePluginDetailComponent extends Container {
+	#settingsList!: SettingsList;
+
+	constructor(
+		private plugin: InstalledPluginSummary,
+		private readonly callbacks: MarketplacePluginDetailCallbacks,
+	) {
+		super();
+		this.#rebuild();
+	}
+
+	#rebuild(): void {
+		this.clear();
+
+		const plugin = this.plugin;
+		const first = plugin.entries[0];
+		const enabled = first?.enabled !== false;
+
+		// Header
+		this.addChild(new Text(theme.bold(theme.fg("accent", plugin.id)), 0, 0));
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("muted", `Marketplace plugin (${plugin.scope})`), 0, 0));
+		if (plugin.shadowedBy) {
+			this.addChild(new Text(theme.fg("muted", "Shadowed by project-scoped install"), 0, 0));
+		}
+		this.addChild(new Spacer(1));
+
+		const items: SettingItem[] = [
+			{
+				id: "__enabled__",
+				label: "Enabled",
+				description: "Enable or disable this marketplace plugin",
+				currentValue: enabled ? "true" : "false",
+				values: ["true", "false"],
+			},
+		];
+
+		this.#settingsList = new SettingsList(
+			items,
+			items.length,
+			getSettingsListTheme(),
+			(id, newValue) => {
+				if (id === "__enabled__") {
+					const next = newValue === "true";
+					this.callbacks.onEnabledChange(next);
+					// Update local view-state so subsequent toggles reflect the new value.
+					if (first) {
+						this.plugin = {
+							...this.plugin,
+							entries: this.plugin.entries.map((e, i) => (i === 0 ? { ...e, enabled: next } : e)),
+						};
+					}
+				}
+			},
+			this.callbacks.onBack,
+		);
+
+		this.addChild(this.#settingsList);
+		this.addChild(new Spacer(1));
+
+		// Read-only metadata
+		if (first) {
+			this.addChild(new Text(theme.fg("muted", `Version:        ${first.version}`), 0, 0));
+			this.addChild(new Text(theme.fg("muted", `Installed at:   ${first.installedAt}`), 0, 0));
+			this.addChild(new Text(theme.fg("muted", `Last updated:   ${first.lastUpdated}`), 0, 0));
+			if (first.gitCommitSha) {
+				this.addChild(new Text(theme.fg("muted", `Git commit:     ${first.gitCommitSha}`), 0, 0));
+			}
+			this.addChild(new Text(theme.fg("muted", `Install path:   ${first.installPath}`), 0, 0));
+		}
+		this.addChild(new Spacer(1));
+		this.addChild(
+			new Text(theme.fg("dim", "Manage with /plugins, /marketplace, or omp plugin uninstall <id>"), 0, 0),
+		);
+		this.addChild(new Spacer(1));
+		this.addChild(new Text(theme.fg("dim", "  Enter to toggle · Esc to go back"), 0, 0));
+	}
+
+	handleInput(data: string): void {
+		if (!this.#settingsList) return;
+		this.#settingsList.handleInput(data);
+	}
+}
+
+// =============================================================================
 // Config Submenus
 // =============================================================================
 
@@ -421,20 +566,36 @@ interface InputHandler {
  * Manages navigation between plugin list and plugin detail views.
  */
 export class PluginSettingsComponent extends Container {
-	#manager: PluginManager;
+	#cwd: string;
+	#npmManager: PluginManager;
+	#marketplaceManager: MarketplaceManager | null = null;
 	#viewComponent: (Container & InputHandler) | null = null;
 	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: state tracking for view management
-	#currentView: "list" | "detail" = "list";
+	#currentView: "list" | "detail" | "marketplace-detail" = "list";
 	// biome-ignore lint/correctness/noUnusedPrivateClassMembers: state tracking for view management
-	#currentPlugin: InstalledPlugin | null = null;
+	#currentPlugin: InstalledPlugin | InstalledPluginSummary | null = null;
 
 	constructor(
 		cwd: string,
 		private readonly callbacks: PluginSettingsCallbacks,
 	) {
 		super();
-		this.#manager = new PluginManager(cwd);
+		this.#cwd = cwd;
+		this.#npmManager = new PluginManager(cwd);
 		this.#showPluginList();
+	}
+
+	async #getMarketplaceManager(): Promise<MarketplaceManager> {
+		if (this.#marketplaceManager) return this.#marketplaceManager;
+		this.#marketplaceManager = new MarketplaceManager({
+			marketplacesRegistryPath: getMarketplacesRegistryPath(),
+			installedRegistryPath: getInstalledPluginsRegistryPath(),
+			projectInstalledRegistryPath: await resolveOrDefaultProjectRegistryPath(this.#cwd),
+			marketplacesCacheDir: getMarketplacesCacheDir(),
+			pluginsCacheDir: getPluginsCacheDir(),
+			clearPluginRootsCache: clearPluginRootsAndCaches,
+		});
+		return this.#marketplaceManager;
 	}
 
 	async #showPluginList(): Promise<void> {
@@ -442,10 +603,29 @@ export class PluginSettingsComponent extends Container {
 		this.#currentPlugin = null;
 		this.clear();
 
-		const plugins = await this.#manager.list();
+		const npmPlugins = await this.#npmManager.list();
+		let marketplacePlugins: InstalledPluginSummary[] = [];
+		try {
+			const mgr = await this.#getMarketplaceManager();
+			marketplacePlugins = await mgr.listInstalledPlugins();
+		} catch {
+			// Marketplace registry may not exist on first run — treat as empty.
+			marketplacePlugins = [];
+		}
 
-		this.#viewComponent = new PluginListComponent(plugins, {
-			onPluginSelect: plugin => this.#showPluginDetail(plugin),
+		const entries: PluginListEntry[] = [
+			...npmPlugins.map<PluginListEntry>(plugin => ({ kind: "npm", plugin })),
+			...marketplacePlugins.map<PluginListEntry>(plugin => ({ kind: "marketplace", plugin })),
+		];
+
+		this.#viewComponent = new PluginListComponent(entries, {
+			onPluginSelect: entry => {
+				if (entry.kind === "npm") {
+					this.#showPluginDetail(entry.plugin);
+				} else {
+					this.#showMarketplaceDetail(entry.plugin);
+				}
+			},
 			onCancel: () => this.callbacks.onClose(),
 		});
 
@@ -457,24 +637,46 @@ export class PluginSettingsComponent extends Container {
 		this.#currentPlugin = plugin;
 		this.clear();
 
-		this.#viewComponent = new PluginDetailComponent(plugin, this.#manager, {
+		this.#viewComponent = new PluginDetailComponent(plugin, this.#npmManager, {
 			onEnabledChange: async enabled => {
-				await this.#manager.setEnabled(plugin.name, enabled);
+				await this.#npmManager.setEnabled(plugin.name, enabled);
 				this.callbacks.onPluginChanged();
 			},
 			onFeatureChange: async (feature, enabled) => {
-				const current = new Set((await this.#manager.getEnabledFeatures(plugin.name)) ?? []);
+				const current = new Set((await this.#npmManager.getEnabledFeatures(plugin.name)) ?? []);
 				if (enabled) {
 					current.add(feature);
 				} else {
 					current.delete(feature);
 				}
-				await this.#manager.setEnabledFeatures(plugin.name, [...current]);
+				await this.#npmManager.setEnabledFeatures(plugin.name, [...current]);
 				this.callbacks.onPluginChanged();
 			},
 			onConfigChange: async (key, value) => {
-				await this.#manager.setPluginSetting(plugin.name, key, value);
+				await this.#npmManager.setPluginSetting(plugin.name, key, value);
 				this.callbacks.onPluginChanged();
+			},
+			onBack: () => this.#showPluginList(),
+		});
+
+		this.addChild(this.#viewComponent);
+	}
+
+	#showMarketplaceDetail(plugin: InstalledPluginSummary): void {
+		this.#currentView = "marketplace-detail";
+		this.#currentPlugin = plugin;
+		this.clear();
+
+		this.#viewComponent = new MarketplacePluginDetailComponent(plugin, {
+			onEnabledChange: async enabled => {
+				try {
+					const mgr = await this.#getMarketplaceManager();
+					await mgr.setPluginEnabled(plugin.id, enabled, plugin.scope);
+					this.callbacks.onPluginChanged();
+				} catch {
+					// Best-effort: registry mismatch surfaces in the slash command;
+					// here we silently keep the local view-state.
+				}
 			},
 			onBack: () => this.#showPluginList(),
 		});
