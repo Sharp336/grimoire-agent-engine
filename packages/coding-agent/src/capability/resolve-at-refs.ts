@@ -123,8 +123,10 @@ async function resolveContent(
 
 		const absRefPath = path.resolve(baseDir, refPath);
 
-		// Path containment: reject refs that escape rootDir
-		if (!isWithin(absRefPath, rootDir)) {
+		// Path containment: refs must stay in the root namespace. Recursive
+		// includes reached through symlinks use real paths, so accept either the
+		// original root path or its realpath namespace.
+		if (!isWithin(absRefPath, rootDir) && !isWithin(absRefPath, realRootDir)) {
 			resolved.push(`<!-- @${refPath}: escapes project root -->`);
 			continue;
 		}
@@ -144,7 +146,8 @@ async function resolveContent(
 			continue;
 		}
 
-		if ((await isIgnoredByGitignore(absRefPath, rootDir)) || (await isIgnoredByGitignore(realRefPath, realRootDir))) {
+		const lexicallyIgnored = isWithin(absRefPath, rootDir) ? await isIgnoredByGitignore(absRefPath, rootDir) : false;
+		if (lexicallyIgnored || (await isIgnoredByGitignore(realRefPath, realRootDir))) {
 			resolved.push(`<!-- @${refPath}: ignored by gitignore -->`);
 			continue;
 		}

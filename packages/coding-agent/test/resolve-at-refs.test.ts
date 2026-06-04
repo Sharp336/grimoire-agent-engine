@@ -297,4 +297,18 @@ describe("resolveAtRefs", () => {
 
 		expect(result[0].content).toContain("rules through symlink root");
 	});
+
+	it("resolves nested refs when the containment root itself is a symlink", async () => {
+		fs.writeFileSync(path.join(tempDir, "rules.md"), "@more.md");
+		fs.writeFileSync(path.join(tempDir, "more.md"), "nested rules through symlink root\n");
+		const linkRoot = path.join(tempHomeDir, "repo-link");
+		fs.symlinkSync(tempDir, linkRoot, "dir");
+
+		const result = await resolveAtRefs([{ path: path.join(linkRoot, "AGENTS.md"), content: "@rules.md" }], {
+			rootDir: linkRoot,
+		});
+
+		expect(result[0].content).toContain("nested rules through symlink root");
+		expect(result[0].content).not.toContain("escapes project root");
+	});
 });
