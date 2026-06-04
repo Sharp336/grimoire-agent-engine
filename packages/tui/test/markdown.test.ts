@@ -678,6 +678,38 @@ more text`,
 		});
 	});
 
+	describe("Plain text fenced blocks", () => {
+		it("hides markdown fence markers for text blocks", () => {
+			const markdown = new Markdown("```text\nplain output\n```", 0, 0, defaultMarkdownTheme);
+			const lines = markdown.render(80);
+			const plainLines = lines.map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual(["  plain output"]);
+		});
+
+		it("hides markdown fence markers for text blocks inside list items", () => {
+			const markdown = new Markdown("- Item\n\n  ```text\n  plain output\n  ```", 0, 0, defaultMarkdownTheme);
+			const lines = markdown.render(80);
+			const plainLines = lines.map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines).toEqual(["- Item", "    plain output"]);
+		});
+
+		it("keeps markdown fence markers for syntax-highlightable blocks", () => {
+			const markdown = new Markdown(
+				"```yaml\nmodelRoles:\n  default: openai/gpt-5.5:high\n```",
+				0,
+				0,
+				defaultMarkdownTheme,
+			);
+			const lines = markdown.render(80);
+			const plainLines = lines.map(line => stripVTControlCharacters(line).trimEnd());
+
+			expect(plainLines[0]).toBe("```yaml");
+			expect(plainLines.at(-1)).toBe("```");
+		});
+	});
+
 	describe("Mermaid fenced blocks", () => {
 		const renderMermaidLines = (text: string, resolveMermaidAscii: (source: string) => string | null) => {
 			const markdown = new Markdown(text, 0, 0, { ...defaultMarkdownTheme, resolveMermaidAscii });
