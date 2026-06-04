@@ -192,6 +192,12 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 | -------------------------- | --------------------------------------------------------------- |
 | `PI_AI_GEMINI_CLI_VERSION` | Overrides Gemini CLI user-agent version tag (`0.35.3` if unset) |
 
+### Web search
+
+| Variable                    | Behavior                                                        |
+| --------------------------- | --------------------------------------------------------------- |
+| `OMP_WEB_SEARCH_TIMEOUT_MS` | Positive integer override for the web-search hard timeout (default 60000) |
+
 ### OpenAI Codex responses (feature/debug controls)
 
 | Variable                                   | Behavior                                             |

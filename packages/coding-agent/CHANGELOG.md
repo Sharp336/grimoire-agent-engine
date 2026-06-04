@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Made the `web_search` provider hard timeout configurable with `OMP_WEB_SEARCH_TIMEOUT_MS`, preserving the 60s default safety net while allowing slow LLM-backed search providers to finish without requiring the agent to pass per-call timeout arguments.
+
 ## [15.9.1] - 2026-06-04
 
 ### Added

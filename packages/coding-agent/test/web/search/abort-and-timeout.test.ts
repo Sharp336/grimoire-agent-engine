@@ -22,7 +22,12 @@ import * as provider from "../../../src/web/search/provider";
 import { searchAnthropic } from "../../../src/web/search/providers/anthropic";
 import type { SearchParams } from "../../../src/web/search/providers/base";
 import { searchBrave } from "../../../src/web/search/providers/brave";
-import { withHardTimeout } from "../../../src/web/search/providers/utils";
+import {
+	getSearchHardTimeoutMs,
+	SEARCH_HARD_TIMEOUT_ENV,
+	SEARCH_HARD_TIMEOUT_MS,
+	withHardTimeout,
+} from "../../../src/web/search/providers/utils";
 import type { SearchProviderId, SearchResponse } from "../../../src/web/search/types";
 
 const FAKE_SESSION = {} as ToolSession;
@@ -35,6 +40,10 @@ const fakeStorage = {
 } as unknown as AgentStorage;
 
 describe("withHardTimeout", () => {
+	afterEach(() => {
+		delete process.env[SEARCH_HARD_TIMEOUT_ENV];
+	});
+
 	it("returns a signal that aborts on the hard timeout when no caller signal is supplied", async () => {
 		const signal = withHardTimeout(undefined, 10);
 		await Bun.sleep(40);
@@ -54,6 +63,19 @@ describe("withHardTimeout", () => {
 		await Bun.sleep(40);
 		expect(signal.aborted).toBe(true);
 		expect(ac.signal.aborted).toBe(false);
+	});
+
+	it("uses OMP_WEB_SEARCH_TIMEOUT_MS as the default hard timeout", async () => {
+		process.env[SEARCH_HARD_TIMEOUT_ENV] = "10";
+		const signal = withHardTimeout(undefined);
+		await Bun.sleep(40);
+		expect(signal.aborted).toBe(true);
+	});
+
+	it("ignores invalid env overrides to preserve the safety net", () => {
+		expect(getSearchHardTimeoutMs({ [SEARCH_HARD_TIMEOUT_ENV]: "0" })).toBe(SEARCH_HARD_TIMEOUT_MS);
+		expect(getSearchHardTimeoutMs({ [SEARCH_HARD_TIMEOUT_ENV]: "-1" })).toBe(SEARCH_HARD_TIMEOUT_MS);
+		expect(getSearchHardTimeoutMs({ [SEARCH_HARD_TIMEOUT_ENV]: "not-a-number" })).toBe(SEARCH_HARD_TIMEOUT_MS);
 	});
 });
 

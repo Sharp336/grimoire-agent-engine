@@ -54,6 +54,19 @@ export function findCredential(
  * uniform without compromising correctness.
  */
 export const SEARCH_HARD_TIMEOUT_MS = 60_000;
+export const SEARCH_HARD_TIMEOUT_ENV = "OMP_WEB_SEARCH_TIMEOUT_MS";
+
+/**
+ * Resolve the hard web-search timeout. Users may raise this process-wide for
+ * slow LLM-backed search providers without teaching the agent to pass a
+ * per-call timeout; invalid or non-positive values keep the safe 60s default.
+ */
+export function getSearchHardTimeoutMs(env: Record<string, string | undefined> = process.env): number {
+	const raw = env[SEARCH_HARD_TIMEOUT_ENV];
+	if (raw === undefined) return SEARCH_HARD_TIMEOUT_MS;
+	const parsed = Number(raw);
+	return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : SEARCH_HARD_TIMEOUT_MS;
+}
 
 /**
  * Compose a caller-supplied {@link AbortSignal} with a hard timeout so an
@@ -66,9 +79,9 @@ export const SEARCH_HARD_TIMEOUT_MS = 60_000;
  * because the user's Esc is never delivered to the native layer.
  *
  * @param signal - Caller cancellation signal, if any.
- * @param ms - Hard timeout in milliseconds. Defaults to {@link SEARCH_HARD_TIMEOUT_MS}.
+ * @param ms - Hard timeout in milliseconds. Defaults to {@link getSearchHardTimeoutMs}.
  */
-export function withHardTimeout(signal: AbortSignal | undefined, ms: number = SEARCH_HARD_TIMEOUT_MS): AbortSignal {
+export function withHardTimeout(signal: AbortSignal | undefined, ms: number = getSearchHardTimeoutMs()): AbortSignal {
 	const timeout = AbortSignal.timeout(ms);
 	return signal ? AbortSignal.any([signal, timeout]) : timeout;
 }

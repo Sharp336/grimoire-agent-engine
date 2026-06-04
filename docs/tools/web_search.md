@@ -193,6 +193,7 @@ Streaming: none. `WebSearchTool.execute()` forwards its `AbortSignal` into `exec
 
 ## Limits & Caps
 - Provider auto-order length: 14 providers (`SEARCH_PROVIDER_ORDER` in `packages/coding-agent/src/web/search/types.ts`).
+- Provider fetch hard timeout: default `60_000` ms (`SEARCH_HARD_TIMEOUT_MS` in `packages/coding-agent/src/web/search/providers/utils.ts`); override process-wide with positive-integer `OMP_WEB_SEARCH_TIMEOUT_MS`.
 - `formatForLLM()` truncates source snippets and citation text to 240 chars (`packages/coding-agent/src/web/search/index.ts`).
 - `formatForLLM()` emits at most 3 search queries, each truncated to 120 chars (`packages/coding-agent/src/web/search/index.ts`).
 - Brave result count: default `10`, max `20` (`DEFAULT_NUM_RESULTS`, `MAX_NUM_RESULTS` in `packages/coding-agent/src/web/search/providers/brave.ts`).
