@@ -7,12 +7,16 @@
  * - format the generic approval prompt body.
  */
 import type { AgentTool, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
+import { getBashPolicyCommands } from "./bash-command-normalization";
 
 export type { ToolApproval, ToolApprovalDecision, ToolTier } from "@oh-my-pi/pi-agent-core";
 
 export type ApprovalPolicy = "allow" | "deny" | "prompt";
 export type ApprovalMode = "always-ask" | "write" | "yolo";
 
+export interface ApprovalOptions {
+	bashStripTrailingHeadTail?: boolean;
+}
 type ApprovalSubject = Pick<AgentTool, "name" | "approval" | "formatApprovalDetails">;
 
 export interface ResolvedApproval {
@@ -79,27 +83,40 @@ function globMatches(pattern: string, value: string): boolean {
 	return getGlobMatcher(pattern).test(value);
 }
 
-function getBashCommand(args: unknown): string {
-	if (!args || typeof args !== "object") return "";
-	const command = (args as Record<string, unknown>).command;
-	return typeof command === "string" ? command : "";
+function getBashCommands(args: unknown, options: ApprovalOptions): readonly string[] {
+	if (!args || typeof args !== "object") return [""];
+	const record = args as Record<string, unknown>;
+	const command = record.command;
+	const cwd = record.cwd;
+	return getBashPolicyCommands(
+		{
+			command: typeof command === "string" ? command : "",
+			cwd: typeof cwd === "string" ? cwd : undefined,
+		},
+		{ stripTrailingHeadTail: options.bashStripTrailingHeadTail },
+	);
 }
 interface UserPolicyResult {
 	policy: ApprovalPolicy;
 	pattern?: string;
 }
 
-function resolveUserPolicy(tool: ApprovalSubject, args: unknown, value: unknown): UserPolicyResult | undefined {
+function resolveUserPolicy(
+	tool: ApprovalSubject,
+	args: unknown,
+	value: unknown,
+	options: ApprovalOptions,
+): UserPolicyResult | undefined {
 	const policy = normalizePolicy(value);
 	if (policy || tool.name !== "bash" || !value || typeof value !== "object" || Array.isArray(value)) {
 		return policy ? { policy } : undefined;
 	}
 
 	let matched: UserPolicyResult | undefined;
-	const command = getBashCommand(args);
+	const commands = getBashCommands(args, options);
 	for (const [pattern, candidate] of Object.entries(value as Record<string, unknown>)) {
 		const patternPolicy = normalizePolicy(candidate);
-		if (patternPolicy && globMatches(pattern, command)) {
+		if (patternPolicy && commands.some(command => globMatches(pattern, command))) {
 			matched = { policy: patternPolicy, pattern };
 		}
 	}
@@ -155,10 +172,11 @@ export function resolveApproval(
 	args: unknown,
 	mode: ApprovalMode,
 	userConfig: Record<string, unknown> = {},
+	options: ApprovalOptions = {},
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args);
 	const userResult = Object.hasOwn(userConfig, tool.name)
-		? resolveUserPolicy(tool, args, userConfig[tool.name])
+		? resolveUserPolicy(tool, args, userConfig[tool.name], options)
 		: undefined;
 	const userPolicy = userResult?.policy;
 	const matchedPattern = userResult?.pattern;
@@ -222,8 +240,9 @@ export function requiresApproval(
 	args: unknown,
 	mode: ApprovalMode,
 	userConfig: Record<string, unknown> = {},
+	options: ApprovalOptions = {},
 ): { required: boolean; reason?: string } {
-	const { policy, reason, matchedPattern } = resolveApproval(tool, args, mode, userConfig);
+	const { policy, reason, matchedPattern } = resolveApproval(tool, args, mode, userConfig, options);
 
 	if (policy === "deny") {
 		const fix =

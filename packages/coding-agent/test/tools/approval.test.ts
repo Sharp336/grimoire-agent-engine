@@ -103,6 +103,42 @@ describe("resolveApproval override and user policy", () => {
 		expect(result).toMatchObject({ policy: "deny", matchedPattern: "echo secret*" });
 	});
 
+	it("matches bash glob policies against commands after leading cd extraction", () => {
+		const bash = tool("bash", "exec");
+		const result = resolveApproval(bash, { command: "cd /tmp && rm file" }, "yolo", {
+			bash: { "rm *": "deny" },
+		});
+		expect(result).toMatchObject({ policy: "deny", matchedPattern: "rm *" });
+	});
+
+	it("does not extract leading cd when cwd is explicitly provided", () => {
+		const bash = tool("bash", "exec");
+		const result = resolveApproval(bash, { command: "cd /tmp && rm file", cwd: "/workspace" }, "yolo", {
+			bash: { "rm *": "deny" },
+		});
+		expect(result.policy).toBe("allow");
+	});
+
+	it("matches bash glob policies against commands after execution fixups", () => {
+		const bash = tool("bash", "exec");
+		const result = resolveApproval(bash, { command: "cd /tmp && rm file 2>&1 | head" }, "yolo", {
+			bash: { "rm file": "deny" },
+		});
+		expect(result).toMatchObject({ policy: "deny", matchedPattern: "rm file" });
+	});
+
+	it("honors disabled bash execution fixups for command glob policies", () => {
+		const bash = tool("bash", "exec");
+		const result = resolveApproval(
+			bash,
+			{ command: "cd /tmp && rm file 2>&1 | head" },
+			"yolo",
+			{ bash: { "rm file": "deny" } },
+			{ bashStripTrailingHeadTail: false },
+		);
+		expect(result.policy).toBe("allow");
+	});
+
 	it("matchedPattern is undefined for plain (non-glob) user policies", () => {
 		const bash = tool("bash", "exec");
 		const result = resolveApproval(bash, {}, "yolo", { bash: "deny" });

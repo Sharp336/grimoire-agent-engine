@@ -118,7 +118,9 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 		const configuredMode = (settings?.get("tools.approvalMode") ?? "yolo") as ApprovalMode;
 		const approvalMode: ApprovalMode = cliAutoApprove ? "yolo" : configuredMode;
 		const userPolicies = (settings?.get("tools.approval") ?? {}) as Record<string, unknown>;
-		const approvalCheck = requiresApproval(this.tool, params, approvalMode, userPolicies);
+		const approvalCheck = requiresApproval(this.tool, params, approvalMode, userPolicies, {
+			bashStripTrailingHeadTail: settings?.get("bash.stripTrailingHeadTail") ?? true,
+		});
 
 		if (approvalCheck.required) {
 			// Check if UI is available
