@@ -20,6 +20,10 @@ export interface LoadMCPConfigsOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
 	filterBrowser?: boolean;
+	/** Whether to inject built-in Zread MCP server when Z.AI credentials are available (default: false) */
+	injectZread?: boolean;
+	/** Pre-resolved Zread API key (avoids re-resolving from env/authStorage) */
+	zreadApiKey?: string;
 }
 
 /** Result of loading MCP configs */
@@ -96,9 +100,14 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 	const enableProjectConfig = options?.enableProjectConfig ?? true;
 	const filterExa = options?.filterExa ?? true;
 	const filterBrowser = options?.filterBrowser ?? false;
+	const injectZread = options?.injectZread ?? false;
 
 	// Load MCP servers via capability system
 	const result = await loadCapability<MCPServer>(mcpCapability.id, { cwd });
+
+	// Collect ALL discovered server names before any filtering (disabled, project-level, etc.)
+	// so injection logic can detect names that were intentionally excluded.
+	const allDiscoveredNames = new Set(result.items.map(s => s.name));
 
 	// Filter out project-level configs if disabled
 	const servers = enableProjectConfig
@@ -132,6 +141,18 @@ export async function loadAllMCPConfigs(cwd: string, options?: LoadMCPConfigsOpt
 		const browserResult = filterBrowserMCPServers(configs, sources);
 		configs = browserResult.configs;
 		sources = browserResult.sources;
+	}
+
+	if (injectZread) {
+		const zreadResult = injectZreadMCPServer(
+			configs,
+			sources,
+			disabledServers,
+			options?.zreadApiKey,
+			allDiscoveredNames,
+		);
+		configs = zreadResult.configs;
+		sources = zreadResult.sources;
 	}
 
 	return { configs, exaApiKeys, sources };
@@ -362,4 +383,93 @@ export function filterBrowserMCPServers(
 	}
 
 	return { configs: filtered, sources: filteredSources };
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Zread MCP server injection (z.ai code reading)
+// ─────────────────────────────────────────────────────────────────────────────
+
+const ZREAD_MCP_SERVER_NAME = "zread";
+const ZREAD_MCP_URL = "https://api.z.ai/api/mcp/zread/mcp";
+
+/** Strip a leading "Bearer " prefix (case-insensitive) if present. */
+function stripBearerPrefix(key: string): string {
+	return key.replace(/^Bearer\s+/i, "");
+}
+
+/**
+ * Check if a server name matches the built-in Zread server (case-insensitive).
+ */
+function isZreadServer(name: string): boolean {
+	return name.toLowerCase() === ZREAD_MCP_SERVER_NAME;
+}
+
+/** Result of injecting a Zread MCP server. */
+export interface ZreadInjectionResult {
+	configs: Record<string, MCPServerConfig>;
+	sources: Record<string, SourceMeta>;
+}
+
+/**
+ * Inject a built-in Zread MCP server when a Z.AI API key is available.
+ *
+ * Zread provides code reading, documentation search, and repository structure
+ * tools for open-source GitHub repositories via the Z.AI platform.
+ *
+ * Returns new maps (does not mutate inputs), following the same pattern as
+ * {@link filterExaMCPServers} and {@link filterBrowserMCPServers}.
+ *
+ * Skipped when:
+ * - `apiKey` is empty/undefined
+ * - The user already has a manually-configured "zread" server (case-insensitive)
+ * - "zread" appears in the `disabledServers` denylist (case-insensitive)
+ * - "zread" appears in `discoveredNames` (raw server names before filtering, catches `enabled: false` configs)
+ */
+export function injectZreadMCPServer(
+	configs: Record<string, MCPServerConfig>,
+	sources: Record<string, SourceMeta>,
+	disabledServers: Set<string> = new Set(),
+	apiKey?: string,
+	discoveredNames: Set<string> = new Set(),
+): ZreadInjectionResult {
+	// Don't inject if user already has a zread server in the active configs
+	if (Object.keys(configs).some(isZreadServer)) {
+		return { configs, sources };
+	}
+
+	// Don't inject if any discovered server (even disabled/filtered) has the zread name
+	if ([...discoveredNames].some(isZreadServer)) {
+		return { configs, sources };
+	}
+
+	// Don't inject if "zread" is in the user's denylist
+	if ([...disabledServers].some(isZreadServer)) {
+		return { configs, sources };
+	}
+
+	if (!apiKey) {
+		return { configs, sources };
+	}
+
+	return {
+		configs: {
+			...configs,
+			[ZREAD_MCP_SERVER_NAME]: {
+				type: "http",
+				url: ZREAD_MCP_URL,
+				headers: {
+					Authorization: `Bearer ${stripBearerPrefix(apiKey)}`,
+				},
+			},
+		},
+		sources: {
+			...sources,
+			[ZREAD_MCP_SERVER_NAME]: {
+				provider: "zread",
+				providerName: "Zread (Z.AI)",
+				path: "builtin:zread",
+				level: "native",
+			},
+		},
+	};
 }

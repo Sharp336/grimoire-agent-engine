@@ -2372,6 +2372,17 @@ export const SETTINGS_SCHEMA = {
 		ui: { tab: "tools", label: "Web Search", description: "Enable the web_search tool for web searching" },
 	},
 
+	"mcp.zread.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			label: "Z.AI Code Search",
+			description:
+				"Enable the Zread MCP server for code reading, documentation search, and repository structure tools (requires Z.AI login)",
+		},
+	},
+
 	"browser.enabled": {
 		type: "boolean",
 		default: true,

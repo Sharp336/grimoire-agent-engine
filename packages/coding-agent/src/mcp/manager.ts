@@ -143,6 +143,8 @@ export interface MCPDiscoverOptions {
 	filterExa?: boolean;
 	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
 	filterBrowser?: boolean;
+	/** Whether to inject built-in Zread MCP server when Z.AI credentials are available (default: false) */
+	injectZread?: boolean;
 	/** Called when starting to connect to servers */
 	onConnecting?: (serverNames: string[]) => void;
 }
@@ -177,6 +179,7 @@ export class MCPManager {
 	#sources = new Map<string, SourceMeta>();
 	#authStorage: AuthStorage | null = null;
 	#onNotification?: (serverName: string, method: string, params: unknown) => void;
+	#injectZread = false;
 	#onToolsChanged?: (tools: CustomTool<TSchema, MCPToolDetails>[]) => void;
 	#onResourcesChanged?: (serverName: string, uri: string) => void;
 	#onPromptsChanged?: (serverName: string) => void;
@@ -304,10 +307,30 @@ export class MCPManager {
 	 * Returns tools and any connection errors.
 	 */
 	async discoverAndConnect(options?: MCPDiscoverOptions): Promise<MCPLoadResult> {
+		// Persist injectZread across reloads (e.g. /mcp reload calls with no options)
+		if (options?.injectZread !== undefined) {
+			this.#injectZread = options.injectZread;
+		}
+
+		// Resolve Zread API key: env var first, then OAuth/login credentials
+		let zreadApiKey: string | undefined;
+		if (this.#injectZread) {
+			zreadApiKey = Bun.env.ZAI_API_KEY;
+			if (!zreadApiKey && this.#authStorage) {
+				try {
+					zreadApiKey = await this.#authStorage.getApiKey("zai");
+				} catch {
+					// Auth resolution failed — injection will be skipped
+				}
+			}
+		}
+
 		const { configs, exaApiKeys, sources } = await loadAllMCPConfigs(this.cwd, {
 			enableProjectConfig: options?.enableProjectConfig,
 			filterExa: options?.filterExa,
 			filterBrowser: options?.filterBrowser,
+			injectZread: this.#injectZread,
+			zreadApiKey,
 		});
 		const result = await this.connectServers(configs, sources, options?.onConnecting);
 		result.exaApiKeys = exaApiKeys;

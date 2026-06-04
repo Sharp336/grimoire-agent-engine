@@ -1358,6 +1358,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				filterExa: true,
 				// Filter browser MCP servers when builtin browser tool is active
 				filterBrowser: settings.get("browser.enabled") ?? false,
+				// Inject Zread MCP server when user enables Code Search in settings
+				injectZread: settings.get("mcp.zread.enabled") ?? false,
 				cacheStorage: settings.getStorage(),
 				authStorage,
 			});
