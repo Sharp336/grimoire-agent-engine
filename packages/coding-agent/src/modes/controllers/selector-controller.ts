@@ -446,7 +446,11 @@ export class SelectorController {
 							if (isAuto) {
 								this.ctx.settings.setModelRole(role, roleValue);
 								this.ctx.session.setThinkingLevel(AUTO_THINKING, false);
-							} else if (concreteThinking && concreteThinking !== ThinkingLevel.Inherit) {
+							} else if (concreteThinking === ThinkingLevel.Inherit) {
+								// Inherit follows the global default and clears any live per-role
+								// override (incl. auto) that setModel's re-apply would otherwise keep.
+								this.ctx.session.setThinkingLevel(this.ctx.settings.get("defaultThinkingLevel"));
+							} else if (concreteThinking) {
 								this.ctx.session.setThinkingLevel(concreteThinking);
 							}
 							this.ctx.statusLine.invalidate();
