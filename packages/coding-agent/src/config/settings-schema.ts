@@ -105,7 +105,8 @@ export type StatusLineSegmentId =
 	| "cache_write"
 	| "cache_hit"
 	| "session_name"
-	| "usage";
+	| "usage"
+	| "hindsight";
 
 /** Submenu choice metadata. */
 export type SubmenuOption<V extends string = string> = {

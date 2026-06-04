@@ -1,6 +1,6 @@
 import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "../../../config/settings-schema";
 import type { AgentSession } from "../../../session/agent-session";
-import type { StatusLineSegmentOptions, StatusLineSettings } from "../status-line";
+import type { HindsightStatus, StatusLineSegmentOptions, StatusLineSettings } from "../status-line";
 
 export type {
 	StatusLinePreset,
@@ -55,6 +55,7 @@ export interface SegmentContext {
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 	} | null;
+	hindsight?: HindsightStatus | null;
 }
 
 export interface RenderedSegment {

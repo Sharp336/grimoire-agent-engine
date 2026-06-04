@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `hindsight` status-line segment that shows the active Hindsight backend's cached connection state inline with the existing status-line segments.
+
+### Fixed
+
+- Fixed the `usage` status-line segment to render provider-level quota windows when usage scopes include an account tier, matching OpenAI Codex subscription usage reports.
+
 ## [15.9.0] - 2026-06-04
 
 ### Breaking Changes
