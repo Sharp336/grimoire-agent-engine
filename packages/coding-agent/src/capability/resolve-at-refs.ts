@@ -17,6 +17,7 @@
 
 import * as fs from "node:fs";
 import * as path from "node:path";
+import { glob } from "@oh-my-pi/pi-natives";
 import { findRepoRoot, readFile } from "./fs";
 
 export interface ResolveAtRefsOptions {
@@ -64,6 +65,29 @@ async function realpathOrSelf(filePath: string): Promise<string> {
 		return await fs.promises.realpath(filePath);
 	} catch {
 		return filePath;
+	}
+}
+
+function toPosixPath(value: string): string {
+	return value.split(path.sep).join("/");
+}
+
+async function isIgnoredByGitignore(absPath: string, root: string): Promise<boolean> {
+	const relativePath = path.relative(root, absPath);
+	if (
+		relativePath === "" ||
+		relativePath === ".." ||
+		relativePath.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(relativePath)
+	) {
+		return true;
+	}
+	const pattern = toPosixPath(relativePath);
+	try {
+		const result = await glob({ pattern, path: root, hidden: true, gitignore: true, maxResults: 1 });
+		return !result.matches.some(match => match.path === pattern);
+	} catch {
+		return true;
 	}
 }
 
@@ -120,23 +144,30 @@ async function resolveContent(
 			continue;
 		}
 
+		if ((await isIgnoredByGitignore(absRefPath, rootDir)) || (await isIgnoredByGitignore(realRefPath, realRootDir))) {
+			resolved.push(`<!-- @${refPath}: ignored by gitignore -->`);
+			continue;
+		}
+
 		// Cycle detection
 		if (seen.has(realRefPath)) {
 			resolved.push(`<!-- @${refPath}: circular reference skipped -->`);
 			continue;
 		}
 
-		const refContent = await readFile(absRefPath);
+		const refContent = await readFile(realRefPath);
 		if (refContent === null) {
 			resolved.push(`<!-- @${refPath}: file not found -->`);
 			continue;
 		}
 
-		// Recursively resolve references in the included file
+		// Recursively resolve references in the included file. Use the real target
+		// path so nested refs in allowed symlinks are resolved from the target's
+		// directory, not the symlink's directory.
 		seen.add(realRefPath);
 		const innerResolved = await resolveContent(
 			refContent,
-			absRefPath,
+			realRefPath,
 			rootDir,
 			realRootDir,
 			seen,

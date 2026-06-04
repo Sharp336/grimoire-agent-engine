@@ -233,6 +233,45 @@ describe("resolveAtRefs", () => {
 		expect(result[0].content).toContain("real content");
 	});
 
+	it("resolves nested refs from symlink target directories", async () => {
+		const docsDir = path.join(tempDir, "docs");
+		fs.mkdirSync(docsDir, { recursive: true });
+		fs.writeFileSync(path.join(docsDir, "rules.md"), "@more.md");
+		fs.writeFileSync(path.join(docsDir, "more.md"), "nested symlink content\n");
+		fs.symlinkSync(path.join(docsDir, "rules.md"), path.join(tempDir, "link.md"));
+
+		const agentsMdPath = path.join(tempDir, "AGENTS.md");
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: "@link.md" }], { rootDir: tempDir });
+
+		expect(result[0].content).toContain("nested symlink content");
+		expect(result[0].content).not.toContain("file not found");
+	});
+
+	it("rejects gitignored refs", async () => {
+		fs.writeFileSync(path.join(tempDir, ".gitignore"), "secret.env\n");
+		fs.writeFileSync(path.join(tempDir, "secret.env"), "SECRET_TOKEN=value\n");
+
+		const agentsMdPath = path.join(tempDir, "AGENTS.md");
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: "@secret.env" }], { rootDir: tempDir });
+
+		expect(result[0].content).toContain("ignored by gitignore");
+		expect(result[0].content).not.toContain("SECRET_TOKEN");
+	});
+
+	it("rejects symlink refs whose targets are gitignored", async () => {
+		const docsDir = path.join(tempDir, "docs");
+		fs.mkdirSync(docsDir, { recursive: true });
+		fs.writeFileSync(path.join(tempDir, ".gitignore"), "docs/secret.env\n");
+		fs.writeFileSync(path.join(docsDir, "secret.env"), "SECRET_TOKEN=value\n");
+		fs.symlinkSync(path.join(docsDir, "secret.env"), path.join(tempDir, "link.env"));
+
+		const agentsMdPath = path.join(tempDir, "AGENTS.md");
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: "@link.env" }], { rootDir: tempDir });
+
+		expect(result[0].content).toContain("ignored by gitignore");
+		expect(result[0].content).not.toContain("SECRET_TOKEN");
+	});
+
 	it("uses an independent containment root for each context file", async () => {
 		fs.mkdirSync(path.join(tempHomeDir, ".git"), { recursive: true });
 		fs.writeFileSync(path.join(tempDir, "rules.md"), "project rules\n");
