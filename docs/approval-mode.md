@@ -6,7 +6,7 @@ Tool approval has two independent inputs:
    - `read`: reads data or updates UI-only session metadata.
    - `write`: mutates workspace/session state but does not execute arbitrary code.
    - `exec`: executes code, shells out, drives a browser, spawns agents, or performs similarly broad actions.
-2. **User policy** — `tools.approval.<toolName>: allow | deny | prompt` overrides the mode for that tool unless a non-yolo safety override forces a prompt.
+2. **User policy** — `tools.approval.<toolName>: allow | deny | prompt` overrides the mode for that tool unless a non-yolo safety override forces a prompt. `bash` also supports command-glob maps.
 
 Tools without an `approval` declaration are treated as `exec`. This is the safe default for MCP and unknown custom tools.
 
@@ -30,15 +30,20 @@ Configure with `tools.approvalMode`:
 tools:
   approvalMode: write
   approval:
-    bash: prompt
+    bash:
+      "*": prompt
+      "bun test *": allow
+      "rm *": deny
     read: allow
     mcp__filesystem__delete: deny
 ```
 
+For `bash`, `tools.approval.bash` may be either a scalar policy for every bash call or a command-glob map. Bash command globs match the full command string; `*` matches any sequence and `?` matches one character. If more than one entry matches, the later entry wins. Object-form policies are only supported for `bash`.
+
 Resolution per tool call:
 
 1. Compute the tool's approval decision from `tool.approval(args)`; omitted means `exec`.
-2. Normalize `tools.approval.<tool>` if present; invalid values are ignored.
+2. Normalize `tools.approval.<tool>` if present; invalid values are ignored. For `bash`, object-form command-glob maps are matched against the full command string.
 3. In `yolo` mode, the user policy is used when present; otherwise the call is allowed. Safety `override` reasons do not force a prompt in `yolo`.
 4. In non-yolo modes, if the tool sets `override: true`, `deny` is blocked and all other cases prompt, even if user policy says `allow`.
 5. Otherwise, a valid user policy wins.

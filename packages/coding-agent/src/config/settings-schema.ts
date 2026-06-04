@@ -2080,7 +2080,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Tool Approval Policies",
 			description:
-				"Per-tool approval policies. Set to 'allow' to auto-approve, 'prompt' to require confirmation, or 'deny' to block. Overrides are honored in every approval mode.",
+				"Per-tool approval policies. Set to 'allow' to auto-approve, 'prompt' to require confirmation, or 'deny' to block. For bash, use a command glob map to scope policies to specific command shapes. Overrides are honored in every approval mode.",
 		},
 	},
 

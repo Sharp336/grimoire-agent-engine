@@ -2,7 +2,7 @@
  * Tool approval resolution.
  *
  * Approval policy is declared by each tool. This module only knows how to:
- * - normalize user `tools.approval.<tool>: allow | deny | prompt` overrides,
+ * - normalize user `tools.approval.<tool>: allow | deny | prompt` overrides and bash command-glob maps,
  * - compare a tool capability tier against the active approval mode,
  * - format the generic approval prompt body.
  */
@@ -44,6 +44,48 @@ function normalizePolicy(value: unknown): ApprovalPolicy | undefined {
 	if (typeof value !== "string") return undefined;
 	const lowered = value.trim().toLowerCase();
 	return POLICY_VALUES.has(lowered as ApprovalPolicy) ? (lowered as ApprovalPolicy) : undefined;
+}
+
+function escapeRegExpChar(char: string): string {
+	return /[\\^$+?.()|[\]{}]/.test(char) ? `\\${char}` : char;
+}
+
+function globMatches(pattern: string, value: string): boolean {
+	let source = "^";
+	for (const char of pattern) {
+		if (char === "*") {
+			source += "[\\s\\S]*";
+		} else if (char === "?") {
+			source += "[\\s\\S]";
+		} else {
+			source += escapeRegExpChar(char);
+		}
+	}
+	source += "$";
+	return new RegExp(source).test(value);
+}
+
+function getBashCommand(args: unknown): string {
+	if (!args || typeof args !== "object") return "";
+	const command = (args as Record<string, unknown>).command;
+	return typeof command === "string" ? command : "";
+}
+
+function resolveUserPolicy(tool: ApprovalSubject, args: unknown, value: unknown): ApprovalPolicy | undefined {
+	const policy = normalizePolicy(value);
+	if (policy || tool.name !== "bash" || !value || typeof value !== "object" || Array.isArray(value)) {
+		return policy;
+	}
+
+	let matched: ApprovalPolicy | undefined;
+	const command = getBashCommand(args);
+	for (const [pattern, candidate] of Object.entries(value as Record<string, unknown>)) {
+		const patternPolicy = normalizePolicy(candidate);
+		if (patternPolicy && globMatches(pattern, command)) {
+			matched = patternPolicy;
+		}
+	}
+	return matched;
 }
 
 function isToolTier(value: unknown): value is ToolTier {
@@ -97,7 +139,9 @@ export function resolveApproval(
 	userConfig: Record<string, unknown> = {},
 ): ResolvedApproval {
 	const decision = getToolDecision(tool, args);
-	const userPolicy = Object.hasOwn(userConfig, tool.name) ? normalizePolicy(userConfig[tool.name]) : undefined;
+	const userPolicy = Object.hasOwn(userConfig, tool.name)
+		? resolveUserPolicy(tool, args, userConfig[tool.name])
+		: undefined;
 
 	if (mode === "yolo") {
 		return { policy: userPolicy ?? "allow", tier: decision.tier, override: false };

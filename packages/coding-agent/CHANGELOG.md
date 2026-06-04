@@ -83,6 +83,10 @@
 - Fixed subagent slow-model priority falling through to older Claude Opus aliases when Opus 4.8 is available by adding Opus 4.8 and 4.7 aliases ahead of older Opus fallbacks ([#1753](https://github.com/can1357/oh-my-pi/issues/1753)).
 - Fixed the web-search provider selectors in TUI settings/setup to derive from the shared provider metadata, so newly added providers cannot be omitted from the preference list.
 
+### Added
+
+- Added command-glob `tools.approval.bash` policies so users can allow, prompt, or deny specific bash command shapes without changing approval behavior for every bash call.
+
 ## [15.8.3] - 2026-06-03
 
 ### Fixed

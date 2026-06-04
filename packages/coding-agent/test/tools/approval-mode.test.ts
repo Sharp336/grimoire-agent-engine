@@ -123,6 +123,31 @@ describe("tools.approvalMode setting", () => {
 		}
 	});
 
+	it("honors bash command-glob approval policies through session settings", async () => {
+		const { tempDir, session, settings } = await makeSession({
+			"tools.approvalMode": "always-ask",
+			"tools.approval": { bash: { "echo allowed": "allow" } },
+		});
+		tempDirs.push(tempDir);
+		try {
+			const bash = session.getToolByName("bash");
+			if (!bash) throw new Error("Expected bash tool");
+
+			const allowed = await bash.execute("glob-allowed", { command: "echo allowed" }, undefined, undefined, {
+				settings,
+			} as AgentToolContext);
+			expect(textOf(allowed)).toContain("allowed");
+
+			await expect(
+				bash.execute("glob-blocked", { command: "echo blocked" }, undefined, undefined, {
+					settings,
+				} as AgentToolContext),
+			).rejects.toThrow(/requires approval but no interactive UI available/);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	it("per-tool prompt overrides can tighten yolo mode", async () => {
 		const { tempDir, session, settings } = await makeSession({
 			"tools.approvalMode": "yolo",

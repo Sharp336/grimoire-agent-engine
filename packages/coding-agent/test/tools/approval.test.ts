@@ -106,6 +106,111 @@ describe("resolveApproval override and user policy", () => {
 		expect(resolveApproval(writeTool, {}, "always-ask", { write: "yes" }).policy).toBe("prompt");
 		expect(resolveApproval(writeTool, {}, "write", { write: 1 }).policy).toBe("allow");
 	});
+
+	it("supports bash command-glob policies", () => {
+		const bash = tool("bash", "exec");
+		const policies = {
+			bash: {
+				"echo *": "allow",
+				"echo secret*": "deny",
+				"bun test ?": "prompt",
+			},
+		};
+
+		expect(resolveApproval(bash, { command: "echo ok" }, "always-ask", policies).policy).toBe("allow");
+		expect(resolveApproval(bash, { command: "echo secret.txt" }, "yolo", policies).policy).toBe("deny");
+		expect(resolveApproval(bash, { command: "bun test x" }, "yolo", policies).policy).toBe("prompt");
+		expect(resolveApproval(bash, { command: "bun test xy" }, "yolo", policies).policy).toBe("allow");
+	});
+
+	it("uses the last matching bash glob policy", () => {
+		const bash = tool("bash", "exec");
+		const policies = {
+			bash: {
+				"*": "prompt",
+				"echo *": "allow",
+			},
+		};
+
+		expect(resolveApproval(bash, { command: "echo ok" }, "yolo", policies).policy).toBe("allow");
+		expect(resolveApproval(bash, { command: "bun test" }, "yolo", policies).policy).toBe("prompt");
+	});
+
+	it("ignores invalid bash glob policies and non-bash object policies", () => {
+		const bash = tool("bash", "exec");
+		const writeTool = tool("write", "write");
+
+		expect(resolveApproval(bash, { command: "echo ok" }, "always-ask", { bash: { "echo *": "yes" } }).policy).toBe(
+			"prompt",
+		);
+		expect(resolveApproval(writeTool, {}, "always-ask", { write: { "*": "allow" } }).policy).toBe("prompt");
+	});
+
+	it("keeps safety override precedence with bash glob policies", () => {
+		const critical = tool("bash", { tier: "exec", override: true, reason: "Critical pattern detected" });
+
+		expect(resolveApproval(critical, { command: "rm -rf /" }, "write", { bash: { "rm *": "allow" } })).toMatchObject({
+			policy: "prompt",
+			override: true,
+			reason: "Critical pattern detected",
+		});
+		expect(resolveApproval(critical, { command: "rm -rf /" }, "write", { bash: { "rm *": "deny" } })).toMatchObject({
+			policy: "deny",
+			override: true,
+		});
+		expect(resolveApproval(critical, { command: "rm -rf /" }, "yolo", { bash: { "rm *": "prompt" } })).toMatchObject({
+			policy: "prompt",
+			override: false,
+		});
+	});
+
+	it("handles empty command and empty pattern correctly", () => {
+		const bash = tool("bash", "exec");
+		expect(resolveApproval(bash, { command: "" }, "yolo", { bash: { "": "deny" } }).policy).toBe("deny");
+		expect(resolveApproval(bash, { command: "" }, "yolo", { bash: { "echo *": "deny" } }).policy).toBe("allow");
+		expect(resolveApproval(bash, { command: "echo hi" }, "yolo", { bash: { "": "deny" } }).policy).toBe("allow");
+	});
+
+	it("skips invalid map entries and non-string pattern values", () => {
+		const bash = tool("bash", "exec");
+		const policies = {
+			bash: {
+				"echo *": "allow",
+				"rm *": null as unknown as string,
+				"cat *": 42 as unknown as string,
+				"echo secret*": "deny",
+			},
+		};
+		expect(resolveApproval(bash, { command: "echo hi" }, "yolo", policies).policy).toBe("allow");
+		expect(resolveApproval(bash, { command: "echo secret.txt" }, "yolo", policies).policy).toBe("deny");
+	});
+
+	it("treats regex special chars in patterns as literals", () => {
+		const bash = tool("bash", "exec");
+		// The pattern contains literal . (dot), not regex wildcard
+		expect(resolveApproval(bash, { command: "echo a.b" }, "yolo", { bash: { "echo a.b": "deny" } }).policy).toBe(
+			"deny",
+		);
+		// The pattern contains literal + (plus), not regex quantifier
+		expect(resolveApproval(bash, { command: "echo a+b" }, "yolo", { bash: { "echo a+b": "deny" } }).policy).toBe(
+			"deny",
+		);
+		// Mismatch because dot is literal, not regex wildcard
+		expect(resolveApproval(bash, { command: "echo axb" }, "yolo", { bash: { "echo a.b": "deny" } }).policy).toBe(
+			"allow",
+		);
+	});
+
+	it("uses insertion order for string keys (last matching wins)", () => {
+		const bash = tool("bash", "exec");
+		const policies = {
+			bash: {
+				"echo *": "prompt",
+				"echo hello": "allow",
+			},
+		};
+		expect(resolveApproval(bash, { command: "echo hello" }, "yolo", policies).policy).toBe("allow");
+	});
 });
 
 describe("MCP fallback and prompt formatting", () => {
