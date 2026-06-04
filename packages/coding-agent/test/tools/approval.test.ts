@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LSP_READONLY_ACTIONS } from "@oh-my-pi/pi-coding-agent/lsp";
 import {
 	type ApprovalMode,
@@ -185,6 +186,30 @@ describe("resolveApproval override and user policy", () => {
 
 		expect(resolveApproval(bash, { command: "echo ok" }, "yolo", policies).policy).toBe("allow");
 		expect(resolveApproval(bash, { command: "bun test" }, "yolo", policies).policy).toBe("prompt");
+	});
+
+	it("keeps higher-precedence bash glob overrides after inherited broad policies", () => {
+		const bash = tool("bash", "exec");
+		const settings = Settings.isolated({
+			"tools.approval": {
+				bash: {
+					"bun test *": "prompt",
+					"*": "prompt",
+				},
+			},
+		});
+		settings.override("tools.approval", {
+			bash: {
+				"bun test *": "allow",
+			},
+		});
+
+		expect(
+			resolveApproval(bash, { command: "bun test packages/coding-agent" }, "yolo", settings.get("tools.approval")),
+		).toMatchObject({
+			policy: "allow",
+			matchedPattern: "bun test *",
+		});
 	});
 
 	it("ignores invalid bash glob policies and non-bash object policies", () => {

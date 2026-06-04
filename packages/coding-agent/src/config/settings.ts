@@ -848,6 +848,9 @@ export class Settings {
 			const baseVal = base[key];
 
 			if (override === undefined) continue;
+			if (Object.hasOwn(result, key)) {
+				delete result[key];
+			}
 
 			if (
 				typeof override === "object" &&
