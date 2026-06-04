@@ -1,3 +1,4 @@
+import { $env } from "@oh-my-pi/pi-utils";
 import type { AgentStorage } from "../../../session/agent-storage";
 import { SearchProviderError, type SearchProviderId, type SearchSource } from "../../../web/search/types";
 import { dateToAgeSeconds } from "../utils";
@@ -61,11 +62,13 @@ export const SEARCH_HARD_TIMEOUT_ENV = "OMP_WEB_SEARCH_TIMEOUT_MS";
  * slow LLM-backed search providers without teaching the agent to pass a
  * per-call timeout; invalid or non-positive values keep the safe 60s default.
  */
-export function getSearchHardTimeoutMs(env: Record<string, string | undefined> = process.env): number {
+export function getSearchHardTimeoutMs(env: Record<string, string | undefined> = $env): number {
 	const raw = env[SEARCH_HARD_TIMEOUT_ENV];
 	if (raw === undefined) return SEARCH_HARD_TIMEOUT_MS;
-	const parsed = Number(raw);
-	return Number.isSafeInteger(parsed) && parsed > 0 ? parsed : SEARCH_HARD_TIMEOUT_MS;
+	const normalized = raw.trim();
+	if (!/^[1-9]\d*$/.test(normalized)) return SEARCH_HARD_TIMEOUT_MS;
+	const parsed = Number.parseInt(normalized, 10);
+	return Number.isSafeInteger(parsed) ? parsed : SEARCH_HARD_TIMEOUT_MS;
 }
 
 /**
@@ -79,7 +82,7 @@ export function getSearchHardTimeoutMs(env: Record<string, string | undefined> =
  * because the user's Esc is never delivered to the native layer.
  *
  * @param signal - Caller cancellation signal, if any.
- * @param ms - Hard timeout in milliseconds. Defaults to {@link getSearchHardTimeoutMs}.
+ * @param ms - Hard timeout in milliseconds. Defaults to `getSearchHardTimeoutMs()`.
  */
 export function withHardTimeout(signal: AbortSignal | undefined, ms: number = getSearchHardTimeoutMs()): AbortSignal {
 	const timeout = AbortSignal.timeout(ms);

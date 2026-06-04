@@ -40,8 +40,14 @@ const fakeStorage = {
 } as unknown as AgentStorage;
 
 describe("withHardTimeout", () => {
+	const originalSearchHardTimeout = process.env[SEARCH_HARD_TIMEOUT_ENV];
+
 	afterEach(() => {
-		delete process.env[SEARCH_HARD_TIMEOUT_ENV];
+		if (originalSearchHardTimeout === undefined) {
+			delete process.env[SEARCH_HARD_TIMEOUT_ENV];
+		} else {
+			process.env[SEARCH_HARD_TIMEOUT_ENV] = originalSearchHardTimeout;
+		}
 	});
 
 	it("returns a signal that aborts on the hard timeout when no caller signal is supplied", async () => {
@@ -72,9 +78,20 @@ describe("withHardTimeout", () => {
 		expect(signal.aborted).toBe(true);
 	});
 
+	it("uses the default hard timeout when OMP_WEB_SEARCH_TIMEOUT_MS is unset", () => {
+		expect(getSearchHardTimeoutMs({})).toBe(SEARCH_HARD_TIMEOUT_MS);
+	});
+
+	it("parses positive decimal env overrides", () => {
+		expect(getSearchHardTimeoutMs({ [SEARCH_HARD_TIMEOUT_ENV]: "120000" })).toBe(120_000);
+		expect(getSearchHardTimeoutMs({ [SEARCH_HARD_TIMEOUT_ENV]: " 120000 " })).toBe(120_000);
+	});
+
 	it("ignores invalid env overrides to preserve the safety net", () => {
 		expect(getSearchHardTimeoutMs({ [SEARCH_HARD_TIMEOUT_ENV]: "0" })).toBe(SEARCH_HARD_TIMEOUT_MS);
 		expect(getSearchHardTimeoutMs({ [SEARCH_HARD_TIMEOUT_ENV]: "-1" })).toBe(SEARCH_HARD_TIMEOUT_MS);
+		expect(getSearchHardTimeoutMs({ [SEARCH_HARD_TIMEOUT_ENV]: "1e3" })).toBe(SEARCH_HARD_TIMEOUT_MS);
+		expect(getSearchHardTimeoutMs({ [SEARCH_HARD_TIMEOUT_ENV]: "0x10" })).toBe(SEARCH_HARD_TIMEOUT_MS);
 		expect(getSearchHardTimeoutMs({ [SEARCH_HARD_TIMEOUT_ENV]: "not-a-number" })).toBe(SEARCH_HARD_TIMEOUT_MS);
 	});
 });
