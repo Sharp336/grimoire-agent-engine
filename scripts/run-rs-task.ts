@@ -53,7 +53,21 @@ if (taskName !== "fmt:rs" && !(isCI() || (await hasRustAffectingChanges()))) {
 	process.exit(0);
 }
 
-for (const command of TASK_COMMANDS[taskName]) {
+async function hasNextest(): Promise<boolean> {
+	try {
+		const res = await $`cargo nextest --version`.quiet().nothrow();
+		return res.exitCode === 0;
+	} catch {
+		return false;
+	}
+}
+
+let commands = TASK_COMMANDS[taskName];
+if (taskName === "test:rs" && !(await hasNextest())) {
+	commands = [["cargo", "test", "--workspace"]];
+}
+
+for (const command of commands) {
 	const exitCode = await runCommand(command);
 	if (exitCode !== 0) {
 		process.exit(exitCode);

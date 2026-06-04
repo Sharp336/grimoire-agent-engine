@@ -484,7 +484,8 @@ describe("pi-natives", () => {
 					session
 						.start(
 							{
-								command: 'bash -lc "set -m; sleep 30 & disown; sleep 30"',
+								command: 'bash -c "set -m; sleep 30 & disown; sleep 30"',
+								shell: 'bash',
 								cwd: testDir,
 								timeoutMs: 150,
 								cols: 120,
