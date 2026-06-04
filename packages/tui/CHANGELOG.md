@@ -9,6 +9,7 @@
 ### Fixed
 
 - Kept streaming lines outside the declared stable prefix out of native scrollback so only newly stable output is committed without clearing existing terminal history
+- Render fenced `text`/`plain` Markdown blocks without visible backtick markers so plain assistant examples read as preformatted text instead of code fences.
 
 ## [15.9.0] - 2026-06-04
 
