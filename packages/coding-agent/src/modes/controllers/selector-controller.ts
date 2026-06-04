@@ -415,32 +415,37 @@ export class SelectorController {
 				this.ctx.session.modelRegistry,
 				this.ctx.session.scopedModels,
 				async (model, role, thinkingLevel, selector) => {
-					// `auto` is session-global: never baked into a per-role model value
-					// (it can't round-trip through `model:<level>`). Apply it to the session
-					// separately and persist via `defaultThinkingLevel`.
 					const isAuto = thinkingLevel === AUTO_THINKING;
 					const concreteThinking = isAuto ? undefined : thinkingLevel;
+					const selectorValue = selector ?? `${model.provider}/${model.id}`;
+					// `:auto` is a first-class per-role selector: persist it on the role and
+					// enter auto in-session without writing the global `defaultThinkingLevel`
+					// (which stays the inherited default for bare roles).
+					const roleValue = formatModelSelectorValue(selectorValue, thinkingLevel);
 					try {
 						if (role === null) {
-							// Temporary: update agent state but don't persist the model to settings
+							// Temporary: session-only model swap, nothing persisted.
+							// setModelTemporary re-resolves the thinking level for the new model.
 							await this.ctx.session.setModelTemporary(model);
-							if (isAuto) {
-								this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
-							}
 							this.ctx.statusLine.invalidate();
 							this.ctx.updateEditorBorderColor();
 							this.ctx.showStatus(`Temporary model: ${selector ?? model.id}`);
 							done();
 							this.ctx.ui.requestRender();
 						} else if (role === "default") {
-							// Default: update agent state and persist
+							// NOTE: live-apply is keyed on "default" assuming it's the active role;
+							// ctrl+p cycling can make another role active, so editing it won't update live.
+							// Default: switch the live model and persist the role value
+							// (including `:auto`). setModel persists for concrete/inherit; for
+							// auto we write `:auto` explicitly and enter auto in-session.
 							await this.ctx.session.setModel(model, role, {
 								selector,
 								thinkingLevel: concreteThinking,
-								persist: true,
+								persist: !isAuto,
 							});
 							if (isAuto) {
-								this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
+								this.ctx.settings.setModelRole(role, roleValue);
+								this.ctx.session.setThinkingLevel(AUTO_THINKING, false);
 							} else if (concreteThinking && concreteThinking !== ThinkingLevel.Inherit) {
 								this.ctx.session.setThinkingLevel(concreteThinking);
 							}
@@ -449,14 +454,9 @@ export class SelectorController {
 							this.ctx.showStatus(`Default model: ${selector ?? model.id}`);
 							// Don't call done() - selector stays open for role assignment
 						} else {
-							// Other roles (smol, slow): just update settings, not current model
-							this.ctx.settings.setModelRole(
-								role,
-								formatModelSelectorValue(selector ?? `${model.provider}/${model.id}`, concreteThinking),
-							);
-							if (isAuto) {
-								this.ctx.session.setThinkingLevel(AUTO_THINKING, true);
-							}
+							// Other roles (smol, slow, ...): persist only; `:auto` lives on the
+							// role and doesn't affect the active session or global default.
+							this.ctx.settings.setModelRole(role, roleValue);
 							const roleInfo = getRoleInfo(role, settings);
 							const roleLabel = roleInfo?.name ?? role;
 							this.ctx.showStatus(`${roleLabel} model: ${selector ?? model.id}`);

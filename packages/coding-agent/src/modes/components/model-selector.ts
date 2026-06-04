@@ -280,8 +280,9 @@ export class ModelSelectorComponent extends Container {
 			if (resolved.model) {
 				this.#roles[role] = {
 					model: resolved.model,
-					thinkingLevel:
-						resolved.explicitThinkingLevel && resolved.thinkingLevel !== undefined
+					thinkingLevel: resolved.auto
+						? AUTO_THINKING
+						: resolved.explicitThinkingLevel && resolved.thinkingLevel !== undefined
 							? resolved.thinkingLevel
 							: ThinkingLevel.Inherit,
 				};

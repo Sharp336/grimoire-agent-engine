@@ -105,6 +105,34 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.thinkingLevel).toBe("off");
 	});
 
+	it("enters auto mode when cycling into a role configured with :auto", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const slowModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+
+		await createSession({
+			initialModelId: defaultModel.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: {
+				default: `${defaultModel.provider}/${defaultModel.id}:high`,
+				slow: `${slowModel.provider}/${slowModel.id}:auto`,
+			},
+		});
+
+		expect(session.isAutoThinking).toBe(false);
+
+		const toSlow = await session.cycleRoleModels(["default", "slow"]);
+		expect(toSlow?.role).toBe("slow");
+		expect(toSlow?.model.id).toBe(slowModel.id);
+		expect(session.isAutoThinking).toBe(true);
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+
+		// Cycling back into a concrete role leaves auto.
+		const toDefault = await session.cycleRoleModels(["default", "slow"]);
+		expect(toDefault?.role).toBe("default");
+		expect(session.isAutoThinking).toBe(false);
+		expect(session.thinkingLevel).toBe(Effort.High);
+	});
+
 	it("preserves current thinking when switching into default/no-suffix role", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const slowModel = getAnthropicModelOrThrow("claude-sonnet-4-6");

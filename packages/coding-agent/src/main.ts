@@ -644,16 +644,19 @@ async function buildSessionOptions(
 
 	// Scoped models for Ctrl+P cycling - fill in default thinking levels when not explicit
 	if (scopedModels.length > 0) {
-		// `auto` is a session-level concept only; per-scoped-model (Ctrl+P) thinking
-		// overrides stay concrete, so coerce the auto default to "unset" here.
+		// Per-scoped-model (Ctrl+P) `:auto` is carried via the `auto` flag below; the
+		// global `auto` default is still coerced to "unset" for the concrete level so a
+		// bare scoped entry doesn't silently inherit auto.
 		const defaultThinkingLevelSetting = activeSettings.get("defaultThinkingLevel");
 		const defaultThinkingLevel =
 			defaultThinkingLevelSetting === AUTO_THINKING ? undefined : defaultThinkingLevelSetting;
+
 		options.scopedModels = scopedModels.map(scopedModel => ({
 			model: scopedModel.model,
 			thinkingLevel: scopedModel.explicitThinkingLevel
 				? (scopedModel.thinkingLevel ?? defaultThinkingLevel)
 				: defaultThinkingLevel,
+			auto: scopedModel.auto,
 		}));
 	}
 

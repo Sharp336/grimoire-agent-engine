@@ -32,6 +32,7 @@ import type { AuthStorage } from "../session/auth-storage";
 import { SKILL_PROMPT_MESSAGE_TYPE } from "../session/messages";
 import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
 import type { ContextFileEntry } from "../tools";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
@@ -1150,6 +1151,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				model,
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
+				auto,
 				authFallbackUsed,
 			} = await awaitAbortable(
 				resolveModelOverrideWithAuthFallback(
@@ -1171,13 +1173,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				progress.contextWindow = model.contextWindow;
 			}
 			if (model) {
-				progress.resolvedModel = explicitThinkingLevel
-					? `${model.provider}/${model.id}:${resolvedThinkingLevel}`
-					: `${model.provider}/${model.id}`;
+				let thinkingSuffix = "";
+				if (auto) thinkingSuffix = ":auto";
+				else if (explicitThinkingLevel) thinkingSuffix = `:${resolvedThinkingLevel}`;
+				progress.resolvedModel = `${model.provider}/${model.id}${thinkingSuffix}`;
 			}
-			const effectiveThinkingLevel = explicitThinkingLevel
+			let effectiveThinkingLevel: ConfiguredThinkingLevel | undefined = explicitThinkingLevel
 				? resolvedThinkingLevel
 				: (thinkingLevel ?? resolvedThinkingLevel);
+			if (auto) {
+				effectiveThinkingLevel = AUTO_THINKING;
+			}
 
 			const sessionManager = sessionFile
 				? await awaitAbortable(SessionManager.open(sessionFile))

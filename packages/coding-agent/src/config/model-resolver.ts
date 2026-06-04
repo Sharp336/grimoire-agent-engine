@@ -16,7 +16,12 @@ import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
-import { parseThinkingLevel, resolveThinkingLevelForModel } from "../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	parseThinkingLevel,
+	resolveThinkingLevelForModel,
+} from "../thinking";
 import { isAuthenticated, kNoAuth, MODEL_ROLE_IDS, type ModelRegistry, type ModelRole } from "./model-registry";
 import type { Settings } from "./settings";
 
@@ -27,6 +32,7 @@ export interface ScopedModel {
 	model: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel: boolean;
+	auto?: boolean;
 }
 
 /**
@@ -59,7 +65,12 @@ export function formatModelString(model: Model<Api>): string {
 	return `${model.provider}/${model.id}`;
 }
 
-export function formatModelSelectorValue(selector: string, thinkingLevel: ThinkingLevel | undefined): string {
+/**
+ * Format a `selector:level` model value. `inherit`/`undefined` yield the bare
+ * selector; `auto` (the session-global selector) round-trips as `selector:auto`.
+ * The resolver decodes `:auto` back into the `auto` flag (never a concrete level).
+ */
+export function formatModelSelectorValue(selector: string, thinkingLevel: ConfiguredThinkingLevel | undefined): string {
 	return thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit ? `${selector}:${thinkingLevel}` : selector;
 }
 
@@ -413,6 +424,8 @@ export interface ParsedModelResult {
 	thinkingLevel?: ThinkingLevel;
 	warning: string | undefined;
 	explicitThinkingLevel: boolean;
+	/** True when the thinking suffix was `:auto` (session-global; never a concrete level). */
+	auto?: boolean;
 }
 
 /**
@@ -449,19 +462,22 @@ function parseModelPatternWithContext(
 
 	const prefix = pattern.substring(0, lastColonIndex);
 	const suffix = pattern.substring(lastColonIndex + 1);
-
+	// A valid concrete level OR the `:auto` selector. `:auto` is session-global — it
+	// can't be a concrete `ThinkingLevel`, so it surfaces as the `auto` flag with
+	// `thinkingLevel` left undefined (the clamp/provider path must never receive it).
 	const parsedThinkingLevel = parseThinkingLevel(suffix);
-	if (parsedThinkingLevel) {
-		// Valid thinking level - recurse on prefix and use this level
+	const isAutoSuffix = suffix === AUTO_THINKING;
+	if (parsedThinkingLevel || isAutoSuffix) {
 		const result = parseModelPatternWithContext(prefix, availableModels, context, options);
 		if (result.model) {
-			// Only use this thinking level if no warning from inner recursion
-			const explicitThinkingLevel = !result.warning;
+			// Honor the suffix only if the inner recursion produced no warning.
+			const valid = !result.warning;
 			return {
 				model: result.model,
-				thinkingLevel: explicitThinkingLevel ? parsedThinkingLevel : undefined,
+				thinkingLevel: !isAutoSuffix && valid ? parsedThinkingLevel : undefined,
+				auto: isAutoSuffix && valid,
 				warning: result.warning,
-				explicitThinkingLevel,
+				explicitThinkingLevel: !isAutoSuffix && valid,
 			};
 		}
 		return result;
@@ -595,6 +611,8 @@ export interface ResolvedModelRoleValue {
 	model: Model<Api> | undefined;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel: boolean;
+	/** True when the role value used `:auto`. Routed to session auto mode, never the provider. */
+	auto?: boolean;
 	warning: string | undefined;
 }
 
@@ -629,6 +647,7 @@ export function resolveModelRoleValue(
 					? (resolveThinkingLevelForModel(resolved.model, resolved.thinkingLevel) ?? resolved.thinkingLevel)
 					: resolved.thinkingLevel,
 				explicitThinkingLevel: resolved.explicitThinkingLevel,
+				auto: resolved.auto,
 				warning: resolved.warning,
 			};
 		}
@@ -717,18 +736,18 @@ export function resolveModelOverride(
 	modelPatterns: string[],
 	modelRegistry: ModelLookupRegistry,
 	settings?: Settings,
-): { model?: Model<Api>; thinkingLevel?: ThinkingLevel; explicitThinkingLevel: boolean } {
+): { model?: Model<Api>; thinkingLevel?: ThinkingLevel; explicitThinkingLevel: boolean; auto?: boolean } {
 	if (modelPatterns.length === 0) return { explicitThinkingLevel: false };
 	const availableModels = modelRegistry.getAvailable();
 	const matchPreferences = { usageOrder: settings?.getStorage()?.getModelUsageOrder() };
 	for (const pattern of modelPatterns) {
-		const { model, thinkingLevel, explicitThinkingLevel } = resolveModelRoleValue(pattern, availableModels, {
+		const { model, thinkingLevel, explicitThinkingLevel, auto } = resolveModelRoleValue(pattern, availableModels, {
 			settings,
 			matchPreferences,
 			modelRegistry,
 		});
 		if (model) {
-			return { model, thinkingLevel, explicitThinkingLevel };
+			return { model, thinkingLevel, explicitThinkingLevel, auto };
 		}
 	}
 	return { explicitThinkingLevel: false };
@@ -764,6 +783,7 @@ export async function resolveModelOverrideWithAuthFallback(
 	model?: Model<Api>;
 	thinkingLevel?: ThinkingLevel;
 	explicitThinkingLevel: boolean;
+	auto?: boolean;
 	authFallbackUsed: boolean;
 }> {
 	const primary = resolveModelOverride(modelPatterns, modelRegistry, settings);
@@ -799,7 +819,7 @@ export function resolveRoleSelection(
 	settings: Settings,
 	availableModels: Model<Api>[],
 	modelRegistry?: CanonicalModelRegistry,
-): { model: Model<Api>; thinkingLevel?: ThinkingLevel } | undefined {
+): { model: Model<Api>; thinkingLevel?: ThinkingLevel; auto?: boolean } | undefined {
 	const matchPreferences = { usageOrder: settings.getStorage()?.getModelUsageOrder() };
 	for (const role of roles) {
 		const resolved = resolveModelRoleValue(settings.getModelRole(role), availableModels, {
@@ -808,7 +828,7 @@ export function resolveRoleSelection(
 			modelRegistry,
 		});
 		if (resolved.model) {
-			return { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			return { model: resolved.model, thinkingLevel: resolved.thinkingLevel, auto: resolved.auto };
 		}
 	}
 	return undefined;
@@ -818,19 +838,25 @@ function resolveExactCanonicalScopePattern(
 	pattern: string,
 	modelRegistry: Pick<ModelRegistry, "getCanonicalVariants">,
 	availableModels: Model<Api>[],
-): { models: Model<Api>[]; thinkingLevel?: ThinkingLevel; explicitThinkingLevel: boolean } | undefined {
+): { models: Model<Api>[]; thinkingLevel?: ThinkingLevel; explicitThinkingLevel: boolean; auto?: boolean } | undefined {
 	const lastColonIndex = pattern.lastIndexOf(":");
 	let canonicalId = pattern;
 	let thinkingLevel: ThinkingLevel | undefined;
 	let explicitThinkingLevel = false;
+	let auto = false;
 
 	if (lastColonIndex !== -1) {
 		const suffix = pattern.substring(lastColonIndex + 1);
-		const parsedThinkingLevel = parseThinkingLevel(suffix);
-		if (parsedThinkingLevel) {
+		if (suffix === AUTO_THINKING) {
 			canonicalId = pattern.substring(0, lastColonIndex);
-			thinkingLevel = parsedThinkingLevel;
-			explicitThinkingLevel = true;
+			auto = true;
+		} else {
+			const parsedThinkingLevel = parseThinkingLevel(suffix);
+			if (parsedThinkingLevel) {
+				canonicalId = pattern.substring(0, lastColonIndex);
+				thinkingLevel = parsedThinkingLevel;
+				explicitThinkingLevel = true;
+			}
 		}
 	}
 
@@ -841,7 +867,7 @@ function resolveExactCanonicalScopePattern(
 		return undefined;
 	}
 
-	return { models: variants, thinkingLevel, explicitThinkingLevel };
+	return { models: variants, thinkingLevel, explicitThinkingLevel, auto };
 }
 
 /**
@@ -872,14 +898,20 @@ export async function resolveModelScope(
 			let globPattern = pattern;
 			let thinkingLevel: ThinkingLevel | undefined;
 			let explicitThinkingLevel = false;
+			let auto = false;
 
 			if (colonIdx !== -1) {
 				const suffix = pattern.substring(colonIdx + 1);
-				const parsedThinkingLevel = parseThinkingLevel(suffix);
-				if (parsedThinkingLevel) {
-					thinkingLevel = parsedThinkingLevel;
-					explicitThinkingLevel = true;
+				if (suffix === AUTO_THINKING) {
+					auto = true;
 					globPattern = pattern.substring(0, colonIdx);
+				} else {
+					const parsedThinkingLevel = parseThinkingLevel(suffix);
+					if (parsedThinkingLevel) {
+						thinkingLevel = parsedThinkingLevel;
+						explicitThinkingLevel = true;
+						globPattern = pattern.substring(0, colonIdx);
+					}
 				}
 			}
 
@@ -904,6 +936,7 @@ export async function resolveModelScope(
 							? (resolveThinkingLevelForModel(model, thinkingLevel) ?? thinkingLevel)
 							: thinkingLevel,
 						explicitThinkingLevel,
+						auto,
 					});
 				}
 			}
@@ -921,13 +954,14 @@ export async function resolveModelScope(
 								exactCanonical.thinkingLevel)
 							: exactCanonical.thinkingLevel,
 						explicitThinkingLevel: exactCanonical.explicitThinkingLevel,
+						auto: exactCanonical.auto,
 					});
 				}
 			}
 			continue;
 		}
 
-		const { model, thinkingLevel, warning, explicitThinkingLevel } = parseModelPatternWithContext(
+		const { model, thinkingLevel, warning, explicitThinkingLevel, auto } = parseModelPatternWithContext(
 			pattern,
 			availableModels,
 			context,
@@ -951,6 +985,7 @@ export async function resolveModelScope(
 					? (resolveThinkingLevelForModel(model, thinkingLevel) ?? thinkingLevel)
 					: thinkingLevel,
 				explicitThinkingLevel,
+				auto,
 			});
 		}
 	}

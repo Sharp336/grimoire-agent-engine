@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import {
 	expandRoleAlias,
+	formatModelSelectorValue,
 	parseModelPattern,
 	parseModelString,
 	resolveAgentModelPatterns,
@@ -12,6 +13,7 @@ import {
 	resolveModelScope,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AUTO_THINKING } from "../src/thinking";
 
 // Mock models for testing
 const mockModels: Model<"anthropic-messages">[] = [
@@ -496,6 +498,67 @@ describe("resolveModelRoleValue", () => {
 		expect(result.model?.id).toBe("claude-sonnet-4-5");
 		expect(result.thinkingLevel).toBe(Effort.High);
 		expect(result.explicitThinkingLevel).toBe(true);
+	});
+});
+
+describe(":auto thinking selector", () => {
+	test("parseModelPattern surfaces :auto as the auto flag, not a concrete level, with no warning", () => {
+		const result = parseModelPattern("sonnet:auto", allModels);
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.auto).toBe(true);
+		expect(result.thinkingLevel).toBeUndefined();
+		expect(result.explicitThinkingLevel).toBe(false);
+		expect(result.warning).toBeUndefined();
+	});
+
+	test("resolveModelRoleValue surfaces :auto as the auto flag, never a concrete thinkingLevel", () => {
+		const result = resolveModelRoleValue("anthropic/claude-sonnet-4-5:auto", allModels);
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.auto).toBe(true);
+		expect(result.thinkingLevel).toBeUndefined();
+		expect(result.explicitThinkingLevel).toBe(false);
+		expect(result.warning).toBeUndefined();
+	});
+
+	test("default :auto resolves to auto while a bare role carries neither auto nor an explicit level", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "anthropic/claude-sonnet-4-5:auto",
+				slow: "anthropic/claude-sonnet-4-5",
+			},
+		});
+		const def = resolveModelRoleValue(settings.getModelRole("default"), allModels, { settings });
+		expect(def.auto).toBe(true);
+		expect(def.explicitThinkingLevel).toBe(false);
+		expect(def.thinkingLevel).toBeUndefined();
+
+		const slow = resolveModelRoleValue(settings.getModelRole("slow"), allModels, { settings });
+		expect(slow.auto).toBeFalsy();
+		expect(slow.explicitThinkingLevel).toBe(false);
+		expect(slow.thinkingLevel).toBeUndefined();
+	});
+
+	test("formatModelSelectorValue round-trips :auto back to the auto flag", () => {
+		const value = formatModelSelectorValue("anthropic/claude-sonnet-4-5", AUTO_THINKING);
+		expect(value).toBe("anthropic/claude-sonnet-4-5:auto");
+		const parsed = resolveModelRoleValue(value, allModels);
+		expect(parsed.auto).toBe(true);
+		expect(parsed.thinkingLevel).toBeUndefined();
+	});
+
+	test("a concrete suffix still clamps to a level and is not auto", () => {
+		const result = resolveModelRoleValue("anthropic/claude-sonnet-4-5:high", allModels);
+		expect(result.thinkingLevel).toBe(Effort.High);
+		expect(result.explicitThinkingLevel).toBe(true);
+		expect(result.auto).toBeFalsy();
+	});
+
+	test("resolveModelOverride surfaces :auto for subagent role overrides", () => {
+		const result = resolveModelOverride(["anthropic/claude-sonnet-4-5:auto"], { getAvailable: () => allModels });
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.auto).toBe(true);
+		expect(result.thinkingLevel).toBeUndefined();
+		expect(result.explicitThinkingLevel).toBe(false);
 	});
 });
 describe("resolveAgentModelPatterns", () => {

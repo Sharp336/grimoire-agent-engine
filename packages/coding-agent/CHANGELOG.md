@@ -35,6 +35,7 @@
 
 ### Added
 
+- Added per-role `:auto` as a first-class thinking selector. Any `modelRoles` entry can now be suffixed with `:auto` (e.g. `default: anthropic/claude-opus-4-8:auto`) to put that role in auto-thinking mode, instead of `auto` being expressible only through the global `defaultThinkingLevel`. This decouples the two: `defaultThinkingLevel` reverts to meaning just the inherited default for bare (suffix-less) roles, so you can have e.g. `default: …:auto` while `slow` inherits a concrete `defaultThinkingLevel: low`. `:auto` is honored across the default role (cold start), Ctrl+P scoped-model cycling, role cycling, and subagent roles; selecting auto in `/model` now persists `:auto` on the role rather than flipping the global default. The `auto` selector stays on the config→session side and is never passed to the provider/effort layer (it resolves to a concrete per-turn effort as before).
 - Added deferred session-title generation so greetings no longer become the session title. A first user message that is only a greeting / acknowledgement / filler ("hi", "thanks", "ok", a bare number, emoji-only, etc.) is now detected deterministically and skips titling entirely — no title model is invoked. Title generation then retries on each subsequent user message while the session stays unnamed, so the title is deduced from the first message that actually describes work. A capable online title model may additionally answer `none` to decline a non-greeting taskless message (normalized to "no title").
 
 ### Changed
