@@ -22,6 +22,30 @@ export interface NotebookDocument {
 
 const CELL_MARKER_RE = /^# %% \[(code|markdown|raw)\](?: cell:(\d+))?$/;
 
+/**
+ * A source line collides with the virtual-cell delimiter when, after removing
+ * any leading run of backslash escapes, the remainder is a cell marker. Such a
+ * line must be escaped on serialize so it is not mistaken for a cell boundary
+ * on the round-trip back (which would split one cell into several and drop the
+ * line's content). Escaping the escape keeps the transform reversible for
+ * content that already begins with a backslash.
+ */
+function bodyLineCollidesWithMarker(line: string): boolean {
+	let unescaped = line;
+	while (unescaped.startsWith("\\")) unescaped = unescaped.slice(1);
+	return CELL_MARKER_RE.test(unescaped);
+}
+
+/** Prefix one backslash to a source line that would otherwise read as a cell marker. */
+function escapeBodyLine(line: string): string {
+	return bodyLineCollidesWithMarker(line) ? `\\${line}` : line;
+}
+
+/** Reverse {@link escapeBodyLine}: strip the single backslash this serializer added. */
+function unescapeBodyLine(line: string): string {
+	return line.startsWith("\\") && bodyLineCollidesWithMarker(line.slice(1)) ? line.slice(1) : line;
+}
+
 export function isNotebookPath(filePath: string): boolean {
 	return path.extname(filePath).toLowerCase() === ".ipynb";
 }
@@ -101,9 +125,12 @@ export function notebookToEditableText(notebook: NotebookDocument): string {
 	return notebook.cells
 		.map((cell, index) => {
 			const source = sourceToText(cell.source);
-			return source.length > 0
-				? `# %% [${cell.cell_type}] cell:${index}\n${source}`
-				: `# %% [${cell.cell_type}] cell:${index}`;
+			const marker = `# %% [${cell.cell_type}] cell:${index}`;
+			if (source.length === 0) return marker;
+			// Escape any body line that would itself read as a cell marker so the
+			// round-trip back does not split this cell at its own content.
+			const escaped = source.split("\n").map(escapeBodyLine).join("\n");
+			return `${marker}\n${escaped}`;
 		})
 		.join("\n");
 }
@@ -156,7 +183,7 @@ function parseNotebookEditableText(text: string, displayPath: string): ParsedVir
 				`Invalid notebook editable representation for ${displayPath}: expected first line to be "# %% [code] cell:0", "# %% [markdown] cell:0", or "# %% [raw] cell:0".`,
 			);
 		}
-		current.lines.push(line);
+		current.lines.push(unescapeBodyLine(line));
 	}
 	flush();
 	return cells;
