@@ -16,8 +16,20 @@ import { fuzzyMatch } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
-import { parseThinkingLevel, resolveThinkingLevelForModel } from "../thinking";
-import { isAuthenticated, kNoAuth, MODEL_ROLE_IDS, type ModelRegistry, type ModelRole } from "./model-registry";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	parseThinkingLevel,
+	resolveThinkingLevelForModel,
+} from "../thinking";
+import {
+	getAllRolesForSelection,
+	isAuthenticated,
+	kNoAuth,
+	MODEL_ROLE_IDS,
+	type ModelRegistry,
+	type ModelRole,
+} from "./model-registry";
 import type { Settings } from "./settings";
 
 /** Default model IDs for each known provider */
@@ -61,6 +73,56 @@ export function formatModelString(model: Model<Api>): string {
 
 export function formatModelSelectorValue(selector: string, thinkingLevel: ThinkingLevel | undefined): string {
 	return thinkingLevel && thinkingLevel !== ThinkingLevel.Inherit ? `${selector}:${thinkingLevel}` : selector;
+}
+
+/**
+ * Minimal session surface needed to apply a model to every role. Declared
+ * structurally so {@link applyModelToAllRoles} stays decoupled from the full
+ * `AgentSession` and is unit-testable with a lightweight fake.
+ */
+export interface AllRolesModelTarget {
+	setModel(
+		model: Model,
+		role: string,
+		options: { selector?: string; thinkingLevel?: ThinkingLevel; persist?: boolean },
+	): Promise<void>;
+	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist?: boolean): void;
+}
+
+/**
+ * Apply a single model+thinking choice to every known role at once — the
+ * behavior behind the model selector "Set for all roles" action.
+ *
+ * The `default` role updates the live session model and persists, mirroring the
+ * single-role path; the remaining roles are written straight to settings. The
+ * session thinking level is then applied once (auto persists; a concrete,
+ * non-inherit level is applied transiently) so the active session reflects the
+ * `default` choice exactly as picking `default` alone would.
+ */
+export async function applyModelToAllRoles(
+	target: AllRolesModelTarget,
+	settings: Settings,
+	model: Model,
+	thinkingLevel: ConfiguredThinkingLevel | undefined,
+	selector: string | undefined,
+): Promise<void> {
+	const isAuto = thinkingLevel === AUTO_THINKING;
+	const concreteThinking = isAuto ? undefined : thinkingLevel;
+	const fallbackSelector = selector ?? `${model.provider}/${model.id}`;
+
+	for (const role of getAllRolesForSelection(settings)) {
+		if (role === "default") {
+			await target.setModel(model, "default", { selector, thinkingLevel: concreteThinking, persist: true });
+		} else {
+			settings.setModelRole(role, formatModelSelectorValue(fallbackSelector, concreteThinking));
+		}
+	}
+
+	if (isAuto) {
+		target.setThinkingLevel(AUTO_THINKING, true);
+	} else if (concreteThinking && concreteThinking !== ThinkingLevel.Inherit) {
+		target.setThinkingLevel(concreteThinking);
+	}
 }
 
 function getOpenRouterRouteSuffix(modelId: string): { baseId: string; suffix: string } | undefined {

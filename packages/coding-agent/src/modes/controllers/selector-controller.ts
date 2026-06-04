@@ -4,8 +4,8 @@ import type { OAuthProvider } from "@oh-my-pi/pi-ai/utils/oauth/types";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Input, Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
-import { getRoleInfo } from "../../config/model-registry";
-import { formatModelSelectorValue } from "../../config/model-resolver";
+import { ALL_ROLES_SELECTION, getRoleInfo } from "../../config/model-registry";
+import { applyModelToAllRoles, formatModelSelectorValue } from "../../config/model-resolver";
 import { settings } from "../../config/settings";
 import { DebugSelectorComponent } from "../../debug";
 import { disableProvider, enableProvider } from "../../discovery";
@@ -426,6 +426,13 @@ export class SelectorController {
 							this.ctx.showStatus(`Temporary model: ${selector ?? model.id}`);
 							done();
 							this.ctx.ui.requestRender();
+						} else if (role === ALL_ROLES_SELECTION) {
+							// Set for all roles: fan the single choice out to every known role.
+							await applyModelToAllRoles(this.ctx.session, this.ctx.settings, model, thinkingLevel, selector);
+							this.ctx.statusLine.invalidate();
+							this.ctx.updateEditorBorderColor();
+							this.ctx.showStatus(`All roles set to: ${selector ?? model.id}`);
+							// Don't call done() - selector stays open for further assignment
 						} else if (role === "default") {
 							// Default: update agent state and persist
 							await this.ctx.session.setModel(model, role, {

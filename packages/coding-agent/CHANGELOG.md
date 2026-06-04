@@ -4,6 +4,7 @@
 ### Added
 
 - Added deferred session-title generation so greetings no longer become the session title. A first user message that is only a greeting / acknowledgement / filler ("hi", "thanks", "ok", a bare number, emoji-only, etc.) is now detected deterministically and skips titling entirely — no title model is invoked. Title generation then retries on each subsequent user message while the session stays unnamed, so the title is deduced from the first message that actually describes work. A capable online title model may additionally answer `none` to decline a non-greeting taskless message (normalized to "no title").
+- Added a **Set for all roles** action at the top of the `/model` selector's action menu. Picking it applies the chosen model — and the thinking level selected in the next step — to every model role at once (default, fast, thinking, vision, architect, designer, commit, subtask, and any custom roles) instead of repeating the model selection once per role. The `default` role updates the live session model and persists like the single-role path; the remaining roles are written to settings; the session thinking level is applied once. The rest of the action menu is unchanged.
 
 ### Changed
 

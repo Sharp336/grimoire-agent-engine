@@ -14,7 +14,14 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import type { ModelRegistry } from "../../config/model-registry";
-import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS, MODEL_ROLES } from "../../config/model-registry";
+import {
+	ALL_ROLES_SELECTION,
+	getAllRolesForSelection,
+	getKnownRoleIds,
+	getRoleInfo,
+	MODEL_ROLE_IDS,
+	MODEL_ROLES,
+} from "../../config/model-registry";
 import { resolveModelRoleValue } from "../../config/model-resolver";
 import type { Settings } from "../../config/settings";
 import { type ThemeColor, theme } from "../../modes/theme/theme";
@@ -255,7 +262,7 @@ export class ModelSelectorComponent extends Container {
 	}
 
 	#buildMenuRoleActions(): void {
-		this.#menuRoleActions = getKnownRoleIds(this.#settings).map(role => {
+		const roleActions = getAllRolesForSelection(this.#settings).map(role => {
 			const roleInfo = getRoleInfo(role, this.#settings);
 			const roleLabel = roleInfo.tag ? `${roleInfo.tag} (${roleInfo.name})` : roleInfo.name;
 			return {
@@ -263,6 +270,9 @@ export class ModelSelectorComponent extends Container {
 				role,
 			};
 		});
+		// "Set for all roles" sits at the top so a single choice can fan out to
+		// every role; the concrete roles follow in their normal order.
+		this.#menuRoleActions = [{ label: "Set for all roles", role: ALL_ROLES_SELECTION }, ...roleActions];
 	}
 
 	#loadRoleModels(): void {
@@ -925,7 +935,11 @@ export class ModelSelectorComponent extends Container {
 					return `${prefix}${action.label}`;
 				});
 
-		const selectedRoleName = this.#menuSelectedRole ? getRoleInfo(this.#menuSelectedRole, this.#settings).name : "";
+		const selectedRoleName = this.#menuSelectedRole
+			? this.#menuSelectedRole === ALL_ROLES_SELECTION
+				? "All roles"
+				: getRoleInfo(this.#menuSelectedRole, this.#settings).name
+			: "";
 		const headerText =
 			showingThinking && this.#menuSelectedRole
 				? `  Thinking for: ${selectedRoleName} (${selectedItem.id})`
@@ -1082,6 +1096,18 @@ export class ModelSelectorComponent extends Container {
 		// For temporary role, don't save to settings - just notify caller
 		if (role === null) {
 			this.#onSelectCallback(item.model, null, undefined, item.selector);
+			return;
+		}
+
+		// "Set for all roles": badge every role locally and notify the caller once
+		// with the sentinel so the controller can fan the choice out across roles.
+		if (role === ALL_ROLES_SELECTION) {
+			const allThinkingLevel = thinkingLevel ?? ThinkingLevel.Inherit;
+			for (const targetRole of getAllRolesForSelection(this.#settings)) {
+				this.#roles[targetRole] = { model: item.model, thinkingLevel: allThinkingLevel };
+			}
+			this.#onSelectCallback(item.model, ALL_ROLES_SELECTION, allThinkingLevel, item.selector);
+			this.#updateList();
 			return;
 		}
 

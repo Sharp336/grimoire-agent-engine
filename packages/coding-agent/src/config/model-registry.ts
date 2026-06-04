@@ -150,6 +150,28 @@ export function getKnownRoleIds(settings: Settings): string[] {
 }
 
 /**
+ * Sentinel role id used by the model selector "Set for all roles" action.
+ *
+ * Namespaced so it can never collide with a real built-in or user-configured
+ * role id (even a custom role literally named "all"). It is never written to
+ * settings; it only marks the in-memory selector action and the per-selection
+ * callback so the controller can fan a single model choice out across every
+ * known role.
+ */
+export const ALL_ROLES_SELECTION = "__omp_all_roles__";
+
+/**
+ * Roles that the model-selector "Set for all roles" action applies a model to.
+ *
+ * Mirrors {@link getKnownRoleIds} ordering (built-ins first, then configured
+ * custom roles) while defensively excluding the synthetic sentinel so it can
+ * never be persisted as a real role.
+ */
+export function getAllRolesForSelection(settings: Settings): string[] {
+	return getKnownRoleIds(settings).filter(role => role !== ALL_ROLES_SELECTION);
+}
+
+/**
  * Get role info for a role name (built-in or custom).
  * Configured metadata overrides built-in defaults when present.
  */
