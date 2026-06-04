@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added command-glob `tools.approval.bash` policies so users can allow, prompt, or deny specific bash command shapes while evaluating the execution-time command after `cd ... &&` extraction and safe bash fixups, preventing deny/prompt rules from being bypassed by wrapped commands.
+
 ## [15.9.1] - 2026-06-04
 
 ### Added
@@ -40,10 +44,6 @@
 - Fixed the SSH tool renderer inlining multiline remote commands into its single-line status header, which produced a malformed cell where the bordered output block opened mid-command. The renderer now drops the command from the header (which keeps only `[host]`) and renders the full command in a framed section above `Output`, mirroring the bash renderer. `renderStatusLine` also flattens any embedded CR/LF in `description`, `meta`, and `title` so no tool can accidentally expand the header into multiple rows ([#1828](https://github.com/can1357/oh-my-pi/issues/1828)).
 - Fixed `tsc --noEmit` against `packages/coding-agent/tsconfig.json` reporting 56 errors under TypeScript 5.x (`builtin-registry.ts` × 46, `agent-session-openai-responses-replay.test.ts` × 10). The repo's own gate (`tsgo` / TypeScript 6.x) already accepted the `() => void` slash-command handlers, but 5.x rejects them because it does not coerce a `void`-returning function value into a `() => T | undefined` slot. The `SlashCommandSpec.handle` / `handleTui` signatures and the test's `createPersistedSession` `populate` callback are now expressed as a union of two function types (one returning a `SlashCommandResult` / target, one returning `void`), so the existing handler bodies typecheck on both compilers ([#1821](https://github.com/can1357/oh-my-pi/issues/1821)).
 - Fixed `omp update` leaving `@oh-my-pi/pi-natives` and the platform-specific `@oh-my-pi/pi-natives-<tag>` leaf at the previous version on `bun install -g` updates, so the next launch loaded a stale `.node` file and aborted at `validateLoadedBindings` with `The .node file on disk is from a different release than this loader`. `omp update` now pins the native addon core and the platform leaf to the same version it installs for `@oh-my-pi/pi-coding-agent` ([#1824](https://github.com/can1357/oh-my-pi/issues/1824)).
-
-### Fixed
-
-- Fixed bash command-glob approval policies evaluating only the raw command before execution-time `cd ... &&` extraction and safe bash fixups, preventing deny/prompt rules from being bypassed by wrapped commands.
 
 ## [15.9.0] - 2026-06-04
 
@@ -86,10 +86,6 @@
 - Fixed `read` failing with "Path not found" on web URLs whose scheme `//` collapsed to a single `/` (e.g. `https:/github.com/...`), which happens when a URL is routed through Node's `path.normalize`/`path.resolve`. The fetch URL recognizer now accepts a single-slash scheme and repairs it back to `//` before fetching, so collapsed URLs resolve instead of falling through to filesystem lookup.
 - Fixed subagent slow-model priority falling through to older Claude Opus aliases when Opus 4.8 is available by adding Opus 4.8 and 4.7 aliases ahead of older Opus fallbacks ([#1753](https://github.com/can1357/oh-my-pi/issues/1753)).
 - Fixed the web-search provider selectors in TUI settings/setup to derive from the shared provider metadata, so newly added providers cannot be omitted from the preference list.
-
-### Added
-
-- Added command-glob `tools.approval.bash` policies so users can allow, prompt, or deny specific bash command shapes without changing approval behavior for every bash call.
 
 ## [15.8.3] - 2026-06-03
 
