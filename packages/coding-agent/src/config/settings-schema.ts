@@ -3127,6 +3127,45 @@ export const SETTINGS_SCHEMA = {
 		default: undefined,
 	},
 
+	// Z.AI Web Search in Chat
+	"zai.webSearchInChat": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			label: "Z.AI Web Search in Chat",
+			description: "Enable Z.AI's built-in web search tool for chat completions",
+		},
+	},
+
+	"zai.webSearchMaxCalls": {
+		type: "number",
+		default: 5,
+		ui: {
+			tab: "providers",
+			label: "Z.AI Web Search Max Calls",
+			description: "Maximum number of separate search invocations per request (1-50)",
+		},
+	},
+
+	"zai.webSearchRecency": {
+		type: "enum",
+		default: "noLimit",
+		values: ["oneDay", "oneWeek", "oneMonth", "oneYear", "noLimit"],
+		ui: {
+			tab: "providers",
+			label: "Z.AI Web Search Recency",
+			description: "Time range filter for web search results",
+			options: [
+				{ value: "oneDay", label: "Past 24 hours" },
+				{ value: "oneWeek", label: "Past week" },
+				{ value: "oneMonth", label: "Past month" },
+				{ value: "oneYear", label: "Past year" },
+				{ value: "noLimit", label: "No limit" },
+			],
+		},
+	},
+
 	"commit.mapReduceEnabled": { type: "boolean", default: true },
 
 	"commit.mapReduceMinFiles": { type: "number", default: 4 },

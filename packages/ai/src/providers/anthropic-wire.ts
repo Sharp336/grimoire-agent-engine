@@ -76,13 +76,36 @@ export type RedactedThinkingBlockParam = {
 	data: string;
 };
 
+export type ServerToolUseBlockParam = {
+	type: "server_tool_use";
+	id: string;
+	name: string;
+	input?: Record<string, unknown> | null;
+};
+
+export type WebSearchResultItem = {
+	type: "web_search_result";
+	url: string;
+	title: string;
+	encrypted_content?: string;
+	page_age?: string;
+};
+
+export type WebSearchToolResultBlockParam = {
+	type: "web_search_tool_result";
+	tool_use_id: string;
+	content: WebSearchResultItem[] | { type: "web_search_tool_result_error"; error_code: string };
+};
+
 export type ContentBlockParam =
 	| TextBlockParam
 	| ImageBlockParam
 	| ToolUseBlockParam
 	| ToolResultBlockParam
 	| ThinkingBlockParam
-	| RedactedThinkingBlockParam;
+	| RedactedThinkingBlockParam
+	| ServerToolUseBlockParam
+	| WebSearchToolResultBlockParam;
 
 /**
  * A single conversation turn.
@@ -228,7 +251,9 @@ export type ResponseContentBlock =
 	| { type: "text"; text: string }
 	| { type: "thinking"; thinking: string; signature?: string }
 	| { type: "redacted_thinking"; data: string }
-	| { type: "tool_use"; id: string; name: string; input?: Record<string, unknown> | null };
+	| { type: "tool_use"; id: string; name: string; input?: Record<string, unknown> | null }
+	| { type: "server_tool_use"; id: string; name: string; input?: Record<string, unknown> | null }
+	| { type: "web_search_tool_result"; tool_use_id: string; content: WebSearchResultItem[] | { type: "web_search_tool_result_error"; error_code: string } };
 
 export type ContentBlockDelta =
 	| { type: "text_delta"; text: string }

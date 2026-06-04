@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Z.AI Web Search in Chat support with `web_search_20250305` built-in tool injection for Z.AI Anthropic endpoints.
+
 ## [15.9.0] - 2026-06-04
 
 ### Fixed

@@ -1976,6 +1976,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return streamSimple(streamModel, context, {
 					...streamOptions,
 					openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
+					zaiWebSearch:
+						streamOptions?.zaiWebSearch ??
+						(settings.get("zai.webSearchInChat")
+							? { enabled: true, maxSearchCalls: settings.get("zai.webSearchMaxCalls") || 5, recencyFilter: settings.get("zai.webSearchRecency") || "noLimit" }
+							: undefined),
 					onAuthError: async (provider, oldKey, error) => {
 						const message = error instanceof Error ? error.message : String(error);
 						// streamSimple invokes this for both 401 auth failures AND

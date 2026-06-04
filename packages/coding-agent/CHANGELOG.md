@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `zai.webSearchInChat`, `zai.webSearchCount`, and `zai.webSearchRecency` settings for Z.AI web search in chat.
+
 ## [15.9.0] - 2026-06-04
 
 ### Breaking Changes

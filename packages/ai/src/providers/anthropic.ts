@@ -797,6 +797,17 @@ function convertContentBlocks(
 export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
 export type AnthropicThinkingDisplay = "summarized" | "omitted";
 
+/** Configuration for Z.AI Web Search in Chat feature. */
+export interface ZaiWebSearchConfig {
+	enabled?: boolean;
+	/** Maximum number of separate search invocations per request (1-50). Defaults to provider behavior. */
+	maxSearchCalls?: number;
+	searchEngine?: string;
+	searchPrompt?: string;
+	recencyFilter?: "oneDay" | "oneWeek" | "oneMonth" | "oneYear" | "noLimit";
+	domainFilter?: string;
+}
+
 export interface AnthropicOptions extends StreamOptions {
 	/**
 	 * Enable extended thinking.
@@ -851,6 +862,7 @@ export interface AnthropicOptions extends StreamOptions {
 	 * including SDK clients such as `AnthropicVertex`.
 	 */
 	client?: AnthropicMessagesClientLike;
+	zaiWebSearch?: ZaiWebSearchConfig;
 }
 
 export type AnthropicClientOptionsArgs = {
@@ -1422,6 +1434,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					let sawEvent = false;
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
+					const skippedBlockIndices = new Set<number>();
 
 					for await (const event of iterateWithIdleTimeout(anthropicStream, {
 						idleTimeoutMs,
@@ -1511,8 +1524,60 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 									contentIndex: output.content.length - 1,
 									partial: output,
 								});
+							} else if (event.content_block.type === "server_tool_use") {
+								// Server has already started an external search; mark replay-unsafe.
+								streamedReplayUnsafeContent = true;
+								skippedBlockIndices.add(event.index);
+							} else if (event.content_block.type === "web_search_tool_result") {
+								const content = event.content_block.content;
+								let resultText = "";
+								if (Array.isArray(content)) {
+									const lines: string[] = [];
+									for (const item of content) {
+										if (item.type === "web_search_result") lines.push(`- [${item.title}](${item.url})`);
+									}
+									if (lines.length > 0) resultText = `**Web search results:**\n${lines.join("\n")}`;
+								} else if (content?.type === "web_search_tool_result_error") {
+									resultText = `**Web search error:** ${content.error_code}`;
+								}
+								if (resultText) {
+									streamedReplayUnsafeContent = true;
+									const searchBlock: Block = { type: "text", text: resultText, index: event.index };
+									output.content.push(searchBlock);
+									const ci = output.content.length - 1;
+									stream.push({ type: "text_start", contentIndex: ci, partial: output });
+									stream.push({ type: "text_delta", contentIndex: ci, delta: resultText, partial: output });
+								}
+							} else if ((event.content_block as { type: string }).type === "tool_result") {
+								// Z.AI search has already run server-side; mark replay-unsafe immediately.
+								streamedReplayUnsafeContent = true;
+								const trBlock = event.content_block as { type: string; content?: unknown };
+								let resultText = "";
+								if (typeof trBlock.content === "string") {
+									try {
+										const parsed: unknown = JSON.parse(trBlock.content);
+										const items = Array.isArray(parsed) ? (parsed as unknown[]).flat() : [];
+										const lines: string[] = [];
+										for (const item of items) {
+											if (typeof item === "object" && item !== null && "title" in item && "link" in item) {
+												const t = String((item as Record<string, unknown>).title);
+												const l = String((item as Record<string, unknown>).link);
+												if (t && l) lines.push(`- [${t}](${l})`);
+											}
+										}
+										if (lines.length > 0) resultText = `**Web search results:**\n${lines.join("\n")}`;
+									} catch {}
+								}
+								if (resultText) {
+									const trBlock2: Block = { type: "text", text: resultText, index: event.index };
+									output.content.push(trBlock2);
+									const ci = output.content.length - 1;
+									stream.push({ type: "text_start", contentIndex: ci, partial: output });
+									stream.push({ type: "text_delta", contentIndex: ci, delta: resultText, partial: output });
+								}
 							}
 						} else if (event.type === "content_block_delta") {
+							if (skippedBlockIndices.has(event.index)) continue;
 							if (event.delta.type === "text_delta") {
 								const index = blocks.findIndex(b => b.index === event.index);
 								const block = blocks[index];
@@ -1563,6 +1628,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 								}
 							}
 						} else if (event.type === "content_block_stop") {
+							if (skippedBlockIndices.has(event.index)) { skippedBlockIndices.delete(event.index); continue; }
 							const index = blocks.findIndex(b => b.index === event.index);
 							const block = blocks[index];
 							if (block) {
@@ -2319,6 +2385,24 @@ function buildParams(
 		);
 	} else if (isOAuthToken) {
 		params.tools = [];
+	}
+
+	// Inject Z.AI web_search built-in tool when configured for Z.AI endpoints.
+	if (options?.zaiWebSearch && isZaiAnthropicEndpoint(model)) {
+		const wsConfig = options.zaiWebSearch;
+		if (wsConfig.enabled !== false) {
+			if (!params.tools) params.tools = [];
+			const hasClientWebSearch = params.tools.some(t => (t as { name?: string }).name === "web_search");
+			if (!hasClientWebSearch) {
+				const ws: Record<string, unknown> = { type: "web_search_20250305", name: "web_search" };
+				if (wsConfig.maxSearchCalls !== undefined) ws.max_uses = Math.max(1, Math.min(50, Math.round(wsConfig.maxSearchCalls)));
+				if (wsConfig.domainFilter) ws.allowed_domains = [wsConfig.domainFilter];
+				if (wsConfig.recencyFilter) ws.search_recency_filter = wsConfig.recencyFilter;
+				if (wsConfig.searchEngine) ws.search_engine = wsConfig.searchEngine;
+				if (wsConfig.searchPrompt) ws.search_prompt = wsConfig.searchPrompt;
+				params.tools.push(ws as unknown as AnthropicWireTool);
+			}
+		}
 	}
 
 	if (model.reasoning) {

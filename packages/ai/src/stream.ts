@@ -738,6 +738,7 @@ function mapOptionsForApi<TApi extends Api>(
 		onSseEvent: options?.onSseEvent,
 		execHandlers: options?.execHandlers,
 		fetch: options?.fetch,
+		zaiWebSearch: options?.zaiWebSearch,
 	};
 
 	switch (model.api) {

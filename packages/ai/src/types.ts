@@ -1,6 +1,6 @@
 import type { ZodType, z } from "zod/v4";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
-import type { AnthropicOptions } from "./providers/anthropic";
+import type { AnthropicOptions, ZaiWebSearchConfig } from "./providers/anthropic";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
 import type { CursorOptions } from "./providers/cursor";
 import type {
@@ -457,6 +457,7 @@ export interface SimpleStreamOptions extends StreamOptions {
 	 * or the catalog entry already names the variant).
 	 */
 	openrouterVariant?: string;
+	zaiWebSearch?: ZaiWebSearchConfig;
 }
 
 // Generic StreamFunction with typed options
