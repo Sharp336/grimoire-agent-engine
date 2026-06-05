@@ -1063,7 +1063,11 @@ async function createClient(
 	const baseFetch = fetchOverride ?? fetch;
 	const wrappedFetch = Object.assign(
 		async (input: string | URL | Request, init?: RequestInit): Promise<Response> => {
-			const response = await baseFetch(input, init);
+			const disableBunTimeout = typeof (globalThis as any).Bun !== "undefined";
+			const response = await baseFetch(
+				input,
+				disableBunTimeout ? ({ ...init, timeout: false } as any) : init,
+			);
 			if (response.ok) {
 				capturedErrorResponse = undefined;
 				return response;
