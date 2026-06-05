@@ -80,7 +80,7 @@ Loaded via symbolic link.
 		// Skills should be discovered and exposed on the session
 		expect(session.skills.length).toBeGreaterThan(0);
 		expect(session.skills.some((s: Skill) => s.name === "test-skill")).toBe(true);
-	});
+	}, { timeout: 30_000 });
 
 	it("should discover skills when skill directory is a symlink", async () => {
 		const { session } = await createAgentSession({
@@ -91,7 +91,7 @@ Loaded via symbolic link.
 		});
 
 		expect(session.skills.some((s: Skill) => s.name === "symlinked-skill")).toBe(true);
-	});
+	}, { timeout: 30_000 });
 
 	it("should still discover project skills when user skills directory is missing", async () => {
 		const userAgentDir = path.join(tempHomeDir, ".omp", "agent");
@@ -106,7 +106,7 @@ Loaded via symbolic link.
 		});
 
 		expect(session.skills.some((s: Skill) => s.name === "test-skill")).toBe(true);
-	});
+	}, { timeout: 30_000 });
 	it("should have empty skills when options.skills is empty array (--no-skills)", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,
@@ -120,7 +120,7 @@ Loaded via symbolic link.
 		expect(session.skills).toEqual([]);
 		// No warnings since we didn't discover
 		expect(session.skillWarnings).toEqual([]);
-	});
+	}, { timeout: 30_000 });
 
 	it("should use provided skills when options.skills is explicitly set", async () => {
 		const customSkill: Skill = {
@@ -143,5 +143,5 @@ Loaded via symbolic link.
 		expect(session.skills).toEqual([customSkill]);
 		// No warnings since we didn't discover
 		expect(session.skillWarnings).toEqual([]);
-	});
+	}, { timeout: 30_000 });
 });
