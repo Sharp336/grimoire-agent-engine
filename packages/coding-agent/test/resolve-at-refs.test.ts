@@ -247,6 +247,21 @@ describe("resolveAtRefs", () => {
 		expect(result[0].content).not.toContain("file not found");
 	});
 
+	it("resolves refs in symlinked context files from the target directory", async () => {
+		const docsDir = path.join(tempDir, "docs");
+		fs.mkdirSync(docsDir, { recursive: true });
+		fs.writeFileSync(path.join(tempDir, "rules.md"), "wrong root rules\n");
+		fs.writeFileSync(path.join(docsDir, "AGENTS.md"), "@rules.md");
+		fs.writeFileSync(path.join(docsDir, "rules.md"), "target directory rules\n");
+		const agentsMdPath = path.join(tempDir, "AGENTS.md");
+		fs.symlinkSync(path.join(docsDir, "AGENTS.md"), agentsMdPath);
+
+		const result = await resolveAtRefs([{ path: agentsMdPath, content: "@rules.md" }], { rootDir: tempDir });
+
+		expect(result[0].content).toContain("target directory rules");
+		expect(result[0].content).not.toContain("wrong root rules");
+	});
+
 	it("rejects gitignored refs", async () => {
 		fs.writeFileSync(path.join(tempDir, ".gitignore"), "secret.env\n");
 		fs.writeFileSync(path.join(tempDir, "secret.env"), "SECRET_TOKEN=value\n");

@@ -102,7 +102,6 @@ async function isIgnoredByGitignore(absPath: string, root: string): Promise<bool
 async function resolveContent(
 	content: string,
 	filePath: string,
-	rootDir: string,
 	realRootDir: string,
 	seen: Set<string>,
 	depth: number,
@@ -129,33 +128,23 @@ async function resolveContent(
 			continue;
 		}
 
-		const absRefPath = path.resolve(baseDir, refPath);
-
-		// Path containment: refs must stay in the root namespace. Recursive
-		// includes reached through symlinks use real paths, so accept either the
-		// original root path or its realpath namespace.
-		if (!isWithin(absRefPath, rootDir) && !isWithin(absRefPath, realRootDir)) {
-			resolved.push(`<!-- @${refPath}: escapes project root -->`);
-			continue;
-		}
-
-		// Symlink containment: resolve the real path and check again.
-		// A repo-local symlink pointing outside the project root would
-		// pass the lexical check above but still read an out-of-root file.
 		let realRefPath: string;
 		try {
-			realRefPath = await fs.promises.realpath(absRefPath);
+			realRefPath = await fs.promises.realpath(path.resolve(baseDir, refPath));
 		} catch {
 			resolved.push(`<!-- @${refPath}: file not found -->`);
 			continue;
 		}
+
+		// Containment is enforced in the realpath namespace. That keeps ordinary
+		// refs, symlinked context files, and symlinked included files on the same
+		// path model while still rejecting symlink traversal outside the root.
 		if (!isWithin(realRefPath, realRootDir)) {
 			resolved.push(`<!-- @${refPath}: escapes project root -->`);
 			continue;
 		}
 
-		const lexicallyIgnored = isWithin(absRefPath, rootDir) ? await isIgnoredByGitignore(absRefPath, rootDir) : false;
-		if (lexicallyIgnored || (await isIgnoredByGitignore(realRefPath, realRootDir))) {
+		if (await isIgnoredByGitignore(realRefPath, realRootDir)) {
 			resolved.push(`<!-- @${refPath}: ignored by gitignore -->`);
 			continue;
 		}
@@ -173,18 +162,9 @@ async function resolveContent(
 		}
 
 		// Recursively resolve references in the included file. Use the real target
-		// path so nested refs in allowed symlinks are resolved from the target's
-		// directory, not the symlink's directory.
+		// path so nested refs are resolved from the target's directory.
 		seen.add(realRefPath);
-		const innerResolved = await resolveContent(
-			refContent,
-			realRefPath,
-			rootDir,
-			realRootDir,
-			seen,
-			depth + 1,
-			maxDepth,
-		);
+		const innerResolved = await resolveContent(refContent, realRefPath, realRootDir, seen, depth + 1, maxDepth);
 		seen.delete(realRefPath);
 
 		resolved.push(innerResolved);
@@ -220,8 +200,9 @@ export async function resolveAtRefs(
 			(await findRepoRoot(path.dirname(path.resolve(file.path)))) ??
 			path.dirname(path.resolve(file.path));
 		const realFileRootDir = await realpathOrSelf(fileRootDir);
-		const seen = new Set<string>([path.resolve(file.path)]);
-		const newContent = await resolveContent(file.content, file.path, fileRootDir, realFileRootDir, seen, 0, maxDepth);
+		const realFilePath = await realpathOrSelf(file.path);
+		const seen = new Set<string>([realFilePath]);
+		const newContent = await resolveContent(file.content, realFilePath, realFileRootDir, seen, 0, maxDepth);
 		resolved.push({
 			path: file.path,
 			content: newContent,
