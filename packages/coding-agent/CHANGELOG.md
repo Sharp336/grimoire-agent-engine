@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `Ctrl+B` shortcut in the `/tree` session-tree selector that branches from the highlighted entry. It moves the active leaf to that entry without the "Summarize branch?" prompt and drops you there, so your next message forks a new child while the line you left stays in the tree to return to. Pairs with the existing `Enter` (navigate, with optional summary) and `Shift+L` (label) actions, and the tree header now advertises it ([#1931](https://github.com/can1357/oh-my-pi/pull/1931) by [@AbdulazizAFM](https://github.com/AbdulazizAFM)).
+
 ## [15.9.2] - 2026-06-05
 
 ### Added

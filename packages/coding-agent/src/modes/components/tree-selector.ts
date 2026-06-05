@@ -66,6 +66,7 @@ class TreeList implements Component {
 	onSelect?: (entryId: string) => void;
 	onCancel?: () => void;
 	onLabelEdit?: (entryId: string, currentLabel: string | undefined) => void;
+	onBranch?: (entryId: string) => void;
 
 	constructor(
 		tree: SessionTreeNode[],
@@ -807,6 +808,11 @@ class TreeList implements Component {
 			if (selected && this.onLabelEdit) {
 				this.onLabelEdit(selected.node.entry.id, selected.node.label);
 			}
+		} else if (matchesKey(keyData, "ctrl+b")) {
+			const selected = this.#filteredNodes[this.#selectedIndex];
+			if (selected && this.onBranch) {
+				this.onBranch(selected.node.entry.id);
+			}
 		} else {
 			const printableText = extractPrintableText(keyData);
 			if (printableText) {
@@ -891,6 +897,7 @@ export class TreeSelectorComponent extends Container {
 		onCancel: () => void,
 		private readonly onLabelChangeCallback?: (entryId: string, label: string | undefined) => void,
 		initialFilterMode: FilterMode = "default",
+		onBranch?: (entryId: string) => void,
 	) {
 		super();
 		const maxVisibleLines = Math.max(5, Math.floor(terminalHeight / 2));
@@ -899,6 +906,7 @@ export class TreeSelectorComponent extends Container {
 		this.#treeList.onSelect = onSelect;
 		this.#treeList.onCancel = onCancel;
 		this.#treeList.onLabelEdit = (entryId, currentLabel) => this.#showLabelInput(entryId, currentLabel);
+		this.#treeList.onBranch = onBranch;
 
 		this.#treeContainer = new Container();
 		this.#treeContainer.addChild(this.#treeList);
@@ -912,7 +920,7 @@ export class TreeSelectorComponent extends Container {
 			new TruncatedText(
 				theme.fg(
 					"muted",
-					"Up/Down: move. Left/Right: page. Shift+L: label. Ctrl+O/Shift+Ctrl+O: filter. Alt+D/T/U/L/A: filter. Type to search",
+					"Up/Down: move. Left/Right: page. Ctrl+B: branch here. Shift+L: label. Ctrl+O/Shift+Ctrl+O: filter. Alt+D/T/U/L/A: filter. Type to search",
 				),
 				0,
 				0,

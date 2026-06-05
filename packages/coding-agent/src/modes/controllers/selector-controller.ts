@@ -720,6 +720,33 @@ export class SelectorController {
 					this.ctx.ui.requestRender();
 				},
 				settings.get("treeFilterMode"),
+				async entryId => {
+					// Ctrl+B: instant in-file branch — move the leaf here with no summary
+					// prompt, drop the user at this point. The next message forks a new child,
+					// and the abandoned line stays in the tree to return to.
+					if (entryId === realLeafId) {
+						done();
+						this.ctx.showStatus("Already at this point");
+						return;
+					}
+					done();
+					try {
+						const result = await this.ctx.session.navigateTree(entryId, { summarize: false });
+						if (result.cancelled) {
+							this.ctx.showStatus("Branch cancelled");
+							return;
+						}
+						this.ctx.chatContainer.clear();
+						this.ctx.renderInitialMessages(result.sessionContext, { clearTerminalHistory: true });
+						await this.ctx.reloadTodos();
+						if (result.editorText && !this.ctx.editor.getText().trim()) {
+							this.ctx.editor.setText(result.editorText);
+						}
+						this.ctx.showStatus("Branched from selected point — continue here");
+					} catch (error) {
+						this.ctx.showError(error instanceof Error ? error.message : String(error));
+					}
+				},
 			);
 			return { component: selector, focus: selector };
 		});
