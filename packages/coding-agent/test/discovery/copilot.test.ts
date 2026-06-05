@@ -27,11 +27,15 @@ describe("copilot MCP discovery", () => {
 	let tempDir = "";
 	let originalHome = "";
 	let originalCopilotHome: string | undefined;
+	let originalTestToken: string | undefined;
+	let originalTestUrl: string | undefined;
 
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-copilot-"));
 		originalHome = process.env.HOME ?? process.env.USERPROFILE ?? "";
 		originalCopilotHome = process.env.COPILOT_HOME;
+		originalTestToken = process.env.OMP_TEST_TOKEN;
+		originalTestUrl = process.env.OMP_TEST_URL;
 		// Point HOME to tempDir so resolveCopilotHome returns tempDir/.copilot
 		process.env.HOME = tempDir;
 		process.env.USERPROFILE = tempDir;
@@ -46,6 +50,16 @@ describe("copilot MCP discovery", () => {
 			delete process.env.COPILOT_HOME;
 		} else {
 			process.env.COPILOT_HOME = originalCopilotHome;
+		}
+		if (originalTestToken === undefined) {
+			delete process.env.OMP_TEST_TOKEN;
+		} else {
+			process.env.OMP_TEST_TOKEN = originalTestToken;
+		}
+		if (originalTestUrl === undefined) {
+			delete process.env.OMP_TEST_URL;
+		} else {
+			process.env.OMP_TEST_URL = originalTestUrl;
 		}
 	});
 
@@ -177,9 +191,6 @@ describe("copilot MCP discovery", () => {
 		expect(servers).toHaveLength(1);
 		expect(servers[0]?.url).toBe("https://mcp.example.com");
 		expect(servers[0]?.headers).toEqual({ Authorization: "secret-token" });
-
-		delete process.env.OMP_TEST_TOKEN;
-		delete process.env.OMP_TEST_URL;
 	});
 
 	test("normalizes type 'local' to transport 'stdio'", async () => {
