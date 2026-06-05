@@ -484,14 +484,16 @@ export class StatusLineComponent implements Component {
 			for (const limit of limits) {
 				if (!limit || typeof limit !== "object") continue;
 				const l = limit as {
-					scope?: { windowId?: string; modelId?: string };
+					scope?: { windowId?: string; modelId?: string; tier?: string; shared?: boolean };
 					window?: { resetsAt?: number };
 					amount?: { usedFraction?: number };
 				};
 				const fraction = l.amount?.usedFraction;
 				if (typeof fraction !== "number") continue;
-				if (typeof l.scope?.modelId === "string") continue;
-				const windowId = l.scope?.windowId;
+				const scope = l.scope;
+				if (typeof scope?.modelId === "string") continue;
+				if (typeof scope?.tier === "string" && scope.tier.length > 0 && scope.shared !== true) continue;
+				const windowId = scope?.windowId;
 				const resetsAt = l.window?.resetsAt;
 				if (windowId === "5h" && !fiveHour) {
 					fiveHour = {

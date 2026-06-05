@@ -195,12 +195,17 @@ describe("StatusLineComponent incremental context breakdown cache", () => {
 				{
 					limits: [
 						{
-							scope: { windowId: "5h", tier: "prolite" },
+							scope: { windowId: "5h", tier: "prolite", shared: true },
 							amount: { usedFraction: 0.13 },
 							window: { resetsAt: Date.now() + 90 * 60_000 },
 						},
 						{
-							scope: { windowId: "7d", tier: "prolite" },
+							scope: { windowId: "7d", tier: "opus" },
+							amount: { usedFraction: 0.77 },
+							window: { resetsAt: Date.now() + 20 * 60 * 60_000 },
+						},
+						{
+							scope: { windowId: "7d", tier: "prolite", shared: true },
 							amount: { usedFraction: 0.03 },
 							window: { resetsAt: Date.now() + 25 * 60 * 60_000 },
 						},
@@ -228,6 +233,7 @@ describe("StatusLineComponent incremental context breakdown cache", () => {
 		expect(rendered).toContain("13%");
 		expect(rendered).toContain("7d");
 		expect(rendered).toContain("3%");
+		expect(rendered).not.toContain("77%");
 		expect(rendered).not.toContain("99%");
 	});
 
