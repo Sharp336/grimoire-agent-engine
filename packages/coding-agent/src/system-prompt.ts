@@ -339,6 +339,8 @@ export interface BuildSystemPromptOptions {
 	repeatToolDescriptions?: boolean;
 	/** Skills settings for discovery. */
 	skillsSettings?: SkillsSettings;
+	/** Frozen set of skill names to show inline; others get a pointer. Null = no redaction. */
+	frequentSkillNames?: ReadonlySet<string> | null;
 	/** Working directory. Default: getProjectDir() */
 	cwd?: string;
 	/** Pre-loaded context files (skips discovery if provided). */
@@ -385,6 +387,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		appendSystemPrompt,
 		repeatToolDescriptions = false,
 		skillsSettings,
+		frequentSkillNames,
 		toolNames: providedToolNames,
 		cwd,
 		contextFiles: providedContextFiles,
@@ -541,7 +544,26 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// - require the `read` tool so the model can actually fetch skill content;
 	// - drop skills with frontmatter `hide: true` (still loadable via skill:// and /skill:<name>).
 	const hasRead = tools?.has("read");
-	const filteredSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+	const allVisibleSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
+
+	let renderedSkills: typeof allVisibleSkills;
+	let deferredSkillCount = 0;
+	const skillsRedacted =
+		!!skillsSettings?.redactDescriptions && frequentSkillNames != null && allVisibleSkills.length > 0;
+	if (skillsRedacted) {
+		renderedSkills = allVisibleSkills.filter(s => frequentSkillNames!.has(s.name));
+		deferredSkillCount = allVisibleSkills.length - renderedSkills.length;
+		// If nothing is actually deferred, clear the redacted flag for the template
+		if (deferredSkillCount === 0) {
+			// All skills fit in the frequent set (e.g. warmup gate or small catalog).
+			// skillsRedacted stays true here but is guarded at the template-data boundary
+			// (`skillsRedacted && deferredSkillCount > 0`) so the pointer never renders.
+			renderedSkills = allVisibleSkills;
+		}
+	} else {
+		renderedSkills = allVisibleSkills;
+	}
+	const showSkillsBlock = renderedSkills.length > 0 || (skillsRedacted && deferredSkillCount > 0);
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
@@ -563,7 +585,10 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		contextFiles,
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
-		skills: filteredSkills,
+		skills: renderedSkills,
+		skillsRedacted: skillsRedacted && deferredSkillCount > 0,
+		deferredSkillCount,
+		showSkillsBlock,
 		rules: rules ?? [],
 		alwaysApplyRules: injectedAlwaysApplyRules,
 		date,

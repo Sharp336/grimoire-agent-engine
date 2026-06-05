@@ -317,6 +317,10 @@ export interface AgentSessionConfig {
 	/** Custom commands (TypeScript slash commands) */
 	customCommands?: LoadedCustomCommand[];
 	skillsSettings?: SkillsSettings;
+	/** Frozen frequent-skill set computed at SDK-init. Null = no redaction. */
+	frequentSkillNames?: ReadonlySet<string> | null;
+	/** Deferred (non-frequent) skills exposed for search_tool_bm25 discovery. */
+	deferredSkillEntries?: readonly DiscoverableTool[];
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
 	/** Tool registry for LSP and settings */
@@ -929,6 +933,8 @@ export class AgentSession {
 
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
+	#frequentSkillNames: ReadonlySet<string> | null = null;
+	#deferredSkillEntries: readonly DiscoverableTool[] = [];
 
 	// Custom commands (TypeScript slash commands)
 	#customCommands: LoadedCustomCommand[] = [];
@@ -1123,6 +1129,8 @@ export class AgentSession {
 		this.#extensionRunner = config.extensionRunner;
 		this.#skills = config.skills ?? [];
 		this.#skillWarnings = config.skillWarnings ?? [];
+		this.#frequentSkillNames = config.frequentSkillNames ?? null;
+		this.#deferredSkillEntries = config.deferredSkillEntries ?? [];
 		this.#customCommands = config.customCommands ?? [];
 		this.#skillsSettings = config.skillsSettings;
 		this.#modelRegistry = config.modelRegistry;
@@ -3340,6 +3348,10 @@ export class AgentSession {
 		return this.#resolveEffectiveDiscoveryMode() !== "off";
 	}
 
+	isSkillDiscoveryEnabled(): boolean {
+		return this.settings.get("skills.redactDescriptions") === true && this.#deferredSkillEntries.length > 0;
+	}
+
 	getDiscoverableTools(filter?: { source?: DiscoverableTool["source"] }): DiscoverableTool[] {
 		// For "all" mode we combine built-in registry entries + MCP tools.
 		// For "mcp-only" mode we only return MCP tools.
@@ -3347,7 +3359,11 @@ export class AgentSession {
 		const activeNames = new Set(this.getActiveToolNames());
 		const mcpTools = Array.from(this.#discoverableMCPTools.values()).filter(t => !activeNames.has(t.name));
 		const builtinTools: DiscoverableTool[] = mode === "all" ? this.#collectDiscoverableBuiltinTools() : [];
-		const allTools = [...builtinTools, ...mcpTools];
+		// Deferred skill entries are appended unconditionally — they must survive the
+		// mode-gate that empties builtins/mcp under discoveryMode:"off" (the default),
+		// or the BM25 index is empty in exactly the config a user hits by enabling
+		// skills.redactDescriptions alone.
+		const allTools = [...builtinTools, ...mcpTools, ...this.#deferredSkillEntries];
 		return filter?.source ? allTools.filter(t => t.source === filter.source) : allTools;
 	}
 

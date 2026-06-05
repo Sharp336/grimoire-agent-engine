@@ -237,6 +237,8 @@ export interface ToolSession {
 	// ── Generic tool discovery (unified — covers built-in + MCP + extension) ──
 	/** Whether any form of tool discovery is active (tools.discoveryMode !== "off" or mcp.discoveryMode). */
 	isToolDiscoveryEnabled?: () => boolean;
+	/** Whether skill-description redaction has deferred skills discoverable via search_tool_bm25. */
+	isSkillDiscoveryEnabled?(): boolean;
 	/** Get all hidden-but-discoverable tools for search_tool_bm25 prompts. */
 	getDiscoverableTools?: (filter?: {
 		source?: import("../tool-discovery/tool-index").DiscoverableToolSource;

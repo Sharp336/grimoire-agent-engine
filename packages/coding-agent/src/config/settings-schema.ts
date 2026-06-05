@@ -2852,6 +2852,39 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.includeSkills": { type: "array", default: [] as string[] },
 
+	"skills.redactDescriptions": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			label: "Redact Skill Descriptions",
+			description:
+				"Hide infrequently-used skill descriptions from the system prompt. Frequent skills (top-N by usage) remain visible; others are discoverable via search_tool_bm25.",
+		},
+	},
+
+	"skills.frequentSkillCount": {
+		type: "number",
+		default: 20,
+		ui: {
+			tab: "tasks",
+			label: "Frequent Skill Count",
+			description:
+				"Number of most-used skills to keep visible in the system prompt when redactDescriptions is enabled.",
+		},
+	},
+
+	"skills.alwaysInclude": {
+		type: "array",
+		default: [] as string[],
+		ui: {
+			tab: "tasks",
+			label: "Always Include Skills",
+			description:
+				"Glob patterns for skills always shown in the system prompt, even when redactDescriptions is enabled.",
+		},
+	},
+
 	// Commands
 	"commands.enableClaudeUser": {
 		type: "boolean",
@@ -3349,6 +3382,9 @@ export interface SkillsSettings {
 	ignoredSkills?: string[];
 	includeSkills?: string[];
 	disabledExtensions?: string[];
+	redactDescriptions?: boolean;
+	frequentSkillCount?: number;
+	alwaysInclude?: string[];
 }
 
 export interface CommitSettings {

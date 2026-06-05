@@ -78,6 +78,7 @@ import {
 	type ToolDefinition,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
+import { resolveFrequentSkillNames } from "./extensibility/skill-frequency";
 import {
 	loadSkills as loadSkillsInternal,
 	type Skill,
@@ -136,6 +137,7 @@ import {
 	type DiscoverableTool,
 	filterBySource,
 	formatDiscoverableToolServerSummary,
+	getDiscoverableSkill,
 	selectDiscoverableToolNamesByServer,
 	summarizeDiscoverableTools,
 } from "./tool-discovery/tool-index";
@@ -1148,6 +1150,28 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		skillWarnings = discovered.warnings;
 	}
 
+	// Freeze the frequent skill set at SDK-init scope. This is captured by the
+	// rebuildSystemPrompt closure and passed into AgentSession — same frozen set
+	// for every rebuild ensures byte-identical <skills> prefix → prompt cache stable.
+	const frequentSkillNames: ReadonlySet<string> | null =
+		!options.parentTaskPrefix && skillsSettings?.redactDescriptions
+			? resolveFrequentSkillNames(
+					settings.getStorage(),
+					skills,
+					{
+						frequentCount: skillsSettings.frequentSkillCount ?? 20,
+						alwaysInclude: skillsSettings.alwaysInclude ?? [],
+					},
+					Math.floor(Date.now() / 1000),
+				)
+			: null;
+
+	// Single owner of the deferred-skill partition. Consumers receive the
+	// pre-computed result — neither rebuildSystemPrompt nor AgentSession re-derive it.
+	const deferredSkillEntries: DiscoverableTool[] = frequentSkillNames
+		? skills.filter(s => !s.hide && !frequentSkillNames.has(s.name)).map(s => getDiscoverableSkill(s))
+		: [];
+
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
 	const { ttsrManager, rulebookRules, alwaysApplyRules } = await logger.time("discoverTtsrRules", async () => {
 		const ttsrSettings = settings.getGroup("ttsr");
@@ -1742,7 +1766,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 							{ source: "builtin" },
 						)
 					: [];
-			const discoverableToolsForDesc: DiscoverableTool[] = [...discoverableBuiltinTools, ...discoverableMCPTools];
+			const discoverableToolsForDesc: DiscoverableTool[] = [
+				...discoverableBuiltinTools,
+				...discoverableMCPTools,
+				...deferredSkillEntries,
+			];
 			const discoverableToolSummary = summarizeDiscoverableTools(discoverableToolsForDesc);
 			const hasDiscoverableTools =
 				mcpDiscoveryEnabled && toolNames.includes("search_tool_bm25") && discoverableToolsForDesc.length > 0;
@@ -1779,6 +1807,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				rules: rulebookRules,
 				alwaysApplyRules,
 				skillsSettings: settings.getGroup("skills"),
+				frequentSkillNames,
 				appendSystemPrompt: appendPrompt,
 				repeatToolDescriptions,
 				intentField,
@@ -2132,6 +2161,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skills,
 			skillWarnings,
 			skillsSettings: settings.getGroup("skills"),
+			frequentSkillNames,
+			deferredSkillEntries,
 			modelRegistry,
 			toolRegistry,
 			transformContext,

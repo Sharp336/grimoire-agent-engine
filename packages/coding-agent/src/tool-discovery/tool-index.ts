@@ -2,7 +2,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 
 // ─── Generic Tool Discovery Types ────────────────────────────────────────────
 
-export type DiscoverableToolSource = "builtin" | "mcp" | "extension" | "custom";
+export type DiscoverableToolSource = "builtin" | "mcp" | "extension" | "custom" | "skill";
 
 export interface DiscoverableTool {
 	name: string;
@@ -148,6 +148,17 @@ export function getDiscoverableTool(
 		serverName: typeof toolRecord.mcpServerName === "string" ? toolRecord.mcpServerName : undefined,
 		mcpToolName: typeof toolRecord.mcpToolName === "string" ? toolRecord.mcpToolName : undefined,
 		schemaKeys: getSchemaPropertyKeys(toolRecord.parameters),
+	};
+}
+
+/** Build a DiscoverableTool descriptor for a skill so it is searchable via search_tool_bm25. */
+export function getDiscoverableSkill(skill: { name: string; description: string }): DiscoverableTool {
+	return {
+		name: skill.name,
+		label: skill.name,
+		summary: skill.description,
+		source: "skill" as const,
+		schemaKeys: [],
 	};
 }
 

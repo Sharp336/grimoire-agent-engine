@@ -122,11 +122,14 @@ ENV
 ===================================
 
 # Skills & Rules
-{{#if skills.length}}
+{{#if showSkillsBlock}}
 <skills>
 {{#each skills}}
 - {{name}}: {{description}}
 {{/each}}
+{{#if skillsRedacted}}
+- ({{deferredSkillCount}} more skills not listed — search with `search_tool_bm25`, then read `skill://<name>` to use one.)
+{{/if}}
 </skills>
 {{/if}}
 
