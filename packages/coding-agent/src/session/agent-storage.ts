@@ -22,9 +22,21 @@ type ModelUsageRow = {
 	last_used_at: number;
 };
 
+/** Row shape for skill_usage table queries */
+type SkillUsageRow = {
+	skill_name: string;
+	decayed_count: number;
+	last_used_at: number;
+	total_count: number;
+};
+
 /** Bump when schema changes require migration */
-const SCHEMA_VERSION = 5;
+const SCHEMA_VERSION = 6;
 const SQLITE_NOW_EPOCH = "CAST(strftime('%s','now') AS INTEGER)";
+
+const SKILL_USAGE_HALF_LIFE_DAYS = 21;
+const SKILL_USAGE_DECAY_LAMBDA = Math.LN2 / (SKILL_USAGE_HALF_LIFE_DAYS * 86_400);
+const SKILL_USAGE_THROTTLE_SECS = 300; // 5 min burst-dedup window
 
 /** Singleton instances per database path */
 const instances = new Map<string, AgentStorage>();
@@ -42,6 +54,9 @@ export class AgentStorage {
 	#upsertModelUsageStmt: Statement;
 	#listModelUsageStmt: Statement;
 	#modelUsageCache: string[] | null = null;
+	#upsertSkillUsageStmt: Statement;
+	#selectSkillUsageStmt: Statement;
+	#listSkillUsageStmt: Statement;
 
 	private constructor(dbPath: string) {
 		this.#ensureDir(dbPath);
@@ -71,6 +86,15 @@ export class AgentStorage {
 		this.#listModelUsageStmt = this.#db.prepare(
 			"SELECT model_key, last_used_at FROM model_usage ORDER BY last_used_at DESC",
 		);
+		this.#upsertSkillUsageStmt = this.#db.prepare(
+			"INSERT INTO skill_usage (skill_name, decayed_count, last_used_at, total_count) VALUES (?, ?, ?, 1) ON CONFLICT(skill_name) DO UPDATE SET decayed_count = ?, last_used_at = ?, total_count = total_count + 1",
+		);
+		this.#selectSkillUsageStmt = this.#db.prepare(
+			"SELECT skill_name, decayed_count, last_used_at, total_count FROM skill_usage WHERE skill_name = ?",
+		);
+		this.#listSkillUsageStmt = this.#db.prepare(
+			"SELECT skill_name, decayed_count, last_used_at, total_count FROM skill_usage ORDER BY decayed_count DESC",
+		);
 	}
 
 	/**
@@ -86,6 +110,13 @@ PRAGMA busy_timeout=5000;
 CREATE TABLE IF NOT EXISTS model_usage (
 	model_key TEXT PRIMARY KEY,
 	last_used_at INTEGER NOT NULL DEFAULT (${SQLITE_NOW_EPOCH})
+);
+
+CREATE TABLE IF NOT EXISTS skill_usage (
+	skill_name TEXT PRIMARY KEY,
+	decayed_count REAL NOT NULL DEFAULT 0,
+	last_used_at INTEGER NOT NULL DEFAULT 0,
+	total_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE TABLE IF NOT EXISTS schema_version (version INTEGER PRIMARY KEY);
@@ -169,6 +200,9 @@ CREATE TABLE settings (
 		}
 		if (fromVersion < 5) {
 			this.#migrateSchemaV4ToV5();
+		}
+		if (fromVersion < 6) {
+			// v5 → v6: skill_usage table added via idempotent CREATE TABLE IF NOT EXISTS in #initializeSchema
 		}
 	}
 
@@ -290,6 +324,55 @@ FROM model_usage_legacy
 			return this.#modelUsageCache;
 		} catch (error) {
 			logger.warn("AgentStorage failed to get model usage order", { error: String(error) });
+			return [];
+		}
+	}
+
+	/**
+	 * Records a skill usage event with exponential-decay scoring.
+	 * Calls within the 5-minute throttle window are silently skipped.
+	 * @param skillName - Identifier of the skill being used
+	 */
+	recordSkillUsage(skillName: string): void {
+		try {
+			const nowSec = Math.floor(Date.now() / 1000);
+			const prior = this.#selectSkillUsageStmt.get(skillName) as SkillUsageRow | undefined;
+
+			// 5-minute burst throttle: skip if already recorded recently
+			if (prior && nowSec - prior.last_used_at < SKILL_USAGE_THROTTLE_SECS) {
+				return;
+			}
+
+			// Decay prior score to now, then add 1
+			const dt = prior ? nowSec - prior.last_used_at : 0;
+			const newScore = prior
+				? prior.decayed_count * Math.exp(-SKILL_USAGE_DECAY_LAMBDA * dt) + 1
+				: 1;
+
+			this.#upsertSkillUsageStmt.run(skillName, newScore, nowSec, newScore, nowSec);
+		} catch (error) {
+			logger.warn("AgentStorage failed to record skill usage", { skillName, error: String(error) });
+		}
+	}
+
+	/**
+	 * Returns all skill usage entries with scores decayed to the current time,
+	 * ordered by descending decayed score.
+	 * @returns Array of skill usage entries
+	 */
+	getSkillUsage(): Array<{ name: string; score: number; lastUsedAt: number; totalCount: number }> {
+		try {
+			const nowSec = Math.floor(Date.now() / 1000);
+			const rows = this.#listSkillUsageStmt.all() as SkillUsageRow[];
+			return rows
+				.map(row => {
+					const dt = nowSec - row.last_used_at;
+					const score = row.decayed_count * Math.exp(-SKILL_USAGE_DECAY_LAMBDA * dt);
+					return { name: row.skill_name, score, lastUsedAt: row.last_used_at, totalCount: row.total_count };
+				})
+				.sort((a, b) => b.score - a.score);
+		} catch (error) {
+			logger.warn("AgentStorage failed to get skill usage", { error: String(error) });
 			return [];
 		}
 	}
