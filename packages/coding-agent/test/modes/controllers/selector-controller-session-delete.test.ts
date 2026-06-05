@@ -1,4 +1,5 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
 import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -6,6 +7,7 @@ import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/typ
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage } from "@oh-my-pi/pi-coding-agent/session/session-storage";
+import { setKeybindings, setKittyProtocolActive } from "@oh-my-pi/pi-tui";
 
 type TestContext = InteractiveModeContext & {
 	editorContainer: {
@@ -143,10 +145,12 @@ function renderText(selector: SessionSelectorComponent): string {
 
 beforeAll(() => {
 	initTheme();
+	setKittyProtocolActive(true);
 });
 
 describe("SelectorController session deletion", () => {
 	beforeEach(() => {
+		setKeybindings(KeybindingsManager.inMemory());
 		vi.spyOn(SessionManager, "list").mockResolvedValue([]);
 		vi.spyOn(SessionManager, "listAll").mockResolvedValue([]);
 	});
@@ -270,5 +274,52 @@ describe("SelectorController session deletion", () => {
 			"editorContainer.addChild",
 			"ui.requestRender",
 		]);
+	});
+
+	it("triggers delete on ctrl+backspace when search is empty", async () => {
+		const session = makeSessionInfo("/tmp/project/sessions/target.jsonl");
+		const { ctx } = createContext("/tmp/project/sessions/other.jsonl");
+		vi.spyOn(SessionManager, "list").mockResolvedValue([session]);
+		const deleteSessionWithArtifacts = vi
+			.spyOn(FileSessionStorage.prototype, "deleteSessionWithArtifacts")
+			.mockResolvedValue(undefined);
+		const controller = new SelectorController(ctx);
+
+		await controller.showSessionSelector();
+		const selector = ctx.editorContainer.children[0];
+		if (!(selector instanceof SessionSelectorComponent)) {
+			throw new Error("Expected session selector component");
+		}
+
+		// Ctrl+Backspace triggers delete when search is empty -> shows confirmation
+		selector.handleInput("\x1b[127;5u"); // Kitty Ctrl+Backspace
+		selector.handleInput("\n"); // Confirm "Yes"
+		await Bun.sleep(0);
+
+		expect(deleteSessionWithArtifacts).toHaveBeenCalledWith(session.path);
+	});
+
+	it("does not trigger delete on ctrl+backspace when search has text", async () => {
+		const session = makeSessionInfo("/tmp/project/sessions/target.jsonl");
+		const { ctx } = createContext("/tmp/project/sessions/other.jsonl");
+		vi.spyOn(SessionManager, "list").mockResolvedValue([session]);
+		const deleteSessionWithArtifacts = vi
+			.spyOn(FileSessionStorage.prototype, "deleteSessionWithArtifacts")
+			.mockResolvedValue(undefined);
+		const controller = new SelectorController(ctx);
+
+		await controller.showSessionSelector();
+		const selector = ctx.editorContainer.children[0];
+		if (!(selector instanceof SessionSelectorComponent)) {
+			throw new Error("Expected session selector component");
+		}
+
+		// Type some text into search
+		selector.handleInput("a");
+		// Ctrl+Backspace should NOT trigger delete when search has text
+		selector.handleInput("\x1b[127;5u"); // Kitty Ctrl+Backspace
+		await Bun.sleep(0);
+
+		expect(deleteSessionWithArtifacts).not.toHaveBeenCalled();
 	});
 });
