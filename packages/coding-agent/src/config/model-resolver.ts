@@ -540,9 +540,10 @@ function resolveConfiguredRolePattern(value: string, settings?: Settings): strin
 	if (!normalized) return undefined;
 
 	const lastColonIndex = normalized.lastIndexOf(":");
-	const thinkingLevel =
-		lastColonIndex > PREFIX_MODEL_ROLE.length ? parseThinkingLevel(normalized.slice(lastColonIndex + 1)) : undefined;
-	const aliasCandidate = thinkingLevel ? normalized.slice(0, lastColonIndex) : normalized;
+	const suffix = lastColonIndex > PREFIX_MODEL_ROLE.length ? normalized.slice(lastColonIndex + 1) : undefined;
+	const thinkingLevel = suffix ? parseThinkingLevel(suffix) : undefined;
+	const autoSuffix = suffix === AUTO_THINKING;
+	const aliasCandidate = thinkingLevel !== undefined || autoSuffix ? normalized.slice(0, lastColonIndex) : normalized;
 	const role = getModelRoleAlias(aliasCandidate);
 	if (!role) return [normalized];
 
@@ -553,7 +554,8 @@ function resolveConfiguredRolePattern(value: string, settings?: Settings): strin
 		return undefined;
 	}
 
-	return thinkingLevel ? resolved.map(pattern => `${pattern}:${thinkingLevel}`) : resolved;
+	const appendedSuffix = autoSuffix ? AUTO_THINKING : thinkingLevel;
+	return appendedSuffix ? resolved.map(pattern => `${pattern}:${appendedSuffix}`) : resolved;
 }
 
 /**

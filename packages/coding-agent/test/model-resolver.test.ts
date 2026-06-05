@@ -463,6 +463,20 @@ describe("resolveModelRoleValue", () => {
 		expect(result.explicitThinkingLevel).toBe(true);
 	});
 
+	test("resolves pi/<role>:auto by expanding the alias and surfacing the auto flag", () => {
+		const settings = {
+			getModelRole: (role: string) => (role === "smol" ? "anthropic/claude-sonnet-4-5" : undefined),
+		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+
+		const result = resolveModelRoleValue("pi/smol:auto", allModels, { settings });
+
+		expect(result.model?.provider).toBe("anthropic");
+		expect(result.model?.id).toBe("claude-sonnet-4-5");
+		expect(result.auto).toBe(true);
+		expect(result.thinkingLevel).toBeUndefined();
+		expect(result.explicitThinkingLevel).toBe(false);
+	});
+
 	test("resolves pi/default through configured default role alias", () => {
 		const settings = {
 			getModelRole: (role: string) => (role === "default" ? "openrouter/qwen/qwen3-coder:exacto" : undefined),

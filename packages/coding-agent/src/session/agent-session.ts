@@ -5399,6 +5399,8 @@ export class AgentSession {
 			this.setThinkingLevel(AUTO_THINKING);
 		} else if (entry.explicitThinkingLevel && entry.thinkingLevel !== undefined) {
 			this.setThinkingLevel(entry.thinkingLevel);
+		} else if (this.#autoThinking) {
+			this.setThinkingLevel(this.settings.get("defaultThinkingLevel"));
 		}
 	}
 

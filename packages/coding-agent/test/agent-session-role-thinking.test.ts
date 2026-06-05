@@ -133,6 +133,34 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.thinkingLevel).toBe(Effort.High);
 	});
 
+	it("resets per-role auto to the inherited default when cycling onto a bare role", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const slowModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+
+		await createSession({
+			initialModelId: defaultModel.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: {
+				default: `${defaultModel.provider}/${defaultModel.id}:auto`,
+				slow: `${slowModel.provider}/${slowModel.id}`, // bare — inherits defaultThinkingLevel
+			},
+		});
+		sessionSettings.set("defaultThinkingLevel", Effort.Low);
+
+		// Enter auto via the default role.
+		await session.cycleRoleModels(["default", "slow"]); // → slow (bare)
+		const toAuto = await session.cycleRoleModels(["default", "slow"]); // → default (:auto)
+		expect(toAuto?.role).toBe("default");
+		expect(session.isAutoThinking).toBe(true);
+
+		// Cycling onto the bare role must drop auto and inherit defaultThinkingLevel,
+		// not leak the previous per-role auto.
+		const toBare = await session.cycleRoleModels(["default", "slow"]); // → slow (bare)
+		expect(toBare?.role).toBe("slow");
+		expect(session.isAutoThinking).toBe(false);
+		expect(session.thinkingLevel).toBe(Effort.Low);
+	});
+
 	it("scoped model cycle applies each entry's own auto/level, not sticky auto", async () => {
 		const autoModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const highModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
