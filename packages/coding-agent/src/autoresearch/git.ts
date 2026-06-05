@@ -1,9 +1,21 @@
+import { Settings } from "../config/settings";
 import type { ExtensionAPI } from "../extensibility/extensions";
 import * as git from "../utils/git";
+import { resolveRepositoryMode } from "../utils/repository-mode";
 import { normalizePathSpec } from "./helpers";
 
 const AUTORESEARCH_BRANCH_PREFIX = "autoresearch/";
 const BRANCH_NAME_MAX_LENGTH = 48;
+const PURE_JJ_AUTORESEARCH_ERROR =
+	"Autoresearch branch isolation is not supported in pure jj repositories yet. Use a colocated Git repository or run without branch isolation.";
+
+function repositoryModeProbeError(err: unknown): string {
+	return `Unable to resolve repository mode before autoresearch branch isolation: ${err instanceof Error ? err.message : String(err)}`;
+}
+
+function isNoSupportedRepositoryError(err: unknown): boolean {
+	return err instanceof Error && err.message.startsWith("No supported repository mode detected.");
+}
 
 export interface EnsureAutoresearchBranchFailure {
 	error: string;
@@ -37,6 +49,11 @@ export async function ensureAutoresearchBranch(
 	workDir: string,
 	goal: string | null,
 ): Promise<EnsureAutoresearchBranchResult> {
+	const gitInteropGuard = await checkGitInteropMutations(workDir);
+	if (gitInteropGuard) {
+		return { ok: false, error: gitInteropGuard };
+	}
+
 	const repoRoot = await git.repo.root(workDir);
 	if (!repoRoot) {
 		return {
@@ -82,6 +99,18 @@ export async function ensureAutoresearchBranch(
 		};
 	}
 	return { ok: true, branchName, created: true };
+}
+
+async function checkGitInteropMutations(workDir: string): Promise<string | null> {
+	try {
+		const settings = await Settings.init({ cwd: workDir });
+		const mode = await resolveRepositoryMode(workDir, settings.get("repository.mode"));
+		if (mode.capabilities.canUseGitInteropMutations && mode.gitRepository !== null) return null;
+		return PURE_JJ_AUTORESEARCH_ERROR;
+	} catch (err) {
+		if (isNoSupportedRepositoryError(err)) return null;
+		return repositoryModeProbeError(err);
+	}
 }
 
 export function parseWorkDirDirtyPaths(statusOutput: string, workDirPrefix: string): string[] {

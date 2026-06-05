@@ -4,10 +4,25 @@ import * as os from "node:os";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
 import { getWorktreeDir, hashPath, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { Settings } from "../config/settings";
 import * as git from "../utils/git";
+import { resolveRepositoryMode } from "../utils/repository-mode";
 
 const { IsoBackendKind } = natives;
 type IsoBackendKind = natives.IsoBackendKind;
+
+const PURE_JJ_TASK_ISOLATION_ERROR =
+	"Task isolation is not supported in pure jj repositories yet. Use a colocated Git repository or disable task isolation for this run.";
+
+function repositoryModeProbeError(operation: string, err: unknown): Error {
+	return new Error(
+		`Unable to resolve repository mode before ${operation}: ${err instanceof Error ? err.message : String(err)}`,
+	);
+}
+
+function isNoSupportedRepositoryError(err: unknown): boolean {
+	return err instanceof Error && err.message.startsWith("No supported repository mode detected.");
+}
 
 /** Baseline state for a single git repository. */
 export interface RepoBaseline {
@@ -26,7 +41,33 @@ export interface WorktreeBaseline {
 	nested: Array<{ relativePath: string; baseline: RepoBaseline }>;
 }
 
+async function resolveGitInteropRepoRoot(cwd: string): Promise<string | null> {
+	try {
+		const settings = await Settings.init({ cwd });
+		const mode = await resolveRepositoryMode(cwd, settings.get("repository.mode"));
+		if (!mode.capabilities.canUseGitInteropMutations || !mode.gitRepository) {
+			throw new Error(PURE_JJ_TASK_ISOLATION_ERROR);
+		}
+		return mode.gitRepository.repoRoot;
+	} catch (err) {
+		if (err instanceof Error && err.message === PURE_JJ_TASK_ISOLATION_ERROR) {
+			throw err;
+		}
+		if (isNoSupportedRepositoryError(err)) {
+			return null;
+		}
+		throw repositoryModeProbeError("task isolation", err);
+	}
+}
+
+async function assertGitInteropMutationsSupported(cwd: string): Promise<void> {
+	await resolveGitInteropRepoRoot(cwd);
+}
+
 export async function getRepoRoot(cwd: string): Promise<string> {
+	const resolvedRepoRoot = await resolveGitInteropRepoRoot(cwd);
+	if (resolvedRepoRoot) return resolvedRepoRoot;
+
 	const repoRoot = await git.repo.root(cwd);
 	if (!repoRoot) {
 		throw new Error("Git repository not found for isolated task execution.");
@@ -125,6 +166,7 @@ async function writeSyntheticTree(repoDir: string, baseTreeish: string, patches:
 }
 
 export async function captureBaseline(repoRoot: string): Promise<WorktreeBaseline> {
+	await assertGitInteropMutationsSupported(repoRoot);
 	const [root, nestedPaths] = await Promise.all([captureRepoBaseline(repoRoot), discoverNestedRepos(repoRoot)]);
 	const nested = await Promise.all(
 		nestedPaths.map(async relativePath => ({

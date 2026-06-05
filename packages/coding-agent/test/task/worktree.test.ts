@@ -3,6 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
+import { Settings } from "../../src/config/settings";
 import {
 	captureBaseline,
 	captureDeltaPatch,
@@ -11,8 +12,12 @@ import {
 	mergeTaskBranches,
 	parseIsolationMode,
 } from "../../src/task/worktree";
+import * as gitUtils from "../../src/utils/git";
+import * as jj from "../../src/utils/jj";
 
 const tempDirs: string[] = [];
+const PURE_JJ_TASK_ISOLATION_ERROR =
+	"Task isolation is not supported in pure jj repositories yet. Use a colocated Git repository or disable task isolation for this run.";
 
 async function runGit(repo: string, args: string[]): Promise<string> {
 	const proc = Bun.spawn(["git", ...args], {
@@ -100,6 +105,85 @@ describe("worktree isolation helpers", () => {
 		expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
 		expect(handle.fellBack).toBe(true);
 		expect(handle.fallbackReason).toBe(unavailable.message);
+	});
+
+	it("rejects pure jj repositories before starting task isolation", async () => {
+		const cwd = "/repo";
+		vi.spyOn(Settings, "init").mockResolvedValue(Settings.isolated({ "repository.mode": "jj" }));
+		vi.spyOn(jj.repo, "resolve").mockResolvedValue({ repoRoot: cwd, storeDir: `${cwd}/.jj/repo/store` });
+		vi.spyOn(gitUtils.repo, "resolve").mockResolvedValue(null);
+		const isoResolve = vi.spyOn(natives, "isoResolve");
+		const isoStart = vi.spyOn(natives, "isoStart");
+
+		await expect(ensureIsolation(cwd, "pure-jj")).rejects.toThrow(PURE_JJ_TASK_ISOLATION_ERROR);
+
+		expect(isoResolve).not.toHaveBeenCalled();
+		expect(isoStart).not.toHaveBeenCalled();
+	});
+
+	it("allows jj mode with colocated Git to use existing task isolation", async () => {
+		const cwd = "/repo";
+		vi.spyOn(Settings, "init").mockResolvedValue(Settings.isolated({ "repository.mode": "jj" }));
+		vi.spyOn(jj.repo, "resolve").mockResolvedValue({ repoRoot: cwd, storeDir: `${cwd}/.jj/repo/store` });
+		vi.spyOn(gitUtils.repo, "resolve").mockResolvedValue({
+			commonDir: `${cwd}/.git`,
+			gitDir: `${cwd}/.git`,
+			gitEntryPath: `${cwd}/.git`,
+			headPath: `${cwd}/.git/HEAD`,
+			repoRoot: cwd,
+		});
+		vi.spyOn(natives, "isoResolve").mockReturnValue({
+			kind: natives.IsoBackendKind.Rcopy,
+			candidates: [natives.IsoBackendKind.Rcopy],
+			fellBack: false,
+			reason: undefined,
+		});
+		const isoStart = vi.spyOn(natives, "isoStart").mockResolvedValue(undefined);
+
+		const handle = await ensureIsolation(cwd, "jj-git");
+
+		expect(handle.backend).toBe(natives.IsoBackendKind.Rcopy);
+		expect(isoStart.mock.calls[0]?.[1]).toBe(cwd);
+	});
+
+	it("rejects pure jj repositories before capturing a Git baseline", async () => {
+		const cwd = "/repo";
+		vi.spyOn(Settings, "init").mockResolvedValue(Settings.isolated({ "repository.mode": "jj" }));
+		vi.spyOn(jj.repo, "resolve").mockResolvedValue({ repoRoot: cwd, storeDir: `${cwd}/.jj/repo/store` });
+		vi.spyOn(gitUtils.repo, "resolve").mockResolvedValue(null);
+		const headSha = vi.spyOn(gitUtils.head, "sha");
+
+		await expect(captureBaseline(cwd)).rejects.toThrow(PURE_JJ_TASK_ISOLATION_ERROR);
+
+		expect(headSha).not.toHaveBeenCalled();
+	});
+
+	it("fails closed when repository mode probing fails before starting task isolation", async () => {
+		const cwd = "/repo";
+		vi.spyOn(Settings, "init").mockRejectedValue(new Error("settings unavailable"));
+		const gitRoot = vi.spyOn(gitUtils.repo, "root");
+		const isoResolve = vi.spyOn(natives, "isoResolve");
+		const isoStart = vi.spyOn(natives, "isoStart");
+
+		await expect(ensureIsolation(cwd, "probe-failure")).rejects.toThrow(
+			"Unable to resolve repository mode before task isolation: settings unavailable",
+		);
+
+		expect(gitRoot).not.toHaveBeenCalled();
+		expect(isoResolve).not.toHaveBeenCalled();
+		expect(isoStart).not.toHaveBeenCalled();
+	});
+
+	it("fails closed when repository mode probing fails before capturing a Git baseline", async () => {
+		const cwd = "/repo";
+		vi.spyOn(Settings, "init").mockRejectedValue(new Error("settings unavailable"));
+		const headSha = vi.spyOn(gitUtils.head, "sha");
+
+		await expect(captureBaseline(cwd)).rejects.toThrow(
+			"Unable to resolve repository mode before task isolation: settings unavailable",
+		);
+
+		expect(headSha).not.toHaveBeenCalled();
 	});
 
 	it("does not pop an unrelated pre-existing stash when the working tree is clean", async () => {
