@@ -52,6 +52,7 @@ import { ResolveTool } from "./resolve";
 import { reportFindingTool } from "./review";
 import { SearchTool } from "./search";
 import { SearchToolBm25Tool } from "./search-tool-bm25";
+import { SecondOpinionTool } from "./second-opinion";
 import { loadSshTool } from "./ssh";
 import { type TodoPhase, TodoTool } from "./todo";
 import { WriteTool } from "./write";
@@ -93,6 +94,7 @@ export * from "./resolve";
 export * from "./review";
 export * from "./search";
 export * from "./search-tool-bm25";
+export * from "./second-opinion";
 export * from "./ssh";
 export * from "./todo";
 export * from "./tts";
@@ -327,6 +329,7 @@ export const BUILTIN_TOOLS: Record<string, ToolFactory> = {
 	retain: MemoryRetainTool.createIf,
 	recall: MemoryRecallTool.createIf,
 	reflect: MemoryReflectTool.createIf,
+	second_opinion: s => new SecondOpinionTool(s),
 };
 
 export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
@@ -429,6 +432,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "ast_edit") return session.settings.get("astEdit.enabled");
 		if (name === "render_mermaid") return session.settings.get("renderMermaid.enabled");
 		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
+		if (name === "second_opinion") return session.settings.get("secondOpinion.enabled");
 		if (name === "web_search") return session.settings.get("web_search.enabled");
 		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
 		if (name === "search_tool_bm25") return discoveryActive;

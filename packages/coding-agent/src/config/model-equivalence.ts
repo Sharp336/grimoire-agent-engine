@@ -60,10 +60,40 @@ const kModelResolutionCache = Symbol("model-equivalence.resolutionCache");
 interface CompiledEquivalenceConfigWithCache extends CompiledEquivalenceConfig {
 	[kModelResolutionCache]?: WeakMap<Model<Api>, ResolvedCanonicalModel>;
 }
+/** Shared model *series* vocabulary. Single source of truth for both canonical
+ *  family extraction and the coarse vendor-lineage grouping in {@link getModelSeries}. */
+const MODEL_SERIES_ALTERNATION =
+	"claude|gemini|gpt|grok|glm|qwen|minimax|kimi|deepseek|llama|gemma|nova|mistral|ministral|pixtral|codestral|devstral|magistral|ernie|doubao|seed|aion|olmo|molmo|nemotron|palmyra|command|codex|coder|o[1345]";
 const FAMILY_EXTRACTION_PATTERNS = [
-	/(?:^|[/:._-])((?:claude|gemini|gpt|grok|glm|qwen|minimax|kimi|deepseek|llama|gemma|nova|mistral|ministral|pixtral|codestral|devstral|magistral|ernie|doubao|seed|aion|olmo|molmo|nemotron|palmyra|command|codex|coder|o[1345])[-a-z0-9.]+)(?::|$)/i,
-	/(?:^|[/:._-])((?:claude|gemini|gpt|grok|glm|qwen|minimax|kimi|deepseek|llama|gemma|nova|mistral|ministral|pixtral|codestral|devstral|magistral|ernie|doubao|seed|aion|olmo|molmo|nemotron|palmyra|command|codex|coder|o[1345])[-a-z0-9.]+(?:[-_/][a-z0-9.]+)*)(?::|$)/i,
+	new RegExp(`(?:^|[/:._-])((?:${MODEL_SERIES_ALTERNATION})[-a-z0-9.]+)(?::|$)`, "i"),
+	new RegExp(`(?:^|[/:._-])((?:${MODEL_SERIES_ALTERNATION})[-a-z0-9.]+(?:[-_/][a-z0-9.]+)*)(?::|$)`, "i"),
 ] as const;
+
+/** Collapse near-equivalent series into one vendor lineage so a same-lab reviewer
+ *  is recognized as same-family (shared blind spots). Tokens absent here stand alone. */
+const SERIES_LINEAGE: Record<string, string> = {
+	gemma: "gemini",
+	ministral: "mistral",
+	pixtral: "mistral",
+	codestral: "mistral",
+	devstral: "mistral",
+	magistral: "mistral",
+};
+const SERIES_TOKEN_PATTERN = new RegExp(`(?:^|[/:._-])(${MODEL_SERIES_ALTERNATION})(?=$|[-_/.:0-9a-z])`, "i");
+
+/**
+ * Coarse vendor/lineage family of a model id or canonical id, or `undefined`
+ * when no known series token is present. Version-insensitive (`claude-opus-4.7`
+ * and `claude-opus-4.8` both yield `"claude"`); pass a canonical id (see
+ * {@link CanonicalModelIndex}) to also fold mirrors/proxies onto the official lineage.
+ */
+export function getModelSeries(value: string): string | undefined {
+	const match = SERIES_TOKEN_PATTERN.exec(value.toLowerCase());
+	if (!match) return undefined;
+	const token = match[1];
+	if (token.length === 2 && token[0] === "o") return "gpt";
+	return SERIES_LINEAGE[token] ?? token;
+}
 
 function shouldReplaceReference(existing: Model<Api> | undefined, candidate: Model<Api>): boolean {
 	if (!existing) return true;

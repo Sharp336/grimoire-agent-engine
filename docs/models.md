@@ -398,7 +398,9 @@ Resolution precedence for exact selectors:
 
 Supported model roles:
 
-- `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `task`
+- `default`, `smol`, `slow`, `vision`, `plan`, `designer`, `commit`, `task`, `secondopinion`
+
+`secondopinion` is the reviewer model for the `second_opinion` tool (independent second-opinion review on a different model). When unset, the tool prefers a cross-family slow model; on first interactive use it discloses what is sent, offers a picker, and persists the choice here. It is intentionally excluded from `cycleOrder`, so it never appears in normal model cycling.
 
 Role aliases like `pi/smol` expand through `settings.modelRoles`. Each role value can also append a thinking selector such as `:minimal`, `:low`, `:medium`, or `:high`.
 

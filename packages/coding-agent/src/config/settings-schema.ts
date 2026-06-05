@@ -259,6 +259,18 @@ export const SETTINGS_SCHEMA = {
 	lastChangelogVersion: { type: "string", default: undefined },
 	setupVersion: { type: "number", default: 0 },
 
+	// second_opinion tool: compact JSON fingerprint of the last interactively
+	// confirmed reviewer `{ sessionModel, slowModel, confirmedReviewer }`. Drives the
+	// "session/slow family changed" picker re-prompt. Hidden from the UI; written
+	// only after an interactive picker confirmation (or when the role is edited
+	// out of band and silently adopted).
+	"secondOpinion.lastPickerFingerprint": { type: "string", default: undefined },
+	// second_opinion tool: whether the user has acknowledged the one-time
+	// disclosure that the full session transcript is sent to a different model
+	// (and possibly a different vendor). Hidden; set after the interactive
+	// consent confirmation. Headless runs treat `secondOpinion.enabled` as consent.
+	"secondOpinion.consented": { type: "boolean", default: false },
+
 	// Auth broker — credentials proxied through a remote `omp auth-broker serve`
 	// host. Hidden from the UI; populate via env vars or hand-edited config.yml.
 	// Env (`OMP_AUTH_BROKER_URL` / `OMP_AUTH_BROKER_TOKEN`) takes precedence so
@@ -2293,6 +2305,17 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			label: "Inspect Image",
 			description: "Enable the inspect_image tool, delegating image understanding to a vision-capable model",
+		},
+	},
+
+	"secondOpinion.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tools",
+			label: "Second Opinion",
+			description:
+				"Enable the second_opinion tool, which sends the current conversation transcript to a different (ideally cross-family) model for an independent review. Off by default because it forwards the full transcript to another model/vendor.",
 		},
 	},
 
