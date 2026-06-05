@@ -23,6 +23,7 @@ import {
 	TINY_TITLE_MODEL_VALUES,
 } from "../tiny/models";
 import { EDIT_MODES } from "../utils/edit-mode";
+import type { RepositoryModeSetting } from "../utils/repository-mode";
 import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_PREFERENCES } from "../web/search/types";
 
 /** Unified settings schema - single source of truth for all settings.
@@ -214,6 +215,7 @@ const EMPTY_STRING_RECORD: Record<string, string> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
+const REPOSITORY_MODE_VALUES = ["auto", "git", "jj"] as const satisfies readonly RepositoryModeSetting[];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
 		pattern: "^\\s*(cat|head|tail|less|more)\\s+",
@@ -316,6 +318,12 @@ export const SETTINGS_SCHEMA = {
 	shellPath: { type: "string", default: undefined },
 
 	extensions: { type: "array", default: EMPTY_STRING_ARRAY },
+
+	"repository.mode": {
+		type: "enum",
+		values: REPOSITORY_MODE_VALUES,
+		default: "auto",
+	},
 
 	"marketplace.autoUpdate": {
 		type: "enum",

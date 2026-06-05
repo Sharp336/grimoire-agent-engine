@@ -11,6 +11,12 @@ import { ModelRegistry } from "../../config/model-registry";
 import { Settings } from "../../config/settings";
 import { discoverAuthStorage, discoverContextFiles } from "../../sdk";
 import * as git from "../../utils/git";
+import * as jj from "../../utils/jj";
+import {
+	assertRepositoryModeCapability,
+	type RepositoryMode,
+	resolveRepositoryMode,
+} from "../../utils/repository-mode";
 import { type ExistingChangelogEntries, runCommitAgentSession } from "./agent";
 import { generateFallbackProposal } from "./fallback";
 import splitConfirmPrompt from "./prompts/split-confirm.md" with { type: "text" };
@@ -21,19 +27,23 @@ import { detectTrivialChange } from "./trivial";
 interface CommitExecutionContext {
 	cwd: string;
 	dryRun: boolean;
+	repositoryMode: RepositoryMode;
 	push: boolean;
 }
 
 export async function runAgenticCommit(args: CommitCommandArgs): Promise<void> {
 	const cwd = getProjectDir();
 	const [settings, authStorage] = await Promise.all([Settings.init({ cwd }), discoverAuthStorage()]);
+	const repositoryMode = await resolveRepositoryMode(cwd, settings.get("repository.mode"));
+	assertSupportedJjCommitOptions(repositoryMode, args);
+	const useJj = repositoryMode.kind !== "git";
 
 	process.stdout.write("● Resolving model...\n");
 	const modelRegistry = new ModelRegistry(authStorage);
 	await modelRegistry.refresh();
 	const stagedFilesPromise = (async () => {
-		let stagedFiles = await git.diff.changedFiles(cwd, { cached: true });
-		if (stagedFiles.length === 0) {
+		let stagedFiles = useJj ? await jj.diff.changedFiles(cwd) : await git.diff.changedFiles(cwd, { cached: true });
+		if (!useJj && stagedFiles.length === 0) {
 			process.stdout.write("No staged changes detected, staging all changes...\n");
 			await git.stage.files(cwd);
 			stagedFiles = await git.diff.changedFiles(cwd, { cached: true });
@@ -58,17 +68,18 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<void> {
 		return;
 	}
 
-	if (!args.noChangelog) {
+	const changelogEnabled = !args.noChangelog && !useJj;
+	if (changelogEnabled) {
 		process.stdout.write("● Detecting changelog targets...\n");
 	}
 	const [changelogBoundaries, contextFiles, numstat, diff] = await Promise.all([
-		args.noChangelog ? [] : detectChangelogBoundaries(cwd, stagedFiles),
+		changelogEnabled ? detectChangelogBoundaries(cwd, stagedFiles) : [],
 		discoverContextFiles(cwd),
-		git.diff.numstat(cwd, { cached: true }),
-		git.diff(cwd, { cached: true }),
+		useJj ? [] : git.diff.numstat(cwd, { cached: true }),
+		useJj ? jj.diff(cwd) : git.diff(cwd, { cached: true }),
 	]);
 	const changelogTargets = changelogBoundaries.map(boundary => boundary.changelogPath);
-	if (!args.noChangelog) {
+	if (changelogEnabled) {
 		if (changelogTargets.length > 0) {
 			for (const path of changelogTargets) {
 				process.stdout.write(`  └─ ${path}\n`);
@@ -91,7 +102,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<void> {
 	if (forceFallback) {
 		process.stdout.write("● Forcing fallback commit generation...\n");
 		const fallbackProposal = generateFallbackProposal(numstat);
-		await runSingleCommit(fallbackProposal, { cwd, dryRun: args.dryRun, push: args.push });
+		await runSingleCommit(fallbackProposal, { cwd, dryRun: args.dryRun, repositoryMode, push: args.push });
 		return;
 	}
 
@@ -108,12 +119,12 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<void> {
 			summary: trivialChange.summary,
 			warnings: [],
 		};
-		await runSingleCommit(trivialProposal, { cwd, dryRun: args.dryRun, push: args.push });
+		await runSingleCommit(trivialProposal, { cwd, dryRun: args.dryRun, repositoryMode, push: args.push });
 		return;
 	}
 
 	let existingChangelogEntries: ExistingChangelogEntries[] | undefined;
-	if (!args.noChangelog && changelogTargets.length > 0) {
+	if (changelogEnabled && changelogTargets.length > 0) {
 		existingChangelogEntries = await loadExistingChangelogEntries(changelogTargets);
 		if (existingChangelogEntries.length === 0) {
 			existingChangelogEntries = undefined;
@@ -159,7 +170,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<void> {
 	}
 
 	let updatedChangelogFiles: string[] = [];
-	if (!args.noChangelog && changelogTargets.length > 0 && !usedFallback) {
+	if (changelogEnabled && changelogTargets.length > 0 && !usedFallback) {
 		if (!commitState.changelogProposal) {
 			process.stderr.write("Commit agent did not provide changelog entries.\n");
 			return;
@@ -184,7 +195,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<void> {
 	}
 
 	if (commitState.proposal) {
-		await runSingleCommit(commitState.proposal, { cwd, dryRun: args.dryRun, push: args.push });
+		await runSingleCommit(commitState.proposal, { cwd, dryRun: args.dryRun, repositoryMode, push: args.push });
 		return;
 	}
 
@@ -192,6 +203,7 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<void> {
 		await runSplitCommit(commitState.splitProposal, {
 			cwd,
 			dryRun: args.dryRun,
+			repositoryMode,
 			push: args.push,
 			additionalFiles: updatedChangelogFiles,
 		});
@@ -199,6 +211,20 @@ export async function runAgenticCommit(args: CommitCommandArgs): Promise<void> {
 	}
 
 	process.stderr.write("Commit agent did not provide a proposal.\n");
+}
+
+function assertSupportedJjCommitOptions(mode: RepositoryMode, args: CommitCommandArgs): void {
+	if (mode.kind === "git") return;
+	if (args.push) {
+		throw new Error(
+			`Repository mode '${mode.kind}' does not support push after jj commit. Supported alternative: single commit without --push.`,
+		);
+	}
+	if (!args.noChangelog) {
+		throw new Error(
+			`Repository mode '${mode.kind}' does not support changelog updates in jj commit flow yet. Supported alternative: pass --no-changelog for jj commit flow, or use Git mode.`,
+		);
+	}
 }
 
 async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionContext): Promise<void> {
@@ -211,9 +237,13 @@ async function runSingleCommit(proposal: CommitProposal, ctx: CommitExecutionCon
 		process.stdout.write(`${commitMessage}\n`);
 		return;
 	}
-	await git.commit(ctx.cwd, commitMessage);
+	if (ctx.repositoryMode.kind === "git") {
+		await git.commit(ctx.cwd, commitMessage);
+	} else {
+		await jj.commit(ctx.cwd, commitMessage);
+	}
 	process.stdout.write("Commit created.\n");
-	if (ctx.push) {
+	if (ctx.push && ctx.repositoryMode.kind === "git") {
 		await git.push(ctx.cwd);
 		process.stdout.write("Pushed to remote.\n");
 	}
@@ -223,6 +253,7 @@ async function runSplitCommit(
 	plan: SplitCommitPlan,
 	ctx: CommitExecutionContext & { additionalFiles?: string[] },
 ): Promise<void> {
+	assertRepositoryModeCapability(ctx.repositoryMode, "canSplitCommit", "split commit", "single commit");
 	if (plan.warnings.length > 0) {
 		process.stdout.write(formatWarnings(plan.warnings));
 	}

@@ -9,6 +9,8 @@ import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } 
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import * as git from "../../utils/git";
+import * as jj from "../../utils/jj";
+import { type RepositoryKind, type RepositoryMode, resolveRepositoryMode } from "../../utils/repository-mode";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../utils/session-color";
 import { sanitizeStatusText } from "../shared";
 import { computeNonMessageTokens } from "../utils/context-usage";
@@ -167,6 +169,9 @@ export class StatusLineComponent implements Component {
 	#defaultBranch?: string;
 	#lastTokensPerSecond: number | null = null;
 	#lastTokensPerSecondTimestamp: number | null = null;
+	#cachedRepositoryMode: RepositoryMode | null = null;
+	#repositoryModeCacheKey: string | null = null;
+	#repositoryModeInFlight = false;
 
 	// Anthropic usage caching (5-min TTL, OAuth/sub only)
 	#cachedUsage: {
@@ -249,6 +254,10 @@ export class StatusLineComponent implements Component {
 			this.#gitWatcher = null;
 		}
 
+		if (settings.get("repository.mode") === "jj" && this.#cachedRepositoryMode?.kind !== "jj-git-interop") {
+			return;
+		}
+
 		const gitHeadPath = git.repo.resolveSync(getProjectDir())?.headPath ?? null;
 		if (!gitHeadPath) return;
 
@@ -280,6 +289,58 @@ export class StatusLineComponent implements Component {
 		this.#cachedBranchRepoId = undefined;
 		this.#cachedPrContext = undefined;
 	}
+	#repositoryModeKey(): string {
+		return `${getProjectDir()}:${settings.get("repository.mode")}`;
+	}
+
+	#getRepositoryMode(): RepositoryMode | null {
+		const cacheKey = this.#repositoryModeKey();
+		if (this.#repositoryModeCacheKey === cacheKey) {
+			return this.#cachedRepositoryMode;
+		}
+		this.#repositoryModeCacheKey = cacheKey;
+		this.#cachedRepositoryMode = null;
+		this.#cachedGitStatus = null;
+		this.#gitStatusLastFetch = 0;
+		this.#invalidateGitCaches();
+		if (this.#repositoryModeInFlight) return null;
+
+		this.#repositoryModeInFlight = true;
+		const cwd = getProjectDir();
+		const modeSetting = settings.get("repository.mode");
+		(async () => {
+			try {
+				const mode = await resolveRepositoryMode(cwd, modeSetting);
+				if (this.#repositoryModeCacheKey === `${cwd}:${modeSetting}`) {
+					this.#cachedRepositoryMode = mode;
+					if (this.#onBranchChange) {
+						this.#onBranchChange();
+					}
+				}
+			} catch {
+				if (this.#repositoryModeCacheKey === `${cwd}:${modeSetting}`) {
+					this.#cachedRepositoryMode = null;
+				}
+			} finally {
+				this.#repositoryModeInFlight = false;
+			}
+		})();
+
+		return null;
+	}
+
+	#canUseGitFirstRenderFallback(): boolean {
+		const modeSetting = settings.get("repository.mode");
+		if (modeSetting === "git") return true;
+		if (modeSetting === "jj") return false;
+		return git.repo.resolveSync(getProjectDir()) !== null;
+	}
+
+	#getRenderRepositoryKind(mode: RepositoryMode | null): RepositoryKind | null {
+		if (mode) return mode.kind;
+		return this.#canUseGitFirstRenderFallback() ? "git" : null;
+	}
+
 	#getCurrentBranch(): string | null {
 		const head = git.head.resolveSync(getProjectDir());
 		const gitHeadPath = head?.headPath ?? null;
@@ -314,16 +375,18 @@ export class StatusLineComponent implements Component {
 		return branch === this.#defaultBranch;
 	}
 
-	#getGitStatus(): { staged: number; unstaged: number; untracked: number } | null {
+	#getRepositoryStatus(kind: RepositoryKind | null): { staged: number; unstaged: number; untracked: number } | null {
+		if (!kind) return null;
 		if (this.#gitStatusInFlight || Date.now() - this.#gitStatusLastFetch < 1000) {
 			return this.#cachedGitStatus;
 		}
 
 		this.#gitStatusInFlight = true;
+		const cwd = getProjectDir();
 
 		(async () => {
 			try {
-				this.#cachedGitStatus = await git.status.summary(getProjectDir());
+				this.#cachedGitStatus = kind === "git" ? await git.status.summary(cwd) : await jj.status.summary(cwd);
 			} catch {
 				this.#cachedGitStatus = null;
 			} finally {
@@ -333,6 +396,13 @@ export class StatusLineComponent implements Component {
 		})();
 
 		return this.#cachedGitStatus;
+	}
+
+	#getRepositoryLabel(kind: RepositoryKind | null): string | null {
+		if (!kind) return null;
+		if (kind === "jj") return "jj";
+		if (kind === "jj-git-interop") return this.#getCurrentBranch() ?? "jj";
+		return this.#getCurrentBranch();
 	}
 
 	#lookupPr(): { number: number; url: string } | null {
@@ -571,6 +641,8 @@ export class StatusLineComponent implements Component {
 		const contextTokens = breakdown.usedTokens;
 		const contextWindow = breakdown.contextWindow || state.model?.contextWindow || 0;
 		const contextPercent = contextWindow > 0 ? (contextTokens / contextWindow) * 100 : 0;
+		const repositoryMode = this.#getRepositoryMode();
+		const repositoryKind = this.#getRenderRepositoryKind(repositoryMode);
 
 		return {
 			session: this.session,
@@ -586,9 +658,9 @@ export class StatusLineComponent implements Component {
 			subagentCount: this.#subagentCount,
 			sessionStartTime: this.#sessionStartTime,
 			git: {
-				branch: this.#getCurrentBranch(),
-				status: this.#getGitStatus(),
-				pr: this.#lookupPr(),
+				branch: this.#getRepositoryLabel(repositoryKind),
+				status: this.#getRepositoryStatus(repositoryKind),
+				pr: repositoryKind === "git" ? this.#lookupPr() : null,
 			},
 			usage: this.#cachedUsage,
 		};

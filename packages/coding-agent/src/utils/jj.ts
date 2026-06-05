@@ -35,6 +35,16 @@ export interface DiffOptions {
 	readonly signal?: AbortSignal;
 }
 
+export interface JjStatusSummary {
+	staged: number;
+	unstaged: number;
+	untracked: number;
+}
+
+export interface CommitOptions {
+	readonly signal?: AbortSignal;
+}
+
 interface CommandOptions {
 	readonly signal?: AbortSignal;
 }
@@ -219,6 +229,26 @@ export const diff = Object.assign(
 		},
 	},
 );
+
+// ════════════════════════════════════════════════════════════════════════════
+// API: status
+// ════════════════════════════════════════════════════════════════════════════
+
+export const status = {
+	/** Parsed working-copy status counts. JJ has no Git-style staging area, so all diff names are unstaged. */
+	async summary(cwd: string, signal?: AbortSignal): Promise<JjStatusSummary> {
+		const changedFiles = await diff.changedFiles(cwd, { signal });
+		return { staged: 0, unstaged: changedFiles.length, untracked: 0 };
+	},
+};
+
+// ════════════════════════════════════════════════════════════════════════════
+// API: commit
+// ════════════════════════════════════════════════════════════════════════════
+
+export async function commit(cwd: string, message: string, options: CommitOptions = {}): Promise<JjCommandResult> {
+	return runChecked(cwd, ["commit", "--message", message], { signal: options.signal });
+}
 
 // ════════════════════════════════════════════════════════════════════════════
 // API: repo

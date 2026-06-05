@@ -7,6 +7,8 @@ import { Settings } from "../config/settings";
 import { discoverAuthStorage } from "../sdk";
 import { loadProjectContextFiles } from "../system-prompt";
 import * as git from "../utils/git";
+import * as jj from "../utils/jj";
+import { type RepositoryMode, resolveRepositoryMode } from "../utils/repository-mode";
 import { runAgenticCommit } from "./agentic";
 import {
 	extractScopeCandidates,
@@ -41,6 +43,8 @@ export async function runCommitCommand(args: CommitCommandArgs): Promise<void> {
 async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 	const cwd = getProjectDir();
 	const settings = await Settings.init();
+	const repositoryMode = await resolveRepositoryMode(cwd, settings.get("repository.mode"));
+	assertSupportedJjCommitOptions(repositoryMode, args);
 	const commitSettings = settings.getGroup("commit");
 	const authStorage = await discoverAuthStorage();
 	const modelRegistry = new ModelRegistry(authStorage);
@@ -57,8 +61,9 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 		thinkingLevel: smolThinkingLevel,
 	} = await resolveSmolModel(settings, modelRegistry, primaryModel, primaryApiKey);
 
-	let stagedFiles = await git.diff.changedFiles(cwd, { cached: true });
-	if (stagedFiles.length === 0) {
+	const useJj = repositoryMode.kind !== "git";
+	let stagedFiles = useJj ? await jj.diff.changedFiles(cwd) : await git.diff.changedFiles(cwd, { cached: true });
+	if (!useJj && stagedFiles.length === 0) {
 		process.stdout.write("No staged changes detected, staging all changes...\n");
 		await git.stage.files(cwd);
 		stagedFiles = await git.diff.changedFiles(cwd, { cached: true });
@@ -68,7 +73,7 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 		return;
 	}
 
-	if (!args.noChangelog) {
+	if (!args.noChangelog && !useJj) {
 		await runChangelogFlow({
 			cwd,
 			model: primaryModel,
@@ -80,11 +85,11 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 		});
 	}
 
-	const diff = await git.diff(cwd, { cached: true });
-	const stat = await git.diff(cwd, { stat: true, cached: true });
-	const numstat = await git.diff.numstat(cwd, { cached: true });
+	const diff = useJj ? await jj.diff(cwd) : await git.diff(cwd, { cached: true });
+	const stat = useJj ? "" : await git.diff(cwd, { stat: true, cached: true });
+	const numstat = useJj ? [] : await git.diff.numstat(cwd, { cached: true });
 	const scopeCandidates = extractScopeCandidates(numstat).scopeCandidates;
-	const recentCommits = await git.log.subjects(cwd, RECENT_COMMITS_COUNT);
+	const recentCommits = useJj ? [] : await git.log.subjects(cwd, RECENT_COMMITS_COUNT);
 	const contextFiles = await loadProjectContextFiles({ cwd });
 	const formattedContextFiles = contextFiles.map(file => ({
 		path: path.relative(cwd, file.path),
@@ -129,11 +134,29 @@ async function runLegacyCommitCommand(args: CommitCommandArgs): Promise<void> {
 		return;
 	}
 
-	await git.commit(cwd, commitMessage);
+	if (useJj) {
+		await jj.commit(cwd, commitMessage);
+	} else {
+		await git.commit(cwd, commitMessage);
+	}
 	process.stdout.write("Commit created.\n");
-	if (args.push) {
+	if (args.push && !useJj) {
 		await git.push(cwd);
 		process.stdout.write("Pushed to remote.\n");
+	}
+}
+
+function assertSupportedJjCommitOptions(mode: RepositoryMode, args: CommitCommandArgs): void {
+	if (mode.kind === "git") return;
+	if (args.push) {
+		throw new Error(
+			`Repository mode '${mode.kind}' does not support push after jj commit. Supported alternative: single commit without --push.`,
+		);
+	}
+	if (!args.noChangelog) {
+		throw new Error(
+			`Repository mode '${mode.kind}' does not support changelog updates in jj commit flow yet. Supported alternative: pass --no-changelog for jj commit flow, or use Git mode.`,
+		);
 	}
 }
 

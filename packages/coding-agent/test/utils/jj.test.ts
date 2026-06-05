@@ -1,7 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { Subprocess } from "bun";
 import * as jj from "../../src/utils/jj";
 
 describe("jj workspace detection", () => {
@@ -75,5 +76,46 @@ describe("jj workspace detection", () => {
 		const resolved = await jj.repo.resolve(secondary);
 		expect(resolved?.repoRoot).toBe(secondary);
 		expect(resolved?.storeDir).toBe(path.join(dir, ".jj", "repo", "store"));
+	});
+});
+
+describe("jj working-copy helpers", () => {
+	const cwd = "/repo";
+	const spawnArgs: string[][] = [];
+
+	afterEach(() => {
+		jj.repo.clearRootCache();
+		spawnArgs.length = 0;
+		vi.restoreAllMocks();
+	});
+
+	function mockJjSpawn(stdout: string): void {
+		const spawn = ((command: string[]) => {
+			spawnArgs.push(command);
+			return {
+				stdout: new Response(stdout).body,
+				stderr: new Response("").body,
+				exited: Promise.resolve(0),
+			} as Subprocess;
+		}) as typeof Bun.spawn;
+		spyOn(Bun, "spawn").mockImplementation(spawn);
+	}
+
+	it("summarizes jj working-copy changes from diff names", async () => {
+		mockJjSpawn("src/a.ts\nsrc/b.ts\n");
+
+		await expect(jj.status.summary(cwd)).resolves.toEqual({ staged: 0, unstaged: 2, untracked: 0 });
+
+		expect(spawnArgs).toEqual([["jj", "--no-pager", "--color=never", "diff", "--name-only"]]);
+	});
+
+	it("commits with an explicit message without opening an editor", async () => {
+		mockJjSpawn("");
+
+		await jj.commit(cwd, "test: support jj commits");
+
+		expect(spawnArgs).toEqual([
+			["jj", "--no-pager", "--color=never", "commit", "--message", "test: support jj commits"],
+		]);
 	});
 });
