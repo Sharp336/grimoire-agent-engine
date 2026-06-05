@@ -10,6 +10,7 @@
  * — contained within the context file's repo root (or cwd fallback).
  * — symlinks resolved before containment check to prevent traversal.
  * — recursive with depth limit and cycle detection.
+ * — git worktree refs require tracked targets when git metadata is available.
  * — controlled by the `contextFiles.resolveAtRefs` setting (default: enabled).
  *
  * See: https://github.com/can1357/oh-my-pi/issues/375
@@ -18,6 +19,7 @@
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { glob } from "@oh-my-pi/pi-natives";
+import * as git from "../utils/git";
 import { findRepoRoot, readFile } from "./fs";
 
 export interface ResolveAtRefsFile {
@@ -99,10 +101,33 @@ async function isIgnoredByGitignore(absPath: string, root: string): Promise<bool
 	}
 }
 
+async function loadTrackedFiles(root: string): Promise<Set<string> | null> {
+	try {
+		return new Set(await git.ls.files(root));
+	} catch {
+		return null;
+	}
+}
+
+function isTrackedByGit(absPath: string, root: string, trackedFiles: Set<string> | null): boolean {
+	if (!trackedFiles) return true;
+	const relativePath = path.relative(root, absPath);
+	if (
+		relativePath === "" ||
+		relativePath === ".." ||
+		relativePath.startsWith(`..${path.sep}`) ||
+		path.isAbsolute(relativePath)
+	) {
+		return false;
+	}
+	return trackedFiles.has(toPosixPath(relativePath));
+}
+
 async function resolveContent(
 	content: string,
 	filePath: string,
 	realRootDir: string,
+	trackedFiles: Set<string> | null,
 	seen: Set<string>,
 	depth: number,
 	maxDepth: number,
@@ -148,6 +173,10 @@ async function resolveContent(
 			resolved.push(`<!-- @${refPath}: ignored by gitignore -->`);
 			continue;
 		}
+		if (!isTrackedByGit(realRefPath, realRootDir, trackedFiles)) {
+			resolved.push(`<!-- @${refPath}: not tracked by git -->`);
+			continue;
+		}
 
 		// Cycle detection
 		if (seen.has(realRefPath)) {
@@ -164,7 +193,15 @@ async function resolveContent(
 		// Recursively resolve references in the included file. Use the real target
 		// path so nested refs are resolved from the target's directory.
 		seen.add(realRefPath);
-		const innerResolved = await resolveContent(refContent, realRefPath, realRootDir, seen, depth + 1, maxDepth);
+		const innerResolved = await resolveContent(
+			refContent,
+			realRefPath,
+			realRootDir,
+			trackedFiles,
+			seen,
+			depth + 1,
+			maxDepth,
+		);
 		seen.delete(realRefPath);
 
 		resolved.push(innerResolved);
@@ -201,8 +238,17 @@ export async function resolveAtRefs(
 			path.dirname(path.resolve(file.path));
 		const realFileRootDir = await realpathOrSelf(fileRootDir);
 		const realFilePath = await realpathOrSelf(file.path);
+		const trackedFiles = await loadTrackedFiles(realFileRootDir);
 		const seen = new Set<string>([realFilePath]);
-		const newContent = await resolveContent(file.content, realFilePath, realFileRootDir, seen, 0, maxDepth);
+		const newContent = await resolveContent(
+			file.content,
+			realFilePath,
+			realFileRootDir,
+			trackedFiles,
+			seen,
+			0,
+			maxDepth,
+		);
 		resolved.push({
 			path: file.path,
 			content: newContent,

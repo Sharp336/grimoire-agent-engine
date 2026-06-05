@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { resolveAtRefs } from "@oh-my-pi/pi-coding-agent/capability/resolve-at-refs";
+import { $ } from "bun";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
 describe("resolveAtRefs", () => {
@@ -285,6 +286,36 @@ describe("resolveAtRefs", () => {
 
 		expect(result[0].content).toContain("ignored by gitignore");
 		expect(result[0].content).not.toContain("SECRET_TOKEN");
+	});
+
+	it("rejects non-gitignored untracked refs in real git worktrees", async () => {
+		fs.rmSync(path.join(tempDir, ".git"), { force: true, recursive: true });
+		fs.writeFileSync(path.join(tempDir, "AGENTS.md"), "@local.settings.json");
+		fs.writeFileSync(path.join(tempDir, "local.settings.json"), '{"token":"SECRET"}\n');
+		await $`git init`.cwd(tempDir).quiet();
+		await $`git add AGENTS.md`.cwd(tempDir).quiet();
+
+		const result = await resolveAtRefs([
+			{ path: path.join(tempDir, "AGENTS.md"), content: fs.readFileSync(path.join(tempDir, "AGENTS.md"), "utf8") },
+		]);
+
+		expect(result[0].content).toContain("not tracked by git");
+		expect(result[0].content).not.toContain("SECRET");
+	});
+
+	it("allows tracked refs in real git worktrees", async () => {
+		fs.rmSync(path.join(tempDir, ".git"), { force: true, recursive: true });
+		fs.writeFileSync(path.join(tempDir, "AGENTS.md"), "@settings.json");
+		fs.writeFileSync(path.join(tempDir, "settings.json"), '{"name":"tracked-settings"}\n');
+		await $`git init`.cwd(tempDir).quiet();
+		await $`git add AGENTS.md settings.json`.cwd(tempDir).quiet();
+
+		const result = await resolveAtRefs([
+			{ path: path.join(tempDir, "AGENTS.md"), content: fs.readFileSync(path.join(tempDir, "AGENTS.md"), "utf8") },
+		]);
+
+		expect(result[0].content).toContain("tracked-settings");
+		expect(result[0].content).not.toContain("not tracked by git");
 	});
 
 	it("uses an independent containment root for each context file", async () => {
