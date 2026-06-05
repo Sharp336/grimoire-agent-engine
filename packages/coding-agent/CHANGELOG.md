@@ -7,6 +7,13 @@
 ### Fixed
 
 - Fixed `@`-mention auto-read injecting an unrelated, same-named file when a mention did not point at a real path — e.g. an npm scope like `@scope/`, a partial path, or a bare token. `generateFileMentionMessages` resolution previously fell back to prefix and repo-wide fuzzy matching (globbing the whole project on every such mention) and auto-read the single "best" guess. Resolution is now exact-only: a mention is auto-read only when it resolves to an existing file or directory; otherwise it is left as prose. The TUI `@`-selector already inserts the real, complete path before send, so post-send guessing was both unnecessary and the source of the wrong-file reads. Directories still resolve and are listed. Removes the per-mention `**/*` project scan.
+### Added
+
+- Added Copilot MCP discovery provider (priority 30) that reads `~/.copilot/mcp-config.json`, with `COPILOT_HOME` env override and `mcpServers`/`servers` key fallback. ([#1917](https://github.com/can1357/oh-my-pi/issues/1917))
+
+### Fixed
+
+- Fixed Copilot `type: "local"` MCP transport entries not being recognized: `transformMCPConfig` now normalizes `"local"` to `"stdio"` at assignment time so Copilot-local MCP servers connect correctly.
 
 ## [15.9.2] - 2026-06-05
 
