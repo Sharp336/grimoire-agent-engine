@@ -2,6 +2,7 @@ import {
 	type Component,
 	Container,
 	fuzzyFilter,
+	getKeybindings,
 	Input,
 	matchesKey,
 	padding,
@@ -308,7 +309,7 @@ class SessionList implements Component {
 		lines.push(
 			theme.fg(
 				"muted",
-				`  [Del delete · Enter select · Tab ${this.#showCwd ? "current folder" : "all projects"} · Esc cancel]`,
+				`  [Ctrl+Backspace/Del delete · Enter select · Tab ${this.#showCwd ? "current folder" : "all projects"} · Esc cancel]`,
 			),
 		);
 
@@ -316,6 +317,18 @@ class SessionList implements Component {
 	}
 
 	handleInput(keyData: string): void {
+		// Ctrl+Backspace when search is empty -> delete selected session
+		if (
+			getKeybindings().matches(keyData, "app.session.deleteNoninvasive") &&
+			this.#searchInput.getValue().length === 0
+		) {
+			const selected = this.#filteredSessions[this.#selectedIndex];
+			if (selected && this.onDeleteRequest) {
+				this.onDeleteRequest(selected);
+			}
+			return;
+		}
+
 		// Delete key - request delete confirmation from parent
 		if (matchesKey(keyData, "delete")) {
 			const selected = this.#filteredSessions[this.#selectedIndex];

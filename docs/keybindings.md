@@ -44,3 +44,15 @@ app.stt.toggle: []
 On Windows Terminal, `Ctrl+V` may be handled by the terminal paste command before `omp` sees it; use the `Alt+V` fallback when clipboard image paste appears to do nothing.
 
 Older unqualified action names are migrated when `keybindings.yml` is loaded, but new docs and new configs should use the namespaced action IDs above. Existing `keybindings.json` files are still accepted and migrated to `keybindings.yml`; `keybindings.yaml` is also accepted.
+
+## Selector keybindings
+
+In the session picker (`/resume`):
+
+| Action | Key | Context |
+| --- | --- | --- |
+| Delete | `Ctrl+Backspace` or Del | Empty search filter |
+| Navigate | `Up` / `Down` | Always |
+| Select | `Enter` | Always |
+| Cancel | `Esc` | Always |
+| Filter | Type to search | Always |
