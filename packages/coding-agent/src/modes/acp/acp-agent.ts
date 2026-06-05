@@ -716,6 +716,8 @@ export class AcpAgent implements Agent {
 		if (!skill) {
 			return false;
 		}
+		// Track explicit skill invocations via slash command
+		record.session.settings.getStorage()?.recordSkillUsage(skillName);
 		const built = await buildSkillPromptMessage(skill, args);
 		await record.session.promptCustomMessage({
 			customType: SKILL_PROMPT_MESSAGE_TYPE,

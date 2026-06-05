@@ -88,6 +88,7 @@ function createStubInputControllerContext(opts: { skillCommands: Map<string, str
 			enqueueCustomMessageDisplay,
 			promptCustomMessage,
 		},
+		settings: Settings.isolated(),
 		showError,
 		updatePendingMessagesDisplay,
 		// Defaults that InputController touches on submit but don't matter here.

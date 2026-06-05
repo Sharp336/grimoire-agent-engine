@@ -507,6 +507,9 @@ export class InputController {
 		const args = spaceIndex === -1 ? "" : text.slice(spaceIndex + 1).trim();
 		const skillPath = this.ctx.skillCommands?.get(commandName);
 		if (!skillPath) return false;
+		// Track explicit skill invocations via slash command
+		const skillName = commandName.slice("skill:".length);
+		this.ctx.settings.getStorage()?.recordSkillUsage(skillName);
 		this.ctx.editor.addToHistory(text);
 		this.ctx.editor.setText("");
 		try {
@@ -517,7 +520,7 @@ export class InputController {
 				metaLines.push(`User: ${args}`);
 			}
 			const message = `${body}\n\n---\n\n${metaLines.join("\n")}`;
-			const skillName = commandName.slice("skill:".length);
+
 			const details: SkillPromptDetails = {
 				name: skillName || commandName,
 				path: skillPath,

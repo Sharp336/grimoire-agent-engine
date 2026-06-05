@@ -2190,6 +2190,15 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			signal,
 			localProtocolOptions: this.session.localProtocolOptions,
 		});
+		// Track skill usage for root skill:// reads.
+		// Placed after a successful resolve — failed resolves throw before this point,
+		// so only deliberate reads are counted (sub-paths excluded).
+		if (
+			scheme === "skill" &&
+			(!urlMeta.pathname || urlMeta.pathname === "/" || urlMeta.pathname === "")
+		) {
+			this.session.settings.getStorage()?.recordSkillUsage(urlMeta.rawHost);
+		}
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
 
 		// If extraction was used, return directly (no pagination)

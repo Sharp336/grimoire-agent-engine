@@ -1415,6 +1415,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			checkAbort();
 			// Autoload skills via sendCustomMessage (same mechanic as /skill:<name>)
+			// Skill usage tracking intentionally excluded: programmatic injection by task specs, not organic user selection
 			if (options.autoloadSkills?.length) {
 				for (const skill of options.autoloadSkills) {
 					const { message } = await buildSkillPromptMessage(skill, "");
