@@ -3,6 +3,7 @@
  */
 
 import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { $env, getGpuCachePath, getProjectDir, hasFsCode, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
@@ -257,6 +258,16 @@ function shouldResolveContextAtRefs(
 	return settings.get("contextFiles.resolveAtRefs") ?? true;
 }
 
+function projectContextRootFromDepth(cwd: string, depth: number | undefined): string {
+	let root = path.resolve(cwd);
+	for (let remaining = Math.max(0, depth ?? 0); remaining > 0; remaining--) {
+		const parent = path.dirname(root);
+		if (parent === root) break;
+		root = parent;
+	}
+	return root;
+}
+
 /**
  * Load all project context files using the capability API.
  * Returns {path, content, depth} entries for all discovered context files.
@@ -272,10 +283,13 @@ export async function loadProjectContextFiles(
 	// Convert ContextFile items and preserve depth info
 	const files = result.items.map(item => {
 		const contextFile = item as ContextFile;
+		const rootDir =
+			contextFile.level === "project" ? projectContextRootFromDepth(resolvedCwd, contextFile.depth) : undefined;
 		return {
 			path: contextFile.path,
 			content: contextFile.content,
 			depth: contextFile.depth,
+			rootDir,
 		};
 	});
 
@@ -287,7 +301,9 @@ export async function loadProjectContextFiles(
 		return depthB - depthA;
 	});
 	const shouldResolveAtRefs = shouldResolveContextAtRefs(options.resolveAtRefs, options.settings);
-	const resolved = shouldResolveAtRefs ? await resolveAtRefs(files) : files;
+	const resolved = shouldResolveAtRefs
+		? await resolveAtRefs(files)
+		: files.map(({ rootDir: _rootDir, ...file }) => file);
 	return dedupeExactContextFiles(resolved);
 }
 

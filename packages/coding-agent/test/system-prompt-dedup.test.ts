@@ -148,6 +148,19 @@ describe("SYSTEM.md prompt assembly", () => {
 
 		expect(agentsFile?.content).toBe("@rules.md");
 	});
+
+	it("uses the session cwd as the no-repo project context root", async () => {
+		const projectDir = path.join(tempDir, "no-repo");
+		fs.mkdirSync(path.join(projectDir, ".omp"), { recursive: true });
+		fs.writeFileSync(path.join(projectDir, "package.json"), JSON.stringify({ name: "no-repo-project" }));
+		fs.writeFileSync(path.join(projectDir, ".omp", "AGENTS.md"), "@../package.json");
+
+		const contextFiles = await loadProjectContextFiles({ cwd: projectDir });
+		const agentsFile = contextFiles.find(file => file.path === path.join(projectDir, ".omp", "AGENTS.md"));
+
+		expect(agentsFile?.content).toContain("no-repo-project");
+		expect(agentsFile?.content).not.toContain("escapes project root");
+	});
 	it("keeps distinct context entries when their contents differ", async () => {
 		const farPath = path.join(tempDir, "far", "AGENTS.md");
 		const nearPath = path.join(tempDir, "near", "CLAUDE.md");

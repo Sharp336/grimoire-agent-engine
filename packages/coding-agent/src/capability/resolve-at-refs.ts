@@ -20,6 +20,14 @@ import * as path from "node:path";
 import { glob } from "@oh-my-pi/pi-natives";
 import { findRepoRoot, readFile } from "./fs";
 
+export interface ResolveAtRefsFile {
+	path: string;
+	content: string;
+	depth?: number;
+	/** Per-file containment root, used when discovery knows the project scope. */
+	rootDir?: string;
+}
+
 export interface ResolveAtRefsOptions {
 	/** Maximum recursion depth for nested @-references (default: 5) */
 	maxDepth?: number;
@@ -197,7 +205,7 @@ async function resolveContent(
  * placeholder instead of crashing.
  */
 export async function resolveAtRefs(
-	files: Array<{ path: string; content: string; depth?: number }>,
+	files: ResolveAtRefsFile[],
 	options: ResolveAtRefsOptions = {},
 ): Promise<Array<{ path: string; content: string; depth?: number }>> {
 	const maxDepth = options.maxDepth ?? 5;
@@ -207,6 +215,7 @@ export async function resolveAtRefs(
 		// User-level files (e.g. ~/.omp/AGENTS.md) use their own repo root
 		// so their @-refs aren't rejected by a project-level boundary.
 		const fileRootDir =
+			file.rootDir ??
 			options.rootDir ??
 			(await findRepoRoot(path.dirname(path.resolve(file.path)))) ??
 			path.dirname(path.resolve(file.path));
