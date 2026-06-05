@@ -161,6 +161,21 @@ describe("SYSTEM.md prompt assembly", () => {
 		expect(agentsFile?.content).toContain("no-repo-project");
 		expect(agentsFile?.content).not.toContain("escapes project root");
 	});
+
+	it("uses the repo root for project context containment", async () => {
+		const repoDir = path.join(tempDir, "repo");
+		const appDir = path.join(repoDir, "packages", "app");
+		fs.mkdirSync(path.join(repoDir, ".git"), { recursive: true });
+		fs.mkdirSync(appDir, { recursive: true });
+		fs.writeFileSync(path.join(repoDir, "package.json"), JSON.stringify({ name: "repo-root-package" }));
+		fs.writeFileSync(path.join(appDir, "AGENTS.md"), "@../../package.json");
+
+		const contextFiles = await loadProjectContextFiles({ cwd: appDir });
+		const agentsFile = contextFiles.find(file => file.path === path.join(appDir, "AGENTS.md"));
+
+		expect(agentsFile?.content).toContain("repo-root-package");
+		expect(agentsFile?.content).not.toContain("escapes project root");
+	});
 	it("keeps distinct context entries when their contents differ", async () => {
 		const farPath = path.join(tempDir, "far", "AGENTS.md");
 		const nearPath = path.join(tempDir, "near", "CLAUDE.md");

@@ -8,6 +8,7 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { $env, getGpuCachePath, getProjectDir, hasFsCode, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { contextFileCapability } from "./capability/context-file";
+import { findRepoRoot } from "./capability/fs";
 import { resolveAtRefs } from "./capability/resolve-at-refs";
 import { systemPromptCapability } from "./capability/system-prompt";
 import { isSettingsInitialized, type Settings, type SkillsSettings, settings } from "./config/settings";
@@ -277,6 +278,7 @@ export async function loadProjectContextFiles(
 	options: LoadContextFilesOptions = {},
 ): Promise<Array<{ path: string; content: string; depth?: number }>> {
 	const resolvedCwd = options.cwd ?? getProjectDir();
+	const repoRoot = await findRepoRoot(resolvedCwd);
 
 	const result = await loadCapability(contextFileCapability.id, { cwd: resolvedCwd });
 
@@ -284,7 +286,9 @@ export async function loadProjectContextFiles(
 	const files = result.items.map(item => {
 		const contextFile = item as ContextFile;
 		const rootDir =
-			contextFile.level === "project" ? projectContextRootFromDepth(resolvedCwd, contextFile.depth) : undefined;
+			contextFile.level === "project"
+				? (repoRoot ?? projectContextRootFromDepth(resolvedCwd, contextFile.depth))
+				: undefined;
 		return {
 			path: contextFile.path,
 			content: contextFile.content,
