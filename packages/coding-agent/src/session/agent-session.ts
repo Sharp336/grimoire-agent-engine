@@ -6400,6 +6400,13 @@ export class AgentSession {
 	}
 
 	#isEmptyAssistantStop(assistantMessage: AssistantMessage): boolean {
+		const hasText = assistantMessage.content.some(
+			content => content.type === "text" && content.text.trim().length > 0,
+		);
+		const hasToolCall = assistantMessage.content.some(content => content.type === "toolCall");
+		if (assistantMessage.stopReason === "toolUse") {
+			return !hasText && !hasToolCall;
+		}
 		if (assistantMessage.stopReason !== "stop") return false;
 		return !assistantMessage.content.some(content => {
 			if (content.type === "text") return content.text.trim().length > 0;

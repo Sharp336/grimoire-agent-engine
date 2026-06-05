@@ -51,6 +51,14 @@ function emptyStop(): MockResponse {
 	};
 }
 
+function orphanedToolUseStop(): MockResponse {
+	return {
+		content: [{ type: "thinking", thinking: "I should call a tool next." }],
+		stopReason: "toolUse",
+		usage: { output: 1, cacheRead: 100 },
+	};
+}
+
 async function createHarness(
 	responses: MockResponse[],
 	settingsOverrides: SettingsOverrides = {},
@@ -175,6 +183,21 @@ describe("AgentSession empty stop guard", () => {
 					.map(entry => entry.message as AgentMessage),
 			),
 		).toHaveLength(1);
+	});
+
+	it("retries a tool-use stop that has no tool call or text", async () => {
+		const { session, mock } = await createHarness([
+			recordCall("orphan", "call-record-orphan"),
+			orphanedToolUseStop(),
+			{ content: ["finished after orphaned tool-use retry"], stopReason: "stop" },
+		]);
+
+		await session.prompt("record orphan");
+		await session.waitForIdle();
+
+		expect(mock.calls).toHaveLength(3);
+		expect(assistantText(session.agent.state.messages)).toContain("finished after orphaned tool-use retry");
+		expect(reminderMessages(session.agent.state.messages)).toHaveLength(1);
 	});
 
 	it("caps empty stop retries at three attempts", async () => {
