@@ -1029,6 +1029,7 @@ export interface ResolveCliModelResult {
 	model: Model<Api> | undefined;
 	selector?: string;
 	thinkingLevel?: ThinkingLevel;
+	auto?: boolean;
 	warning: string | undefined;
 	error: string | undefined;
 }
@@ -1148,7 +1149,7 @@ export function resolveCliModel(options: {
 	}
 
 	const candidates = provider ? availableModels.filter(model => model.provider === provider) : availableModels;
-	const { model, thinkingLevel, warning } = parseModelPattern(pattern, candidates, preferences, {
+	const { model, thinkingLevel, auto, warning } = parseModelPattern(pattern, candidates, preferences, {
 		allowInvalidThinkingSelectorFallback: false,
 		modelRegistry,
 	});
@@ -1183,6 +1184,7 @@ export function resolveCliModel(options: {
 		model,
 		selector,
 		thinkingLevel,
+		auto,
 		warning,
 		error: undefined,
 	};

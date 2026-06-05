@@ -161,6 +161,22 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.thinkingLevel).toBe(Effort.Low);
 	});
 
+	it("setModelTemporary enters auto thinking when given AUTO_THINKING", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const planModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+
+		await createSession({
+			initialModelId: defaultModel.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${defaultModel.provider}/${defaultModel.id}:high` },
+		});
+		expect(session.isAutoThinking).toBe(false);
+
+		await session.setModelTemporary(planModel, AUTO_THINKING);
+		expect(session.model?.id).toBe(planModel.id);
+		expect(session.isAutoThinking).toBe(true);
+	});
+
 	it("scoped model cycle applies each entry's own auto/level, not sticky auto", async () => {
 		const autoModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const highModel = getAnthropicModelOrThrow("claude-sonnet-4-6");

@@ -597,10 +597,13 @@ async function buildSessionOptions(
 			});
 			if (!parsed.thinking && resolved.thinkingLevel) {
 				options.thinkingLevel = resolved.thinkingLevel;
+			} else if (!parsed.thinking && resolved.auto) {
+				options.thinkingLevel = AUTO_THINKING;
 			}
 		}
 	} else if (scopedModels.length > 0 && !parsed.continue && !parsed.resume) {
 		const remembered = activeSettings.getModelRole("default");
+		let selectedScoped: ScopedModel | undefined;
 		if (remembered) {
 			const rememberedSpec = resolveModelRoleValue(
 				remembered,
@@ -612,38 +615,30 @@ async function buildSessionOptions(
 				},
 			);
 			const rememberedResolvedModel = rememberedSpec.model;
-			const rememberedModel = rememberedResolvedModel
+			selectedScoped = rememberedResolvedModel
 				? scopedModels.find(
 						scopedModel =>
 							scopedModel.model.provider === rememberedResolvedModel.provider &&
 							scopedModel.model.id === rememberedResolvedModel.id,
 					)
 				: scopedModels.find(scopedModel => scopedModel.model.id.toLowerCase() === remembered.toLowerCase());
-			if (rememberedModel) {
-				options.model = rememberedModel.model;
-				// Apply explicit thinking level from remembered role value
-				if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
-					options.thinkingLevel = rememberedSpec.thinkingLevel;
-				} else if (!parsed.thinking && rememberedSpec.auto) {
-					// A remembered `:auto` default must set the initial selector to auto;
-					// options.model is set below (→ hasExplicitModel), which would otherwise
-					// skip the role's auto in createAgentSession.
-					options.thinkingLevel = AUTO_THINKING;
-				}
+		}
+		selectedScoped ??= scopedModels[0];
+		options.model = selectedScoped.model;
+		// Pin thinking from the selected entry, not always scopedModels[0]: setting
+		// options.model flips hasExplicitModel, which skips the role selector at startup.
+		if (!parsed.thinking) {
+			if (selectedScoped.explicitThinkingLevel && selectedScoped.thinkingLevel !== undefined) {
+				options.thinkingLevel = selectedScoped.thinkingLevel;
+			} else if (selectedScoped.auto) {
+				options.thinkingLevel = AUTO_THINKING;
 			}
 		}
-		if (!options.model) options.model = scopedModels[0].model;
 	}
 
 	// Thinking level
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
-	} else if (scopedModels.length > 0 && options.thinkingLevel === undefined && !parsed.continue && !parsed.resume) {
-		if (scopedModels[0].explicitThinkingLevel === true) {
-			options.thinkingLevel = scopedModels[0].thinkingLevel;
-		} else if (scopedModels[0].auto) {
-			options.thinkingLevel = AUTO_THINKING;
-		}
 	}
 
 	// Scoped models for Ctrl+P cycling - fill in default thinking levels when not explicit

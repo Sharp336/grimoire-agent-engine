@@ -5295,7 +5295,7 @@ export class AgentSession {
 	 */
 	async setModelTemporary(
 		model: Model,
-		thinkingLevel?: ThinkingLevel,
+		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
 		const previousEditMode = this.#resolveActiveEditMode();

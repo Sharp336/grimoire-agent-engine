@@ -82,6 +82,7 @@ import { getRecentSessions } from "../session/session-manager";
 import type { ShakeMode } from "../session/shake-types";
 import { formatDuration } from "../slash-commands/helpers/format";
 import { STTController, type SttState } from "../stt";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme } from "../tools/path-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
@@ -336,7 +337,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#goalContinuationTurnInFlight = false;
 	#goalSuppressNextContinuation = false;
 	#planModePreviousModelState: { model: Model; thinkingLevel?: ThinkingLevel } | undefined;
-	#pendingModelSwitch: { model: Model; thinkingLevel?: ThinkingLevel } | undefined;
+	#pendingModelSwitch: { model: Model; thinkingLevel?: ConfiguredThinkingLevel } | undefined;
 	#planModeHasEntered = false;
 	#planReviewContainer: Container | undefined;
 	readonly lspServers: LspStartupServerInfo[] | undefined = undefined;
@@ -1334,7 +1335,11 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const currentModel = this.session.model;
 		const sameModel = modelsAreEqual(currentModel, resolved.model);
-		const planThinkingLevel = resolved.explicitThinkingLevel ? resolved.thinkingLevel : undefined;
+		const planThinkingLevel: ConfiguredThinkingLevel | undefined = resolved.auto
+			? AUTO_THINKING
+			: resolved.explicitThinkingLevel
+				? resolved.thinkingLevel
+				: undefined;
 
 		this.#planModePreviousModelState = currentModel
 			? { model: currentModel, thinkingLevel: this.session.thinkingLevel }
