@@ -379,7 +379,13 @@ function createClient(
 		headers.session_id ??= sessionId;
 		headers["x-client-request-id"] ??= sessionId;
 	}
-	const baseFetch = fetchOverride ?? fetch;
+	const _rawFetch = fetchOverride ?? fetch;
+	const baseFetch = typeof (globalThis as any).Bun !== "undefined"
+		? Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => _rawFetch(input, { ...init, timeout: false } as any),
+			{ preconnect: _rawFetch.preconnect },
+		)
+		: _rawFetch;
 	return {
 		client: new OpenAI({
 			apiKey,

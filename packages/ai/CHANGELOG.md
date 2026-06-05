@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Bun runtime's built-in 300s `fetch()` timeout killing long-running streaming requests to local models (LM Studio, Ollama, llama.cpp, vLLM) before pi-ai's watchdog layer could fire, making `PI_STREAM_FIRST_EVENT_TIMEOUT_MS=0` ineffective. The completions, responses, and Azure responses providers now pass `timeout: false` to Bun's `fetch()` so the pi-ai watchdog timers are the authoritative timeout layer. ([#602](https://github.com/can1357/oh-my-pi/issues/602))
+
 ## [15.9.1] - 2026-06-04
 
 ### Added

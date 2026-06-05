@@ -267,7 +267,13 @@ function createClient(model: Model<"azure-openai-responses">, apiKey: string, op
 
 	const { baseUrl, apiVersion } = resolveAzureConfig(model, options);
 
-	const baseFetch = options?.fetch ?? fetch;
+	const _rawFetch = options?.fetch ?? fetch;
+	const baseFetch = typeof (globalThis as any).Bun !== "undefined"
+		? Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => _rawFetch(input, { ...init, timeout: false } as any),
+			{ preconnect: _rawFetch.preconnect },
+		)
+		: _rawFetch;
 	const onSseEvent = options?.onSseEvent;
 	return new AzureOpenAI({
 		apiKey,
