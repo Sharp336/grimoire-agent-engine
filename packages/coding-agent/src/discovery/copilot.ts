@@ -32,7 +32,7 @@ interface CopilotMCPConfig {
  * Resolve the Copilot home directory.
  * Prefers COPILOT_HOME env var; falls back to ~/.copilot.
  */
-export function resolveCopilotHome(ctx: LoadContext): string {
+function resolveCopilotHome(ctx: LoadContext): string {
 	return process.env.COPILOT_HOME || path.join(ctx.home, ".copilot");
 }
 
