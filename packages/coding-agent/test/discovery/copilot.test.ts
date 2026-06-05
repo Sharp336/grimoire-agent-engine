@@ -7,9 +7,8 @@ import { loadCapability } from "@oh-my-pi/pi-coding-agent/discovery";
 
 /**
  * Load MCP servers using only the "copilot" provider.
- * Caller must set HOME/USERPROFILE before calling so resolveCopilotHome
- * picks up the temp fixture directory. loadCapability derives ctx.home
- * from os.homedir() — it does NOT accept a home option.
+ * beforeEach sets COPILOT_HOME to the temp fixture directory so
+ * resolveCopilotHome reads from there instead of the real home.
  */
 async function loadCopilotMcpServers(cwd: string): Promise<MCPServer[]> {
 	const result = await loadCapability<MCPServer>(mcpCapability.id, {
@@ -25,27 +24,22 @@ function envPlaceholder(name: string): string {
 
 describe("copilot MCP discovery", () => {
 	let tempDir = "";
-	let originalHome = "";
 	let originalCopilotHome: string | undefined;
 	let originalTestToken: string | undefined;
 	let originalTestUrl: string | undefined;
 
 	beforeEach(async () => {
 		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-copilot-"));
-		originalHome = process.env.HOME ?? process.env.USERPROFILE ?? "";
 		originalCopilotHome = process.env.COPILOT_HOME;
 		originalTestToken = process.env.OMP_TEST_TOKEN;
 		originalTestUrl = process.env.OMP_TEST_URL;
-		// Point HOME to tempDir so resolveCopilotHome returns tempDir/.copilot
-		process.env.HOME = tempDir;
-		process.env.USERPROFILE = tempDir;
-		delete process.env.COPILOT_HOME;
+		// Drive all tests through COPILOT_HOME — os.homedir() is not
+		// reliably overridable via process.env.HOME in Bun.
+		process.env.COPILOT_HOME = path.join(tempDir, ".copilot");
 	});
 
 	afterEach(async () => {
-		await fs.rm(tempDir, { recursive: true, force: true });
-		process.env.HOME = originalHome;
-		process.env.USERPROFILE = originalHome;
+		if (tempDir) await fs.rm(tempDir, { recursive: true, force: true });
 		if (originalCopilotHome === undefined) {
 			delete process.env.COPILOT_HOME;
 		} else {
