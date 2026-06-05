@@ -133,6 +133,49 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(session.thinkingLevel).toBe(Effort.High);
 	});
 
+	it("scoped model cycle applies each entry's own auto/level, not sticky auto", async () => {
+		const autoModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const highModel = getAnthropicModelOrThrow("claude-sonnet-4-6");
+		const agent = new Agent({
+			initialState: {
+				model: autoModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: resolveProvisionalAutoLevel(autoModel),
+			},
+		});
+		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth-scoped-cycle.db"));
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models-scoped-cycle.yml"));
+		sessionSettings = Settings.isolated();
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: sessionSettings,
+			modelRegistry,
+			thinkingLevel: AUTO_THINKING,
+			scopedModels: [
+				{ model: autoModel, auto: true },
+				{ model: highModel, thinkingLevel: Effort.High },
+			],
+		});
+
+		expect(session.isAutoThinking).toBe(true);
+
+		// Cycle onto the concrete `:high` entry — must apply high, not keep auto sticky.
+		const toHigh = await session.cycleModel("forward");
+		expect(toHigh?.model.id).toBe(highModel.id);
+		expect(session.isAutoThinking).toBe(false);
+		expect(session.thinkingLevel).toBe(Effort.High);
+
+		// Cycle back onto the `:auto` entry — re-enters auto.
+		const toAuto = await session.cycleModel("forward");
+		expect(toAuto?.model.id).toBe(autoModel.id);
+		expect(session.isAutoThinking).toBe(true);
+	});
+
 	it("preserves current thinking when switching into default/no-suffix role", async () => {
 		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
 		const slowModel = getAnthropicModelOrThrow("claude-sonnet-4-6");

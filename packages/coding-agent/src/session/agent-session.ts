@@ -5464,8 +5464,10 @@ export class AgentSession {
 		this.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
 		this.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
-		// Apply the scoped model's configured thinking level, preserving auto.
-		this.setThinkingLevel(next.auto || this.#autoThinking ? AUTO_THINKING : next.thinkingLevel);
+		// Apply the scoped entry's own configured thinking: `:auto` enters auto, a
+		// concrete level uses that level. The entry is authoritative — auto does not
+		// "stick" from the previous entry onto a later concrete one.
+		this.setThinkingLevel(next.auto ? AUTO_THINKING : next.thinkingLevel);
 		await this.#syncEditToolModeAfterModelChange(previousEditMode);
 
 		return { model: next.model, thinkingLevel: this.thinkingLevel, isScoped: true };

@@ -624,6 +624,11 @@ async function buildSessionOptions(
 				// Apply explicit thinking level from remembered role value
 				if (!parsed.thinking && rememberedSpec.explicitThinkingLevel && rememberedSpec.thinkingLevel) {
 					options.thinkingLevel = rememberedSpec.thinkingLevel;
+				} else if (!parsed.thinking && rememberedSpec.auto) {
+					// A remembered `:auto` default must set the initial selector to auto;
+					// options.model is set below (→ hasExplicitModel), which would otherwise
+					// skip the role's auto in createAgentSession.
+					options.thinkingLevel = AUTO_THINKING;
 				}
 			}
 		}
@@ -633,13 +638,12 @@ async function buildSessionOptions(
 	// Thinking level
 	if (parsed.thinking) {
 		options.thinkingLevel = parsed.thinking;
-	} else if (
-		scopedModels.length > 0 &&
-		scopedModels[0].explicitThinkingLevel === true &&
-		!parsed.continue &&
-		!parsed.resume
-	) {
-		options.thinkingLevel = scopedModels[0].thinkingLevel;
+	} else if (scopedModels.length > 0 && options.thinkingLevel === undefined && !parsed.continue && !parsed.resume) {
+		if (scopedModels[0].explicitThinkingLevel === true) {
+			options.thinkingLevel = scopedModels[0].thinkingLevel;
+		} else if (scopedModels[0].auto) {
+			options.thinkingLevel = AUTO_THINKING;
+		}
 	}
 
 	// Scoped models for Ctrl+P cycling - fill in default thinking levels when not explicit
