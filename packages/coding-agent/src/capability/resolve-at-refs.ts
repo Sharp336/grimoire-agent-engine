@@ -169,12 +169,14 @@ async function resolveContent(
 			continue;
 		}
 
-		if (await isIgnoredByGitignore(realRefPath, realRootDir)) {
-			resolved.push(`<!-- @${refPath}: ignored by gitignore -->`);
+		const trackedByGit = isTrackedByGit(realRefPath, realRootDir, trackedFiles);
+		if (!trackedByGit) {
+			resolved.push(`<!-- @${refPath}: not tracked by git -->`);
 			continue;
 		}
-		if (!isTrackedByGit(realRefPath, realRootDir, trackedFiles)) {
-			resolved.push(`<!-- @${refPath}: not tracked by git -->`);
+
+		if (!trackedFiles && (await isIgnoredByGitignore(realRefPath, realRootDir))) {
+			resolved.push(`<!-- @${refPath}: ignored by gitignore -->`);
 			continue;
 		}
 

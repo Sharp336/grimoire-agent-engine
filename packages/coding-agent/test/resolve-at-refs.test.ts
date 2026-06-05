@@ -318,6 +318,24 @@ describe("resolveAtRefs", () => {
 		expect(result[0].content).not.toContain("not tracked by git");
 	});
 
+	it("allows tracked refs that match gitignore patterns", async () => {
+		fs.rmSync(path.join(tempDir, ".git"), { force: true, recursive: true });
+		fs.mkdirSync(path.join(tempDir, "docs"), { recursive: true });
+		fs.writeFileSync(path.join(tempDir, ".gitignore"), "*.local.md\n");
+		fs.writeFileSync(path.join(tempDir, "AGENTS.md"), "@docs/rules.local.md");
+		fs.writeFileSync(path.join(tempDir, "docs", "rules.local.md"), "tracked local rules\n");
+		await $`git init`.cwd(tempDir).quiet();
+		await $`git add AGENTS.md .gitignore`.cwd(tempDir).quiet();
+		await $`git add -f docs/rules.local.md`.cwd(tempDir).quiet();
+
+		const result = await resolveAtRefs([
+			{ path: path.join(tempDir, "AGENTS.md"), content: fs.readFileSync(path.join(tempDir, "AGENTS.md"), "utf8") },
+		]);
+
+		expect(result[0].content).toContain("tracked local rules");
+		expect(result[0].content).not.toContain("ignored by gitignore");
+	});
+
 	it("uses an independent containment root for each context file", async () => {
 		fs.mkdirSync(path.join(tempHomeDir, ".git"), { recursive: true });
 		fs.writeFileSync(path.join(tempDir, "rules.md"), "project rules\n");
