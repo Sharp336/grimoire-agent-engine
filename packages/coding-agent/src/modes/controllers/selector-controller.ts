@@ -121,6 +121,7 @@ export class SelectorController {
 								leftSegments: settings.get("statusLine.leftSegments"),
 								rightSegments: settings.get("statusLine.rightSegments"),
 								separator: settings.get("statusLine.separator"),
+								placement: settings.get("statusLine.placement"),
 								showHookStatus: settings.get("statusLine.showHookStatus"),
 								sessionAccent: settings.get("statusLine.sessionAccent"),
 								...previewSettings,
@@ -131,7 +132,11 @@ export class SelectorController {
 						getStatusLinePreview: () => {
 							// Return the rendered status line for inline preview
 							const availableWidth = this.ctx.editor.getTopBorderAvailableWidth(this.ctx.ui.terminal.columns);
-							return this.ctx.statusLine.getTopBorder(availableWidth).content;
+							return (
+								this.ctx.statusLine.getEditorTopBorder(availableWidth)?.content ??
+								this.ctx.statusLine.getLineBelowEditor(this.ctx.ui.terminal.columns)[0] ??
+								""
+							);
 						},
 						onPluginsChanged: async () => {
 							const projectPath = await resolveActiveProjectRegistryPath(this.ctx.sessionManager.getCwd());
@@ -148,6 +153,7 @@ export class SelectorController {
 								leftSegments: settings.get("statusLine.leftSegments"),
 								rightSegments: settings.get("statusLine.rightSegments"),
 								separator: settings.get("statusLine.separator"),
+								placement: settings.get("statusLine.placement"),
 								showHookStatus: settings.get("statusLine.showHookStatus"),
 								sessionAccent: settings.get("statusLine.sessionAccent"),
 							});
@@ -355,6 +361,7 @@ export class SelectorController {
 			case "statusLine.preset":
 			case "statusLineSeparator":
 			case "statusLine.separator":
+			case "statusLine.placement":
 			case "statusLineShowHooks":
 			case "statusLine.showHookStatus":
 			case "statusLine.sessionAccent":
@@ -374,6 +381,7 @@ export class SelectorController {
 					leftSegments: settings.get("statusLine.leftSegments"),
 					rightSegments: settings.get("statusLine.rightSegments"),
 					separator: settings.get("statusLine.separator"),
+					placement: settings.get("statusLine.placement"),
 					showHookStatus: settings.get("statusLine.showHookStatus"),
 					sessionAccent: settings.get("statusLine.sessionAccent"),
 					segmentOptions: settings.get("statusLine.segmentOptions"),

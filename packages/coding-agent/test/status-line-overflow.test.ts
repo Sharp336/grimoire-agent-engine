@@ -122,6 +122,37 @@ describe("status line session accent", () => {
 	});
 });
 
+describe("status line placement", () => {
+	function buildComponent(placement: "above" | "below") {
+		const component = new StatusLineComponent(createStatusLineSession("Named session"));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: ["pi"],
+			rightSegments: ["session_name"],
+			separator: "powerline-thin",
+			placement,
+		});
+		return component;
+	}
+
+	it("keeps the main status line in the editor top border by default", () => {
+		const component = buildComponent("above");
+
+		expect(component.getEditorTopBorder(80)?.content).toBe(component.getTopBorder(80).content);
+		expect(component.getLineBelowEditor(80)).toEqual([]);
+	});
+
+	it("can render the main status line below the editor", () => {
+		const component = buildComponent("below");
+		const belowLines = component.getLineBelowEditor(80);
+
+		expect(component.getEditorTopBorder(80)).toBeUndefined();
+		expect(belowLines).toHaveLength(1);
+		expect(belowLines[0]).toBe(component.getTopBorder(80).content);
+		expect(visibleWidth(belowLines[0] ?? "")).toBe(80);
+	});
+});
+
 describe("path segment truncation at varying maxLength", () => {
 	let tmpDir: string;
 

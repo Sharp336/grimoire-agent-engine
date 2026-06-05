@@ -235,6 +235,16 @@ function formatContextTokenCount(value: number): string {
 	return formatNumber(Math.max(0, Math.round(value))).toLowerCase();
 }
 
+class StatusLineBelowEditorComponent implements Component {
+	constructor(private readonly statusLine: StatusLineComponent) {}
+
+	invalidate(): void {}
+
+	render(width: number): string[] {
+		return this.statusLine.getLineBelowEditor(width);
+	}
+}
+
 /** Options for creating an InteractiveMode instance (for future API use) */
 export interface InteractiveModeOptions {
 	/** Providers that were migrated during startup */
@@ -269,6 +279,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	hookWidgetContainerAbove: Container;
 	hookWidgetContainerBelow: Container;
 	statusLine: StatusLineComponent;
+	statusLineBelowEditor: StatusLineBelowEditorComponent;
 
 	isInitialized = false;
 	isBackgrounded = false;
@@ -432,6 +443,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editorContainer = new Container();
 		this.editorContainer.addChild(this.editor);
 		this.statusLine = new StatusLineComponent(session);
+		this.statusLineBelowEditor = new StatusLineBelowEditorComponent(this.statusLine);
 		this.statusLine.setAutoCompactEnabled(session.autoCompactionEnabled);
 
 		this.hideThinkingBlock = settings.get("hideThinkingBlock");
@@ -568,6 +580,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.addChild(this.statusLine); // Only renders hook statuses (main status in editor border)
 		this.ui.addChild(this.hookWidgetContainerAbove);
 		this.ui.addChild(this.editorContainer);
+		this.ui.addChild(this.statusLineBelowEditor);
 		this.ui.addChild(this.hookWidgetContainerBelow);
 		this.ui.setFocus(this.editor);
 
@@ -1031,7 +1044,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	updateEditorTopBorder(): void {
 		const availableWidth = this.editor.getTopBorderAvailableWidth(this.ui.terminal.columns);
-		const topBorder = this.statusLine.getTopBorder(availableWidth);
+		const topBorder = this.statusLine.getEditorTopBorder(availableWidth);
 		this.editor.setTopBorder(topBorder);
 	}
 
