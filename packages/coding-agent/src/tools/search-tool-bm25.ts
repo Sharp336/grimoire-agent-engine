@@ -51,6 +51,12 @@ export interface SearchToolBm25Details {
 	activated_tools: string[];
 	active_selected_tools: string[];
 	tools: SearchToolBm25Match[];
+	skills?: Array<{
+		name: string;
+		description: string;
+		read: string; // "skill://<name>"
+		score: number;
+	}>;
 }
 
 function formatMatch(tool: DiscoverableTool, score: number): SearchToolBm25Match {
@@ -71,6 +77,12 @@ function buildSearchToolBm25Content(details: SearchToolBm25Details): string {
 		activated_tools: details.activated_tools,
 		match_count: details.tools.length,
 		total_tools: details.total_tools,
+		...(details.skills && details.skills.length > 0
+			? {
+					skill_matches: details.skills,
+					skill_match_count: details.skills.length,
+				}
+			: {}),
 	});
 }
 
@@ -146,12 +158,15 @@ export function renderSearchToolBm25Description(discoverableTools: DiscoverableT
 	const builtinToolNames = filterBySource(discoverableTools, "builtin")
 		.map(t => t.name)
 		.sort();
+	const skillCount = discoverableTools.filter(t => t.source === "skill").length;
 	return prompt.render(searchToolBm25Description, {
 		discoverableToolCount: summary.toolCount,
 		discoverableMCPServerSummaries: summary.servers.map(formatDiscoverableToolServerSummary),
 		hasDiscoverableMCPServers: summary.servers.length > 0,
 		discoverableBuiltinToolNames: builtinToolNames,
 		hasDiscoverableBuiltinTools: builtinToolNames.length > 0,
+		discoverableSkillCount: skillCount,
+		hasDiscoverableSkills: skillCount > 0,
 	});
 }
 
@@ -201,7 +216,9 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 	static createIf(session: ToolSession): SearchToolBm25Tool | null {
 		// Direct createTools() calls do not know the final MCP/extension catalog yet, so
 		// auto mode is activated later by createAgentSession after the full registry exists.
-		if (resolveEffectiveToolDiscoveryMode(session.settings, 0) === "off") return null;
+		// Skill discovery (skills.redactDescriptions) keeps this tool alive even when
+		// tool discovery is "off" — it needs search_tool_bm25 to surface deferred skills.
+		if (resolveEffectiveToolDiscoveryMode(session.settings, 0) === "off" && !session.isSkillDiscoveryEnabled?.()) return null;
 		return supportsToolDiscoveryExecution(session) ? new SearchToolBm25Tool(session) : null;
 	}
 
@@ -215,9 +232,9 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 		if (!supportsToolDiscoveryExecution(this.session)) {
 			throw new ToolError("Tool discovery is unavailable in this session.");
 		}
-		if (!isDiscoveryEnabled(this.session)) {
+		if (!isDiscoveryEnabled(this.session) && !(this.session.isSkillDiscoveryEnabled?.() === true)) {
 			throw new ToolError(
-				"Tool discovery is disabled. Enable tools.discoveryMode or mcp.discoveryMode to use search_tool_bm25.",
+				"Tool discovery is disabled. Enable tools.discoveryMode, mcp.discoveryMode, or skills.redactDescriptions to use search_tool_bm25.",
 			);
 		}
 
@@ -243,11 +260,14 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			}
 			throw error;
 		}
+		const skillResults = ranked.filter(r => r.tool.source === "skill");
+		const toolResults = ranked.filter(r => r.tool.source !== "skill");
+
 		const activated =
-			ranked.length > 0
+			toolResults.length > 0
 				? await activateTools(
 						this.session,
-						ranked.map(result => result.tool.name),
+						toolResults.map(result => result.tool.name),
 					)
 				: [];
 
@@ -257,7 +277,15 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			total_tools: searchIndex.documents.length,
 			activated_tools: activated,
 			active_selected_tools: getSelectedToolNames(this.session),
-			tools: ranked.map(result => formatMatch(result.tool, result.score)),
+			tools: toolResults.map(result => formatMatch(result.tool, result.score)),
+			skills: skillResults.length > 0
+				? skillResults.map(result => ({
+						name: result.tool.name,
+						description: result.tool.summary,
+						read: `skill://${result.tool.name}`,
+						score: Number(result.score.toFixed(6)),
+					}))
+				: undefined,
 		};
 
 		return {
@@ -296,6 +324,8 @@ export const searchToolBm25Renderer = {
 		}
 
 		const { details } = result;
+		const hasToolMatches = details.tools.length > 0;
+		const hasSkillMatches = details.skills !== undefined && details.skills.length > 0;
 		const meta = [
 			formatCount("match", details.tools.length),
 			`${details.active_selected_tools.length} active`,
@@ -305,31 +335,46 @@ export const searchToolBm25Renderer = {
 		const safeQuery = replaceTabs(details.query);
 		const header = renderStatusLine(
 			{
-				icon: details.tools.length > 0 ? "success" : "warning",
+				icon: hasToolMatches || hasSkillMatches ? "success" : "warning",
 				title: TOOL_DISCOVERY_TITLE,
 				description: truncateToWidth(safeQuery, MATCH_LABEL_LEN),
 				meta,
 			},
 			uiTheme,
 		);
-		if (details.tools.length === 0) {
+		if (!hasToolMatches && !hasSkillMatches) {
 			const emptyMessage =
 				details.total_tools === 0 ? "No discoverable tools are currently loaded." : "No matching tools found.";
 			return new Text(`${header}\n${uiTheme.fg("muted", emptyMessage)}`, 0, 0);
 		}
 
 		const lines = [header];
-		const treeLines = renderTreeList(
-			{
-				items: details.tools,
-				expanded: options.expanded,
-				maxCollapsed: COLLAPSED_MATCH_LIMIT,
-				itemType: "tool",
-				renderItem: match => renderMatchLines(match, uiTheme),
-			},
-			uiTheme,
-		);
-		lines.push(...treeLines);
+		if (hasToolMatches) {
+			const treeLines = renderTreeList(
+				{
+					items: details.tools,
+					expanded: options.expanded,
+					maxCollapsed: COLLAPSED_MATCH_LIMIT,
+					itemType: "tool",
+					renderItem: match => renderMatchLines(match, uiTheme),
+				},
+				uiTheme,
+			);
+			lines.push(...treeLines);
+		}
+		if (hasSkillMatches) {
+			lines.push(uiTheme.fg("dim", `Skills (${details.skills!.length}):`));
+			for (const skill of details.skills!) {
+				const truncName = truncateToWidth(skill.name, MATCH_LABEL_LEN);
+				const truncDesc = skill.description
+					? truncateToWidth(replaceTabs(skill.description), MATCH_DESCRIPTION_LEN)
+					: "";
+				const scoreStr = uiTheme.fg("dim", `score ${skill.score.toFixed(3)}`);
+				lines.push(`  ${uiTheme.fg("accent", truncName)} ${scoreStr}`);
+				if (truncDesc) lines.push(`  ${uiTheme.fg("muted", truncDesc)}`);
+				lines.push(`  ${uiTheme.fg("dim", `read: ${skill.read}`)}`);
+			}
+		}
 		return new Text(lines.join("\n"), 0, 0);
 	},
 

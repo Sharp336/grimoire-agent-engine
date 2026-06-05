@@ -10,6 +10,9 @@ Discoverable built-in tools: {{#list discoverableBuiltinToolNames join=", "}}{{t
 {{#if discoverableToolCount}}
 Total discoverable tools available: {{discoverableToolCount}}.
 {{/if}}
+{{#if hasDiscoverableSkills}}
+Skills: {{discoverableSkillCount}} skills are also searchable. Skill matches include a `read` field with a `skill://<name>` URL — use the read tool with that URL to load the skill. Skills are not activated like tools.
+{{/if}}
 Input:
 - `query` — required natural-language or keyword query
 - `limit` — optional maximum number of tools to return and activate (default `8`)
