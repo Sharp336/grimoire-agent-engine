@@ -112,15 +112,23 @@ export function transformMessages<TApi extends Api>(
 					// Skip empty thinking blocks, convert others to plain text
 					if (!sanitized.thinking || sanitized.thinking.trim() === "") return [];
 					if (isSameModel) return sanitized;
+					// Preserve thinking blocks when target model can handle structured
+					// reasoning: Anthropic models (native thinking blocks) or OpenAI-compat
+					// models with reasoningContentField (convertMessages handles the wire format).
+					const canPreserveThinking =
+					model.api === "anthropic-messages" || !!model.compat?.reasoningContentField;
+					if (canPreserveThinking) return sanitized;
 					return {
-						type: "text" as const,
-						text: sanitized.thinking,
+					type: "text" as const,
+					text: sanitized.thinking,
 					};
 				}
 
-				if (block.type === "redactedThinking") {
+					if (block.type === "redactedThinking") {
 					if (mustPreserveLatestAnthropicThinking) return block;
 					if (isSameModel) return block;
+					// Anthropic models understand redacted thinking blocks natively
+					if (model.api === "anthropic-messages") return block;
 					return [];
 				}
 
