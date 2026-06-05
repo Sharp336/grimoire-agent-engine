@@ -16,8 +16,9 @@
  */
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import { resetSettingsForTest, Settings } from "../src/config/settings";
+import type { HindsightSessionState } from "../src/hindsight";
 import { StatusLineComponent } from "../src/modes/components/status-line";
-import { initTheme } from "../src/modes/theme/theme";
+import { initTheme, theme } from "../src/modes/theme/theme";
 import type { AgentSession } from "../src/session/agent-session";
 
 beforeAll(async () => {
@@ -38,12 +39,16 @@ function makeSession(opts: {
 	contextWindow?: number;
 	modelId?: string;
 }): AgentSession {
+	const model = { id: opts.modelId ?? "test-model", contextWindow: opts.contextWindow ?? 200_000 };
 	return {
 		messages: opts.messages,
+		state: { messages: opts.messages, model },
 		systemPrompt: opts.systemPrompt ?? ["You are a helpful assistant."],
 		agent: { state: { tools: opts.tools ?? [] } },
 		skills: opts.skills ?? [],
-		model: { id: opts.modelId ?? "test-model", contextWindow: opts.contextWindow ?? 200_000 },
+		model,
+		isStreaming: false,
+		getAsyncJobSnapshot: () => ({ running: [] }),
 	} as unknown as AgentSession;
 }
 
@@ -181,5 +186,136 @@ describe("StatusLineComponent incremental context breakdown cache", () => {
 		comp.refreshUsageInBackground();
 		await Bun.sleep(0);
 		expect(calls).toBe(1);
+	});
+
+	it("renders provider-level subscription usage when the quota scope includes a tier", async () => {
+		const session = makeSession({ messages: [userMessage("hi")] });
+		(session as { fetchUsageReports?: () => Promise<unknown> }).fetchUsageReports = () =>
+			Promise.resolve([
+				{
+					limits: [
+						{
+							scope: { windowId: "5h", tier: "prolite", shared: true },
+							amount: { usedFraction: 0.13 },
+							window: { resetsAt: Date.now() + 90 * 60_000 },
+						},
+						{
+							scope: { windowId: "7d", tier: "opus" },
+							amount: { usedFraction: 0.77 },
+							window: { resetsAt: Date.now() + 20 * 60 * 60_000 },
+						},
+						{
+							scope: { windowId: "7d", tier: "prolite", shared: true },
+							amount: { usedFraction: 0.03 },
+							window: { resetsAt: Date.now() + 25 * 60 * 60_000 },
+						},
+						{
+							scope: { windowId: "5h", tier: "spark", modelId: "GPT-5.3-Codex-Spark" },
+							amount: { usedFraction: 0.99 },
+							window: { resetsAt: Date.now() + 30 * 60_000 },
+						},
+					],
+				},
+			]);
+		const comp = new StatusLineComponent(session);
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["usage"],
+			rightSegments: [],
+			separator: "pipe",
+		});
+
+		comp.refreshUsageInBackground();
+		await Bun.sleep(0);
+
+		const rendered = comp.getTopBorder(120).content;
+		expect(rendered).toContain("5h");
+		expect(rendered).toContain("13%");
+		expect(rendered).toContain("7d");
+		expect(rendered).toContain("3%");
+		expect(rendered).not.toContain("77%");
+		expect(rendered).not.toContain("99%");
+	});
+
+	it("renders Hindsight connection status after a successful background probe", async () => {
+		const session = makeSession({ messages: [userMessage("hi")] });
+		const state = {
+			bankId: "test-bank",
+			client: {
+				listMemories: () => Promise.resolve({ results: [] }),
+			},
+		} as unknown as HindsightSessionState;
+		(session as { getHindsightSessionState?: () => HindsightSessionState | undefined }).getHindsightSessionState =
+			() => state;
+		const comp = new StatusLineComponent(session);
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["hindsight"],
+			rightSegments: [],
+			separator: "pipe",
+		});
+
+		comp.refreshHindsightInBackground();
+		await Bun.sleep(0);
+
+		const rendered = comp.getTopBorder(120).content;
+		expect(rendered).toContain("mem");
+		expect(rendered).toContain(theme.status.success);
+	});
+
+	it("renders Hindsight pending status while the background probe is in flight", async () => {
+		const session = makeSession({ messages: [userMessage("hi")] });
+		const probe = Promise.withResolvers<{ results: unknown[] }>();
+		const state = {
+			bankId: "test-bank",
+			client: {
+				listMemories: () => probe.promise,
+			},
+		} as unknown as HindsightSessionState;
+		(session as { getHindsightSessionState: () => HindsightSessionState | undefined }).getHindsightSessionState =
+			() => state;
+		const comp = new StatusLineComponent(session);
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["hindsight"],
+			rightSegments: [],
+			separator: "pipe",
+		});
+
+		comp.refreshHindsightInBackground();
+
+		const rendered = comp.getTopBorder(120).content;
+		expect(rendered).toContain("mem");
+		expect(rendered).toContain(theme.status.pending);
+
+		probe.resolve({ results: [] });
+		await Bun.sleep(0);
+	});
+
+	it("renders generic Hindsight error status after a failed background probe", async () => {
+		const session = makeSession({ messages: [userMessage("hi")] });
+		const state = {
+			bankId: "test-bank",
+			client: {
+				listMemories: () => Promise.reject(new Error("secret-token-timeout")),
+			},
+		} as unknown as HindsightSessionState;
+		(session as { getHindsightSessionState: () => HindsightSessionState | undefined }).getHindsightSessionState =
+			() => state;
+		const comp = new StatusLineComponent(session);
+		comp.updateSettings({
+			preset: "custom",
+			leftSegments: ["hindsight"],
+			rightSegments: [],
+			separator: "pipe",
+		});
+
+		comp.refreshHindsightInBackground();
+		await Bun.sleep(0);
+
+		const rendered = comp.getTopBorder(120).content;
+		expect(rendered).toContain("mem");
+		expect(rendered).toContain(theme.status.error);
+		expect(rendered).not.toContain("secret-token-timeout");
 	});
 });

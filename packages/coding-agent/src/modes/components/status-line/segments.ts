@@ -543,6 +543,23 @@ const usageSegment: StatusLineSegment = {
 	},
 };
 
+const hindsightSegment: StatusLineSegment = {
+	id: "hindsight",
+	render(ctx) {
+		const status = ctx.hindsight;
+		if (!status) return { content: "", visible: false };
+
+		switch (status.state) {
+			case "ok":
+				return { content: theme.fg("success", `mem ${theme.status.success}`), visible: true };
+			case "error":
+				return { content: theme.fg("error", `mem ${theme.status.error}`), visible: true };
+			case "pending":
+				return { content: theme.fg("muted", `mem ${theme.status.pending}`), visible: true };
+		}
+	},
+};
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Segment Registry
 // ═══════════════════════════════════════════════════════════════════════════
@@ -571,6 +588,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	cache_hit: cacheHitSegment,
 	session_name: sessionNameSegment,
 	usage: usageSegment,
+	hindsight: hindsightSegment,
 };
 
 export function renderSegment(id: StatusLineSegmentId, ctx: SegmentContext): RenderedSegment {

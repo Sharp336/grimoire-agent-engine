@@ -40,6 +40,18 @@ export interface StatusLineSettings {
 	sessionAccent?: boolean;
 }
 
+type ResolvedStatusLineSettings = Required<
+	Pick<StatusLineSettings, "leftSegments" | "rightSegments" | "separator" | "segmentOptions">
+> &
+	StatusLineSettings;
+
+export type HindsightConnectionState = "pending" | "ok" | "error";
+
+export interface HindsightStatus {
+	state: HindsightConnectionState;
+	bankId: string;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Per-message token cache
 // ═══════════════════════════════════════════════════════════════════════════
@@ -168,13 +180,18 @@ export class StatusLineComponent implements Component {
 	#lastTokensPerSecond: number | null = null;
 	#lastTokensPerSecondTimestamp: number | null = null;
 
-	// Anthropic usage caching (5-min TTL, OAuth/sub only)
+	// Provider quota usage caching (5-min TTL, OAuth/sub only)
 	#cachedUsage: {
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 	} | null = null;
 	#usageFetchedAt = 0;
 	#usageInFlight = false;
+
+	// Hindsight connection-status caching (5-min TTL)
+	#cachedHindsight: HindsightStatus | null = null;
+	#hindsightFetchedAt = 0;
+	#hindsightInFlight = false;
 	// Context breakdown — incremental cache. Replaces the previous 2-second
 	// TTL design (which re-walked every message on each refresh and produced
 	// ~1.1 s sync freezes on 2,000+ message sessions because `updateEditorTopBorder`
@@ -467,22 +484,24 @@ export class StatusLineComponent implements Component {
 			for (const limit of limits) {
 				if (!limit || typeof limit !== "object") continue;
 				const l = limit as {
-					scope?: { windowId?: string; tier?: string };
+					scope?: { windowId?: string; modelId?: string; tier?: string; shared?: boolean };
 					window?: { resetsAt?: number };
 					amount?: { usedFraction?: number };
 				};
 				const fraction = l.amount?.usedFraction;
 				if (typeof fraction !== "number") continue;
-				const windowId = l.scope?.windowId;
-				const tier = l.scope?.tier;
+				const scope = l.scope;
+				if (typeof scope?.modelId === "string") continue;
+				if (typeof scope?.tier === "string" && scope.tier.length > 0 && scope.shared !== true) continue;
+				const windowId = scope?.windowId;
 				const resetsAt = l.window?.resetsAt;
-				if (windowId === "5h" && !tier && !fiveHour) {
+				if (windowId === "5h" && !fiveHour) {
 					fiveHour = {
 						percent: fraction * 100,
 						resetMinutes:
 							typeof resetsAt === "number" ? Math.max(0, Math.round((resetsAt - now) / 60_000)) : undefined,
 					};
-				} else if (windowId === "7d" && !tier && !sevenDay) {
+				} else if (windowId === "7d" && !sevenDay) {
 					sevenDay = {
 						percent: fraction * 100,
 						resetHours:
@@ -493,6 +512,55 @@ export class StatusLineComponent implements Component {
 		}
 		if (!fiveHour && !sevenDay) return null;
 		return { fiveHour, sevenDay };
+	}
+
+	/**
+	 * Background-refresh the active Hindsight connection status. The status line
+	 * stays synchronous: renders use the cached value while this probes a small,
+	 * authenticated list endpoint in the background. A failed probe is cached
+	 * with the same 5-minute backoff as quota usage so an outage does not hammer
+	 * the Hindsight server on every render.
+	 */
+	refreshHindsightInBackground(): void {
+		const state = this.session.getHindsightSessionState();
+		const primary = state?.aliasOf ?? state;
+		if (!primary) {
+			this.#cachedHindsight = null;
+			this.#hindsightFetchedAt = 0;
+			return;
+		}
+
+		const bankId = primary.bankId;
+		if (this.#cachedHindsight?.bankId !== bankId) {
+			this.#cachedHindsight = { state: "pending", bankId };
+			this.#hindsightFetchedAt = 0;
+		}
+
+		const now = Date.now();
+		if (this.#hindsightInFlight) return;
+		if (this.#hindsightFetchedAt > 0 && now - this.#hindsightFetchedAt < 5 * 60_000) return;
+
+		this.#hindsightInFlight = true;
+		const probeState = primary;
+		const cacheProbeResult = (status: HindsightConnectionState) => {
+			const latestState = this.session.getHindsightSessionState();
+			const latestPrimary = latestState?.aliasOf ?? latestState;
+			if (latestPrimary !== probeState || latestPrimary?.bankId !== bankId) return;
+			this.#cachedHindsight = { state: status, bankId };
+			this.#hindsightFetchedAt = Date.now();
+		};
+
+		void primary.client
+			.listMemories(bankId, { limit: 1 })
+			.then(() => {
+				cacheProbeResult("ok");
+			})
+			.catch(() => {
+				cacheProbeResult("error");
+			})
+			.finally(() => {
+				this.#hindsightInFlight = false;
+			});
 	}
 
 	/**
@@ -546,11 +614,17 @@ export class StatusLineComponent implements Component {
 		return `${modelId}|${sp.length}:${sp[0]?.length ?? 0}|${tools.length}|${skills.length}`;
 	}
 
-	#buildSegmentContext(width: number): SegmentContext {
+	#buildSegmentContext(width: number, effectiveSettings: ResolvedStatusLineSettings): SegmentContext {
 		const state = this.session.state;
+		const enabledSegments = new Set<StatusLineSegmentId>([
+			...effectiveSettings.leftSegments,
+			...effectiveSettings.rightSegments,
+		]);
 
-		// Trigger background fetch (5-min TTL); render uses cached value
-		this.refreshUsageInBackground();
+		// Trigger background fetches (5-min TTL); render uses cached values.
+		// Only probe provider/Hindsight endpoints when their segments are enabled.
+		if (enabledSegments.has("usage")) this.refreshUsageInBackground();
+		if (enabledSegments.has("hindsight")) this.refreshHindsightInBackground();
 
 		// Get usage statistics
 		const aggregateUsageStats = this.session.sessionManager?.getUsageStatistics() ?? {
@@ -575,7 +649,7 @@ export class StatusLineComponent implements Component {
 		return {
 			session: this.session,
 			width,
-			options: this.#resolveSettings().segmentOptions ?? {},
+			options: effectiveSettings.segmentOptions ?? {},
 			planMode: this.#planModeStatus,
 			loopMode: this.#loopModeStatus,
 			goalMode: this.#goalModeStatus,
@@ -591,13 +665,10 @@ export class StatusLineComponent implements Component {
 				pr: this.#lookupPr(),
 			},
 			usage: this.#cachedUsage,
+			hindsight: this.#cachedHindsight,
 		};
 	}
-
-	#resolveSettings(): Required<
-		Pick<StatusLineSettings, "leftSegments" | "rightSegments" | "separator" | "segmentOptions">
-	> &
-		StatusLineSettings {
+	#resolveSettings(): ResolvedStatusLineSettings {
 		const preset = this.#settings.preset ?? "default";
 		const presetDef = getPreset(preset);
 		const useCustomSegments = preset === "custom";
@@ -632,8 +703,8 @@ export class StatusLineComponent implements Component {
 	}
 
 	#buildStatusLine(width: number): string {
-		const ctx = this.#buildSegmentContext(width);
 		const effectiveSettings = this.#resolveSettings();
+		const ctx = this.#buildSegmentContext(width, effectiveSettings);
 		const separatorDef = getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
 
 		const bgAnsi = theme.getBgAnsi("statusLineBg");
