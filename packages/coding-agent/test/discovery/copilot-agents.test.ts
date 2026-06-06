@@ -98,4 +98,32 @@ describe("discoverAgents — GitHub Copilot agents", () => {
 		expect(names).not.toContain("gated-user-agent");
 		expect(names).not.toContain("gated-proj-agent");
 	});
+
+	test("home-dir agent overrides project agent of the same name", async () => {
+		writeAgent(path.join(tempProject, ".github", "agents"), "shared", "project version");
+		writeAgent(path.join(tempHome, ".copilot", "agents"), "shared", "home version");
+
+		const { agents } = await discoverAgents(tempProject, tempHome);
+
+		const found = agents.filter(a => a.name === "shared");
+		expect(found).toHaveLength(1);
+		expect(found[0].source).toBe("user");
+		expect(found[0].description).toBe("home version");
+	});
+
+	test("derives the agent name from a *.agent.md filename when frontmatter omits name", async () => {
+		const dir = path.join(tempHome, ".copilot", "agents");
+		fs.mkdirSync(dir, { recursive: true });
+		// No `name` in frontmatter — Copilot uses the filename (minus .agent.md) as identity.
+		fs.writeFileSync(
+			path.join(dir, "security-expert.agent.md"),
+			"---\ndescription: Security review specialist\n---\nAudit code for vulnerabilities.\n",
+		);
+
+		const { agents } = await discoverAgents(tempProject, tempHome);
+
+		const found = agents.find(a => a.name === "security-expert");
+		expect(found).toBeDefined();
+		expect(found?.description).toBe("Security review specialist");
+	});
 });

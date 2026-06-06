@@ -104,11 +104,16 @@ export function parseAgent(
 	content: string,
 	source: AgentSource,
 	level: "fatal" | "warn" | "off" = "fatal",
+	fallbackName?: string,
 ): AgentDefinition {
 	const { frontmatter, body } = parseFrontmatter(content, {
 		location: filePath,
 		level,
 	});
+	// GitHub Copilot agent profiles may omit `name`, using the filename as identity.
+	if (fallbackName && typeof frontmatter.name !== "string") {
+		frontmatter.name = fallbackName;
+	}
 	const fields = parseAgentFields(frontmatter);
 	if (!fields) {
 		throw new AgentParsingError(new Error(`Invalid agent field: ${filePath}\n${content}`), filePath);

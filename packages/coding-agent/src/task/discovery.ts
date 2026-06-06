@@ -71,6 +71,50 @@ async function findNearestCopilotAgentsDir(startDir: string): Promise<string | n
 }
 
 /**
+ * Load GitHub Copilot agent files from a directory. Copilot agent profiles use the
+ * `.agent.md` (or `.md`) extension and may omit `name` — the filename (minus the
+ * extension) is then the identity — so a filename-derived fallback name is supplied.
+ */
+async function loadCopilotAgentsFromDir(dir: string, source: AgentSource): Promise<AgentDefinition[]> {
+	const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => []);
+	const files = entries
+		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
+		.sort((a, b) => a.name.localeCompare(b.name))
+		.map(file => {
+			const filePath = path.join(dir, file.name);
+			const fallbackName = file.name.replace(/\.agent\.md$/, "").replace(/\.md$/, "");
+			return fs
+				.readFile(filePath, "utf-8")
+				.then(content => parseAgent(filePath, content, source, "warn", fallbackName))
+				.catch(error => {
+					logger.warn("Failed to read Copilot agent file", { filePath, error });
+					return null;
+				});
+		});
+
+	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
+}
+
+/**
+ * Discover GitHub Copilot custom agents from `~/.copilot/agents/` (user-global,
+ * relocatable via COPILOT_HOME) and `.github/agents/` (project, nearest walking up).
+ * Per Copilot CLI, a home-directory agent overrides a project agent of the same name,
+ * so user agents are returned first (the caller dedupes first-name-wins). Gated on the
+ * github discovery provider.
+ */
+async function loadCopilotAgents(cwd: string, home: string): Promise<AgentDefinition[]> {
+	if (!isProviderEnabled("github")) return [];
+
+	const copilotHome = process.env.COPILOT_HOME?.trim() || path.join(home, ".copilot");
+	const agents = await loadCopilotAgentsFromDir(path.join(copilotHome, "agents"), "user");
+
+	const projectDir = await findNearestCopilotAgentsDir(cwd);
+	if (projectDir) agents.push(...(await loadCopilotAgentsFromDir(projectDir, "project")));
+
+	return agents;
+}
+
+/**
  * Discover agents from filesystem and merge with bundled agents.
  *
  * Precedence (highest wins): .omp > .pi > .claude (project before user), then bundled
@@ -122,24 +166,17 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
 		orderedDirs.push({ dir: agentsDir, source: plugin.scope === "project" ? "project" : "user" });
 	}
 
-	// GitHub Copilot custom agents: project `.github/agents/` (nearest, walking up from cwd)
-	// and user-global `~/.copilot/agents/` (relocatable via COPILOT_HOME). Gated on the
-	// github discovery provider so disabling it also disables Copilot agent discovery.
-	if (isProviderEnabled("github")) {
-		const projectCopilotDir = await findNearestCopilotAgentsDir(resolvedCwd);
-		if (projectCopilotDir) orderedDirs.push({ dir: projectCopilotDir, source: "project" });
-		const copilotHome = process.env.COPILOT_HOME?.trim() || path.join(home, ".copilot");
-		orderedDirs.push({ dir: path.join(copilotHome, "agents"), source: "user" });
-	}
+	const baseResults = await Promise.all(orderedDirs.map(({ dir, source }) => loadAgentsFromDir(dir, source)));
+	// Copilot agents are lowest priority among discovered sources; within Copilot the
+	// user (home) dir wins over the project dir, so it is loaded first.
+	const copilotAgents = await loadCopilotAgents(resolvedCwd, home);
 
 	const seen = new Set<string>();
-	const loadedAgents = (await Promise.all(orderedDirs.map(({ dir, source }) => loadAgentsFromDir(dir, source))))
-		.flat()
-		.filter(agent => {
-			if (seen.has(agent.name)) return false;
-			seen.add(agent.name);
-			return true;
-		});
+	const loadedAgents = [...baseResults.flat(), ...copilotAgents].filter(agent => {
+		if (seen.has(agent.name)) return false;
+		seen.add(agent.name);
+		return true;
+	});
 
 	const bundledAgents = loadBundledAgents().filter(agent => {
 		if (seen.has(agent.name)) return false;
