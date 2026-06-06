@@ -1,3 +1,6 @@
+# AI assistant session artifacts (Claude Code memory, plans, workflow transcripts)
+.claude/
+
 # Dependencies
 node_modules/
 .npm/
