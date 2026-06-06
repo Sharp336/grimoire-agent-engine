@@ -217,6 +217,7 @@ export function isOpenAICompletionsProgressChunk(chunk: unknown): boolean {
 				reasoning?: unknown;
 				reasoning_content?: unknown;
 				reasoning_text?: unknown;
+				reasoning_details?: unknown;
 				refusal?: unknown;
 			};
 		}>;
@@ -234,6 +235,7 @@ export function isOpenAICompletionsProgressChunk(chunk: unknown): boolean {
 	if (typeof delta.reasoning === "string" && delta.reasoning.length > 0) return true;
 	if (typeof delta.reasoning_content === "string" && delta.reasoning_content.length > 0) return true;
 	if (typeof delta.reasoning_text === "string" && delta.reasoning_text.length > 0) return true;
+	if (Array.isArray(delta.reasoning_details) && delta.reasoning_details.length > 0) return true;
 	if (typeof delta.refusal === "string" && delta.refusal.length > 0) return true;
 	return false;
 }
@@ -1702,6 +1704,9 @@ export function convertMessages(
 					if (textContent.trim()) {
 						if (Array.isArray(assistantMsg.content)) {
 							assistantMsg.content.push({ type: "text", text: textContent });
+						} else if (typeof assistantMsg.content === "string") {
+							// Append to existing string content
+							assistantMsg.content = assistantMsg.content + "\n\n" + textContent;
 						} else {
 							assistantMsg.content = [{ type: "text", text: textContent }];
 						}
