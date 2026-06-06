@@ -34,6 +34,12 @@ export function computeFrequentSkillNames({
 }: {
 	skills: Pick<Skill, "name" | "hide">[];
 	usage: UsageEntry[];
+	/**
+	 * Soft upper bound on the returned set size.
+	 * Applied only to the top-N pass; skills added via `alwaysInclude` globs or
+	 * the recent-7d override are included unconditionally and may push the total
+	 * above this number.
+	 */
 	frequentCount: number;
 	alwaysInclude: string[];
 	nowSec: number;
@@ -86,6 +92,13 @@ export function computeFrequentSkillNames({
  * Resolves the frequent skill set with a daily SQLite cache.
  * Cache is authoritative on hit; recomputed on hash mismatch or miss.
  * Null storage: compute without caching.
+ *
+ * **Intentional staleness:** the cache TTL is 24 hours. A skill first used
+ * today stays out of the frequent set until cache expiry or recompute — up to
+ * 24 hours, which may span multiple sessions. The skill is reachable via
+ * `search_tool_bm25` during this window. Within a single session the set is
+ * frozen at SDK-init, so the `<skills>` block stays byte-identical across all
+ * prompt rebuilds and preserves Anthropic's prompt-cache prefix.
  */
 export function resolveFrequentSkillNames(
 	storage: AgentStorage | null,
