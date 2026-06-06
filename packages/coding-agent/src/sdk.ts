@@ -1361,6 +1361,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			activateDiscoveredMCPTools: toolNames => session.activateDiscoveredMCPTools(toolNames),
 			// Generic tool discovery (unified — covers built-in + MCP + extension)
 			isToolDiscoveryEnabled: () => session.isToolDiscoveryEnabled(),
+			isSkillDiscoveryEnabled: () => session.isSkillDiscoveryEnabled?.() ?? false,
 			getDiscoverableTools: filter => session.getDiscoverableTools(filter),
 			getDiscoverableToolSearchIndex: () => session.getDiscoverableToolSearchIndex(),
 			getSelectedDiscoveredToolNames: () => session.getSelectedDiscoveredToolNames(),
@@ -1736,7 +1737,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			settings,
 			countToolsForAutoDiscovery(toolRegistry.keys()),
 		);
-		if (effectiveDiscoveryMode !== "off" && !toolRegistry.has("search_tool_bm25")) {
+		if ((effectiveDiscoveryMode !== "off" || settings.get("skills.redactDescriptions")) && !toolRegistry.has("search_tool_bm25")) {
 			const searchTool: Tool = new SearchToolBm25Tool(toolSession);
 			toolRegistry.set(
 				searchTool.name,

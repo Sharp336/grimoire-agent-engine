@@ -446,8 +446,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "render_mermaid") return session.settings.get("renderMermaid.enabled");
 		if (name === "inspect_image") return session.settings.get("inspect_image.enabled");
 		if (name === "web_search") return session.settings.get("web_search.enabled");
-		// search_tool_bm25 is allowed when either legacy mcp.discoveryMode or new tools.discoveryMode is active.
-		if (name === "search_tool_bm25") return discoveryActive;
+		// search_tool_bm25 is allowed when tool discovery is active OR when skill-description
+		// redaction is enabled (deferred skills need BM25 to be discoverable).
+		if (name === "search_tool_bm25")
+			return discoveryActive || session.settings.get("skills.redactDescriptions") === true;
 		if (name === "browser") return session.settings.get("browser.enabled");
 		if (name === "checkpoint" || name === "rewind") return session.settings.get("checkpoint.enabled");
 		if (name === "irc") {

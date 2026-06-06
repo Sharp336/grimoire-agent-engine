@@ -236,7 +236,9 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 		// auto mode is activated later by createAgentSession after the full registry exists.
 		// Skill discovery (skills.redactDescriptions) keeps this tool alive even when
 		// tool discovery is "off" — it needs search_tool_bm25 to surface deferred skills.
-		if (resolveEffectiveToolDiscoveryMode(session.settings, 0) === "off" && !session.isSkillDiscoveryEnabled?.())
+		// Use settings directly (not isSkillDiscoveryEnabled) because session is not yet
+		// constructed at createTools() time.
+		if (resolveEffectiveToolDiscoveryMode(session.settings, 0) === "off" && !session.settings.get("skills.redactDescriptions"))
 			return null;
 		return supportsToolDiscoveryExecution(session) ? new SearchToolBm25Tool(session) : null;
 	}
