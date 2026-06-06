@@ -125,10 +125,10 @@ ENV
 {{#if showSkillsBlock}}
 <skills>
 {{#each skills}}
-- {{escapeXml name}}: {{escapeXml description}}
+- {{escapeXml name}}{{#if description}}: {{escapeXml description}}{{/if}}
 {{/each}}
 {{#if skillsRedacted}}
-- ({{deferredSkillCount}} more skills not listed — search with `search_tool_bm25`, then read `skill://<name>` to use one.)
+- ({{deferredSkillCount}} skills above are listed without descriptions — search `search_tool_bm25` to match by capability, then read `skill://<name>` to use one.)
 {{/if}}
 </skills>
 {{/if}}

@@ -546,24 +546,19 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const hasRead = tools?.has("read");
 	const allVisibleSkills = hasRead ? skills.filter(skill => skill.hide !== true) : [];
 
-	let renderedSkills: typeof allVisibleSkills;
-	let deferredSkillCount = 0;
-	const skillsRedacted =
+	// Redaction keeps every visible skill's name but blanks the description of
+	// any skill not in the frequent set. Names are ~5 tokens each and make
+	// `skill://<name>` reads directly inferable; descriptions are deferred to
+	// BM25 search. frequentSkillNames! is load-bearing: TS cannot narrow the
+	// non-null check through the separate redactionActive const.
+	const redactionActive =
 		!!skillsSettings?.redactDescriptions && frequentSkillNames != null && allVisibleSkills.length > 0;
-	if (skillsRedacted) {
-		renderedSkills = allVisibleSkills.filter(s => frequentSkillNames!.has(s.name));
-		deferredSkillCount = allVisibleSkills.length - renderedSkills.length;
-		// If nothing is actually deferred, clear the redacted flag for the template
-		if (deferredSkillCount === 0) {
-			// All skills fit in the frequent set (e.g. warmup gate or small catalog).
-			// skillsRedacted stays true here but is guarded at the template-data boundary
-			// (`skillsRedacted && deferredSkillCount > 0`) so the pointer never renders.
-			renderedSkills = allVisibleSkills;
-		}
-	} else {
-		renderedSkills = allVisibleSkills;
-	}
-	const showSkillsBlock = renderedSkills.length > 0 || (skillsRedacted && deferredSkillCount > 0);
+	const renderedSkills = allVisibleSkills.map(s => ({
+		name: s.name,
+		description: redactionActive && !frequentSkillNames!.has(s.name) ? undefined : s.description,
+	}));
+	const deferredSkillCount = renderedSkills.reduce((n, s) => n + (s.description === undefined ? 1 : 0), 0);
+	const showSkillsBlock = renderedSkills.length > 0;
 
 	const effectiveSystemPromptCustomization = dedupePromptSource(systemPromptCustomization, [
 		resolvedCustomPrompt,
@@ -586,7 +581,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		agentsMdSearch: { files: agentsMdFiles },
 		workspaceTree,
 		skills: renderedSkills,
-		skillsRedacted: skillsRedacted && deferredSkillCount > 0,
+		skillsRedacted: deferredSkillCount > 0,
 		deferredSkillCount,
 		showSkillsBlock,
 		rules: rules ?? [],

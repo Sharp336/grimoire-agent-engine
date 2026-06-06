@@ -86,23 +86,28 @@ describe("system prompt skill redaction", () => {
 		expect(offWithSet).toBe(plainBaseline);
 	});
 
-	it("redactDescriptions:true renders only frequent skills plus a pointer with the deferred count", async () => {
+	it("redactDescriptions:true keeps every skill name, redacts descriptions of non-frequent skills, plus a pointer", async () => {
 		const skills = [makeSkill("alpha"), makeSkill("beta"), makeSkill("gamma"), makeSkill("delta")];
 		const text = await render({
 			skills,
 			redactDescriptions: true,
 			frequentSkillNames: new Set(["alpha", "beta"]),
 		});
+		// Frequent skills render with their descriptions.
 		expect(text).toContain("- alpha: desc for alpha");
 		expect(text).toContain("- beta: desc for beta");
-		expect(text).not.toContain("- gamma: desc for gamma");
-		expect(text).not.toContain("- delta: desc for delta");
-		// 2 deferred (gamma, delta)
-		expect(text).toContain("(2 more skills not listed");
+		// Redacted skills keep their name but lose the description.
+		expect(text).toContain("- gamma");
+		expect(text).not.toContain("desc for gamma");
+		expect(text).toContain("- delta");
+		expect(text).not.toContain("desc for delta");
+		// 2 redacted (gamma, delta)
+		expect(text).toContain("(2 skills above are listed without descriptions");
 		expect(text).toContain("search_tool_bm25");
+		expect(text).toContain("skill://<name>");
 	});
 
-	it("deferredSkillCount === 0 (all skills frequent) renders all skills and no pointer", async () => {
+	it("deferredSkillCount === 0 (all skills frequent) renders all skills with descriptions and no pointer", async () => {
 		const skills = [makeSkill("alpha"), makeSkill("beta")];
 		const text = await render({
 			skills,
@@ -111,10 +116,10 @@ describe("system prompt skill redaction", () => {
 		});
 		expect(text).toContain("- alpha: desc for alpha");
 		expect(text).toContain("- beta: desc for beta");
-		expect(text).not.toContain("more skills not listed");
+		expect(text).not.toContain("skills above are listed without descriptions");
 	});
 
-	it("hidden skills never appear in rendered output or the deferred count", async () => {
+	it("hidden skills never appear; deferred skills keep names but lose descriptions", async () => {
 		const skills = [makeSkill("alpha"), makeSkill("beta"), makeSkill("secret", { hide: true }), makeSkill("gamma")];
 		const text = await render({
 			skills,
@@ -123,36 +128,73 @@ describe("system prompt skill redaction", () => {
 		});
 		// hidden skill is never rendered
 		expect(text).not.toContain("secret");
-		// rendered: alpha; deferred: beta, gamma (hidden "secret" excluded from both)
+		// frequent: alpha (name + desc)
 		expect(text).toContain("- alpha: desc for alpha");
-		expect(text).toContain("(2 more skills not listed");
+		// deferred: beta, gamma — names present, descriptions absent (hidden "secret" excluded from both)
+		expect(text).toContain("- beta");
+		expect(text).not.toContain("desc for beta");
+		expect(text).toContain("- gamma");
+		expect(text).not.toContain("desc for gamma");
+		expect(text).toContain("(2 skills above are listed without descriptions");
 	});
 
-	it("empty frequentSkillNames Set defers all skills — pointer-only block", async () => {
+	it("empty frequentSkillNames Set redacts all descriptions while keeping every name", async () => {
 		const skillList = [makeSkill("alpha"), makeSkill("beta")];
 		const text = await render({
 			skills: skillList,
 			redactDescriptions: true,
 			frequentSkillNames: new Set<string>([]),
 		});
-		// No skill entries rendered
-		expect(text).not.toContain("- alpha:");
-		expect(text).not.toContain("- beta:");
-		// Pointer line references both deferred skills
-		expect(text).toContain("(2 more skills not listed");
+		// Every skill name still rendered...
+		expect(text).toContain("- alpha");
+		expect(text).toContain("- beta");
+		// ...but no descriptions remain.
+		expect(text).not.toContain("desc for alpha");
+		expect(text).not.toContain("desc for beta");
+		// Pointer line references both redacted skills
+		expect(text).toContain("(2 skills above are listed without descriptions");
 		expect(text).toContain("search_tool_bm25");
 	});
 
 	it("subagent path: redactDescriptions:true + frequentSkillNames:null renders full block (no pointer)", async () => {
 		// Subagent sessions always pass frequentSkillNames=null (gated at sdk.ts:1157).
-		// system-prompt.ts requires `frequentSkillNames != null` for skillsRedacted to be true,
+		// system-prompt.ts requires `frequentSkillNames != null` for redaction to be active,
 		// so a null set means redaction is inactive even when redactDescriptions is on:
-		// every visible skill renders inline and no pointer line appears.
+		// every visible skill renders inline with its description and no pointer line appears.
 		const skills = [makeSkill("alpha"), makeSkill("beta")];
 		const text = await render({ skills, redactDescriptions: true, frequentSkillNames: null });
 		expect(text).toContain("- alpha: desc for alpha");
 		expect(text).toContain("- beta: desc for beta");
-		expect(text).not.toContain("more skills not listed");
+		expect(text).not.toContain("skills above are listed without descriptions");
 		expect(text).not.toContain("search_tool_bm25");
+	});
+
+	it("custom system prompt: redacted skills render as name-only <skill> entries plus the pointer", async () => {
+		const skills = [makeSkill("alpha"), makeSkill("beta"), makeSkill("gamma")];
+		const { systemPrompt } = await buildSystemPrompt({
+			cwd: projectDir,
+			customPrompt: "You are a custom agent.",
+			contextFiles: [],
+			skills,
+			rules: [],
+			toolNames: ["read"],
+			tools: READ_TOOLS,
+			skillsSettings: { redactDescriptions: true },
+			frequentSkillNames: new Set(["alpha"]),
+			workspaceTree: workspaceTree(projectDir),
+		});
+		const text = systemPrompt.join("\n\n");
+		// Frequent skill keeps its full <skill> element with description.
+		expect(text).toContain('<skill name="alpha">');
+		expect(text).toContain("desc for alpha");
+		// Redacted skills render as self-closing name-only entries.
+		expect(text).toContain('<skill name="beta"/>');
+		expect(text).toContain('<skill name="gamma"/>');
+		expect(text).not.toContain("desc for beta");
+		expect(text).not.toContain("desc for gamma");
+		// Pointer present with the redacted count.
+		expect(text).toContain("(2 skills above are listed without descriptions");
+		expect(text).toContain("search_tool_bm25");
+		expect(text).toContain("skill://<name>");
 	});
 });

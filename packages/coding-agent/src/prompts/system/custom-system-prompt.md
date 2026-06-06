@@ -33,10 +33,17 @@ Skills are specialized knowledge. Scan descriptions for your task domain.
 If a skill applies, you MUST read `skill://<name>` before proceeding.
 <skills>
 {{#list skills join="\n"}}
+{{#if description}}
 <skill name="{{name}}">
 {{description}}
 </skill>
+{{else}}
+<skill name="{{name}}"/>
+{{/if}}
 {{/list}}
+{{#if skillsRedacted}}
+({{deferredSkillCount}} skills above are listed without descriptions — search `search_tool_bm25` to match by capability, then read `skill://<name>` to use one.)
+{{/if}}
 </skills>
 {{/if}}
 {{#if alwaysApplyRules.length}}
