@@ -805,7 +805,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 
 					if (foundReasoningField) {
 						const delta = (choice.delta as any)[foundReasoningField];
-						appendThinkingDelta(delta, foundReasoningField);
+						appendThinkingDelta(delta); // Don't pass field name as signature
 					}
 
 					if (choice?.delta?.tool_calls && choice.delta.tool_calls.length > 0) {
@@ -902,7 +902,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 							// MiniMax returns reasoning in reasoning_details with text field
 							// when reasoning_split=true is set in extra_body
 							if (typeof detail.text === "string" && detail.text.length > 0) {
-								appendThinkingDelta(detail.text, "reasoning_content");
+								appendThinkingDelta(detail.text); // Don't pass field name as signature
 							}
 						}
 					}
@@ -1667,14 +1667,11 @@ export function convertMessages(
 			}
 
 			if (compat.requiresReasoningContentForToolCalls) {
-				const streamedReasoningField = nonEmptyThinkingBlocks[0]?.thinkingSignature;
-				const recognizedFields = ["reasoning_content", "reasoning", "reasoning_text", "reasoning_details"];
-				// Always use reasoningContentField as the target wire field, regardless of synthetic flag.
-				const reasoningField =
-					streamedReasoningField && recognizedFields.includes(streamedReasoningField)
-						? (compat.reasoningContentField ?? "reasoning_content")
-						: undefined;
-				if (reasoningField) {
+				// Always use the target model's configured reasoningContentField
+				// Don't rely on thinkingSignature - it may be undefined for plaintext reasoning
+				const reasoningField = compat.reasoningContentField ?? "reasoning_content";
+				
+				if (nonEmptyThinkingBlocks.length > 0) {
 					const reasoningContent = (assistantMsg as any)[reasoningField];
 					if (!reasoningContent) {
 						const reasoning = (assistantMsg as any).reasoning;
@@ -1683,7 +1680,8 @@ export function convertMessages(
 							(assistantMsg as any)[reasoningField] = reasoning;
 						} else if (reasoningText && reasoningField !== "reasoning_text") {
 							(assistantMsg as any)[reasoningField] = reasoningText;
-						} else if (nonEmptyThinkingBlocks.length > 0) {
+						} else {
+							// Use thinking blocks to populate the reasoning field
 							if (reasoningField === "reasoning_details") {
 								(assistantMsg as any)[reasoningField] = nonEmptyThinkingBlocks.map((b, idx) => ({
 									type: "reasoning.text",
@@ -1695,20 +1693,6 @@ export function convertMessages(
 							} else {
 								(assistantMsg as any)[reasoningField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
 							}
-						}
-					}
-				} else if (nonEmptyThinkingBlocks.length > 0) {
-					// Signature not recognized - convert thinking blocks to text content
-					// instead of silently dropping them
-					const textContent = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n\n");
-					if (textContent.trim()) {
-						if (Array.isArray(assistantMsg.content)) {
-							assistantMsg.content.push({ type: "text", text: textContent });
-						} else if (typeof assistantMsg.content === "string") {
-							// Append to existing string content
-							assistantMsg.content = assistantMsg.content + "\n\n" + textContent;
-						} else {
-							assistantMsg.content = [{ type: "text", text: textContent }];
 						}
 					}
 				}
@@ -1758,23 +1742,21 @@ export function convertMessages(
 			) {
 				const allThinkingBlocks = msg.content.filter(b => b.type === "thinking") as ThinkingContent[];
 				if (allThinkingBlocks.length > 0) {
-					const signature = allThinkingBlocks[0].thinkingSignature;
-					const recognizedFields = ["reasoning_content", "reasoning", "reasoning_text", "reasoning_details"];
-					if (signature && recognizedFields.includes(signature)) {
-						const reasoningField = compat.reasoningContentField ?? "reasoning_content";
-						if (reasoningField === "reasoning_details") {
-							(assistantMsg as any)[reasoningField] = allThinkingBlocks.map((b, idx) => ({
-								type: "reasoning.text",
-								id: `reasoning-text-${idx + 1}`,
-								format: "MiniMax-response-v1",
-								index: idx,
-								text: b.thinking,
-							}));
-						} else {
-							(assistantMsg as any)[reasoningField] = allThinkingBlocks.map(b => b.thinking).join("\n");
-						}
-						hasReasoningField = true;
+					// Use thinking blocks to populate the reasoning field
+					// Don't rely on thinkingSignature - it may be undefined for plaintext reasoning
+					const reasoningField = compat.reasoningContentField ?? "reasoning_content";
+					if (reasoningField === "reasoning_details") {
+						(assistantMsg as any)[reasoningField] = allThinkingBlocks.map((b, idx) => ({
+							type: "reasoning.text",
+							id: `reasoning-text-${idx + 1}`,
+							format: "MiniMax-response-v1",
+							index: idx,
+							text: b.thinking,
+						}));
+					} else {
+						(assistantMsg as any)[reasoningField] = allThinkingBlocks.map(b => b.thinking).join("\n");
 					}
+					hasReasoningField = true;
 				}
 			}
 			// Tier 2: When the provider requires reasoning_content but there are genuinely no

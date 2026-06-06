@@ -555,7 +555,7 @@ describe("openai-completions compatibility", () => {
 		expect(result.content).toContainEqual({
 			type: "thinking",
 			thinking: "inspect tool output",
-			thinkingSignature: "reasoning_text",
+			thinkingSignature: undefined,
 		});
 
 		const compat = { ...detectCompat(model), requiresReasoningContentForToolCalls: true };
