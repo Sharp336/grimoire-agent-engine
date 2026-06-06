@@ -2870,7 +2870,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tasks",
 			label: "Frequent Skill Count",
 			description:
-				"Number of most-used skills to keep visible in the system prompt when redactDescriptions is enabled.",
+				"Number of most-used skills to keep descriptions for in the system prompt when redactDescriptions is enabled.",
 		},
 	},
 
@@ -2881,7 +2881,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tasks",
 			label: "Always Include Skills",
 			description:
-				"Glob patterns for skills always shown in the system prompt, even when redactDescriptions is enabled.",
+				"Glob patterns for skills always shown with descriptions in the system prompt, even when redactDescriptions is enabled.",
 		},
 	},
 

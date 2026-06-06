@@ -5,8 +5,9 @@
 ### Added
 
 - Added frequency-based skill-description redaction behind `skills.redactDescriptions` (default `false`).
-  When enabled, infrequently-used skills are hidden from the `<skills>` system-prompt block and surfaced
-  via `search_tool_bm25`; a deferred count pointer in `<skills>` directs the model to search. Frequent
+  When enabled, infrequently-used skills are still listed in the `<skills>` system-prompt block but
+  WITHOUT their descriptions, and those descriptions are surfaced via `search_tool_bm25`; a deferred
+  count pointer in `<skills>` directs the model to search. Frequent
   skills are selected as: pinned glob patterns (`skills.alwaysInclude`), skills used within the last 7 days,
   and the top-N by exponentially-decayed usage score (half-life 21 days, configurable via
   `skills.frequentSkillCount`, default 20). The frequent set is cached daily (invalidated on catalog or
