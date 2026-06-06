@@ -142,4 +142,17 @@ describe("system prompt skill redaction", () => {
 		expect(text).toContain("(2 more skills not listed");
 		expect(text).toContain("search_tool_bm25");
 	});
+
+	it("subagent path: redactDescriptions:true + frequentSkillNames:null renders full block (no pointer)", async () => {
+		// Subagent sessions always pass frequentSkillNames=null (gated at sdk.ts:1157).
+		// system-prompt.ts requires `frequentSkillNames != null` for skillsRedacted to be true,
+		// so a null set means redaction is inactive even when redactDescriptions is on:
+		// every visible skill renders inline and no pointer line appears.
+		const skills = [makeSkill("alpha"), makeSkill("beta")];
+		const text = await render({ skills, redactDescriptions: true, frequentSkillNames: null });
+		expect(text).toContain("- alpha: desc for alpha");
+		expect(text).toContain("- beta: desc for beta");
+		expect(text).not.toContain("more skills not listed");
+		expect(text).not.toContain("search_tool_bm25");
+	});
 });
