@@ -1932,6 +1932,75 @@
 				"maxLevel": "high"
 			}
 		},
+		"openai.gpt-5.4": {
+			"id": "openai.gpt-5.4",
+			"name": "GPT-5.4",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 2.75,
+				"output": 16.5,
+				"cacheRead": 0.275,
+				"cacheWrite": 0
+			},
+			"contextWindow": 272000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "budget",
+				"minLevel": "low",
+				"maxLevel": "xhigh"
+			}
+		},
+		"openai.gpt-5.5": {
+			"id": "openai.gpt-5.5",
+			"name": "GPT-5.5",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 5.5,
+				"output": 33,
+				"cacheRead": 0.55,
+				"cacheWrite": 0
+			},
+			"contextWindow": 272000,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "budget",
+				"minLevel": "low",
+				"maxLevel": "xhigh"
+			}
+		},
+		"openai.gpt-oss-120b": {
+			"id": "openai.gpt-oss-120b",
+			"name": "gpt-oss-120b",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.15,
+				"output": 0.6,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 128000,
+			"maxTokens": 16384
+		},
 		"openai.gpt-oss-120b-1:0": {
 			"id": "openai.gpt-oss-120b-1:0",
 			"name": "gpt-oss-120b",
@@ -1945,6 +2014,25 @@
 			"cost": {
 				"input": 0.15,
 				"output": 0.6,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 128000,
+			"maxTokens": 16384
+		},
+		"openai.gpt-oss-20b": {
+			"id": "openai.gpt-oss-20b",
+			"name": "gpt-oss-20b",
+			"api": "bedrock-converse-stream",
+			"provider": "amazon-bedrock",
+			"baseUrl": "https://bedrock-runtime.us-east-1.amazonaws.com",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.07,
+				"output": 0.3,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -11197,7 +11285,7 @@
 		},
 		"deepseek/deepseek-r1-distill-llama-70b": {
 			"id": "deepseek/deepseek-r1-distill-llama-70b",
-			"name": "DeepSeek: R1 Distill Llama 70B",
+			"name": "DeepSeek: R1 Distill Llama 70B (retires Jun 11)",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -12648,7 +12736,7 @@
 		},
 		"meta-llama/llama-3-70b-instruct": {
 			"id": "meta-llama/llama-3-70b-instruct",
-			"name": "Meta: Llama 3 70B Instruct",
+			"name": "Meta: Llama 3 70B Instruct (retires Jun 19)",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -12667,7 +12755,7 @@
 		},
 		"meta-llama/llama-3-8b-instruct": {
 			"id": "meta-llama/llama-3-8b-instruct",
-			"name": "Meta: Llama 3 8B Instruct",
+			"name": "Meta: Llama 3 8B Instruct (retires Jun 19)",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -13187,6 +13275,25 @@
 		},
 		"minimax/minimax-m3": {
 			"id": "minimax/minimax-m3",
+			"name": "MiniMax: MiniMax M3 (new)",
+			"api": "openai-completions",
+			"provider": "kilo",
+			"baseUrl": "https://api.kilo.ai/api/gateway",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"minimax/minimax-m3:discounted": {
+			"id": "minimax/minimax-m3:discounted",
 			"name": "MiniMax: MiniMax M3 (50% off through 2026-06-07)",
 			"api": "openai-completions",
 			"provider": "kilo",
@@ -14262,6 +14369,63 @@
 			"contextWindow": 222222,
 			"maxTokens": 8888
 		},
+		"nvidia/nemotron-3-ultra-550b-a55b": {
+			"id": "nvidia/nemotron-3-ultra-550b-a55b",
+			"name": "NVIDIA: Nemotron 3 Ultra",
+			"api": "openai-completions",
+			"provider": "kilo",
+			"baseUrl": "https://api.kilo.ai/api/gateway",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"nvidia/nemotron-3-ultra-550b-a55b:free": {
+			"id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+			"name": "NVIDIA: Nemotron 3 Ultra (free)",
+			"api": "openai-completions",
+			"provider": "kilo",
+			"baseUrl": "https://api.kilo.ai/api/gateway",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"nvidia/nemotron-3.5-content-safety:free": {
+			"id": "nvidia/nemotron-3.5-content-safety:free",
+			"name": "NVIDIA: Nemotron 3.5 Content Safety (free)",
+			"api": "openai-completions",
+			"provider": "kilo",
+			"baseUrl": "https://api.kilo.ai/api/gateway",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
 		"nvidia/nemotron-nano-12b-v2-vl": {
 			"id": "nvidia/nemotron-nano-12b-v2-vl",
 			"name": "NVIDIA: Nemotron Nano 12B 2 VL",
@@ -14283,7 +14447,7 @@
 		},
 		"nvidia/nemotron-nano-9b-v2": {
 			"id": "nvidia/nemotron-nano-9b-v2",
-			"name": "NVIDIA: Nemotron Nano 9B V2",
+			"name": "NVIDIA: Nemotron Nano 9B V2 (retires Jun 11)",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -16371,7 +16535,7 @@
 		},
 		"qwen/qwen3-30b-a3b": {
 			"id": "qwen/qwen3-30b-a3b",
-			"name": "Qwen: Qwen3 30B A3B (retires Jun 5)",
+			"name": "Qwen: Qwen3 30B A3B",
 			"api": "openai-completions",
 			"provider": "kilo",
 			"baseUrl": "https://api.kilo.ai/api/gateway",
@@ -19100,7 +19264,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19130,7 +19294,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19157,7 +19321,7 @@
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content",
+				"reasoningContentField": "reasoning_details",
 				"supportsStore": false
 			},
 			"contextWindow": 1000000,
@@ -19190,7 +19354,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19220,7 +19384,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19247,7 +19411,7 @@
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content",
+				"reasoningContentField": "reasoning_details",
 				"supportsStore": false
 			},
 			"contextWindow": 204800,
@@ -19280,7 +19444,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19310,7 +19474,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19341,7 +19505,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19373,7 +19537,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19403,7 +19567,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19430,7 +19594,7 @@
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content",
+				"reasoningContentField": "reasoning_details",
 				"supportsStore": false
 			},
 			"contextWindow": 1000000,
@@ -19463,7 +19627,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19493,7 +19657,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19520,7 +19684,7 @@
 			"compat": {
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content",
+				"reasoningContentField": "reasoning_details",
 				"supportsStore": false
 			},
 			"contextWindow": 204800,
@@ -19553,7 +19717,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19583,7 +19747,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19614,7 +19778,7 @@
 				"supportsStore": false,
 				"supportsDeveloperRole": false,
 				"supportsReasoningEffort": false,
-				"reasoningContentField": "reasoning_content"
+				"reasoningContentField": "reasoning_details"
 			},
 			"thinking": {
 				"mode": "effort",
@@ -19993,24 +20157,19 @@
 			"api": "openai-completions",
 			"provider": "mistral",
 			"baseUrl": "https://api.mistral.ai/v1",
-			"reasoning": true,
+			"reasoning": false,
 			"input": [
 				"text",
 				"image"
 			],
 			"cost": {
-				"input": 1.5,
-				"output": 7.5,
+				"input": 0.4,
+				"output": 2,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 262144,
-			"thinking": {
-				"mode": "effort",
-				"minLevel": "minimal",
-				"maxLevel": "xhigh"
-			}
+			"maxTokens": 262144
 		},
 		"mistral-nemo": {
 			"id": "mistral-nemo",
@@ -25743,6 +25902,82 @@
 			"contextWindow": 222222,
 			"maxTokens": 8888
 		},
+		"linkup-research-high": {
+			"id": "linkup-research-high",
+			"name": "linkup-research-high",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"linkup-research-low": {
+			"id": "linkup-research-low",
+			"name": "linkup-research-low",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"linkup-research-medium": {
+			"id": "linkup-research-medium",
+			"name": "linkup-research-medium",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"linkup-research-xhigh": {
+			"id": "linkup-research-xhigh",
+			"name": "linkup-research-xhigh",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
 		"liquid/lfm-2-24b-a2b": {
 			"id": "liquid/lfm-2-24b-a2b",
 			"name": "liquid/lfm-2-24b-a2b",
@@ -28337,6 +28572,30 @@
 			},
 			"contextWindow": 262144,
 			"maxTokens": 262144,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "xhigh"
+			}
+		},
+		"nvidia/nemotron-3-ultra-550b-a55b": {
+			"id": "nvidia/nemotron-3-ultra-550b-a55b",
+			"name": "nvidia/nemotron-3-ultra-550b-a55b",
+			"api": "openai-completions",
+			"provider": "nanogpt",
+			"baseUrl": "https://nano-gpt.com/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888,
 			"thinking": {
 				"mode": "effort",
 				"minLevel": "minimal",
@@ -36130,6 +36389,250 @@
 		}
 	},
 	"ollama-cloud": {
+		"cogito-2.1:671b": {
+			"id": "cogito-2.1:671b",
+			"name": "cogito-2.1:671b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 163840,
+			"maxTokens": 8192
+		},
+		"deepseek-v3.1:671b": {
+			"id": "deepseek-v3.1:671b",
+			"name": "deepseek-v3.1:671b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 163840,
+			"maxTokens": 8192
+		},
+		"deepseek-v3.2": {
+			"id": "deepseek-v3.2",
+			"name": "DeepSeek V3.2",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 163840,
+			"maxTokens": 8192
+		},
+		"deepseek-v4-flash": {
+			"id": "deepseek-v4-flash",
+			"name": "DeepSeek V4 Flash",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.14,
+				"output": 0.28,
+				"cacheRead": 0.0028,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 384000
+		},
+		"deepseek-v4-pro": {
+			"id": "deepseek-v4-pro",
+			"name": "DeepSeek V4 Pro",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.435,
+				"output": 0.87,
+				"cacheRead": 0.003625,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 384000
+		},
+		"devstral-2:123b": {
+			"id": "devstral-2:123b",
+			"name": "devstral-2:123b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"devstral-small-2:24b": {
+			"id": "devstral-small-2:24b",
+			"name": "devstral-small-2:24b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"gemini-3-flash-preview": {
+			"id": "gemini-3-flash-preview",
+			"name": "Gemini 3 Flash Preview",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.5,
+				"output": 3,
+				"cacheRead": 0.05,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 65536
+		},
+		"gemma3:12b": {
+			"id": "gemma3:12b",
+			"name": "gemma3:12b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8192
+		},
+		"gemma3:27b": {
+			"id": "gemma3:27b",
+			"name": "gemma3:27b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8192
+		},
+		"gemma3:4b": {
+			"id": "gemma3:4b",
+			"name": "gemma3:4b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8192
+		},
 		"gemma4:31b": {
 			"id": "gemma4:31b",
 			"name": "Gemma 4",
@@ -36154,6 +36657,102 @@
 				"minLevel": "minimal",
 				"maxLevel": "high"
 			}
+		},
+		"glm-4.6": {
+			"id": "glm-4.6",
+			"name": "GLM-4.6",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.6,
+				"output": 2.2,
+				"cacheRead": 0.1,
+				"cacheWrite": 0
+			},
+			"contextWindow": 202752,
+			"maxTokens": 131072
+		},
+		"glm-4.7": {
+			"id": "glm-4.7",
+			"name": "GLM-4.7",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.6,
+				"output": 2.2,
+				"cacheRead": 0.1,
+				"cacheWrite": 0
+			},
+			"contextWindow": 202752,
+			"maxTokens": 131072
+		},
+		"glm-5": {
+			"id": "glm-5",
+			"name": "GLM-5",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1,
+				"output": 3.2,
+				"cacheRead": 0.2,
+				"cacheWrite": 0
+			},
+			"contextWindow": 202752,
+			"maxTokens": 131072
+		},
+		"glm-5.1": {
+			"id": "glm-5.1",
+			"name": "GLM-5.1",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 1.4,
+				"output": 4.4,
+				"cacheRead": 0.26,
+				"cacheWrite": 0
+			},
+			"contextWindow": 202752,
+			"maxTokens": 131072
 		},
 		"gpt-oss:120b": {
 			"id": "gpt-oss:120b",
@@ -36204,6 +36803,405 @@
 				"maxLevel": "high"
 			}
 		},
+		"kimi-k2-thinking": {
+			"id": "kimi-k2-thinking",
+			"name": "Kimi K2 Thinking",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.4,
+				"output": 2.5,
+				"cacheRead": 0.4,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 262144
+		},
+		"kimi-k2:1t": {
+			"id": "kimi-k2:1t",
+			"name": "kimi-k2:1t",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"kimi-k2.5": {
+			"id": "kimi-k2.5",
+			"name": "Kimi K2.5",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 65536
+		},
+		"kimi-k2.6": {
+			"id": "kimi-k2.6",
+			"name": "Kimi K2.6",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.95,
+				"output": 4,
+				"cacheRead": 0.16,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 65536
+		},
+		"minimax-m2": {
+			"id": "minimax-m2",
+			"name": "minimax-m2",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 204800,
+			"maxTokens": 8192
+		},
+		"minimax-m2.1": {
+			"id": "minimax-m2.1",
+			"name": "MiniMax M2.1",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.1,
+				"cacheWrite": 0
+			},
+			"contextWindow": 204800,
+			"maxTokens": 131072
+		},
+		"minimax-m2.5": {
+			"id": "minimax-m2.5",
+			"name": "MiniMax M2.5",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.06,
+				"cacheWrite": 0
+			},
+			"contextWindow": 196608,
+			"maxTokens": 131072
+		},
+		"minimax-m2.7": {
+			"id": "minimax-m2.7",
+			"name": "MiniMax M2.7",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.3,
+				"output": 1.2,
+				"cacheRead": 0.06,
+				"cacheWrite": 0
+			},
+			"contextWindow": 196608,
+			"maxTokens": 131072
+		},
+		"minimax-m3": {
+			"id": "minimax-m3",
+			"name": "MiniMax M3",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.6,
+				"output": 2.4,
+				"cacheRead": 0.12,
+				"cacheWrite": 0
+			},
+			"contextWindow": 524288,
+			"maxTokens": 131072
+		},
+		"ministral-3:14b": {
+			"id": "ministral-3:14b",
+			"name": "ministral-3:14b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"ministral-3:3b": {
+			"id": "ministral-3:3b",
+			"name": "ministral-3:3b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"ministral-3:8b": {
+			"id": "ministral-3:8b",
+			"name": "ministral-3:8b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"mistral-large-3:675b": {
+			"id": "mistral-large-3:675b",
+			"name": "mistral-large-3:675b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"nemotron-3-nano:30b": {
+			"id": "nemotron-3-nano:30b",
+			"name": "nemotron-3-nano:30b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"nemotron-3-super": {
+			"id": "nemotron-3-super",
+			"name": "nemotron-3-super",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"nemotron-3-ultra": {
+			"id": "nemotron-3-ultra",
+			"name": "nemotron-3-ultra",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"qwen3-coder-next": {
+			"id": "qwen3-coder-next",
+			"name": "Qwen3 Coder Next",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 65536
+		},
+		"qwen3-coder:480b": {
+			"id": "qwen3-coder:480b",
+			"name": "qwen3-coder:480b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
 		"qwen3-next:80b": {
 			"id": "qwen3-next:80b",
 			"name": "Qwen 3 Next (80B)",
@@ -36227,6 +37225,95 @@
 				"minLevel": "minimal",
 				"maxLevel": "high"
 			}
+		},
+		"qwen3-vl:235b": {
+			"id": "qwen3-vl:235b",
+			"name": "qwen3-vl:235b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"qwen3-vl:235b-instruct": {
+			"id": "qwen3-vl:235b-instruct",
+			"name": "qwen3-vl:235b-instruct",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"qwen3.5:397b": {
+			"id": "qwen3.5:397b",
+			"name": "qwen3.5:397b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": true,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			},
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8192
+		},
+		"rnj-1:8b": {
+			"id": "rnj-1:8b",
+			"name": "rnj-1:8b",
+			"api": "ollama-chat",
+			"provider": "ollama-cloud",
+			"baseUrl": "https://ollama.com",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8192
 		}
 	},
 	"openai": {
@@ -38214,7 +39301,7 @@
 				"cacheRead": 0.05,
 				"cacheWrite": 0.625
 			},
-			"contextWindow": 262144,
+			"contextWindow": 1000000,
 			"maxTokens": 65536,
 			"thinking": {
 				"mode": "effort",
@@ -38263,7 +39350,7 @@
 				"cacheRead": 0.04,
 				"cacheWrite": 0.5
 			},
-			"contextWindow": 262144,
+			"contextWindow": 1000000,
 			"maxTokens": 65536,
 			"thinking": {
 				"mode": "budget",
@@ -39618,6 +40705,30 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 204800,
+			"maxTokens": 128000,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "xhigh"
+			}
+		},
+		"nemotron-3-ultra-free": {
+			"id": "nemotron-3-ultra-free",
+			"name": "Nemotron 3 Ultra Free",
+			"api": "openai-completions",
+			"provider": "opencode-zen",
+			"baseUrl": "https://opencode.ai/zen/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
 			"maxTokens": 128000,
 			"thinking": {
 				"mode": "effort",
@@ -41767,12 +42878,12 @@
 			],
 			"cost": {
 				"input": 0.12,
-				"output": 0.37,
-				"cacheRead": 0.019999999499999997,
+				"output": 0.36,
+				"cacheRead": 0.09,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 16384,
+			"maxTokens": 8192,
 			"thinking": {
 				"mode": "effort",
 				"minLevel": "minimal",
@@ -42135,7 +43246,7 @@
 			],
 			"cost": {
 				"input": 0.02,
-				"output": 0.049999999999999996,
+				"output": 0.03,
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
@@ -42360,7 +43471,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 204800,
-			"maxTokens": 131072,
+			"maxTokens": 196608,
 			"thinking": {
 				"mode": "effort",
 				"minLevel": "minimal",
@@ -43289,6 +44400,54 @@
 			},
 			"contextWindow": 1000000,
 			"maxTokens": 262144,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"nvidia/nemotron-3-ultra-550b-a55b": {
+			"id": "nvidia/nemotron-3-ultra-550b-a55b",
+			"name": "NVIDIA: Nemotron 3 Ultra",
+			"api": "openai-completions",
+			"provider": "openrouter",
+			"baseUrl": "https://openrouter.ai/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.5,
+				"output": 2.5,
+				"cacheRead": 0.15,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 16384,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "high"
+			}
+		},
+		"nvidia/nemotron-3-ultra-550b-a55b:free": {
+			"id": "nvidia/nemotron-3-ultra-550b-a55b:free",
+			"name": "NVIDIA: Nemotron 3 Ultra (free)",
+			"api": "openai-completions",
+			"provider": "openrouter",
+			"baseUrl": "https://openrouter.ai/api/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65536,
 			"thinking": {
 				"mode": "effort",
 				"minLevel": "minimal",
@@ -45244,7 +46403,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 131072,
-			"maxTokens": 20000,
+			"maxTokens": 16384,
 			"thinking": {
 				"mode": "effort",
 				"minLevel": "minimal",
@@ -47890,6 +49049,728 @@
 		}
 	},
 	"together": {
+		"agentica-org/DeepCoder-14B-Preview": {
+			"id": "agentica-org/DeepCoder-14B-Preview",
+			"name": "agentica-org/DeepCoder-14B-Preview",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"alibaba/happyhorse-1.0-i2v": {
+			"id": "alibaba/happyhorse-1.0-i2v",
+			"name": "alibaba/happyhorse-1.0-i2v",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"alibaba/happyhorse-1.0-r2v": {
+			"id": "alibaba/happyhorse-1.0-r2v",
+			"name": "alibaba/happyhorse-1.0-r2v",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"alibaba/happyhorse-1.0-t2v": {
+			"id": "alibaba/happyhorse-1.0-t2v",
+			"name": "alibaba/happyhorse-1.0-t2v",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"allenai/Molmo-7B-D-0924": {
+			"id": "allenai/Molmo-7B-D-0924",
+			"name": "allenai/Molmo-7B-D-0924",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"arcee-ai/trinity-mini": {
+			"id": "arcee-ai/trinity-mini",
+			"name": "arcee-ai/trinity-mini",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 128000,
+			"maxTokens": 8888
+		},
+		"arize-ai/qwen-2-1.5b-instruct": {
+			"id": "arize-ai/qwen-2-1.5b-instruct",
+			"name": "arize-ai/qwen-2-1.5b-instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"BAAI/bge-base-en-v1.5": {
+			"id": "BAAI/bge-base-en-v1.5",
+			"name": "BAAI/bge-base-en-v1.5",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 512,
+			"maxTokens": 8888
+		},
+		"black-forest-labs/FLUX.1-kontext-max": {
+			"id": "black-forest-labs/FLUX.1-kontext-max",
+			"name": "black-forest-labs/FLUX.1-kontext-max",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"black-forest-labs/FLUX.1-kontext-pro": {
+			"id": "black-forest-labs/FLUX.1-kontext-pro",
+			"name": "black-forest-labs/FLUX.1-kontext-pro",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"black-forest-labs/FLUX.1-schnell": {
+			"id": "black-forest-labs/FLUX.1-schnell",
+			"name": "black-forest-labs/FLUX.1-schnell",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"black-forest-labs/FLUX.1.1-pro": {
+			"id": "black-forest-labs/FLUX.1.1-pro",
+			"name": "black-forest-labs/FLUX.1.1-pro",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"black-forest-labs/FLUX.2-dev": {
+			"id": "black-forest-labs/FLUX.2-dev",
+			"name": "black-forest-labs/FLUX.2-dev",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"black-forest-labs/FLUX.2-flex": {
+			"id": "black-forest-labs/FLUX.2-flex",
+			"name": "black-forest-labs/FLUX.2-flex",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"black-forest-labs/FLUX.2-max": {
+			"id": "black-forest-labs/FLUX.2-max",
+			"name": "black-forest-labs/FLUX.2-max",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"black-forest-labs/FLUX.2-pro": {
+			"id": "black-forest-labs/FLUX.2-pro",
+			"name": "black-forest-labs/FLUX.2-pro",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"ByteDance-Seed/Seedream-3.0": {
+			"id": "ByteDance-Seed/Seedream-3.0",
+			"name": "ByteDance-Seed/Seedream-3.0",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"ByteDance-Seed/Seedream-4.0": {
+			"id": "ByteDance-Seed/Seedream-4.0",
+			"name": "ByteDance-Seed/Seedream-4.0",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"ByteDance/Seedance-1.0-lite": {
+			"id": "ByteDance/Seedance-1.0-lite",
+			"name": "ByteDance/Seedance-1.0-lite",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"ByteDance/Seedance-1.0-pro": {
+			"id": "ByteDance/Seedance-1.0-pro",
+			"name": "ByteDance/Seedance-1.0-pro",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"ByteDance/Seedance-2.0": {
+			"id": "ByteDance/Seedance-2.0",
+			"name": "ByteDance/Seedance-2.0",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"ByteDance/Seedream-5.0-lite": {
+			"id": "ByteDance/Seedream-5.0-lite",
+			"name": "ByteDance/Seedream-5.0-lite",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"canopylabs/orpheus-3b-0.1-ft": {
+			"id": "canopylabs/orpheus-3b-0.1-ft",
+			"name": "canopylabs/orpheus-3b-0.1-ft",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"cartesia/sonic": {
+			"id": "cartesia/sonic",
+			"name": "cartesia/sonic",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"cartesia/sonic-2": {
+			"id": "cartesia/sonic-2",
+			"name": "cartesia/sonic-2",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"cartesia/sonic-3": {
+			"id": "cartesia/sonic-3",
+			"name": "cartesia/sonic-3",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"deepcogito/cogito-v1-preview-llama-70B": {
+			"id": "deepcogito/cogito-v1-preview-llama-70B",
+			"name": "deepcogito/cogito-v1-preview-llama-70B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"deepcogito/cogito-v1-preview-llama-70B-Turbo": {
+			"id": "deepcogito/cogito-v1-preview-llama-70B-Turbo",
+			"name": "deepcogito/cogito-v1-preview-llama-70B-Turbo",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"deepcogito/cogito-v1-preview-llama-8B": {
+			"id": "deepcogito/cogito-v1-preview-llama-8B",
+			"name": "deepcogito/cogito-v1-preview-llama-8B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"deepcogito/cogito-v1-preview-qwen-14B": {
+			"id": "deepcogito/cogito-v1-preview-qwen-14B",
+			"name": "deepcogito/cogito-v1-preview-qwen-14B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"deepcogito/cogito-v1-preview-qwen-32B": {
+			"id": "deepcogito/cogito-v1-preview-qwen-32B",
+			"name": "deepcogito/cogito-v1-preview-qwen-32B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"deepcogito/cogito-v2-1-671b": {
+			"id": "deepcogito/cogito-v2-1-671b",
+			"name": "deepcogito/cogito-v2-1-671b",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 163840,
+			"maxTokens": 8888
+		},
+		"deepgram/aura-2": {
+			"id": "deepgram/aura-2",
+			"name": "deepgram/aura-2",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"deepgram/flux": {
+			"id": "deepgram/flux",
+			"name": "deepgram/flux",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"deepgram/nova-3-en": {
+			"id": "deepgram/nova-3-en",
+			"name": "deepgram/nova-3-en",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"deepgram/nova-3-multi": {
+			"id": "deepgram/nova-3-multi",
+			"name": "deepgram/nova-3-multi",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"deepseek-ai/deepseek-coder-33b-instruct": {
+			"id": "deepseek-ai/deepseek-coder-33b-instruct",
+			"name": "deepseek-ai/deepseek-coder-33b-instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"deepseek-ai/DeepSeek-OCR-2": {
+			"id": "deepseek-ai/DeepSeek-OCR-2",
+			"name": "deepseek-ai/DeepSeek-OCR-2",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 8192,
+			"maxTokens": 8888
+		},
 		"deepseek-ai/DeepSeek-R1": {
 			"id": "deepseek-ai/DeepSeek-R1",
 			"name": "DeepSeek R1",
@@ -47914,6 +49795,101 @@
 				"maxLevel": "xhigh"
 			}
 		},
+		"deepseek-ai/DeepSeek-R1-0528": {
+			"id": "deepseek-ai/DeepSeek-R1-0528",
+			"name": "deepseek-ai/DeepSeek-R1-0528",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 163840,
+			"maxTokens": 8888
+		},
+		"deepseek-ai/DeepSeek-R1-Distill-Llama-70B": {
+			"id": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+			"name": "deepseek-ai/DeepSeek-R1-Distill-Llama-70B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B": {
+			"id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+			"name": "deepseek-ai/DeepSeek-R1-Distill-Qwen-1.5B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"deepseek-ai/DeepSeek-R1-Distill-Qwen-14B": {
+			"id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+			"name": "deepseek-ai/DeepSeek-R1-Distill-Qwen-14B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"deepseek-ai/DeepSeek-R1-Distill-Qwen-7B": {
+			"id": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+			"name": "deepseek-ai/DeepSeek-R1-Distill-Qwen-7B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
 		"deepseek-ai/DeepSeek-V3.1": {
 			"id": "deepseek-ai/DeepSeek-V3.1",
 			"name": "DeepSeek V3.1",
@@ -47933,6 +49909,1171 @@
 			"contextWindow": 131072,
 			"maxTokens": 8192
 		},
+		"deepseek-ai/DeepSeek-V4-Pro": {
+			"id": "deepseek-ai/DeepSeek-V4-Pro",
+			"name": "deepseek-ai/DeepSeek-V4-Pro",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 512000,
+			"maxTokens": 8888
+		},
+		"essentialai/rnj-1-instruct": {
+			"id": "essentialai/rnj-1-instruct",
+			"name": "essentialai/rnj-1-instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"facebook/cwm": {
+			"id": "facebook/cwm",
+			"name": "facebook/cwm",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"google/flash-image-2.5": {
+			"id": "google/flash-image-2.5",
+			"name": "google/flash-image-2.5",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/flash-image-3.1": {
+			"id": "google/flash-image-3.1",
+			"name": "google/flash-image-3.1",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/gemini-3-pro-image": {
+			"id": "google/gemini-3-pro-image",
+			"name": "google/gemini-3-pro-image",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/gemma-2-27b-it": {
+			"id": "google/gemma-2-27b-it",
+			"name": "google/gemma-2-27b-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 8192,
+			"maxTokens": 8888
+		},
+		"google/gemma-2-9b-it": {
+			"id": "google/gemma-2-9b-it",
+			"name": "google/gemma-2-9b-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 8192,
+			"maxTokens": 8888
+		},
+		"google/gemma-2b-it": {
+			"id": "google/gemma-2b-it",
+			"name": "google/gemma-2b-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 8192,
+			"maxTokens": 8888
+		},
+		"google/gemma-3-1b-it": {
+			"id": "google/gemma-3-1b-it",
+			"name": "google/gemma-3-1b-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"google/gemma-3-1b-pt": {
+			"id": "google/gemma-3-1b-pt",
+			"name": "google/gemma-3-1b-pt",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"google/gemma-3-270m-it": {
+			"id": "google/gemma-3-270m-it",
+			"name": "google/gemma-3-270m-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"google/gemma-3-270m-it-lora": {
+			"id": "google/gemma-3-270m-it-lora",
+			"name": "google/gemma-3-270m-it-lora",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"google/gemma-3-27b-it": {
+			"id": "google/gemma-3-27b-it",
+			"name": "Gemma-3-27B-IT",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 65536,
+			"maxTokens": 8192,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "xhigh"
+			}
+		},
+		"google/gemma-3-27b-it-lora": {
+			"id": "google/gemma-3-27b-it-lora",
+			"name": "google/gemma-3-27b-it-lora",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/gemma-3-27b-pt": {
+			"id": "google/gemma-3-27b-pt",
+			"name": "google/gemma-3-27b-pt",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/gemma-3-4b-it": {
+			"id": "google/gemma-3-4b-it",
+			"name": "google/gemma-3-4b-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 65536,
+			"maxTokens": 8888
+		},
+		"google/gemma-3n-E4B-it": {
+			"id": "google/gemma-3n-E4B-it",
+			"name": "google/gemma-3n-E4B-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"google/gemma-4-26B-A4B-it": {
+			"id": "google/gemma-4-26B-A4B-it",
+			"name": "google/gemma-4-26B-A4B-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"google/gemma-4-31B-it": {
+			"id": "google/gemma-4-31B-it",
+			"name": "google/gemma-4-31B-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"google/gemma-4-31B-it-lora": {
+			"id": "google/gemma-4-31B-it-lora",
+			"name": "google/gemma-4-31B-it-lora",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"google/gemma-4-E2B-it": {
+			"id": "google/gemma-4-E2B-it",
+			"name": "google/gemma-4-E2B-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"google/gemma-4-E4B-it": {
+			"id": "google/gemma-4-E4B-it",
+			"name": "google/gemma-4-E4B-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"google/imagen-4.0-fast": {
+			"id": "google/imagen-4.0-fast",
+			"name": "google/imagen-4.0-fast",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/imagen-4.0-preview": {
+			"id": "google/imagen-4.0-preview",
+			"name": "google/imagen-4.0-preview",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/imagen-4.0-ultra": {
+			"id": "google/imagen-4.0-ultra",
+			"name": "google/imagen-4.0-ultra",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/medgemma-27b-text-it": {
+			"id": "google/medgemma-27b-text-it",
+			"name": "google/medgemma-27b-text-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"google/veo-2.0": {
+			"id": "google/veo-2.0",
+			"name": "google/veo-2.0",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/veo-3.0": {
+			"id": "google/veo-3.0",
+			"name": "google/veo-3.0",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/veo-3.0-audio": {
+			"id": "google/veo-3.0-audio",
+			"name": "google/veo-3.0-audio",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/veo-3.0-fast": {
+			"id": "google/veo-3.0-fast",
+			"name": "google/veo-3.0-fast",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/veo-3.0-fast-audio": {
+			"id": "google/veo-3.0-fast-audio",
+			"name": "google/veo-3.0-fast-audio",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/veo-3.1": {
+			"id": "google/veo-3.1",
+			"name": "google/veo-3.1",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/veo-3.1-lite": {
+			"id": "google/veo-3.1-lite",
+			"name": "google/veo-3.1-lite",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"google/veo-3.1-test-debug": {
+			"id": "google/veo-3.1-test-debug",
+			"name": "google/veo-3.1-test-debug",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Hcompany/Holo3-35B-A3B": {
+			"id": "Hcompany/Holo3-35B-A3B",
+			"name": "Hcompany/Holo3-35B-A3B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"hexgrad/Kokoro-82M": {
+			"id": "hexgrad/Kokoro-82M",
+			"name": "hexgrad/Kokoro-82M",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"HiDream-ai/HiDream-I1-Dev": {
+			"id": "HiDream-ai/HiDream-I1-Dev",
+			"name": "HiDream-ai/HiDream-I1-Dev",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"HiDream-ai/HiDream-I1-Fast": {
+			"id": "HiDream-ai/HiDream-I1-Fast",
+			"name": "HiDream-ai/HiDream-I1-Fast",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"HiDream-ai/HiDream-I1-Full": {
+			"id": "HiDream-ai/HiDream-I1-Full",
+			"name": "HiDream-ai/HiDream-I1-Full",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"ideogram/ideogram-3.0": {
+			"id": "ideogram/ideogram-3.0",
+			"name": "ideogram/ideogram-3.0",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"ideogram/ideogram-4.0": {
+			"id": "ideogram/ideogram-4.0",
+			"name": "ideogram/ideogram-4.0",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"intfloat/multilingual-e5-large-instruct": {
+			"id": "intfloat/multilingual-e5-large-instruct",
+			"name": "intfloat/multilingual-e5-large-instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 514,
+			"maxTokens": 8888
+		},
+		"kwaivgI/kling-1.6-pro": {
+			"id": "kwaivgI/kling-1.6-pro",
+			"name": "kwaivgI/kling-1.6-pro",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"kwaivgI/kling-1.6-standard": {
+			"id": "kwaivgI/kling-1.6-standard",
+			"name": "kwaivgI/kling-1.6-standard",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"kwaivgI/kling-2.0-master": {
+			"id": "kwaivgI/kling-2.0-master",
+			"name": "kwaivgI/kling-2.0-master",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"kwaivgI/kling-2.1-master": {
+			"id": "kwaivgI/kling-2.1-master",
+			"name": "kwaivgI/kling-2.1-master",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"kwaivgI/kling-2.1-pro": {
+			"id": "kwaivgI/kling-2.1-pro",
+			"name": "kwaivgI/kling-2.1-pro",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"kwaivgI/kling-2.1-standard": {
+			"id": "kwaivgI/kling-2.1-standard",
+			"name": "kwaivgI/kling-2.1-standard",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"LiquidAI/LFM2-24B-A2B": {
+			"id": "LiquidAI/LFM2-24B-A2B",
+			"name": "LiquidAI/LFM2-24B-A2B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Lykon/DreamShaper": {
+			"id": "Lykon/DreamShaper",
+			"name": "Lykon/DreamShaper",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"meta-llama/Llama-2-7b-chat-hf": {
+			"id": "meta-llama/Llama-2-7b-chat-hf",
+			"name": "meta-llama/Llama-2-7b-chat-hf",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"meta-llama/Llama-3-8b-chat-hf": {
+			"id": "meta-llama/Llama-3-8b-chat-hf",
+			"name": "meta-llama/Llama-3-8b-chat-hf",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 8192,
+			"maxTokens": 8888
+		},
+		"meta-llama/Llama-3.1-405B": {
+			"id": "meta-llama/Llama-3.1-405B",
+			"name": "meta-llama/Llama-3.1-405B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"meta-llama/Llama-3.1-405B-Instruct": {
+			"id": "meta-llama/Llama-3.1-405B-Instruct",
+			"name": "meta-llama/Llama-3.1-405B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"meta-llama/Llama-3.2-1B": {
+			"id": "meta-llama/Llama-3.2-1B",
+			"name": "meta-llama/Llama-3.2-1B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"meta-llama/Llama-3.2-1B-Instruct": {
+			"id": "meta-llama/Llama-3.2-1B-Instruct",
+			"name": "meta-llama/Llama-3.2-1B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"meta-llama/Llama-3.2-3B": {
+			"id": "meta-llama/Llama-3.2-3B",
+			"name": "meta-llama/Llama-3.2-3B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"meta-llama/Llama-3.2-3B-Instruct": {
+			"id": "meta-llama/Llama-3.2-3B-Instruct",
+			"name": "meta-llama/Llama-3.2-3B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"meta-llama/Llama-3.3-70B-Instruct": {
+			"id": "meta-llama/Llama-3.3-70B-Instruct",
+			"name": "meta-llama/Llama-3.3-70B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"meta-llama/Llama-3.3-70B-Instruct-FP8-Lora": {
+			"id": "meta-llama/Llama-3.3-70B-Instruct-FP8-Lora",
+			"name": "meta-llama/Llama-3.3-70B-Instruct-FP8-Lora",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
 		"meta-llama/Llama-3.3-70B-Instruct-Turbo": {
 			"id": "meta-llama/Llama-3.3-70B-Instruct-Turbo",
 			"name": "Llama 3.3 70B Instruct Turbo",
@@ -47951,6 +51092,25 @@
 			},
 			"contextWindow": 131072,
 			"maxTokens": 8192
+		},
+		"meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP4": {
+			"id": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP4",
+			"name": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP4",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 8888
 		},
 		"meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8": {
 			"id": "meta-llama/Llama-4-Maverick-17B-128E-Instruct-FP8",
@@ -47972,6 +51132,25 @@
 			"contextWindow": 20000000,
 			"maxTokens": 32768
 		},
+		"meta-llama/Llama-4-Scout-17B-16E": {
+			"id": "meta-llama/Llama-4-Scout-17B-16E",
+			"name": "meta-llama/Llama-4-Scout-17B-16E",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
 		"meta-llama/Llama-4-Scout-17B-16E-Instruct": {
 			"id": "meta-llama/Llama-4-Scout-17B-16E-Instruct",
 			"name": "Llama 4 Scout 17B 16E Instruct",
@@ -47989,8 +51168,578 @@
 				"cacheRead": 0.18,
 				"cacheWrite": 0.18
 			},
-			"contextWindow": 10000000,
+			"contextWindow": 1048576,
 			"maxTokens": 32768
+		},
+		"meta-llama/Llama-4-Scout-17B-16E-Instruct-FP8-Lora": {
+			"id": "meta-llama/Llama-4-Scout-17B-16E-Instruct-FP8-Lora",
+			"name": "meta-llama/Llama-4-Scout-17B-16E-Instruct-FP8-Lora",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 10485760,
+			"maxTokens": 8888
+		},
+		"meta-llama/Llama-Guard-4-12B": {
+			"id": "meta-llama/Llama-Guard-4-12B",
+			"name": "meta-llama/Llama-Guard-4-12B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 8888
+		},
+		"meta-llama/Meta-Llama-3-70B-Instruct-Turbo": {
+			"id": "meta-llama/Meta-Llama-3-70B-Instruct-Turbo",
+			"name": "meta-llama/Meta-Llama-3-70B-Instruct-Turbo",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 8192,
+			"maxTokens": 8888
+		},
+		"meta-llama/Meta-Llama-3-8B-Instruct": {
+			"id": "meta-llama/Meta-Llama-3-8B-Instruct",
+			"name": "meta-llama/Meta-Llama-3-8B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 8192,
+			"maxTokens": 8888
+		},
+		"meta-llama/Meta-Llama-3-8B-Instruct-Lite": {
+			"id": "meta-llama/Meta-Llama-3-8B-Instruct-Lite",
+			"name": "meta-llama/Meta-Llama-3-8B-Instruct-Lite",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 8192,
+			"maxTokens": 8888
+		},
+		"meta-llama/Meta-Llama-3.1-70B": {
+			"id": "meta-llama/Meta-Llama-3.1-70B",
+			"name": "meta-llama/Meta-Llama-3.1-70B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo": {
+			"id": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+			"name": "meta-llama/Meta-Llama-3.1-70B-Instruct-Turbo",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"meta-llama/Meta-Llama-3.1-8B": {
+			"id": "meta-llama/Meta-Llama-3.1-8B",
+			"name": "meta-llama/Meta-Llama-3.1-8B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo": {
+			"id": "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+			"name": "meta-llama/Meta-Llama-3.1-8B-Instruct-Turbo",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"minimax/hailuo-02": {
+			"id": "minimax/hailuo-02",
+			"name": "minimax/hailuo-02",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"minimax/speech-2.6-turbo": {
+			"id": "minimax/speech-2.6-turbo",
+			"name": "minimax/speech-2.6-turbo",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"minimax/speech-2.8-turbo": {
+			"id": "minimax/speech-2.8-turbo",
+			"name": "minimax/speech-2.8-turbo",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"minimax/video-01-director": {
+			"id": "minimax/video-01-director",
+			"name": "minimax/video-01-director",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"MiniMaxAI/MiniMax-M1-40k": {
+			"id": "MiniMaxAI/MiniMax-M1-40k",
+			"name": "MiniMaxAI/MiniMax-M1-40k",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 8888
+		},
+		"MiniMaxAI/MiniMax-M1-80k": {
+			"id": "MiniMaxAI/MiniMax-M1-80k",
+			"name": "MiniMaxAI/MiniMax-M1-80k",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 8888
+		},
+		"MiniMaxAI/MiniMax-M2": {
+			"id": "MiniMaxAI/MiniMax-M2",
+			"name": "MiniMaxAI/MiniMax-M2",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 196608,
+			"maxTokens": 8888
+		},
+		"MiniMaxAI/MiniMax-M2.5-FP4": {
+			"id": "MiniMaxAI/MiniMax-M2.5-FP4",
+			"name": "MiniMaxAI/MiniMax-M2.5-FP4",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 8192,
+			"maxTokens": 8888
+		},
+		"MiniMaxAI/MiniMax-M2.7": {
+			"id": "MiniMaxAI/MiniMax-M2.7",
+			"name": "MiniMaxAI/MiniMax-M2.7",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 196608,
+			"maxTokens": 8888
+		},
+		"mistralai/Devstral-Small-2505": {
+			"id": "mistralai/Devstral-Small-2505",
+			"name": "mistralai/Devstral-Small-2505",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"mistralai/Magistral-Small-2506": {
+			"id": "mistralai/Magistral-Small-2506",
+			"name": "mistralai/Magistral-Small-2506",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 40960,
+			"maxTokens": 8888
+		},
+		"mistralai/Ministral-3-14B-Instruct-2512": {
+			"id": "mistralai/Ministral-3-14B-Instruct-2512",
+			"name": "mistralai/Ministral-3-14B-Instruct-2512",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"mistralai/Mistral-7B-Instruct-v0.1": {
+			"id": "mistralai/Mistral-7B-Instruct-v0.1",
+			"name": "mistralai/Mistral-7B-Instruct-v0.1",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"mistralai/Mistral-7B-Instruct-v0.3": {
+			"id": "mistralai/Mistral-7B-Instruct-v0.3",
+			"name": "mistralai/Mistral-7B-Instruct-v0.3",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"mistralai/Mistral-7B-v0.1": {
+			"id": "mistralai/Mistral-7B-v0.1",
+			"name": "mistralai/Mistral-7B-v0.1",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"mistralai/Mistral-Small-24B-Instruct-2501": {
+			"id": "mistralai/Mistral-Small-24B-Instruct-2501",
+			"name": "mistralai/Mistral-Small-24B-Instruct-2501",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"mistralai/Mixtral-8x22B-Instruct-v0.1": {
+			"id": "mistralai/Mixtral-8x22B-Instruct-v0.1",
+			"name": "mistralai/Mixtral-8x22B-Instruct-v0.1",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 65536,
+			"maxTokens": 8888
+		},
+		"mistralai/Mixtral-8x7B-Instruct-v0.1": {
+			"id": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+			"name": "mistralai/Mixtral-8x7B-Instruct-v0.1",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"mistralai/Mixtral-8x7B-Instruct-v0.1-FP8-Lora": {
+			"id": "mistralai/Mixtral-8x7B-Instruct-v0.1-FP8-Lora",
+			"name": "mistralai/Mixtral-8x7B-Instruct-v0.1-FP8-Lora",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"mistralai/Mixtral-8x7B-v0.1": {
+			"id": "mistralai/Mixtral-8x7B-v0.1",
+			"name": "mistralai/Mixtral-8x7B-v0.1",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"mixedbread-ai/mxbai-rerank-large-v2": {
+			"id": "mixedbread-ai/mxbai-rerank-large-v2",
+			"name": "mixedbread-ai/mxbai-rerank-large-v2",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
 		},
 		"moonshotai/Kimi-K2-Instruct-0905": {
 			"id": "moonshotai/Kimi-K2-Instruct-0905",
@@ -48036,6 +51785,2277 @@
 				"maxLevel": "xhigh"
 			}
 		},
+		"moonshotai/Kimi-K2.5-fp4": {
+			"id": "moonshotai/Kimi-K2.5-fp4",
+			"name": "moonshotai/Kimi-K2.5-fp4",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"moonshotai/Kimi-K2.6": {
+			"id": "moonshotai/Kimi-K2.6",
+			"name": "moonshotai/Kimi-K2.6",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"nim/meta/llama-3.1-70b-instruct": {
+			"id": "nim/meta/llama-3.1-70b-instruct",
+			"name": "nim/meta/llama-3.1-70b-instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"nim/meta/llama-3.1-8b-instruct": {
+			"id": "nim/meta/llama-3.1-8b-instruct",
+			"name": "nim/meta/llama-3.1-8b-instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"nim/meta/llama-3.2-11b-vision-instruct": {
+			"id": "nim/meta/llama-3.2-11b-vision-instruct",
+			"name": "nim/meta/llama-3.2-11b-vision-instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"nim/meta/llama-3.2-90b-vision-instruct": {
+			"id": "nim/meta/llama-3.2-90b-vision-instruct",
+			"name": "nim/meta/llama-3.2-90b-vision-instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"nim/meta/llama-3.3-70b-instruct": {
+			"id": "nim/meta/llama-3.3-70b-instruct",
+			"name": "nim/meta/llama-3.3-70b-instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"nim/mistralai/mixtral-8x22b-instruct-v01": {
+			"id": "nim/mistralai/mixtral-8x22b-instruct-v01",
+			"name": "nim/mistralai/mixtral-8x22b-instruct-v01",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"nim/mistralai/mixtral-8x7b-instruct-v01": {
+			"id": "nim/mistralai/mixtral-8x7b-instruct-v01",
+			"name": "nim/mistralai/mixtral-8x7b-instruct-v01",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"nim/nv-mistralai/mistral-nemo-12b-instruct": {
+			"id": "nim/nv-mistralai/mistral-nemo-12b-instruct",
+			"name": "nim/nv-mistralai/mistral-nemo-12b-instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"nim/nvidia/llama-3.1-nemotron-70b-instruct": {
+			"id": "nim/nvidia/llama-3.1-nemotron-70b-instruct",
+			"name": "nim/nvidia/llama-3.1-nemotron-70b-instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"nim/nvidia/llama-3.3-nemotron-super-49b-v1": {
+			"id": "nim/nvidia/llama-3.3-nemotron-super-49b-v1",
+			"name": "nim/nvidia/llama-3.3-nemotron-super-49b-v1",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO": {
+			"id": "NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO",
+			"name": "NousResearch/Nous-Hermes-2-Mixtral-8x7B-DPO",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"nvidia/Llama-3.1-Nemotron-70B-Instruct-HF": {
+			"id": "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF",
+			"name": "nvidia/Llama-3.1-Nemotron-70B-Instruct-HF",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"nvidia/nemotron-3-asr-streaming-0.6b": {
+			"id": "nvidia/nemotron-3-asr-streaming-0.6b",
+			"name": "nvidia/nemotron-3-asr-streaming-0.6b",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning-fp8": {
+			"id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning-fp8",
+			"name": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning-fp8",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"nvidia/nemotron-3-ultra-550b-a55b": {
+			"id": "nvidia/nemotron-3-ultra-550b-a55b",
+			"name": "nvidia/nemotron-3-ultra-550b-a55b",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 512288,
+			"maxTokens": 8888
+		},
+		"nvidia/nemotron-3.5-asr-streaming-0.6b": {
+			"id": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+			"name": "nvidia/nemotron-3.5-asr-streaming-0.6b",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16": {
+			"id": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+			"name": "nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16": {
+			"id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+			"name": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-BF16",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8": {
+			"id": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
+			"name": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"nvidia/NVIDIA-Nemotron-Nano-9B-v2": {
+			"id": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+			"name": "nvidia/NVIDIA-Nemotron-Nano-9B-v2",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"nvidia/parakeet-tdt-0.6b-v3": {
+			"id": "nvidia/parakeet-tdt-0.6b-v3",
+			"name": "nvidia/parakeet-tdt-0.6b-v3",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"openai/gpt-image-1.5": {
+			"id": "openai/gpt-image-1.5",
+			"name": "openai/gpt-image-1.5",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"openai/gpt-oss-120b": {
+			"id": "openai/gpt-oss-120b",
+			"name": "GPT OSS 120B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "xhigh"
+			}
+		},
+		"openai/gpt-oss-20b": {
+			"id": "openai/gpt-oss-20b",
+			"name": "GPT OSS 20B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 65536,
+			"thinking": {
+				"mode": "effort",
+				"minLevel": "minimal",
+				"maxLevel": "xhigh"
+			}
+		},
+		"openai/sora-2": {
+			"id": "openai/sora-2",
+			"name": "openai/sora-2",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"openai/sora-2-pro": {
+			"id": "openai/sora-2-pro",
+			"name": "openai/sora-2-pro",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"openai/whisper-large-v3": {
+			"id": "openai/whisper-large-v3",
+			"name": "openai/whisper-large-v3",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1,
+			"maxTokens": 8888
+		},
+		"pearl-ai/gemma-4-31b-it": {
+			"id": "pearl-ai/gemma-4-31b-it",
+			"name": "pearl-ai/gemma-4-31b-it",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"pixverse/pixverse-v5": {
+			"id": "pixverse/pixverse-v5",
+			"name": "pixverse/pixverse-v5",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"pixverse/pixverse-v5.6": {
+			"id": "pixverse/pixverse-v5.6",
+			"name": "pixverse/pixverse-v5.6",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"pixverse/pixverse-v6": {
+			"id": "pixverse/pixverse-v6",
+			"name": "pixverse/pixverse-v6",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen-Image": {
+			"id": "Qwen/Qwen-Image",
+			"name": "Qwen/Qwen-Image",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen-Image-2.0": {
+			"id": "Qwen/Qwen-Image-2.0",
+			"name": "Qwen/Qwen-Image-2.0",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen-Image-2.0-Pro": {
+			"id": "Qwen/Qwen-Image-2.0-Pro",
+			"name": "Qwen/Qwen-Image-2.0-Pro",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2-1.5B": {
+			"id": "Qwen/Qwen2-1.5B",
+			"name": "Qwen/Qwen2-1.5B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2-1.5B-Instruct": {
+			"id": "Qwen/Qwen2-1.5B-Instruct",
+			"name": "Qwen/Qwen2-1.5B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2-72B": {
+			"id": "Qwen/Qwen2-72B",
+			"name": "Qwen/Qwen2-72B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2-72B-Instruct": {
+			"id": "Qwen/Qwen2-72B-Instruct",
+			"name": "Qwen/Qwen2-72B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2-7B": {
+			"id": "Qwen/Qwen2-7B",
+			"name": "Qwen/Qwen2-7B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2-VL-72B-Instruct": {
+			"id": "Qwen/Qwen2-VL-72B-Instruct",
+			"name": "Qwen/Qwen2-VL-72B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-1.5B": {
+			"id": "Qwen/Qwen2.5-1.5B",
+			"name": "Qwen/Qwen2.5-1.5B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-1.5B-Instruct": {
+			"id": "Qwen/Qwen2.5-1.5B-Instruct",
+			"name": "Qwen/Qwen2.5-1.5B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-14B": {
+			"id": "Qwen/Qwen2.5-14B",
+			"name": "Qwen/Qwen2.5-14B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-14B-Instruct": {
+			"id": "Qwen/Qwen2.5-14B-Instruct",
+			"name": "Qwen/Qwen2.5-14B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-32B": {
+			"id": "Qwen/Qwen2.5-32B",
+			"name": "Qwen/Qwen2.5-32B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-32B-Instruct": {
+			"id": "Qwen/Qwen2.5-32B-Instruct",
+			"name": "Qwen/Qwen2.5-32B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-3B-Instruct": {
+			"id": "Qwen/Qwen2.5-3B-Instruct",
+			"name": "Qwen/Qwen2.5-3B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-72B": {
+			"id": "Qwen/Qwen2.5-72B",
+			"name": "Qwen/Qwen2.5-72B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-72B-Instruct": {
+			"id": "Qwen/Qwen2.5-72B-Instruct",
+			"name": "Qwen/Qwen2.5-72B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-72B-Instruct-Turbo": {
+			"id": "Qwen/Qwen2.5-72B-Instruct-Turbo",
+			"name": "Qwen/Qwen2.5-72B-Instruct-Turbo",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-7B": {
+			"id": "Qwen/Qwen2.5-7B",
+			"name": "Qwen/Qwen2.5-7B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-7B-Instruct": {
+			"id": "Qwen/Qwen2.5-7B-Instruct",
+			"name": "Qwen/Qwen2.5-7B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-7B-Instruct-Turbo": {
+			"id": "Qwen/Qwen2.5-7B-Instruct-Turbo",
+			"name": "Qwen/Qwen2.5-7B-Instruct-Turbo",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-Coder-32B-Instruct": {
+			"id": "Qwen/Qwen2.5-Coder-32B-Instruct",
+			"name": "Qwen/Qwen2.5-Coder-32B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 16384,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen2.5-VL-72B-Instruct": {
+			"id": "Qwen/Qwen2.5-VL-72B-Instruct",
+			"name": "Qwen/Qwen2.5-VL-72B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-0.6B": {
+			"id": "Qwen/Qwen3-0.6B",
+			"name": "Qwen/Qwen3-0.6B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 40960,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-0.6B-Base": {
+			"id": "Qwen/Qwen3-0.6B-Base",
+			"name": "Qwen/Qwen3-0.6B-Base",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-1.7B": {
+			"id": "Qwen/Qwen3-1.7B",
+			"name": "Qwen/Qwen3-1.7B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 40960,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-1.7B-Base": {
+			"id": "Qwen/Qwen3-1.7B-Base",
+			"name": "Qwen/Qwen3-1.7B-Base",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-14B": {
+			"id": "Qwen/Qwen3-14B",
+			"name": "Qwen/Qwen3-14B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 2048,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-14B-Base": {
+			"id": "Qwen/Qwen3-14B-Base",
+			"name": "Qwen/Qwen3-14B-Base",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-235B-A22B-Instruct-2507-FP8": {
+			"id": "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
+			"name": "Qwen/Qwen3-235B-A22B-Instruct-2507-FP8",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-235B-A22B-Instruct-2507-tput": {
+			"id": "Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
+			"name": "Qwen/Qwen3-235B-A22B-Instruct-2507-tput",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-30B-A3B": {
+			"id": "Qwen/Qwen3-30B-A3B",
+			"name": "Qwen/Qwen3-30B-A3B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 40960,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-30B-A3B-Base": {
+			"id": "Qwen/Qwen3-30B-A3B-Base",
+			"name": "Qwen/Qwen3-30B-A3B-Base",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-30B-A3B-Instruct-2507-Lora": {
+			"id": "Qwen/Qwen3-30B-A3B-Instruct-2507-Lora",
+			"name": "Qwen/Qwen3-30B-A3B-Instruct-2507-Lora",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-32B": {
+			"id": "Qwen/Qwen3-32B",
+			"name": "Qwen/Qwen3-32B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 40960,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-4B-Base": {
+			"id": "Qwen/Qwen3-4B-Base",
+			"name": "Qwen/Qwen3-4B-Base",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-4B-Instruct-2507": {
+			"id": "Qwen/Qwen3-4B-Instruct-2507",
+			"name": "Qwen/Qwen3-4B-Instruct-2507",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-8B": {
+			"id": "Qwen/Qwen3-8B",
+			"name": "Qwen/Qwen3-8B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 40960,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-8B-Base": {
+			"id": "Qwen/Qwen3-8B-Base",
+			"name": "Qwen/Qwen3-8B-Base",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-8B-Lora": {
+			"id": "Qwen/Qwen3-8B-Lora",
+			"name": "Qwen/Qwen3-8B-Lora",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 40960,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-Coder-30B-A3B-Instruct": {
+			"id": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+			"name": "Qwen/Qwen3-Coder-30B-A3B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8": {
+			"id": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+			"name": "Qwen/Qwen3-Coder-480B-A35B-Instruct-FP8",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-Coder-Next-FP8": {
+			"id": "Qwen/Qwen3-Coder-Next-FP8",
+			"name": "Qwen/Qwen3-Coder-Next-FP8",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-Next-80B-A3B-Instruct": {
+			"id": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+			"name": "Qwen/Qwen3-Next-80B-A3B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-Next-80B-A3B-Instruct-FP8": {
+			"id": "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8",
+			"name": "Qwen/Qwen3-Next-80B-A3B-Instruct-FP8",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-Next-80B-A3B-Thinking": {
+			"id": "Qwen/Qwen3-Next-80B-A3B-Thinking",
+			"name": "Qwen/Qwen3-Next-80B-A3B-Thinking",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-VL-235B-A22B-Instruct-FP8": {
+			"id": "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8",
+			"name": "Qwen/Qwen3-VL-235B-A22B-Instruct-FP8",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-VL-32B-Instruct": {
+			"id": "Qwen/Qwen3-VL-32B-Instruct",
+			"name": "Qwen/Qwen3-VL-32B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3-VL-8B-Instruct": {
+			"id": "Qwen/Qwen3-VL-8B-Instruct",
+			"name": "Qwen/Qwen3-VL-8B-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3.5-122B-A10B-FP8": {
+			"id": "Qwen/Qwen3.5-122B-A10B-FP8",
+			"name": "Qwen/Qwen3.5-122B-A10B-FP8",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3.5-35B-A3B": {
+			"id": "Qwen/Qwen3.5-35B-A3B",
+			"name": "Qwen/Qwen3.5-35B-A3B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3.5-397B-A17B": {
+			"id": "Qwen/Qwen3.5-397B-A17B",
+			"name": "Qwen/Qwen3.5-397B-A17B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3.5-9B": {
+			"id": "Qwen/Qwen3.5-9B",
+			"name": "Qwen/Qwen3.5-9B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3.5-9B-FP8": {
+			"id": "Qwen/Qwen3.5-9B-FP8",
+			"name": "Qwen/Qwen3.5-9B-FP8",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3.6-35B-A3B-FP8": {
+			"id": "Qwen/Qwen3.6-35B-A3B-FP8",
+			"name": "Qwen/Qwen3.6-35B-A3B-FP8",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3.6-Plus": {
+			"id": "Qwen/Qwen3.6-Plus",
+			"name": "Qwen/Qwen3.6-Plus",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 8888
+		},
+		"Qwen/Qwen3.7-Max": {
+			"id": "Qwen/Qwen3.7-Max",
+			"name": "Qwen/Qwen3.7-Max",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 8888
+		},
+		"Qwen/QwQ-32B": {
+			"id": "Qwen/QwQ-32B",
+			"name": "Qwen/QwQ-32B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"rime-labs/rime-arcana-v2": {
+			"id": "rime-labs/rime-arcana-v2",
+			"name": "rime-labs/rime-arcana-v2",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"rime-labs/rime-arcana-v3": {
+			"id": "rime-labs/rime-arcana-v3",
+			"name": "rime-labs/rime-arcana-v3",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"rime-labs/rime-arcana-v3-turbo": {
+			"id": "rime-labs/rime-arcana-v3-turbo",
+			"name": "rime-labs/rime-arcana-v3-turbo",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"rime-labs/rime-mist-v2": {
+			"id": "rime-labs/rime-mist-v2",
+			"name": "rime-labs/rime-mist-v2",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"rime-labs/rime-mist-v3": {
+			"id": "rime-labs/rime-mist-v3",
+			"name": "rime-labs/rime-mist-v3",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"rime-labs/rime-mist-v3-omni": {
+			"id": "rime-labs/rime-mist-v3-omni",
+			"name": "rime-labs/rime-mist-v3-omni",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 448,
+			"maxTokens": 8888
+		},
+		"Rundiffusion/Juggernaut-Lightning-Flux": {
+			"id": "Rundiffusion/Juggernaut-Lightning-Flux",
+			"name": "Rundiffusion/Juggernaut-Lightning-Flux",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"RunDiffusion/Juggernaut-pro-flux": {
+			"id": "RunDiffusion/Juggernaut-pro-flux",
+			"name": "RunDiffusion/Juggernaut-pro-flux",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Salesforce/Llama-Rank-V1": {
+			"id": "Salesforce/Llama-Rank-V1",
+			"name": "Salesforce/Llama-Rank-V1",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 8192,
+			"maxTokens": 8888
+		},
+		"sarvamai/sarvam-m": {
+			"id": "sarvamai/sarvam-m",
+			"name": "sarvam-m",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8192
+		},
+		"stabilityai/stable-diffusion-3-medium": {
+			"id": "stabilityai/stable-diffusion-3-medium",
+			"name": "stabilityai/stable-diffusion-3-medium",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"stabilityai/stable-diffusion-xl-base-1.0": {
+			"id": "stabilityai/stable-diffusion-xl-base-1.0",
+			"name": "stabilityai/stable-diffusion-xl-base-1.0",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"togethercomputer/EssentialAI-RNJ-1-Instruct": {
+			"id": "togethercomputer/EssentialAI-RNJ-1-Instruct",
+			"name": "togethercomputer/EssentialAI-RNJ-1-Instruct",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 32768,
+			"maxTokens": 8888
+		},
+		"togethercomputer/meta-llama-3.1-8B-Instruct-AWQ-INT4": {
+			"id": "togethercomputer/meta-llama-3.1-8B-Instruct-AWQ-INT4",
+			"name": "togethercomputer/meta-llama-3.1-8B-Instruct-AWQ-INT4",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"vidu/vidu-2.0": {
+			"id": "vidu/vidu-2.0",
+			"name": "vidu/vidu-2.0",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"vidu/vidu-q1": {
+			"id": "vidu/vidu-q1",
+			"name": "vidu/vidu-q1",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"vidu/vidu-q3": {
+			"id": "vidu/vidu-q3",
+			"name": "vidu/vidu-q3",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"vidu/vidu-q3-turbo": {
+			"id": "vidu/vidu-q3-turbo",
+			"name": "vidu/vidu-q3-turbo",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Wan-AI/Wan2.2-I2V-A14B": {
+			"id": "Wan-AI/Wan2.2-I2V-A14B",
+			"name": "Wan-AI/Wan2.2-I2V-A14B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Wan-AI/Wan2.2-T2V-A14B": {
+			"id": "Wan-AI/Wan2.2-T2V-A14B",
+			"name": "Wan-AI/Wan2.2-T2V-A14B",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Wan-AI/Wan2.6-image": {
+			"id": "Wan-AI/Wan2.6-image",
+			"name": "Wan-AI/Wan2.6-image",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Wan-AI/wan2.7-i2v": {
+			"id": "Wan-AI/wan2.7-i2v",
+			"name": "Wan-AI/wan2.7-i2v",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Wan-AI/wan2.7-r2v": {
+			"id": "Wan-AI/wan2.7-r2v",
+			"name": "Wan-AI/wan2.7-r2v",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"Wan-AI/wan2.7-t2v": {
+			"id": "Wan-AI/wan2.7-t2v",
+			"name": "Wan-AI/wan2.7-t2v",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
+		},
+		"zai-org/GLM-4.5-Air-FP8": {
+			"id": "zai-org/GLM-4.5-Air-FP8",
+			"name": "zai-org/GLM-4.5-Air-FP8",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
+		},
+		"zai-org/GLM-4.5V": {
+			"id": "zai-org/GLM-4.5V",
+			"name": "zai-org/GLM-4.5V",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 65536,
+			"maxTokens": 8888
+		},
+		"zai-org/GLM-4.6": {
+			"id": "zai-org/GLM-4.6",
+			"name": "zai-org/GLM-4.6",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 202752,
+			"maxTokens": 8888
+		},
 		"zai-org/GLM-4.7": {
 			"id": "zai-org/GLM-4.7",
 			"name": "GLM 4.7 Fp8",
@@ -48054,6 +54074,82 @@
 			},
 			"contextWindow": 202752,
 			"maxTokens": 8192
+		},
+		"zai-org/GLM-4.7-fp4": {
+			"id": "zai-org/GLM-4.7-fp4",
+			"name": "zai-org/GLM-4.7-fp4",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 202752,
+			"maxTokens": 8888
+		},
+		"zai-org/GLM-5": {
+			"id": "zai-org/GLM-5",
+			"name": "zai-org/GLM-5",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 202752,
+			"maxTokens": 8888
+		},
+		"zai-org/GLM-5.1": {
+			"id": "zai-org/GLM-5.1",
+			"name": "zai-org/GLM-5.1",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 202752,
+			"maxTokens": 8888
+		},
+		"zai-org/GLM-OCR": {
+			"id": "zai-org/GLM-OCR",
+			"name": "zai-org/GLM-OCR",
+			"api": "openai-completions",
+			"provider": "together",
+			"baseUrl": "https://api.together.xyz/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 8888
 		}
 	},
 	"venice": {
@@ -49629,6 +55725,28 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 128000,
+			"maxTokens": 8888,
+			"compat": {
+				"supportsUsageInStreaming": false
+			}
+		},
+		"nvidia-nemotron-3-ultra-550b-a55b": {
+			"id": "nvidia-nemotron-3-ultra-550b-a55b",
+			"name": "nvidia-nemotron-3-ultra-550b-a55b",
+			"api": "openai-completions",
+			"provider": "venice",
+			"baseUrl": "https://api.venice.ai/api/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 256000,
 			"maxTokens": 8888,
 			"compat": {
 				"supportsUsageInStreaming": false
@@ -52853,6 +58971,30 @@
 				"maxLevel": "xhigh"
 			}
 		},
+		"nvidia/nemotron-3-ultra-550b-a55b": {
+			"id": "nvidia/nemotron-3-ultra-550b-a55b",
+			"name": "Nemotron 3 Ultra",
+			"api": "anthropic-messages",
+			"provider": "vercel-ai-gateway",
+			"baseUrl": "https://ai-gateway.vercel.sh",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0.6,
+				"output": 2.4,
+				"cacheRead": 0.12,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 65000,
+			"thinking": {
+				"mode": "budget",
+				"minLevel": "minimal",
+				"maxLevel": "xhigh"
+			}
+		},
 		"nvidia/nemotron-nano-12b-v2-vl": {
 			"id": "nvidia/nemotron-nano-12b-v2-vl",
 			"name": "Nvidia Nemotron Nano 12B V2 VL",
@@ -55964,6 +62106,25 @@
 				"minLevel": "minimal",
 				"maxLevel": "high"
 			}
+		},
+		"mimo-v2.5-asr": {
+			"id": "mimo-v2.5-asr",
+			"name": "mimo-v2.5-asr",
+			"api": "openai-completions",
+			"provider": "xiaomi",
+			"baseUrl": "https://api.xiaomimimo.com/v1",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 222222,
+			"maxTokens": 8888
 		},
 		"mimo-v2.5-pro": {
 			"id": "mimo-v2.5-pro",

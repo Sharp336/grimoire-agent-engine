@@ -792,7 +792,7 @@ export interface OpenAICompat {
 	/** Optional `thinking.keep` value for Z.ai/Moonshot-style thinking params. Set false to suppress auto-detected keep. Default: auto-detected. */
 	thinkingKeep?: "all" | false;
 	/** Which reasoning content field to emit on assistant messages. Default: auto-detected. */
-	reasoningContentField?: "reasoning_content" | "reasoning" | "reasoning_text";
+	reasoningContentField?: "reasoning_content" | "reasoning" | "reasoning_text" | "reasoning_details";
 	/** Whether assistant tool-call messages must include reasoning content. Default: false. */
 	requiresReasoningContentForToolCalls?: boolean;
 	/** Whether the provider accepts a synthetic placeholder (e.g. ".") for missing reasoning_content on tool-call turns. Default: true. Set to false for providers like DeepSeek that validate the exact reasoning_content value. */
@@ -828,6 +828,34 @@ export interface OpenAICompat {
 	supportsStrictMode?: boolean;
 	/** Whether tool schemas must be sent either all strict or all non-strict. Undefined keeps the existing per-tool mixed behavior. */
 	toolStrictMode?: "all_strict" | "none";
+	/**
+	 * Whether to preserve thinking blocks in conversation history for
+	 * cross-model switches. When true (default for reasoning models),
+	 * thinking blocks are preserved as structured blocks so downstream
+	 * convertMessages can send them as reasoning_content on the wire.
+	 *
+	 * Set to false for older-style reasoning models that don't require
+	 * reasoning content to be sent back (e.g. older DeepSeek R1).
+	 * Thinking blocks will be converted to plain text.
+	 *
+	 * Only applies to reasoning models (model.reasoning === true).
+	 * Non-reasoning models always convert thinking to text.
+	 *
+	 * Default: true for reasoning models.
+	 */
+	interleaved?: boolean;
+	/**
+	 * Safety valve: force OLD OMP handling for this provider, as if
+	 * our changes to transformMessages never existed. Use this when
+	 * a provider's reasoning implementation is incompatible with
+	 * structured thinking block preservation.
+	 *
+	 * When true, thinking blocks are always converted to plain text
+	 * regardless of model.reasoning or interleaved settings.
+	 *
+	 * Default: false.
+	 */
+	legacy_style?: boolean;
 }
 
 /**

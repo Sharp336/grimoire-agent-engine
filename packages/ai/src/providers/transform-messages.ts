@@ -1,10 +1,12 @@
 import turnAbortedGuidance from "../prompts/turn-aborted-guidance.md" with { type: "text" };
+
 import type {
 	Api,
 	AssistantMessage,
 	DeveloperMessage,
 	Message,
 	Model,
+	OpenAICompat,
 	ToolCall,
 	ToolResultMessage,
 	UserMessage,
@@ -33,6 +35,15 @@ function getLatestSurvivingAssistantIndex(messages: readonly Message[]): number 
 }
 
 /**
+ * Detect official provider APIs by baseUrl. These use signatures/obfuscation
+ * for reasoning and require original OMP handling — we must not interfere.
+ */
+function isOfficialApi(model: Model): boolean {
+	const url = (model.baseUrl || "").toLowerCase();
+	return url.includes("api.anthropic.com") || url.includes("api.openai.com");
+}
+
+/**
  * Normalize tool call ID for cross-provider compatibility.
  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
  * Anthropic APIs require IDs matching ^[a-zA-Z0-9_-]+$ (max 64 chars).
@@ -49,6 +60,7 @@ export function transformMessages<TApi extends Api>(
 ): Message[] {
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
+	const officialApi = isOfficialApi(model);
 
 	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages);
 	// First pass: transform messages (thinking blocks, tool call ID normalization)
@@ -112,23 +124,42 @@ export function transformMessages<TApi extends Api>(
 					// Skip empty thinking blocks, convert others to plain text
 					if (!sanitized.thinking || sanitized.thinking.trim() === "") return [];
 					if (isSameModel) return sanitized;
-					// Preserve thinking blocks when target model can handle structured
-					// reasoning: Anthropic models (native thinking blocks) or OpenAI-compat
-					// models with reasoningContentField (convertMessages handles the wire format).
-					const canPreserveThinking =
-					model.api === "anthropic-messages" || !!model.compat?.reasoningContentField;
-					if (canPreserveThinking) return sanitized;
-					return {
-					type: "text" as const,
-					text: sanitized.thinking,
-					};
+
+					// 1. Official APIs: preserve original OMP handling (signatures, obfuscation, etc.)
+					if (officialApi) {
+						return { type: "text" as const, text: sanitized.thinking };
+					}
+
+					// 2. legacy_style: force OLD OMP handling for this provider (safety valve)
+					// Cast is safe here: `legacy_style`/`interleaved` are optional fields on `OpenAICompat`, not `AnthropicCompat`.
+					const openaiCompat = model.compat as unknown as OpenAICompat | undefined;
+					if (openaiCompat?.legacy_style === true) {
+						return { type: "text" as const, text: sanitized.thinking };
+					}
+
+					// 3. interleaved: false — older reasoning models that don't need reasoning content sent back
+					if (model.reasoning && openaiCompat?.interleaved === false) {
+						return { type: "text" as const, text: sanitized.thinking };
+					}
+
+					// 4. Anthropic-compatible APIs: preserve thinking blocks (they understand them natively)
+					if (model.api === "anthropic-messages") {
+						return sanitized;
+					}
+
+					// 5. All other reasoning models: preserve thinking blocks (new behavior)
+					if (model.reasoning) {
+						return sanitized;
+					}
+
+					return { type: "text" as const, text: sanitized.thinking };
 				}
 
-					if (block.type === "redactedThinking") {
+				if (block.type === "redactedThinking") {
 					if (mustPreserveLatestAnthropicThinking) return block;
 					if (isSameModel) return block;
-					// Anthropic models understand redacted thinking blocks natively
-					if (model.api === "anthropic-messages") return block;
+					// Anthropic-compatible APIs understand redacted thinking natively
+					if (!officialApi && model.api === "anthropic-messages") return block;
 					return [];
 				}
 
@@ -162,6 +193,7 @@ export function transformMessages<TApi extends Api>(
 
 				return block;
 			});
+
 
 			return {
 				...assistantMsg,

@@ -136,6 +136,8 @@ describe("openai-completions compatibility", () => {
 			vercelGatewayRouting: {},
 			extraBody: {},
 			supportsStrictMode: true,
+			interleaved: true,
+			legacy_style: false,
 			toolStrictMode: "none",
 		} satisfies ResolvedOpenAICompat;
 		const assistantMessage: AssistantMessage = {
@@ -562,8 +564,8 @@ describe("openai-completions compatibility", () => {
 		expect(assistant).toBeDefined();
 		const assistantObject = toObject(assistant);
 		expect(assistantObject).toBeDefined();
-		expect(assistantObject ? Reflect.get(assistantObject, "reasoning_text") : undefined).toBe("inspect tool output");
-		expect(assistantObject ? Reflect.get(assistantObject, "reasoning_content") : undefined).toBeUndefined();
+		expect(assistantObject ? Reflect.get(assistantObject, "reasoning_content") : undefined).toBe("inspect tool output");
+		expect(assistantObject ? Reflect.get(assistantObject, "reasoning_text") : undefined).toBeUndefined();
 	});
 });
 

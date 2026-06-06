@@ -30,7 +30,7 @@ export const OpenAICompatSchema = z.object({
 	requiresMistralToolIds: z.boolean().optional(),
 	requiresAssistantAfterToolResult: z.boolean().optional(),
 	requiresThinkingAsText: z.boolean().optional(),
-	reasoningContentField: z.enum(["reasoning_content", "reasoning", "reasoning_text"]).optional(),
+	reasoningContentField: z.enum(["reasoning_content", "reasoning", "reasoning_text", "reasoning_details"]).optional(),
 	requiresReasoningContentForToolCalls: z.boolean().optional(),
 	allowsSyntheticReasoningContentForToolCalls: z.boolean().optional(),
 	requiresAssistantContentForToolCalls: z.boolean().optional(),

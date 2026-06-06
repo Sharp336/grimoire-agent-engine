@@ -414,7 +414,7 @@ function applyGeneratedModelPolicy(model: ApiModel<Api>): void {
 			supportsStore: false,
 			supportsDeveloperRole: false,
 			supportsReasoningEffort: false,
-			reasoningContentField: "reasoning_content",
+			reasoningContentField: "reasoning_details",
 		};
 		delete model.compat.thinkingFormat;
 	}

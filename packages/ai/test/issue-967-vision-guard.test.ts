@@ -44,6 +44,8 @@ const compat: ResolvedOpenAICompat = {
 	vercelGatewayRouting: {},
 	extraBody: {},
 	supportsStrictMode: true,
+	interleaved: true,
+	legacy_style: false,
 	toolStrictMode: "none",
 };
 
