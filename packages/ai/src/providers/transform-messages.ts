@@ -44,6 +44,19 @@ function isOfficialApi(model: Model): boolean {
 }
 
 /**
+ * Check if a thinking signature is valid JSON (required by openai-responses encoder).
+ * Returns true if the signature can be parsed as JSON, false otherwise.
+ */
+function isValidJsonSignature(signature: string): boolean {
+	try {
+		JSON.parse(signature);
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/**
  * Normalize tool call ID for cross-provider compatibility.
  * OpenAI Responses API generates IDs that are 450+ chars with special characters like `|`.
  * Anthropic APIs require IDs matching ^[a-zA-Z0-9_-]+$ (max 64 chars).
@@ -148,7 +161,16 @@ export function transformMessages<TApi extends Api>(
 					}
 
 					// 5. All other reasoning models: preserve thinking blocks (new behavior)
+					// But for openai-responses, only preserve JSON-compatible signatures
 					if (model.reasoning) {
+						if (model.api === "openai-responses") {
+							// Responses encoder expects JSON signatures; convert non-JSON to text
+							if (sanitized.thinkingSignature && isValidJsonSignature(sanitized.thinkingSignature)) {
+								return sanitized;
+							}
+							// Non-JSON signature - convert to text
+							return { type: "text" as const, text: sanitized.thinking };
+						}
 						return sanitized;
 					}
 

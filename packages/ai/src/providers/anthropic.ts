@@ -2455,6 +2455,10 @@ function isNativeAnthropicSignature(signature: string | undefined): boolean {
 	// Known OpenAI field names that should not be sent as Anthropic signatures
 	const openAIFieldNames = ["reasoning_content", "reasoning", "reasoning_text", "reasoning_details"];
 	if (openAIFieldNames.includes(signature)) return false;
+	// OpenAI Responses models store JSON-serialized reasoning items as signatures
+	// These are not valid Anthropic signatures and should be rejected
+	const trimmed = signature.trim();
+	if (trimmed.startsWith("{") || trimmed.startsWith("[")) return false;
 	// Any other signature is considered native to Anthropic
 	return true;
 }
