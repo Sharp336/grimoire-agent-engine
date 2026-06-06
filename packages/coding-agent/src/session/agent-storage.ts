@@ -93,7 +93,7 @@ export class AgentStorage {
 			"SELECT skill_name, decayed_count, last_used_at, total_count FROM skill_usage WHERE skill_name = ?",
 		);
 		this.#listSkillUsageStmt = this.#db.prepare(
-			"SELECT skill_name, decayed_count, last_used_at, total_count FROM skill_usage ORDER BY decayed_count DESC",
+			"SELECT skill_name, decayed_count, last_used_at, total_count FROM skill_usage",
 		);
 	}
 
