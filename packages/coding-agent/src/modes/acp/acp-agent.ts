@@ -716,8 +716,6 @@ export class AcpAgent implements Agent {
 		if (!skill) {
 			return false;
 		}
-		// Track explicit skill invocations via slash command
-		record.session.settings.getStorage()?.recordSkillUsage(skillName);
 		const built = await buildSkillPromptMessage(skill, args);
 		await record.session.promptCustomMessage({
 			customType: SKILL_PROMPT_MESSAGE_TYPE,
@@ -726,6 +724,16 @@ export class AcpAgent implements Agent {
 			details: built.details,
 			attribution: "user",
 		});
+		// Track only after successful dispatch; failure to record usage is not fatal
+		try {
+			record.session.settings.getStorage()?.recordSkillUsage(skillName);
+		} catch (storageErr) {
+			// Log but don't fail the skill invocation if recording usage fails
+			logger.warn("Failed to record skill usage", {
+				skillName,
+				error: storageErr instanceof Error ? storageErr.message : String(storageErr),
+			});
+		}
 		return true;
 	}
 

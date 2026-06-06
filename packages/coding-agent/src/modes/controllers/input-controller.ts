@@ -509,7 +509,6 @@ export class InputController {
 		if (!skillPath) return false;
 		// Track explicit skill invocations via slash command
 		const skillName = commandName.slice("skill:".length);
-		this.ctx.settings.getStorage()?.recordSkillUsage(skillName);
 		this.ctx.editor.addToHistory(text);
 		this.ctx.editor.setText("");
 		try {
@@ -549,6 +548,16 @@ export class InputController {
 			if (this.ctx.session.isStreaming) {
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
+			}
+			// Track only after successful dispatch; failure to record usage is not fatal
+			try {
+				this.ctx.settings.getStorage()?.recordSkillUsage(skillName);
+			} catch (storageErr) {
+				// Log but don't fail the skill invocation if recording usage fails
+				logger.warn("Failed to record skill usage", {
+					skillName,
+					error: storageErr instanceof Error ? storageErr.message : String(storageErr),
+				});
 			}
 		} catch (err) {
 			this.ctx.showError(`Failed to load skill: ${err instanceof Error ? err.message : String(err)}`);
