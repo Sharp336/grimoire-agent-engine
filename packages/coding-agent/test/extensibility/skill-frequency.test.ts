@@ -1,5 +1,9 @@
 import { describe, expect, it } from "bun:test";
-import { computeFrequentSkillNames } from "@oh-my-pi/pi-coding-agent/extensibility/skill-frequency";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import { AgentStorage } from "../../src/session/agent-storage";
+import { computeFrequentSkillNames, resolveFrequentSkillNames } from "@oh-my-pi/pi-coding-agent/extensibility/skill-frequency";
 
 const skills = (names: string[]) => names.map(name => ({ name, hide: false }));
 const NOW = 1_700_000_000;
@@ -55,9 +59,11 @@ describe("computeFrequentSkillNames", () => {
 	});
 
 	it("alphabetical tiebreak for zero-score skills", () => {
+		// Use a loaded skill ("zzz") to carry the warmup count so the gate passes.
+		// All three have score 0 and stale timestamps; alphabetical top-2 picks "aaa" and "mmm".
 		const result = computeFrequentSkillNames({
 			skills: skills(["zzz", "aaa", "mmm"]),
-			usage: [{ name: "dummy", score: 0, lastUsedAt: 0, totalCount: 10 }],
+			usage: [{ name: "zzz", score: 0, lastUsedAt: NOW - 86_400 * 30, totalCount: 10 }],
 			frequentCount: 2,
 			alwaysInclude: [],
 			nowSec: NOW,
@@ -80,5 +86,136 @@ describe("computeFrequentSkillNames", () => {
 		});
 		expect(result.has("visible")).toBe(true);
 		expect(result.has("hidden")).toBe(false);
+	});
+
+	it("warmup accumulates across multiple rows: 5+5=10 crosses threshold", () => {
+		// Use stale timestamps (> 7 days) so neither skill qualifies via recent-7d path.
+		// Only top-N applies; "a" wins with higher score, result size = 1.
+		const result = computeFrequentSkillNames({
+			skills: skills(["a", "b", "c"]),
+			usage: [
+				{ name: "a", score: 5, lastUsedAt: NOW - 86_400 * 30, totalCount: 5 },
+				{ name: "b", score: 3, lastUsedAt: NOW - 86_400 * 30, totalCount: 5 },
+			],
+			frequentCount: 1,
+			alwaysInclude: [],
+			nowSec: NOW,
+		});
+		// Total loaded invocations = 10, threshold crossed → top-N applies (only 1)
+		expect(result.has("a")).toBe(true);
+		expect(result.size).toBe(1);
+	});
+
+	it("warmup: uninstalled-skill totalCount is excluded from threshold sum", () => {
+		// "ghost" has 9 invocations but is not in the loaded skills list → should not count
+		const result = computeFrequentSkillNames({
+			skills: skills(["a", "b", "c"]), // no "ghost"
+			usage: [
+				{ name: "ghost", score: 5, lastUsedAt: NOW - 100, totalCount: 9 },
+				{ name: "a", score: 1, lastUsedAt: NOW - 100, totalCount: 1 },
+			],
+			frequentCount: 1,
+			alwaysInclude: [],
+			nowSec: NOW,
+		});
+		// Only "a" counts toward warmup (totalCount=1), ghost is unloaded; total=1 < 10 → full list
+		expect([...result].sort()).toEqual(["a", "b", "c"]);
+	});
+});
+
+const CACHE_KEY = "skills.frequentSet";
+// T0 is used for pure-computation tests only; SQLite cache tests use actual clock.
+const T0 = 1_700_000_000;
+
+describe("resolveFrequentSkillNames", () => {
+	async function withStorage(fn: (storage: AgentStorage, dbPath: string) => Promise<void>): Promise<void> {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-freq-"));
+		try {
+			const dbPath = path.join(tempDir, "agent.db");
+			const storage = await AgentStorage.open(dbPath);
+			await fn(storage, dbPath);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	}
+
+	it("cache hit: matching hash returns cached names without recomputing", async () => {
+		await withStorage(async storage => {
+			const skillList = [{ name: "alpha", hide: false }, { name: "beta", hide: false }];
+			const settings = { frequentCount: 1, alwaysInclude: [] };
+
+			// Prime the cache with a far-future expiry (SQLite strftime uses OS clock,
+			// so we must set a TTL that's in the future by the real wall clock).
+			const nowSec = Math.floor(Date.now() / 1000);
+			const nonHiddenNames = ["alpha", "beta"].sort();
+			const settingsHash = JSON.stringify({
+				frequentCount: settings.frequentCount,
+				alwaysInclude: [],
+				skillNames: nonHiddenNames,
+			});
+			const payload = JSON.stringify({ settingsHash, names: ["alpha"] });
+			storage.setCache(CACHE_KEY, payload, nowSec + 86_400 * 365);
+
+			const result = resolveFrequentSkillNames(storage, skillList, settings, nowSec);
+			expect([...result]).toEqual(["alpha"]);
+		});
+	});
+
+	it("cache hit with hash mismatch (different frequentCount) triggers recompute", async () => {
+		await withStorage(async storage => {
+			const skillList = [{ name: "a", hide: false }, { name: "b", hide: false }];
+			// Write cache with frequentCount: 1
+			const settingsHashOld = JSON.stringify({ frequentCount: 1, alwaysInclude: [], skillNames: ["a", "b"] });
+			storage.setCache(CACHE_KEY, JSON.stringify({ settingsHash: settingsHashOld, names: ["a"] }), T0 + 86_400);
+
+			// Record enough usage so warmup passes and top-N produces "b" (higher score)
+			for (let i = 0; i < 10; i++) {
+				storage.recordSkillUsage("b");
+			}
+
+			// Now resolve with frequentCount: 2 — hash won't match
+			const result = resolveFrequentSkillNames(storage, skillList, { frequentCount: 2, alwaysInclude: [] }, T0 + 86_401 * 100);
+			// Both a and b should be in the result (frequentCount=2, 2 skills)
+			expect(result.has("a")).toBe(true);
+			expect(result.has("b")).toBe(true);
+		});
+	});
+
+	it("null storage: computes without throwing and returns a Set", () => {
+		const skillList = [{ name: "x", hide: false }];
+		const settings = { frequentCount: 5, alwaysInclude: [] };
+		// Should not throw; warmup gate fires (no usage) → all skills returned
+		const result = resolveFrequentSkillNames(null, skillList, settings, T0);
+		expect(result instanceof Set).toBe(true);
+		expect(result.has("x")).toBe(true);
+	});
+
+	it("writes cache with TTL = nowSec + 86400 on recompute", async () => {
+		await withStorage(async storage => {
+			const skillList = [{ name: "a", hide: false }];
+			const settings = { frequentCount: 5, alwaysInclude: [] };
+			// Use actual wall-clock time so the written TTL (nowSec + 86400) is in the future
+			// and SQLite's strftime('now') considers it unexpired on the subsequent getCache call.
+			const nowSec = Math.floor(Date.now() / 1000);
+			resolveFrequentSkillNames(storage, skillList, settings, nowSec);
+
+			// Cache should now exist and be readable
+			const raw = storage.getCache(CACHE_KEY);
+			expect(raw).not.toBeNull();
+			const parsed = JSON.parse(raw!);
+			expect(Array.isArray(parsed.names)).toBe(true);
+		});
+	});
+
+	it("corrupt JSON in cache silently falls back to recompute", async () => {
+		await withStorage(async storage => {
+			storage.setCache(CACHE_KEY, "not-valid-json{{{", T0 + 86_400);
+			const skillList = [{ name: "a", hide: false }];
+			const settings = { frequentCount: 5, alwaysInclude: [] };
+			// Should not throw
+			expect(() => resolveFrequentSkillNames(storage, skillList, settings, T0)).not.toThrow();
+			const result = resolveFrequentSkillNames(storage, skillList, settings, T0);
+			expect(result.has("a")).toBe(true);
+		});
 	});
 });

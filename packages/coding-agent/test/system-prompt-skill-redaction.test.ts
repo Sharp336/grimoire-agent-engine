@@ -127,4 +127,19 @@ describe("system prompt skill redaction", () => {
 		expect(text).toContain("- alpha: desc for alpha");
 		expect(text).toContain("(2 more skills not listed");
 	});
+
+	it("empty frequentSkillNames Set defers all skills — pointer-only block", async () => {
+		const skillList = [makeSkill("alpha"), makeSkill("beta")];
+		const text = await render({
+			skills: skillList,
+			redactDescriptions: true,
+			frequentSkillNames: new Set<string>([]),
+		});
+		// No skill entries rendered
+		expect(text).not.toContain("- alpha:");
+		expect(text).not.toContain("- beta:");
+		// Pointer line references both deferred skills
+		expect(text).toContain("(2 more skills not listed");
+		expect(text).toContain("search_tool_bm25");
+	});
 });

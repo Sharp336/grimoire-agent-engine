@@ -154,4 +154,23 @@ describe("AgentStorage skill_usage tracking", () => {
 		// After one half-life, initial score of 1 decays to 0.5
 		expect(usage[0].score).toBeCloseTo(0.5, 4);
 	});
+
+	it("throttle boundary: dt=300s exactly is NOT throttled (strict < 300)", async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-skill-usage-boundary-"));
+		const dbPath = path.join(tempDir, "agent.db");
+
+		const baseTime = new Date("2026-01-01T00:00:00Z");
+		setSystemTime(baseTime);
+
+		const storage = await AgentStorage.open(dbPath);
+		storage.recordSkillUsage("read_file");
+
+		// Advance by exactly 300s — condition is `< 300`, so dt=300 is NOT throttled
+		setSystemTime(new Date(baseTime.getTime() + 300_000));
+		storage.recordSkillUsage("read_file");
+
+		const usage = storage.getSkillUsage();
+		expect(usage).toHaveLength(1);
+		expect(usage[0].totalCount).toBe(2);
+	});
 });
