@@ -96,20 +96,22 @@ async function loadCopilotAgentsFromDir(dir: string, source: AgentSource): Promi
 }
 
 /**
- * Discover GitHub Copilot custom agents from `~/.copilot/agents/` (user-global,
- * relocatable via COPILOT_HOME) and `.github/agents/` (project, nearest walking up).
- * Per Copilot CLI, a home-directory agent overrides a project agent of the same name,
- * so user agents are returned first (the caller dedupes first-name-wins). Gated on the
- * github discovery provider.
+ * Discover GitHub Copilot custom agents from `.github/agents/` (project, nearest walking
+ * up) and `~/.copilot/agents/` (user-global, relocatable via COPILOT_HOME). Per the
+ * Copilot CLI config-dir reference, a project agent takes precedence over a personal
+ * agent of the same name (consistent with Copilot skills/MCP and OMP's own
+ * project-over-user convention), so project agents are returned first and the caller
+ * dedupes first-name-wins. Gated on the github discovery provider.
  */
 async function loadCopilotAgents(cwd: string, home: string): Promise<AgentDefinition[]> {
 	if (!isProviderEnabled("github")) return [];
 
-	const copilotHome = process.env.COPILOT_HOME?.trim() || path.join(home, ".copilot");
-	const agents = await loadCopilotAgentsFromDir(path.join(copilotHome, "agents"), "user");
-
+	const agents: AgentDefinition[] = [];
 	const projectDir = await findNearestCopilotAgentsDir(cwd);
 	if (projectDir) agents.push(...(await loadCopilotAgentsFromDir(projectDir, "project")));
+
+	const copilotHome = process.env.COPILOT_HOME?.trim() || path.join(home, ".copilot");
+	agents.push(...(await loadCopilotAgentsFromDir(path.join(copilotHome, "agents"), "user")));
 
 	return agents;
 }

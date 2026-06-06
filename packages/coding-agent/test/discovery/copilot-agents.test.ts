@@ -99,7 +99,7 @@ describe("discoverAgents — GitHub Copilot agents", () => {
 		expect(names).not.toContain("gated-proj-agent");
 	});
 
-	test("home-dir agent overrides project agent of the same name", async () => {
+	test("project agent overrides home-dir agent of the same name", async () => {
 		writeAgent(path.join(tempProject, ".github", "agents"), "shared", "project version");
 		writeAgent(path.join(tempHome, ".copilot", "agents"), "shared", "home version");
 
@@ -107,8 +107,8 @@ describe("discoverAgents — GitHub Copilot agents", () => {
 
 		const found = agents.filter(a => a.name === "shared");
 		expect(found).toHaveLength(1);
-		expect(found[0].source).toBe("user");
-		expect(found[0].description).toBe("home version");
+		expect(found[0].source).toBe("project");
+		expect(found[0].description).toBe("project version");
 	});
 
 	test("derives the agent name from a *.agent.md filename when frontmatter omits name", async () => {
