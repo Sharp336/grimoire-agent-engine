@@ -156,7 +156,7 @@ export function getDiscoverableSkill(skill: { name: string; description: string 
 	return {
 		name: skill.name,
 		label: skill.name,
-		summary: skill.description,
+		summary: skill.description.slice(0, 200),
 		source: "skill" as const,
 		schemaKeys: [],
 	};
