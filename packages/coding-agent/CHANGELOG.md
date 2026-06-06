@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added GitHub Copilot custom-agent discovery: `discoverAgents()` now finds agent definitions in `.github/agents/` (project-level, resolved by walking up from the cwd) and `~/.copilot/agents/` (user-global, relocatable via `COPILOT_HOME`). Previously only `.omp`/`.claude`/`.codex`/`.gemini` agent sources were scanned, so Copilot CLI users' custom agents were invisible. Gated on the `github` discovery provider. Closes #1914.
 
 ## [15.9.5] - 2026-06-05
 ### Added

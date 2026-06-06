@@ -8,6 +8,8 @@
  *   - .omp/agents/*.md (project-level, primary)
  *   - .pi/agents/*.md (project-level, legacy)
  *   - .claude/agents/*.md (project-level, legacy)
+ *   - ~/.copilot/agents/*.md (user-level, GitHub Copilot; relocatable via COPILOT_HOME)
+ *   - .github/agents/*.md (project-level, GitHub Copilot)
  *
  * Agent files use markdown with YAML frontmatter.
  */
@@ -47,6 +49,25 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
 		});
 
 	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
+}
+
+/**
+ * Find the nearest `.github/agents` directory, walking up from `startDir`. Mirrors how
+ * project config dirs are resolved so Copilot agents work from monorepo subdirectories.
+ */
+async function findNearestCopilotAgentsDir(startDir: string): Promise<string | null> {
+	let dir = startDir;
+	while (true) {
+		const candidate = path.join(dir, ".github", "agents");
+		const isDir = await fs
+			.stat(candidate)
+			.then(s => s.isDirectory())
+			.catch(() => false);
+		if (isDir) return candidate;
+		const parent = path.dirname(dir);
+		if (parent === dir) return null;
+		dir = parent;
+	}
 }
 
 /**
@@ -99,6 +120,16 @@ export async function discoverAgents(cwd: string, home: string = os.homedir()): 
 	for (const plugin of sortedPluginRoots) {
 		const agentsDir = path.join(plugin.path, "agents");
 		orderedDirs.push({ dir: agentsDir, source: plugin.scope === "project" ? "project" : "user" });
+	}
+
+	// GitHub Copilot custom agents: project `.github/agents/` (nearest, walking up from cwd)
+	// and user-global `~/.copilot/agents/` (relocatable via COPILOT_HOME). Gated on the
+	// github discovery provider so disabling it also disables Copilot agent discovery.
+	if (isProviderEnabled("github")) {
+		const projectCopilotDir = await findNearestCopilotAgentsDir(resolvedCwd);
+		if (projectCopilotDir) orderedDirs.push({ dir: projectCopilotDir, source: "project" });
+		const copilotHome = process.env.COPILOT_HOME?.trim() || path.join(home, ".copilot");
+		orderedDirs.push({ dir: path.join(copilotHome, "agents"), source: "user" });
 	}
 
 	const seen = new Set<string>();
