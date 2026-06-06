@@ -238,7 +238,10 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 		// tool discovery is "off" — it needs search_tool_bm25 to surface deferred skills.
 		// Use settings directly (not isSkillDiscoveryEnabled) because session is not yet
 		// constructed at createTools() time.
-		if (resolveEffectiveToolDiscoveryMode(session.settings, 0) === "off" && !session.settings.get("skills.redactDescriptions"))
+		if (
+			resolveEffectiveToolDiscoveryMode(session.settings, 0) === "off" &&
+			!session.settings.get("skills.redactDescriptions")
+		)
 			return null;
 		return supportsToolDiscoveryExecution(session) ? new SearchToolBm25Tool(session) : null;
 	}

@@ -1737,7 +1737,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			settings,
 			countToolsForAutoDiscovery(toolRegistry.keys()),
 		);
-		if ((effectiveDiscoveryMode !== "off" || settings.get("skills.redactDescriptions")) && !toolRegistry.has("search_tool_bm25")) {
+		if (
+			(effectiveDiscoveryMode !== "off" || settings.get("skills.redactDescriptions")) &&
+			!toolRegistry.has("search_tool_bm25")
+		) {
 			const searchTool: Tool = new SearchToolBm25Tool(toolSession);
 			toolRegistry.set(
 				searchTool.name,
