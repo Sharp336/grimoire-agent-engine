@@ -45,6 +45,7 @@ export class ExtensionUiController {
 			notify: (message, type) => this.showHookNotify(message, type),
 			onTerminalInput: handler => this.addExtensionTerminalInputListener(handler),
 			setStatus: (key, text) => this.setHookStatus(key, text),
+			setStatusSegment: (key, text, options) => this.setStatusSegment(key, text, options),
 			setWorkingMessage: message => this.ctx.setWorkingMessage(message),
 			setWidget: (key, content, options) => this.setHookWidget(key, content, options),
 			setTitle: title => setTerminalTitle(title),
@@ -490,6 +491,7 @@ export class ExtensionUiController {
 			notify: () => {},
 			onTerminalInput: () => () => {},
 			setStatus: () => {},
+			setStatusSegment: () => {},
 			setWorkingMessage: () => {},
 			setWidget: () => {},
 			setTitle: () => {},
@@ -574,6 +576,18 @@ export class ExtensionUiController {
 			return;
 		}
 		this.ctx.statusLine.setHookStatus(key, text);
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Set extension text inside the editor top-border status line.
+	 */
+	setStatusSegment(key: string, text: string | undefined, options?: { side?: "left" | "right" }): void {
+		if (this.ctx.isBackgrounded) {
+			return;
+		}
+		this.ctx.statusLine.setExtensionSegment(key, text, options?.side);
+		this.ctx.updateEditorTopBorder();
 		this.ctx.ui.requestRender();
 	}
 

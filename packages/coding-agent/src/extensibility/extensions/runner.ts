@@ -149,6 +149,7 @@ const noOpUIContext: ExtensionUIContext = {
 	notify: () => {},
 	onTerminalInput: () => () => {},
 	setStatus: () => {},
+	setStatusSegment: () => {},
 	setWorkingMessage: () => {},
 	setWidget: () => {},
 	setFooter: () => {},

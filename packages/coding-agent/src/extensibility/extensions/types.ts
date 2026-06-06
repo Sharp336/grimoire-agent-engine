@@ -182,6 +182,15 @@ export interface ExtensionUIContext {
 	/** Set status text in the footer/status bar. Pass undefined to clear. */
 	setStatus(key: string, text: string | undefined): void;
 
+	/**
+	 * Set text inside the main status line (editor top border / powerline).
+	 * Unlike setStatus, which renders a separate line below the status line,
+	 * this contributes an inline segment to the bar itself. Pass undefined to
+	 * clear. Text is sanitized to a single line; styling is applied by the
+	 * status line, so pass plain text (icons/glyphs ok). Defaults to the left
+	 * side; under width pressure, extension segments are dropped before built-in ones.
+	 */
+	setStatusSegment(key: string, text: string | undefined, options?: { side?: "left" | "right" }): void;
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;
 

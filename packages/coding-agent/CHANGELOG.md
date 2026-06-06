@@ -5,6 +5,7 @@
 ### Added
 
 - Added `app.display.reset`, bound to `Ctrl+L` by default, to force an immediate terminal display reset/redraw without resizing the window.
+- Added `ctx.ui.setStatusSegment(...)` so extensions can contribute sanitized inline text to the editor top-border status line.
 
 ### Changed
 

@@ -149,6 +149,7 @@ export class StatusLineComponent implements Component {
 	#onBranchChange: (() => void) | null = null;
 	#autoCompactEnabled: boolean = true;
 	#hookStatuses: Map<string, string> = new Map();
+	#extensionSegments: Map<string, { text: string; side: "left" | "right" }> = new Map();
 	#subagentCount: number = 0;
 	#sessionStartTime: number = Date.now();
 	#planModeStatus: { enabled: boolean; paused: boolean } | null = null;
@@ -235,6 +236,14 @@ export class StatusLineComponent implements Component {
 			this.#hookStatuses.delete(key);
 		} else {
 			this.#hookStatuses.set(key, text);
+		}
+	}
+
+	setExtensionSegment(key: string, text: string | undefined, side: "left" | "right" = "left"): void {
+		if (text === undefined) {
+			this.#extensionSegments.delete(key);
+		} else {
+			this.#extensionSegments.set(key, { text, side });
 		}
 	}
 
@@ -642,7 +651,7 @@ export class StatusLineComponent implements Component {
 
 		// Collect visible segment contents
 		const leftParts: string[] = [];
-		const leftSegIds: StatusLineSegmentId[] = [];
+		const leftSegIds: (StatusLineSegmentId | "__ext")[] = [];
 		for (const segId of effectiveSettings.leftSegments) {
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
@@ -664,6 +673,21 @@ export class StatusLineComponent implements Component {
 			const icon = theme.icon.agents ? `${theme.icon.agents} ` : "";
 			const label = `${formatCount("job", runningBackgroundJobs)} running`;
 			rightParts.push(theme.fg("statusLineSubagents", `${icon}${label}`));
+		}
+
+		if (this.#extensionSegments.size > 0) {
+			for (const [, segment] of [...this.#extensionSegments.entries()].sort(([a], [b]) =>
+				a < b ? -1 : a > b ? 1 : 0,
+			)) {
+				const content = sanitizeStatusText(segment.text);
+				if (!content) continue;
+				if (segment.side === "right") {
+					rightParts.push(content);
+				} else {
+					leftParts.push(content);
+					leftSegIds.push("__ext");
+				}
+			}
 		}
 		const topFillWidth = Math.max(0, width);
 		const left = [...leftParts];

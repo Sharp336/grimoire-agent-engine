@@ -352,6 +352,7 @@ export function createAcpExtensionUiContext(
 		},
 		onTerminalInput: () => () => {},
 		setStatus: () => {},
+		setStatusSegment: () => {},
 		setWorkingMessage: () => {},
 		setWidget: () => {},
 		setFooter: () => {},
