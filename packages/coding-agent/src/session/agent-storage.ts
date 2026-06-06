@@ -341,12 +341,12 @@ FROM model_usage_legacy
 			const prior = this.#selectSkillUsageStmt.get(skillName) as SkillUsageRow | undefined;
 
 			// 5-minute burst throttle: skip if already recorded recently
-			if (prior && nowSec - prior.last_used_at < SKILL_USAGE_THROTTLE_SECS) {
+			if (prior && Math.max(0, nowSec - prior.last_used_at) < SKILL_USAGE_THROTTLE_SECS) {
 				return;
 			}
 
 			// Decay prior score to now, then add 1
-			const dt = prior ? nowSec - prior.last_used_at : 0;
+			const dt = prior ? Math.max(0, nowSec - prior.last_used_at) : 0;
 			const newScore = prior ? prior.decayed_count * Math.exp(-SKILL_USAGE_DECAY_LAMBDA * dt) + 1 : 1;
 
 			this.#upsertSkillUsageStmt.run(skillName, newScore, nowSec, newScore, nowSec);
@@ -366,7 +366,7 @@ FROM model_usage_legacy
 			const rows = this.#listSkillUsageStmt.all() as SkillUsageRow[];
 			return rows
 				.map(row => {
-					const dt = nowSec - row.last_used_at;
+					const dt = Math.max(0, nowSec - row.last_used_at);
 					const score = row.decayed_count * Math.exp(-SKILL_USAGE_DECAY_LAMBDA * dt);
 					return { name: row.skill_name, score, lastUsedAt: row.last_used_at, totalCount: row.total_count };
 				})
