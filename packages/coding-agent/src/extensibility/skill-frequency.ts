@@ -39,20 +39,21 @@ export function computeFrequentSkillNames({
 	nowSec: number;
 }): Set<string> {
 	const nonHiddenSkills = skills.filter(s => !s.hide);
+	const loadedNames = new Set(nonHiddenSkills.map(s => s.name));
 
-	// Warmup gate: not enough data → render everything
-	const totalInvocations = usage.reduce((sum, u) => sum + u.totalCount, 0);
+	// Warmup gate: not enough data from loaded skills → render everything
+	const totalInvocations = usage.filter(u => loadedNames.has(u.name)).reduce((sum, u) => sum + u.totalCount, 0);
 	if (totalInvocations < SKILL_FREQUENCY_WARMUP_THRESHOLD) {
-		return new Set(nonHiddenSkills.map(s => s.name));
+		return new Set(loadedNames);
 	}
 
-	const loadedNames = new Set(nonHiddenSkills.map(s => s.name));
 	const frequent = new Set<string>();
 
-	// Pinned: alwaysInclude glob patterns
+	// Pinned: alwaysInclude glob patterns — pre-compile outside the per-skill loop
 	if (alwaysInclude.length > 0) {
+		const globs = alwaysInclude.map(pattern => new Bun.Glob(pattern));
 		for (const skill of nonHiddenSkills) {
-			if (alwaysInclude.some(pattern => new Bun.Glob(pattern).match(skill.name))) {
+			if (globs.some(glob => glob.match(skill.name))) {
 				frequent.add(skill.name);
 			}
 		}
@@ -98,7 +99,7 @@ export function resolveFrequentSkillNames(
 		.sort();
 	const settingsHash = JSON.stringify({
 		frequentCount: settings.frequentCount,
-		alwaysInclude: settings.alwaysInclude,
+		alwaysInclude: [...settings.alwaysInclude].sort(),
 		skillNames: nonHiddenNames,
 	});
 
@@ -108,9 +109,9 @@ export function resolveFrequentSkillNames(
 			const raw = storage.getCache(FREQUENT_SKILL_CACHE_KEY);
 			const cached = raw ? (JSON.parse(raw) as FrequentSkillsPayload) : null;
 			if (cached && cached.settingsHash === settingsHash) {
-				// Intersect with currently-loaded skills (handles uninstalls)
-				const loadedSet = new Set(nonHiddenNames);
-				return new Set(cached.names.filter(n => loadedSet.has(n)));
+				// Hash encodes catalog identity (skillNames), so a match guarantees
+				// cached.names is a subset of the current non-hidden names — no intersection needed.
+				return new Set(cached.names);
 			}
 		} catch {
 			// cache miss / parse error → recompute
@@ -133,7 +134,7 @@ export function resolveFrequentSkillNames(
 				settingsHash,
 				names: Array.from(frequent),
 			};
-			storage.setCache(FREQUENT_SKILL_CACHE_KEY, JSON.stringify(payload), Math.floor(nowSec) + 86_400);
+			storage.setCache(FREQUENT_SKILL_CACHE_KEY, JSON.stringify(payload), nowSec + 86_400);
 		} catch {
 			// cache write failure is non-fatal
 		}
