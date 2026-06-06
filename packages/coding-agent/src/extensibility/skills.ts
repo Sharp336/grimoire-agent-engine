@@ -39,12 +39,22 @@ let activeSkills: readonly Skill[] = [];
 /**
  * Process-global snapshot of skills the active session loaded.
  * Read by internal URL protocol handlers (skill://).
+ *
+ * KNOWN HAZARD (ARCH-03): two concurrent top-level sessions with different
+ * skill catalogs will race on this global — the second setActiveSkills()
+ * overwrites the first's snapshot, causing session A's frozen skill://
+ * deferredSkillEntries to resolve against session B's catalog. Current
+ * usage is single top-level session so the invariant holds in practice.
+ * Fix: thread a per-session skill catalog into SkillProtocolHandler.resolve()
+ * instead of reading this global.
  */
 export function getActiveSkills(): readonly Skill[] {
 	return activeSkills;
 }
 
-/** Replace the active skill snapshot. Called once per top-level session. */
+/** Replace the active skill snapshot. Called once per top-level session.
+ *
+ * NOTE: see getActiveSkills() comment on the concurrent-session hazard. */
 export function setActiveSkills(value: readonly Skill[]): void {
 	activeSkills = value;
 }
