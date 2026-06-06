@@ -252,6 +252,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 			(isKimiModel && !isOpenCodeProvider) ||
 			(isDeepseekFamily && Boolean(model.reasoning)) ||
 			isXiaomiMimo ||
+			(isMiniMaxHost && Boolean(model.reasoning)) ||
 			((provider === "openrouter" || baseUrl.includes("openrouter.ai")) && Boolean(model.reasoning)),
 		// DeepSeek V4 and Xiaomi MiMo reject synthetic reasoning_content placeholders (".") on tool-call turns.
 		// Kimi and OpenRouter accept them when actual reasoning is unavailable.
@@ -262,8 +263,12 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		vercelGatewayRouting: undefined,
 		interleaved: true,
 		legacy_style: false,
+		extraBody: isDirectDeepseekReasoning
+			? { thinking: { type: "enabled" } }
+			: isMiniMaxHost && Boolean(model.reasoning)
+				? { reasoning_split: true }
+				: undefined,
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
-		extraBody: isDirectDeepseekReasoning ? { thinking: { type: "enabled" } } : undefined,
 		toolStrictMode: isCerebras ? "all_strict" : "mixed",
 	};
 }

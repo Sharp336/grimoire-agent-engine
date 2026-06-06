@@ -1645,26 +1645,25 @@ export function convertMessages(
 					// rather than echoing the upstream field name.
 					// Use reasoningContentField as the target wire field regardless of synthetic flag.
 					// The thinkingSignature is a source metadata, not a target wire format.
-					const signature = nonEmptyThinkingBlocks[0].thinkingSignature;
-				const recognizedFields = ["reasoning_content", "reasoning", "reasoning_text", "reasoning_details"];
-					const wireField = signature && recognizedFields.includes(signature)
-						? (compat.reasoningContentField ?? "reasoning_content")
-						: undefined;
-					if (wireField) {
-						if (wireField === "reasoning_details") {
-							(assistantMsg as any)[wireField] = nonEmptyThinkingBlocks.map(
-								(b, idx) => ({
-									type: "reasoning.text",
-									id: `reasoning-text-${idx + 1}`,
-									format: "MiniMax-response-v1",
-									index: idx,
-									text: b.thinking,
-								}),
-							);
-						} else {
-							(assistantMsg as any)[wireField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
-						}
-					}
+				const signature = nonEmptyThinkingBlocks[0].thinkingSignature;
+				// For reasoning_details (MiniMax), always use the target field.
+				// For other cases, use the configured reasoningContentField (not the streamed field).
+				const wireField = compat.reasoningContentField === "reasoning_details"
+					? "reasoning_details"
+					: (compat.reasoningContentField ?? "reasoning_content");
+				if (wireField === "reasoning_details") {
+					(assistantMsg as any)[wireField] = nonEmptyThinkingBlocks.map(
+						(b, idx) => ({
+							type: "reasoning.text",
+							id: `reasoning-text-${idx + 1}`,
+							format: "MiniMax-response-v1",
+							index: idx,
+							text: b.thinking,
+						}),
+					);
+				} else {
+					(assistantMsg as any)[wireField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
+				}
 				}
 			}
 
@@ -1698,10 +1697,18 @@ export function convertMessages(
 								);
 							} else {
 								(assistantMsg as any)[reasoningField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
+							}
+						}
+					}
+				} else if (nonEmptyThinkingBlocks.length > 0) {
+					// Signature not recognized - convert thinking blocks to text content
+					// instead of silently dropping them
+					const textContent = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n\n");
+					if (textContent.trim()) {
+						assistantMsg.content = assistantMsg.content || [];
+						assistantMsg.content.push({ type: "text", text: textContent });
 					}
 				}
-			}
-			}
 			}
 			const toolCalls = msg.content.filter(b => b.type === "toolCall") as ToolCall[];
 			// Replay reasoning_content on assistant turns for backends that validate

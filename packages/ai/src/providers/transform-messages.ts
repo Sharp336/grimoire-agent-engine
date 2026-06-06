@@ -131,14 +131,14 @@ export function transformMessages<TApi extends Api>(
 					}
 
 					// 2. legacy_style: force OLD OMP handling for this provider (safety valve)
-					// Cast is safe here: `legacy_style`/`interleaved` are optional fields on `OpenAICompat`, not `AnthropicCompat`.
-					const openaiCompat = model.compat as unknown as OpenAICompat | undefined;
-					if (openaiCompat?.legacy_style === true) {
+					// Only applies to OpenAI-compatible models
+					if (model.api === "openai-completions" && model.compat?.legacy_style === true) {
 						return { type: "text" as const, text: sanitized.thinking };
 					}
 
 					// 3. interleaved: false — older reasoning models that don't need reasoning content sent back
-					if (model.reasoning && openaiCompat?.interleaved === false) {
+					// Only applies to OpenAI-compatible reasoning models
+					if (model.api === "openai-completions" && model.reasoning && model.compat?.interleaved === false) {
 						return { type: "text" as const, text: sanitized.thinking };
 					}
 

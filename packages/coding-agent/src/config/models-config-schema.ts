@@ -31,6 +31,8 @@ export const OpenAICompatSchema = z.object({
 	requiresAssistantAfterToolResult: z.boolean().optional(),
 	requiresThinkingAsText: z.boolean().optional(),
 	reasoningContentField: z.enum(["reasoning_content", "reasoning", "reasoning_text", "reasoning_details"]).optional(),
+	interleaved: z.boolean().optional(),
+	legacy_style: z.boolean().optional(),
 	requiresReasoningContentForToolCalls: z.boolean().optional(),
 	allowsSyntheticReasoningContentForToolCalls: z.boolean().optional(),
 	requiresAssistantContentForToolCalls: z.boolean().optional(),

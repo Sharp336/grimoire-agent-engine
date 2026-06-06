@@ -23,6 +23,18 @@
 ### Fixed
 
 - Fixed parallel `function_call` items on the OpenAI Responses API losing arguments on every call except the last when the upstream server interleaves their stream events (observed against llama.cpp and other local Responses-compat hosts). `processResponsesStream` no longer routes `function_call_arguments.{delta,done}`, `output_item.done`, content_part/text/refusal/reasoning events through a singleton `currentItem`/`currentBlock` reference; it now tracks every open item in registries keyed by `output_index` and `item_id` so each event is folded into the matching block and the emitted `toolcall_end` carries the correct `contentIndex`. ([#1880](https://github.com/can1357/oh-my-pi/issues/1880))
+### Added
+
+- Added reasoning content preservation for cross-model conversations. Thinking blocks from reasoning models (DeepSeek, GLM, MiniMax, etc.) are now preserved in their native format when switching between models, instead of being converted to plain text. This allows downstream models to access the full chain-of-thought reasoning from previous turns.
+- Added `reasoning_details` array format support for MiniMax M3 and other models that use the `reasoning_details` field. The format includes structured reasoning text blocks with type, id, format, index, and text fields.
+- Added `interleaved` and `legacy_style` compatibility flags to `OpenAICompat` interface. `interleaved: false` disables reasoning content replay for older models that don't need it. `legacy_style: true` forces the old OMP behavior (converting thinking to text) for providers that haven't been updated yet.
+- Added `reasoningContentField: "reasoning_details"` to the schema, allowing models to specify they use the array format instead of the string format (`reasoning_content`, `reasoning`, `reasoning_text`).
+
+### Fixed
+
+- Fixed MiniMax catalog entries not activating reasoning content replay. Added `requiresReasoningContentForToolCalls: true` and `reasoning_split: true` to MiniMax model detection in `detectOpenAICompat()`.
+- Fixed cross-model signature handling for opaque signatures (e.g., Anthropic's `anthropic-sig-v1`). The code now always uses the target model's configured `reasoningContentField` instead of checking if the source signature is recognized.
+- Fixed test expectation regression where tests expected `reasoning_content` but should expect the configured field. Scoped the override to `reasoning_details` only, preserving old behavior for other fields.
 
 ## [15.9.1] - 2026-06-04
 
