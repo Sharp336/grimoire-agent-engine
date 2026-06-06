@@ -173,9 +173,14 @@ describe("resolveFrequentSkillNames", () => {
 				{ name: "a", hide: false },
 				{ name: "b", hide: false },
 			];
+			// Use wall-clock-relative TTL so the row is live when getCache runs.
+			// T0 + 86_400 is Nov 2023 + 1 day — already expired by the OS clock — so
+			// getCache's `expires_at > strftime('%s','now')` returns null before the
+			// settingsHash comparison is ever reached.
+			const nowSec = Math.floor(Date.now() / 1000);
 			// Write cache with frequentCount: 1
 			const settingsHashOld = JSON.stringify({ frequentCount: 1, alwaysInclude: [], skillNames: ["a", "b"] });
-			storage.setCache(CACHE_KEY, JSON.stringify({ settingsHash: settingsHashOld, names: ["a"] }), T0 + 86_400);
+			storage.setCache(CACHE_KEY, JSON.stringify({ settingsHash: settingsHashOld, names: ["a"] }), nowSec + 86_400);
 
 			// Record enough usage so warmup passes and top-N produces "b" (higher score)
 			for (let i = 0; i < 10; i++) {
@@ -183,12 +188,7 @@ describe("resolveFrequentSkillNames", () => {
 			}
 
 			// Now resolve with frequentCount: 2 — hash won't match
-			const result = resolveFrequentSkillNames(
-				storage,
-				skillList,
-				{ frequentCount: 2, alwaysInclude: [] },
-				T0 + 86_401 * 100,
-			);
+			const result = resolveFrequentSkillNames(storage, skillList, { frequentCount: 2, alwaysInclude: [] }, nowSec);
 			// Both a and b should be in the result (frequentCount=2, 2 skills)
 			expect(result.has("a")).toBe(true);
 			expect(result.has("b")).toBe(true);
@@ -223,12 +223,17 @@ describe("resolveFrequentSkillNames", () => {
 
 	it("corrupt JSON in cache silently falls back to recompute", async () => {
 		await withStorage(async storage => {
-			storage.setCache(CACHE_KEY, "not-valid-json{{{", T0 + 86_400);
+			// Use wall-clock-relative TTL so the corrupt row is live when getCache runs.
+			// T0 + 86_400 is Nov 2023 + 1 day — already expired — so without this fix
+			// getCache returns null from TTL expiry before JSON.parse is ever reached,
+			// leaving the try/catch in resolveFrequentSkillNames untested.
+			const nowSec = Math.floor(Date.now() / 1000);
+			storage.setCache(CACHE_KEY, "not-valid-json{{{", nowSec + 86_400);
 			const skillList = [{ name: "a", hide: false }];
 			const settings = { frequentCount: 5, alwaysInclude: [] };
-			// Should not throw
-			expect(() => resolveFrequentSkillNames(storage, skillList, settings, T0)).not.toThrow();
-			const result = resolveFrequentSkillNames(storage, skillList, settings, T0);
+			// Should not throw — getCache returns the live corrupt row, JSON.parse fires, catch handles it
+			expect(() => resolveFrequentSkillNames(storage, skillList, settings, nowSec)).not.toThrow();
+			const result = resolveFrequentSkillNames(storage, skillList, settings, nowSec);
 			expect(result.has("a")).toBe(true);
 		});
 	});
