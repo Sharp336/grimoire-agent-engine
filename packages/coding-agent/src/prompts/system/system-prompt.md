@@ -125,7 +125,7 @@ ENV
 {{#if showSkillsBlock}}
 <skills>
 {{#each skills}}
-- {{name}}: {{description}}
+- {{escapeXml name}}: {{escapeXml description}}
 {{/each}}
 {{#if skillsRedacted}}
 - ({{deferredSkillCount}} more skills not listed — search with `search_tool_bm25`, then read `skill://<name>` to use one.)
@@ -144,7 +144,7 @@ ENV
 {{#if rules.length}}
 <domain-rules>
 {{#each rules}}
-- {{name}} ({{#list globs join=", "}}{{this}}{{/list}}): {{description}}
+- {{escapeXml name}} ({{#list globs join=", "}}{{escapeXml this}}{{/list}}): {{escapeXml description}}
 {{/each}}
 </domain-rules>
 {{/if}}
