@@ -205,8 +205,26 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 	readonly approval = "read" as const;
 	readonly label = "SearchTools";
 	readonly loadMode = "essential";
+	// Cache description alongside the search index: same invalidation signal
+	// (getDiscoverableToolSearchIndex returns a new reference when the tool list changes),
+	// so we avoid O(tools+skills) re-render on every normalizeTools() call per API turn.
+	#descriptionCache: { index: DiscoverableToolSearchIndex; text: string } | null = null;
 	get description(): string {
-		return renderSearchToolBm25Description(getDiscoverableToolsForDescription(this.session));
+		// Guard: during early SDK init the session proxy exists but the captured AgentSession
+		// is not constructed yet — getDiscoverableToolSearchIndex() would throw from inside the
+		// closure. Swallow and fall through to uncached render (same as getDiscoverableToolsForDescription).
+		let index: DiscoverableToolSearchIndex | undefined;
+		try {
+			index = this.session.getDiscoverableToolSearchIndex?.();
+		} catch {
+			// session not yet fully initialized
+		}
+		if (index && this.#descriptionCache?.index === index) {
+			return this.#descriptionCache.text;
+		}
+		const text = renderSearchToolBm25Description(getDiscoverableToolsForDescription(this.session));
+		if (index) this.#descriptionCache = { index, text };
+		return text;
 	}
 	readonly parameters = searchToolBm25Schema;
 	readonly strict = true;
