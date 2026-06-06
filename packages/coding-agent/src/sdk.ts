@@ -1166,11 +1166,30 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				)
 			: null;
 
+	// Gate the deferred set on read-tool presence, mirroring system-prompt.ts
+	// (`hasRead = tools?.has("read")` → `allVisibleSkills`). Without `read` the
+	// model cannot fetch skill content, so advertising skill:// read URLs via
+	// search_tool_bm25 surfaces tools it can never invoke (ARCH-02).
+	//
+	// The two sites use different tool-name sources but stay equivalent: the
+	// prompt checks the live `tools` Map, while here the registry does not exist
+	// yet (built below), so we mirror the `hasEditTool` getter and check the
+	// requested set. `read` is an essential tool (loadMode "essential"), so it is
+	// present in the Map iff it is requested at init and cannot toggle across
+	// rebuilds — the init-time boolean can never diverge from the per-rebuild
+	// `tools.has("read")`. Undefined `toolNames` means "all defaults" (includes
+	// `read`), so the default-true branch is load-bearing.
+	const requestedToolNamesForSkillGate = options.toolNames
+		? [...new Set(options.toolNames.map(name => name.toLowerCase()))]
+		: undefined;
+	const hasRead = !requestedToolNamesForSkillGate || requestedToolNamesForSkillGate.includes("read");
+
 	// Single owner of the deferred-skill partition. Consumers receive the
 	// pre-computed result — neither rebuildSystemPrompt nor AgentSession re-derive it.
-	const deferredSkillEntries: DiscoverableTool[] = frequentSkillNames
-		? skills.filter(s => !s.hide && !frequentSkillNames.has(s.name)).map(s => getDiscoverableSkill(s))
-		: [];
+	const deferredSkillEntries: DiscoverableTool[] =
+		frequentSkillNames && hasRead
+			? skills.filter(s => !s.hide && !frequentSkillNames.has(s.name)).map(s => getDiscoverableSkill(s))
+			: [];
 
 	// Discover rules and bucket them in one pass to avoid repeated scans over large rule sets.
 	const { ttsrManager, rulebookRules, alwaysApplyRules } = await logger.time("discoverTtsrRules", async () => {
