@@ -190,8 +190,12 @@ CREATE TABLE settings (
 		if (schemaVersion < SCHEMA_VERSION) {
 			this.#migrateSchema(schemaVersion);
 		}
-		this.#db.prepare("DELETE FROM schema_version").run();
-		this.#db.prepare("INSERT INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
+		// Only rewrite schema_version when we own it (equal or older).
+		// A newer version means a newer binary ran this DB; preserve it.
+		if (schemaVersion <= SCHEMA_VERSION) {
+			this.#db.prepare("DELETE FROM schema_version").run();
+			this.#db.prepare("INSERT INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
+		}
 	}
 
 	#migrateSchema(fromVersion: number): void {
