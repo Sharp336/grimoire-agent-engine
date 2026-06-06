@@ -307,7 +307,7 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 					? skillResults.map(result => ({
 							name: result.tool.name,
 							description: result.tool.summary,
-							read: `skill://${result.tool.name}`,
+							read: `skill://${encodeURIComponent(result.tool.name)}`,
 							score: Number(result.score.toFixed(6)),
 						}))
 					: undefined,
