@@ -8,7 +8,6 @@ import { readTableSql } from "./helpers/sqlite-inspect";
 
 const HALF_LIFE_DAYS = 21;
 const HALF_LIFE_MS = HALF_LIFE_DAYS * 86_400 * 1000;
-const THROTTLE_SECS = 300;
 
 describe("AgentStorage skill_usage tracking", () => {
 	let tempDir = "";

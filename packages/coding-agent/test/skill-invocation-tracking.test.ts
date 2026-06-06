@@ -10,13 +10,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../src/config/settings";
-import { InternalUrlRouter } from "../src/internal-urls";
 import { resetActiveSkillsForTests, setActiveSkills } from "../src/extensibility/skills";
-import type { ToolSession } from "../src/tools";
-import { ReadTool } from "../src/tools/read";
+import { InternalUrlRouter } from "../src/internal-urls";
 import { InputController } from "../src/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "../src/modes/types";
 import type { AgentStorage } from "../src/session/agent-storage";
+import type { ToolSession } from "../src/tools";
+import { ReadTool } from "../src/tools/read";
 
 // ---------------------------------------------------------------------------
 // Shared helpers

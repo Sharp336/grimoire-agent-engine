@@ -69,79 +69,99 @@ Loaded via symbolic link.
 
 	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
 
-	it("should discover skills by default and expose them on session.skills", async () => {
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
-			settings: createIsolatedSkillsSettings(),
-		});
+	it(
+		"should discover skills by default and expose them on session.skills",
+		async () => {
+			const { session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				sessionManager: SessionManager.inMemory(),
+				settings: createIsolatedSkillsSettings(),
+			});
 
-		// Skills should be discovered and exposed on the session
-		expect(session.skills.length).toBeGreaterThan(0);
-		expect(session.skills.some((s: Skill) => s.name === "test-skill")).toBe(true);
-	}, { timeout: 30_000 });
+			// Skills should be discovered and exposed on the session
+			expect(session.skills.length).toBeGreaterThan(0);
+			expect(session.skills.some((s: Skill) => s.name === "test-skill")).toBe(true);
+		},
+		{ timeout: 30_000 },
+	);
 
-	it("should discover skills when skill directory is a symlink", async () => {
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
-			settings: createIsolatedSkillsSettings(),
-		});
+	it(
+		"should discover skills when skill directory is a symlink",
+		async () => {
+			const { session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				sessionManager: SessionManager.inMemory(),
+				settings: createIsolatedSkillsSettings(),
+			});
 
-		expect(session.skills.some((s: Skill) => s.name === "symlinked-skill")).toBe(true);
-	}, { timeout: 30_000 });
+			expect(session.skills.some((s: Skill) => s.name === "symlinked-skill")).toBe(true);
+		},
+		{ timeout: 30_000 },
+	);
 
-	it("should still discover project skills when user skills directory is missing", async () => {
-		const userAgentDir = path.join(tempHomeDir, ".omp", "agent");
-		fs.rmSync(path.join(userAgentDir, "skills"), { recursive: true, force: true });
-		fs.writeFileSync(path.join(userAgentDir, "placeholder.txt"), "placeholder");
+	it(
+		"should still discover project skills when user skills directory is missing",
+		async () => {
+			const userAgentDir = path.join(tempHomeDir, ".omp", "agent");
+			fs.rmSync(path.join(userAgentDir, "skills"), { recursive: true, force: true });
+			fs.writeFileSync(path.join(userAgentDir, "placeholder.txt"), "placeholder");
 
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
-			settings: createIsolatedSkillsSettings(),
-		});
+			const { session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				sessionManager: SessionManager.inMemory(),
+				settings: createIsolatedSkillsSettings(),
+			});
 
-		expect(session.skills.some((s: Skill) => s.name === "test-skill")).toBe(true);
-	}, { timeout: 30_000 });
-	it("should have empty skills when options.skills is empty array (--no-skills)", async () => {
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
-			skills: [], // Explicitly empty - like --no-skills
-			settings: createIsolatedSkillsSettings(),
-		});
+			expect(session.skills.some((s: Skill) => s.name === "test-skill")).toBe(true);
+		},
+		{ timeout: 30_000 },
+	);
+	it(
+		"should have empty skills when options.skills is empty array (--no-skills)",
+		async () => {
+			const { session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				sessionManager: SessionManager.inMemory(),
+				skills: [], // Explicitly empty - like --no-skills
+				settings: createIsolatedSkillsSettings(),
+			});
 
-		// session.skills should be empty
-		expect(session.skills).toEqual([]);
-		// No warnings since we didn't discover
-		expect(session.skillWarnings).toEqual([]);
-	}, { timeout: 30_000 });
+			// session.skills should be empty
+			expect(session.skills).toEqual([]);
+			// No warnings since we didn't discover
+			expect(session.skillWarnings).toEqual([]);
+		},
+		{ timeout: 30_000 },
+	);
 
-	it("should use provided skills when options.skills is explicitly set", async () => {
-		const customSkill: Skill = {
-			name: "custom-skill",
-			description: "A custom skill",
-			filePath: "/fake/path/SKILL.md",
-			baseDir: "/fake/path",
-			source: "custom" as const,
-		};
+	it(
+		"should use provided skills when options.skills is explicitly set",
+		async () => {
+			const customSkill: Skill = {
+				name: "custom-skill",
+				description: "A custom skill",
+				filePath: "/fake/path/SKILL.md",
+				baseDir: "/fake/path",
+				source: "custom" as const,
+			};
 
-		const { session } = await createAgentSession({
-			cwd: tempDir,
-			agentDir: tempDir,
-			sessionManager: SessionManager.inMemory(),
-			skills: [customSkill],
-			settings: createIsolatedSkillsSettings(),
-		});
+			const { session } = await createAgentSession({
+				cwd: tempDir,
+				agentDir: tempDir,
+				sessionManager: SessionManager.inMemory(),
+				skills: [customSkill],
+				settings: createIsolatedSkillsSettings(),
+			});
 
-		// session.skills should contain only the provided skill
-		expect(session.skills).toEqual([customSkill]);
-		// No warnings since we didn't discover
-		expect(session.skillWarnings).toEqual([]);
-	}, { timeout: 30_000 });
+			// session.skills should contain only the provided skill
+			expect(session.skills).toEqual([customSkill]);
+			// No warnings since we didn't discover
+			expect(session.skillWarnings).toEqual([]);
+		},
+		{ timeout: 30_000 },
+	);
 });

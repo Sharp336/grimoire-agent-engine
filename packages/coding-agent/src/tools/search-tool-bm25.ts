@@ -236,7 +236,8 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 		// auto mode is activated later by createAgentSession after the full registry exists.
 		// Skill discovery (skills.redactDescriptions) keeps this tool alive even when
 		// tool discovery is "off" — it needs search_tool_bm25 to surface deferred skills.
-		if (resolveEffectiveToolDiscoveryMode(session.settings, 0) === "off" && !session.isSkillDiscoveryEnabled?.()) return null;
+		if (resolveEffectiveToolDiscoveryMode(session.settings, 0) === "off" && !session.isSkillDiscoveryEnabled?.())
+			return null;
 		return supportsToolDiscoveryExecution(session) ? new SearchToolBm25Tool(session) : null;
 	}
 
@@ -296,14 +297,15 @@ export class SearchToolBm25Tool implements AgentTool<typeof searchToolBm25Schema
 			activated_tools: activated,
 			active_selected_tools: getSelectedToolNames(this.session),
 			tools: toolResults.map(result => formatMatch(result.tool, result.score)),
-			skills: skillResults.length > 0
-				? skillResults.map(result => ({
-						name: result.tool.name,
-						description: result.tool.summary,
-						read: `skill://${result.tool.name}`,
-						score: Number(result.score.toFixed(6)),
-					}))
-				: undefined,
+			skills:
+				skillResults.length > 0
+					? skillResults.map(result => ({
+							name: result.tool.name,
+							description: result.tool.summary,
+							read: `skill://${result.tool.name}`,
+							score: Number(result.score.toFixed(6)),
+						}))
+					: undefined,
 		};
 
 		return {

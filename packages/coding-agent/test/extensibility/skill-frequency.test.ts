@@ -2,8 +2,11 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import {
+	computeFrequentSkillNames,
+	resolveFrequentSkillNames,
+} from "@oh-my-pi/pi-coding-agent/extensibility/skill-frequency";
 import { AgentStorage } from "../../src/session/agent-storage";
-import { computeFrequentSkillNames, resolveFrequentSkillNames } from "@oh-my-pi/pi-coding-agent/extensibility/skill-frequency";
 
 const skills = (names: string[]) => names.map(name => ({ name, hide: false }));
 const NOW = 1_700_000_000;
@@ -141,7 +144,10 @@ describe("resolveFrequentSkillNames", () => {
 
 	it("cache hit: matching hash returns cached names without recomputing", async () => {
 		await withStorage(async storage => {
-			const skillList = [{ name: "alpha", hide: false }, { name: "beta", hide: false }];
+			const skillList = [
+				{ name: "alpha", hide: false },
+				{ name: "beta", hide: false },
+			];
 			const settings = { frequentCount: 1, alwaysInclude: [] };
 
 			// Prime the cache with a far-future expiry (SQLite strftime uses OS clock,
@@ -163,7 +169,10 @@ describe("resolveFrequentSkillNames", () => {
 
 	it("cache hit with hash mismatch (different frequentCount) triggers recompute", async () => {
 		await withStorage(async storage => {
-			const skillList = [{ name: "a", hide: false }, { name: "b", hide: false }];
+			const skillList = [
+				{ name: "a", hide: false },
+				{ name: "b", hide: false },
+			];
 			// Write cache with frequentCount: 1
 			const settingsHashOld = JSON.stringify({ frequentCount: 1, alwaysInclude: [], skillNames: ["a", "b"] });
 			storage.setCache(CACHE_KEY, JSON.stringify({ settingsHash: settingsHashOld, names: ["a"] }), T0 + 86_400);
@@ -174,7 +183,12 @@ describe("resolveFrequentSkillNames", () => {
 			}
 
 			// Now resolve with frequentCount: 2 — hash won't match
-			const result = resolveFrequentSkillNames(storage, skillList, { frequentCount: 2, alwaysInclude: [] }, T0 + 86_401 * 100);
+			const result = resolveFrequentSkillNames(
+				storage,
+				skillList,
+				{ frequentCount: 2, alwaysInclude: [] },
+				T0 + 86_401 * 100,
+			);
 			// Both a and b should be in the result (frequentCount=2, 2 skills)
 			expect(result.has("a")).toBe(true);
 			expect(result.has("b")).toBe(true);

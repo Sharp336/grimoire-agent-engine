@@ -347,9 +347,7 @@ FROM model_usage_legacy
 
 			// Decay prior score to now, then add 1
 			const dt = prior ? nowSec - prior.last_used_at : 0;
-			const newScore = prior
-				? prior.decayed_count * Math.exp(-SKILL_USAGE_DECAY_LAMBDA * dt) + 1
-				: 1;
+			const newScore = prior ? prior.decayed_count * Math.exp(-SKILL_USAGE_DECAY_LAMBDA * dt) + 1 : 1;
 
 			this.#upsertSkillUsageStmt.run(skillName, newScore, nowSec, newScore, nowSec);
 		} catch (error) {

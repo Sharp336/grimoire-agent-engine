@@ -5,7 +5,7 @@ import type { RenderResultOptions } from "../../src/extensibility/custom-tools/t
 import { getThemeByName, initTheme, type Theme } from "../../src/modes/theme/theme";
 import type { DiscoverableTool, DiscoverableToolSearchIndex } from "../../src/tool-discovery/tool-index";
 import type { ToolSession } from "../../src/tools/index";
-import { searchToolBm25Renderer, SearchToolBm25Tool } from "../../src/tools/search-tool-bm25";
+import { SearchToolBm25Tool, searchToolBm25Renderer } from "../../src/tools/search-tool-bm25";
 
 let uiTheme: Theme;
 
@@ -192,9 +192,7 @@ describe("SearchToolBm25Tool — skill discovery", () => {
 	});
 
 	it("JSON content includes skill_matches and skill_match_count when skills match", async () => {
-		const tools: DiscoverableTool[] = [
-			skillTool("run-tests", "Execute the project test suite and report results"),
-		];
+		const tools: DiscoverableTool[] = [skillTool("run-tests", "Execute the project test suite and report results")];
 		const session = createGenericSession(tools, true, false);
 		const tool = new SearchToolBm25Tool(session);
 
@@ -226,8 +224,6 @@ describe("SearchToolBm25Tool — skill discovery", () => {
 		const session = createGenericSession(tools, false, false);
 		const tool = new SearchToolBm25Tool(session);
 
-		await expect(tool.execute("call-disabled", { query: "anything" })).rejects.toThrow(
-			"Tool discovery is disabled.",
-		);
+		await expect(tool.execute("call-disabled", { query: "anything" })).rejects.toThrow("Tool discovery is disabled.");
 	});
 });
