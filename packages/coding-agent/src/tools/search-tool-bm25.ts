@@ -387,14 +387,14 @@ export const searchToolBm25Renderer = {
 		if (hasSkillMatches) {
 			lines.push(uiTheme.fg("dim", `Skills (${details.skills!.length}):`));
 			for (const skill of details.skills!) {
-				const truncName = truncateToWidth(skill.name, MATCH_LABEL_LEN);
+				const truncName = truncateToWidth(replaceTabs(skill.name), MATCH_LABEL_LEN);
 				const truncDesc = skill.description
 					? truncateToWidth(replaceTabs(skill.description), MATCH_DESCRIPTION_LEN)
 					: "";
 				const scoreStr = uiTheme.fg("dim", `score ${skill.score.toFixed(3)}`);
 				lines.push(`  ${uiTheme.fg("accent", truncName)} ${scoreStr}`);
 				if (truncDesc) lines.push(`  ${uiTheme.fg("muted", truncDesc)}`);
-				lines.push(`  ${uiTheme.fg("dim", `read: ${skill.read}`)}`);
+				lines.push(`  ${uiTheme.fg("dim", `read: ${replaceTabs(skill.read)}`)}`);
 			}
 		}
 		return new Text(lines.join("\n"), 0, 0);
