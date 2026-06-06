@@ -933,7 +933,6 @@ export class AgentSession {
 
 	#skills: Skill[];
 	#skillWarnings: SkillWarning[];
-	#frequentSkillNames: ReadonlySet<string> | null = null;
 	#deferredSkillEntries: readonly DiscoverableTool[] = [];
 
 	// Custom commands (TypeScript slash commands)
@@ -1129,7 +1128,6 @@ export class AgentSession {
 		this.#extensionRunner = config.extensionRunner;
 		this.#skills = config.skills ?? [];
 		this.#skillWarnings = config.skillWarnings ?? [];
-		this.#frequentSkillNames = config.frequentSkillNames ?? null;
 		this.#deferredSkillEntries = config.deferredSkillEntries ?? [];
 		this.#customCommands = config.customCommands ?? [];
 		this.#skillsSettings = config.skillsSettings;
@@ -3349,6 +3347,10 @@ export class AgentSession {
 	}
 
 	isSkillDiscoveryEnabled(): boolean {
+		// Note: reads live settings each call, but #deferredSkillEntries is frozen at session init.
+		// A mid-session toggle of skills.redactDescriptions therefore changes the gate outcome
+		// without changing the deferred set — which is intentional (prompt caching requires the
+		// frozen set; the live flag controls whether BM25 surfaces the already-computed entries).
 		return this.settings.get("skills.redactDescriptions") === true && this.#deferredSkillEntries.length > 0;
 	}
 
