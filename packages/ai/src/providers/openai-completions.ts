@@ -1670,7 +1670,7 @@ export function convertMessages(
 				// Always use the target model's configured reasoningContentField
 				// Don't rely on thinkingSignature - it may be undefined for plaintext reasoning
 				const reasoningField = compat.reasoningContentField ?? "reasoning_content";
-				
+
 				if (nonEmptyThinkingBlocks.length > 0) {
 					const reasoningContent = (assistantMsg as any)[reasoningField];
 					if (!reasoningContent) {
