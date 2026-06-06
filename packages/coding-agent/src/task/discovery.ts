@@ -82,7 +82,7 @@ async function loadCopilotAgentsFromDir(dir: string, source: AgentSource): Promi
 		.sort((a, b) => a.name.localeCompare(b.name))
 		.map(file => {
 			const filePath = path.join(dir, file.name);
-			const fallbackName = file.name.replace(/\.agent\.md$/, "").replace(/\.md$/, "");
+			const fallbackName = copilotAgentId(file.name);
 			return fs
 				.readFile(filePath, "utf-8")
 				.then(content => parseAgent(filePath, content, source, "warn", fallbackName))
@@ -93,6 +93,11 @@ async function loadCopilotAgentsFromDir(dir: string, source: AgentSource): Promi
 		});
 
 	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
+}
+
+/** Copilot agent ID = filename minus the `.agent.md`/`.md` extension; used for cross-level dedup. */
+function copilotAgentId(fileName: string): string {
+	return fileName.replace(/\.agent\.md$/, "").replace(/\.md$/, "");
 }
 
 /**
@@ -106,14 +111,27 @@ async function loadCopilotAgentsFromDir(dir: string, source: AgentSource): Promi
 async function loadCopilotAgents(cwd: string, home: string): Promise<AgentDefinition[]> {
 	if (!isProviderEnabled("github")) return [];
 
-	const agents: AgentDefinition[] = [];
+	// Copilot dedupes between levels by file ID (filename minus extension) — not the
+	// frontmatter `name` — with the project level winning. Add project agents first and
+	// skip any personal agent whose file ID was already seen.
+	const seenIds = new Set<string>();
+	const result: AgentDefinition[] = [];
+	const add = (loaded: AgentDefinition[]) => {
+		for (const agent of loaded) {
+			const id = agent.filePath ? copilotAgentId(path.basename(agent.filePath)) : agent.name;
+			if (seenIds.has(id)) continue;
+			seenIds.add(id);
+			result.push(agent);
+		}
+	};
+
 	const projectDir = await findNearestCopilotAgentsDir(cwd);
-	if (projectDir) agents.push(...(await loadCopilotAgentsFromDir(projectDir, "project")));
+	if (projectDir) add(await loadCopilotAgentsFromDir(projectDir, "project"));
 
 	const copilotHome = process.env.COPILOT_HOME?.trim() || path.join(home, ".copilot");
-	agents.push(...(await loadCopilotAgentsFromDir(path.join(copilotHome, "agents"), "user")));
+	add(await loadCopilotAgentsFromDir(path.join(copilotHome, "agents"), "user"));
 
-	return agents;
+	return result;
 }
 
 /**

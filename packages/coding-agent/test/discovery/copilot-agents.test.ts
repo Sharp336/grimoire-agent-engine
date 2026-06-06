@@ -126,4 +126,26 @@ describe("discoverAgents — GitHub Copilot agents", () => {
 		expect(found).toBeDefined();
 		expect(found?.description).toBe("Security review specialist");
 	});
+
+	test("dedupes across levels by file id, not frontmatter name (project shadows personal)", async () => {
+		// Same filename in both levels but different frontmatter names: Copilot dedupes by
+		// the file id (reviewer), so the project file shadows the personal one.
+		const proj = path.join(tempProject, ".github", "agents");
+		const user = path.join(tempHome, ".copilot", "agents");
+		fs.mkdirSync(proj, { recursive: true });
+		fs.mkdirSync(user, { recursive: true });
+		fs.writeFileSync(
+			path.join(proj, "reviewer.agent.md"),
+			"---\nname: project-reviewer\ndescription: p\n---\nBody.\n",
+		);
+		fs.writeFileSync(
+			path.join(user, "reviewer.agent.md"),
+			"---\nname: personal-reviewer\ndescription: u\n---\nBody.\n",
+		);
+
+		const { agents } = await discoverAgents(tempProject, tempHome);
+
+		expect(agents.find(a => a.name === "project-reviewer")).toBeDefined();
+		expect(agents.find(a => a.name === "personal-reviewer")).toBeUndefined();
+	});
 });
