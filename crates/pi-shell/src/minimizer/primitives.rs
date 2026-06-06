@@ -2,6 +2,30 @@
 
 use std::collections::BTreeMap;
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapClass {
+	Errors,
+	Warnings,
+	List,
+	Inventory,
+}
+
+impl CapClass {
+	pub const fn lines(self) -> usize {
+		match self {
+			Self::Errors => 160,
+			Self::Warnings => 120,
+			Self::List => 80,
+			Self::Inventory => 40,
+		}
+	}
+}
+
+pub const fn reduced(cap: usize, by: usize) -> usize {
+	let reduced = cap.saturating_sub(by);
+	if reduced == 0 && cap > 0 { 1 } else { reduced }
+}
+
 /// Remove ANSI CSI escape sequences and carriage-return progress frames.
 pub fn strip_ansi(input: &str) -> String {
 	let mut out = String::with_capacity(input.len());
@@ -76,6 +100,14 @@ pub fn head_tail_lines(input: &str, head: usize, tail: usize) -> String {
 		out.push('\n');
 	}
 	out
+}
+
+/// Keep head/tail lines using a named cap class.
+pub fn head_tail_cap(input: &str, class: CapClass) -> String {
+	let cap = class.lines();
+	let head = reduced(cap, cap / 3);
+	let tail = cap - head;
+	head_tail_lines(input, head, tail)
 }
 
 /// Drop lines matching any of the supplied predicates.
@@ -296,6 +328,24 @@ mod tests {
 	fn head_tail_marks_omitted_lines() {
 		let out = head_tail_lines("1\n2\n3\n4\n5\n", 2, 1);
 		assert_eq!(out, "1\n2\n… 2 lines omitted …\n5\n");
+	}
+
+	#[test]
+	fn named_caps_have_nonzero_reductions() {
+		assert_eq!(CapClass::Errors.lines(), 160);
+		assert_eq!(reduced(1, 10), 1);
+		assert_eq!(reduced(0, 10), 0);
+	}
+
+	#[test]
+	fn head_tail_cap_uses_named_budget() {
+		let input = (0..100)
+			.map(|idx| idx.to_string())
+			.collect::<Vec<_>>()
+			.join("\n");
+		let out = head_tail_cap(&input, CapClass::List);
+		assert!(out.contains("lines omitted"));
+		assert!(out.lines().count() <= CapClass::List.lines() + 1);
 	}
 
 	#[test]

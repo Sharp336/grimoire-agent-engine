@@ -136,7 +136,7 @@ export declare class Shell {
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV15_10_0(): void
+export declare function __piNativesV15_8_0(): void
 
 /**
  * Apply conservative pre-execution rewrites to a bash command.
@@ -146,6 +146,8 @@ export declare function __piNativesV15_10_0(): void
  * `pi_shell::fixup`. Synchronous and cheap (one parse pass over the input).
  */
 export declare function applyBashFixups(command: string): BashFixupResult
+
+export declare function applyShellMinimizer(options: ShellMinimizerApplyOptions): MinimizerResult | null
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -544,9 +546,8 @@ export declare function getWorkProfile(lastSeconds: number): WorkProfile
  * Resolves the search root, scans entries, applies glob and optional file-type
  * filters, and optionally streams each accepted match through `on_match`.
  *
- * If `sortByMtime` is enabled with a finite `maxResults`, uncached scans keep
- * only the current top results while traversing instead of collecting the full
- * tree.
+ * If `sortByMtime` is enabled, all matching entries are collected, sorted by
+ * descending mtime, then truncated to `maxResults`.
  *
  * # Errors
  * Returns an error when the search path cannot be resolved, the path is not a
@@ -1049,16 +1050,35 @@ export interface MinimizerOptions {
    * the raw, un-minimized output. Default 4 MiB.
    */
   maxCaptureBytes?: number
+  /**
+   * Source-outline aggressiveness for `cat <source-file>` minimization.
+   * Accepts `"default"` (current behavior) or `"aggressive"` (strip
+   * function/method bodies for ts/tsx/js/jsx/py/rs/go).
+   */
+  sourceOutlineLevel?: string
+  /**
+   * Master switch for the AI-summary filter (W4 / rtk smart). Defaults
+   * to off; only effective when the host crate is built with the
+   * `ai-smart` Cargo feature.
+   */
+  aiSmartEnabled?: boolean
+  /** Provider key for the AI summarizer. Defaults to `"deepseek"`. */
+  aiSmartProvider?: string
+  /**
+   * Kill-switch to fall back to pre-PR legacy behavior for the
+   * always-shrink filters (grep, find, pytest). When unset, defers to
+   * the `OMP_MINIMIZER_LEGACY_FILTERS` env var; default `false`.
+   */
+  legacyFilters?: boolean
 }
 
 /**
  * Telemetry for a single minimization.
  *
- * Surfaced when the minimizer actually rewrote the command's output. The
- * session layer is expected to persist `original_text` via its
- * `ArtifactManager`, splice the resulting `artifact://<id>` reference
- * into `text`, and replace any previously streamed raw output with the
- * minimized text.
+ * Surfaced when the minimizer rewrote output or emitted a reason-only
+ * miss label. The session layer should persist `original_text` only for
+ * actual rewrites; reason-only records keep `text` unchanged and must not
+ * trigger artifact persistence.
  */
 export interface MinimizerResult {
   /**
@@ -1249,6 +1269,13 @@ export interface ShellExecuteOptions {
   minimizer?: MinimizerOptions
   /** Abort signal for cancelling the operation. */
   signal?: unknown
+}
+
+export interface ShellMinimizerApplyOptions {
+  command: string
+  captured: string
+  exitCode?: number
+  minimizer?: MinimizerOptions
 }
 
 /** Options for configuring a persistent shell session. */
