@@ -13,44 +13,48 @@ function makeModel<TApi extends Api>(overrides: Partial<Model<TApi>> = {}): Mode
 	} as Model<TApi>;
 }
 
-	const dummyUsage = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
+const dummyUsage = {
+	input: 0,
+	output: 0,
+	cacheRead: 0,
+	cacheWrite: 0,
+	totalTokens: 0,
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+};
 
-	function assistantWithThinking(thinking: string, signature?: string): AssistantMessage {
-		return {
-			role: "assistant",
-			content: [
-				{ type: "thinking", thinking, thinkingSignature: signature },
-				{ type: "text", text: "hello" },
-			],
-			provider: "other-provider",
-			api: "openai-completions",
-			model: "other-model",
-			stopReason: "stop",
-			timestamp: Date.now(),
-			usage: dummyUsage,
-		};
-	}
+function assistantWithThinking(thinking: string, signature?: string): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [
+			{ type: "thinking", thinking, thinkingSignature: signature },
+			{ type: "text", text: "hello" },
+		],
+		provider: "other-provider",
+		api: "openai-completions",
+		model: "other-model",
+		stopReason: "stop",
+		timestamp: Date.now(),
+		usage: dummyUsage,
+	};
+}
 
-	function assistantWithRedactedThinking(): AssistantMessage {
-		return {
-			role: "assistant",
-			content: [
-				{ type: "redactedThinking", data: "encrypted-blob" },
-				{ type: "text", text: "hello" },
-			],
-			provider: "other-provider",
-			api: "anthropic-messages",
-			model: "other-model",
-			stopReason: "stop",
-			timestamp: Date.now(),
-			usage: dummyUsage,
-		};
-	}
-
-
+function assistantWithRedactedThinking(): AssistantMessage {
+	return {
+		role: "assistant",
+		content: [
+			{ type: "redactedThinking", data: "encrypted-blob" },
+			{ type: "text", text: "hello" },
+		],
+		provider: "other-provider",
+		api: "anthropic-messages",
+		model: "other-model",
+		stopReason: "stop",
+		timestamp: Date.now(),
+		usage: dummyUsage,
+	};
+}
 
 describe("transformMessages — cross-model thinking preservation", () => {
-
 	it("converts thinking to text for non-reasoning model", () => {
 		const messages: Message[] = [assistantWithThinking("my reasoning", "sig1")];
 		const model = makeModel<"openai-completions">({ api: "openai-completions" });
@@ -296,8 +300,7 @@ describe("transformMessages — legacy_style safety valve", () => {
 	});
 });
 
-describe("transformMessages — mid-session model switch", () => {
-});
+describe("transformMessages — mid-session model switch", () => {});
 
 describe("transformMessages — mid-session model switch", () => {
 	function multiTurnHistory(): Message[] {
@@ -306,12 +309,16 @@ describe("transformMessages — mid-session model switch", () => {
 			{
 				role: "assistant",
 				content: [
-					{ type: "thinking", thinking: "I need to call the weather tool for SF.", thinkingSignature: "anthropic-sig-v1" },
+					{
+						type: "thinking",
+						thinking: "I need to call the weather tool for SF.",
+						thinkingSignature: "anthropic-sig-v1",
+					},
 					{
 						type: "toolCall",
 						id: "call_1",
 						name: "get_weather",
-						arguments: {"location":"San Francisco"},
+						arguments: { location: "San Francisco" },
 						customWireName: "get_weather",
 						toolArguments: '{"location":"San Francisco"}',
 						toolDefinition: { name: "get_weather" },
@@ -323,11 +330,22 @@ describe("transformMessages — mid-session model switch", () => {
 				stopReason: "toolUse",
 				timestamp: 1000,
 			} as AssistantMessage,
-			{ role: "toolResult", toolCallId: "call_1", toolName: "get_weather", content: [{ type: "text", text: "24°C, sunny" }], isError: false, timestamp: 1000 } as Message,
+			{
+				role: "toolResult",
+				toolCallId: "call_1",
+				toolName: "get_weather",
+				content: [{ type: "text", text: "24°C, sunny" }],
+				isError: false,
+				timestamp: 1000,
+			} as Message,
 			{
 				role: "assistant",
 				content: [
-					{ type: "thinking", thinking: "The tool returned 24°C sunny. I should present this clearly.", thinkingSignature: "anthropic-sig-v2" },
+					{
+						type: "thinking",
+						thinking: "The tool returned 24°C sunny. I should present this clearly.",
+						thinkingSignature: "anthropic-sig-v2",
+					},
 					{ type: "text", text: "The weather in SF is 24°C and sunny." },
 				],
 				provider: "anthropic-provider",
@@ -388,7 +406,9 @@ describe("transformMessages — mid-session model switch", () => {
 		const assistant1 = result[1] as AssistantMessage;
 		const assistant2 = result[3] as AssistantMessage;
 		expect(assistant1.content.some(b => b.type === "thinking")).toBe(false);
-		expect(assistant1.content.some(b => b.type === "text" && b.text.includes("I need to call the weather tool"))).toBe(true);
+		expect(
+			assistant1.content.some(b => b.type === "text" && b.text.includes("I need to call the weather tool")),
+		).toBe(true);
 		expect(assistant2.content.some(b => b.type === "thinking")).toBe(false);
 		expect(assistant2.content.some(b => b.type === "text" && b.text.includes("The tool returned 24°C"))).toBe(true);
 	});
@@ -425,9 +445,7 @@ describe("transformMessages — mid-session model switch", () => {
 			{ role: "user", content: "Follow up" } as Message,
 			{
 				role: "assistant",
-				content: [
-					{ type: "text", text: "<think>\nMiniMax thinking\n</think>\nMiniMax response" },
-				],
+				content: [{ type: "text", text: "<think>\nMiniMax thinking\n</think>\nMiniMax response" }],
 				provider: "minimax-china",
 				api: "openai-completions",
 				model: "MiniMax-M3",
@@ -502,10 +520,13 @@ describe("transformMessages — mixed reasoning providers", () => {
 			minimaxAssistant("MiniMax reasoned about this"),
 			{ role: "user", content: "follow up" } as Message,
 		];
-		const result = transformMessages(messages, makeModel<"anthropic-messages">({
-			id: "claude-sonnet-4-20250514",
-			api: "anthropic-messages",
-		}));
+		const result = transformMessages(
+			messages,
+			makeModel<"anthropic-messages">({
+				id: "claude-sonnet-4-20250514",
+				api: "anthropic-messages",
+			}),
+		);
 		const assistant = result[1] as AssistantMessage;
 		const thinking = assistant.content.find(b => b.type === "thinking");
 		expect(thinking).toBeDefined();
@@ -518,11 +539,14 @@ describe("transformMessages — mixed reasoning providers", () => {
 			deepseekAssistant("DeepSeek chain of thought"),
 			{ role: "user", content: "follow up" } as Message,
 		];
-		const result = transformMessages(messages, makeModel<"openai-completions">({
-			id: "MiniMax-M3",
-			api: "openai-completions",
-			reasoning: true,
-		}));
+		const result = transformMessages(
+			messages,
+			makeModel<"openai-completions">({
+				id: "MiniMax-M3",
+				api: "openai-completions",
+				reasoning: true,
+			}),
+		);
 		const assistant = result[1] as AssistantMessage;
 		const thinking = assistant.content.find(b => b.type === "thinking");
 		expect(thinking).toBeDefined();
@@ -534,11 +558,14 @@ describe("transformMessages — mixed reasoning providers", () => {
 			anthropicAssistant("Claude reasoned about this"),
 			{ role: "user", content: "follow up" } as Message,
 		];
-		const result = transformMessages(messages, makeModel<"openai-completions">({
-			id: "deepseek-r1",
-			api: "openai-completions",
-			reasoning: true,
-		}));
+		const result = transformMessages(
+			messages,
+			makeModel<"openai-completions">({
+				id: "deepseek-r1",
+				api: "openai-completions",
+				reasoning: true,
+			}),
+		);
 		const assistant = result[1] as AssistantMessage;
 		const thinking = assistant.content.find(b => b.type === "thinking");
 		expect(thinking).toBeDefined();
@@ -554,11 +581,14 @@ describe("transformMessages — mixed reasoning providers", () => {
 			{ role: "user", content: "q3" } as Message,
 		];
 		// Now switching to MiniMax — all thinking blocks should be preserved
-		const result = transformMessages(messages, makeModel<"openai-completions">({
-			id: "MiniMax-M3",
-			api: "openai-completions",
-			reasoning: true,
-		}));
+		const result = transformMessages(
+			messages,
+			makeModel<"openai-completions">({
+				id: "MiniMax-M3",
+				api: "openai-completions",
+				reasoning: true,
+			}),
+		);
 		const a1 = result[1] as AssistantMessage;
 		const a2 = result[3] as AssistantMessage;
 		expect(a1.content.find(b => b.type === "thinking")).toBeDefined();
@@ -575,11 +605,14 @@ describe("transformMessages — mixed reasoning providers", () => {
 			{ role: "user", content: "q3" } as Message,
 		];
 		// Switching to DeepSeek with reasoning: true
-		const result = transformMessages(messages, makeModel<"openai-completions">({
-			id: "deepseek-r1",
-			api: "openai-completions",
-			reasoning: true,
-		}));
+		const result = transformMessages(
+			messages,
+			makeModel<"openai-completions">({
+				id: "deepseek-r1",
+				api: "openai-completions",
+				reasoning: true,
+			}),
+		);
 		const a1 = result[1] as AssistantMessage;
 		const a2 = result[3] as AssistantMessage;
 		expect(a1.content.find(b => b.type === "thinking")).toBeDefined();
@@ -593,11 +626,14 @@ describe("transformMessages — mixed reasoning providers", () => {
 			minimaxAssistant("MiniMax reasoning"),
 			{ role: "user", content: "follow up" } as Message,
 		];
-		const result = transformMessages(messages, makeModel<"openai-completions">({
-			id: "gpt-4o",
-			api: "openai-completions",
-			// no reasoning: true
-		}));
+		const result = transformMessages(
+			messages,
+			makeModel<"openai-completions">({
+				id: "gpt-4o",
+				api: "openai-completions",
+				// no reasoning: true
+			}),
+		);
 		const assistant = result[1] as AssistantMessage;
 		expect(assistant.content.some(b => b.type === "thinking")).toBe(false);
 		expect(assistant.content.some(b => b.type === "text" && b.text.includes("MiniMax reasoning"))).toBe(true);
@@ -608,10 +644,13 @@ describe("transformMessages — mixed reasoning providers", () => {
 			deepseekAssistant("DeepSeek chain of thought"),
 			{ role: "user", content: "follow up" } as Message,
 		];
-		const result = transformMessages(messages, makeModel<"openai-completions">({
-			id: "gpt-4o",
-			api: "openai-completions",
-		}));
+		const result = transformMessages(
+			messages,
+			makeModel<"openai-completions">({
+				id: "gpt-4o",
+				api: "openai-completions",
+			}),
+		);
 		const assistant = result[1] as AssistantMessage;
 		expect(assistant.content.some(b => b.type === "thinking")).toBe(false);
 		expect(assistant.content.some(b => b.type === "text" && b.text.includes("DeepSeek chain of thought"))).toBe(true);

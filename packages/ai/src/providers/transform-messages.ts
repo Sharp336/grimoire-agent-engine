@@ -145,14 +145,17 @@ export function transformMessages<TApi extends Api>(
 
 					// 2. legacy_style: force OLD OMP handling for this provider (safety valve)
 					// Only applies to OpenAI-compatible models
-					if (model.api === "openai-completions" && model.compat?.legacy_style === true) {
-						return { type: "text" as const, text: sanitized.thinking };
-					}
+					if (model.api === "openai-completions") {
+						const openaiCompat = model.compat as OpenAICompat | undefined;
+						if (openaiCompat?.legacy_style === true) {
+							return { type: "text" as const, text: sanitized.thinking };
+						}
 
-					// 3. interleaved: false — older reasoning models that don't need reasoning content sent back
-					// Only applies to OpenAI-compatible reasoning models
-					if (model.api === "openai-completions" && model.reasoning && model.compat?.interleaved === false) {
-						return { type: "text" as const, text: sanitized.thinking };
+						// 3. interleaved: false — older reasoning models that don't need reasoning content sent back
+						// Only applies to OpenAI-compatible reasoning models
+						if (model.reasoning && openaiCompat?.interleaved === false) {
+							return { type: "text" as const, text: sanitized.thinking };
+						}
 					}
 
 					// 4. Anthropic-compatible APIs: preserve thinking blocks (they understand them natively)
@@ -215,7 +218,6 @@ export function transformMessages<TApi extends Api>(
 
 				return block;
 			});
-
 
 			return {
 				...assistantMsg,

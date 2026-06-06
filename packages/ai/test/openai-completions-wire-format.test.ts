@@ -1,7 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { convertMessages } from "../src/providers/openai-completions";
-import type { AssistantMessage, Context, Message } from "../src/types";
 import type { ResolvedOpenAICompat } from "../src/providers/openai-completions-compat";
+import type { AssistantMessage, Context, Message } from "../src/types";
+
 const compat: ResolvedOpenAICompat = {
 	supportsStore: true,
 	supportsDeveloperRole: true,
@@ -44,7 +45,14 @@ const assistantMessage = (blocks: AssistantMessage["content"] | string): Assista
 	api: "openai-completions",
 	model: "test-model",
 	stopReason: "stop",
-	usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
+	usage: {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	},
 	timestamp: 0,
 	responseId: undefined,
 	providerPayload: undefined,
@@ -118,11 +126,7 @@ describe("convertMessages — wire format for reasoning_details", () => {
 
 	it("skips synthetic placeholder for reasoning_details array", () => {
 		const compatWithSynthetic = { ...compat, allowsSyntheticReasoningContentForToolCalls: true };
-		const messages = [
-			assistantMessage([
-				{ type: "text", text: "result" },
-			]),
-		];
+		const messages = [assistantMessage([{ type: "text", text: "result" }])];
 		const result = convertMessages(model, makeCtx(messages), compatWithSynthetic);
 		const assistant = result[0] as any;
 		expect(assistant.reasoning_details).toBeUndefined();
@@ -152,9 +156,7 @@ describe("convertMessages — wire format for reasoning_content string", () => {
 describe("convertMessages — onConverted callback", () => {
 	it("fires onConverted with converted messages", () => {
 		const messages = [
-			assistantMessage([
-				{ type: "thinking", thinking: "Step 1", thinkingSignature: "reasoning_content" },
-			]),
+			assistantMessage([{ type: "thinking", thinking: "Step 1", thinkingSignature: "reasoning_content" }]),
 		];
 		let captured: any[] | undefined;
 		convertMessages(model, makeCtx(messages), compat, converted => {

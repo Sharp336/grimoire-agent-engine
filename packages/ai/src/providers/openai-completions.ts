@@ -435,7 +435,6 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 				client,
 				copilotPremiumRequests,
 				baseUrl,
-				requestHeaders,
 				getCapturedErrorResponse: captureErrorResponse,
 				clearCapturedErrorResponse,
 			} = await createClient(
@@ -475,12 +474,12 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 					model: model.id,
 					method: "POST",
 					url: `${baseUrl}/chat/completions`,
-				body: params,
-			};
-			const requestOptions =
-				requestTimeoutMs === undefined
-					? { signal: requestSignal }
-					: { signal: requestSignal, timeout: requestTimeoutMs };
+					body: params,
+				};
+				const requestOptions =
+					requestTimeoutMs === undefined
+						? { signal: requestSignal }
+						: { signal: requestSignal, timeout: requestTimeoutMs };
 				let requestTimeout: NodeJS.Timeout | undefined;
 				if (requestTimeoutMs !== undefined) {
 					requestTimeout = setTimeout(
@@ -1645,36 +1644,34 @@ export function convertMessages(
 					// rather than echoing the upstream field name.
 					// Use reasoningContentField as the target wire field regardless of synthetic flag.
 					// The thinkingSignature is a source metadata, not a target wire format.
-				const signature = nonEmptyThinkingBlocks[0].thinkingSignature;
-				// For reasoning_details (MiniMax), always use the target field.
-				// For other cases, use the configured reasoningContentField (not the streamed field).
-				const wireField = compat.reasoningContentField === "reasoning_details"
-					? "reasoning_details"
-					: (compat.reasoningContentField ?? "reasoning_content");
-				if (wireField === "reasoning_details") {
-					(assistantMsg as any)[wireField] = nonEmptyThinkingBlocks.map(
-						(b, idx) => ({
+					// For reasoning_details (MiniMax), always use the target field.
+					// For other cases, use the configured reasoningContentField (not the streamed field).
+					const wireField =
+						compat.reasoningContentField === "reasoning_details"
+							? "reasoning_details"
+							: (compat.reasoningContentField ?? "reasoning_content");
+					if (wireField === "reasoning_details") {
+						(assistantMsg as any)[wireField] = nonEmptyThinkingBlocks.map((b, idx) => ({
 							type: "reasoning.text",
 							id: `reasoning-text-${idx + 1}`,
 							format: "MiniMax-response-v1",
 							index: idx,
 							text: b.thinking,
-						}),
-					);
-				} else {
-					(assistantMsg as any)[wireField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
-				}
+						}));
+					} else {
+						(assistantMsg as any)[wireField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
+					}
 				}
 			}
 
-
 			if (compat.requiresReasoningContentForToolCalls) {
 				const streamedReasoningField = nonEmptyThinkingBlocks[0]?.thinkingSignature;
-			const recognizedFields = ["reasoning_content", "reasoning", "reasoning_text", "reasoning_details"];
+				const recognizedFields = ["reasoning_content", "reasoning", "reasoning_text", "reasoning_details"];
 				// Always use reasoningContentField as the target wire field, regardless of synthetic flag.
-				const reasoningField = streamedReasoningField && recognizedFields.includes(streamedReasoningField)
-					? (compat.reasoningContentField ?? "reasoning_content")
-					: undefined;
+				const reasoningField =
+					streamedReasoningField && recognizedFields.includes(streamedReasoningField)
+						? (compat.reasoningContentField ?? "reasoning_content")
+						: undefined;
 				if (reasoningField) {
 					const reasoningContent = (assistantMsg as any)[reasoningField];
 					if (!reasoningContent) {
@@ -1686,15 +1683,13 @@ export function convertMessages(
 							(assistantMsg as any)[reasoningField] = reasoningText;
 						} else if (nonEmptyThinkingBlocks.length > 0) {
 							if (reasoningField === "reasoning_details") {
-								(assistantMsg as any)[reasoningField] = nonEmptyThinkingBlocks.map(
-									(b, idx) => ({
-										type: "reasoning.text",
-										id: `reasoning-text-${idx + 1}`,
-										format: "MiniMax-response-v1",
-										index: idx,
-										text: b.thinking,
-									}),
-								);
+								(assistantMsg as any)[reasoningField] = nonEmptyThinkingBlocks.map((b, idx) => ({
+									type: "reasoning.text",
+									id: `reasoning-text-${idx + 1}`,
+									format: "MiniMax-response-v1",
+									index: idx,
+									text: b.thinking,
+								}));
 							} else {
 								(assistantMsg as any)[reasoningField] = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n");
 							}
@@ -1705,8 +1700,11 @@ export function convertMessages(
 					// instead of silently dropping them
 					const textContent = nonEmptyThinkingBlocks.map(b => b.thinking).join("\n\n");
 					if (textContent.trim()) {
-						assistantMsg.content = assistantMsg.content || [];
-						assistantMsg.content.push({ type: "text", text: textContent });
+						if (Array.isArray(assistantMsg.content)) {
+							assistantMsg.content.push({ type: "text", text: textContent });
+						} else {
+							assistantMsg.content = [{ type: "text", text: textContent }];
+						}
 					}
 				}
 			}
@@ -1760,15 +1758,13 @@ export function convertMessages(
 					if (signature && recognizedFields.includes(signature)) {
 						const reasoningField = compat.reasoningContentField ?? "reasoning_content";
 						if (reasoningField === "reasoning_details") {
-							(assistantMsg as any)[reasoningField] = allThinkingBlocks.map(
-								(b, idx) => ({
-									type: "reasoning.text",
-									id: `reasoning-text-${idx + 1}`,
-									format: "MiniMax-response-v1",
-									index: idx,
-									text: b.thinking,
-								}),
-							);
+							(assistantMsg as any)[reasoningField] = allThinkingBlocks.map((b, idx) => ({
+								type: "reasoning.text",
+								id: `reasoning-text-${idx + 1}`,
+								format: "MiniMax-response-v1",
+								index: idx,
+								text: b.thinking,
+							}));
 						} else {
 							(assistantMsg as any)[reasoningField] = allThinkingBlocks.map(b => b.thinking).join("\n");
 						}

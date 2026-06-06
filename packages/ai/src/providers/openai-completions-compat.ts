@@ -265,7 +265,7 @@ export function detectOpenAICompat(model: Model<"openai-completions">, resolvedB
 		legacy_style: false,
 		extraBody: isDirectDeepseekReasoning
 			? { thinking: { type: "enabled" } }
-			: isMiniMaxHost && Boolean(model.reasoning)
+			: isMiniMaxHost && model.reasoning
 				? { reasoning_split: true }
 				: undefined,
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),

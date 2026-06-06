@@ -2463,7 +2463,6 @@ function isNativeAnthropicSignature(signature: string | undefined): boolean {
 	return true;
 }
 
-
 function buildToolResultBlock(model: Model<"anthropic-messages">, msg: ToolResultMessage): ContentBlockParam {
 	const block: ContentBlockParam = {
 		type: "tool_result",
@@ -2534,31 +2533,31 @@ export function convertAnthropicMessages(
 						text: block.text.toWellFormed(),
 					});
 				} else if (block.type === "thinking") {
-				if (hasSignedThinking) {
-					if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
-						if (block.thinking.trim().length === 0) continue;
+					if (hasSignedThinking) {
+						if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
+							if (block.thinking.trim().length === 0) continue;
+							blocks.push({
+								type: "text",
+								text: block.thinking.toWellFormed(),
+							});
+							continue;
+						}
+						// Only send native Anthropic signatures; convert foreign signatures to text
+						if (!isNativeAnthropicSignature(block.thinkingSignature)) {
+							if (block.thinking.trim().length === 0) continue;
+							blocks.push({
+								type: "text",
+								text: block.thinking.toWellFormed(),
+							});
+							continue;
+						}
 						blocks.push({
-							type: "text",
-							text: block.thinking.toWellFormed(),
+							type: "thinking",
+							thinking: block.thinking,
+							signature: block.thinkingSignature,
 						});
 						continue;
 					}
-					// Only send native Anthropic signatures; convert foreign signatures to text
-					if (!isNativeAnthropicSignature(block.thinkingSignature)) {
-						if (block.thinking.trim().length === 0) continue;
-						blocks.push({
-							type: "text",
-							text: block.thinking.toWellFormed(),
-						});
-						continue;
-					}
-					blocks.push({
-						type: "thinking",
-						thinking: block.thinking,
-						signature: block.thinkingSignature,
-					});
-					continue;
-				}
 					if (block.thinking.trim().length === 0) continue;
 					if (!block.thinkingSignature || block.thinkingSignature.trim().length === 0) {
 						if (isNonSigningAnthropicEndpoint(model)) {

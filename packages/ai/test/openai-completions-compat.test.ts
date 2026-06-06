@@ -564,7 +564,9 @@ describe("openai-completions compatibility", () => {
 		expect(assistant).toBeDefined();
 		const assistantObject = toObject(assistant);
 		expect(assistantObject).toBeDefined();
-		expect(assistantObject ? Reflect.get(assistantObject, "reasoning_content") : undefined).toBe("inspect tool output");
+		expect(assistantObject ? Reflect.get(assistantObject, "reasoning_content") : undefined).toBe(
+			"inspect tool output",
+		);
 		expect(assistantObject ? Reflect.get(assistantObject, "reasoning_text") : undefined).toBeUndefined();
 	});
 });
