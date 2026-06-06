@@ -54,6 +54,13 @@ interface SnapshotCarrier {
 interface FinalizableBlock {
 	isTranscriptBlockFinalized?(): boolean;
 	/**
+	 * Live blocks may opt out of native scrollback commit promotion even when
+	 * their current frame diff looks append-shaped. Replacement thinking
+	 * renderers own previously rendered rows and can re-layout them on later
+	 * chunks, so those rows must stay in the repaintable live region.
+	 */
+	isTranscriptBlockAppendOnly?(): boolean;
+	/**
 	 * Monotonic content version for blocks that can still mutate *after*
 	 * reporting finalized (e.g. `AssistantMessageComponent`: the inline error
 	 * restored at the next turn's `agent_start`, late tool-result images). The
@@ -73,6 +80,10 @@ function isBlockFinalized(child: Component): boolean {
 function getBlockVersion(child: Component): number | undefined {
 	const fn = (child as Component & FinalizableBlock).getTranscriptBlockVersion;
 	return fn ? fn.call(child) : undefined;
+}
+function canCommitLiveBlock(child: Component): boolean {
+	const fn = (child as Component & FinalizableBlock).isTranscriptBlockAppendOnly;
+	return fn ? fn.call(child) : true;
 }
 
 // A "plain blank" row is empty or whitespace-only with no ANSI bytes. It marks
@@ -542,6 +553,7 @@ export class TranscriptContainer
 			const previousSnapshot = child[kSnapshot];
 			const previous = previousSegments[i];
 			const finalized = isBlockFinalized(child);
+			const liveCommitAllowed = finalized || canCommitLiveBlock(child);
 			const version = getBlockVersion(child);
 			const committedReusable =
 				previous !== undefined &&
@@ -572,7 +584,7 @@ export class TranscriptContainer
 					previous.generation === this.#generation);
 			const contribution = reusable ? previous.contribution : stripPlainBlankEdges(raw);
 			let liveCommitState: LiveCommitState | undefined;
-			if (i >= liveStartIndex && !finalized) {
+			if (i >= liveStartIndex && !finalized && liveCommitAllowed) {
 				liveCommitState = deriveLiveCommitState(previousSnapshot, contribution, width, this.#generation);
 			}
 			// Cache the latest contribution as the next frame's diff input.
@@ -644,7 +656,11 @@ export class TranscriptContainer
 
 			const blockStart = row + sep;
 			if (i >= liveStartIndex && commitSafeOpen) {
-				const safeLength = finalized ? contribution.length : (liveCommitState?.safeLength ?? 0);
+				const safeLength = finalized
+					? contribution.length
+					: liveCommitAllowed
+						? (liveCommitState?.safeLength ?? 0)
+						: 0;
 				if (safeLength > 0) {
 					this.#nativeScrollbackCommitSafeEnd = blockStart + safeLength;
 				}

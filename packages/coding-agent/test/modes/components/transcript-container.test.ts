@@ -187,6 +187,48 @@ describe("TranscriptContainer", () => {
 		expect(container.getNativeScrollbackLiveRegionStart()).toBe(3);
 	});
 
+	it("keeps replacement-rendered assistant thinking out of commit-safe scrollback", () => {
+		const defaultContainer = new TranscriptContainer();
+		const defaultAssistant = new AssistantMessageComponent();
+		defaultAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "Append" }],
+			}),
+		);
+		defaultContainer.addChild(defaultAssistant);
+		defaultContainer.render(80);
+		defaultAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "Append-only thinking." }],
+			}),
+		);
+		defaultContainer.render(80);
+		expect(defaultContainer.getNativeScrollbackCommitSafeEnd()).toBeGreaterThan(0);
+
+		const replacementContainer = new TranscriptContainer();
+		const replacementAssistant = new AssistantMessageComponent(undefined, false, undefined, [
+			({ text }) => ({ type: "replace", component: new Text(`redacted${".".repeat(text.length)}`, 1, 0) }),
+		]);
+		replacementAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "x" }],
+			}),
+		);
+		replacementContainer.addChild(replacementAssistant);
+		replacementContainer.render(80);
+		replacementAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "xx" }],
+			}),
+		);
+
+		const rendered = plain(replacementContainer.render(80));
+		expect(rendered).toContain("redacted..");
+		expect(rendered).not.toContain("xx");
+		expect(replacementContainer.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(replacementContainer.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
+	});
+
 	it("keeps an unfinalized block below the seam when a finalized block is appended below it", () => {
 		const container = new TranscriptContainer();
 		// A foreground tool whose args are still streaming (no result yet).
