@@ -183,7 +183,7 @@ Extension UI bridge:
 - Tracks pending dialog requests by generated `id` and resolves them when matching `extension_ui_response` arrives on stdin.
 - Supports timeout/abort-aware dialog defaults for `select`, `confirm`, and `input`.
 - Fire-and-forget UI notifications (`notify`, `setStatus`, `setWidget`, `setTitle`, `set_editor_text`) are emitted as requests without expected responses.
-- TUI-specific operations are explicitly unsupported in RPC mode (`setFooter`, `setHeader`, theme switching, custom editor components).
+- TUI-specific operations are explicitly unsupported in RPC mode (`setStatusSegment`, `setFooter`, `setHeader`, theme switching, custom editor components).
 
 Shutdown behavior:
 
