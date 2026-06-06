@@ -37,10 +37,17 @@ function getLatestSurvivingAssistantIndex(messages: readonly Message[]): number 
 /**
  * Detect official provider APIs by baseUrl. These use signatures/obfuscation
  * for reasoning and require original OMP handling — we must not interfere.
+ * 
+ * Official APIs (api.openai.com, api.anthropic.com) encrypt or sign reasoning content
+ * for security reasons. When targeting these APIs, we convert thinking blocks to plain text
+ * to avoid sending invalid signatures or attempting to decrypt content we don't have keys for.
+ * 
+ * @param model - The target model to check
+ * @returns true if the model's baseUrl points to an official API endpoint
  */
 function isOfficialApi(model: Model): boolean {
 	const url = (model.baseUrl || "").toLowerCase();
-	return url.includes("api.anthropic.com") || url.includes("api.openai.com");
+	return url.includes("api.openai.com") || url.includes("api.anthropic.com");
 }
 
 /**

@@ -256,6 +256,7 @@ describe("Cross-model reasoning preservation", () => {
 			const messages = convertMessages(model, { messages: transformed }, model.compat!);
 			const assistantMsg = messages.find(m => m.role === "assistant");
 
+			// Thinking blocks are concatenated with newline separator
 			expect((assistantMsg as any).reasoning_content).toBe("First thought\nSecond thought");
 		});
 
