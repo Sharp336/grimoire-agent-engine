@@ -912,7 +912,11 @@ function renderAgentResult(result: SingleResult, isLast: boolean, expanded: bool
 		);
 	}
 	// Check for review result (yield with review schema + report_finding)
-	const completeData = result.extractedToolData?.yield as Array<{ data: unknown }> | undefined;
+	const completeData = Array.isArray(result.extractedToolData?.yield)
+		? (result.extractedToolData?.yield as Array<{ data: unknown }>)
+		: result.extractedToolData?.yield != null
+			? ([result.extractedToolData.yield] as Array<{ data: unknown }>)
+			: undefined;
 	const reportFindingData = normalizeReportFindings(result.extractedToolData?.report_finding);
 
 	// Extract review verdict from yield tool's data field if it matches SubmitReviewDetails
