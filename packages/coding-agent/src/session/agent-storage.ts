@@ -181,7 +181,7 @@ CREATE TABLE settings (
 			| { version?: number }
 			| undefined;
 		const schemaVersion = typeof versionRow?.version === "number" ? versionRow.version : 0;
-		if (versionRow?.version !== undefined && versionRow.version !== SCHEMA_VERSION) {
+		if (versionRow?.version !== undefined && versionRow.version > SCHEMA_VERSION) {
 			logger.warn("AgentStorage schema version mismatch", {
 				current: versionRow.version,
 				expected: SCHEMA_VERSION,
@@ -190,7 +190,8 @@ CREATE TABLE settings (
 		if (schemaVersion < SCHEMA_VERSION) {
 			this.#migrateSchema(schemaVersion);
 		}
-		this.#db.prepare("INSERT OR REPLACE INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
+		this.#db.prepare("DELETE FROM schema_version").run();
+		this.#db.prepare("INSERT INTO schema_version(version) VALUES (?)").run(SCHEMA_VERSION);
 	}
 
 	#migrateSchema(fromVersion: number): void {
@@ -334,6 +335,7 @@ FROM model_usage_legacy
 	 * @param skillName - Identifier of the skill being used
 	 */
 	recordSkillUsage(skillName: string): void {
+		if (!skillName || skillName.length > 255) return;
 		try {
 			const nowSec = Math.floor(Date.now() / 1000);
 			const prior = this.#selectSkillUsageStmt.get(skillName) as SkillUsageRow | undefined;
