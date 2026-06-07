@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Effort, type Model } from "@oh-my-pi/pi-ai";
 import {
 	expandRoleAlias,
+	filterAvailableModelsByEnabledPatterns,
 	parseModelPattern,
 	parseModelString,
 	resolveAgentModelPatterns,
@@ -920,5 +921,63 @@ describe("expandRoleAlias", () => {
 		settings.setModelRole("default", "anthropic/claude-sonnet-4-5");
 
 		expect(expandRoleAlias("pi/vision", settings)).toBe("pi/vision");
+	});
+});
+
+describe("filterAvailableModelsByEnabledPatterns", () => {
+	const models = mockModels as Model[];
+	const registry = {
+		getCanonicalVariants: (_id: string, _opts?: unknown) => [] as { model: Model }[],
+	};
+
+	test("returns all models when patterns is empty", () => {
+		expect(filterAvailableModelsByEnabledPatterns(models, [], registry)).toEqual(models);
+	});
+
+	test("filters by exact provider/modelId", () => {
+		const result = filterAvailableModelsByEnabledPatterns(models, ["anthropic/claude-sonnet-4-5"], registry);
+		expect(result).toHaveLength(1);
+		expect(result[0].id).toBe("claude-sonnet-4-5");
+	});
+
+	test("filters by bare model id matching across providers", () => {
+		const result = filterAvailableModelsByEnabledPatterns(models, ["claude-sonnet-4-5"], registry);
+		expect(result).toHaveLength(1);
+		expect(result[0].provider).toBe("anthropic");
+	});
+
+	test("expands canonical id via registry", () => {
+		const canonicalRegistry = {
+			getCanonicalVariants: (id: string, _opts?: unknown) =>
+				id === "claude-sonnet-4-5" ? [{ model: models[0] }] : [],
+		};
+		const result = filterAvailableModelsByEnabledPatterns(models, ["claude-sonnet-4-5"], canonicalRegistry);
+		expect(result).toHaveLength(1);
+		expect(result[0].id).toBe("claude-sonnet-4-5");
+	});
+
+	test("strips thinking-level suffix before matching", () => {
+		const result = filterAvailableModelsByEnabledPatterns(models, ["anthropic/claude-sonnet-4-5:high"], registry);
+		expect(result).toHaveLength(1);
+		expect(result[0].id).toBe("claude-sonnet-4-5");
+	});
+
+	test("returns all models when a glob pattern is present", () => {
+		const result = filterAvailableModelsByEnabledPatterns(models, ["anthropic/*"], registry);
+		expect(result).toEqual(models);
+	});
+
+	test("returns all models when no pattern matches (rather than empty)", () => {
+		const result = filterAvailableModelsByEnabledPatterns(models, ["nonexistent-model"], registry);
+		expect(result).toEqual(models);
+	});
+
+	test("includes multiple patterns from different providers", () => {
+		const result = filterAvailableModelsByEnabledPatterns(
+			models,
+			["anthropic/claude-sonnet-4-5", "openai/gpt-4o"],
+			registry,
+		);
+		expect(result).toHaveLength(2);
 	});
 });
