@@ -43,9 +43,13 @@ function toolResult(id: string, text: string, toolName = "bash"): ToolResultMess
 }
 
 function assistantWithToolCall(id: string): AssistantMessage {
+	return assistantWithToolCalls([id]);
+}
+
+function assistantWithToolCalls(ids: string[]): AssistantMessage {
 	return {
 		role: "assistant",
-		content: [{ type: "text", text: "" }, toolCall(id)],
+		content: ids.map(id => toolCall(id)),
 		provider: "test-provider",
 		api: "openai-completions",
 		model: "test-model",
@@ -72,11 +76,11 @@ describe("transformMessages — duplicate tool_call_id handling", () => {
 
 		// First assistant turn keeps the original id.
 		const firstAssistant = out[0] as AssistantMessage;
-		expect(firstAssistant.content[1]).toMatchObject({ id: "functions.eval:301" });
+		expect(firstAssistant.content[0]).toMatchObject({ id: "functions.eval:301" });
 
 		// Second assistant turn is rewritten to a unique id.
 		const secondAssistant = out[2] as AssistantMessage;
-		const rewrittenId = (secondAssistant.content[1] as ToolCall).id;
+		const rewrittenId = (secondAssistant.content[0] as ToolCall).id;
 		expect(rewrittenId).not.toBe("functions.eval:301");
 		expect(rewrittenId).toMatch(/^functions\.eval:301_dup\d+$/);
 
@@ -168,7 +172,77 @@ describe("transformMessages — duplicate tool_call_id handling", () => {
 		}
 		expect(seen).toHaveLength(2);
 		// First call is the original id; the second is rewritten.
+		expect(seen).toHaveLength(2);
+		// First call is the original id; the second is rewritten.
 		expect(seen[0]).toBe("dup:9");
 		expect(seen[1]).toMatch(/^dup:9_dup\d+$/);
+	});
+	it("rewrites only the offending block in a parallel-tool-call assistant", () => {
+		// From the PR review: when an assistant turn has [A, B] and a later
+		// assistant turn has [A, C] (only A is the duplicate), pass 2 must
+		// rename the second A to A_dup1 and leave A/B/C in the first turn and
+		// C in the second turn alone. The earlier implementation keyed
+		// rewrites by message index and clobbered the whole turn.
+		const messages: Message[] = [
+			assistantWithToolCalls(["A", "B"]),
+			toolResult("A", "a1"),
+			toolResult("B", "b1"),
+			assistantWithToolCalls(["A", "C"]),
+			toolResult("A", "a2"),
+			toolResult("C", "c1"),
+		];
+		const out = transformMessages(messages, makeModel());
+		const callIds = out
+			.filter((m): m is AssistantMessage => m.role === "assistant")
+			.flatMap(m => m.content)
+			.filter((b): b is ToolCall => b.type === "toolCall")
+			.map(b => b.id);
+		// All four distinct call ids survive (no clobbering), and the second
+		// occurrence of A is rewritten.
+		expect(callIds).toEqual(["A", "B", expect.stringMatching(/^A_dup\d+$/), "C"]);
+		const resultIds = out.filter((m): m is ToolResultMessage => m.role === "toolResult").map(r => r.toolCallId);
+		// The parallel result batch routes correctly: the first batch keeps
+		// A/B, the second batch's first toolResult (A's) follows the rewritten
+		// id, and the second toolResult (C) keeps its id.
+		expect(resultIds).toEqual(["A", "B", expect.stringMatching(/^A_dup\d+$/), "C"]);
+	});
+	it("dedupes intra-message duplicates (multiple toolCall blocks with the same id in one turn)", () => {
+		// From the PR review: an assistant turn with [tc X, tc X] used to come
+		// out of the function with both blocks relabeled to X_dup1 (still a
+		// duplicate, just renamed). Per-block tracking ensures each duplicate
+		// gets a distinct suffix.
+		const messages: Message[] = [assistantWithToolCalls(["X", "X"]), toolResult("X", "only one result")];
+		const out = transformMessages(messages, makeModel());
+		const callIds = (out[0] as AssistantMessage).content
+			.filter((b): b is ToolCall => b.type === "toolCall")
+			.map(b => b.id);
+		expect(callIds).toHaveLength(2);
+		expect(callIds[0]).toBe("X");
+		expect(callIds[1]).toMatch(/^X_dup\d+$/);
+		expect(callIds[0]).not.toBe(callIds[1]);
+	});
+	it("skips _dupN suffixes that already exist in the input history", () => {
+		// From the PR review: if the history already contains `call_dup1`
+		// (real input), the rewrite of a later `call` must pick `_dup2` or
+		// higher instead of colliding.
+		const messages: Message[] = [
+			assistantWithToolCall("call"),
+			toolResult("call", "r0"),
+			assistantWithToolCall("call_dup1"), // real, not a rewrite
+			toolResult("call_dup1", "r1"),
+			assistantWithToolCall("call"),
+			toolResult("call", "r2"),
+		];
+		const out = transformMessages(messages, makeModel());
+		const callIds = out
+			.filter((m): m is AssistantMessage => m.role === "assistant")
+			.flatMap(m => m.content)
+			.filter((b): b is ToolCall => b.type === "toolCall")
+			.map(b => b.id);
+		// First "call" stays, real "call_dup1" stays, second "call" is
+		// rewritten to "call_dup2" (skipping the already-present "_dup1").
+		expect(callIds).toEqual(["call", "call_dup1", "call_dup2"]);
+		const resultIds = out.filter((m): m is ToolResultMessage => m.role === "toolResult").map(r => r.toolCallId);
+		expect(resultIds).toEqual(["call", "call_dup1", "call_dup2"]);
 	});
 });

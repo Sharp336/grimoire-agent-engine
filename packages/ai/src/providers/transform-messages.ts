@@ -46,40 +46,59 @@ function getLatestSurvivingAssistantIndex(messages: readonly Message[]): number 
 /**
  * Walk the message history and rewrite duplicate `tool_call_id` values so every
  * `tool_call` is uniquely identifiable. Some upstream models re-emit the same
- * id across distinct tool calls (e.g. MiMo 2.5 Pro via opencode-go, Kimi on
+ * id across distinct tool calls (notably MiniMax-M3 via opencode-go, Kimi on
  * certain proxies). Without this normalization, downstream `Map`/`Set` lookups
  * in the second pass silently collapse the duplicates and one of the calls is
  * left unfulfilled, which the provider rejects with HTTP 400
  * ("tool call result does not follow tool call").
  *
- * The first occurrence of each id is preserved; subsequent occurrences are
- * rewritten as `<id>_dup<N>`, where `<N>` starts at 1 and is unique per original
- * id. For each rewritten tool call, the matching `toolResult` that immediately
- * follows it (if any) is rewritten to the new id; toolResults that belong to
- * earlier occurrences keep the original id. The returned message list is a
- * shallow copy only when at least one rewrite happened; otherwise the input
- * array is returned unchanged.
+ * Rewrites are tracked per-block (`Map<"msgIdx:blockIdx", string>`) so a single
+ * assistant turn with multiple parallel `toolCall` blocks only renames the
+ * offending block(s) and leaves its siblings alone. The first occurrence of
+ * each id is preserved; subsequent occurrences are rewritten as `<id>_dup<N>`,
+ * where `<N>` is the lowest positive integer that produces an id not already
+ * present in the history (so input that already contains `call_dup1` won't
+ * collide). For each rewritten tool call, the `toolResult` that follows it is
+ * rewritten to the new id; toolResults that follow non-rewritten (or already-
+ * intact.
  */
 function deduplicateToolCallIds(messages: readonly Message[]): Message[] {
-	const seenIds = new Set<string>();
-	let needsRewrite = false;
-
-	// First pass: identify which assistant tool_call blocks need rewriting and
-	// assign a unique suffix to each duplicate occurrence.
-	const rewrites = new Map<number, string>(); // message index → new id
-	const idSuffixCounter = new Map<string, number>();
-
-	for (let i = 0; i < messages.length; i++) {
-		const msg = messages[i]!;
+	// First pass: collect every tool_call id that already exists in the history,
+	// so when we pick `<id>_dup<N>` we can avoid colliding with real input ids
+	// that happen to use the suffix form.
+	const existingIds = new Set<string>();
+	for (const msg of messages) {
 		if (msg.role !== "assistant") continue;
 		for (const block of msg.content) {
+			if (block.type === "toolCall") existingIds.add(block.id);
+		}
+	}
+
+	// Second pass: identify which (msgIdx, blockIdx) pairs need rewriting and
+	// assign a unique suffix to each duplicate occurrence.
+	const seenIds = new Set<string>();
+	const rewrites = new Map<string, string>(); // "msgIdx:blockIdx" → new id
+	let needsRewrite = false;
+
+	const keyOf = (msgIdx: number, blockIdx: number): string => `${msgIdx}:${blockIdx}`;
+	const nextUnusedSuffix = (id: string): number => {
+		for (let n = 1; ; n += 1) {
+			const candidate = `${id}_dup${n}`;
+			if (!existingIds.has(candidate) && !seenIds.has(candidate)) return n;
+		}
+	};
+
+	for (let i = 0; i < messages.length; i += 1) {
+		const msg = messages[i]!;
+		if (msg.role !== "assistant") continue;
+		for (let j = 0; j < msg.content.length; j += 1) {
+			const block = msg.content[j]!;
 			if (block.type !== "toolCall") continue;
 			const id = block.id;
 			if (seenIds.has(id)) {
-				const nextSuffix = idSuffixCounter.get(id) ?? 1;
-				idSuffixCounter.set(id, nextSuffix + 1);
-				const newId = `${id}_dup${nextSuffix}`;
-				rewrites.set(i, newId);
+				const n = nextUnusedSuffix(id);
+				const newId = `${id}_dup${n}`;
+				rewrites.set(keyOf(i, j), newId);
 				seenIds.add(newId);
 				needsRewrite = true;
 			} else {
@@ -90,37 +109,70 @@ function deduplicateToolCallIds(messages: readonly Message[]): Message[] {
 
 	if (!needsRewrite) return messages as Message[];
 
-	// Second pass: rewrite the assistant tool_call blocks, and for each rewrite
-	// update the toolResult that follows it. toolResults that appear after a
-	// non-rewritten (original) tool call keep the original id so the call/result
-	// pairing stays intact.
-	const rewrittenAssistantIndices = new Set(rewrites.keys());
+	// Third pass: walk the parallel toolResult batches and figure out which
+	// toolResult belongs to which rewritten tool_call. For each toolResult,
+	// walk back past toolResult siblings to the owning assistant, then pick
+	// the (N-th) block with the same id as the N-th toolResult in the batch.
+	const toolResultRewrites = new Map<number, string>(); // toolResult msgIdx → new toolCallId
+
+	for (let i = 0; i < messages.length; i += 1) {
+		const msg = messages[i]!;
+		if (msg.role !== "toolResult") continue;
+		const toolCallId = msg.toolCallId;
+
+		// Walk back past toolResult siblings to the owning assistant turn.
+		let assistantIdx = -1;
+		for (let j = i - 1; j >= 0; j -= 1) {
+			const prev = messages[j]!;
+			if (prev.role === "assistant") {
+				assistantIdx = j;
+				break;
+			}
+			if (prev.role !== "toolResult") break;
+		}
+		if (assistantIdx === -1) continue;
+
+		// Count prior toolResults with the same toolCallId in this batch.
+		let positionInBatch = 0;
+		for (let j = i - 1; j > assistantIdx; j -= 1) {
+			const prev = messages[j]!;
+			if (prev.role === "toolResult" && prev.toolCallId === toolCallId) {
+				positionInBatch += 1;
+			}
+		}
+
+		// Find the block at the same position in the assistant turn.
+		let blockPos = -1;
+		for (let k = 0; k < messages[assistantIdx]!.content.length; k += 1) {
+			const block = messages[assistantIdx]!.content[k]!;
+			if (block.type !== "toolCall") continue;
+			if (block.id !== toolCallId) continue;
+			blockPos += 1;
+			if (blockPos === positionInBatch) {
+				const rewrite = rewrites.get(keyOf(assistantIdx, k));
+				if (rewrite) toolResultRewrites.set(i, rewrite);
+				break;
+			}
+		}
+	}
+
+	// Fourth pass: apply all rewrites in a single map.
 	return messages.map((msg, idx) => {
 		if (msg.role === "assistant") {
-			const rewrite = rewrites.get(idx);
-			if (!rewrite) return msg;
-			const newContent = msg.content.map(block => {
+			let mutated = false;
+			const newContent = msg.content.map((block, j) => {
 				if (block.type !== "toolCall") return block;
-				return { ...block, id: rewrite };
+				const newId = rewrites.get(keyOf(idx, j));
+				if (!newId) return block;
+				mutated = true;
+				return { ...block, id: newId };
 			});
-			return { ...msg, content: newContent };
+			return mutated ? { ...msg, content: newContent } : msg;
 		}
 		if (msg.role === "toolResult") {
-			// Walk backwards to find the most recent assistant message; if its
-			// tool call was rewritten, this result belongs to that rewritten
-			// call and must follow the new id.
-			for (let j = idx - 1; j >= 0; j--) {
-				const prev = messages[j]!;
-				if (prev.role === "assistant") {
-					if (rewrittenAssistantIndices.has(j)) {
-						const newId = rewrites.get(j)!;
-						if (msg.toolCallId !== newId) {
-							return { ...msg, toolCallId: newId };
-						}
-					}
-					break;
-				}
-				if (prev.role === "toolResult") break;
+			const newId = toolResultRewrites.get(idx);
+			if (newId && newId !== msg.toolCallId) {
+				return { ...msg, toolCallId: newId };
 			}
 		}
 		return msg;

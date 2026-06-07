@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed HTTP 400 "tool call result does not follow tool call" errors when upstream models (notably MiniMax-M3 via opencode-go and Kimi on certain proxies) emit the same `tool_call_id` for distinct tool calls. `transformMessages` now rewrites duplicate ids per-block as `<id>_dup<N>` while preserving call/result pairing, including across parallel tool-call batches and intra-message duplicates. ([#2055](https://github.com/can1357/oh-my-pi/issues/2055))
 ## [15.10.1] - 2026-06-07
 
 ### Breaking Changes
