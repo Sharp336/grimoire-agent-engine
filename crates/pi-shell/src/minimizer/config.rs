@@ -165,6 +165,9 @@ impl MinimizerConfig {
 					if legacy_requested {
 						cfg.legacy_filters_active = true;
 					}
+					if opts.legacy_filters == Some(false) {
+						cfg.legacy_filters_active = false;
+					}
 				}
 				match pipeline::parse_file(&contents, "user") {
 					Ok((pipelines, tests)) => {
