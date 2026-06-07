@@ -16,7 +16,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, parseFrontmatter } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled } from "../capability";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
 import { listClaudePluginRoots } from "../discovery/helpers";
@@ -80,16 +80,22 @@ async function loadCopilotAgentsFromDir(dir: string, source: AgentSource): Promi
 	const files = entries
 		.filter(entry => (entry.isFile() || entry.isSymbolicLink()) && entry.name.endsWith(".md"))
 		.sort((a, b) => a.name.localeCompare(b.name))
-		.map(file => {
+		.map(async file => {
 			const filePath = path.join(dir, file.name);
-			const fallbackName = copilotAgentId(file.name);
-			return fs
-				.readFile(filePath, "utf-8")
-				.then(content => parseAgent(filePath, content, source, "warn", fallbackName))
-				.catch(error => {
-					logger.warn("Failed to read Copilot agent file", { filePath, error });
-					return null;
-				});
+			try {
+				const content = await fs.readFile(filePath, "utf-8");
+				const { frontmatter } = parseFrontmatter(content, { location: filePath, level: "warn" });
+				// Skip profiles targeted only at a non-Copilot environment (e.g. `target: vscode`);
+				// an unset target defaults to both environments.
+				const target = frontmatter.target;
+				if (typeof target === "string" && target !== "github-copilot") return null;
+				const agent = parseAgent(filePath, content, source, "warn", copilotAgentId(file.name));
+				agent.tools = translateCopilotTools(agent.tools);
+				return agent;
+			} catch (error) {
+				logger.warn("Failed to read Copilot agent file", { filePath, error });
+				return null;
+			}
 		});
 
 	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
@@ -98,6 +104,44 @@ async function loadCopilotAgentsFromDir(dir: string, source: AgentSource): Promi
 /** Copilot agent ID = filename minus the `.agent.md`/`.md` extension; used for cross-level dedup. */
 function copilotAgentId(fileName: string): string {
 	return fileName.replace(/\.agent\.md$/, "").replace(/\.md$/, "");
+}
+
+/**
+ * Map GitHub Copilot tool aliases onto OMP tool names. Copilot's documented aliases
+ * (custom-agents-configuration reference) differ from OMP's tool ids, and OMP treats
+ * `agent.tools` as a strict allow-list — so untranslated aliases (or `*`) would silently
+ * leave a restricted agent with the wrong tools or none at all. `*` means all tools → no
+ * restriction; MCP-namespaced (`server/tool`) and unknown names pass through unchanged.
+ */
+const COPILOT_TOOL_ALIASES: Record<string, string> = {
+	execute: "bash",
+	shell: "bash",
+	bash: "bash",
+	powershell: "bash",
+	read: "read",
+	notebookread: "read",
+	edit: "edit",
+	multiedit: "edit",
+	write: "edit",
+	notebookedit: "edit",
+	search: "search",
+	grep: "search",
+	glob: "search",
+	agent: "task",
+	"custom-agent": "task",
+	task: "task",
+	web: "web_search",
+	websearch: "web_search",
+	webfetch: "web_search",
+	todo: "todo",
+	todowrite: "todo",
+};
+
+function translateCopilotTools(tools: string[] | undefined): string[] | undefined {
+	if (!tools || tools.length === 0) return tools;
+	if (tools.includes("*")) return undefined; // all tools → no restriction
+	const mapped = tools.map(tool => (tool.includes("/") ? tool : (COPILOT_TOOL_ALIASES[tool.toLowerCase()] ?? tool)));
+	return Array.from(new Set(mapped));
 }
 
 /**

@@ -3,7 +3,7 @@
 ## [Unreleased]
 ### Added
 
-- Added GitHub Copilot custom-agent discovery: `discoverAgents()` now finds agent definitions in `.github/agents/` (project-level, resolved by walking up from the cwd) and `~/.copilot/agents/` (user-global, relocatable via `COPILOT_HOME`). Previously only `.omp`/`.claude`/`.codex`/`.gemini` agent sources were scanned, so Copilot CLI users' custom agents were invisible. Matches Copilot CLI semantics: a project agent takes precedence over a personal agent of the same name (per the CLI config-dir reference), and `*.agent.md` profiles that omit `name` derive their identity from the filename. Gated on the `github` discovery provider. Closes #1914.
+- Added GitHub Copilot custom-agent discovery: `discoverAgents()` now finds agent definitions in `.github/agents/` (project-level, resolved by walking up from the cwd) and `~/.copilot/agents/` (user-global, relocatable via `COPILOT_HOME`). Previously only `.omp`/`.claude`/`.codex`/`.gemini` agent sources were scanned, so Copilot CLI users' custom agents were invisible. Matches Copilot CLI semantics: a project agent takes precedence over a personal agent of the same name and agents are deduped by file id (per the CLI config-dir reference), `*.agent.md` profiles that omit `name` derive their identity from the filename, profiles targeted at a non-Copilot environment (`target: vscode`) are skipped, and Copilot tool aliases (`execute`, `agent`, `*`, …) are translated to OMP tool names. Gated on the `github` discovery provider. Closes #1914.
 
 ## [15.9.5] - 2026-06-05
 ### Added

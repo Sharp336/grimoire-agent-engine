@@ -148,4 +148,54 @@ describe("discoverAgents — GitHub Copilot agents", () => {
 		expect(agents.find(a => a.name === "project-reviewer")).toBeDefined();
 		expect(agents.find(a => a.name === "personal-reviewer")).toBeUndefined();
 	});
+
+	test("skips Copilot agents targeted at a non-Copilot environment (target: vscode)", async () => {
+		const dir = path.join(tempProject, ".github", "agents");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "vsonly.agent.md"),
+			"---\nname: vsonly\ndescription: d\ntarget: vscode\n---\nBody.\n",
+		);
+		fs.writeFileSync(
+			path.join(dir, "cli.agent.md"),
+			"---\nname: cli-agent\ndescription: d\ntarget: github-copilot\n---\nBody.\n",
+		);
+
+		const { agents } = await discoverAgents(tempProject, tempHome);
+
+		expect(agents.find(a => a.name === "vsonly")).toBeUndefined();
+		expect(agents.find(a => a.name === "cli-agent")).toBeDefined();
+	});
+
+	test("translates Copilot tool aliases to OMP tool names", async () => {
+		const dir = path.join(tempHome, ".copilot", "agents");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "restricted.agent.md"),
+			"---\nname: restricted\ndescription: d\ntools: [execute, read, agent]\n---\nBody.\n",
+		);
+
+		const { agents } = await discoverAgents(tempProject, tempHome);
+
+		const found = agents.find(a => a.name === "restricted");
+		expect(found?.tools).toContain("bash");
+		expect(found?.tools).toContain("read");
+		expect(found?.tools).toContain("task");
+		expect(found?.tools).not.toContain("execute");
+	});
+
+	test("treats Copilot tools: ['*'] as unrestricted (all tools)", async () => {
+		const dir = path.join(tempHome, ".copilot", "agents");
+		fs.mkdirSync(dir, { recursive: true });
+		fs.writeFileSync(
+			path.join(dir, "alltools.agent.md"),
+			"---\nname: alltools\ndescription: d\ntools: ['*']\n---\nBody.\n",
+		);
+
+		const { agents } = await discoverAgents(tempProject, tempHome);
+
+		const found = agents.find(a => a.name === "alltools");
+		expect(found).toBeDefined();
+		expect(found?.tools).toBeUndefined();
+	});
 });
