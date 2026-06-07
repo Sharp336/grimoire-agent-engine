@@ -179,7 +179,16 @@ OAuth host chain: `KIMI_CODE_OAUTH_HOST` → `KIMI_OAUTH_HOST` → `https://auth
 | `PI_CODEX_WEBSOCKET_IDLE_TIMEOUT_MS` | Positive integer override (default 300000)           |
 | `PI_CODEX_WEBSOCKET_RETRY_BUDGET`    | Non-negative integer override (default 5)            |
 | `PI_CODEX_WEBSOCKET_RETRY_DELAY_MS`  | Positive integer base backoff override (default 500) |
-| `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`   | Positive integer OpenAI stream idle timeout override |
+
+### Streaming watchdogs (stall detection)
+
+These guard against streams that open but then go silent, which otherwise wedges the turn until the session is restarted. Set any to `0` to disable that watchdog.
+
+| Variable                              | Behavior                                                                              |
+| ------------------------------------- | ------------------------------------------------------------------------------------ |
+| `PI_STREAM_FIRST_EVENT_TIMEOUT_MS`    | Timeout waiting for the first stream event (default 100000, or idle timeout if lower) |
+| `PI_OPENAI_STREAM_IDLE_TIMEOUT_MS`    | Inter-event idle timeout for OpenAI-family streams (default 120000)                   |
+| `PI_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS` | Inter-event idle timeout for Anthropic streams (default 120000)                       |
 
 ### Cursor provider debug
 

@@ -196,3 +196,126 @@ describe("anthropic first-event timeout retries", () => {
 		expect((result.errorMessage ?? "").toLowerCase()).toContain("abort");
 	});
 });
+
+function createThinkingStallEvents(): MockAnthropicEvent[] {
+	return [
+		{
+			type: "message_start",
+			message: {
+				id: "msg_stall",
+				usage: {
+					input_tokens: 5,
+					output_tokens: 0,
+					cache_read_input_tokens: 0,
+					cache_creation_input_tokens: 0,
+				},
+			},
+		},
+		// Replay-safe: thinking has started but no text/tool content has streamed yet.
+		{ type: "content_block_start", index: 0, content_block: { type: "thinking", thinking: "" } },
+	];
+}
+
+function createTextStallEvents(): MockAnthropicEvent[] {
+	return [
+		{
+			type: "message_start",
+			message: {
+				id: "msg_stall_text",
+				usage: {
+					input_tokens: 5,
+					output_tokens: 0,
+					cache_read_input_tokens: 0,
+					cache_creation_input_tokens: 0,
+				},
+			},
+		},
+		// Replay-unsafe: visible text has streamed; a stall here cannot be silently retried.
+		{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+		{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "partial" } },
+	];
+}
+
+function createStallingAnthropicRequest({
+	signal,
+	preEvents,
+}: {
+	signal: AbortSignal | undefined;
+	preEvents: MockAnthropicEvent[];
+}): MockAnthropicRequest {
+	const response = new Response(null, {
+		status: 200,
+		headers: { "request-id": "req_stall" },
+	});
+	const stream: MockAnthropicStream = {
+		async *[Symbol.asyncIterator]() {
+			for (const event of preEvents) {
+				yield event;
+			}
+			// Go silent until the idle watchdog tears the request down.
+			await waitForAbortAndThrowAbortError(signal);
+		},
+	};
+	return {
+		async withResponse() {
+			return {
+				data: stream,
+				response,
+				request_id: response.headers.get("request-id"),
+			};
+		},
+	};
+}
+
+describe("anthropic inter-event idle stall", () => {
+	it("retries when the stream stalls before replay-unsafe content streams", async () => {
+		let attempt = 0;
+		const create = ((_body: unknown, requestOptions?: { signal?: AbortSignal }) => {
+			attempt += 1;
+			if (attempt === 1) {
+				return createStallingAnthropicRequest({
+					signal: requestOptions?.signal,
+					preEvents: createThinkingStallEvents(),
+				}) as never;
+			}
+			return createAnthropicMockStream({
+				signal: requestOptions?.signal,
+				events: createSuccessfulAnthropicEvents("recovered after stall"),
+			}) as never;
+		}) as unknown as Anthropic["messages"]["create"];
+		const client = { messages: { create } } as Anthropic;
+
+		const result = await streamAnthropic(model, context, {
+			client,
+			streamFirstEventTimeoutMs: 10_000,
+			streamIdleTimeoutMs: 20,
+		}).result();
+
+		expect(attempt).toBe(2);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([{ type: "text", text: "recovered after stall" }]);
+	});
+
+	it("surfaces a stall as an error once replay-unsafe content has streamed", async () => {
+		let attempt = 0;
+		const create = ((_body: unknown, requestOptions?: { signal?: AbortSignal }) => {
+			attempt += 1;
+			return createStallingAnthropicRequest({
+				signal: requestOptions?.signal,
+				preEvents: createTextStallEvents(),
+			}) as never;
+		}) as unknown as Anthropic["messages"]["create"];
+		const client = { messages: { create } } as Anthropic;
+
+		const result = await streamAnthropic(model, context, {
+			client,
+			streamFirstEventTimeoutMs: 10_000,
+			streamIdleTimeoutMs: 20,
+		}).result();
+
+		expect(attempt).toBe(1);
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toContain("stalled while waiting for the next event");
+		expect(result.content).toEqual([{ type: "text", text: "partial" }]);
+	});
+});

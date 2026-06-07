@@ -38,7 +38,12 @@ import { createAbortSourceTracker } from "../utils/abort";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { isFoundryEnabled } from "../utils/foundry";
 import { finalizeErrorMessage, type RawHttpRequestDump, rewriteCopilotError } from "../utils/http-inspector";
-import { createWatchdog, getStreamFirstEventTimeoutMs } from "../utils/idle-iterator";
+import {
+	createWatchdog,
+	getAnthropicStreamIdleTimeoutMs,
+	getStreamFirstEventTimeoutMs,
+	iterateWithIdleTimeout,
+} from "../utils/idle-iterator";
 import { parseJsonWithRepair, parseStreamingJson } from "../utils/json-parse";
 import { parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { notifyProviderResponse } from "../utils/provider-response";
@@ -910,6 +915,18 @@ function isTransientStreamParseError(error: unknown): boolean {
 	return /json parse error|unterminated string|unexpected end of json input/i.test(error.message);
 }
 
+/**
+ * Message thrown when the Anthropic stream goes silent between events. The stall
+ * watchdog tears the request down so a dead upstream connection cannot wedge the
+ * turn forever (the symptom: "Working…" with no response until the session is
+ * reopened).
+ */
+const ANTHROPIC_STREAM_IDLE_TIMEOUT_MESSAGE = "Anthropic stream stalled while waiting for the next event";
+
+function isAnthropicStreamIdleStallError(error: unknown): boolean {
+	return error instanceof Error && error.message.includes(ANTHROPIC_STREAM_IDLE_TIMEOUT_MESSAGE);
+}
+
 const ANTHROPIC_STREAM_ENVELOPE_ERROR_PREFIX = "Anthropic stream envelope error:";
 
 function createAnthropicStreamEnvelopeError(message: string): Error {
@@ -1099,7 +1116,8 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				| (ToolCall & { partialJson: string })
 			) & { index: number };
 			const blocks = output.content as Block[];
-			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs();
+			const idleTimeoutMs = options?.streamIdleTimeoutMs ?? getAnthropicStreamIdleTimeoutMs();
+			const firstEventTimeoutMs = options?.streamFirstEventTimeoutMs ?? getStreamFirstEventTimeoutMs(idleTimeoutMs);
 			stream.push({ type: "start", partial: output });
 			// Retry loop for transient errors from the stream.
 			// Provider-level transport/rate-limit failures: only before any streamed content starts.
@@ -1110,7 +1128,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				const firstEventTimeoutAbortError = new Error(
 					"Anthropic stream timed out while waiting for the first event",
 				);
-				const { requestSignal } = activeAbortTracker;
+				const { requestSignal, requestAbortController } = activeAbortTracker;
 				const anthropicRequest = client.messages.create({ ...params, stream: true }, { signal: requestSignal });
 				let streamedReplayUnsafeContent = false;
 
@@ -1128,10 +1146,16 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 					let sawMessageStart = false;
 					let sawTerminalEnvelope = false;
 
-					for await (const event of anthropicStream) {
-						if (!sawEvent) {
-							clearTimeout(firstEventWatchdog);
-						}
+					for await (const event of iterateWithIdleTimeout(anthropicStream, {
+						watchdog: firstEventWatchdog,
+						idleTimeoutMs,
+						// The first event is guarded by `firstEventWatchdog` (above), which routes
+						// through the abort tracker so first-event timeouts stay retryable.
+						firstItemTimeoutMs: 0,
+						errorMessage: ANTHROPIC_STREAM_IDLE_TIMEOUT_MESSAGE,
+						onIdle: () => requestAbortController.abort(),
+						abortSignal: options?.signal,
+					})) {
 						sawEvent = true;
 
 						if (event.type === "message_start") {
@@ -1357,7 +1381,9 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 						continue;
 					}
 					const isTransientEnvelopeFailure =
-						isTransientStreamParseError(streamFailure) || isTransientStreamEnvelopeError(streamFailure);
+						isTransientStreamParseError(streamFailure) ||
+						isTransientStreamEnvelopeError(streamFailure) ||
+						isAnthropicStreamIdleStallError(streamFailure);
 					const canRetryTransientEnvelopeFailure = isTransientEnvelopeFailure && !streamedReplayUnsafeContent;
 					const canRetryProviderFailure =
 						firstTokenTime === undefined && isProviderRetryableError(streamFailure, model.provider);

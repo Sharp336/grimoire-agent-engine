@@ -239,6 +239,12 @@ export interface StreamOptions {
 	 * Set to 0 to disable the first-event watchdog for this request.
 	 */
 	streamFirstEventTimeoutMs?: number;
+	/**
+	 * Optional override for the inter-event idle watchdog in milliseconds. Applies
+	 * to providers that enforce a maximum gap between streamed events. Set to 0 to
+	 * disable the idle watchdog for this request.
+	 */
+	streamIdleTimeoutMs?: number;
 	/** Cursor exec/MCP tool handlers (cursor-agent only). */
 	execHandlers?: CursorExecHandlers;
 }

@@ -20,6 +20,19 @@ export function getOpenAIStreamIdleTimeoutMs(): number | undefined {
 	return normalizeIdleTimeoutMs($env.PI_OPENAI_STREAM_IDLE_TIMEOUT_MS, DEFAULT_OPENAI_STREAM_IDLE_TIMEOUT_MS);
 }
 
+const DEFAULT_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS = 120_000;
+
+/**
+ * Returns the idle timeout enforced between Anthropic streaming events.
+ *
+ * Anthropic streams can stall mid-response (after `message_start`) when an
+ * upstream connection goes silent; without this watchdog the consumer blocks on
+ * `iterator.next()` forever. Set `PI_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS=0` to disable.
+ */
+export function getAnthropicStreamIdleTimeoutMs(): number | undefined {
+	return normalizeIdleTimeoutMs($env.PI_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS, DEFAULT_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS);
+}
+
 /**
  * Returns the timeout used while waiting for the first stream event.
  * The first token can legitimately take longer than later inter-event gaps,

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic streaming to abort and retry when the connection goes silent mid-response. Previously only the first event was guarded by a watchdog; a stall after `message_start` (e.g. after a thinking block started) blocked the turn indefinitely, requiring the session to be reopened. An inter-event idle watchdog now tears the request down, and a stall before any replay-unsafe text/tool content is retried transparently. Configurable via `PI_ANTHROPIC_STREAM_IDLE_TIMEOUT_MS` (defaults to 120s; `0` disables).
+- Added `streamIdleTimeoutMs` stream option to override the inter-event idle watchdog per request (symmetric with `streamFirstEventTimeoutMs`; `0` disables).
+
 ## [14.6.4] - 2026-05-03
 
 ### Fixed
