@@ -661,10 +661,12 @@ export class StatusLineComponent implements Component {
 		}
 
 		const rightParts: string[] = [];
+		const rightSegIds: (StatusLineSegmentId | "__ext" | "__job")[] = [];
 		for (const segId of effectiveSettings.rightSegments) {
 			const rendered = renderSegment(segId, ctx);
 			if (rendered.visible && rendered.content) {
 				rightParts.push(rendered.content);
+				rightSegIds.push(segId);
 			}
 		}
 
@@ -673,6 +675,7 @@ export class StatusLineComponent implements Component {
 			const icon = theme.icon.agents ? `${theme.icon.agents} ` : "";
 			const label = `${formatCount("job", runningBackgroundJobs)} running`;
 			rightParts.push(theme.fg("statusLineSubagents", `${icon}${label}`));
+			rightSegIds.push("__job");
 		}
 
 		if (this.#extensionSegments.size > 0) {
@@ -683,6 +686,7 @@ export class StatusLineComponent implements Component {
 				if (!content) continue;
 				if (segment.side === "right") {
 					rightParts.push(content);
+					rightSegIds.push("__ext");
 				} else {
 					leftParts.push(content);
 					leftSegIds.push("__ext");
@@ -710,6 +714,37 @@ export class StatusLineComponent implements Component {
 		const totalWidth = () => leftWidth + rightWidth + (left.length > 0 && right.length > 0 ? 1 : 0);
 
 		if (topFillWidth > 0) {
+			// Per the setStatusSegment contract, extension segments are shed before
+			// any built-in segment regardless of side. Drop them (last appended /
+			// highest order first, right side first) until the line fits or none remain.
+			const dropLastExt = (
+				parts: string[],
+				ids: string[],
+				capWidth: number,
+				sepWidth: number,
+			): number | undefined => {
+				for (let i = parts.length - 1; i >= 0; i--) {
+					if (ids[i] === "__ext") {
+						parts.splice(i, 1);
+						ids.splice(i, 1);
+						return groupWidth(parts, capWidth, sepWidth);
+					}
+				}
+				return undefined;
+			};
+			while (totalWidth() > topFillWidth) {
+				const newRightWidth = dropLastExt(right, rightSegIds, rightCapWidth, rightSepWidth);
+				if (newRightWidth !== undefined) {
+					rightWidth = newRightWidth;
+					continue;
+				}
+				const newLeftWidth = dropLastExt(left, leftSegIds, leftCapWidth, leftSepWidth);
+				if (newLeftWidth !== undefined) {
+					leftWidth = newLeftWidth;
+					continue;
+				}
+				break;
+			}
 			while (totalWidth() > topFillWidth && right.length > 0) {
 				right.pop();
 				rightWidth = groupWidth(right, rightCapWidth, rightSepWidth);

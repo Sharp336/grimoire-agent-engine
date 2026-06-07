@@ -112,6 +112,28 @@ describe("status line extension segments", () => {
 		expect(plain).not.toContain("extremely-long-extension-segment");
 	});
 
+	it("drops a left extension before built-in right segments under overflow", () => {
+		// Regression: a long left extension must not evict a built-in right
+		// segment. Extension segments are shed before built-ins on either side.
+		const component = new StatusLineComponent(createStatusLineSession("coremodel"));
+		component.updateSettings({
+			preset: "custom",
+			leftSegments: [],
+			rightSegments: ["model"],
+			separator: "pipe",
+			sessionAccent: false,
+		});
+		const width = 24;
+
+		component.setExtensionSegment("profile", "extremely-long-extension-segment");
+		const border = component.getTopBorder(width);
+		const plain = Bun.stripANSI(border.content);
+
+		expect(visibleWidth(border.content)).toBeLessThanOrEqual(width);
+		expect(plain).toContain("coremodel");
+		expect(plain).not.toContain("extremely-long-extension-segment");
+	});
+
 	it("renders multiple extension segment keys deterministically", () => {
 		const component = buildComponent();
 
