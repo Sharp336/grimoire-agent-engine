@@ -126,7 +126,10 @@ fn is_explicit_kubectl_json_yaml(command: &str) -> bool {
 			}
 		}
 		// Fully-attached form: `-ojson`, `-oyaml`, `-ojsonpath=...`, etc.
-		if let Some(val) = tok.strip_prefix("-o").filter(|v| !v.is_empty() && !v.starts_with('=')) {
+		if let Some(val) = tok
+			.strip_prefix("-o")
+			.filter(|v| !v.is_empty() && !v.starts_with('='))
+		{
 			let base = val.split('=').next().unwrap_or(val);
 			if matches!(base, "json" | "yaml") {
 				return true;
@@ -187,7 +190,10 @@ fn is_kubectl_non_table_format(command: &str) -> bool {
 			}
 		}
 		// Fully-attached form: `-oname`, `-ojsonpath=...`, `-ogo-template=...`, etc.
-		if let Some(val) = tok.strip_prefix("-o").filter(|v| !v.is_empty() && !v.starts_with('=')) {
+		if let Some(val) = tok
+			.strip_prefix("-o")
+			.filter(|v| !v.is_empty() && !v.starts_with('='))
+		{
 			let base = val.split('=').next().unwrap_or(val);
 			if matches!(
 				base,
@@ -886,7 +892,8 @@ mod tests {
 		// noise, so they must not be dropped by compact_build_or_progress.
 		let cfg = MinimizerConfig { enabled: true, ..Default::default() };
 		let helm_ctx = ctx("helm", Some("template"), &cfg);
-		let input = "apiVersion: v1\nkind: ConfigMap\ndata:\n  phase: Waiting\n  action: Downloading\n";
+		let input =
+			"apiVersion: v1\nkind: ConfigMap\ndata:\n  phase: Waiting\n  action: Downloading\n";
 		let out = filter(&helm_ctx, input, 0).text;
 		assert_eq!(out, input, "helm template output must be preserved verbatim");
 	}
