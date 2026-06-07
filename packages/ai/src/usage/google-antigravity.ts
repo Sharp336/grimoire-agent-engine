@@ -34,16 +34,6 @@ interface AntigravityUsageResponse {
 const DEFAULT_ENDPOINT = "https://daily-cloudcode-pa.googleapis.com";
 const FETCH_AVAILABLE_MODELS_PATH = "/v1internal:fetchAvailableModels";
 
-const KNOWN_MODEL_IDS = new Set([
-	"gemini-3.5-flash-extra-low",
-	"gemini-3.5-flash-low",
-	"gemini-3-flash-agent",
-	"gemini-3.1-pro-low",
-	"gemini-pro-agent",
-	"claude-sonnet-4-6",
-	"claude-opus-4-6-thinking",
-]);
-
 function clampFraction(value: number | undefined): number | undefined {
 	if (value === undefined || !Number.isFinite(value)) return undefined;
 	if (value < 0) return 0;
@@ -136,7 +126,8 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 	const accessToken = resolveAccessToken(params);
 	if (!accessToken) return null;
 
-	const url = `${DEFAULT_ENDPOINT}${FETCH_AVAILABLE_MODELS_PATH}`;
+	const baseUrl = params.baseUrl?.replace(/\/+$/, "") || DEFAULT_ENDPOINT;
+	const url = `${baseUrl}${FETCH_AVAILABLE_MODELS_PATH}`;
 	const response = await ctx.fetch(url, {
 		method: "POST",
 		headers: {
@@ -157,56 +148,99 @@ async function fetchAntigravityUsage(params: UsageFetchParams, ctx: UsageFetchCo
 	}
 
 	const data = (await response.json()) as AntigravityUsageResponse;
-	const limits: UsageLimit[] = [];
+
+	// The API returns per-model quota entries, but quota is shared across
+	// models within the same tier. Deduplicate by (tier, windowId) so one
+	// account doesn't produce 15 redundant bars.
+	const deduped = new Map<
+		string,
+		{ amount: UsageAmount; window: UsageWindow | undefined; tier: string | undefined }
+	>();
 	let earliestReset: number | undefined;
 
-	for (const [modelId, modelInfo] of Object.entries(data.models ?? {})) {
-		if (!KNOWN_MODEL_IDS.has(modelId)) continue;
+	for (const [_modelId, modelInfo] of Object.entries(data.models ?? {})) {
 		const quotaInfos = normalizeQuotaInfos(modelInfo);
-		if (quotaInfos.length === 0) continue;
-
-		// Collapse all tiers/windows into a single limit per model — pick
-		// the lowest remaining fraction (most constrained quota).
-		let minRemaining: number | undefined;
-		let representativeWindow: UsageWindow | undefined;
 		for (const quotaInfo of quotaInfos) {
-			const fr = clampFraction(quotaInfo.remainingFraction);
-			if (fr !== undefined && (minRemaining === undefined || fr < minRemaining)) {
-				minRemaining = fr;
+			const amount = buildAmount(quotaInfo);
+			const window = parseWindow(quotaInfo);
+			if (window?.resetsAt) {
+				earliestReset = earliestReset ? Math.min(earliestReset, window.resetsAt) : window.resetsAt;
 			}
-			const w = parseWindow(quotaInfo);
-			if (w?.resetsAt) {
-				earliestReset = earliestReset ? Math.min(earliestReset, w.resetsAt) : w.resetsAt;
-				if (!representativeWindow || (representativeWindow.resetsAt !== undefined && w.resetsAt < representativeWindow.resetsAt)) {
-					representativeWindow = w;
-				}
+			const tier = (quotaInfo.tier ?? "default").toLowerCase();
+			// Use quotaInfo.windowId even when parseWindow returns undefined
+			// (no resetTime) — separate windows must not collapse to "default".
+			const windowId = quotaInfo.windowId ?? window?.id ?? "default";
+			const key = `${tier}|${windowId}`;
+			const existing = deduped.get(key);
+			if (!existing) {
+				deduped.set(key, { amount, window, tier: quotaInfo.tier });
+				continue;
 			}
-		}
+			// Merge: keep the entry with fraction data for the bar, but
+			// also keep any window with a reset time so "resets in…" survives.
+			const eFrac = existing.amount.remainingFraction;
+			const cFrac = amount.remainingFraction;
+			const eHasFrac = eFrac !== undefined;
+			const cHasFrac = cFrac !== undefined;
 
-		const amount = buildAmount({ remainingFraction: minRemaining });
+			let bestAmount = existing.amount;
+			let bestWindow = existing.window?.resetsAt ? existing.window : (window ?? existing.window);
+			let bestTier = existing.tier ?? quotaInfo.tier;
+
+			if (!eHasFrac && cHasFrac) {
+				bestAmount = amount;
+				bestTier = quotaInfo.tier ?? existing.tier;
+			} else if (eHasFrac && cHasFrac && cFrac! < eFrac!) {
+				bestAmount = amount;
+				bestTier = quotaInfo.tier ?? existing.tier;
+			}
+			// Always merge in window with reset time if the current
+			// best doesn't have one.
+			if (!bestWindow?.resetsAt && window?.resetsAt) {
+				bestWindow = window;
+			}
+			deduped.set(key, { amount: bestAmount, window: bestWindow, tier: bestTier });
+		}
+	}
+
+	const limits: UsageLimit[] = [];
+	for (const [key, entry] of deduped) {
+		const [tier, windowId] = key.split("|") as [string, string];
+		const label = "Usage";
 		limits.push({
-			id: `${modelId}:default`,
-			label: modelInfo.displayName || modelId,
+			id: `${params.provider}:${tier}:${windowId}`,
+			label,
 			scope: {
 				provider: params.provider,
 				accountId: credential.accountId,
 				projectId: credential.projectId,
-				modelId,
+				tier: entry.tier,
+				windowId,
 			},
-			window: representativeWindow,
-			amount,
-			status: getUsageStatus(amount.remainingFraction),
+			window: entry.window,
+			amount: entry.amount,
+			status: getUsageStatus(entry.amount.remainingFraction),
 		});
 	}
+
+	limits.sort((a, b) => {
+		const aFraction = a.amount.remainingFraction ?? 1;
+		const bFraction = b.amount.remainingFraction ?? 1;
+		return aFraction - bFraction;
+	});
+
+	const metadata: UsageReport["metadata"] = {
+		endpoint: url,
+		projectId: credential.projectId,
+	};
+	if (credential.email) metadata.email = credential.email;
+	if (credential.accountId) metadata.accountId = credential.accountId;
 
 	const report: UsageReport = {
 		provider: params.provider,
 		fetchedAt: nowMs,
 		limits,
-		metadata: {
-			endpoint: url,
-			projectId: credential.projectId,
-		},
+		metadata,
 		raw: data,
 	};
 
