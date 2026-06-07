@@ -42,17 +42,114 @@ function getLatestSurvivingAssistantIndex(messages: readonly Message[]): number 
  * - Injects synthetic "aborted" tool results
  * - Adds a <turn-aborted> guidance marker for the model
  */
+
+/**
+ * Walk the message history and rewrite duplicate `tool_call_id` values so every
+ * `tool_call` is uniquely identifiable. Some upstream models re-emit the same
+ * id across distinct tool calls (e.g. MiMo 2.5 Pro via opencode-go, Kimi on
+ * certain proxies). Without this normalization, downstream `Map`/`Set` lookups
+ * in the second pass silently collapse the duplicates and one of the calls is
+ * left unfulfilled, which the provider rejects with HTTP 400
+ * ("tool call result does not follow tool call").
+ *
+ * The first occurrence of each id is preserved; subsequent occurrences are
+ * rewritten as `<id>_dup<N>`, where `<N>` starts at 1 and is unique per original
+ * id. For each rewritten tool call, the matching `toolResult` that immediately
+ * follows it (if any) is rewritten to the new id; toolResults that belong to
+ * earlier occurrences keep the original id. The returned message list is a
+ * shallow copy only when at least one rewrite happened; otherwise the input
+ * array is returned unchanged.
+ */
+function deduplicateToolCallIds(messages: readonly Message[]): Message[] {
+	const seenIds = new Set<string>();
+	let needsRewrite = false;
+
+	// First pass: identify which assistant tool_call blocks need rewriting and
+	// assign a unique suffix to each duplicate occurrence.
+	const rewrites = new Map<number, string>(); // message index → new id
+	const idSuffixCounter = new Map<string, number>();
+
+	for (let i = 0; i < messages.length; i++) {
+		const msg = messages[i]!;
+		if (msg.role !== "assistant") continue;
+		for (const block of msg.content) {
+			if (block.type !== "toolCall") continue;
+			const id = block.id;
+			if (seenIds.has(id)) {
+				const nextSuffix = idSuffixCounter.get(id) ?? 1;
+				idSuffixCounter.set(id, nextSuffix + 1);
+				const newId = `${id}_dup${nextSuffix}`;
+				rewrites.set(i, newId);
+				seenIds.add(newId);
+				needsRewrite = true;
+			} else {
+				seenIds.add(id);
+			}
+		}
+	}
+
+	if (!needsRewrite) return messages as Message[];
+
+	// Second pass: rewrite the assistant tool_call blocks, and for each rewrite
+	// update the toolResult that follows it. toolResults that appear after a
+	// non-rewritten (original) tool call keep the original id so the call/result
+	// pairing stays intact.
+	const rewrittenAssistantIndices = new Set(rewrites.keys());
+	return messages.map((msg, idx) => {
+		if (msg.role === "assistant") {
+			const rewrite = rewrites.get(idx);
+			if (!rewrite) return msg;
+			const newContent = msg.content.map(block => {
+				if (block.type !== "toolCall") return block;
+				return { ...block, id: rewrite };
+			});
+			return { ...msg, content: newContent };
+		}
+		if (msg.role === "toolResult") {
+			// Walk backwards to find the most recent assistant message; if its
+			// tool call was rewritten, this result belongs to that rewritten
+			// call and must follow the new id.
+			for (let j = idx - 1; j >= 0; j--) {
+				const prev = messages[j]!;
+				if (prev.role === "assistant") {
+					if (rewrittenAssistantIndices.has(j)) {
+						const newId = rewrites.get(j)!;
+						if (msg.toolCallId !== newId) {
+							return { ...msg, toolCallId: newId };
+						}
+					}
+					break;
+				}
+				if (prev.role === "toolResult") break;
+			}
+		}
+		return msg;
+	});
+}
+
 export function transformMessages<TApi extends Api>(
 	messages: Message[],
 	model: Model<TApi>,
 	normalizeToolCallId?: (id: string, model: Model<TApi>, source: AssistantMessage) => string,
 ): Message[] {
+	// Detect and resolve duplicate tool call IDs in the source messages. Some models
+	// (e.g. MiniMax-M3, Kimi on certain proxies) emit the same `tool_call_id` for
+	// two distinct tool calls, which breaks the API contract — every `tool_call`
+	// must be followed by a `tool_result` with the matching id. Without this fix,
+	// `Map`/`Set` lookups in the second pass silently collapse duplicates, leaving
+	// one of the calls unfulfilled and the provider returns HTTP 400.
+	//
+	// We rewrite the source messages in place: the first occurrence keeps the
+	// original id, subsequent occurrences get a unique `_dupN` suffix. The
+	// corresponding `toolResult` messages are updated to match the new ids.
+	const dedupedMessages = deduplicateToolCallIds(messages);
+
 	// Build a map of original tool call IDs to normalized IDs
 	const toolCallIdMap = new Map<string, string>();
 
-	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(messages);
+	const latestSurvivingAssistantIndex = getLatestSurvivingAssistantIndex(dedupedMessages);
 	// First pass: transform messages (thinking blocks, tool call ID normalization)
-	const transformed = messages.map((msg, index) => {
+	const transformed = dedupedMessages.map((msg, index) => {
 		// User and developer messages pass through unchanged
 		if (msg.role === "user" || msg.role === "developer") {
 			return msg;
@@ -266,7 +363,7 @@ export function transformMessages<TApi extends Api>(
 			// `stopReason: "stop"` thinking-only messages are intentionally preserved: they
 			// represent reasoning-only assistant turns used for replay round-trips
 			// (OpenAI completions `reasoning_text`, Google signed thought parts).
-			const originalMsg = messages[i]!;
+			const originalMsg = dedupedMessages[i]!;
 			if (originalMsg.role === "assistant" && shouldDropTruncatedThinkingOnlyAssistant(originalMsg)) {
 				if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
 					// Still arm the aborted-turn note so downstream guidance fires.
