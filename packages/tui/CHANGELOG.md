@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced `SelectList` render-time width measurement to the visible window plus bounded overscan, improving responsiveness for large autocomplete/dropdown result sets such as slash commands.
+
 ## [15.10.1] - 2026-06-07
 ### Breaking Changes
 

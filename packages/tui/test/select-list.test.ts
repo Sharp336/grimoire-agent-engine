@@ -129,6 +129,60 @@ describe("SelectList", () => {
 		expect(visibleIndexOf(rendered[1], "second")).toBe(22);
 	});
 
+	it("does not let distant offscreen items stretch the visible primary column", () => {
+		const items = [
+			{ value: "alpha", label: "alpha", description: "first" },
+			{ value: "beta", label: "beta", description: "second" },
+			...Array.from({ length: 6 }, (_, i) => ({
+				value: `filler-${i}`,
+				label: `filler-${i}`,
+				description: `filler ${i}`,
+			})),
+			{
+				value: "long",
+				label: "very-long-offscreen-command-name-that-should-not-size-the-visible-page",
+				description: "offscreen long",
+			},
+		];
+
+		const list = new SelectList(items, 2, testTheme, {
+			minPrimaryColumnWidth: 1,
+			maxPrimaryColumnWidth: 80,
+		});
+		const rendered = list.render(100);
+
+		expect(visibleIndexOf(rendered[0], "first")).toBeLessThan(20);
+		expect(rendered.join("\n")).not.toContain("offscreen long");
+	});
+
+	it("sizes the primary column from the scrolled visible window", () => {
+		const items = [
+			{ value: "alpha", label: "alpha", description: "first" },
+			{ value: "beta", label: "beta", description: "second" },
+			...Array.from({ length: 6 }, (_, i) => ({
+				value: `filler-${i}`,
+				label: `filler-${i}`,
+				description: `filler ${i}`,
+			})),
+			{
+				value: "long",
+				label: "very-long-visible-command-name-that-should-size-the-current-page",
+				description: "long description",
+			},
+		];
+
+		const list = new SelectList(items, 2, testTheme, {
+			minPrimaryColumnWidth: 1,
+			maxPrimaryColumnWidth: 80,
+		});
+		list.setSelectedIndex(items.length - 1);
+		const rendered = list.render(100);
+		const longLine = rendered.find(line => line.includes("long description")) ?? "";
+
+		expect(longLine).toContain("long description");
+		expect(visibleIndexOf(longLine, "long description")).toBeGreaterThan(40);
+	});
+
 	it("allows overriding primary truncation while preserving description alignment", () => {
 		const items = [
 			{

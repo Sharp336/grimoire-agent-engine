@@ -95,14 +95,9 @@ export class SelectList implements Component {
 			return lines;
 		}
 
-		const primaryColumnWidth = this.#getPrimaryColumnWidth();
-
 		// Calculate visible range with scrolling
-		const startIndex = Math.max(
-			0,
-			Math.min(this.#selectedIndex - Math.floor(this.maxVisible / 2), this.#filteredItems.length - this.maxVisible),
-		);
-		const endIndex = Math.min(startIndex + this.maxVisible, this.#filteredItems.length);
+		const { startIndex, endIndex } = this.#getVisibleRange();
+		const primaryColumnWidth = this.#getPrimaryColumnWidth(startIndex, endIndex);
 
 		// Render visible items
 		const overflow = this.#filteredItems.length > this.maxVisible;
@@ -219,11 +214,31 @@ export class SelectList implements Component {
 		return prefix + truncatedValue;
 	}
 
-	#getPrimaryColumnWidth(): number {
+	#getVisibleRange(): { startIndex: number; endIndex: number } {
+		const startIndex = Math.max(
+			0,
+			Math.min(this.#selectedIndex - Math.floor(this.maxVisible / 2), this.#filteredItems.length - this.maxVisible),
+		);
+		const endIndex = Math.min(startIndex + this.maxVisible, this.#filteredItems.length);
+		return { startIndex, endIndex };
+	}
+
+	#getPrimaryColumnWidth(startIndex: number, endIndex: number): number {
 		const { min, max } = this.#getPrimaryColumnBounds();
-		const widestPrimary = this.#filteredItems.reduce((widest, item) => {
-			return Math.max(widest, visibleWidth(this.#getDisplayValue(item)) + PRIMARY_COLUMN_GAP);
-		}, 0);
+		// Keep render-time width measurement bounded. SelectList only renders a
+		// small viewport, but large autocomplete/dropdown result sets previously
+		// measured every label on every TUI render. Measure the visible rows plus
+		// one page of overscan on each side so nearby scrolling keeps a stable
+		// layout without an O(n) visibleWidth pass per frame.
+		const overscan = Math.max(1, this.maxVisible);
+		const measurementStart = Math.max(0, startIndex - overscan);
+		const measurementEnd = Math.min(this.#filteredItems.length, endIndex + overscan);
+		let widestPrimary = 0;
+		for (let i = measurementStart; i < measurementEnd; i++) {
+			const item = this.#filteredItems[i];
+			if (!item) continue;
+			widestPrimary = Math.max(widestPrimary, visibleWidth(this.#getDisplayValue(item)) + PRIMARY_COLUMN_GAP);
+		}
 
 		return clamp(widestPrimary, min, max);
 	}
