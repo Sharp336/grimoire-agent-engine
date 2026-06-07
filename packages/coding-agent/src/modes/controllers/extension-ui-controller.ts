@@ -580,7 +580,7 @@ export class ExtensionUiController {
 	}
 
 	/**
-	 * Set extension text inside the editor top-border status line.
+	 * Set extension text in the status line rendered in the editor's top border.
 	 */
 	setStatusSegment(
 		key: string,
