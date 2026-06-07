@@ -121,4 +121,25 @@ describe("status line extension segments", () => {
 
 		expect(plain.indexOf("A segment")).toBeLessThan(plain.indexOf("Z segment"));
 	});
+
+	it("orders extension segments by order then key", () => {
+		const component = buildComponent();
+
+		// alpha sorts before zeta by key, but order overrides: zeta(order 0) first.
+		component.setExtensionSegment("alpha", "A segment", "left", 10);
+		component.setExtensionSegment("zeta", "Z segment", "left", 0);
+		const plain = plainTopBorder(component);
+
+		expect(plain.indexOf("Z segment")).toBeLessThan(plain.indexOf("A segment"));
+	});
+
+	it("breaks order ties by key", () => {
+		const component = buildComponent();
+
+		component.setExtensionSegment("zeta", "Z segment", "left", 5);
+		component.setExtensionSegment("alpha", "A segment", "left", 5);
+		const plain = plainTopBorder(component);
+
+		expect(plain.indexOf("A segment")).toBeLessThan(plain.indexOf("Z segment"));
+	});
 });

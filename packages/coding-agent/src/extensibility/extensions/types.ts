@@ -189,8 +189,12 @@ export interface ExtensionUIContext {
 	 * clear. Text is sanitized to a single line; styling is applied by the
 	 * status line, so pass plain text (icons/glyphs ok). Defaults to the left
 	 * side; under width pressure, extension segments are dropped before built-in ones.
+	 *
+	 * `options.order` controls placement among extension segments on the same
+	 * side: lower values sort first (toward the built-in segments), ties break by
+	 * `key`. Built-in segment placement is not affected.
 	 */
-	setStatusSegment(key: string, text: string | undefined, options?: { side?: "left" | "right" }): void;
+	setStatusSegment(key: string, text: string | undefined, options?: { side?: "left" | "right"; order?: number }): void;
 	/** Set the working/loading message shown during streaming. Call with no argument to restore default. */
 	setWorkingMessage(message?: string): void;
 

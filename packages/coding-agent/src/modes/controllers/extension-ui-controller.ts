@@ -582,11 +582,15 @@ export class ExtensionUiController {
 	/**
 	 * Set extension text inside the editor top-border status line.
 	 */
-	setStatusSegment(key: string, text: string | undefined, options?: { side?: "left" | "right" }): void {
+	setStatusSegment(
+		key: string,
+		text: string | undefined,
+		options?: { side?: "left" | "right"; order?: number },
+	): void {
 		if (this.ctx.isBackgrounded) {
 			return;
 		}
-		this.ctx.statusLine.setExtensionSegment(key, text, options?.side);
+		this.ctx.statusLine.setExtensionSegment(key, text, options?.side, options?.order);
 		this.ctx.updateEditorTopBorder();
 		this.ctx.ui.requestRender();
 	}

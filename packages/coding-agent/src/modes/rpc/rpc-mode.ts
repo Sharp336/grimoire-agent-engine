@@ -332,7 +332,11 @@ export async function runRpcMode(
 			} as RpcExtensionUIRequest);
 		}
 
-		setStatusSegment(_key: string, _text: string | undefined, _options?: { side?: "left" | "right" }): void {
+		setStatusSegment(
+			_key: string,
+			_text: string | undefined,
+			_options?: { side?: "left" | "right"; order?: number },
+		): void {
 			// Not supported in RPC mode
 		}
 

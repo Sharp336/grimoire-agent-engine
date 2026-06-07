@@ -149,7 +149,7 @@ export class StatusLineComponent implements Component {
 	#onBranchChange: (() => void) | null = null;
 	#autoCompactEnabled: boolean = true;
 	#hookStatuses: Map<string, string> = new Map();
-	#extensionSegments: Map<string, { text: string; side: "left" | "right" }> = new Map();
+	#extensionSegments: Map<string, { text: string; side: "left" | "right"; order: number }> = new Map();
 	#subagentCount: number = 0;
 	#sessionStartTime: number = Date.now();
 	#planModeStatus: { enabled: boolean; paused: boolean } | null = null;
@@ -239,11 +239,11 @@ export class StatusLineComponent implements Component {
 		}
 	}
 
-	setExtensionSegment(key: string, text: string | undefined, side: "left" | "right" = "left"): void {
+	setExtensionSegment(key: string, text: string | undefined, side: "left" | "right" = "left", order = 0): void {
 		if (text === undefined) {
 			this.#extensionSegments.delete(key);
 		} else {
-			this.#extensionSegments.set(key, { text, side });
+			this.#extensionSegments.set(key, { text, side, order });
 		}
 	}
 
@@ -676,8 +676,8 @@ export class StatusLineComponent implements Component {
 		}
 
 		if (this.#extensionSegments.size > 0) {
-			for (const [, segment] of [...this.#extensionSegments.entries()].sort(([a], [b]) =>
-				a < b ? -1 : a > b ? 1 : 0,
+			for (const [, segment] of [...this.#extensionSegments.entries()].sort(([aKey, a], [bKey, b]) =>
+				a.order !== b.order ? a.order - b.order : aKey < bKey ? -1 : aKey > bKey ? 1 : 0,
 			)) {
 				const content = sanitizeStatusText(segment.text);
 				if (!content) continue;
