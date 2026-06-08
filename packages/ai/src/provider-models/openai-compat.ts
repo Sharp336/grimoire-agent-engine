@@ -1,6 +1,7 @@
+import { Effort } from "../effort";
 import type { ModelManagerOptions } from "../model-manager";
-import { Effort } from "../model-thinking";
 import { getBundledModels } from "../models";
+import { getGitHubCopilotBaseUrl, OPENCODE_HEADERS, parseGitHubCopilotApiKey } from "../registry/oauth/github-copilot";
 import type { Api, Model, Provider, ThinkingConfig } from "../types";
 import { isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import {
@@ -9,8 +10,8 @@ import {
 	type OpenAICompatibleModelRecord,
 } from "../utils/discovery/openai-compatible";
 import { toFireworksPublicModelId } from "../utils/fireworks-model-id";
-import { getGitHubCopilotBaseUrl, OPENCODE_HEADERS, parseGitHubCopilotApiKey } from "../utils/oauth/github-copilot";
 import { createBundledReferenceMap, createReferenceResolver } from "./bundled-references";
+import { UNK_CONTEXT_WINDOW, UNK_MAX_TOKENS } from "./discovery-constants";
 
 const MODELS_DEV_URL = "https://models.dev/api.json";
 const ANTHROPIC_BASE_URL = "https://api.anthropic.com/v1";
@@ -242,6 +243,22 @@ async function fetchOllamaNativeModels(
 const OLLAMA_FALLBACK_CONTEXT_WINDOW = 128_000;
 /** Cap max output tokens at a value that matches OMP's other openai-responses defaults. */
 const OLLAMA_DEFAULT_MAX_TOKENS = 8192;
+/**
+ * Ollama's OpenAI-compatible `reasoning.effort` only accepts
+ * `high|medium|low|max|none`; passing OMP's `minimal`/`xhigh` levels verbatim
+ * makes the server reject the turn with HTTP 400 `invalid reasoning value`.
+ * Map the two unsupported levels onto the closest accepted ones (`low`/`max`).
+ */
+const OLLAMA_REASONING_EFFORT_MAP = { minimal: "low", xhigh: "max" } as const;
+
+/** Stamp the Ollama reasoning-effort map onto a reasoning-capable model. */
+function applyOllamaReasoningCompat(model: Model<"openai-responses">): void {
+	if (!model.reasoning) return;
+	model.compat = {
+		...model.compat,
+		reasoningEffortMap: { ...OLLAMA_REASONING_EFFORT_MAP, ...model.compat?.reasoningEffortMap },
+	};
+}
 
 interface OllamaResolvedMetadata {
 	contextWindow: number;
@@ -425,7 +442,7 @@ function isLikelyNanoGptTextModelId(id: string): boolean {
 
 type SimpleProviderConfig = { apiKey?: string; baseUrl?: string };
 
-function createSimpleOpenAICompletionsOptions(
+export function createSimpleOpenAICompletionsOptions(
 	providerId: Parameters<typeof getBundledModels>[0],
 	defaultBaseUrl: string,
 	config?: SimpleProviderConfig,
@@ -955,6 +972,29 @@ export function clampFireworksKimiMaxTokens(modelId: string, candidate: number):
 	return isFireworksKimiK2ModelId(modelId) ? Math.min(candidate, FIREWORKS_KIMI_MAX_TOKENS) : candidate;
 }
 
+/**
+ * Fireworks DeepSeek V4 accepts effort via `reasoning_effort` but rejects the
+ * DeepSeek-native binary `thinking` toggle when both are present.
+ */
+export function stripFireworksDeepSeekThinkingToggle(
+	model: Model<"openai-completions">,
+	publicModelId: string,
+): Model<"openai-completions"> {
+	if (!publicModelId.startsWith("deepseek-v4")) return model;
+	const compat = model.compat;
+	if (!compat?.extraBody || !("thinking" in compat.extraBody)) return model;
+
+	const extraBody = { ...compat.extraBody };
+	delete extraBody.thinking;
+	if (Object.keys(extraBody).length > 0) {
+		return { ...model, compat: { ...compat, extraBody } };
+	}
+
+	const nextCompat = { ...compat };
+	delete nextCompat.extraBody;
+	return { ...model, compat: nextCompat };
+}
+
 export interface FireworksModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -1024,7 +1064,10 @@ export function fireworksModelManagerOptions(
 					mapModel: (entry, defaults) => {
 						const publicModelId = toFireworksPublicModelId(defaults.id);
 						const reference = modelsDevReferences.get(publicModelId) ?? bundledReferences(publicModelId);
-						const model = mapWithBundledReference(entry, defaults, reference);
+						const model = stripFireworksDeepSeekThinkingToggle(
+							mapWithBundledReference(entry, defaults, reference),
+							publicModelId,
+						);
 						return {
 							...model,
 							id: publicModelId,
@@ -1357,12 +1400,14 @@ export function ollamaModelManagerOptions(config?: OllamaModelManagerConfig): Mo
 						if (metadata.input) {
 							model.input = metadata.input;
 						}
+						applyOllamaReasoningCompat(model);
 					}),
 				);
 				return openAiCompatible;
 			}
 			const nativeFallback = await fetchOllamaNativeModels(baseUrl, resolveMetadata);
 			if (nativeFallback && nativeFallback.length > 0) {
+				for (const model of nativeFallback) applyOllamaReasoningCompat(model);
 				return nativeFallback;
 			}
 			return openAiCompatible;
@@ -1872,12 +1917,23 @@ export function moonshotModelManagerOptions(
 						const reference = references.get(defaults.id);
 						const model = mapWithBundledReference(entry, defaults, reference);
 						const id = model.id.toLowerCase();
-						const isThinking = id.includes("thinking");
-						const isVision = id.includes("vision") || id.includes("vl") || id.includes("k2.5");
+						// Moonshot's K2.x family (K2.5, K2.6, kimi-k2-thinking, …) is reasoning-capable
+						// and vision-capable on the native API. Without these flags the openai-completions
+						// path skips the z.ai-format `thinking` block, and Moonshot K2.6 stalls on first
+						// turn because its endpoint expects an explicit `thinking: {type}` (#2113). Match
+						// the bundled K2.5 metadata for every K2.x id we discover.
+						const isKimiK2Reasoning = id.includes("thinking") || /(^|\/)kimi-k2(?:\.\d+)?(?:[-:]|$)/.test(id);
+						const isVision =
+							id.includes("vision") || id.includes("vl") || /(^|\/)kimi-k2(?:\.\d+)?(?:[-:]|$)/.test(id);
 						return {
 							...model,
-							reasoning: isThinking || model.reasoning,
+							reasoning: isKimiK2Reasoning || model.reasoning,
 							input: isVision ? ["text", "image"] : model.input,
+							thinking:
+								model.thinking ??
+								(isKimiK2Reasoning
+									? { mode: "effort", minLevel: Effort.Minimal, maxLevel: Effort.High }
+									: undefined),
 						};
 					},
 				}),
@@ -2341,8 +2397,7 @@ export function anthropicModelManagerOptions(
 // Models.dev provider descriptors for generate-models.ts
 // ---------------------------------------------------------------------------
 
-export const UNK_CONTEXT_WINDOW = 222_222;
-export const UNK_MAX_TOKENS = 8_888;
+export { UNK_CONTEXT_WINDOW, UNK_MAX_TOKENS } from "./discovery-constants";
 
 /** Describes how to map models.dev API data for a single provider. */
 export interface ModelsDevProviderDescriptor {

@@ -1,14 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import * as toolsManager from "@oh-my-pi/pi-coding-agent/utils/tools-manager";
+import { handleYouTube } from "@oh-my-pi/pi-coding-agent/web/scrapers/youtube";
 import { hookFetch } from "@oh-my-pi/pi-utils";
-import { resetSettingsForTest, Settings } from "../../../src/config/settings";
-import * as toolsManager from "../../../src/utils/tools-manager";
-import { handleYouTube } from "../../../src/web/scrapers/youtube";
 
 describe("handleYouTube with Parallel extract", () => {
 	beforeEach(async () => {
 		resetSettingsForTest();
 		process.env.PARALLEL_API_KEY = "test-parallel-key";
-		await Settings.init({ inMemory: true, overrides: { "providers.parallelFetch": true } });
+		await Settings.init({ inMemory: true, overrides: { "providers.fetch": "auto" } });
 	});
 
 	afterEach(() => {

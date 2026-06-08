@@ -2,10 +2,10 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { createModelManager } from "../src/model-manager";
-import { Effort } from "../src/model-thinking";
-import { getBundledModel } from "../src/models";
-import { githubCopilotModelManagerOptions } from "../src/provider-models/openai-compat";
+import { Effort } from "@oh-my-pi/pi-ai/effort";
+import { createModelManager } from "@oh-my-pi/pi-ai/model-manager";
+import { getBundledModel } from "@oh-my-pi/pi-ai/models";
+import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-ai/provider-models/openai-compat";
 
 const originalFetch = global.fetch;
 

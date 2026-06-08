@@ -1,4 +1,5 @@
 import type { ZodType, z } from "zod/v4";
+import type { ApiKey } from "./auth-retry";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses";
@@ -27,6 +28,7 @@ import type { OllamaChatOptions } from "./providers/ollama";
 import type { OpenAICodexResponsesOptions } from "./providers/openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./providers/openai-completions";
 import type { OpenAIResponsesOptions } from "./providers/openai-responses";
+import type { KnownProviderId } from "./registry";
 import type { AssistantMessageEventStream } from "./utils/event-stream";
 
 export type { AssistantMessageEventStream } from "./utils/event-stream";
@@ -95,63 +97,14 @@ export interface ThinkingConfig {
 	mode: ThinkingControlMode;
 }
 
-export type KnownProvider =
-	| "alibaba-coding-plan"
-	| "amazon-bedrock"
-	| "anthropic"
-	| "google"
-	| "google-gemini-cli"
-	| "google-antigravity"
-	| "google-vertex"
-	| "openai"
-	| "openai-codex"
-	| "kimi-code"
-	| "minimax-code"
-	| "minimax-code-cn"
-	| "github-copilot"
-	| "fireworks"
-	| "firepass"
-	| "gitlab-duo"
-	| "cursor"
-	| "deepseek"
-	| "xai"
-	| "xai-oauth"
-	| "groq"
-	| "cerebras"
-	| "openrouter"
-	| "kilo"
-	| "vercel-ai-gateway"
-	| "zai"
-	| "zhipu-coding-plan"
-	| "mistral"
-	| "minimax"
-	| "opencode-go"
-	| "opencode-zen"
-	| "synthetic"
-	| "cloudflare-ai-gateway"
-	| "huggingface"
-	| "litellm"
-	| "moonshot"
-	| "nvidia"
-	| "nanogpt"
-	| "ollama"
-	| "ollama-cloud"
-	| "qianfan"
-	| "qwen-portal"
-	| "together"
-	| "venice"
-	| "vllm"
-	| "xiaomi"
-	| "xiaomi-token-plan-sgp"
-	| "xiaomi-token-plan-ams"
-	| "xiaomi-token-plan-cn"
-	| "wafer-pass"
-	| "wafer-serverless"
-	| "zenmux"
-	| "lm-studio";
-export type Provider = KnownProvider | string;
+export type KnownProvider = KnownProviderId;
+// `Provider` is any provider-id string; `KnownProvider` enumerates the built-in model
+// providers. Kept structurally `string` (the prior `KnownProvider | string` already
+// collapsed to `string`) so the registry-derived `KnownProvider` can reference the model
+// types below without forming a circular type-alias reference.
+export type Provider = string;
 
-import type { Effort } from "./model-thinking";
+import type { Effort } from "./effort";
 
 /** Token budgets for each thinking level (token-based providers only) */
 export type ThinkingBudgets = { [key in Effort]?: number };
@@ -298,12 +251,6 @@ export interface StreamOptions {
 	maxTokens?: number;
 	signal?: AbortSignal;
 	apiKey?: string;
-	/**
-	 * Called when a provider returns 401 before any replay-unsafe assistant
-	 * event has been emitted. Returning a different key retries the provider
-	 * request once.
-	 */
-	onAuthError?: (provider: string, apiKey: string, error: unknown) => Promise<string | undefined>;
 	cacheRetention?: CacheRetention;
 	/**
 	 * Additional headers to include in provider requests.
@@ -415,7 +362,15 @@ export interface StreamOptions {
 }
 
 // Unified options with reasoning passed to streamSimple() and completeSimple()
-export interface SimpleStreamOptions extends StreamOptions {
+export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
+	/**
+	 * API key for the request: either a static bearer string, or an
+	 * {@link ApiKeyResolver} that mints/rotates the key across the central
+	 * a/b/c auth-retry policy. `streamSimple`/`completeSimple` resolve a
+	 * resolver to a string before per-provider dispatch, so providers only
+	 * ever see the resolved {@link StreamOptions.apiKey} string.
+	 */
+	apiKey?: ApiKey;
 	reasoning?: Effort;
 	/**
 	 * Force-disable reasoning for the request even when the model supports it.
@@ -905,6 +860,18 @@ export interface Model<TApi extends Api = any> {
 	premiumMultiplier?: number;
 	contextWindow: number;
 	maxTokens: number;
+	/**
+	 * When `true`, providers MUST omit `max_output_tokens` (Responses) /
+	 * `max_tokens` / `max_completion_tokens` (Completions) from the outbound
+	 * request and let the upstream API decide the per-response cap. `maxTokens`
+	 * is still used locally for budgeting (compaction, context promotion); only
+	 * the wire field is suppressed.
+	 *
+	 * Use this for proxies (notably Ollama) that forward to a backend whose true
+	 * output limit OMP cannot discover — sending the wrong value triggers 400s
+	 * from the upstream provider.
+	 */
+	omitMaxOutputTokens?: boolean;
 	headers?: Record<string, string>;
 	/**
 	 * Streaming transport override. When `"pi-native"`, `streamSimple` routes

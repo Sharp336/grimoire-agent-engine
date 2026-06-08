@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { streamAnthropic } from "../src/providers/anthropic";
-import type { AnthropicMessagesClientLike } from "../src/providers/anthropic-client";
-import type { Context, Model } from "../src/types";
+import { streamAnthropic } from "@oh-my-pi/pi-ai/providers/anthropic";
+import type { AnthropicMessagesClientLike } from "@oh-my-pi/pi-ai/providers/anthropic-client";
+import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { waitForDelayOrAbort } from "./helpers";
 
 const originalFetch = global.fetch;
@@ -86,6 +86,7 @@ function createSuccessfulAnthropicEvents(text: string): MockAnthropicEvent[] {
 				cache_creation_input_tokens: 0,
 			},
 		},
+		{ type: "message_stop" },
 	];
 }
 
@@ -94,11 +95,13 @@ function createAnthropicMockStream({
 	connectDelayMs = 0,
 	events,
 	hangAfterEvents = false,
+	onIteratorStart,
 }: {
 	signal: AbortSignal | undefined;
 	connectDelayMs?: number;
 	events?: MockAnthropicEvent[];
 	hangAfterEvents?: boolean;
+	onIteratorStart?: () => void;
 }): MockAnthropicRequest {
 	const response = new Response(null, {
 		status: 200,
@@ -107,6 +110,7 @@ function createAnthropicMockStream({
 
 	const stream: MockAnthropicStream = {
 		async *[Symbol.asyncIterator]() {
+			onIteratorStart?.();
 			if (!events) {
 				await waitForAbortAndThrowAbortError(signal);
 				return;
@@ -134,14 +138,45 @@ function createAnthropicMockStream({
 	};
 }
 
+type PromiseOutcome<T> = { kind: "fulfilled"; value: T } | { kind: "rejected"; error: unknown };
+
+async function drainMicrotasksUntil(predicate: () => boolean, errorMessage: string): Promise<void> {
+	for (let i = 0; i < 1000; i++) {
+		if (predicate()) return;
+		await Promise.resolve();
+	}
+	throw new Error(errorMessage);
+}
+
+async function resolveAfterMicrotasks<T>(promise: Promise<T>, errorMessage: string): Promise<T> {
+	let outcome: PromiseOutcome<T> | undefined;
+	promise.then(
+		value => {
+			outcome = { kind: "fulfilled", value };
+		},
+		error => {
+			outcome = { kind: "rejected", error };
+		},
+	);
+	for (let i = 0; i < 1000 && !outcome; i++) {
+		await Promise.resolve();
+	}
+	if (!outcome) throw new Error(errorMessage);
+	if (outcome.kind === "rejected") throw outcome.error;
+	return outcome.value;
+}
+
 afterEach(() => {
 	global.fetch = originalFetch;
+	vi.useRealTimers();
 	vi.restoreAllMocks();
 });
 
 describe("anthropic first-event timeout retries", () => {
 	it("retries when the provider never sends the first stream event", async () => {
+		vi.useFakeTimers();
 		let attempt = 0;
+		let firstAttemptIteratorStarted = false;
 		const requestTimeouts: Array<number | undefined> = [];
 		const requestMaxRetries: Array<number | undefined> = [];
 		const create = ((
@@ -154,16 +189,35 @@ describe("anthropic first-event timeout retries", () => {
 			return createAnthropicMockStream({
 				signal: requestOptions?.signal,
 				events: attempt === 1 ? undefined : createSuccessfulAnthropicEvents("retry recovered"),
+				onIteratorStart:
+					attempt === 1
+						? () => {
+								firstAttemptIteratorStarted = true;
+							}
+						: undefined,
 			}) as never;
 		}) as unknown as AnthropicMessagesClientLike["messages"]["create"];
 		const client = { messages: { create } } as AnthropicMessagesClientLike;
 		const providerRetryWait = vi.fn(async () => {});
 
-		const result = await streamAnthropic(model, context, {
+		const resultPromise = streamAnthropic(model, context, {
 			client,
 			streamFirstEventTimeoutMs: 1,
 			providerRetryWait,
 		}).result();
+
+		await drainMicrotasksUntil(
+			() => firstAttemptIteratorStarted,
+			"Anthropic mock stream did not enter the hung first attempt",
+		);
+		await drainMicrotasksUntil(() => vi.getTimerCount() > 0, "Anthropic first-event watchdog timer was not armed");
+		expect(attempt).toBe(1);
+
+		vi.advanceTimersByTime(1);
+		const result = await resolveAfterMicrotasks(
+			resultPromise,
+			"Anthropic retry did not settle after the deterministic first-event timeout",
+		);
 
 		expect(attempt).toBe(2);
 		expect(providerRetryWait).toHaveBeenCalledWith(2000, undefined);

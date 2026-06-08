@@ -50,6 +50,7 @@ import {
 } from "@opentelemetry/api";
 import { AgentRunCollector, type AgentRunCoverage, type AgentRunSummary, type ToolStatus } from "./run-collector";
 import type { AgentTool } from "./types";
+import { EventLoopKeepalive } from "./utils/yield";
 
 /** Default tracer name. Override via {@link AgentTelemetryConfig.tracerName}. */
 export const DEFAULT_TRACER_NAME = "@oh-my-pi/pi-agent-core";
@@ -1629,6 +1630,13 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 	options: SimpleStreamOptions,
 	span: InstrumentedChatSpanOptions,
 ): Promise<AssistantMessage> {
+	// Oneshot LLM calls (handoff, compaction/branch summaries) run outside the
+	// agent `#runLoop`, which is where the EventLoopKeepalive normally lives.
+	// Without it, Bun's JSC loop stops servicing timers while parked on the
+	// long-lived completion promise, freezing any host spinner (e.g. the
+	// `/handoff` Loader) until an unrelated I/O event (a terminal resize)
+	// pokes the loop. Keep the loop healthy for the duration of the call.
+	using _keepalive = new EventLoopKeepalive();
 	const { telemetry, parent, oneshotKind } = span;
 	const stepNumber = span.stepNumber ?? -1;
 	const reasoning = options.reasoning;
@@ -1861,7 +1869,8 @@ export function finishInvokeAgentSpan(
 
 /**
  * Invoke {@link AgentTelemetryConfig.onRunEnd} on `telemetry` if set. Throws
- are caught and logged via `console.warn` — telemetry callbacks NEVER turn a
+ * are caught and surfaced via the `onTelemetryWarning` hook (falling back to `console.warn`
+ * when no hook is set) — telemetry callbacks NEVER turn a
  * successful agent run into a failed one. Idempotent at the call site via
  * {@link AgentRunCollector.markRunEnded}; callers must check that before
  * calling this helper.

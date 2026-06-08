@@ -1,7 +1,7 @@
 import { DEFAULT_MAX_BYTES, OutputSink } from "../../session/streaming-output";
 import type { ToolSession } from "../../tools";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../../tools/output-meta";
-import { EVAL_HEARTBEAT_OP } from "../heartbeat";
+import { isEvalTimeoutControlEvent } from "../bridge-timeout";
 import { executeInVmContext, type JsDisplayOutput } from "./context-manager";
 import type { JsStatusEvent } from "./shared/types";
 
@@ -10,9 +10,9 @@ export interface JsExecutorOptions {
 	timeoutMs?: number;
 	deadlineMs?: number;
 	/**
-	 * Inactivity budget (ms). Used for worker cold-start headroom and
-	 * timeout-annotation text when the caller drives cancellation via an
-	 * idle-aware `signal` instead of `deadlineMs`/`timeoutMs`. Never arms a timer.
+	 * Runtime-work budget (ms). Used for worker cold-start headroom and
+	 * timeout-annotation text when the caller drives cancellation via the eval
+	 * watchdog `signal` instead of `deadlineMs`/`timeoutMs`. Never arms a timer.
 	 */
 	idleTimeoutMs?: number;
 	onChunk?: (chunk: string) => Promise<void> | void;
@@ -24,6 +24,8 @@ export interface JsExecutorOptions {
 	artifactPath?: string;
 	artifactId?: string;
 	session: ToolSession;
+	/** On-disk roots the helpers substitute for internal-URL schemes (e.g. `local://`). */
+	localRoots?: Record<string, string>;
 }
 
 export interface JsResult {
@@ -85,9 +87,9 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 		options.signal && timeoutSignal
 			? AbortSignal.any([options.signal, timeoutSignal])
 			: (options.signal ?? timeoutSignal);
-	// The eval tool drives cancellation via an idle-aware `signal` and passes only
-	// an inactivity budget; use it solely as worker cold-start headroom and never
-	// derive a competing fixed timer from it.
+	// The eval tool drives cancellation via its own watchdog `signal` and passes
+	// only the runtime-work budget; use it solely as worker cold-start headroom
+	// and never derive a competing fixed timer from it.
 	const acquireBudgetMs = legacyTimeoutMs ?? options.idleTimeoutMs;
 
 	try {
@@ -96,6 +98,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			sessionId: options.sessionId,
 			cwd: options.cwd ?? options.session.cwd,
 			session: options.session,
+			localRoots: options.localRoots,
 			reset: options.reset,
 			code,
 			filename: `js-cell-${crypto.randomUUID()}.js`,
@@ -105,10 +108,10 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 				onText: chunk => outputSink.push(chunk),
 				onDisplay: output => {
 					if (output.type === "status") {
-						// Heartbeats are pure idle-watchdog keepalives: forward them so
-						// the eval tool re-arms its timer, but never store or render them.
+						// Timeout-control events drive the eval watchdog only; never
+						// store or render them as cell output.
 						options.onStatus?.(output.event);
-						if (output.event.op === EVAL_HEARTBEAT_OP) return;
+						if (isEvalTimeoutControlEvent(output.event)) return;
 					}
 					displayOutputs.push(output);
 				},
