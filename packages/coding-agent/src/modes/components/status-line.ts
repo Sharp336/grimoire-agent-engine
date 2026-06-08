@@ -5,7 +5,12 @@ import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui"
 import { formatCount, getProjectDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { settings } from "../../config/settings";
-import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "../../config/settings-schema";
+import type {
+	StatusLinePlacement,
+	StatusLinePreset,
+	StatusLineSegmentId,
+	StatusLineSeparatorStyle,
+} from "../../config/settings-schema";
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
 import * as git from "../../utils/git";
@@ -35,6 +40,7 @@ export interface StatusLineSettings {
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];
 	separator?: StatusLineSeparatorStyle;
+	placement?: StatusLinePlacement;
 	segmentOptions?: StatusLineSegmentOptions;
 	showHookStatus?: boolean;
 	sessionAccent?: boolean;
@@ -202,6 +208,7 @@ export class StatusLineComponent implements Component {
 			leftSegments: settings.get("statusLine.leftSegments"),
 			rightSegments: settings.get("statusLine.rightSegments"),
 			separator: settings.get("statusLine.separator"),
+			placement: settings.get("statusLine.placement"),
 			showHookStatus: settings.get("statusLine.showHookStatus"),
 			segmentOptions: settings.getGroup("statusLine").segmentOptions,
 			sessionAccent: settings.get("statusLine.sessionAccent"),
@@ -643,6 +650,7 @@ export class StatusLineComponent implements Component {
 			rightSegments,
 			separator: this.#settings.separator ?? presetDef.separator,
 			segmentOptions: mergedSegmentOptions,
+			placement: this.#settings.placement ?? "above",
 		};
 	}
 
@@ -789,6 +797,20 @@ export class StatusLineComponent implements Component {
 			content,
 			width: visibleWidth(content),
 		};
+	}
+
+	getEditorTopBorder(width: number): { content: string; width: number } | undefined {
+		if ((this.#settings.placement ?? "above") === "below") {
+			return undefined;
+		}
+		return this.getTopBorder(width);
+	}
+
+	getLineBelowEditor(width: number): string[] {
+		if ((this.#settings.placement ?? "above") !== "below") {
+			return [];
+		}
+		return [this.#buildStatusLine(width)];
 	}
 
 	render(width: number): string[] {

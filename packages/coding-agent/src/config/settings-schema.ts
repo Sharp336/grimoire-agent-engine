@@ -441,6 +441,21 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"statusLine.placement": {
+		type: "enum",
+		values: ["above", "below"] as const,
+		default: "above",
+		ui: {
+			tab: "appearance",
+			label: "Status Line Placement",
+			description: "Render the main status line in the editor top border or below the editor",
+			options: [
+				{ value: "above", label: "Above", description: "In the editor top border" },
+				{ value: "below", label: "Below", description: "Below the editor" },
+			],
+		},
+	},
+
 	"statusLine.sessionAccent": {
 		type: "boolean",
 		default: true,
@@ -3308,6 +3323,9 @@ export type StatusLinePreset = SettingValue<"statusLine.preset">;
 /** Status line separator style - derived from schema */
 export type StatusLineSeparatorStyle = SettingValue<"statusLine.separator">;
 
+/** Status line placement - derived from schema */
+export type StatusLinePlacement = SettingValue<"statusLine.placement">;
+
 /** Tree selector filter mode - derived from schema */
 export type TreeFilterMode = SettingValue<"treeFilterMode">;
 
@@ -3415,6 +3433,7 @@ export interface ExaSettings {
 export interface StatusLineSettings {
 	preset: StatusLinePreset;
 	separator: StatusLineSeparatorStyle;
+	placement: StatusLinePlacement;
 	showHookStatus: boolean;
 	leftSegments: StatusLineSegmentId[];
 	rightSegments: StatusLineSegmentId[];

@@ -41,6 +41,7 @@ Boundary rule: the TUI engine is message-agnostic. It only knows `Component.rend
 - `statusLine`
 - `hookWidgetContainerAbove`
 - `editorContainer` (holds `CustomEditor`)
+- `statusLineBelowEditor` (renders main status line when `statusLine.placement=below`)
 - `hookWidgetContainerBelow`
 
 `init()` wires the tree in that order after any startup warnings/welcome/changelog, focuses the editor, registers input handlers via `InputController`, starts TUI, pushes terminal title state, updates the editor border, and requests a forced render.
@@ -168,7 +169,7 @@ Read-tool grouping is intentionally stateful (`#lastReadGroup`) to coalesce cons
 Status lane ownership:
 
 - `statusContainer` holds transient loaders (`loadingAnimation`, `autoCompactionLoader`, `retryLoader`).
-- `statusLine` renders persistent status/hooks/plan indicators and drives editor top border updates.
+- `statusLine` renders persistent hook/plan indicators and drives editor top border updates. The main status line lives in the editor top border by default; when `statusLine.placement=below`, `statusLineBelowEditor` renders that main row below the editor and the editor top border falls back to plain chrome.
 
 Loader behavior:
 

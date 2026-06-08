@@ -16,6 +16,7 @@ import {
 import { getDefault, type SettingPath, settings } from "../../config/settings";
 import type {
 	SettingTab,
+	StatusLinePlacement,
 	StatusLinePreset,
 	StatusLineSegmentId,
 	StatusLineSeparatorStyle,
@@ -195,6 +196,7 @@ export interface StatusLinePreviewSettings {
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];
 	separator?: StatusLineSeparatorStyle;
+	placement?: StatusLinePlacement;
 	sessionAccent?: boolean;
 }
 
@@ -430,6 +432,16 @@ export class SettingsSelectorComponent extends Container {
 				this.callbacks.onStatusLinePreview?.({ separator });
 				this.#updateStatusPreview();
 			};
+		} else if (def.path === "statusLine.placement") {
+			onPreview = value => {
+				this.callbacks.onStatusLinePreview?.({ placement: value as StatusLinePlacement });
+				this.#updateStatusPreview();
+			};
+			onPreviewCancel = () => {
+				const placement = settings.get("statusLine.placement");
+				this.callbacks.onStatusLinePreview?.({ placement });
+				this.#updateStatusPreview();
+			};
 		}
 
 		// Provide status line preview for theme selection
@@ -589,6 +601,7 @@ export class SettingsSelectorComponent extends Container {
 			leftSegments: settings.get("statusLine.leftSegments"),
 			rightSegments: settings.get("statusLine.rightSegments"),
 			separator: settings.get("statusLine.separator"),
+			placement: settings.get("statusLine.placement"),
 			sessionAccent: settings.get("statusLine.sessionAccent"),
 		};
 		this.callbacks.onStatusLinePreview?.(statusLineSettings);
