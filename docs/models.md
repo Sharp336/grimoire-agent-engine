@@ -623,6 +623,46 @@ providers:
         input: [text, image]
 ```
 
+### OpenAI-compatible relay with model discovery
+
+Use a separate provider id for OpenAI-compatible relay services instead of
+overriding the built-in `openai` provider. `apiKey` is resolved as an
+environment variable name first, then as a literal token.
+
+```yaml
+providers:
+  openai-relay:
+    baseUrl: https://relay.example.com/v1
+    apiKey: OPENAI_RELAY_API_KEY
+    api: openai-completions
+    discovery:
+      type: openai-models-list
+    compat:
+      supportsDeveloperRole: false
+      supportsReasoningEffort: false
+```
+
+If the relay does not support `GET /v1/models`, define the model list manually:
+
+```yaml
+providers:
+  openai-relay:
+    baseUrl: https://relay.example.com/v1
+    apiKey: OPENAI_RELAY_API_KEY
+    api: openai-completions
+    models:
+      - id: gpt-5.4
+        name: GPT-5.4 via relay
+        reasoning: true
+        input: [text]
+        contextWindow: 1000000
+        maxTokens: 32768
+```
+
+Use `api: openai-responses` only when the relay explicitly supports the
+Responses API. Most generic OpenAI-compatible relays are safer with
+`openai-completions`.
+
 ### Override built-in provider route + model metadata
 
 ```yaml

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added regression coverage and documentation for configuring OpenAI-compatible relay providers through `models.yml`, including provider-level `baseUrl`, `apiKey`, discovery, and selector availability.
+
 ## [15.10.4] - 2026-06-08
 
 ### Added

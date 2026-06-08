@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Effort, type Model, type OpenAICompat, type ThinkingConfig, writeModelCache } from "@oh-my-pi/pi-ai";
+import { closeModelCache } from "@oh-my-pi/pi-ai/model-cache";
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -52,6 +53,7 @@ describe("ModelRegistry", () => {
 		} else {
 			Bun.env.OLLAMA_CONTEXT_LENGTH = originalOllamaContextLength;
 		}
+		closeModelCache();
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
 			fs.rmSync(tempDir, { recursive: true });
@@ -2019,6 +2021,58 @@ describe("ModelRegistry", () => {
 			expect(state?.status).toBe("unauthenticated");
 			expect(state?.models).toContain("local-coder");
 		});
+
+		test("OpenAI-compatible relay discovery uses models.yml API key and marks models available", async () => {
+			const originalRelayKey = Bun.env.OPENAI_RELAY_API_KEY;
+			Bun.env.OPENAI_RELAY_API_KEY = "relay-test-key";
+			try {
+				writeRawModelsJson({
+					"openai-relay": {
+						baseUrl: "https://relay.example.com/v1",
+						apiKey: "OPENAI_RELAY_API_KEY",
+						api: "openai-completions",
+						discovery: { type: "openai-models-list" },
+						compat: {
+							supportsDeveloperRole: false,
+							supportsReasoningEffort: false,
+						},
+					},
+				});
+
+				using _hook = hookFetch((input, init) => {
+					const url = String(input);
+					if (url === "https://relay.example.com/v1/models") {
+						const headers = init?.headers as Headers | Record<string, string> | undefined;
+						const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+						expect(authHeader).toBe("Bearer relay-test-key");
+						return new Response(JSON.stringify({ data: [{ id: "gpt-relay" }] }), {
+							status: 200,
+							headers: { "Content-Type": "application/json" },
+						});
+					}
+					throw new Error(`Unexpected URL: ${url}`);
+				});
+
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				await registry.refreshProvider("openai-relay");
+
+				const model = registry.find("openai-relay", "gpt-relay");
+				expect(model?.api).toBe("openai-completions");
+				expect(model?.baseUrl).toBe("https://relay.example.com/v1");
+				expect(getOpenAICompat(model)?.supportsDeveloperRole).toBe(false);
+				expect(getOpenAICompat(model)?.supportsReasoningEffort).toBe(false);
+				expect(registry.getAvailable().some(candidate => candidate.provider === "openai-relay")).toBe(true);
+				await expect(registry.getApiKey(model!)).resolves.toBe("relay-test-key");
+				expect(registry.getProviderDiscoveryState("openai-relay")?.status).toBe("ok");
+			} finally {
+				if (originalRelayKey === undefined) {
+					delete Bun.env.OPENAI_RELAY_API_KEY;
+				} else {
+					Bun.env.OPENAI_RELAY_API_KEY = originalRelayKey;
+				}
+			}
+		});
+
 		test("llama.cpp discovery honors configured API key", async () => {
 			authStorage.setRuntimeApiKey("llama.cpp", "test-llama-key");
 			using _hook = hookFetch((input, init) => {

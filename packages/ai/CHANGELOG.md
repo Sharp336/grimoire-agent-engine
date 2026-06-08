@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed model-cache SQLite statements staying open after cache reads, allowing tests and short-lived callers to close the shared cache database cleanly on Windows.
+
 ## [15.10.4] - 2026-06-08
 ### Added
 

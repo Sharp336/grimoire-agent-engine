@@ -1,9 +1,9 @@
 import { Database } from "bun:sqlite";
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { readModelCache, writeModelCache } from "../src/model-cache";
+import { closeModelCache, readModelCache, writeModelCache } from "../src/model-cache";
 import type { Model } from "../src/types";
 
 const TTL_MS = 24 * 60 * 60 * 1000;
@@ -38,6 +38,7 @@ describe("model cache migrations", () => {
 	});
 
 	afterEach(async () => {
+		closeModelCache();
 		if (tempDir) {
 			await fs.rm(tempDir, { recursive: true, force: true });
 			tempDir = "";
@@ -73,5 +74,25 @@ describe("model cache migrations", () => {
 		const overwritten = readModelCache<"openai-completions">("ollama-cloud", TTL_MS, Date.now, dbPath);
 		expect(overwritten?.models.map(model => model.id)).toEqual(["fresh-cloud-model"]);
 		expect(overwritten?.staticFingerprint).toBe("static-v3");
+	});
+
+	it("reopens the shared database after close throws", () => {
+		const cachedModel = createModel("cached-cloud-model", "Cached Cloud Model");
+		writeModelCache("ollama-cloud", Date.now(), [cachedModel], true, "static-v3", dbPath);
+
+		const originalClose = Database.prototype.close;
+		const closeSpy = spyOn(Database.prototype, "close").mockImplementation(function (this: Database) {
+			originalClose.call(this);
+			throw new Error("close failed");
+		});
+		try {
+			expect(() => closeModelCache()).toThrow("close failed");
+		} finally {
+			closeSpy.mockRestore();
+		}
+
+		const reopened = readModelCache<"openai-completions">("ollama-cloud", TTL_MS, Date.now, dbPath);
+
+		expect(reopened?.models.map(model => model.id)).toEqual(["cached-cloud-model"]);
 	});
 });

@@ -66,8 +66,25 @@ function getDb(dbPath?: string): Database {
 	return db;
 }
 
+export function closeModelCache(): void {
+	if (sharedDb) {
+		try {
+			sharedDb.close();
+		} finally {
+			sharedDb = null;
+			sharedDbPath = null;
+		}
+	}
+}
+
 function migrateCacheSchema(db: Database): void {
-	const columns = db.prepare("PRAGMA table_info(model_cache)").all() as TableInfoRow[];
+	const tableInfoStmt = db.prepare("PRAGMA table_info(model_cache)");
+	let columns: TableInfoRow[];
+	try {
+		columns = tableInfoStmt.all() as TableInfoRow[];
+	} finally {
+		tableInfoStmt.finalize();
+	}
 	if (!columns.some(column => column.name === "static_fingerprint")) {
 		db.run("ALTER TABLE model_cache ADD COLUMN static_fingerprint TEXT NOT NULL DEFAULT ''");
 	}
@@ -82,7 +99,13 @@ export function readModelCache<TApi extends Api>(
 ): CacheEntry<TApi> | null {
 	try {
 		const db = getDb(dbPath);
-		const row = db.query<CacheRow, [string]>("SELECT * FROM model_cache WHERE provider_id = ?").get(providerId);
+		const stmt = db.query<CacheRow, [string]>("SELECT * FROM model_cache WHERE provider_id = ?");
+		let row: CacheRow | null;
+		try {
+			row = stmt.get(providerId);
+		} finally {
+			stmt.finalize();
+		}
 		if (!row || row.version !== CACHE_SCHEMA_VERSION) {
 			return null;
 		}
