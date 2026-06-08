@@ -83,6 +83,10 @@ const MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1003h\x1b[?1006h";
 const MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1003l\x1b[?1000l";
 const ALT_SCREEN_ENTER = "\x1b[?1049h";
 const ALT_SCREEN_EXIT = "\x1b[?1049l";
+const APP_VIEWPORT_MOUSE_TRACKING_ON = "\x1b[?1000h\x1b[?1006h";
+const APP_VIEWPORT_MOUSE_TRACKING_OFF = "\x1b[?1006l\x1b[?1000l";
+const APP_VIEWPORT_SCROLLBAR_DOTS = [0x08, 0x10, 0x20, 0x80] as const;
+const APP_VIEWPORT_SCROLLBAR_BLANK = " ";
 
 type InputListenerResult = { consume?: boolean; data?: string } | undefined;
 type InputListener = (data: string) => InputListenerResult;
@@ -229,6 +233,24 @@ export interface NativeScrollbackCommittedRows {
 
 function setNativeScrollbackCommittedRows(component: Component, rows: number): void {
 	(component as Component & Partial<NativeScrollbackCommittedRows>).setNativeScrollbackCommittedRows?.(rows);
+}
+
+/**
+ * Optional experimental app-owned transcript viewport seam. Components that
+ * implement it identify the root-line range that may scroll inside the app
+ * frame; siblings below that range are rendered as sticky chrome.
+ */
+export interface AppViewportScrollRegion {
+	getAppViewportScrollRegionStart(): number | undefined;
+	getAppViewportScrollRegionEnd(): number | undefined;
+}
+
+function getAppViewportScrollRegionStart(component: Component): number | undefined {
+	return (component as Component & Partial<AppViewportScrollRegion>).getAppViewportScrollRegionStart?.();
+}
+
+function getAppViewportScrollRegionEnd(component: Component): number | undefined {
+	return (component as Component & Partial<AppViewportScrollRegion>).getAppViewportScrollRegionEnd?.();
 }
 
 function isOverlayFocusTarget(owner: Component, component: Component | null): boolean {
@@ -1019,6 +1041,13 @@ export class TUI extends Container {
 	// pushing wrapped fragments into native scrollback.
 	#resizeAltActive = false;
 	#stopped = false;
+	#appViewportBackend = Bun.env.PI_TUI_RENDER_BACKEND === "app-viewport";
+	#appViewportActive = false;
+	#appViewportPreviousLines: string[] = [];
+	#appViewportPreviousWidth = 0;
+	#appViewportScrollRegionEnd: number | undefined;
+	#appViewportScrollTop = 0;
+	#appViewportFollow = true;
 	// Always-on event-loop lag probe. The high default threshold keeps it quiet;
 	// it only logs `ui.loop-blocked` (with the current loop phase) when a frame
 	// budget is genuinely starved. Armed in start(), disarmed in stop().
@@ -1029,6 +1058,7 @@ export class TUI extends Container {
 	// normal-screen accounting field (#previousFrameLength, #viewportTopRow, …)
 	// untouched, so exiting reconciles cleanly against the terminal-restored
 	// normal screen. #altPreviousLines is the last alt frame, for repaint-skip.
+	// Disabled when the main app-viewport backend owns the alternate screen.
 	#altActive = false;
 	#altPreviousLines: string[] = [];
 	#altEnterWidth = 0;
@@ -1095,6 +1125,7 @@ export class TUI extends Container {
 		this.#nativeScrollbackLiveRegionStart = undefined;
 		this.#nativeScrollbackCommitSafeEnd = undefined;
 		this.#nativeScrollbackSnapshotSafeEnd = undefined;
+		this.#appViewportScrollRegionEnd = undefined;
 		const children = this.children;
 		const previousSegments = this.#frameSegments;
 		const segments: FrameSegment[] = new Array(children.length);
@@ -1174,6 +1205,18 @@ export class TUI extends Container {
 				if (snapshotLocalEnd !== undefined) {
 					this.#nativeScrollbackSnapshotSafeEnd = offset + snapshotLocalEnd;
 				}
+			}
+			const appScrollStart = getAppViewportScrollRegionStart(child);
+			if (appScrollStart !== undefined) {
+				const boundedStart = Number.isFinite(appScrollStart)
+					? Math.max(0, Math.min(childLines.length, Math.trunc(appScrollStart)))
+					: 0;
+				const appScrollEnd = getAppViewportScrollRegionEnd(child);
+				const boundedEnd =
+					appScrollEnd !== undefined && Number.isFinite(appScrollEnd)
+						? Math.max(boundedStart, Math.min(childLines.length, Math.trunc(appScrollEnd)))
+						: childLines.length;
+				this.#appViewportScrollRegionEnd = offset + boundedEnd;
 			}
 			if (chainStable) {
 				if (previous !== undefined && previous.component === child && previous.start === offset) {
@@ -1686,9 +1729,24 @@ export class TUI extends Container {
 		this.#cursorEndSequence = enabled ? CURSOR_END : CURSOR_END_NO_SYNC;
 	}
 
+	#enterAppViewport(): void {
+		if (this.#appViewportActive) return;
+		this.terminal.write(`\x1b[?1049h${APP_VIEWPORT_MOUSE_TRACKING_ON}`);
+		this.terminal.hideCursor();
+		this.#appViewportActive = true;
+		this.#appViewportPreviousLines = [];
+		this.#appViewportPreviousWidth = 0;
+	}
 	stop(): void {
+		if (this.#appViewportActive) {
+			this.terminal.write(`${APP_VIEWPORT_MOUSE_TRACKING_OFF}\x1b[?1049l`);
+			this.#appViewportActive = false;
+			this.#previousWindow = [];
+			this.#appViewportPreviousLines = [];
+			this.#appViewportPreviousWidth = 0;
+		}
 		// Leave the alt buffer first so the teardown cursor math below runs against
-		// the restored normal screen (which #previousLines still describes).
+		// the restored normal screen (which #previousWindow still describes).
 		if (this.#resizeAltActive) {
 			this.terminal.write(this.#leaveResizeAltSequence());
 		}
@@ -2075,6 +2133,60 @@ export class TUI extends Container {
 		}, delay);
 	}
 
+	#handleAppViewportInput(data: string): boolean {
+		if (!this.#appViewportBackend || this.hasOverlay()) return false;
+		if (data.startsWith("\x1b[<")) {
+			return this.#handleAppViewportMouse(data);
+		}
+		const page = Math.max(1, this.terminal.rows - 2);
+		if (matchesKey(data, "pageUp") || matchesKey(data, "alt+pageUp")) {
+			this.#scrollAppViewport(-page);
+			return true;
+		}
+		if (matchesKey(data, "pageDown") || matchesKey(data, "alt+pageDown")) {
+			this.#scrollAppViewport(page);
+			return true;
+		}
+		// Plain Home/End are editor line navigation; keep transcript absolute jumps
+		// on Alt+Home/Alt+End for this hidden backend demo.
+		if (matchesKey(data, "alt+home")) {
+			this.#scrollAppViewportToTop();
+			return true;
+		}
+		if (matchesKey(data, "alt+end")) {
+			this.#scrollAppViewportToBottom();
+			return true;
+		}
+		return false;
+	}
+
+	#handleAppViewportMouse(data: string): boolean {
+		const match = /^\x1b\[<(\d+);\d+;\d+([Mm])$/.exec(data);
+		if (!match) return true;
+		const button = Number(match[1]);
+		if (button & 64) {
+			this.#scrollAppViewport(button & 1 ? 3 : -3);
+		}
+		return true;
+	}
+
+	#scrollAppViewport(delta: number): void {
+		this.#appViewportScrollTop = Math.max(0, this.#appViewportScrollTop + delta);
+		this.#appViewportFollow = false;
+		this.requestRender(true);
+	}
+
+	#scrollAppViewportToTop(): void {
+		this.#appViewportScrollTop = 0;
+		this.#appViewportFollow = false;
+		this.requestRender(true);
+	}
+
+	#scrollAppViewportToBottom(): void {
+		this.#appViewportFollow = true;
+		this.requestRender(true);
+	}
+
 	#handleInput(data: string): void {
 		if (this.#inputListeners.size > 0) {
 			let current = data;
@@ -2104,6 +2216,7 @@ export class TUI extends Container {
 			return;
 		}
 
+		if (this.#handleAppViewportInput(data)) return;
 		// If focused component is an overlay, verify it's still visible
 		// (visibility can change due to terminal resize or visible() callback)
 		const focusedOverlay = this.overlayStack.find(o => o.component === this.#focusedComponent);
@@ -2368,6 +2481,7 @@ export class TUI extends Container {
 		if (resultWidth <= totalWidth) {
 			return result;
 		}
+
 		// Truncate with strict=true to ensure we don't exceed totalWidth
 		return sliceByColumn(result, 0, totalWidth, true);
 	}
@@ -2421,6 +2535,11 @@ export class TUI extends Container {
 		// requests made up to this frame, whichever path the frame takes.
 		const componentScopedOnly = this.#pendingRenderComponentsOnly;
 		this.#pendingRenderComponentsOnly = false;
+
+		if (this.#appViewportBackend) {
+			this.#renderAppViewportFrame(width, height);
+			return;
+		}
 
 		// Fullscreen alt-screen short-circuit. While the topmost visible overlay
 		// requests it, borrow the terminal's alternate buffer and paint only the
@@ -3259,6 +3378,173 @@ export class TUI extends Container {
 		this.terminal.write(buffer);
 	}
 
+	#renderAppViewportFrame(width: number, height: number): void {
+		this.#enterAppViewport();
+		this.#imageBudget.beginPass();
+		const contentWidth = Math.max(1, width - 1);
+		const rawFrame = this.render(contentWidth);
+		if (this.#imageBudget.endPass()) {
+			this.#clearScrollbackOnNextRender = true;
+			this.#appViewportPreviousLines = [];
+		}
+		if (this.#maybeDeferGhosttyInitialImagePaint()) return;
+
+		let cursorPos: { row: number; col: number } | null = null;
+		const cursorMarkers = this.#frameCursorMarkers;
+		if (cursorMarkers.length > 0) cursorPos = cursorMarkers[cursorMarkers.length - 1]!;
+		const frame = this.#prepareFrame(rawFrame, contentWidth);
+		const imageTransmits = this.#imageBudget.takeTransmits();
+		if (imageTransmits.length > 0) {
+			let transmitBuffer = "";
+			for (const seq of imageTransmits) transmitBuffer += seq;
+			this.terminal.write(transmitBuffer);
+		}
+		this.#emitAppViewportFrame(frame, width, height, cursorPos);
+		this.#clearScrollbackOnNextRender = false;
+		this.#hasEverRendered = true;
+	}
+
+	#emitAppViewportFrame(
+		lines: string[],
+		width: number,
+		height: number,
+		cursorPos: { row: number; col: number } | null,
+	): void {
+		let fitted = this.#buildAppViewportLines(lines, width, height);
+		let fittedCursorPos = this.#appViewportCursorPosition(cursorPos, lines.length, height);
+		let hasVisibleOverlay = false;
+		for (const entry of this.overlayStack) {
+			if (this.#isOverlayVisible(entry)) {
+				hasVisibleOverlay = true;
+				break;
+			}
+		}
+		if (hasVisibleOverlay) {
+			fitted = this.#compositeOverlaysIntoWindow(fitted, width, height);
+			const overlayMarkers = this.#extractCursorMarkers(fitted);
+			if (overlayMarkers.length > 0) fittedCursorPos = overlayMarkers[0]!;
+			fitted = this.#prepareLinesArray(fitted, width);
+		}
+		if (this.#appViewportPreviousWidth === width && this.#appViewportPreviousLines.length === height) {
+			let same = true;
+			for (let r = 0; r < height; r++) {
+				if (fitted[r] !== this.#appViewportPreviousLines[r]) {
+					same = false;
+					break;
+				}
+			}
+			if (same) {
+				this.#writeAppViewportCursor(fittedCursorPos, height);
+				return;
+			}
+		}
+		this.#fullRedrawCount += 1;
+		let buffer = `${this.#paintBeginSequence}\x1b[H`;
+		const purgeIds = this.#imageBudget.takePurgeIds();
+		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
+			for (const id of purgeIds) buffer += encodeKittyDeleteImage(id);
+		}
+		for (let r = 0; r < height; r++) {
+			if (r > 0) buffer += "\r\n";
+			buffer += this.#lineRewriteSequence(fitted[r] ?? "", width);
+		}
+		const cursorControl = this.#cursorControlSequence(fittedCursorPos, height, Math.max(0, height - 1));
+		buffer += cursorControl.seq;
+		buffer += this.#paintEndSequence;
+		this.terminal.write(buffer);
+		this.#appViewportPreviousLines = fitted;
+		this.#appViewportPreviousWidth = width;
+		this.#commit(lines, fitted, width, height, cursorControl);
+	}
+
+	#writeAppViewportCursor(cursorPos: { row: number; col: number } | null, height: number): void {
+		const cursorControl = this.#cursorControlSequence(cursorPos, height, this.#hardwareCursorRow);
+		this.#recordHardwareCursorUpdate(cursorControl);
+		this.terminal.write(`${this.#cursorBeginSequence}${cursorControl.seq}${this.#cursorEndSequence}`);
+	}
+
+	#appViewportCursorPosition(
+		cursorPos: { row: number; col: number } | null,
+		totalLines: number,
+		height: number,
+	): { row: number; col: number } | null {
+		if (!cursorPos) return null;
+		const scrollEnd = this.#appViewportScrollRegionEnd ?? totalLines;
+		const boundedScrollEnd = Math.max(0, Math.min(scrollEnd, totalLines));
+		const suffixCount = Math.max(0, Math.min(totalLines - boundedScrollEnd, height));
+		const scrollHeight = Math.max(0, height - suffixCount);
+		if (cursorPos.row >= boundedScrollEnd) {
+			const suffixRow = cursorPos.row - boundedScrollEnd;
+			if (suffixRow >= suffixCount) return null;
+			return { row: height - suffixCount + suffixRow, col: cursorPos.col };
+		}
+		if (cursorPos.row < this.#appViewportScrollTop || cursorPos.row >= this.#appViewportScrollTop + scrollHeight) {
+			return null;
+		}
+		return { row: cursorPos.row - this.#appViewportScrollTop, col: cursorPos.col };
+	}
+
+	#buildAppViewportLines(lines: string[], width: number, height: number): string[] {
+		const fitted: string[] = new Array(Math.max(0, height)).fill("");
+		const scrollEnd = this.#appViewportScrollRegionEnd ?? lines.length;
+		const boundedScrollEnd = Math.max(0, Math.min(scrollEnd, lines.length));
+		const suffixCount = Math.max(0, Math.min(lines.length - boundedScrollEnd, height));
+		const scrollHeight = Math.max(0, height - suffixCount);
+		const maxTop = Math.max(0, boundedScrollEnd - scrollHeight);
+		if (this.#appViewportFollow) {
+			this.#appViewportScrollTop = maxTop;
+		} else {
+			this.#appViewportScrollTop = Math.max(0, Math.min(this.#appViewportScrollTop, maxTop));
+			if (this.#appViewportScrollTop >= maxTop) this.#appViewportFollow = true;
+		}
+		for (let row = 0; row < scrollHeight; row++) {
+			const sourceRow = this.#appViewportScrollTop + row;
+			fitted[row] = sourceRow < boundedScrollEnd ? (lines[sourceRow] ?? "") : "";
+		}
+		this.#applyAppViewportScrollbar(fitted, width, scrollHeight, boundedScrollEnd, maxTop);
+		const suffixStart = height - suffixCount;
+		for (let i = 0; i < suffixCount; i++) fitted[suffixStart + i] = lines[boundedScrollEnd + i] ?? "";
+		return fitted;
+	}
+
+	#applyAppViewportScrollbar(
+		lines: string[],
+		width: number,
+		scrollHeight: number,
+		totalRows: number,
+		maxTop: number,
+	): void {
+		if (width <= 0 || scrollHeight <= 0 || totalRows <= scrollHeight) return;
+		const slotsPerRow = APP_VIEWPORT_SCROLLBAR_DOTS.length;
+		const totalSlots = scrollHeight * slotsPerRow;
+		const proportionalThumbSlots = Math.floor((totalSlots * scrollHeight) / totalRows);
+		const minThumbSlots = Math.min(slotsPerRow, totalSlots);
+		const thumbSlots = Math.max(minThumbSlots, Math.min(proportionalThumbSlots, totalSlots));
+		const travelSlots = totalSlots - thumbSlots;
+		const thumbStart = maxTop === 0 ? 0 : Math.round((this.#appViewportScrollTop / maxTop) * travelSlots);
+		const thumbEnd = thumbStart + thumbSlots;
+		const contentWidth = Math.max(0, width - 1);
+		for (let row = 0; row < scrollHeight; row++) {
+			const line = lines[row] ?? "";
+			if (TERMINAL.isImageLine(line)) continue;
+			const content = sliceByColumn(line, 0, contentWidth, true);
+			const pad = " ".repeat(Math.max(0, contentWidth - visibleWidth(content)));
+			const glyph = this.#appViewportScrollbarGlyph(row, slotsPerRow, thumbStart, thumbEnd);
+			lines[row] = `${content}${pad}${LINE_TERMINATOR}${glyph}`;
+		}
+	}
+
+	#appViewportScrollbarGlyph(row: number, slotsPerRow: number, thumbStart: number, thumbEnd: number): string {
+		let mask = 0;
+		const rowStart = row * slotsPerRow;
+		for (let slot = 0; slot < slotsPerRow; slot++) {
+			const absoluteSlot = rowStart + slot;
+			if (absoluteSlot >= thumbStart && absoluteSlot < thumbEnd) mask |= APP_VIEWPORT_SCROLLBAR_DOTS[slot] ?? 0;
+		}
+		return mask === 0
+			? APP_VIEWPORT_SCROLLBAR_BLANK
+			: `\x1b[2m${String.fromCodePoint(0x2800 | mask)}${SEGMENT_RESET}`;
+	}
 	/** Topmost visible overlay requests the alternate-screen buffer. */
 	#wantsAltScreen(): boolean {
 		for (let i = this.overlayStack.length - 1; i >= 0; i--) {

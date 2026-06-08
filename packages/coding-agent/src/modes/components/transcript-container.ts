@@ -1,4 +1,5 @@
 import {
+	type AppViewportScrollRegion,
 	type Component,
 	Container,
 	type NativeScrollbackCommittedRows,
@@ -418,7 +419,12 @@ function deriveLiveCommitState(
  */
 export class TranscriptContainer
 	extends Container
-	implements NativeScrollbackLiveRegion, NativeScrollbackCommittedRows, RenderStablePrefix, ViewportTailProvider
+	implements
+		NativeScrollbackLiveRegion,
+		NativeScrollbackCommittedRows,
+		AppViewportScrollRegion,
+		RenderStablePrefix,
+		ViewportTailProvider
 {
 	// Bumped to retire every block's diff snapshot at once (theme change /
 	// clear); a snapshot is only honored when its stored generation matches.
@@ -489,6 +495,14 @@ export class TranscriptContainer
 
 	getNativeScrollbackSnapshotSafeEnd(): number | undefined {
 		return this.#nativeScrollbackSnapshotSafeEnd;
+	}
+
+	getAppViewportScrollRegionStart(): number | undefined {
+		return 0;
+	}
+
+	getAppViewportScrollRegionEnd(): number | undefined {
+		return undefined;
 	}
 
 	/**

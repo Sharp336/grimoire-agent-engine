@@ -55,7 +55,8 @@ export type ScenarioTag =
 	| "strictScrollback"
 	| "unknownViewport"
 	| "foregroundStream"
-	| "ed3Risk";
+	| "ed3Risk"
+	| "appViewport";
 const ENV_KEYS = [
 	"TMUX",
 	"STY",
@@ -78,6 +79,7 @@ type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonValue[] | { [key: string]: JsonValue };
 type JsonObject = { [key: string]: JsonValue };
 
+type RenderBackend = "native" | "app-viewport";
 export type OperationKind =
 	| "appendSmall"
 	| "appendExactWidth"
@@ -279,6 +281,7 @@ export interface Scenario {
 	// real Ghostty-backed terminal's cell widths.
 	reflow: boolean;
 	tags: readonly ScenarioTag[];
+	renderBackend: RenderBackend;
 	replayOperations?: readonly OperationKind[];
 }
 
@@ -582,6 +585,7 @@ function scenarioTags(
 	template: Pick<Scenario, "envMode" | "terminalMode" | "geometryMode">,
 	strictNativeScrollback: boolean,
 	foregroundStreaming: boolean,
+	renderBackend: RenderBackend,
 ): readonly ScenarioTag[] {
 	const tags: ScenarioTag[] = [template.geometryMode];
 	if (template.envMode === "tmux") tags.push("tmux");
@@ -589,6 +593,7 @@ function scenarioTags(
 	if (template.terminalMode !== "normal") tags.push("unknownViewport");
 	if (foregroundStreaming) tags.push("foregroundStream");
 	if (isEd3RiskScenario(template.terminalMode, template.envMode)) tags.push("ed3Risk");
+	if (renderBackend === "app-viewport") tags.push("appViewport");
 	return tags;
 }
 
@@ -1157,6 +1162,7 @@ class StressDriver {
 	// boundary and never go out of {0,1}.
 	#syncDepth = 0;
 	#autowrapOffDepth = 0;
+	#appViewportWriteLogScanned = 0;
 
 	constructor(scenario: Scenario) {
 		this.#scenario = scenario;
@@ -1325,9 +1331,10 @@ class StressDriver {
 	#expectedFrame(): ExpectedFrame {
 		const width = this.#term.columns;
 		const height = this.#term.rows;
-		const baseLines = this.#baseFrameLines(width);
+		const contentWidth = this.#scenario.renderBackend === "app-viewport" ? Math.max(1, width - 1) : width;
+		const baseLines = this.#baseFrameLines(contentWidth);
 		const composed = compositeExpectedOverlays(baseLines, this.#overlays, width, height);
-		return expectedFrameFromLines(composed, width, height);
+		return expectedFrameFromLines(composed, contentWidth, height);
 	}
 
 	#baseFrameLines(width: number): string[] {
@@ -2135,6 +2142,12 @@ class StressDriver {
 		});
 	}
 	#assertOracles(op: AppliedOperation, before: Snapshot, after: Snapshot, index: number): void {
+		if (this.#scenario.renderBackend === "app-viewport") {
+			this.#assertSyncOutputDiscipline(op, before, after, index);
+			this.#assertAppViewportNoEd3(op, before, after, index);
+			this.#assertAppViewportGridBounded(op, before, after, index);
+			return;
+		}
 		this.#assertSyncOutputDiscipline(op, before, after, index);
 		this.#assertTapeScrollParity(op, before, after, index);
 		this.#assertViewportFidelity(op, before, after, index);
@@ -2180,6 +2193,28 @@ class StressDriver {
 			this.#fail("tape/physical scroll parity", op, before, after, index, {
 				physicalDelta,
 				tapeDelta,
+			});
+		}
+	}
+
+	#assertAppViewportNoEd3(op: AppliedOperation, before: Snapshot, after: Snapshot, index: number): void {
+		for (; this.#appViewportWriteLogScanned < this.#writeLog.length; this.#appViewportWriteLogScanned++) {
+			const data = this.#writeLog[this.#appViewportWriteLogScanned]!;
+			if (data.includes("\x1b[3J")) this.#fail("app viewport emitted ED3", op, before, after, index, {});
+		}
+	}
+
+	#assertAppViewportGridBounded(op: AppliedOperation, before: Snapshot, after: Snapshot, index: number): void {
+		if (after.position.baseY !== 0 || after.position.viewportY !== 0) {
+			this.#fail("app viewport mutated terminal scrollback", op, before, after, index, {
+				baseY: after.position.baseY,
+				viewportY: after.position.viewportY,
+			});
+		}
+		if (after.buffer.length > after.height) {
+			this.#fail("app viewport buffer exceeded visible grid", op, before, after, index, {
+				bufferLength: after.buffer.length,
+				height: after.height,
 			});
 		}
 	}
@@ -3415,6 +3450,71 @@ export function buildScenarios(): Scenario[] {
 	return scenarios;
 }
 
+export function buildAppViewportScenarios(): Scenario[] {
+	const iterations = parsePositiveInt("TUI_APP_VIEWPORT_STRESS_ITER", 40);
+	const timeoutMs = parsePositiveInt("TUI_APP_VIEWPORT_STRESS_TIMEOUT_MS", 30_000);
+	const templates: ScenarioTemplate[] = [
+		{
+			name: "app-viewport-linux-normal-small",
+			platform: "linux",
+			terminalMode: "normal",
+			envMode: "plain",
+			geometryMode: "small",
+			columns: 40,
+			rows: 6,
+			widthChoices: [10, 18, 32, 40],
+			heightChoices: [3, 4, 6],
+			renderBackend: "app-viewport",
+		},
+		{
+			name: "app-viewport-win32-unknown-small",
+			platform: "win32",
+			terminalMode: "unknown",
+			envMode: "plain",
+			geometryMode: "small",
+			columns: 32,
+			rows: 4,
+			widthChoices: [10, 16, 32],
+			heightChoices: [3, 4, 6],
+			renderBackend: "app-viewport",
+		},
+		{
+			name: "app-viewport-linux-unknown-wsl-small",
+			platform: "linux",
+			terminalMode: "unknown",
+			envMode: "wsl",
+			geometryMode: "small",
+			columns: 32,
+			rows: 4,
+			widthChoices: [10, 16, 32],
+			heightChoices: [3, 4, 6],
+			renderBackend: "app-viewport",
+		},
+		{
+			name: "app-viewport-darwin-normal-tmux-small",
+			platform: "darwin",
+			terminalMode: "normal",
+			envMode: "tmux",
+			geometryMode: "small",
+			columns: 32,
+			rows: 4,
+			widthChoices: [10, 16, 32],
+			heightChoices: [3, 4, 6],
+			renderBackend: "app-viewport",
+		},
+	];
+	return templates.map((template, index) =>
+		materializeScenario(
+			template,
+			mixSeed(0xa9971000, index),
+			iterations,
+			CORE_BULK_MAX,
+			timeoutMs,
+			maxOf(template.heightChoices),
+		),
+	);
+}
+
 function materializeScenario(
 	template: ScenarioTemplate,
 	seed: number,
@@ -3428,6 +3528,7 @@ function materializeScenario(
 		template.envMode !== "tmux" && template.terminalMode === "normal" && template.platform !== "win32";
 	const foregroundStream = template.foregroundStream ?? false;
 	const reflow = template.reflow ?? false;
+	const renderBackend = template.renderBackend ?? "native";
 	return {
 		...template,
 		seed,
@@ -3439,7 +3540,8 @@ function materializeScenario(
 		uniqueContent: template.uniqueContent ?? false,
 		foregroundStream,
 		reflow,
-		tags: scenarioTags(template, strictScrollback, foregroundStream),
+		renderBackend,
+		tags: scenarioTags(template, strictScrollback, foregroundStream, renderBackend),
 		replayOperations,
 	};
 }
@@ -3542,6 +3644,7 @@ type ScenarioTemplate = Omit<
 	| "uniqueContent"
 	| "foregroundStream"
 	| "reflow"
+	| "renderBackend"
 	| "tags"
 	| "replayOperations"
 > & {
@@ -3549,6 +3652,7 @@ type ScenarioTemplate = Omit<
 	uniqueContent?: boolean;
 	foregroundStream?: boolean;
 	reflow?: boolean;
+	renderBackend?: RenderBackend;
 };
 
 function writeReplayLog(scenario: Scenario, operations: readonly OperationLogEntry[]): string {
@@ -3950,6 +4054,24 @@ async function withPatchedEnv<T>(envMode: Scenario["envMode"], run: () => Promis
 	}
 }
 
+async function withPatchedRenderBackend<T>(renderBackend: RenderBackend, run: () => Promise<T>): Promise<T> {
+	const previous = Bun.env.PI_TUI_RENDER_BACKEND;
+	if (renderBackend === "app-viewport") {
+		Bun.env.PI_TUI_RENDER_BACKEND = "app-viewport";
+	} else {
+		delete Bun.env.PI_TUI_RENDER_BACKEND;
+	}
+	try {
+		return await run();
+	} finally {
+		if (previous === undefined) {
+			delete Bun.env.PI_TUI_RENDER_BACKEND;
+		} else {
+			Bun.env.PI_TUI_RENDER_BACKEND = previous;
+		}
+	}
+}
+
 async function withPatchedPlatform<T>(platform: Scenario["platform"], run: () => Promise<T>): Promise<T> {
 	if (platformPatchDepth > 0) throw new Error("Nested stress platform patching is not supported");
 	platformPatchDepth += 1;
@@ -3989,8 +4111,10 @@ export type StressScenarioResult = StressScenarioSuccess | StressScenarioFailure
 export async function runStressScenario(scenario: Scenario, options?: { patchEnv?: boolean }): Promise<void> {
 	const run = async (): Promise<void> => {
 		await withPatchedPlatform(scenario.platform, async () => {
-			const driver = new StressDriver(scenario);
-			await driver.run();
+			await withPatchedRenderBackend(scenario.renderBackend, async () => {
+				const driver = new StressDriver(scenario);
+				await driver.run();
+			});
 		});
 	};
 	if (options?.patchEnv === false) {
