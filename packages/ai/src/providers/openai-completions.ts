@@ -264,7 +264,8 @@ type OpenAICompletionsParams = OpenAI.Chat.Completions.ChatCompletionCreateParam
 	repetition_penalty?: number;
 	thinking?: { type: "enabled" | "disabled"; keep?: "all" };
 	enable_thinking?: boolean;
-	chat_template_kwargs?: { enable_thinking: boolean };
+	thinking_token_budget?: number;
+	chat_template_kwargs?: { enable_thinking: boolean; preserve_thinking?: boolean };
 	reasoning?: { effort?: string } | { enabled: false };
 	provider?: OpenAICompat["openRouterRouting"];
 	providerOptions?: { gateway?: { only?: string[]; order?: string[] } };
@@ -1327,11 +1328,28 @@ function buildParams(
 		}
 	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen" && model.reasoning) {
 		// Qwen uses top-level enable_thinking: boolean
-		params.enable_thinking = !!options?.reasoning && !options?.disableReasoning;
+		// vLLM supports thinking_token_budget for fine-grained reasoning control
+		const thinkingEnabled = !!options?.reasoning && !options?.disableReasoning;
+		params.enable_thinking = thinkingEnabled;
+		if (thinkingEnabled && options?.thinkingBudgets) {
+			const budget = options.thinkingBudgets[options.reasoning!];
+			if (budget != null) {
+				params.thinking_token_budget = budget;
+			}
+		}
 	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
+		// Qwen chat-template variant uses chat_template_kwargs
+		const thinkingEnabled = !!options?.reasoning && !options?.disableReasoning;
 		params.chat_template_kwargs = {
-			enable_thinking: !!options?.reasoning && !options?.disableReasoning,
+			enable_thinking: thinkingEnabled,
+			preserve_thinking: thinkingEnabled,
 		};
+		if (thinkingEnabled && options?.thinkingBudgets) {
+			const budget = options.thinkingBudgets[options.reasoning!];
+			if (budget != null) {
+				params.thinking_token_budget = budget;
+			}
+		}
 	} else if (supportsReasoningParams && compat.thinkingFormat === "openrouter" && model.reasoning) {
 		// OpenRouter normalizes reasoning across providers via a nested reasoning object.
 		// Without an explicit signal, OpenRouter defaults reasoning models to thinking, which
@@ -1356,6 +1374,13 @@ function buildParams(
 	) {
 		// OpenAI-style reasoning_effort
 		params.reasoning_effort = mapReasoningEffort(options.reasoning, compat.reasoningEffortMap) as Effort;
+		// vLLM and other OpenAI-compatible backends support thinking_token_budget
+		if (options?.thinkingBudgets) {
+			const budget = options.thinkingBudgets[options.reasoning];
+			if (budget != null) {
+				params.thinking_token_budget = budget;
+			}
+		}
 	} else if (
 		supportsReasoningParams &&
 		options?.disableReasoning &&
@@ -1379,6 +1404,7 @@ function buildParams(
 		// contract and suppress reasoning for this single request.
 		delete params.reasoning_effort;
 		delete params.reasoning;
+		delete params.thinking_token_budget;
 	}
 
 	if (compat.disableReasoningOnForcedToolChoice && isForcedToolChoice(params.tool_choice)) {
@@ -1387,6 +1413,7 @@ function buildParams(
 		// turn while keeping the tool-selection contract intact.
 		delete params.reasoning_effort;
 		delete params.reasoning;
+		delete params.thinking_token_budget;
 		if (compat.thinkingFormat === "zai") {
 			params.thinking = { type: "disabled" };
 		}
