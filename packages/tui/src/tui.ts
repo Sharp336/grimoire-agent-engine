@@ -3063,11 +3063,26 @@ export class TUI extends Container {
 
 		this.#maxLinesRendered = options.clearViewport ? lines.length : Math.max(this.#maxLinesRendered, lines.length);
 		if (options.clearScrollback) {
-			this.#scrollbackHighWater = 0;
 			this.#suppressNextSuffixScroll = lines.length > height;
 		}
 		const pushedNow = Math.max(0, lines.length - height);
-		if (pushedNow > this.#scrollbackHighWater) {
+		if (options.clearViewport) {
+			// A full repaint rewrites the entire transcript from home, so exactly
+			// `pushedNow` rows now sit above the viewport — that is the new high-water,
+			// not the max with the previous frame's. This must *lower* it on a shrink,
+			// not just raise it. Multiplexers (`clearScrollback: false`) cannot erase
+			// the stale pane-history rows left above the fresh content, but those rows
+			// are no longer part of the logical transcript and must not leak into the
+			// live-region/diff math: a stale-high `#scrollbackHighWater` makes the
+			// pinned emitter's `appendFrom`/`committedSealedEnd` point past the real
+			// content, mispositioning every frame after a rewind (the input drifts to
+			// the top of the pane and scrollback overlays incorrectly). Resetting here
+			// is the rewind-shrink reconcile that `#resolveRenderIntent` skips inside a
+			// multiplexer (its `naturalViewportTop < #scrollbackHighWater` rebuild is
+			// gated `!isMultiplexerSession()`). Equivalent to the old reset-to-0 path
+			// for `clearScrollback`, since every full paint clears the viewport.
+			this.#scrollbackHighWater = pushedNow;
+		} else if (pushedNow > this.#scrollbackHighWater) {
 			this.#scrollbackHighWater = pushedNow;
 		}
 		this.#commit(lines, width, height, Math.max(0, this.#maxLinesRendered - height), cursorControl);
@@ -3645,7 +3660,8 @@ export class TUI extends Container {
 							? `${intent.kind}(row=${intent.row})`
 							: intent.kind;
 		const state =
-			`shw=${this.#scrollbackHighWater}, max=${this.#maxLinesRendered}, vpTop=${this.#viewportTopRow}, ` +
+			`shw=${this.#scrollbackHighWater}, streamHW=${this.#streamingHighWater}, mux=${isMultiplexerSession()}, ` +
+			`max=${this.#maxLinesRendered}, vpTop=${this.#viewportTopRow}, ` +
 			`dirty=${this.#nativeScrollbackDirty}, eager=${this.#eagerNativeScrollbackRebuild}, ` +
 			`lrStart=${this.#nativeScrollbackLiveRegionStart}, commitSafeEnd=${this.#nativeScrollbackCommitSafeEnd}`;
 		const msg = `[${new Date().toISOString()}] render: ${detail} (prev=${this.#previousLines.length}, new=${newLength}, height=${height}, ${state})\n`;

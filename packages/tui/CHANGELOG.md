@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed rewinding/branching to an earlier message inside tmux (and other multiplexers) permanently corrupting the viewport once an assistant reply had grown past the pane: the chat input anchored to the top of the screen and scrolling back through pane history showed overlaid/discontinuous transcript. Regression from #1974, which started committing a streamed reply's scrolled-off head into pane history and tracking it in `#scrollbackHighWater`. A rewind collapses the transcript below that peak, but the `sessionReplace`/`historyRebuild` full paint cannot erase multiplexer pane history (`clearScrollback` is forced off there) and `#emitFullPaint` only ever *raised* `#scrollbackHighWater` — so the stale peak survived the shrink and the pinned emitter positioned every subsequent frame past the real content (the `naturalViewportTop < #scrollbackHighWater` shrink rebuild that would otherwise reconcile it is gated `!isMultiplexerSession()`). A full repaint now resets `#scrollbackHighWater` to the rows it actually pushed above the viewport, so the rewind reconciles the high-water even when pane history cannot be cleared ([#2130](https://github.com/can1357/oh-my-pi/issues/2130)).
+
 ## [15.10.5] - 2026-06-08
 
 ### Added

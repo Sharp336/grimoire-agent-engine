@@ -359,4 +359,77 @@ describe("issue #1974: tmux scrollback rendering", () => {
 			}
 		});
 	});
+
+	// Regression for the rewind/branch viewport corruption introduced by the
+	// #1974 fix. Once streaming commits a large `#scrollbackHighWater` to tmux
+	// pane history, a rewind that collapses the transcript below that peak used
+	// to leave the high-water stale: `#emitFullPaint` only ever *raised* it, and
+	// the `naturalViewportTop < #scrollbackHighWater` shrink rebuild that would
+	// reconcile it is gated `!isMultiplexerSession()`. The pinned emitter then
+	// positioned the next reply past the real content — the input anchored to the
+	// top of the pane and scrollback overlaid incorrectly. A full repaint must
+	// reset the high-water to the rows it actually pushed above the viewport.
+	it("repositions the next reply after a rewind shrinks below the streaming high-water", async () => {
+		if (process.platform === "win32") return;
+
+		await withEnvPatch(TMUX_ENV, async () => {
+			await withTerminalRisk(true, async () => {
+				const term = new VirtualTerminal(80, 8, 10_000);
+				overrideProbe(term, undefined);
+				const tui = new TUI(term);
+				const stream = new StreamingLiveRegion([]);
+				tui.addChild(stream);
+
+				try {
+					tui.start();
+					tui.setEagerNativeScrollbackRebuild(true);
+					await settle(term);
+
+					// 1. Stream a tall first reply so the renderer commits a large
+					//    high-water of rows into tmux pane history.
+					const replyA = Array.from({ length: 40 }, (_unused, i) => `A-${String(i).padStart(3, "0")}`);
+					for (let chunk = 5; chunk <= replyA.length; chunk += 5) {
+						stream.setLines(replyA.slice(0, chunk));
+						tui.requestRender();
+						await settle(term);
+					}
+
+					// 2. Rewind/branch: the transcript collapses to a short prefix and
+					//    the caller forces a clear-scrollback full paint — exactly what
+					//    `branch()` drives. In tmux this is a `sessionReplace` that
+					//    cannot erase pane history (`clearScrollback` forced off), so the
+					//    only chance to drop the stale high-water is the full repaint.
+					stream.setLines(["A-000"]);
+					tui.requestRender(true, { clearScrollback: true });
+					await settle(term);
+
+					// 3. Stream the post-rewind reply. With a stale high-water the
+					//    pinned emitter positions these rows past the real content and
+					//    they overlay / duplicate in pane history.
+					const replyB = Array.from({ length: 30 }, (_unused, i) => `B-${String(i).padStart(3, "0")}`);
+					for (let chunk = 5; chunk <= replyB.length; chunk += 5) {
+						stream.setLines(["A-000", ...replyB.slice(0, chunk)]);
+						tui.requestRender();
+						await settle(term);
+					}
+
+					// Every post-rewind row appears exactly once across pane history +
+					// viewport: no "missing sections", no "repeating chunks".
+					const buffer = strip(term.getScrollBuffer()).join("\n");
+					const missing = replyB.filter(mark => occurrencesOf(buffer, mark) === 0);
+					const duplicated = replyB.filter(mark => occurrencesOf(buffer, mark) > 1);
+					expect(missing).toEqual([]);
+					expect(duplicated).toEqual([]);
+
+					// The live tail is anchored in the viewport, not stranded above a
+					// blank pane or pushed off the top.
+					const viewport = strip(term.getViewport());
+					expect(viewport.some(row => row.includes("B-029"))).toBe(true);
+				} finally {
+					tui.stop();
+					await term.flush();
+				}
+			});
+		});
+	});
 });
