@@ -85,14 +85,16 @@ services:
     volumes:
       - ${PI_ROOT:-../..}:/work/pi:ro
       - robomp_data:/data
+      - /home/svtter/.config/gnutls/config:/etc/gnutls/config:ro
       # Host agent config is mounted read-only under /srv/agent-home-stage
       # with host-controlled permissions. The entrypoint copies it into
       # root-owned, world-readable files under /srv/agent-home; the agent
       # subprocess runs with HOME=/srv/agent-home, so ~/.omp and ~/.agent
       # resolve there without exposing mutable host mounts.
-      - ${HOME}/.omp/agent/models.container.yml:/srv/agent-home-stage/.omp/agent/models.yml:ro
-      - ${HOME}/.agent/AGENT.md:/srv/agent-home-stage/.agent/AGENTS.md:ro
-      - ${HOME}/.agent/rules:/srv/agent-home-stage/.agent/rules:ro
+      - /home/svtter/.omp/agent/models.container.yml:/srv/agent-home-stage/.omp/agent/models.yml:ro
+      - /home/svtter/.agent/AGENT.md:/srv/agent-home-stage/.agent/AGENTS.md:ro
+      - /home/svtter/.agent/rules:/srv/agent-home-stage/.agent/rules:ro
+      - /home/svtter/.config/gnutls/config:/etc/gnutls/config:ro
     ports:
       - "0.0.0.0:6543:8080"
 
