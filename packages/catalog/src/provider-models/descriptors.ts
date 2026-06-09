@@ -52,6 +52,7 @@ import {
 	veniceModelManagerOptions,
 	vercelAiGatewayModelManagerOptions,
 	vllmModelManagerOptions,
+	volcengineCodingPlanModelManagerOptions,
 	waferServerlessModelManagerOptions,
 	xaiModelManagerOptions,
 	xaiOAuthModelManagerOptions,
@@ -542,6 +543,13 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => zhipuCodingPlanModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Zhipu Coding Plan" },
+	},
+	{
+		id: "volcengine-coding-plan",
+		defaultModel: "ark-code-latest",
+		envVars: ["VOLCENGINE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => volcengineCodingPlanModelManagerOptions(config),
+		catalogDiscovery: { label: "Volcengine Coding Plan" },
 	},
 ] as const satisfies readonly ProviderCatalogEntry[];
 

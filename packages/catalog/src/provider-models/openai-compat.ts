@@ -1758,6 +1758,29 @@ export function zhipuCodingPlanModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 7.4b Volcengine Coding Plan (火山引擎)
+// ---------------------------------------------------------------------------
+
+export interface VolcengineCodingPlanModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function volcengineCodingPlanModelManagerOptions(
+	config?: VolcengineCodingPlanModelManagerConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	return createSimpleAnthropicProviderOptions(
+		"volcengine-coding-plan",
+		"https://ark.cn-beijing.volces.com/api/coding",
+		{
+			...config,
+			authStyle: "bearer",
+		},
+	);
+}
+
+// ---------------------------------------------------------------------------
 // 7.5 Fireworks
 // ---------------------------------------------------------------------------
 

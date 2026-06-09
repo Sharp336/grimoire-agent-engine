@@ -11,6 +11,8 @@
 ### Added
 
 - Added support for reporting Cursor personal monthly USD quotas and remaining balances, labeled by verified profile email accounts.
+- Added Volcengine Coding Plan (火山引擎) as a new upstream provider (`volcengine-coding-plan`) with 9 bundled models — `doubao-seed-2.1-turbo`, `doubao-seed-2.0-lite`, `minimax-m3`, `glm-5.2` (`glm-latest`), `deepseek-v4-flash`, `deepseek-v4-pro`, `kimi-k2.7-code`, and `ark-code-latest` (console-managed) — using Anthropic-compatible wire protocol with bearer auth, defaulting to `ark-code-latest`.
+- Added Cursor personal monthly USD quota and remaining-balance reporting with verified profile email account labels.
 
 ### Fixed
 
