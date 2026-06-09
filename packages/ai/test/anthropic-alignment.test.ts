@@ -143,7 +143,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(headers["X-Stainless-Arch"]).toBe(mapStainlessArch(process.arch));
 	});
 
-	it("matches Claude Code OAuth header defaults", () => {
+	it("uses SSE accept on OAuth streams while keeping Claude Code headers", () => {
 		const sessionId = "167ec5b4-e711-4169-879f-84fa52679d9c";
 		const headers = buildAnthropicHeaders({
 			apiKey: "sk-ant-oat-test",
@@ -152,12 +152,19 @@ describe("Anthropic request fingerprint alignment", () => {
 			claudeCodeSessionId: sessionId,
 		});
 
-		expect(headers.Accept).toBe("application/json");
+		expect(headers.Accept).toBe("text/event-stream");
 		expect(headers["User-Agent"]).toBe(
 			`claude-cli/${claudeCodeVersion} (external, local-agent, agent-sdk/${claudeAgentSdkVersion})`,
 		);
 		expect(headers["X-Claude-Code-Session-Id"]).toBe(sessionId);
 		expect(headers["x-client-request-id"]).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+
+		const nonStreaming = buildAnthropicHeaders({
+			apiKey: "sk-ant-oat-test",
+			isOAuth: true,
+			stream: false,
+		});
+		expect(nonStreaming.Accept).toBe("application/json");
 	});
 
 	it("sends redact-thinking beta only when thinking display is omitted", () => {
@@ -583,7 +590,7 @@ describe("Anthropic request fingerprint alignment", () => {
 		expect(await promise).toEqual({
 			sessionHeader: sessionId,
 			url: "https://api.anthropic.com/v1/messages?beta=true",
-			accept: "application/json",
+			accept: "text/event-stream",
 		});
 	});
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic OAuth streaming requests negotiating `Accept: application/json` even when `stream: true`, which could make Opus 4.7/4.8 Claude Pro/Max streams drop mid-response with `Connection error.` instead of reading SSE through `message_stop` ([#2151](https://github.com/can1357/oh-my-pi/issues/2151)).
+
 ## [15.10.7] - 2026-06-08
 
 ### Fixed

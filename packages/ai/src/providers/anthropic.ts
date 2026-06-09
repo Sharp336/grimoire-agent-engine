@@ -206,7 +206,7 @@ export function buildAnthropicHeaders(options: AnthropicHeaderOptions): Record<s
 	const extraBetas = options.extraBetas ?? [];
 	const stream = options.stream ?? false;
 	const betaHeader = buildBetaHeader(options.claudeCodeBetas ?? buildClaudeCodeBetas(true, true, false), extraBetas);
-	const acceptHeader = oauthToken ? "application/json" : stream ? "text/event-stream" : "application/json";
+	const acceptHeader = stream ? "text/event-stream" : "application/json";
 	const modelHeaders = Object.fromEntries(
 		Object.entries(options.modelHeaders ?? {}).filter(([key]) => !enforcedHeaderKeys.has(key.toLowerCase())),
 	);
