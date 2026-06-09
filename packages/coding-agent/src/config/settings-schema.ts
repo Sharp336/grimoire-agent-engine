@@ -703,7 +703,7 @@ export const SETTINGS_SCHEMA = {
 	// Reasoning and prompts
 	defaultThinkingLevel: {
 		type: "enum",
-		values: [...THINKING_EFFORTS, AUTO_THINKING],
+		values: [...THINKING_EFFORTS, AUTO_THINKING, "0-off"],
 		default: "high",
 		ui: {
 			tab: "model",
@@ -711,6 +711,7 @@ export const SETTINGS_SCHEMA = {
 			description: "Reasoning depth for thinking-capable models",
 			options: [
 				getConfiguredThinkingLevelMetadata(AUTO_THINKING),
+				{ value: "0-off", label: "0-off", description: "Thinking enabled with 0 token budget" },
 				...THINKING_EFFORTS.map(getThinkingLevelMetadata),
 			],
 		},
@@ -3231,7 +3232,6 @@ export const SETTINGS_SCHEMA = {
 		values: ["unset", "granted", "denied"] as const,
 		default: "unset" as const,
 	},
-
 	"thinkingBudgets.minimal": { type: "number", default: 1024 },
 
 	"thinkingBudgets.low": { type: "number", default: 2048 },
@@ -3240,6 +3240,9 @@ export const SETTINGS_SCHEMA = {
 
 	"thinkingBudgets.high": { type: "number", default: 16384 },
 
+	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
+
+	"thinkingBudgets.zeroOff": { type: "number", default: 0 },
 	"thinkingBudgets.xhigh": { type: "number", default: 32768 },
 } as const;
 

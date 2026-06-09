@@ -17,6 +17,7 @@ const THINKING_LEVEL_METADATA: Record<ThinkingLevel, ThinkingLevelMetadata> = {
 		description: "Inherit session default",
 	},
 	[ThinkingLevel.Off]: { value: ThinkingLevel.Off, label: "off", description: "No reasoning" },
+	[ThinkingLevel.ZeroOff]: { value: ThinkingLevel.ZeroOff, label: "0-off", description: "Thinking enabled with 0 token budget" },
 	[ThinkingLevel.Minimal]: {
 		value: ThinkingLevel.Minimal,
 		label: "min",
@@ -35,8 +36,7 @@ const THINKING_LEVEL_METADATA: Record<ThinkingLevel, ThinkingLevelMetadata> = {
 		description: "Maximum reasoning (~32k tokens)",
 	},
 };
-
-const THINKING_LEVELS = new Set<string>([ThinkingLevel.Inherit, ThinkingLevel.Off, ...THINKING_EFFORTS]);
+const THINKING_LEVELS = new Set<string>([ThinkingLevel.Inherit, ThinkingLevel.Off, ThinkingLevel.ZeroOff, ...THINKING_EFFORTS]);
 const EFFORT_LEVELS = new Set<string>(THINKING_EFFORTS);
 
 /**
@@ -67,12 +67,12 @@ export function toReasoningEffort(level: ThinkingLevel | undefined): Effort | un
 	if (level === undefined || level === ThinkingLevel.Off || level === ThinkingLevel.Inherit) {
 		return undefined;
 	}
+	// ZeroOff enables thinking but with 0 token budget
+	if (level === ThinkingLevel.ZeroOff) {
+		return Effort.Minimal;
+	}
 	return level;
 }
-
-/**
- * Resolves a selector against the current model while preserving explicit "off".
- */
 export function resolveThinkingLevelForModel(
 	model: Model | undefined,
 	level: ThinkingLevel | undefined,
@@ -81,6 +81,14 @@ export function resolveThinkingLevelForModel(
 		return undefined;
 	}
 	if (level === ThinkingLevel.Off) {
+		return ThinkingLevel.Off;
+	}
+	// ZeroOff enables thinking but with 0 token budget - don't clamp it
+	if (level === ThinkingLevel.ZeroOff) {
+		return ThinkingLevel.ZeroOff;
+	}
+	return clampThinkingLevelForModel(model, level);
+}
 		return ThinkingLevel.Off;
 	}
 	return clampThinkingLevelForModel(model, level);
