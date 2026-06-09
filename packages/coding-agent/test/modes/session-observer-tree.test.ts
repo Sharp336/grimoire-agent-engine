@@ -1,6 +1,8 @@
 import { describe, expect, test } from "bun:test";
 import { SubagentBrowserComponent } from "../../src/modes/components/subagent-browser";
+import { SelectorController } from "../../src/modes/controllers/selector-controller";
 import { type ObserverTreeNode, SessionObserverRegistry } from "../../src/modes/session-observer-registry";
+import type { InteractiveModeContext } from "../../src/modes/types";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../../src/task";
 import { EventBus } from "../../src/utils/event-bus";
 
@@ -208,7 +210,7 @@ describe("SessionObserverTree", () => {
 		expect(tree[0].children.map(c => c.session.id)).toEqual(["A", "B", "C"]);
 	});
 
-	test("Browser defaults Enter to the first subagent instead of the main root", () => {
+	test("Browser defaults Enter to the first subagent but still selects the main root", () => {
 		const registry = new SessionObserverRegistry();
 		const bus = new EventBus();
 		registry.subscribeToEventBus(bus);
@@ -223,21 +225,66 @@ describe("SessionObserverTree", () => {
 			parentId: "Main",
 		});
 
-		let selectedId: string | undefined;
+		const selectedIds: string[] = [];
 		const browser = new SubagentBrowserComponent(registry, {
 			onSelect: session => {
-				selectedId = session.id;
+				selectedIds.push(session.id);
 			},
 			onDone: () => {},
 			requestRender: () => {},
 		});
 
 		browser.handleInput("\n");
-		expect(selectedId).toBe("A");
+		expect(selectedIds.at(-1)).toBe("A");
 
-		selectedId = undefined;
 		browser.handleInput("k");
 		browser.handleInput("\n");
-		expect(selectedId).toBeUndefined();
+		expect(selectedIds.at(-1)).toBe("main");
+	});
+
+	test("Selecting the main root closes /observe instead of opening a transcript observer", () => {
+		const registry = new SessionObserverRegistry();
+		const bus = new EventBus();
+		registry.subscribeToEventBus(bus);
+		registry.setMainSession("/tmp/main.jsonl");
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "A",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 1,
+			parentId: "Main",
+		});
+
+		let browser: SubagentBrowserComponent | undefined;
+		let hideCount = 0;
+		let renderCount = 0;
+		let showOverlayCount = 0;
+		const ctx = {
+			ui: {
+				showOverlay: (component: SubagentBrowserComponent) => {
+					showOverlayCount++;
+					browser = component;
+					return {
+						hide: () => {
+							hideCount++;
+						},
+					};
+				},
+				setFocus: () => {},
+				requestRender: () => {
+					renderCount++;
+				},
+			},
+		} as unknown as InteractiveModeContext;
+
+		new SelectorController(ctx).showSubagentBrowser(registry);
+		expect(browser).toBeDefined();
+		browser!.handleInput("k");
+		browser!.handleInput("\n");
+
+		expect(hideCount).toBe(1);
+		expect(renderCount).toBeGreaterThan(0);
+		expect(showOverlayCount).toBe(1);
 	});
 });

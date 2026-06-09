@@ -46,7 +46,7 @@ function flattenTree(
 	return result;
 }
 
-function isSelectableSession(session: ObservableSession): boolean {
+function isPreferredInitialSession(session: ObservableSession): boolean {
 	return session.kind === "subagent";
 }
 
@@ -111,10 +111,10 @@ export class SubagentBrowserComponent extends Container {
 			this.#selectedIndex = 0;
 		} else {
 			this.#selectedIndex = Math.max(0, Math.min(this.#selectedIndex, this.#flatView.length - 1));
-			if (!isSelectableSession(this.#flatView[this.#selectedIndex]!.node.session)) {
-				const firstSelectableIndex = this.#flatView.findIndex(item => isSelectableSession(item.node.session));
-				if (firstSelectableIndex !== -1) {
-					this.#selectedIndex = firstSelectableIndex;
+			if (!isPreferredInitialSession(this.#flatView[this.#selectedIndex]!.node.session)) {
+				const firstSubagentIndex = this.#flatView.findIndex(item => isPreferredInitialSession(item.node.session));
+				if (firstSubagentIndex !== -1) {
+					this.#selectedIndex = firstSubagentIndex;
 				}
 			}
 		}
@@ -140,7 +140,7 @@ export class SubagentBrowserComponent extends Container {
 
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
 			const selected = this.#flatView[this.#selectedIndex];
-			if (selected && isSelectableSession(selected.node.session)) {
+			if (selected) {
 				this.#options.onSelect(selected.node.session);
 			}
 			return;

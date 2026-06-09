@@ -1110,6 +1110,14 @@ export class SelectorController {
 		registry: SessionObserverRegistry,
 		options?: { initialSessionId?: string; onBack?: () => void },
 	): void {
+		const initialSession = options?.initialSessionId
+			? registry.getSessions().find(session => session.id === options.initialSessionId)
+			: undefined;
+		if (initialSession?.kind === "main") {
+			this.ctx.ui.requestRender();
+			return;
+		}
+
 		const observeKeys = this.ctx.keybindings.getKeys("app.session.observe");
 		let cleanup: (() => void) | undefined;
 		let overlayHandle: OverlayHandle | undefined;
@@ -1162,18 +1170,19 @@ export class SelectorController {
 		let cleanup: (() => void) | undefined;
 		let overlayHandle: OverlayHandle | undefined;
 
-		const onDone = () => {
+		const closeBrowser = () => {
 			cleanup?.();
 			overlayHandle?.hide();
 			this.ctx.ui.requestRender();
 		};
 
+		const onDone = closeBrowser;
+
 		const onSelect = (session: ObservableSession) => {
-			if (session.kind !== "subagent") {
+			closeBrowser();
+			if (session.kind === "main") {
 				return;
 			}
-			cleanup?.();
-			overlayHandle?.hide();
 			this.showSessionObserver(registry, {
 				initialSessionId: session.id,
 				onBack: () => this.showSubagentBrowser(registry),
