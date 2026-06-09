@@ -32,6 +32,7 @@ const TOOL_RESULT_TRUNC = 400;
 
 export const SECOND_OPINION_VERDICTS = ["SOUND", "SOUND_WITH_CAVEATS", "FLAWED"] as const;
 export type SecondOpinionVerdict = (typeof SECOND_OPINION_VERDICTS)[number];
+const TRANSCRIPT_TRUNC_MARKER = " …[truncated to transcript budget]";
 
 const verdictSchema = z.object({
 	verdict: z
@@ -232,9 +233,17 @@ export function buildTranscript(entries: SessionEntry[], lookback?: number): { t
 	const kept: string[] = [];
 	let total = 0;
 	for (let i = blocks.length - 1; i >= 0; i--) {
-		total += blocks[i].length + 2;
-		if (total > CHAR_BUDGET && kept.length > 0) break;
+		const separator = kept.length > 0 ? 2 : 0;
+		const nextTotal = total + separator + blocks[i].length;
+		if (nextTotal > CHAR_BUDGET) {
+			if (kept.length === 0) {
+				const limit = Math.max(0, CHAR_BUDGET - TRANSCRIPT_TRUNC_MARKER.length);
+				kept.unshift(`${blocks[i].slice(0, limit)}${TRANSCRIPT_TRUNC_MARKER}`);
+			}
+			break;
+		}
 		kept.unshift(blocks[i]);
+		total = nextTotal;
 	}
 	return { text: kept.join("\n\n"), count: kept.length };
 }
@@ -367,15 +376,16 @@ export class SecondOpinionTool implements AgentTool<typeof secondOpinionSchema, 
 					sessionModel,
 					familyOf,
 				);
-				if (picked) {
-					reviewer = picked;
-					source = "configured";
-					settings.setModelRole(REVIEWER_ROLE, formatModelString(picked));
-					settings.set(
-						FINGERPRINT_KEY,
-						encodeFingerprint({ sessionFamily, slowFamily, confirmedReviewer: formatModelString(picked) }),
-					);
+				if (!picked) {
+					throw new ToolError("second_opinion cancelled: reviewer selection was dismissed.");
 				}
+				reviewer = picked;
+				source = "configured";
+				settings.setModelRole(REVIEWER_ROLE, formatModelString(picked));
+				settings.set(
+					FINGERPRINT_KEY,
+					encodeFingerprint({ sessionFamily, slowFamily, confirmedReviewer: formatModelString(picked) }),
+				);
 			}
 
 			if (!reviewer) {

@@ -294,4 +294,11 @@ describe("second_opinion transcript rendering", () => {
 		expect(text).not.toContain("one");
 		expect(text).toContain("three");
 	});
+
+	it("caps a single oversized newest turn", () => {
+		const { text, count } = buildTranscript([messageEntry("user", "x".repeat(60_000))]);
+		expect(count).toBe(1);
+		expect(text.length).toBeLessThanOrEqual(48_000);
+		expect(text).toContain("…[truncated to transcript budget]");
+	});
 });

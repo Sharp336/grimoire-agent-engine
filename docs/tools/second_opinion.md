@@ -65,10 +65,10 @@ There is intentionally **no** `priority.json` entry for `secondopinion`. Cross-f
 - Settings: on picker confirmation writes `modelRoles.secondopinion` and `secondOpinion.lastPickerFingerprint`; on first interactive transcript send writes `secondOpinion.consented`. Reads those plus model usage order and the active model.
 - Network: sends the rendered transcript to the reviewer model via `instrumentedCompleteSimple(...)`.
 - Session state: reads the current branch via `sessionManager.getBranch()`; does not mutate the transcript. The verdict is returned as information only — it does not auto-steer subsequent turns.
-- Cancellation: passes the caller `AbortSignal` into the completion call; aborted responses surface as `ToolError`.
+- Cancellation: dismissing the reviewer picker throws `ToolError` instead of falling through to an automatic reviewer; the caller `AbortSignal` is passed into the completion call and aborted responses surface as `ToolError`.
 
 ## Limits & Caps
-- `CHAR_BUDGET = 48_000` characters of transcript, keeping the most recent turns; at least one turn is always kept.
+- `CHAR_BUDGET = 48_000` characters of transcript, keeping the most recent turns; at least one turn is always kept, but a single oversized turn is truncated to fit the cap.
 - `TOOL_RESULT_TRUNC = 400` characters per tool-result turn before `…[truncated]`.
 - Reasoning effort is clamped to the model's supported set; non-reasoning models and `effort: "off"` send no reasoning level.
 - Transcript rendering drops thinking and image blocks; tool calls render as `[tool call: <name>]` markers.
@@ -78,7 +78,7 @@ There is intentionally **no** `priority.json` entry for `secondopinion`. Cross-f
 
 ## Errors
 - Context / registry: `second_opinion requires an active session context.`, `second_opinion has no session transcript to review.`, `Model registry is unavailable for second_opinion.`, `No authenticated models available for second_opinion.`
-- Consent: `second_opinion cancelled: transcript sharing was declined.`
+- Consent / picker: `second_opinion cancelled: transcript sharing was declined.`, `second_opinion cancelled: reviewer selection was dismissed.`
 - Model resolution: `second_opinion: model "<selector>" not found. Available include: …`, `second_opinion could not resolve a reviewer model.`, `No API key available for <provider>/<id>. …`
 - Transcript: `second_opinion has no prior conversation context to review.`
 - Model call: provider `errorMessage` passthrough else `second_opinion reviewer request failed.`, `second_opinion review aborted.`, `second_opinion reviewer returned no review text.`
