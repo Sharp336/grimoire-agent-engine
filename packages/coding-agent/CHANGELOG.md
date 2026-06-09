@@ -6,6 +6,7 @@
 
 - Added a `/observe` command that opens a Subagent Browser — the full live agent tree (main → `task` subagents → nested children → eval `agent()`/workflow fan-outs) with per-agent status icons and live progress, searchable and collapsible. Selecting an agent opens its transcript.
 - Reworked the session observer transcript view to render through the same pipeline as the main agent (token streaming, real tool/bash/eval cards, thinking blocks) instead of the previous hand-rolled static view. The view shows a breadcrumb of the parent chain, cycles siblings (`[`/`]`), toggles follow-live tailing (`f`), can stop a running agent (`x`), and seeds from the session file then attaches to the live event stream, handing off to a static replay when the agent completes.
+- Added a `bash.enabled` setting to disable the model-facing bash tool while leaving user-initiated bang/RPC bash commands available.
 
 ## [15.10.7] - 2026-06-08
 
