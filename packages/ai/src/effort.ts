@@ -9,6 +9,7 @@ export const enum Effort {
 }
 
 export const THINKING_EFFORTS: readonly Effort[] = [
+	Effort.ZeroOff,
 	Effort.Minimal,
 	Effort.Low,
 	Effort.Medium,

@@ -703,7 +703,7 @@ export const SETTINGS_SCHEMA = {
 	// Reasoning and prompts
 	defaultThinkingLevel: {
 		type: "enum",
-		values: [...THINKING_EFFORTS, AUTO_THINKING, "0-off"],
+		values: [...THINKING_EFFORTS, AUTO_THINKING, "zeroOff"],
 		default: "high",
 		ui: {
 			tab: "model",
@@ -711,7 +711,7 @@ export const SETTINGS_SCHEMA = {
 			description: "Reasoning depth for thinking-capable models",
 			options: [
 				getConfiguredThinkingLevelMetadata(AUTO_THINKING),
-				{ value: "0-off", label: "0-off", description: "Thinking enabled with 0 token budget" },
+				{ value: "zeroOff", label: "0-off", description: "Thinking enabled with 0 token budget" },
 				...THINKING_EFFORTS.map(getThinkingLevelMetadata),
 			],
 		},
