@@ -570,6 +570,96 @@ describe("openai-completions compatibility", () => {
 		expect(assistantObject ? Reflect.get(assistantObject, "reasoning_text") : undefined).toBe("inspect tool output");
 		expect(assistantObject ? Reflect.get(assistantObject, "reasoning_content") : undefined).toBeUndefined();
 	});
+
+	it("sends thinking_token_budget for qwen format when thinkingBudgets is set", async () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+			reasoning: true,
+			compat: {
+				thinkingFormat: "qwen",
+			},
+		};
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			reasoning: "high",
+			thinkingBudgets: { high: 4096 },
+			signal: createAbortedSignal(),
+			onPayload: payload => resolve(payload),
+		});
+		const payload = await promise;
+		expect(toObject(payload)?.thinking_token_budget).toBe(4096);
+	});
+
+	it("sends thinking_token_budget and preserve_thinking for qwen-chat-template when thinkingBudgets is set", async () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+			reasoning: true,
+			compat: {
+				thinkingFormat: "qwen-chat-template",
+			},
+		};
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			reasoning: "high",
+			thinkingBudgets: { high: 4096 },
+			signal: createAbortedSignal(),
+			onPayload: payload => resolve(payload),
+		});
+		const payload = await promise;
+		expect(toObject(payload)?.thinking_token_budget).toBe(4096);
+		const chatTemplateArgs = getNestedObject(payload, "chat_template_kwargs");
+		expect(getNestedBoolean(chatTemplateArgs, "enable_thinking")).toBe(true);
+		expect(getNestedBoolean(chatTemplateArgs, "preserve_thinking")).toBe(true);
+	});
+
+	it("omits preserve_thinking for qwen-chat-template when thinkingBudgets is not set", async () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+			reasoning: true,
+			compat: {
+				thinkingFormat: "qwen-chat-template",
+			},
+		};
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			reasoning: "high",
+			signal: createAbortedSignal(),
+			onPayload: payload => resolve(payload),
+		});
+		const payload = await promise;
+		const chatTemplateArgs = getNestedObject(payload, "chat_template_kwargs");
+		expect(getNestedBoolean(chatTemplateArgs, "enable_thinking")).toBe(true);
+		expect(chatTemplateArgs?.preserve_thinking).toBeUndefined();
+	});
+
+	it("drops thinking_token_budget on disableReasoningOnForcedToolChoice", async () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+			reasoning: true,
+			compat: {
+				thinkingFormat: "qwen",
+				disableReasoningOnForcedToolChoice: true,
+			},
+		};
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			reasoning: "high",
+			thinkingBudgets: { high: 4096 },
+			toolChoice: { type: "tool", name: "read" },
+			signal: createAbortedSignal(),
+			onPayload: payload => resolve(payload),
+		});
+		const payload = await promise;
+		expect(toObject(payload)?.thinking_token_budget).toBeUndefined();
+	});
 });
 
 describe("kimi model detection via detectCompat", () => {

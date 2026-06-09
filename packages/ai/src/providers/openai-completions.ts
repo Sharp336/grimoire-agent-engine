@@ -1164,6 +1164,17 @@ async function createClient(
 	};
 }
 
+/**
+ * Apply `thinking_token_budget` from `thinkingBudgets` when a budget is
+ * configured for the current reasoning effort. Only used by backends that
+ * support the field (vLLM, Qwen).
+ */
+function applyThinkingTokenBudget(params: OpenAICompletionsParams, options: OpenAICompletionsOptions | undefined): void {
+	const effort = options?.reasoning;
+	if (effort && options.thinkingBudgets?.[effort] != null) {
+		params.thinking_token_budget = options.thinkingBudgets[effort];
+	}
+}
 function buildParams(
 	model: Model<"openai-completions">,
 	context: Context,
@@ -1331,25 +1342,15 @@ function buildParams(
 		// vLLM supports thinking_token_budget for fine-grained reasoning control
 		const thinkingEnabled = !!options?.reasoning && !options?.disableReasoning;
 		params.enable_thinking = thinkingEnabled;
-		if (thinkingEnabled && options?.thinkingBudgets) {
-			const budget = options.thinkingBudgets[options.reasoning!];
-			if (budget != null) {
-				params.thinking_token_budget = budget;
-			}
-		}
+		applyThinkingTokenBudget(params, options);
 	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
 		// Qwen chat-template variant uses chat_template_kwargs
 		const thinkingEnabled = !!options?.reasoning && !options?.disableReasoning;
 		params.chat_template_kwargs = {
 			enable_thinking: thinkingEnabled,
-			preserve_thinking: thinkingEnabled,
+			...(options?.thinkingBudgets ? { preserve_thinking: thinkingEnabled } : {}),
 		};
-		if (thinkingEnabled && options?.thinkingBudgets) {
-			const budget = options.thinkingBudgets[options.reasoning!];
-			if (budget != null) {
-				params.thinking_token_budget = budget;
-			}
-		}
+		applyThinkingTokenBudget(params, options);
 	} else if (supportsReasoningParams && compat.thinkingFormat === "openrouter" && model.reasoning) {
 		// OpenRouter normalizes reasoning across providers via a nested reasoning object.
 		// Without an explicit signal, OpenRouter defaults reasoning models to thinking, which
@@ -1374,13 +1375,6 @@ function buildParams(
 	) {
 		// OpenAI-style reasoning_effort
 		params.reasoning_effort = mapReasoningEffort(options.reasoning, compat.reasoningEffortMap) as Effort;
-		// vLLM and other OpenAI-compatible backends support thinking_token_budget
-		if (options?.thinkingBudgets) {
-			const budget = options.thinkingBudgets[options.reasoning];
-			if (budget != null) {
-				params.thinking_token_budget = budget;
-			}
-		}
 	} else if (
 		supportsReasoningParams &&
 		options?.disableReasoning &&
