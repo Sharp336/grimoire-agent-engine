@@ -2,6 +2,32 @@
 
 ## [Unreleased]
 
+## [15.10.10] - 2026-06-09
+
+### Added
+
+- Added a read-only `view` op to the `todo` tool that echoes the current list without mutating state, so the agent can recover exact task text instead of guessing it from memory.
+
+### Changed
+
+- Rewrote the bash tool's coreutils guidance (tool prompt and system prompt) around an explicit litmus: pipelines that compute a new fact (`wc -l`, `sort | uniq -c`, `comm`, `diff`) are legitimate bash, while commands that merely move, page, or trim bytes a dedicated tool can fetch remain banned — output trimming destroys data the `artifact://` capture would have saved.
+
+### Fixed
+
+- Fixed the model selector dropping an immediate Enter when cached models were available but the selector's offline refresh was still pending.
+- Fixed dynamic `import(...)` inside functions passed to the browser tool's `tab.evaluate`/`page.evaluate` failing with `__omp_import__ is not defined`. The eval/browser JS runtime rewrites dynamic-import callees to the worker-injected `__omp_import__` helper, but puppeteer serializes evaluate callbacks with `Function.prototype.toString()` and re-runs them inside the page, where the helper does not exist. The rewriter now substitutes a guarded shim that falls back to native dynamic import when the helper is absent, so serialized code works in the page realm while in-worker imports keep resolving against the session cwd.
+- Transcript block freezing is now unconditional instead of gated on ED3-risk terminal detection: every finalized block replays its frozen snapshot once it crosses out of the live region, on all terminals including Windows, because the rewritten renderer's committed scrollback is immutable everywhere. Still-mutating blocks (pending tools, streaming messages, async thinking renderers) anchor the live region and keep repainting until they finalize, which structurally fixes stale/duplicated output from late async expansions ([#1823](https://github.com/can1357/oh-my-pi/issues/1823)).
+- Fixed the edit tool's post-edit diff preview occasionally echoing a context line twice with out-of-order numbering. Block-boundary context injection classified space-prefixed diff rows as old-file-only, so an unchanged line sitting in a net-offset region (old N / new N+k) was missing from the new file's visibility window; `findBlockContextLines` then re-surfaced it under its post-edit number and the row was spliced in after the adjacent change run. New-file boundary lines are now translated back to pre-edit numbers (the compact-preview renumbering contract) and merged into a single old-numbered insertion pass — also fixing closers below a net-offset edit being dropped or renumbered incorrectly.
+- Fixed the Anthropic web-search provider claiming the Claude Code identity on API-key requests: the CC billing header + system instruction were injected whenever the model wasn't Haiku 3.5, regardless of auth mode. Injection is now OAuth-gated like the streaming path, and OAuth search requests patch the billing header's `cch` attestation (via `wrapFetchForCch`) instead of shipping the `cch=00000` placeholder.
+- Fixed long streamed content appearing cut off mid-run: scrolled-off rows were erased from the viewport without ever being appended to terminal history. The transcript's commit boundary (`deriveLiveCommitState`) was all-or-nothing per block — one perpetually rewriting row (a task tool's ticking progress tree, per-agent cost/tool counters, spinner stats) suspended scrollback commits for the entire block, so once the block outgrew the viewport its static head (e.g. a task's prompt/context markdown) was neither committed nor on screen until the tool sealed, and was lost outright if the session ended mid-run. A stable-prefix ratchet now promotes leading rows that stayed visibly identical for a full 30-frame window as commit-safe, so the settled head reaches native scrollback while only the genuinely volatile tail stays deferred; a rewrite above the promoted run retreats the boundary and the engine audit recommits (duplication, never loss).
+- Fixed local tiny-title worker stdout/stderr leaking raw native model output such as `</title>` and cache/status lines into the interactive TUI scrollback ([#2206](https://github.com/can1357/oh-my-pi/issues/2206)).
+- Fixed task-agent discovery advertising Claude Code custom agents from `.claude/agents/*.md` as OMP subagents; direct task-agent discovery now only loads OMP-native `.omp` agent roots, while Claude marketplace plugin agents keep their existing provider path ([#2209](https://github.com/can1357/oh-my-pi/issues/2209)).
+
+### Removed
+
+- Removed the `clearOnShrink` setting and its `PI_CLEAR_ON_SHRINK` environment variable: the rewritten renderer always clears shrunken rows exactly, so the flicker/perf tradeoff the setting controlled no longer exists. Existing config entries are ignored.
+- Removed the prompt-submit native-scrollback reconciliation checkpoint and the eager streaming render mode from the interactive controllers — the renderer's append-only contract made both obsolete.
+
 ## [15.10.9] - 2026-06-09
 
 ### Fixed
