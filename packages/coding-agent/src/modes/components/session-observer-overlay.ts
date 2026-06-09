@@ -1,10 +1,11 @@
 /**
  * Session observer overlay component.
  *
- * Picker mode: lists main + active subagent sessions with live status.
- * Viewer mode: renders a scrollable, interactive transcript of the selected subagent's session
- *   by reading its JSONL session file — shows thinking, text, tool calls, results
- *   with expand/collapse per entry and breadcrumb navigation for nested sub-agents.
+ * Renders a read-only transcript viewer for one selected subagent session,
+ * using a mounted TranscriptRenderer fed by a TranscriptSource (Replay/Live/Hybrid).
+ * Supports line-based scrolling, live-tailing with follow-live (`f`), stopping
+ * the agent (`x`), back navigation (`u`), sibling cycling (`[`/`]`), and a parentId
+ * breadcrumb for nested subagents.
  */
 import { Container, matchesKey, ScrollView } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";

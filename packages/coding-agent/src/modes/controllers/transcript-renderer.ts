@@ -201,9 +201,9 @@ export class TranscriptRenderer {
 
 	/**
 	 * Create + register the streaming assistant component and begin its reveal.
-	 * Reused for orphan recovery: when a live transcript attaches mid-message (the
-	 * original message_start was missed), the first update/end synthesizes the
-	 * component so the in-flight turn still renders instead of being dropped.
+	 * Reused for orphan recovery: when a live transcript attaches mid-message (missing
+	 * the original message_start event), a subsequent message_update or message_end
+	 * event synthesizes the component so the in-flight turn still renders instead of being dropped.
 	 */
 	#beginAssistantComponent(message: AssistantMessage): AssistantMessageComponent {
 		this.#lastVisibleBlockCount = 0;
@@ -224,7 +224,7 @@ export class TranscriptRenderer {
 	#handleMessageUpdate(event: MessageUpdateEvent): void {
 		if (event.message.role !== "assistant") return;
 		if (!this.#getStreamingComponent()) {
-			// Mid-message attach: synthesize the missed start so updates still render.
+			// Orphan recovery: mid-message attach missing start event, synthesize it so updates still render.
 			this.#beginAssistantComponent(event.message);
 		}
 		this.#setStreamingMessage(event.message);
@@ -279,6 +279,7 @@ export class TranscriptRenderer {
 
 	#handleMessageEnd(event: MessageEndEvent): void {
 		if (event.message.role !== "assistant") return;
+		// Orphan recovery: if message_end is received without a prior component, synthesize it now.
 		const component = this.#getStreamingComponent() ?? this.#beginAssistantComponent(event.message);
 		this.#setStreamingMessage(event.message);
 		this.#streamingReveal.stop();

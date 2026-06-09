@@ -71,13 +71,6 @@ export class SubagentBrowserComponent extends Container {
 		this.#registry = registry;
 		this.#options = options;
 
-		this.#searchInput.onSubmit = () => {
-			const selected = this.#flatView[this.#selectedIndex];
-			if (selected) {
-				this.#options.onSelect(selected.node.session);
-			}
-		};
-
 		this.#rebuildFlatView();
 	}
 
@@ -117,8 +110,9 @@ export class SubagentBrowserComponent extends Container {
 		}
 	}
 
-	invalidate(): void {
-		// No cached state to invalidate currently
+	override invalidate(): void {
+		super.invalidate();
+		this.#searchInput.invalidate();
 	}
 
 	handleInput(keyData: string): void {
