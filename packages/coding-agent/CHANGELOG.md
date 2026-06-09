@@ -5,6 +5,99 @@
 ### Added
 
 - Added regression coverage and documentation for configuring OpenAI-compatible relay providers through `models.yml`, including provider-level `baseUrl`, `apiKey`, discovery, and selector availability.
+## [15.10.8] - 2026-06-09
+
+### Added
+
+- Added an optional `fetch` option to `CustomToolContext` so custom tools can use a caller-provided HTTP implementation
+- Added optional `fetch` overrides to `ModelRegistry` construction and MCP/web search/tool network calls, enabling callers to inject custom HTTP clients instead of relying on global `fetch`
+- Added a `bash.enabled` setting to disable the model-facing bash tool while leaving user-initiated bang/RPC bash commands available.
+- Added an `@<upstream>` model-selector suffix to pin an aggregator model to a single upstream provider per invocation, e.g. `--model openrouter/z-ai/glm-4.7@cerebras` (sets OpenRouter `provider.only`; Vercel AI Gateway models map to `vercelGatewayRouting.only`). Resolved through `parseModelPattern`, so it works for `--model`/`--smol`, model roles, and the SDK, and composes with a trailing thinking level (`...@cerebras:high`). The base must resolve to an aggregator (`openrouter.ai` / `ai-gateway.vercel.sh`); otherwise the `@` stays part of the id, so ids that legitimately contain `@` (`claude-opus-4-8@default`, `workers-ai/@cf/...`) are unaffected.
+
+### Fixed
+
+- Fixed a turn-ending provider error (e.g. a 502 whose body is the proxy's full HTML page) flooding the transcript: `AnthropicApiError` folds the entire response body into `errorMessage`, and the inline transcript render reprinted it verbatim — every embedded blank line included — leaving a tall mostly-empty block ending in `</html>`. The inline error now drops blank lines, clamps to 8 lines, and width-truncates each line via `getPreviewLines`, matching the pinned error banner.
+
+## [15.10.7] - 2026-06-08
+
+### Fixed
+
+- Fixed MCP OAuth fallback rendering to show a short terminal hyperlink and keep the raw authorization URL on one unwrapped copy line ([#2121](https://github.com/can1357/oh-my-pi/issues/2121)).
+- Fixed `omp` startup blocking 25–30 s on a single unresponsive MCP server when no cached tools were available for it. `MCPManager.connectServers` used to fall through to an unbounded `Promise.allSettled` over every still-pending server without a cached tool list, so one server stuck waiting on the per-request MCP timeout (`OMP_MCP_TIMEOUT_MS`, default 30 000 ms) gated the entire UI ready signal. Pending-without-cache servers are now left in flight: their tools surface via the existing background `#onToolsChanged` → `refreshMCPTools` path the moment the connect completes, and failures continue to log through the background catch handler ([#2100](https://github.com/can1357/oh-my-pi/issues/2100)).
+
+## [15.10.6] - 2026-06-08
+
+### Added
+
+- Added a `/plan-review` command that manually (re-)opens the plan-review overlay while plan mode is active. Since there is no fixed plan filename, it reviews the newest `local://<slug>-plan.md` the agent wrote — useful for pulling the review back up after dismissing it, or reviewing a plan the agent wrote without calling `resolve`.
+
+### Changed
+
+- Reverted the `task` tool's result-header glyph from the `⇶` signature icon back to the quiet `status.done` bullet (`•`): white while a subagent is running, accent once it finishes. The reviewer verdict line and per-agent result lines use the same bullet.
+
+### Fixed
+
+- Fixed `/login` API-key prompts (OpenCode Zen, Perplexity OTP, GitHub Enterprise URL, manual OAuth redirect URL, …) silently dropping pasted content on kitty/Linux/Wayland — and any other terminal supporting OSC 5522 enhanced paste. `InputController` enables kitty's enhanced clipboard protocol on TUI start and consumes the resulting OSC 5522 packets in an `addInputListener` that runs before focus dispatch, so the paste never reached the modal `Input`'s bracketed-paste handler; the routing then stuffed the text into the main `CustomEditor` unconditionally, even when `selector-controller` had detached the editor and focused a temporary OAuth input. The pasted API key accumulated in the hidden editor and only resurfaced in the main prompt when the user dismissed the modal with Enter or Esc. The enhanced-paste callback now consults `ui.getFocused()` and routes the text to the focused component when it exposes a `pasteText` hook, falling back to the editor only when no modal target is in focus; image pastes refuse with a status message instead of stuffing a binary blob into the hidden editor. ([#2127](https://github.com/can1357/oh-my-pi/issues/2127))
+- Fixed an auto-compaction dead loop when `compaction.strategy` was `shake` and the configured threshold was low enough that a single shake pass could not bring the context below it (e.g. a 50K-token threshold on a session well above it). Each pass auto-continued, the next agent turn re-triggered the threshold check, and the second shake had nothing new to drop, so the session spun forever. The shake recovery path now estimates post-shake context and, when it is still above the threshold (or shake reclaimed nothing on overflow recovery), surfaces a one-shot warning and falls back to the summarization-driven `context-full` compaction so progress actually resumes ([#2119](https://github.com/can1357/oh-my-pi/issues/2119)).
+- Fixed `/skill:` prompts so magic keywords and turn-budget directives in skill args inject the same hidden notices as normal user prompts, matching the editor highlight behavior ([#2128](https://github.com/can1357/oh-my-pi/issues/2128)).
+- Fixed MCP OAuth fallback rendering to show a short terminal hyperlink and keep the raw authorization URL on one unwrapped copy line ([#2121](https://github.com/can1357/oh-my-pi/issues/2121)).
+- Fixed the `task` tool rendering a success bullet and a `success` frame state for detail-less error results (e.g. an argument-validation failure that never executes): the header now shows the error glyph with an error border and `error` state, and surfaces the dispatched agent name.
+- Fixed Agent Control Center new-agent creation so Windows Ctrl+Enter sequences submitted as a single LF generate the agent instead of inserting a newline ([#2118](https://github.com/can1357/oh-my-pi/issues/2118)).
+- Fixed plan-mode subagents preserving read-only specialty tools such as `report_finding` while still stripping mutating tools ([#1998](https://github.com/can1357/oh-my-pi/issues/1998)).
+- Removed unreachable standalone Exa tool-suite exports and stale tool-count barrel exposure while keeping the live Exa `web_search` provider helpers ([#2093](https://github.com/can1357/oh-my-pi/issues/2093)).
+- Fixed `omp commit` split plans accepting hunk selectors that resolve to no parsed hunks, which crashed the apply step after the index reset and left the working tree fully unstaged ([#2098](https://github.com/can1357/oh-my-pi/issues/2098)).
+
+## [15.10.5] - 2026-06-08
+
+### Added
+
+- Added Homebrew and mise package-manager update paths to the self-update command so installations launched from those tools are updated through their native workflows
+- Added detection of Homebrew and mise install locations so self-update chooses the manager-specific updater when the active `omp` binary comes from a package-manager-managed path
+- Added `astCondition` to TTSR rule frontmatter as a syntax-aware alternative to regex `condition`, enabling AST-based matching for edit/write tool snapshots
+- Added a built-in `ts-redundant-clear-guard` rule that flags redundant guards around `clearTimeout`, `clearInterval`, and `clearImmediate` calls
+- Added a built-in `ts-no-test-timers` rule that flags real timers (`Bun.sleep`, `setTimeout`, `setInterval`) in `*.test.ts` files, steering toward fake timers (`vi.useFakeTimers()` / `vi.advanceTimersByTime()`)
+- Added support for paste marker highlighting with accent styling (`[Paste #N, +X lines]`/`[Paste #N, Y chars]`) in the prompt editor, matching the visual treatment of image references
+- Added pixel dimensions to pasted/loaded image placeholders in the prompt — the marker now reads `[Image #N, WxH]` (falling back to `[Image #N]` when the header can't be decoded).
+- The bundled shell now treats `nohup` as a builtin: `nohup … &` runs the command without masking `SIGHUP` or detaching it, so agent-started daemons stay tied to this agent's lifetime instead of leaking as orphans when the agent exits. Updated the bash tool prompt's daemon guidance to match (dropped the `nohup … & / setsid … & / disown` detach recommendation in favor of a large `timeout` plus the persistent session).
+- Added per-tool `tool.*` theme symbol keys (nerd/unicode/ascii presets) plus a quiet `status.done` glyph, so each tool's result header can carry a signature icon instead of a generic status mark
+
+### Changed
+
+- Updated pi-ai OAuth imports to the renamed `@oh-my-pi/pi-ai/oauth` subpath (was `@oh-my-pi/pi-ai/utils/oauth`) across the login UI, MCP OAuth flow, model registry, setup wizard, and web-search Codex auth. The legacy-plugin specifier shim drops its `pi-ai/oauth` → `pi-ai/utils/oauth` subpath rewrite, since the canonical `@oh-my-pi/pi-ai/oauth` export now resolves directly.
+- Changed forced self-updates for Homebrew installs to run `brew reinstall` and for mise installs to run `mise install --force` after `mise upgrade` when `--force` is requested
+- Changed TTSR rule bucketing and matching so rules with only `astCondition` are treated as TTSR rules and evaluated in the interrupt flow using reconstructed edit/write source snapshots
+- Normalized image content before it enters model context so attached images are downscaled and preprocessed for prompts, steering messages, follow-ups, and custom agent messages
+- Changed image marker format to include pixel dimensions when available (`[Image #N, WxH]`), falling back to bare `[Image #N]` when header cannot be decoded
+- Changed the prompt editor to highlight large-paste placeholders (`[Paste #N, +X lines]`/`[Paste #N, Y chars]`) with the same accent styling as image references (bold, no hyperlink), and to delete image/paste markers atomically: a single backspace or forward-delete removes the whole marker instead of leaving a broken `[Paste #N, +X lines` behind.
+- Browser tool helpers (`tab.*`) are now individually tracked and time-bounded: when a `run` cell hits its budget, the timeout error names the still-running helper(s) and how long each has been stalled (e.g. `... (stalled on tab.screenshot({ selector: ".x" }) (29.9s))`) instead of the opaque `Browser code execution timed out after 30000ms`. Page-coupled helpers that should resolve quickly (`observe`, `screenshot`, `extract`) also fail fast with a named per-op error at `min(cellBudget, 20s)`, leaving budget for the rest of the cell, rather than silently consuming the whole budget.
+- Derived the auth-broker OAuth callback ports (`CALLBACK_PORTS`) and the paste-code login-provider set from the `@oh-my-pi/pi-ai` provider registry, removing the duplicated `CALLBACK_SERVER_PROVIDERS` tables in the model selector and the setup-wizard sign-in scene.
+- Raised the `eval` tool's per-cell `timeout` ceiling from 600s to 3600s (matching `bash`), in both the Zod schema and the `TOOL_TIMEOUTS.eval` runtime clamp, so heavy local-compute cells can request budgets above 10 minutes.
+- Derived the auth-broker OAuth callback ports (`CALLBACK_PORTS`) and the paste-code login-provider set from the `@oh-my-pi/pi-ai` provider registry, removing the duplicated `CALLBACK_SERVER_PROVIDERS` tables in the model selector and the setup-wizard sign-in scene.
+- Reworked tool result-header glyphs to cut the overused success checkmark/dot: each tool now shows its own signature icon on success (terminal for bash, pencil for edit, magnifier/globe for search, plug for MCP, etc.; read keeps the read-group status dot), tools without a custom renderer fall back to a quiet `status.done` dot, and error/warning/pending states keep the universal cross/warning/spinner
+- Changed steady-state health indicators (LSP server ready, OAuth logged-in, plugin-doctor checks) from a success checkmark to a colored `status.enabled` dot, so failures stand out instead of every line reading as a check
+- Changed one-shot MCP/SSH/debug confirmation messages from a generic checkmark to contextual action glyphs (add/remove, connect/enable/disable toggles, reload, job-completed), reflecting what happened rather than just "success"
+- Derived the auth-broker OAuth callback ports (`CALLBACK_PORTS`) and the paste-code login-provider set from the `@oh-my-pi/pi-ai` provider registry, removing the duplicated `CALLBACK_SERVER_PROVIDERS` tables in the model selector and the setup-wizard sign-in scene.
+
+### Fixed
+
+- Fixed package subpath exports for status-line, setup-wizard, tool-discovery, and gallery fixture modules so rewritten test imports resolve through `@oh-my-pi/pi-coding-agent`.
+- Fixed runtime model provider discovery so extension-registered providers are now refreshed after extension load and extension-supplied models appear without restarting
+- Fixed task-row shimmer timing so every running description starts its highlight on the first character together and reaches the last character together, regardless of text length.
+- Fixed the `eval` tool's `read`/`write`/`append` helpers (both Python and JS backends) treating `local://` (and other internal-URL) paths as plain filesystem paths. `pathlib.Path`/`path.resolve` collapse `local://x.md` to `local:/x.md`, so `write("local://x.md", …)` created a junk `local:` directory under the cwd instead of writing where `read local://x.md` resolves. The helpers now substitute injected on-disk roots for known schemes (currently `local://`, pinned to the session's own `local://` root), reject path traversal and unknown `scheme://` paths, and leave plain paths resolving against the cwd.
+- Fixed read and edit previews to surface the enclosing syntactic block's off-window boundary line (behind an ellipsis) when a shown line opens or closes a block whose other end falls outside the displayed range. Powered by a new tree-sitter `enclosingBlockBoundaries` native, so it covers brace languages and indentation languages (Python) using real syntactic spans, with a lexical bracket scan as fallback for unparseable sources.
+- Fixed `tab.screenshot({ selector })` hanging for the entire cell budget on continuously-animating pages (WebGL / `backdrop-filter` "glass" effects). The element-screenshot path no longer routes through puppeteer's `scrollIntoViewIfNeeded()`, whose `IntersectionObserver` promise can stall indefinitely under heavy rendering; it now does a single instant `scrollIntoView` and captures with `scrollIntoView: false` (relying on `captureBeyondViewport`), so off-screen elements are still captured without the stall.
+- Fixed follow-up message submissions to forward pending clipboard-pasted images to `session.prompt` in both streaming and non-streaming flows
+- Fixed follow-up handling to clear consumed clipboard image state after submission so pasted images are not silently carried into later messages
+- Fixed clipboard-pasted images being rejected when steering or following up during compaction. Instead of bailing with "Retry after it completes to send images", the message and its images are now queued via `queueCompactionMessage` and forwarded to the session (steer/follow-up/prompt) when the compaction queue flushes.
+- Fixed edit tool result previews to show only current-file lines and collapse long inserted blocks instead of echoing removed content.
+- Fixed `generateDiffString` to omit the mid-skip `...` placeholder between two nearby edits, conveying the elided gap via the jump in line numbers instead (consistent with how leading/trailing context skips already render). The placeholder row was indistinguishable from a genuine `...` context line and wasted a row in compact previews.
+- Fixed concurrent interactive dialogs clobbering each other on the shared editor surface. `ExtensionUiController` presents the selector / input / editor modals by swapping a component into the single `editorContainer` and stealing focus, with no serialization — so a second `select`/`input`/`editor` request (from a hook, extension, the `ask` tool, or an internal flow) opened while one was already up would clear the container and re-focus, orphaning the first dialog. Its promise then hung until the caller's signal aborted (surfacing a stray `Ask input was cancelled` on top of the answered call). These modals are now serialized through `#presentDialog`: at most one shows at a time and the rest queue (FIFO); a queued request whose signal aborts before its turn resolves `undefined` and is never shown. The first dialog is still presented synchronously, so single-dialog timing is unchanged.
+- Fixed the `ask` tool potentially hanging when the model emitted two `ask` calls in one tool batch. `ask` now declares `concurrency: "exclusive"`, so the agent loop serializes the batch and each question's selector runs to completion before the next starts, instead of racing for the shared selector surface.
+- Expanded `@path/to/file` import references in CLAUDE.md / AGENTS.md / GEMINI.md (and the other discovered context-file flavors) when loading them into the system prompt, matching the convention used by Claude Code, Goose, and other agents. Imports resolve relative to the importing file's directory, support `~/...`, recurse up to 5 hops, and are skipped inside fenced code blocks and inline code spans so technical examples like `npm install @types/node` survive intact ([#2111](https://github.com/can1357/oh-my-pi/issues/2111)).
+
+### Removed
+
+- Removed the special Anthropic `claude-opus-4-8` tool-call batch cap; sessions no longer abort an in-flight provider stream after a fixed number of completed tool calls.
 
 ## [15.10.4] - 2026-06-08
 
