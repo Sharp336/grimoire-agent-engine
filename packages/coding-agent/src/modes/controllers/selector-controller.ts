@@ -28,6 +28,7 @@ import {
 	theme,
 } from "../../modes/theme/theme";
 import type { InteractiveModeContext } from "../../modes/types";
+import { isSilentAbort } from "../../session/messages";
 import { type SessionInfo, SessionManager } from "../../session/session-manager";
 import { FileSessionStorage } from "../../session/session-storage";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
@@ -1098,6 +1099,12 @@ export class SelectorController {
 			getEditAllowFuzzy: () => settings.get("edit.fuzzyMatch"),
 			getAssistantThinkingRenderers: () => this.ctx.session.extensionRunner?.getAssistantThinkingRenderers() ?? [],
 			getImageBudget: () => this.ctx.ui?.imageBudget,
+			// Suppress the silent-abort sentinel so an observed transcript never renders
+			// SILENT_ABORT_MARKER verbatim or a spurious ✗ for an internal silent abort.
+			getAssistantMessageDisplay: message =>
+				message.stopReason === "aborted" && isSilentAbort(message.errorMessage)
+					? { ...message, stopReason: "stop" as const }
+					: message,
 		};
 	}
 

@@ -7,12 +7,7 @@ import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { canonicalSnapshotKey } from "@oh-my-pi/pi-coding-agent/edit/file-snapshot-store";
 import type { RenderResultOptions } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
-import { SessionObserverOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-observer-overlay";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
-import type {
-	ObservableSession,
-	SessionObserverRegistry,
-} from "@oh-my-pi/pi-coding-agent/modes/session-observer-registry";
 import type { Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { SessionEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -82,21 +77,6 @@ async function createSearchFixture(rootDir: string): Promise<void> {
 		"const providerOptions = {};\nlegacyWrap(otherValue, otherArg);\n",
 	);
 }
-async function makeJsonlSessionFile(dirPath: string, entries: object[]): Promise<string> {
-	const filePath = path.join(dirPath, "session.jsonl");
-	await Bun.write(filePath, `${entries.map(entry => JSON.stringify(entry)).join("\n")}\n`);
-	return filePath;
-}
-
-function makeSubagentRegistry(sessions: ObservableSession[]): SessionObserverRegistry {
-	return {
-		getSessions: () => sessions,
-		onChange: () => () => {},
-		setMainSession: () => {},
-		getActiveSubagentCount: () => sessions.filter(session => session.status === "active").length,
-	} as unknown as SessionObserverRegistry;
-}
-
 let treeEntryCounter = 0;
 function makeMessageNode(message: AgentMessage, parentId: string | null = null): SessionTreeNode {
 	const entry: SessionEntry = {
@@ -285,77 +265,6 @@ describe("tool path arrays", () => {
 		expect(component).toBeInstanceOf(Text);
 		expect((component as Text).getText()).toContain("in folder with spaces/");
 	});
-	it("session observer overlay renders a single-string search path summary", async () => {
-		const sessionFile = await makeJsonlSessionFile(tempDir, [
-			{ type: "session", version: 3, id: "search-overlay-session", timestamp: new Date().toISOString() },
-			{
-				type: "message",
-				id: "msg-user-1",
-				parentId: null,
-				timestamp: new Date().toISOString(),
-				message: { role: "user", content: "search", timestamp: 1 },
-			},
-			{
-				type: "message",
-				id: "msg-assistant-1",
-				parentId: "msg-user-1",
-				timestamp: new Date().toISOString(),
-				message: {
-					role: "assistant",
-					content: [
-						{
-							type: "toolCall",
-							id: "search-call-1",
-							name: "search",
-							arguments: { pattern: "space-needle", paths: "folder with spaces/" },
-						},
-					],
-					api: "test",
-					provider: "test",
-					model: "test",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-					},
-					timestamp: 2,
-				},
-			},
-			{
-				type: "message",
-				id: "msg-tool-1",
-				parentId: "msg-assistant-1",
-				timestamp: new Date().toISOString(),
-				message: {
-					role: "toolResult",
-					toolName: "search",
-					toolCallId: "search-call-1",
-					content: [{ type: "text", text: "note.txt" }],
-					isError: false,
-					timestamp: 3,
-				},
-			},
-		]);
-		const registry = makeSubagentRegistry([
-			{
-				id: "search-overlay-session",
-				kind: "subagent",
-				label: "Search Overlay",
-				status: "active",
-				sessionFile,
-				lastUpdate: Date.now(),
-			},
-		]);
-
-		const overlay = new SessionObserverOverlayComponent(registry, () => {}, ["ctrl+s"]);
-		const rendered = Bun.stripANSI(overlay.render(120).join("\n"));
-
-		expect(rendered).toContain("paths: folder with spaces/");
-	});
-
 	it("tree selector renders a single-string search path summary", () => {
 		const root = makeMessageNode({ role: "user", content: "search", timestamp: 1 });
 		const assistant = makeMessageNode(

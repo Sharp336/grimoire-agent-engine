@@ -16,6 +16,8 @@ export interface ObservableSession {
 	progress?: AgentProgress;
 	parentId?: string;
 	phase?: string;
+	/** Stable insertion order assigned once by the registry; used as the sort key so live progress updates don't reshuffle the tree. */
+	createdOrder?: number;
 }
 
 export interface ObserverTreeNode {
@@ -35,6 +37,7 @@ export class SessionObserverRegistry {
 	#listeners = new Set<() => void>();
 	#eventBusUnsubscribers: Array<() => void> = [];
 	#eventBus?: EventBus;
+	#orderCounter = 0;
 
 	getEventBus(): EventBus | undefined {
 		return this.#eventBus;
@@ -59,6 +62,7 @@ export class SessionObserverRegistry {
 			status: "active",
 			sessionFile: sessionFile ?? existing?.sessionFile,
 			lastUpdate: Date.now(),
+			createdOrder: existing?.createdOrder ?? this.#orderCounter++,
 		});
 		this.#notifyListeners();
 	}
@@ -68,7 +72,7 @@ export class SessionObserverRegistry {
 		sessions.sort((a, b) => {
 			if (a.kind === "main") return -1;
 			if (b.kind === "main") return 1;
-			return a.lastUpdate - b.lastUpdate;
+			return (a.createdOrder ?? 0) - (b.createdOrder ?? 0);
 		});
 		return sessions;
 	}
@@ -203,6 +207,7 @@ export class SessionObserverRegistry {
 						sessionFile: payload.sessionFile,
 						lastUpdate: Date.now(),
 						parentId,
+						createdOrder: this.#orderCounter++,
 						...(phase !== undefined ? { phase } : {}),
 					});
 				}
@@ -236,6 +241,7 @@ export class SessionObserverRegistry {
 						lastUpdate: Date.now(),
 						progress,
 						parentId,
+						createdOrder: this.#orderCounter++,
 					});
 				}
 				this.#notifyListeners();

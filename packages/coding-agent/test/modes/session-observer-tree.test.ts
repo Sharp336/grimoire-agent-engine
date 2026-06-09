@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { SessionObserverRegistry } from "../../src/modes/session-observer-registry";
-import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "../../src/task";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../../src/task";
 import { EventBus } from "../../src/utils/event-bus";
 
 describe("SessionObserverTree", () => {
@@ -135,5 +135,75 @@ describe("SessionObserverTree", () => {
 
 		expect(allIds).toContain("X");
 		expect(allIds).toContain("Y");
+	});
+
+	test("Order stability — progress updates do not reorder sessions", () => {
+		const registry = new SessionObserverRegistry();
+		const bus = new EventBus();
+		registry.subscribeToEventBus(bus);
+		registry.setMainSession("/tmp/main.jsonl");
+
+		// Emit A, B, C under parentId "Main"
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "A",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 1,
+			parentId: "Main",
+		});
+
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "B",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 2,
+			parentId: "Main",
+		});
+
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "C",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 3,
+			parentId: "Main",
+		});
+
+		// Capture the order: getSessions().map(s => s.id) -> expect ["main", "A", "B", "C"]
+		expect(registry.getSessions().map(s => s.id)).toEqual(["main", "A", "B", "C"]);
+
+		// Now emit a PROGRESS event for A
+		bus.emit(TASK_SUBAGENT_PROGRESS_CHANNEL, {
+			index: 1,
+			agent: "task",
+			agentSource: "bundled",
+			task: "test",
+			parentId: "Main",
+			progress: {
+				index: 1,
+				id: "A",
+				agent: "task",
+				agentSource: "bundled",
+				status: "running",
+				task: "test",
+				toolCount: 0,
+				tokens: 1,
+				cost: 0,
+				durationMs: 0,
+				recentTools: [],
+				recentOutput: [],
+			},
+		});
+
+		// Assert A did not move
+		expect(registry.getSessions().map(s => s.id)).toEqual(["main", "A", "B", "C"]);
+
+		// Assert the top-level getTree() children order is unchanged
+		const tree = registry.getTree();
+		expect(tree.length).toBe(1);
+		expect(tree[0].session.id).toBe("main");
+		expect(tree[0].children.map(c => c.session.id)).toEqual(["A", "B", "C"]);
 	});
 });
