@@ -2,11 +2,34 @@
 
 ## [Unreleased]
 
+## [15.10.9] - 2026-06-09
+
+### Fixed
+
+- Fixed streaming thinking (and other styled assistant content) vanishing from native scrollback once it scrolled past the viewport top during a foreground turn. The transcript's append-only commit detector compared raw row bytes, so a styled paragraph wrapping onto a new row (the span-closing SGR and width padding move while the visible cells stay identical) or a streamed token pushing the last word down a line flagged the block as permanently volatile — the commit boundary froze and every later row that crossed the viewport top was committed nowhere. Rows are now compared by visible content, a wrap-shrink of the in-flight bottom line counts as append-only, and a genuine one-off interior rewrite only suspends commits until the block re-earns append-only (30 clean frames), after which the pinned emitter backfills the stalled gap contiguously. Periodically rewriting blocks (spinners, collapsing tool previews) never re-earn and stay deferred.
+
+- Fixed bracketed pastes containing multiple image file paths so each image is attached in order instead of treating the whole paste as one unreadable path.
+
+- Fixed MCP OAuth fallback prompts so the "Click here to authorize" label emits an auth-safe terminal hyperlink even when hyperlink auto-detection is unavailable, keeping non-browser MCP setup usable ([#2196](https://github.com/can1357/oh-my-pi/issues/2196)).
+- Fixed `task`-spawned subagents repeating filesystem scans the parent had already completed. `ExecutorOptions` and the `createAgentSession()` call inside `runSubprocess()` did not forward `rules`, the discovered extension paths, or the discovered `.omp/tools/` paths, so each subagent re-ran `loadCapability<Rule>()`, `discoverAndLoadExtensions()`, and the full `.omp/tools/` walk. The toolsession now caches `session.rules`, `session.extensionPaths`, and `session.customToolPaths`; `runSubprocess()` threads them through; and `createAgentSession()` accepts new `preloadedExtensionPaths` and `preloadedCustomToolPaths` options backed by new exported `discoverExtensionPaths()` and `discoverCustomToolPaths()` helpers. Crucially, only path lists are forwarded — never loaded instances. Each session rebuilds its own `Extension` and `LoadedCustomTool` objects so the per-session `ExtensionAPI`/`CustomToolAPI` (cwd, eventBus, runtime, exec, pushPendingAction, UI) targets the right session; forwarding loaded instances would have routed extension handlers and custom-tool execution back through the parent. The CLI's `preloadedExtensions` short-circuit is preserved for same-process reuse and now shallow-clones the caller's `extensions` array so inline-extension augmentation (autoresearch + custom-tools wrapper) cannot bleed back into it ([#2190](https://github.com/can1357/oh-my-pi/issues/2190)).
+- Fixed SSH tool cancellation hanging behind OpenSSH ControlMaster streams that stayed open after an Esc/user interrupt ([#2180](https://github.com/can1357/oh-my-pi/issues/2180)).
+- Fixed Windows stdio MCP servers launched through PATH shims such as `codegraph.cmd` so bare commands like `codegraph` resolve via `PATHEXT` before spawn ([#2174](https://github.com/can1357/oh-my-pi/issues/2174)).
+- Fixed compiled-binary extensions failing to load `@oh-my-pi/pi-*` packages when `bun --compile` quietly dropped one of the extra entrypoints (observed on macOS arm64 release builds): the legacy-pi compat shim's package-root override branch returned the bunfs path without checking the target was present, so the rewrite emitted a `file://` URL to a missing module and the #1216 fallback (scoped to the throwing `getResolvedSpecifier` path) never ran. Override targets are now validated against the on-disk filesystem at module init, missing entries are dropped, and resolution falls through to canonical lookup so Bun resolves the import from the extension's own `node_modules` ([#2168](https://github.com/can1357/oh-my-pi/issues/2168)).
+
+## [15.10.8] - 2026-06-09
+
 ### Added
 
 - Added a `/observe` command that opens a Subagent Browser — the full live agent tree (main → `task` subagents → nested children → eval `agent()`/workflow fan-outs) with per-agent status icons and live progress, searchable and collapsible. Selecting an agent opens its transcript.
 - Reworked the session observer transcript view to render through the same pipeline as the main agent (token streaming, real tool/bash/eval cards, thinking blocks) instead of the previous hand-rolled static view. The view shows a breadcrumb of the parent chain, cycles siblings (`[`/`]`), toggles follow-live tailing (`f`), can stop a running agent (`x`), and seeds from the session file then attaches to the live event stream, handing off to a static replay when the agent completes.
+- Added an optional `fetch` option to `CustomToolContext` so custom tools can use a caller-provided HTTP implementation
+- Added optional `fetch` overrides to `ModelRegistry` construction and MCP/web search/tool network calls, enabling callers to inject custom HTTP clients instead of relying on global `fetch`
 - Added a `bash.enabled` setting to disable the model-facing bash tool while leaving user-initiated bang/RPC bash commands available.
+- Added an `@<upstream>` model-selector suffix to pin an aggregator model to a single upstream provider per invocation, e.g. `--model openrouter/z-ai/glm-4.7@cerebras` (sets OpenRouter `provider.only`; Vercel AI Gateway models map to `vercelGatewayRouting.only`). Resolved through `parseModelPattern`, so it works for `--model`/`--smol`, model roles, and the SDK, and composes with a trailing thinking level (`...@cerebras:high`). The base must resolve to an aggregator (`openrouter.ai` / `ai-gateway.vercel.sh`); otherwise the `@` stays part of the id, so ids that legitimately contain `@` (`claude-opus-4-8@default`, `workers-ai/@cf/...`) are unaffected.
+
+### Fixed
+
+- Fixed a turn-ending provider error (e.g. a 502 whose body is the proxy's full HTML page) flooding the transcript: `AnthropicApiError` folds the entire response body into `errorMessage`, and the inline transcript render reprinted it verbatim — every embedded blank line included — leaving a tall mostly-empty block ending in `</html>`. The inline error now drops blank lines, clamps to 8 lines, and width-truncates each line via `getPreviewLines`, matching the pinned error banner.
 
 ## [15.10.7] - 2026-06-08
 

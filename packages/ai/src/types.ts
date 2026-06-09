@@ -33,6 +33,19 @@ import type { AssistantMessageEventStream } from "./utils/event-stream";
 
 export type { AssistantMessageEventStream } from "./utils/event-stream";
 
+/**
+ * Ceiling on the output-token count omp requests from any OpenAI-family endpoint
+ * (openai-responses, azure/xai responses, and openai-completions). Mirrors
+ * Anthropic's {@link CLAUDE_CODE_MAX_OUTPUT_TOKENS}.
+ *
+ * Catalog `maxTokens` frequently reflects a model's context window rather than a
+ * given upstream's real per-request output cap. OpenRouter, for instance,
+ * advertises 131072 output tokens for `z-ai/glm-4.7`, but the Cerebras upstream
+ * only allows ~131072 tokens total — so requesting the full ceiling overflows
+ * with a 400. Requested output is clamped to this value (and to `model.maxTokens`).
+ */
+export const OPENAI_MAX_OUTPUT_TOKENS = 64000;
+
 export type KnownApi =
 	| "openai-completions"
 	| "openai-responses"
@@ -560,6 +573,14 @@ export interface AssistantMessage {
 	provider: Provider;
 	model: string;
 	responseId?: string; // Provider-specific response/message identifier when the upstream API exposes one
+	/**
+	 * Name of the upstream provider an aggregator routed this request to, as
+	 * reported in the response (e.g. OpenRouter's top-level `provider` field:
+	 * `"OpenAI"`, `"Anthropic"`, `"Together"`). Distinct from `provider`, which
+	 * is the configured gateway we called (`"openrouter"`). Undefined for direct
+	 * providers that expose no such field.
+	 */
+	upstreamProvider?: string;
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
@@ -810,11 +831,20 @@ export interface AnthropicCompat {
 	supportsLongCacheRetention?: boolean;
 	/**
 	 * Whether mid-conversation `role: "system"` messages are accepted in the
-	 * `messages` array (Claude Opus 4.8+ on the first-party Claude API and
-	 * Claude Platform on AWS). When unset, auto-detected from the model id and
-	 * base URL. Not available on Bedrock, Vertex AI, or Microsoft Foundry.
+	 * `messages` array (Claude Opus 4.8+ and Claude Fable/Mythos 5 on the
+	 * first-party Claude API and Claude Platform on AWS). When unset,
+	 * auto-detected from the model id and base URL. Not available on Bedrock,
+	 * Vertex AI, or Microsoft Foundry.
 	 */
 	supportsMidConversationSystem?: boolean;
+	/**
+	 * Whether the model accepts a forced `tool_choice` (`{ type: "any" }` or
+	 * `{ type: "tool", name }`). Claude Fable/Mythos 5 reject forced tool use
+	 * outright ("tool_choice forces tool use is not compatible with this model");
+	 * the request builder downgrades forced choices to `auto` when this is false.
+	 * When unset, auto-detected from the model id. Default: true.
+	 */
+	supportsForcedToolChoice?: boolean;
 }
 
 /**
