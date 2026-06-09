@@ -10,6 +10,7 @@ import { formatModelSelectorValue } from "../../config/model-resolver";
 import { settings } from "../../config/settings";
 import { disableProvider, enableProvider } from "../../discovery";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
+import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import {
 	getInstalledPluginsRegistryPath,
 	getMarketplacesCacheDir,
@@ -55,6 +56,7 @@ import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
+import type { TranscriptRendererDeps } from "../controllers/transcript-renderer";
 import type { ObservableSession, SessionObserverRegistry } from "../session-observer-registry";
 import { computeContextBreakdown } from "../utils/context-usage";
 import { buildCopyTargets } from "../utils/copy-targets";
@@ -1079,6 +1081,26 @@ export class SelectorController {
 		});
 	}
 
+	#buildObserverRendererDeps(): Partial<TranscriptRendererDeps> {
+		// Mirror EventController's renderer deps (minus the main-session streaming-component
+		// sync and pendingTools) so a subagent's transcript renders tool/bash/eval cards
+		// identically to the main agent. Without `ui` the renderer drops every non-read tool.
+		return {
+			ui: this.ctx.ui,
+			getToolByName: toolName => this.ctx.session.getToolByName?.(toolName),
+			getCwd: () => this.ctx.sessionManager.getCwd(),
+			getSnapshots: () => getFileSnapshotStore(this.ctx.session),
+			getToolResultPreview: () => settings.get("read.toolResultPreview"),
+			getToolOutputExpanded: () => this.ctx.toolOutputExpanded,
+			getShowImages: () => settings.get("terminal.showImages"),
+			getHideThinkingBlock: () => this.ctx.hideThinkingBlock,
+			getEditFuzzyThreshold: () => settings.get("edit.fuzzyThreshold"),
+			getEditAllowFuzzy: () => settings.get("edit.fuzzyMatch"),
+			getAssistantThinkingRenderers: () => this.ctx.session.extensionRunner?.getAssistantThinkingRenderers() ?? [],
+			getImageBudget: () => this.ctx.ui?.imageBudget,
+		};
+	}
+
 	showSessionObserver(
 		registry: SessionObserverRegistry,
 		options?: { initialSessionId?: string; onBack?: () => void },
@@ -1093,12 +1115,27 @@ export class SelectorController {
 			this.ctx.ui.requestRender();
 		};
 
+		// Tear down this transcript overlay before invoking the caller's back action
+		// (e.g. reopening the browser) so the live event-bus subscription does not leak.
+		const onBack = options?.onBack
+			? () => {
+					cleanup?.();
+					overlayHandle?.hide();
+					this.ctx.ui.requestRender();
+					options.onBack?.();
+				}
+			: undefined;
+
 		const selector = new SessionObserverOverlayComponent(
 			registry,
 			done,
 			observeKeys,
 			() => this.ctx.ui.requestRender(),
-			options,
+			{
+				initialSessionId: options?.initialSessionId,
+				onBack,
+				rendererDeps: this.#buildObserverRendererDeps(),
+			},
 		);
 
 		cleanup = registry.onChange(() => {

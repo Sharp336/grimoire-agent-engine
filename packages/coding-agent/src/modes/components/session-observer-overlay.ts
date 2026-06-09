@@ -9,9 +9,10 @@
 import { Container, matchesKey, ScrollView } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
+import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { AgentRegistry, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { TRUNCATE_LENGTHS } from "../../tools/render-utils";
-import { TranscriptRenderer } from "../controllers/transcript-renderer";
+import { TranscriptRenderer, type TranscriptRendererDeps } from "../controllers/transcript-renderer";
 import type { ObservableSession, SessionObserverRegistry } from "../session-observer-registry";
 import { theme } from "../theme/theme";
 import type { TranscriptSource } from "../transcript-source";
@@ -52,13 +53,14 @@ export class SessionObserverOverlayComponent extends Container {
 	#sourceUnsub?: () => void;
 	#followLive = true;
 	#liveSession = false;
+	#rendererDeps: Partial<TranscriptRendererDeps>;
 
 	constructor(
 		registry: SessionObserverRegistry,
 		onDone: () => void,
 		observeKeys: KeyId[],
 		requestRender: () => void = () => {},
-		options?: { initialSessionId?: string; onBack?: () => void },
+		options?: { initialSessionId?: string; onBack?: () => void; rendererDeps?: Partial<TranscriptRendererDeps> },
 	) {
 		super();
 		this.#registry = registry;
@@ -66,6 +68,7 @@ export class SessionObserverOverlayComponent extends Container {
 		this.#observeKeys = observeKeys;
 		this.#requestRender = requestRender;
 		this.#onBack = options?.onBack;
+		this.#rendererDeps = options?.rendererDeps ?? {};
 
 		const sessions = this.#registry.getSessions();
 		let targetSession: ObservableSession | undefined;
@@ -139,6 +142,19 @@ export class SessionObserverOverlayComponent extends Container {
 			}
 			this.#liveSession = this.#source instanceof HybridSource || this.#source instanceof LiveSource;
 
+			// Resolve tool/cwd/snapshot deps from the observed agent's OWN session while it
+			// is still live, so a running subagent's edit/tool cards render against the
+			// correct tool registry, cwd, and file snapshots. Completed agents fall back to
+			// the main-session deps (their results are already materialized in the JSONL).
+			const agentSession = AgentRegistry.global().get(id)?.session;
+			const sessionDeps: Partial<TranscriptRendererDeps> = agentSession
+				? {
+						getToolByName: name => agentSession.getToolByName(name),
+						getCwd: () => agentSession.sessionManager.getCwd(),
+						getSnapshots: () => getFileSnapshotStore(agentSession),
+					}
+				: {};
+
 			if (this.#source) {
 				this.#renderer = new TranscriptRenderer({
 					getSmoothStreaming: () => false,
@@ -146,6 +162,8 @@ export class SessionObserverOverlayComponent extends Container {
 					getToolResultPreview: () => true,
 					getToolOutputExpanded: () => false,
 					getShowImages: () => true,
+					...this.#rendererDeps,
+					...sessionDeps,
 					requestRender: () => {
 						this.#requestRender();
 					},
@@ -367,6 +385,7 @@ export class SessionObserverOverlayComponent extends Container {
 		// u / Backspace — back navigation
 		if (keyData === "u" || matchesKey(keyData, "backspace")) {
 			if (this.#onBack) {
+				this.#disposeAll();
 				this.#onBack();
 			}
 			return;

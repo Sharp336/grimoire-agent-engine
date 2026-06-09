@@ -3,10 +3,13 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
+import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "../../src/config/settings";
 import { TranscriptRenderer } from "../../src/modes/controllers/transcript-renderer";
 import { initTheme } from "../../src/modes/theme/theme";
-import { ReplaySource } from "../../src/modes/transcript-source";
+import { HybridSource, ReplaySource } from "../../src/modes/transcript-source";
+import { TASK_SUBAGENT_EVENT_CHANNEL } from "../../src/task";
+import { EventBus } from "../../src/utils/event-bus";
 
 describe("ReplaySource", () => {
 	beforeAll(() => {
@@ -151,5 +154,132 @@ describe("ReplaySource", () => {
 				// Ignore
 			}
 		}
+	});
+});
+
+describe("HybridSource", () => {
+	it("delivers in-flight live messages to the renderer and filters other agents", async () => {
+		const tempFilePath = path.join(os.tmpdir(), `transcript-hybrid-${Date.now()}.jsonl`);
+		// One completed assistant message already flushed to disk (the backlog).
+		const backlog = `${JSON.stringify({
+			type: "message",
+			id: "e1",
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			message: {
+				role: "assistant",
+				model: "test-model",
+				content: [{ type: "text", text: "Completed turn." }],
+			},
+		})}\n`;
+
+		try {
+			await Bun.write(tempFilePath, backlog);
+
+			const bus = new EventBus();
+			const agentId = "Worker";
+			const source = new HybridSource(tempFilePath, bus, agentId);
+
+			expect(source.backlog().some(e => e.type === "message_start")).toBe(true);
+
+			const received: AgentEvent[] = [];
+			const unsub = source.subscribe(e => received.push(e));
+
+			// In-flight assistant message that started AFTER attach (not yet on disk): its
+			// events MUST reach the renderer, not be dropped as a positional "backlog" dup.
+			const inflight = {
+				role: "assistant",
+				model: "test-model",
+				content: [{ type: "text", text: "Live in-flight text." }],
+			};
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+				id: agentId,
+				index: 0,
+				agent: "task",
+				agentSource: "bundled",
+				task: "t",
+				event: { type: "message_start", message: inflight },
+			});
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+				id: agentId,
+				index: 0,
+				agent: "task",
+				agentSource: "bundled",
+				task: "t",
+				event: { type: "message_end", message: inflight },
+			});
+
+			// An event for a different agent must be filtered out by the id filter.
+			bus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+				id: "OtherAgent",
+				index: 0,
+				agent: "task",
+				agentSource: "bundled",
+				task: "t",
+				event: {
+					type: "message_start",
+					message: { role: "assistant", model: "test-model", content: [{ type: "text", text: "noise" }] },
+				},
+			});
+
+			unsub();
+
+			const texts: string[] = [];
+			for (const e of received) {
+				if ((e.type === "message_start" || e.type === "message_end") && e.message.role === "assistant") {
+					for (const block of e.message.content) {
+						if (block.type === "text") texts.push(block.text);
+					}
+				}
+			}
+			expect(texts).toContain("Live in-flight text.");
+			expect(texts).not.toContain("noise");
+		} finally {
+			try {
+				fs.unlinkSync(tempFilePath);
+			} catch {
+				// Ignore
+			}
+		}
+	});
+});
+
+describe("TranscriptRenderer orphan recovery", () => {
+	beforeAll(() => {
+		initTheme();
+	});
+
+	beforeEach(async () => {
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+	});
+
+	afterEach(() => {
+		resetSettingsForTest();
+	});
+
+	it("renders an in-flight assistant turn whose message_start was missed (mid-attach)", () => {
+		const renderer = new TranscriptRenderer({
+			getSmoothStreaming: () => false,
+			getHideThinkingBlock: () => false,
+			getToolResultPreview: () => true,
+			getToolOutputExpanded: () => true,
+			getShowImages: () => false,
+			requestRender: () => {},
+		});
+		// Simulate attaching to a running subagent AFTER its message_start: only the
+		// later update/end events arrive. The renderer must synthesize the component
+		// so the in-flight turn renders instead of being silently dropped.
+		const message = {
+			role: "assistant",
+			model: "test-model",
+			content: [{ type: "text", text: "Mid-flight reasoning." }],
+		};
+		renderer.feed({ type: "message_update", message } as unknown as AgentEvent);
+		renderer.feed({ type: "message_end", message } as unknown as AgentEvent);
+
+		expect(renderer.getContainer().children.length).toBeGreaterThan(0);
+		const text = stripVTControlCharacters(renderer.getContainer().render(100).join("\n"));
+		expect(text).toContain("Mid-flight reasoning.");
 	});
 });

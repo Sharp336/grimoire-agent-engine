@@ -193,7 +193,6 @@ export class HybridSource implements TranscriptSource {
 	#replaySource: ReplaySource;
 	#liveSource: LiveSource;
 	#seenAssistantIds = new Set<string>();
-	#backlogCount = 0;
 
 	constructor(sessionFile: string, eventBus: EventBus, agentId: string, meta?: Partial<TranscriptSourceMeta>) {
 		this.#meta = meta;
@@ -203,58 +202,34 @@ export class HybridSource implements TranscriptSource {
 
 	backlog(): AgentEvent[] {
 		const events = this.#replaySource.backlog();
-		let assistantCount = 0;
+		// Record ids of assistant messages already seeded so the live stream can drop a
+		// concrete duplicate (the narrow window where a message both flushed to disk and
+		// re-emitted live). Messages without a stable id are not deduped: the live stream
+		// only carries future events, so a completed backlog message is never re-sent.
 		for (const e of events) {
 			if (e.type === "message_start" && e.message.role === "assistant") {
-				const identity = (e.message as { id?: string }).id || String(assistantCount);
-				this.#seenAssistantIds.add(identity);
-				assistantCount++;
+				const id = (e.message as { id?: string }).id;
+				if (id) this.#seenAssistantIds.add(id);
 			}
 		}
-		this.#backlogCount = assistantCount;
 		return events;
 	}
 
 	subscribe(cb: (e: AgentEvent) => void): () => void {
-		// Initialize the live assistant index count.
-		// If the live stream has an in-flight message that is already in the backlog,
-		// we assume it is the last message in the backlog (index backlogCount - 1).
-		// If there are no messages in the backlog, we start at 0.
-		let liveAssistantIndex = this.#backlogCount > 0 ? this.#backlogCount - 1 : 0;
-		let foundNewMessageStart = false;
-
-		const unsubscribe = this.#liveSource.subscribe(e => {
-			if (e.type === "message_start" && e.message.role === "assistant") {
-				const identity = (e.message as { id?: string }).id || String(liveAssistantIndex);
-				// If we see a message start for an identity not in the backlog,
-				// it means we have reached a brand new assistant message.
-				if (!this.#seenAssistantIds.has(identity)) {
-					foundNewMessageStart = true;
-				}
-				// Increment the live assistant index for the next message
-				liveAssistantIndex++;
+		return this.#liveSource.subscribe(e => {
+			// Drop a live assistant event only when it is a concrete id-duplicate of a
+			// message already seeded from the backlog. Never drop based on position: an
+			// in-flight message (whose message_start we attached after) is not yet on
+			// disk, so its updates/end MUST reach the renderer.
+			if (
+				(e.type === "message_start" || e.type === "message_update" || e.type === "message_end") &&
+				e.message?.role === "assistant"
+			) {
+				const id = (e.message as { id?: string }).id;
+				if (id && this.#seenAssistantIds.has(id)) return;
 			}
-
-			// Deduplication logic:
-			// Drop message_start, message_update, message_end events for assistant messages
-			// that were already emitted in backlog (exist in seenAssistantIds) until we
-			// encounter a brand new message_start event.
-			if (!foundNewMessageStart) {
-				if (e.type === "message_start" || e.type === "message_update" || e.type === "message_end") {
-					if (e.message?.role === "assistant") {
-						const identity = (e.message as { id?: string }).id || String(liveAssistantIndex);
-						if (this.#seenAssistantIds.has(identity)) {
-							// Drop this event to avoid double rendering the seeded message
-							return;
-						}
-					}
-				}
-			}
-
 			cb(e);
 		});
-
-		return unsubscribe;
 	}
 
 	meta(): TranscriptSourceMeta {

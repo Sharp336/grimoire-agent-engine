@@ -1,14 +1,5 @@
-import {
-	Container,
-	fuzzyMatch,
-	Input,
-	matchesKey,
-	replaceTabs,
-	ScrollView,
-	truncateToWidth,
-	visibleWidth,
-} from "@oh-my-pi/pi-tui";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import { Container, fuzzyMatch, Input, matchesKey, ScrollView, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ObservableSession, ObserverTreeNode, SessionObserverRegistry } from "../session-observer-registry";
 import type { ThemeColor } from "../theme/theme";
 import { theme } from "../theme/theme";
@@ -253,8 +244,8 @@ export class SubagentBrowserComponent extends Container {
 		}
 		const statusPart = `${theme.fg(statusColor, statusGlyph)} `;
 
-		const label = replaceTabs(node.session.label || node.session.id);
-		const agentPart = node.session.agent ? ` ${theme.fg("dim", replaceTabs(node.session.agent))}` : "";
+		const label = sanitizeText(node.session.label || node.session.id);
+		const agentPart = node.session.agent ? ` ${theme.fg("dim", sanitizeText(node.session.agent))}` : "";
 
 		let suffixPart = "";
 		if (progress) {
@@ -262,10 +253,10 @@ export class SubagentBrowserComponent extends Container {
 			if (status === "active") {
 				let toolSuffix = "";
 				if (progress.currentTool) {
-					toolSuffix = replaceTabs(progress.currentTool);
+					toolSuffix = sanitizeText(progress.currentTool);
 					const detail = progress.lastIntent || progress.currentToolArgs;
 					if (detail) {
-						toolSuffix += ` ${replaceTabs(detail)}`;
+						toolSuffix += ` ${sanitizeText(detail)}`;
 					}
 				}
 				suffixPart = ` · ${tokens} tok${toolSuffix ? ` · ${toolSuffix}` : ""}`;

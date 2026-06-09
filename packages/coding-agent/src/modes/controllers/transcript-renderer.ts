@@ -195,6 +195,17 @@ export class TranscriptRenderer {
 			this.#resetReadGroup();
 			return;
 		}
+		this.#beginAssistantComponent(event.message);
+		this.#deps.requestRender();
+	}
+
+	/**
+	 * Create + register the streaming assistant component and begin its reveal.
+	 * Reused for orphan recovery: when a live transcript attaches mid-message (the
+	 * original message_start was missed), the first update/end synthesizes the
+	 * component so the in-flight turn still renders instead of being dropped.
+	 */
+	#beginAssistantComponent(message: AssistantMessage): AssistantMessageComponent {
 		this.#lastVisibleBlockCount = 0;
 		const component = new AssistantMessageComponent(
 			undefined,
@@ -204,16 +215,18 @@ export class TranscriptRenderer {
 			this.#deps.getImageBudget?.() ?? this.#deps.ui?.imageBudget,
 		);
 		this.#setStreamingComponent(component);
-		this.#setStreamingMessage(event.message);
+		this.#setStreamingMessage(message);
 		this.#container.addChild(component);
-		this.#streamingReveal.begin(component, event.message);
-		this.#deps.requestRender();
+		this.#streamingReveal.begin(component, message);
+		return component;
 	}
 
 	#handleMessageUpdate(event: MessageUpdateEvent): void {
 		if (event.message.role !== "assistant") return;
-		const component = this.#getStreamingComponent();
-		if (!component) return;
+		if (!this.#getStreamingComponent()) {
+			// Mid-message attach: synthesize the missed start so updates still render.
+			this.#beginAssistantComponent(event.message);
+		}
 		this.#setStreamingMessage(event.message);
 		this.#streamingReveal.setTarget(event.message);
 
@@ -266,8 +279,7 @@ export class TranscriptRenderer {
 
 	#handleMessageEnd(event: MessageEndEvent): void {
 		if (event.message.role !== "assistant") return;
-		const component = this.#getStreamingComponent();
-		if (!component) return;
+		const component = this.#getStreamingComponent() ?? this.#beginAssistantComponent(event.message);
 		this.#setStreamingMessage(event.message);
 		this.#streamingReveal.stop();
 		component.updateContent(this.#deps.getAssistantMessageDisplay?.(event.message) ?? event.message);
