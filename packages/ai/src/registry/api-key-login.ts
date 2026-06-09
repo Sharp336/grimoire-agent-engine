@@ -26,6 +26,8 @@ type AnthropicMessagesValidation = {
 	provider: string;
 	baseUrl: string;
 	model: string;
+	/** Auth header style. Defaults to "x-api-key" (Anthropic native); use "bearer" for third-party Anthropic-compatible providers. */
+	authStyle?: "x-api-key" | "bearer";
 };
 
 type ModelsEndpointValidation = {
@@ -94,6 +96,7 @@ export function createApiKeyLogin(config: ApiKeyLoginConfig): (options: OAuthCon
 					model: config.validation.model,
 					signal: options.signal,
 					fetch: options.fetch,
+					authStyle: config.validation.authStyle,
 				});
 			} else {
 				await validateApiKeyAgainstModelsEndpoint({
