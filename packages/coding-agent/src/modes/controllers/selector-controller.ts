@@ -1095,6 +1095,8 @@ export class SelectorController {
 			getEditAllowFuzzy: () => settings.get("edit.fuzzyMatch"),
 			getAssistantThinkingRenderers: () => this.ctx.session.extensionRunner?.getAssistantThinkingRenderers() ?? [],
 			getImageBudget: () => this.ctx.ui?.imageBudget,
+			getRenderNonAssistantMessages: () => true,
+			getCustomMessageRenderer: customType => this.ctx.session.extensionRunner?.getMessageRenderer(customType),
 			// Suppress the silent-abort sentinel so an observed transcript never renders
 			// SILENT_ABORT_MARKER verbatim or a spurious ✗ for an internal silent abort.
 			getAssistantMessageDisplay: message =>
@@ -1167,6 +1169,9 @@ export class SelectorController {
 		};
 
 		const onSelect = (session: ObservableSession) => {
+			if (session.kind !== "subagent") {
+				return;
+			}
 			cleanup?.();
 			overlayHandle?.hide();
 			this.showSessionObserver(registry, {

@@ -67,7 +67,7 @@ describe("ReplaySource", () => {
 			await Bun.write(tempFilePath, fixture);
 
 			const source = new ReplaySource(tempFilePath);
-			const events = source.backlog();
+			const events = await source.backlog();
 
 			expect(events.length).toBe(4);
 
@@ -118,7 +118,7 @@ describe("ReplaySource", () => {
 
 		try {
 			await Bun.write(tempFilePath, fixture);
-			const events = new ReplaySource(tempFilePath).backlog();
+			const events = await new ReplaySource(tempFilePath).backlog();
 
 			// No toolResult entry exists, so the toolCall must surface as an in-progress
 			// start, NOT a fabricated tool_execution_end with empty content.
@@ -148,6 +148,16 @@ describe("ReplaySource", () => {
 	it("renders replayed events through the TranscriptRenderer into visible lines", async () => {
 		const tempFilePath = path.join(os.tmpdir(), `transcript-replay-render-${Date.now()}.jsonl`);
 		const fixture = `${[
+			JSON.stringify({
+				type: "message",
+				id: "u1",
+				parentId: null,
+				timestamp: new Date().toISOString(),
+				message: {
+					role: "user",
+					content: "Review the auth file.",
+				},
+			}),
 			JSON.stringify({
 				type: "message",
 				id: "m1",
@@ -186,11 +196,13 @@ describe("ReplaySource", () => {
 				getToolOutputExpanded: () => true,
 				getShowImages: () => false,
 				requestRender: () => {},
+				getRenderNonAssistantMessages: () => true,
 			});
-			renderer.seed(new ReplaySource(tempFilePath).backlog());
+			renderer.seed(await new ReplaySource(tempFilePath).backlog());
 
 			expect(renderer.getContainer().children.length).toBeGreaterThan(0);
 			const text = stripVTControlCharacters(renderer.getContainer().render(100).join("\n"));
+			expect(text).toContain("Review the auth file.");
 			expect(text).toContain("Checking the token path.");
 			expect(text.toLowerCase()).toContain("auth.ts");
 		} finally {
@@ -226,7 +238,7 @@ describe("HybridSource", () => {
 			const agentId = "Worker";
 			const source = new HybridSource(tempFilePath, bus, agentId);
 
-			expect(source.backlog().some(e => e.type === "message_start")).toBe(true);
+			expect((await source.backlog()).some(e => e.type === "message_start")).toBe(true);
 
 			const received: AgentEvent[] = [];
 			const unsub = source.subscribe(e => received.push(e));

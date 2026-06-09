@@ -15,7 +15,6 @@ export interface ObservableSession {
 	/** Latest progress snapshot from the subagent executor */
 	progress?: AgentProgress;
 	parentId?: string;
-	phase?: string;
 	/** Stable insertion order assigned once by the registry; used as the sort key so live progress updates don't reshuffle the tree. */
 	createdOrder?: number;
 }
@@ -188,14 +187,12 @@ export class SessionObserverRegistry {
 
 				const existing = this.#sessions.get(payload.id);
 				const parentId = payload.parentId;
-				const phase = (payload as any).phase;
 				if (existing) {
 					existing.status = status;
 					existing.lastUpdate = Date.now();
 					if (payload.description) existing.description = payload.description;
 					if (payload.sessionFile) existing.sessionFile = payload.sessionFile;
 					existing.parentId = parentId ?? existing.parentId;
-					if (phase !== undefined) existing.phase = phase;
 				} else {
 					this.#sessions.set(payload.id, {
 						id: payload.id,
@@ -208,7 +205,6 @@ export class SessionObserverRegistry {
 						lastUpdate: Date.now(),
 						parentId,
 						createdOrder: this.#orderCounter++,
-						...(phase !== undefined ? { phase } : {}),
 					});
 				}
 				this.#notifyListeners();

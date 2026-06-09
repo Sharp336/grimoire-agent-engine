@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { SessionObserverRegistry } from "../../src/modes/session-observer-registry";
+import { SubagentBrowserComponent } from "../../src/modes/components/subagent-browser";
+import { type ObserverTreeNode, SessionObserverRegistry } from "../../src/modes/session-observer-registry";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../../src/task";
 import { EventBus } from "../../src/utils/event-bus";
 
@@ -125,7 +126,7 @@ describe("SessionObserverTree", () => {
 
 		// Find X and Y anywhere in the tree structure.
 		const allIds: string[] = [];
-		const traverse = (node: any) => {
+		const traverse = (node: ObserverTreeNode) => {
 			allIds.push(node.session.id);
 			for (const child of node.children) {
 				traverse(child);
@@ -205,5 +206,38 @@ describe("SessionObserverTree", () => {
 		expect(tree.length).toBe(1);
 		expect(tree[0].session.id).toBe("main");
 		expect(tree[0].children.map(c => c.session.id)).toEqual(["A", "B", "C"]);
+	});
+
+	test("Browser defaults Enter to the first subagent instead of the main root", () => {
+		const registry = new SessionObserverRegistry();
+		const bus = new EventBus();
+		registry.subscribeToEventBus(bus);
+		registry.setMainSession("/tmp/main.jsonl");
+
+		bus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "A",
+			agent: "task",
+			agentSource: "bundled",
+			status: "started",
+			index: 1,
+			parentId: "Main",
+		});
+
+		let selectedId: string | undefined;
+		const browser = new SubagentBrowserComponent(registry, {
+			onSelect: session => {
+				selectedId = session.id;
+			},
+			onDone: () => {},
+			requestRender: () => {},
+		});
+
+		browser.handleInput("\n");
+		expect(selectedId).toBe("A");
+
+		selectedId = undefined;
+		browser.handleInput("k");
+		browser.handleInput("\n");
+		expect(selectedId).toBeUndefined();
 	});
 });

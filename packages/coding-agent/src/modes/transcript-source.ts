@@ -98,6 +98,9 @@ export class ReplaySource implements TranscriptSource {
 		const events: AgentEvent[] = [];
 		for (const entry of this.#entries) {
 			const msg = entry.message;
+			if (msg.role === "toolResult") {
+				continue;
+			}
 			if (msg.role === "assistant") {
 				events.push({ type: "message_start", message: msg } as AgentEvent);
 				events.push({ type: "message_update", message: msg } as AgentEvent);
@@ -134,6 +137,8 @@ export class ReplaySource implements TranscriptSource {
 						}
 					}
 				}
+			} else {
+				events.push({ type: "message_start", message: msg } as AgentEvent);
 			}
 		}
 

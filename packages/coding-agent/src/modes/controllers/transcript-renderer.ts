@@ -1,16 +1,21 @@
 import type { SnapshotStore } from "@oh-my-pi/hashline";
-import type { AgentEvent, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentEvent, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
-import type { ImageBudget, TUI } from "@oh-my-pi/pi-tui";
-import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
+import { type ImageBudget, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import type { AssistantThinkingRenderer, MessageRenderer } from "../../extensibility/extensions/types";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
+import { CustomMessageComponent } from "../../modes/components/custom-message";
 import {
 	ReadToolGroupComponent,
 	readArgsHaveTarget,
 	readArgsTargetInternalUrl,
 } from "../../modes/components/read-tool-group";
 import { ToolExecutionComponent, type ToolExecutionHandle } from "../../modes/components/tool-execution";
-import { TranscriptContainer } from "../../modes/components/transcript-container";
+import { TranscriptBlock, TranscriptContainer } from "../../modes/components/transcript-container";
+import { UserMessageComponent } from "../../modes/components/user-message";
+import type { CustomMessage } from "../../session/messages";
+import { theme } from "../theme/theme";
 import { StreamingRevealController } from "./streaming-reveal";
 
 export interface TranscriptRendererDeps {
@@ -33,6 +38,8 @@ export interface TranscriptRendererDeps {
 	setStreamingComponent?(component: AssistantMessageComponent | undefined): void;
 	setStreamingMessage?(message: AssistantMessage | undefined): void;
 	getAssistantMessageDisplay?(message: AssistantMessage): AssistantMessage;
+	getRenderNonAssistantMessages?(): boolean;
+	getCustomMessageRenderer?(customType: string): MessageRenderer | undefined;
 }
 
 type MessageStartEvent = Extract<AgentEvent, { type: "message_start" }>;
@@ -61,8 +68,15 @@ function asyncState(details: unknown): string | undefined {
 }
 
 function argsWithPartialJson(args: unknown, partialJson: unknown): unknown {
-	if (partialJson === undefined) return args;
-	return { ...normalizedRecord(args), __partialJson: partialJson };
+	return args && typeof args === "object" && !Array.isArray(args) ? { ...args, __partialJson: partialJson } : args;
+}
+
+function userVisibleText(message: Extract<AgentMessage, { role: "user" | "developer" }>): string {
+	if (typeof message.content === "string") return message.content;
+	return message.content
+		.filter((content): content is { type: "text"; text: string } => content.type === "text")
+		.map(content => content.text)
+		.join("");
 }
 
 export class TranscriptRenderer {
@@ -193,10 +207,65 @@ export class TranscriptRenderer {
 	#handleMessageStart(event: MessageStartEvent): void {
 		if (event.message.role !== "assistant") {
 			this.#resetReadGroup();
+			if (this.#deps.getRenderNonAssistantMessages?.()) {
+				this.#renderStaticMessage(event.message);
+				this.#deps.requestRender();
+			}
 			return;
 		}
 		this.#beginAssistantComponent(event.message);
 		this.#deps.requestRender();
+	}
+
+	#renderStaticMessage(message: AgentMessage): void {
+		switch (message.role) {
+			case "user":
+			case "developer": {
+				const text = userVisibleText(message);
+				if (!text) return;
+				const synthetic = message.role === "developer" ? true : Boolean(message.synthetic);
+				this.#container.addChild(new UserMessageComponent(text, synthetic));
+				return;
+			}
+			case "fileMention": {
+				const block = new TranscriptBlock();
+				for (const file of message.files) {
+					const suffix =
+						file.skippedReason === "tooLarge"
+							? "(skipped: too large)"
+							: file.image
+								? "(image)"
+								: file.lineCount === undefined
+									? "(unknown lines)"
+									: `(${file.lineCount} lines)`;
+					block.addChild(
+						new Text(
+							`${theme.fg("dim", `${theme.tree.last} `)}${theme.fg("muted", "Read")} ${theme.fg(
+								"accent",
+								sanitizeText(file.path),
+							)} ${theme.fg("dim", suffix)}`,
+							0,
+							0,
+						),
+					);
+				}
+				if (block.children.length > 0) this.#container.addChild(block);
+				return;
+			}
+			case "custom":
+			case "hookMessage": {
+				if (!message.display) return;
+				const component = new CustomMessageComponent(
+					message as CustomMessage<unknown>,
+					this.#deps.getCustomMessageRenderer?.(message.customType),
+				);
+				component.setExpanded(this.#deps.getToolOutputExpanded());
+				this.#container.addChild(component);
+				return;
+			}
+			default:
+				return;
+		}
 	}
 
 	/**
