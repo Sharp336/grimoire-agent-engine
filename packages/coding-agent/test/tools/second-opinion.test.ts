@@ -133,6 +133,30 @@ describe("second_opinion resolveDefaultReviewer", () => {
 		expect(source).toBe("fallback");
 	});
 
+	it("skips a same-family first available model when no slow model is configured", () => {
+		const [m, source] = pick({
+			configuredModel: undefined,
+			slowModel: undefined,
+			sessionModel: claudeSession,
+			available: [claudeSlow, gemini],
+			familyOf,
+		});
+		expect(m).toBe(gemini);
+		expect(source).toBe("fallback");
+	});
+
+	it("falls back to the first available model after exhausting cross-family candidates", () => {
+		const [m, source] = pick({
+			configuredModel: undefined,
+			slowModel: undefined,
+			sessionModel: claudeSession,
+			available: [claudeSlow],
+			familyOf,
+		});
+		expect(m).toBe(claudeSlow);
+		expect(source).toBe("fallback");
+	});
+
 	it("falls back to slow when no cross-family model is available", () => {
 		const [m, source] = pick({
 			configuredModel: undefined,
@@ -178,6 +202,19 @@ describe("second_opinion parseVerdict", () => {
 			]),
 		);
 		expect(r).toEqual({ verdict: "FLAWED", review: "off-by-one in loop", structured: true });
+	});
+
+	it("ignores extra fields in tool-call arguments", () => {
+		const r = parseVerdict(
+			assistant([
+				{
+					type: "toolCall",
+					name: "submit_review",
+					arguments: { verdict: "SOUND", review: "usable", reasoning: "extra", confidence: 0.8 },
+				},
+			]),
+		);
+		expect(r).toEqual({ verdict: "SOUND", review: "usable", structured: true });
 	});
 
 	it("falls back to a JSON payload in the text", () => {

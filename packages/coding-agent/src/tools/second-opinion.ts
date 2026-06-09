@@ -33,18 +33,14 @@ const TOOL_RESULT_TRUNC = 400;
 export const SECOND_OPINION_VERDICTS = ["SOUND", "SOUND_WITH_CAVEATS", "FLAWED"] as const;
 export type SecondOpinionVerdict = (typeof SECOND_OPINION_VERDICTS)[number];
 
-const verdictSchema = z
-	.object({
-		verdict: z
-			.enum(SECOND_OPINION_VERDICTS)
-			.describe("Overall judgement of the reviewed work after independent scrutiny."),
-		review: z
-			.string()
-			.describe(
-				"The full review: specific findings, bugs, weak reasoning, and what (if anything) is actually fine.",
-			),
-	})
-	.strict();
+const verdictSchema = z.object({
+	verdict: z
+		.enum(SECOND_OPINION_VERDICTS)
+		.describe("Overall judgement of the reviewed work after independent scrutiny."),
+	review: z
+		.string()
+		.describe("The full review: specific findings, bugs, weak reasoning, and what (if anything) is actually fine."),
+});
 
 const secondOpinionSchema = z
 	.object({
@@ -58,7 +54,7 @@ const secondOpinionSchema = z
 			.string()
 			.optional()
 			.describe(
-				'Explicit reviewer selector ("provider/id", "id", or substring). Bypasses the configured role and the picker.',
+				'Explicit reviewer selector ("provider/id", "id", or substring). Bypasses the configured role and picker; first-run consent still applies.',
 			),
 		effort: z
 			.enum(["off", "low", "medium", "high"])
@@ -152,7 +148,7 @@ export function resolveDefaultReviewer(args: {
 	const { configuredModel, slowModel, sessionModel, available, familyOf } = args;
 	if (configuredModel) return { model: configuredModel, source: "configured" };
 	const sessionFamily = sessionModel ? familyOf(sessionModel) : undefined;
-	const crossFamily = sessionFamily ? available.find(m => familyOf(m) !== sessionFamily) : undefined;
+	const crossFamily = sessionFamily ? available.find(m => familyOf(m) !== sessionFamily) : available[0];
 	if (slowModel) {
 		if (!sessionFamily || familyOf(slowModel) !== sessionFamily) return { model: slowModel, source: "slow" };
 		if (crossFamily) return { model: crossFamily, source: "fallback" };
@@ -364,17 +360,6 @@ export class SecondOpinionTool implements AgentTool<typeof secondOpinionSchema, 
 			const fingerprint = decodeFingerprint(settings.get(FINGERPRINT_KEY));
 
 			if (shouldShowPicker({ fingerprint, sessionFamily, slowFamily }) && context.hasUI && context.ui) {
-				if (!settings.get(CONSENTED_KEY)) {
-					const consented = await context.ui.confirm(
-						"Second opinion — data disclosure",
-						"This sends your full conversation transcript — including tool outputs and any file contents in it — to a " +
-							"separate model, which may be a different vendor than your session model. Continue?",
-					);
-					if (!consented) {
-						throw new ToolError("second_opinion cancelled: transcript sharing was declined.");
-					}
-					settings.set(CONSENTED_KEY, true);
-				}
 				const picked = await this.#runPicker(
 					context,
 					available,
@@ -423,6 +408,17 @@ export class SecondOpinionTool implements AgentTool<typeof secondOpinionSchema, 
 		const { text: transcript, count } = buildTranscript(sessionManager.getBranch(), params.lookback);
 		if (!transcript.trim()) {
 			throw new ToolError("second_opinion has no prior conversation context to review.");
+		}
+		if (!settings.get(CONSENTED_KEY) && context.hasUI && context.ui) {
+			const consented = await context.ui.confirm(
+				"Second opinion — data disclosure",
+				"This sends your full conversation transcript — including tool outputs and any file contents in it — to a " +
+					"separate model, which may be a different vendor than your session model. Continue?",
+			);
+			if (!consented) {
+				throw new ToolError("second_opinion cancelled: transcript sharing was declined.");
+			}
+			settings.set(CONSENTED_KEY, true);
 		}
 
 		const apiKey = await modelRegistry.getApiKey(reviewer);
@@ -489,7 +485,7 @@ export class SecondOpinionTool implements AgentTool<typeof secondOpinionSchema, 
 		};
 	}
 
-	/** Interactive reviewer picker. Returns the chosen model, or undefined if cancelled. */
+	/** Interactive reviewer picker. Returns the model to persist as `modelRoles.secondopinion`, or undefined if cancelled. */
 	async #runPicker(
 		context: AgentToolContext,
 		available: Model<Api>[],
@@ -519,7 +515,7 @@ export class SecondOpinionTool implements AgentTool<typeof secondOpinionSchema, 
 			: 0;
 
 		for (;;) {
-			const chosen = await ui.select("Second-opinion reviewer model", options, { initialIndex });
+			const chosen = await ui.select("Second-opinion reviewer model (saved as default)", options, { initialIndex });
 			if (chosen === undefined) return undefined;
 			const picked = byLabel.get(chosen);
 			if (!picked) return undefined;

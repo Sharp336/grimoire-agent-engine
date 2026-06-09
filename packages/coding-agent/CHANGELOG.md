@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the opt-in `second_opinion` tool and `secondopinion` model role for transcript-based adversarial review, including first-run transcript disclosure consent, reviewer picker persistence, cross-family reviewer selection, and structured verdict parsing. ([#1918](https://github.com/can1357/oh-my-pi/pull/1918))
+
 ## [15.9.1] - 2026-06-04
 
 ### Added
