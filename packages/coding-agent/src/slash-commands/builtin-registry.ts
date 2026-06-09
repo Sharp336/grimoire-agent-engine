@@ -630,6 +630,14 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "observe",
+		description: "Browse and watch subagent transcripts",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showSubagentBrowser();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "branch",
 		description: "Create a new branch from a previous message",
 		handleTui: (_command, runtime) => {

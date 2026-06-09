@@ -181,6 +181,8 @@ export interface ExecutorOptions {
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	sessionFile?: string | null;
+	/** Real id of the agent that spawned this subagent (the parent), for the observer tree. */
+	parentAgentId?: string;
 	persistArtifacts?: boolean;
 	artifactsDir?: string;
 	/** Path to parent conversation context file */
@@ -827,6 +829,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				assignment,
 				progress: { ...progress },
 				sessionFile: subtaskSessionFile,
+				parentId: options.parentAgentId,
 			});
 		}
 		lastProgressEmitMs = Date.now();
@@ -911,11 +914,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 		if (options.eventBus) {
 			options.eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
+				id,
 				index,
 				agent: agent.name,
 				agentSource: agent.source,
 				task,
 				assignment,
+				sessionFile: subtaskSessionFile,
+				parentId: options.parentAgentId,
 				event,
 			});
 		}
@@ -1307,6 +1313,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					parentHindsightSessionState: options.parentHindsightSessionState,
 					parentMnemopiSessionState: options.parentMnemopiSessionState,
 					parentTaskPrefix: id,
+					parentAgentId: options.parentAgentId,
 					agentId: id,
 					agentDisplayName: agent.name,
 					enableLsp: lspEnabled,
@@ -1331,6 +1338,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					description: options.description,
 					status: "started",
 					sessionFile: subtaskSessionFile,
+					parentId: options.parentAgentId,
 					index,
 				});
 			}
@@ -1681,6 +1689,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			description: options.description,
 			status: progress.status as "completed" | "failed" | "aborted",
 			sessionFile: subtaskSessionFile,
+			parentId: options.parentAgentId,
 			index,
 		});
 	}

@@ -263,6 +263,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			description: trimToUndefined(parsed.label),
 			index: 0,
 			id,
+			parentAgentId: options.session.getAgentId?.() ?? undefined,
 			taskDepth: options.session.taskDepth ?? 0,
 			modelOverride,
 			parentActiveModelPattern,

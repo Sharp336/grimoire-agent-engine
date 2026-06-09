@@ -1,3 +1,4 @@
+import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { AgentProgress, SubagentLifecyclePayload, SubagentProgressPayload } from "../task";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task";
 import type { EventBus } from "../utils/event-bus";
@@ -13,6 +14,13 @@ export interface ObservableSession {
 	lastUpdate: number;
 	/** Latest progress snapshot from the subagent executor */
 	progress?: AgentProgress;
+	parentId?: string;
+	phase?: string;
+}
+
+export interface ObserverTreeNode {
+	session: ObservableSession;
+	children: ObserverTreeNode[];
 }
 
 const STATUS_MAP: Record<string, ObservableSession["status"]> = {
@@ -26,6 +34,11 @@ export class SessionObserverRegistry {
 	#sessions = new Map<string, ObservableSession>();
 	#listeners = new Set<() => void>();
 	#eventBusUnsubscribers: Array<() => void> = [];
+	#eventBus?: EventBus;
+
+	getEventBus(): EventBus | undefined {
+		return this.#eventBus;
+	}
 
 	/** Add a change listener. Returns unsubscribe function. */
 	onChange(cb: () => void): () => void {
@@ -60,6 +73,82 @@ export class SessionObserverRegistry {
 		return sessions;
 	}
 
+	getTree(): ObserverTreeNode[] {
+		const sessions = this.getSessions();
+		const nodes = new Map<string, ObserverTreeNode>();
+
+		for (const s of sessions) {
+			nodes.set(s.id, { session: s, children: [] });
+		}
+
+		const parentMap = new Map<string, string | null>();
+
+		for (const s of sessions) {
+			if (s.id === "main") {
+				continue;
+			}
+			let pId: string | null = s.parentId ?? null;
+			if (!pId || pId === MAIN_AGENT_ID || pId === "main" || !this.#sessions.has(pId)) {
+				pId = null;
+			}
+			if (pId !== null) {
+				let curr: string | null = pId;
+				let hasCycle = false;
+				const visited = new Set<string>();
+				while (curr !== null && curr !== undefined) {
+					if (curr === s.id) {
+						hasCycle = true;
+						break;
+					}
+					if (visited.has(curr)) {
+						hasCycle = true;
+						break;
+					}
+					visited.add(curr);
+					curr = parentMap.get(curr) ?? null;
+				}
+				if (hasCycle) {
+					pId = null;
+				}
+			}
+			parentMap.set(s.id, pId);
+		}
+
+		const roots: ObserverTreeNode[] = [];
+		const mainNode = nodes.get("main");
+		if (mainNode) {
+			roots.push(mainNode);
+		}
+
+		for (const s of sessions) {
+			if (s.id === "main") {
+				continue;
+			}
+			const node = nodes.get(s.id)!;
+			const pId = parentMap.get(s.id);
+			if (pId === null || pId === undefined) {
+				if (mainNode) {
+					mainNode.children.push(node);
+				} else {
+					roots.push(node);
+				}
+			} else {
+				const parentNode = nodes.get(pId);
+				if (parentNode) {
+					parentNode.children.push(node);
+				} else {
+					if (mainNode) {
+						mainNode.children.push(node);
+					} else {
+						roots.push(node);
+					}
+				}
+			}
+		}
+
+		return roots;
+	}
+
 	getActiveSubagentCount(): number {
 		let count = 0;
 		for (const s of this.#sessions.values()) {
@@ -82,6 +171,7 @@ export class SessionObserverRegistry {
 	}
 
 	subscribeToEventBus(eventBus: EventBus): void {
+		this.#eventBus = eventBus;
 		// Dispose previous EventBus subscriptions if called again
 		for (const unsub of this.#eventBusUnsubscribers) unsub();
 		this.#eventBusUnsubscribers = [];
@@ -93,11 +183,15 @@ export class SessionObserverRegistry {
 				if (!status) return;
 
 				const existing = this.#sessions.get(payload.id);
+				const parentId = payload.parentId;
+				const phase = (payload as any).phase;
 				if (existing) {
 					existing.status = status;
 					existing.lastUpdate = Date.now();
 					if (payload.description) existing.description = payload.description;
 					if (payload.sessionFile) existing.sessionFile = payload.sessionFile;
+					existing.parentId = parentId ?? existing.parentId;
+					if (phase !== undefined) existing.phase = phase;
 				} else {
 					this.#sessions.set(payload.id, {
 						id: payload.id,
@@ -108,6 +202,8 @@ export class SessionObserverRegistry {
 						status,
 						sessionFile: payload.sessionFile,
 						lastUpdate: Date.now(),
+						parentId,
+						...(phase !== undefined ? { phase } : {}),
 					});
 				}
 				this.#notifyListeners();
@@ -121,11 +217,13 @@ export class SessionObserverRegistry {
 				const id = progress.id;
 				const existing = this.#sessions.get(id);
 
+				const parentId = payload.parentId;
 				if (existing) {
 					existing.lastUpdate = Date.now();
 					existing.progress = progress;
 					if (progress.description) existing.description = progress.description;
 					if (payload.sessionFile) existing.sessionFile = payload.sessionFile;
+					existing.parentId = parentId ?? existing.parentId;
 				} else {
 					this.#sessions.set(id, {
 						id,
@@ -137,6 +235,7 @@ export class SessionObserverRegistry {
 						sessionFile: payload.sessionFile,
 						lastUpdate: Date.now(),
 						progress,
+						parentId,
 					});
 				}
 				this.#notifyListeners();

@@ -3065,6 +3065,15 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showSessionObserver(this.#observerRegistry);
 	}
 
+	showSubagentBrowser(): void {
+		const sessions = this.#observerRegistry.getSessions();
+		if (sessions.length <= 1) {
+			this.showStatus("No active subagent sessions");
+			return;
+		}
+		this.#selectorController.showSubagentBrowser(this.#observerRegistry);
+	}
+
 	resetObserverRegistry(): void {
 		this.#observerRegistry.resetSessions();
 		this.#observerRegistry.setMainSession(this.sessionManager.getSessionFile() ?? undefined);

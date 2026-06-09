@@ -1,17 +1,12 @@
-import { INTENT_FIELD } from "@oh-my-pi/pi-agent-core";
+import { type AgentEvent, INTENT_FIELD } from "@oh-my-pi/pi-agent-core";
 import { calculatePromptTokens } from "@oh-my-pi/pi-agent-core/compaction/compaction";
 import type { AssistantMessage, ImageContent } from "@oh-my-pi/pi-ai";
 import { type Component, Loader, TERMINAL } from "@oh-my-pi/pi-tui";
 import { settings } from "../../config/settings";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
-import { AssistantMessageComponent } from "../../modes/components/assistant-message";
-import {
-	ReadToolGroupComponent,
-	readArgsHaveTarget,
-	readArgsTargetInternalUrl,
-} from "../../modes/components/read-tool-group";
+import type { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { TodoReminderComponent } from "../../modes/components/todo-reminder";
-import { ToolExecutionComponent } from "../../modes/components/tool-execution";
+import type { TranscriptContainer } from "../../modes/components/transcript-container";
 import { TtsrNotificationComponent } from "../../modes/components/ttsr-notification";
 import { getSymbolTheme, theme } from "../../modes/theme/theme";
 import type { InteractiveModeContext, TodoPhase } from "../../modes/types";
@@ -20,7 +15,7 @@ import type { AgentSessionEvent } from "../../session/agent-session";
 import { isSilentAbort, readPendingDisplayTag, resolveAbortLabel } from "../../session/messages";
 import type { ResolveToolDetails } from "../../tools/resolve";
 import { interruptHint } from "../shared";
-import { StreamingRevealController } from "./streaming-reveal";
+import { TranscriptRenderer } from "./transcript-renderer";
 
 type AgentSessionEventKind = AgentSessionEvent["type"];
 
@@ -54,23 +49,13 @@ type AgentSessionEventHandlers = {
 };
 
 export class EventController {
-	#lastReadGroup: ReadToolGroupComponent | undefined = undefined;
-	// Count of visible assistant content blocks (rendered non-empty text/thinking)
-	// already seen in the current streaming message. A newly appearing one breaks
-	// the read run: the rendered reasoning/answer is a visual separator, so reads
-	// after it start a fresh group. Empty/absent thinking — common when a model
-	// emits one read per completion — does not break it, so a run of consecutive
-	// reads collapses into one group even across completion boundaries.
-	#lastVisibleBlockCount = 0;
 	#renderedCustomMessages = new Set<string>();
 	#lastIntent: string | undefined = undefined;
 	#backgroundToolCallIds = new Set<string>();
 	#assistantMessageStreaming = false;
 	#agentTurnActive = false;
 	#interrupting = false;
-	#readToolCallArgs = new Map<string, Record<string, unknown>>();
-	#readToolCallAssistantComponents = new Map<string, AssistantMessageComponent>();
-	#lastAssistantComponent: AssistantMessageComponent | undefined = undefined;
+	#renderer: TranscriptRenderer;
 	// Assistant component whose turn-ending error is currently mirrored in the
 	// pinned banner. Its inline `Error: …` line is suppressed while pinned and
 	// restored when the banner clears at the next `agent_start` (see
@@ -78,15 +63,38 @@ export class EventController {
 	#pinnedErrorComponent: AssistantMessageComponent | undefined = undefined;
 	#idleCompactionTimer?: NodeJS.Timeout;
 	#ircExpiryTimers = new Map<string, NodeJS.Timeout>();
-	#streamingReveal: StreamingRevealController;
 	#handlers: AgentSessionEventHandlers;
 
 	constructor(private ctx: InteractiveModeContext) {
-		this.#streamingReveal = new StreamingRevealController({
-			getSmoothStreaming: () => this.ctx.settings.get("display.smoothStreaming"),
-			getHideThinkingBlock: () => this.ctx.hideThinkingBlock,
-			requestRender: () => this.ctx.ui.requestRender(),
-		});
+		this.#renderer = new TranscriptRenderer(
+			{
+				getSmoothStreaming: () => this.ctx.settings.get("display.smoothStreaming"),
+				getHideThinkingBlock: () => this.ctx.hideThinkingBlock,
+				getToolResultPreview: () => this.ctx.settings.get("read.toolResultPreview"),
+				getToolOutputExpanded: () => this.ctx.toolOutputExpanded,
+				getShowImages: () => settings.get("terminal.showImages"),
+				requestRender: () => this.ctx.ui.requestRender(),
+				ui: this.ctx.ui,
+				pendingTools: this.ctx.pendingTools,
+				getToolByName: toolName => this.ctx.session.getToolByName?.(toolName),
+				getCwd: () => this.ctx.sessionManager.getCwd(),
+				getSnapshots: () => getFileSnapshotStore(this.ctx.session),
+				getEditFuzzyThreshold: () => settings.get("edit.fuzzyThreshold"),
+				getEditAllowFuzzy: () => settings.get("edit.fuzzyMatch"),
+				getAssistantThinkingRenderers: () =>
+					this.ctx.session.extensionRunner?.getAssistantThinkingRenderers() ?? [],
+				getImageBudget: () => this.ctx.ui?.imageBudget,
+				getStreamingComponent: () => this.ctx.streamingComponent,
+				setStreamingComponent: component => {
+					this.ctx.streamingComponent = component;
+				},
+				setStreamingMessage: message => {
+					this.ctx.streamingMessage = message;
+				},
+				getAssistantMessageDisplay: message => this.#getAssistantMessageDisplay(message),
+			},
+			this.ctx.chatContainer as TranscriptContainer,
+		);
 		this.#handlers = {
 			agent_start: e => this.#handleAgentStart(e),
 			agent_end: e => this.#handleAgentEnd(e),
@@ -119,7 +127,7 @@ export class EventController {
 	}
 
 	dispose(): void {
-		this.#streamingReveal.stop();
+		this.#renderer.dispose();
 		this.#cancelIdleCompaction();
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
@@ -127,55 +135,27 @@ export class EventController {
 		this.#ircExpiryTimers.clear();
 	}
 
-	#resetReadGroup(): void {
-		this.#lastReadGroup?.finalize();
-		this.#lastReadGroup = undefined;
-	}
-
-	#getReadGroup(): ReadToolGroupComponent {
-		if (!this.#lastReadGroup) {
-			const group = new ReadToolGroupComponent({
-				showContentPreview: this.ctx.settings.get("read.toolResultPreview"),
-			});
-			group.setExpanded(this.ctx.toolOutputExpanded);
-			this.ctx.chatContainer.addChild(group);
-			this.#lastReadGroup = group;
+	#getAssistantMessageDisplay(message: AssistantMessage): AssistantMessage {
+		const aborted = message.stopReason === "aborted";
+		const silentlyAborted = aborted && isSilentAbort(message.errorMessage);
+		const ttsrSilenced = aborted && this.ctx.session.isTtsrAbortPending;
+		if (aborted && !silentlyAborted && !ttsrSilenced) {
+			// Resolve the operator-facing label: a user-interrupt (Esc) abort
+			// carries USER_INTERRUPT_LABEL on errorMessage (threaded through the
+			// AbortController), which is preserved verbatim; any other abort with
+			// no threaded reason falls back to the retry-aware generic label.
+			// AgentSession.#handleAgentEvent already stamped SILENT_ABORT_MARKER for
+			// the plan-compact transition before this controller ran, so reaching
+			// this branch implies the abort was NOT a silent internal transition.
+			message.errorMessage = resolveAbortLabel(message.errorMessage, this.ctx.session.retryAttempt);
 		}
-		return this.#lastReadGroup;
-	}
-
-	#trackReadToolCall(toolCallId: string, args: unknown): void {
-		if (!toolCallId) return;
-		const normalizedArgs =
-			args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : {};
-		this.#readToolCallArgs.set(toolCallId, normalizedArgs);
-		const assistantComponent = this.ctx.streamingComponent ?? this.#lastAssistantComponent;
-		if (assistantComponent) {
-			this.#readToolCallAssistantComponents.set(toolCallId, assistantComponent);
+		if (silentlyAborted || ttsrSilenced) {
+			// Silence the streaming render by downgrading stopReason to "stop" for
+			// display only — does NOT mutate the persisted message's stopReason
+			// (the marker on errorMessage drives replay-side suppression).
+			return { ...message, stopReason: "stop" as const };
 		}
-	}
-
-	#clearReadToolCall(toolCallId: string): void {
-		this.#readToolCallArgs.delete(toolCallId);
-		this.#readToolCallAssistantComponents.delete(toolCallId);
-	}
-
-	#inlineReadToolImages(
-		toolCallId: string,
-		result: { content: Array<{ type: string; data?: string; mimeType?: string }> },
-	): boolean {
-		if (!settings.get("terminal.showImages")) return false;
-		const assistantComponent = this.#readToolCallAssistantComponents.get(toolCallId);
-		if (!assistantComponent) return false;
-		const images: ImageContent[] = result.content
-			.filter(
-				(content): content is ImageContent =>
-					content.type === "image" && typeof content.data === "string" && typeof content.mimeType === "string",
-			)
-			.map(content => ({ type: "image", data: content.data, mimeType: content.mimeType }));
-		if (images.length === 0) return false;
-		assistantComponent.setToolResultImages(toolCallId, images);
-		return true;
+		return message;
 	}
 	#updateWorkingMessageFromIntent(intent: unknown): void {
 		if (this.#interrupting) return;
@@ -247,11 +227,8 @@ export class EventController {
 		this.#agentTurnActive = true;
 		this.#interrupting = false;
 		this.#lastIntent = undefined;
-		this.#readToolCallArgs.clear();
-		this.#readToolCallAssistantComponents.clear();
-		this.#resetReadGroup();
+		this.#renderer.feed(_event as AgentEvent);
 		this.#assistantMessageStreaming = false;
-		this.#lastAssistantComponent = undefined;
 		// Restore the previous turn's inline error in the transcript before dropping
 		// the banner, so the error stays in history once the banner is gone.
 		this.#pinnedErrorComponent?.setErrorPinned(false);
@@ -279,7 +256,7 @@ export class EventController {
 				return;
 			}
 			this.#renderedCustomMessages.add(signature);
-			this.#resetReadGroup();
+			this.#renderer.feed(event as AgentEvent);
 			this.ctx.addMessageToChat(event.message);
 			// Tag-keyed pending-bar refresh: when AgentSession.#handleAgentEvent
 			// spliced this dequeued custom message out of #steeringMessages /
@@ -307,7 +284,7 @@ export class EventController {
 			const imageCount = imageBlocks.length;
 			const signature = `${textContent}\u0000${imageCount}`;
 
-			this.#resetReadGroup();
+			this.#renderer.feed(event as AgentEvent);
 			const wasOptimistic = this.ctx.optimisticUserMessageSignature === signature;
 			const wasLocallySubmitted = this.ctx.locallySubmittedUserSignatures.delete(signature) || wasOptimistic;
 			if (!wasOptimistic) {
@@ -336,23 +313,12 @@ export class EventController {
 			}
 			this.ctx.ui.requestRender();
 		} else if (event.message.role === "fileMention") {
-			this.#resetReadGroup();
+			this.#renderer.feed(event as AgentEvent);
 			this.ctx.addMessageToChat(event.message);
 			this.ctx.ui.requestRender();
 		} else if (event.message.role === "assistant") {
 			this.#assistantMessageStreaming = true;
-			this.#lastVisibleBlockCount = 0;
-			this.ctx.streamingComponent = new AssistantMessageComponent(
-				undefined,
-				this.ctx.hideThinkingBlock,
-				() => this.ctx.ui.requestRender(),
-				this.ctx.session.extensionRunner?.getAssistantThinkingRenderers(),
-				this.ctx.ui.imageBudget,
-			);
-			this.ctx.streamingMessage = event.message;
-			this.ctx.chatContainer.addChild(this.ctx.streamingComponent);
-			this.#streamingReveal.begin(this.ctx.streamingComponent, this.ctx.streamingMessage);
-			this.ctx.ui.requestRender();
+			this.#renderer.feed(event as AgentEvent);
 		}
 	}
 
@@ -362,7 +328,7 @@ export class EventController {
 			return;
 		}
 		this.#renderedCustomMessages.add(signature);
-		this.#resetReadGroup();
+		this.#renderer.feed({ type: "message_start", message: event.message } as AgentEvent);
 		const components = this.ctx.addMessageToChat(event.message);
 		this.#scheduleIrcExpiry(signature, components);
 		this.ctx.ui.requestRender();
@@ -393,287 +359,81 @@ export class EventController {
 	}
 
 	async #handleMessageUpdate(event: Extract<AgentSessionEvent, { type: "message_update" }>): Promise<void> {
-		if (this.ctx.streamingComponent && event.message.role === "assistant") {
-			this.ctx.streamingMessage = event.message;
-			this.#streamingReveal.setTarget(this.ctx.streamingMessage);
+		if (event.message.role !== "assistant") return;
 
-			const visibleBlockCount = this.ctx.streamingMessage.content.filter(
-				content =>
-					(content.type === "text" && content.text.trim().length > 0) ||
-					(content.type === "thinking" && content.thinking.trim().length > 0),
-			).length;
-			if (visibleBlockCount > this.#lastVisibleBlockCount) {
-				this.#resetReadGroup();
-				this.#lastVisibleBlockCount = visibleBlockCount;
+		// Update working message with intent from streamed tool arguments
+		for (const content of event.message.content) {
+			if (content.type !== "toolCall") continue;
+			const args = content.arguments;
+			if (!args || typeof args !== "object") continue;
+			if (INTENT_FIELD in args) {
+				this.#updateWorkingMessageFromIntent(args[INTENT_FIELD]);
+				continue;
 			}
-			for (const content of this.ctx.streamingMessage.content) {
-				if (content.type !== "toolCall") continue;
-				if (content.name === "read") {
-					if (!readArgsHaveTarget(content.arguments)) {
-						// Args still streaming — defer until path is parseable so we can route to the
-						// read group (regular files) vs ToolExecutionComponent (internal URLs).
-						// Creating either component now would lock the read into the wrong shape.
-						continue;
-					}
-					if (!readArgsTargetInternalUrl(content.arguments)) {
-						this.#trackReadToolCall(content.id, content.arguments);
-						const component = this.ctx.pendingTools.get(content.id);
-						if (component) {
-							component.updateArgs(content.arguments, content.id);
-						} else {
-							const group = this.#getReadGroup();
-							group.updateArgs(content.arguments, content.id);
-							this.ctx.pendingTools.set(content.id, group);
-						}
-						continue;
-					}
-					// Internal URL read falls through to ToolExecutionComponent below.
+			const tool = this.ctx.session.getToolByName?.(content.name);
+			if (typeof tool?.intent !== "function") continue;
+			try {
+				const derived = tool.intent(args as never)?.trim();
+				if (derived) {
+					this.#updateWorkingMessageFromIntent(derived);
 				}
-
-				// Preserve the raw partial JSON for renderers that need to surface fields before the JSON object closes.
-				// Bash uses this to show inline env assignments during streaming instead of popping them in at completion.
-				const renderArgs =
-					"partialJson" in content
-						? { ...content.arguments, __partialJson: content.partialJson }
-						: content.arguments;
-				if (!this.ctx.pendingTools.has(content.id)) {
-					this.#resetReadGroup();
-					const tool = this.ctx.session.getToolByName(content.name);
-					const component = new ToolExecutionComponent(
-						content.name,
-						renderArgs,
-						{
-							snapshots: getFileSnapshotStore(this.ctx.session),
-							showImages: settings.get("terminal.showImages"),
-							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
-							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
-						},
-						tool,
-						this.ctx.ui,
-						this.ctx.sessionManager.getCwd(),
-						content.id,
-					);
-					component.setExpanded(this.ctx.toolOutputExpanded);
-					this.ctx.chatContainer.addChild(component);
-					this.ctx.pendingTools.set(content.id, component);
-				} else {
-					const component = this.ctx.pendingTools.get(content.id);
-					if (component) {
-						component.updateArgs(renderArgs, content.id);
-					}
-				}
+			} catch {
+				// intent function must never break the UI
 			}
-
-			// Update working message with intent from streamed tool arguments
-			for (const content of this.ctx.streamingMessage.content) {
-				if (content.type !== "toolCall") continue;
-				const args = content.arguments;
-				if (!args || typeof args !== "object") continue;
-				if (INTENT_FIELD in args) {
-					this.#updateWorkingMessageFromIntent(args[INTENT_FIELD]);
-					continue;
-				}
-				const tool = this.ctx.session.getToolByName(content.name);
-				if (typeof tool?.intent !== "function") continue;
-				try {
-					const derived = tool.intent(args as never)?.trim();
-					if (derived) {
-						this.#updateWorkingMessageFromIntent(derived);
-					}
-				} catch {
-					// intent function must never break the UI
-				}
-			}
-
-			this.ctx.ui.requestRender();
 		}
+		this.#renderer.feed(event as AgentEvent);
 	}
 
 	async #handleMessageEnd(event: Extract<AgentSessionEvent, { type: "message_end" }>): Promise<void> {
 		if (event.message.role === "user") return;
-		if (event.message.role === "assistant") {
-			this.#assistantMessageStreaming = false;
+		if (event.message.role !== "assistant") {
+			this.#renderer.feed(event as AgentEvent);
+			this.ctx.ui.requestRender();
+			return;
 		}
-		if (this.ctx.streamingComponent && event.message.role === "assistant") {
-			this.ctx.streamingMessage = event.message;
-			this.#streamingReveal.stop();
-			let errorMessage: string | undefined;
-			const aborted = this.ctx.streamingMessage.stopReason === "aborted";
-			const silentlyAborted = aborted && isSilentAbort(this.ctx.streamingMessage.errorMessage);
-			const ttsrSilenced = aborted && this.ctx.session.isTtsrAbortPending;
-			if (aborted && !silentlyAborted && !ttsrSilenced) {
-				// Resolve the operator-facing label: a user-interrupt (Esc) abort
-				// carries USER_INTERRUPT_LABEL on errorMessage (threaded through the
-				// AbortController), which is preserved verbatim; any other abort with
-				// no threaded reason falls back to the retry-aware generic label.
-				// AgentSession.#handleAgentEvent already stamped SILENT_ABORT_MARKER for
-				// the plan-compact transition before this controller ran, so reaching
-				// this branch implies the abort was NOT a silent internal transition.
-				errorMessage = resolveAbortLabel(this.ctx.streamingMessage.errorMessage, this.ctx.session.retryAttempt);
-				this.ctx.streamingMessage.errorMessage = errorMessage;
-			}
-			if (silentlyAborted || ttsrSilenced) {
-				// Silence the streaming render by downgrading stopReason to "stop" for
-				// display only — does NOT mutate the persisted message's stopReason
-				// (the marker on errorMessage drives replay-side suppression).
-				const msgWithoutAbort = { ...this.ctx.streamingMessage, stopReason: "stop" as const };
-				this.ctx.streamingComponent.updateContent(msgWithoutAbort);
-			} else {
-				this.ctx.streamingComponent.updateContent(this.ctx.streamingMessage);
-			}
-
-			if (this.ctx.streamingMessage.stopReason !== "aborted" && this.ctx.streamingMessage.stopReason !== "error") {
-				for (const [toolCallId, component] of this.ctx.pendingTools.entries()) {
-					component.setArgsComplete(toolCallId);
-				}
-			} else {
-				// The turn ended without running these calls (abort/error/TTSR rewind),
-				// so they will never produce a result. Seal them so they stop animating
-				// and freeze instead of pinning the transcript live region while a retry
-				// streams fresh blocks below them. Background tools keep updating.
-				for (const [toolCallId, component] of this.ctx.pendingTools.entries()) {
-					if (!this.#backgroundToolCallIds.has(toolCallId) && component instanceof ToolExecutionComponent) {
-						component.seal();
-					}
-				}
-			}
-			this.#lastAssistantComponent = this.ctx.streamingComponent;
-			this.#lastAssistantComponent.setUsageInfo(event.message.usage);
-			this.#lastAssistantComponent.markTranscriptBlockFinalized();
-			this.ctx.streamingComponent = undefined;
-			this.ctx.streamingMessage = undefined;
-			// Pin a turn-ending provider error (e.g. Anthropic content-filter block)
-			// above the editor so it survives transcript scroll. Cleared at the next
-			// turn's agent_start. Suppress the transcript's inline `Error: …` line for
-			// the same message while pinned so the error isn't rendered twice.
-			if (
-				event.message.stopReason === "error" &&
-				event.message.errorMessage &&
-				!isSilentAbort(event.message.errorMessage)
-			) {
-				this.#lastAssistantComponent?.setErrorPinned(true);
-				this.#pinnedErrorComponent = this.#lastAssistantComponent;
-				this.ctx.showPinnedError(event.message.errorMessage);
-			}
-			this.ctx.statusLine.invalidate();
-			this.ctx.updateEditorTopBorder();
+		this.#assistantMessageStreaming = false;
+		const endingComponent = this.#renderer.streamingComponent ?? this.ctx.streamingComponent;
+		this.#renderer.feed(event as AgentEvent);
+		// Pin a turn-ending provider error (e.g. Anthropic content-filter block)
+		// above the editor so it survives transcript scroll. Cleared at the next
+		// turn's agent_start. Suppress the transcript's inline `Error: …` line for
+		// the same message while pinned so the error isn't rendered twice.
+		if (
+			event.message.stopReason === "error" &&
+			event.message.errorMessage &&
+			!isSilentAbort(event.message.errorMessage)
+		) {
+			endingComponent?.setErrorPinned(true);
+			this.#pinnedErrorComponent = endingComponent;
+			this.ctx.showPinnedError(event.message.errorMessage);
 		}
+		this.ctx.statusLine.invalidate();
+		this.ctx.updateEditorTopBorder();
 		this.ctx.ui.requestRender();
 	}
 
 	async #handleToolExecutionStart(event: Extract<AgentSessionEvent, { type: "tool_execution_start" }>): Promise<void> {
 		this.#updateWorkingMessageFromIntent(event.intent);
-		if (!this.ctx.pendingTools.has(event.toolCallId)) {
-			if (event.toolName === "read" && readArgsHaveTarget(event.args) && !readArgsTargetInternalUrl(event.args)) {
-				this.#trackReadToolCall(event.toolCallId, event.args);
-				const component = this.ctx.pendingTools.get(event.toolCallId);
-				if (component) {
-					component.updateArgs(event.args, event.toolCallId);
-				} else {
-					const group = this.#getReadGroup();
-					group.updateArgs(event.args, event.toolCallId);
-					this.ctx.pendingTools.set(event.toolCallId, group);
-				}
-				this.ctx.ui.requestRender();
-				return;
-			}
-
-			this.#resetReadGroup();
-			const tool = this.ctx.session.getToolByName(event.toolName);
-			const component = new ToolExecutionComponent(
-				event.toolName,
-				event.args,
-				{
-					snapshots: getFileSnapshotStore(this.ctx.session),
-					showImages: settings.get("terminal.showImages"),
-					editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
-					editAllowFuzzy: settings.get("edit.fuzzyMatch"),
-				},
-				tool,
-				this.ctx.ui,
-				this.ctx.sessionManager.getCwd(),
-				event.toolCallId,
-			);
-			component.setExpanded(this.ctx.toolOutputExpanded);
-			this.ctx.chatContainer.addChild(component);
-			this.ctx.pendingTools.set(event.toolCallId, component);
-			this.ctx.ui.requestRender();
-		}
+		this.#renderer.feed(event as AgentEvent);
 	}
 
 	async #handleToolExecutionUpdate(
 		event: Extract<AgentSessionEvent, { type: "tool_execution_update" }>,
 	): Promise<void> {
-		const component = this.ctx.pendingTools.get(event.toolCallId);
-		if (component) {
-			const asyncState = (event.partialResult.details as { async?: { state?: string } } | undefined)?.async?.state;
-			const isFinalAsyncState = asyncState === "completed" || asyncState === "failed";
-			component.updateResult(
-				{ ...event.partialResult, isError: asyncState === "failed" },
-				!isFinalAsyncState,
-				event.toolCallId,
-			);
-			if (isFinalAsyncState) {
-				this.ctx.pendingTools.delete(event.toolCallId);
-				this.#backgroundToolCallIds.delete(event.toolCallId);
-			}
-			this.ctx.ui.requestRender();
+		this.#renderer.feed(event as AgentEvent);
+		const asyncState = (event.partialResult.details as { async?: { state?: string } } | undefined)?.async?.state;
+		if (asyncState === "completed" || asyncState === "failed") {
+			this.#backgroundToolCallIds.delete(event.toolCallId);
 		}
 	}
 
 	async #handleToolExecutionEnd(event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>): Promise<void> {
-		if (event.toolName === "read") {
-			if (this.#inlineReadToolImages(event.toolCallId, event.result)) {
-				const component = this.ctx.pendingTools.get(event.toolCallId);
-				if (component) {
-					component.updateResult({ ...event.result, isError: event.isError }, false, event.toolCallId);
-					this.ctx.pendingTools.delete(event.toolCallId);
-				}
-				const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
-				if (asyncState === "running") {
-					this.#backgroundToolCallIds.add(event.toolCallId);
-				} else {
-					this.#backgroundToolCallIds.delete(event.toolCallId);
-					this.#clearReadToolCall(event.toolCallId);
-				}
-				this.ctx.ui.requestRender();
-			} else {
-				let component = this.ctx.pendingTools.get(event.toolCallId);
-				if (!component) {
-					const group = this.#getReadGroup();
-					const args = this.#readToolCallArgs.get(event.toolCallId);
-					if (args) {
-						group.updateArgs(args, event.toolCallId);
-					}
-					component = group;
-					this.ctx.pendingTools.set(event.toolCallId, group);
-				}
-				const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
-				const isBackgroundRunning = asyncState === "running";
-				component.updateResult({ ...event.result, isError: event.isError }, isBackgroundRunning, event.toolCallId);
-				if (isBackgroundRunning) {
-					this.#backgroundToolCallIds.add(event.toolCallId);
-				} else {
-					this.ctx.pendingTools.delete(event.toolCallId);
-					this.#backgroundToolCallIds.delete(event.toolCallId);
-					this.#clearReadToolCall(event.toolCallId);
-				}
-				this.ctx.ui.requestRender();
-			}
+		this.#renderer.feed(event as AgentEvent);
+		const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
+		if (asyncState === "running") {
+			this.#backgroundToolCallIds.add(event.toolCallId);
 		} else {
-			const component = this.ctx.pendingTools.get(event.toolCallId);
-			if (component) {
-				const asyncState = (event.result.details as { async?: { state?: string } } | undefined)?.async?.state;
-				const isBackgroundRunning = asyncState === "running";
-				component.updateResult({ ...event.result, isError: event.isError }, isBackgroundRunning, event.toolCallId);
-				if (isBackgroundRunning) {
-					this.#backgroundToolCallIds.add(event.toolCallId);
-				} else {
-					this.ctx.pendingTools.delete(event.toolCallId);
-					this.#backgroundToolCallIds.delete(event.toolCallId);
-				}
-				this.ctx.ui.requestRender();
-			}
+			this.#backgroundToolCallIds.delete(event.toolCallId);
 		}
 		// Update todo display when todo tool completes
 		if (event.toolName === "todo" && !event.isError) {
@@ -702,40 +462,16 @@ export class EventController {
 	async #handleAgentEnd(_event: Extract<AgentSessionEvent, { type: "agent_end" }>): Promise<void> {
 		this.#agentTurnActive = false;
 		this.#assistantMessageStreaming = false;
-		this.#streamingReveal.stop();
+		this.#renderer.feed(_event as AgentEvent);
 		if (this.ctx.loadingAnimation) {
 			this.ctx.loadingAnimation.stop();
 			this.ctx.loadingAnimation = undefined;
 			this.ctx.statusContainer.clear();
 		}
-		if (this.ctx.streamingComponent) {
-			this.ctx.chatContainer.removeChild(this.ctx.streamingComponent);
-			this.ctx.streamingComponent = undefined;
-			this.ctx.streamingMessage = undefined;
-		}
 		await this.ctx.flushPendingModelSwitch();
-		for (const toolCallId of Array.from(this.ctx.pendingTools.keys())) {
-			if (!this.#backgroundToolCallIds.has(toolCallId)) {
-				// A foreground tool still pending at turn end never delivered a result;
-				// seal it so it freezes (and stops animating) rather than lingering in
-				// the transcript live region as a streaming preview until the next thaw.
-				const component = this.ctx.pendingTools.get(toolCallId);
-				// A foreground read still pending at turn end shares a group component
-				// keyed by every read's id; seal it too so a never-delivered read does
-				// not keep the group live (and pinning the live region) indefinitely.
-				if (component instanceof ToolExecutionComponent || component instanceof ReadToolGroupComponent) {
-					component.seal();
-				}
-				this.ctx.pendingTools.delete(toolCallId);
-			}
-		}
 		this.#backgroundToolCallIds = new Set(
 			Array.from(this.#backgroundToolCallIds).filter(toolCallId => this.ctx.pendingTools.has(toolCallId)),
 		);
-		this.#readToolCallArgs.clear();
-		this.#readToolCallAssistantComponents.clear();
-		this.#resetReadGroup();
-		this.#lastAssistantComponent = undefined;
 		this.ctx.ui.requestRender();
 		this.#scheduleIdleCompaction();
 		this.sendCompletionNotification();

@@ -388,6 +388,8 @@ export interface CreateAgentSessionOptions {
 	agentRegistry?: AgentRegistry;
 	/** Parent task ID prefix for nested artifact naming (e.g., "Extensions") */
 	parentTaskPrefix?: string;
+	/** Real parent agent id for the registry tree edge (distinct from parentTaskPrefix). */
+	parentAgentId?: string;
 	/** Inherited eval executor session id for subagents sharing parent eval state. */
 	parentEvalSessionId?: string;
 
@@ -1992,7 +1994,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			id: resolvedAgentId,
 			displayName: resolvedAgentDisplayName,
 			kind: (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? "sub" : "main",
-			parentId: options.parentTaskPrefix,
+			parentId: options.parentAgentId ?? options.parentTaskPrefix,
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,
 			status: "running",

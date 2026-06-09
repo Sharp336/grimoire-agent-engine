@@ -50,11 +50,12 @@ import { PluginSelectorComponent } from "../components/plugin-selector";
 import { SessionObserverOverlayComponent } from "../components/session-observer-overlay";
 import { SessionSelectorComponent } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
+import { SubagentBrowserComponent } from "../components/subagent-browser";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
 import { UserMessageSelectorComponent } from "../components/user-message-selector";
-import type { SessionObserverRegistry } from "../session-observer-registry";
+import type { ObservableSession, SessionObserverRegistry } from "../session-observer-registry";
 import { computeContextBreakdown } from "../utils/context-usage";
 import { buildCopyTargets } from "../utils/copy-targets";
 
@@ -1078,7 +1079,10 @@ export class SelectorController {
 		});
 	}
 
-	showSessionObserver(registry: SessionObserverRegistry): void {
+	showSessionObserver(
+		registry: SessionObserverRegistry,
+		options?: { initialSessionId?: string; onBack?: () => void },
+	): void {
 		const observeKeys = this.ctx.keybindings.getKeys("app.session.observe");
 		let cleanup: (() => void) | undefined;
 		let overlayHandle: OverlayHandle | undefined;
@@ -1089,7 +1093,13 @@ export class SelectorController {
 			this.ctx.ui.requestRender();
 		};
 
-		const selector = new SessionObserverOverlayComponent(registry, done, observeKeys);
+		const selector = new SessionObserverOverlayComponent(
+			registry,
+			done,
+			observeKeys,
+			() => this.ctx.ui.requestRender(),
+			options,
+		);
 
 		cleanup = registry.onChange(() => {
 			selector.refreshFromRegistry();
@@ -1103,6 +1113,46 @@ export class SelectorController {
 			margin: 0,
 		});
 		this.ctx.ui.setFocus(selector);
+		this.ctx.ui.requestRender();
+	}
+
+	showSubagentBrowser(registry: SessionObserverRegistry): void {
+		let cleanup: (() => void) | undefined;
+		let overlayHandle: OverlayHandle | undefined;
+
+		const onDone = () => {
+			cleanup?.();
+			overlayHandle?.hide();
+			this.ctx.ui.requestRender();
+		};
+
+		const onSelect = (session: ObservableSession) => {
+			cleanup?.();
+			overlayHandle?.hide();
+			this.showSessionObserver(registry, {
+				initialSessionId: session.id,
+				onBack: () => this.showSubagentBrowser(registry),
+			});
+		};
+
+		const browser = new SubagentBrowserComponent(registry, {
+			onSelect,
+			onDone,
+			requestRender: () => this.ctx.ui.requestRender(),
+		});
+
+		cleanup = registry.onChange(() => {
+			browser.refresh();
+			this.ctx.ui.requestRender();
+		});
+
+		overlayHandle = this.ctx.ui.showOverlay(browser, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(browser);
 		this.ctx.ui.requestRender();
 	}
 }
