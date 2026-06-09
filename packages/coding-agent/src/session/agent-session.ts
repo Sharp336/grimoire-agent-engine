@@ -4007,6 +4007,10 @@ export class AgentSession {
 
 		const preparedOptions: SimpleStreamOptions =
 			openrouterVariant === undefined ? { ...options } : { ...options, openrouterVariant };
+		// Pass thinkingBudgets for budget-based thinking control (e.g., 0-off)
+		if (!preparedOptions.thinkingBudgets) {
+			preparedOptions.thinkingBudgets = this.settings.getGroup("thinkingBudgets");
+		}
 
 		// Stamp session metadata (e.g. user_id={session_id}) onto direct-call requests so
 		// they share the same session bucket as Agent.prompt-routed requests on Anthropic
