@@ -46,12 +46,16 @@ function makeSubagentRegistry(sessions: ObservableSession[]): SessionObserverReg
  * SelectorController.#buildObserverRendererDeps wires in production, so this test
  * defends the actual observer rendering contract.
  */
-function makeObserverOverlay(registry: SessionObserverRegistry): SessionObserverOverlayComponent {
-	return new SessionObserverOverlayComponent(
+function makeObserverOverlay(registry: SessionObserverRegistry): {
+	overlay: SessionObserverOverlayComponent;
+	ready: Promise<void>;
+} {
+	const ready = Promise.withResolvers<void>();
+	const overlay = new SessionObserverOverlayComponent(
 		registry,
 		() => {},
 		["ctrl+s"],
-		() => {},
+		() => ready.resolve(),
 		{
 			rendererDeps: {
 				getAssistantMessageDisplay: message =>
@@ -61,6 +65,7 @@ function makeObserverOverlay(registry: SessionObserverRegistry): SessionObserver
 			},
 		},
 	);
+	return { overlay, ready: ready.promise };
 }
 
 describe("Observer overlay silent-abort regression", () => {
@@ -81,7 +86,7 @@ describe("Observer overlay silent-abort regression", () => {
 		resetSettingsForTest();
 	});
 
-	it("does not render an Error line for silent-abort assistant messages with empty content", () => {
+	it("does not render an Error line for silent-abort assistant messages with empty content", async () => {
 		const sessionFile = makeJsonlSessionFile(tmpDir, [
 			{ type: "session", version: 3, id: SESSION_ID, timestamp: new Date().toISOString() },
 			{
@@ -128,7 +133,8 @@ describe("Observer overlay silent-abort regression", () => {
 			},
 		]);
 
-		const overlay = makeObserverOverlay(registry);
+		const { overlay, ready } = makeObserverOverlay(registry);
+		await ready;
 		const renderedText = overlay.render(120).join("\n");
 
 		// The sentinel MUST NOT appear verbatim in any rendered line.
@@ -137,7 +143,7 @@ describe("Observer overlay silent-abort regression", () => {
 		expect(renderedText).not.toContain("Error:");
 	});
 
-	it("renders normal error messages as a visible Error line", () => {
+	it("renders normal error messages as a visible Error line", async () => {
 		const sessionFile = makeJsonlSessionFile(tmpDir, [
 			{ type: "session", version: 3, id: SESSION_ID, timestamp: new Date().toISOString() },
 			{
@@ -184,7 +190,8 @@ describe("Observer overlay silent-abort regression", () => {
 			},
 		]);
 
-		const overlay = makeObserverOverlay(registry);
+		const { overlay, ready } = makeObserverOverlay(registry);
+		await ready;
 		const renderedText = overlay.render(120).join("\n");
 
 		// A real error renders the same way as in the main agent: a red "Error: <msg>" line.

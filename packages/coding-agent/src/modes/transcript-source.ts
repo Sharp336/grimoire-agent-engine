@@ -1,10 +1,11 @@
-import * as fs from "node:fs";
 import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { SessionMessageEntry } from "../session/session-manager";
 import { parseSessionEntries } from "../session/session-manager";
 import { type SubagentEventPayload, TASK_SUBAGENT_EVENT_CHANNEL } from "../task";
 import type { EventBus } from "../utils/event-bus";
+
+const utf8Decoder = new TextDecoder();
 
 export interface TranscriptSourceMeta {
 	status: "active" | "completed" | "failed" | "aborted";
@@ -15,24 +16,22 @@ export interface TranscriptSourceMeta {
 }
 
 export interface TranscriptSource {
-	backlog(): AgentEvent[]; // events to seed() the renderer
+	backlog(): Promise<AgentEvent[]>; // events to seed() the renderer
 	subscribe(cb: (e: AgentEvent) => void): () => void; // live tail; no-op + returns noop for completed
 	meta(): TranscriptSourceMeta;
 	dispose(): void;
 }
 
-function readFileIncremental(filePath: string, fromByte: number): { text: string; newSize: number } | null {
+async function readFileIncremental(
+	filePath: string,
+	fromByte: number,
+): Promise<{ text: string; newSize: number } | null> {
 	try {
-		const stat = fs.statSync(filePath);
-		if (stat.size <= fromByte) return { text: "", newSize: stat.size };
-		const buf = Buffer.alloc(stat.size - fromByte);
-		const fd = fs.openSync(filePath, "r");
-		try {
-			fs.readSync(fd, buf, 0, buf.length, fromByte);
-		} finally {
-			fs.closeSync(fd);
-		}
-		return { text: buf.toString("utf-8"), newSize: stat.size };
+		const file = Bun.file(filePath);
+		const size = file.size;
+		if (size <= fromByte) return { text: "", newSize: size };
+		const bytes = await file.slice(fromByte).bytes();
+		return { text: utf8Decoder.decode(bytes), newSize: size };
 	} catch {
 		return null;
 	}
@@ -54,8 +53,8 @@ export class ReplaySource implements TranscriptSource {
 		}
 	}
 
-	#readIncremental(): void {
-		const result = readFileIncremental(this.#sessionFile, this.#bytesRead);
+	async #readIncremental(): Promise<void> {
+		const result = await readFileIncremental(this.#sessionFile, this.#bytesRead);
 		if (!result) return;
 		if (result.newSize < this.#bytesRead) {
 			this.#bytesRead = 0;
@@ -84,8 +83,8 @@ export class ReplaySource implements TranscriptSource {
 		}
 	}
 
-	backlog(): AgentEvent[] {
-		this.#readIncremental();
+	async backlog(): Promise<AgentEvent[]> {
+		await this.#readIncremental();
 
 		// Build a tool call ID -> tool result map
 		const toolResults = new Map<string, ToolResultMessage>();
@@ -174,7 +173,7 @@ export class LiveSource implements TranscriptSource {
 		this.#meta = meta;
 	}
 
-	backlog(): AgentEvent[] {
+	async backlog(): Promise<AgentEvent[]> {
 		return [];
 	}
 
@@ -212,8 +211,8 @@ export class HybridSource implements TranscriptSource {
 		this.#liveSource = new LiveSource(eventBus, agentId, meta);
 	}
 
-	backlog(): AgentEvent[] {
-		const events = this.#replaySource.backlog();
+	async backlog(): Promise<AgentEvent[]> {
+		const events = await this.#replaySource.backlog();
 		// Record ids of assistant messages already seeded so the live stream can drop a
 		// concrete duplicate (the narrow window where a message both flushed to disk and
 		// re-emitted live). Messages without a stable id are not deduped: the live stream

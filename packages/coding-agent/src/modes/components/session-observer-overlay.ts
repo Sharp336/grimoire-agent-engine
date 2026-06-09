@@ -55,6 +55,7 @@ export class SessionObserverOverlayComponent extends Container {
 	#followLive = true;
 	#liveSession = false;
 	#rendererDeps: Partial<TranscriptRendererDeps>;
+	#setupGeneration = 0;
 
 	constructor(
 		registry: SessionObserverRegistry,
@@ -82,7 +83,7 @@ export class SessionObserverOverlayComponent extends Container {
 
 		if (targetSession) {
 			this.#selectedSessionId = targetSession.id;
-			this.#setupViewer();
+			void this.#setupViewer();
 		} else {
 			// No sub-agents — close immediately
 			queueMicrotask(() => this.#onDone());
@@ -104,6 +105,7 @@ export class SessionObserverOverlayComponent extends Container {
 	}
 
 	#disposeAll(): void {
+		this.#setupGeneration++;
 		this.#sourceUnsub?.();
 		this.#sourceUnsub = undefined;
 		this.#source?.dispose();
@@ -112,8 +114,9 @@ export class SessionObserverOverlayComponent extends Container {
 		this.#renderer = undefined;
 	}
 
-	#setupViewer(): void {
+	async #setupViewer(): Promise<void> {
 		this.#disposeAll();
+		const setupGeneration = this.#setupGeneration;
 		this.#scrollOffset = 0;
 		this.#wasAtBottom = true;
 		this.#liveSession = false;
@@ -157,7 +160,8 @@ export class SessionObserverOverlayComponent extends Container {
 				: {};
 
 			if (this.#source) {
-				this.#renderer = new TranscriptRenderer({
+				const source = this.#source;
+				const renderer = new TranscriptRenderer({
 					getSmoothStreaming: () => false,
 					getHideThinkingBlock: () => false,
 					getToolResultPreview: () => true,
@@ -169,10 +173,17 @@ export class SessionObserverOverlayComponent extends Container {
 						this.#requestRender();
 					},
 				});
+				this.#renderer = renderer;
 
-				this.#renderer.seed(this.#source.backlog());
-				this.#sourceUnsub = this.#source.subscribe(e => {
-					this.#renderer!.feed(e);
+				const backlog = await source.backlog();
+				if (setupGeneration !== this.#setupGeneration || this.#source !== source || this.#renderer !== renderer) {
+					return;
+				}
+
+				renderer.seed(backlog);
+				this.#sourceUnsub = source.subscribe(e => {
+					if (setupGeneration !== this.#setupGeneration) return;
+					renderer.feed(e);
 					if (this.#followLive) this.#wasAtBottom = true;
 					this.#rebuildViewerContent();
 					this.#requestRender();
@@ -180,7 +191,9 @@ export class SessionObserverOverlayComponent extends Container {
 			}
 		}
 
+		if (setupGeneration !== this.#setupGeneration) return;
 		this.#rebuildViewerContent();
+		this.#requestRender();
 	}
 
 	/** Rebuild content from live registry data */
@@ -191,7 +204,7 @@ export class SessionObserverOverlayComponent extends Container {
 		if (this.#liveSession) {
 			const session = this.#registry.getSessions().find(s => s.id === this.#selectedSessionId);
 			if (session && session.status !== "active") {
-				this.#setupViewer();
+				void this.#setupViewer();
 				return;
 			}
 		}
@@ -503,6 +516,6 @@ export class SessionObserverOverlayComponent extends Container {
 		this.#selectedSessionId = ids[nextIdx];
 		this.#scrollOffset = 0;
 		this.#wasAtBottom = true;
-		this.#setupViewer();
+		void this.#setupViewer();
 	}
 }
