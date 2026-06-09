@@ -1353,12 +1353,16 @@ function buildParams(
 	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen" && model.reasoning) {
 		// Qwen uses top-level enable_thinking: boolean
 		// vLLM supports thinking_token_budget for fine-grained reasoning control
-		const thinkingEnabled = !!options?.reasoning && !options?.disableReasoning;
+		const effort = options?.reasoning;
+		const budget = effort ? options?.thinkingBudgets?.[effort] : undefined;
+		const thinkingEnabled = !!effort && !options?.disableReasoning && budget !== 0;
 		params.enable_thinking = thinkingEnabled;
 		applyThinkingBudget(params, options, compat.thinkingFormat);
 	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
 		// Qwen chat-template variant uses chat_template_kwargs
-		const thinkingEnabled = !!options?.reasoning && !options?.disableReasoning;
+		const effort = options?.reasoning;
+		const budget = effort ? options?.thinkingBudgets?.[effort] : undefined;
+		const thinkingEnabled = !!effort && !options?.disableReasoning && budget !== 0;
 		params.chat_template_kwargs = {
 			enable_thinking: thinkingEnabled,
 			...(options?.thinkingBudgets ? { preserve_thinking: thinkingEnabled } : {}),
