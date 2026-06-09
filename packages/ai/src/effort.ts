@@ -1,6 +1,6 @@
 /** User-facing thinking levels, ordered least to most intensive. */
 export const enum Effort {
-	ZeroOff = "0-off",
+	ZeroOff = "zeroOff",
 	Minimal = "minimal",
 	Low = "low",
 	Medium = "medium",
