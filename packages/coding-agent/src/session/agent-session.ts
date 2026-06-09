@@ -5882,7 +5882,7 @@ export class AgentSession {
 	 */
 	getAvailableThinkingLevels(): ReadonlyArray<Effort> {
 		if (!this.model) return [];
-		return getSupportedEfforts(this.model);
+		return [Effort.ZeroOff, ...getSupportedEfforts(this.model)];
 	}
 
 	// =========================================================================

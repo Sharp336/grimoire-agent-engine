@@ -1355,14 +1355,14 @@ function buildParams(
 		// vLLM supports thinking_token_budget for fine-grained reasoning control
 		const effort = options?.reasoning;
 		const budget = effort ? options?.thinkingBudgets?.[effort] : undefined;
-		const thinkingEnabled = !!effort && !options?.disableReasoning && budget !== 0;
+		const thinkingEnabled = !!effort && !options?.disableReasoning && budget !== undefined;
 		params.enable_thinking = thinkingEnabled;
 		applyThinkingBudget(params, options, compat.thinkingFormat);
 	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
 		// Qwen chat-template variant uses chat_template_kwargs
 		const effort = options?.reasoning;
 		const budget = effort ? options?.thinkingBudgets?.[effort] : undefined;
-		const thinkingEnabled = !!effort && !options?.disableReasoning && budget !== 0;
+		const thinkingEnabled = !!effort && !options?.disableReasoning && budget !== undefined;
 		params.chat_template_kwargs = {
 			enable_thinking: thinkingEnabled,
 			...(options?.thinkingBudgets ? { preserve_thinking: thinkingEnabled } : {}),

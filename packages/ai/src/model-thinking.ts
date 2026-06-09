@@ -275,7 +275,7 @@ export function requireSupportedEffort<TApi extends Api>(model: ApiModel<TApi>, 
 		throw new Error(`Model ${model.provider}/${model.id} does not support thinking`);
 	}
 	const levels = getSupportedEfforts(model);
-	if (!levels.includes(effort)) {
+	if (effort !== Effort.ZeroOff && !levels.includes(effort)) {
 		throw new Error(
 			`Thinking effort ${effort} is not supported by ${model.provider}/${model.id}. Supported efforts: ${levels.join(", ")}`,
 		);
