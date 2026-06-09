@@ -1167,21 +1167,22 @@ async function createClient(
 
 /**
  * Apply thinking budget from `thinkingBudgets` when a budget is configured for
- * the current reasoning effort. Uses `thinking_budget` for Qwen Cloud/DashScope
- * and `thinking_token_budget` for vLLM and other backends.
+ * the current reasoning effort. Uses `thinking_budget` for Qwen-compatible
+ * backends (Cloud, DashScope, proxied) and `thinking_token_budget` for vLLM.
  */
 function applyThinkingBudget(
 	params: OpenAICompletionsParams,
 	options: OpenAICompletionsOptions | undefined,
-	resolvedBaseUrl?: string,
+	thinkingFormat: string,
 ): void {
 	const effort = options?.reasoning;
 	if (!effort || options.thinkingBudgets?.[effort] == null) {
 		return;
 	}
 	const budget = options.thinkingBudgets[effort];
-	// Qwen Cloud / DashScope uses `thinking_budget`; vLLM and others use `thinking_token_budget`
-	if (resolvedBaseUrl?.includes("dashscope")) {
+	// Qwen-compatible backends (Cloud, DashScope, proxied) use `thinking_budget`
+	// vLLM with qwen-chat-template uses `thinking_token_budget`
+	if (thinkingFormat === "qwen") {
 		(params as Record<string, unknown>).thinking_budget = budget;
 	} else {
 		params.thinking_token_budget = budget;
@@ -1354,7 +1355,7 @@ function buildParams(
 		// vLLM supports thinking_token_budget for fine-grained reasoning control
 		const thinkingEnabled = !!options?.reasoning && !options?.disableReasoning;
 		params.enable_thinking = thinkingEnabled;
-		applyThinkingBudget(params, options, resolvedBaseUrl);
+		applyThinkingBudget(params, options, compat.thinkingFormat);
 	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
 		// Qwen chat-template variant uses chat_template_kwargs
 		const thinkingEnabled = !!options?.reasoning && !options?.disableReasoning;
@@ -1362,7 +1363,7 @@ function buildParams(
 			enable_thinking: thinkingEnabled,
 			...(options?.thinkingBudgets ? { preserve_thinking: thinkingEnabled } : {}),
 		};
-		applyThinkingBudget(params, options, resolvedBaseUrl);
+		applyThinkingBudget(params, options, compat.thinkingFormat);
 	} else if (supportsReasoningParams && compat.thinkingFormat === "openrouter" && model.reasoning) {
 		// OpenRouter normalizes reasoning across providers via a nested reasoning object.
 		// Without an explicit signal, OpenRouter defaults reasoning models to thinking, which

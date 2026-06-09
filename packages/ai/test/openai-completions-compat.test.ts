@@ -571,7 +571,7 @@ describe("openai-completions compatibility", () => {
 		expect(assistantObject ? Reflect.get(assistantObject, "reasoning_content") : undefined).toBeUndefined();
 	});
 
-	it("sends thinking_token_budget for qwen format when thinkingBudgets is set", async () => {
+	it("sends thinking_budget for qwen format when thinkingBudgets is set", async () => {
 		const model: Model<"openai-completions"> = {
 			...getBundledModel("openai", "gpt-4o-mini"),
 			api: "openai-completions",
@@ -589,7 +589,7 @@ describe("openai-completions compatibility", () => {
 			onPayload: payload => resolve(payload),
 		});
 		const payload = await promise;
-		expect(toObject(payload)?.thinking_token_budget).toBe(4096);
+		expect(toObject(payload)?.thinking_budget).toBe(4096);
 	});
 
 	it("sends thinking_token_budget and preserve_thinking for qwen-chat-template when thinkingBudgets is set", async () => {
