@@ -15,6 +15,8 @@ type AnthropicCompatibleValidationOptions = {
 	model: string;
 	signal?: AbortSignal;
 	fetch?: FetchImpl;
+	/** Auth header style. Defaults to "x-api-key" (Anthropic native); use "bearer" for third-party Anthropic-compatible providers. */
+	authStyle?: "x-api-key" | "bearer";
 };
 
 type ModelListValidationOptions = {
@@ -83,13 +85,18 @@ export async function validateAnthropicCompatibleApiKey(options: AnthropicCompat
 	const baseUrl = normalizeAnthropicCompatibleBaseUrl(options.baseUrl);
 	const fetchImpl = options.fetch ?? fetch;
 
+	const headers: Record<string, string> = {
+		"Content-Type": "application/json",
+		"anthropic-version": "2023-06-01",
+	};
+	if (options.authStyle === "bearer") {
+		headers.Authorization = `Bearer ${options.apiKey}`;
+	} else {
+		headers["x-api-key"] = options.apiKey;
+	}
 	const response = await fetchImpl(`${baseUrl}/v1/messages`, {
 		method: "POST",
-		headers: {
-			"Content-Type": "application/json",
-			"anthropic-version": "2023-06-01",
-			"x-api-key": options.apiKey,
-		},
+		headers,
 		body: JSON.stringify({
 			model: options.model,
 			messages: [{ role: "user", content: "ping" }],

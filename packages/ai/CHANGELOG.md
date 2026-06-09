@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added Volcengine Coding Plan (火山引擎) as a new upstream provider (`volcengine-coding-plan`) with 10 bundled models including `doubao-seed-2.0-code` as the default, using Anthropic-compatible wire protocol with bearer auth
 
 ## [15.10.8] - 2026-06-09
 ### Added
