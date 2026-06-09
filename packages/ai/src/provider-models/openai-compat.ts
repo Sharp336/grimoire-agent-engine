@@ -1009,6 +1009,26 @@ const ZHIPU_REASONING_MODELS: Readonly<Record<string, true>> = {
 const ZHIPU_VISION_PATTERN = /^glm-[45](?:\.\d+)?v(?:-|$)/;
 
 // ---------------------------------------------------------------------------
+// 7.4 Volcengine Coding Plan (火山引擎)
+// ---------------------------------------------------------------------------
+
+export interface VolcengineCodingPlanModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function volcengineCodingPlanModelManagerOptions(
+	config?: VolcengineCodingPlanModelManagerConfig,
+): ModelManagerOptions<"anthropic-messages"> {
+	return createSimpleAnthropicProviderOptions(
+		"volcengine-coding-plan",
+		"https://ark.cn-beijing.volces.com/api/coding",
+		config,
+	);
+}
+
+// ---------------------------------------------------------------------------
 // 7.5 Fireworks
 // ---------------------------------------------------------------------------
 

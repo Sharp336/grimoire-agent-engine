@@ -47,6 +47,7 @@ import type { ProviderDefinition } from "./types";
 import { veniceProvider } from "./venice";
 import { vercelAiGatewayProvider } from "./vercel-ai-gateway";
 import { vllmProvider } from "./vllm";
+import { volcengineCodingPlanProvider } from "./volcengine-coding-plan";
 import { waferPassProvider } from "./wafer-pass";
 import { waferServerlessProvider } from "./wafer-serverless";
 import { xaiProvider } from "./xai";
@@ -82,6 +83,7 @@ const ALL = [
 	alibabaCodingPlanProvider,
 	aimlApiProvider,
 	zhipuCodingPlanProvider,
+	volcengineCodingPlanProvider,
 	qwenPortalProvider,
 	minimaxCodeProvider,
 	minimaxCodeCnProvider,
