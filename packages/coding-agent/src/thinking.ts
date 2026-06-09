@@ -69,7 +69,7 @@ export function toReasoningEffort(level: ThinkingLevel | undefined): Effort | un
 	}
 	// ZeroOff enables thinking but with 0 token budget
 	if (level === ThinkingLevel.ZeroOff) {
-		return Effort.Minimal;
+		return Effort.ZeroOff;
 	}
 	return level;
 }
@@ -89,11 +89,6 @@ export function resolveThinkingLevelForModel(
 	}
 	return clampThinkingLevelForModel(model, level);
 }
-		return ThinkingLevel.Off;
-	}
-	return clampThinkingLevelForModel(model, level);
-}
-
 /**
  * Sentinel selector for the coding-agent "auto" thinking mode. Kept entirely
  * inside the coding-agent layer: it is never an {@link Effort} or
