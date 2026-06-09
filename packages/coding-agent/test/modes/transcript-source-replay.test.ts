@@ -99,6 +99,52 @@ describe("ReplaySource", () => {
 		}
 	});
 
+	it("emits tool_execution_start (not a fake completion) for a toolCall with no result", async () => {
+		const tempFilePath = path.join(os.tmpdir(), `transcript-source-replay-noresult-${Date.now()}.jsonl`);
+		const fixture = `${JSON.stringify({
+			type: "message",
+			id: "msg1",
+			parentId: null,
+			timestamp: new Date().toISOString(),
+			message: {
+				role: "assistant",
+				model: "test-model",
+				content: [
+					{ type: "text", text: "Running a tool" },
+					{ type: "toolCall", id: "tc-pending", name: "bash", arguments: { command: "ls" } },
+				],
+			},
+		})}\n`;
+
+		try {
+			await Bun.write(tempFilePath, fixture);
+			const events = new ReplaySource(tempFilePath).backlog();
+
+			// No toolResult entry exists, so the toolCall must surface as an in-progress
+			// start, NOT a fabricated tool_execution_end with empty content.
+			expect(events.map(e => e.type)).toEqual([
+				"message_start",
+				"message_update",
+				"message_end",
+				"tool_execution_start",
+			]);
+			const start = events[3];
+			if (start.type === "tool_execution_start") {
+				expect(start.toolCallId).toBe("tc-pending");
+				expect(start.toolName).toBe("bash");
+			} else {
+				throw new Error("Expected fourth event to be tool_execution_start");
+			}
+			expect(events.some(e => e.type === "tool_execution_end")).toBe(false);
+		} finally {
+			try {
+				fs.unlinkSync(tempFilePath);
+			} catch {
+				// Ignore
+			}
+		}
+	});
+
 	it("renders replayed events through the TranscriptRenderer into visible lines", async () => {
 		const tempFilePath = path.join(os.tmpdir(), `transcript-replay-render-${Date.now()}.jsonl`);
 		const fixture = `${[

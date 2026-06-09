@@ -273,6 +273,7 @@ export class SubagentBrowserComponent extends Container {
 		}
 
 		let line = cursor + theme.fg("dim", indent) + theme.fg("dim", expandPart) + statusPart + content;
+		line = truncateToWidth(line, width);
 
 		if (isSelected) {
 			line = theme.bg("selectedBg", line);

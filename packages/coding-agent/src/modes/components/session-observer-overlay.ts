@@ -7,7 +7,7 @@
  * the agent (`x`), back navigation (`u`), sibling cycling (`[`/`]`), and a parentId
  * breadcrumb for nested subagents.
  */
-import { Container, matchesKey, ScrollView } from "@oh-my-pi/pi-tui";
+import { Container, matchesKey, ScrollView, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { KeyId } from "../../config/keybindings";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
@@ -204,9 +204,10 @@ export class SessionObserverOverlayComponent extends Container {
 		const session = sessions.find(s => s.id === this.#selectedSessionId);
 
 		// Header
+		const targetWidth = contentWidth();
 		this.#viewerHeaderLines = [];
 		const breadcrumb = this.#buildBreadcrumb(session);
-		this.#viewerHeaderLines.push(theme.fg("accent", breadcrumb));
+		this.#viewerHeaderLines.push(truncateToWidth(theme.fg("accent", breadcrumb), targetWidth));
 		if (session) {
 			const statusColor = session.status === "active" ? "success" : session.status === "failed" ? "error" : "dim";
 			const statusText = theme.fg(statusColor, `[${sanitizeText(session.status)}]`);
@@ -218,7 +219,10 @@ export class SessionObserverOverlayComponent extends Container {
 			const modelName = this.#source?.meta().model;
 			const modelLabel = modelName ? theme.fg("muted", ` · ${sanitizeText(modelName)}`) : "";
 			this.#viewerHeaderLines.push(
-				`${theme.bold(sanitizeText(session.label))} ${statusText}${agentTag}${posLabel}${modelLabel}`,
+				truncateToWidth(
+					`${theme.bold(sanitizeText(session.label))} ${statusText}${agentTag}${posLabel}${modelLabel}`,
+					targetWidth,
+				),
 			);
 		}
 

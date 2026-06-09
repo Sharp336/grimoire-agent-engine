@@ -106,25 +106,32 @@ export class ReplaySource implements TranscriptSource {
 				for (const block of msg.content) {
 					if (block.type === "toolCall") {
 						const tr = toolResults.get(block.id);
-						events.push({
-							type: "tool_execution_end",
-							toolCallId: block.id,
-							toolName: block.name,
-							isError: tr ? (tr.isError ?? false) : false,
-							result: {
-								content: tr
-									? tr.content.map(item => {
-											if (item.type === "text") {
-												return { type: "text", text: item.text };
-											} else if (item.type === "image") {
-												return { type: "image", data: item.data, mimeType: item.mimeType };
-											}
-											return item;
-										})
-									: [],
-								details: tr?.details,
-							},
-						} as AgentEvent);
+						if (tr) {
+							events.push({
+								type: "tool_execution_end",
+								toolCallId: block.id,
+								toolName: block.name,
+								isError: tr.isError ?? false,
+								result: {
+									content: tr.content.map(item => {
+										if (item.type === "text") {
+											return { type: "text", text: item.text };
+										} else if (item.type === "image") {
+											return { type: "image", data: item.data, mimeType: item.mimeType };
+										}
+										return item;
+									}),
+									details: tr.details,
+								},
+							} as AgentEvent);
+						} else {
+							events.push({
+								type: "tool_execution_start",
+								toolCallId: block.id,
+								toolName: block.name,
+								args: block.arguments,
+							} as AgentEvent);
+						}
 					}
 				}
 			}
