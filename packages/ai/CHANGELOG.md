@@ -4,7 +4,7 @@
 
 ### Added
 
-- Added `thinking_token_budget` parameter support for vLLM and other OpenAI-compatible backends that expose the `thinking_token_budget` field. The budget is driven by the existing `thinkingBudgets` setting and is sent for `qwen` and `qwen-chat-template` thinking formats. `preserve_thinking` in `chat_template_kwargs` is gated on `thinkingBudgets` being configured, so existing users without budgets see no behavior change.
+- Added `thinking_token_budget` / `thinking_budget` parameter support for vLLM and Qwen Cloud/DashScope backends that expose thinking budget fields. The budget is driven by the existing `thinkingBudgets` setting and is sent for `qwen` and `qwen-chat-template` thinking formats. Qwen Cloud/DashScope uses `thinking_budget`; vLLM and other backends use `thinking_token_budget`. `preserve_thinking` in `chat_template_kwargs` is gated on `thinkingBudgets` being configured, so existing users without budgets see no behavior change.
 ## [15.10.8] - 2026-06-09
 ### Added
 

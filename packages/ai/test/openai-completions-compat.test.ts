@@ -660,6 +660,29 @@ describe("openai-completions compatibility", () => {
 		const payload = await promise;
 		expect(toObject(payload)?.thinking_token_budget).toBeUndefined();
 	});
+
+	it("sends thinking_budget (not thinking_token_budget) for dashscope baseUrl", async () => {
+		const model: Model<"openai-completions"> = {
+			...getBundledModel("openai", "gpt-4o-mini"),
+			api: "openai-completions",
+			reasoning: true,
+			baseUrl: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+			compat: {
+				thinkingFormat: "qwen",
+			},
+		};
+		const { promise, resolve } = Promise.withResolvers<unknown>();
+		streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			reasoning: "high",
+			thinkingBudgets: { high: 4096 },
+			signal: createAbortedSignal(),
+			onPayload: payload => resolve(payload),
+		});
+		const payload = await promise;
+		expect(toObject(payload)?.thinking_budget).toBe(4096);
+		expect(toObject(payload)?.thinking_token_budget).toBeUndefined();
+	});
 });
 
 describe("kimi model detection via detectCompat", () => {

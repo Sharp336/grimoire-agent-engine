@@ -265,6 +265,7 @@ type OpenAICompletionsParams = OpenAI.Chat.Completions.ChatCompletionCreateParam
 	thinking?: { type: "enabled" | "disabled"; keep?: "all" };
 	enable_thinking?: boolean;
 	thinking_token_budget?: number;
+	thinking_budget?: number;
 	chat_template_kwargs?: { enable_thinking: boolean; preserve_thinking?: boolean };
 	reasoning?: { effort?: string } | { enabled: false };
 	provider?: OpenAICompat["openRouterRouting"];
@@ -1165,14 +1166,25 @@ async function createClient(
 }
 
 /**
- * Apply `thinking_token_budget` from `thinkingBudgets` when a budget is
- * configured for the current reasoning effort. Only used by backends that
- * support the field (vLLM, Qwen).
+ * Apply thinking budget from `thinkingBudgets` when a budget is configured for
+ * the current reasoning effort. Uses `thinking_budget` for Qwen Cloud/DashScope
+ * and `thinking_token_budget` for vLLM and other backends.
  */
-function applyThinkingTokenBudget(params: OpenAICompletionsParams, options: OpenAICompletionsOptions | undefined): void {
+function applyThinkingBudget(
+	params: OpenAICompletionsParams,
+	options: OpenAICompletionsOptions | undefined,
+	resolvedBaseUrl?: string,
+): void {
 	const effort = options?.reasoning;
-	if (effort && options.thinkingBudgets?.[effort] != null) {
-		params.thinking_token_budget = options.thinkingBudgets[effort];
+	if (!effort || options.thinkingBudgets?.[effort] == null) {
+		return;
+	}
+	const budget = options.thinkingBudgets[effort];
+	// Qwen Cloud / DashScope uses `thinking_budget`; vLLM and others use `thinking_token_budget`
+	if (resolvedBaseUrl?.includes("dashscope")) {
+		(params as Record<string, unknown>).thinking_budget = budget;
+	} else {
+		params.thinking_token_budget = budget;
 	}
 }
 function buildParams(
@@ -1342,7 +1354,7 @@ function buildParams(
 		// vLLM supports thinking_token_budget for fine-grained reasoning control
 		const thinkingEnabled = !!options?.reasoning && !options?.disableReasoning;
 		params.enable_thinking = thinkingEnabled;
-		applyThinkingTokenBudget(params, options);
+		applyThinkingBudget(params, options, resolvedBaseUrl);
 	} else if (supportsReasoningParams && compat.thinkingFormat === "qwen-chat-template" && model.reasoning) {
 		// Qwen chat-template variant uses chat_template_kwargs
 		const thinkingEnabled = !!options?.reasoning && !options?.disableReasoning;
@@ -1350,7 +1362,7 @@ function buildParams(
 			enable_thinking: thinkingEnabled,
 			...(options?.thinkingBudgets ? { preserve_thinking: thinkingEnabled } : {}),
 		};
-		applyThinkingTokenBudget(params, options);
+		applyThinkingBudget(params, options, resolvedBaseUrl);
 	} else if (supportsReasoningParams && compat.thinkingFormat === "openrouter" && model.reasoning) {
 		// OpenRouter normalizes reasoning across providers via a nested reasoning object.
 		// Without an explicit signal, OpenRouter defaults reasoning models to thinking, which
@@ -1399,6 +1411,7 @@ function buildParams(
 		delete params.reasoning_effort;
 		delete params.reasoning;
 		delete params.thinking_token_budget;
+		delete params.thinking_budget;
 	}
 
 	if (compat.disableReasoningOnForcedToolChoice && isForcedToolChoice(params.tool_choice)) {
@@ -1408,6 +1421,7 @@ function buildParams(
 		delete params.reasoning_effort;
 		delete params.reasoning;
 		delete params.thinking_token_budget;
+		delete params.thinking_budget;
 		if (compat.thinkingFormat === "zai") {
 			params.thinking = { type: "disabled" };
 		}
