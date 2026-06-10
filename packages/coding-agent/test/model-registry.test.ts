@@ -816,6 +816,45 @@ describe("ModelRegistry", () => {
 			expect(model?.baseUrl).toBe("https://compat.example.com/v1");
 		});
 
+		test("OPENAI_BASE_URL remains keyless with headers-only models config", async () => {
+			$env.OPENAI_BASE_URL = "https://compat.example.com/v1";
+			writeRawModelsJson({
+				"openai-compatible": {
+					headers: {
+						"HTTP-Referer": "https://omp.sh/",
+						"X-Route": "canary",
+					},
+					compat: {
+						supportsStore: false,
+						toolStrictMode: "all_strict",
+					},
+				},
+			});
+
+			const fetchMock: FetchImpl = async (input, init) => {
+				expect(String(input)).toBe("https://compat.example.com/v1/models");
+				expect(authorizationHeader(init?.headers)).toBeUndefined();
+				const headers = init?.headers as Headers | Record<string, string> | undefined;
+				const routeHeader = headers instanceof Headers ? headers.get("X-Route") : headers?.["X-Route"];
+				expect(routeHeader).toBe("canary");
+				return new Response(JSON.stringify({ data: [{ id: "public-routed-model" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			};
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refreshProvider("openai-compatible", "online");
+
+			const model = registry.find("openai-compatible", "public-routed-model");
+			const compat = getOpenAICompat(model);
+			expect(model?.baseUrl).toBe("https://compat.example.com/v1");
+			expect(model?.headers?.["HTTP-Referer"]).toBe("https://omp.sh/");
+			expect(model?.headers?.["X-Route"]).toBe("canary");
+			expect(compat?.supportsStore).toBe(false);
+			expect(compat?.toolStrictMode).toBe("all_strict");
+		});
+
 		test("OPENAI_BASE_URL activates a separate discovered provider without changing official OpenAI", async () => {
 			$env.OPENAI_COMPAT_API_KEY = "compat-key";
 			$env.OPENAI_BASE_URL = "https://compat.example.com/v1";

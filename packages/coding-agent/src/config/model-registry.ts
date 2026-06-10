@@ -999,7 +999,6 @@ export class ModelRegistry {
 		overrides: Map<string, ProviderOverride>;
 		keylessProviders: Set<string>;
 		discoverableProviders: DiscoveryProviderConfig[];
-		configuredProviders: Set<string>;
 	}): void {
 		const envBaseUrl = readOpenAICompatibleBaseUrlEnv();
 		if (envBaseUrl) {
@@ -1039,11 +1038,7 @@ export class ModelRegistry {
 			args.discoverableProviders.push(envDiscovery);
 		}
 
-		if (
-			!getEnvApiKey(OPENAI_COMPATIBLE_PROVIDER_ID) &&
-			!override?.apiKey &&
-			!args.configuredProviders.has(OPENAI_COMPATIBLE_PROVIDER_ID)
-		) {
+		if (!getEnvApiKey(OPENAI_COMPATIBLE_PROVIDER_ID) && !override?.apiKey) {
 			args.keylessProviders.add(OPENAI_COMPATIBLE_PROVIDER_ID);
 		}
 	}
@@ -1071,7 +1066,6 @@ export class ModelRegistry {
 				overrides,
 				keylessProviders,
 				discoverableProviders,
-				configuredProviders,
 			});
 			return {
 				models: [],
@@ -1164,7 +1158,6 @@ export class ModelRegistry {
 			overrides,
 			keylessProviders,
 			discoverableProviders,
-			configuredProviders,
 		});
 
 		return {
