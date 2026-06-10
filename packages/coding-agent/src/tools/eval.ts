@@ -145,7 +145,7 @@ const EVAL_WORKSPACE_WRITE_PATTERNS: Record<EvalCellInput["language"], RegExp[]>
 	py: [
 		/(?:^|[^\w.])(?:write|append)\s*\(\s*(?!["']local:\/\/)/,
 		/\b(?:write_text|write_bytes)\s*\(/,
-		/\bopen\s*\([^,\n]+,\s*["'][^"']*[wax+]/,
+		/\bopen\s*\([^)\n]*(?:,\s*["'][^"']*[wax+]|,\s*mode\s*=\s*["'][^"']*[wax+])/,
 		/\b(?:shutil\.(?:copy|copyfile|move)|os\.(?:rename|replace))\s*\(/,
 	],
 };

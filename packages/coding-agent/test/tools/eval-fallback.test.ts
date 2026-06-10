@@ -160,6 +160,16 @@ describe("EvalTool language dispatch", () => {
 				cells: [{ language: "py", code: "from pathlib import Path\nPath('src.py').write_text('x')" }],
 			}),
 		).rejects.toThrow(/use `edit` with hashline ops/);
+		await expect(
+			tool.execute("call-py-open-keyword-write", {
+				cells: [{ language: "py", code: "open('src.py', mode='w').write('x')" }],
+			}),
+		).rejects.toThrow(/use `edit` with hashline ops/);
+		await expect(
+			tool.execute("call-py-open-keyword-append", {
+				cells: [{ language: "py", code: "open('src.py', mode='a').write('x')" }],
+			}),
+		).rejects.toThrow(/use `edit` with hashline ops/);
 	});
 
 	it("allows eval cells to persist local artifacts", async () => {
