@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `OPENAI_BASE_URL` now activates a separate `openai-compatible` runtime provider that discovers models from the normalized `/v1` base URL, leaving the official `openai` provider on its default OpenAI endpoint; for that provider, `OPENAI_BASE_URL` wins over `providers.openai-compatible.baseUrl`, while routing headers and compatibility quirks remain configured in `models.yml`.
+
 ## [15.10.12] - 2026-06-10
 
 ### Added
@@ -12,7 +16,6 @@
 - Added `python.interpreter` to pin eval's Python backend to an explicit interpreter and skip automatic runtime discovery ([#1802](https://github.com/can1357/oh-my-pi/issues/1802)).
 - Added `!command` resolution for `models.yml` provider `apiKey` values and provider/model headers ([#1888](https://github.com/can1357/oh-my-pi/issues/1888)).
 - Documented the oMLX setup path through existing OpenAI-compatible local discovery ([#1957](https://github.com/can1357/oh-my-pi/issues/1957)).
-- `OPENAI_BASE_URL` now activates a separate `openai-compatible` runtime provider that discovers models from the normalized `/v1` base URL, leaving the official `openai` provider on its default OpenAI endpoint; for that provider, `OPENAI_BASE_URL` wins over `providers.openai-compatible.baseUrl`, while routing headers and compatibility quirks remain configured in `models.yml`.
 - Added `TITLE_SYSTEM.md` discovery so users can override the automatic session-title generation prompt for online and local tiny title models without patching installed prompt files.
 - Added `TITLE_SYSTEM.md` discovery so users can override the automatic session-title generation prompt for online and local tiny title models without patching installed prompt files. The override is re-discovered when the session working directory changes via `/cwd`.
 - Added a structured memory runtime surface for extensions and UI integrations to query backend status, search memories, and save explicit memories across the configured memory backend.
