@@ -28,6 +28,7 @@ import "./claude-plugins";
 import "./cline";
 import "./agents";
 import "./codex";
+import "./copilot";
 import "./cursor";
 import "./gemini";
 import "./opencode";

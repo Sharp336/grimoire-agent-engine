@@ -18,9 +18,9 @@ const PROVIDER_ID = "mcp-json";
 const DISPLAY_NAME = "MCP Config";
 
 /**
- * Raw MCP JSON format (matches Claude Desktop's format).
+ * Raw MCP JSON format (Claude Desktop + Copilot extensions).
  */
-interface MCPConfigFile {
+export interface MCPConfigFile {
 	mcpServers?: Record<
 		string,
 		{
@@ -39,7 +39,7 @@ interface MCPConfigFile {
 				clientId?: string;
 				clientSecret?: string;
 			};
-			type?: "stdio" | "sse" | "http";
+			type?: "stdio" | "sse" | "http" | "local";
 			oauth?: {
 				clientId?: string;
 				clientSecret?: string;
@@ -54,7 +54,7 @@ interface MCPConfigFile {
 /**
  * Transform raw MCP config to canonical MCPServer format.
  */
-function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServer[] {
+export function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServer[] {
 	const servers: MCPServer[] = [];
 
 	if (config.mcpServers) {
@@ -94,7 +94,8 @@ function transformMCPConfig(config: MCPConfigFile, source: SourceMeta): MCPServe
 				headers: serverConfig.headers,
 				auth: serverConfig.auth,
 				oauth: serverConfig.oauth,
-				transport: serverConfig.type,
+				// Normalize Copilot "local" transport to OMP "stdio"
+				transport: serverConfig.type === "local" ? "stdio" : serverConfig.type,
 				_source: source,
 			};
 

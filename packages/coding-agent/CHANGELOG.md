@@ -566,6 +566,19 @@
 - Fixed `omp plugin install <local-path>` failing with `Invalid package name: .` (and similar) for cwd-relative (`.`, `./pkg`), absolute (`/abs`, `C:\…`, `\\unc`), and tilde-prefixed (`~/pkg`) specs. `classifyInstallTarget` now returns a `local` arm in addition to `marketplace`/`npm`, and `plugin install` routes those specs to `PluginManager.link()` — the same code path as `omp plugin link`. ([#1945](https://github.com/can1357/oh-my-pi/issues/1945))
 - Fixed the `web_search` result renderer capping the synthesized answer at 12 lines even when expanded, while the Sources list expanded in full — so a long answer stayed truncated ("… N more lines") after `Ctrl+O`, making the expand toggle look like a no-op and dwarfing the answer next to its sources. The answer now renders the full text (markdown-formatted) when expanded and a short markdown preview when collapsed, matching the sources' collapse/expand behavior. The answer is also rendered through the Markdown component instead of dimmed raw lines, so headings, bold, lists, and code in the answer display formatted.
 
+### Added
+
+- Added Copilot MCP discovery provider (priority 30) that reads `~/.copilot/mcp-config.json`, with `COPILOT_HOME` env override and `mcpServers`/`servers` key fallback. ([#1917](https://github.com/can1357/oh-my-pi/issues/1917))
+
+### Changed
+
+- Exported `MCPConfigFile` interface and `transformMCPConfig` function from `mcp-json.ts` so they can be reused by other MCP discovery providers (e.g. the new Copilot provider). ([#1917](https://github.com/can1357/oh-my-pi/issues/1917))
+
+### Fixed
+
+- Fixed Copilot `type: "local"` MCP transport entries not being recognized: `transformMCPConfig` now normalizes `"local"` to `"stdio"` at assignment time so Copilot-local MCP servers connect correctly. ([#1917](https://github.com/can1357/oh-my-pi/issues/1917))
+- Fixed test isolation in Copilot MCP discovery tests: replaced `HOME`/`USERPROFILE` mutation (ineffective under Bun's `os.homedir()`) with `COPILOT_HOME` override, and added `fs.rm` guard against empty temp directory. ([#1917](https://github.com/can1357/oh-my-pi/issues/1917))
+
 ## [15.9.3] - 2026-06-05
 
 ### Fixed
