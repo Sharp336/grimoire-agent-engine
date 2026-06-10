@@ -57,8 +57,8 @@ Mnemopi:
 - Mnemopi tool path: one local scoped recall followed by context formatting.
 - Hindsight bank scoping:
   - `global` — no tag filter.
-  - `per-project` — separate bank id per cwd basename.
-  - `per-project-tagged` — shared bank id plus `project:<cwd basename>` filter with `tagsMatch = "any"`.
+  - `per-project` — separate bank id per memory project identity.
+  - `per-project-tagged` — shared bank id plus `project:<key>` filter with `tagsMatch = "any"`.
 - Mnemopi bank scoping:
   - `global` — reads the shared bank.
   - `per-project` — reads the project bank.

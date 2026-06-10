@@ -10,6 +10,7 @@ import { getAgentDbPath, getMemoriesDir, logger, parseJsonlLenient, prompt } fro
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
 import type { Settings } from "../config/settings";
+import { resolveMemoryProjectIdentity } from "../memory-project-identity";
 import consolidationTemplate from "../prompts/memories/consolidation.md" with { type: "text" };
 import readPathTemplate from "../prompts/memories/read-path.md" with { type: "text" };
 import stageOneInputTemplate from "../prompts/memories/stage_one_input.md" with { type: "text" };
@@ -154,7 +155,7 @@ export async function buildMemoryToolDeveloperInstructions(
 ): Promise<string | undefined> {
 	const cfg = loadMemoryConfig(settings);
 	if (!cfg.enabled) return undefined;
-	const memoryRoot = getMemoryRoot(agentDir, settings.getCwd());
+	const memoryRoot = getMemoryRoot(agentDir, settings.getCwd(), settings.get("memory.projectKey"));
 	const summaryPath = path.join(memoryRoot, "memory_summary.md");
 
 	let text: string;
@@ -177,20 +178,25 @@ export async function buildMemoryToolDeveloperInstructions(
 /**
  * Clear all persisted memory state and generated artifacts.
  */
-export async function clearMemoryData(agentDir: string, cwd: string): Promise<void> {
+export async function clearMemoryData(agentDir: string, cwd: string, projectKey?: string): Promise<void> {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	try {
 		clearMemoryDataInDb(db);
 	} finally {
 		closeMemoryDb(db);
 	}
-	await fs.rm(getMemoryRoot(agentDir, cwd), { recursive: true, force: true });
+	await fs.rm(getMemoryRoot(agentDir, cwd, projectKey), { recursive: true, force: true });
 }
 
 /**
  * Force-enqueue global consolidation maintenance work.
  */
-export function enqueueMemoryConsolidation(agentDir: string, cwd: string, sourceUpdatedAt = unixNow()): void {
+export function enqueueMemoryConsolidation(
+	agentDir: string,
+	cwd: string,
+	sourceUpdatedAt = unixNow(),
+	_projectKey?: string,
+): void {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	try {
 		enqueueGlobalWatermark(db, sourceUpdatedAt, cwd, { forceDirtyWhenNotAdvanced: true });
@@ -222,7 +228,11 @@ async function runPhase1(options: {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	const nowSec = unixNow();
 	const workerId = `memory-${process.pid}`;
-	const memoryRoot = getMemoryRoot(agentDir, session.sessionManager.getCwd());
+	const memoryRoot = getMemoryRoot(
+		agentDir,
+		session.sessionManager.getCwd(),
+		options.settings.get("memory.projectKey"),
+	);
 	const currentThreadId = session.sessionManager.getSessionId();
 
 	try {
@@ -359,7 +369,7 @@ async function runPhase2(options: {
 	const db = openMemoryDb(getAgentDbPath(agentDir));
 	const nowSec = unixNow();
 	const workerId = `memory-${process.pid}`;
-	const memoryRoot = getMemoryRoot(agentDir, cwd);
+	const memoryRoot = getMemoryRoot(agentDir, cwd, options.settings.get("memory.projectKey"));
 
 	try {
 		const claimResult = tryClaimGlobalPhase2Job(db, {
@@ -1121,12 +1131,8 @@ function loadMemoryConfig(settings: Settings): MemoryRuntimeConfig {
 	};
 }
 
-export function getMemoryRoot(agentDir: string, cwd: string): string {
-	return path.join(getMemoriesDir(agentDir), encodeProjectPath(cwd));
-}
-
-function encodeProjectPath(cwd: string): string {
-	return `--${cwd.replace(/^[/\\]/, "").replace(/[/\\:]/g, "-")}--`;
+export function getMemoryRoot(agentDir: string, cwd: string, projectKey?: string): string {
+	return path.join(getMemoriesDir(agentDir), `--${resolveMemoryProjectIdentity(cwd, projectKey).segment}--`);
 }
 
 function unixNow(): number {

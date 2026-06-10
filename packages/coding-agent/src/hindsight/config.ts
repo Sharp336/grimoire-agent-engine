@@ -22,6 +22,7 @@ export interface HindsightConfig {
 	bankId: string | null;
 	bankIdPrefix: string;
 	scoping: HindsightScoping;
+	projectKey: string | null;
 	bankMission: string;
 	retainMission: string | null;
 
@@ -104,6 +105,7 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 	const apiUrlEnv = envString(env.HINDSIGHT_API_URL);
 	const apiTokenEnv = envString(env.HINDSIGHT_API_TOKEN);
 	const bankIdEnv = envString(env.HINDSIGHT_BANK_ID);
+	const projectKeyEnv = envString(env.OMP_PROJECT_KEY) ?? envString(env.HINDSIGHT_PROJECT_KEY);
 	const bankMissionEnv = envString(env.HINDSIGHT_BANK_MISSION);
 	const retainModeEnv = pickRetainMode(env.HINDSIGHT_RETAIN_MODE);
 	const recallBudgetEnv = pickBudget(env.HINDSIGHT_RECALL_BUDGET);
@@ -138,6 +140,7 @@ export function loadHindsightConfig(settings: Settings, env: NodeJS.ProcessEnv =
 		bankId: bankIdEnv ?? settings.get("hindsight.bankId") ?? null,
 		bankIdPrefix: settings.get("hindsight.bankIdPrefix") ?? "",
 		scoping: scopingEnv ?? settingsScoping ?? "per-project-tagged",
+		projectKey: projectKeyEnv ?? settings.get("memory.projectKey") ?? null,
 		bankMission: bankMissionEnv ?? settings.get("hindsight.bankMission") ?? "",
 		retainMission: settings.get("hindsight.retainMission") ?? null,
 

@@ -22,11 +22,11 @@
  * write at retain time will refresh empty. Therefore seed tags MUST be a
  * subset of the tags actually attached by `retainSession` / `enqueueRetain`
  * for the active scoping mode. In `per-project-tagged` we only carry
- * `project:<cwd>`; do not invent new tag axes here without first wiring the
+ * `project:<key>`; do not invent new tag axes here without first wiring the
  * retain side to emit them.
  *
  * Seed tags are baked from `seeds.json` plus, for `projectTagged: true`
- * entries, the active scope's `retainTags` (i.e. `project:<cwd>`). In
+ * entries, the active scope's `retainTags` (i.e. `project:<key>`). In
  * `per-project-tagged`, those project seeds also get project-suffixed ids so
  * each tag can own its conventions/decisions models in the shared bank.
  * Untagged seeds (e.g. `user-preferences`) read every memory in the bank — the

@@ -59,8 +59,8 @@ Mnemopi:
 - Mnemopi tool path: direct local `remember(...)` into the scoped retain bank.
 - Hindsight bank scoping from `computeBankScope(...)`:
   - `global` — one shared bank, no project tags.
-  - `per-project` — bank id gets `-<cwd basename>` appended.
-  - `per-project-tagged` — shared bank plus `project:<cwd basename>` tags on retained memories.
+  - `per-project` — bank id gets `-<project-segment>` appended.
+  - `per-project-tagged` — shared bank plus `project:<key>` tags on retained memories.
 - Mnemopi bank scoping from `resolveBankScope(...)`:
   - `global` — retain and recall use the shared bank.
   - `per-project` — retain and recall use the project bank.

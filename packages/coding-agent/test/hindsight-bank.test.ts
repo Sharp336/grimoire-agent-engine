@@ -44,6 +44,7 @@ const baseConfig = (overrides: Partial<HindsightConfig> = {}): HindsightConfig =
 	bankId: null,
 	bankIdPrefix: "",
 	scoping: "global",
+	projectKey: null,
 	bankMission: "",
 	retainMission: null,
 	autoRecall: true,
@@ -144,9 +145,9 @@ describe("computeBankScope", () => {
 	});
 
 	// Regression for #2232: linked git worktrees used to silo memory into
-	// distinct `project:<basename>` tags. The fix resolves the primary
-	// checkout root via `git.repo.primaryRootSync`, so every worktree of one
-	// repo collapses to the same tag (and the same per-project bank id).
+	// distinct `project:<basename>` tags. Project identity now resolves through
+	// the git remote when possible and otherwise a common-dir-derived local key,
+	// so every worktree of one repo shares the same tag and per-project bank id.
 	describe("git worktree handling", () => {
 		let baseDir: string;
 		let primaryRoot: string;
@@ -184,31 +185,31 @@ describe("computeBankScope", () => {
 		it("emits the same project tag from the primary checkout and a linked worktree", () => {
 			const fromPrimary = computeBankScope(baseConfig({ scoping: "per-project-tagged" }), primaryRoot);
 			const fromWorktree = computeBankScope(baseConfig({ scoping: "per-project-tagged" }), worktreeRoot);
-			expect(fromPrimary.retainTags).toEqual(["project:myrepo"]);
-			expect(fromWorktree.retainTags).toEqual(["project:myrepo"]);
+			expect(fromPrimary.retainTags?.[0]).toStartWith("project:local/myrepo/");
+			expect(fromWorktree.retainTags).toEqual(fromPrimary.retainTags);
 			expect(fromWorktree).toEqual(fromPrimary);
 		});
 
-		it("uses the primary root basename for the per-project bank id from a worktree", () => {
-			expect(computeBankScope(baseConfig({ scoping: "per-project" }), worktreeRoot)).toEqual({
-				bankId: "omp-myrepo",
-			});
+		it("uses the shared local repository key for the per-project bank id from a worktree", () => {
+			expect(computeBankScope(baseConfig({ scoping: "per-project" }), worktreeRoot).bankId).toStartWith(
+				"omp-local-myrepo-",
+			);
 		});
 
 		it("emits one shared project label across worktrees attached to a bare repository", () => {
 			const fromA = computeBankScope(baseConfig({ scoping: "per-project-tagged" }), bareWorktreeA);
 			const fromB = computeBankScope(baseConfig({ scoping: "per-project-tagged" }), bareWorktreeB);
-			expect(fromA.retainTags).toEqual(["project:bare-repo.git"]);
+			expect(fromA.retainTags?.[0]).toStartWith("project:local/bare-repo/");
 			expect(fromB).toEqual(fromA);
-			expect(computeBankScope(baseConfig({ scoping: "per-project" }), bareWorktreeB)).toEqual({
-				bankId: "omp-bare-repo.git",
-			});
+			expect(computeBankScope(baseConfig({ scoping: "per-project" }), bareWorktreeB).bankId).toStartWith(
+				"omp-local-bare-repo-",
+			);
 		});
 
 		it("falls back to the cwd basename outside any repository", () => {
 			// The temp parent dir is not itself a repo — it just contains one.
 			expect(computeBankScope(baseConfig({ scoping: "per-project-tagged" }), baseDir).retainTags).toEqual([
-				`project:${path.basename(baseDir)}`,
+				`project:${path.basename(baseDir).toLowerCase()}`,
 			]);
 		});
 	});

@@ -2,7 +2,7 @@ import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
 import { getMemoriesDir } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import * as git from "../utils/git";
+import { resolveMemoryProjectIdentity } from "../memory-project-identity";
 
 export type MnemopiLlmMode = "none" | "smol" | "remote";
 
@@ -40,7 +40,7 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 	const configuredDbPath = settings.get("mnemopi.dbPath");
 	const cwd = settings.getCwd();
 	const scoping = settings.get("mnemopi.scoping");
-	const scope = resolveBankScope(settings.get("mnemopi.bank"), cwd, scoping);
+	const scope = resolveBankScope(settings.get("mnemopi.bank"), cwd, scoping, settings.get("memory.projectKey"));
 	const llmMode = settings.get("mnemopi.llmMode");
 	return {
 		dbPath: configuredDbPath ?? path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db"),
@@ -91,8 +91,13 @@ interface MnemopiBankScope {
 
 // Mnemopi does not have built-in tag-filtered recall, so `per-project-tagged`
 // maps to a project-local write bank plus a shared recall-visible bank.
-function resolveBankScope(configured: string | undefined, cwd: string, scoping: MnemopiScoping): MnemopiBankScope {
-	const project = projectBank(configured, cwd);
+function resolveBankScope(
+	configured: string | undefined,
+	cwd: string,
+	scoping: MnemopiScoping,
+	projectKey?: string,
+): MnemopiBankScope {
+	const project = projectBank(configured, cwd, projectKey);
 	const globalBank = sharedBank(configured);
 	switch (scoping) {
 		case "global":
@@ -126,16 +131,14 @@ function sharedBank(configured: string | undefined): string {
 	return sanitizeBankName(configured) ?? DEFAULT_SHARED_BANK;
 }
 
-function projectBank(configured: string | undefined, cwd: string): string {
-	const projectRoot = git.repo.resolveSync(cwd)?.repoRoot ?? path.resolve(cwd);
-	const project = projectBankSegment(projectRoot);
+function projectBank(configured: string | undefined, cwd: string, projectKey?: string): string {
+	const identity = resolveMemoryProjectIdentity(cwd, projectKey);
+	const project =
+		identity.source === "cwd"
+			? limitBankName(`${identity.segment}-${Bun.hash(path.resolve(cwd)).toString(36)}`)
+			: identity.segment;
 	const base = sanitizeBankName(configured);
 	return limitBankName(base ? `${base}-${project}` : project);
-}
-
-function projectBankSegment(projectRoot: string): string {
-	const project = sanitizeBankName(path.basename(projectRoot)) ?? "default";
-	return limitBankName(`${project}-${Bun.hash(path.resolve(projectRoot)).toString(36)}`);
 }
 
 function sanitizeBankName(value: string | undefined): string | undefined {

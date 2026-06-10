@@ -9,6 +9,8 @@ memory:
   backend: local
 ```
 
+Project-scoped memory uses a stable project identity. Set `memory.projectKey` for an explicit cross-worktree key such as `github.com/org/repo`; otherwise OMP derives identity from the git remote, then git common-dir, and only falls back to cwd outside git.
+
 ## Usage
 
 ### What gets injected
@@ -82,6 +84,7 @@ If the requested memory role is not configured, memory model resolution falls ba
 | Setting                               | Default | Description                                                                                                                              |
 | ------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
 | `memory.backend`                      | `off`   | Select `local` for this pipeline; legacy `memories.enabled: true` is migrated to `memory.backend: local` when no explicit backend is set |
+| `memory.projectKey`                   | —       | Optional stable project identity shared across worktrees, e.g. `github.com/org/repo`; falls back to git remote, git common-dir, then cwd |
 | `memories.maxRolloutAgeDays`          | `30`    | Sessions older than this are not processed                                                                                               |
 | `memories.minRolloutIdleHours`        | `12`    | Sessions active more recently than this are skipped                                                                                      |
 | `memories.maxRolloutsPerStartup`      | `64`    | Cap on sessions processed in a single startup                                                                                            |
