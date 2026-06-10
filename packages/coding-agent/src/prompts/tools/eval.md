@@ -31,9 +31,9 @@ print(value, ...) → None
 read(path, offset?=1, limit?=None) → str
     Read file contents as text. offset/limit are 1-indexed line bounds. Accepts `local://…` (resolved to the session-local root, same place `read local://…` reads).
 write(path, content) → str
-    Write content to a file (creates parent directories). Returns the resolved path. Accepts `local://…` to persist artifacts across turns / share with subagents.
+    Persist artifacts only. Workspace/source-file changes are blocked here; use `edit` with `[PATH#TAG]` hashline ops from `read`/`search`. `local://…` remains allowed to share artifacts across turns/subagents.
 append(path, content) → str
-    Append content to a file. Returns the resolved path. Accepts `local://…`.
+    Append to artifacts only. Workspace/source-file changes are blocked here; use `edit`; `local://…` remains allowed.
 tree(path?=".", max_depth?=3, show_hidden?=False) → str
     Render a directory tree.
 diff(a, b) → str

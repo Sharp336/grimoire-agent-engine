@@ -13,7 +13,7 @@ Executes bash command in shell session for terminal operations like git, bun, ca
 </instruction>
 
 <critical>
-- NEVER use shell to fetch, display, list, page, or search content a dedicated tool serves: `cat`/`head`/`tail`/`less`/`more`/`ls` → `read`; `grep`/`rg`/`ag`/`ack` → `search`; `find`/`fd` → `find`; `sed -i`/`perl -i`/`awk -i` → `edit`; `echo >`/heredoc → `write`. The tools keep gitignore semantics, line anchors, and structured output that shell loses.
+- NEVER use shell to fetch, display, list, page, search, or edit content a dedicated tool serves: `cat`/`head`/`tail`/`less`/`more`/`ls` → `read`; `grep`/`rg`/`ag`/`ack` → `search`; `find`/`fd` → `find`; `sed -i`/`perl -i`/`awk -i`/scripted `python -c` or `node -e` file writes → `edit`; `echo >`/heredoc → `write`. The tools keep gitignore semantics, line anchors, hashline snapshots, and structured output that shell loses.
 - NEVER trim or silence output: no `| head -n N`, `| tail -n N`, `| less`, `2>&1`, `2>/dev/null`. stderr is already merged; long output is auto-truncated with the FULL capture kept at `artifact://<id>`. Defensive trimming is a habit from harnesses without artifact recovery — here it only destroys data the artifact would have saved.
 - Pipelines that COMPUTE a new fact are correct bash: `wc -l`, `sort | uniq -c`, `comm`, `cut`, `diff a b`, `shasum`. Litmus: produces a count, frequency table, set difference, or checksum no tool returns → bash. Merely moves or trims bytes a tool can fetch → use the tool.
 </critical>

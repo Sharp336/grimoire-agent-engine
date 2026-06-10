@@ -37,6 +37,7 @@
 
 ### Fixed
 
+- Fixed hashline edit enforcement by blocking scripted Python/JavaScript file writes in bash/eval and returning actionable guidance for malformed hashline edit payloads ([#2272](https://github.com/can1357/oh-my-pi/issues/2272)).
 - Fixed startup Ctrl+C handling in pre-TUI mode so it now clears typed text before exiting on a second press
 - Fixed npm CLI distribution bundles by embedding the stats dashboard client bundle so dashboard assets are served in prebuilt installs
 - Fixed the CLI smoke-test command to start the stats server and verify dashboard HTML is served, catching bundled-asset regressions

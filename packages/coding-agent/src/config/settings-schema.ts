@@ -246,6 +246,22 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 		message: "Use the `edit` tool instead of awk -i inplace. It provides diff preview and fuzzy matching.",
 	},
 	{
+		pattern:
+			"^\\s*(?:python\\d*(?:\\.\\d+)?|uv\\s+run\\s+python)\\s+(?:-[cCm]|--command)\\s+.*(?:\\.write_text\\s*\\(|\\.write_bytes\\s*\\(|open\\s*\\([^)]*,\\s*[\"'][^\"']*[wax+]|\\.write\\s*\\()",
+		flags: "s",
+		tool: "edit",
+		message:
+			"Use the `edit` tool instead of scripted Python file writes. It preserves hashline snapshots and diff preview.",
+	},
+	{
+		pattern:
+			"^\\s*(?:node|bun)\\s+(?:-e|--eval)\\s+.*(?:\\b(?:writeFileSync|writeFile|appendFileSync|appendFile|createWriteStream)\\s*\\(|\\bBun\\.write\\s*\\()",
+		flags: "s",
+		tool: "edit",
+		message:
+			"Use the `edit` tool instead of scripted JavaScript file writes. It preserves hashline snapshots and diff preview.",
+	},
+	{
 		// `>` must sit outside quoted regions (so `echo "a -> b"` passes) and be
 		// followed by a plausible filename — including `$VAR` targets; `>|`
 		// (clobber) counts as a redirect; `>&2`/`2>&1` style fd duplication is

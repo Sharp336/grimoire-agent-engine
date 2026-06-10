@@ -134,6 +134,33 @@ function detailsNotice(cells: ResolvedEvalCell[]): string | undefined {
 	return notices.length > 0 ? notices.join(" ") : undefined;
 }
 
+const EVAL_WRITE_DIAGNOSTIC =
+	"Eval cannot modify workspace files directly. Use `read` or `search` to get a `[PATH#TAG]` snapshot, then use `edit` with hashline ops. Use `write` only for new files or `local://` artifacts.";
+
+const EVAL_WORKSPACE_WRITE_PATTERNS: Record<EvalCellInput["language"], RegExp[]> = {
+	js: [
+		/(?:^|[^\w.])(?:write|append)\s*\(\s*(?!["'`]local:\/\/)/,
+		/\b(?:Bun\.write|writeFile(?:Sync)?|appendFile(?:Sync)?|createWriteStream)\s*\(/,
+	],
+	py: [
+		/(?:^|[^\w.])(?:write|append)\s*\(\s*(?!["']local:\/\/)/,
+		/\b(?:write_text|write_bytes)\s*\(/,
+		/\bopen\s*\([^,\n]+,\s*["'][^"']*[wax+]/,
+		/\b(?:shutil\.(?:copy|copyfile|move)|os\.(?:rename|replace))\s*\(/,
+	],
+};
+
+function assertNoEvalWorkspaceWrites(params: EvalToolParams): void {
+	for (let index = 0; index < params.cells.length; index++) {
+		const cell = params.cells[index];
+		const patterns = EVAL_WORKSPACE_WRITE_PATTERNS[cell.language];
+		if (patterns.some(pattern => pattern.test(cell.code))) {
+			const title = cell.title ? ` (${cell.title})` : "";
+			throw new ToolError(`Blocked cell ${index + 1}${title}: ${EVAL_WRITE_DIAGNOSTIC}`);
+		}
+	}
+}
+
 function timeoutSecondsFromMs(timeoutMs: number): number {
 	return clampTimeout("eval", timeoutMs / 1000);
 }
@@ -211,6 +238,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		onUpdate?: AgentToolUpdateCallback,
 		_ctx?: AgentToolContext,
 	): Promise<AgentToolResult<EvalToolDetails | undefined>> {
+		assertNoEvalWorkspaceWrites(params);
+
 		if (this.#proxyExecutor) {
 			return this.#proxyExecutor(params, signal);
 		}

@@ -142,4 +142,40 @@ describe("EvalTool language dispatch", () => {
 			}),
 		).rejects.toThrow(/PI_JS=0/);
 	});
+
+	it("blocks eval cells that try to write workspace files", async () => {
+		const tool = new EvalTool(null, {
+			proxyExecutor: async () => {
+				throw new Error("proxy should not execute blocked code");
+			},
+		});
+
+		await expect(
+			tool.execute("call-js-write", {
+				cells: [{ language: "js", code: "await Bun.write('src.ts', 'x')" }],
+			}),
+		).rejects.toThrow(/Use `read` or `search` to get a `\[PATH#TAG\]` snapshot/);
+		await expect(
+			tool.execute("call-py-write", {
+				cells: [{ language: "py", code: "from pathlib import Path\nPath('src.py').write_text('x')" }],
+			}),
+		).rejects.toThrow(/use `edit` with hashline ops/);
+	});
+
+	it("allows eval cells to persist local artifacts", async () => {
+		const proxyExecutor = vi.fn(async () => ({
+			content: [{ type: "text" as const, text: "ok" }],
+			details: undefined,
+		}));
+		const tool = new EvalTool(null, { proxyExecutor });
+
+		await tool.execute("call-local-write", {
+			cells: [
+				{ language: "js", code: "await write('local://notes.txt', 'x')" },
+				{ language: "py", code: "write('local://notes.txt', 'x')" },
+			],
+		});
+
+		expect(proxyExecutor).toHaveBeenCalledTimes(1);
+	});
 });

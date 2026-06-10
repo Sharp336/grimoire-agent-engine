@@ -157,12 +157,29 @@ function renderSection(result: PatchSectionResult, diagnostics: FileDiagnosticsR
 	};
 }
 
+function noHashlineSectionsDiagnostic(): string {
+	return [
+		"No hashline sections found in input.",
+		"",
+		"Use the hashline edit format exactly: start with a `[PATH#TAG]` header copied from `read` or `search`, then one or more hashline ops such as `replace N..M:`, `insert after N:`, or `delete N`.",
+		"Do not send prose, JSON, Markdown fences, or an object with separate path/edits fields as `input`; the entire hashline patch must be the `input` string.",
+	].join("\n");
+}
+
 export async function executeHashlineSingle(
 	options: ExecuteHashlineSingleOptions,
 ): Promise<AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema>> {
-	const patch = Patch.parse(options.input, { cwd: options.session.cwd });
+	let patch: Patch;
+	try {
+		patch = Patch.parse(options.input, { cwd: options.session.cwd });
+	} catch (error) {
+		if (error instanceof Error && error.message.includes("input must begin with")) {
+			throw new ToolError(`${noHashlineSectionsDiagnostic()}\n\nParser detail: ${error.message}`);
+		}
+		throw error;
+	}
 	if (patch.sections.length === 0) {
-		throw new Error("No hashline sections found in input.");
+		throw new ToolError(noHashlineSectionsDiagnostic());
 	}
 
 	const fs = new HashlineFilesystem({

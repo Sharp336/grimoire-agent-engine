@@ -128,6 +128,17 @@ describe("hashline executor", () => {
 		});
 	});
 
+	it("rejects non-hashline input with format recovery guidance", async () => {
+		await withTempDir(async tempDir => {
+			await expect(
+				executeHashlineSingle(hashlineExecuteOptions(tempDir, '{"path":"a.ts","edits":[]}')),
+			).rejects.toThrow(/hashline edit format/);
+			await expect(executeHashlineSingle(hashlineExecuteOptions(tempDir, "Here is the patch:"))).rejects.toThrow(
+				/Do not send prose, JSON, Markdown fences/,
+			);
+		});
+	});
+
 	it("preflights every section before writing multi-file edits", async () => {
 		await withTempDir(async tempDir => {
 			const aPath = path.join(tempDir, "a.ts");

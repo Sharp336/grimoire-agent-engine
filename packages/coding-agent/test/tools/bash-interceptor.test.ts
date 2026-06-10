@@ -84,6 +84,39 @@ describe("default echo/printf redirect rule", () => {
 	});
 });
 
+describe("default scripted file-write rules", () => {
+	const tools = ["edit"];
+
+	it("blocks Python and JavaScript one-liners that write files", () => {
+		const python = checkBashInterception(
+			"python -c \"from pathlib import Path; Path('src.ts').write_text('x')\"",
+			tools,
+			DEFAULT_BASH_INTERCEPTOR_RULES,
+		);
+		const node = checkBashInterception(
+			"node -e \"require('fs').writeFileSync('src.ts','x')\"",
+			tools,
+			DEFAULT_BASH_INTERCEPTOR_RULES,
+		);
+
+		expect(python.block).toBe(true);
+		expect(python.suggestedTool).toBe("edit");
+		expect(python.message).toContain("hashline snapshots");
+		expect(node.block).toBe(true);
+		expect(node.suggestedTool).toBe("edit");
+		expect(node.message).toContain("hashline snapshots");
+	});
+
+	it("allows Python and JavaScript one-liners that only compute output", () => {
+		expect(checkBashInterception('python -c "print(1 + 1)"', tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
+			false,
+		);
+		expect(checkBashInterception('node -e "console.log(1 + 1)"', tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
+			false,
+		);
+	});
+});
+
 describe("BashTool argument validation", () => {
 	it("preserves async requests so disabled async mode returns the explicit error", async () => {
 		const tool = createBashTool([]);
