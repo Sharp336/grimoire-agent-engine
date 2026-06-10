@@ -65,6 +65,7 @@ function createCtx(overrides?: { pathMaxLength?: number; branch?: string | null 
 			pr: null,
 		},
 		usage: null,
+		localModelEnergy: null,
 	};
 }
 

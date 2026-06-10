@@ -3,6 +3,7 @@ import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
+import { formatLocalModelEnergy } from "../../../metrics/local-model-energy";
 import { type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath } from "../../../tools/render-utils";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
@@ -105,6 +106,11 @@ const modelSegment: StatusLineSegment = {
 					}
 				}
 			}
+		}
+
+		const energyText = ctx.localModelEnergy ? formatLocalModelEnergy(ctx.localModelEnergy.joules) : null;
+		if (energyText) {
+			content += `${theme.sep.dot}${energyText}`;
 		}
 
 		return { content: theme.fg("statusLineModel", content), visible: true };

@@ -11,6 +11,7 @@
 
 ### Added
 
+- Added local-model GPU energy accounting for the status-line model segment. Local engine streams (`ollama`, `llama.cpp`, `lm-studio`, `vllm` on loopback URLs) are sampled through `nvidia-smi` power draw and shown as cumulative local-model energy when available.
 - Added pre-TUI startup input capture so users could type while interactive sessions initialize and keep their draft while the application loads
 - Snapcompact compaction now passes the session model so frames render in the provider-optimal shape (unscii `8x8r-bw` for Anthropic-family/unknown APIs, `8x8r-sent` for Google, Lanczos-stretched `6x6u-sent` with `detail: "original"` for OpenAI), per the snapcompact 200k-token evals
 - Added queued submission replay so Enter presses made before startup completion are submitted automatically once interactive mode begins

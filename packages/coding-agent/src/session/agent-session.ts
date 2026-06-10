@@ -172,6 +172,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import type { IrcMessage } from "../irc/bus";
 import { resolveMemoryBackend } from "../memory-backend";
+import { streamWithLocalModelEnergy, withLocalModelEnergyStreamFn } from "../metrics/local-model-energy";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
@@ -1127,6 +1128,7 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.agent.streamFn = withLocalModelEnergyStreamFn(this.agent.streamFn);
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#autoApprove = config.autoApprove === true;
@@ -9155,7 +9157,12 @@ export class AgentSession {
 		let providerReplyText = "";
 		let emittedReplyText = "";
 		let assistantMessage: AssistantMessage | undefined;
-		const stream = streamSimple(model, obfuscateProviderContext(this.#obfuscator, context), options);
+		const stream = await streamWithLocalModelEnergy(
+			model,
+			obfuscateProviderContext(this.#obfuscator, context),
+			options,
+			streamSimple,
+		);
 		for await (const event of stream) {
 			if (event.type === "text_delta") {
 				providerReplyText += event.delta;

@@ -70,6 +70,12 @@ export interface SegmentContext {
 		fiveHour?: { percent: number; resetMinutes?: number };
 		sevenDay?: { percent: number; resetHours?: number };
 	} | null;
+	localModelEnergy: {
+		joules: number;
+		active: boolean;
+		available: boolean;
+		lastWatts: number | null;
+	} | null;
 }
 
 export interface RenderedSegment {

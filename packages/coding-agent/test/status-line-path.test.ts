@@ -51,6 +51,7 @@ function createPathContext(): SegmentContext {
 			pr: null,
 		},
 		usage: null,
+		localModelEnergy: null,
 	};
 }
 

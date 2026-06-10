@@ -41,6 +41,7 @@ function createCtx(usage: Partial<SegmentContext["usageStats"]>): SegmentContext
 			pr: null,
 		},
 		usage: null,
+		localModelEnergy: null,
 	};
 }
 

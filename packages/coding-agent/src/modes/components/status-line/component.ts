@@ -6,6 +6,7 @@ import { type Component, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui"
 import { formatCount, getProjectDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { settings } from "../../../config/settings";
+import { getLocalModelEnergyMonitor } from "../../../metrics/local-model-energy";
 import type { AgentSession } from "../../../session/agent-session";
 import * as git from "../../../utils/git";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
@@ -145,6 +146,7 @@ export class StatusLineComponent implements Component {
 	#cachedBranchCwd: string | undefined = undefined;
 	#gitWatcher: fs.FSWatcher | null = null;
 	#onBranchChange: (() => void) | null = null;
+	#unsubscribeLocalModelEnergy: (() => void) | undefined;
 	#autoCompactEnabled: boolean = true;
 	#hookStatuses: Map<string, string> = new Map();
 	#subagentCount: number = 0;
@@ -242,6 +244,11 @@ export class StatusLineComponent implements Component {
 
 	watchBranch(onBranchChange: () => void): void {
 		this.#onBranchChange = onBranchChange;
+		if (!this.#unsubscribeLocalModelEnergy) {
+			this.#unsubscribeLocalModelEnergy = getLocalModelEnergyMonitor().subscribe(() => {
+				this.#onBranchChange?.();
+			});
+		}
 		this.#setupGitWatcher();
 	}
 
@@ -274,6 +281,10 @@ export class StatusLineComponent implements Component {
 		if (this.#gitWatcher) {
 			this.#gitWatcher.close();
 			this.#gitWatcher = null;
+		}
+		if (this.#unsubscribeLocalModelEnergy) {
+			this.#unsubscribeLocalModelEnergy();
+			this.#unsubscribeLocalModelEnergy = undefined;
 		}
 	}
 
@@ -662,6 +673,7 @@ export class StatusLineComponent implements Component {
 				pr: this.#lookupPr(),
 			},
 			usage: this.#cachedUsage,
+			localModelEnergy: getLocalModelEnergyMonitor().snapshotForModel(state.model ?? this.session.model),
 		};
 	}
 
