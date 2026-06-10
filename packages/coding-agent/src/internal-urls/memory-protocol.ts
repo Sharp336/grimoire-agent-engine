@@ -11,8 +11,8 @@ const MEMORY_NAMESPACE = "root";
 
 /**
  * Snapshot of memory roots for every registered session, deduped.
- * Each session has its own cwd (possibly a worktree), so subagents and main
- * may see different roots.
+ * Linked worktrees of the same repository resolve to the same memory project
+ * root unless an explicit `memory.projectKey` overrides that identity.
  */
 export function memoryRootsFromRegistry(): string[] {
 	const agentDir = getAgentDir();
@@ -20,7 +20,7 @@ export function memoryRootsFromRegistry(): string[] {
 	for (const ref of AgentRegistry.global().list()) {
 		const sm = ref.session?.sessionManager;
 		if (!sm) continue;
-		const root = getMemoryRoot(agentDir, sm.getCwd());
+		const root = getMemoryRoot(agentDir, sm.getCwd(), ref.session?.settings.get("memory.projectKey"));
 		if (root && !roots.includes(root)) roots.push(root);
 	}
 	return roots;
@@ -123,9 +123,8 @@ async function tryResolveInRoot(url: InternalUrl, memoryRoot: string): Promise<I
 /**
  * Protocol handler for memory:// URLs.
  *
- * Walks every active session's memory root. Worktree-based subagents have
- * their own root; first one containing the file wins. Parent and subagent
- * sharing a cwd see the same file regardless of order.
+ * Walks every active session's memory root. Linked worktrees of the same
+ * repository normally share a root; first one containing the file wins.
  */
 export class MemoryProtocolHandler implements ProtocolHandler {
 	readonly scheme = "memory";

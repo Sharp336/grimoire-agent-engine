@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { resolveMemoryProjectIdentity } from "../memory-project-identity";
 
 export interface MemoryThread {
 	id: string;
@@ -37,11 +38,11 @@ const GLOBAL_KIND = "memory_consolidate_global";
 const DEFAULT_RETRY_REMAINING = 3;
 
 /**
- * Per-project job key so Phase 2 consolidation is isolated to a single cwd.
- * Previously a single "global" key caused cross-project memory contamination.
+ * Per-project job key keyed by stable memory project identity, not by cwd.
+ * Linked git worktrees therefore share one local-memory consolidation lane.
  */
 function globalJobKey(cwd: string): string {
-	return `global:${cwd}`;
+	return `global:${resolveMemoryProjectIdentity(cwd).segment}`;
 }
 
 export function openMemoryDb(dbPath: string): Database {
@@ -486,21 +487,19 @@ WHERE kind = ? AND job_key = ? AND status = 'running' AND ownership_token = ?
 	return Number(result.changes ?? 0) > 0;
 }
 
-// Filter by cwd so each project only consolidates its own thread outputs.
-// Before this filter existed, whichever project ran Phase 2 first got every
-// project's data written into its memory directory (see #369).
+// Filter by stable memory project identity so linked worktrees of the same
+// repository consolidate together without reintroducing cross-project leakage.
 export function listStage1OutputsForGlobal(db: Database, limit: number, cwd: string): Stage1OutputRow[] {
+	const projectSegment = resolveMemoryProjectIdentity(cwd).segment;
 	const rows = db
 		.prepare(`
 SELECT o.thread_id, o.source_updated_at, o.raw_memory, o.rollout_summary, o.rollout_slug, o.generated_at, t.cwd
 FROM stage1_outputs o
 LEFT JOIN threads t ON t.id = o.thread_id
 WHERE (TRIM(COALESCE(o.raw_memory, '')) != '' OR TRIM(COALESCE(o.rollout_summary, '')) != '')
-  AND t.cwd = ?
 ORDER BY o.source_updated_at DESC
-LIMIT ?
 `)
-		.all(cwd, limit) as Array<{
+		.all() as Array<{
 		thread_id: string;
 		source_updated_at: number;
 		raw_memory: string;
@@ -509,15 +508,18 @@ LIMIT ?
 		generated_at: number;
 		cwd: string | null;
 	}>;
-	return rows.map(row => ({
-		threadId: row.thread_id,
-		sourceUpdatedAt: row.source_updated_at,
-		rawMemory: row.raw_memory,
-		rolloutSummary: row.rollout_summary,
-		rolloutSlug: row.rollout_slug,
-		generatedAt: row.generated_at,
-		cwd: row.cwd ?? "",
-	}));
+	return rows
+		.filter(row => resolveMemoryProjectIdentity(row.cwd ?? "").segment === projectSegment)
+		.slice(0, limit)
+		.map(row => ({
+			threadId: row.thread_id,
+			sourceUpdatedAt: row.source_updated_at,
+			rawMemory: row.raw_memory,
+			rolloutSummary: row.rollout_summary,
+			rolloutSlug: row.rollout_slug,
+			generatedAt: row.generated_at,
+			cwd: row.cwd ?? "",
+		}));
 }
 
 export function markGlobalPhase2Succeeded(

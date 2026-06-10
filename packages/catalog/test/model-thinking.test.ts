@@ -184,6 +184,20 @@ describe("model thinking derivation", () => {
 		expect(pinned.thinking?.supportsDisplay).toBe(false);
 	});
 
+	it("infers thinking when explicit metadata is malformed", () => {
+		const model = createModel({
+			id: "gpt-5.2",
+			api: "openai-responses",
+			provider: "openai",
+			thinking: { mode: "effort" } as ModelSpec<"openai-responses">["thinking"],
+		});
+
+		expect(model.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		});
+	});
+
 	it("bakes sampling-param rejection into anthropic compat", () => {
 		const sonnet45 = createModel({ id: "claude-sonnet-4-5", api: "anthropic-messages", provider: "anthropic" });
 		const opus47 = createModel({ id: "claude-opus-4.7", api: "anthropic-messages", provider: "anthropic" });
