@@ -157,9 +157,11 @@ describe("AgentSession shake", () => {
 			session.settings.set("compaction.thresholdPercent", 1);
 			session.settings.set("contextPromotion.enabled", false);
 
+			// Free enough that the post-shake re-check (provider-anchored, with the
+			// recovery band) sees the pressure as resolved and no fallback runs.
 			const shakeSpy = vi
 				.spyOn(session, "shake")
-				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 500 });
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 10_000 });
 
 			const assistantMessage: AssistantMessage = {
 				role: "assistant",
@@ -244,6 +246,128 @@ describe("AgentSession shake", () => {
 				e => e.type === "auto_compaction_start" && (e as { action?: string }).action === "context-full",
 			);
 			expect(fullStart).toBeDefined();
+		});
+
+		it("falls back when provider-reported usage stays above the threshold even though the local estimate is below it", async () => {
+			session.settings.set("compaction.strategy", "shake");
+			session.settings.set("compaction.thresholdTokens", 2000);
+			session.settings.set("contextPromotion.enabled", false);
+
+			// Agent state: a short assistant turn whose *provider-reported* usage is
+			// far above the threshold. The local estimator only sees a few dozen
+			// tokens of text, so the pre-fix re-check declared the pressure resolved
+			// ("handled") and re-armed the auto-continue prompt after every turn.
+			const bigUsage = { ...usage, input: 10_000, output: 1_000, totalTokens: 11_000 };
+			session.agent.replaceMessages([
+				{ role: "user", content: [{ type: "text", text: "hi" }], timestamp: Date.now() - 2 } as never,
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "short" }],
+					...apiInfo,
+					stopReason: "stop",
+					usage: bigUsage,
+					timestamp: Date.now() - 1,
+				} as never,
+			]);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 100 });
+
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: bigUsage,
+				timestamp: Date.now(),
+			};
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await Bun.sleep(50);
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			const shakeEnd = events.find(
+				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
+			) as { errorMessage?: string } | undefined;
+			expect(shakeEnd).toBeDefined();
+			expect(shakeEnd?.errorMessage).toMatch(/falling back to context-full/i);
+			const fullStart = events.find(
+				e => e.type === "auto_compaction_start" && (e as { action?: string }).action === "context-full",
+			);
+			expect(fullStart).toBeDefined();
+		});
+
+		it("falls back when shake lands inside the recovery band just under the threshold", async () => {
+			session.settings.set("compaction.strategy", "shake");
+			session.settings.set("compaction.thresholdTokens", 2000);
+			session.settings.set("contextPromotion.enabled", false);
+
+			// 2,500 reported - 600 freed = 1,900: under the 2,000 threshold but above
+			// the 0.8 recovery band (1,600). Without hysteresis this is "handled" and
+			// the session oscillates at the boundary, re-firing shake every turn.
+			const nearUsage = { ...usage, input: 2_000, output: 500, totalTokens: 2_500 };
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: nearUsage,
+				timestamp: Date.now(),
+			};
+			session.agent.replaceMessages([assistantMessage as never]);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 600 });
+
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await Bun.sleep(50);
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			const shakeEnd = events.find(
+				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
+			) as { errorMessage?: string } | undefined;
+			expect(shakeEnd?.errorMessage).toMatch(/falling back to context-full/i);
+		});
+
+		it("stays handled when shake brings the reported usage below the recovery band", async () => {
+			session.settings.set("compaction.strategy", "shake");
+			session.settings.set("compaction.thresholdTokens", 2000);
+			session.settings.set("contextPromotion.enabled", false);
+
+			// 2,500 reported - 1,200 freed = 1,300: below the 0.8 recovery band
+			// (1,600), so shake genuinely resolved the pressure and no fallback runs.
+			const nearUsage = { ...usage, input: 2_000, output: 500, totalTokens: 2_500 };
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: nearUsage,
+				timestamp: Date.now(),
+			};
+			session.agent.replaceMessages([assistantMessage as never]);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_200 });
+
+			session.agent.emitExternalEvent({ type: "message_end", message: assistantMessage });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMessage] });
+			await Bun.sleep(50);
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			const shakeEnd = events.find(
+				e => e.type === "auto_compaction_end" && (e as { action?: string }).action === "shake",
+			) as { errorMessage?: string } | undefined;
+			expect(shakeEnd).toBeDefined();
+			expect(shakeEnd?.errorMessage).toBeUndefined();
+			const fullStart = events.find(
+				e => e.type === "auto_compaction_start" && (e as { action?: string }).action === "context-full",
+			);
+			expect(fullStart).toBeUndefined();
 		});
 	});
 });

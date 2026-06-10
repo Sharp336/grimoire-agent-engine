@@ -50,6 +50,7 @@ import {
 	generateBranchSummary,
 	generateHandoff,
 	prepareCompaction,
+	resolveThresholdTokens,
 	type ShakeConfig,
 	type ShakeRegion,
 	type SummaryOptions,
@@ -297,6 +298,15 @@ export type AsyncJobSnapshotItem = Pick<AsyncJob, "id" | "type" | "status" | "la
 const EMPTY_STOP_MAX_RETRIES = 3;
 const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;
 const RETRY_BACKOFF_JITTER_RATIO = 0.25;
+/**
+ * Recovery band for the post-shake pressure re-check: shake must bring the
+ * provider-anchored context size below this fraction of the compaction
+ * threshold, otherwise we fall back to context-full compaction. Requiring
+ * real headroom (rather than "just under the threshold") prevents sessions
+ * from oscillating at the boundary, where each turn re-triggers shake and
+ * re-fires the auto-continue prompt.
+ */
+const SHAKE_RECOVERY_FACTOR = 0.8;
 
 function calculateRetryBackoffDelayMs(baseDelayMs: number, attempt: number): number {
 	const cappedDelayMs = Math.min(Math.max(0, baseDelayMs) * 2 ** Math.max(0, attempt - 1), RETRY_BACKOFF_MAX_DELAY_MS);
@@ -6552,6 +6562,26 @@ export class AgentSession {
 		return tokens;
 	}
 
+	/**
+	 * Provider-reported context size at the end of the last completed turn, or
+	 * `undefined` when no assistant message carries usable usage data. Anchors
+	 * the post-shake pressure re-check to real token counts: the pre-flight
+	 * estimator can drift far below provider-reported usage, which silently
+	 * disarms the #2119 dead-loop guard.
+	 */
+	#lastReportedContextTokens(): number | undefined {
+		const messages = this.agent.state.messages;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const message = messages[i];
+			if (message.role !== "assistant") continue;
+			const usage = (message as AssistantMessage).usage;
+			if (!usage) continue;
+			const tokens = calculateContextTokens(usage);
+			if (Number.isFinite(tokens) && tokens > 0) return tokens;
+		}
+		return undefined;
+	}
+
 	async #runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.model;
 		if (!model) return;
@@ -7982,6 +8012,16 @@ export class AgentSession {
 			// shake runs, but the resulting context is still above the configured
 			// threshold. The next agent_end would re-trigger shake, which has nothing
 			// new to drop on the second pass, so the loop spins until the user kills it.
+			// Two hardenings over the original re-check:
+			// - Anchor the post-shake figure to the provider-reported usage of the
+			//   last completed turn minus what shake freed; fall back to the local
+			//   estimator only when no usage data exists. The estimator can read far
+			//   below provider-reported usage, silently disarming this guard while
+			//   the threshold trigger (which uses provider usage) keeps re-firing.
+			// - Require shake to bring the context into a recovery band below the
+			//   threshold (SHAKE_RECOVERY_FACTOR) instead of merely under it, so a
+			//   shake that frees a trickle each turn cannot oscillate at the boundary
+			//   and re-inject the auto-continue prompt after every turn.
 			// Same hazard for "incomplete" (the retry would re-hit the length cap) and
 			// for the existing "overflow + nothing reclaimed" case. In every recovery
 			// reason we hand off to the summarization-driven context-full path so the
@@ -7989,8 +8029,16 @@ export class AgentSession {
 			// re-checks usage before re-firing and cannot dead-loop on its own.
 			const contextWindow = this.model?.contextWindow ?? 0;
 			const compactionSettings = this.settings.getGroup("compaction");
-			const postShakeTokens = contextWindow > 0 ? this.#estimatePendingPromptTokens([]) : 0;
-			const stillOverThreshold = shouldCompact(postShakeTokens, contextWindow, compactionSettings);
+			const lastReportedTokens = this.#lastReportedContextTokens();
+			const postShakeTokens =
+				lastReportedTokens !== undefined
+					? Math.max(0, lastReportedTokens - result.tokensFreed)
+					: contextWindow > 0
+						? this.#estimatePendingPromptTokens([])
+						: 0;
+			const stillOverThreshold =
+				contextWindow > 0 &&
+				postShakeTokens > SHAKE_RECOVERY_FACTOR * resolveThresholdTokens(contextWindow, compactionSettings);
 			const shouldFallBack = reason !== "idle" && ((reason === "overflow" && !reclaimed) || stillOverThreshold);
 			if (shouldFallBack) {
 				const errorMessage = reclaimed
