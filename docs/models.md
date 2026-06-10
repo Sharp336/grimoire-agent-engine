@@ -523,6 +523,39 @@ providers:
 
 The built-in model policy currently links OpenAI `codex-spark` variants to `gpt-5.5`, and `gpt-5.5` to `gpt-5.4`, when that target exists on the same provider/API.
 
+## OpenAI-compatible provider
+
+Put `OPENAI_BASE_URL` in the agent env file (`~/.omp/agent/.env`, respecting `PI_CODING_AGENT_DIR`) to activate a separate runtime provider named `openai-compatible`. This does not change the official `openai` provider or its default `https://api.openai.com/v1` base URL.
+
+Discovery normalizes `OPENAI_BASE_URL` to an OpenAI-style `/v1` base URL, calls `<normalized-base>/models`, and creates selectable models under `openai-compatible/<model-id>`. Authentication uses the dedicated `OPENAI_COMPAT_API_KEY`; `OPENAI_API_KEY` remains reserved for the official `openai` provider.
+
+If both `OPENAI_BASE_URL` and `providers.openai-compatible.baseUrl` are set, `OPENAI_BASE_URL` wins.
+
+```dotenv
+OPENAI_BASE_URL=https://proxy.example.com/v1
+OPENAI_COMPAT_API_KEY=sk-...
+```
+
+The same provider can also be configured in `models.yml` when you need static headers, compat overrides, or explicit discovery config:
+
+```yaml
+providers:
+  openai-compatible:
+    baseUrl: https://proxy.example.com/v1
+    api: openai-completions
+    apiKey: OPENAI_COMPAT_API_KEY
+    discovery:
+      type: openai-models-list
+    headers:
+      HTTP-Referer: https://omp.sh/
+    compat:
+      supportsStore: false
+      supportsDeveloperRole: true
+      toolStrictMode: all_strict
+```
+
+Routing headers and request-shape compatibility quirks stay in `models.yml` via `providers.openai-compatible.headers` and `providers.openai-compatible.compat`.
+
 ## Compatibility and routing fields
 
 The `compat` block on a provider or model overrides the URL-based auto-detection in `packages/ai/src/providers/openai-completions-compat.ts`. It is validated by `OpenAICompatSchema` in `packages/coding-agent/src/config/models-config-schema.ts` and consumed by every `openai-completions` transport (`packages/ai/src/providers/openai-completions.ts`). The canonical type is `OpenAICompat` in `packages/ai/src/types.ts`.

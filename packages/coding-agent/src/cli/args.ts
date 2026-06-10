@@ -262,6 +262,8 @@ export function getExtraHelpText(): string {
   CLAUDE_CODE_CLIENT_KEY     - Client private key (PEM path or inline PEM) for mTLS
   NODE_EXTRA_CA_CERTS        - CA bundle path (or inline PEM) for server certificate validation
   OPENAI_API_KEY             - OpenAI GPT models
+  OPENAI_BASE_URL            - In ~/.omp/agent/.env: activate openai-compatible and discover <base>/models
+  OPENAI_COMPAT_API_KEY      - In ~/.omp/agent/.env: API key for openai-compatible
   GEMINI_API_KEY             - Google Gemini models
   COPILOT_GITHUB_TOKEN      - GitHub Copilot
 

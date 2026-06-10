@@ -35,7 +35,8 @@ These are consumed via `getEnvApiKey()` (`packages/ai/src/stream.ts`) unless not
 | `ANTHROPIC_OAUTH_TOKEN`         | Anthropic API auth                               | Using Anthropic with OAuth token auth                          | Takes precedence over `ANTHROPIC_API_KEY` for provider auth resolution                              |
 | `ANTHROPIC_API_KEY`             | Anthropic API auth                               | Using Anthropic without OAuth token                            | Fallback after `ANTHROPIC_OAUTH_TOKEN`                                                              |
 | `ANTHROPIC_FOUNDRY_API_KEY`     | Anthropic via Azure Foundry / enterprise gateway | `CLAUDE_CODE_USE_FOUNDRY` enabled                              | Takes precedence over `ANTHROPIC_OAUTH_TOKEN` and `ANTHROPIC_API_KEY` when Foundry mode is enabled  |
-| `OPENAI_API_KEY`                | OpenAI auth                                      | Using OpenAI-family providers without explicit apiKey argument | Used by OpenAI Completions/Responses providers                                                      |
+| `OPENAI_API_KEY`                | Official OpenAI auth                             | Using the official `openai` provider without explicit apiKey argument | Activates official `openai/*` models only                                                           |
+| `OPENAI_COMPAT_API_KEY`         | `openai-compatible` auth                         | Using `OPENAI_BASE_URL` with an authenticated OpenAI-compatible endpoint | Dedicated key for `openai-compatible`; does not fall back to `OPENAI_API_KEY`                       |
 | `GEMINI_API_KEY`                | Google Gemini auth                               | Using `google` provider models                                 | Primary key for Gemini provider mapping                                                             |
 | `GOOGLE_API_KEY`                | Gemini image tool auth fallback                  | Using `gemini_image` tool without `GEMINI_API_KEY`             | Used by coding-agent image tool fallback path                                                       |
 | `GROQ_API_KEY`                  | Groq auth                                        | Using Groq models                                              |                                                                                                     |
@@ -106,6 +107,17 @@ The gateway has no dedicated env vars — it inherits `OMP_AUTH_BROKER_*`. Its o
 ---
 
 ## 2) Provider-specific runtime configuration
+
+### OpenAI-compatible provider
+
+Put these in the agent env file (`~/.omp/agent/.env`, respecting `PI_CODING_AGENT_DIR`). Env files are loaded at process startup, so restart `omp` after editing them. `OPENAI_BASE_URL` activates a separate runtime provider named `openai-compatible`. It does not modify the official `openai` provider. Model discovery normalizes the value to an OpenAI-style `/v1` base URL and calls `<normalized-base>/models`; if `providers.openai-compatible.baseUrl` is also set in `models.yml`, `OPENAI_BASE_URL` wins.
+
+| Variable | Default / behavior |
+| -------- | ------------------ |
+| `OPENAI_BASE_URL` | Base URL for the `openai-compatible` provider. If it does not end in `/v1`, `/v1` is appended before runtime discovery calls `<base>/models`. |
+| `OPENAI_COMPAT_API_KEY` | API key for `openai-compatible`; this is intentionally separate from official `OPENAI_API_KEY`. |
+
+Request-shape compatibility options and routing headers for this provider remain configured in `models.yml` through `providers.openai-compatible.compat` and `providers.openai-compatible.headers`.
 
 ### Anthropic Foundry Gateway (Azure / enterprise proxy)
 

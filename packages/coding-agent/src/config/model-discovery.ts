@@ -530,7 +530,7 @@ function toLlamaCppNativeBaseUrl(baseUrl: string): string {
 	}
 }
 
-function normalizeOpenAIModelsListBaseUrl(baseUrl?: string): string {
+export function normalizeOpenAIModelsListBaseUrl(baseUrl?: string): string {
 	const defaultBaseUrl = "http://127.0.0.1:1234/v1";
 	const raw = baseUrl || defaultBaseUrl;
 	try {

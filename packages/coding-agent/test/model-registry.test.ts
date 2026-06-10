@@ -8,7 +8,7 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
-import { Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, Snowflake } from "@oh-my-pi/pi-utils";
 
 describe("ModelRegistry", () => {
 	let tempDir: string;
@@ -18,15 +18,24 @@ describe("ModelRegistry", () => {
 	let originalOllamaBaseUrl: string | undefined;
 	let originalOllamaHost: string | undefined;
 	let originalOllamaContextLength: string | undefined;
+	let originalOpenAIApiKey: string | undefined;
+	let originalOpenAICompatApiKey: string | undefined;
+	let originalOpenAIBaseUrl: string | undefined;
 
 	beforeEach(async () => {
 		resetSettingsForTest();
 		originalOllamaBaseUrl = Bun.env.OLLAMA_BASE_URL;
 		originalOllamaHost = Bun.env.OLLAMA_HOST;
 		originalOllamaContextLength = Bun.env.OLLAMA_CONTEXT_LENGTH;
+		originalOpenAIApiKey = Bun.env.OPENAI_API_KEY;
+		originalOpenAICompatApiKey = Bun.env.OPENAI_COMPAT_API_KEY;
+		originalOpenAIBaseUrl = Bun.env.OPENAI_BASE_URL;
 		delete Bun.env.OLLAMA_BASE_URL;
 		delete Bun.env.OLLAMA_HOST;
 		delete Bun.env.OLLAMA_CONTEXT_LENGTH;
+		delete Bun.env.OPENAI_API_KEY;
+		delete Bun.env.OPENAI_COMPAT_API_KEY;
+		delete Bun.env.OPENAI_BASE_URL;
 		tempDir = path.join(os.tmpdir(), `pi-test-model-registry-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 		modelsJsonPath = path.join(tempDir, "models.json");
@@ -53,6 +62,21 @@ describe("ModelRegistry", () => {
 			delete Bun.env.OLLAMA_CONTEXT_LENGTH;
 		} else {
 			Bun.env.OLLAMA_CONTEXT_LENGTH = originalOllamaContextLength;
+		}
+		if (originalOpenAIApiKey === undefined) {
+			delete Bun.env.OPENAI_API_KEY;
+		} else {
+			Bun.env.OPENAI_API_KEY = originalOpenAIApiKey;
+		}
+		if (originalOpenAICompatApiKey === undefined) {
+			delete Bun.env.OPENAI_COMPAT_API_KEY;
+		} else {
+			Bun.env.OPENAI_COMPAT_API_KEY = originalOpenAICompatApiKey;
+		}
+		if (originalOpenAIBaseUrl === undefined) {
+			delete Bun.env.OPENAI_BASE_URL;
+		} else {
+			Bun.env.OPENAI_BASE_URL = originalOpenAIBaseUrl;
 		}
 		authStorage.close();
 		if (tempDir && fs.existsSync(tempDir)) {
@@ -145,6 +169,16 @@ describe("ModelRegistry", () => {
 			}
 			throw new Error(`Unexpected URL: ${requestUrl}`);
 		};
+	}
+
+	function authorizationHeader(headers: RequestInit["headers"] | undefined): string | null | undefined {
+		if (!headers) return undefined;
+		if (headers instanceof Headers) return headers.get("Authorization");
+		if (Array.isArray(headers)) return new Headers(headers).get("Authorization");
+		const value = headers.Authorization ?? headers.authorization;
+		if (typeof value === "string") return value;
+		if (Array.isArray(value)) return value.join(", ");
+		return undefined;
 	}
 
 	describe("canonical equivalence", () => {
@@ -720,6 +754,160 @@ describe("ModelRegistry", () => {
 			const compat = getOpenAICompat(model);
 			expect(compat?.supportsUsageInStreaming).toBe(true);
 			expect(compat?.maxTokensField).toBe("max_completion_tokens");
+		});
+	});
+
+	describe("OpenAI-compatible env provider", () => {
+		test("OPENAI_COMPAT_API_KEY does not make official OpenAI available", () => {
+			$env.OPENAI_COMPAT_API_KEY = "compat-key";
+			$env.OPENAI_BASE_URL = "https://compat.example.com/v1";
+			writeModelsJson({});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			expect(getModelsForProvider(registry, "openai").length).toBeGreaterThan(0);
+			expect(registry.getAvailable().some(model => model.provider === "openai")).toBe(false);
+		});
+
+		test("OPENAI_API_KEY is not reused for OpenAI-compatible discovery", async () => {
+			$env.OPENAI_API_KEY = "official-key";
+			$env.OPENAI_BASE_URL = "https://compat.example.com/v1";
+			writeModelsJson({});
+
+			const fetchMock: FetchImpl = async (input, init) => {
+				expect(String(input)).toBe("https://compat.example.com/v1/models");
+				expect(authorizationHeader(init?.headers)).toBeUndefined();
+				return new Response(JSON.stringify({ data: [{ id: "public-model" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			};
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refreshProvider("openai-compatible", "online");
+
+			expect(registry.find("openai-compatible", "public-model")?.provider).toBe("openai-compatible");
+		});
+
+		test("OPENAI_BASE_URL activates discovery when models config is missing", async () => {
+			$env.OPENAI_COMPAT_API_KEY = "compat-key";
+			$env.OPENAI_BASE_URL = "https://compat.example.com/v1";
+
+			const fetchMock = mockOpenAiCompatibleModels("https://compat.example.com/v1/models", ["env-only-model"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			expect(registry.getDiscoverableProviders()).toContain("openai-compatible");
+
+			await registry.refreshProvider("openai-compatible", "online");
+
+			const model = registry.find("openai-compatible", "env-only-model");
+			expect(model?.baseUrl).toBe("https://compat.example.com/v1");
+		});
+
+		test("OPENAI_BASE_URL without /v1 stores the normalized request baseUrl", async () => {
+			$env.OPENAI_BASE_URL = "https://compat.example.com";
+
+			const fetchMock = mockOpenAiCompatibleModels("https://compat.example.com/v1/models", ["env-root-model"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("openai-compatible", "online");
+
+			const model = registry.find("openai-compatible", "env-root-model");
+			expect(model?.baseUrl).toBe("https://compat.example.com/v1");
+		});
+
+		test("OPENAI_BASE_URL activates a separate discovered provider without changing official OpenAI", async () => {
+			$env.OPENAI_COMPAT_API_KEY = "compat-key";
+			$env.OPENAI_BASE_URL = "https://compat.example.com/v1";
+			writeModelsJson({});
+
+			const fetchMock: FetchImpl = async (input, init) => {
+				expect(String(input)).toBe("https://compat.example.com/v1/models");
+				const headers = init?.headers as Headers | Record<string, string> | undefined;
+				const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+				expect(authHeader).toBe("Bearer compat-key");
+				return new Response(JSON.stringify({ data: [{ id: "local-gpt" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			};
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			expect(registry.getDiscoverableProviders()).toContain("openai-compatible");
+			expect(registry.find("openai", "gpt-5.4")?.baseUrl).toBe("https://api.openai.com/v1");
+
+			await registry.refreshProvider("openai-compatible", "online");
+
+			const model = registry.find("openai-compatible", "local-gpt");
+			expect(model?.provider).toBe("openai-compatible");
+			expect(model?.api).toBe("openai-completions");
+			expect(model?.baseUrl).toBe("https://compat.example.com/v1");
+		});
+
+		test("OPENAI_BASE_URL wins over models.yml openai-compatible baseUrl", async () => {
+			$env.OPENAI_BASE_URL = "https://env.example.com/v1";
+			writeRawModelsJson({
+				"openai-compatible": {
+					baseUrl: "https://yaml.example.com/v1",
+					apiKey: "yaml-key",
+					api: "openai-completions",
+					discovery: { type: "openai-models-list" },
+				},
+			});
+
+			const fetchMock = mockOpenAiCompatibleModels("https://env.example.com/v1/models", ["env-model"]);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+			await registry.refreshProvider("openai-compatible", "online");
+
+			const model = registry.find("openai-compatible", "env-model");
+			expect(model?.baseUrl).toBe("https://env.example.com/v1");
+		});
+
+		test("OPENAI_BASE_URL keeps models.yml headers and compat for OpenAI-compatible", async () => {
+			$env.OPENAI_BASE_URL = "https://env.example.com/v1";
+			writeRawModelsJson({
+				"openai-compatible": {
+					baseUrl: "https://yaml.example.com/v1",
+					apiKey: "yaml-key",
+					api: "openai-completions",
+					discovery: { type: "openai-models-list" },
+					headers: {
+						"HTTP-Referer": "https://omp.sh/",
+						"X-Route": "canary",
+					},
+					compat: {
+						supportsStore: false,
+						supportsDeveloperRole: true,
+						toolStrictMode: "all_strict",
+					},
+				},
+			});
+
+			const fetchMock: FetchImpl = async (input, init) => {
+				expect(String(input)).toBe("https://env.example.com/v1/models");
+				const headers = init?.headers as Headers | Record<string, string> | undefined;
+				const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+				const routeHeader = headers instanceof Headers ? headers.get("X-Route") : headers?.["X-Route"];
+				expect(authHeader).toBe("Bearer yaml-key");
+				expect(routeHeader).toBe("canary");
+				return new Response(JSON.stringify({ data: [{ id: "routed-model" }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			};
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			await registry.refreshProvider("openai-compatible", "online");
+
+			const model = registry.find("openai-compatible", "routed-model");
+			const compat = getOpenAICompat(model);
+			expect(model?.baseUrl).toBe("https://env.example.com/v1");
+			expect(model?.headers?.["HTTP-Referer"]).toBe("https://omp.sh/");
+			expect(model?.headers?.["X-Route"]).toBe("canary");
+			expect(compat?.toolStrictMode).toBe("all_strict");
+			expect(compat?.supportsStore).toBe(false);
+			expect(compat?.supportsDeveloperRole).toBe(true);
 		});
 	});
 

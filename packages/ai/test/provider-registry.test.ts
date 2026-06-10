@@ -13,7 +13,13 @@ import type { OAuthCredentials, OAuthProvider } from "@oh-my-pi/pi-ai/registry/o
 import { getEnvApiKey } from "@oh-my-pi/pi-ai/stream";
 
 const FIXTURE_SOURCE = "provider-registry-test";
-const ENV_KEYS = ["ZENMUX_API_KEY", "EXA_API_KEY", "XAI_OAUTH_TOKEN"] as const;
+const ENV_KEYS = [
+	"ZENMUX_API_KEY",
+	"EXA_API_KEY",
+	"XAI_OAUTH_TOKEN",
+	"OPENAI_COMPAT_API_KEY",
+	"OPENAI_API_KEY",
+] as const;
 const originalEnv = new Map(ENV_KEYS.map(key => [key, Bun.env[key]]));
 
 afterEach(() => {
@@ -44,12 +50,21 @@ describe("provider registry auth surface", () => {
 		expect(getEnvApiKey("xai-oauth")).toBe("xai-oauth-env");
 	});
 
+	test("OpenAI-compatible provider uses only its own env key", () => {
+		Bun.env.OPENAI_API_KEY = "openai-env";
+		Bun.env.OPENAI_COMPAT_API_KEY = "compat-env";
+		expect(getEnvApiKey("openai-compatible")).toBe("compat-env");
+		delete Bun.env.OPENAI_COMPAT_API_KEY;
+		expect(getEnvApiKey("openai-compatible")).toBeUndefined();
+	});
+
 	test("login list contains loginable providers and excludes env-only model providers", () => {
 		const ids = getOAuthProviders().map(provider => provider.id);
 		expect(ids).toContain("zenmux");
 		expect(ids).toContain("kagi");
 		// openai has no interactive login flow.
 		expect(ids).not.toContain("openai");
+		expect(ids).not.toContain("openai-compatible");
 	});
 
 	test("paste-code login set is derived from pasteCodeFlow", () => {

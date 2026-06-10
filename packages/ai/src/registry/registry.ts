@@ -34,6 +34,7 @@ import { ollamaCloudProvider } from "./ollama-cloud";
 import { openaiProvider } from "./openai";
 import { openaiCodexProvider } from "./openai-codex";
 import { openaiCodexDeviceProvider } from "./openai-codex-device";
+import { openaiCompatibleProvider } from "./openai-compatible";
 import { opencodeGoProvider } from "./opencode-go";
 import { opencodeZenProvider } from "./opencode-zen";
 import { openrouterProvider } from "./openrouter";
@@ -119,6 +120,7 @@ const ALL = [
 	ollamaCloudProvider,
 	lmStudioProvider,
 	vllmProvider,
+	openaiCompatibleProvider,
 	openaiProvider,
 	googleProvider,
 	googleVertexProvider,

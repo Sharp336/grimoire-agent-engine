@@ -31,12 +31,15 @@ const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
 	"openai-codex",
 ];
 
+const OPENAI_COMPATIBLE_PROVIDER_ID = "openai-compatible";
+const OPENAI_COMPATIBLE_DEFAULT_API: Api = "openai-completions";
+
 const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = [
 	...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
 	...SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
 ];
 
-import type { ApiKeyResolver, FetchImpl } from "@oh-my-pi/pi-ai";
+import { type ApiKeyResolver, type FetchImpl, getEnvApiKey } from "@oh-my-pi/pi-ai";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import {
@@ -54,7 +57,7 @@ import {
 	resolveCanonicalVariant,
 	resolveModelReference,
 } from "@oh-my-pi/pi-catalog/identity";
-import { isRecord, logger } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger } from "@oh-my-pi/pi-utils";
 import { parseModelString, resolveProviderModelReference } from "../config/model-resolver";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
 import { type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
@@ -66,6 +69,7 @@ import {
 	discoverModelsByProviderType,
 	getImplicitOllamaBaseUrl,
 	getOllamaContextLengthOverride,
+	normalizeOpenAIModelsListBaseUrl,
 } from "./model-discovery";
 import { ModelsConfigFile, type ProviderValidationModel, validateProviderConfiguration } from "./models-config";
 import type { ModelOverride, ModelsConfig, ProviderAuthMode } from "./models-config-schema";
@@ -320,6 +324,27 @@ function mergeCompat<TBase extends object, TOverride extends object>(
 			isRecord(baseValue) && isRecord(overrideValue) ? mergeCompat(baseValue, overrideValue) : overrideValue;
 	}
 	return merged as TBase & TOverride;
+}
+
+function trimmedEnv(name: string): string | undefined {
+	const value = $env[name]?.trim();
+	return value ? value : undefined;
+}
+
+function readOpenAICompatibleBaseUrlEnv(): string | undefined {
+	const value = trimmedEnv("OPENAI_BASE_URL");
+	return value ? normalizeOpenAIModelsListBaseUrl(value) : undefined;
+}
+
+function resolveOpenAICompatibleProviderBaseUrl(
+	providerName: string,
+	configBaseUrl: string | undefined,
+): string | undefined {
+	if (providerName !== OPENAI_COMPATIBLE_PROVIDER_ID) {
+		return configBaseUrl;
+	}
+	const baseUrl = readOpenAICompatibleBaseUrlEnv() ?? configBaseUrl;
+	return baseUrl ? normalizeOpenAIModelsListBaseUrl(baseUrl) : undefined;
 }
 
 /**
@@ -970,6 +995,59 @@ export class ModelRegistry {
 		}
 	}
 
+	#applyOpenAICompatibleEnvProvider(args: {
+		overrides: Map<string, ProviderOverride>;
+		keylessProviders: Set<string>;
+		discoverableProviders: DiscoveryProviderConfig[];
+		configuredProviders: Set<string>;
+	}): void {
+		const envBaseUrl = readOpenAICompatibleBaseUrlEnv();
+		if (envBaseUrl) {
+			args.overrides.set(
+				OPENAI_COMPATIBLE_PROVIDER_ID,
+				this.#mergeProviderOverride(args.overrides.get(OPENAI_COMPATIBLE_PROVIDER_ID), {
+					baseUrl: envBaseUrl,
+				}),
+			);
+		}
+
+		if (!envBaseUrl) {
+			return;
+		}
+
+		const override = args.overrides.get(OPENAI_COMPATIBLE_PROVIDER_ID);
+		const existingIndex = args.discoverableProviders.findIndex(
+			provider => provider.provider === OPENAI_COMPATIBLE_PROVIDER_ID,
+		);
+		const envDiscovery: DiscoveryProviderConfig = {
+			provider: OPENAI_COMPATIBLE_PROVIDER_ID,
+			api: OPENAI_COMPATIBLE_DEFAULT_API,
+			baseUrl: envBaseUrl,
+			headers: override?.headers,
+			compat: override?.compat,
+			discovery: { type: "openai-models-list" },
+			optional: false,
+		};
+		if (existingIndex >= 0) {
+			args.discoverableProviders[existingIndex] = {
+				...args.discoverableProviders[existingIndex],
+				baseUrl: envBaseUrl,
+				headers: override?.headers ?? args.discoverableProviders[existingIndex].headers,
+				compat: override?.compat ?? args.discoverableProviders[existingIndex].compat,
+			};
+		} else {
+			args.discoverableProviders.push(envDiscovery);
+		}
+
+		if (
+			!getEnvApiKey(OPENAI_COMPATIBLE_PROVIDER_ID) &&
+			!override?.apiKey &&
+			!args.configuredProviders.has(OPENAI_COMPATIBLE_PROVIDER_ID)
+		) {
+			args.keylessProviders.add(OPENAI_COMPATIBLE_PROVIDER_ID);
+		}
+	}
+
 	#loadCustomModels(): CustomModelsResult {
 		const { value, error, status } = this.#modelsConfigFile.tryLoad();
 
@@ -985,13 +1063,23 @@ export class ModelRegistry {
 				found: true,
 			};
 		} else if (status === "not-found") {
+			const overrides = new Map<string, ProviderOverride>();
+			const keylessProviders = new Set<string>();
+			const discoverableProviders: DiscoveryProviderConfig[] = [];
+			const configuredProviders = new Set<string>();
+			this.#applyOpenAICompatibleEnvProvider({
+				overrides,
+				keylessProviders,
+				discoverableProviders,
+				configuredProviders,
+			});
 			return {
 				models: [],
-				overrides: new Map(),
+				overrides,
 				modelOverrides: new Map(),
-				keylessProviders: new Set(),
-				discoverableProviders: [],
-				configuredProviders: new Set(),
+				keylessProviders,
+				discoverableProviders,
+				configuredProviders,
 				found: false,
 			};
 		}
@@ -1004,25 +1092,27 @@ export class ModelRegistry {
 		const configuredProviders = new Set(Object.keys(value.providers ?? {}));
 
 		for (const [providerName, providerConfig] of providerEntries) {
+			const providerBaseUrl = resolveOpenAICompatibleProviderBaseUrl(providerName, providerConfig.baseUrl);
 			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
 			const resolvedProviderApiKey = providerConfig.apiKey ? resolveConfigValue(providerConfig.apiKey) : undefined;
+			const providerCompat = providerConfig.compat;
 			// Always set overrides when baseUrl/headers/apiKey/authHeader/compat/disableStrictTools/transport are present
 			if (
-				providerConfig.baseUrl ||
+				providerBaseUrl ||
 				resolvedProviderHeaders ||
 				providerConfig.apiKey ||
 				providerConfig.authHeader !== undefined ||
-				providerConfig.compat ||
+				providerCompat ||
 				providerConfig.disableStrictTools ||
 				providerConfig.transport
 			) {
 				const disableStrictCompat = providerConfig.disableStrictTools ? { disableStrictTools: true } : undefined;
 				overrides.set(providerName, {
-					baseUrl: providerConfig.baseUrl,
+					baseUrl: providerBaseUrl,
 					headers: resolvedProviderHeaders,
 					apiKey: providerConfig.apiKey,
 					authHeader: providerConfig.authHeader,
-					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
+					compat: mergeCompat(providerCompat, disableStrictCompat),
 					transport: providerConfig.transport,
 				});
 			}
@@ -1040,9 +1130,9 @@ export class ModelRegistry {
 					// supported_endpoint_types; the provider-level api is only a
 					// fallback for entries that don't advertise one.
 					api: (providerConfig.api ?? "openai-completions") as Api,
-					baseUrl: providerConfig.baseUrl,
+					baseUrl: providerBaseUrl,
 					headers: resolvedProviderHeaders,
-					compat: mergeCompat(providerConfig.compat, disableStrictCompat),
+					compat: mergeCompat(providerCompat, disableStrictCompat),
 					discovery: providerConfig.discovery,
 					optional: false,
 				});
@@ -1069,6 +1159,13 @@ export class ModelRegistry {
 				allModelOverrides.set(providerName, perModel);
 			}
 		}
+
+		this.#applyOpenAICompatibleEnvProvider({
+			overrides,
+			keylessProviders,
+			discoverableProviders,
+			configuredProviders,
+		});
 
 		return {
 			models: this.#parseModels(value),
@@ -1476,6 +1573,7 @@ export class ModelRegistry {
 		for (const [providerName, providerConfig] of Object.entries(config.providers ?? {})) {
 			const modelDefs = providerConfig.models ?? [];
 			if (modelDefs.length === 0) continue; // Override-only, no custom models
+			const providerBaseUrl = resolveOpenAICompatibleProviderBaseUrl(providerName, providerConfig.baseUrl);
 			const resolvedProviderHeaders = resolveConfigHeaders(providerConfig.headers);
 			const resolvedProviderApiKey = providerConfig.apiKey ? resolveConfigValue(providerConfig.apiKey) : undefined;
 			if (providerConfig.apiKey) {
@@ -1488,7 +1586,7 @@ export class ModelRegistry {
 					: providerConfig.compat;
 				const model = buildCustomModelOverlay(
 					providerName,
-					providerConfig.baseUrl!,
+					providerBaseUrl!,
 					providerConfig.api as Api | undefined,
 					resolvedProviderHeaders,
 					providerConfig.apiKey,
