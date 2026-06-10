@@ -98,6 +98,11 @@ describe("default scripted file-write rules", () => {
 			tools,
 			DEFAULT_BASH_INTERCEPTOR_RULES,
 		);
+		const open = checkBashInterception(
+			"python -c \"open('src.py', mode='w').write('x')\"",
+			tools,
+			DEFAULT_BASH_INTERCEPTOR_RULES,
+		);
 
 		expect(python.block).toBe(true);
 		expect(python.suggestedTool).toBe("edit");
@@ -105,12 +110,22 @@ describe("default scripted file-write rules", () => {
 		expect(node.block).toBe(true);
 		expect(node.suggestedTool).toBe("edit");
 		expect(node.message).toContain("hashline snapshots");
+		expect(open.block).toBe(true);
+		expect(open.suggestedTool).toBe("edit");
+		expect(open.message).toContain("hashline snapshots");
 	});
 
 	it("allows Python and JavaScript one-liners that only compute output", () => {
 		expect(checkBashInterception('python -c "print(1 + 1)"', tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
 			false,
 		);
+		expect(
+			checkBashInterception(
+				"python -c \"import sys; sys.stdout.write('ok'); sys.stderr.write('progress')\"",
+				tools,
+				DEFAULT_BASH_INTERCEPTOR_RULES,
+			).block,
+		).toBe(false);
 		expect(checkBashInterception('node -e "console.log(1 + 1)"', tools, DEFAULT_BASH_INTERCEPTOR_RULES).block).toBe(
 			false,
 		);

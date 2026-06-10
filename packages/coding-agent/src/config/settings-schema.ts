@@ -247,7 +247,7 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	},
 	{
 		pattern:
-			"^\\s*(?:python\\d*(?:\\.\\d+)?|uv\\s+run\\s+python)\\s+(?:-[cCm]|--command)\\s+.*(?:\\.write_text\\s*\\(|\\.write_bytes\\s*\\(|open\\s*\\([^)]*,\\s*[\"'][^\"']*[wax+]|\\.write\\s*\\()",
+			"^\\s*(?:python\\d*(?:\\.\\d+)?|uv\\s+run\\s+python)\\s+(?:-[cCm]|--command)\\s+.*(?:\\.write_text\\s*\\(|\\.write_bytes\\s*\\(|\\bopen\\s*\\([^)]*(?:,\\s*[\"'][^\"']*[wax+]|,\\s*mode\\s*=\\s*[\"'][^\"']*[wax+])|\\.open\\s*\\([^)]*(?:,\\s*[\"'][^\"']*[wax+]|,\\s*mode\\s*=\\s*[\"'][^\"']*[wax+]))",
 		flags: "s",
 		tool: "edit",
 		message:
