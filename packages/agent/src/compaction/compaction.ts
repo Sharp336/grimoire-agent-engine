@@ -7,13 +7,14 @@
 
 import {
 	type AssistantMessage,
-	clampThinkingLevelForModel,
 	Effort,
+	type FetchImpl,
 	type Message,
 	type MessageAttribution,
 	type Model,
 	type Usage,
 } from "@oh-my-pi/pi-ai";
+import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { countTokens } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
@@ -538,10 +539,11 @@ function effortFromThinkingLevel(level: ThinkingLevel): Effort {
  * - Explicit effort → respect user choice → clamped per model.
  *
  * The clamp routes through `clampThinkingLevelForModel`, which returns
- * `undefined` for models with `compat.supportsReasoningEffort: false`
- * (e.g. `xai-oauth/grok-build`). That `undefined` then flows through to the
- * openai-responses mapper where `modelOmitsReasoningEffort` short-circuits
- * the wire param — no `requireSupportedEffort` throw.
+ * `undefined` for reasoning models without a thinking config — the build-time
+ * encoding of `compat.supportsReasoningEffort: false` (e.g.
+ * `xai-oauth/grok-build`). That `undefined` then flows through to the
+ * openai-responses mapper, which omits the wire param — no
+ * `requireSupportedEffort` throw.
  */
 function resolveCompactionEffort(model: Model, level: ThinkingLevel | undefined): Effort | undefined {
 	if (level === ThinkingLevel.Off) return undefined;
@@ -595,6 +597,8 @@ export interface SummaryOptions {
 	 * `resolveCompactionEffort` for the conversion contract.
 	 */
 	thinkingLevel?: ThinkingLevel;
+	/** Optional fetch implementation threaded into remote compaction calls. */
+	fetch?: FetchImpl;
 }
 
 export async function generateSummary(
@@ -647,6 +651,7 @@ export async function generateSummary(
 				prompt: promptText,
 			},
 			signal,
+			{ fetch: options.fetch },
 		);
 		return remote.summary;
 	}
@@ -992,6 +997,7 @@ export async function compact(
 		// silently falls back to Effort.High — the same defect e07b47ee4 fixed
 		// at the call sites, leaked back in here. See resolveCompactionEffort.
 		thinkingLevel: options?.thinkingLevel,
+		fetch: options?.fetch,
 	};
 
 	let preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, undefined);
@@ -1015,6 +1021,7 @@ export async function compact(
 					remoteHistory,
 					summaryOptions.remoteInstructions ?? SUMMARIZATION_SYSTEM_PROMPT,
 					signal,
+					{ fetch: summaryOptions.fetch },
 				);
 				preserveData = withOpenAiRemoteCompactionPreserveData(previousPreserveData, remote);
 			} catch (err) {

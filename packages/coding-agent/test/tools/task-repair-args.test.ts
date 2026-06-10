@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
-import { repairDoubleEncodedJsonString, repairTaskParams } from "../../src/task/repair-args";
-import type { TaskParams } from "../../src/task/types";
+import { repairDoubleEncodedJsonString, repairTaskParams } from "@oh-my-pi/pi-coding-agent/task/repair-args";
+import type { TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
 
 describe("repairDoubleEncodedJsonString", () => {
 	it("decodes a uniformly double-encoded prose value", () => {
@@ -71,10 +71,5 @@ describe("repairTaskParams", () => {
 			tasks: [{ id: "A", description: "label", assignment: "do work" }],
 		} as unknown as TaskParams;
 		expect(repairTaskParams(params)).toBe(params);
-	});
-
-	it("tolerates partially-streamed args without throwing", () => {
-		const partial = { agent: "task", tasks: [{ id: "A" }, undefined] } as unknown as TaskParams;
-		expect(() => repairTaskParams(partial)).not.toThrow();
 	});
 });

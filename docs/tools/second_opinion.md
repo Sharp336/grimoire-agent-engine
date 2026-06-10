@@ -7,9 +7,9 @@
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/second-opinion.md`
 - Reviewer system persona: `packages/coding-agent/src/prompts/tools/second-opinion-system.md`
 - Key collaborators:
-  - `packages/coding-agent/src/config/model-equivalence.ts` — `getModelSeries(...)` coarse vendor-lineage family used for the cross-family default and the same-family warning.
+  - `packages/catalog/src/identity/equivalence.ts` — `getModelSeries(...)` coarse vendor-lineage family used for the cross-family default and the same-family warning.
   - `packages/coding-agent/src/config/model-resolver.ts` — `expandRoleAlias(...)` / `resolveModelFromString(...)` / `formatModelString(...)` reviewer resolution.
-  - `packages/coding-agent/src/config/model-registry.ts` — `secondopinion` model role, `getAvailable(...)`, `getCanonicalId(...)`, `getApiKey(...)`.
+  - `packages/coding-agent/src/config/model-roles.ts` / `model-registry.ts` — `secondopinion` model role metadata plus `getAvailable(...)`, `getCanonicalId(...)`, `getApiKey(...)`.
   - `packages/agent/src/telemetry.ts` — `instrumentedCompleteSimple(...)` / `resolveTelemetry(...)` one-shot completion with oneshot kind `second_opinion`.
   - `packages/coding-agent/src/session/session-manager.ts` — `sessionManager.getBranch()` supplies the transcript.
 
@@ -25,7 +25,7 @@
 | `focus` | `string` | No | What the reviewer should scrutinize. Falls back to a general adversarial-review instruction when omitted. |
 | `model` | `string` | No | Explicit reviewer selector (`provider/id`, `id`, or substring). Bypasses the configured role and the picker; first-run transcript consent still applies; never persisted. |
 | `effort` | `"off" \| "low" \| "medium" \| "high"` | No (default `medium`) | Reviewer reasoning effort, clamped to what the model supports via `getSupportedEfforts(...)`. |
-| `lookback` | positive integer | No | Limit the review to the N most recent **rendered message turns** instead of all that fit the char budget. |
+| `lookback` | positive integer | No | Limit the review to the N most recent **rendered transcript turns** instead of all that fit the char budget. |
 
 The schema is `.strict()`: only these four fields are accepted.
 
@@ -74,7 +74,7 @@ There is intentionally **no** `priority.json` entry for `secondopinion`. Cross-f
 - Transcript rendering drops thinking and image blocks; tool calls render as `[tool call: <name>]` markers.
 
 ## Branch semantics
-`lookback` counts **rendered message turns** (user/assistant/tool-result/custom-message), not raw entries, bytes, or tokens. "Current branch" is `SessionManager.getBranch()` — the path from the current leaf to the root — so in a forked session the reviewer sees only the active path, never sibling branches.
+`lookback` counts **rendered transcript turns** (user/assistant/tool-result/custom-message/compaction/branch-summary), not raw entries, bytes, or tokens. "Current branch" is `SessionManager.getBranch()` — the path from the current leaf to the root — so in a forked session the reviewer sees only the active path, never sibling branches.
 
 ## Errors
 - Context / registry: `second_opinion requires an active session context.`, `second_opinion has no session transcript to review.`, `Model registry is unavailable for second_opinion.`, `No authenticated models available for second_opinion.`
@@ -86,6 +86,6 @@ There is intentionally **no** `priority.json` entry for `secondopinion`. Cross-f
 Failures surface as thrown `ToolError`s from `execute(...)`.
 
 ## Notes
-- The `secondopinion` model role is first-class (`MODEL_ROLES` / `MODEL_ROLE_IDS`) but intentionally absent from `cycleOrder` and `priority.json`.
+- The `secondopinion` model role is first-class (`MODEL_ROLES` / `getKnownRoleIds`) but intentionally absent from `cycleOrder`, `priority.json`, and generic fallback role lists used by unrelated commit/compaction requests.
 - Family inference uses `getModelSeries(...)` on the model's canonical id (so mirrors/proxies and point releases fold onto the same vendor lineage) and is used only for cross-family default selection and the same-family warning, never for resolution itself.
 - Distinct from `task(agent:"oracle")`: that re-runs the agent loop with tools and its own system prompt on a same-tier model; `second_opinion` is a stateless one-shot review of the verbatim transcript on a deliberately different model.

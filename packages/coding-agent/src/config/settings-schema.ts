@@ -246,7 +246,11 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 		message: "Use the `edit` tool instead of awk -i inplace. It provides diff preview and fuzzy matching.",
 	},
 	{
-		pattern: "^\\s*(echo|printf|cat\\s*<<)\\s+.*[^|]>\\s*\\S",
+		// `>` must sit outside quoted regions (so `echo "a -> b"` passes) and be
+		// followed by a plausible filename — including `$VAR` targets; `>|`
+		// (clobber) counts as a redirect; `>&2`/`2>&1` style fd duplication is
+		// not matched.
+		pattern: "^\\s*(echo|printf|cat\\s*<<)\\s+(?:[^\"'>]|\"[^\"]*\"|'[^']*')*(?<!\\|)>{1,2}\\|?\\s*[$\\w./~\"'-]",
 		tool: "write",
 		message: "Use the `write` tool instead of echo/cat redirection. It handles encoding and provides confirmation.",
 	},
@@ -256,11 +260,10 @@ export const SETTINGS_SCHEMA = {
 	// ────────────────────────────────────────────────────────────────────────
 	// General settings (no UI)
 	// ────────────────────────────────────────────────────────────────────────
-	lastChangelogVersion: { type: "string", default: undefined },
 	setupVersion: { type: "number", default: 0 },
 
 	// second_opinion tool: compact JSON fingerprint of the last interactively
-	// confirmed reviewer `{ sessionModel, slowModel, confirmedReviewer }`. Drives the
+	// confirmed reviewer `{ sessionFamily, slowFamily, confirmedReviewer }`. Drives the
 	// "session/slow family changed" picker re-prompt. Hidden from the UI; written
 	// only after an interactive picker confirmation (or when the role is edited
 	// out of band and silently adopted).
@@ -647,7 +650,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "appearance",
 			label: "Terminal Hyperlinks",
 			description:
-				"Wrap file paths in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
+				"Wrap paths and URLs in OSC 8 hyperlinks for terminal-native click-to-open (auto: detect support; off: never; always: unconditional)",
 		},
 	},
 	// Display rendering
@@ -672,6 +675,16 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"display.smoothStreaming": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			label: "Smooth Streaming",
+			description: "Reveal assistant text smoothly while streamed chunks arrive",
+		},
+	},
+
 	"display.showTokenUsage": {
 		type: "boolean",
 		default: false,
@@ -686,16 +699,6 @@ export const SETTINGS_SCHEMA = {
 		type: "boolean",
 		default: true, // will be computed based on platform if undefined
 		ui: { tab: "appearance", label: "Show Hardware Cursor", description: "Show terminal cursor for IME support" },
-	},
-
-	clearOnShrink: {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "appearance",
-			label: "Clear on Shrink",
-			description: "Clear empty rows when content shrinks (may cause flicker)",
-		},
 	},
 
 	// ────────────────────────────────────────────────────────────────────────
@@ -731,6 +734,16 @@ export const SETTINGS_SCHEMA = {
 			tab: "model",
 			label: "Repeat Tool Descriptions",
 			description: "Render full tool descriptions in the system prompt instead of a tool name list",
+		},
+	},
+
+	includeModelInPrompt: {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			label: "Include Model In Prompt",
+			description: "Surface the active model identifier in the system prompt so the agent knows which model it is",
 		},
 	},
 
@@ -902,6 +915,15 @@ export const SETTINGS_SCHEMA = {
 			label: "Max Retry Delay",
 			description:
 				"Maximum wait between retries, in ms. When the provider asks us to wait longer than this and no credential or model fallback succeeds, the request fails fast instead of sleeping (e.g. 3-hour Anthropic rate-limit windows).",
+		},
+	},
+	"retry.modelFallback": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			label: "Retry Model Fallback",
+			description: "Allow retry recovery to switch to configured fallback models",
 		},
 	},
 	"retry.fallbackChains": { type: "record", default: {} as Record<string, string[]> },
@@ -1857,7 +1879,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "editing",
 			label: "Hash Lines",
 			description:
-				"Include snapshot-tag headers and line numbers in read output for hashline edit mode (¶PATH#tag plus LINE:content)",
+				"Include snapshot-tag headers and line numbers in read output for hashline edit mode ([PATH#TAG] plus LINE:content)",
 		},
 	},
 
@@ -1965,6 +1987,17 @@ export const SETTINGS_SCHEMA = {
 		type: "boolean",
 		default: true,
 		ui: { tab: "editing", label: "LSP", description: "Enable the lsp tool for language server protocol" },
+	},
+
+	"lsp.lazy": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "editing",
+			label: "Lazy LSP Startup",
+			description:
+				"Start language servers on first use (lsp tool or editing a matching file type) instead of at session startup",
+		},
 	},
 
 	"lsp.formatOnWrite": {
@@ -2168,6 +2201,12 @@ export const SETTINGS_SCHEMA = {
 			label: "Create Todos Automatically",
 			description: "Automatically create a comprehensive todo list after the first message",
 		},
+	},
+
+	"bash.enabled": {
+		type: "boolean",
+		default: true,
+		ui: { tab: "tools", label: "Bash", description: "Enable the bash tool for shell command execution" },
 	},
 
 	// Search and AST tools
@@ -2506,13 +2545,13 @@ export const SETTINGS_SCHEMA = {
 	// Tool Discovery
 	"tools.discoveryMode": {
 		type: "enum",
-		values: ["off", "mcp-only", "all"] as const,
-		default: "off",
+		values: ["auto", "off", "mcp-only", "all"] as const,
+		default: "auto",
 		ui: {
 			tab: "tools",
 			label: "Tool Discovery",
 			description:
-				"Hide tools behind a search tool to save tokens. 'mcp-only' hides MCP tools; 'all' hides all non-essential built-ins too.",
+				"Hide tools behind a search tool to save tokens. 'auto' hides MCP tools once the tool set has more than 40 tools; 'mcp-only' always hides MCP tools; 'all' hides all non-essential built-ins too.",
 		},
 	},
 
@@ -3063,13 +3102,26 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
-	"providers.parallelFetch": {
-		type: "boolean",
-		default: true,
+	"providers.fetch": {
+		type: "enum",
+		values: ["auto", "native", "trafilatura", "lynx", "parallel", "jina"] as const,
+		default: "auto",
 		ui: {
 			tab: "providers",
-			label: "Parallel Fetch",
-			description: "Use Parallel extract API for URL fetching when credentials are available",
+			label: "Fetch Provider",
+			description: "Reader backend priority for the fetch/read URL tool",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Priority: native > trafilatura > lynx > parallel > jina",
+				},
+				{ value: "native", label: "Native", description: "In-process HTML→Markdown converter (always available)" },
+				{ value: "trafilatura", label: "Trafilatura", description: "Auto-installs via uv/pip" },
+				{ value: "lynx", label: "Lynx", description: "Requires lynx system package" },
+				{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
+				{ value: "jina", label: "Jina", description: "Uses r.jina.ai reader (JINA_API_KEY optional)" },
+			],
 		},
 	},
 	"provider.appendOnlyContext": {
@@ -3320,6 +3372,7 @@ export interface RetrySettings {
 	maxRetries: number;
 	baseDelayMs: number;
 	maxDelayMs: number;
+	modelFallback: boolean;
 }
 
 export interface MemoriesSettings {

@@ -4,15 +4,14 @@
  * This file handles CLI argument parsing and translates them into
  * createAgentSession() options. The SDK does the heavy lifting.
  */
-
-import * as fs from "node:fs/promises";
+import * as fsSync from "node:fs";
 import * as os from "node:os";
-import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	$env,
+	getLogPath,
 	getProjectDir,
 	logger,
 	normalizePathForComparison,
@@ -28,9 +27,17 @@ import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { runListModelsCommand } from "./cli/list-models";
 import { selectSession } from "./cli/session-picker";
+import { applyStartupCwd } from "./cli/startup-cwd";
 import { findConfigFile } from "./config";
-import { ModelRegistry, ModelsConfigFile } from "./config/model-registry";
-import { resolveCliModel, resolveModelRoleValue, resolveModelScope, type ScopedModel } from "./config/model-resolver";
+import { ModelRegistry } from "./config/model-registry";
+import {
+	getModelMatchPreferences,
+	resolveCliModel,
+	resolveModelRoleValue,
+	resolveModelScope,
+	type ScopedModel,
+} from "./config/model-resolver";
+import { ModelsConfigFile } from "./config/models-config";
 import { getDefault, type SettingPath, Settings, settings } from "./config/settings";
 import { initializeWithSettings } from "./discovery";
 import {
@@ -40,19 +47,14 @@ import {
 	resolveActiveProjectRegistryPath,
 } from "./discovery/helpers";
 import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
-import { exportFromFile } from "./export/html";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
-import {
-	getInstalledPluginsRegistryPath,
-	getMarketplacesCacheDir,
-	getMarketplacesRegistryPath,
-	getPluginsCacheDir,
-	MarketplaceManager,
-} from "./extensibility/plugins/marketplace";
+import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import type { MCPManager } from "./mcp";
-import { InteractiveMode, runAcpMode, runPrintMode, runRpcMode } from "./modes";
-import { ALL_SCENES, runSetupWizard, selectSetupScenes } from "./modes/setup-wizard";
+import { WelcomeComponent } from "./modes/components/welcome";
+import { InteractiveMode } from "./modes/interactive-mode";
+import type { PrintModeOptions } from "./modes/print-mode";
+import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
 import {
@@ -68,9 +70,60 @@ import { resolveResumableSession, type SessionInfo, SessionManager } from "./ses
 import { resolvePromptInput } from "./system-prompt";
 import { initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { AUTO_THINKING } from "./thinking";
-import type { LspStartupServerInfo } from "./tools";
-import { getChangelogPath, getNewEntries, parseChangelog } from "./utils/changelog";
+import { discoverStartupLspServers, type LspStartupServerInfo } from "./tools";
+import {
+	getChangelogPath,
+	getNewEntries,
+	parseChangelog,
+	readLastChangelogVersion,
+	writeLastChangelogVersion,
+} from "./utils/changelog";
 import { EventBus } from "./utils/event-bus";
+
+type RunAcpMode = (createSession: AcpSessionFactory) => Promise<never>;
+type RunPrintMode = (session: AgentSession, options: PrintModeOptions) => Promise<void>;
+type RunRpcMode = (
+	session: AgentSession,
+	setToolUIContext?: (uiContext: ExtensionUIContext, hasUI: boolean) => void,
+) => Promise<never>;
+
+function maybeShowStartupSplash(options: {
+	isInteractive: boolean;
+	resuming: boolean;
+	quiet: boolean;
+	version: string;
+	setupPending: boolean;
+	modelName?: string;
+	providerName?: string;
+	lspServers?: LspStartupServerInfo[];
+}): void {
+	if (!options.isInteractive) return;
+	if (options.resuming || options.quiet) return;
+	if ($env.PI_TIMING) return;
+	if (!process.stdin.isTTY || !process.stdout.isTTY) return;
+	// First-run launches go straight into the setup wizard, which paints its own
+	// splash — keep the minimal two-line notice there.
+	if (options.setupPending) {
+		process.stdout.write(`${chalk.dim(`omp ${options.version}`)}\n${chalk.dim("Initializing session…")}\n`);
+		return;
+	}
+	// Render the same welcome box the TUI paints first: recent sessions as a
+	// loading placeholder (the fixed slot count keeps the box height stable) and
+	// the logo held on the intro animation's first frame so the in-TUI intro
+	// continues from the frame shown here. Clearing the screen first puts the
+	// box at the same origin the TUI's first full paint (clearScrollback) uses,
+	// so the live welcome replaces this frame in place without shifting.
+	const welcome = new WelcomeComponent(
+		options.version,
+		options.modelName ?? "",
+		options.providerName ?? "",
+		null,
+		options.lspServers ?? [],
+	);
+	welcome.holdIntroFirstFrame();
+	const lines = welcome.render(process.stdout.columns || 80);
+	process.stdout.write(`\x1b[2J\x1b[H\x1b[3J\n${lines.join("\n")}\n`);
+}
 
 async function checkForNewVersion(currentVersion: string): Promise<string | undefined> {
 	if (!settings.get("startup.checkUpdate")) {
@@ -137,13 +190,77 @@ function applyAcpDefaultSettingOverrides(targetSettings: Settings = settings): v
 
 async function readPipedInput(): Promise<string | undefined> {
 	if (process.stdin.isTTY !== false) return undefined;
+	// stdin is a pipe: a producer that never writes nor closes would block
+	// startup forever with zero output. Say what we're blocked on after 1s.
+	const notice = setTimeout(() => {
+		process.stderr.write(`${chalk.dim("Reading prompt from piped stdin (waiting for EOF; ctrl+c to abort)…")}\n`);
+	}, 1000);
+	notice.unref?.();
 	try {
 		const text = await Bun.stdin.text();
 		if (text.trim().length === 0) return undefined;
 		return text;
 	} catch {
 		return undefined;
+	} finally {
+		clearTimeout(notice);
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Startup watchdog
+// ---------------------------------------------------------------------------
+// Speculative-hang reporter: until startup hands off to a mode runner, print a
+// stderr line every 10s naming the deepest in-flight startup phase. Turns
+// zero-output indefinite hangs (stuck discovery read, network wait, stdin
+// pipe) into self-diagnosing reports instead of "it just hangs" (see the
+// PI_DEBUG_STARTUP markers for the synchronous-hang counterpart).
+
+const STARTUP_WATCHDOG_INTERVAL_MS = 10_000;
+let startupWatchdogTimer: NodeJS.Timeout | undefined;
+let startupWatchdogActive = false;
+let startupWatchdogStartedAt = 0;
+
+function armStartupWatchdog(): void {
+	if (startupWatchdogTimer) return;
+	startupWatchdogTimer = setInterval(() => {
+		const elapsed = Math.round((Date.now() - startupWatchdogStartedAt) / 1000);
+		const phase = logger.openSpanPath().join(" > ") || "module load / pre-phase work";
+		process.stderr.write(
+			`${chalk.yellow(`Still starting after ${elapsed}s`)}${chalk.dim(` — phase: ${phase}`)}\n` +
+				`${chalk.dim(`  logs: ${getLogPath()} · re-run with PI_DEBUG_STARTUP=1 for streaming phase markers`)}\n`,
+		);
+	}, STARTUP_WATCHDOG_INTERVAL_MS);
+	startupWatchdogTimer.unref?.();
+}
+
+function disarmStartupWatchdog(): void {
+	if (!startupWatchdogTimer) return;
+	clearInterval(startupWatchdogTimer);
+	startupWatchdogTimer = undefined;
+}
+
+/** Begin watching startup (idempotent). */
+function startStartupWatchdog(): void {
+	startupWatchdogActive = true;
+	startupWatchdogStartedAt = Date.now();
+	armStartupWatchdog();
+}
+
+/** Permanently stop watching: a mode runner now owns the terminal. */
+function stopStartupWatchdog(): void {
+	startupWatchdogActive = false;
+	disarmStartupWatchdog();
+}
+
+/** Pause while an interactive prompt legitimately waits on the user. */
+function pauseStartupWatchdog(): void {
+	disarmStartupWatchdog();
+}
+
+/** Resume after an interactive prompt, if startup is still being watched. */
+function resumeStartupWatchdog(): void {
+	if (startupWatchdogActive) armStartupWatchdog();
 }
 
 export interface InteractiveModeNotify {
@@ -165,7 +282,8 @@ export async function submitInteractiveInput(
 
 	try {
 		using _keepalive = new EventLoopKeepalive();
-		// Continue shortcuts submit an already-started empty prompt with no optimistic user message.
+		// Continue shortcuts submit an already-started synthetic developer prompt with
+		// no optimistic user message.
 		if (!input.started && !mode.markPendingSubmissionStarted(input)) {
 			return;
 		}
@@ -176,6 +294,8 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent",
 			});
+		} else if (input.synthetic) {
+			await session.prompt(input.text, { synthetic: true, expandPromptTemplates: false });
 		} else {
 			await session.prompt(input.text, { images: input.images });
 		}
@@ -261,17 +381,29 @@ async function runInteractiveMode(
 		eventBus,
 	);
 
-	const setupScenes = await selectSetupScenes(settings.get("setupVersion"), ALL_SCENES, mode, {
-		resuming,
-		isTTY: process.stdin.isTTY && process.stdout.isTTY,
-		setupWizardEnabled: settings.get("startup.setupWizard"),
-		force: forceSetupWizard,
+	// Cold-launch gate: the full setup wizard (every scene + the overlay and
+	// their TUI/OAuth/search/theme deps) is heavy, yet the common case only needs
+	// to know whether the stored setup version is current. Lazy-load the wizard
+	// barrel only when setup is stale or forced; otherwise skip it entirely.
+	const storedSetupVersion = settings.get("setupVersion");
+	const setupWizard =
+		forceSetupWizard || storedSetupVersion < CURRENT_SETUP_VERSION ? await import("./modes/setup-wizard") : undefined;
+	const setupScenes = setupWizard
+		? await setupWizard.selectSetupScenes(storedSetupVersion, setupWizard.ALL_SCENES, mode, {
+				resuming,
+				isTTY: process.stdin.isTTY && process.stdout.isTTY,
+				setupWizardEnabled: settings.get("startup.setupWizard"),
+				force: forceSetupWizard,
+			})
+		: [];
+
+	await mode.init({
+		suppressWelcomeIntro: resuming || setupScenes.length > 0,
+		clearInitialTerminalHistory: true,
 	});
 
-	await mode.init({ suppressWelcomeIntro: setupScenes.length > 0 });
-
-	if (setupScenes.length > 0) {
-		await runSetupWizard(mode, setupScenes);
+	if (setupWizard && setupScenes.length > 0) {
+		await setupWizard.runSetupWizard(mode, setupScenes);
 	}
 
 	versionCheckPromise
@@ -285,7 +417,12 @@ async function runInteractiveMode(
 		})
 		.catch(() => {});
 
-	mode.renderInitialMessages(undefined, { preserveExistingChat: true });
+	// Cold-launch cleanup: the first paint already clears native history, and this
+	// replay replaces the welcome/startup frame with the resumed/new transcript.
+	// Every in-process session load also uses `clearTerminalHistory`; cold launch
+	// follows the same clean-cutover path instead of preserving a previous run's
+	// transcript above the fresh one.
+	mode.renderInitialMessages(undefined, { preserveExistingChat: true, clearTerminalHistory: true });
 
 	for (const notify of notifs) {
 		if (!notify) {
@@ -326,22 +463,88 @@ async function runInteractiveMode(
 	}
 }
 
-type ForkSessionPromptResult = "accepted" | "declined" | "unavailable";
+type SessionPromptResult = "accepted" | "declined" | "unavailable";
 
-type ForkSessionPrompt = (session: SessionInfo) => Promise<ForkSessionPromptResult>;
+type SessionPrompt = (session: SessionInfo) => Promise<SessionPromptResult>;
 
-async function promptForkSession(session: SessionInfo): Promise<ForkSessionPromptResult> {
+async function promptForkSession(session: SessionInfo): Promise<SessionPromptResult> {
 	if (!process.stdin.isTTY) {
 		return "unavailable";
 	}
 	const message = `Session found in different project: ${session.cwd}. Fork into current directory? [y/N] `;
+	pauseStartupWatchdog();
 	const rl = createInterface({ input: process.stdin, output: process.stdout });
 	try {
 		const answer = (await rl.question(message)).trim().toLowerCase();
 		return answer === "y" || answer === "yes" ? "accepted" : "declined";
 	} finally {
 		rl.close();
+		resumeStartupWatchdog();
 	}
+}
+
+async function promptMoveSession(session: SessionInfo): Promise<SessionPromptResult> {
+	if (!process.stdin.isTTY) {
+		return "unavailable";
+	}
+	const message = `Session's directory no longer exists (${session.cwd}). Move (re-root) it into the current directory? [Y/n] `;
+	pauseStartupWatchdog();
+	const rl = createInterface({ input: process.stdin, output: process.stdout });
+	try {
+		const answer = (await rl.question(message)).trim().toLowerCase();
+		return answer === "" || answer === "y" || answer === "yes" ? "accepted" : "declined";
+	} finally {
+		rl.close();
+		resumeStartupWatchdog();
+	}
+}
+
+/**
+ * Friendly CLI failure raised by {@link createSessionManager} when the user's
+ * session-resolution flags (`--resume`/`--fork`/cross-project prompts) cannot
+ * be satisfied. {@link runRootCommand} catches it and prints a clean stderr
+ * message instead of letting it surface as `[Uncaught Exception]`
+ * (see issue #2084).
+ */
+export class SessionResolutionError extends Error {
+	readonly hint?: string;
+	constructor(message: string, hint?: string) {
+		super(message);
+		this.name = "SessionResolutionError";
+		this.hint = hint;
+	}
+}
+
+type MissingCwdMoveResult =
+	| { status: "not-needed" }
+	| { status: "declined" }
+	| { status: "moved"; manager: SessionManager };
+
+async function moveMissingCwdSessionIfNeeded(
+	sessionArg: string,
+	session: SessionInfo,
+	cwd: string,
+	sessionDir: string | undefined,
+	askToMoveSession: SessionPrompt,
+): Promise<MissingCwdMoveResult> {
+	const sourceCwd = session.cwd;
+	if (!sourceCwd || fsSync.existsSync(sourceCwd)) {
+		return { status: "not-needed" };
+	}
+
+	const movePromptResult = await askToMoveSession(session);
+	if (movePromptResult === "unavailable") {
+		throw new SessionResolutionError(
+			`Session "${sessionArg}" belongs to a directory that no longer exists (${sourceCwd}); run interactively to move it into the current project.`,
+		);
+	}
+	if (movePromptResult === "declined") {
+		return { status: "declined" };
+	}
+
+	const manager = await SessionManager.open(session.path, sessionDir);
+	await manager.moveTo(cwd, sessionDir);
+	return { status: "moved", manager };
 }
 
 async function getChangelogForDisplay(parsed: Args): Promise<string | undefined> {
@@ -349,7 +552,7 @@ async function getChangelogForDisplay(parsed: Args): Promise<string | undefined>
 		return undefined;
 	}
 
-	const lastVersion = settings.get("lastChangelogVersion");
+	const lastVersion = await readLastChangelogVersion();
 	if (lastVersion === VERSION) {
 		// Steady state: user already saw the current version's changelog. Skip the file read + parse.
 		return undefined;
@@ -360,15 +563,13 @@ async function getChangelogForDisplay(parsed: Args): Promise<string | undefined>
 
 	if (!lastVersion) {
 		if (entries.length > 0) {
-			settings.set("lastChangelogVersion", VERSION);
-			await flushChangelogVersion();
+			await writeLastChangelogVersion(VERSION);
 			return entries.map(e => e.content).join("\n\n");
 		}
 	} else {
 		const newEntries = getNewEntries(entries, lastVersion);
 		if (newEntries.length > 0) {
-			settings.set("lastChangelogVersion", VERSION);
-			await flushChangelogVersion();
+			await writeLastChangelogVersion(VERSION);
 			return newEntries.map(e => e.content).join("\n\n");
 		}
 	}
@@ -376,24 +577,17 @@ async function getChangelogForDisplay(parsed: Args): Promise<string | undefined>
 	return undefined;
 }
 
-async function flushChangelogVersion(): Promise<void> {
-	try {
-		await settings.flush();
-	} catch (error: unknown) {
-		logger.warn("Failed to persist lastChangelogVersion", { error });
-	}
-}
-
 /** Resolves CLI session flags into an existing, forked, in-memory, or cancelled session manager. */
 export async function createSessionManager(
 	parsed: Args,
 	cwd: string,
 	activeSettings: Settings = settings,
-	askToForkSession: ForkSessionPrompt = promptForkSession,
+	askToForkSession: SessionPrompt = promptForkSession,
+	askToMoveSession: SessionPrompt = promptMoveSession,
 ): Promise<SessionManager | undefined> {
 	if (parsed.fork) {
 		if (parsed.noSession) {
-			throw new Error("--fork requires session persistence");
+			throw new SessionResolutionError("--fork requires session persistence");
 		}
 		const forkSource = parsed.fork;
 		if (forkSource.includes("/") || forkSource.includes("\\") || forkSource.endsWith(".jsonl")) {
@@ -401,7 +595,10 @@ export async function createSessionManager(
 		}
 		const match = await resolveResumableSession(forkSource, cwd, parsed.sessionDir);
 		if (!match) {
-			throw new Error(`Session "${forkSource}" not found.`);
+			throw new SessionResolutionError(
+				`Session "${forkSource}" not found.`,
+				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
+			);
 		}
 		return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
 	}
@@ -416,15 +613,46 @@ export async function createSessionManager(
 		}
 		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
 		if (!match) {
-			throw new Error(`Session "${sessionArg}" not found.`);
+			throw new SessionResolutionError(
+				`Session "${sessionArg}" not found.`,
+				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
+			);
+		}
+		if (match.scope === "local") {
+			const moveResult = await moveMissingCwdSessionIfNeeded(
+				sessionArg,
+				match.session,
+				cwd,
+				parsed.sessionDir,
+				askToMoveSession,
+			);
+			if (moveResult.status === "moved") {
+				return moveResult.manager;
+			}
+			if (moveResult.status === "declined") {
+				return undefined;
+			}
 		}
 		if (match.scope === "global") {
 			const normalizedCwd = normalizePathForComparison(cwd);
 			const normalizedMatchCwd = normalizePathForComparison(match.session.cwd || cwd);
 			if (normalizedCwd !== normalizedMatchCwd) {
+				const moveResult = await moveMissingCwdSessionIfNeeded(
+					sessionArg,
+					match.session,
+					cwd,
+					parsed.sessionDir,
+					askToMoveSession,
+				);
+				if (moveResult.status === "moved") {
+					return moveResult.manager;
+				}
+				if (moveResult.status === "declined") {
+					return undefined;
+				}
 				const forkPromptResult = await askToForkSession(match.session);
 				if (forkPromptResult === "unavailable") {
-					throw new Error(
+					throw new SessionResolutionError(
 						`Session "${sessionArg}" is in another project (${match.session.cwd}); run interactively to fork it into the current project.`,
 					);
 				}
@@ -460,56 +688,6 @@ export async function createSessionManager(
 	}
 	// Default case (new session) returns undefined, SDK will create one
 	return undefined;
-}
-
-async function maybeAutoChdir(parsed: Args): Promise<void> {
-	if (parsed.allowHome || parsed.cwd) {
-		return;
-	}
-
-	const home = os.homedir();
-	if (!home) {
-		return;
-	}
-
-	const normalizePath = normalizePathForComparison;
-
-	const cwd = normalizePath(getProjectDir());
-	const normalizedHome = normalizePath(home);
-	if (cwd !== normalizedHome) {
-		return;
-	}
-
-	const isDirectory = async (p: string) => {
-		try {
-			const s = await fs.stat(p);
-			return s.isDirectory();
-		} catch {
-			return false;
-		}
-	};
-
-	const candidates = [path.join(home, "tmp"), "/tmp", "/var/tmp"];
-	for (const candidate of candidates) {
-		try {
-			if (!(await isDirectory(candidate))) {
-				continue;
-			}
-			setProjectDir(candidate);
-			return;
-		} catch {
-			// Try next candidate.
-		}
-	}
-
-	try {
-		const fallback = os.tmpdir();
-		if (fallback && normalizePath(fallback) !== cwd && (await isDirectory(fallback))) {
-			setProjectDir(fallback);
-		}
-	} catch {
-		// Ignore fallback errors.
-	}
 }
 
 /** Discover SYSTEM.md file if no CLI system prompt was provided */
@@ -568,9 +746,7 @@ async function buildSessionOptions(
 	// Model from CLI
 	// - supports --provider <name> --model <pattern>
 	// - supports --model <provider>/<pattern>
-	const modelMatchPreferences = {
-		usageOrder: activeSettings.getStorage()?.getModelUsageOrder(),
-	};
+	const modelMatchPreferences = getModelMatchPreferences(activeSettings);
 	if (parsed.model) {
 		const resolved = resolveCliModel({
 			cliProvider: parsed.provider,
@@ -710,7 +886,7 @@ async function buildSessionOptions(
 interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
 	discoverAuthStorage?: typeof discoverAuthStorage;
-	runAcpMode?: typeof runAcpMode;
+	runAcpMode?: RunAcpMode;
 	settings?: Settings;
 	forceSetupWizard?: boolean;
 }
@@ -721,18 +897,19 @@ export async function runRootCommand(
 	deps: RunRootCommandDependencies = {},
 ): Promise<void> {
 	logger.startTiming();
+	startStartupWatchdog();
 
 	// Initialize theme early with defaults (CLI commands need symbols)
 	// Will be re-initialized with user preferences later
 	await logger.time("initTheme:initial", initTheme);
 
 	const parsedArgs = parsed;
-	await logger.time("maybeAutoChdir", maybeAutoChdir, parsedArgs);
+	await logger.time("applyStartupCwd", applyStartupCwd, parsedArgs);
 
 	const notifs: (InteractiveModeNotify | null)[] = [];
 
 	// Create AuthStorage and ModelRegistry upfront
-	const authStorage = await logger.time("discoverModels", deps.discoverAuthStorage ?? discoverAuthStorage);
+	const authStorage = await logger.time("discoverAuthStorage", deps.discoverAuthStorage ?? discoverAuthStorage);
 	const modelRegistry = new ModelRegistry(authStorage);
 
 	if (parsedArgs.version) {
@@ -767,6 +944,7 @@ export async function runRootCommand(
 		let result: string;
 		try {
 			const outputPath = parsedArgs.messages.length > 0 ? parsedArgs.messages[0] : undefined;
+			const { exportFromFile } = await import("./export/html");
 			result = await exportFromFile(parsedArgs.export, outputPath);
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : "Failed to export session";
@@ -861,9 +1039,7 @@ export async function runRootCommand(
 
 	let scopedModels: ScopedModel[] = [];
 	const modelPatterns = parsedArgs.models ?? settingsInstance.get("enabledModels");
-	const modelMatchPreferences = {
-		usageOrder: settingsInstance.getStorage()?.getModelUsageOrder(),
-	};
+	const modelMatchPreferences = getModelMatchPreferences(settingsInstance);
 	if (modelPatterns && modelPatterns.length > 0) {
 		scopedModels = await logger.time(
 			"resolveModelScope",
@@ -874,14 +1050,29 @@ export async function runRootCommand(
 		);
 	}
 
-	// Create session manager based on CLI flags
-	let sessionManager = await logger.time(
-		"createSessionManager",
-		createSessionManager,
-		parsedArgs,
-		cwd,
-		settingsInstance,
-	);
+	// Create session manager based on CLI flags. SessionResolutionError signals a
+	// user-facing failure (unknown --resume/--fork id, non-interactive fork
+	// prompt, --fork with --no-session): print + exit cleanly instead of letting
+	// it surface as `[Uncaught Exception]` (see issue #2084).
+	let sessionManager: SessionManager | undefined;
+	try {
+		sessionManager = await logger.time(
+			"createSessionManager",
+			createSessionManager,
+			parsedArgs,
+			cwd,
+			settingsInstance,
+		);
+	} catch (error: unknown) {
+		if (error instanceof SessionResolutionError) {
+			process.stderr.write(`${chalk.red(`Error: ${error.message}`)}\n`);
+			if (error.hint) {
+				process.stderr.write(`${chalk.dim(error.hint)}\n`);
+			}
+			process.exit(1);
+		}
+		throw error;
+	}
 
 	// User declined the cross-project fork prompt — exit cleanly with a friendly
 	// message rather than letting the decline bubble up as an uncaught exception
@@ -906,10 +1097,12 @@ export async function runRootCommand(
 			}
 			startInAllScope = true;
 		}
+		pauseStartupWatchdog();
 		const selected = await logger.time("selectSession", selectSession, folderSessions, {
 			allSessions: preloadedAllSessions,
 			startInAllScope,
 		});
+		resumeStartupWatchdog();
 		if (!selected) {
 			process.stdout.write(`${chalk.dim("No session selected")}\n`);
 			return;
@@ -934,33 +1127,11 @@ export async function runRootCommand(
 
 	await pluginPreloadPromise;
 
-	// Background marketplace auto-update — never blocks startup.
-	const autoUpdate = settingsInstance.get("marketplace.autoUpdate");
-	if (autoUpdate !== "off") {
-		void (async () => {
-			try {
-				const mgr = new MarketplaceManager({
-					marketplacesRegistryPath: getMarketplacesRegistryPath(),
-					installedRegistryPath: getInstalledPluginsRegistryPath(),
-					projectInstalledRegistryPath: (await resolveActiveProjectRegistryPath(getProjectDir())) ?? undefined,
-					marketplacesCacheDir: getMarketplacesCacheDir(),
-					pluginsCacheDir: getPluginsCacheDir(),
-					clearPluginRootsCache: clearPluginRootsAndCaches,
-				});
-				await mgr.refreshStaleMarketplaces();
-				const updates = await mgr.checkForUpdates();
-				if (updates.length === 0) return;
-				if (autoUpdate === "auto") {
-					await mgr.upgradeAllPlugins();
-					logger.debug(`Auto-upgraded ${updates.length} marketplace plugin(s)`);
-				} else {
-					logger.debug(`${updates.length} marketplace plugin update(s) available — /marketplace upgrade`);
-				}
-			} catch {
-				// Silently ignore — network failure, corrupt data, offline.
-			}
-		})();
-	}
+	scheduleMarketplaceAutoUpdate({
+		autoUpdate: settingsInstance.get("marketplace.autoUpdate"),
+		resolveActiveProjectRegistryPath,
+		clearPluginRootsCache: clearPluginRootsAndCaches,
+	});
 
 	const { options: sessionOptions } = await logger.time(
 		"buildSessionOptions",
@@ -982,7 +1153,7 @@ export async function runRootCommand(
 	// Both are no-ops when OTEL_EXPORTER_OTLP_ENDPOINT is unset. An empty config
 	// is enough to enable telemetry — content capture is governed by the
 	// standard OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT env var.
-	initTelemetryExport();
+	await initTelemetryExport();
 	if (isTelemetryExportEnabled()) {
 		sessionOptions.telemetry = {};
 	}
@@ -1021,7 +1192,10 @@ export async function runRootCommand(
 			rawArgs,
 			createSession,
 		});
-		await (deps.runAcpMode ?? runAcpMode)(createAcpSession);
+		// Branch-only protocol runner: keep ACP server code out of normal interactive startup.
+		const runAcpMode = deps.runAcpMode ?? (await import("./modes/acp/acp-mode")).runAcpMode;
+		stopStartupWatchdog();
+		await runAcpMode(createAcpSession);
 	} else {
 		// Resolve extension-registered CLI flags before creating the session so a
 		// bad `@file` fails fast WITHOUT leaving a junk session/breadcrumb
@@ -1052,6 +1226,42 @@ export async function runRootCommand(
 			fileText: processedFiles?.text,
 			fileImages: processedFiles?.images,
 			stdinContent: pipedInput,
+		});
+
+		// Resolve the model the session will most likely start with so the splash
+		// box matches the final welcome screen (the raw role selector, e.g.
+		// "anthropic/claude-fable-5:high", is wider than the left column and would
+		// collapse the box into the single-column layout).
+		let splashModel = sessionOptions.model;
+		if (!splashModel) {
+			const remembered = settingsInstance.getModelRole("default");
+			if (remembered) {
+				splashModel = resolveModelRoleValue(remembered, modelRegistry.getAll(), {
+					settings: settingsInstance,
+					matchPreferences: modelMatchPreferences,
+					modelRegistry,
+				}).model;
+			}
+		}
+		// Mirror createAgentSession's startup LSP discovery (sync and cheap: root
+		// markers + binary lookup) so the splash lists the same servers the live
+		// welcome screen will show.
+		const splashLspServers =
+			(sessionOptions.enableLsp ?? true)
+				? discoverStartupLspServers(
+						sessionOptions.cwd ?? cwd,
+						settingsInstance.get("lsp.lazy") ? "available" : "connecting",
+					)
+				: [];
+		maybeShowStartupSplash({
+			isInteractive,
+			resuming: Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork),
+			quiet: settingsInstance.get("startup.quiet"),
+			version: VERSION,
+			setupPending: deps.forceSetupWizard === true || settingsInstance.get("setupVersion") < CURRENT_SETUP_VERSION,
+			modelName: splashModel?.name,
+			providerName: splashModel?.provider,
+			lspServers: splashLspServers,
 		});
 
 		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await createSession({
@@ -1085,6 +1295,9 @@ export async function runRootCommand(
 		}
 
 		if (mode === "rpc" || mode === "rpc-ui") {
+			// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
+			const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
+			stopStartupWatchdog();
 			await runRpcMode(session, mode === "rpc-ui" ? setToolUIContext : undefined);
 		} else if (isInteractive) {
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
@@ -1103,11 +1316,12 @@ export async function runRootCommand(
 
 			if ($env.PI_TIMING) {
 				logger.printTimings();
-				if ($env.PI_TIMING === "x") {
+				if (logger.shouldExitAfterTimings()) {
 					process.exit(0);
 				}
 			}
 
+			stopStartupWatchdog();
 			logger.endTiming();
 			await runInteractiveMode(
 				session,
@@ -1126,6 +1340,9 @@ export async function runRootCommand(
 				initialImages,
 			);
 		} else {
+			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
+			stopStartupWatchdog();
+			const runPrintMode: RunPrintMode = (await import("./modes/print-mode")).runPrintMode;
 			await runPrintMode(session, {
 				mode,
 				messages: initialArgs.messages,

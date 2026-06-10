@@ -8,11 +8,13 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentTelemetryConfig, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import type { Rule } from "../capability/rule";
 import { ModelRegistry } from "../config/model-registry";
 import { resolveModelOverrideWithAuthFallback } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
+import type { ToolPathWithSource } from "../extensibility/custom-tools";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import { runExtensionCompact, runExtensionSetModel } from "../extensibility/extensions/compact-handler";
 import { getSessionSlashCommands } from "../extensibility/extensions/get-commands-handler";
@@ -34,7 +36,11 @@ import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import type { ContextFileEntry } from "../tools";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
-import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
+import {
+	buildOutputValidator,
+	type OutputValidator,
+	summarizeValidationFailure,
+} from "../tools/output-schema-validator";
 
 import { type ReportFindingDetails, toReviewFinding } from "../tools/review";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -166,6 +172,13 @@ export interface ExecutorOptions {
 	outputSchema?: unknown;
 	/** Parent task recursion depth (0 = top-level, 1 = first child, etc.) */
 	taskDepth?: number;
+	/**
+	 * Override the `task.maxRuntimeMs` wall-clock cap for this run. When provided
+	 * it wins over the settings value; `0` disables the per-subagent wall-clock
+	 * limit entirely. Used by the eval `agent()` bridge, whose parent cell
+	 * watchdog is already suspended for the call's duration.
+	 */
+	maxRuntimeMs?: number;
 	enableLsp?: boolean;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
@@ -179,6 +192,20 @@ export interface ExecutorOptions {
 	skills?: Skill[];
 	promptTemplates?: PromptTemplate[];
 	workspaceTree?: WorkspaceTree;
+	/** Parent-discovered rules, forwarded to skip rule discovery in the subagent. */
+	rules?: Rule[];
+	/**
+	 * Parent's discovered extension source paths. Forwarded to skip the
+	 * extension FS scan in the subagent; the subagent then re-binds each
+	 * extension against its own `ExtensionAPI` (cwd, eventBus, runtime).
+	 */
+	preloadedExtensionPaths?: string[];
+	/**
+	 * Parent's discovered custom-tool source paths. Forwarded to skip the
+	 * `.omp/tools/` FS scan in the subagent; the subagent then re-binds each
+	 * tool against its own `CustomToolAPI` (cwd, exec, pushPendingAction, UI).
+	 */
+	preloadedCustomToolPaths?: ToolPathWithSource[];
 	mcpManager?: MCPManager;
 	authStorage?: AuthStorage;
 	modelRegistry?: ModelRegistry;
@@ -249,21 +276,40 @@ function extractCompletionData(parsed: unknown): unknown {
 	return parsed;
 }
 
-function normalizeCompleteData(data: unknown, reportFindings?: ReviewFinding[]): unknown {
-	let normalized = parseStringifiedJson(data ?? null);
+/**
+ * Resolve the final yielded payload, optionally splicing collected
+ * `report_finding` entries into a top-level `findings` array.
+ *
+ * Injection is suppressed when an active validator would reject the augmented
+ * payload (e.g. a caller-supplied schema with `additionalProperties: false`
+ * that does not declare `findings`). That keeps the in-tool yield validator
+ * (which only sees the raw, pre-injection data) in lockstep with this
+ * post-mortem validator — honoring the "accepted in-tool ⇒ accepted
+ * post-mortem" guarantee documented in `output-schema-validator.ts`. The
+ * dropped findings are still preserved verbatim in the agent's progress
+ * stream and JSONL artifact, so no information is lost when injection is
+ * suppressed.
+ */
+function normalizeCompleteData(
+	data: unknown,
+	reportFindings: ReviewFinding[] | undefined,
+	validator: OutputValidator | undefined,
+): unknown {
+	const normalized = parseStringifiedJson(data ?? null);
 	if (
-		Array.isArray(reportFindings) &&
-		reportFindings.length > 0 &&
-		normalized &&
-		typeof normalized === "object" &&
-		!Array.isArray(normalized)
+		!Array.isArray(reportFindings) ||
+		reportFindings.length === 0 ||
+		!normalized ||
+		typeof normalized !== "object" ||
+		Array.isArray(normalized)
 	) {
-		const record = normalized as Record<string, unknown>;
-		if (!("findings" in record)) {
-			normalized = { ...record, findings: reportFindings };
-		}
+		return normalized;
 	}
-	return normalized;
+	const record = normalized as Record<string, unknown>;
+	if ("findings" in record) return normalized;
+	const injected = { ...record, findings: reportFindings };
+	if (validator && !validator.validate(injected).success) return normalized;
+	return injected;
 }
 
 function resolveFallbackCompletion(rawOutput: string, outputSchema: unknown): { data: unknown } | null {
@@ -281,6 +327,15 @@ export interface YieldItem {
 	data?: unknown;
 	status?: "success" | "aborted";
 	error?: string;
+	/**
+	 * Set by the in-tool yield validator when it exhausted its retry budget
+	 * (MAX_SCHEMA_RETRIES) and accepted a schema-invalid payload anyway.
+	 * `finalizeSubprocessOutput` honors this by serializing the payload and
+	 * surfacing a stderr warning, instead of re-emitting `schema_violation`
+	 * — which would silently swap the subagent's "accepted" view for a
+	 * different, opaque error blob in the parent's view of the result.
+	 */
+	schemaOverridden?: boolean;
 }
 
 interface FinalizeSubprocessOutputArgs {
@@ -301,7 +356,8 @@ interface FinalizeSubprocessOutputResult {
 	abortedViaYield: boolean;
 	hasYield: boolean;
 }
-
+export const SUBAGENT_WARNING_SCHEMA_OVERRIDDEN =
+	"SYSTEM WARNING: Subagent exhausted schema-retry budget; result was accepted despite failing the output schema.";
 export const SUBAGENT_WARNING_NULL_YIELD = "SYSTEM WARNING: Subagent called yield with null data.";
 export const SUBAGENT_WARNING_MISSING_YIELD =
 	"SYSTEM WARNING: Subagent exited without calling yield tool after 3 reminders.";
@@ -353,30 +409,32 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			if (submitData === null || submitData === undefined) {
 				rawOutput = rawOutput ? `${SUBAGENT_WARNING_NULL_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_NULL_YIELD;
 			} else {
-				const completeData = normalizeCompleteData(submitData, reportFindings);
 				const { validator, error: schemaError } = buildOutputValidator(outputSchema);
-				if (schemaError) {
-					rawOutput = `{"error":"schema_violation","message":"invalid output schema: ${schemaError.replace(/"/g, '\\"')}"}`;
-					stderr = `schema_violation: invalid output schema: ${schemaError}`;
-					exitCode = 1;
+				const overridden = lastYield?.schemaOverridden === true;
+				const completeData = normalizeCompleteData(submitData, reportFindings, validator);
+				const result =
+					schemaError || overridden
+						? { success: true as const }
+						: (validator?.validate(completeData) ?? { success: true as const });
+				if (!result.success) {
+					const summary = summarizeValidationFailure(result, completeData, validator?.requiredFields ?? []);
+					const outcome = buildSchemaViolationOutcome(summary, completeData);
+					rawOutput = outcome.rawOutput;
+					stderr = outcome.stderr;
+					exitCode = outcome.exitCode;
 				} else {
-					const result = validator?.validate(completeData) ?? { success: true as const };
-					if (!result.success) {
-						const summary = summarizeValidationFailure(result, completeData, validator?.requiredFields ?? []);
-						const outcome = buildSchemaViolationOutcome(summary, completeData);
-						rawOutput = outcome.rawOutput;
-						stderr = outcome.stderr;
-						exitCode = outcome.exitCode;
-					} else {
-						try {
-							rawOutput = JSON.stringify(completeData, null, 2) ?? "null";
-						} catch (err) {
-							const errorMessage = err instanceof Error ? err.message : String(err);
-							rawOutput = `{"error":"Failed to serialize yield data: ${errorMessage}"}`;
-						}
-						exitCode = 0;
-						stderr = "";
+					try {
+						rawOutput = JSON.stringify(completeData, null, 2) ?? "null";
+					} catch (err) {
+						const errorMessage = err instanceof Error ? err.message : String(err);
+						rawOutput = `{"error":"Failed to serialize yield data: ${errorMessage}"}`;
 					}
+					exitCode = 0;
+					stderr = overridden
+						? SUBAGENT_WARNING_SCHEMA_OVERRIDDEN
+						: schemaError
+							? `invalid output schema: ${schemaError}`
+							: "";
 				}
 			}
 		}
@@ -386,8 +444,8 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 		const hasOutputSchema = normalizedSchema !== undefined && !schemaError;
 		const fallback = allowFallback ? resolveFallbackCompletion(rawOutput, outputSchema) : null;
 		if (fallback) {
-			const completeData = normalizeCompleteData(fallback.data, reportFindings);
 			const { validator } = buildOutputValidator(outputSchema);
+			const completeData = normalizeCompleteData(fallback.data, reportFindings, validator);
 			const result = validator?.validate(completeData) ?? { success: true as const };
 			if (!result.success) {
 				const summary = summarizeValidationFailure(result, completeData, validator?.requiredFields ?? []);
@@ -481,7 +539,7 @@ function getUsageTokens(usage: unknown): number {
 /**
  * Create proxy tools that reuse the parent's MCP connections.
  */
-function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
+export function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 	return mcpManager.getTools().map(tool => {
 		const mcpTool = tool as { mcpToolName?: string; mcpServerName?: string };
 		return {
@@ -531,7 +589,10 @@ function createMCPProxyTools(mcpManager: MCPManager): CustomTool[] {
 	});
 }
 
-function createSubagentSettings(baseSettings: Settings): Settings {
+export function createSubagentSettings(
+	baseSettings: Settings,
+	overrides?: Partial<Record<SettingPath, unknown>>,
+): Settings {
 	const snapshot: Partial<Record<SettingPath, unknown>> = {};
 	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		snapshot[key] = baseSettings.get(key);
@@ -545,6 +606,7 @@ function createSubagentSettings(baseSettings: Settings): Settings {
 		// the parent task approval is the authorization boundary. Use yolo mode
 		// to preserve unattended subagent execution. User `tools.approval` policies still apply.
 		"tools.approvalMode": "yolo",
+		...overrides,
 	});
 }
 
@@ -619,9 +681,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const settings = options.settings ?? Settings.isolated();
-	const subagentSettings = createSubagentSettings(settings);
+	const subagentSettings = createSubagentSettings(
+		settings,
+		agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
+	);
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
-	const maxRuntimeMs = Math.max(0, Math.trunc(Number(settings.get("task.maxRuntimeMs") ?? 0) || 0));
+	const maxRuntimeMs = Math.max(
+		0,
+		Math.trunc(Number(options.maxRuntimeMs ?? settings.get("task.maxRuntimeMs") ?? 0) || 0),
+	);
 	const parentDepth = options.taskDepth ?? 0;
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
@@ -1217,56 +1285,67 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
 
-			const { session } = await awaitAbortable(
-				createAgentSession({
-					cwd: worktree ?? cwd,
-					authStorage,
-					modelRegistry,
-					settings: subagentSettings,
-					model,
-					thinkingLevel: effectiveThinkingLevel,
-					toolNames,
-					outputSchema,
-					requireYieldTool: true,
-					contextFiles: options.contextFiles,
-					skills: options.skills,
-					promptTemplates: options.promptTemplates,
-					workspaceTree: options.workspaceTree,
-					systemPrompt: defaultPrompt => {
-						const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-							agent: agent.systemPrompt,
-							context: options.context?.trim() ?? "",
-							planReference: options.planReference?.content ?? "",
-							planReferencePath: options.planReference?.path ?? "",
-							worktree: worktree ?? "",
-							outputSchema: normalizedOutputSchema,
-							contextFile: contextFileForPrompt,
-							ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
-							ircSelfId: ircEnabled ? id : "",
-						});
-						return defaultPrompt.length === 0
-							? [subagentPrompt]
-							: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-					},
-					sessionManager,
-					hasUI: false,
-					spawns: spawnsEnv,
-					taskDepth: childDepth,
-					parentHindsightSessionState: options.parentHindsightSessionState,
-					parentMnemopiSessionState: options.parentMnemopiSessionState,
-					parentTaskPrefix: id,
-					agentId: id,
-					agentDisplayName: agent.name,
-					enableLsp: lspEnabled,
-					skipPythonPreflight,
-					enableMCP,
-					mcpManager: options.mcpManager,
-					customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
-					localProtocolOptions: options.localProtocolOptions,
-					telemetry: subagentTelemetry,
-					parentEvalSessionId: options.parentEvalSessionId,
-				}),
-			);
+			const sessionPromise = createAgentSession({
+				cwd: worktree ?? cwd,
+				authStorage,
+				modelRegistry,
+				settings: subagentSettings,
+				model,
+				thinkingLevel: effectiveThinkingLevel,
+				toolNames,
+				outputSchema,
+				requireYieldTool: true,
+				contextFiles: options.contextFiles,
+				skills: options.skills,
+				promptTemplates: options.promptTemplates,
+				workspaceTree: options.workspaceTree,
+				rules: options.rules,
+				preloadedExtensionPaths: options.preloadedExtensionPaths,
+				preloadedCustomToolPaths: options.preloadedCustomToolPaths,
+				systemPrompt: defaultPrompt => {
+					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+						agent: agent.systemPrompt,
+						context: options.context?.trim() ?? "",
+						planReference: options.planReference?.content ?? "",
+						planReferencePath: options.planReference?.path ?? "",
+						worktree: worktree ?? "",
+						outputSchema: normalizedOutputSchema,
+						contextFile: contextFileForPrompt,
+						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+						ircSelfId: ircEnabled ? id : "",
+					});
+					return defaultPrompt.length === 0
+						? [subagentPrompt]
+						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+				},
+				sessionManager,
+				hasUI: false,
+				spawns: spawnsEnv,
+				taskDepth: childDepth,
+				parentHindsightSessionState: options.parentHindsightSessionState,
+				parentMnemopiSessionState: options.parentMnemopiSessionState,
+				parentTaskPrefix: id,
+				agentId: id,
+				agentDisplayName: agent.name,
+				enableLsp: lspEnabled,
+				skipPythonPreflight,
+				enableMCP,
+				mcpManager: options.mcpManager,
+				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+				localProtocolOptions: options.localProtocolOptions,
+				telemetry: subagentTelemetry,
+				parentEvalSessionId: options.parentEvalSessionId,
+			});
+			let session: AgentSession;
+			try {
+				({ session } = await awaitAbortable(sessionPromise));
+			} catch (err) {
+				// Abort raced session startup. The session may still resolve later
+				// holding live LSP/MCP child processes — dispose it when it does so
+				// a cancelled subagent cannot leak them.
+				void sessionPromise.then(created => created.session.dispose()).catch(() => {});
+				throw err;
+			}
 
 			activeSession = session;
 
@@ -1449,6 +1528,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					await awaitAbortable(
 						session.prompt(reminder, {
 							attribution: "agent",
+							synthetic: true,
 							...(isFinalRetry && reminderToolChoice ? { toolChoice: reminderToolChoice } : {}),
 						}),
 					);
@@ -1480,7 +1560,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				if (lastAssistant.stopReason === "aborted") {
 					aborted = abortReason === "signal" || runtimeLimitExceeded || abortReason === undefined;
 					if (aborted) {
-						abortReasonText ??= resolveAbortReasonText();
+						// A real caller signal or the wall-clock timer carries a precise
+						// reason (signal.reason / "runtime limit exceeded"). An internal
+						// turn abort (abortReason === undefined) does NOT — prefer the
+						// assistant message's own errorMessage ("Request was aborted" or a
+						// specific stream error) over the misleading "Cancelled by caller".
+						abortReasonText ??=
+							abortReason === "signal" || runtimeLimitExceeded
+								? resolveAbortReasonText()
+								: lastAssistant.errorMessage?.trim() || resolveAbortReasonText();
 					}
 					exitCode = 1;
 				} else if (lastAssistant.stopReason === "error") {

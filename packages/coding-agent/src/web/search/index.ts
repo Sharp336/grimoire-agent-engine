@@ -150,7 +150,7 @@ async function executeSearch(
 		lastProvider = provider;
 		try {
 			const response = await provider.search({
-				query: params.query.replace(/202\d/g, String(new Date().getFullYear())), // LUL
+				query: params.query,
 				limit: params.limit,
 				recency: params.recency,
 				systemPrompt: webSearchSystemPrompt,
@@ -278,8 +278,8 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchRende
 		return renderSearchCall(args, options, theme);
 	},
 
-	renderResult(result, options: RenderResultOptions, theme: Theme) {
-		return renderSearchResult(result, options, theme);
+	renderResult(result, options: RenderResultOptions, theme: Theme, args) {
+		return renderSearchResult(result, options, theme, args);
 	},
 };
 

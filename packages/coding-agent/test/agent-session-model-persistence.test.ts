@@ -1,7 +1,8 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
-import { type Api, Effort, getBundledModel, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { type CreateAgentSessionResult, createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
@@ -18,7 +19,24 @@ describe("AgentSession model persistence", () => {
 	let tempDir: TempDir;
 	let session: AgentSession | undefined;
 	let sessionSettings: Settings;
-	const authStorages: AuthStorage[] = [];
+	// Auth storage (SQLite DB) and the model registry are immutable across these tests:
+	// every test sets the same anthropic runtime key and only ever reads the bundled model
+	// list. Building them once avoids ~12 SQLite opens + registry constructions.
+	let sharedDir: TempDir;
+	let sharedAuthStorage: AuthStorage;
+	let sharedModelRegistry: ModelRegistry;
+
+	beforeAll(async () => {
+		sharedDir = TempDir.createSync("@pi-model-persistence-shared-");
+		sharedAuthStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
+		sharedAuthStorage.setRuntimeApiKey("anthropic", "test-key");
+		sharedModelRegistry = new ModelRegistry(sharedAuthStorage, path.join(sharedDir.path(), "models.yml"));
+	});
+
+	afterAll(() => {
+		sharedAuthStorage.close();
+		sharedDir.removeSync();
+	});
 
 	beforeEach(() => {
 		tempDir = TempDir.createSync("@pi-model-persistence-");
@@ -28,9 +46,6 @@ describe("AgentSession model persistence", () => {
 		if (session) {
 			await session.dispose();
 			session = undefined;
-		}
-		for (const authStorage of authStorages.splice(0)) {
-			authStorage.close();
 		}
 		tempDir.removeSync();
 	});
@@ -84,13 +99,7 @@ describe("AgentSession model persistence", () => {
 		modelRoles?: Record<string, string>;
 		persist?: boolean;
 	}): Promise<{ modelRegistry: ModelRegistry; settings: Settings; session: AgentSession }> {
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), `testauth-${authStorages.length}.db`));
-		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(
-			authStorage,
-			path.join(tempDir.path(), `models-${authStorages.length}.yml`),
-		);
+		const modelRegistry = sharedModelRegistry;
 		const model =
 			options?.initialModel ??
 			options?.selectInitialModel?.(modelRegistry.getAvailable()) ??
@@ -118,7 +127,7 @@ describe("AgentSession model persistence", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager: options?.persist
-				? SessionManager.create(tempDir.path(), path.join(tempDir.path(), `active-${authStorages.length}`))
+				? SessionManager.create(tempDir.path(), path.join(tempDir.path(), "active"))
 				: SessionManager.inMemory(),
 			settings: sessionSettings,
 			modelRegistry,
@@ -131,19 +140,12 @@ describe("AgentSession model persistence", () => {
 		targetSessionFile: string,
 		settings: Settings = Settings.isolated(),
 	): Promise<CreateAgentSessionResult> {
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), `testauth-${authStorages.length}.db`));
-		authStorages.push(authStorage);
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
-		const modelRegistry = new ModelRegistry(
-			authStorage,
-			path.join(tempDir.path(), `models-${authStorages.length}.yml`),
-		);
 		const sessionManager = await SessionManager.open(targetSessionFile, path.join(tempDir.path(), "startup"));
 		const result = await createAgentSession({
 			cwd: tempDir.path(),
 			agentDir: tempDir.path(),
-			authStorage,
-			modelRegistry,
+			authStorage: sharedAuthStorage,
+			modelRegistry: sharedModelRegistry,
 			sessionManager,
 			settings,
 			disableExtensionDiscovery: true,

@@ -1,10 +1,11 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import { type Api, completeSimple, Effort, getSupportedEfforts, type Model, type Tool } from "@oh-my-pi/pi-ai";
+import { type Api, completeSimple, Effort, type Model, type Tool } from "@oh-my-pi/pi-ai";
+import { getModelSeries } from "@oh-my-pi/pi-catalog/identity";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { prompt } from "@oh-my-pi/pi-utils";
 import * as z from "zod/v4";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../commit/utils";
-import { getModelSeries } from "../config/model-equivalence";
 import { expandRoleAlias, formatModelString, resolveModelFromString } from "../config/model-resolver";
 import secondOpinionDescription from "../prompts/tools/second-opinion.md" with { type: "text" };
 import secondOpinionSystemPrompt from "../prompts/tools/second-opinion-system.md" with { type: "text" };
@@ -183,6 +184,10 @@ function roleLabel(role: string): string {
 			return "DEVELOPER";
 		case "tool":
 			return "TOOL RESULT";
+		case "compaction":
+			return "COMPACTION SUMMARY";
+		case "branch_summary":
+			return "BRANCH SUMMARY";
 		default:
 			return role.toUpperCase();
 	}
@@ -213,13 +218,21 @@ export function renderEntry(entry: SessionEntry): RenderedTurn | null {
 		if (!text.trim()) return null;
 		return { role: `note:${entry.customType ?? "custom"}`, text };
 	}
+	if (entry.type === "compaction") {
+		if (!entry.summary.trim()) return null;
+		return { role: "compaction", text: `[compacted ${entry.tokensBefore} prior tokens]\n${entry.summary}` };
+	}
+	if (entry.type === "branch_summary") {
+		if (!entry.summary.trim()) return null;
+		return { role: "branch_summary", text: `[from ${entry.fromId}]\n${entry.summary}` };
+	}
 	return null;
 }
 
 /**
  * Build a transcript from session entries (current branch path-from-leaf),
  * keeping the most recent within the char budget. `lookback` counts rendered
- * message turns, not raw entries.
+ * transcript turns, not raw entries.
  */
 export function buildTranscript(entries: SessionEntry[], lookback?: number): { text: string; count: number } {
 	const rendered: RenderedTurn[] = [];
@@ -340,6 +353,22 @@ export class SecondOpinionTool implements AgentTool<typeof secondOpinionSchema, 
 		}
 
 		const settings = this.session.settings;
+		const { text: transcript, count } = buildTranscript(sessionManager.getBranch(), params.lookback);
+		if (!transcript.trim()) {
+			throw new ToolError("second_opinion has no prior conversation context to review.");
+		}
+		if (!settings.get(CONSENTED_KEY) && context.hasUI && context.ui) {
+			const consented = await context.ui.confirm(
+				"Second opinion — data disclosure",
+				"This sends your full conversation transcript — including tool outputs and any file contents in it — to a " +
+					"separate model, which may be a different vendor than your session model. Continue?",
+			);
+			if (!consented) {
+				throw new ToolError("second_opinion cancelled: transcript sharing was declined.");
+			}
+			settings.set(CONSENTED_KEY, true);
+		}
+
 		const matchPreferences = { usageOrder: settings.getStorage()?.getModelUsageOrder() };
 		const resolvePattern = (pattern: string | undefined): Model<Api> | undefined => {
 			if (!pattern) return undefined;
@@ -413,22 +442,6 @@ export class SecondOpinionTool implements AgentTool<typeof secondOpinionSchema, 
 					);
 				}
 			}
-		}
-
-		const { text: transcript, count } = buildTranscript(sessionManager.getBranch(), params.lookback);
-		if (!transcript.trim()) {
-			throw new ToolError("second_opinion has no prior conversation context to review.");
-		}
-		if (!settings.get(CONSENTED_KEY) && context.hasUI && context.ui) {
-			const consented = await context.ui.confirm(
-				"Second opinion — data disclosure",
-				"This sends your full conversation transcript — including tool outputs and any file contents in it — to a " +
-					"separate model, which may be a different vendor than your session model. Continue?",
-			);
-			if (!consented) {
-				throw new ToolError("second_opinion cancelled: transcript sharing was declined.");
-			}
-			settings.set(CONSENTED_KEY, true);
 		}
 
 		const apiKey = await modelRegistry.getApiKey(reviewer);

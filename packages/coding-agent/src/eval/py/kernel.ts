@@ -18,6 +18,7 @@ import { type KernelDisplayOutput, renderKernelDisplay } from "./display";
 import { PYTHON_PRELUDE } from "./prelude";
 import RUNNER_SCRIPT from "./runner.py" with { type: "text" };
 import { enumeratePythonRuntimes, filterEnv, type PythonRuntime, resolvePythonRuntime } from "./runtime";
+import { hostHasInheritableConsole, shouldHideKernelWindow } from "./spawn-options";
 
 export type { KernelDisplayOutput, PythonStatusEvent } from "./display";
 export { renderKernelDisplay } from "./display";
@@ -128,10 +129,29 @@ function throwIfAborted(signal: AbortSignal | undefined, fallbackReason: string)
 	throw createAbortError("AbortError", typeof reason === "string" ? reason : fallbackReason);
 }
 
+// Cache successful probes per resolved cwd: every cell otherwise pays one (or
+// two — backend.isAvailable + ensureKernelAvailable) interpreter spawns even
+// when the kernel is already hot. Failures are not cached so installing a
+// Python mid-session is picked up on the next attempt.
+const availabilityCache = new Map<string, Promise<PythonKernelAvailability>>();
+
 export async function checkPythonKernelAvailability(cwd: string): Promise<PythonKernelAvailability> {
 	if (isBunTestRuntime() || $flag("PI_PYTHON_SKIP_CHECK")) {
 		return { ok: true };
 	}
+	const key = path.resolve(cwd);
+	const cached = availabilityCache.get(key);
+	if (cached) return await cached;
+	const probe = probePythonKernelAvailability(key);
+	availabilityCache.set(key, probe);
+	const result = await probe;
+	if (!result.ok && availabilityCache.get(key) === probe) {
+		availabilityCache.delete(key);
+	}
+	return result;
+}
+
+async function probePythonKernelAvailability(cwd: string): Promise<PythonKernelAvailability> {
 	try {
 		const settings = await Settings.init();
 		const { env } = settings.getShellConfig();
@@ -253,7 +273,16 @@ export class PythonKernel {
 			stdin: "pipe",
 			stdout: "pipe",
 			stderr: "pipe",
-			windowsHide: true,
+			// Detached from any inherited console only when the host itself
+			// has no console — kernel32!GetConsoleWindow() is authoritative
+			// (works even when every stdio stream is redirected), with a
+			// TTY-OR fallback when the FFI probe is unavailable. See #1960
+			// for the numpy/pandas LoadLibraryExW hang + SIGINT-recovery
+			// failure that motivates the predicate.
+			windowsHide: shouldHideKernelWindow({
+				platform: process.platform,
+				hostHasInheritableConsole: hostHasInheritableConsole(),
+			}),
 		});
 		kernel.#proc = proc;
 		kernel.#stdin = proc.stdin;

@@ -1,10 +1,11 @@
 import { rm } from "node:fs/promises";
 import * as path from "node:path";
 import { completeSimple } from "@oh-my-pi/pi-ai";
-import { Mnemopi } from "@oh-my-pi/pi-mnemopi";
-import { BankManager } from "@oh-my-pi/pi-mnemopi/core";
-import { type DiagnosticSummary, inspectDatabase } from "@oh-my-pi/pi-mnemopi/diagnose";
+import type { Mnemopi } from "@oh-my-pi/pi-mnemopi";
+import type * as MnemopiDiagnoseNs from "@oh-my-pi/pi-mnemopi/diagnose";
+import type { DiagnosticSummary } from "@oh-my-pi/pi-mnemopi/diagnose";
 import { logger } from "@oh-my-pi/pi-utils";
+
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type { MemoryBackend, MemoryBackendStartOptions } from "../memory-backend/types";
@@ -24,9 +25,24 @@ import {
 	getMnemopiScopedBanks,
 	getMnemopiScopedDbPaths,
 	getMnemopiSessionState,
+	loadMnemopi,
+	loadMnemopiCore,
 	MnemopiSessionState,
+	requireMnemopi,
+	requireMnemopiCore,
 	setMnemopiSessionState,
 } from "./state";
+
+// `/diagnose` is the only user of this subpath; load it lazily alongside the
+// loaders in ./state to keep mnemopi off the CLI startup module graph.
+let mnemopiDiagnoseMod: typeof MnemopiDiagnoseNs | undefined;
+
+async function loadMnemopiDiagnose(): Promise<typeof MnemopiDiagnoseNs> {
+	if (!mnemopiDiagnoseMod) {
+		mnemopiDiagnoseMod = await import("@oh-my-pi/pi-mnemopi/diagnose");
+	}
+	return mnemopiDiagnoseMod;
+}
 
 const STATIC_INSTRUCTIONS = [
 	"# Memory",
@@ -67,6 +83,7 @@ export const mnemopiBackend: MemoryBackend = {
 
 		try {
 			const config = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, sessionId);
+			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 			const state = new MnemopiSessionState({ sessionId, config, session });
 			const previous = setMnemopiSessionState(session, state);
 			previous?.dispose();
@@ -96,6 +113,7 @@ export const mnemopiBackend: MemoryBackend = {
 		previous?.dispose();
 		const config = previous?.config ?? (session ? loadMnemopiConfig(session.settings, agentDir) : undefined);
 		if (!config) return;
+		await loadMnemopiCore();
 		await removeDbFiles(getMnemopiScopedDbPaths(config));
 	},
 
@@ -109,6 +127,7 @@ export const mnemopiBackend: MemoryBackend = {
 					session.modelRegistry,
 					session.sessionId,
 				);
+				await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 				state = new MnemopiSessionState({ sessionId: session.sessionId, config, session });
 				setMnemopiSessionState(session, state);
 			}
@@ -123,6 +142,7 @@ export const mnemopiBackend: MemoryBackend = {
 	},
 
 	async stats(agentDir, _cwd, session): Promise<string | undefined> {
+		await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 		const { targets, owned } = createStatsTargets(agentDir, session);
 		try {
 			if (targets.length === 0) return undefined;
@@ -136,6 +156,7 @@ export const mnemopiBackend: MemoryBackend = {
 		const state = getMnemopiSessionState(session);
 		const config = state?.config ?? (session ? loadMnemopiConfig(session.settings, agentDir) : undefined);
 		if (!config) return undefined;
+		const [{ inspectDatabase }] = await Promise.all([loadMnemopiDiagnose(), loadMnemopiCore()]);
 		const banks = getMnemopiScopedBanks(config);
 		const dbPaths = getMnemopiScopedDbPaths(config);
 		const summaries = dbPaths.map((dbPath, index) => ({
@@ -178,6 +199,7 @@ function createStatsTargets(
 
 function createStatsMemory(config: MnemopiBackendConfig, bank: string): Mnemopi {
 	const providerOptions = config.providerOptions as Record<string, unknown>;
+	const { Mnemopi } = requireMnemopi();
 	return new Mnemopi({
 		dbPath: resolveBankDbPath(config, bank),
 		bank,
@@ -192,6 +214,7 @@ function createStatsMemory(config: MnemopiBackendConfig, bank: string): Mnemopi 
 function resolveBankDbPath(config: MnemopiBackendConfig, bank: string): string {
 	const sharedBank = config.globalBank ?? config.baseBank ?? "default";
 	if (bank === sharedBank) return config.dbPath;
+	const { BankManager } = requireMnemopiCore();
 	return new BankManager(path.dirname(config.dbPath)).getBankDbPath(bank);
 }
 
@@ -334,7 +357,10 @@ async function resolveMnemopiProviderOptions(
 						messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
 					},
 					{
-						apiKey,
+						apiKey: modelRegistry.resolver(model.provider, {
+							sessionId,
+							baseUrl: model.baseUrl,
+						}),
 						maxTokens: opts?.maxTokens,
 						temperature: opts?.temperature,
 					},

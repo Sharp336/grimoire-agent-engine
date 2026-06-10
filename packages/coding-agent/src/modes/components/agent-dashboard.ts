@@ -27,6 +27,7 @@ import {
 	matchesKey,
 	padding,
 	replaceTabs,
+	ScrollView,
 	Spacer,
 	Text,
 	truncateToWidth,
@@ -193,7 +194,7 @@ class AgentListPane implements Component {
 		private readonly maxVisible: number,
 	) {}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		const lines: string[] = [];
 		const searchPrefix = theme.fg("muted", "Search: ");
 		const searchText = this.searchQuery || theme.fg("dim", "type to filter");
@@ -205,9 +206,12 @@ class AgentListPane implements Component {
 			return lines;
 		}
 
+		const overflow = this.agents.length > this.maxVisible;
+		const rowWidth = Math.max(0, width - (overflow ? 1 : 0));
 		const start = this.scrollOffset;
 		const end = Math.min(start + this.maxVisible, this.agents.length);
 
+		const rows: string[] = [];
 		for (let i = start; i < end; i++) {
 			const agent = this.agents[i];
 			const selected = i === this.selectedIndex;
@@ -224,12 +228,17 @@ class AgentListPane implements Component {
 				line = theme.fg("dim", line);
 			}
 
-			lines.push(truncateToWidth(line, width));
+			rows.push(truncateToWidth(line, rowWidth));
 		}
 
-		if (this.agents.length > this.maxVisible) {
-			lines.push(theme.fg("muted", `  (${this.selectedIndex + 1}/${this.agents.length})`));
-		}
+		const sv = new ScrollView(rows, {
+			height: rows.length,
+			scrollbar: "auto",
+			totalRows: this.agents.length,
+			theme: { track: t => theme.fg("muted", t), thumb: t => theme.fg("accent", t) },
+		});
+		sv.setScrollOffset(this.scrollOffset);
+		lines.push(...sv.render(width));
 
 		return lines;
 	}
@@ -246,7 +255,7 @@ class AgentInspectorPane implements Component {
 		private readonly effectiveResolution: ModelResolution | undefined,
 	) {}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		if (!this.agent) {
 			return [theme.fg("muted", "Select an agent"), theme.fg("dim", "to inspect settings")];
 		}
@@ -305,7 +314,7 @@ class TwoColumnBody implements Component {
 		private readonly maxHeight: number,
 	) {}
 
-	render(width: number): string[] {
+	render(width: number): readonly string[] {
 		const leftWidth = Math.floor(width * 0.5);
 		const rightWidth = width - leftWidth - 3;
 		const leftLines = this.leftPane.render(leftWidth);
@@ -498,7 +507,7 @@ export class AgentDashboard extends Container {
 		return Math.max(3, this.#computeBodyHeight() - 3);
 	}
 
-	override render(width: number): string[] {
+	override render(width: number): readonly string[] {
 		// Rebuild when terminal geometry changes so the full-screen overlay
 		// re-fits on resize.
 		if (this.#terminalRows() !== this.#builtRows || this.#uiWidth() !== this.#builtCols) {
@@ -507,10 +516,13 @@ export class AgentDashboard extends Container {
 		const lines = super.render(width);
 		// Pad to the full viewport so every state (list, edit, create) covers the
 		// screen as a true full-screen view instead of letting the transcript peek
-		// through below it.
+		// through below it. Copy before padding — the container's render result is
+		// component-owned and must not be mutated.
 		const rows = this.#terminalRows();
-		while (lines.length < rows) lines.push("");
-		return lines;
+		if (lines.length >= rows) return lines;
+		const padded = lines.slice();
+		while (padded.length < rows) padded.push("");
+		return padded;
 	}
 
 	#clampSelection(): void {
@@ -638,6 +650,11 @@ export class AgentDashboard extends Container {
 		this.#createInput.handleInput("\n");
 		this.#createDescription = this.#createInput.getExpandedText();
 		this.#buildLayout();
+	}
+
+	#shouldSubmitCreateDescription(data: string): boolean {
+		if (matchesKey(data, "ctrl+enter")) return true;
+		return process.platform === "win32" && data === "\n" && this.#createDescription.trim().length > 0;
 	}
 
 	async #generateAgentFromDescription(rawDescription: string): Promise<void> {
@@ -1085,10 +1102,7 @@ export class AgentDashboard extends Container {
 				}
 				return;
 			}
-			if (
-				!this.#createGenerating &&
-				(matchesKey(data, "ctrl+enter") || (data.charCodeAt(0) === 10 && data.length > 1))
-			) {
+			if (!this.#createGenerating && this.#shouldSubmitCreateDescription(data)) {
 				this.#submitCreateDescription();
 				return;
 			}

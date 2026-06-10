@@ -1,6 +1,42 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Restored `PI_DEBUG_STARTUP` streaming startup markers: `logger.time` now writes a synchronous `[startup] <op>:start` / `:done` / `:fail` stderr line per phase (independent of `PI_TIMING`), so a startup that hangs hard still names the phase it is stuck in — the `PI_TIMING` tree only prints after startup completes and is structurally unable to diagnose a hang. The CLI runner emits `cli:load:<name>` markers around each lazily-imported command module for the same reason.
+- Added `logger.openSpanPath()`: ops of the currently-open timing-span chain (root → deepest), used by the coding agent's startup watchdog to name the in-flight phase of a stalled startup.
+- Added `declareWorkerHostEntry()` / `workerHostEntry()` (env): self-dispatching CLI entrypoints declare `Bun.main` as the worker host so worker spawn sites can re-enter the single entry module with `WorkerOptions.argv` selectors across source, npm-bundle, and compiled distributions
+
+### Changed
+
+- Changed `prompt.compile()` to cache compiled templates by the raw template string so repeated calls reuse the same compiled function without re-disambiguating
+- `Snowflake.formatParts` packs the id as a single 64-bit BigInt hex format instead of stitching four 16-bit segments (simpler and ~1.7x faster), and `getTimestamp` extracts via exact double arithmetic instead of a BigInt round-trip. Output is bit-identical.
+- Logger initialization is lazy: the winston logger, file transport, and log-directory creation now happen on first log emission instead of at module import (the import previously cost ~8ms of fs work on the CLI startup path); the in-memory timing infrastructure never touches winston
+- `prompt.format()` post-processing got cheap per-line guards and a single-pass ASCII-symbol replacement (was 7 chained regex passes per line), roughly halving render post-processing cost; output is byte-identical
+
+### Fixed
+
+- Fixed `prompt.format()` so ASCII symbol replacements such as `-->` and `!=` still run on lines containing a closing HTML comment token when not inside a comment
+- `isCompiledBinary()` now also honors a define-folded `process.env.PI_COMPILED` (only `Bun.env` was checked), so builds that constant-fold `process.env` keep compiled-binary detection without relying on `import.meta.url` bunfs markers
+- `omp <cmd> --help` now loads only the requested command module instead of the entire command table, so an unrelated command whose import graph hangs or crashes can no longer take down every per-command help invocation.
+
+## [15.10.8] - 2026-06-09
+### Removed
+
+- Removed the exported `hookFetch` API, which previously intercepted `globalThis.fetch` via middleware handlers
+- Removed `hookFetch` from the package entrypoint, so imports from `@.../utils` no longer provide this fetch interception helper
+
+## [15.10.0] - 2026-06-06
+
+### Changed
+
+- `logger.printTimings()` (the `PI_TIMING` startup tree) now surfaces two previously-invisible regions: a `(before instrumentation)` line for runtime init / uncaptured pre-marker work, and an `(unattributed self)` line for the root span's own untimed work so the gap between visible top-level spans and `Total` is no longer swallowed. `Total` is now labelled `(since first marker)` to make the window explicit. The restored `module-timer.ts` preload can feed module spans into the report: each module records `onLoad` → final top-level marker as `total`, a prepended body marker → final marker as `body/TLA`, and resolved static imports as a bounded dependency tree so the report separates graph wait from actual top-level module work.
+
+## [15.9.2] - 2026-06-05
+
+### Added
+
+- Added `getAuthBrokerSnapshotCachePath()` with `OMP_AUTH_BROKER_SNAPSHOT_CACHE` override support for isolating the encrypted broker snapshot cache.
 
 ## [15.9.1] - 2026-06-04
 

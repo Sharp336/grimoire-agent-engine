@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { type Api, Effort, type Model } from "@oh-my-pi/pi-ai";
-import { getModelSeries } from "../../src/config/model-equivalence";
+import { getModelSeries } from "@oh-my-pi/pi-catalog/identity";
 import type { SessionEntry } from "../../src/session/session-manager";
 import {
 	buildTranscript,
@@ -22,9 +22,7 @@ function model(partial: { provider: string; id: string; reasoning?: boolean; lev
 		name: partial.id,
 		api: "anthropic-messages",
 		reasoning: partial.reasoning ?? false,
-		thinking: partial.levels
-			? { minLevel: partial.levels[0], maxLevel: partial.levels[partial.levels.length - 1], levels: partial.levels }
-			: undefined,
+		thinking: partial.levels ? { efforts: partial.levels } : undefined,
 	} as unknown as Model<Api>;
 }
 
@@ -273,6 +271,32 @@ describe("second_opinion transcript rendering", () => {
 		const rendered = renderEntry(messageEntry("toolResult", big, "search"));
 		expect(rendered?.role).toBe("tool");
 		expect(rendered?.text).toContain("…[truncated]");
+	});
+
+	it("renders compaction and branch summaries", () => {
+		const compaction = {
+			type: "compaction",
+			id: "c",
+			parentId: null,
+			timestamp: "0",
+			summary: "Earlier decision: keep consent before transcript sharing.",
+			firstKeptEntryId: "u",
+			tokensBefore: 1234,
+		} as unknown as SessionEntry;
+		const branch = {
+			type: "branch_summary",
+			id: "b",
+			parentId: "c",
+			timestamp: "0",
+			fromId: "old-leaf",
+			summary: "Abandoned path found a same-family reviewer caveat.",
+		} as unknown as SessionEntry;
+		const { text, count } = buildTranscript([compaction, branch, messageEntry("user", "continue")]);
+		expect(count).toBe(3);
+		expect(text).toContain("## COMPACTION SUMMARY");
+		expect(text).toContain("keep consent before transcript sharing");
+		expect(text).toContain("## BRANCH SUMMARY");
+		expect(text).toContain("same-family reviewer caveat");
 	});
 
 	it("marks tool calls and drops thinking blocks", () => {
