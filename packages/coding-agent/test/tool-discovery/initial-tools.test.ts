@@ -29,6 +29,7 @@ const allToolsSettings = Settings.isolated({
 	"todo.enabled": true,
 	"memory.backend": "mnemopi",
 	"tools.discoveryMode": "all",
+	"secondOpinion.enabled": true,
 });
 
 const toolSession: ToolSession = {

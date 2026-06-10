@@ -80,7 +80,7 @@ describe("editToolRenderer", () => {
 		expect(expanded).toContain("head-line-1");
 		expect(expanded).toContain("tail-line-20");
 		expect(expanded).not.toContain("more lines above");
-		expect(expanded).not.toContain("(preview)");
+		expect(expanded).toContain("(preview)");
 	});
 
 	it("uses hashline input headers for streaming call path without apply_patch errors", async () => {

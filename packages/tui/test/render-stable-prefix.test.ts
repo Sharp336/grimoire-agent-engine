@@ -99,7 +99,8 @@ describe("RenderStablePrefix engine contract", () => {
 			expect(duplicated).toEqual([]);
 
 			// And in original append order.
-			expect(buffer.match(/ROW-\d{3}/g) ?? []).toEqual(markers);
+			const seenMarkers = buffer.match(/ROW-\d{3}/g);
+			expect(seenMarkers ? Array.from(seenMarkers) : []).toEqual(markers);
 		} finally {
 			tui.stop();
 			await term.flush();
