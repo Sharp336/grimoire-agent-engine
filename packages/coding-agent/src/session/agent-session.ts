@@ -198,6 +198,7 @@ import {
 	clampAutoThinkingEffort,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
+	shouldDisableReasoning,
 	toReasoningEffort,
 } from "../thinking";
 import { shutdownTinyTitleClient } from "../tiny/title-client";
@@ -330,6 +331,8 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	sessionManager: SessionManager;
 	settings: Settings;
+	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
+	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Initial session thinking selector. */
@@ -845,6 +848,7 @@ export class AgentSession {
 	readonly settings: Settings;
 	readonly yieldQueue: YieldQueue;
 	fileSnapshotStore?: InMemorySnapshotStore;
+	#autoApprove: boolean;
 
 	#powerAssertion: MacOSPowerAssertion | undefined;
 
@@ -1124,6 +1128,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
+		this.#autoApprove = config.autoApprove === true;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
 		this.#parentEvalSessionId = config.parentEvalSessionId;
@@ -1139,6 +1144,7 @@ export class AgentSession {
 		} else {
 			this.#thinkingLevel = config.thinkingLevel;
 		}
+		this.#applyThinkingLevelToAgent(this.#thinkingLevel);
 		this.#promptTemplates = config.promptTemplates ?? [];
 		this.#slashCommands = config.slashCommands ?? [];
 		this.#extensionRunner = config.extensionRunner;
@@ -3536,13 +3542,12 @@ export class AgentSession {
 	 * Only wraps tools whose name is in PERMISSION_REQUIRED_TOOLS and only when
 	 * the bridge exposes `requestPermission`. No-ops for all other cases.
 	 *
-	 * When the user has explicitly opted into `yolo` approval mode (via the
-	 * `--yolo` / `--auto-approve` CLI flags — reflected into a
-	 * `tools.approvalMode` settings override by `main.ts` — or a configured
-	 * `tools.approvalMode: yolo`), skips the gate unless the per-tool policy
-	 * explicitly requires a prompt or deny. The schema default is also `yolo`,
-	 * so an explicit configuration is required: default-config ACP sessions
-	 * keep the client-side permission gate.
+	 * When the user has explicitly opted into `yolo` / auto-approve behavior (via
+	 * the SDK/CLI `autoApprove` flag or a configured `tools.approvalMode: yolo`),
+	 * skips the gate unless the per-tool policy explicitly requires a prompt or
+	 * deny. The schema default is also `yolo`, so an explicit configuration or
+	 * explicit session flag is required: default-config ACP sessions keep the
+	 * client-side permission gate.
 	 */
 	#wrapToolForAcpPermission<T extends AgentTool>(tool: T): T {
 		const bridge = this.#clientBridge;
@@ -3551,7 +3556,7 @@ export class AgentSession {
 		if (!PERMISSION_REQUIRED_TOOLS.has(tool.name)) return tool;
 		// Skip the gate only on explicit yolo opt-in; honour per-tool policies
 		// that require a prompt or deny (matching the normal approval wrapper).
-		if (this.settings.isConfigured("tools.approvalMode") && this.settings.get("tools.approvalMode") === "yolo") {
+		if (this.#isExplicitAutoApproveMode()) {
 			const userPolicies = (this.settings.get("tools.approval") ?? {}) as Record<string, unknown>;
 			const toolPolicy = userPolicies[tool.name];
 			if (!toolPolicy || toolPolicy === "allow") return tool;
@@ -3641,6 +3646,13 @@ export class AgentSession {
 				};
 			},
 		}) as T;
+	}
+
+	#isExplicitAutoApproveMode(): boolean {
+		return (
+			this.#autoApprove ||
+			(this.settings.isConfigured("tools.approvalMode") && this.settings.get("tools.approvalMode") === "yolo")
+		);
 	}
 
 	async #applyActiveToolsByName(
@@ -4047,6 +4059,14 @@ export class AgentSession {
 	#deobfuscateFromProvider(text: string): string {
 		if (!this.#obfuscator?.hasSecrets()) return text;
 		return this.#obfuscator.deobfuscate(text);
+	}
+
+	#deobfuscatedProviderTextReadyForDelta(text: string): string {
+		const deobfuscated = this.#deobfuscateFromProvider(text);
+		if (!this.#obfuscator?.hasSecrets()) return deobfuscated;
+		const pendingPlaceholderStart = deobfuscated.match(/#[A-Z0-9]{0,4}$/);
+		if (pendingPlaceholderStart?.index === undefined) return deobfuscated;
+		return deobfuscated.slice(0, pendingPlaceholderStart.index);
 	}
 
 	#convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
@@ -5770,6 +5790,11 @@ export class AgentSession {
 	// Thinking Level Management
 	// =========================================================================
 
+	#applyThinkingLevelToAgent(level: ThinkingLevel | undefined): void {
+		this.agent.setThinkingLevel(toReasoningEffort(level));
+		this.agent.setDisableReasoning(shouldDisableReasoning(level));
+	}
+
 	/**
 	 * Set the thinking level. `auto` enables per-turn classification; the selector
 	 * itself is never written to the session log, but resolved concrete levels are
@@ -5783,7 +5808,7 @@ export class AgentSession {
 			this.#autoThinking = true;
 			this.#autoResolvedLevel = undefined;
 			this.#thinkingLevel = provisional;
-			this.agent.setThinkingLevel(toReasoningEffort(provisional));
+			this.#applyThinkingLevelToAgent(provisional);
 			if (persist) {
 				this.settings.set("defaultThinkingLevel", AUTO_THINKING);
 			}
@@ -5799,7 +5824,7 @@ export class AgentSession {
 		const isChanging = effectiveLevel !== this.#thinkingLevel;
 
 		this.#thinkingLevel = effectiveLevel;
-		this.agent.setThinkingLevel(toReasoningEffort(effectiveLevel));
+		this.#applyThinkingLevelToAgent(effectiveLevel);
 
 		if (isChanging) {
 			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
@@ -5889,7 +5914,7 @@ export class AgentSession {
 		const shouldPersistResolution = this.#autoResolvedLevel !== effort;
 		this.#autoResolvedLevel = effort;
 		this.#thinkingLevel = effort;
-		this.agent.setThinkingLevel(toReasoningEffort(effort));
+		this.#applyThinkingLevelToAgent(effort);
 		if (shouldPersistResolution) {
 			this.sessionManager.appendThinkingLevelChange(effort);
 		}
@@ -8615,11 +8640,12 @@ export class AgentSession {
 	 * @param command The bash command to execute
 	 * @param onChunk Optional streaming callback for output
 	 * @param options.excludeFromContext If true, command output won't be sent to LLM (!! prefix)
+	 * @param options.useUserShell If true, allow caller to request configured user-shell routing
 	 */
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean },
+		options?: { excludeFromContext?: boolean; useUserShell?: boolean },
 	): Promise<BashResult> {
 		const excludeFromContext = options?.excludeFromContext === true;
 		const cwd = this.sessionManager.getCwd();
@@ -8647,6 +8673,7 @@ export class AgentSession {
 				sessionKey: this.sessionId,
 				timeout: clampTimeout("bash") * 1000,
 				onMinimizedSave: originalText => this.#saveBashOriginalArtifact(originalText),
+				useUserShell: options?.useUserShell,
 			});
 
 			this.recordBashResult(command, result, options);
@@ -9065,6 +9092,7 @@ export class AgentSession {
 				promptCacheKey: cacheSessionId,
 				preferWebsockets: false,
 				reasoning: toReasoningEffort(this.thinkingLevel),
+				disableReasoning: shouldDisableReasoning(this.thinkingLevel),
 				hideThinkingSummary: this.agent.hideThinkingSummary,
 				serviceTier: this.serviceTier,
 				signal: args.signal,
@@ -9073,17 +9101,27 @@ export class AgentSession {
 			model.provider,
 		);
 
-		let replyText = "";
+		let providerReplyText = "";
+		let emittedReplyText = "";
 		let assistantMessage: AssistantMessage | undefined;
 		const stream = streamSimple(model, obfuscateProviderContext(this.#obfuscator, context), options);
 		for await (const event of stream) {
 			if (event.type === "text_delta") {
-				replyText += event.delta;
-				if (args.onTextDelta) args.onTextDelta(event.delta);
+				providerReplyText += event.delta;
+				if (args.onTextDelta) {
+					const readyText = this.#deobfuscatedProviderTextReadyForDelta(providerReplyText);
+					if (readyText.length > emittedReplyText.length) {
+						const delta = readyText.slice(emittedReplyText.length);
+						emittedReplyText = readyText;
+						args.onTextDelta(delta);
+					}
+				}
 				continue;
 			}
 			if (event.type === "done") {
-				assistantMessage = event.message;
+				assistantMessage = this.#obfuscator?.hasSecrets()
+					? { ...event.message, content: this.#obfuscator.deobfuscateObject(event.message.content) }
+					: event.message;
 				break;
 			}
 			if (event.type === "error") {
@@ -9093,6 +9131,10 @@ export class AgentSession {
 
 		if (!assistantMessage) {
 			throw new Error("Ephemeral turn ended without a final message");
+		}
+		const replyText = this.#deobfuscateFromProvider(providerReplyText);
+		if (args.onTextDelta && replyText.length > emittedReplyText.length) {
+			args.onTextDelta(replyText.slice(emittedReplyText.length));
 		}
 		return {
 			replyText: args.dedupeReply === false ? replyText.trim() : dedupeIrcReply(replyText.trim()),
@@ -9353,7 +9395,7 @@ export class AgentSession {
 				this.#autoResolvedLevel = undefined;
 				this.#thinkingLevel = resolveThinkingLevelForModel(this.model, restoredThinkingLevel);
 			}
-			this.agent.setThinkingLevel(toReasoningEffort(this.#thinkingLevel));
+			this.#applyThinkingLevelToAgent(this.#thinkingLevel);
 			this.agent.serviceTier = hasServiceTierEntry
 				? sessionContext.serviceTier
 				: configuredServiceTier === "none"
@@ -9410,7 +9452,7 @@ export class AgentSession {
 			this.#thinkingLevel = previousThinkingLevel;
 			this.#autoThinking = previousAutoThinking;
 			this.#autoResolvedLevel = previousAutoResolvedLevel;
-			this.agent.setThinkingLevel(toReasoningEffort(previousThinkingLevel));
+			this.#applyThinkingLevelToAgent(previousThinkingLevel);
 			this.agent.serviceTier = previousServiceTier;
 			this.#syncTodoPhasesFromBranch();
 			this.#reconnectToAgent();
