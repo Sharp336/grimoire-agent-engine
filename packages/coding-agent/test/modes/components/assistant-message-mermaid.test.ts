@@ -239,8 +239,9 @@ describe("AssistantMessageComponent thinking renderers", () => {
 				context => {
 					rendererCalls += 1;
 					requestRender = context.requestRender;
-					mountedNote ??= new Text("translation loading", 1, 0);
-					return mountedNote;
+					const note = new Text("translation loading", 1, 0);
+					mountedNote ??= note;
+					return note;
 				},
 			],
 		);
@@ -252,7 +253,7 @@ describe("AssistantMessageComponent thinking renderers", () => {
 
 		const rendered = Bun.stripANSI(component.render(120).join("\n"));
 		expect(renderRequests).toBe(1);
-		expect(rendererCalls).toBe(2);
+		expect(rendererCalls).toBe(1);
 		expect(rendered).toContain("translation ready");
 		expect(rendered).not.toContain("translation loading");
 	});

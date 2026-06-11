@@ -861,7 +861,7 @@ export interface AssistantThinkingRenderContext {
 	thinkingIndex: number;
 	/** Current full trimmed thinking snapshot. */
 	text: string;
-	/** Re-run this thinking block's renderers and schedule a repaint after async renderer state changes. */
+	/** Repaint mounted output, or re-run this thinking block's renderers when no component was mounted yet. */
 	requestRender(): void;
 }
 

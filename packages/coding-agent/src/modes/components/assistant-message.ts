@@ -248,7 +248,11 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	#requestThinkingRender(): void {
+	#requestThinkingRender(rebuild: boolean): void {
+		if (!rebuild) {
+			this.onImageUpdate?.();
+			return;
+		}
 		if (this.#thinkingRenderRefreshQueued) return;
 		this.#thinkingRenderRefreshQueued = true;
 		queueMicrotask(() => {
@@ -279,6 +283,7 @@ export class AssistantMessageComponent extends Container {
 		const append: Component[] = [];
 		let replacement: Component | undefined;
 		for (const renderer of this.thinkingRenderers) {
+			let rebuildOnRequest = true;
 			try {
 				const result: AssistantThinkingRenderResult = renderer(
 					{
@@ -296,12 +301,13 @@ export class AssistantMessageComponent extends Container {
 						contentIndex,
 						thinkingIndex,
 						text,
-						requestRender: () => this.#requestThinkingRender(),
+						requestRender: () => this.#requestThinkingRender(rebuildOnRequest),
 					},
 					theme,
 				);
 				if (!result) continue;
 				if (isComponent(result)) {
+					rebuildOnRequest = false;
 					append.push(result);
 					continue;
 				}
@@ -320,9 +326,11 @@ export class AssistantMessageComponent extends Container {
 						});
 						continue;
 					}
+					rebuildOnRequest = false;
 					replacement = result.component;
 					continue;
 				}
+				rebuildOnRequest = false;
 				append.push(result.component);
 			} catch (error) {
 				logger.warn("Assistant thinking renderer failed", {
