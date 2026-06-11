@@ -494,15 +494,18 @@ export class TranscriptContainer
 
 		const count = this.children.length;
 
-		// The live region spans from the earliest still-mutating block through the
-		// bottom. A block that has not finalized must stay below the seam: out-of-
-		// band inserts (TTSR/todo cards) can append a finalized block *below* a
-		// tool that is still awaiting its result, and committing the tool there
-		// would strand its history rows on the mid-stream preview the late result
-		// never reaches.
+		// The live region spans from the earliest still-mutating or explicitly
+		// non-committable block through the bottom. A block that has not finalized
+		// must stay below the seam: out-of-band inserts (TTSR/todo cards) can
+		// append a finalized block *below* a tool that is still awaiting its
+		// result, and committing the tool there would strand its history rows on
+		// the mid-stream preview the late result never reaches. A finalized block
+		// may also opt out when it can still repaint prior rows through async
+		// renderer state, e.g. replacement-capable assistant thinking.
 		let liveStartIndex = count - 1;
 		for (let i = 0; i < count; i++) {
-			if (!isBlockFinalized(this.children[i]!)) {
+			const child = this.children[i]!;
+			if (!isBlockFinalized(child) || !canCommitLiveBlock(child)) {
 				liveStartIndex = i;
 				break;
 			}

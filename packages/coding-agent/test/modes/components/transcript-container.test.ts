@@ -293,6 +293,25 @@ describe("TranscriptContainer", () => {
 		expect(replacementContainer.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
 	});
 
+	it("keeps finalized replacement-capable assistant thinking in the live region above later finalized blocks", () => {
+		const container = new TranscriptContainer();
+		const assistant = new AssistantMessageComponent(undefined, false, undefined, [() => undefined]);
+		assistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "raw final thinking" }],
+			}),
+		);
+		assistant.markTranscriptBlockFinalized();
+		container.addChild(assistant);
+		container.addChild(new MutableBlock(["next finalized block"]));
+
+		const rendered = plain(container.render(80));
+		expect(rendered).toContain("raw final thinking");
+		expect(rendered).toContain("next finalized block");
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(container.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
+	});
+
 	it("keeps an unfinalized block below the seam when a finalized block is appended below it", () => {
 		const container = new TranscriptContainer();
 		// A foreground tool whose args are still streaming (no result yet).
