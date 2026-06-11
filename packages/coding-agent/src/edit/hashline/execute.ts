@@ -14,7 +14,6 @@ import {
 	type BlockResolution,
 	buildCompactDiffPreview,
 	MismatchError as HashlineMismatchError,
-	Patch,
 	Patcher,
 	type PatchSectionResult,
 	type PreparedSection,
@@ -31,6 +30,7 @@ import { nativeBlockResolver } from "./block-resolver";
 import { HashlineFilesystem } from "./filesystem";
 import { hashPatchInput, NOOP_HARD_LIMIT, recordNoopEdit, resetNoopEdit } from "./noop-loop-guard";
 import { type HashlineParams, hashlineEditParamsSchema } from "./params";
+import { parseHashlineEditInput } from "./parse-input";
 
 export interface ExecuteHashlineSingleOptions {
 	session: ToolSession;
@@ -160,10 +160,7 @@ function renderSection(result: PatchSectionResult, diagnostics: FileDiagnosticsR
 export async function executeHashlineSingle(
 	options: ExecuteHashlineSingleOptions,
 ): Promise<AgentToolResult<EditToolDetails, typeof hashlineEditParamsSchema>> {
-	const patch = Patch.parse(options.input, { cwd: options.session.cwd });
-	if (patch.sections.length === 0) {
-		throw new Error("No hashline sections found in input.");
-	}
+	const patch = parseHashlineEditInput(options.input, options.session.cwd);
 
 	const fs = new HashlineFilesystem({
 		session: options.session,

@@ -42,6 +42,11 @@ import signal
 import subprocess
 import sys
 import threading
+_OMP_RUNNER_DIR = os.path.dirname(os.path.abspath(__file__))
+if _OMP_RUNNER_DIR not in sys.path:
+    sys.path.insert(0, _OMP_RUNNER_DIR)
+
+
 import time
 import traceback
 from pathlib import Path
@@ -586,16 +591,54 @@ def _magic_cell_timeit(args: str, body: str) -> None:
     _emit_status("timeit", loops=iters, total_ms=round(total * 1000, 3))
 
 
+
+
+def _eval_assert_write_allowed(path: str | Path) -> None:
+    try:
+        import eval_guard
+    except ImportError:
+        return
+    if not eval_guard.block_source_writes_enabled():
+        return
+    raw = str(path)
+    match = re.match(r"^([a-z][a-z0-9+.-]*)://(.*)$", raw.strip(), re.IGNORECASE)
+    if match:
+        try:
+            roots = json.loads(os.environ.get("PI_EVAL_LOCAL_ROOTS") or "{}")
+        except (ValueError, TypeError):
+            roots = {}
+        if isinstance(roots, dict) and match.group(1).lower() in roots:
+            return
+    raise ValueError(eval_guard.blocked_message() or "eval cannot write project source when edit is available.")
+
+
 @cell_magic("writefile")
 def _magic_cell_writefile(args: str, body: str) -> str:
     path = Path(os.path.expanduser(args.strip()))
+    _eval_assert_write_allowed(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     _emit_status("writefile", path=str(path), bytes=len(body))
     return str(path)
 
 
+
+
+def _assert_shell_magic_allowed() -> None:
+    try:
+        import eval_guard
+    except ImportError:
+        return
+    if not eval_guard.block_source_writes_enabled():
+        return
+    msg = eval_guard.blocked_message() or (
+        "eval cannot run shell magics that may write project source when the edit tool is available."
+    )
+    raise ValueError(msg)
+
+
 def _run_shell_body(body: str, *, shell_arg: str) -> int:
+    _assert_shell_magic_allowed()
     proc = subprocess.Popen(
         [shell_arg, "-c", body],
         stdout=subprocess.PIPE,
@@ -641,6 +684,7 @@ class _ShellResult(list):
 
 
 def __omp_shell(cmd: str) -> _ShellResult:
+    _assert_shell_magic_allowed()
     proc = subprocess.run(
         cmd,
         shell=True,
@@ -918,7 +962,21 @@ _MANAGED_ENV_KEYS = (
     "PI_TOOL_BRIDGE_TOKEN",
     "PI_TOOL_BRIDGE_SESSION",
     "PI_EVAL_LOCAL_ROOTS",
+    "PI_EVAL_BLOCK_SOURCE_WRITES",
 )
+
+
+def _host_local_roots_from_env() -> dict[str, str]:
+    raw = os.environ.get("PI_EVAL_LOCAL_ROOTS")
+    if not raw:
+        return {}
+    try:
+        parsed = json.loads(raw)
+    except (ValueError, TypeError):
+        return {}
+    if not isinstance(parsed, dict):
+        return {}
+    return {str(k): str(v) for k, v in parsed.items() if isinstance(k, str) and isinstance(v, str)}
 
 
 def _apply_request_runtime(req: dict) -> None:
@@ -939,6 +997,25 @@ def _apply_request_runtime(req: dict) -> None:
                 os.environ[key] = value
             elif value is None:
                 os.environ.pop(key, None)
+        try:
+            import eval_guard
+        except ImportError:
+            eval_guard = None  # type: ignore[assignment]
+        if eval_guard is not None:
+            block = os.environ.get("PI_EVAL_BLOCK_SOURCE_WRITES") == "1"
+            msg = eval_guard.blocked_message()
+            if not msg:
+                msg = (
+                    "eval write() and append() cannot change project source files when the edit tool is available."
+                )
+            eval_guard._host_set_guard_state(block_source_writes=block, blocked_message=msg)
+            eval_guard._host_set_local_roots(_host_local_roots_from_env())
+        try:
+            import eval_io_guard
+        except ImportError:
+            eval_io_guard = None  # type: ignore[assignment]
+        if eval_io_guard is not None:
+            eval_io_guard.install()
 
 def _start_parent_watchdog() -> None:
     """Self-terminate when the host process dies.

@@ -26,6 +26,7 @@ export interface JsExecutorOptions {
 	session: ToolSession;
 	/** On-disk roots the helpers substitute for internal-URL schemes (e.g. `local://`). */
 	localRoots?: Record<string, string>;
+	blockProjectSourceWrites?: boolean;
 }
 
 export interface JsResult {
@@ -103,6 +104,7 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 			cwd: options.cwd ?? options.session.cwd,
 			session: options.session,
 			localRoots: options.localRoots,
+			blockProjectSourceWrites: options.blockProjectSourceWrites,
 			reset: options.reset,
 			code,
 			filename: `js-cell-${crypto.randomUUID()}.js`,

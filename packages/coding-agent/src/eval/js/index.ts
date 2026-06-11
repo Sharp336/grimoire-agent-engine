@@ -5,6 +5,7 @@ import {
 	type ExecutorBackendResult,
 	resolveEvalUrlRoots,
 } from "../backend";
+import { shouldBlockEvalSourceWrites } from "../eval-write-guard";
 import { executeJs } from "./executor";
 
 const JS_SESSION_PREFIX = "js:";
@@ -34,6 +35,7 @@ export default {
 			onStatus: opts.onStatus,
 			session: opts.session,
 			localRoots: resolveEvalUrlRoots(opts.session),
+			blockProjectSourceWrites: shouldBlockEvalSourceWrites(opts.session),
 		});
 		return {
 			output: result.output,

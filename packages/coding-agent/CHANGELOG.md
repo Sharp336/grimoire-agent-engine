@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Grok Composer 2.5 Fast bypassing hashline `edit` via scripted `bash` and `eval` writes when `edit` is available ([#2272](https://github.com/can1357/oh-my-pi/issues/2272)): bash interceptor rules for write-only `python -c` / `node -e` / `bun -e` (including `Bun.write`, `appendFile*`, multiline payloads, `Path.open`/`write_bytes`, env/`/usr/bin/env` wrappers) with shared `HASHLINE_EDIT_INPUT_GUIDANCE` on block; enforced eval project-path write blocks for JS (`node:fs`, `fs/promises`, prelude `write`/`append`, guarded `Bun.write`) and Python (`builtins.open`, `io.open`, `Path.open`, `write_text`/`write_bytes` via immutable `eval_guard`); malformed hashline `edit` input surfaces actionable `ToolError` via `parseHashlineEditInput`.
+
 ## [15.11.0] - 2026-06-10
 
 ### Breaking Changes

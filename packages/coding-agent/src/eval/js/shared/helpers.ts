@@ -3,6 +3,11 @@ import * as path from "node:path";
 
 import * as Diff from "diff";
 import { ToolError } from "../../../tools/tool-errors";
+import {
+	EVAL_SOURCE_WRITE_BLOCKED_MESSAGE,
+	isEvalArtifactWritePath,
+	isEvalLocalRootFilesystemPath,
+} from "../../eval-write-guard";
 import type { JsStatusEvent } from "./types";
 
 export interface HelperOptions {
@@ -30,6 +35,8 @@ export interface HelperContext {
 	 * to `<root>/x.md` before any filesystem op; unknown schemes are rejected.
 	 */
 	localRoots(): Record<string, string>;
+	/** When true, `write`/`append` reject non-artifact project paths (edit tool available). */
+	blockProjectSourceWrites?: boolean;
 	emitStatus(event: JsStatusEvent): void;
 }
 
@@ -48,6 +55,14 @@ export interface HelperBundle {
 	diff(rawA: string, rawB: string): Promise<string>;
 	tree(searchPath?: string, options?: HelperOptions): Promise<string>;
 	env(key?: string, value?: string): string | Record<string, string> | undefined;
+}
+
+function assertEvalWriteAllowed(ctx: HelperContext, rawPath: string): void {
+	if (!ctx.blockProjectSourceWrites) return;
+	const roots = ctx.localRoots();
+	if (isEvalArtifactWritePath(rawPath, roots)) return;
+	if (isEvalLocalRootFilesystemPath(rawPath, roots)) return;
+	throw new ToolError(EVAL_SOURCE_WRITE_BLOCKED_MESSAGE);
 }
 
 const utf8Encoder = new TextEncoder();
@@ -69,6 +84,7 @@ export function createHelpers(ctx: HelperContext): HelperBundle {
 			return text;
 		},
 		writeFile: async (rawPath, data) => {
+			assertEvalWriteAllowed(ctx, rawPath);
 			if (!isWriteData(data)) {
 				throw new ToolError("write() expects string, Blob, ArrayBuffer, or TypedArray data");
 			}
@@ -82,6 +98,7 @@ export function createHelpers(ctx: HelperContext): HelperBundle {
 			return filePath;
 		},
 		append: async (rawPath, content) => {
+			assertEvalWriteAllowed(ctx, rawPath);
 			const target = resolveHelperPath(ctx, rawPath, "write");
 			// O(1) append; read-all+rewrite both raced concurrent writers and went
 			// quadratic when called in a loop. Bun.write creates parent dirs, so

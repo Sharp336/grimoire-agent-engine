@@ -1,8 +1,11 @@
 import * as fs from "node:fs";
+import * as nodeFs from "node:fs";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import * as vm from "node:vm";
+import type { EvalFsPathGuard } from "../../eval-fs-guard";
+import { guardedImportModuleNamespace } from "../../eval-fs-guard";
 import { collectModuleSourceSpecifiers, stripTypeScriptSyntax } from "./rewrite-imports";
 
 interface LocalModuleEntry {
@@ -28,11 +31,23 @@ export class LocalModuleLoader {
 	#moduleBuilds = new Map<string, Promise<LocalModuleEntry>>();
 	#externalModules = new Map<string, Promise<vm.Module>>();
 	#requireCache = new Map<string, NodeJS.Require>();
+	#requireWrapper: ((base: NodeJS.Require) => NodeJS.Require) | undefined;
+	#fsGuard: EvalFsPathGuard | undefined;
 	#modulePaths = new WeakMap<vm.Module, string>();
 
 	constructor(sessionId: string) {
 		this.#context = vm.createContext(globalThis);
 		this.#sessionTag = Bun.hash(sessionId).toString(16);
+	}
+
+	setRequireWrapper(wrapper: ((base: NodeJS.Require) => NodeJS.Require) | undefined): void {
+		this.#requireWrapper = wrapper;
+		this.#requireCache.clear();
+	}
+
+	setFsWriteGuard(guard: EvalFsPathGuard | undefined): void {
+		this.#fsGuard = guard;
+		this.#externalModules.clear();
 	}
 
 	async resolveForRun(cwd: string, source: string): Promise<LocalImportResolution> {
@@ -52,6 +67,7 @@ export class LocalModuleLoader {
 		let cached = this.#requireCache.get(basePath);
 		if (!cached) {
 			cached = buildRequire(basePath);
+			if (this.#requireWrapper) cached = this.#requireWrapper(cached);
 			this.#requireCache.set(basePath, cached);
 		}
 		return cached;
@@ -209,8 +225,12 @@ export class LocalModuleLoader {
 		const existing = this.#externalModules.get(target);
 		if (existing) return await existing;
 		const loadPromise = (async () => {
-			const namespace = await import(target);
-			const exportNames = Object.keys(namespace);
+			const namespace = this.#fsGuard
+				? await guardedImportModuleNamespace(target, this.#fsGuard, nodeFs, (t, o) =>
+						o !== undefined ? import(t, o) : import(t),
+					)
+				: await import(target);
+			const exportNames = Object.keys(namespace as object);
 			const module = new vm.SyntheticModule(
 				exportNames,
 				function () {

@@ -11,6 +11,7 @@ export interface SessionSnapshot {
 	 * accept `local://…` paths instead of writing a literal `local:/` directory.
 	 */
 	localRoots?: Record<string, string>;
+	blockProjectSourceWrites?: boolean;
 }
 
 export interface RunErrorPayload {

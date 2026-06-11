@@ -14,7 +14,10 @@ import { $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
 import { $ } from "bun";
 import { Settings } from "../../config/settings";
+import { EVAL_SOURCE_WRITE_BLOCKED_MESSAGE } from "../eval-write-guard";
 import { type KernelDisplayOutput, renderKernelDisplay } from "./display";
+import EVAL_GUARD_SCRIPT from "./eval_guard.py" with { type: "text" };
+import EVAL_IO_GUARD_SCRIPT from "./eval_io_guard.py" with { type: "text" };
 import { PYTHON_PRELUDE } from "./prelude";
 import RUNNER_SCRIPT from "./runner.py" with { type: "text" };
 import {
@@ -39,13 +42,18 @@ let RUNNER_SCRIPT_PATH: string | null = null;
 async function ensureRunnerScript(): Promise<string> {
 	if (RUNNER_SCRIPT_PATH) return RUNNER_SCRIPT_PATH;
 	await fs.promises.mkdir(RUNNER_CACHE_DIR, { recursive: true });
-	const hash = Bun.hash(RUNNER_SCRIPT).toString(36);
-	const target = path.join(RUNNER_CACHE_DIR, `runner-${hash}.py`);
-	if (!fs.existsSync(target)) {
-		await Bun.write(target, RUNNER_SCRIPT);
+	const bundle = `${EVAL_GUARD_SCRIPT}\n\n${EVAL_IO_GUARD_SCRIPT}\n\n${RUNNER_SCRIPT}`;
+	const hash = Bun.hash(bundle).toString(36);
+	const cacheRoot = path.join(RUNNER_CACHE_DIR, `bundle-${hash}`);
+	const runnerPath = path.join(cacheRoot, "runner.py");
+	if (!fs.existsSync(runnerPath)) {
+		await fs.promises.mkdir(cacheRoot, { recursive: true });
+		await Bun.write(path.join(cacheRoot, "eval_guard.py"), EVAL_GUARD_SCRIPT);
+		await Bun.write(path.join(cacheRoot, "eval_io_guard.py"), EVAL_IO_GUARD_SCRIPT);
+		await Bun.write(runnerPath, RUNNER_SCRIPT);
 	}
-	RUNNER_SCRIPT_PATH = target;
-	return target;
+	RUNNER_SCRIPT_PATH = runnerPath;
+	return runnerPath;
 }
 
 const SHUTDOWN_GRACE_MS = 1_000;
@@ -319,7 +327,9 @@ export class PythonKernel {
 		const startupBudget = Math.min(getRemainingTimeMs(startup.deadlineMs) ?? STARTUP_TIMEOUT_MS, STARTUP_TIMEOUT_MS);
 
 		try {
-			const initScript = buildInitScript(options.cwd, options.env);
+			const initScript = buildInitScript(options.cwd, options.env, {
+				blockSourceWrites: options.env?.PI_EVAL_BLOCK_SOURCE_WRITES === "1",
+			});
 			await kernel.#executeWithBudget(initScript, startup.signal, startupBudget, "Python kernel init");
 			await kernel.#executeWithBudget(PYTHON_PRELUDE, startup.signal, startupBudget, "Python kernel prelude");
 			return kernel;
@@ -734,15 +744,28 @@ function isTimeoutReason(reason: unknown): boolean {
 	return false;
 }
 
-function buildInitScript(cwd: string, env?: Record<string, string | undefined>): string {
+function buildInitScript(
+	cwd: string,
+	env?: Record<string, string | undefined>,
+	guard?: { blockSourceWrites: boolean },
+): string {
 	const envEntries = Object.entries(env ?? {}).filter(([, value]) => value !== undefined);
 	const envPayload = Object.fromEntries(envEntries);
-	return [
+	const block = guard?.blockSourceWrites === true;
+	const lines = [
 		"import os, sys",
+		"import eval_guard",
 		`__omp_cwd = ${JSON.stringify(cwd)}`,
 		"os.chdir(__omp_cwd)",
 		`__omp_env = ${JSON.stringify(envPayload)}`,
 		"for __omp_key, __omp_val in __omp_env.items():\n    os.environ[__omp_key] = __omp_val",
 		"if __omp_cwd not in sys.path:\n    sys.path.insert(0, __omp_cwd)",
-	].join("\n");
+		`eval_guard._host_set_guard_state(block_source_writes=${block ? "True" : "False"}, blocked_message=${JSON.stringify(EVAL_SOURCE_WRITE_BLOCKED_MESSAGE)})`,
+		"import json",
+		"__omp_lr = json.loads(os.environ.get('PI_EVAL_LOCAL_ROOTS') or '{}')",
+		"eval_guard._host_set_local_roots({k: str(v) for k, v in __omp_lr.items() if isinstance(k, str) and isinstance(v, str)}) if isinstance(__omp_lr, dict) else None",
+		"import eval_io_guard",
+		"eval_io_guard.install()",
+	];
+	return lines.join("\n");
 }

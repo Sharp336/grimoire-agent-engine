@@ -7,7 +7,20 @@ import { Writable } from "node:stream";
 import * as util from "node:util";
 
 import { logger } from "@oh-my-pi/pi-utils";
-
+import {
+	createEvalFsPathGuard,
+	createGuardedBunNamespace,
+	createGuardedCreateRequire,
+	createGuardedFsModule,
+	createGuardedRequire,
+	guardedImportModuleNamespace,
+	wrapBuiltinModuleForGuard,
+} from "../../eval-fs-guard";
+import {
+	guardChildProcessModule,
+	guardProcessGetBuiltinModule,
+	isChildProcessModuleId,
+} from "../../eval-subprocess-guard";
 import { createHelpers, type HelperBundle } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
@@ -47,6 +60,7 @@ export interface RuntimeOptions {
 	 * `{ local: "/…/artifacts/local" }`). Stable for the worker's lifetime.
 	 */
 	localRoots?: Record<string, string>;
+	blockProjectSourceWrites?: boolean;
 }
 
 // Strict base64: characters from the standard alphabet plus optional `=` padding, and a
@@ -132,6 +146,7 @@ export class JsRuntime {
 	#als = new AsyncLocalStorage<RunContext>();
 	#moduleLoader: LocalModuleLoader;
 	#localRoots: Record<string, string>;
+	#blockProjectSourceWrites: boolean;
 
 	constructor(opts: RuntimeOptions) {
 		this.#cwd = opts.initialCwd;
@@ -139,10 +154,12 @@ export class JsRuntime {
 		this.#env = new Map();
 		this.#moduleLoader = new LocalModuleLoader(this.sessionId);
 		this.#localRoots = opts.localRoots ?? {};
+		this.#blockProjectSourceWrites = opts.blockProjectSourceWrites === true;
 		this.helpers = createHelpers({
 			cwd: () => this.#activeCwd(),
 			env: this.#env,
 			localRoots: () => this.#localRoots,
+			blockProjectSourceWrites: opts.blockProjectSourceWrites,
 			emitStatus: event => this.#activeHooks("emitStatus")?.onDisplay({ type: "status", event }),
 		});
 		this.#install(opts.extraGlobals);
@@ -258,7 +275,14 @@ export class JsRuntime {
 	}
 
 	#buildDynamicRequire(): NodeJS.Require {
-		const dynamicRequire = ((id: string) => this.#activeRequire()(id)) as NodeJS.Require;
+		const guard = createEvalFsPathGuard(this.#blockProjectSourceWrites, this.#localRoots);
+		const dynamicRequire = ((id: string) => {
+			const base = this.#activeRequire();
+			if (guard) {
+				return createGuardedRequire(base, guard, fs)(id);
+			}
+			return base(id);
+		}) as NodeJS.Require;
 		const resolve = ((id: string, options?: { paths?: string[] }) =>
 			this.#activeRequire().resolve(id, options)) as NodeJS.Require["resolve"] & {
 			paths(request: string): string[] | null;
@@ -273,7 +297,18 @@ export class JsRuntime {
 		return dynamicRequire;
 	}
 
+	#fsGuard() {
+		return createEvalFsPathGuard(this.#blockProjectSourceWrites, this.#localRoots);
+	}
+
+	#guardedFsModule() {
+		return createGuardedFsModule(fs, this.#fsGuard());
+	}
+
 	#install(extraGlobals: Record<string, unknown> | undefined): void {
+		const guard = this.#fsGuard();
+		this.#moduleLoader.setRequireWrapper(guard ? base => createGuardedRequire(base, guard, fs) : undefined);
+		this.#moduleLoader.setFsWriteGuard(guard);
 		const injected: Record<string, unknown> = {
 			__omp_session__: { cwd: this.#cwd, sessionId: this.sessionId },
 			__omp_helpers__: this.helpers,
@@ -286,13 +321,35 @@ export class JsRuntime {
 				const resolved = await this.#moduleLoader.resolveForRun(this.#activeCwd(), source);
 				if (resolved.mode === "local") return resolved.value;
 				const target = resolved.target;
-				return options !== undefined ? await import(target, options) : await import(target);
+				const g = this.#fsGuard();
+				const loaded = await guardedImportModuleNamespace(
+					target,
+					g,
+					fs,
+					(t, o) => (o !== undefined ? import(t, o) : import(t)),
+					options,
+				);
+				if (g && isChildProcessModuleId(target)) {
+					return guardChildProcessModule(loaded as object, true);
+				}
+				return loaded;
 			},
 			__omp_import_from__: async (moduleUrl: string, source: string, options?: ImportCallOptions) => {
 				const resolved = await this.#moduleLoader.resolveForModule(moduleUrl, source, this.#activeCwd());
 				if (resolved.mode === "local") return resolved.value;
 				const target = resolved.target;
-				return options !== undefined ? await import(target, options) : await import(target);
+				const g = this.#fsGuard();
+				const loaded = await guardedImportModuleNamespace(
+					target,
+					g,
+					fs,
+					(t, o) => (o !== undefined ? import(t, o) : import(t)),
+					options,
+				);
+				if (g && isChildProcessModuleId(target)) {
+					return guardChildProcessModule(loaded as object, true);
+				}
+				return loaded;
 			},
 			__omp_get_require__: (moduleUrl?: string) => this.#activeRequire(moduleUrl),
 			__omp_get_filename__: (moduleUrl?: string) => this.#moduleFilename(moduleUrl),
@@ -335,10 +392,28 @@ export class JsRuntime {
 			// `process` object. Subsetting it caused segfaults in workers that share state with
 			// puppeteer/worker_threads internals.
 			require: this.#buildDynamicRequire(),
-			createRequire,
-			fs,
+			createRequire: createGuardedCreateRequire(createRequire, guard, fs),
+			fs: this.#guardedFsModule(),
 		};
+		const guardedBun = createGuardedBunNamespace(guard);
+		if (guardedBun !== undefined) {
+			injected.Bun = guardedBun;
+		}
 		Object.assign(globalThis, injected, extraGlobals ?? {});
+
+		if (guard) {
+			const hostProcess = globalThis.process as NodeJS.Process;
+			const wrappedProcess = guardProcessGetBuiltinModule(hostProcess, true, (specifier, mod) =>
+				wrapBuiltinModuleForGuard(specifier, mod, guard, fs),
+			);
+			Object.defineProperty(globalThis, "process", {
+				value: wrappedProcess,
+				configurable: true,
+				writable: true,
+				enumerable: true,
+			});
+		}
+
 		// Prelude assigns console bridge + short aliases (`read`, `write`, `tool`, `display`, ...)
 		// onto globalThis. Must run after helpers are in place.
 		indirectEval(JAVASCRIPT_PRELUDE_SOURCE);

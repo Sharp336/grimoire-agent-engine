@@ -47,6 +47,15 @@ if "__omp_prelude_loaded__" not in globals():
             _emit_status("env", count=len(items), keys=list(items.keys())[:20])
             return items
         if value is not None:
+            try:
+                import eval_guard
+            except ImportError:
+                eval_guard = None  # type: ignore[assignment]
+            if eval_guard is not None and eval_guard.is_managed_env_key(key):
+                raise ValueError(
+                    f"env() cannot change host-managed variable {key!r} during eval; "
+                    "project source writes stay blocked when the edit tool is available."
+                )
             os.environ[key] = value
             _emit_status("env", key=key, value=value, action="set")
             return value
@@ -106,8 +115,57 @@ if "__omp_prelude_loaded__" not in globals():
         _emit_status("read", path=str(p), chars=len(data), preview=preview)
         return data
 
+    _EVAL_WRITE_BLOCKED = (
+        "eval write() and append() cannot change project source files when the edit tool is available. "
+        "Call `edit` with a hashline `input` string: copy a `[PATH#TAG]` header from your latest `read`/`search`, "
+        "then add ops (`replace N..M:`, `insert after N:`, `delete N`, …) with `+` body rows. "
+        "Do not edit files via `bash` (`python -c`, `node -e`, `bun -e`, `sed`) or `eval` when `edit` is available."
+    )
+
+    def _is_eval_artifact_path(path: str | Path) -> bool:
+        if not isinstance(path, str):
+            return False
+        match = _OMP_INTERNAL_URL_RE.match(path.strip())
+        if not match:
+            return False
+        try:
+            roots = json.loads(os.environ.get("PI_EVAL_LOCAL_ROOTS") or "{}")
+        except (ValueError, TypeError):
+            roots = {}
+        if not isinstance(roots, dict):
+            return False
+        return match.group(1).lower() in roots
+
+    def _is_under_eval_local_roots(path: str | Path) -> bool:
+        try:
+            import eval_guard
+        except ImportError:
+            return False
+        raw = str(path)
+        normalized = os.path.normpath(raw)
+        for root in eval_guard.local_roots_snapshot().values():
+            norm_root = os.path.normpath(root)
+            if normalized == norm_root or normalized.startswith(norm_root + os.sep):
+                return True
+        return False
+
+    def _assert_eval_write_allowed(path: str | Path) -> None:
+        try:
+            import eval_guard
+        except ImportError:
+            return
+        if not eval_guard.block_source_writes_enabled():
+            return
+        if _is_eval_artifact_path(path):
+            return
+        if _is_under_eval_local_roots(path):
+            return
+        msg = eval_guard.blocked_message() or _EVAL_WRITE_BLOCKED
+        raise ValueError(msg)
+
     def write(path: str | Path, content: str) -> Path:
         """Write file contents (create parents)."""
+        _assert_eval_write_allowed(path)
         p = _resolve_omp_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         p.write_text(content, encoding="utf-8")
@@ -116,6 +174,7 @@ if "__omp_prelude_loaded__" not in globals():
 
     def append(path: str | Path, content: str) -> Path:
         """Append to file."""
+        _assert_eval_write_allowed(path)
         p = _resolve_omp_path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         with p.open("a", encoding="utf-8") as f:

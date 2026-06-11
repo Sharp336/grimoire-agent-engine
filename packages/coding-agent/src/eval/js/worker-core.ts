@@ -72,6 +72,7 @@ export class WorkerCore {
 			initialCwd: snapshot.cwd,
 			sessionId: snapshot.sessionId,
 			localRoots: snapshot.localRoots,
+			blockProjectSourceWrites: snapshot.blockProjectSourceWrites,
 		});
 		return this.#runtime;
 	}

@@ -5,6 +5,7 @@ import {
 	type ExecutorBackendResult,
 	resolveEvalUrlRoots,
 } from "../backend";
+import { shouldBlockEvalSourceWrites } from "../eval-write-guard";
 import { executePython, type PythonExecutorOptions } from "./executor";
 import { checkPythonKernelAvailability } from "./kernel";
 
@@ -50,6 +51,7 @@ export default {
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,
 			toolSession: opts.session,
+			blockSourceWrites: shouldBlockEvalSourceWrites(opts.session),
 		};
 		const result = await executePython(code, executorOptions);
 		return {

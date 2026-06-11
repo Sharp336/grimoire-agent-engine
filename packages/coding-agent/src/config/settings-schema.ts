@@ -245,6 +245,20 @@ export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 		message: "Use the `edit` tool instead of awk -i inplace. It provides diff preview and fuzzy matching.",
 	},
 	{
+		pattern:
+			"^\\s*python(?:3(?:\\.\\d+)?)?(?:\\.exe)?\\b[^\\n\\r]*\\s+-c\\b[\\s\\S]*(?:\\.(?:write_text|write_bytes)\\s*\\(|Path\\s*\\([^\\)]*\\)\\s*\\.open\\s*\\(\\s*['\"](?:(?:w|a|x)[^'\"]*|[^'\"]*\\+[^'\"]*)[^'\"]*['\"]|Path\\s*\\([^\\)]*\\)\\s*\\.writelines\\s*\\(|open\\s*\\([^\\)]*\\)\\s*\\.writelines\\s*\\(|open\\s*\\([^\\)]*,\\s*['\"][^'\"]*(?:(?:w|a|x)[^'\"]*|[^'\"]*\\+[^'\"]*)[^'\"]*['\"]|open\\s*\\([^\\)]*mode\\s*=\\s*['\"](?:(?:w|a|x)[^'\"]*|[^'\"]*\\+[^'\"]*)[^'\"]*['\"]|open\\s*\\([^\\)]*\\)\\s*\\.write\\s*\\()",
+		tool: "edit",
+		message:
+			"Use the `edit` tool (hashline `input`) instead of `python -c` to change files. Copy `[PATH#TAG]` from `read`/`search`, then add hashline ops.",
+	},
+	{
+		pattern:
+			"^\\s*(?:node|nodejs|bun)(?:\\.exe)?\\b[^\\n\\r]*\\s+-e\\b[\\s\\S]*(?:\\b(?:write|append)File(?:Sync)?\\s*\\(|Bun\\.write\\s*\\()",
+		tool: "edit",
+		message:
+			"Use the `edit` tool instead of `node -e` / `bun -e` file writes. Pass hashline sections in `edit`'s `input` parameter.",
+	},
+	{
 		// `>` must sit outside quoted regions (so `echo "a -> b"` passes) and be
 		// followed by a plausible filename — including `$VAR` targets; `>|`
 		// (clobber) counts as a redirect; `>&2`/`2>&1` style fd duplication is

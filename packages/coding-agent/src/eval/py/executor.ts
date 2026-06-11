@@ -89,6 +89,8 @@ export interface PythonExecutorOptions {
 	bridgeSessionId?: string;
 	/** @internal Bridge endpoint info, set by `executePython` before delegating. */
 	bridge?: { url: string; token: string };
+	/** Block prelude write/append to project paths when edit is available. */
+	blockSourceWrites?: boolean;
 }
 
 export interface PythonKernelExecutor {
@@ -301,6 +303,7 @@ const MANAGED_KERNEL_ENV_KEYS = [
 	"PI_TOOL_BRIDGE_TOKEN",
 	"PI_TOOL_BRIDGE_SESSION",
 	"PI_EVAL_LOCAL_ROOTS",
+	"PI_EVAL_BLOCK_SOURCE_WRITES",
 ] as const;
 
 function buildKernelEnvPatch(options: {
@@ -309,6 +312,7 @@ function buildKernelEnvPatch(options: {
 	bridgeSessionId?: string;
 	bridge?: { url: string; token: string };
 	localRoots?: Record<string, string>;
+	blockSourceWrites?: boolean;
 }): KernelRuntimeEnv {
 	const localRoots = options.localRoots;
 	return {
@@ -318,6 +322,7 @@ function buildKernelEnvPatch(options: {
 		PI_TOOL_BRIDGE_TOKEN: options.bridge?.token ?? null,
 		PI_TOOL_BRIDGE_SESSION: options.bridge && options.bridgeSessionId ? options.bridgeSessionId : null,
 		PI_EVAL_LOCAL_ROOTS: localRoots && Object.keys(localRoots).length > 0 ? JSON.stringify(localRoots) : null,
+		PI_EVAL_BLOCK_SOURCE_WRITES: options.blockSourceWrites ? "1" : null,
 	};
 }
 
@@ -327,6 +332,7 @@ function buildKernelEnv(options: {
 	bridgeSessionId?: string;
 	bridge?: { url: string; token: string };
 	localRoots?: Record<string, string>;
+	blockSourceWrites?: boolean;
 }): Record<string, string> | undefined {
 	const patch = buildKernelEnvPatch(options);
 	const env: Record<string, string> = {};
