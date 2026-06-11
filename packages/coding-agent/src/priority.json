@@ -1,14 +1,5 @@
 {
-	"smol": [
-		"cerebras/zai-glm-4.7",
-		"cerebras/zai-glm-4.6",
-		"cerebras/zai-glm",
-		"haiku-4-5",
-		"haiku-4.5",
-		"haiku",
-		"flash",
-		"mini"
-	],
+	"smol": [],
 	"slow": [
 		"gpt-5.4",
 		"gpt-5.3-codex",
