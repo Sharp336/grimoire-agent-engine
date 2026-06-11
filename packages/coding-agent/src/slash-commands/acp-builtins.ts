@@ -1,9 +1,27 @@
 import type { AvailableCommand } from "@agentclientprotocol/sdk";
-import { BUILTIN_SLASH_COMMANDS_INTERNAL, lookupBuiltinSlashCommand } from "./builtin-registry";
+import type { TranslateFn } from "../i18n";
+import {
+	BUILTIN_SLASH_COMMANDS_INTERNAL,
+	getLocalizedSlashCommandSpec,
+	lookupBuiltinSlashCommand,
+} from "./builtin-registry";
 import { parseSlashCommand } from "./helpers/parse";
 import type { AcpBuiltinSlashCommandResult, SlashCommandRuntime } from "./types";
 
 export type { AcpBuiltinSlashCommandResult } from "./types";
+
+function dynamicReadonlyArray<T>(read: () => ReadonlyArray<T>): ReadonlyArray<T> {
+	return new Proxy([] as T[], {
+		get(_target, prop, receiver) {
+			const current = read();
+			const value = Reflect.get(current, prop, receiver);
+			return typeof value === "function" ? value.bind(current) : value;
+		},
+		has: (_target, prop) => prop in read(),
+		ownKeys: () => Reflect.ownKeys(read()),
+		getOwnPropertyDescriptor: (_target, prop) => Object.getOwnPropertyDescriptor(read(), prop),
+	}) as ReadonlyArray<T>;
+}
 
 /**
  * All names (primary + aliases) that are reserved by ACP builtins. Used to
@@ -34,19 +52,21 @@ export function isAcpBuiltinShadowedName(name: string): boolean {
  * (e.g. `/quit`, `/login`, dashboards) are filtered out so the client doesn't
  * see commands it cannot drive.
  */
-export const ACP_BUILTIN_SLASH_COMMANDS: AvailableCommand[] = BUILTIN_SLASH_COMMANDS_INTERNAL.filter(
-	command => command.handle !== undefined,
-).map(command => {
-	// Honor mode-specific copy: ACP clients receive concise text-mode
-	// descriptions/hints when the spec sets `acpDescription` / `acpInputHint`,
-	// otherwise fall back to the unified `description` / `inlineHint`.
-	const hint = command.acpInputHint ?? command.inlineHint;
-	return {
-		name: command.name,
-		description: command.acpDescription ?? command.description,
-		input: hint ? { hint } : undefined,
-	};
-});
+/** @deprecated Use getAcpBuiltinSlashCommands(); this legacy view resolves against the active locale on access. */
+export const ACP_BUILTIN_SLASH_COMMANDS: ReadonlyArray<AvailableCommand> =
+	dynamicReadonlyArray(getAcpBuiltinSlashCommands);
+
+export function getAcpBuiltinSlashCommands(translate?: TranslateFn): AvailableCommand[] {
+	return BUILTIN_SLASH_COMMANDS_INTERNAL.filter(command => command.handle !== undefined).map(command => {
+		const localized = getLocalizedSlashCommandSpec(command, translate);
+		const hint = localized.acpInputHint ?? localized.inlineHint;
+		return {
+			name: command.name,
+			description: localized.acpDescription ?? localized.description,
+			input: hint ? { hint } : undefined,
+		};
+	});
+}
 
 /**
  * Dispatch a slash command in ACP/text mode. Returns:

@@ -268,6 +268,31 @@ export const SETTINGS_SCHEMA = {
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined },
 
+	"ui.locale": {
+		type: "string",
+		default: "en",
+		ui: {
+			tab: "interaction",
+			label: "UI Language",
+			description: "Locale code for interface translations, e.g. zh-Hans",
+		},
+	},
+
+	"ui.translationMode": {
+		type: "enum",
+		values: ["english", "translated", "bilingual"] as const,
+		default: "english",
+		ui: {
+			tab: "interaction",
+			label: "Translation Mode",
+			description: "How translated UI text is displayed",
+			options: [
+				{ value: "english", label: "English", description: "Show original English UI text" },
+				{ value: "translated", label: "Translated", description: "Show translated UI text only" },
+				{ value: "bilingual", label: "Bilingual", description: "Show English first, then translated text" },
+			],
+		},
+	},
 	autoResume: {
 		type: "boolean",
 		default: false,

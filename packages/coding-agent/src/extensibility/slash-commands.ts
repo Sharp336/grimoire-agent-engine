@@ -4,9 +4,10 @@ import { slashCommandCapability } from "../capability/slash-command";
 import { appendInlineArgsFallback, templateUsesInlineArgPlaceholders } from "../config/prompt-templates";
 import type { SlashCommand } from "../discovery";
 import { loadCapability } from "../discovery";
+import type { TranslateFn } from "../i18n";
 import {
-	BUILTIN_SLASH_COMMAND_DEFS,
 	type BuiltinSlashCommand,
+	getBuiltinSlashCommandDefs,
 	type SubcommandDef,
 } from "../slash-commands/builtin-registry";
 import { EMBEDDED_COMMAND_TEMPLATES } from "../task/commands";
@@ -90,31 +91,49 @@ function buildStaticInlineHint(hint: string): (argumentText: string) => string |
 	return (argumentText: string) => (argumentText.trim().length === 0 ? hint : null);
 }
 
+function dynamicReadonlyArray<T>(read: () => ReadonlyArray<T>): ReadonlyArray<T> {
+	return new Proxy([] as T[], {
+		get(_target, prop, receiver) {
+			const current = read();
+			const value = Reflect.get(current, prop, receiver);
+			return typeof value === "function" ? value.bind(current) : value;
+		},
+		has: (_target, prop) => prop in read(),
+		ownKeys: () => Reflect.ownKeys(read()),
+		getOwnPropertyDescriptor: (_target, prop) => Object.getOwnPropertyDescriptor(read(), prop),
+	}) as ReadonlyArray<T>;
+}
+
 /**
  * Materialized builtin slash commands with completion functions derived from
  * declarative subcommand/hint definitions.
  */
-export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<
+export function getBuiltinSlashCommands(translate?: TranslateFn): ReadonlyArray<
 	BuiltinSlashCommand & {
 		getArgumentCompletions?: (prefix: string) => AutocompleteItem[] | null;
 		getInlineHint?: (argumentText: string) => string | null;
 	}
-> = BUILTIN_SLASH_COMMAND_DEFS.map(cmd => {
-	if (cmd.subcommands) {
-		return {
-			...cmd,
-			getArgumentCompletions: buildArgumentCompletions(cmd.subcommands),
-			getInlineHint: buildSubcommandInlineHint(cmd.subcommands),
-		};
-	}
-	if (cmd.inlineHint) {
-		return {
-			...cmd,
-			getInlineHint: buildStaticInlineHint(cmd.inlineHint),
-		};
-	}
-	return cmd;
-});
+> {
+	return getBuiltinSlashCommandDefs(translate).map(cmd => {
+		if (cmd.subcommands) {
+			return {
+				...cmd,
+				getArgumentCompletions: buildArgumentCompletions(cmd.subcommands),
+				getInlineHint: buildSubcommandInlineHint(cmd.subcommands),
+			};
+		}
+		if (cmd.inlineHint) {
+			return {
+				...cmd,
+				getInlineHint: buildStaticInlineHint(cmd.inlineHint),
+			};
+		}
+		return cmd;
+	});
+}
+
+/** @deprecated Use getBuiltinSlashCommands(); this legacy view resolves against the active locale on access. */
+export const BUILTIN_SLASH_COMMANDS = dynamicReadonlyArray(getBuiltinSlashCommands);
 
 /**
  * Represents a custom slash command loaded from a file

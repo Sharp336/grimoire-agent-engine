@@ -3,8 +3,13 @@
 ## [Unreleased]
 
 ## [15.11.3] - 2026-06-11
+### Added
+
+- Added UI localization support with extension-registered locale packs, `ui.locale` / `ui.translationMode` settings, localized settings metadata, and localized built-in slash-command descriptions. Added `@oh-my-pi/locale-zh-hans` as the Simplified Chinese locale pack.
 
 ### Fixed
+
+- Fixed extension `setLabel()` runtime wiring so registered extensions can update their display labels after initialization.
 
 - Fixed stale `Working…` loader rows being committed to native scrollback above the live loader: the interactive status container now reports a live-region seam while it has mounted content ([#2328](https://github.com/can1357/oh-my-pi/pull/2328) by [@35844493](https://github.com/35844493)).
 - Fixed Mnemopi memory consolidation never running on session shutdown: `MnemopiSessionState.dispose()` now drains pending fact extractions and runs `sleepAllSessions` on every owned bank before closing handles (and `AgentSession.dispose()` awaits the result), matching the `/memory enqueue` slash command. `mnemopiBackend.clear` opts out via `dispose({ consolidate: false })` so the destructive `/memory clear` path does not spend tokens consolidating memories that are wiped on the next line. `consolidate()` deliberately keeps no `aliasOf` short-circuit so `/memory enqueue` from a subagent still flushes and sleeps the parent's shared banks (the alias guard lives in `dispose` for lifecycle, not in `consolidate` for content). Without this, `episodic_memory`, `gists`, `consolidation_log`, `graph_edges`, and `triples` stayed empty for every deployment because the SHMR/beam pipeline only ran when a user typed `/memory enqueue|rebuild` ([#2320](https://github.com/can1357/oh-my-pi/issues/2320)).

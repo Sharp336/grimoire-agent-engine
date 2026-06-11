@@ -21,6 +21,7 @@ import type {
 	StatusLineSeparatorStyle,
 } from "../../config/settings-schema";
 import { SETTING_TABS, TAB_METADATA } from "../../config/settings-schema";
+import { type TranslateFn, t } from "../../i18n";
 import { getCurrentThemeName, getSelectListTheme, getSettingsListTheme, theme } from "../../modes/theme/theme";
 import { matchesAppInterrupt } from "../../modes/utils/keybinding-matchers";
 import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../../thinking";
@@ -30,9 +31,10 @@ import { handleInputOrEscape, PluginSettingsComponent } from "./plugin-settings"
 import { getSettingsForTab, type SettingDef } from "./settings-defs";
 import { getPreset } from "./status-line/presets";
 
-/**
- * A submenu component for selecting from a list of options.
- */
+function defaultTranslate(key: string, fallback: string, options?: Parameters<TranslateFn>[2]): string {
+	return t(key, fallback, options);
+}
+
 /**
  * Submenu component for free-text string settings.
  * Mirrors the ConfigInputSubmenu pattern from plugin-settings.ts.
@@ -46,6 +48,7 @@ class TextInputSubmenu extends Container {
 		currentValue: string,
 		private readonly onSubmit: (value: string) => void,
 		private readonly onCancel: () => void,
+		private readonly translate: TranslateFn = defaultTranslate,
 	) {
 		super();
 
@@ -67,7 +70,16 @@ class TextInputSubmenu extends Container {
 		};
 		this.addChild(this.#input);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to save · Esc to cancel · Clear field to unset"), 0, 0));
+		this.addChild(
+			new Text(
+				theme.fg(
+					"dim",
+					this.translate("settings.input.hint", "  Enter to save · Esc to cancel · Clear field to unset"),
+				),
+				0,
+				0,
+			),
+		);
 	}
 
 	handleInput(data: string): void {
@@ -87,6 +99,7 @@ class SelectSubmenu extends Container {
 		currentValue: string,
 		onSelect: (value: string) => void,
 		onCancel: () => void,
+		private readonly translate: TranslateFn = defaultTranslate,
 		onSelectionChange?: (value: string) => void | Promise<void>,
 		private readonly getPreview?: () => string,
 	) {
@@ -104,7 +117,7 @@ class SelectSubmenu extends Container {
 		// Preview (if provided)
 		if (getPreview) {
 			this.addChild(new Spacer(1));
-			this.addChild(new Text(theme.fg("muted", "Preview:"), 0, 0));
+			this.addChild(new Text(theme.fg("muted", this.translate("common.preview", "Preview:")), 0, 0));
 			this.#previewText = new Text(getPreview(), 0, 0);
 			this.addChild(this.#previewText);
 		}
@@ -149,7 +162,9 @@ class SelectSubmenu extends Container {
 
 		// Hint
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to select · Esc to go back"), 0, 0));
+		this.addChild(
+			new Text(theme.fg("dim", this.translate("settings.select.hint", "  Enter to select · Esc to go back")), 0, 0),
+		);
 	}
 
 	#updatePreview(): void {
@@ -163,14 +178,14 @@ class SelectSubmenu extends Container {
 	}
 }
 
-function getSettingsTabs(): Tab[] {
+function getSettingsTabs(translate: TranslateFn = defaultTranslate): Tab[] {
 	return [
 		...SETTING_TABS.map(id => {
 			const meta = TAB_METADATA[id];
 			const icon = theme.symbol(meta.icon as Parameters<typeof theme.symbol>[0]);
-			return { id, label: `${icon} ${meta.label}` };
+			return { id, label: `${icon} ${translate(`settings.tab.${id}`, meta.label)}` };
 		}),
-		{ id: "plugins", label: `${theme.icon.package} Plugins` },
+		{ id: "plugins", label: `${theme.icon.package} ${translate("settings.tab.plugins", "Plugins")}` },
 	];
 }
 
@@ -231,6 +246,7 @@ export class SettingsSelectorComponent extends Container {
 	constructor(
 		private readonly context: SettingsRuntimeContext,
 		private readonly callbacks: SettingsCallbacks,
+		private readonly translate: TranslateFn = defaultTranslate,
 	) {
 		super();
 
@@ -238,7 +254,11 @@ export class SettingsSelectorComponent extends Container {
 		this.addChild(new DynamicBorder());
 
 		// Tab bar
-		this.#tabBar = new TabBar("Settings", getSettingsTabs(), getTabBarTheme());
+		this.#tabBar = new TabBar(
+			this.translate("settings.title", "Settings"),
+			getSettingsTabs(this.translate),
+			getTabBarTheme(),
+		);
 		this.#tabBar.onTabChange = () => {
 			this.#switchToTab(this.#tabBar.getActiveTab().id as SettingTab | "plugins");
 		};
@@ -252,6 +272,27 @@ export class SettingsSelectorComponent extends Container {
 
 		// Add bottom border
 		this.addChild(new DynamicBorder());
+	}
+
+	refreshLocalization(): void {
+		const activeIndex = this.#tabBar.getActiveIndex();
+		const previousTabBar = this.#tabBar;
+		this.#tabBar = new TabBar(
+			this.translate("settings.title", "Settings"),
+			getSettingsTabs(this.translate),
+			getTabBarTheme(),
+			activeIndex,
+		);
+		this.#tabBar.onTabChange = () => {
+			this.#switchToTab(this.#tabBar.getActiveTab().id as SettingTab | "plugins");
+		};
+
+		const tabBarIndex = this.children.indexOf(previousTabBar);
+		if (tabBarIndex !== -1) {
+			this.children[tabBarIndex] = this.#tabBar;
+		}
+
+		this.#switchToTab(this.#currentTabId);
 	}
 
 	#switchToTab(tabId: SettingTab | "plugins"): void {
@@ -451,6 +492,7 @@ export class SettingsSelectorComponent extends Container {
 				onPreviewCancel?.();
 				done();
 			},
+			this.translate,
 			onPreview,
 			getPreview,
 		);
@@ -481,6 +523,7 @@ export class SettingsSelectorComponent extends Container {
 				wrappedDone(value);
 			},
 			() => wrappedDone(),
+			this.translate,
 		);
 	}
 
@@ -507,7 +550,7 @@ export class SettingsSelectorComponent extends Container {
 	 * Show a settings tab using definitions.
 	 */
 	#showSettingsTab(tabId: SettingTab): void {
-		const defs = getSettingsForTab(tabId);
+		const defs = getSettingsForTab(tabId, this.translate);
 
 		// Add status line preview for appearance tab
 		if (tabId === "appearance") {
@@ -578,7 +621,7 @@ export class SettingsSelectorComponent extends Container {
 		if (this.callbacks.getStatusLinePreview) {
 			return this.callbacks.getStatusLinePreview();
 		}
-		return theme.fg("dim", "(preview not available)");
+		return theme.fg("dim", this.translate("settings.preview.unavailable", "(preview not available)"));
 	}
 
 	/**

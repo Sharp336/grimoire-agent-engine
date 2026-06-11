@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "bun:test";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import {
-	BUILTIN_SLASH_COMMAND_DEFS,
 	executeBuiltinSlashCommand,
+	getBuiltinSlashCommandDefs,
 } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 
 function createRuntime() {
@@ -26,7 +26,7 @@ function createRuntime() {
 
 describe("/setup slash command", () => {
 	it("exposes the providers alias to slash command autocomplete", () => {
-		const setupCommand = BUILTIN_SLASH_COMMAND_DEFS.find(command => command.name === "setup");
+		const setupCommand = getBuiltinSlashCommandDefs().find(command => command.name === "setup");
 		expect(setupCommand?.aliases).toContain("providers");
 	});
 

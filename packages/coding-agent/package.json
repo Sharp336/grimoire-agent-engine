@@ -105,6 +105,10 @@
 			"types": "./src/*.ts",
 			"import": "./src/*.ts"
 		},
+		"./i18n": {
+			"types": "./src/i18n/index.ts",
+			"import": "./src/i18n/index.ts"
+		},
 		"./async": {
 			"types": "./src/async/index.ts",
 			"import": "./src/async/index.ts"

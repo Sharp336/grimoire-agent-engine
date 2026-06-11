@@ -5,7 +5,7 @@ import type { ExtensionRunner } from "../extensibility/extensions";
 import { getSkillSlashCommandName, type Skill } from "../extensibility/skills";
 import { type FileSlashCommand, loadSlashCommands } from "../extensibility/slash-commands";
 import { ACP_BUILTIN_RESERVED_NAMES, isAcpBuiltinShadowedName } from "./acp-builtins";
-import { BUILTIN_SLASH_COMMANDS_INTERNAL } from "./builtin-registry";
+import { BUILTIN_SLASH_COMMANDS_INTERNAL, getLocalizedSlashCommandSpec } from "./builtin-registry";
 
 export type AvailableSlashCommandSource = "builtin" | "skill" | "extension" | "custom" | "mcp_prompt" | "file";
 
@@ -40,15 +40,28 @@ export async function buildAvailableSlashCommands(
 		commands.push(command);
 	};
 
+	const runner = session.extensionRunner;
+	const translate =
+		runner && typeof runner.t === "function"
+			? (
+					key: string,
+					fallback: string,
+					options?: { vars?: Readonly<Record<string, string | number | boolean | undefined | null>> },
+				) => runner.t(key, fallback, options?.vars)
+			: undefined;
+
 	for (const command of BUILTIN_SLASH_COMMANDS_INTERNAL) {
-		if (!command.handle) continue;
-		const hint = command.acpInputHint ?? command.inlineHint;
+		if (command.handle === undefined) continue;
+		const localized = getLocalizedSlashCommandSpec(command, translate);
 		appendCommand({
 			name: command.name,
 			aliases: command.aliases,
-			description: command.acpDescription ?? command.description,
-			input: hint ? { hint } : undefined,
-			subcommands: command.subcommands,
+			description: localized.acpDescription ?? localized.description,
+			input:
+				(localized.acpInputHint ?? localized.inlineHint)
+					? { hint: (localized.acpInputHint ?? localized.inlineHint)! }
+					: undefined,
+			subcommands: localized.subcommands,
 			source: "builtin",
 		});
 	}
@@ -64,7 +77,6 @@ export async function buildAvailableSlashCommands(
 		}
 	}
 
-	const runner = session.extensionRunner;
 	if (runner) {
 		for (const command of runner.getRegisteredCommands(ACP_BUILTIN_RESERVED_NAMES)) {
 			if (isAcpBuiltinShadowedName(command.name)) continue;

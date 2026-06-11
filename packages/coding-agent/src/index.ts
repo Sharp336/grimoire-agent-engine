@@ -26,6 +26,17 @@ export * from "./extensibility/extensions";
 export * from "./extensibility/skills";
 // Slash commands
 export { type FileSlashCommand, loadSlashCommands as discoverSlashCommands } from "./extensibility/slash-commands";
+export type { LocaleCode, TranslateFn, TranslateOptions, TranslationMap, TranslationMode } from "./i18n";
+export {
+	createI18nRegistry,
+	getLocale,
+	getTranslationMode,
+	I18nRegistry,
+	registerLocale,
+	setLocale,
+	setTranslationMode,
+	t,
+} from "./i18n";
 export type * from "./lsp";
 // Main entry point
 export * from "./main";

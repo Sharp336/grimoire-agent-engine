@@ -475,11 +475,12 @@ export class ExtensionUiController {
 		previousSessionFile?: string,
 	): Promise<void> {
 		const event = { reason, previousSessionFile };
-		const uiContext = this.ctx.session.extensionRunner?.getUIContext();
-		if (!uiContext) {
+		const runner = this.ctx.session.extensionRunner;
+		const uiContext = runner?.getUIContext();
+		if (!runner || !uiContext) {
 			return;
 		}
-		for (const registeredTool of this.ctx.session.extensionRunner?.getAllRegisteredTools() ?? []) {
+		for (const registeredTool of runner.getAllRegisteredTools()) {
 			if (registeredTool.definition.onSession) {
 				try {
 					await registeredTool.definition.onSession(event, {
@@ -500,6 +501,13 @@ export class ExtensionUiController {
 							// Signal shutdown request
 						},
 						getSystemPrompt: () => this.ctx.session.systemPrompt,
+						get locale() {
+							return runner.getLocale();
+						},
+						get translationMode() {
+							return runner.getTranslationMode();
+						},
+						t: (key, fallback, vars) => runner.t(key, fallback, vars),
 					});
 				} catch (err) {
 					this.showToolError(registeredTool.definition.name, err instanceof Error ? err.message : String(err));

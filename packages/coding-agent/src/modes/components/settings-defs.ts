@@ -22,6 +22,7 @@ import {
 	type SettingTab,
 	type SubmenuOption,
 } from "../../config/settings-schema";
+import { getI18nVersion, type TranslateFn, t } from "../../i18n";
 
 // ═══════════════════════════════════════════════════════════════════════════
 // UI Definition Types
@@ -105,13 +106,33 @@ function resolveOptions(ui: AnyUiMetadata): OptionList | "runtime" | undefined {
 	return ui.options;
 }
 
-function pathToSettingDef(path: SettingPath): SettingDef | null {
+function settingKey(path: SettingPath, suffix: string): string {
+	return `settings.${path}.${suffix}`;
+}
+
+function translateOption(path: SettingPath, option: SubmenuOption, translate: TranslateFn): SubmenuOption {
+	return {
+		...option,
+		label: translate(settingKey(path, `option.${option.value}.label`), option.label),
+		description: option.description
+			? translate(settingKey(path, `option.${option.value}.description`), option.description)
+			: undefined,
+	};
+}
+
+function pathToSettingDef(path: SettingPath, translate: TranslateFn): SettingDef | null {
 	const ui = getUi(path);
 	if (!ui) return null;
 
 	const schemaType = getType(path);
 	const condition = ui.condition ? CONDITIONS[ui.condition] : undefined;
-	const base = { path, label: ui.label, description: ui.description, tab: ui.tab, condition };
+	const base = {
+		path,
+		label: translate(settingKey(path, "label"), ui.label),
+		description: translate(settingKey(path, "description"), ui.description),
+		tab: ui.tab,
+		condition,
+	};
 
 	if (schemaType === "boolean") {
 		return { ...base, type: "boolean" };
@@ -125,13 +146,16 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 		}
 		// "runtime" is not a valid sentinel for enums — schema types prevent this,
 		// but treat defensively as an empty submenu.
-		return { ...base, type: "submenu", options: options === "runtime" ? [] : options };
+		return {
+			...base,
+			type: "submenu",
+			options: options === "runtime" ? [] : options.map(option => translateOption(path, option, translate)),
+		};
 	}
 
 	if (schemaType === "number") {
-		// Numbers without options are intentionally hidden from the UI.
 		if (!options || options === "runtime") return null;
-		return { ...base, type: "submenu", options };
+		return { ...base, type: "submenu", options: options.map(option => translateOption(path, option, translate)) };
 	}
 
 	if (schemaType === "string") {
@@ -140,7 +164,7 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 			return { ...base, type: "submenu", options: [] };
 		}
 		if (options) {
-			return { ...base, type: "submenu", options };
+			return { ...base, type: "submenu", options: options.map(option => translateOption(path, option, translate)) };
 		}
 		return { ...base, type: "text" };
 	}
@@ -154,30 +178,44 @@ function pathToSettingDef(path: SettingPath): SettingDef | null {
 
 /** Cache of generated definitions */
 let cachedDefs: SettingDef[] | null = null;
+let cachedI18nVersion = -1;
 
 /** Get all setting definitions with UI */
-export function getAllSettingDefs(): SettingDef[] {
-	if (cachedDefs) return cachedDefs;
+export function getAllSettingDefs(translate: TranslateFn = t): SettingDef[] {
+	if (translate !== t) {
+		const defs: SettingDef[] = [];
+		for (const tab of SETTING_TABS) {
+			for (const path of getPathsForTab(tab)) {
+				const def = pathToSettingDef(path, translate);
+				if (def) defs.push(def);
+			}
+		}
+		return defs;
+	}
+
+	const version = getI18nVersion();
+	if (cachedDefs && cachedI18nVersion === version) return cachedDefs;
 
 	const defs: SettingDef[] = [];
 	for (const tab of SETTING_TABS) {
 		for (const path of getPathsForTab(tab)) {
-			const def = pathToSettingDef(path);
+			const def = pathToSettingDef(path, translate);
 			if (def) defs.push(def);
 		}
 	}
+	cachedI18nVersion = version;
 	cachedDefs = defs;
 	return defs;
 }
 
 /** Get settings for a specific tab */
-export function getSettingsForTab(tab: SettingTab): SettingDef[] {
-	return getAllSettingDefs().filter(def => def.tab === tab);
+export function getSettingsForTab(tab: SettingTab, translate: TranslateFn = t): SettingDef[] {
+	return getAllSettingDefs(translate).filter(def => def.tab === tab);
 }
 
 /** Get a setting definition by path */
-export function getSettingDef(path: SettingPath): SettingDef | undefined {
-	return getAllSettingDefs().find(def => def.path === path);
+export function getSettingDef(path: SettingPath, translate: TranslateFn = t): SettingDef | undefined {
+	return getAllSettingDefs(translate).find(def => def.path === path);
 }
 
 /** Get default value for display */

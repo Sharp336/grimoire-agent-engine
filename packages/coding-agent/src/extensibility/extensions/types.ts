@@ -39,6 +39,7 @@ import type { EditToolDetails } from "../../edit";
 import type { PythonResult } from "../../eval/py/executor";
 import type { BashResult } from "../../exec/bash-executor";
 import type { ExecOptions, ExecResult } from "../../exec/exec";
+import type { TranslationMap, TranslationMode } from "../../i18n";
 import type * as PiCodingAgent from "../../index";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import type { CustomEditor } from "../../modes/components/custom-editor";
@@ -322,6 +323,16 @@ export interface ExtensionContext {
 	getSystemPrompt(): string[];
 	/** Structured memory runtime for status/search/save across the configured backend. */
 	memory?: MemoryRuntimeContext;
+	/** Active UI locale. */
+	locale: string;
+	/** Active translation display mode for UI-facing copy. */
+	translationMode: TranslationMode;
+	/** Translate UI-facing copy with the active locale and display mode. */
+	t(
+		key: string,
+		fallback: string,
+		vars?: Readonly<Record<string, string | number | boolean | undefined | null>>,
+	): string;
 }
 
 /**
@@ -991,6 +1002,21 @@ export interface ExtensionAPI {
 		},
 	): void;
 
+	/** Register UI-facing translations for a locale. */
+	registerLocale(locale: string, entries: TranslationMap): void;
+
+	/** Current UI locale. */
+	getLocale(): string;
+
+	/** Current translation display mode. */
+	getTranslationMode(): TranslationMode;
+
+	/** Translate UI-facing copy with the active locale and display mode. */
+	t(
+		key: string,
+		fallback: string,
+		vars?: Readonly<Record<string, string | number | boolean | undefined | null>>,
+	): string;
 	/** Set the display label for this extension, or set a label on a specific entry. */
 	setLabel(entryIdOrLabel: string, label?: string | undefined): void;
 
@@ -1240,6 +1266,16 @@ export interface ExtensionRuntimeState {
 	flagValues: Map<string, boolean | string>;
 	/** Provider registrations queued during extension loading, processed during session initialization */
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }>;
+	registerLocale(locale: string, entries: TranslationMap): void;
+	getLocale(): string;
+	getTranslationMode(): TranslationMode;
+	setLocale(locale: string | undefined): void;
+	setTranslationMode(mode: TranslationMode | undefined): void;
+	t(
+		key: string,
+		fallback: string,
+		vars?: Readonly<Record<string, string | number | boolean | undefined | null>>,
+	): string;
 }
 
 /** Action implementations for ExtensionAPI methods. */

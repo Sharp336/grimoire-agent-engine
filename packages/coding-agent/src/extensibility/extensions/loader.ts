@@ -14,6 +14,7 @@ import { loadCapability } from "../../discovery";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
 import type { ExecOptions } from "../../exec/exec";
 import { execCommand } from "../../exec/exec";
+import { createI18nRegistry, type I18nRegistry, type LocaleCode, type TranslationMode } from "../../i18n";
 // Runtime self-reference: dereference this namespace only inside loader functions to keep the index.ts cycle safe.
 import * as PiCodingAgent from "../../index";
 import type { CustomMessage } from "../../session/messages";
@@ -60,6 +61,39 @@ export class ExtensionRuntimeNotInitializedError extends Error {
 export class ExtensionRuntime implements IExtensionRuntime {
 	flagValues = new Map<string, boolean | string>();
 	pendingProviderRegistrations: Array<{ name: string; config: ProviderConfig; sourceId: string }> = [];
+	readonly i18n: I18nRegistry;
+
+	constructor(options: { locale?: LocaleCode; translationMode?: TranslationMode } = {}) {
+		this.i18n = createI18nRegistry(options.locale, options.translationMode);
+	}
+
+	registerLocale(locale: string, entries: Record<string, string>): void {
+		this.i18n.registerLocale(locale, entries);
+	}
+
+	getLocale(): string {
+		return this.i18n.getLocale();
+	}
+
+	getTranslationMode() {
+		return this.i18n.getMode();
+	}
+
+	setLocale(locale: string | undefined): void {
+		this.i18n.setLocale(locale);
+	}
+
+	setTranslationMode(mode: TranslationMode | undefined): void {
+		this.i18n.setMode(mode);
+	}
+
+	t(
+		key: string,
+		fallback: string,
+		vars?: Readonly<Record<string, string | number | boolean | undefined | null>>,
+	): string {
+		return this.i18n.t(key, fallback, { vars });
+	}
 
 	sendMessage(): void {
 		throw new ExtensionRuntimeNotInitializedError();
@@ -73,7 +107,7 @@ export class ExtensionRuntime implements IExtensionRuntime {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
-	setLabel(): void {
+	setLabel(_targetId: string, _label: string | undefined): void {
 		throw new ExtensionRuntimeNotInitializedError();
 	}
 
@@ -162,8 +196,12 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		this.extension.commands.set(name, { name, ...options });
 	}
 
-	setLabel(label: string): void {
-		this.extension.label = label;
+	setLabel(...args: [label: string] | [entryId: string, label: string | undefined]): void {
+		if (args.length === 1) {
+			this.extension.label = args[0];
+			return;
+		}
+		this.runtime.setLabel(args[0], args[1]);
 	}
 
 	registerShortcut(
@@ -184,6 +222,34 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		if (options.default !== undefined) {
 			this.runtime.flagValues.set(name, options.default);
 		}
+	}
+
+	registerLocale(locale: string, entries: Record<string, string>): void {
+		this.runtime.registerLocale(locale, entries);
+	}
+
+	getLocale(): string {
+		return this.runtime.getLocale();
+	}
+
+	getTranslationMode() {
+		return this.runtime.getTranslationMode();
+	}
+
+	setLocale(locale: string | undefined): void {
+		this.runtime.setLocale(locale);
+	}
+
+	setTranslationMode(mode: TranslationMode | undefined): void {
+		this.runtime.setTranslationMode(mode);
+	}
+
+	t(
+		key: string,
+		fallback: string,
+		vars?: Readonly<Record<string, string | number | boolean | undefined | null>>,
+	): string {
+		return this.runtime.t(key, fallback, vars);
 	}
 
 	registerMessageRenderer<T>(customType: string, renderer: MessageRenderer<T>): void {
@@ -327,11 +393,16 @@ export async function loadExtensionFromFactory(
 /**
  * Load extensions from paths.
  */
-export async function loadExtensions(paths: string[], cwd: string, eventBus?: EventBus): Promise<LoadExtensionsResult> {
+export async function loadExtensions(
+	paths: string[],
+	cwd: string,
+	eventBus?: EventBus,
+	runtimeOptions?: { locale?: LocaleCode; translationMode?: TranslationMode },
+): Promise<LoadExtensionsResult> {
 	const extensions: Extension[] = [];
 	const errors: Array<{ path: string; error: string }> = [];
 	const resolvedEventBus = eventBus ?? new EventBus();
-	const runtime = new ExtensionRuntime();
+	const runtime = new ExtensionRuntime(runtimeOptions);
 
 	for (const extPath of paths) {
 		const { extension, error } = await loadExtension(extPath, cwd, resolvedEventBus, runtime);

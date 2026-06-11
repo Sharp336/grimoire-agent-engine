@@ -101,6 +101,7 @@ export const packages: PublishPackage[] = [
 	},
 	{ dir: "packages/agent", kind: "typescript" },
 	{ dir: "packages/coding-agent", kind: "typescript", publishBin: { omp: "dist/cli.js" } },
+	{ dir: "packages/locale-zh-hans", kind: "typescript" },
 ];
 
 function rewriteSrcPath(value: string): string {

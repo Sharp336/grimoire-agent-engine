@@ -19,6 +19,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
+import { type TranslateFn, t } from "../i18n";
 import { resolveMemoryBackend } from "../memory-backend";
 import type { InteractiveModeContext } from "../modes/types";
 import type { FreshSessionResult } from "../session/agent-session";
@@ -1716,16 +1717,64 @@ for (const command of BUILTIN_SLASH_COMMAND_REGISTRY) {
 
 export const BUILTIN_SLASH_COMMAND_RESERVED_NAMES: ReadonlySet<string> = new Set(BUILTIN_SLASH_COMMAND_LOOKUP.keys());
 
+function dynamicReadonlyArray<T>(read: () => ReadonlyArray<T>): ReadonlyArray<T> {
+	return new Proxy([] as T[], {
+		get(_target, prop, receiver) {
+			const current = read();
+			const value = Reflect.get(current, prop, receiver);
+			return typeof value === "function" ? value.bind(current) : value;
+		},
+		has: (_target, prop) => prop in read(),
+		ownKeys: () => Reflect.ownKeys(read()),
+		getOwnPropertyDescriptor: (_target, prop) => Object.getOwnPropertyDescriptor(read(), prop),
+	}) as ReadonlyArray<T>;
+}
+
+function localizeBuiltinSlashCommand(command: SlashCommandSpec, translate: TranslateFn = t): BuiltinSlashCommand {
+	const localized = getLocalizedSlashCommandSpec(command, translate);
+	return {
+		name: localized.name,
+		aliases: localized.aliases,
+		description: localized.description,
+		subcommands: localized.subcommands,
+		inlineHint: localized.inlineHint,
+	};
+}
+
+export function getLocalizedSlashCommandSpec(command: SlashCommandSpec, translate: TranslateFn = t): SlashCommandSpec {
+	return {
+		...command,
+		acpDescription: command.acpDescription
+			? translate(`slash.command.${command.name}.acpDescription`, command.acpDescription)
+			: undefined,
+		acpInputHint: command.acpInputHint
+			? translate(`slash.command.${command.name}.acpInputHint`, command.acpInputHint)
+			: undefined,
+		description: translate(`slash.command.${command.name}.description`, command.description),
+		subcommands: command.subcommands?.map(subcommand => ({
+			...subcommand,
+			description: translate(
+				`slash.command.${command.name}.subcommand.${subcommand.name}.description`,
+				subcommand.description,
+			),
+			usage: subcommand.usage
+				? translate(`slash.command.${command.name}.subcommand.${subcommand.name}.usage`, subcommand.usage)
+				: undefined,
+		})),
+		inlineHint: command.inlineHint
+			? translate(`slash.command.${command.name}.inlineHint`, command.inlineHint)
+			: undefined,
+	};
+}
+
 /** Builtin command metadata used for slash-command autocomplete and help text. */
-export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BUILTIN_SLASH_COMMAND_REGISTRY.map(
-	command => ({
-		name: command.name,
-		aliases: command.aliases,
-		description: command.description,
-		subcommands: command.subcommands,
-		inlineHint: command.inlineHint,
-	}),
-);
+export function getBuiltinSlashCommandDefs(translate: TranslateFn = t): ReadonlyArray<BuiltinSlashCommand> {
+	return BUILTIN_SLASH_COMMAND_REGISTRY.map(command => localizeBuiltinSlashCommand(command, translate));
+}
+
+/** @deprecated Use getBuiltinSlashCommandDefs(); this legacy view resolves against the active locale on access. */
+export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> =
+	dynamicReadonlyArray(getBuiltinSlashCommandDefs);
 
 /**
  * Unified registry exposed for cross-mode tooling. Each spec carries at least

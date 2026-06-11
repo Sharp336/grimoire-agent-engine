@@ -643,7 +643,10 @@ export async function loadSessionExtensions(
 	eventBus: EventBus,
 ): Promise<LoadExtensionsResult> {
 	const paths = await discoverSessionExtensionPaths(options, cwd, settings);
-	const result = await logger.time("loadExtensions", loadExtensions, paths, cwd, eventBus);
+	const result = await logger.time("loadExtensions", loadExtensions, paths, cwd, eventBus, {
+		locale: settings.get("ui.locale"),
+		translationMode: settings.get("ui.translationMode"),
+	});
 	for (const { path, error } of result.errors) {
 		logger.error("Failed to load extension", { path, error });
 	}
@@ -1630,7 +1633,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				.filter(p => !p.startsWith("<inline"));
 		} else if (options.preloadedExtensionPaths) {
 			extensionPaths = options.preloadedExtensionPaths;
-			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
+			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus, {
+				locale: settings.get("ui.locale"),
+				translationMode: settings.get("ui.translationMode"),
+			});
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
 			}
@@ -1638,7 +1644,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			extensionPaths = await logger.time("discoverSessionExtensionPaths", () =>
 				discoverSessionExtensionPaths(options, cwd, settings),
 			);
-			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus);
+			extensionsResult = await logger.time("loadExtensions", loadExtensions, extensionPaths, cwd, eventBus, {
+				locale: settings.get("ui.locale"),
+				translationMode: settings.get("ui.translationMode"),
+			});
 			for (const { path, error } of extensionsResult.errors) {
 				logger.error("Failed to load extension", { path, error });
 			}

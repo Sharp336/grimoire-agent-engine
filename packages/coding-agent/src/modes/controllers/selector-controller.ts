@@ -4,7 +4,7 @@ import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Input, Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { getAgentDbPath, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
+import { getAgentDbPath, getProjectDir, logger, normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import { formatModelSelectorValue } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
@@ -17,6 +17,7 @@ import {
 	getPluginsCacheDir,
 	MarketplaceManager,
 } from "../../extensibility/plugins/marketplace";
+import { setLocale, setTranslationMode, type TranslationMode } from "../../i18n";
 import {
 	getAvailableThemes,
 	getSymbolTheme,
@@ -92,8 +93,18 @@ export class SelectorController {
 
 	showSettingsSelector(): void {
 		getAvailableThemes().then(availableThemes => {
+			let selector: SettingsSelectorComponent;
+			const runner = this.ctx.session.extensionRunner;
+			const translate =
+				runner && typeof runner.t === "function"
+					? (
+							key: string,
+							fallback: string,
+							options?: { vars?: Readonly<Record<string, string | number | boolean | undefined | null>> },
+						) => runner.t(key, fallback, options?.vars)
+					: undefined;
 			this.showSelector(done => {
-				const selector = new SettingsSelectorComponent(
+				selector = new SettingsSelectorComponent(
 					{
 						availableThinkingLevels: [...this.ctx.session.getAvailableThinkingLevels()],
 						thinkingLevel: this.ctx.session.thinkingLevel,
@@ -101,7 +112,13 @@ export class SelectorController {
 						cwd: getProjectDir(),
 					},
 					{
-						onChange: (id, value) => this.handleSettingChange(id, value),
+						onChange: (id, value) => {
+							this.handleSettingChange(id, value);
+							if (id === "ui.locale" || id === "ui.translationMode") {
+								selector.refreshLocalization();
+								this.ctx.ui.requestRender();
+							}
+						},
 						onThemePreview: async themeName => {
 							const result = await previewTheme(themeName);
 							if (result.success) {
@@ -154,6 +171,7 @@ export class SelectorController {
 							this.ctx.ui.requestRender();
 						},
 					},
+					translate,
 				);
 				return { component: selector, focus: selector };
 			});
@@ -270,6 +288,23 @@ export class SelectorController {
 
 			case "autocompleteMaxVisible":
 				this.ctx.editor.setAutocompleteMaxVisible(typeof value === "number" ? value : Number(value));
+				break;
+
+			case "ui.locale":
+				setLocale(value as string);
+				this.ctx.session.extensionRunner?.setLocale(value as string);
+				this.ctx.refreshSlashCommandState().catch(error => {
+					logger.warn("Failed to refresh slash commands after locale change", { error: String(error) });
+				});
+				this.ctx.ui.invalidate();
+				break;
+			case "ui.translationMode":
+				setTranslationMode(value as TranslationMode);
+				this.ctx.session.extensionRunner?.setTranslationMode(value as TranslationMode);
+				this.ctx.refreshSlashCommandState().catch(error => {
+					logger.warn("Failed to refresh slash commands after translation mode change", { error: String(error) });
+				});
+				this.ctx.ui.invalidate();
 				break;
 
 			// Settings with UI side effects

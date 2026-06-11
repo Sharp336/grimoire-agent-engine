@@ -50,6 +50,7 @@ import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
+import { setLocale, setTranslationMode } from "./i18n";
 import type { MCPManager } from "./mcp";
 import { InteractiveMode } from "./modes/interactive-mode";
 import type { PrintModeOptions } from "./modes/print-mode";
@@ -979,6 +980,8 @@ export async function runRootCommand(
 	} else if (parsedArgs.mode === "acp") {
 		applyAcpDefaultSettingOverrides(settingsInstance);
 	}
+	setLocale(settingsInstance.get("ui.locale"));
+	setTranslationMode(settingsInstance.get("ui.translationMode"));
 	if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 		Bun.env.PI_NO_PTY = "1";
 	}
@@ -1106,6 +1109,8 @@ export async function runRootCommand(
 			// Re-scope project settings (.claude/settings.yml etc.) to the resumed
 			// project in place so the session is built with its configuration.
 			await settingsInstance.reloadForCwd(cwd);
+			setLocale(settingsInstance.get("ui.locale"));
+			setTranslationMode(settingsInstance.get("ui.translationMode"));
 		}
 		sessionManager = await SessionManager.open(selected.path);
 	}

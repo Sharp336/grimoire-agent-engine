@@ -6,6 +6,7 @@ import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMeta
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
+import type { TranslationMode } from "../../i18n";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { SessionManager } from "../../session/session-manager";
@@ -212,6 +213,30 @@ export class ExtensionRunner {
 		this.#getMemoryFn = getMemory;
 	}
 
+	getLocale(): string {
+		return this.runtime.getLocale();
+	}
+
+	getTranslationMode(): TranslationMode {
+		return this.runtime.getTranslationMode();
+	}
+
+	setLocale(locale: string | undefined): void {
+		this.runtime.setLocale(locale);
+	}
+
+	setTranslationMode(mode: TranslationMode | undefined): void {
+		this.runtime.setTranslationMode(mode);
+	}
+
+	t(
+		key: string,
+		fallback: string,
+		vars?: Readonly<Record<string, string | number | boolean | undefined | null>>,
+	): string {
+		return this.runtime.t(key, fallback, vars);
+	}
+
 	initialize(
 		actions: ExtensionActions,
 		contextActions: ExtensionContextActions,
@@ -222,6 +247,7 @@ export class ExtensionRunner {
 		this.runtime.sendMessage = actions.sendMessage;
 		this.runtime.sendUserMessage = actions.sendUserMessage;
 		this.runtime.appendEntry = actions.appendEntry;
+		this.runtime.setLabel = actions.setLabel;
 		this.runtime.getActiveTools = actions.getActiveTools;
 		this.runtime.getAllTools = actions.getAllTools;
 		this.runtime.setActiveTools = actions.setActiveTools;
@@ -468,6 +494,7 @@ export class ExtensionRunner {
 
 	createContext(): ExtensionContext {
 		const getModel = this.#getModel;
+		const runtime = this.runtime;
 		return {
 			ui: this.#uiContext,
 			getContextUsage: () => this.#getContextUsageFn(),
@@ -485,6 +512,13 @@ export class ExtensionRunner {
 			shutdown: () => this.#shutdownHandler(),
 			getSystemPrompt: () => this.#getSystemPromptFn(),
 			memory: this.#getMemoryFn?.(),
+			get locale() {
+				return runtime.getLocale();
+			},
+			get translationMode() {
+				return runtime.getTranslationMode();
+			},
+			t: (key, fallback, vars) => runtime.t(key, fallback, vars),
 		};
 	}
 

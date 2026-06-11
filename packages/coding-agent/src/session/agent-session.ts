@@ -170,6 +170,7 @@ import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slas
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
+import { getLocale, getTranslationMode, t } from "../i18n";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { IrcBus, type IrcMessage } from "../irc/bus";
 import { resolveMemoryBackend } from "../memory-backend";
@@ -4948,6 +4949,13 @@ export class AgentSession {
 				await this.reload();
 			},
 			getSystemPrompt: () => this.systemPrompt,
+			get locale() {
+				return getLocale();
+			},
+			get translationMode() {
+				return getTranslationMode();
+			},
+			t: (key, fallback, vars) => t(key, fallback, { vars }),
 		};
 	}
 
