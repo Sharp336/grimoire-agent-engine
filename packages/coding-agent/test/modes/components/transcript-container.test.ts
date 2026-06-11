@@ -106,6 +106,28 @@ class VersionedFinalizedBlock implements Component {
 	}
 }
 
+class NonCommittableFinalizedBlock implements Component {
+	#lines: string[];
+
+	constructor(lines: string[]) {
+		this.#lines = lines;
+	}
+
+	isTranscriptBlockFinalized(): boolean {
+		return true;
+	}
+
+	isTranscriptBlockAppendOnly(): boolean {
+		return false;
+	}
+
+	invalidate(): void {}
+
+	render(_width: number): string[] {
+		return [...this.#lines];
+	}
+}
+
 beforeAll(() => {
 	initTheme();
 });
@@ -308,6 +330,29 @@ describe("TranscriptContainer", () => {
 		const rendered = plain(container.render(80));
 		expect(rendered).toContain("raw final thinking");
 		expect(rendered).toContain("next finalized block");
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(container.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
+	});
+
+	it("treats blocks below finalized non-committable blocks as live", () => {
+		const container = new TranscriptContainer();
+		const volatile = new NonCommittableFinalizedBlock(["volatile"]);
+		const card = new MutableBlock(["notification"]);
+		container.addChild(volatile);
+		container.addChild(card);
+
+		expect(container.render(40)).toEqual(["volatile", "", "notification"]);
+		expect(container.isWithinLiveRegion(card)).toBe(true);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(container.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
+	});
+
+	it("closes the commit-safe run for empty finalized non-committable blocks", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new NonCommittableFinalizedBlock([]));
+		container.addChild(new MutableBlock(["later finalized block"]));
+
+		expect(container.render(40)).toEqual(["later finalized block"]);
 		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
 		expect(container.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
 	});

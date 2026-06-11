@@ -85,6 +85,9 @@ function canCommitLiveBlock(child: Component): boolean {
 	const fn = (child as Component & FinalizableBlock).isTranscriptBlockAppendOnly;
 	return fn ? fn.call(child) : true;
 }
+function isLiveRegionBoundary(child: Component): boolean {
+	return !isBlockFinalized(child) || !canCommitLiveBlock(child);
+}
 
 // A "plain blank" row is empty or whitespace-only with no ANSI bytes. It marks
 // separation padding (a `Spacer`, or a no-background `paddingY` row) as opposed
@@ -470,10 +473,10 @@ export class TranscriptContainer
 	}
 
 	/**
-	 * Whether `component` sits below a still-mutating block — i.e. inside the
-	 * live region, where its rows cannot have been committed to native
-	 * scrollback yet (commits are prefix-only and stop at the first
-	 * still-live block). Callers that retract ephemeral blocks (IRC cards)
+	 * Whether `component` sits below a still-mutating or explicitly non-
+	 * committable block — i.e. inside the live region, where its rows cannot
+	 * have been committed to native scrollback yet (commits are prefix-only and
+	 * stop at the first live-region boundary). Callers that retract ephemeral
 	 * must check this: removing a block whose rows may already be in history
 	 * is an interior deletion of the committed prefix, which the engine can
 	 * only repair by recommitting everything below it — duplication.
@@ -482,7 +485,7 @@ export class TranscriptContainer
 		const index = this.children.indexOf(component);
 		if (index < 0) return false;
 		for (let i = 0; i < index; i++) {
-			if (!isBlockFinalized(this.children[i]!)) return true;
+			if (isLiveRegionBoundary(this.children[i]!)) return true;
 		}
 		return false;
 	}
@@ -505,7 +508,7 @@ export class TranscriptContainer
 		let liveStartIndex = count - 1;
 		for (let i = 0; i < count; i++) {
 			const child = this.children[i]!;
-			if (!isBlockFinalized(child) || !canCommitLiveBlock(child)) {
+			if (isLiveRegionBoundary(child)) {
 				liveStartIndex = i;
 				break;
 			}
@@ -604,11 +607,11 @@ export class TranscriptContainer
 			};
 
 			// Empty (or stripped-to-nothing) children contribute nothing and never
-			// affect spacing or the live-region offsets. An empty still-live child
-			// still closes the commit-safe run: if it later gains rows, it pushes
-			// everything below it.
+			// affect spacing or the live-region offsets. An empty live-region
+			// boundary still closes the commit-safe run: if it later gains rows, it
+			// pushes everything below it.
 			if (contribution.length === 0) {
-				if (i >= liveStartIndex && commitSafeOpen && !finalized) commitSafeOpen = false;
+				if (i >= liveStartIndex && commitSafeOpen && isLiveRegionBoundary(child)) commitSafeOpen = false;
 				if (chainStable && !(reusable && previous.rowCount === 0 && previous.startRow === row)) {
 					chainStable = false;
 					lines.length = row;
