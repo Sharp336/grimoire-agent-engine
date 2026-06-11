@@ -77,7 +77,7 @@ export class AssistantMessageComponent extends Container {
 	/** Whether the last updateContent carried an in-flight streaming partial; such
 	 *  renders bypass the markdown module LRU (see Markdown.transientRenderCache). */
 	#lastUpdateTransient = false;
-	#hasReplacementThinkingRenderer = false;
+	#replacementThinkingPossible = false;
 
 	constructor(
 		message?: AssistantMessage,
@@ -130,14 +130,14 @@ export class AssistantMessageComponent extends Container {
 	}
 
 	/**
-	 * Assistant text/thinking streams are append-only only while the visible rows
-	 * keep their previous content and grow at the bottom. A replacement thinking
-	 * renderer owns the thinking rows and may re-layout prior rows as streaming
-	 * text changes, so keep those rows inside the repaintable live region instead
-	 * of marking them safe for native scrollback commits.
+	 * Default assistant text/thinking streams are append-only while visible rows
+	 * keep prior content and grow at the bottom. Once a visible thinking block is
+	 * handed to extension renderers, any renderer can later switch from `undefined`
+	 * to `{ type: "replace" }` via `requestRender()`, so keep those rows in the
+	 * repaintable live region instead of marking them safe for native scrollback.
 	 */
 	isTranscriptBlockAppendOnly(): boolean {
-		return !this.#hasReplacementThinkingRenderer;
+		return !this.#replacementThinkingPossible;
 	}
 
 	markTranscriptBlockFinalized(): void {
@@ -318,7 +318,7 @@ export class AssistantMessageComponent extends Container {
 		this.#lastMessage = message;
 		this.#lastUpdateTransient = opts?.transient === true;
 
-		this.#hasReplacementThinkingRenderer = false;
+		this.#replacementThinkingPossible = false;
 		// Clear content container
 		this.#contentContainer.clear();
 
@@ -349,10 +349,12 @@ export class AssistantMessageComponent extends Container {
 					.slice(i + 1)
 					.some(c => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
 
+				if (this.thinkingRenderers.length > 0) {
+					this.#replacementThinkingPossible = true;
+				}
 				const thinkingText = content.thinking.trim();
 				const thinkingComponents = this.#renderThinkingExtensions(message, content, i, thinkingIndex, thinkingText);
 				if (thinkingComponents.replace) {
-					this.#hasReplacementThinkingRenderer = true;
 					this.#contentContainer.addChild(thinkingComponents.replace);
 				} else {
 					// Thinking traces in thinkingText color, italic
