@@ -54,10 +54,10 @@ interface SnapshotCarrier {
 interface FinalizableBlock {
 	isTranscriptBlockFinalized?(): boolean;
 	/**
-	 * Live blocks may opt out of native scrollback commit promotion even when
-	 * their current frame diff looks append-shaped. Replacement thinking
-	 * renderers own previously rendered rows and can re-layout them on later
-	 * chunks, so those rows must stay in the repaintable live region.
+	 * Blocks may opt out of native scrollback commit promotion even when their
+	 * current frame is otherwise eligible. Replacement thinking renderers own
+	 * previously rendered rows and can re-layout them after async state changes,
+	 * so those rows must stay in the repaintable live region.
 	 */
 	isTranscriptBlockAppendOnly?(): boolean;
 	/**
@@ -553,7 +553,7 @@ export class TranscriptContainer
 			const previousSnapshot = child[kSnapshot];
 			const previous = previousSegments[i];
 			const finalized = isBlockFinalized(child);
-			const liveCommitAllowed = finalized || canCommitLiveBlock(child);
+			const commitAllowed = canCommitLiveBlock(child);
 			const version = getBlockVersion(child);
 			const committedReusable =
 				previous !== undefined &&
@@ -584,7 +584,7 @@ export class TranscriptContainer
 					previous.generation === this.#generation);
 			const contribution = reusable ? previous.contribution : stripPlainBlankEdges(raw);
 			let liveCommitState: LiveCommitState | undefined;
-			if (i >= liveStartIndex && !finalized && liveCommitAllowed) {
+			if (i >= liveStartIndex && !finalized && commitAllowed) {
 				liveCommitState = deriveLiveCommitState(previousSnapshot, contribution, width, this.#generation);
 			}
 			// Cache the latest contribution as the next frame's diff input.
@@ -656,11 +656,11 @@ export class TranscriptContainer
 
 			const blockStart = row + sep;
 			if (i >= liveStartIndex && commitSafeOpen) {
-				const safeLength = finalized
-					? contribution.length
-					: liveCommitAllowed
-						? (liveCommitState?.safeLength ?? 0)
-						: 0;
+				const safeLength = commitAllowed
+					? finalized
+						? contribution.length
+						: (liveCommitState?.safeLength ?? 0)
+					: 0;
 				if (safeLength > 0) {
 					this.#nativeScrollbackCommitSafeEnd = blockStart + safeLength;
 				}

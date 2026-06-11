@@ -264,6 +264,34 @@ describe("TranscriptContainer", () => {
 		expect(rendered).not.toContain("raw grows");
 		expect(container.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
 	});
+	it("keeps finalized replacement-capable assistant thinking out of commit-safe scrollback", () => {
+		const defaultContainer = new TranscriptContainer();
+		const defaultAssistant = new AssistantMessageComponent();
+		defaultAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "Final append-only thinking." }],
+			}),
+		);
+		defaultAssistant.markTranscriptBlockFinalized();
+		defaultContainer.addChild(defaultAssistant);
+		defaultContainer.render(80);
+		expect(defaultContainer.getNativeScrollbackCommitSafeEnd()).toBeGreaterThan(0);
+
+		const replacementContainer = new TranscriptContainer();
+		const replacementAssistant = new AssistantMessageComponent(undefined, false, undefined, [() => undefined]);
+		replacementAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "raw final thinking" }],
+			}),
+		);
+		replacementAssistant.markTranscriptBlockFinalized();
+		replacementContainer.addChild(replacementAssistant);
+
+		const rendered = plain(replacementContainer.render(80));
+		expect(rendered).toContain("raw final thinking");
+		expect(replacementContainer.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(replacementContainer.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
+	});
 
 	it("keeps an unfinalized block below the seam when a finalized block is appended below it", () => {
 		const container = new TranscriptContainer();
