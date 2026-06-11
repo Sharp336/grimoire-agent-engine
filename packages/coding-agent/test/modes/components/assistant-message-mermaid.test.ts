@@ -221,7 +221,7 @@ describe("AssistantMessageComponent thinking renderers", () => {
 		expect(rendered).not.toContain("renderer failed");
 	});
 
-	it("keeps async renderer components mounted when they request a render", () => {
+	it("keeps async renderer components mounted when they request a render", async () => {
 		let renderRequests = 0;
 		let rendererCalls = 0;
 		let mountedNote: Text | undefined;
@@ -239,9 +239,8 @@ describe("AssistantMessageComponent thinking renderers", () => {
 				context => {
 					rendererCalls += 1;
 					requestRender = context.requestRender;
-					const note = new Text("translation loading", 1, 0);
-					mountedNote ??= note;
-					return note;
+					mountedNote ??= new Text("translation loading", 1, 0);
+					return mountedNote;
 				},
 			],
 		);
@@ -249,12 +248,51 @@ describe("AssistantMessageComponent thinking renderers", () => {
 		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("translation loading");
 		mountedNote?.setText("translation ready");
 		requestRender?.();
+		await Promise.resolve();
 
 		const rendered = Bun.stripANSI(component.render(120).join("\n"));
 		expect(renderRequests).toBe(1);
-		expect(rendererCalls).toBe(1);
+		expect(rendererCalls).toBe(2);
 		expect(rendered).toContain("translation ready");
 		expect(rendered).not.toContain("translation loading");
+	});
+
+	it("mounts a replacement when an async renderer becomes ready after streaming stops", async () => {
+		let ready = false;
+		let renderRequests = 0;
+		let rendererCalls = 0;
+		let requestRender: (() => void) | undefined;
+		const component = new AssistantMessageComponent(
+			{
+				...createAssistantMessage(""),
+				content: [{ type: "thinking", thinking: "Sensitive async thinking." }],
+			},
+			false,
+			() => {
+				renderRequests += 1;
+			},
+			[
+				context => {
+					rendererCalls += 1;
+					requestRender = context.requestRender;
+					if (!ready) return undefined;
+					return { type: "replace", component: new Text(`redacted ${context.text.length}`, 1, 0) };
+				},
+			],
+		);
+
+		expect(Bun.stripANSI(component.render(120).join("\n"))).toContain("Sensitive async thinking.");
+		expect(rendererCalls).toBe(1);
+
+		ready = true;
+		requestRender?.();
+		await Promise.resolve();
+
+		const rendered = Bun.stripANSI(component.render(120).join("\n"));
+		expect(renderRequests).toBe(1);
+		expect(rendererCalls).toBe(2);
+		expect(rendered).toContain("redacted 25");
+		expect(rendered).not.toContain("Sensitive async thinking.");
 	});
 
 	it("does not invoke extension renderers when thinking is hidden", () => {

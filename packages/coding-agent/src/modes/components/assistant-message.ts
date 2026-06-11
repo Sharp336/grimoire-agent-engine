@@ -78,6 +78,7 @@ export class AssistantMessageComponent extends Container {
 	 *  renders bypass the markdown module LRU (see Markdown.transientRenderCache). */
 	#lastUpdateTransient = false;
 	#replacementThinkingPossible = false;
+	#thinkingRenderRefreshQueued = false;
 
 	constructor(
 		message?: AssistantMessage,
@@ -247,6 +248,27 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
+	#requestThinkingRender(): void {
+		if (this.#thinkingRenderRefreshQueued) return;
+		this.#thinkingRenderRefreshQueued = true;
+		queueMicrotask(() => {
+			try {
+				if (this.#lastMessage) {
+					this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+				} else {
+					super.invalidate();
+				}
+				this.onImageUpdate?.();
+			} catch (error) {
+				logger.warn("Assistant thinking renderer refresh failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			} finally {
+				this.#thinkingRenderRefreshQueued = false;
+			}
+		});
+	}
+
 	#renderThinkingExtensions(
 		message: AssistantMessage,
 		content: ThinkingContent,
@@ -274,7 +296,7 @@ export class AssistantMessageComponent extends Container {
 						contentIndex,
 						thinkingIndex,
 						text,
-						requestRender: () => this.onImageUpdate?.(),
+						requestRender: () => this.#requestThinkingRender(),
 					},
 					theme,
 				);
