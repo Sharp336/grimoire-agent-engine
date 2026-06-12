@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added explicit assistant thinking renderer result arms for extensions: `{ type: "append", component: Component }` keeps the existing supplemental rendering behavior, while `{ type: "replace", component: Component }` suppresses the default thinking Markdown so extensions can render the block themselves. Bare `Component` returns remain the legacy append shorthand. Thinking render contexts now include parent assistant message metadata and provider thinking content metadata for async renderer state.
+
 ## [17.2.15] - 2026-08-12
 
 ### Added
