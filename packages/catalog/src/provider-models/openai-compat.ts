@@ -2745,21 +2745,28 @@ export interface RequestyModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+// OMP uses "minimal" and "xhigh"; Requesty documents "min"/"max" for those ends.
+// "low"/"medium"/"high" are accepted unchanged.
+const REQUESTY_REASONING_EFFORT_MAP = { minimal: "min", xhigh: "max" } as const;
+
 export function requestyModelManagerOptions(
 	config?: RequestyModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
 	const baseUrl = config?.baseUrl ?? "https://router.requesty.ai/v1";
 	return {
-		providerId: "requesty" as Parameters<typeof getBundledModels>[0],
+		providerId: "requesty",
+		dynamicModelsAuthoritative: true,
 		fetchDynamicModels: () =>
 			fetchOpenAICompatibleModels({
 				api: "openai-completions",
-				provider: "requesty" as Parameters<typeof getBundledModels>[0],
+				provider: "requesty",
 				baseUrl,
 				apiKey,
 				filterModel: (entry: OpenAICompatibleModelRecord) =>
-					entry.api === "chat" && entry.supports_tool_calling === true,
+					// api and supports_tool_calling are Requesty extensions; absent means
+					// standard OpenAI-style entry (chat, unknown capability) — include it.
+					(entry.api == null || entry.api === "chat") && entry.supports_tool_calling !== false,
 				mapModel: (
 					entry: OpenAICompatibleModelRecord,
 					defaults: ModelSpec<"openai-completions">,
@@ -2794,6 +2801,11 @@ export function requestyModelManagerOptions(
 							output: outputPrice,
 							cacheRead: cacheReadPrice,
 							cacheWrite: cacheWritePrice,
+						},
+						compat: {
+							...defaults.compat,
+							reasoningEffortMap: REQUESTY_REASONING_EFFORT_MAP,
+							maxTokensField: "max_tokens",
 						},
 					};
 				},

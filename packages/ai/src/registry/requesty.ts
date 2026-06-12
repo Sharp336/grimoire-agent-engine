@@ -11,7 +11,7 @@ import type { ProviderDefinition } from "./types";
  */
 export const loginRequesty = createApiKeyLogin({
 	providerLabel: "Requesty",
-	authUrl: "https://app.requesty.ai",
+	authUrl: "https://app.requesty.ai/api-keys",
 	instructions: "Create or copy your Requesty API key",
 	promptMessage: "Paste your Requesty API key",
 	placeholder: "rqsty-sk-...",
