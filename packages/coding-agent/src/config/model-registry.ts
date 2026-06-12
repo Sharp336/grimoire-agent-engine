@@ -1138,6 +1138,16 @@ export class ModelRegistry {
 			});
 			this.#keylessProviders.add("lm-studio");
 		}
+		if (!configuredProviders.has("atomic-chat") && !disabledProviders.has("atomic-chat")) {
+			this.#discoverableProviders.push({
+				provider: "atomic-chat",
+				api: "openai-completions",
+				baseUrl: Bun.env.ATOMIC_CHAT_BASE_URL || "http://127.0.0.1:1337/v1",
+				discovery: { type: "openai-models-list" },
+				optional: true,
+			});
+			this.#keylessProviders.add("atomic-chat");
+		}
 	}
 
 	#loadCustomModels(): CustomModelsResult {

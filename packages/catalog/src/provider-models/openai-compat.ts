@@ -2239,6 +2239,39 @@ export function kimiCodeModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 12.4. Atomic Chat
+// ---------------------------------------------------------------------------
+
+export interface AtomicChatModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function atomicChatModelManagerOptions(
+	config?: AtomicChatModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? Bun.env.ATOMIC_CHAT_BASE_URL ?? "http://127.0.0.1:1337/v1";
+	const references = createBundledReferenceMap<"openai-completions">("atomic-chat" as any);
+	return {
+		providerId: "atomic-chat",
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels({
+				api: "openai-completions",
+				provider: "atomic-chat",
+				baseUrl,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					const reference = references.get(defaults.id);
+					return mapWithBundledReference(entry, defaults, reference);
+				},
+				fetch: config?.fetch,
+			}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 12.5. LM Studio
 // ---------------------------------------------------------------------------
 

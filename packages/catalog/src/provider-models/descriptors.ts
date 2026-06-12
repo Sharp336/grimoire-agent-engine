@@ -12,6 +12,7 @@ import {
 	aimlApiModelManagerOptions,
 	alibabaCodingPlanModelManagerOptions,
 	anthropicModelManagerOptions,
+	atomicChatModelManagerOptions,
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	deepseekModelManagerOptions,
@@ -80,6 +81,13 @@ export const CATALOG_PROVIDERS = [
 		id: "azure",
 		defaultModel: "gpt-5.5",
 		envVars: ["AZURE_OPENAI_API_KEY"],
+	},
+	{
+		id: "atomic-chat",
+		defaultModel: "local",
+		envVars: ["ATOMIC_CHAT_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => atomicChatModelManagerOptions(config),
+		allowUnauthenticated: true,
 	},
 	{
 		id: "cerebras",
