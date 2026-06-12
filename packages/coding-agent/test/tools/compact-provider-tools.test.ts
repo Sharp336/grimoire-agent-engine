@@ -40,6 +40,17 @@ describe("stripNestedSchemaDescriptions", () => {
 		expect(stripped.properties.path.type).toBe("string");
 		expect(stripped.properties._i.description).toBeUndefined();
 	});
+
+	it("does not recurse into enum instance values", () => {
+		const schema = {
+			type: "string",
+			enum: [{ description: "fast", value: 1 }],
+		};
+		const stripped = stripNestedSchemaDescriptions(schema) as {
+			enum: Array<Record<string, unknown>>;
+		};
+		expect(stripped.enum[0]).toEqual({ description: "fast", value: 1 });
+	});
 });
 
 describe("compactProviderTools", () => {

@@ -2171,18 +2171,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						renderToolResults: settings.get("snapcompact.toolResults"),
 					})
 				: undefined;
-		const compactProviderDefinitions = settings.get("tools.compactProviderDefinitions");
-		const transformProviderContext =
-			obfuscator || snapcompactInline || compactProviderDefinitions !== "off"
-				? (context: Context, transformModel: Model): Context => {
-						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
-						if (snapcompactInline) transformed = snapcompactInline.transform(transformed, transformModel);
-						if (compactProviderDefinitions !== "off") {
-							transformed = compactProviderContext(transformed, compactProviderDefinitions);
-						}
-						return transformed;
-					}
-				: undefined;
+		const transformProviderContext = (context: Context, transformModel: Model): Context => {
+			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+			if (snapcompactInline) transformed = snapcompactInline.transform(transformed, transformModel);
+			const compactMode = settings.get("tools.compactProviderDefinitions");
+			if (compactMode !== "off") transformed = compactProviderContext(transformed, compactMode);
+			return transformed;
+		};
 		const onPayload = async (payload: unknown, _model?: Model) => {
 			return await extensionRunner.emitBeforeProviderRequest(payload);
 		};

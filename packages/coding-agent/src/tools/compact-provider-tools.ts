@@ -32,11 +32,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+function stripSchemaArrayKeyword(value: unknown): unknown {
+	if (!Array.isArray(value)) return value;
+	return value.map(entry => stripNestedSchemaDescriptions(entry));
+}
+
 /** Remove nested `description` fields from a JSON Schema object (wire shape). */
 export function stripNestedSchemaDescriptions(schema: unknown): unknown {
-	if (Array.isArray(schema)) {
-		return schema.map(entry => stripNestedSchemaDescriptions(entry));
-	}
 	if (!isPlainObject(schema)) return schema;
 
 	const out: Record<string, unknown> = {};
@@ -52,6 +54,14 @@ export function stripNestedSchemaDescriptions(schema: unknown): unknown {
 		}
 		if (key === "items") {
 			out.items = stripNestedSchemaDescriptions(value);
+			continue;
+		}
+		if (key === "prefixItems") {
+			out.prefixItems = stripSchemaArrayKeyword(value);
+			continue;
+		}
+		if (key === "anyOf" || key === "oneOf" || key === "allOf") {
+			out[key] = stripSchemaArrayKeyword(value);
 			continue;
 		}
 		if (key === "additionalProperties" && isPlainObject(value)) {
@@ -80,6 +90,10 @@ export function stripNestedSchemaDescriptions(schema: unknown): unknown {
 				mapped[name] = stripNestedSchemaDescriptions(sub);
 			}
 			out.$defs = mapped;
+			continue;
+		}
+		if (key === "enum" || key === "const" || key === "required" || key === "type") {
+			out[key] = value;
 			continue;
 		}
 		out[key] = stripNestedSchemaDescriptions(value);
