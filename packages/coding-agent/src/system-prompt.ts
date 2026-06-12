@@ -3,8 +3,18 @@
  */
 
 import * as os from "node:os";
+import * as path from "node:path";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
-import { $env, getGpuCachePath, getProjectDir, hasFsCode, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import {
+	$env,
+	getConfigAgentDirName,
+	getGpuCachePath,
+	getProjectDir,
+	hasFsCode,
+	isEnoent,
+	logger,
+	prompt,
+} from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { contextFileCapability } from "./capability/context-file";
 import { systemPromptCapability } from "./capability/system-prompt";
@@ -24,11 +34,37 @@ import { shortenPath } from "./tools/render-utils";
 import { AGENTS_MD_LIMIT, buildWorkspaceTree, type WorkspaceTree } from "./workspace-tree";
 
 /** Bundled personality specs, keyed by the `personality` setting value. */
-const PERSONALITY_SPECS: Record<Exclude<Personality, "none">, string> = {
+const PERSONALITY_SPECS: Record<Exclude<Personality, "none" | "custom">, string> = {
 	default: defaultPersonality,
 	friendly: friendlyPersonality,
 	pragmatic: pragmaticPersonality,
 };
+
+/** User-level custom personality file: ~/.omp/agent/PERSONALITY.md (overridable via PI_CONFIG_DIR). */
+async function loadCustomPersonality(): Promise<string | null> {
+	const personalityPath = path.join(os.homedir(), getConfigAgentDirName(), "PERSONALITY.md");
+	try {
+		const content = (await Bun.file(personalityPath).text()).trim();
+		return content || null;
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("Could not read PERSONALITY.md", { path: personalityPath, error: String(error) });
+		}
+		return null;
+	}
+}
+
+/** Resolve the personality block content; "custom" loads PERSONALITY.md, falling back to default when absent. */
+async function resolvePersonalitySpec(personality: Personality): Promise<string> {
+	if (personality === "none") return "";
+	if (personality === "custom") {
+		const custom = await loadCustomPersonality();
+		if (custom) return custom;
+		logger.warn("Personality 'custom' selected but no PERSONALITY.md found; falling back to default");
+		return PERSONALITY_SPECS.default.trim();
+	}
+	return PERSONALITY_SPECS[personality].trim();
+}
 
 interface AlwaysApplyRule {
 	name: string;
@@ -584,6 +620,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const injectedAlwaysApplyRules = dedupeAlwaysApplyRules(alwaysApplyRules, promptSources);
 
 	const environment = await logger.time("getEnvironmentInfo", getEnvironmentInfo);
+	const personalitySpec = await resolvePersonalitySpec(personality);
 	const data = {
 		systemPromptCustomization: effectiveSystemPromptCustomization,
 		customPrompt: resolvedCustomPrompt,
@@ -603,7 +640,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		dateTime,
 		cwd: promptCwd,
 		model: model ?? "",
-		personality: personality === "none" ? "" : PERSONALITY_SPECS[personality].trim(),
+		personality: personalitySpec,
 		intentTracing: !!intentField,
 		intentField: intentField ?? "",
 		mcpDiscoveryMode,

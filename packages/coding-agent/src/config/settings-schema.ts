@@ -824,7 +824,7 @@ export const SETTINGS_SCHEMA = {
 
 	personality: {
 		type: "enum",
-		values: ["default", "friendly", "pragmatic", "none"] as const,
+		values: ["default", "friendly", "pragmatic", "custom", "none"] as const,
 		default: "default",
 		ui: {
 			tab: "model",
@@ -846,6 +846,11 @@ export const SETTINGS_SCHEMA = {
 					value: "pragmatic",
 					label: "Pragmatic",
 					description: "Direct, efficient engineer focused on clarity and rigor",
+				},
+				{
+					value: "custom",
+					label: "Custom (PERSONALITY.md)",
+					description: "Load persona from ~/.omp/agent/PERSONALITY.md (falls back to Default if missing)",
 				},
 				{ value: "none", label: "None", description: "Omit the personality block entirely" },
 			],

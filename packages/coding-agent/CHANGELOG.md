@@ -5,6 +5,7 @@
 ### Added
 
 - Added `skills.enableAgentsUser` and `skills.enableAgentsProject` settings (default on) so the canonical OMP-native `~/.agent[s]/skills` and project-walkup `.agent[s]/skills` are configurable independently from the third-party Claude/Codex/Pi toggles.
+- Added a `custom` option to the `personality` setting that loads a user-authored persona from `~/.omp/agent/PERSONALITY.md` (falls back to the default personality when the file is absent), selectable from the personality selector alongside the built-in presets.
 
 
 ### Changed

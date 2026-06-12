@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -18,14 +18,19 @@ describe("system prompt personality block", () => {
 	let tempDir = "";
 	let tempHomeDir = "";
 	let originalHome: string | undefined;
+	let homedirSpy: { mockRestore(): void } | undefined;
 
 	beforeEach(() => {
 		tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-prompt-personality-"));
 		tempHomeDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-prompt-personality-home-"));
 		originalHome = process.env.HOME;
 		process.env.HOME = tempHomeDir;
+		// Bun's os.homedir() ignores a mutated process.env.HOME, so mock it directly
+		// (matches the discovery-layer test convention, e.g. sdk-mcp-instructions.test.ts).
+		homedirSpy = spyOn(os, "homedir").mockReturnValue(tempHomeDir);
 	});
 
+	afterEach(() => homedirSpy?.mockRestore());
 	afterEach(cleanupTempHome(() => ({ tempDir, tempHomeDir, originalHome })));
 
 	async function render(personality?: Personality): Promise<string> {
@@ -59,5 +64,22 @@ describe("system prompt personality block", () => {
 		const rendered = await render("none");
 		expect(rendered).not.toContain("<personality>");
 		expect(rendered).not.toContain("</personality>");
+	});
+
+	it('loads ~/.omp/agent/PERSONALITY.md when personality is "custom"', async () => {
+		const agentDir = path.join(tempHomeDir, ".omp", "agent");
+		fs.mkdirSync(agentDir, { recursive: true });
+		fs.writeFileSync(path.join(agentDir, "PERSONALITY.md"), "Speak only in haiku. Sign off as Captain Custom.");
+
+		const rendered = await render("custom");
+		expect(rendered).toContain("<personality>");
+		expect(rendered).toContain("Sign off as Captain Custom.");
+		expect(rendered).not.toContain("terse, evidence-first engineer");
+	});
+
+	it('falls back to the default spec when "custom" is selected but PERSONALITY.md is missing', async () => {
+		const rendered = await render("custom");
+		expect(rendered).toContain("<personality>");
+		expect(rendered).toContain("terse, evidence-first engineer");
 	});
 });
