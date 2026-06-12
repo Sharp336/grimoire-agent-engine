@@ -2758,23 +2758,29 @@ export function requestyModelManagerOptions(
 				provider: "requesty" as Parameters<typeof getBundledModels>[0],
 				baseUrl,
 				apiKey,
-				// Requesty mixes chat, image-gen, TTS, etc. — keep only chat models.
 				filterModel: (entry: OpenAICompatibleModelRecord) =>
 					entry.api === "chat" && entry.supports_tool_calling === true,
 				mapModel: (
 					entry: OpenAICompatibleModelRecord,
 					defaults: ModelSpec<"openai-completions">,
 				): ModelSpec<"openai-completions"> => {
-					// Prices are per-token; OMP stores per-million.
-					const inputPrice = typeof entry.input_price === "number" ? entry.input_price * 1_000_000 : defaults.cost.input;
-					const outputPrice = typeof entry.output_price === "number" ? entry.output_price * 1_000_000 : defaults.cost.output;
-					// cached_price is only meaningful when supports_caching=true; for
-					// non-caching models it mirrors input_price and should not be used.
+					const inputPrice =
+						typeof entry.input_price === "number" ? entry.input_price * 1_000_000 : defaults.cost.input;
+					const outputPrice =
+						typeof entry.output_price === "number" ? entry.output_price * 1_000_000 : defaults.cost.output;
 					const supportsCaching = entry.supports_caching === true;
-					const cacheReadPrice = supportsCaching && typeof entry.cached_price === "number" ? entry.cached_price * 1_000_000 : 0;
-					const cacheWritePrice = supportsCaching && typeof entry.caching_price === "number" ? entry.caching_price * 1_000_000 : 0;
-					const contextWindow = typeof entry.context_window === "number" && entry.context_window > 0 ? entry.context_window : defaults.contextWindow;
-					const maxTokens = typeof entry.max_output_tokens === "number" && entry.max_output_tokens > 0 ? entry.max_output_tokens : defaults.maxTokens;
+					const cacheReadPrice =
+						supportsCaching && typeof entry.cached_price === "number" ? entry.cached_price * 1_000_000 : 0;
+					const cacheWritePrice =
+						supportsCaching && typeof entry.caching_price === "number" ? entry.caching_price * 1_000_000 : 0;
+					const contextWindow =
+						typeof entry.context_window === "number" && entry.context_window > 0
+							? entry.context_window
+							: defaults.contextWindow;
+					const maxTokens =
+						typeof entry.max_output_tokens === "number" && entry.max_output_tokens > 0
+							? entry.max_output_tokens
+							: defaults.maxTokens;
 					const supportsVision = entry.supports_vision === true;
 					const supportsReasoning = entry.supports_reasoning === true;
 					return {
