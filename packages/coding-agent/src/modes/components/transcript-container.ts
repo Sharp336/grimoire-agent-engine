@@ -54,6 +54,13 @@ interface SnapshotCarrier {
 interface FinalizableBlock {
 	isTranscriptBlockFinalized?(): boolean;
 	/**
+	 * Blocks may opt out of native scrollback commit promotion even when their
+	 * current frame is otherwise eligible. Replacement thinking renderers own
+	 * previously rendered rows and can re-layout them after async state changes,
+	 * so those rows must stay in the repaintable live region.
+	 */
+	isTranscriptBlockAppendOnly?(): boolean;
+	/**
 	 * Monotonic content version for blocks that can still mutate *after*
 	 * reporting finalized (e.g. `AssistantMessageComponent`: the inline error
 	 * restored at the next turn's `agent_start`, late tool-result images). The
@@ -73,6 +80,13 @@ function isBlockFinalized(child: Component): boolean {
 function getBlockVersion(child: Component): number | undefined {
 	const fn = (child as Component & FinalizableBlock).getTranscriptBlockVersion;
 	return fn ? fn.call(child) : undefined;
+}
+function canCommitLiveBlock(child: Component): boolean {
+	const fn = (child as Component & FinalizableBlock).isTranscriptBlockAppendOnly;
+	return fn ? fn.call(child) : true;
+}
+function isLiveRegionBoundary(child: Component): boolean {
+	return !isBlockFinalized(child) || !canCommitLiveBlock(child);
 }
 
 // A "plain blank" row is empty or whitespace-only with no ANSI bytes. It marks
@@ -459,10 +473,10 @@ export class TranscriptContainer
 	}
 
 	/**
-	 * Whether `component` sits below a still-mutating block — i.e. inside the
-	 * live region, where its rows cannot have been committed to native
-	 * scrollback yet (commits are prefix-only and stop at the first
-	 * still-live block). Callers that retract ephemeral blocks (IRC cards)
+	 * Whether `component` sits below a still-mutating or explicitly non-
+	 * committable block — i.e. inside the live region, where its rows cannot
+	 * have been committed to native scrollback yet (commits are prefix-only and
+	 * stop at the first live-region boundary). Callers that retract ephemeral
 	 * must check this: removing a block whose rows may already be in history
 	 * is an interior deletion of the committed prefix, which the engine can
 	 * only repair by recommitting everything below it — duplication.
@@ -471,7 +485,7 @@ export class TranscriptContainer
 		const index = this.children.indexOf(component);
 		if (index < 0) return false;
 		for (let i = 0; i < index; i++) {
-			if (!isBlockFinalized(this.children[i]!)) return true;
+			if (isLiveRegionBoundary(this.children[i]!)) return true;
 		}
 		return false;
 	}
@@ -509,15 +523,18 @@ export class TranscriptContainer
 
 		const count = this.children.length;
 
-		// The live region spans from the earliest still-mutating block through the
-		// bottom. A block that has not finalized must stay below the seam: out-of-
-		// band inserts (TTSR/todo cards) can append a finalized block *below* a
-		// tool that is still awaiting its result, and committing the tool there
-		// would strand its history rows on the mid-stream preview the late result
-		// never reaches.
+		// The live region spans from the earliest still-mutating or explicitly
+		// non-committable block through the bottom. A block that has not finalized
+		// must stay below the seam: out-of-band inserts (TTSR/todo cards) can
+		// append a finalized block *below* a tool that is still awaiting its
+		// result, and committing the tool there would strand its history rows on
+		// the mid-stream preview the late result never reaches. A finalized block
+		// may also opt out when it can still repaint prior rows through async
+		// renderer state, e.g. replacement-capable assistant thinking.
 		let liveStartIndex = count - 1;
 		for (let i = 0; i < count; i++) {
-			if (!isBlockFinalized(this.children[i]!)) {
+			const child = this.children[i]!;
+			if (isLiveRegionBoundary(child)) {
 				liveStartIndex = i;
 				break;
 			}
@@ -568,6 +585,9 @@ export class TranscriptContainer
 			const previousSnapshot = child[kSnapshot];
 			const previous = previousSegments[i];
 			const finalized = isBlockFinalized(child);
+			const commitAllowed = canCommitLiveBlock(child);
+			const inLiveRegion = i >= liveStartIndex;
+			const liveBoundary = !finalized || !commitAllowed;
 			const version = getBlockVersion(child);
 			const committedReusable =
 				previous !== undefined &&
@@ -598,7 +618,7 @@ export class TranscriptContainer
 					previous.generation === this.#generation);
 			const contribution = reusable ? previous.contribution : stripPlainBlankEdges(raw);
 			let liveCommitState: LiveCommitState | undefined;
-			if (i >= liveStartIndex && !finalized) {
+			if (inLiveRegion && !finalized && commitAllowed) {
 				liveCommitState = deriveLiveCommitState(previousSnapshot, contribution, width, this.#generation);
 			}
 			// Cache the latest contribution as the next frame's diff input.
@@ -615,11 +635,11 @@ export class TranscriptContainer
 			};
 
 			// Empty (or stripped-to-nothing) children contribute nothing and never
-			// affect spacing or the live-region offsets. An empty still-live child
-			// still closes the commit-safe run: if it later gains rows, it pushes
-			// everything below it.
+			// affect spacing or the live-region offsets. An empty live-region
+			// boundary still closes the commit-safe run: if it later gains rows, it
+			// pushes everything below it.
 			if (contribution.length === 0) {
-				if (i >= liveStartIndex && commitSafeOpen && !finalized) commitSafeOpen = false;
+				if (inLiveRegion && commitSafeOpen && liveBoundary) commitSafeOpen = false;
 				if (chainStable && !(reusable && previous.rowCount === 0 && previous.startRow === row)) {
 					chainStable = false;
 					lines.length = row;
@@ -650,7 +670,7 @@ export class TranscriptContainer
 			// The separator before the first live block stays in the committed
 			// prefix (it is deterministic once the prior block's body is settled),
 			// so the live region begins at the block's first content row.
-			if (!liveRecorded && i >= liveStartIndex) {
+			if (!liveRecorded && inLiveRegion) {
 				this.#nativeScrollbackLiveRegionStart = row + sep;
 				liveRecorded = true;
 			}
@@ -669,8 +689,12 @@ export class TranscriptContainer
 			}
 
 			const blockStart = row + sep;
-			if (i >= liveStartIndex && commitSafeOpen) {
-				const safeLength = finalized ? contribution.length : (liveCommitState?.safeLength ?? 0);
+			if (inLiveRegion && commitSafeOpen) {
+				const safeLength = commitAllowed
+					? finalized
+						? contribution.length
+						: (liveCommitState?.safeLength ?? 0)
+					: 0;
 				if (safeLength > 0) {
 					this.#nativeScrollbackCommitSafeEnd = blockStart + safeLength;
 				}

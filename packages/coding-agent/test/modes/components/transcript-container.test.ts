@@ -106,6 +106,28 @@ class VersionedFinalizedBlock implements Component {
 	}
 }
 
+class NonCommittableFinalizedBlock implements Component {
+	#lines: string[];
+
+	constructor(lines: string[]) {
+		this.#lines = lines;
+	}
+
+	isTranscriptBlockFinalized(): boolean {
+		return true;
+	}
+
+	isTranscriptBlockAppendOnly(): boolean {
+		return false;
+	}
+
+	invalidate(): void {}
+
+	render(_width: number): string[] {
+		return [...this.#lines];
+	}
+}
+
 beforeAll(() => {
 	initTheme();
 });
@@ -185,6 +207,154 @@ describe("TranscriptContainer", () => {
 		b.set(["b1", "b2"]);
 		expect(container.render(40)).toEqual(["a1", "a2", "", "b1", "b2"]);
 		expect(container.getNativeScrollbackLiveRegionStart()).toBe(3);
+	});
+
+	it("keeps replacement-rendered assistant thinking out of commit-safe scrollback", () => {
+		const defaultContainer = new TranscriptContainer();
+		const defaultAssistant = new AssistantMessageComponent();
+		defaultAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "Append" }],
+			}),
+		);
+		defaultContainer.addChild(defaultAssistant);
+		defaultContainer.render(80);
+		defaultAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "Append-only thinking." }],
+			}),
+		);
+		defaultContainer.render(80);
+		expect(defaultContainer.getNativeScrollbackCommitSafeEnd()).toBeGreaterThan(0);
+
+		const replacementContainer = new TranscriptContainer();
+		const replacementAssistant = new AssistantMessageComponent(undefined, false, undefined, [
+			({ text }) => ({ type: "replace", component: new Text(`redacted${".".repeat(text.length)}`, 1, 0) }),
+		]);
+		replacementAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "x" }],
+			}),
+		);
+		replacementContainer.addChild(replacementAssistant);
+		replacementContainer.render(80);
+		replacementAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "xx" }],
+			}),
+		);
+
+		const rendered = plain(replacementContainer.render(80));
+		expect(rendered).toContain("redacted..");
+		expect(rendered).not.toContain("xx");
+		expect(replacementContainer.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(replacementContainer.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
+	});
+
+	it("keeps pending replacement-capable assistant thinking out of commit-safe scrollback", () => {
+		let ready = false;
+		const container = new TranscriptContainer();
+		const assistant = new AssistantMessageComponent(undefined, false, undefined, [
+			({ text }) => (ready ? { type: "replace", component: new Text(`redacted ${text.length}`, 1, 0) } : undefined),
+		]);
+		assistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "raw" }],
+			}),
+		);
+		container.addChild(assistant);
+		container.render(80);
+		assistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "raw grows" }],
+			}),
+		);
+
+		expect(plain(container.render(80))).toContain("raw grows");
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(container.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
+
+		ready = true;
+		assistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "raw grows" }],
+			}),
+		);
+
+		const rendered = plain(container.render(80));
+		expect(rendered).toContain("redacted 9");
+		expect(rendered).not.toContain("raw grows");
+		expect(container.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
+	});
+	it("keeps finalized replacement-capable assistant thinking out of commit-safe scrollback", () => {
+		const defaultContainer = new TranscriptContainer();
+		const defaultAssistant = new AssistantMessageComponent();
+		defaultAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "Final append-only thinking." }],
+			}),
+		);
+		defaultAssistant.markTranscriptBlockFinalized();
+		defaultContainer.addChild(defaultAssistant);
+		defaultContainer.render(80);
+		expect(defaultContainer.getNativeScrollbackCommitSafeEnd()).toBeGreaterThan(0);
+
+		const replacementContainer = new TranscriptContainer();
+		const replacementAssistant = new AssistantMessageComponent(undefined, false, undefined, [() => undefined]);
+		replacementAssistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "raw final thinking" }],
+			}),
+		);
+		replacementAssistant.markTranscriptBlockFinalized();
+		replacementContainer.addChild(replacementAssistant);
+
+		const rendered = plain(replacementContainer.render(80));
+		expect(rendered).toContain("raw final thinking");
+		expect(replacementContainer.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(replacementContainer.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
+	});
+
+	it("keeps finalized replacement-capable assistant thinking in the live region above later finalized blocks", () => {
+		const container = new TranscriptContainer();
+		const assistant = new AssistantMessageComponent(undefined, false, undefined, [() => undefined]);
+		assistant.updateContent(
+			makeAssistantMessage({
+				content: [{ type: "thinking", thinking: "raw final thinking" }],
+			}),
+		);
+		assistant.markTranscriptBlockFinalized();
+		container.addChild(assistant);
+		container.addChild(new MutableBlock(["next finalized block"]));
+
+		const rendered = plain(container.render(80));
+		expect(rendered).toContain("raw final thinking");
+		expect(rendered).toContain("next finalized block");
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(container.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
+	});
+
+	it("treats blocks below finalized non-committable blocks as live", () => {
+		const container = new TranscriptContainer();
+		const volatile = new NonCommittableFinalizedBlock(["volatile"]);
+		const card = new MutableBlock(["notification"]);
+		container.addChild(volatile);
+		container.addChild(card);
+
+		expect(container.render(40)).toEqual(["volatile", "", "notification"]);
+		expect(container.isWithinLiveRegion(card)).toBe(true);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(container.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
+	});
+
+	it("closes the commit-safe run for empty finalized non-committable blocks", () => {
+		const container = new TranscriptContainer();
+		container.addChild(new NonCommittableFinalizedBlock([]));
+		container.addChild(new MutableBlock(["later finalized block"]));
+
+		expect(container.render(40)).toEqual(["later finalized block"]);
+		expect(container.getNativeScrollbackLiveRegionStart()).toBe(0);
+		expect(container.getNativeScrollbackCommitSafeEnd()).toBeUndefined();
 	});
 
 	it("keeps an unfinalized block below the seam when a finalized block is appended below it", () => {

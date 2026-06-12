@@ -1,8 +1,18 @@
-import type { AssistantMessage, ImageContent, Usage } from "@oh-my-pi/pi-ai";
-import { Container, Image, type ImageBudget, ImageProtocol, Markdown, Spacer, TERMINAL, Text } from "@oh-my-pi/pi-tui";
-import { formatNumber } from "@oh-my-pi/pi-utils";
+import type { AssistantMessage, ImageContent, ThinkingContent, Usage } from "@oh-my-pi/pi-ai";
+import {
+	type Component,
+	Container,
+	Image,
+	type ImageBudget,
+	ImageProtocol,
+	Markdown,
+	Spacer,
+	TERMINAL,
+	Text,
+} from "@oh-my-pi/pi-tui";
+import { formatNumber, logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
-import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
+import type { AssistantThinkingRenderer, AssistantThinkingRenderResult } from "../../extensibility/extensions/types";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { resolveAbortLabel, shouldRenderAbortReason } from "../../session/messages";
 import { getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
@@ -15,6 +25,24 @@ import { getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../to
  * the persisted session.
  */
 const MAX_TRANSCRIPT_ERROR_LINES = 8;
+
+interface ThinkingExtensionComponents {
+	append: Component[];
+	replace?: Component;
+}
+
+function isComponent(result: AssistantThinkingRenderResult): result is Component {
+	return typeof result === "object" && result !== null && typeof (result as Component).render === "function";
+}
+
+function isStructuredThinkingResult(
+	result: AssistantThinkingRenderResult,
+): result is { type: "append" | "replace"; component: Component } {
+	if (typeof result !== "object" || result === null || isComponent(result)) return false;
+	const candidate = result as { type?: unknown; component?: unknown };
+	if (!isComponent(candidate.component as AssistantThinkingRenderResult)) return false;
+	return candidate.type === "append" || candidate.type === "replace";
+}
 
 /**
  * Component that renders a complete assistant message
@@ -49,6 +77,8 @@ export class AssistantMessageComponent extends Container {
 	/** Whether the last updateContent carried an in-flight streaming partial; such
 	 *  renders bypass the markdown module LRU (see Markdown.transientRenderCache). */
 	#lastUpdateTransient = false;
+	#visibleThinkingUsesRenderers = false;
+	#thinkingRenderRefreshQueued = false;
 
 	constructor(
 		message?: AssistantMessage,
@@ -98,6 +128,17 @@ export class AssistantMessageComponent extends Container {
 
 	getTranscriptBlockVersion(): number {
 		return this.#blockVersion;
+	}
+
+	/**
+	 * Default assistant text/thinking streams are append-only while visible rows
+	 * keep prior content and grow at the bottom. Once a visible thinking block is
+	 * handed to extension renderers, any renderer can later switch from `undefined`
+	 * to `{ type: "replace" }` via `requestRender()`, so keep those rows in the
+	 * repaintable live region instead of marking them safe for native scrollback.
+	 */
+	isTranscriptBlockAppendOnly(): boolean {
+		return !this.#visibleThinkingUsesRenderers;
 	}
 
 	markTranscriptBlockFinalized(): void {
@@ -207,25 +248,99 @@ export class AssistantMessageComponent extends Container {
 		}
 	}
 
-	#appendThinkingExtensions(contentIndex: number, thinkingIndex: number, text: string): void {
-		for (const renderer of this.thinkingRenderers) {
+	#requestThinkingRender(rerunRenderers: boolean): void {
+		if (!rerunRenderers) {
+			this.onImageUpdate?.();
+			return;
+		}
+		if (this.#thinkingRenderRefreshQueued) return;
+		this.#thinkingRenderRefreshQueued = true;
+		queueMicrotask(() => {
 			try {
-				const component = renderer(
+				if (this.#lastMessage) {
+					this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+				} else {
+					super.invalidate();
+				}
+				this.onImageUpdate?.();
+			} catch (error) {
+				logger.warn("Assistant thinking renderer refresh failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			} finally {
+				this.#thinkingRenderRefreshQueued = false;
+			}
+		});
+	}
+
+	#renderThinkingExtensions(
+		message: AssistantMessage,
+		content: ThinkingContent,
+		contentIndex: number,
+		thinkingIndex: number,
+		text: string,
+	): ThinkingExtensionComponents {
+		const append: Component[] = [];
+		let replacement: Component | undefined;
+		for (const renderer of this.thinkingRenderers) {
+			let rerunRenderersOnRequest = true;
+			try {
+				const result: AssistantThinkingRenderResult = renderer(
 					{
+						message: {
+							timestamp: message.timestamp,
+							responseId: message.responseId,
+							api: message.api,
+							provider: message.provider,
+							model: message.model,
+						},
+						content: {
+							itemId: content.itemId,
+							thinkingSignature: content.thinkingSignature,
+						},
 						contentIndex,
 						thinkingIndex,
 						text,
-						requestRender: () => this.onImageUpdate?.(),
+						requestRender: () => this.#requestThinkingRender(rerunRenderersOnRequest),
 					},
 					theme,
 				);
-				if (component) {
-					this.#contentContainer.addChild(component);
+				if (!result) continue;
+				if (isComponent(result)) {
+					rerunRenderersOnRequest = false;
+					append.push(result);
+					continue;
 				}
-			} catch {
-				// Ignore extension renderer failures and keep the original thinking block visible.
+				if (!isStructuredThinkingResult(result)) {
+					logger.warn("Assistant thinking renderer returned an invalid result", {
+						contentIndex,
+						thinkingIndex,
+					});
+					continue;
+				}
+				if (result.type === "replace") {
+					if (replacement) {
+						logger.warn("Assistant thinking replacement renderer ignored because one is already active", {
+							contentIndex,
+							thinkingIndex,
+						});
+						continue;
+					}
+					rerunRenderersOnRequest = false;
+					replacement = result.component;
+					continue;
+				}
+				rerunRenderersOnRequest = false;
+				append.push(result.component);
+			} catch (error) {
+				logger.warn("Assistant thinking renderer failed", {
+					contentIndex,
+					thinkingIndex,
+					error: error instanceof Error ? error.message : String(error),
+				});
 			}
 		}
+		return { append, replace: replacement };
 	}
 
 	updateContent(message: AssistantMessage, opts?: { transient?: boolean }): void {
@@ -233,6 +348,7 @@ export class AssistantMessageComponent extends Container {
 		this.#lastMessage = message;
 		this.#lastUpdateTransient = opts?.transient === true;
 
+		this.#visibleThinkingUsesRenderers = false;
 		// Clear content container
 		this.#contentContainer.clear();
 
@@ -259,19 +375,34 @@ export class AssistantMessageComponent extends Container {
 				}
 				// Add spacing only when another visible assistant content block follows.
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
-				const hasVisibleContentAfter = message.content
-					.slice(i + 1)
-					.some(c => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && c.thinking.trim()));
+				let hasVisibleContentAfter = false;
+				for (let j = i + 1; j < message.content.length; j++) {
+					const next = message.content[j]!;
+					if ((next.type === "text" && next.text.trim()) || (next.type === "thinking" && next.thinking.trim())) {
+						hasVisibleContentAfter = true;
+						break;
+					}
+				}
 
+				if (this.thinkingRenderers.length > 0) {
+					this.#visibleThinkingUsesRenderers = true;
+				}
 				const thinkingText = content.thinking.trim();
-				// Thinking traces in thinkingText color, italic
-				const thinkingMarkdown = new Markdown(thinkingText, 1, 0, getMarkdownTheme(), {
-					color: (text: string) => theme.fg("thinkingText", text),
-					italic: true,
-				});
-				thinkingMarkdown.transientRenderCache = this.#lastUpdateTransient;
-				this.#contentContainer.addChild(thinkingMarkdown);
-				this.#appendThinkingExtensions(i, thinkingIndex, thinkingText);
+				const thinkingComponents = this.#renderThinkingExtensions(message, content, i, thinkingIndex, thinkingText);
+				if (thinkingComponents.replace) {
+					this.#contentContainer.addChild(thinkingComponents.replace);
+				} else {
+					// Thinking traces in thinkingText color, italic
+					const thinkingMarkdown = new Markdown(thinkingText, 1, 0, getMarkdownTheme(), {
+						color: (text: string) => theme.fg("thinkingText", text),
+						italic: true,
+					});
+					thinkingMarkdown.transientRenderCache = this.#lastUpdateTransient;
+					this.#contentContainer.addChild(thinkingMarkdown);
+				}
+				for (const component of thinkingComponents.append) {
+					this.#contentContainer.addChild(component);
+				}
 				thinkingIndex += 1;
 				if (hasVisibleContentAfter) {
 					this.#contentContainer.addChild(new Spacer(1));
