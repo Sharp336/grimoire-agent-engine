@@ -16275,7 +16275,7 @@
 			"name": "Claude Opus 4.5",
 			"api": "google-gemini-cli",
 			"provider": "google-antigravity",
-			"baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"baseUrl": "https://daily-cloudcode-pa.googleapis.com",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -16311,7 +16311,7 @@
 			"name": "Claude Opus 4.6",
 			"api": "google-gemini-cli",
 			"provider": "google-antigravity",
-			"baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"baseUrl": "https://daily-cloudcode-pa.googleapis.com",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -16347,7 +16347,7 @@
 			"name": "Claude Sonnet 4.5",
 			"api": "google-gemini-cli",
 			"provider": "google-antigravity",
-			"baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"baseUrl": "https://daily-cloudcode-pa.googleapis.com",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -16384,7 +16384,7 @@
 			"name": "Claude Sonnet 4.6",
 			"api": "google-gemini-cli",
 			"provider": "google-antigravity",
-			"baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"baseUrl": "https://daily-cloudcode-pa.googleapis.com",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -16421,7 +16421,7 @@
 			"name": "Gemini 2.5 Flash",
 			"api": "google-gemini-cli",
 			"provider": "google-antigravity",
-			"baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"baseUrl": "https://daily-cloudcode-pa.googleapis.com",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -16457,7 +16457,7 @@
 			"name": "Gemini 2.5 Pro",
 			"api": "google-gemini-cli",
 			"provider": "google-antigravity",
-			"baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"baseUrl": "https://daily-cloudcode-pa.googleapis.com",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -16487,7 +16487,7 @@
 			"name": "Gemini 3 Flash",
 			"api": "google-gemini-cli",
 			"provider": "google-antigravity",
-			"baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"baseUrl": "https://daily-cloudcode-pa.googleapis.com",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -16517,7 +16517,7 @@
 			"name": "Gemini 3 Pro",
 			"api": "google-gemini-cli",
 			"provider": "google-antigravity",
-			"baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"baseUrl": "https://daily-cloudcode-pa.googleapis.com",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -16551,7 +16551,7 @@
 			"name": "Gemini 3.1 Pro Preview",
 			"api": "google-gemini-cli",
 			"provider": "google-antigravity",
-			"baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"baseUrl": "https://daily-cloudcode-pa.googleapis.com",
 			"reasoning": true,
 			"input": [
 				"text",
@@ -16585,7 +16585,7 @@
 			"name": "GPT OSS 120B",
 			"api": "google-gemini-cli",
 			"provider": "google-antigravity",
-			"baseUrl": "https://daily-cloudcode-pa.sandbox.googleapis.com",
+			"baseUrl": "https://daily-cloudcode-pa.googleapis.com",
 			"reasoning": true,
 			"input": [
 				"text"
