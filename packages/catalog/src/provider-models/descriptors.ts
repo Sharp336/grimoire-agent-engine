@@ -35,6 +35,7 @@ import {
 	openrouterModelManagerOptions,
 	qianfanModelManagerOptions,
 	qwenPortalModelManagerOptions,
+	requestyModelManagerOptions,
 	syntheticModelManagerOptions,
 	togetherModelManagerOptions,
 	veniceModelManagerOptions,
@@ -292,6 +293,14 @@ export const CATALOG_PROVIDERS = [
 			label: "Qwen Portal",
 			oauthProvider: "qwen-portal",
 		},
+	},
+	{
+		id: "requesty",
+		defaultModel: "minimaxi/minimax-m3",
+		envVars: ["REQUESTY_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => requestyModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Requesty", allowUnauthenticated: true },
 	},
 	{
 		id: "synthetic",

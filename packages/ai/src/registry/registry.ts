@@ -40,6 +40,7 @@ import { openrouterProvider } from "./openrouter";
 import { parallelProvider } from "./parallel";
 import { perplexityProvider } from "./perplexity";
 import { qianfanProvider } from "./qianfan";
+import { requestyProvider } from "./requesty";
 import { qwenPortalProvider } from "./qwen-portal";
 import { syntheticProvider } from "./synthetic";
 import { tavilyProvider } from "./tavily";
@@ -101,6 +102,7 @@ const ALL = [
 	huggingfaceProvider,
 	perplexityProvider,
 	qianfanProvider,
+	requestyProvider,
 	veniceProvider,
 	syntheticProvider,
 	nanogptProvider,
