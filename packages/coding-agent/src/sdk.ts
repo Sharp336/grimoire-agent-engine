@@ -1967,6 +1967,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			sessionManager,
 			modelRegistry,
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
+			settings,
 		);
 
 		credentialDisabledTarget = extensionRunner;
