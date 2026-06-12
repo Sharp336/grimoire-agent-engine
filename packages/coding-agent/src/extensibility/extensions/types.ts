@@ -17,9 +17,11 @@ import type {
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type {
 	Api,
+	AssistantMessage,
 	AssistantMessageEvent,
 	AssistantMessageEventStream,
 	Context,
+	Effort,
 	ImageContent,
 	Model,
 	ModelSpec,
@@ -318,6 +320,29 @@ export interface ExtensionModelQuery {
 	 * identity. Compare it; do not persist it (the vocabulary tracks new releases).
 	 */
 	family(model: Model): string;
+	/**
+	 * Run a one-shot completion against a chosen model on its OWN context. The
+	 * request is never appended to session history — distinct from `pi.sendMessage`,
+	 * which injects into the live conversation. Credentials and telemetry are resolved
+	 * through core. Resolves with the model's `AssistantMessage` (inspect `stopReason`
+	 * for provider-level errors/aborts); rejects on credential/transport/setup failures.
+	 *
+	 * `request.tools` are model tool *schemas* for structured output (e.g. a forced
+	 * `submit` call), not OMP tools to execute.
+	 *
+	 * @param model A `Model`, or a string/role spec resolved via {@link resolve}.
+	 */
+	complete(model: Model | string, request: Context, options?: ExtensionCompleteOptions): Promise<AssistantMessage>;
+}
+
+/** Options for {@link ExtensionModelQuery.complete}. */
+export interface ExtensionCompleteOptions {
+	/** Reasoning effort for the call (on models that support thinking). */
+	effort?: Effort;
+	/** Force a specific tool call — e.g. `{ type: "tool", name: "submit" }` for structured output. */
+	toolChoice?: SimpleStreamOptions["toolChoice"];
+	/** Abort signal; honored by the underlying request. */
+	signal?: AbortSignal;
 }
 
 export interface ExtensionContext {

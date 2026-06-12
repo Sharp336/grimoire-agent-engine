@@ -1,7 +1,7 @@
 /**
  * Extension runner - executes extensions and manages their lifecycle.
  */
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -10,7 +10,7 @@ import type { Settings } from "../../config/settings";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { SessionManager } from "../../session/session-manager";
-import { createExtensionModelQuery } from "./model-api";
+import { createExtensionModelQuery, type ExtensionSideRequestPreparer } from "./model-api";
 import type {
 	AfterProviderResponseEvent,
 	AssistantThinkingRenderer,
@@ -232,6 +232,9 @@ export class ExtensionRunner {
 		private readonly modelRegistry: ModelRegistry,
 		getMemory?: () => MemoryRuntimeContext | undefined,
 		private readonly settings?: Settings,
+		private readonly getTelemetry?: () => AgentTelemetryConfig | undefined,
+		private readonly getSessionId?: () => string | undefined,
+		private readonly prepareSideRequest?: ExtensionSideRequestPreparer,
 	) {
 		this.#uiContext = noOpUIContext;
 		this.#getMemoryFn = getMemory;
@@ -491,7 +494,7 @@ export class ExtensionRunner {
 		return undefined;
 	}
 
-	createContext(): ExtensionContext {
+	createContext(scope?: string): ExtensionContext {
 		const getModel = this.#getModel;
 		return {
 			ui: this.#uiContext,
@@ -504,7 +507,12 @@ export class ExtensionRunner {
 			get model() {
 				return getModel();
 			},
-			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel),
+			models: createExtensionModelQuery(this.modelRegistry, this.settings, getModel, {
+				getTelemetry: this.getTelemetry,
+				getSessionId: this.getSessionId,
+				scope,
+				prepareSideRequest: this.prepareSideRequest,
+			}),
 			isIdle: () => this.#isIdleFn(),
 			abort: () => this.#abortFn(),
 			hasPendingMessages: () => this.#hasPendingMessagesFn(),

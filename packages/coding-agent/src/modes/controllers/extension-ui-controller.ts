@@ -497,6 +497,13 @@ export class ExtensionUiController {
 							this.ctx.session.modelRegistry,
 							this.ctx.session.settings,
 							() => this.ctx.session.model,
+							{
+								getSessionId: () => this.ctx.session.sessionId,
+								getTelemetry: () => this.ctx.session.telemetry,
+								scope: registeredTool.definition.name,
+								prepareSideRequest: (model, context, options) =>
+									this.ctx.session.prepareExtensionSideRequest(model, context, options),
+							},
 						),
 						isIdle: () => !this.ctx.session.isStreaming,
 						hasPendingMessages: () => this.ctx.session.queuedMessageCount > 0,

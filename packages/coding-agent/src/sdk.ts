@@ -1990,6 +1990,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			modelRegistry,
 			() => (hasSession ? createSessionMemoryRuntimeContext(session, agentDir, cwd) : undefined),
 			settings,
+			() => agent?.telemetry,
+			() => agent?.sessionId,
+			(model, context, options) =>
+				hasSession ? session.prepareExtensionSideRequest(model, context, options) : undefined,
 		);
 
 		credentialDisabledTarget = extensionRunner;

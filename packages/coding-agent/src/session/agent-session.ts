@@ -4713,6 +4713,30 @@ export class AgentSession {
 		return preparedOptions;
 	}
 
+	/**
+	 * Prepare an extension `ctx.models.complete()` side request to match this
+	 * session's secret obfuscation and stream hooks: obfuscate the caller's context
+	 * for the provider, layer session onPayload/onResponse/metadata/OpenRouter routing
+	 * onto the options, and deobfuscate the response before it returns to the extension.
+	 * Without this, a caller context carrying real secrets (e.g. a transcript) would be
+	 * sent raw to a possibly-different vendor.
+	 */
+	prepareExtensionSideRequest(
+		model: Model,
+		context: Context,
+		options: SimpleStreamOptions,
+	): { context: Context; options: SimpleStreamOptions; finalize: (message: AssistantMessage) => AssistantMessage } {
+		const obfuscator = this.#obfuscator;
+		const obfuscate = obfuscator?.hasSecrets() === true;
+		return {
+			context: obfuscate ? obfuscateProviderContext(obfuscator, context) : context,
+			options: this.prepareSimpleStreamOptions(options, model.provider),
+			finalize: obfuscate
+				? message => ({ ...message, content: obfuscator.deobfuscateObject(message.content) })
+				: message => message,
+		};
+	}
+
 	/** Current steering mode */
 	get steeringMode(): "all" | "one-at-a-time" {
 		return this.agent.getSteeringMode();
@@ -4736,6 +4760,10 @@ export class AgentSession {
 	/** Current session ID */
 	get sessionId(): string {
 		return this.#activeProviderSessionId();
+	}
+	/** Telemetry config for out-of-band extension completions (`ctx.models.complete`). */
+	get telemetry() {
+		return this.agent.telemetry;
 	}
 	getEvalSessionId(): string | null {
 		if (this.#parentEvalSessionId !== undefined) return this.#parentEvalSessionId;
@@ -5439,7 +5467,11 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			modelRegistry: this.#modelRegistry,
 			model: this.model ?? undefined,
-			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined),
+			models: createExtensionModelQuery(this.#modelRegistry, this.settings, () => this.model ?? undefined, {
+				getSessionId: () => this.sessionId,
+				getTelemetry: () => this.agent.telemetry,
+				prepareSideRequest: (model, context, options) => this.prepareExtensionSideRequest(model, context, options),
+			}),
 			isIdle: () => !this.isStreaming,
 			abort: () => {
 				void this.abort();

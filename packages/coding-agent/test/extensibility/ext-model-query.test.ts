@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import {
+	type Api,
+	type AssistantMessage,
+	type Context,
+	Effort,
+	type Model,
+	type SimpleStreamOptions,
+} from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -25,12 +32,15 @@ const claudePrev = model("claude-opus-4-7", "Claude Opus 4.7", "anthropic");
 const gpt = model("gpt-5.4", "GPT-5.4", "openai");
 
 const available = [claude, gpt] as Model<Api>[];
+const apiKeyResolver = async () => "test-key";
 
 /** Minimal registry stub: only the methods the facade and core resolver touch. */
-function registry(): ModelRegistry {
+function registry(getApiKey: () => Promise<string | undefined> = async () => "test-key"): ModelRegistry {
 	return {
 		getAvailable: () => available,
 		getCanonicalId: (m: Model<Api>) => m.id,
+		getApiKey,
+		resolver: () => apiKeyResolver,
 	} as unknown as ModelRegistry;
 }
 
@@ -103,5 +113,135 @@ describe("createExtensionModelQuery", () => {
 		const qOverride = createExtensionModelQuery(reg, settings, () => gpt);
 		expect(qOverride.list()).toContain(gpt);
 		expect(qOverride.resolve("openai/gpt-5.4")).toBe(gpt);
+	});
+});
+
+const request = {
+	systemPrompt: ["review this"],
+	messages: [{ role: "user", content: [{ type: "text", text: "transcript" }], timestamp: 0 }],
+	tools: [],
+} as unknown as Context;
+
+const reply = {
+	role: "assistant",
+	content: [{ type: "text", text: "ok" }],
+	stopReason: "end_turn",
+} as unknown as AssistantMessage;
+
+describe("createExtensionModelQuery.complete", () => {
+	function spy() {
+		const calls: { model: Model<Api>; ctx: Context; options: SimpleStreamOptions }[] = [];
+		const completeImpl = async (
+			model: Model<Api>,
+			ctx: Context,
+			options: SimpleStreamOptions,
+		): Promise<AssistantMessage> => {
+			calls.push({ model, ctx, options });
+			return reply;
+		};
+		return { calls, completeImpl };
+	}
+
+	test("resolves a string spec, passes the registry resolver, and runs the caller's own context", async () => {
+		const { calls, completeImpl } = spy();
+		const ac = new AbortController();
+		const q = createExtensionModelQuery(registry(), undefined, () => undefined, { completeImpl });
+		const out = await q.complete("anthropic/claude-opus-4-8", request, {
+			effort: Effort.High,
+			signal: ac.signal,
+			toolChoice: { type: "tool", name: "submit" },
+		});
+		expect(out).toBe(reply);
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.model).toBe(claude);
+		expect(calls[0]?.ctx).toBe(request); // its OWN context — never the session transcript
+		// The registry resolver (not a pre-resolved string) is forwarded so streamSimple can rotate credentials.
+		expect(calls[0]?.options.apiKey).toBe(apiKeyResolver);
+		expect(calls[0]?.options.signal).toBe(ac.signal);
+		expect(calls[0]?.options.reasoning).toBe(Effort.High);
+		expect(calls[0]?.options.toolChoice).toEqual({ type: "tool", name: "submit" });
+	});
+
+	test("accepts a resolved Model directly", async () => {
+		const { calls, completeImpl } = spy();
+		const q = createExtensionModelQuery(registry(), undefined, () => undefined, { completeImpl });
+		await q.complete(gpt, request);
+		expect(calls[0]?.model).toBe(gpt);
+	});
+
+	test("rejects when a string spec resolves to nothing", async () => {
+		const { completeImpl } = spy();
+		const q = createExtensionModelQuery(registry(), undefined, () => undefined, { completeImpl });
+		await expect(q.complete("nope/nope", request)).rejects.toThrow(/no model matches/);
+	});
+
+	test("rejects when no API key is available for the model", async () => {
+		const { completeImpl } = spy();
+		const q = createExtensionModelQuery(
+			registry(async () => undefined),
+			undefined,
+			() => undefined,
+			{ completeImpl },
+		);
+		await expect(q.complete(gpt, request)).rejects.toThrow(/no API key/);
+	});
+
+	test("threads the session id into both the key guard and the resolver", async () => {
+		const seen: { guard?: string; resolver?: string } = {};
+		const reg = {
+			getAvailable: () => available,
+			getCanonicalId: (m: Model<Api>) => m.id,
+			getApiKey: async (_m: Model<Api>, sid?: string) => {
+				seen.guard = sid;
+				return "k";
+			},
+			resolver: (_m: Model<Api>, sid?: string) => {
+				seen.resolver = sid;
+				return apiKeyResolver;
+			},
+		} as unknown as ModelRegistry;
+		const { completeImpl } = spy();
+		const q = createExtensionModelQuery(reg, undefined, () => undefined, {
+			completeImpl,
+			getSessionId: () => "sess-123",
+		});
+		await q.complete(gpt, request);
+		expect(seen.guard).toBe("sess-123");
+		expect(seen.resolver).toBe("sess-123");
+	});
+
+	test("applies prepareSideRequest: obfuscated context goes out, reply is finalized", async () => {
+		const { calls, completeImpl } = spy();
+		const obfCtx = { ...request, marker: "obfuscated" } as unknown as Context;
+		const finalReply = { ...reply, content: [{ type: "text", text: "deobfuscated" }] } as unknown as AssistantMessage;
+		const q = createExtensionModelQuery(registry(), undefined, () => undefined, {
+			completeImpl,
+			prepareSideRequest: (_model, _context, options) => ({ context: obfCtx, options, finalize: () => finalReply }),
+		});
+		const out = await q.complete(gpt, request);
+		// The prepared (obfuscated) context reached the provider, not the caller's raw one.
+		expect(calls[0]?.ctx).toBe(obfCtx);
+		// The reply was finalized (deobfuscated) before returning to the extension.
+		expect(out).toBe(finalReply);
+	});
+
+	test("rejects a directly-passed Model outside the enabledModels scope", async () => {
+		const settings = {
+			get: (key: string) => (key === "enabledModels" ? ["anthropic/*"] : undefined),
+			getModelRole: () => undefined,
+		} as unknown as Settings;
+		const reg = {
+			getAvailable: () => available,
+			getCanonicalId: (m: Model<Api>) => m.id,
+			getCanonicalVariants: () => [],
+			getApiKey: async () => "k",
+			resolver: () => apiKeyResolver,
+		} as unknown as ModelRegistry;
+		const { completeImpl } = spy();
+		const q = createExtensionModelQuery(reg, settings, () => undefined, { completeImpl });
+		// gpt (openai) is authenticated but outside the anthropic-only scope.
+		await expect(q.complete(gpt, request)).rejects.toThrow(/enabledModels scope/);
+		// an in-scope model still completes.
+		await expect(q.complete(claude, request)).resolves.toBe(reply);
 	});
 });

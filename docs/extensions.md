@@ -166,6 +166,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `current()` — the live session model (read lazily, so it reflects `/model` switches).
 - `resolve(spec)` — a model string (`provider/id`, bare id) or role alias (`pi/slow`, a configured role) → `Model`, honoring the same settings-backed aliases and match preferences as `--model`. Returns `undefined` when nothing matches.
 - `family(model)` — an opaque lineage token for "same family?" checks (Claude point releases share a token; Claude and GPT differ). Compare it; don't persist it (the vocabulary tracks new releases).
+- `complete(model, request, options?)` — run a one-shot completion against `model` (a `Model` or a string/role spec) on the `request` context you build. The request never enters the conversation (unlike `pi.sendMessage`); credentials and telemetry are handled by core. Resolves with the model's `AssistantMessage` (inspect `stopReason` for provider-level errors/aborts); rejects on credential/transport failures. `request.tools` are model tool schemas for structured output, not OMP tools to execute.
 
 ```ts
 // Pick a model from a different family than the current one (e.g. a cross-family reviewer).
@@ -173,6 +174,23 @@ const current = ctx.models.current();
 const contrasting = ctx.models
   .list()
   .find(m => current && ctx.models.family(m) !== ctx.models.family(current));
+```
+
+```ts
+// Out-of-band review: send a transcript to a contrasting model and get a structured verdict.
+const reviewer = contrasting ?? ctx.models.resolve("pi/slow");
+if (reviewer) {
+  const reply = await ctx.models.complete(
+    reviewer,
+    {
+      systemPrompt: ["You are an adversarial reviewer. Be concise."],
+      messages: [{ role: "user", content: [{ type: "text", text: transcript }], timestamp: Date.now() }],
+      tools: [verdictTool],
+    },
+    { effort: Effort.High, toolChoice: { type: "tool", name: "submit_review" } },
+  );
+  // reply is a fresh AssistantMessage; nothing was added to the live conversation.
+}
 ```
 
 ## 3) Command context (`ExtensionCommandContext`)
