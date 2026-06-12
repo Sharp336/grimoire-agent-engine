@@ -118,6 +118,14 @@ export function mergeDiscoveredModel<TApi extends Api>(
 			...model,
 			baseUrl: providerOverride?.baseUrl ?? model.baseUrl ?? existing.baseUrl,
 			headers: existing.headers ? { ...existing.headers, ...model.headers } : model.headers,
+			// A provider-level `transport` override (e.g. `pi-native` in models.json)
+			// must win even when the discovered model matches a bundled/cached entry.
+			// Without this, unauthenticated-discoverable providers (OpenRouter, Kilo,
+			// Vercel AI Gateway) silently lose the override on refresh and fall back to
+			// the per-API dispatch — POSTing `{baseUrl}/chat/completions` at a gateway
+			// that only serves `/v1/pi/stream`, which 404s. The no-existing branch below
+			// already applies it; the two paths must stay symmetric.
+			...(providerOverride?.transport !== undefined ? { transport: providerOverride.transport } : {}),
 			compat: model.compatConfig,
 		} as ModelSpec<TApi>);
 	}

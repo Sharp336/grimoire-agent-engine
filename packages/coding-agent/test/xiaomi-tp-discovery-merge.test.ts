@@ -79,4 +79,39 @@ describe("mergeDiscoveredModel", () => {
 		const merged = mergeDiscoveredModel(discovered, undefined);
 		expect(merged).toEqual(discovered);
 	});
+
+	test("provider override transport survives when a bundled/existing entry matches", () => {
+		// Regression: unauthenticated-discoverable providers (OpenRouter, Kilo,
+		// Vercel AI Gateway) replace bundled entries via the `existing` branch on
+		// refresh. That branch used to drop the provider-level `transport`
+		// override, so a `models.json` `transport: pi-native` pin was silently
+		// lost and stream calls fell back to per-API dispatch → `POST
+		// {baseUrl}/chat/completions` at a gateway that only serves
+		// `/v1/pi/stream` → 404 "No route: POST /chat/completions".
+		const discovered = bundled(STANDARD);
+		const existing = bundled(STANDARD);
+		const merged = mergeDiscoveredModel(discovered, existing, {
+			baseUrl: "http://localhost:4000",
+			transport: "pi-native",
+		});
+		expect(merged.transport).toBe("pi-native");
+		expect(merged.baseUrl).toBe("http://localhost:4000");
+	});
+
+	test("provider override transport applies when no bundled entry exists", () => {
+		const discovered = bundled(STANDARD);
+		const merged = mergeDiscoveredModel(discovered, undefined, {
+			baseUrl: "http://localhost:4000",
+			transport: "pi-native",
+		});
+		expect(merged.transport).toBe("pi-native");
+		expect(merged.baseUrl).toBe("http://localhost:4000");
+	});
+
+	test("existing model transport is left untouched when override omits transport", () => {
+		const discovered = bundled(STANDARD);
+		const existing = bundled(STANDARD);
+		const merged = mergeDiscoveredModel(discovered, existing, { baseUrl: TOKEN_PLAN });
+		expect(merged.transport).toBeUndefined();
+	});
 });
