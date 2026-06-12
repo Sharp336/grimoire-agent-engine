@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `.ipynb` notebook round-trip corruption where a source line that collides with the cell-marker pattern (a body line that itself reads like `# %%`) was misparsed as a cell boundary on reserialize. Such lines are now escaped on write and symmetrically unescaped on read, with an escape-the-escape branch so content that legitimately begins with a backslash round-trips unchanged ([#1836](https://github.com/can1357/oh-my-pi/pull/1836) by [@Mubashirrrr](https://github.com/Mubashirrrr)).
+
 ## [15.9.0] - 2026-06-04
 
 ### Breaking Changes
