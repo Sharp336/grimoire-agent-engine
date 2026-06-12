@@ -2491,6 +2491,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		);
 	}
 
+	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_accepts_last_background_process_id() {
 		let options = ShellExecuteOptions {
@@ -2507,6 +2508,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert!(!result.timed_out);
 	}
 
+	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_n_p_records_completed_process_id() {
 		let options = ShellExecuteOptions {
@@ -2526,6 +2528,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		assert!(!result.timed_out);
 	}
 
+	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_f_accepts_process_id() {
 		let options = ShellExecuteOptions {
@@ -2757,10 +2760,12 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	/// own exit status — not nohup's (`125`/`126`/`127`) error codes.
 	#[tokio::test(flavor = "multi_thread")]
 	async fn nohup_builtin_propagates_command_exit_code() {
-		let options = ShellExecuteOptions {
-			command: "nohup /bin/sh -c 'exit 7'".to_string(),
-			..Default::default()
+		let command = if cfg!(windows) {
+			"nohup cmd /C exit 7"
+		} else {
+			"nohup /bin/sh -c 'exit 7'"
 		};
+		let options = ShellExecuteOptions { command: command.to_string(), ..Default::default() };
 		let result = execute_shell(options, None, CancelToken::default())
 			.await
 			.expect("execute should succeed");
