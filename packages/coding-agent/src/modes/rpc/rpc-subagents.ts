@@ -1,4 +1,4 @@
-import { readCompleteEntryPage } from "../../agent-control/transcript";
+import { readCompleteEntryPage } from "../../session/complete-entry-page";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-manager";
 import {
 	type AgentProgress,

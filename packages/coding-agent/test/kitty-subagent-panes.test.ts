@@ -204,6 +204,20 @@ describe("Kitty subagent pane launcher", () => {
 		await controller.shutdown();
 	});
 
+	it("removes a successful launch handoff when cleanup wins before the viewer consumes it", async () => {
+		const host = new HostHarness();
+		host.children = [snapshot(host.generation, "one")];
+		const kitty = new KittyHarness();
+		const removed: string[] = [];
+		const controller = createController(host, kitty, [], removed);
+		await controller.start();
+
+		expect(kitty.windows.size).toBe(1);
+		expect(removed).toEqual([]);
+		await controller.shutdown();
+		expect(removed).toEqual([`/tmp/omp-agent-pane-501/handoff-${NONCES[0]}.json`]);
+	});
+
 	it("resets admission on generation change and closes only an id+nonce+viewer identity match", async () => {
 		const host = new HostHarness();
 		host.children = [snapshot(host.generation, "one")];

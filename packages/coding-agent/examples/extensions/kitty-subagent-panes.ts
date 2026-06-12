@@ -11,6 +11,7 @@ import { $which } from "@oh-my-pi/pi-utils";
 
 const DEFAULT_CAP = 4;
 const KITTY_TIMEOUT_MS = 5_000;
+const HANDOFF_EXPIRY_MS = 30_000;
 const OWNER_VAR = "OMP_PANE_OWNER";
 const VIEWER_VAR = "OMP_PANE_VIEWER";
 const UNAVAILABLE_NOTICE = "Kitty subagent panes are unavailable; agents continue in Agent Hub.";
@@ -46,6 +47,8 @@ interface PaneRecord {
 	nonce: string;
 	viewerId: string;
 	windowId: number;
+	handoffLocator?: string;
+	handoffTimer?: NodeJS.Timeout;
 }
 
 interface KittyResolvedConfig {
@@ -297,7 +300,7 @@ export class KittyPaneController {
 			this.#noticeFailure();
 			return;
 		}
-		const record: PaneRecord = { nonce, viewerId, windowId };
+		const record: PaneRecord = { nonce, viewerId, windowId, handoffLocator: locator };
 		if (found && found.id !== responseId && responseId !== undefined) {
 			await this.#closeOwned(record, [found]);
 			await this.#removeHandoff(locator);
@@ -310,11 +313,15 @@ export class KittyPaneController {
 			await this.#removeHandoff(locator);
 			return;
 		}
-		if (found || responseId !== undefined) this.#panes.set(child.id, record);
+		if (found || responseId !== undefined) {
+			this.#panes.set(child.id, record);
+			this.#scheduleHandoffExpiry(record);
+		}
 	}
 
 	async #cleanup(records: PaneRecord[]): Promise<void> {
 		if (records.length === 0) return;
+		for (const record of records) await this.#expireHandoff(record);
 		let windows: KittyWindow[];
 		try {
 			windows = await this.#listWindows();
@@ -323,6 +330,26 @@ export class KittyPaneController {
 			return;
 		}
 		for (const record of records) await this.#closeOwned(record, windows);
+	}
+
+	#scheduleHandoffExpiry(record: PaneRecord): void {
+		const locator = record.handoffLocator;
+		if (!locator) return;
+		record.handoffTimer = setTimeout(() => {
+			void this.#enqueue(async () => {
+				if (record.handoffLocator !== locator) return;
+				await this.#expireHandoff(record);
+			});
+		}, HANDOFF_EXPIRY_MS);
+		record.handoffTimer.unref();
+	}
+
+	async #expireHandoff(record: PaneRecord): Promise<void> {
+		clearTimeout(record.handoffTimer);
+		record.handoffTimer = undefined;
+		const locator = record.handoffLocator;
+		record.handoffLocator = undefined;
+		if (locator) await this.#removeHandoff(locator);
 	}
 
 	async #closeOwned(record: PaneRecord, windows?: KittyWindow[]): Promise<void> {

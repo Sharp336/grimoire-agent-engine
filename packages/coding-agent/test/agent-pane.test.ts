@@ -184,6 +184,52 @@ describe("pane protocol and client", () => {
 		client.close();
 	});
 
+	it("cancels an abandoned stream before reconnecting when post-connect reconciliation fails", async () => {
+		const events: string[] = [];
+		const secondRequested = Promise.withResolvers<void>();
+		const firstBody = new ReadableStream<Uint8Array>({
+			cancel: () => {
+				events.push("first canceled");
+			},
+		});
+		const second = eventStream();
+		let snapshots = 0;
+		let streams = 0;
+		const client = new AgentPaneClient(permission, {
+			reconnectDelayMs: 0,
+			fetch: fixtureFetch(url => {
+				if (url.pathname === "/v1/snapshot") {
+					snapshots += 1;
+					return snapshots === 2 ? json({ error: "temporarily_unavailable" }, 503) : json(snapshot);
+				}
+				if (url.pathname === "/v1/transcript")
+					return json({
+						version: 1,
+						generation: permission.generation,
+						childId: permission.childId,
+						fromByte: 0,
+						nextByte: 0,
+						reset: false,
+						entries: [],
+					});
+				if (url.pathname === "/v1/stream") {
+					streams += 1;
+					if (streams === 1) return new Response(firstBody, { headers: { "Content-Type": "text/event-stream" } });
+					events.push("second requested");
+					secondRequested.resolve();
+					return second.response;
+				}
+				return json({ error: "not_found" }, 404);
+			}),
+		});
+
+		await client.start();
+		await secondRequested.promise;
+		expect(events).toEqual(["first canceled", "second requested"]);
+		client.close();
+		second.close();
+	});
+
 	it("uses one generation-scoped command id and never retries an ambiguous mutation", async () => {
 		let sends = 0;
 		let commandId = "";

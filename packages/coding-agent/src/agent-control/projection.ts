@@ -1,5 +1,6 @@
 import type { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import type { AgentRegistry, RegistryEvent } from "../registry/agent-registry";
+import { readCompleteEntryPage } from "../session/complete-entry-page";
 import type { FileEntry } from "../session/session-manager";
 import {
 	type SubagentEventPayload,
@@ -18,7 +19,6 @@ import {
 	type TranscriptEntryDTO,
 	type TranscriptPageDTO,
 } from "./protocol";
-import { readCompleteEntryPage } from "./transcript";
 
 interface ProjectedChild {
 	target: ChildControlTarget;

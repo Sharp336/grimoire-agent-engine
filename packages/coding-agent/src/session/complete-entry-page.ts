@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import { isEnoent } from "@oh-my-pi/pi-utils";
-import type { FileEntry } from "../session/session-manager";
-import { parseSessionEntries } from "../session/session-manager";
+import type { FileEntry } from "./session-manager";
+import { parseSessionEntries } from "./session-manager";
 
 export interface CompleteEntryPage {
 	fromByte: number;

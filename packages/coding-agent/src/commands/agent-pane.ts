@@ -307,18 +307,25 @@ export class AgentPaneClient {
 				if (!response.headers.get("content-type")?.toLowerCase().startsWith("text/event-stream")) {
 					throw new AgentPaneProtocolError("Sidecar stream has an invalid content type.");
 				}
-				await this.#reconcile(true, false);
-				disconnectedAt = undefined;
-				this.#emit("connected");
-				const parser = new AgentPaneSseParser();
 				const reader = response.body.getReader();
-				const decoder = new TextDecoder();
-				while (!this.#closed) {
-					const next = await reader.read();
-					if (next.done) break;
-					for (const invalidation of parser.push(decoder.decode(next.value, { stream: true }))) {
-						this.#acceptInvalidation(invalidation);
+				try {
+					await this.#reconcile(true, false);
+					disconnectedAt = undefined;
+					this.#emit("connected");
+					const parser = new AgentPaneSseParser();
+					const decoder = new TextDecoder();
+					while (!this.#closed) {
+						const next = await reader.read();
+						if (next.done) break;
+						for (const invalidation of parser.push(decoder.decode(next.value, { stream: true }))) {
+							this.#acceptInvalidation(invalidation);
+						}
 					}
+				} finally {
+					try {
+						await reader.cancel();
+					} catch {}
+					reader.releaseLock();
 				}
 			} catch (error) {
 				if (this.#closed || this.#frozen) return;
