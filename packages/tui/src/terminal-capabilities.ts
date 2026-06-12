@@ -336,10 +336,18 @@ export const TERMINAL: RuntimeTerminal = (() => {
 		const fallbackImageProtocol = getFallbackImageProtocol(resolved.id);
 		if (fallbackImageProtocol) resolved.imageProtocol = fallbackImageProtocol;
 	}
-	// tmux and screen multiplexers do not reliably forward OSC 8 hyperlinks
-	// to the outer terminal, so force them off regardless of detected terminal.
+	// Hyperlinks under multiplexers: tmux >= 3.4 stores OSC 8 as a cell
+	// attribute and forwards it to clients whose terminal-features include
+	// "hyperlinks" (`set -as terminal-features "wezterm*:hyperlinks"`), but
+	// older tmux and screen drop the sequence silently. Keep the conservative
+	// default and let users opt in or out explicitly, mirroring the
+	// PI_FORCE_SYNC_OUTPUT / PI_NO_SYNC_OUTPUT convention.
 	const term = Bun.env.TERM?.toLowerCase() ?? "";
-	if (resolved.hyperlinks && (Bun.env.TMUX || term.startsWith("tmux") || term.startsWith("screen"))) {
+	if (Bun.env.PI_NO_HYPERLINKS) {
+		resolved.hyperlinks = false;
+	} else if (Bun.env.PI_FORCE_HYPERLINKS === "1") {
+		resolved.hyperlinks = true;
+	} else if (resolved.hyperlinks && (Bun.env.TMUX || term.startsWith("tmux") || term.startsWith("screen"))) {
 		resolved.hyperlinks = false;
 	}
 	// DECCARA rectangular-SGR background fills. The static per-terminal capability
