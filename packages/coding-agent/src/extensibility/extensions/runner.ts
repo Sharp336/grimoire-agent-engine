@@ -3,7 +3,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
-import type { KeyId } from "@oh-my-pi/pi-tui";
+import { canonicalKeyId, type KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { MemoryRuntimeContext } from "../../memory-backend";
@@ -363,6 +363,8 @@ export class ExtensionRunner {
 		"ctrl+q": true,
 		"shift+tab": true,
 		"shift+ctrl+p": true,
+		"alt+shift+right": true,
+		"alt+shift+left": true,
 		"alt+enter": true,
 		escape: true,
 		enter: true,
@@ -372,7 +374,7 @@ export class ExtensionRunner {
 		const allShortcuts = new Map<KeyId, ExtensionShortcut>();
 		for (const ext of this.extensions) {
 			for (const [key, shortcut] of ext.shortcuts) {
-				const normalizedKey = key.toLowerCase() as KeyId;
+				const normalizedKey = canonicalKeyId(key) as KeyId;
 
 				if (ExtensionRunner.#RESERVED_SHORTCUTS[normalizedKey]) {
 					logger.warn("Extension shortcut conflicts with built-in shortcut", {

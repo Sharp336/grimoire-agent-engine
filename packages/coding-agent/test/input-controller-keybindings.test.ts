@@ -38,6 +38,10 @@ async function createContext() {
 		"app.display.reset": ["ctrl+l"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
+		"app.model.cycleForward": ["ctrl+p"],
+		"app.model.cycleBackward": ["shift+ctrl+p"],
+		"app.modelPreset.cycleForward": ["alt+shift+right"],
+		"app.modelPreset.cycleBackward": ["alt+shift+left"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -58,6 +62,27 @@ async function createContext() {
 	const interruptAndFlushQueuedMessages = vi.fn(async () => {});
 	const getQueuedMessages = vi.fn(() => ({ steering: [] as string[], followUp: [] as string[] }));
 	const updatePendingMessagesDisplay = vi.fn();
+	const cycleRoleModels = vi.fn(async () => ({
+		model: { provider: "test", id: "slow-model", name: "Slow Model" },
+		role: "slow",
+		thinkingLevel: undefined,
+	}));
+	const cycleModelPreset = vi.fn(async () => ({
+		preset: "smart",
+		label: "Smart",
+		defaultModel: { provider: "test", id: "smart-model" },
+		roles: [],
+	}));
+	const getRoleModelCycle = vi.fn(() => ({
+		models: [
+			{ role: "default", model: { provider: "test", id: "default-model" } },
+			{ role: "slow", model: { provider: "test", id: "slow-model" } },
+		],
+		currentIndex: 1,
+	}));
+	const showStatus = vi.fn();
+	const showError = vi.fn();
+	const invalidateStatusLine = vi.fn();
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
@@ -99,6 +124,14 @@ async function createContext() {
 			getQueuedMessages,
 			abort,
 			interruptAndFlushQueuedMessages,
+			cycleRoleModels,
+			cycleModelPreset,
+			getRoleModelCycle,
+			settings: {
+				get(key: string) {
+					return key === "cycleOrder" ? ["default", "slow"] : undefined;
+				},
+			},
 		} as unknown as InteractiveModeContext["session"],
 		keybindings: {
 			getKeys(action: string) {
@@ -148,6 +181,9 @@ async function createContext() {
 		toggleThinkingBlockVisibility: vi.fn(),
 		showModelSelector,
 		updateEditorBorderColor: vi.fn(),
+		showStatus,
+		showError,
+		statusLine: { invalidate: invalidateStatusLine },
 		hasActiveBtw: vi.fn(() => false),
 	} as unknown as InteractiveModeContext;
 
@@ -166,6 +202,11 @@ async function createContext() {
 			interruptAndFlushQueuedMessages,
 			getQueuedMessages,
 			resetDisplay,
+			cycleRoleModels,
+			cycleModelPreset,
+			showStatus,
+			showError,
+			invalidateStatusLine,
 		},
 	};
 }
@@ -192,6 +233,24 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps role model cycling on model keys and presets on separate keys", async () => {
+		const { InputController, ctx, editor, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		await editor.onCycleModelForward?.();
+		await editor.onCycleModelBackward?.();
+		customHandlers.get("alt+shift+right")?.();
+		customHandlers.get("alt+shift+left")?.();
+
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.cycleForward", ["ctrl+p"]);
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.cycleBackward", ["shift+ctrl+p"]);
+		expect(spies.cycleRoleModels).toHaveBeenNthCalledWith(1, ["default", "slow"], "forward");
+		expect(spies.cycleRoleModels).toHaveBeenNthCalledWith(2, ["default", "slow"], "backward");
+		expect(spies.cycleModelPreset).toHaveBeenNthCalledWith(1, "forward");
+		expect(spies.cycleModelPreset).toHaveBeenNthCalledWith(2, "backward");
 	});
 
 	it("empty Enter interrupts and sends a queued steering message", async () => {

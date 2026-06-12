@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import type { AutocompleteProvider, SlashCommand } from "@oh-my-pi/pi-tui";
 import { $env, isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getModelPresetInfo, MODEL_PRESET_IDS } from "../../config/model-presets";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { renderSegmentTrack } from "../../modes/components/segment-track";
@@ -252,6 +253,12 @@ export class InputController {
 		}
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
+		}
+		for (const key of this.ctx.keybindings.getKeys("app.modelPreset.cycleForward")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => void this.cycleModelPreset("forward"));
+		}
+		for (const key of this.ctx.keybindings.getKeys("app.modelPreset.cycleBackward")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => void this.cycleModelPreset("backward"));
 		}
 		const hubKeys = new Set([
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
@@ -1060,8 +1067,7 @@ export class InputController {
 
 	async cycleRoleModel(direction: "forward" | "backward" = "forward"): Promise<void> {
 		try {
-			const cycleOrder = settings.get("cycleOrder");
-			const result = await this.ctx.session.cycleRoleModels(cycleOrder, direction);
+			const result = await this.ctx.session.cycleRoleModels(this.ctx.session.settings.get("cycleOrder"), direction);
 			if (!result) {
 				this.ctx.showStatus("Only one role model available");
 				return;
@@ -1069,12 +1075,34 @@ export class InputController {
 
 			this.ctx.statusLine.invalidate();
 			this.ctx.updateEditorBorderColor();
-			// The status line already reports the resolved model + thinking level, so
-			// the cycle status is just a status-line-style chip track (active role
-			// filled), matching the plan-approval model slider.
+			const cycle = this.ctx.session.getRoleModelCycle(this.ctx.session.settings.get("cycleOrder"));
+			const track =
+				cycle && cycle.models.length > 1
+					? renderSegmentTrack(
+							cycle.models.map(entry => ({ label: entry.role })),
+							cycle.currentIndex,
+						)
+					: `${result.role}: ${result.model.name || result.model.id}`;
+			this.ctx.showStatus(track, { dim: false });
+		} catch (error) {
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+		}
+	}
+
+	async cycleModelPreset(direction: "forward" | "backward" = "forward"): Promise<void> {
+		try {
+			const result = await this.ctx.session.cycleModelPreset(direction);
+			if (!result) {
+				this.ctx.showStatus("Only one model preset available");
+				return;
+			}
+
+			this.ctx.statusLine.invalidate();
+			this.ctx.updateEditorBorderColor();
+			const activeIndex = MODEL_PRESET_IDS.indexOf(result.preset);
 			const track = renderSegmentTrack(
-				cycleOrder.map(role => ({ label: role })),
-				cycleOrder.indexOf(result.role),
+				MODEL_PRESET_IDS.map(id => ({ label: getModelPresetInfo(id).label })),
+				activeIndex,
 			);
 			this.ctx.showStatus(track, { dim: false });
 		} catch (error) {

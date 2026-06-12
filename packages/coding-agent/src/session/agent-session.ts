@@ -65,6 +65,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type {
+	Api,
 	AssistantMessage,
 	Context,
 	ImageContent,
@@ -116,6 +117,13 @@ import { classifyDifficulty } from "../auto-thinking/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { Rule } from "../capability/rule";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
+import {
+	MODEL_PRESET_IDS,
+	type ModelPresetId,
+	type ResolvedModelPreset,
+	type ResolvedModelPresetRole,
+	resolveModelPreset,
+} from "../config/model-presets";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	extractExplicitThinkingSelector,
@@ -485,6 +493,12 @@ export interface RoleModelCycleResult {
 	model: Model;
 	thinkingLevel: ThinkingLevel | undefined;
 	role: string;
+}
+export interface AppliedModelPreset {
+	preset: ModelPresetId;
+	label: string;
+	defaultModel: Model<Api>;
+	roles: readonly ResolvedModelPresetRole[];
 }
 
 /** A configured role resolved to a concrete model, used by role cycling and
@@ -5772,6 +5786,50 @@ export class AgentSession {
 		if (currentIndex === -1) currentIndex = 0;
 
 		return { models, currentIndex };
+	}
+
+	getResolvedModelPreset(preset: ModelPresetId): ResolvedModelPreset {
+		return resolveModelPreset(this.settings, this.#modelRegistry, this.getAvailableModels(), preset);
+	}
+
+	async applyModelPreset(preset: ModelPresetId): Promise<AppliedModelPreset> {
+		const resolved = this.getResolvedModelPreset(preset);
+		const defaultModel = resolved.defaultRole.model;
+		const apiKey = await this.#modelRegistry.getApiKey(defaultModel, this.sessionId);
+		if (!apiKey) {
+			throw new Error(`No API key for ${defaultModel.provider}/${defaultModel.id}`);
+		}
+
+		await this.setModel(defaultModel, "default");
+		if (resolved.defaultRole.explicitThinkingLevel) {
+			this.setThinkingLevel(resolved.defaultRole.thinkingLevel);
+		}
+
+		const roles: Record<string, string> = {};
+		for (const role of resolved.roles) {
+			roles[role.role] = role.selector;
+		}
+		this.settings.setModelRoles(roles);
+		this.settings.set("modelPreset", preset);
+
+		return {
+			preset,
+			label: resolved.info.label,
+			defaultModel,
+			roles: resolved.roles,
+		};
+	}
+
+	async cycleModelPreset(direction: "forward" | "backward" = "forward"): Promise<AppliedModelPreset | undefined> {
+		if (MODEL_PRESET_IDS.length <= 1) return undefined;
+
+		const stored = this.settings.get("modelPreset");
+		const current = MODEL_PRESET_IDS.includes(stored) ? stored : "balanced";
+		const currentIndex = MODEL_PRESET_IDS.indexOf(current);
+		const step = direction === "backward" ? -1 : 1;
+		const next = MODEL_PRESET_IDS[(currentIndex + step + MODEL_PRESET_IDS.length) % MODEL_PRESET_IDS.length];
+
+		return this.applyModelPreset(next);
 	}
 
 	/**

@@ -18,6 +18,7 @@ interface FakeAcpBuiltinSession {
 	sessionId: string;
 	sessionName: string;
 	_todoPhases: Array<{ name: string; tasks: Array<{ content: string; status: string }> }>;
+	cycleDirection?: "forward" | "backward";
 	toggleFastMode(): boolean;
 	setFastMode(enabled: boolean): void;
 	isFastModeEnabled(): boolean;
@@ -42,6 +43,19 @@ interface FakeAcpBuiltinSession {
 	getContextUsage(): { tokens?: number; contextWindow: number } | undefined;
 	getAvailableModels(): Array<{ provider: string; id: string; contextWindow?: number }>;
 	setModel(model: unknown): Promise<void>;
+	applyModelPreset(preset: "budget" | "balanced" | "smart" | "ultra"): Promise<{
+		preset: "budget" | "balanced" | "smart" | "ultra";
+		label: string;
+		defaultModel: { provider: string; id: string };
+	}>;
+	cycleModelPreset(direction?: "forward" | "backward"): Promise<{
+		preset: "budget" | "balanced" | "smart" | "ultra";
+		label: string;
+		defaultModel: { provider: string; id: string };
+	}>;
+	getResolvedModelPreset(preset: "budget" | "balanced" | "smart" | "ultra"): {
+		defaultRole: { model: { provider: string; id: string } };
+	};
 	listResetCredits: () => Promise<ResetCreditAccountStatus[]>;
 	redeemResetCredit: (target: ResetCreditTarget) => Promise<ResetCreditRedeemOutcome>;
 }
@@ -107,6 +121,19 @@ function createRuntime() {
 		getAvailableModels: () => [] as Array<{ provider: string; id: string; contextWindow?: number }>,
 		async setModel(_model: unknown) {},
 		async refreshSshTool(_options?: { activateIfAvailable?: boolean }) {},
+		async applyModelPreset(preset) {
+			const labels = { budget: "Budget", balanced: "Balanced", smart: "Smart", ultra: "Ultra" };
+			this.settings.set("modelPreset", preset);
+			this.model = { provider: "test", id: `${preset}-model` };
+			return { preset, label: labels[preset], defaultModel: this.model };
+		},
+		async cycleModelPreset(direction = "forward") {
+			this.cycleDirection = direction;
+			return this.applyModelPreset(direction === "backward" ? "budget" : "smart");
+		},
+		getResolvedModelPreset(preset) {
+			return { defaultRole: { model: { provider: "test", id: `${preset}-model` } } };
+		},
 	};
 	const typedSession = session as unknown as AgentSession & FakeAcpBuiltinSession;
 	const fakeSessionManager = {
@@ -913,6 +940,64 @@ describe("wave 5 — adapters and polish", () => {
 		const result = await executeAcpBuiltinSlashCommand("/jobs", runtime);
 		expect(result).toEqual({ consumed: true });
 		expect(output[0]).toContain("background jobs");
+	});
+
+	it("/preset lists presets without mutating state", async () => {
+		const { output, runtime } = createRuntime();
+		const before = runtime.session.settings.get("modelPreset");
+
+		const result = await executeAcpBuiltinSlashCommand("/preset", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(runtime.session.settings.get("modelPreset")).toBe(before);
+		expect(output[0]).toContain("Budget");
+		expect(output[0]).toContain("Balanced");
+		expect(output[0]).toContain("Smart");
+		expect(output[0]).toContain("Ultra");
+	});
+
+	it("/preset smart applies preset and notifies clients", async () => {
+		const { output, runtime } = createRuntime();
+		let titleUpdates = 0;
+		let configUpdates = 0;
+		runtime.notifyTitleChanged = () => {
+			titleUpdates++;
+		};
+		runtime.notifyConfigChanged = () => {
+			configUpdates++;
+		};
+
+		const result = await executeAcpBuiltinSlashCommand("/preset smart", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output).toEqual(["Preset Smart applied: test/smart-model."]);
+		expect(runtime.session.settings.get("modelPreset")).toBe("smart");
+		expect(titleUpdates).toBe(1);
+		expect(configUpdates).toBe(1);
+	});
+
+	it("/preset nope emits usage without notifications", async () => {
+		const { output, runtime } = createRuntime();
+		let titleUpdates = 0;
+		runtime.notifyTitleChanged = () => {
+			titleUpdates++;
+		};
+
+		const result = await executeAcpBuiltinSlashCommand("/preset nope", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(output[0]).toContain("budget, balanced, smart, ultra, next, prev");
+		expect(titleUpdates).toBe(0);
+	});
+
+	it("/preset next cycles forward", async () => {
+		const { output, runtime } = createRuntime();
+
+		const result = await executeAcpBuiltinSlashCommand("/preset next", runtime);
+
+		expect(result).toEqual({ consumed: true });
+		expect(runtime.session.cycleDirection).toBe("forward");
+		expect(output).toEqual(["Preset Smart applied: test/smart-model."]);
 	});
 
 	// /marketplace discover bulleted list

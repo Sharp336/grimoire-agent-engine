@@ -17,6 +17,12 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { formatNumber } from "@oh-my-pi/pi-utils";
+import {
+	getModelPresetInfo,
+	MODEL_PRESET_IDS,
+	type ModelPresetId,
+	resolveModelPreset,
+} from "../../config/model-presets";
 import type { ModelRegistry } from "../../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../../config/model-resolver";
 import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS, MODEL_ROLES } from "../../config/model-roles";
@@ -103,6 +109,16 @@ interface ScopedModelItem {
 	model: Model;
 	thinkingLevel?: string;
 }
+interface PresetItem {
+	kind: "preset";
+	id: ModelPresetId;
+	selector: string;
+	label: string;
+	description: string;
+	defaultModelLabel: string;
+	roleSummary: string;
+	error?: string;
+}
 
 interface RoleAssignment {
 	model: Model;
@@ -116,6 +132,7 @@ type RoleSelectCallback = (
 	thinkingLevel?: ConfiguredThinkingLevel,
 	selector?: string,
 ) => void;
+type PresetSelectCallback = (preset: ModelPresetId) => void | Promise<void>;
 type CancelCallback = () => void;
 interface MenuRoleAction {
 	label: string;
@@ -127,10 +144,17 @@ interface ProviderTabState {
 	label: string;
 	providerId?: string;
 }
+const PRESETS_TAB = "PRESETS";
 const ALL_TAB = "ALL";
 const CANONICAL_TAB = "CANONICAL";
 
-const STATIC_PROVIDER_TABS: ProviderTabState[] = [
+const STATIC_MODEL_TABS: ProviderTabState[] = [
+	{ id: PRESETS_TAB, label: PRESETS_TAB },
+	{ id: ALL_TAB, label: ALL_TAB },
+	{ id: CANONICAL_TAB, label: CANONICAL_TAB },
+];
+
+const STATIC_TEMPORARY_TABS: ProviderTabState[] = [
 	{ id: ALL_TAB, label: ALL_TAB },
 	{ id: CANONICAL_TAB, label: CANONICAL_TAB },
 ];
@@ -161,11 +185,13 @@ export class ModelSelectorComponent extends Container {
 	#filteredModels: ModelItem[] = [];
 	#canonicalModels: CanonicalModelItem[] = [];
 	#filteredCanonicalModels: CanonicalModelItem[] = [];
+	#presetItems: PresetItem[] = [];
 	#selectedIndex: number = 0;
 	#roles = {} as Record<string, RoleAssignment | undefined>;
 	#settings = null as unknown as Settings;
 	#modelRegistry = null as unknown as ModelRegistry;
 	#onSelectCallback = (() => {}) as RoleSelectCallback;
+	#onPresetSelectCallback: PresetSelectCallback | undefined;
 	#onCancelCallback = (() => {}) as CancelCallback;
 	#errorMessage?: unknown;
 	#tui: TUI;
@@ -176,7 +202,7 @@ export class ModelSelectorComponent extends Container {
 	#menuRoleActions: MenuRoleAction[] = [];
 
 	// Tab state
-	#providers: ProviderTabState[] = STATIC_PROVIDER_TABS;
+	#providers: ProviderTabState[] = STATIC_MODEL_TABS;
 	#activeTabIndex: number = 0;
 	#refreshingProviders: Set<string> = new Set();
 	#scheduledProviderRefreshes: Map<string, ReturnType<typeof setTimeout>> = new Map();
@@ -197,7 +223,12 @@ export class ModelSelectorComponent extends Container {
 		scopedModels: ReadonlyArray<ScopedModelItem>,
 		onSelect: RoleSelectCallback,
 		onCancel: () => void,
-		options?: { temporaryOnly?: boolean; initialSearchInput?: string; currentContextTokens?: number },
+		options?: {
+			temporaryOnly?: boolean;
+			initialSearchInput?: string;
+			currentContextTokens?: number;
+			onPresetSelect?: PresetSelectCallback;
+		},
 	) {
 		super();
 
@@ -206,6 +237,7 @@ export class ModelSelectorComponent extends Container {
 		this.#modelRegistry = modelRegistry;
 		this.#scopedModels = scopedModels;
 		this.#onSelectCallback = onSelect;
+		this.#onPresetSelectCallback = options?.onPresetSelect;
 		this.#onCancelCallback = onCancel;
 		this.#temporaryOnly = options?.temporaryOnly ?? false;
 		const currentContextTokens = options?.currentContextTokens ?? 0;
@@ -243,8 +275,12 @@ export class ModelSelectorComponent extends Container {
 			this.#searchInput.setValue(initialSearchInput);
 		}
 		this.#searchInput.onSubmit = () => {
-			// Enter on search input opens menu if we have an enabled selection
-			if (this.#getSelectedItem()) {
+			const preset = this.#getSelectedPresetItem();
+			if (preset) {
+				void this.#handlePresetSelect(preset);
+				return;
+			}
+			if (this.#getSelectedModelItem()) {
 				this.#openMenu();
 			}
 		};
@@ -445,6 +481,42 @@ export class ModelSelectorComponent extends Container {
 		});
 	}
 
+	#loadPresetItems(): void {
+		if (this.#temporaryOnly) {
+			this.#presetItems = [];
+			return;
+		}
+
+		const availableModels = this.#modelRegistry.getAvailable();
+		this.#presetItems = MODEL_PRESET_IDS.map(id => {
+			const info = getModelPresetInfo(id);
+			try {
+				const resolved = resolveModelPreset(this.#settings, this.#modelRegistry, availableModels, id);
+				const roles = resolved.roles.map(role => role.role).join(", ");
+				return {
+					kind: "preset",
+					id,
+					selector: `preset:${id}`,
+					label: info.label,
+					description: info.description,
+					defaultModelLabel: `${resolved.defaultRole.model.provider}/${resolved.defaultRole.model.id}`,
+					roleSummary: roles,
+				};
+			} catch (error) {
+				return {
+					kind: "preset",
+					id,
+					selector: `preset:${id}`,
+					label: info.label,
+					description: info.description,
+					defaultModelLabel: "unavailable",
+					roleSummary: error instanceof Error ? error.message : String(error),
+					error: error instanceof Error ? error.message : String(error),
+				};
+			}
+		});
+	}
+
 	#loadModelsFromCurrentRegistryState(): void {
 		let models: ModelItem[];
 		if (this.#scopedModels.length > 0) {
@@ -477,6 +549,7 @@ export class ModelSelectorComponent extends Container {
 				this.#filteredModels = [];
 				this.#canonicalModels = [];
 				this.#filteredCanonicalModels = [];
+				this.#presetItems = [];
 				this.#errorMessage = error instanceof Error ? error.message : String(error);
 				return;
 			}
@@ -484,6 +557,7 @@ export class ModelSelectorComponent extends Container {
 
 		const candidates = models.map(item => item.model);
 		this.#loadRoleModels(candidates);
+		this.#loadPresetItems();
 		const canonicalSelections = this.#modelRegistry.getCanonicalModelSelections({
 			availableOnly: this.#scopedModels.length === 0,
 			candidates,
@@ -495,7 +569,10 @@ export class ModelSelectorComponent extends Container {
 				selectedModel.provider,
 				selectedModel.id,
 				selectedModel.name,
-				...record.variants.flatMap(variant => [variant.selector, variant.model.name]),
+				...record.variants.flatMap((variant: { selector: string; model: { name: string } }) => [
+					variant.selector,
+					variant.model.name,
+				]),
 			].join(" ");
 			return {
 				kind: "canonical",
@@ -516,7 +593,7 @@ export class ModelSelectorComponent extends Container {
 		this.#filteredModels = models;
 		this.#canonicalModels = canonicalModels;
 		this.#filteredCanonicalModels = canonicalModels;
-		const visibleModels = this.#isCanonicalTab() ? canonicalModels : models;
+		const visibleModels = this.#getVisibleItems();
 		this.#selectedIndex = this.#coerceSelectedIndex(
 			Math.min(this.#selectedIndex, Math.max(0, visibleModels.length - 1)),
 			visibleModels,
@@ -558,10 +635,10 @@ export class ModelSelectorComponent extends Container {
 		const sortedProviderIds = Array.from(providerSet).sort((left, right) =>
 			formatProviderTabLabel(left).localeCompare(formatProviderTabLabel(right)),
 		);
-		this.#providers = [...STATIC_PROVIDER_TABS, ...sortedProviderIds.map(createProviderTab)];
+		const staticTabs = this.#temporaryOnly ? STATIC_TEMPORARY_TABS : STATIC_MODEL_TABS;
+		this.#providers = [...staticTabs, ...sortedProviderIds.map(createProviderTab)];
 		const activeIndex = this.#providers.findIndex(tab => tab.id === activeTabId);
-		this.#activeTabIndex =
-			activeIndex >= 0 ? activeIndex : Math.min(this.#activeTabIndex, this.#providers.length - 1);
+		this.#activeTabIndex = activeIndex >= 0 ? activeIndex : 0;
 	}
 
 	#getActiveProviderRefreshStatusText(): string | undefined {
@@ -683,7 +760,8 @@ export class ModelSelectorComponent extends Container {
 	}
 
 	#getActiveTab(): ProviderTabState {
-		return this.#providers[this.#activeTabIndex] ?? STATIC_PROVIDER_TABS[0]!;
+		const fallback = this.#temporaryOnly ? STATIC_TEMPORARY_TABS[0] : STATIC_MODEL_TABS[0];
+		return this.#providers[this.#activeTabIndex] ?? fallback!;
 	}
 
 	#getActiveTabId(): string {
@@ -692,6 +770,10 @@ export class ModelSelectorComponent extends Container {
 
 	#getActiveProviderId(): string | undefined {
 		return this.#getActiveTab().providerId;
+	}
+
+	#isPresetTab(): boolean {
+		return this.#getActiveTabId() === PRESETS_TAB;
 	}
 
 	#isCanonicalTab(): boolean {
@@ -703,8 +785,8 @@ export class ModelSelectorComponent extends Container {
 		return this.#currentContextTokens > 0 && contextWindow > 0 && this.#currentContextTokens > contextWindow;
 	}
 
-	#isItemDisabled(item: ModelItem | CanonicalModelItem): boolean {
-		return this.#isModelOverContextLimit(item.model);
+	#isItemDisabled(item: PresetItem | ModelItem | CanonicalModelItem): boolean {
+		return item.kind !== "preset" && this.#isModelOverContextLimit(item.model);
 	}
 
 	#formatContextLimitSuffix(model: Model): string {
@@ -714,13 +796,14 @@ export class ModelSelectorComponent extends Container {
 		return ` ${theme.status.disabled} context>${formatNumber(model.contextWindow).toLowerCase()}`;
 	}
 
-	#getVisibleItems(): ReadonlyArray<ModelItem | CanonicalModelItem> {
+	#getVisibleItems(): ReadonlyArray<PresetItem | ModelItem | CanonicalModelItem> {
+		if (this.#isPresetTab()) return this.#presetItems;
 		return this.#isCanonicalTab() ? this.#filteredCanonicalModels : this.#filteredModels;
 	}
 
 	#coerceSelectedIndex(
 		index: number,
-		visibleItems: ReadonlyArray<ModelItem | CanonicalModelItem> = this.#getVisibleItems(),
+		visibleItems: ReadonlyArray<PresetItem | ModelItem | CanonicalModelItem> = this.#getVisibleItems(),
 	): number {
 		const maxIndex = visibleItems.length - 1;
 		if (maxIndex < 0) {
@@ -769,6 +852,7 @@ export class ModelSelectorComponent extends Container {
 	#filterModels(query: string): void {
 		const activeTabId = this.#getActiveTabId();
 		const activeProviderId = this.#getActiveProviderId();
+		const isPresetTab = activeTabId === PRESETS_TAB;
 		const isCanonicalTab = activeTabId === CANONICAL_TAB;
 
 		// Start with all models or filter by provider/canonical view
@@ -780,11 +864,12 @@ export class ModelSelectorComponent extends Container {
 
 		// Apply fuzzy filter if query is present
 		if (query.trim()) {
-			// If user is searching from a provider tab, auto-switch to ALL to show global provider results.
-			if (activeProviderId && !isCanonicalTab) {
-				this.#activeTabIndex = 0;
-				if (this.#tabBar && this.#tabBar.getActiveIndex() !== 0) {
-					this.#tabBar.setActiveIndex(0);
+			// Searching from PRESETS or provider tabs switches to ALL to show global provider results.
+			if ((isPresetTab || activeProviderId) && !isCanonicalTab) {
+				const allIndex = this.#providers.findIndex(tab => tab.id === ALL_TAB);
+				this.#activeTabIndex = allIndex >= 0 ? allIndex : 0;
+				if (this.#tabBar && this.#tabBar.getActiveIndex() !== this.#activeTabIndex) {
+					this.#tabBar.setActiveIndex(this.#activeTabIndex);
 					return;
 				}
 				this.#updateTabBar();
@@ -836,7 +921,7 @@ export class ModelSelectorComponent extends Container {
 			this.#filteredCanonicalModels = baseCanonicalModels;
 		}
 
-		const visibleItems = isCanonicalTab ? this.#filteredCanonicalModels : this.#filteredModels;
+		const visibleItems = this.#getVisibleItems();
 		this.#selectedIndex = this.#coerceSelectedIndex(
 			Math.min(this.#selectedIndex, Math.max(0, visibleItems.length - 1)),
 			visibleItems,
@@ -909,8 +994,9 @@ export class ModelSelectorComponent extends Container {
 
 	#updateList(): void {
 		this.#listContainer.clear();
+		const isPresetTab = this.#isPresetTab();
 		const isCanonicalTab = this.#isCanonicalTab();
-		const visibleItems = isCanonicalTab ? this.#filteredCanonicalModels : this.#filteredModels;
+		const visibleItems = this.#getVisibleItems();
 
 		const maxVisible = 10;
 		const startIndex = Math.max(
@@ -922,18 +1008,26 @@ export class ModelSelectorComponent extends Container {
 		const showProvider = this.#getActiveTabId() === ALL_TAB;
 
 		const rows: string[] = [];
-		// Show visible slice of filtered models
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = visibleItems[i];
 			if (!item) continue;
-			const canonicalItem = isCanonicalTab ? (item as CanonicalModelItem) : undefined;
-			const providerItem = isCanonicalTab ? undefined : (item as ModelItem);
 
 			const isSelected = i === this.#selectedIndex;
+			const prefix = isSelected ? theme.fg("accent", `${theme.nav.cursor} `) : "  ";
+
+			if (item.kind === "preset") {
+				const defaultLabel = item.error ? theme.fg("error", item.defaultModelLabel) : item.defaultModelLabel;
+				const summary = theme.fg("dim", ` — ${defaultLabel}; roles: ${item.roleSummary}`);
+				const label = isSelected ? theme.fg("accent", item.label) : item.label;
+				rows.push(`${prefix}${label}${summary}`);
+				continue;
+			}
+
+			const canonicalItem = isCanonicalTab ? (item as CanonicalModelItem) : undefined;
+			const providerItem = isCanonicalTab ? undefined : (item as ModelItem);
 			const isDisabled = this.#isItemDisabled(item);
 			const disabledSuffix = this.#formatContextLimitSuffix(item.model);
 
-			// Build role badges. Solid badges are configured; outlined badges are auto-selected defaults.
 			const roleBadgeTokens: string[] = [];
 			for (const role of MODEL_ROLE_IDS) {
 				const { tag, color } = getRoleInfo(role, this.#settings);
@@ -942,7 +1036,6 @@ export class ModelSelectorComponent extends Container {
 
 				roleBadgeTokens.push(makeRoleBadgeToken(tag, color ?? "success", assigned));
 			}
-			// Custom role badges
 			for (const [role, assigned] of Object.entries(this.#roles)) {
 				if (role in MODEL_ROLES || !assigned || !modelsAreEqual(assigned.model, item.model)) continue;
 				const roleInfo = getRoleInfo(role, this.#settings);
@@ -951,31 +1044,17 @@ export class ModelSelectorComponent extends Container {
 			}
 			const badgeText = roleBadgeTokens.length > 0 ? ` ${roleBadgeTokens.join(" ")}` : "";
 
-			let line = "";
-			if (isSelected) {
-				const prefix = theme.fg("accent", `${theme.nav.cursor} `);
-				if (isCanonicalTab) {
-					const variants = theme.fg("dim", ` [${canonicalItem?.variantCount ?? 0}]`);
-					const backing = theme.fg("dim", ` -> ${item.model.provider}/${item.model.id}`);
-					line = `${prefix}${theme.fg("accent", item.id)}${variants}${backing}${badgeText}${disabledSuffix}`;
-				} else if (showProvider) {
-					const providerPrefix = theme.fg("dim", `${providerItem?.provider ?? ""}/`);
-					line = `${prefix}${providerPrefix}${theme.fg("accent", providerItem?.id ?? item.id)}${badgeText}${disabledSuffix}`;
-				} else {
-					line = `${prefix}${theme.fg("accent", item.id)}${badgeText}${disabledSuffix}`;
-				}
+			let line: string;
+			if (isCanonicalTab) {
+				const variants = theme.fg("dim", ` [${canonicalItem?.variantCount ?? 0}]`);
+				const backing = theme.fg("dim", ` -> ${item.model.provider}/${item.model.id}`);
+				line = `${prefix}${isSelected ? theme.fg("accent", item.id) : item.id}${variants}${backing}${badgeText}${disabledSuffix}`;
+			} else if (showProvider) {
+				const providerPrefix = theme.fg("dim", `${providerItem?.provider ?? ""}/`);
+				const id = providerItem?.id ?? item.id;
+				line = `${prefix}${providerPrefix}${isSelected ? theme.fg("accent", id) : id}${badgeText}${disabledSuffix}`;
 			} else {
-				const prefix = "  ";
-				if (isCanonicalTab) {
-					const variants = theme.fg("dim", ` [${canonicalItem?.variantCount ?? 0}]`);
-					const backing = theme.fg("dim", ` -> ${item.model.provider}/${item.model.id}`);
-					line = `${prefix}${item.id}${variants}${backing}${badgeText}${disabledSuffix}`;
-				} else if (showProvider) {
-					const providerPrefix = theme.fg("dim", `${providerItem?.provider ?? ""}/`);
-					line = `${prefix}${providerPrefix}${providerItem?.id ?? item.id}${badgeText}${disabledSuffix}`;
-				} else {
-					line = `${prefix}${item.id}${badgeText}${disabledSuffix}`;
-				}
+				line = `${prefix}${isSelected ? theme.fg("accent", item.id) : item.id}${badgeText}${disabledSuffix}`;
 			}
 
 			if (isDisabled) {
@@ -995,21 +1074,22 @@ export class ModelSelectorComponent extends Container {
 			this.#listContainer.addChild(sv);
 		}
 
-		// Show error message or "no results" if empty
 		if (this.#errorMessage) {
 			const errorLines = String(this.#errorMessage).split("\n");
 			for (const line of errorLines) {
 				this.#listContainer.addChild(new Text(theme.fg("error", line), 0, 0));
 			}
 		} else if (visibleItems.length === 0) {
-			const statusMessage = this.#getProviderEmptyStateMessage();
+			const statusMessage = isPresetTab ? "  No model presets" : this.#getProviderEmptyStateMessage();
 			this.#listContainer.addChild(new Text(theme.fg("muted", statusMessage ?? "  No matching models"), 0, 0));
 		} else {
 			const selected = visibleItems[this.#selectedIndex];
-			if (!selected) {
+			if (!selected) return;
+			this.#listContainer.addChild(new Spacer(1));
+			if (selected.kind === "preset") {
+				this.#listContainer.addChild(new Text(theme.fg("muted", `  ${selected.description}`), 0, 0));
 				return;
 			}
-			this.#listContainer.addChild(new Spacer(1));
 			const suffix = isCanonicalTab
 				? ` (${selected.model.provider}/${selected.model.id}, ${(selected as CanonicalModelItem).variantCount} variants)`
 				: "";
@@ -1039,14 +1119,22 @@ export class ModelSelectorComponent extends Container {
 		return foundIndex >= 0 ? foundIndex : 0;
 	}
 
-	#getSelectedItem(): ModelItem | CanonicalModelItem | undefined {
-		return this.#isCanonicalTab()
-			? this.#filteredCanonicalModels[this.#selectedIndex]
-			: this.#filteredModels[this.#selectedIndex];
+	#getSelectedItem(): PresetItem | ModelItem | CanonicalModelItem | undefined {
+		return this.#getVisibleItems()[this.#selectedIndex];
+	}
+
+	#getSelectedModelItem(): ModelItem | CanonicalModelItem | undefined {
+		const item = this.#getSelectedItem();
+		return item?.kind === "preset" ? undefined : item;
+	}
+
+	#getSelectedPresetItem(): PresetItem | undefined {
+		const item = this.#getSelectedItem();
+		return item?.kind === "preset" ? item : undefined;
 	}
 
 	#openMenu(): void {
-		const selectedItem = this.#getSelectedItem();
+		const selectedItem = this.#getSelectedModelItem();
 		if (!selectedItem || this.#isItemDisabled(selectedItem)) return;
 
 		this.#isMenuOpen = true;
@@ -1066,7 +1154,7 @@ export class ModelSelectorComponent extends Container {
 	#updateMenu(): void {
 		this.#menuContainer.clear();
 
-		const selectedItem = this.#getSelectedItem();
+		const selectedItem = this.#getSelectedModelItem();
 		if (!selectedItem) return;
 
 		const showingThinking = this.#menuStep === "thinking" && this.#menuSelectedRole !== null;
@@ -1122,6 +1210,17 @@ export class ModelSelectorComponent extends Container {
 		this.#menuContainer.addChild(new Text(theme.fg("border", theme.boxSharp.horizontal.repeat(menuWidth)), 0, 0));
 	}
 
+	async #handlePresetSelect(item: PresetItem): Promise<void> {
+		if (!this.#onPresetSelectCallback) return;
+		try {
+			await this.#onPresetSelectCallback(item.id);
+		} catch (error) {
+			this.#errorMessage = error instanceof Error ? error.message : String(error);
+			this.#updateList();
+			this.#tui.requestRender();
+		}
+	}
+
 	handleInput(keyData: string): void {
 		if (this.#isMenuOpen) {
 			this.#handleMenuInput(keyData);
@@ -1147,7 +1246,13 @@ export class ModelSelectorComponent extends Container {
 
 		// Enter - open context menu or select directly in temporary mode
 		if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
-			const selectedItem = this.#getSelectedItem();
+			const preset = this.#getSelectedPresetItem();
+			if (preset) {
+				void this.#handlePresetSelect(preset);
+				return;
+			}
+
+			const selectedItem = this.#getSelectedModelItem();
 			if (selectedItem && !this.#isItemDisabled(selectedItem)) {
 				if (this.#temporaryOnly) {
 					// In temporary mode, skip menu and select directly
@@ -1170,7 +1275,7 @@ export class ModelSelectorComponent extends Container {
 		this.#filterModels(this.#searchInput.getValue());
 	}
 	#handleMenuInput(keyData: string): void {
-		const selectedItem = this.#getSelectedItem();
+		const selectedItem = this.#getSelectedModelItem();
 		if (!selectedItem || this.#isItemDisabled(selectedItem)) return;
 
 		const optionCount =

@@ -8,6 +8,12 @@ import { Snowflake, setProjectDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
+import {
+	getModelPresetInfo,
+	MODEL_PRESET_IDS,
+	type ModelPresetId,
+	normalizeModelPresetId,
+} from "../config/model-presets";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import {
@@ -246,6 +252,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "guided-goal",
+		description: "Interview and refine a goal before enabling goal mode",
+		inlineHint: "[rough objective]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			await runtime.ctx.handleGuidedGoalCommand(command.args || undefined);
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "loop",
 		description:
 			"Toggle loop mode. While enabled, the next prompt you send re-submits after every yield. Esc cancels the current iteration; /loop again to disable.",
@@ -294,6 +310,132 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showModelSelector();
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "preset",
+		description: "Apply or list model presets",
+		acpDescription: "Apply or list model presets",
+		inlineHint: "[budget|balanced|smart|ultra|next|prev]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			const usageText = "Usage: /preset [budget, balanced, smart, ultra, next, prev]";
+			const applyPreset = async (preset: ModelPresetId) => {
+				const result = await runtime.session.applyModelPreset(preset);
+				await runtime.output(
+					`Preset ${result.label} applied: ${result.defaultModel.provider}/${result.defaultModel.id}.`,
+				);
+				await runtime.notifyTitleChanged?.();
+				await runtime.notifyConfigChanged?.();
+				return commandConsumed();
+			};
+
+			if (!arg) {
+				const activePreset = runtime.session.settings.get("modelPreset");
+				const lines = ["Model presets:"];
+				for (const preset of MODEL_PRESET_IDS) {
+					const info = getModelPresetInfo(preset);
+					const active = activePreset === preset ? "*" : " ";
+					try {
+						const resolved = runtime.session.getResolvedModelPreset(preset);
+						lines.push(
+							`${active} ${info.label} (${preset}) - ${resolved.defaultRole.model.provider}/${resolved.defaultRole.model.id}`,
+						);
+					} catch (error) {
+						lines.push(`${active} ${info.label} (${preset}) - unavailable: ${errorMessage(error)}`);
+					}
+				}
+				await runtime.output(lines.join("\n"));
+				return commandConsumed();
+			}
+
+			try {
+				if (arg === "next") {
+					const result = await runtime.session.cycleModelPreset("forward");
+					if (!result) {
+						await runtime.output("Only one model preset available.");
+						return commandConsumed();
+					}
+					await runtime.output(
+						`Preset ${result.label} applied: ${result.defaultModel.provider}/${result.defaultModel.id}.`,
+					);
+					await runtime.notifyTitleChanged?.();
+					await runtime.notifyConfigChanged?.();
+					return commandConsumed();
+				}
+				if (arg === "prev" || arg === "previous") {
+					const result = await runtime.session.cycleModelPreset("backward");
+					if (!result) {
+						await runtime.output("Only one model preset available.");
+						return commandConsumed();
+					}
+					await runtime.output(
+						`Preset ${result.label} applied: ${result.defaultModel.provider}/${result.defaultModel.id}.`,
+					);
+					await runtime.notifyTitleChanged?.();
+					await runtime.notifyConfigChanged?.();
+					return commandConsumed();
+				}
+
+				const preset = normalizeModelPresetId(arg);
+				if (!preset) {
+					return usage(`${usageText}. Valid values: budget, balanced, smart, ultra, next, prev.`, runtime);
+				}
+				return await applyPreset(preset);
+			} catch (error) {
+				return usage(`Failed to apply preset: ${errorMessage(error)}`, runtime);
+			}
+		},
+		handleTui: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (!arg) {
+				const activePreset = runtime.ctx.session.settings.get("modelPreset");
+				const lines = ["Model presets:"];
+				for (const preset of MODEL_PRESET_IDS) {
+					const info = getModelPresetInfo(preset);
+					const active = activePreset === preset ? "*" : " ";
+					try {
+						const resolved = runtime.ctx.session.getResolvedModelPreset(preset);
+						lines.push(
+							`${active} ${info.label} (${preset}) - ${resolved.defaultRole.model.provider}/${resolved.defaultRole.model.id}`,
+						);
+					} catch (error) {
+						lines.push(`${active} ${info.label} (${preset}) - unavailable: ${errorMessage(error)}`);
+					}
+				}
+				runtime.ctx.showStatus(lines.join("\n"));
+				runtime.ctx.editor.setText("");
+				return commandConsumed();
+			}
+
+			try {
+				const direction =
+					arg === "next" ? "forward" : arg === "prev" || arg === "previous" ? "backward" : undefined;
+				const preset = normalizeModelPresetId(arg);
+				let result: { label: string; defaultModel: { provider: string; id: string } } | undefined;
+				if (direction) {
+					result = await runtime.ctx.session.cycleModelPreset(direction);
+				} else {
+					if (!preset) {
+						runtime.ctx.showWarning("Usage: /preset [budget, balanced, smart, ultra, next, prev]");
+						return commandConsumed();
+					}
+					result = await runtime.ctx.session.applyModelPreset(preset);
+				}
+				if (!result) {
+					runtime.ctx.showWarning("Only one model preset available");
+					return commandConsumed();
+				}
+				refreshStatusLine(runtime.ctx);
+				runtime.ctx.showStatus(
+					`Preset ${result.label} applied: ${result.defaultModel.provider}/${result.defaultModel.id}.`,
+				);
+			} catch (error) {
+				runtime.ctx.showError(errorMessage(error));
+			}
+			runtime.ctx.editor.setText("");
+			return commandConsumed();
 		},
 	},
 	{

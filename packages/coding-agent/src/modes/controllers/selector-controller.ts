@@ -497,7 +497,20 @@ export class SelectorController {
 					done();
 					this.ctx.ui.requestRender();
 				},
-				{ ...options, currentContextTokens },
+				{
+					...options,
+					currentContextTokens,
+					onPresetSelect: async preset => {
+						const result = await this.ctx.session.applyModelPreset(preset);
+						this.ctx.statusLine.invalidate();
+						this.ctx.updateEditorBorderColor();
+						this.ctx.showStatus(
+							`Preset ${result.label}: ${result.defaultModel.provider}/${result.defaultModel.id}`,
+						);
+						done();
+						this.ctx.ui.requestRender();
+					},
+				},
 			);
 			return { component: selector, focus: selector };
 		});

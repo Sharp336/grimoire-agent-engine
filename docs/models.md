@@ -423,6 +423,23 @@ Role aliases like `pi/smol` expand through `settings.modelRoles`. Each role valu
 
 If a role points at another role, the target model still inherits normally and any explicit suffix on the referring role wins for that role-specific use.
 
+### Model presets
+
+`modelPreset` stores the last applied profile: `budget`, `balanced`, `smart`, or `ultra`. Presets are complete role profiles, not aliases for one model. Applying one replaces `modelRoles`, updates the active `default` model, and keeps role-specific thinking suffixes.
+
+Use `/preset` to list profiles, `/preset smart` to apply one, and `/preset next` or `/preset prev` to cycle. The `/model` selector also has a `PRESETS` tab.
+
+Override built-ins with `modelPresets`:
+
+```yaml
+modelPresets:
+  smart:
+    default: openai/gpt-5.4:high
+    task: anthropic/claude-sonnet-4-5:high
+```
+
+Only the named role entries are overridden; the rest of the built-in profile is inherited.
+
 Related settings:
 
 - `modelRoles` (record)

@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Budget, Balanced, Smart, and Ultra model presets with `/preset`, separate preset-cycling shortcuts, and a `PRESETS` tab in `/model`.
+- Added `/guided-goal` for a Plan/Slow-model interview that refines a rough objective before entering goal mode.
+
 ## [15.11.8] - 2026-06-12
 
 ### Added

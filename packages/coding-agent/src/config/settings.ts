@@ -33,6 +33,12 @@ import { AgentStorage } from "../session/agent-storage";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { withFileLock } from "./file-lock";
 import {
+	type ModelPresetId,
+	type ModelPresetOverrides,
+	type ModelPresetRoleMap,
+	modelPresetOverridesFromUnknown,
+} from "./model-presets";
+import {
 	type BashInterceptorRule,
 	type GroupPrefix,
 	type GroupTypeMap,
@@ -520,6 +526,19 @@ export class Settings {
 			this.override("modelRoles", { ...shallowStringRecord(runtimeOverrides), [role]: modelId });
 		}
 	}
+	/**
+	 * Replace the full model role profile.
+	 */
+	setModelRoles(roles: ReadOnlyDict<string>): void {
+		const next: Record<string, string> = {};
+		for (const [role, modelId] of Object.entries(roles)) {
+			if (typeof modelId === "string") {
+				next[role] = modelId;
+			}
+		}
+		this.set("modelRoles", next);
+		this.override("modelRoles", next);
+	}
 
 	/**
 	 * Get a model role (helper for modelRoles record).
@@ -536,7 +555,7 @@ export class Settings {
 		return { ...this.get("modelRoles") };
 	}
 
-	/*
+	/**
 	 * Override model roles (helper for modelRoles record).
 	 */
 	overrideModelRoles(roles: ReadOnlyDict<string>): void {
@@ -547,6 +566,14 @@ export class Settings {
 			}
 		}
 		this.override("modelRoles", next);
+	}
+
+	getModelPreset(id: ModelPresetId): ModelPresetRoleMap | undefined {
+		return this.getModelPresets()[id];
+	}
+
+	getModelPresets(): ModelPresetOverrides {
+		return modelPresetOverridesFromUnknown(this.get("modelPresets"));
 	}
 
 	/**
@@ -973,6 +1000,10 @@ export class Settings {
 		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#project);
 		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
+		const modelRolesOverride = getByPath(this.#overrides, ["modelRoles"]);
+		if (modelRolesOverride && typeof modelRolesOverride === "object" && !Array.isArray(modelRolesOverride)) {
+			setByPath(this.#merged, ["modelRoles"], shallowStringRecord(modelRolesOverride));
+		}
 		this.#resolvedCache.clear();
 	}
 

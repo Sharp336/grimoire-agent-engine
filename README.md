@@ -262,7 +262,7 @@ Setting-gated, off by default: `github`, `inspect_image`, `render_mermaid`, `che
 
 ## Forty-plus providers, hundreds of models, _one /model away_.
 
-Roles route work by intent. `default` for normal turns. `smol` for cheap subagent fan-out. `slow` for deep reasoning. `plan` for plan mode. `commit` for changelogs. Override at launch with `--smol`, `--slow`, or `--plan`; cycle through the configured models for the active role with `Ctrl+P`. Swap the active model mid-session with the `/model` slash command.
+Roles route work by intent. `default` for normal turns. `smol` for cheap subagent fan-out. `slow` for deep reasoning. `plan` for plan mode. `commit` for changelogs. Override at launch with `--smol`, `--slow`, or `--plan`; cycle role models with `Ctrl+P` / `Shift+Ctrl+P`; switch complete Budget/Balanced/Smart/Ultra role profiles with `Alt+Shift+Right` / `Alt+Shift+Left`, `/preset`, or the `PRESETS` tab in `/model`. Swap the active model mid-session with the `/model` slash command.
 
 Auth tags below: `oauth` signs in with your provider account, `plan` routes through a coding-plan subscription, `local` runs against a local server with the key optional.
 
