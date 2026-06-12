@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `omp-permissions` example extension: fine-grained, predicate-based tool-call permissions modeled on opencode's permission categories with compound-bash-command decomposition (ported from `liberzon/claude-hooks`), covering built-in and `serena` MCP tools, plus configurable self-protection (ask/deny) for its own config file and user-listed paths, and an optional JSONL audit log of every tool call ([#2409](https://github.com/can1357/oh-my-pi/pull/2409) by [@ClemDNL](https://github.com/ClemDNL))
+
 ## [15.12.3] - 2026-06-12
 
 ### Fixed

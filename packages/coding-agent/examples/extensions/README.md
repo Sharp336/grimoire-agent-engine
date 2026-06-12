@@ -22,6 +22,7 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 | `protected-paths.ts`     | Blocks writes to protected paths (.env, .git/, node_modules/)                |
 | `confirm-destructive.ts` | Confirms before destructive session actions (clear, switch, branch)          |
 | `dirty-repo-guard.ts`    | Prevents session changes with uncommitted git changes                        |
+| `omp-permissions/`     | Config-driven, predicate-based permissions (opencode-style rules + compound-bash decomposition) for built-in and `serena` tools, with configurable self-protection and an audit log |
 
 ### Custom Tools
 

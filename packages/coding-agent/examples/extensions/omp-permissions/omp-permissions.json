@@ -1,0 +1,25 @@
+{
+  "enabled": true,
+  "log": { "enabled": false, "path": "~/.omp/agent/omp-permissions.log" },
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "rm -rf /": "deny",
+      ":(){ :|:& };:": "deny",
+      "sudo *": "ask",
+      "git push *": "ask",
+      "curl *": "ask",
+      "wget *": "ask"
+    },
+    "edit": { "*": "allow" },
+    "read": { "*": "allow", "*.env": "deny", "*.env.*": "deny", "*.env.example": "allow" },
+    "webfetch": { "*": "ask" },
+    "external_directory": { "~/projects/**": "allow", "*": "ask" },
+    "doom_loop": "ask"
+  },
+  "protect": {
+    "enabled": true,
+    "action": "ask",
+    "paths": ["**/.env", "**/.env.*", "~/.ssh/**", "**/secrets/**"]
+  }
+}
