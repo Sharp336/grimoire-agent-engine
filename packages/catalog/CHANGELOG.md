@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the default \`baseUrl\` for \`google-antigravity\` provider models, routing requests to the primary daily endpoint (\`https://daily-cloudcode-pa.googleapis.com\`) instead of the unstable developer sandbox endpoint (\`https://daily-cloudcode-pa.sandbox.googleapis.com\`).
+
 ## [15.11.8] - 2026-06-12
 
 ### Fixed
