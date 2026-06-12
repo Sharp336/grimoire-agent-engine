@@ -6,6 +6,7 @@ import { HookEditorComponent, HookInputComponent, HookSelectorComponent } from "
 export { Container, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 // Logging
 export { getAgentDir, logger, VERSION } from "@oh-my-pi/pi-utils";
+export * from "./agent-control/handoff";
 export * from "./config/keybindings";
 export * from "./config/model-registry";
 // Prompt templates

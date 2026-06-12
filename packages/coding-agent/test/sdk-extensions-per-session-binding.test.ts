@@ -11,16 +11,24 @@
  * Pins down `loadExtensions()` so the SDK can rely on it returning fresh
  * Extension instances per call.
  */
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { bindAgentControlExtensionHost, LazyAgentControlHost } from "@oh-my-pi/pi-coding-agent/agent-control/server";
+import { type ExtensionFactory, loadExtensions } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
+import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
+import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 
 describe("loadExtensions per-session binding (#2190 review fix)", () => {
 	let tmp: string;
 	let extPath: string;
+	const controlHosts: LazyAgentControlHost[] = [];
+	afterEach(async () => {
+		await Promise.all(controlHosts.splice(0).map(host => host.close()));
+	});
 
 	beforeAll(async () => {
 		tmp = await fs.mkdtemp(path.join(os.tmpdir(), "pi-ext-binding-"));
@@ -81,5 +89,25 @@ describe("loadExtensions per-session binding (#2190 review fix)", () => {
 		expect(bindings).toHaveLength(2);
 		expect(bindings[0]?.events).toBe(parentEventBus);
 		expect(bindings[1]?.events).toBe(subagentEventBus);
+	});
+
+	it("exposes lazy control only through the bound top-level EventBus", async () => {
+		const parentEvents = new EventBus();
+		const childEvents = new EventBus();
+		const registry = new AgentRegistry();
+		const host = new LazyAgentControlHost(parentEvents, registry, new AgentLifecycleManager(registry));
+		controlHosts.push(host);
+		const acquired: unknown[] = [];
+		const factory: ExtensionFactory = api => {
+			acquired.push(api.acquireAgentControl());
+		};
+		const unbind = bindAgentControlExtensionHost(parentEvents, host);
+
+		await loadExtensionFromFactory(factory, "/tmp/parent", parentEvents, new ExtensionRuntime());
+		await loadExtensionFromFactory(factory, "/tmp/child", childEvents, new ExtensionRuntime());
+
+		expect(acquired[0]).toBe(host);
+		expect(acquired[1]).toBeUndefined();
+		unbind();
 	});
 });

@@ -354,6 +354,27 @@ describe("readRpcSubagentTranscript", () => {
 			messages: [],
 		});
 	});
+
+	test("replays appended complete entries after a partial tail and resets only beyond EOF", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-cursor-"));
+		tempPaths.push(dir);
+		const sessionFile = path.join(dir, "session.jsonl");
+		const first = `${JSON.stringify({ type: "session", id: "s1", timestamp: "2026-06-09T00:00:00.000Z", cwd: dir })}\n`;
+		const second = `${JSON.stringify({ type: "message", id: "m1", parentId: null, timestamp: "2026-06-09T00:00:00.000Z", message: { role: "user", content: "hello" } })}\n`;
+		await Bun.write(sessionFile, `${first}${second.slice(0, -1)}`);
+
+		const partial = await readRpcSubagentTranscript(sessionFile, Buffer.byteLength(first, "utf8"));
+		expect(partial.nextByte).toBe(Buffer.byteLength(first, "utf8"));
+		expect(partial.entries).toEqual([]);
+		await Bun.write(sessionFile, `${first}${second}`);
+		const caughtUp = await readRpcSubagentTranscript(sessionFile, partial.nextByte);
+		expect(caughtUp.messages).toHaveLength(1);
+		expect(caughtUp.reset).toBe(false);
+
+		const reset = await readRpcSubagentTranscript(sessionFile, 1_000_000);
+		expect(reset.reset).toBe(true);
+		expect(reset.fromByte).toBe(0);
+	});
 });
 
 describe("RpcClient subagent frames", () => {

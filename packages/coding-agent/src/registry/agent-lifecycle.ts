@@ -90,6 +90,11 @@ export class AgentLifecycleManager {
 		return this.#adopted.has(id);
 	}
 
+	/** True when a parked agent has a registered session reviver. */
+	canRevive(id: string): boolean {
+		return this.#adopted.get(id)?.revive !== undefined;
+	}
+
 	/** True while {@link park} is disposing this agent's session (lets dispose hooks distinguish park from teardown). */
 	isParking(id: string): boolean {
 		return this.#parking.has(id);

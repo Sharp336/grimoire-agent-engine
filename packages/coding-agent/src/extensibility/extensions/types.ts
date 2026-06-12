@@ -33,6 +33,7 @@ import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oaut
 import type { AutocompleteItem, Component, EditorTheme, KeyId, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type * as Zod from "zod/v4";
+import type { AgentControlExtensionHost } from "../../agent-control/server";
 import type { KeybindingsManager } from "../../config/keybindings";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { EditToolDetails } from "../../edit";
@@ -1100,6 +1101,9 @@ export interface ExtensionAPI {
 	 * });
 	 */
 	registerProvider(name: string, config: ProviderConfig): void;
+
+	/** Lazily acquire direct-child control; available only to the top-level interactive EventBus. */
+	acquireAgentControl(): AgentControlExtensionHost | undefined;
 
 	/** Shared event bus for extension communication. */
 	events: EventBus;

@@ -13,6 +13,11 @@ Package-specific references:
 - [MCP server/tool authoring](../../docs/mcp-server-tool-authoring.md)
 - [DEVELOPMENT](./DEVELOPMENT.md)
 - [RenderMermaid guide](../../docs/render-mermaid.md)
+- [Kitty subagent pane setup](../../docs/kitty-subagent-panes.md)
+
+## Kitty subagent panes
+
+The npm/Bun package ships an opt-in example extension that opens transcript/prompt panes for up to four current-generation direct `task` children in local Kitty. Children remain in-process; nested descendants and every failure path stay available through Agent Hub. The feature requires explicit local opt-in plus the supplied fail-closed Kitty authorization policy. See the [setup, security, acceptance, and rollback guide](../../docs/kitty-subagent-panes.md).
 
 ## Memory backends
 

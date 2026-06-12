@@ -2,6 +2,7 @@ import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 import * as z from "zod/v4";
+import type { ControlGeneration } from "../agent-control/control";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { NestedRepoPatch } from "./worktree";
 
@@ -45,12 +46,15 @@ export interface SubagentProgressPayload {
 	assignment?: string;
 	progress: AgentProgress;
 	sessionFile?: string;
+	controlGeneration?: ControlGeneration;
 }
 
 /** Payload emitted on TASK_SUBAGENT_EVENT_CHANNEL */
 export interface SubagentEventPayload {
 	id: string;
 	event: AgentSessionEvent;
+	sessionFile?: string;
+	controlGeneration?: ControlGeneration;
 }
 
 /** Payload emitted on TASK_SUBAGENT_LIFECYCLE_CHANNEL */
@@ -63,6 +67,7 @@ export interface SubagentLifecyclePayload {
 	sessionFile?: string;
 	parentToolCallId?: string;
 	index: number;
+	controlGeneration?: ControlGeneration;
 }
 
 /**

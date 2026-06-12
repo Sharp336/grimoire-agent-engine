@@ -20,6 +20,7 @@ import type { AgentTool, AgentToolResult, AgentToolUpdateCallback } from "@oh-my
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "..";
+import type { DirectChildControlAdmission, DirectChildControlSource } from "../agent-control/control";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
 import { MCPManager } from "../mcp/manager";
 import type { Theme } from "../modes/theme/theme";
@@ -458,6 +459,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	private constructor(
 		private readonly session: ToolSession,
 		discoveredAgents: AgentDefinition[],
+		private readonly directChildControlSource?: DirectChildControlSource,
 	) {
 		this.#blockedAgent = $env.PI_BLOCKED_AGENT;
 		this.#discoveredAgents = discoveredAgents;
@@ -475,9 +477,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	/**
 	 * Create a TaskTool instance with async agent discovery.
 	 */
-	static async create(session: ToolSession): Promise<TaskTool> {
+	static async create(session: ToolSession, directChildControlSource?: DirectChildControlSource): Promise<TaskTool> {
 		const { agents } = await discoverAgentsForCreate(session.cwd);
-		return new TaskTool(session, agents);
+		return new TaskTool(session, agents, directChildControlSource);
 	}
 
 	async execute(
@@ -493,6 +495,8 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			return createTaskModeError(validationError);
 		}
 
+		const directChildControl = this.directChildControlSource?.capture();
+
 		const spawnItems = resolveSpawnItems(params);
 		const selectedAgent = this.#discoveredAgents.find(agent => agent.name === params.agent);
 		const asyncEnabled = this.session.settings.get("async.enabled");
@@ -505,7 +509,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			if (asyncEnabled && !manager) {
 				logger.warn("task: no AsyncJobManager registered; falling back to sync execution");
 			}
-			return this.#executeSyncFanout(toolCallId, params, spawnItems, signal, onUpdate);
+			return this.#executeSyncFanout(toolCallId, params, spawnItems, signal, onUpdate, directChildControl);
 		}
 
 		// Resolve agent ids up front so the immediate result can name them.
@@ -575,6 +579,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					ircEnabled,
 					buildDetails: buildAsyncDetails,
 					onUpdate,
+					directChildControl,
 					onSettled: failed => {
 						settledCount += 1;
 						if (failed) failedCount += 1;
@@ -668,9 +673,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		buildDetails: (state: "running" | "completed" | "failed", jobId: string) => TaskToolDetails;
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>;
 		onSettled?: (failed: boolean) => void;
+		directChildControl?: DirectChildControlAdmission;
 	}): string {
-		const { manager, toolCallId, spawnParams, agentId, progress, ircEnabled, buildDetails, onUpdate, onSettled } =
-			options;
+		const {
+			manager,
+			toolCallId,
+			spawnParams,
+			agentId,
+			progress,
+			ircEnabled,
+			buildDetails,
+			onUpdate,
+			onSettled,
+			directChildControl,
+		} = options;
 		const buildFollowUpHint = (aborted: boolean): string => {
 			if (aborted) {
 				return `\n\n${agentId} was aborted — transcript at history://${agentId}`;
@@ -698,7 +714,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					buildDetails("running", ownJobId) as unknown as Record<string, unknown>,
 				);
 				try {
-					const result = await this.#executeSync(toolCallId, spawnParams, runSignal, undefined, agentId);
+					const result = await this.#executeSync(
+						toolCallId,
+						spawnParams,
+						runSignal,
+						undefined,
+						agentId,
+						directChildControl,
+					);
 					const finalText = result.content.find(part => part.type === "text")?.text ?? "(no output)";
 					const singleResult = result.details?.results[0];
 					// A missing result means the sync path failed at the tool level
@@ -776,12 +799,20 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		spawnItems: TaskItem[],
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
+		directChildControl?: DirectChildControlAdmission,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const semaphore = this.#getSpawnSemaphore();
 		if (spawnItems.length === 1) {
 			await semaphore.acquire();
 			try {
-				return await this.#executeSync(toolCallId, spawnParamsFor(params, spawnItems[0]), signal, onUpdate);
+				return await this.#executeSync(
+					toolCallId,
+					spawnParamsFor(params, spawnItems[0]),
+					signal,
+					onUpdate,
+					undefined,
+					directChildControl,
+				);
 			} finally {
 				semaphore.release();
 			}
@@ -818,7 +849,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 								}
 							}
 						: undefined;
-					return await this.#executeSync(toolCallId, spawnParamsFor(params, item), workerSignal, itemOnUpdate);
+					return await this.#executeSync(
+						toolCallId,
+						spawnParamsFor(params, item),
+						workerSignal,
+						itemOnUpdate,
+						undefined,
+						directChildControl,
+					);
 				} finally {
 					semaphore.release();
 				}
@@ -875,8 +913,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 		preAllocatedId?: string,
+		directChildControl?: DirectChildControlAdmission,
 	): Promise<AgentToolResult<TaskToolDetails>> {
-		return this.#runSpawn(toolCallId, params, signal, onUpdate, preAllocatedId);
+		return this.#runSpawn(toolCallId, params, signal, onUpdate, preAllocatedId, directChildControl);
 	}
 
 	/** Spawn a fresh subagent and run it to completion. */
@@ -886,6 +925,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		signal?: AbortSignal,
 		onUpdate?: AgentToolUpdateCallback<TaskToolDetails>,
 		preAllocatedId?: string,
+		directChildControl?: DirectChildControlAdmission,
 	): Promise<AgentToolResult<TaskToolDetails>> {
 		const startTime = Date.now();
 		const { agents, projectAgentsDir } = await discoverAgents(this.session.cwd);
@@ -1134,6 +1174,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				enableLsp: subagentLspEnabled,
 				signal,
 				eventBus: this.session.eventBus,
+				directChildControl,
 				onProgress: (progress: AgentProgress) => {
 					// Shallow snapshot; recentTools is mutated in place by the
 					// executor, the rest is reassigned or immutable. A deep clone

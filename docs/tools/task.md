@@ -23,6 +23,7 @@
   - `packages/coding-agent/src/tools/index.ts` — tool registration and recursion-depth gating.
   - `packages/coding-agent/src/sdk.ts` — child-session router/tool wiring and per-subagent `AgentOutputManager`.
   - `docs/task-agent-discovery.md` — deeper discovery and precedence notes.
+- `docs/kitty-subagent-panes.md` — optional npm/Bun Kitty frontend for current-generation direct children, including secure setup, limits, fallback, and rollback.
 
 ## Inputs
 
@@ -106,6 +107,10 @@ Artifacts and side channels:
 - Isolation backend: `none`, `worktree`, `fuse-overlay`, `fuse-projfs`.
 - Isolation merge strategy: patch mode (capture/apply root patches) or branch mode (commit to `omp/task/<id>`, cherry-pick into parent).
 - Agent source precedence: project custom agents, then user custom agents, then bundled agents (`explore`, `plan`, `designer`, `reviewer`, `task`, `quick_task`, `librarian`, `oracle`).
+
+### Optional Kitty direct-child panes
+
+The packaged npm/Bun distribution ships an opt-in example extension that projects current-generation direct children into Kitty transcript/prompt panes. It does not change task execution: children remain in-process, closing a pane does not abort/release the child, nested descendants stay Agent Hub-only, and async settlement is unchanged. Admission is start-ordered and capped at four per generation; launch failure, overflow, or manual close does not backfill until the next generation. See [`docs/kitty-subagent-panes.md`](../kitty-subagent-panes.md) for exact setup, security boundary, fallback, update, and rollback.
 
 ## Side Effects
 - Filesystem

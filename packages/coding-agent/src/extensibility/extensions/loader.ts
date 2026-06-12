@@ -9,6 +9,7 @@ import type { ImageContent, Model, TextContent, TSchema } from "@oh-my-pi/pi-ai"
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { hasFsCode, isEacces, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import * as Zod from "zod/v4";
+import { acquireAgentControlExtensionHost } from "../../agent-control/server";
 import { type ExtensionModule, extensionModuleCapability } from "../../capability/extension-module";
 import { loadCapability } from "../../discovery";
 import { getExtensionNameFromPath } from "../../discovery/helpers";
@@ -137,6 +138,10 @@ class ConcreteExtensionAPI implements ExtensionAPI, IExtensionRuntime {
 		private readonly cwd: string,
 		public readonly events: EventBus,
 	) {}
+
+	acquireAgentControl() {
+		return acquireAgentControlExtensionHost(this.events);
+	}
 
 	on<F extends HandlerFn>(event: string, handler: F): void {
 		const list = this.extension.handlers.get(event) ?? [];

@@ -224,5 +224,22 @@ describe("omp completions (integration / drift)", () => {
 		// Hidden/default commands must NOT surface as completable subcommands.
 		expect(stdout).not.toContain("_omp_cmd_launch");
 		expect(stdout).not.toContain("_omp_cmd___complete");
+		expect(stdout).not.toContain("_omp_cmd___agent-pane");
+	});
+
+	it("keeps the packaged agent pane command out of root help", async () => {
+		const proc = Bun.spawn([process.execPath, cliEntry, "--help"], {
+			cwd: repoRoot,
+			stdout: "pipe",
+			stderr: "pipe",
+			env: { ...process.env, NO_COLOR: "1", PI_NO_TITLE: "1" },
+		});
+		const [stdout, , exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+		expect(exitCode).toBe(0);
+		expect(stdout).not.toContain("__agent-pane");
 	});
 });

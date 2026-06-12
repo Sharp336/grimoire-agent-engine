@@ -125,6 +125,10 @@
 			"types": "./src/autoresearch/tools/*.ts",
 			"import": "./src/autoresearch/tools/*.ts"
 		},
+		"./agent-control/*": {
+			"types": "./src/agent-control/*.ts",
+			"import": "./src/agent-control/*.ts"
+		},
 		"./capability": {
 			"types": "./src/capability/index.ts",
 			"import": "./src/capability/index.ts"

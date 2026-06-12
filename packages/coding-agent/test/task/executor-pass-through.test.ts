@@ -3,7 +3,12 @@
  * to `createAgentSession` so subagents skip the FS scans the parent already
  * paid for. Regression guard for issue #2190.
  */
+
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import path from "node:path";
+import type { ChildControlTarget, DirectChildControlAdmission } from "@oh-my-pi/pi-coding-agent/agent-control/control";
 import type { Rule } from "@oh-my-pi/pi-coding-agent/capability/rule";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -12,6 +17,14 @@ import type { LoadExtensionsResult } from "@oh-my-pi/pi-coding-agent/extensibili
 import type { CreateAgentSessionResult } from "@oh-my-pi/pi-coding-agent/sdk";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import {
+	type SubagentEventPayload,
+	type SubagentLifecyclePayload,
+	type SubagentProgressPayload,
+	TASK_SUBAGENT_EVENT_CHANNEL,
+	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+	TASK_SUBAGENT_PROGRESS_CHANNEL,
+} from "@oh-my-pi/pi-coding-agent/task";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
@@ -89,9 +102,12 @@ const baseOptions = {
 	enableLsp: false,
 };
 
+const tempDirs: string[] = [];
+
 describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
+		await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 	});
 
 	it("forwards rules, preloadedExtensionPaths, and preloadedCustomToolPaths to createAgentSession", async () => {
@@ -131,5 +147,55 @@ describe("runSubprocess parent-discovery pass-through (issue #2190)", () => {
 		expect(forwarded?.rules).toBeUndefined();
 		expect(forwarded?.preloadedExtensionPaths).toBeUndefined();
 		expect(forwarded?.preloadedCustomToolPaths).toBeUndefined();
+	});
+
+	it("stamps and admits only the explicit direct-child control generation", async () => {
+		const session = yieldEmittingSession();
+		vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue(createSessionResult(session));
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-control-metadata-"));
+		tempDirs.push(artifactsDir);
+		const eventBus = new EventBus();
+		const lifecycle: SubagentLifecyclePayload[] = [];
+		const progress: SubagentProgressPayload[] = [];
+		const events: SubagentEventPayload[] = [];
+		eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, payload => lifecycle.push(payload as SubagentLifecyclePayload));
+		eventBus.on(TASK_SUBAGENT_PROGRESS_CHANNEL, payload => progress.push(payload as SubagentProgressPayload));
+		eventBus.on(TASK_SUBAGENT_EVENT_CHANNEL, payload => events.push(payload as SubagentEventPayload));
+		const admitted: ChildControlTarget[] = [];
+		const directChildControl: DirectChildControlAdmission = {
+			controlGeneration: "generation-explicit",
+			admit: target => {
+				admitted.push(target);
+				return true;
+			},
+			markTerminal: () => {},
+		};
+
+		await runSubprocess({
+			...baseOptions,
+			id: "subagent-control-metadata",
+			artifactsDir,
+			eventBus,
+			directChildControl,
+		});
+
+		const expectedTarget = {
+			controlGeneration: "generation-explicit",
+			id: "subagent-control-metadata",
+			sessionFile: path.join(artifactsDir, "subagent-control-metadata.jsonl"),
+		};
+		expect(admitted).toEqual([expectedTarget]);
+		expect(lifecycle.map(payload => payload.controlGeneration)).toEqual([
+			"generation-explicit",
+			"generation-explicit",
+		]);
+		expect(progress[0]).toMatchObject({
+			controlGeneration: "generation-explicit",
+			sessionFile: expectedTarget.sessionFile,
+		});
+		expect(events[0]).toMatchObject({
+			controlGeneration: "generation-explicit",
+			sessionFile: expectedTarget.sessionFile,
+		});
 	});
 });

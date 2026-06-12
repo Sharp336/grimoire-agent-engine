@@ -25,6 +25,12 @@ smoke_cli() {
    # probe for #1011/#1027 worker loading and for npm/compiled distributions
    # missing the dashboard assets that `stats --summary` never touches.
    XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" --smoke-test
+   # Loads the hidden pane command from source, npm bundle, and compiled binary.
+   # A missing one-shot locator must fail closed before constructing a TUI.
+   if XDG_DATA_HOME="$runtime_dir/xdg" HOME="$runtime_dir/home" "$omp_bin" __agent-pane smoke-child "$runtime_dir/missing-handoff.json"; then
+      echo "Agent pane unexpectedly accepted a missing handoff"
+      exit 1
+   fi
 }
 
 find_tarball() {

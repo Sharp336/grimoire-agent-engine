@@ -1,7 +1,5 @@
-import * as fs from "node:fs/promises";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { readCompleteEntryPage } from "../../agent-control/transcript";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-manager";
-import { parseSessionEntries } from "../../session/session-manager";
 import {
 	type AgentProgress,
 	type SubagentEventPayload,
@@ -66,41 +64,14 @@ function addPruned(set: Set<string>, value: string, maxSize: number): void {
 }
 
 export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 0): Promise<RpcSubagentMessagesResult> {
-	let startByte = Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0;
-	const file = Bun.file(sessionFile);
-	let size: number;
-	try {
-		({ size } = await fs.stat(sessionFile));
-	} catch (err) {
-		if (!isEnoent(err)) throw err;
-		return {
-			sessionFile,
-			fromByte: startByte,
-			nextByte: startByte,
-			reset: false,
-			entries: [],
-			messages: [],
-		};
-	}
-	let reset = false;
-	if (startByte > size) {
-		startByte = 0;
-		reset = true;
-	}
-
-	const text = startByte >= size ? "" : await file.slice(startByte).text();
-	const lastNewline = text.lastIndexOf("\n");
-	const completeText = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
-	const entries = completeText.length > 0 ? parseSessionEntries(completeText) : [];
-	const nextByte = startByte + Buffer.byteLength(completeText, "utf8");
-
+	const page = await readCompleteEntryPage(sessionFile, { fromByte });
 	return {
 		sessionFile,
-		fromByte: startByte,
-		nextByte,
-		reset,
-		entries,
-		messages: entries.filter(isSessionMessageEntry).map(entry => entry.message),
+		fromByte: page.fromByte,
+		nextByte: page.nextByte,
+		reset: page.reset,
+		entries: page.entries,
+		messages: page.entries.filter(isSessionMessageEntry).map(entry => entry.message),
 	};
 }
 

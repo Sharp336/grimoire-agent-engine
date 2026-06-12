@@ -12,6 +12,10 @@
  * test/task/task-schema.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type {
+	DirectChildControlAdmission,
+	DirectChildControlSource,
+} from "@oh-my-pi/pi-coding-agent/agent-control/control";
 import { AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -186,5 +190,68 @@ describe("task spawn routing", () => {
 		await secondJob.promise;
 		expect(firstJob.status).toBe("completed");
 		expect(secondJob.status).toBe("completed");
+	});
+
+	it("supplies child control only when the trusted task host explicitly provides it", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const runSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => makeResult(options.id));
+		const admission: DirectChildControlAdmission = {
+			controlGeneration: "trusted-generation",
+			admit: () => true,
+			markTerminal: () => {},
+		};
+		const source: DirectChildControlSource = { capture: () => admission };
+		const explicit = await TaskTool.create(createSession({ settings: { "async.enabled": false } }), source);
+		const ordinary = await TaskTool.create(createSession({ settings: { "async.enabled": false } }));
+
+		await explicit.execute("tc-explicit", { agent: "task", id: "Explicit", assignment: "Work." } as TaskParams);
+		await ordinary.execute("tc-ordinary", { agent: "task", id: "Ordinary", assignment: "Work." } as TaskParams);
+
+		expect(runSpy.mock.calls[0]?.[0].directChildControl).toBe(admission);
+		expect(runSpy.mock.calls[1]?.[0].directChildControl).toBeUndefined();
+	});
+
+	it("keeps the captured generation when an async child starts after the source switches", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const gate = deferred();
+		let received: DirectChildControlAdmission | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			received = options.directChildControl;
+			await gate.promise;
+			return makeResult(options.id);
+		});
+		const admissionA: DirectChildControlAdmission = {
+			controlGeneration: "generation-a",
+			admit: () => true,
+			markTerminal: () => {},
+		};
+		const admissionB: DirectChildControlAdmission = {
+			controlGeneration: "generation-b",
+			admit: () => true,
+			markTerminal: () => {},
+		};
+		let current = admissionA;
+		const source: DirectChildControlSource = { capture: () => current };
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, settings: { "async.enabled": true } }), source);
+
+		const result = await tool.execute("tc-captured", {
+			agent: "task",
+			id: "Captured",
+			assignment: "Work later.",
+		} as TaskParams);
+		current = admissionB;
+		gate.resolve();
+		await manager.getJob(result.details!.async!.jobId)!.promise;
+
+		expect(received).toBe(admissionA);
 	});
 });

@@ -20,6 +20,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { bindAgentControlExtensionHost, LazyAgentControlHost } from "./agent-control/server";
 import { reset as resetCapabilities } from "./capability";
 import type { Args } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -56,6 +57,8 @@ import type { PrintModeOptions } from "./modes/print-mode";
 import { CURRENT_SETUP_VERSION } from "./modes/setup-version";
 import { initTheme, stopThemeWatcher } from "./modes/theme/theme";
 import type { SubmittedUserInput } from "./modes/types";
+import { AgentLifecycleManager } from "./registry/agent-lifecycle";
+import { AgentRegistry } from "./registry/agent-registry";
 import {
 	type CreateAgentSessionOptions,
 	type CreateAgentSessionResult,
@@ -1190,6 +1193,12 @@ export async function runRootCommand(
 		// file — and the same result is handed to createAgentSession via
 		// `preloadedExtensions` so the discovery work is not repeated.
 		const eventBus = new EventBus();
+		const agentControlHost = isInteractive
+			? new LazyAgentControlHost(eventBus, AgentRegistry.global(), () => AgentLifecycleManager.global())
+			: undefined;
+		const unbindAgentControlHost = agentControlHost
+			? bindAgentControlExtensionHost(eventBus, agentControlHost)
+			: undefined;
 		const extensionsResult = await loadSessionExtensions(sessionOptions, cwd, settingsInstance, eventBus);
 		const extensionFlagSink: ExtensionFlagSink = {
 			getFlags: () => ExtensionRunner.aggregateFlags(extensionsResult.extensions),
@@ -1220,11 +1229,21 @@ export async function runRootCommand(
 			version: VERSION,
 		});
 
-		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = await createSession({
-			...sessionOptions,
-			eventBus,
-			preloadedExtensions: extensionsResult,
-		});
+		let createdSession: CreateAgentSessionResult;
+		try {
+			createdSession = await createSession({
+				...sessionOptions,
+				eventBus,
+				preloadedExtensions: extensionsResult,
+				directChildControlSource: agentControlHost,
+			});
+		} catch (error) {
+			unbindAgentControlHost?.();
+			await agentControlHost?.close();
+			throw error;
+		}
+		const { session, setToolUIContext, modelFallbackMessage, lspServers, mcpManager } = createdSession;
+		agentControlHost?.bindSession(session);
 		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
 			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
 		}
@@ -1282,23 +1301,28 @@ export async function runRootCommand(
 
 			stopStartupWatchdog();
 			logger.endTiming();
-			await runInteractiveMode(
-				session,
-				VERSION,
-				changelogMarkdown,
-				notifs,
-				versionCheckPromise,
-				initialArgs.messages,
-				setToolUIContext,
-				lspServers,
-				mcpManager,
-				Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork),
-				deps.forceSetupWizard === true,
-				eventBus,
-				initialMessage,
-				initialImages,
-				titleSystemPrompt,
-			);
+			try {
+				await runInteractiveMode(
+					session,
+					VERSION,
+					changelogMarkdown,
+					notifs,
+					versionCheckPromise,
+					initialArgs.messages,
+					setToolUIContext,
+					lspServers,
+					mcpManager,
+					Boolean(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork),
+					deps.forceSetupWizard === true,
+					eventBus,
+					initialMessage,
+					initialImages,
+					titleSystemPrompt,
+				);
+			} finally {
+				unbindAgentControlHost?.();
+				await agentControlHost?.close();
+			}
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
 			stopStartupWatchdog();

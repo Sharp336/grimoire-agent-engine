@@ -9,6 +9,7 @@ import type { AgentEvent, AgentIdentity, AgentTelemetryConfig, ThinkingLevel } f
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import type { ControlGeneration, DirectChildControlAdmission } from "../agent-control/control";
 import type { Rule } from "../capability/rule";
 import { ModelRegistry } from "../config/model-registry";
 import { resolveModelOverrideWithAuthFallback } from "../config/model-resolver";
@@ -219,6 +220,8 @@ export interface ExecutorOptions {
 	persistArtifacts?: boolean;
 	artifactsDir?: string;
 	eventBus?: EventBus;
+	/** Trusted direct-child admission supplied by the owning top-level task host. */
+	directChildControl?: DirectChildControlAdmission;
 	contextFiles?: ContextFileEntry[];
 	skills?: Skill[];
 	promptTemplates?: PromptTemplate[];
@@ -657,6 +660,7 @@ interface RunMonitorArgs {
 	eventBus?: EventBus;
 	parentToolCallId?: string;
 	sessionFile?: string;
+	controlGeneration?: ControlGeneration;
 	/** Soft assistant-request budget; 0 disables the guard. */
 	softRequestBudget: number;
 	/** Wall-clock cap in ms; 0 disables the timer. */
@@ -839,6 +843,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 				assignment,
 				progress: { ...progress },
 				sessionFile: args.sessionFile,
+				controlGeneration: args.controlGeneration,
 			});
 		}
 		lastProgressEmitMs = Date.now();
@@ -923,6 +928,8 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		args.eventBus.emit(TASK_SUBAGENT_EVENT_CHANNEL, {
 			id,
 			event,
+			sessionFile: args.sessionFile,
+			controlGeneration: args.controlGeneration,
 		});
 	};
 
@@ -1414,6 +1421,7 @@ interface FinalizeRunArgs {
 	eventBus?: EventBus;
 	parentToolCallId?: string;
 	sessionFile?: string;
+	controlGeneration?: ControlGeneration;
 	startTime: number;
 }
 
@@ -1515,6 +1523,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 			description: args.description,
 			status: progress.status as "completed" | "failed" | "aborted",
 			sessionFile: args.sessionFile,
+			controlGeneration: args.controlGeneration,
 			index,
 		});
 	}
@@ -1678,6 +1687,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		eventBus: options.eventBus,
 		parentToolCallId: options.parentToolCallId,
 		sessionFile: subtaskSessionFile,
+		controlGeneration: options.directChildControl?.controlGeneration,
 		softRequestBudget,
 		maxRuntimeMs,
 	});
@@ -1915,6 +1925,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				};
 			}
 
+			if (subtaskSessionFile && options.directChildControl) {
+				options.directChildControl.admit({
+					controlGeneration: options.directChildControl.controlGeneration,
+					id,
+					sessionFile: subtaskSessionFile,
+				});
+			}
+
 			// Emit lifecycle start event
 			if (options.eventBus) {
 				options.eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
@@ -1925,6 +1943,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					description: options.description,
 					status: "started",
 					sessionFile: subtaskSessionFile,
+					controlGeneration: options.directChildControl?.controlGeneration,
 					index,
 				});
 			}
@@ -2070,6 +2089,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				if (aborted) {
 					// Hard abort (caller signal / wall-clock / budget): terminal teardown.
 					registry.setStatus(id, "aborted");
+					if (subtaskSessionFile && options.directChildControl) {
+						options.directChildControl.markTerminal({
+							controlGeneration: options.directChildControl.controlGeneration,
+							id,
+							sessionFile: subtaskSessionFile,
+						});
+					}
 					try {
 						await untilAborted(AbortSignal.timeout(5000), () => session.dispose());
 					} catch {
@@ -2128,6 +2154,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		eventBus: options.eventBus,
 		parentToolCallId: options.parentToolCallId,
 		sessionFile: subtaskSessionFile,
+		controlGeneration: options.directChildControl?.controlGeneration,
 		startTime,
 	});
 }

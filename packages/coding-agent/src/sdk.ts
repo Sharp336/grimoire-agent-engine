@@ -35,6 +35,7 @@ import {
 	Snowflake,
 } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import type { DirectChildControlSource } from "./agent-control/control";
 import { type AsyncJob, AsyncJobManager } from "./async";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
@@ -423,6 +424,8 @@ export interface CreateAgentSessionOptions {
 	agentDisplayName?: string;
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
 	agentRegistry?: AgentRegistry;
+	/** Top-level interactive-only lazy direct-child control source. */
+	directChildControlSource?: DirectChildControlSource;
 	/** Parent task ID prefix for nested artifact naming (e.g., "Extensions") */
 	parentTaskPrefix?: string;
 	/** Inherited eval executor session id for subagents sharing parent eval state. */
@@ -1411,6 +1414,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
+			directChildControlSource: options.directChildControlSource,
 			getSessionSpawns: () => options.spawns ?? "*",
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,

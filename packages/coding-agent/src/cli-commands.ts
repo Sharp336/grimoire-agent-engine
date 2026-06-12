@@ -19,6 +19,7 @@ export const commands: CommandEntry[] = [
 	{ name: "commit", load: () => import("./commands/commit").then(m => m.default) },
 	{ name: "completions", load: () => import("./commands/completions").then(m => m.default) },
 	{ name: "__complete", load: () => import("./commands/complete").then(m => m.default) },
+	{ name: "__agent-pane", load: () => import("./commands/agent-pane").then(m => m.default) },
 	{ name: "config", load: () => import("./commands/config").then(m => m.default) },
 	{ name: "dry-balance", load: () => import("./commands/dry-balance").then(m => m.default) },
 	{ name: "grep", load: () => import("./commands/grep").then(m => m.default) },
