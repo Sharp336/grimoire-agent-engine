@@ -15,6 +15,7 @@
 - `/context` (TUI panel and ACP report) now shows estimated snapcompact wire savings when `snapcompact.systemPrompt` or `snapcompact.toolResults` is enabled — per-feature text → frames token deltas, the reason a swap does not apply (savings margin, image budget, or text-only model), and the estimated size of the next request. The estimate and the live provider-request transform share one planner (`planInlineSwaps`) so displayed numbers cannot drift from wire behavior.
 - Added `/debug dump-request` and `/debug next-request` as aliases for `/debug dump-next-request` when arming a one-shot AI provider request dump
 - Added `/debug dump-next-request <path>` to dump the next AI provider HTTP request JSON to a chosen file.
+- Added `tools.compactProviderDefinitions` (`off` | `description` | `schema`) to shrink tool definitions on provider API requests only: short first-line summaries and optional removal of nested JSON Schema property descriptions. `/context` and the status line estimate **System tools** using the same compacted wire shape; in-session tools and `/tools` remain full-fidelity.
 
 ### Changed
 

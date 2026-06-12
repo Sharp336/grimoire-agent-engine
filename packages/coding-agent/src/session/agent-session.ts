@@ -200,9 +200,10 @@ import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" w
 import {
 	deobfuscateSessionContext,
 	obfuscateProviderContext,
-	obfuscateProviderTools,
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
+import { compactProviderContext } from "../tools/compact-provider-tools";
+import { finalizeProviderToolDefinitions } from "../tools/finalize-provider-tools";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
 import {
 	AUTO_THINKING,
@@ -3275,6 +3276,10 @@ export class AgentSession {
 	/** Current model (may be undefined if not yet selected) */
 	get model(): Model | undefined {
 		return this.agent.state.model;
+	}
+
+	get obfuscator(): SecretObfuscator | undefined {
+		return this.#obfuscator;
 	}
 
 	/** Effective thinking level applied to the agent (the resolved level when `auto`). */
@@ -6608,7 +6613,10 @@ export class AgentSession {
 				this.#modelRegistry.resolver(model, this.sessionId),
 				{
 					systemPrompt: this.#obfuscateForProvider(this.#baseSystemPrompt),
-					tools: obfuscateProviderTools(this.#obfuscator, this.agent.state.tools),
+					tools: finalizeProviderToolDefinitions(this.agent.state.tools, {
+						obfuscator: this.#obfuscator,
+						compactMode: this.settings.get("tools.compactProviderDefinitions"),
+					}),
 					customInstructions: this.#obfuscateTextForProvider(customInstructions),
 					convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 					initiatorOverride: "agent",
@@ -9378,7 +9386,10 @@ export class AgentSession {
 		let providerReplyText = "";
 		let emittedReplyText = "";
 		let assistantMessage: AssistantMessage | undefined;
-		const stream = streamSimple(model, obfuscateProviderContext(this.#obfuscator, context), options);
+		let ephemeralContext = obfuscateProviderContext(this.#obfuscator, context);
+		const compactMode = this.settings.get("tools.compactProviderDefinitions");
+		if (compactMode !== "off") ephemeralContext = compactProviderContext(ephemeralContext, compactMode);
+		const stream = streamSimple(model, ephemeralContext, options);
 		for await (const event of stream) {
 			if (event.type === "text_delta") {
 				providerReplyText += event.delta;

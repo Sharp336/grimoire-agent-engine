@@ -817,6 +817,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tools.compactProviderDefinitions": {
+		type: "enum",
+		values: ["off", "description", "schema"] as const,
+		default: "off",
+		ui: {
+			tab: "tools",
+			group: "Discovery & MCP",
+			label: "Compact Provider Tool Definitions",
+			description:
+				"Shrink tool name/description/schema sent to the model API (not the in-session tool list). 'description' keeps the first summary line; 'schema' also drops nested JSON Schema property descriptions.",
+		},
+	},
+
 	personality: {
 		type: "enum",
 		values: ["default", "friendly", "pragmatic", "none"] as const,

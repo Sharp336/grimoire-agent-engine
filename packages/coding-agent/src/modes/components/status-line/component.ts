@@ -608,7 +608,8 @@ export class StatusLineComponent implements Component {
 		const tools = this.session.agent?.state?.tools ?? [];
 		const skills = this.session.skills ?? [];
 		const modelId = this.session.model?.id ?? "";
-		return `${modelId}|${sp.length}:${sp[0]?.length ?? 0}|${tools.length}|${skills.length}`;
+		const compactMode = this.session.settings.get("tools.compactProviderDefinitions");
+		return `${modelId}|${sp.length}:${sp[0]?.length ?? 0}|${tools.length}|${skills.length}|${compactMode}`;
 	}
 
 	#buildSegmentContext(

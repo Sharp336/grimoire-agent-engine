@@ -181,6 +181,7 @@ import {
 	warmupLspServers,
 } from "./tools";
 import { ToolContextStore } from "./tools/context";
+import { compactProviderContext } from "./tools/compact-provider-tools";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { queueResolveHandler } from "./tools/resolve";
@@ -2170,11 +2171,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 						renderToolResults: settings.get("snapcompact.toolResults"),
 					})
 				: undefined;
+		const compactProviderDefinitions = settings.get("tools.compactProviderDefinitions");
 		const transformProviderContext =
-			obfuscator || snapcompactInline
+			obfuscator || snapcompactInline || compactProviderDefinitions !== "off"
 				? (context: Context, transformModel: Model): Context => {
 						let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
 						if (snapcompactInline) transformed = snapcompactInline.transform(transformed, transformModel);
+						if (compactProviderDefinitions !== "off") {
+							transformed = compactProviderContext(transformed, compactProviderDefinitions);
+						}
 						return transformed;
 					}
 				: undefined;
