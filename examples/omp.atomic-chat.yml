@@ -1,0 +1,10 @@
+# Example ~/.omp/agent/models.yml snippet for Atomic Chat.
+# Copy the providers block into your models config, or rely on implicit discovery
+# when Atomic Chat's Local API Server is running on the default port.
+providers:
+  atomic-chat:
+    baseUrl: http://127.0.0.1:1337/v1
+    api: openai-completions
+    auth: none
+    discovery:
+      type: openai-models-list

@@ -304,6 +304,43 @@ Runtime discovery probes LiteLLM management metadata in order: `GET /model_group
 
 If every metadata route is unavailable, discovery falls back to the OpenAI-compatible `GET /models` list. A forbidden or failed metadata request is logged once with its endpoint and status; `404` is treated as an absent route. Rich metadata maps per-model context and capability fields, while bare fallback ids are enriched against bundled reference metadata when available. Models absent from the bundled catalog can therefore have unknown context and pricing after fallback.
 
+### Implicit Atomic Chat discovery
+
+If `atomic-chat` is not explicitly configured, registry adds an implicit discoverable provider:
+
+- provider: `atomic-chat`
+- api: `openai-completions`
+- base URL: `ATOMIC_CHAT_BASE_URL` or `http://127.0.0.1:1337/v1`
+- auth mode: keyless (`auth: none` behavior)
+
+Runtime discovery fetches models (`GET /v1/models`) from [Atomic Chat](https://atomic.chat)'s Local API Server.
+
+Quick start:
+
+1. Install Atomic Chat and download at least one model.
+2. Enable **Settings → Local API Server** (default port `1337`).
+3. Run `omp` and pick a model under the **atomic-chat** provider tab (`/model`).
+
+Environment variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `ATOMIC_CHAT_BASE_URL` | Override discovery/chat base URL (default `http://127.0.0.1:1337/v1`) |
+| `ATOMIC_CHAT_API_KEY` | Optional bearer token when Atomic Chat is behind auth or a reverse proxy |
+
+Explicit `models.yml` override (disables implicit discovery for this provider):
+
+```yaml
+providers:
+  atomic-chat:
+    baseUrl: http://127.0.0.1:1337/v1
+    api: openai-completions
+    auth: none
+    discovery:
+      type: openai-models-list
+```
+
+
 ### Explicit provider discovery
 
 You can configure discovery yourself:
