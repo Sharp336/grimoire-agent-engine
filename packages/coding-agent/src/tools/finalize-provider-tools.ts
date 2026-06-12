@@ -1,10 +1,7 @@
 import type { Tool } from "@oh-my-pi/pi-ai";
 import type { SecretObfuscator } from "../secrets/obfuscator";
 import { obfuscateProviderTools } from "../secrets/obfuscator";
-import {
-	type CompactProviderToolDefinitionsMode,
-	compactProviderTools,
-} from "./compact-provider-tools";
+import { type CompactProviderToolDefinitionsMode, compactProviderTools } from "./compact-provider-tools";
 
 /** Provider-visible tool definitions (obfuscation + optional compaction). Session tools stay unchanged. */
 export function finalizeProviderToolDefinitions(

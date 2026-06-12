@@ -1,16 +1,13 @@
 import type { Context, Tool } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
+import { stamp } from "@oh-my-pi/pi-ai/utils/schema/stamps";
 import type { SettingValue } from "../config/settings-schema";
 
 export type CompactProviderToolDefinitionsMode = SettingValue<"tools.compactProviderDefinitions">;
 
 const DEFAULT_DESCRIPTION_MAX = 280;
 
-function dropDescriptionField(schema: unknown): unknown {
-	if (!isPlainObject(schema) || !("description" in schema)) return schema;
-	const { description: _d, ...rest } = schema;
-	return rest;
-}
+const kCompactToolByMode = Symbol("pi.coding-agent.compactProviderToolByMode");
 
 /** First substantive line of a tool description (drops empty lines and markdown headings). */
 export function compactToolDescription(description: string, maxLen = DEFAULT_DESCRIPTION_MAX): string {
@@ -48,23 +45,23 @@ export function stripNestedSchemaDescriptions(schema: unknown): unknown {
 		if (key === "properties" && isPlainObject(value)) {
 			const props: Record<string, unknown> = {};
 			for (const [propName, propSchema] of Object.entries(value)) {
-				props[propName] = dropDescriptionField(stripNestedSchemaDescriptions(propSchema));
+				props[propName] = stripNestedSchemaDescriptions(propSchema);
 			}
 			out.properties = props;
 			continue;
 		}
 		if (key === "items") {
-			out.items = dropDescriptionField(stripNestedSchemaDescriptions(value));
+			out.items = stripNestedSchemaDescriptions(value);
 			continue;
 		}
 		if (key === "additionalProperties" && isPlainObject(value)) {
-			out.additionalProperties = dropDescriptionField(stripNestedSchemaDescriptions(value));
+			out.additionalProperties = stripNestedSchemaDescriptions(value);
 			continue;
 		}
 		if (key === "patternProperties" && isPlainObject(value)) {
 			const mapped: Record<string, unknown> = {};
 			for (const [pattern, sub] of Object.entries(value)) {
-				mapped[pattern] = dropDescriptionField(stripNestedSchemaDescriptions(sub));
+				mapped[pattern] = stripNestedSchemaDescriptions(sub);
 			}
 			out.patternProperties = mapped;
 			continue;
@@ -72,7 +69,7 @@ export function stripNestedSchemaDescriptions(schema: unknown): unknown {
 		if (key === "definitions" && isPlainObject(value)) {
 			const mapped: Record<string, unknown> = {};
 			for (const [name, sub] of Object.entries(value)) {
-				mapped[name] = dropDescriptionField(stripNestedSchemaDescriptions(sub));
+				mapped[name] = stripNestedSchemaDescriptions(sub);
 			}
 			out.definitions = mapped;
 			continue;
@@ -80,7 +77,7 @@ export function stripNestedSchemaDescriptions(schema: unknown): unknown {
 		if (key === "$defs" && isPlainObject(value)) {
 			const mapped: Record<string, unknown> = {};
 			for (const [name, sub] of Object.entries(value)) {
-				mapped[name] = dropDescriptionField(stripNestedSchemaDescriptions(sub));
+				mapped[name] = stripNestedSchemaDescriptions(sub);
 			}
 			out.$defs = mapped;
 			continue;
@@ -90,9 +87,7 @@ export function stripNestedSchemaDescriptions(schema: unknown): unknown {
 	return out;
 }
 
-function compactWireTool(tool: Tool, mode: CompactProviderToolDefinitionsMode): Tool {
-	if (mode === "off") return tool;
-
+function computeCompactWireTool(tool: Tool, mode: CompactProviderToolDefinitionsMode): Tool {
 	let description = tool.description;
 	if (mode === "description" || mode === "schema") {
 		description = compactToolDescription(description);
@@ -111,6 +106,20 @@ function compactWireTool(tool: Tool, mode: CompactProviderToolDefinitionsMode): 
 	};
 }
 
+function compactWireTool(tool: Tool, mode: CompactProviderToolDefinitionsMode): Tool {
+	if (mode === "off") return tool;
+	const cache = stamp(
+		tool as object,
+		kCompactToolByMode,
+		(): Partial<Record<CompactProviderToolDefinitionsMode, Tool>> => ({}),
+	);
+	const hit = cache[mode];
+	if (hit) return hit;
+	const compacted = computeCompactWireTool(tool, mode);
+	cache[mode] = compacted;
+	return compacted;
+}
+
 /** Shrink tool definitions for provider requests only (session tools stay full-fidelity). */
 export function compactProviderTools(
 	tools: Tool[] | undefined,
@@ -121,10 +130,7 @@ export function compactProviderTools(
 }
 
 /** Apply compaction to an outbound provider context. */
-export function compactProviderContext(
-	context: Context,
-	mode: CompactProviderToolDefinitionsMode,
-): Context {
+export function compactProviderContext(context: Context, mode: CompactProviderToolDefinitionsMode): Context {
 	if (mode === "off" || !context.tools) return context;
 	return {
 		...context,

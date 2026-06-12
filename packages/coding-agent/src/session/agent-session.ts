@@ -79,6 +79,7 @@ import type {
 	ServiceTier,
 	SimpleStreamOptions,
 	TextContent,
+	Tool,
 	ToolCall,
 	ToolChoice,
 	Usage,
@@ -197,13 +198,7 @@ import planModeToolDecisionReminderPrompt from "../prompts/system/plan-mode-tool
 };
 import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { type: "text" };
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
-import {
-	deobfuscateSessionContext,
-	obfuscateProviderContext,
-	type SecretObfuscator,
-} from "../secrets/obfuscator";
-import { compactProviderContext } from "../tools/compact-provider-tools";
-import { finalizeProviderToolDefinitions } from "../tools/finalize-provider-tools";
+import { deobfuscateSessionContext, obfuscateProviderContext, type SecretObfuscator } from "../secrets/obfuscator";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
 import {
 	AUTO_THINKING,
@@ -227,6 +222,8 @@ import {
 } from "../tool-discovery/tool-index";
 import { assertEditableFile } from "../tools/auto-generated-guard";
 import type { CheckpointState } from "../tools/checkpoint";
+import { compactProviderContext } from "../tools/compact-provider-tools";
+import { finalizeProviderToolDefinitions } from "../tools/finalize-provider-tools";
 import { outputMeta } from "../tools/output-meta";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { isAutoQaEnabled } from "../tools/report-tool-issue";
@@ -3278,8 +3275,12 @@ export class AgentSession {
 		return this.agent.state.model;
 	}
 
-	get obfuscator(): SecretObfuscator | undefined {
-		return this.#obfuscator;
+	/** Provider-visible tool definitions for context estimates and side requests. */
+	finalizeProviderToolsForContext(tools: Tool[] | undefined): Tool[] | undefined {
+		return finalizeProviderToolDefinitions(tools, {
+			obfuscator: this.#obfuscator,
+			compactMode: this.settings.get("tools.compactProviderDefinitions"),
+		});
 	}
 
 	/** Effective thinking level applied to the agent (the resolved level when `auto`). */
@@ -6613,10 +6614,7 @@ export class AgentSession {
 				this.#modelRegistry.resolver(model, this.sessionId),
 				{
 					systemPrompt: this.#obfuscateForProvider(this.#baseSystemPrompt),
-					tools: finalizeProviderToolDefinitions(this.agent.state.tools, {
-						obfuscator: this.#obfuscator,
-						compactMode: this.settings.get("tools.compactProviderDefinitions"),
-					}),
+					tools: this.finalizeProviderToolsForContext(this.agent.state.tools),
 					customInstructions: this.#obfuscateTextForProvider(customInstructions),
 					convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 					initiatorOverride: "agent",

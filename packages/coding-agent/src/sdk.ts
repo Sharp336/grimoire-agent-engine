@@ -180,8 +180,8 @@ import {
 	WriteTool,
 	warmupLspServers,
 } from "./tools";
-import { ToolContextStore } from "./tools/context";
 import { compactProviderContext } from "./tools/compact-provider-tools";
+import { ToolContextStore } from "./tools/context";
 import { getImageGenTools } from "./tools/image-gen";
 import { wrapToolWithMetaNotice } from "./tools/output-meta";
 import { queueResolveHandler } from "./tools/resolve";

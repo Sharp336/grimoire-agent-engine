@@ -826,7 +826,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "Compact Provider Tool Definitions",
 			description:
-				"Shrink tool name/description/schema sent to the model API (not the in-session tool list). 'description' keeps the first summary line; 'schema' also drops nested JSON Schema property descriptions.",
+				"Shrink tool description and JSON Schema sent to the model API (not the in-session tool list). 'description' keeps the first summary line; 'schema' also drops nested JSON Schema property descriptions.",
 		},
 	},
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { Tool } from "@oh-my-pi/pi-ai";
+import type { Context, Tool } from "@oh-my-pi/pi-ai";
 import { z } from "@oh-my-pi/pi-ai";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import {
@@ -73,11 +73,32 @@ describe("compactProviderTools", () => {
 		const props = (wire as { properties?: Record<string, { description?: string }> }).properties;
 		expect(props?.path?.description).toBeUndefined();
 	});
+
+	it("reuses compacted wire tool per mode on repeated calls", () => {
+		const first = compactProviderTools([tool], "description")![0]!;
+		const second = compactProviderTools([tool], "description")![0]!;
+		expect(second).toBe(first);
+	});
 });
 
 describe("compactProviderContext", () => {
 	it("leaves context unchanged when mode is off", () => {
 		const ctx = { systemPrompt: ["hi"], messages: [], tools: [{ name: "t", description: "d", parameters: {} }] };
 		expect(compactProviderContext(ctx, "off")).toBe(ctx);
+	});
+
+	it("compacts tools and preserves other context fields in description mode", () => {
+		const longDesc = `# Read\n\nReads files.\n\n${"detail ".repeat(50)}`;
+		const ctx: Context = {
+			systemPrompt: ["hi"],
+			messages: [{ role: "user", content: "ping", timestamp: 0 }],
+			tools: [{ name: "read", description: longDesc, parameters: {} }],
+		};
+		const out = compactProviderContext(ctx, "description");
+		expect(out).not.toBe(ctx);
+		expect(out.systemPrompt).toBe(ctx.systemPrompt);
+		expect(out.messages).toBe(ctx.messages);
+		expect(out.tools?.[0]?.description).toBe("Reads files.");
+		expect(out.tools?.[0]?.description).not.toBe(longDesc);
 	});
 });

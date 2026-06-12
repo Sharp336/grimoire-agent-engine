@@ -8,7 +8,6 @@ import type { Skill } from "../../extensibility/skills";
 import type { AgentSession } from "../../session/agent-session";
 import { estimateInlineSavings, type SnapcompactSavingsEstimate } from "../../session/snapcompact-inline";
 import type { Tool } from "../../tools";
-import { finalizeProviderToolDefinitions } from "../../tools/finalize-provider-tools";
 import type { theme as Theme } from "../theme/theme";
 
 const GRID_COLS = 20;
@@ -85,10 +84,7 @@ export function estimateToolSchemaTokens(
  */
 export function computeNonMessageTokens(session: AgentSession): number {
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
-	const providerTools = finalizeProviderToolDefinitions(session.agent?.state?.tools ?? EMPTY_TOOLS, {
-		obfuscator: session.obfuscator,
-		compactMode: session.settings.get("tools.compactProviderDefinitions"),
-	});
+	const providerTools = session.finalizeProviderToolsForContext(session.agent?.state?.tools ?? EMPTY_TOOLS);
 	return countTokens(systemPromptParts) + estimateToolSchemaTokens(providerTools ?? []);
 }
 
@@ -105,10 +101,7 @@ function computeNonMessageBreakdown(session: AgentSession): {
 	systemPromptTokens: number;
 } {
 	const skillsTokens = estimateSkillsTokens(session.skills ?? []);
-	const providerTools = finalizeProviderToolDefinitions(session.agent?.state?.tools ?? [], {
-		obfuscator: session.obfuscator,
-		compactMode: session.settings.get("tools.compactProviderDefinitions"),
-	});
+	const providerTools = session.finalizeProviderToolsForContext(session.agent?.state?.tools ?? []);
 	const toolsTokens = estimateToolSchemaTokens(providerTools ?? []);
 	const systemPromptParts = session.systemPrompt ?? [];
 	const systemContextTokens = countTokens(systemPromptParts.slice(1));
