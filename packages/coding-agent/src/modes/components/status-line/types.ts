@@ -45,6 +45,8 @@ export type RGB = readonly [number, number, number];
 
 export interface SegmentContext {
 	session: AgentSession;
+	/** Focused subagent id while the view is proxied at its session, undefined otherwise. */
+	focusedAgentId?: string | undefined;
 	width: number;
 	options: StatusLineSegmentOptions;
 	planMode: {
@@ -69,7 +71,8 @@ export interface SegmentContext {
 		cost: number;
 		tokensPerSecond: number | null;
 	};
-	contextPercent: number;
+	/** Context usage percent, or null when unknown (e.g. right after compaction). */
+	contextPercent: number | null;
 	contextWindow: number;
 	autoCompactEnabled: boolean;
 	subagentCount: number;

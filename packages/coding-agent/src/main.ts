@@ -25,7 +25,6 @@ import type { Args } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
-import { runListModelsCommand } from "./cli/list-models";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { findConfigFile } from "./config";
@@ -244,6 +243,22 @@ export interface InteractiveModeNotify {
 	message: string;
 }
 
+export function buildModelScopeNotification(
+	scopedModelsForDisplay: readonly Pick<ScopedModel, "model" | "thinkingLevel" | "explicitThinkingLevel">[],
+	startupQuiet: boolean,
+): InteractiveModeNotify | null {
+	if (startupQuiet || scopedModelsForDisplay.length === 0) {
+		return null;
+	}
+	const modelList = scopedModelsForDisplay
+		.map(scopedModel => {
+			const thinkingStr =
+				scopedModel.explicitThinkingLevel && scopedModel.thinkingLevel ? `:${scopedModel.thinkingLevel}` : "";
+			return `${scopedModel.model.id}${thinkingStr}`;
+		})
+		.join(", ");
+	return { kind: "info", message: `Model scope: ${modelList} (Ctrl+P to cycle)` };
+}
 export async function submitInteractiveInput(
 	mode: Pick<
 		InteractiveMode,
@@ -904,30 +919,6 @@ export async function runRootCommand(
 		process.exit(0);
 	}
 
-	if (parsedArgs.listModels !== undefined) {
-		const settingsInstance = await logger.time("settings:init:list-models", Settings.init, {
-			cwd: getProjectDir(),
-			configFiles: parsedArgs.config,
-		});
-		await modelRegistry.refresh("online");
-		const cliExtensionPaths = parsedArgs.noExtensions
-			? []
-			: [...(parsedArgs.extensions ?? []), ...(parsedArgs.hooks ?? [])];
-		const settingsExtensions = settingsInstance.get("extensions") ?? [];
-		const disabledExtensionIds = settingsInstance.get("disabledExtensions") ?? [];
-		const searchPattern = typeof parsedArgs.listModels === "string" ? parsedArgs.listModels : undefined;
-		await runListModelsCommand({
-			modelRegistry,
-			cwd: getProjectDir(),
-			additionalExtensionPaths: cliExtensionPaths,
-			settingsExtensions,
-			disabledExtensionIds,
-			disableExtensionDiscovery: Boolean(parsedArgs.noExtensions),
-			searchPattern,
-		});
-		process.exit(0);
-	}
-
 	if (parsedArgs.export) {
 		let result: string;
 		try {
@@ -1267,18 +1258,15 @@ export async function runRootCommand(
 			const versionCheckPromise = checkForNewVersion(VERSION).catch(() => undefined);
 			const changelogMarkdown = await logger.time("main:getChangelogForDisplay", getChangelogForDisplay, parsedArgs);
 
-			const scopedModelsForDisplay = sessionOptions.scopedModels ?? scopedModels;
-			if (scopedModelsForDisplay.length > 0) {
-				const modelList = scopedModelsForDisplay
-					.map(scopedModel => {
-						const thinkingStr = !scopedModel.thinkingLevel ? `:${scopedModel.thinkingLevel}` : "";
-						return `${scopedModel.model.id}${thinkingStr}`;
-					})
-					.join(", ");
+			const modelScopeNotification = buildModelScopeNotification(
+				scopedModels,
+				settingsInstance.get("startup.quiet"),
+			);
+			if (modelScopeNotification) {
 				// Routed through the TUI (not stdout): the startup capture owns the
 				// terminal in raw mode here, and the TUI's first clearScrollback paint
 				// would wipe a pre-TUI line anyway.
-				notifs.push({ kind: "info", message: `Model scope: ${modelList} (Ctrl+P to cycle)` });
+				notifs.push(modelScopeNotification);
 			}
 
 			if ($env.PI_TIMING) {

@@ -793,7 +793,7 @@ export class ModelSelectorComponent extends Container {
 		if (!this.#isModelOverContextLimit(model)) {
 			return "";
 		}
-		return ` ${theme.status.disabled} context>${formatNumber(model.contextWindow).toLowerCase()}`;
+		return ` ${theme.status.disabled} context>${formatNumber(model.contextWindow ?? 0).toLowerCase()}`;
 	}
 
 	#getVisibleItems(): ReadonlyArray<PresetItem | ModelItem | CanonicalModelItem> {
@@ -1096,7 +1096,7 @@ export class ModelSelectorComponent extends Container {
 			const limitWarning = this.#isItemDisabled(selected)
 				? theme.fg(
 						"dim",
-						` — current context ${formatNumber(this.#currentContextTokens).toLowerCase()} > ${formatNumber(selected.model.contextWindow).toLowerCase()} limit`,
+						` — current context ${formatNumber(this.#currentContextTokens).toLowerCase()} > ${formatNumber(selected.model.contextWindow ?? 0).toLowerCase()} limit`,
 					)
 				: "";
 			this.#listContainer.addChild(

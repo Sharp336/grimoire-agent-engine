@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as core from "@oh-my-pi/pi-agent-core";
+import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { runGuidedGoalTurn } from "@oh-my-pi/pi-coding-agent/goals/guided-setup";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 
-const planModel = { provider: "test", id: "plan" };
-const slowModel = { provider: "test", id: "slow" };
+const planModel = { provider: "test", id: "plan" } as unknown as Model<Api>;
+const slowModel = { provider: "test", id: "slow" } as unknown as Model<Api>;
 
 function createSession(options?: { plan?: boolean; slow?: boolean }): AgentSession {
 	const plan = options?.plan ?? true;

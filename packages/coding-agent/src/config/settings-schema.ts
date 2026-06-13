@@ -1,4 +1,5 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
+import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
@@ -1347,7 +1348,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			group: "Collab",
 			label: "Relay URL",
-			description: "Relay used by /collab (wss://host[:port]; self-host with the omp-collab-relay service)",
+			description: "Relay used by /collab (wss://host[:port])",
 		},
 	},
 
@@ -1359,6 +1360,29 @@ export const SETTINGS_SCHEMA = {
 			group: "Collab",
 			label: "Display Name",
 			description: "Name shown to other collab participants (default: OS username)",
+		},
+	},
+
+	"share.serverUrl": {
+		type: "string",
+		default: DEFAULT_SHARE_URL,
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Share Server",
+			description:
+				"Share viewer/upload base used by /share (encrypted blob upload + viewer; links are <base>/<id>#<key>)",
+		},
+	},
+
+	"share.redactSecrets": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "interaction",
+			group: "Collab",
+			label: "Share Secret Redaction",
+			description: "Run the secret obfuscator over /share snapshots before upload (uses the secrets.* config)",
 		},
 	},
 
@@ -1603,6 +1627,18 @@ export const SETTINGS_SCHEMA = {
 			group: "Compaction",
 			label: "Supersede Stale Reads",
 			description: "Prune older read results when the same file is read again (cache-aware, runs every turn)",
+		},
+	},
+
+	"compaction.dropUseless": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Elide Uneventful Results",
+			description:
+				"Prune tool results flagged contextually useless (no matches, timed-out waits) once consumed (cache-aware)",
 		},
 	},
 
@@ -2997,6 +3033,18 @@ export const SETTINGS_SCHEMA = {
 			description: "Launch browser in headless mode (disable to show browser UI)",
 		},
 	},
+
+	"browser.cmux": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Search & Browser",
+			label: "cmux Browser",
+			description:
+				"Use cmux WKWebView surfaces for browser automation when a cmux socket is available. Set PI_BROWSER_CMUX=0 or PI_BROWSER_CMUX=1 to override.",
+		},
+	},
 	"browser.screenshotDir": {
 		type: "string",
 		default: undefined,
@@ -3500,6 +3548,10 @@ export const SETTINGS_SCHEMA = {
 
 	"skills.enablePiProject": { type: "boolean", default: true },
 
+	"skills.enableAgentsUser": { type: "boolean", default: true },
+
+	"skills.enableAgentsProject": { type: "boolean", default: true },
+
 	"skills.customDirectories": { type: "array", default: [] as string[] },
 
 	"skills.ignoredSkills": { type: "array", default: [] as string[] },
@@ -3760,14 +3812,24 @@ export const SETTINGS_SCHEMA = {
 	},
 	// Codex saved rate-limit resets (auto-redeem)
 	"codexResets.autoRedeem": {
-		type: "boolean",
-		default: false,
+		type: "enum",
+		values: ["unset", "yes", "no"] as const,
+		default: "unset" as const,
 		ui: {
 			tab: "providers",
 			group: "Services",
 			label: "Codex Auto-Redeem Saved Resets",
 			description:
-				"When a turn is blocked by the Codex weekly limit on the active account and no other account is available, automatically spend one saved rate-limit reset (ChatGPT 'save rate limit resets'). Conservative: never fires for 5-hour-only or Spark limits, near a natural reset, or twice for the same block. Requires retries enabled.",
+				"When a turn is blocked by the Codex weekly limit on the active account and no other account is available, run the conservative saved-reset check. unset asks before spending the first eligible reset, yes spends eligible resets without prompting, and no disables the check entirely. Requires retries enabled.",
+			options: [
+				{
+					value: "unset",
+					label: "Unset",
+					description: "Check eligibility, then ask before spending the first saved reset.",
+				},
+				{ value: "yes", label: "Yes", description: "Spend eligible saved resets without prompting." },
+				{ value: "no", label: "No", description: "Do not run the saved-reset auto-redeem check." },
+			],
 		},
 	},
 	"codexResets.minBlockedMinutes": {
@@ -3911,9 +3973,6 @@ export const SETTINGS_SCHEMA = {
 
 	"dev.autoqaPush.endpoint": {
 		type: "string",
-		// Bundled QA collector — runs `/work/pi-www/autoqa` behind qa.omp.sh.
-		// Override via `PI_AUTO_QA_PUSH_URL` or `dev.autoqaPush.endpoint`
-		// in `config.yml` to point at a self-hosted instance.
 		default: "https://qa.omp.sh/v1/grievances" as const,
 		ui: {
 			tab: "tools",
@@ -4054,6 +4113,7 @@ export interface CompactionSettings {
 	idleThresholdTokens: number;
 	idleTimeoutSeconds: number;
 	supersedeReads: boolean;
+	dropUseless: boolean;
 }
 
 export interface ContextPromotionSettings {
@@ -4103,6 +4163,8 @@ export interface SkillsSettings {
 	enableClaudeProject?: boolean;
 	enablePiUser?: boolean;
 	enablePiProject?: boolean;
+	enableAgentsUser?: boolean;
+	enableAgentsProject?: boolean;
 	customDirectories?: string[];
 	ignoredSkills?: string[];
 	includeSkills?: string[];
@@ -4179,8 +4241,10 @@ export interface ShellMinimizerSettings {
 	sourceOutlineLevel: "default" | "aggressive";
 	legacyFilters: boolean | undefined;
 }
+export type CodexAutoRedeemMode = "unset" | "yes" | "no";
+
 export interface CodexResetsSettings {
-	autoRedeem: boolean;
+	autoRedeem: CodexAutoRedeemMode;
 	minBlockedMinutes: number;
 	keepCredits: number;
 }

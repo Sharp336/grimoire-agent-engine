@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { prompt } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
+import { z } from "zod/v4";
 import type { AsyncJob, AsyncJobManager } from "../async";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { shimmerEnabled, shimmerText } from "../modes/theme/shimmer";
@@ -24,7 +24,7 @@ import {
 import { ToolError } from "./tool-errors";
 
 const jobSchema = z.object({
-	poll: z.array(z.string()).optional().describe("job ids to wait for"),
+	poll: z.array(z.string()).optional().describe("job ids to wait for; omit to wait on all running jobs"),
 	cancel: z.array(z.string()).optional().describe("job ids to cancel"),
 	list: z.boolean().optional().describe("snapshot all jobs"),
 });
@@ -171,6 +171,9 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 			return {
 				content: [{ type: "text", text: message }],
 				details: { jobs: [] },
+				// Nothing found / nothing to wait for is noise once consumed —
+				// the follow-up call has already corrected course.
+				useless: true,
 			};
 		}
 
@@ -334,12 +337,17 @@ export class JobTool implements AgentTool<typeof jobSchema, JobToolDetails> {
 			}
 		}
 
+		const details: JobToolDetails = {
+			jobs: jobResults,
+			...(cancelOutcomes.length ? { cancelled: cancelOutcomes.map(({ id, status }) => ({ id, status })) } : {}),
+		};
 		return {
 			content: [{ type: "text", text: lines.join("\n").trimEnd() }],
-			details: {
-				jobs: jobResults,
-				...(cancelOutcomes.length ? { cancelled: cancelOutcomes.map(({ id, status }) => ({ id, status })) } : {}),
-			},
+			details,
+			// A poll where everything is still running carries no new information
+			// once a later poll exists — same predicate the TUI uses to displace
+			// stale waiting frames.
+			...(isWaitingPollDetails(details) ? { useless: true } : {}),
 		};
 	}
 }
@@ -512,14 +520,11 @@ export const jobToolRenderer = {
 						itemType: "job",
 						renderItem: job => {
 							const lines: string[] = [];
-							const icon =
-								job.status === "completed"
-									? uiTheme.styledSymbol("tool.job", "accent")
-									: formatStatusIcon(
-											statusToIcon(job.status),
-											uiTheme,
-											job.status === "running" ? options.spinnerFrame : undefined,
-										);
+							const icon = formatStatusIcon(
+								statusToIcon(job.status),
+								uiTheme,
+								job.status === "running" ? options.spinnerFrame : undefined,
+							);
 							const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
 							// Task jobs label themselves with their agent id, which is also
 							// the job id — drop the id column instead of stuttering it twice.

@@ -1639,6 +1639,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				if (replacementPayload !== undefined) {
 					nextParams = replacementPayload as typeof nextParams;
 				}
+				nextParams = toWellFormedDeep(nextParams) as typeof nextParams;
 				rawRequestDump = {
 					provider: model.provider,
 					api: output.api,
@@ -2816,7 +2817,8 @@ function buildParams(
 	// Claude Code requests at most 64k output tokens; clamp only OAuth requests,
 	// where the wire fingerprint must match. API-key callers keep the full model
 	// ceiling (e.g. 128k on Opus 4.8).
-	const maxOutputTokens = isOAuthToken ? Math.min(CLAUDE_CODE_MAX_OUTPUT_TOKENS, model.maxTokens) : model.maxTokens;
+	const modelMaxTokens = model.maxTokens ?? CLAUDE_CODE_MAX_OUTPUT_TOKENS;
+	const maxOutputTokens = isOAuthToken ? Math.min(CLAUDE_CODE_MAX_OUTPUT_TOKENS, modelMaxTokens) : modelMaxTokens;
 
 	// Build params in the canonical field order: model → messages → system → tools →
 	// metadata → max_tokens → thinking → context_management → output_config → stream.
@@ -2826,7 +2828,7 @@ function buildParams(
 		...(systemBlocks && { system: systemBlocks }),
 		...(tools !== undefined && { tools }),
 		...(metadata && { metadata }),
-		max_tokens: Math.min(maxOutputTokens, options?.maxTokens || model.maxTokens),
+		max_tokens: Math.min(maxOutputTokens, options?.maxTokens || modelMaxTokens),
 		...(thinking && { thinking }),
 		...(contextManagement && { context_management: contextManagement }),
 		...(outputConfig && { output_config: outputConfig }),
@@ -3075,13 +3077,12 @@ export function convertAnthropicMessages(
 						type: "tool_use",
 						id: block.id,
 						name: isOAuthToken ? applyClaudeToolPrefix(block.name) : block.name,
-						// Anthropic-origin arguments are guaranteed well-formed (they came
-						// from the API's own JSON); cross-API replays can carry lone
-						// surrogates that Anthropic's strict UTF-8 validation rejects.
-						input:
-							msg.api === "anthropic-messages"
-								? (block.arguments ?? {})
-								: toWellFormedDeep(block.arguments ?? {}),
+						// Always sanitize: the model itself can emit lone-surrogate escapes
+						// in tool-argument JSON (streamed out fine, rejected with a 400 on
+						// replay by Anthropic's strict UTF-8 validation). toWellFormedDeep
+						// is identity-preserving, so well-formed arguments stay
+						// byte-identical and prompt-cache prefixes are unaffected.
+						input: toWellFormedDeep(block.arguments ?? {}),
 					});
 				}
 			}

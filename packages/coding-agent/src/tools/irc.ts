@@ -12,7 +12,7 @@
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { formatAge, formatDuration, prompt } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
+import { z } from "zod/v4";
 import type { Settings } from "../config/settings";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { IrcBus, type IrcDeliveryReceipt, type IrcMessage } from "../irc/bus";
@@ -310,6 +310,8 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 			return {
 				content: [{ type: "text", text: `No message${filterNote} within ${formatDuration(timeoutMs)}.` }],
 				details: { op: "wait", from: senderId, waited: null },
+				// A clean wait timeout carries no information once consumed.
+				useless: true,
 			};
 		}
 		return {
@@ -324,6 +326,8 @@ export class IrcTool implements AgentTool<typeof ircSchema, IrcDetails> {
 			return {
 				content: [{ type: "text", text: "Inbox empty." }],
 				details: { op: "inbox", from: senderId, inbox: [] },
+				// An empty inbox drain carries no information once consumed.
+				useless: true,
 			};
 		}
 		const header = params.peek ? `${messages.length} unread message(s):` : `${messages.length} message(s):`;

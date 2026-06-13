@@ -65,7 +65,11 @@ function classifyProjectDir(pwd: string): { scratch: boolean; relative: string |
 
 const piSegment: StatusLineSegment = {
 	id: "pi",
-	render(_ctx) {
+	render(ctx) {
+		if (ctx.focusedAgentId) {
+			const icon = theme.icon.ghost ? `${theme.icon.ghost} ` : "";
+			return { content: theme.fg("warning", `${icon}${ctx.focusedAgentId} `), visible: true };
+		}
 		const content = theme.icon.pi ? `${theme.icon.pi} ` : "";
 		return { content: theme.fg("accent", content), visible: true };
 	},
@@ -360,7 +364,7 @@ const contextPctSegment: StatusLineSegment = {
 		const autoIcon = ctx.autoCompactEnabled && theme.icon.auto ? ` ${theme.icon.auto}` : "";
 		const text = `${formatContextUsage(pct, window)}${autoIcon}`;
 
-		const color = getContextUsageThemeColor(getContextUsageLevel(pct, window));
+		const color = getContextUsageThemeColor(getContextUsageLevel(pct ?? 0, window));
 		const content = withIcon(theme.icon.context, theme.fg(color, text));
 
 		return { content, visible: true };

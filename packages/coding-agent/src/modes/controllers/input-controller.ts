@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
-import type { AutocompleteProvider, SlashCommand } from "@oh-my-pi/pi-tui";
+import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@oh-my-pi/pi-tui";
 import { $env, isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getModelPresetInfo, MODEL_PRESET_IDS } from "../../config/model-presets";
 import { isSettingsInitialized, settings } from "../../config/settings";
@@ -61,6 +61,7 @@ export class InputController {
 	) {}
 
 	#enhancedPaste?: EnhancedPasteController;
+	#focusedLeftTapListenerInstalled = false;
 
 	#showTinyTitleDownloadProgress(modelKey: string): void {
 		if (!isTinyTitleLocalModelKey(modelKey)) return;
@@ -109,11 +110,49 @@ export class InputController {
 
 	setupKeyHandlers(): void {
 		this.ctx.editor.setActionKeys("app.interrupt", this.ctx.keybindings.getKeys("app.interrupt"));
+		if (!this.#focusedLeftTapListenerInstalled) {
+			this.#focusedLeftTapListenerInstalled = true;
+			this.ctx.ui.addInputListener(data => {
+				if (!this.ctx.focusedAgentId) return undefined;
+				if (!matchesKey(data, "left")) return undefined;
+				if (this.ctx.editor.getText().trim()) return undefined;
+				this.#handleFocusedLeftTap();
+				return { consume: true };
+			});
+		}
 		this.ctx.editor.onEscape = () => {
+			// Active context maintenance owns Esc: auto/manual compaction,
+			// handoff generation, and auto-retry backoff all advertise
+			// "(esc to cancel)". Dispatch on live session state instead of
+			// swapping onEscape handlers — interleaved start/end events used
+			// to clobber the single saved-handler slot (auto-compaction start
+			// → /compact → auto end → manual finally), leaving Esc wired to a
+			// stale no-op closure until restart.
+			const viewSession = this.ctx.viewSession;
+			let aborted = false;
+			if (viewSession.isCompacting) {
+				try {
+					viewSession.abortCompaction();
+				} catch {}
+				aborted = true;
+			}
+			if (viewSession.isGeneratingHandoff) {
+				try {
+					viewSession.abortHandoff();
+				} catch {}
+				aborted = true;
+			}
+			if (viewSession.isRetrying) {
+				try {
+					viewSession.abortRetry();
+				} catch {}
+				aborted = true;
+			}
+			if (aborted) return;
+
 			if (this.ctx.loopModeEnabled) {
 				this.ctx.pauseLoop();
 				if (this.ctx.session.isStreaming) {
-					this.ctx.notifyInterrupting();
 					void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 				} else {
 					this.ctx.cancelPendingSubmission();
@@ -126,12 +165,23 @@ export class InputController {
 			if (this.ctx.hasActiveOmfg() && this.ctx.handleOmfgEscape()) {
 				return;
 			}
+			if (this.ctx.focusedAgentId) {
+				// Esc never interrupts the focused agent's turn: clear typed text,
+				// else return the view to the main session. Interrupt via empty
+				// steer-flush submit if needed.
+				if (this.ctx.editor.getText().trim()) {
+					this.ctx.editor.setText("");
+					this.ctx.ui.requestRender();
+				} else {
+					void this.ctx.unfocusSession();
+				}
+				return; // double-escape backtrack (/tree, /branch) stays main-only
+			}
 			if (this.ctx.collabGuest) {
 				// Guest Esc: ask the host to interrupt its agent; the local replica
 				// session is never streaming, so the native abort path below would
 				// no-op.
 				if (this.ctx.collabGuest.state?.isStreaming || this.ctx.loadingAnimation) {
-					this.ctx.notifyInterrupting();
 					this.ctx.collabGuest.sendAbort();
 				}
 				return;
@@ -154,9 +204,13 @@ export class InputController {
 				this.ctx.isPythonMode = false;
 				this.ctx.updateEditorBorderColor();
 			} else if (this.ctx.session.isStreaming) {
-				this.ctx.notifyInterrupting();
 				void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
-			} else if (!this.ctx.editor.getText().trim()) {
+			} else if (this.ctx.editor.getText().trim()) {
+				// Esc with typed text clears the draft instead of (or before) any double-Esc action
+				this.ctx.editor.setText("");
+				this.ctx.ui.requestRender();
+				this.ctx.lastEscapeTime = 0;
+			} else {
 				// Double-interrupt with empty editor triggers /tree, /branch, or nothing based on setting
 				const action = settings.get("doubleEscapeAction");
 				if (action !== "none") {
@@ -167,6 +221,7 @@ export class InputController {
 						} else {
 							this.ctx.showUserMessageSelector();
 						}
+						this.ctx.ui.resetDisplay();
 						this.ctx.lastEscapeTime = 0;
 					} else {
 						this.ctx.lastEscapeTime = now;
@@ -268,9 +323,14 @@ export class InputController {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showAgentHub());
 		}
 
-		// Double-tap left arrow on an empty editor opens the agent hub — same
-		// 500ms window as the double-escape state machine above.
+		// Double-tap left arrow on an empty editor: opens the agent hub from the
+		// main session, or returns the focused subagent view to the main session.
+		// Focused ←← intentionally matches Esc.
 		this.ctx.editor.onLeftAtStart = () => {
+			if (this.ctx.focusedAgentId) {
+				this.#handleFocusedLeftTap();
+				return;
+			}
 			const now = Date.now();
 			if (now - this.ctx.lastLeftTapTime < 500) {
 				this.ctx.lastLeftTapTime = 0;
@@ -292,6 +352,16 @@ export class InputController {
 				this.ctx.updateEditorBorderColor();
 			}
 		};
+	}
+
+	#handleFocusedLeftTap(): void {
+		const now = Date.now();
+		if (now - this.ctx.lastLeftTapTime < 500) {
+			this.ctx.lastLeftTapTime = 0;
+			void this.ctx.unfocusSession();
+		} else {
+			this.ctx.lastLeftTapTime = now;
+		}
 	}
 
 	#setupEnhancedPaste(): void {
@@ -331,22 +401,24 @@ export class InputController {
 			text = text.trim();
 			if ((!isSettingsInitialized() || settings.get("emojiAutocomplete")) && text) text = expandEmoticons(text);
 
-			// Empty submit while streaming with queued steering: interrupt now and
-			// immediately resume so the visible `Steer:` entry is sent without
-			// waiting for the current tool/model boundary.
+			// Focused subagent session: the editor is a plain chat box for it.
+			// Everything below (continue shortcuts, slash/bash/python, loop,
+			// compaction queueing) is main-session-only.
+			if (this.ctx.focusedAgentId) {
+				await this.#submitToFocusedSession(text, "steer");
+				return;
+			}
+
+			// Empty submit while streaming with queued messages: abort the active
+			// turn and let the post-unwind drain deliver the agent-core queue.
 			if (!text && this.ctx.session.isStreaming) {
-				const queuedMessages = this.ctx.session.getQueuedMessages();
-				if (queuedMessages.steering.length > 0) {
-					await this.ctx.session.interruptAndFlushQueuedMessages({ reason: USER_INTERRUPT_LABEL });
+				if (this.ctx.session.queuedMessageCount > 0) {
+					const aborting = this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+					await aborting;
 					this.ctx.updatePendingMessagesDisplay();
 					this.ctx.ui.requestRender();
-					return;
 				}
-				if (this.ctx.session.queuedMessageCount > 0) {
-					// Preserve the existing empty-submit flush for non-steer queues.
-					await this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
-					return;
-				}
+				return;
 			}
 
 			if (!text) return;
@@ -421,6 +493,11 @@ export class InputController {
 				if (text.startsWith("!") || text.startsWith("$")) {
 					this.ctx.showStatus("Local execution is host-only during a collab session");
 					this.ctx.editor.setText("");
+					return;
+				}
+				if (this.ctx.collabGuest.readOnly) {
+					// Keep the typed text: the prompt was not consumed.
+					this.ctx.showStatus("This collab link is read-only — prompting is disabled");
 					return;
 				}
 				this.ctx.editor.addToHistory(text);
@@ -609,6 +686,41 @@ export class InputController {
 		};
 	}
 
+	/** Submit editor text to the focused subagent session (chat-only focus policy). */
+	async #submitToFocusedSession(text: string, streamingBehavior: "steer" | "followUp"): Promise<void> {
+		const target = this.ctx.viewSession;
+		if (!text) {
+			if (target.isStreaming && target.queuedMessageCount > 0) {
+				const aborting = target.abort({ reason: USER_INTERRUPT_LABEL });
+				await aborting;
+				this.ctx.updatePendingMessagesDisplay();
+				this.ctx.ui.requestRender();
+			}
+			return;
+		}
+		if (text.startsWith("/") || text.startsWith("!") || text.startsWith("$")) {
+			this.ctx.showStatus("Commands run in the main session — press ←← to return first");
+			return; // editor text not cleared: Editor does not auto-clear on submit
+		}
+		const images = this.ctx.pendingImages.length > 0 ? [...this.ctx.pendingImages] : undefined;
+		this.ctx.editor.addToHistory(text);
+		this.ctx.editor.setText("");
+		this.ctx.editor.imageLinks = undefined;
+		this.ctx.pendingImages = [];
+		this.ctx.pendingImageLinks = [];
+		try {
+			// prompt() handles idle (new turn) and streaming (queues per streamingBehavior).
+			await this.ctx.withLocalSubmission(text, () => target.prompt(text, { streamingBehavior, images }), {
+				imageCount: images?.length ?? 0,
+			});
+		} catch (error) {
+			this.ctx.editor.setText(text); // hand the message back, mirroring the main submit error path
+			this.ctx.showError(error instanceof Error ? error.message : String(error));
+		}
+		this.ctx.updatePendingMessagesDisplay();
+		this.ctx.ui.requestRender();
+	}
+
 	handleCtrlC(): void {
 		const now = Date.now();
 		if (now - this.ctx.lastSigintTime < 500) {
@@ -616,6 +728,18 @@ export class InputController {
 		} else {
 			this.ctx.clearEditor();
 			this.ctx.lastSigintTime = now;
+		}
+		// Sync-flush the session JSONL so in-flight writes survive a hard exit.
+		// The TUI consumes Ctrl+C as a key event in raw mode, so postmortem's
+		// process-level SIGINT handler never fires. The second press still
+		// funnels through shutdown() which awaits its own async flush — the
+		// sync flush here is a superset that also covers the first-press case.
+		try {
+			this.ctx.sessionManager.flushSync();
+		} catch (err) {
+			logger.warn("session-manager sync flush on Ctrl+C failed", {
+				error: err instanceof Error ? err.message : String(err),
+			});
 		}
 	}
 
@@ -713,15 +837,6 @@ export class InputController {
 				args: args || undefined,
 				lineCount: body ? body.split("\n").length : 0,
 			};
-			// When the agent is streaming, register the compact slash-form text as
-			// the pending-display twin BEFORE dispatching the CustomMessage. The
-			// returned tag is embedded in details so AgentSession.#handleAgentEvent
-			// can remove the matching display entry when the agent consumes this
-			// message (mirrors the user-message dequeue path).
-			if (this.ctx.session.isStreaming) {
-				const tag = this.ctx.session.enqueueCustomMessageDisplay(text, streamingBehavior);
-				details.__pendingDisplayTag = tag;
-			}
 			await this.ctx.session.promptCustomMessage(
 				{
 					customType: SKILL_PROMPT_MESSAGE_TYPE,
@@ -730,7 +845,7 @@ export class InputController {
 					details,
 					attribution: "user",
 				},
-				{ streamingBehavior },
+				{ streamingBehavior, queueChipText: text },
 			);
 			if (this.ctx.session.isStreaming) {
 				this.ctx.updatePendingMessagesDisplay();
@@ -746,6 +861,12 @@ export class InputController {
 	async handleFollowUp(): Promise<void> {
 		let text = this.ctx.editor.getText().trim();
 		if (!text) return;
+
+		// Focused subagent session: follow-ups go to it; non-chat input is gated.
+		if (this.ctx.focusedAgentId) {
+			await this.#submitToFocusedSession(text, "followUp");
+			return;
+		}
 
 		// Compaction first: while compacting, free text gets queued via
 		// `queueCompactionMessage`, and `/skill:*` rides the same queue so a
@@ -814,7 +935,7 @@ export class InputController {
 		if (allQueued.length === 0) {
 			this.ctx.updatePendingMessagesDisplay();
 			if (options?.abort) {
-				this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+				void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 			}
 			return 0;
 		}
@@ -833,7 +954,7 @@ export class InputController {
 		}
 		this.ctx.updatePendingMessagesDisplay();
 		if (options?.abort) {
-			this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
+			void this.ctx.session.abort({ reason: USER_INTERRUPT_LABEL });
 		}
 		return allQueued.length;
 	}
@@ -1056,6 +1177,10 @@ export class InputController {
 	}
 
 	cycleThinkingLevel(): void {
+		if (this.ctx.focusedAgentId) {
+			this.ctx.showStatus("Model/thinking apply to the main session — press ←← to return first");
+			return;
+		}
 		const newLevel = this.ctx.session.cycleThinkingLevel();
 		if (newLevel === undefined) {
 			this.ctx.showStatus("Current model does not support thinking");
@@ -1066,6 +1191,10 @@ export class InputController {
 	}
 
 	async cycleRoleModel(direction: "forward" | "backward" = "forward"): Promise<void> {
+		if (this.ctx.focusedAgentId) {
+			this.ctx.showStatus("Model/thinking apply to the main session — press ←← to return first");
+			return;
+		}
 		try {
 			const result = await this.ctx.session.cycleRoleModels(this.ctx.session.settings.get("cycleOrder"), direction);
 			if (!result) {

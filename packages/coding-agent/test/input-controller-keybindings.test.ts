@@ -59,8 +59,6 @@ async function createContext() {
 	const terminalWrite = vi.fn();
 	const prompt = vi.fn(async () => {});
 	const abort = vi.fn(async () => {});
-	const interruptAndFlushQueuedMessages = vi.fn(async () => {});
-	const getQueuedMessages = vi.fn(() => ({ steering: [] as string[], followUp: [] as string[] }));
 	const updatePendingMessagesDisplay = vi.fn();
 	const cycleRoleModels = vi.fn(async () => ({
 		model: { provider: "test", id: "slow-model", name: "Slow Model" },
@@ -121,9 +119,7 @@ async function createContext() {
 			extensionRunner: undefined,
 			prompt,
 			queuedMessageCount: 0,
-			getQueuedMessages,
 			abort,
-			interruptAndFlushQueuedMessages,
 			cycleRoleModels,
 			cycleModelPreset,
 			getRoleModelCycle,
@@ -199,8 +195,6 @@ async function createContext() {
 			updatePendingMessagesDisplay,
 			requestRender,
 			abort,
-			interruptAndFlushQueuedMessages,
-			getQueuedMessages,
 			resetDisplay,
 			cycleRoleModels,
 			cycleModelPreset,
@@ -253,19 +247,17 @@ describe("InputController keybinding setup", () => {
 		expect(spies.cycleModelPreset).toHaveBeenNthCalledWith(2, "backward");
 	});
 
-	it("empty Enter interrupts and sends a queued steering message", async () => {
+	it("empty Enter aborts the active stream when queued messages are pending", async () => {
 		const { InputController, ctx, editor, spies } = await createContext();
 		const session = ctx.session as unknown as { isStreaming: boolean; queuedMessageCount: number };
 		session.isStreaming = true;
 		session.queuedMessageCount = 1;
-		spies.getQueuedMessages.mockReturnValue({ steering: ["Send this now"], followUp: [] });
 		const controller = new InputController(ctx);
 
 		controller.setupEditorSubmitHandler();
 		await editor.onSubmit?.("");
 
-		expect(spies.interruptAndFlushQueuedMessages).toHaveBeenCalledWith({ reason: "Interrupted by user" });
-		expect(spies.abort).not.toHaveBeenCalled();
+		expect(spies.abort).toHaveBeenCalledWith({ reason: "Interrupted by user" });
 		expect(spies.updatePendingMessagesDisplay).toHaveBeenCalledTimes(1);
 		expect(spies.requestRender).toHaveBeenCalledTimes(1);
 		expect(spies.prompt).not.toHaveBeenCalled();

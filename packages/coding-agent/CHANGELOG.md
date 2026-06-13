@@ -6,6 +6,104 @@
 
 - Added Budget, Balanced, Smart, and Ultra model presets with `/preset`, separate preset-cycling shortcuts, and a `PRESETS` tab in `/model`.
 - Added `/guided-goal` for a Plan/Slow-model interview that refines a rough objective before entering goal mode.
+## [15.12.4] - 2026-06-13
+
+### Breaking Changes
+
+- Removed the top-level `--list-models` flag path and migrated model listing to the new `omp models` command
+
+### Added
+
+- Added `omp models` command to list and manage models with `ls`, `find`, `canonical`, and `refresh` actions
+- Added `--json` output plus `-e/--extension`, `--no-extensions`, and `--config` controls to `omp models` listings
+- Added `skills.enableAgentsUser` and `skills.enableAgentsProject` settings (default on) so the canonical OMP-native `~/.agent[s]/skills` and project-walkup `.agent[s]/skills` are configurable independently from the third-party Claude/Codex/Pi toggles.
+
+### Changed
+
+- Model registry merge and `omp models` / model picker handle unknown context/output limits (`null`) — unknown limits render as `-` instead of a fake `222K`/`8.9K`.
+- Changed `omp models` to use cached provider data by default and require `omp models refresh` for a forced online re-fetch
+- Updated model-resolution errors to point to `omp models` when a provider or model is not found
+- Upgraded workspace catalog packages to their latest versions as of 3 days ago, and refactored the ACP agent implementation to be compatible with `@agentclientprotocol/sdk` version `0.25.0`.
+- Made the `zod` version requirement in the workspace catalog more tolerant (`^4.0.0` instead of `4.4.3`), and aligned type definitions in coding-agent extensibility modules.
+- Changed `/logout` to pick a stored account after the provider, so multi-account OAuth providers can remove one credential without logging out every account.
+- Changed the status-line context% to report the provider's real prompt-token count — anchored on the last assistant response, matching the `/context` panel and the collab host broadcast — instead of an independent cl100k estimate of the whole conversation. The estimate could read several points high and climb past 100% on subscription/Codex models (whose advertised window, e.g. `272K`, is already the input budget after reserving max output) while the request was still well within the real limit. Right after compaction the segment now shows `?` until the next response re-establishes the true count, and the redundant per-message estimate cache was dropped in favor of memoizing `getContextUsage()`.
+
+### Fixed
+
+- Fixed ACP thinking-delta mapping to tolerate live chunks that only carry delta text.
+- Fixed image input to Ollama (local `ollama`, `ollama-cloud`, and any `ollama-chat` model) failing with an opaque HTTP 400 when an attached image was encoded as WebP. Ollama decodes images through llama.cpp / `stb_image`, which is built without WebP support, so the resize pipeline now auto-excludes WebP for those models — the automatic equivalent of `OMP_NO_WEBP=1`, applied across every image path (`@file` mentions and prompt/paste/CLI attachments, the `read`/`inspect_image` tools, `eval` display images, `fetch`ed images, and browser screenshots). Other providers are unaffected and still honor `OMP_NO_WEBP`.
+- Fixed queued steering/follow-up display to derive from the agent-core queue, so queued chips clear when the core dequeues them and no longer strand after empty-Enter aborts.
+- Fixed model auth gateway probing to avoid skipping candidates with unknown `maxTokens` limits (`null`)
+- Fixed model listings so providers registered via extensions are now included from `-e` and configured `extensions` sources
+- Fixed `/mcp reauth`, `/mcp test`, and `/mcp unauth` to find and operate on MCP servers reported by `/mcp list` even when they are only runtime-discovered and not stored in writable config, including namespaced plugin servers like `cloudflare:cloudflare-api`
+- Fixed MCP server name validation so colon-namespaced server IDs are accepted when persisting reauth overrides so namespaced OAuth MCP servers can be stored in user config as `server:subserver` entries
+- Retried assistant turns that stop with reasoning/thinking only and no final text or tool call, so Gemini/Antigravity thought-only `STOP` responses continue instead of silently ending the session.
+- Fixed `~/.agent[s]/skills` not appearing as `/skill:<name>` commands when every named source toggle (`skills.enableCodexUser`, `skills.enableClaudeUser`, `skills.enableClaudeProject`, `skills.enablePiUser`, `skills.enablePiProject`) was off: `loadSkills` gated the `agents` provider on `anyBuiltInSkillSourceEnabled`, so a user who turned off the Claude/Codex/Pi sources to clean noise also lost their own canonical OMP-native skills. The `agents` provider now reads the dedicated `enableAgentsUser`/`enableAgentsProject` toggles, decoupled from the third-party fall-through ([#2401](https://github.com/can1357/oh-my-pi/issues/2401)).
+- Fixed Windows PowerShell image paste so Ctrl+V can fall back to the PowerShell clipboard bridge when the native clipboard reader reports no image ([#2429](https://github.com/can1357/oh-my-pi/issues/2429)).
+- Fixed misaligned box borders in Mermaid ASCII rendering for CJK (Korean/Japanese/Chinese) and emoji labels — affects both fenced `mermaid` code blocks in assistant messages and the `render_mermaid` tool. `beautiful-mermaid@1.1.3` measures label width in UTF-16 code units while terminals render East Asian characters 2 columns wide; a `patchedDependencies` entry rebuilds its ASCII renderer to measure terminal display columns (grapheme-cluster aware, wcwidth-style policy). The patch mirrors the upstream PR (lukilabs/beautiful-mermaid#128) and should be dropped once it ships in a release.
+- Fixed interrupt loader state getting stuck after queued-message aborts by removing the session-layer flush/latch path; empty Enter now aborts the active turn and lets the existing post-unwind queue drain resume normally.
+- Fixed `/goal <objective>` and `/goal set <objective>` during streaming so goal context is steered immediately but objective submission waits for the active turn to finish instead of spamming `AgentBusyError` ([#2454](https://github.com/can1357/oh-my-pi/issues/2454)).
+- Fixed concurrent `omp --session` startups (e.g. cmux pane restore after an unclean shutdown) crashing with `SQLITE_BUSY_RECOVERY` while the agent SQLite databases were still under WAL recovery. The auth credential store and `AgentStorage.open()` retry the `SQLITE_BUSY` family with bounded backoff, and every shared SQLite open path (`AgentStorage`, history, autoresearch, memories, github cache, auto-QA grievances, catalog model cache, stats) now installs the busy handler before the first lock-taking statement so transient WAL recovery contention waits instead of crashing ([#2421](https://github.com/can1357/oh-my-pi/issues/2421)).
+- Mnemopi `per-project` / `per-project-tagged` bank derivation is now stable for one cwd, ignoring the surrounding git layout. Previously the bank id was hashed from `git.repo.resolveSync(cwd)?.repoRoot ?? path.resolve(cwd)`, so adding or removing a `.git` anywhere above the working directory silently repointed the same conversation to a new bank and stranded its memories (e.g. `/home/x/projects/repo` flipping between `projects-…` and `repo-…`). The derivation in `packages/coding-agent/src/mnemopi/config.ts` now hashes `path.resolve(cwd)` directly, and session startup widens the recall set with any sibling bank under `<dbDir>/banks/` whose `working_memory` rows already carry the active cwd in `metadata_json.$.cwd`, so memories stranded by the old, less-stable derivation become visible again on the next session without manual migration ([#2412](https://github.com/can1357/oh-my-pi/issues/2412)).
+- Fixed model switching (Ctrl+P role cycling and the alt+p / `/switch` / `/models` selector) intermittently freezing the UI for several seconds. `AgentSession.setModel`/`setModelTemporary` ran an eager `await modelRegistry.getApiKey(model)` purely as an existence pre-flight and discarded the value — but `getApiKey` does real work: it synchronously executes command-backed key programs (`apiKey: "!cmd"`, `execSync` with a 10s timeout, blocking the event loop) and refreshes OAuth tokens over the network when one crosses the expiry window (the "fine for a few switches, then a multi-second stall" symptom). Switching now uses the synchronous, side-effect-free `ModelRegistry.hasConfiguredAuth` check; the concrete key (command execution + OAuth refresh) is still resolved lazily per request via the existing resolver, so an unconfigured provider still fails fast with `No API key` while a healthy switch never touches the network or spawns a subprocess. `hasConfiguredAuth` no longer runs the command program or refreshes tokens either, matching its documented "probe without resolving an API key" contract.
+- Fixed session resume (`pi -c` / `--continue` / `--session`) hanging for ~10s at startup — surfaced by the watchdog as `Still starting … phase: createAgentSession > restoreSessionModel` — when an OAuth token needed refreshing or the auth broker (`OMP_AUTH_BROKER_URL`) was unreachable. Picking which saved model to restore is a pure *selection* that only needs to know whether auth is configured, but `restoreSessionModel` probed each candidate with the async `getApiKey`, which refreshes OAuth tokens over the network, executes command-backed key programs, and issues auth-broker requests — so a slow or unreachable endpoint stalled resume for the full refresh timeout per candidate. Startup model selection now uses the synchronous, side-effect-free `ModelRegistry.hasConfiguredAuth` probe (the same fix already applied to interactive model switching); the concrete key is still resolved lazily on the first request via the resolver.
+
+## [15.12.3] - 2026-06-12
+
+### Fixed
+
+- Restored the intended double-Esc default to `/tree` and fixed the Esc-opened selector path to reset the terminal display instead of preserving stale scrollback when the selector opens.
+
+## [15.12.2] - 2026-06-12
+
+### Fixed
+
+- Collab links now dot-join the room secret (`<roomId>.<key>`, `host/r/<roomId>.<key>`) instead of using a second `#`: RFC 3986 forbids a raw `#` inside a URL fragment, so macOS Foundation (behind terminal click-to-open) percent-encoded the browser deep link's second `#` to `%23` and the web client rejected the session. `/join`, `omp join`, and the web client still accept legacy `#`-joined links and leniently decode `%23`-mangled ones
+- Fixed `brew install can1357/tap/omp` failing on macOS with `sandbox-exec … exited with 1`: the generated `Formula/omp.rb` (rendered by `scripts/ci-update-brew-formula.ts`) now stamps `using: :nounzip` on every per-platform `url` so Homebrew leaves the bare Mach-O/ELF asset in the staging CWD (the previous `Dir["omp-*"].first` returned `nil` because `UnpackStrategy::Uncompressed#extract_nestedly` nested the file outside it), and wraps `generate_completions_from_executable` in `with_env(HOME: buildpath)` so the popened binary's `~/.omp` lookup goes to the writable staging dir instead of the sandbox-denied real home ([#2398](https://github.com/can1357/oh-my-pi/issues/2398))
+
+## [15.12.1] - 2026-06-12
+
+### Added
+
+- Added the `compaction.dropUseless` setting (default on): tool results flagged contextually useless are elided by the per-turn cache-aware prune pass and the pre-compaction threshold prune, replaced with `[Uneventful result elided]`. Built-in tools flag their uneventful outcomes — zero-match/zero-result `search`/`find`/`ast_grep`/`recall` (warnings included; the follow-up call has already corrected course), empty LSP lookups, `job` polls where everything is still running (plus nothing-to-wait-for and unknown-id polls), `irc` wait timeouts and empty inbox drains, and zero-result `github` searches / run-watch give-ups
+
+### Fixed
+
+- Restored the default double-Esc behavior to open the editable message-history selector instead of `/tree` so pressing Esc twice can edit a previous message again ([#2396](https://github.com/can1357/oh-my-pi/issues/2396)).
+
+## [15.12.0] - 2026-06-12
+
+### Added
+
+- Added `/collab view` command to create a read-only spectator join link
+- Added read-only hints and status text for guest-only participation in collab sessions
+- Added `share.serverUrl` and `share.redactSecrets` settings: the share server/viewer base for `/share` links (default `https://my.omp.sh/s`) and a toggle (default on) that runs the secret obfuscator over the shared snapshot before upload
+- HTML session exports now embed subagent transcripts: sub-session files stored next to the session (`<session>/<AgentId>.jsonl`, recursively) ride along in the export payload, agent ids in task tool cards become drill-down links, and a breadcrumbed overlay renders each subagent's full transcript — including its own tool cards and deeper nested agents — with Esc/backdrop navigation
+- Added Agent Hub focus mode: Enter on a local agent now retargets the main view to that live subagent session with regular transcript rendering, steering, Esc-to-main return, ←← parent navigation, and a ghost status-line badge.
+
+### Changed
+
+- Blocked cycling model and thinking presets while a focused subagent session is active and now prompts users to return to the main session first
+- Changed `codexResets.autoRedeem` from a boolean to `unset`/`yes`/`no`: unset runs the eligibility check and asks before spending a saved Codex reset, yes redeems without prompting, and no skips the check entirely
+- Changed collab links so full links with a write token grant mutation rights while links without a token now join as read-only
+- `/share` no longer uploads a plaintext HTML export to a gist for gistpreview. It now snapshots the session JSON, gzips and seals it with a fresh AES-256-GCM key, and pushes the blob to a secret gist (when `gh` is authenticated) or to the share server (capped at 1 MB; oversized sessions are trimmed — images first, then long strings, then oldest entries). The share link is `https://my.omp.sh/s/<id>#<key>`: the viewer fetches the blob (hex ids from the gist API, others from the relay store) and decrypts it in-browser, so the key never leaves the client. Configured secrets are additionally redacted from the snapshot unless `share.redactSecrets` is off. Custom `~/.omp/agent/share.{ts,js,mjs}` handlers keep the legacy HTML-file contract; `/share` also works for in-memory (`--no-session`) sessions now
+- `/collab` now prints a join hint with both link forms: the compact `omp join` link for terminals and a click-to-join browser deep link (`https://<relay-host>/#<link>`, displayed scheme-less, OSC 8-linked) — the relay serves the collab web client at `/`, and the room id + key ride in the URL fragment, so they never appear in any HTTP request. `/join`, `omp join`, and the web connect screen accept either form
+- npm installs no longer download fastembed's ~270MB ONNX native dependency tree eagerly: `fastembed` and `onnxruntime-node` are external to the bundle and optional peers of `@oh-my-pi/pi-mnemopi`, fetched on demand only when Mnemopi local embeddings are first used
+- The `job` tool prompt now documents that omitting `poll` waits on all running jobs, so agents stop enumerating every job id to poll everything
+- Collapsed task tool blocks now cap the per-agent list at 4 rows: the live progress view keeps the running/pending tail visible behind a `… N more agents (…)` summary line with per-status counts, finalized batches keep failed/aborted rows visible while folding the slowest successes, and the streaming call preview caps at the same 4 (expand shows the full list)
+- The anchored Subagents HUD above the editor now lists only detached background spawns: sync task calls (the parent turn is blocked and the inline tool block already renders live progress) and eval `agent()` helpers (rendered by their eval cell's own progress tree) no longer appear in the list
+- Completed rows in the `job` tool output now show the standard done checkmark instead of the watch glyph that replaced the spinner
+- HTML session exports render tool calls through the same React tool renderers the collab web client uses: per-tool views for all built-in tools (bash, edit diffs, todo boards, eval cells, task batches, LSP, search, browser screenshots, …) are bundled as an `<omp-tool-view>` web component into the export instead of the previous string-built dummy renderers
+- Modernized the HTML export page chrome to match the tool-card design language: hairline borders, dense mono typography, compact role-tinted message cards, refined tree sidebar and filter controls, themed scrollbars, collapsed-by-default thinking blocks, and mobile sidebar drawer — derived from the active theme's variables so light and dark themes both render correctly
+- Agent Hub's embedded chat overlay is now reserved for collab guest viewing; local agents open in the main session renderer instead.
+
+### Fixed
+
+- Filtered silent abort markers from Agent Hub assistant output so failed turns now render as normal error text
+- Reset focus-session state when switching transcript rendering between the main session and a focused subagent so streaming/progress context no longer leaks across sessions
+- Fixed read-only collab sessions so prompting, interrupts, and other write actions are blocked with a read-only warning instead of being applied
+- Fixed Mnemopi local embeddings in bundled and compiled installs failing with `Cannot find module '../bin/napi-v3/.../onnxruntime_binding.node'`: the Bun bundle inlined fastembed's loader so its relative native require resolved against `dist/cli.js`. `fastembed`/`onnxruntime-node` are no longer bundled; on first use Mnemopi `bun install`s the pinned pair into `~/.omp/cache/fastembed-runtime/<version-key>` and loads the binding from there ([#2389](https://github.com/can1357/oh-my-pi/issues/2389))
+- Fixed the interactive Model scope startup banner so models without an explicit thinking level do not show `:undefined`, and entries that were scoped without a `:level` are no longer rendered with the global default thinking level (which `applyRootSessionOptions` pre-fills on the cycling array for Ctrl+P) ([#2385](https://github.com/can1357/oh-my-pi/issues/2385)).
 
 ## [15.11.8] - 2026-06-12
 
@@ -13,7 +111,7 @@
 
 - Updated collab link handling to accept compact `roomId#key` links and relay hosts without explicit scheme when joining or starting sessions
 - Added `/collab stop` and `/collab status` options to control and inspect active shared sessions
-- Added `/collab`, `/join`, and `/leave` for live session sharing: the host shares an end-to-end encrypted link (AES-256-GCM key only in the link fragment; the relay sees opaque bytes) and guests render the session natively in their own TUI — streaming text, tool cards, footer state, ctrl+o expansion, `/dump` — and can prompt or interrupt the host's agent. Guest prompts render with an author badge; session-mutating commands stay host-only. Defaults to the public `relay.omp.sh` relay (`collab.relayUrl`); a self-hostable Go relay lives in the pi-www repo as `omp-collab-relay`
+- Added `/collab`, `/join`, and `/leave` for live session sharing: the host shares an end-to-end encrypted link (AES-256-GCM key only in the link fragment; the relay sees opaque bytes) and guests render the session natively in their own TUI — streaming text, tool cards, footer state, ctrl+o expansion, `/dump` — and can prompt or interrupt the host's agent. Guest prompts render with an author badge; session-mutating commands stay host-only. Defaults to the public `my.omp.sh` relay (`collab.relayUrl`)
 - Added `collab.relayUrl` and `collab.displayName` settings plus a `collab` status-line segment showing the participant count (host) or guest role. Guests mirror the host's real model/thinking state into their replica agent and the host's subagent ecosystem end-to-end: the live subagent HUD, the Agent Hub table with live progress, hub chat/kill/revive (routed to the host), and on-demand subagent transcript viewing
 - Added `omp join <link>` subcommand that launches the interactive TUI and immediately runs `/join <link>`
 

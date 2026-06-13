@@ -7,7 +7,7 @@ import { type GrepMatch, GrepOutputMode, type GrepResult, grep } from "@oh-my-pi
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
+import { z } from "zod/v4";
 import { recordFileSnapshot } from "../edit/file-snapshot-store";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls/local-protocol";
@@ -1124,7 +1124,9 @@ export class SearchTool implements AgentTool<typeof searchSchema, SearchToolDeta
 						? `No more results (${totalFilesLabel} files total; skip=${normalizedSkip} is past the end)`
 						: "No matches found";
 					const text = warningNote ? `${noMatchText}\n${warningNote}` : noMatchText;
-					return toolResult(details).text(text).done();
+					// Zero matches is useless regardless of warnings: by the time
+					// compaction runs, the follow-up call has already corrected course.
+					return toolResult(details).text(text).useless().done();
 				}
 				const outputLines: string[] = [];
 				let linesTruncated = false;

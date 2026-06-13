@@ -1,7 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
-import * as z from "zod/v4";
+import { z } from "zod/v4";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { NestedRepoPatch } from "./worktree";
 
@@ -45,6 +45,8 @@ export interface SubagentProgressPayload {
 	assignment?: string;
 	progress: AgentProgress;
 	sessionFile?: string;
+	/** See {@link SubagentLifecyclePayload.detached}. */
+	detached?: boolean;
 }
 
 /** Payload emitted on TASK_SUBAGENT_EVENT_CHANNEL */
@@ -63,6 +65,13 @@ export interface SubagentLifecyclePayload {
 	sessionFile?: string;
 	parentToolCallId?: string;
 	index: number;
+	/**
+	 * Spawn runs as a detached background job: the parent turn keeps working
+	 * while this agent runs. Sync task spawns (parent blocked on the call) and
+	 * eval `agent()` bridge spawns (rendered inside their eval cell) leave this
+	 * unset — surfaces like the subagent HUD only list detached spawns.
+	 */
+	detached?: boolean;
 }
 
 /**

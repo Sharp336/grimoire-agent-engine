@@ -39,6 +39,7 @@ import {
 import type { SessionContext } from "../../session/session-manager";
 import { createIrcMessageCard } from "../../tools/irc";
 import { formatBytes, formatDuration } from "../../tools/render-utils";
+import { hasVisibleThinking } from "../../utils/thinking-display";
 
 type TextBlock = { type: "text"; text: string };
 interface RenderInitialMessagesOptions {
@@ -233,7 +234,7 @@ export class UiHelpers {
 						this.ctx.chatContainer.addChild(card);
 						return [card];
 					}
-					const renderer = this.ctx.session.extensionRunner?.getMessageRenderer(message.customType);
+					const renderer = this.ctx.viewSession.extensionRunner?.getMessageRenderer(message.customType);
 					// Both HookMessage and CustomMessage have the same structure, cast for compatibility
 					const component = new CustomMessageComponent(message as CustomMessage<unknown>, renderer);
 					component.setExpanded(this.ctx.toolOutputExpanded);
@@ -284,7 +285,10 @@ export class UiHelpers {
 					const isSynthetic = message.role === "developer" ? true : (message.synthetic ?? false);
 					const imageLinks =
 						options?.imageLinks ??
-						imageLinksForMessage(message, this.ctx.sessionManager.putBlobSync.bind(this.ctx.sessionManager));
+						imageLinksForMessage(
+							message,
+							this.ctx.viewSession.sessionManager.putBlobSync.bind(this.ctx.viewSession.sessionManager),
+						);
 					const userComponent = new UserMessageComponent(textContent, isSynthetic, imageLinks);
 					this.ctx.chatContainer.addChild(userComponent);
 					if (options?.populateHistory && message.role === "user" && !isSynthetic) {
@@ -298,7 +302,7 @@ export class UiHelpers {
 					message,
 					this.ctx.hideThinkingBlock,
 					() => this.ctx.ui.requestRender(),
-					this.ctx.session.extensionRunner?.getAssistantThinkingRenderers(),
+					this.ctx.viewSession.extensionRunner?.getAssistantThinkingRenderers(),
 					this.ctx.ui.imageBudget,
 				);
 				this.ctx.chatContainer.addChild(assistantComponent);
@@ -364,7 +368,7 @@ export class UiHelpers {
 				const hasVisibleAssistantContent = message.content.some(
 					content =>
 						(content.type === "text" && content.text.trim().length > 0) ||
-						(content.type === "thinking" && content.thinking.trim().length > 0),
+						(content.type === "thinking" && hasVisibleThinking(content)),
 				);
 				if (hasVisibleAssistantContent) {
 					// Rebuild reconstructs immutable history; seal (not finalize) so the
@@ -379,7 +383,7 @@ export class UiHelpers {
 					!isAbortedSilently && (message.stopReason === "aborted" || message.stopReason === "error");
 				const errorMessage = hasErrorStop
 					? message.stopReason === "aborted"
-						? resolveAbortLabel(message.errorMessage, this.ctx.session.retryAttempt)
+						? resolveAbortLabel(message.errorMessage, this.ctx.viewSession.retryAttempt)
 						: message.errorMessage || "Error"
 					: null;
 
@@ -424,7 +428,7 @@ export class UiHelpers {
 
 					readGroup?.seal();
 					readGroup = null;
-					const tool = this.ctx.session.getToolByName(content.name);
+					const tool = this.ctx.viewSession.getToolByName(content.name);
 					const renderArgs =
 						"partialJson" in content
 							? { ...content.arguments, __partialJson: content.partialJson }
@@ -433,7 +437,7 @@ export class UiHelpers {
 						content.name,
 						renderArgs,
 						{
-							snapshots: getFileSnapshotStore(this.ctx.session),
+							snapshots: getFileSnapshotStore(this.ctx.viewSession),
 							showImages: settings.get("terminal.showImages"),
 							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
@@ -441,7 +445,7 @@ export class UiHelpers {
 						},
 						tool,
 						this.ctx.ui,
-						this.ctx.sessionManager.getCwd(),
+						this.ctx.viewSession.sessionManager.getCwd(),
 						content.id,
 					);
 					component.setExpanded(this.ctx.toolOutputExpanded);
@@ -550,14 +554,14 @@ export class UiHelpers {
 
 		// Display always uses the full-history transcript: compactions show as
 		// inline dividers instead of restarting the visible conversation.
-		const context = this.ctx.session.buildTranscriptSessionContext();
+		const context = this.ctx.viewSession.buildTranscriptSessionContext();
 		this.ctx.renderSessionContext(context, {
 			updateFooter: true,
-			populateHistory: true,
+			populateHistory: !this.ctx.focusedAgentId,
 		});
 
 		// Show compaction info if session was compacted
-		const allEntries = this.ctx.sessionManager.getEntries();
+		const allEntries = this.ctx.viewSession.sessionManager.getEntries();
 		let compactionCount = 0;
 		for (const entry of allEntries) {
 			if (entry.type === "compaction") {
@@ -614,7 +618,7 @@ export class UiHelpers {
 
 	updatePendingMessagesDisplay(): void {
 		this.ctx.pendingMessagesContainer.clear();
-		const queuedMessages = this.ctx.session.getQueuedMessages() as QueuedMessages;
+		const queuedMessages = this.ctx.viewSession.getQueuedMessages() as QueuedMessages;
 
 		const steeringMessages: Array<{ message: string; label: string }> = [];
 		for (const message of queuedMessages.steering) {
@@ -800,8 +804,8 @@ export class UiHelpers {
 	}
 
 	findLastAssistantMessage(): AssistantMessage | undefined {
-		for (let i = this.ctx.session.messages.length - 1; i >= 0; i--) {
-			const message = this.ctx.session.messages[i];
+		for (let i = this.ctx.viewSession.messages.length - 1; i >= 0; i--) {
+			const message = this.ctx.viewSession.messages[i];
 			if (message?.role === "assistant") {
 				return message as AssistantMessage;
 			}
