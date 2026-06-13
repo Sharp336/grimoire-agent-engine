@@ -109,7 +109,8 @@ export async function executeHs(code: string, options: HsExecutorOptions): Promi
 			stderr: "pipe",
 		});
 
-		const decoder = new TextDecoder();
+		const stdoutDecoder = new TextDecoder();
+		const stderrDecoder = new TextDecoder();
 		const stdoutReader = (proc.stdout as ReadableStream<Uint8Array>).getReader();
 		const stderrReader = (proc.stderr as ReadableStream<Uint8Array>).getReader();
 
@@ -120,10 +121,10 @@ export async function executeHs(code: string, options: HsExecutorOptions): Promi
 					if (done) {
 						break;
 					}
-					const text = decoder.decode(value, { stream: true });
+					const text = stdoutDecoder.decode(value, { stream: true });
 					outputSink.push(text);
 				}
-				outputSink.push(decoder.decode());
+				outputSink.push(stdoutDecoder.decode());
 			} finally {
 				stdoutReader.releaseLock();
 			}
@@ -136,10 +137,10 @@ export async function executeHs(code: string, options: HsExecutorOptions): Promi
 					if (done) {
 						break;
 					}
-					const text = decoder.decode(value, { stream: true });
+					const text = stderrDecoder.decode(value, { stream: true });
 					outputSink.push(text);
 				}
-				outputSink.push(decoder.decode());
+				outputSink.push(stderrDecoder.decode());
 			} finally {
 				stderrReader.releaseLock();
 			}
