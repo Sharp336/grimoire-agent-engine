@@ -5,6 +5,11 @@
 ### Added
 
 - Added `clearModelCache(dbPath?, providerId?)` to delete cached provider/model metadata rows from the model-cache SQLite store — all rows by default, or only the given provider's rows — returning the number of rows removed ([#2474](https://github.com/can1357/oh-my-pi/issues/2474))
+- Added GLM-5.2 to the bundled zai (GLM Coding Plan) catalog as the selectable 1M served model.
+
+### Changed
+
+- Pinned zai `glm-5.2` to 1M context during catalog generation so endpoint discovery and older fallbacks cannot regress it to 200k.
 
 ## [15.12.4] - 2026-06-13
 
