@@ -1,6 +1,9 @@
 # Changelog
 
 ## [Unreleased]
+### Fixed
+- Honor `context_length` reported by OpenAI-compatible proxy `/v1/models` discovery (`discovery: { type: "proxy" }` or `discovery: { type: "openai-models-list" }`), so aggregator-reported windows override the bundled reference when they differ.
+
 
 ## [15.12.4] - 2026-06-13
 ### Fixed
