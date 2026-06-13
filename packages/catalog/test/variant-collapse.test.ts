@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { fetchAntigravityDiscoveryModels } from "@oh-my-pi/pi-catalog/discovery/antigravity";
+import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "@oh-my-pi/pi-catalog/discovery/antigravity";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { stripThinkingVariantToken } from "@oh-my-pi/pi-catalog/identity/family";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
@@ -501,6 +501,22 @@ describe("antigravity discovery collapsing", () => {
 			Promise.resolve(new Response(JSON.stringify(payload), { status: 200 })),
 		{ preconnect: fetch.preconnect },
 	);
+
+	it("uses the primary daily endpoint by default", async () => {
+		const requestedUrls: string[] = [];
+		const defaultFetcher = Object.assign(
+			(input: Parameters<typeof fetch>[0], _init?: Parameters<typeof fetch>[1]) => {
+				requestedUrls.push(String(input));
+				return Promise.resolve(new Response(JSON.stringify(payload), { status: 200 }));
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		const models = await fetchAntigravityDiscoveryModels({ token: "t", fetcher: defaultFetcher });
+
+		expect(requestedUrls).toEqual([`${ANTIGRAVITY_PRIMARY_ENDPOINT}/v1internal:fetchAvailableModels`]);
+		expect(models?.every(model => model.baseUrl === ANTIGRAVITY_PRIMARY_ENDPOINT)).toBe(true);
+	});
 
 	it("returns collapsed logical entries and keeps the denylist", async () => {
 		const models = await fetchAntigravityDiscoveryModels({ token: "t", endpoint: "https://cca.test", fetcher });
