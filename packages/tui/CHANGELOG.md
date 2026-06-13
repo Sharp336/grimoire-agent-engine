@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the editor's software-cursor render dropping a `decorateText` decoration on text ending exactly at the cursor. The four end-of-text software-cursor branches now decorate the pre-cursor segment in isolation (instead of relying on the whole-line fallback, where the appended ESC-prefixed cursor marker broke a trailing word boundary such as a magic-keyword's `(?!\S)`), so an end-anchored match is decorated as it is typed while visible width is unchanged ([#2475](https://github.com/can1357/oh-my-pi/issues/2475))
+
 ## [15.12.5] - 2026-06-13
 ### Added
 

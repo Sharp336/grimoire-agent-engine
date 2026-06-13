@@ -8,6 +8,25 @@ export type KeywordHighlighter = (text: string, resetTo?: string) => string;
 
 const FG_RESET = "\x1b[39m";
 
+/**
+ * Shared rotation phase for the live editor shimmer. {@link advanceGlowPhase}
+ * bumps it once per animation frame; {@link createGradientHighlighter}'s `paint`
+ * offsets each character's gradient stop by it so the colors sweep over time.
+ * At phase 0 the offset is a no-op, so static renders (sent message bubbles, the
+ * idle prompt) stay byte-identical to the un-animated gradient.
+ */
+let glowPhase = 0;
+
+/** Advance the shared shimmer phase by one stop. Wraps as an unsigned 32-bit counter. */
+export function advanceGlowPhase(): void {
+	glowPhase = (glowPhase + 1) >>> 0;
+}
+
+/** Reset the shimmer phase to 0, restoring byte-identical static gradient output. */
+export function resetGlowPhase(): void {
+	glowPhase = 0;
+}
+
 /** Declarative spec for {@link createGradientHighlighter}. */
 export interface GradientHighlightSpec {
 	/** Cheap, stateless presence probe used to skip the boundary regex on most lines. Must be non-global. */
@@ -58,7 +77,10 @@ export function createGradientHighlighter(spec: GradientHighlightSpec): KeywordH
 		let out = "";
 		let prev = "";
 		for (let i = 0; i < n; i++) {
-			const color = stopsArr[Math.floor((i / n) * stopsArr.length)] ?? stopsArr[0] ?? "";
+			// Offset by the shared shimmer phase so the gradient rotates across frames;
+			// at phase 0 this is a no-op (`idx % len === idx` for idx in [0, len)).
+			const idx = (Math.floor((i / n) * stopsArr.length) + glowPhase) % stopsArr.length;
+			const color = stopsArr[idx] ?? stopsArr[0] ?? "";
 			// Coalesce consecutive characters that resolve to the same stop.
 			if (color !== prev) {
 				out += color;

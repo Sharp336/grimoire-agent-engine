@@ -917,10 +917,12 @@ export class Editor implements Component, Focusable {
 					} else if (inlineHint) {
 						const availWidth = Math.max(0, lineContentWidth - displayWidth - overrideWidth);
 						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
-						displayText = before + marker + this.cursorOverride + hintText;
+						displayText = this.#decorate(before) + marker + this.cursorOverride + hintText;
+						decorated = true;
 						displayWidth += overrideWidth + Math.min(visibleWidth(inlineHint), availWidth);
 					} else {
-						displayText = before + marker + this.cursorOverride;
+						displayText = this.#decorate(before) + marker + this.cursorOverride;
+						decorated = true;
 						displayWidth += overrideWidth;
 					}
 				} else {
@@ -935,10 +937,12 @@ export class Editor implements Component, Focusable {
 					} else if (inlineHint) {
 						const availWidth = Math.max(0, lineContentWidth - displayWidth - cursorWidth);
 						const hintText = hintStyle(truncateToWidth(inlineHint, availWidth));
-						displayText = before + marker + cursor + hintText;
+						displayText = this.#decorate(before) + marker + cursor + hintText;
+						decorated = true;
 						displayWidth += cursorWidth + Math.min(visibleWidth(inlineHint), availWidth);
 					} else {
-						displayText = before + marker + cursor;
+						displayText = this.#decorate(before) + marker + cursor;
+						decorated = true;
 						displayWidth += cursorWidth;
 					}
 					if (displayWidth > lineContentWidth && paddingX > 0) {

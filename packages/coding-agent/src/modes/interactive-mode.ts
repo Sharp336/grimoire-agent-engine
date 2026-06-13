@@ -533,6 +533,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
+		this.editor.onGlowTick = () => {
+			// Component-scoped repaint: the shimmer changes only the editor, so the TUI
+			// reuses every other root subtree instead of re-walking the tree at 30fps.
+			this.ui.requestComponentRender(this.editor);
+		};
+		this.editor.isMagicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		this.#syncEditorMaxHeight();
 		this.#resizeHandler = () => {
 			this.#syncEditorMaxHeight();
@@ -2713,6 +2719,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#observerRegistry.dispose();
 		this.#eventController.dispose();
 		this.statusLine.dispose();
+		this.editor.dispose();
 		if (this.#resizeHandler) {
 			process.stdout.removeListener("resize", this.#resizeHandler);
 			this.#resizeHandler = undefined;
@@ -2806,6 +2813,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.onAutocompleteUpdate = () => {
 			this.ui.requestRender();
 		};
+		nextEditor.onGlowTick = () => {
+			this.ui.requestComponentRender(this.editor);
+		};
+		nextEditor.isMagicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		nextEditor.setMaxHeight(this.#computeEditorMaxHeight());
 		if (this.historyStorage) {
 			nextEditor.setHistoryStorage(this.historyStorage);
@@ -2813,6 +2824,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		nextEditor.setText(previousText);
 
 		this.editorContainer.clear();
+		previousEditor.dispose();
 		this.editor = nextEditor;
 		this.editorContainer.addChild(nextEditor);
 		this.ui.setFocus(nextEditor);

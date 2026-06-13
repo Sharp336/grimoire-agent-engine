@@ -2279,4 +2279,47 @@ describe("Editor component", () => {
 			expect(editor.getText()).toBe("");
 		});
 	});
+
+	describe("magic-keyword glow at the cursor seam", () => {
+		// Mirror the real gradient highlighter's whitespace-delimited boundary so the test
+		// genuinely exercises the seam: an ESC-prefixed cursor marker right after the keyword
+		// is non-whitespace, so `(?!\S)` only matches when `before` is decorated in isolation.
+		const SGR = "\x1b[38;2;255;0;0m";
+		const RESET = "\x1b[39m";
+		const glow = (text: string): string => text.replace(/(?<!\S)ultrathink(?!\S)/g, m => `${SGR}${m}${RESET}`);
+		const cursorWidth = visibleWidth(defaultEditorTheme.symbols.inputCursor);
+
+		it("glows a keyword typed with the cursor at its end, preserving visible width", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setBorderVisible(false);
+			editor.focused = true; // software cursor: useTerminalCursor stays false
+			editor.decorateText = glow;
+			editor.setText("ultrathink"); // cursor lands at end-of-text — the broken seam
+
+			const [line] = editor.render(80);
+
+			// Seam: the gradient SGR wraps the keyword even though the ESC cursor marker and
+			// glyph follow it immediately. Before the fix the whole-line decorate ran on
+			// "ultrathink\x1b…" and the `(?!\S)` right boundary dropped the match.
+			expect(line).toContain(`${SGR}ultrathink${RESET}`);
+
+			// Decoration is zero-width: visible content is the keyword plus the cursor glyph.
+			const visible = stripVTControlCharacters(line!.replaceAll(CURSOR_MARKER, "")).trimEnd();
+			expect(visible).toBe(`ultrathink${defaultEditorTheme.symbols.inputCursor}`);
+			expect(Bun.stringWidth(visible)).toBe(Bun.stringWidth("ultrathink") + cursorWidth);
+		});
+
+		it("still glows when the cursor sits mid-line after the keyword (regression guard)", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setBorderVisible(false);
+			editor.focused = true;
+			editor.decorateText = glow;
+			editor.setText("ultrathink go");
+			editor.handleInput("\x1b[D"); // Left: cursor off the end, onto a later grapheme
+
+			const [line] = editor.render(80);
+
+			expect(line).toContain(`${SGR}ultrathink${RESET}`);
+		});
+	});
 });

@@ -1,4 +1,5 @@
-import { beforeAll, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
+import { advanceGlowPhase, resetGlowPhase } from "@oh-my-pi/pi-coding-agent/modes/gradient-highlight";
 import { highlightMagicKeywords } from "@oh-my-pi/pi-coding-agent/modes/magic-keywords";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
@@ -42,5 +43,30 @@ describe("highlightMagicKeywords", () => {
 		expect(decorated).toContain(reset);
 		// The reset must land before the trailing prose so it keeps the bubble color.
 		expect(decorated.endsWith(`${reset} go`)).toBe(true);
+	});
+});
+
+describe("glow shimmer phase", () => {
+	afterEach(() => {
+		// Shared module-level phase: never leak a non-idle phase into the static-gradient tests.
+		resetGlowPhase();
+	});
+
+	it("rotates the gradient with phase, preserving visible text and width, and restores idle bytes on reset", () => {
+		const input = "please ultrathink now";
+		const frame0 = highlightMagicKeywords(input);
+
+		advanceGlowPhase();
+		const frame1 = highlightMagicKeywords(input);
+
+		// Shimmer: the per-character stop indices shift, so the SGR byte stream changes…
+		expect(frame1).not.toBe(frame0);
+		// …but the visible text and its width are untouched (decoration is zero-width).
+		expect(Bun.stripANSI(frame1)).toBe(input);
+		expect(Bun.stringWidth(Bun.stripANSI(frame1))).toBe(Bun.stringWidth(input));
+
+		// Idle (phase 0) output is byte-identical to the pre-animation gradient.
+		resetGlowPhase();
+		expect(highlightMagicKeywords(input)).toBe(frame0);
 	});
 });

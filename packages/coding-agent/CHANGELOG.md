@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an animated shimmer to the magic-keyword glow in the prompt editor (Claude Code style). While a magic keyword (`ultrathink`/`orchestrate`/`workflowz`) is present and the editor is focused, a 30 fps ticker rotates the gradient palette phase; combined with the cursor-seam fix the keyword now also glows immediately as it is typed. Gated on the existing `magicKeywords.enabled` setting; the idle (phase-0) gradient is byte-identical to before, so sent-message rendering is unchanged ([#2475](https://github.com/can1357/oh-my-pi/issues/2475))
+
 ## [15.12.5] - 2026-06-13
 ### Changed
 

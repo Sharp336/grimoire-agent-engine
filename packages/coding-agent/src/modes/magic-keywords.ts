@@ -1,6 +1,6 @@
-import { highlightOrchestrate } from "./orchestrate";
-import { highlightUltrathink } from "./ultrathink";
-import { highlightWorkflow } from "./workflow";
+import { containsOrchestrate, highlightOrchestrate } from "./orchestrate";
+import { containsUltrathink, highlightUltrathink } from "./ultrathink";
+import { containsWorkflow, highlightWorkflow } from "./workflow";
 
 /**
  * Gradient-highlight every magic keyword ("ultrathink", "orchestrate",
@@ -17,4 +17,14 @@ import { highlightWorkflow } from "./workflow";
  */
 export function highlightMagicKeywords(text: string, resetTo?: string): string {
 	return highlightWorkflow(highlightOrchestrate(highlightUltrathink(text, resetTo), resetTo), resetTo);
+}
+
+/**
+ * Whether `text` contains any standalone magic keyword ("ultrathink",
+ * "orchestrate", or "workflowz") in prose — never inside a code block, inline
+ * code span, or XML/HTML section. Cheap presence probe used to gate the live
+ * editor glow shimmer.
+ */
+export function containsAnyMagicKeyword(text: string): boolean {
+	return containsUltrathink(text) || containsOrchestrate(text) || containsWorkflow(text);
 }

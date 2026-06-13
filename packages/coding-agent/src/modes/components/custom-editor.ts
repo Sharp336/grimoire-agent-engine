@@ -1,7 +1,8 @@
 import { addKeyAliases, canonicalKeyId, Editor, type KeyId, parseKey, parseKittySequence } from "@oh-my-pi/pi-tui";
 import type { AppKeybinding } from "../../config/keybindings";
+import { advanceGlowPhase, resetGlowPhase } from "../gradient-highlight";
 import { imageReferenceHyperlink, PLACEHOLDER_REGEX, renderPlaceholders } from "../image-references";
-import { highlightMagicKeywords } from "../magic-keywords";
+import { containsAnyMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
 import { theme } from "../theme/theme";
 
 type ConfigurableEditorAction = Extract<
@@ -60,6 +61,9 @@ const BRACKETED_PASTE_END = "\x1b[201~";
 const BRACKETED_IMAGE_PATH_REGEX = /\.(?:png|jpe?g|gif|webp)$/i;
 const BRACKETED_IMAGE_PATH_BOUNDARY_REGEX = /\.(?:png|jpe?g|gif|webp)(?=$|["']?\s)/gi;
 const SHELL_ESCAPED_PATH_CHAR_REGEX = /\\([\\\s'"()[\]{}&;<>|?*!$`])/g;
+
+/** Magic-keyword glow shimmer redraw cadence (30fps), mirroring the Loader spinner cadence. */
+const GLOW_RENDER_INTERVAL_MS = 1000 / 30;
 
 function isPastedPathSeparator(char: string | undefined): boolean {
 	return char === undefined || char === " " || char === "\t" || char === "\r" || char === "\n";
@@ -178,6 +182,18 @@ export class CustomEditor extends Editor {
 	/** Called when left-arrow is pressed while the editor is empty (cursor necessarily at start). */
 	onLeftAtStart?: () => void;
 
+	/** Fired on each live glow-shimmer frame so the host can repaint this editor. */
+	onGlowTick?: () => void;
+	/** Gate for the glow shimmer; when set and returning false the ticker never starts
+	 *  (e.g. the `magicKeywords.enabled` setting is off). Defaults to always-on. */
+	isMagicKeywordsEnabled?: () => boolean;
+
+	/** 30fps phase ticker driving the magic-keyword glow shimmer; unset while idle. */
+	#glowTimer?: ReturnType<typeof setInterval>;
+	/** Cached magic-keyword presence, recomputed only on text change so the 30fps
+	 *  shimmer frame loop never re-scans the whole buffer. */
+	#hasMagicKeyword = false;
+
 	/** Custom key handlers from extensions and non-built-in app actions. */
 	#customKeyHandlers = new Map<KeyId, () => void>();
 	#customMatchKeys = new Map<string, () => void>();
@@ -236,6 +252,86 @@ export class CustomEditor extends Editor {
 	clearCustomKeyHandlers(): void {
 		this.#customKeyHandlers.clear();
 		this.#rebuildCustomMatchKeys();
+	}
+
+	/**
+	 * Re-sync hardware/software cursor mode. The TUI calls this when focus is
+	 * (re)assigned, so it doubles as our focus hook: re-evaluate the glow so a
+	 * restored draft containing a keyword starts shimmering once the editor is focused.
+	 */
+	override setUseTerminalCursor(useTerminalCursor: boolean): void {
+		super.setUseTerminalCursor(useTerminalCursor);
+		this.#updateGlowAnimation();
+	}
+
+	/** Lifecycle teardown: stop the glow shimmer timer. Idempotent. */
+	dispose(): void {
+		this.#stopGlowAnimation();
+	}
+
+	/** Whether the live glow shimmer should currently run. */
+	#shouldGlow(): boolean {
+		return this.focused && (this.isMagicKeywordsEnabled?.() ?? true) && this.#hasMagicKeyword;
+	}
+
+	/**
+	 * Start or stop the glow shimmer to match {@link #shouldGlow}. Idempotent, so it
+	 * is safe to call on every text change and focus sync.
+	 */
+	#updateGlowAnimation(): void {
+		if (this.#shouldGlow()) {
+			this.#startGlowAnimation();
+		} else {
+			this.#stopGlowAnimation();
+		}
+	}
+
+	#startGlowAnimation(): void {
+		if (this.#glowTimer !== undefined) return;
+		this.#glowTimer = setInterval(() => {
+			// Re-check every frame so blur, submit/clear, or disabling the setting stops the
+			// shimmer within one frame — no idle CPU and no animation while the editor is unfocused.
+			if (!this.#shouldGlow()) {
+				this.#stopGlowAnimation();
+				this.onGlowTick?.();
+				return;
+			}
+			advanceGlowPhase();
+			this.onGlowTick?.();
+		}, GLOW_RENDER_INTERVAL_MS);
+		// Never keep the event loop alive for the shimmer; it only animates while the TUI runs.
+		this.#glowTimer.unref?.();
+	}
+
+	#stopGlowAnimation(): void {
+		if (this.#glowTimer !== undefined) {
+			clearInterval(this.#glowTimer);
+			this.#glowTimer = undefined;
+		}
+		resetGlowPhase();
+	}
+
+	/** Recompute the cached magic-keyword presence and (re)sync the shimmer. Called
+	 *  only on text changes (keystrokes, paste, programmatic set/insert) — never per
+	 *  frame — so a large buffer is scanned once per edit, not 30 times a second. */
+	#refreshMagicKeyword(): void {
+		this.#hasMagicKeyword = containsAnyMagicKeyword(this.getText());
+		this.#updateGlowAnimation();
+	}
+
+	override setText(text: string): void {
+		super.setText(text);
+		this.#refreshMagicKeyword();
+	}
+
+	override insertText(text: string): void {
+		super.insertText(text);
+		this.#refreshMagicKeyword();
+	}
+
+	override pasteText(text: string): void {
+		super.pasteText(text);
+		this.#refreshMagicKeyword();
 	}
 
 	handleInput(data: string): void {
@@ -394,5 +490,7 @@ export class CustomEditor extends Editor {
 
 		// Pass to parent for normal handling
 		super.handleInput(data);
+		// Typing may have completed or removed a magic keyword: (re)evaluate the shimmer.
+		this.#refreshMagicKeyword();
 	}
 }
