@@ -103,12 +103,21 @@ export interface EvalToolDescriptionOptions {
 	spawns?: boolean;
 }
 
+export class LanguageSelectedPromptInjectionFunctor {
+	constructor(private readonly options: EvalToolDescriptionOptions) {}
+
+	map(template: string): string {
+		const py = this.options.py ?? true;
+		const js = this.options.js ?? true;
+		const hs = this.options.hs ?? true;
+		const spawns = this.options.spawns ?? true;
+		return prompt.render(template, { py, js, hs, spawns });
+	}
+}
+
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
-	const py = options.py ?? true;
-	const js = options.js ?? true;
-	const hs = options.hs ?? true;
-	const spawns = options.spawns ?? true;
-	return prompt.render(evalDescription, { py, js, hs, spawns });
+	const functor = new LanguageSelectedPromptInjectionFunctor(options);
+	return functor.map(evalDescription);
 }
 
 export interface EvalToolOptions {
@@ -198,7 +207,42 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const spawnsAllowed = sessionSpawns !== "" && sessionSpawns !== null;
 		return getEvalToolDescription({ py: backends.python, js: backends.js, hs: backends.hs, spawns: spawnsAllowed });
 	}
-	readonly parameters = evalSchema;
+	get parameters(): typeof evalSchema {
+		const backends = this.session ? resolveEvalBackends(this.session) : { python: true, js: true, hs: true };
+		const enabledLangs: string[] = [];
+		if (backends.python) enabledLangs.push("py");
+		if (backends.js) enabledLangs.push("js");
+		if (backends.hs) enabledLangs.push("hs");
+
+		const langEnum =
+			enabledLangs.length > 0 ? z.enum(enabledLangs as [string, ...string[]]) : z.enum(["py", "js", "hs"]);
+
+		const dynamicCellSchema = z.object({
+			language: langEnum.describe(
+				'runtime: "py" for the IPython kernel, "js" for the persistent JS VM, "hs" for the Haskell compiler-backend',
+			),
+			code: z.string().describe("cell body, verbatim. Use top-level await freely."),
+			title: z.string().optional().describe('short label shown in transcript (e.g. "imports", "load config")'),
+			timeout: z
+				.number()
+				.int()
+				.min(1)
+				.max(3600)
+				.optional()
+				.describe("per-cell timeout in seconds (1-3600, default 30)"),
+			reset: z
+				.boolean()
+				.optional()
+				.describe("wipe this cell's language kernel before running. Other languages are untouched."),
+		});
+
+		return z.object({
+			cells: z
+				.array(dynamicCellSchema)
+				.min(1)
+				.describe("cells executed in order. State persists within each language across cells and tool calls."),
+		}) as unknown as typeof evalSchema;
+	}
 	readonly concurrency = "exclusive";
 	readonly strict = true;
 	readonly intent = (args: Partial<z.infer<typeof evalSchema>>): string | undefined => {

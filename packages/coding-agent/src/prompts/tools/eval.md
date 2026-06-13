@@ -16,6 +16,7 @@ Work incrementally: one logical step per cell (imports, define, test, use); pass
 On failure, errors name the failing cell ("Cell 3 failed") — resubmit only the fixed cell (plus any remaining).
 </instruction>
 
+{{#ifAny py js}}
 <prelude>
 {{#ifAll py js}}Same helpers in both runtimes, same positional order. Python: helpers run synchronously; trailing options are keyword args. JavaScript: helpers are async and `await`able; trailing options are ONE trailing object literal, never positional (extra positional args throw).{{else}}{{#if py}}Helpers run synchronously. Trailing options are keyword arguments.{{/if}}{{#if js}}Helpers are async and `await`able. Trailing options are ONE trailing object literal, never positional (extra positional args throw).{{/if}}{{/ifAll}}
 ```
@@ -58,7 +59,9 @@ budget → per-turn token budget
     {{#if py}}`budget.total` (ceiling or None), `budget.spent()`, `budget.remaining()` (math.inf when no ceiling), `budget.hard` (bool).{{/if}}{{#if js}}`await budget.total()` (ceiling or null), `await budget.spent()`, `await budget.remaining()` (Infinity when no ceiling), `await budget.hard()`.{{/if}} Ceiling comes from a `+Nk` directive (advisory) or `+Nk!`/Goal Mode (hard — `agent()` refuses to spawn past it); otherwise None/null, spend still tracked across the turn.
 ```
 </prelude>
+{{/ifAny}}
 
+{{#if py}}
 <example>
 {
   "cells": [
@@ -67,3 +70,14 @@ budget → per-turn token budget
   ]
 }
 </example>
+{{/if}}
+
+{{#if hs}}
+<example>
+{
+  "cells": [
+    { "language": "hs", "title": "factorial", "code": "main = print (product [1..100])" }
+  ]
+}
+</example>
+{{/if}}
