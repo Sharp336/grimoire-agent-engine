@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added Haskell (`"hs"`) compiler-backend support to the `eval` tool. Exposes a new `"hs"` option for execution of standalone Haskell code via `runhaskell`.
 - Added `skills.enableAgentsUser` and `skills.enableAgentsProject` settings (default on) so the canonical OMP-native `~/.agent[s]/skills` and project-walkup `.agent[s]/skills` are configurable independently from the third-party Claude/Codex/Pi toggles.
 
 

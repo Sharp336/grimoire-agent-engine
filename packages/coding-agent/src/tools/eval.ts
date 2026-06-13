@@ -103,6 +103,23 @@ export interface EvalToolDescriptionOptions {
 	spawns?: boolean;
 }
 
+let cachedHsAvailable: boolean | undefined;
+
+function checkHsAvailable(): boolean {
+	if (cachedHsAvailable !== undefined) {
+		return cachedHsAvailable;
+	}
+	try {
+		const result = Bun.spawnSync(["runhaskell", "--version"], {
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		cachedHsAvailable = result.exitCode === 0;
+	} catch {
+		cachedHsAvailable = false;
+	}
+	return cachedHsAvailable;
+}
 export class LanguageSelectedPromptInjectionFunctor {
 	constructor(private readonly options: EvalToolDescriptionOptions) {}
 
@@ -205,14 +222,15 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const backends = resolveEvalBackends(this.session);
 		const sessionSpawns = this.session.getSessionSpawns?.() ?? "*";
 		const spawnsAllowed = sessionSpawns !== "" && sessionSpawns !== null;
-		return getEvalToolDescription({ py: backends.python, js: backends.js, hs: backends.hs, spawns: spawnsAllowed });
+		const hsActive = backends.hs && checkHsAvailable();
+		return getEvalToolDescription({ py: backends.python, js: backends.js, hs: hsActive, spawns: spawnsAllowed });
 	}
 	get parameters(): typeof evalSchema {
 		const backends = this.session ? resolveEvalBackends(this.session) : { python: true, js: true, hs: true };
 		const enabledLangs: string[] = [];
 		if (backends.python) enabledLangs.push("py");
 		if (backends.js) enabledLangs.push("js");
-		if (backends.hs) enabledLangs.push("hs");
+		if (backends.hs && checkHsAvailable()) enabledLangs.push("hs");
 
 		const langEnum =
 			enabledLangs.length > 0 ? z.enum(enabledLangs as [string, ...string[]]) : z.enum(["py", "js", "hs"]);
