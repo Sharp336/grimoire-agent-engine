@@ -33,6 +33,12 @@ import { AgentStorage } from "../session/agent-storage";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { withFileLock } from "./file-lock";
 import {
+	type ModelPresetId,
+	type ModelPresetOverrides,
+	type ModelPresetRoleMap,
+	modelPresetsFromUnknown,
+} from "./model-presets";
+import {
 	type BashInterceptorRule,
 	type GroupPrefix,
 	type GroupTypeMap,
@@ -208,6 +214,10 @@ export class Settings {
 	#overrides: RawSettings = {};
 	/** Merged view (global + project + overrides) */
 	#merged: RawSettings = {};
+	/** Base (pre-preset-overlay) model roles, snapshotted on each merge for preset resolution */
+	#baseModelRoles: Record<string, string> = {};
+	/** Session-scoped preset role overlay (top merge layer, never persisted) */
+	#sessionPresetRoles: Record<string, string> = {};
 	/** Cached resolved values from the merged view, including defaults/path scoping */
 	#resolvedCache = new Map<SettingPath, unknown>();
 
@@ -406,6 +416,7 @@ export class Settings {
 		cloned.#configFiles = [...this.#configFiles];
 		cloned.#configOverlay = structuredClone(this.#configOverlay);
 		cloned.#overrides = structuredClone(this.#overrides);
+		cloned.#sessionPresetRoles = { ...this.#sessionPresetRoles };
 		cloned.#rebuildMerged();
 		cloned.#fireAllHooks();
 		return cloned;
@@ -520,6 +531,29 @@ export class Settings {
 			this.override("modelRoles", { ...shallowStringRecord(runtimeOverrides), [role]: modelId });
 		}
 	}
+	/**
+	 * Replace the session preset role overlay (top merge layer, never persisted).
+	 * An empty map clears the overlay.
+	 */
+	setSessionPresetRoles(map: ReadOnlyDict<string>): void {
+		this.#sessionPresetRoles = shallowStringRecord(map);
+		this.#rebuildMerged();
+	}
+
+	/** Base model role value, excluding the session preset overlay. */
+	getBaseModelRole(role: ModelRole | string): string | undefined {
+		return this.#baseModelRoles[role];
+	}
+
+	/** Keys of the base model role map, excluding the session preset overlay. */
+	getBaseModelRoleKeys(): Set<string> {
+		return new Set(Object.keys(this.#baseModelRoles));
+	}
+
+	/** Keys set via runtime overrides (e.g. --model/--smol/--slow/--plan). */
+	getOverrideModelRoleKeys(): Set<string> {
+		return new Set(Object.keys(shallowStringRecord(getByPath(this.#overrides, ["modelRoles"]))));
+	}
 
 	/**
 	 * Get a model role (helper for modelRoles record).
@@ -536,7 +570,7 @@ export class Settings {
 		return { ...this.get("modelRoles") };
 	}
 
-	/*
+	/**
 	 * Override model roles (helper for modelRoles record).
 	 */
 	overrideModelRoles(roles: ReadOnlyDict<string>): void {
@@ -547,6 +581,14 @@ export class Settings {
 			}
 		}
 		this.override("modelRoles", next);
+	}
+
+	getModelPreset(id: ModelPresetId): ModelPresetRoleMap | undefined {
+		return this.getModelPresets()[id];
+	}
+
+	getModelPresets(): ModelPresetOverrides {
+		return modelPresetsFromUnknown(this.get("modelPresets"));
 	}
 
 	/**
@@ -985,6 +1027,12 @@ export class Settings {
 		this.#merged = this.#deepMerge(this.#deepMerge({}, this.#global), this.#project);
 		this.#merged = this.#deepMerge(this.#merged, this.#configOverlay);
 		this.#merged = this.#deepMerge(this.#merged, this.#overrides);
+		// Snapshot the base model roles (pre preset overlay) for base-relative preset resolution.
+		this.#baseModelRoles = shallowStringRecord(getByPath(this.#merged, ["modelRoles"]));
+		// Apply the session preset overlay as the top, never-persisted layer.
+		if (Object.keys(this.#sessionPresetRoles).length > 0) {
+			setByPath(this.#merged, ["modelRoles"], { ...this.#baseModelRoles, ...this.#sessionPresetRoles });
+		}
 		this.#resolvedCache.clear();
 	}
 

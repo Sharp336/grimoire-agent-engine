@@ -254,6 +254,7 @@ export interface ModelTagDef {
 export interface ModelTagsSettings {
 	[key: string]: ModelTagDef;
 }
+export type ModelPresetsSettings = Record<string, Record<string, string>>;
 
 // Typed defaults for array/record settings — named constants avoid `as` casts
 // under `as const` while still letting SettingValue infer the correct element type.
@@ -261,6 +262,7 @@ const EMPTY_STRING_ARRAY: string[] = [];
 const EMPTY_STRING_RECORD: Record<string, string> = {};
 const DEFAULT_CYCLE_ORDER: string[] = ["smol", "default", "slow"];
 const EMPTY_MODEL_TAGS_RECORD: ModelTagsSettings = {};
+const EMPTY_MODEL_PRESETS_RECORD: ModelPresetsSettings = {};
 const HINDSIGHT_RECALL_TYPES_DEFAULT: string[] = ["world", "experience"];
 export const DEFAULT_BASH_INTERCEPTOR_RULES: BashInterceptorRule[] = [
 	{
@@ -380,6 +382,12 @@ export const SETTINGS_SCHEMA = {
 	disabledExtensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
 	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
+	modelPreset: {
+		type: "string",
+		default: "balanced",
+	},
+
+	modelPresets: { type: "record", default: EMPTY_MODEL_PRESETS_RECORD },
 
 	modelTags: { type: "record", default: EMPTY_MODEL_TAGS_RECORD },
 

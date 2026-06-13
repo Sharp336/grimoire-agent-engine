@@ -674,6 +674,7 @@ function resolveDefaultInheritedPatterns(
 	roleDefaults: string[],
 	settings: Settings | undefined,
 	visited: Set<ModelRole>,
+	roleLookup?: (role: ModelRole | string) => string | undefined,
 ): string[] {
 	if (!shouldInheritDefaultBeforePriority(role) || !configuredDefault) return [];
 
@@ -695,7 +696,7 @@ function resolveDefaultInheritedPatterns(
 			// Cross-role alias (e.g. modelRoles.default = "pi/slow"): resolve the
 			// target role's patterns now so downstream one-layer expanders see
 			// concrete model patterns instead of another role alias.
-			const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
+			const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited), roleLookup);
 			if (recursed && recursed.length > 0) {
 				resolved.push(...recursed);
 				continue;
@@ -710,6 +711,7 @@ function resolveConfiguredRolePattern(
 	value: string,
 	settings?: Settings,
 	visited: Set<ModelRole> = new Set(),
+	roleLookup?: (role: ModelRole | string) => string | undefined,
 ): string[] | undefined {
 	const normalized = value.trim();
 	if (!normalized) return undefined;
@@ -720,12 +722,12 @@ function resolveConfiguredRolePattern(
 	if (visited.has(role)) return undefined;
 	visited.add(role);
 
-	const configured = settings?.getModelRole(role)?.trim();
-	const configuredDefault = settings?.getModelRole(DEFAULT_MODEL_ROLE)?.trim();
+	const configured = (roleLookup?.(role) ?? settings?.getModelRole(role))?.trim();
+	const configuredDefault = (roleLookup?.(DEFAULT_MODEL_ROLE) ?? settings?.getModelRole(DEFAULT_MODEL_ROLE))?.trim();
 	const roleDefaults = normalizeModelPatternList(MODEL_PRIO[role as keyof typeof MODEL_PRIO]);
 	const resolved = configured
 		? normalizeModelPatternList(configured)
-		: resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited);
+		: resolveDefaultInheritedPatterns(role, configuredDefault, roleDefaults, settings, visited, roleLookup);
 	if (resolved.length === 0) {
 		resolved.push(...roleDefaults);
 	}
@@ -749,10 +751,14 @@ export function expandRoleAlias(value: string, settings?: Settings): string {
 	return resolved ?? value;
 }
 
-export function resolveConfiguredModelPatterns(value: string | string[] | undefined, settings?: Settings): string[] {
+export function resolveConfiguredModelPatterns(
+	value: string | string[] | undefined,
+	settings?: Settings,
+	roleLookup?: (role: ModelRole | string) => string | undefined,
+): string[] {
 	const patterns = normalizeModelPatternList(value);
 	return patterns.flatMap(pattern => {
-		const resolved = resolveConfiguredRolePattern(pattern, settings);
+		const resolved = resolveConfiguredRolePattern(pattern, settings, new Set(), roleLookup);
 		return resolved ?? [];
 	});
 }
@@ -797,7 +803,12 @@ export interface ResolvedModelRoleValue {
 export function resolveModelRoleValue(
 	roleValue: string | undefined,
 	availableModels: Model<Api>[],
-	options?: { settings?: Settings; matchPreferences?: ModelMatchPreferences; modelRegistry?: CanonicalModelRegistry },
+	options?: {
+		settings?: Settings;
+		matchPreferences?: ModelMatchPreferences;
+		modelRegistry?: CanonicalModelRegistry;
+		roleLookup?: (role: ModelRole | string) => string | undefined;
+	},
 ): ResolvedModelRoleValue {
 	if (!roleValue) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
@@ -808,7 +819,7 @@ export function resolveModelRoleValue(
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
 
-	const effectivePatterns = resolveConfiguredModelPatterns(normalized, options?.settings);
+	const effectivePatterns = resolveConfiguredModelPatterns(normalized, options?.settings, options?.roleLookup);
 	if (!effectivePatterns || effectivePatterns.length === 0) {
 		return { model: undefined, thinkingLevel: undefined, explicitThinkingLevel: false, warning: undefined };
 	}
