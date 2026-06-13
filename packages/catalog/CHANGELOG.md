@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `glm-5.2` to the bundled `zai` provider catalog (1,000,000-token context window, `anthropic-messages` API), so it is selectable out of the box without a manual `models.yml` entry. Matches the `glm-5.1` shape with the expanded context window.
+
 ### Fixed
 
 - Fixed the model cache opening with `PRAGMA journal_mode=WAL` before `PRAGMA busy_timeout`, so concurrent omp startups could crash inside `getDb()` on `SQLITE_BUSY` during WAL recovery instead of waiting through the transient lock. The busy handler is now installed before the first lock-taking statement ([#2421](https://github.com/can1357/oh-my-pi/issues/2421)).
