@@ -5,6 +5,7 @@ import type { OAuthProvider } from "@oh-my-pi/pi-ai/oauth/types";
 import type { Component, OverlayHandle } from "@oh-my-pi/pi-tui";
 import { Input, Loader, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
+import type { ModelPresetId } from "../../config/model-presets";
 import { formatModelSelectorValue } from "../../config/model-resolver";
 import { getRoleInfo } from "../../config/model-roles";
 import { settings } from "../../config/settings";
@@ -499,7 +500,20 @@ export class SelectorController {
 					done();
 					this.ctx.ui.requestRender();
 				},
-				{ ...options, currentContextTokens },
+				{
+					...options,
+					currentContextTokens,
+					onPresetSelect: async (preset: ModelPresetId) => {
+						const result = await this.ctx.session.applyModelPreset(preset);
+						this.ctx.statusLine.invalidate();
+						this.ctx.updateEditorBorderColor();
+						this.ctx.showStatus(
+							`Preset ${result.label}: ${result.defaultModel.provider}/${result.defaultModel.id}`,
+						);
+						done();
+						this.ctx.ui.requestRender();
+					},
+				},
 			);
 			return { component: selector, focus: selector };
 		});
