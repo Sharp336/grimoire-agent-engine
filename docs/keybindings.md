@@ -10,6 +10,7 @@ User remaps live in `~/.omp/agent/keybindings.yml`. The file is a YAML mapping w
 app.model.cycleForward: Ctrl+P
 app.model.selectTemporary: Alt+P
 app.plan.toggle: Alt+Shift+P
+app.modelPreset.cycleForward: Alt+Shift+Right
 ```
 
 Chord names are case-insensitive and use the same notation shown in the UI, such as `Ctrl+P`, `Alt+Shift+P`, `Shift+Enter`, and `Ctrl+Backspace`.
@@ -22,25 +23,27 @@ app.stt.toggle: []
 
 ## Common action IDs
 
-| Action ID                   | Default                                | Meaning                                       |
-| --------------------------- | -------------------------------------- | --------------------------------------------- |
-| `app.model.cycleForward`    | `Ctrl+P`                               | Cycle role models forward                     |
-| `app.model.cycleBackward`   | `Shift+Ctrl+P`                         | Cycle role models backward                    |
-| `app.model.selectTemporary` | `Alt+P`                                | Pick a model temporarily for this session     |
-| `app.model.select`          | `Alt+M`                                | Open the model selector and set roles         |
-| `app.plan.toggle`           | `Alt+Shift+P`                          | Toggle plan mode                              |
-| `app.history.search`        | `Ctrl+R`                               | Search prompt history                         |
-| `app.tools.expand`          | `Ctrl+O`                               | Toggle tool-output expansion                  |
-| `app.thinking.toggle`       | `Ctrl+T`                               | Toggle thinking-block visibility              |
-| `app.thinking.cycle`        | `Shift+Tab`                            | Cycle thinking level                          |
-| `app.editor.external`       | `Ctrl+G`                               | Edit the draft in `$VISUAL` / `$EDITOR`       |
-| `app.message.followUp`      | `Ctrl+Q`, `Ctrl+Enter`                 | Queue a follow-up message                     |
-| `app.message.dequeue`       | `Alt+Up`                               | Dequeue a queued message back into the editor |
-| `app.display.reset`         | `Ctrl+L`                               | Reset terminal display                        |
-| `app.clipboard.copyLine`    | `Alt+Shift+L`                          | Copy the current line                         |
-| `app.clipboard.copyPrompt`  | `Alt+Shift+C`                          | Copy the whole prompt                         |
-| `app.clipboard.pasteImage`  | `Ctrl+V` (`Alt+V` fallback on Windows) | Paste from the clipboard (image preferred, text fallback) |
-| `app.stt.toggle`            | `Alt+H`                                | Toggle speech-to-text recording               |
+| Action ID                         | Default                                | Meaning                                       |
+| --------------------------------- | -------------------------------------- | --------------------------------------------- |
+| `app.model.cycleForward`          | `Ctrl+P`                               | Cycle role models forward                     |
+| `app.model.cycleBackward`         | `Shift+Ctrl+P`                         | Cycle role models backward                    |
+| `app.modelPreset.cycleForward`    | `Alt+Shift+Right`                      | Cycle model presets forward (`/preset next`)  |
+| `app.modelPreset.cycleBackward`   | `Alt+Shift+Left`                       | Cycle model presets backward (`/preset prev`) |
+| `app.model.selectTemporary`       | `Alt+P`                                | Pick a model temporarily for this session     |
+| `app.model.select`                | `Alt+M`                                | Open the model selector and set roles         |
+| `app.plan.toggle`                 | `Alt+Shift+P`                          | Toggle plan mode                              |
+| `app.history.search`              | `Ctrl+R`                               | Search prompt history                         |
+| `app.tools.expand`                | `Ctrl+O`                               | Toggle tool-output expansion                  |
+| `app.thinking.toggle`             | `Ctrl+T`                               | Toggle thinking-block visibility              |
+| `app.thinking.cycle`              | `Shift+Tab`                            | Cycle thinking level                          |
+| `app.editor.external`             | `Ctrl+G`                               | Edit the draft in `$VISUAL` / `$EDITOR`       |
+| `app.message.followUp`            | `Ctrl+Q`, `Ctrl+Enter`                 | Queue a follow-up message                     |
+| `app.message.dequeue`             | `Alt+Up`                               | Dequeue a queued message back into the editor |
+| `app.display.reset`               | `Ctrl+L`                               | Reset terminal display                        |
+| `app.clipboard.copyLine`          | `Alt+Shift+L`                          | Copy the current line                         |
+| `app.clipboard.copyPrompt`        | `Alt+Shift+C`                          | Copy the whole prompt                         |
+| `app.clipboard.pasteImage`        | `Ctrl+V` (`Alt+V` fallback on Windows) | Paste from the clipboard (image preferred, text fallback) |
+| `app.stt.toggle`                  | `Alt+H`                                | Toggle speech-to-text recording               |
 
 On Windows Terminal, `Ctrl+V` may be handled by the terminal paste command before `omp` sees it; use the `Alt+V` fallback when clipboard image paste appears to do nothing. When the clipboard holds no image, `app.clipboard.pasteImage` pastes the clipboard text instead, so hosts that deliver only this chord (VS Code's integrated terminal when configured to forward `Ctrl+V`, Windows clipboard history via `Win+V`) work for both payload kinds. Windows Terminal also swallows `Ctrl+Enter`, so the follow-up shortcut also binds `Ctrl+Q` — the same chord GitHub Copilot CLI uses. If your existing `keybindings.yml` already assigns `Ctrl+Q` to another action, that user remap wins and follow-up keeps `Ctrl+Enter` unless you explicitly bind `app.message.followUp`.
 
