@@ -66,6 +66,48 @@ describe("repository mode resolver", () => {
 		});
 	});
 
+	it("auto picks a nested Git repo over an outer JJ workspace when their roots differ (not interop)", async () => {
+		// cwd is inside `/repo/vendor/lib/.git` while a parent `/repo/.jj` also resolves. The two
+		// are NOT a colocated interop checkout, so Git (the nearer root) must win — routing commits
+		// through the outer JJ workspace would be wrong.
+		const outerJj: jj.JjRepository = { repoRoot: "/repo", storeDir: "/repo/.jj/repo/store" };
+		const nestedGit: git.GitRepository = { ...GIT_REPOSITORY, repoRoot: "/repo/vendor/lib" };
+		spyOn(jj.repo, "resolve").mockResolvedValue(outerJj);
+		spyOn(git.repo, "resolve").mockResolvedValue(nestedGit);
+
+		const mode = await resolveRepositoryMode("/repo/vendor/lib", "auto");
+
+		expect(mode.kind).toBe("git");
+		expect(mode.gitRepository).toBe(nestedGit);
+		expect(mode.jjRepository).toBeNull();
+	});
+
+	it("auto picks a nested JJ workspace over an outer Git repo when their roots differ", async () => {
+		const outerGit: git.GitRepository = { ...GIT_REPOSITORY, repoRoot: "/repo" };
+		const nestedJj: jj.JjRepository = { repoRoot: "/repo/sub", storeDir: "/repo/sub/.jj/repo/store" };
+		spyOn(jj.repo, "resolve").mockResolvedValue(nestedJj);
+		spyOn(git.repo, "resolve").mockResolvedValue(outerGit);
+
+		const mode = await resolveRepositoryMode("/repo/sub", "auto");
+
+		expect(mode.kind).toBe("jj");
+		expect(mode.jjRepository).toBe(nestedJj);
+		expect(mode.gitRepository).toBeNull();
+	});
+
+	it("explicit jj keeps the outer JJ workspace even when a nested Git repo is nearer", async () => {
+		const outerJj: jj.JjRepository = { repoRoot: "/repo", storeDir: "/repo/.jj/repo/store" };
+		const nestedGit: git.GitRepository = { ...GIT_REPOSITORY, repoRoot: "/repo/vendor/lib" };
+		spyOn(jj.repo, "resolve").mockResolvedValue(outerJj);
+		spyOn(git.repo, "resolve").mockResolvedValue(nestedGit);
+
+		const mode = await resolveRepositoryMode("/repo/vendor/lib", "jj");
+
+		expect(mode.kind).toBe("jj");
+		expect(mode.jjRepository).toBe(outerJj);
+		expect(mode.gitRepository).toBeNull();
+	});
+
 	it("auto detects pure JJ when Git is absent", async () => {
 		spyOn(jj.repo, "resolve").mockResolvedValue(JJ_REPOSITORY);
 		spyOn(git.repo, "resolve").mockResolvedValue(null);

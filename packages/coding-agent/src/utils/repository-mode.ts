@@ -1,3 +1,4 @@
+import * as path from "node:path";
 import * as git from "./git";
 import * as jj from "./jj";
 
@@ -79,8 +80,21 @@ export async function resolveRepositoryMode(
 
 	if (jjRepository) {
 		const gitRepository = await detectGit(cwd);
-		const kind: RepositoryKind = gitRepository ? "jj-git-interop" : "jj";
-		return buildRepositoryMode(setting, kind, gitRepository, jjRepository);
+		if (!gitRepository) return buildRepositoryMode(setting, "jj", null, jjRepository);
+		// Colocated interop ONLY when the Git and JJ roots are the same workspace. Both repos
+		// were found by walking up from cwd, so when the roots differ one is nested inside the
+		// other: under `auto` the nearer (deeper) root wins — a `vendor/.git` under a parent
+		// `.jj` keeps using Git, not the outer JJ workspace — while an explicit `jj` setting
+		// always uses its JJ workspace.
+		const gitRoot = path.resolve(gitRepository.repoRoot);
+		const jjRoot = path.resolve(jjRepository.repoRoot);
+		if (gitRoot === jjRoot) {
+			return buildRepositoryMode(setting, "jj-git-interop", gitRepository, jjRepository);
+		}
+		if (setting === "auto" && gitRoot.startsWith(`${jjRoot}${path.sep}`)) {
+			return buildRepositoryMode(setting, "git", gitRepository, null);
+		}
+		return buildRepositoryMode(setting, "jj", null, jjRepository);
 	}
 
 	const gitRepository = await detectGit(cwd);
