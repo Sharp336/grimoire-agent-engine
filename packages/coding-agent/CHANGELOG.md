@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Budget, Balanced, Smart, and Ultra model presets with `/preset`, separate preset-cycling shortcuts, and a `PRESETS` tab in `/model`.
+- Added `/guided-goal` for a Plan/Slow-model interview that refines a rough objective before entering goal mode.
+- Added custom model presets via the `modelPresets` config map (arbitrary preset names → `role → selector` maps), surfaced alongside the built-ins in the `/model` PRESETS tab, `/preset`, and `--preset list`.
+- Added `--preset <name>` (alias `--profile <name>`) and the `PI_PRESET` environment variable to select a model preset at launch, plus `--preset list` to print the available presets and exit.
+
+### Changed
+
+- Applying a model preset is now a non-destructive runtime overlay: it layers the preset's role map over the live session and persists only the active `modelPreset` id, instead of rewriting persistent `modelRoles`. The persisted default preset auto-applies at startup, but explicitly configured roles (YAML `modelRoles` and `--model`/`--smol`/`--slow`/`--plan` flags) win — the overlay fills only the roles you have not already set — and auto-apply is skipped on `--continue` / `--resume`.
+
+### Fixed
+
+- Fixed preset switching corrupting later model-role resolution, and fixed applying a preset rewriting `modelRoles` or dropping roles such as `vision` that the preset did not mention.
+
 ## [15.12.4] - 2026-06-13
 
 ### Breaking Changes
