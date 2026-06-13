@@ -74,4 +74,16 @@ describe("clearModelCache", () => {
 		expect(readModelCache("p1", TTL_MS, Date.now, dbPath)).not.toBeNull();
 		expect(readModelCache("p2", TTL_MS, Date.now, dbPath)).not.toBeNull();
 	});
+
+	it("returns 0 for a missing-but-creatable cache without deleting anything else", () => {
+		const fresh = path.join(tempDir, "absent.db");
+		// getDb opens with create:true; the empty table yields 0 rows, not an error.
+		expect(clearModelCache(fresh)).toBe(0);
+	});
+
+	it("propagates a failure to open the cache instead of reporting a silent success", () => {
+		// `tempDir` is a directory, so opening it as a SQLite database fails. A purge
+		// must surface that error rather than swallowing it and reporting 0 cleared.
+		expect(() => clearModelCache(tempDir)).toThrow();
+	});
 });
