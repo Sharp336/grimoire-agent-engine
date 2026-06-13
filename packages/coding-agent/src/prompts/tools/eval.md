@@ -5,7 +5,7 @@ Cells run in array order. State persists per language — across cells, tool cal
 
 Cell fields:
 
-- `language` — {{#if py}}`"py"` for the IPython kernel{{/if}}{{#ifAll py js}}, {{/ifAll}}{{#if js}}`"js"` for the persistent JavaScript VM{{/if}}.
+- `language` — {{#if py}}`"py"` for the IPython kernel{{/if}}{{#ifAll py js}}, {{/ifAll}}{{#if js}}`"js"` for the persistent JavaScript VM{{/if}}{{#if hs}}, `"hs"` for the Haskell compiler-backend{{/if}}.
 - `code` — cell body, verbatim. Newlines and quotes JSON-encoded; no fences, no headers.
 - `title` (optional) — short transcript label (e.g. `"imports"`).
 - `timeout` (optional) — per-cell seconds (1-3600, default 30). Bounds the cell's own work only; the clock pauses while `agent()`/`parallel()`/`completion()` calls are in flight, so fanouts never need a raise. Raise only for heavy local compute or long non-agent tool calls.

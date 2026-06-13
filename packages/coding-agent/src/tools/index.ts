@@ -456,9 +456,10 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const backends = resolveEvalBackends(session);
 	const allowPython = backends.python;
 	const allowJs = backends.js;
+	const allowHs = backends.hs;
 	const skipPythonPreflight = session.skipPythonPreflight === true;
 	// Eval tool is enabled if EITHER backend is reachable. We only need to know
-	// whether python is reachable when JS is disabled — otherwise allowEval is
+	// whether python is reachable when JS and HS are disabled — otherwise allowEval is
 	// already true and the python-availability check can be deferred to first
 	// invocation of the python backend (already handled inside the executor).
 	let pythonAvailable = true;
@@ -466,6 +467,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		!skipPythonPreflight &&
 		allowPython &&
 		!allowJs &&
+		!allowHs &&
 		(requestedTools === undefined || requestedTools.includes("eval"))
 	) {
 		const availability = await logger.time(
@@ -476,16 +478,26 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		);
 		pythonAvailable = availability.ok;
 		if (!availability.ok) {
-			logger.warn("Python kernel unavailable and JS backend disabled; eval will be unavailable", {
+			logger.warn("Python kernel unavailable and other backends disabled; eval will be unavailable", {
 				reason: availability.reason,
 			});
 		}
 	}
 
+	let hsAvailable = true;
+	if (allowHs && !allowJs && !allowPython && (requestedTools === undefined || requestedTools.includes("eval"))) {
+		try {
+			const result = Bun.spawnSync(["runhaskell", "--version"], { stdout: "ignore", stderr: "ignore" });
+			hsAvailable = result.exitCode === 0;
+		} catch {
+			hsAvailable = false;
+		}
+	}
+
 	const effectivePythonAllowed = allowPython && pythonAvailable;
-	// Eval is exposed whenever any backend is reachable. The python backend may
-	// be unreachable, in which case eval dispatches exclusively to js.
-	const allowEval = effectivePythonAllowed || allowJs;
+	const effectiveHsAllowed = allowHs && hsAvailable;
+	// Eval is exposed whenever any backend is reachable.
+	const allowEval = effectivePythonAllowed || allowJs || effectiveHsAllowed;
 
 	// Auto-include AST counterparts when their text-based sibling is present
 	if (requestedTools) {

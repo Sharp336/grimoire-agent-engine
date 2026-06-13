@@ -41,8 +41,10 @@ import {
 } from "./render-utils";
 export const EVAL_DEFAULT_PREVIEW_LINES = 10;
 
-function languageForHighlighter(language: EvalLanguage | undefined): "python" | "javascript" {
-	return language === "js" ? "javascript" : "python";
+function languageForHighlighter(language: EvalLanguage | undefined): "python" | "javascript" | "haskell" {
+	if (language === "js") return "javascript";
+	if (language === "hs") return "haskell";
+	return "python";
 }
 
 interface EvalRenderCellArg {
@@ -70,7 +72,9 @@ interface EvalRenderCell {
 }
 
 function normalizeRenderLanguage(value: string | undefined): EvalLanguage {
-	return value === "js" ? "js" : "python";
+	if (value === "js") return "js";
+	if (value === "hs") return "hs";
+	return "python";
 }
 
 function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {

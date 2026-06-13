@@ -4,6 +4,7 @@ import type { ToolSession } from ".";
 export interface EvalBackendsAllowance {
 	python: boolean;
 	js: boolean;
+	hs: boolean;
 }
 
 /** Read per-backend allowance from settings (defaults true). */
@@ -11,6 +12,7 @@ export function readEvalBackendsAllowance(session: ToolSession): EvalBackendsAll
 	return {
 		python: session.settings.get("eval.py") ?? true,
 		js: session.settings.get("eval.js") ?? true,
+		hs: session.settings.get("eval.hs") ?? true,
 	};
 }
 
@@ -23,5 +25,6 @@ export function resolveEvalBackends(session: ToolSession): EvalBackendsAllowance
 	return {
 		python: $flag("PI_PY", settings.python),
 		js: $flag("PI_JS", settings.js),
+		hs: $flag("PI_HS", settings.hs),
 	};
 }

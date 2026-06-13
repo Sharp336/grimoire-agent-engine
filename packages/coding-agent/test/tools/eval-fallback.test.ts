@@ -8,8 +8,9 @@ import { resolveEvalBackends } from "@oh-my-pi/pi-coding-agent/tools/eval-backen
 
 let originalPiPy: string | undefined;
 let originalPiJs: string | undefined;
+let originalPiHs: string | undefined;
 
-function restoreEnv(name: "PI_PY" | "PI_JS", value: string | undefined): void {
+function restoreEnv(name: "PI_PY" | "PI_JS" | "PI_HS", value: string | undefined): void {
 	if (value === undefined) {
 		delete Bun.env[name];
 		return;
@@ -43,14 +44,17 @@ describe("EvalTool language dispatch", () => {
 	beforeEach(() => {
 		originalPiPy = Bun.env.PI_PY;
 		originalPiJs = Bun.env.PI_JS;
+		originalPiHs = Bun.env.PI_HS;
 		delete Bun.env.PI_PY;
 		delete Bun.env.PI_JS;
+		delete Bun.env.PI_HS;
 	});
 
 	afterEach(() => {
 		vi.restoreAllMocks();
 		restoreEnv("PI_PY", originalPiPy);
 		restoreEnv("PI_JS", originalPiJs);
+		restoreEnv("PI_HS", originalPiHs);
 	});
 
 	it('dispatches to the JS backend when cell.language === "js"', async () => {
@@ -66,6 +70,33 @@ describe("EvalTool language dispatch", () => {
 		expect(pythonExecuteSpy).not.toHaveBeenCalled();
 	});
 
+	it('dispatches to the Haskell backend when cell.language === "hs"', async () => {
+		const hsExecuteSpy = vi.spyOn(evalIndex.hsBackend, "execute").mockResolvedValue(mockResult);
+		const jsExecuteSpy = vi.spyOn(evalIndex.jsBackend, "execute");
+		const pythonExecuteSpy = vi.spyOn(evalIndex.pythonBackend, "execute");
+
+		const tool = new EvalTool(makeSession());
+		await tool.execute("call-hs", {
+			cells: [{ language: "hs", code: 'main = putStrLn "hello"' }],
+		});
+
+		expect(hsExecuteSpy).toHaveBeenCalledTimes(1);
+		expect(jsExecuteSpy).not.toHaveBeenCalled();
+		expect(pythonExecuteSpy).not.toHaveBeenCalled();
+	});
+	it("executes a real Haskell cell via runhaskell", async () => {
+		const session = makeSession();
+		if (!(await evalIndex.hsBackend.isAvailable(session))) {
+			return;
+		}
+		const tool = new EvalTool(session);
+		const result = await tool.execute("call-hs-real", {
+			cells: [{ language: "hs", code: 'main = putStrLn "Hello from Haskell!"' }],
+		});
+		const first = result.content[0];
+		const text = first && "text" in first ? first.text : "";
+		expect(text).toContain("Hello from Haskell!");
+	});
 	it('dispatches to the Python backend when cell.language === "py"', async () => {
 		vi.spyOn(pyKernel, "checkPythonKernelAvailability").mockResolvedValue({ ok: true });
 		vi.spyOn(evalIndex.pythonBackend, "isAvailable").mockResolvedValue(true);
@@ -127,7 +158,7 @@ describe("EvalTool language dispatch", () => {
 		settings.set("eval.py", false);
 		settings.set("eval.js", false);
 
-		expect(resolveEvalBackends(makeSession(settings))).toEqual({ python: true, js: false });
+		expect(resolveEvalBackends(makeSession(settings))).toEqual({ python: true, js: false, hs: true });
 	});
 
 	it("lets PI_JS disable js execution even when eval.js is enabled", async () => {
@@ -141,5 +172,28 @@ describe("EvalTool language dispatch", () => {
 				cells: [{ language: "js", code: "const x = 1;" }],
 			}),
 		).rejects.toThrow(/PI_JS=0/);
+	});
+	it("rejects hs cells when eval.hs is disabled", async () => {
+		const settings = Settings.isolated();
+		settings.set("eval.hs", false);
+		const tool = new EvalTool(makeSession(settings));
+		await expect(
+			tool.execute("call-hs-disabled", {
+				cells: [{ language: "hs", code: 'main = putStrLn "hello"' }],
+			}),
+		).rejects.toThrow(/eval\.hs = false/);
+	});
+
+	it("lets PI_HS disable hs execution even when eval.hs is enabled", async () => {
+		Bun.env.PI_HS = "0";
+		const settings = Settings.isolated();
+		settings.set("eval.hs", true);
+		const tool = new EvalTool(makeSession(settings));
+
+		await expect(
+			tool.execute("call-hs-env-disabled", {
+				cells: [{ language: "hs", code: 'main = putStrLn "hello"' }],
+			}),
+		).rejects.toThrow(/PI_HS=0/);
 	});
 });

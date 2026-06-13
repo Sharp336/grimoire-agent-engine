@@ -2,7 +2,7 @@ import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallb
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { z } from "zod/v4";
-import { jsBackend, pythonBackend } from "../eval";
+import { hsBackend, jsBackend, pythonBackend } from "../eval";
 import type { ExecutorBackend, ExecutorBackendResult } from "../eval/backend";
 import { EVAL_TIMEOUT_PAUSE_OP, EVAL_TIMEOUT_RESUME_OP } from "../eval/bridge-timeout";
 import { IdleTimeout } from "../eval/idle-timeout";
@@ -27,7 +27,11 @@ export { EVAL_DEFAULT_PREVIEW_LINES, evalToolRenderer } from "./eval-render";
  * across cells and across tool calls.
  */
 const evalCellSchema = z.object({
-	language: z.enum(["py", "js"]).describe('runtime: "py" for the IPython kernel, "js" for the persistent JS VM'),
+	language: z
+		.enum(["py", "js", "hs"])
+		.describe(
+			'runtime: "py" for the IPython kernel, "js" for the persistent JS VM, "hs" for the Haskell compiler-backend',
+		),
 	code: z.string().describe("cell body, verbatim. Use top-level await freely."),
 	title: z.string().optional().describe('short label shown in transcript (e.g. "imports", "load config")'),
 	timeout: z.number().int().min(1).max(3600).optional().describe("per-cell timeout in seconds (1-3600, default 30)"),
@@ -88,6 +92,7 @@ function formatDisplayOutputsForText(outputs: EvalDisplayOutput[]): string {
 export interface EvalToolDescriptionOptions {
 	py?: boolean;
 	js?: boolean;
+	hs?: boolean;
 	/**
 	 * Whether `agent()` is allowed in this session. Driven by the parent's
 	 * spawn policy (`getSessionSpawns`). Defaults to `true` for backward
@@ -101,8 +106,9 @@ export interface EvalToolDescriptionOptions {
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
 	const py = options.py ?? true;
 	const js = options.js ?? true;
+	const hs = options.hs ?? true;
 	const spawns = options.spawns ?? true;
-	return prompt.render(evalDescription, { py, js, spawns });
+	return prompt.render(evalDescription, { py, js, hs, spawns });
 }
 
 export interface EvalToolOptions {
@@ -142,6 +148,7 @@ async function resolveBackend(session: ToolSession, language: EvalLanguage): Pro
 	const backends = resolveEvalBackends(session);
 	const allowPy = backends.python;
 	const allowJs = backends.js;
+	const allowHs = backends.hs;
 
 	if (language === "python") {
 		if (!allowPy) throw new ToolError("Python backend is disabled (PI_PY=0 or eval.py = false).");
@@ -151,6 +158,15 @@ async function resolveBackend(session: ToolSession, language: EvalLanguage): Pro
 			);
 		}
 		return { backend: pythonBackend };
+	}
+	if (language === "hs") {
+		if (!allowHs) throw new ToolError("Haskell backend is disabled (PI_HS=0 or eval.hs = false).");
+		if (!(await hsBackend.isAvailable(session))) {
+			throw new ToolError(
+				"Haskell backend is unavailable in this session. Make sure GHC / runhaskell is installed.",
+			);
+		}
+		return { backend: hsBackend };
 	}
 	if (!allowJs) throw new ToolError("JavaScript backend is disabled (PI_JS=0 or eval.js = false).");
 	return { backend: jsBackend };
@@ -180,7 +196,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const backends = resolveEvalBackends(this.session);
 		const sessionSpawns = this.session.getSessionSpawns?.() ?? "*";
 		const spawnsAllowed = sessionSpawns !== "" && sessionSpawns !== null;
-		return getEvalToolDescription({ py: backends.python, js: backends.js, spawns: spawnsAllowed });
+		return getEvalToolDescription({ py: backends.python, js: backends.js, hs: backends.hs, spawns: spawnsAllowed });
 	}
 	readonly parameters = evalSchema;
 	readonly concurrency = "exclusive";
@@ -223,7 +239,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const cells: ResolvedEvalCell[] = [];
 		for (let i = 0; i < params.cells.length; i++) {
 			const cell = params.cells[i];
-			const language: EvalLanguage = cell.language === "py" ? "python" : "js";
+			const language: EvalLanguage = cell.language === "py" ? "python" : cell.language === "js" ? "js" : "hs";
 			const resolved = await resolveBackend(session, language);
 			cells.push({
 				index: i,

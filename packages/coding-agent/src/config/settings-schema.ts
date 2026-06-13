@@ -2653,6 +2653,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Allow the eval tool to dispatch JavaScript cells to the in-process runtime",
 		},
 	},
+	"eval.hs": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "shell",
+			group: "Eval & Python",
+			label: "Haskell Eval Backend",
+			description: "Allow the eval tool to dispatch Haskell cells to runhaskell",
+		},
+	},
 
 	// Python kernel knobs (consumed by the eval py backend and the /python slash command)
 	"python.kernelMode": {
