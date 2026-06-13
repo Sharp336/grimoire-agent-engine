@@ -458,16 +458,27 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	const allowJs = backends.js;
 	const allowHs = backends.hs;
 	const skipPythonPreflight = session.skipPythonPreflight === true;
-	// Eval tool is enabled if EITHER backend is reachable. We only need to know
-	// whether python is reachable when JS and HS are disabled — otherwise allowEval is
-	// already true and the python-availability check can be deferred to first
-	// invocation of the python backend (already handled inside the executor).
 	let pythonAvailable = true;
+	let hsAvailable = false;
+
+	if (allowHs) {
+		try {
+			const result = Bun.spawnSync(["runhaskell", "--version"], { stdout: "ignore", stderr: "ignore" });
+			hsAvailable = result.exitCode === 0;
+		} catch {
+			hsAvailable = false;
+		}
+	}
+
+	const hasRunnableHs = allowHs && hsAvailable;
+
+	// Eval tool is enabled if ANY backend is reachable. We only need to run the slow
+	// Python availability check when both JavaScript and Haskell are unavailable.
 	if (
 		!skipPythonPreflight &&
 		allowPython &&
 		!allowJs &&
-		!allowHs &&
+		!hasRunnableHs &&
 		(requestedTools === undefined || requestedTools.includes("eval"))
 	) {
 		const availability = await logger.time(
@@ -483,17 +494,6 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			});
 		}
 	}
-
-	let hsAvailable = true;
-	if (allowHs && !allowJs && !allowPython && (requestedTools === undefined || requestedTools.includes("eval"))) {
-		try {
-			const result = Bun.spawnSync(["runhaskell", "--version"], { stdout: "ignore", stderr: "ignore" });
-			hsAvailable = result.exitCode === 0;
-		} catch {
-			hsAvailable = false;
-		}
-	}
-
 	const effectivePythonAllowed = allowPython && pythonAvailable;
 	const effectiveHsAllowed = allowHs && hsAvailable;
 	// Eval is exposed whenever any backend is reachable.
