@@ -384,7 +384,7 @@ export const SETTINGS_SCHEMA = {
 	modelRoles: { type: "record", default: EMPTY_STRING_RECORD },
 	modelPreset: {
 		type: "string",
-		default: "balanced",
+		default: "",
 	},
 
 	modelPresets: { type: "record", default: EMPTY_MODEL_PRESETS_RECORD },

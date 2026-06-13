@@ -1202,8 +1202,9 @@ export async function runRootCommand(
 		try {
 			await result.session.initializeModelPreset({
 				explicitId: startupPresetId,
-				resuming: !!(parsedArgs.continue || parsedArgs.resume),
+				resuming: !!(parsedArgs.continue || parsedArgs.resume || parsedArgs.fork),
 				modelPattern: options.modelPattern,
+				scopedDefault: scopedModels.length > 0 && !options.modelPattern,
 			});
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : String(error);

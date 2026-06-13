@@ -5776,7 +5776,12 @@ export class AgentSession {
 	 * Roles configured in YAML/CLI win — the overlay fills only the rest.
 	 * Auto-apply of the persisted default is skipped on resume.
 	 */
-	async initializeModelPreset(opts: { explicitId?: string; resuming: boolean; modelPattern?: string }): Promise<void> {
+	async initializeModelPreset(opts: {
+		explicitId?: string;
+		resuming: boolean;
+		modelPattern?: string;
+		scopedDefault?: boolean;
+	}): Promise<void> {
 		const explicit = !!opts.explicitId;
 		const id = opts.explicitId ?? this.settings.get("modelPreset");
 		if (!id) return;
@@ -5786,7 +5791,7 @@ export class AgentSession {
 		for (const key of this.settings.getOverrideModelRoleKeys()) {
 			pinnedKeys.add(key);
 		}
-		if (opts.modelPattern?.trim()) {
+		if (opts.modelPattern?.trim() || opts.scopedDefault) {
 			pinnedKeys.add("default");
 		}
 
