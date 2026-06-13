@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the `edit` tool being rejected in plan mode when targeting the active `local://<slug>-plan.md` file even though `write` to the same path succeeded. The shared plan-mode guard now resolves the candidate to the same absolute path the write will use (normalizing the `local:` scheme) and falls back to a separator-bounded `path.resolve` prefix check when `realpathSync` throws, instead of silently denying an in-sandbox target — so the guard authorizes exactly the path that gets written and a `#tag`/selector-decorated out-of-sandbox path can no longer pass the membership test while resolving elsewhere ([#2472](https://github.com/can1357/oh-my-pi/issues/2472))
+
 ## [15.12.5] - 2026-06-13
 ### Changed
 

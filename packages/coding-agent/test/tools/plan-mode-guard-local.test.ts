@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { formatHashlineHeader, Patch } from "@oh-my-pi/hashline";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { enforcePlanModeWrite, resolvePlanPath } from "@oh-my-pi/pi-coding-agent/tools/plan-mode-guard";
@@ -104,10 +105,79 @@ describe("enforcePlanModeWrite accepts absolute local-sandbox paths", () => {
 		expect(() => enforcePlanModeWrite(session, absolute, { op: "update" })).not.toThrow();
 	});
 
+	it("allows the absolute plan path carrying a hashline #TAG (edit-header residue)", async () => {
+		// `edit` forwards the literal `[PATH#TAG]` header; a trailing `#tag`
+		// must not knock the path out of sandbox membership.
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "plan-guard-test-"));
+		const session = makeSession({ artifactsDir, planMode });
+		const absolute = resolvePlanPath(session, "local://my-plan.md");
+		expect(() => enforcePlanModeWrite(session, `${absolute}#1A2B`, { op: "update" })).not.toThrow();
+	});
+
+	it("allows the absolute plan path carrying a read line-range selector", async () => {
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "plan-guard-test-"));
+		const session = makeSession({ artifactsDir, planMode });
+		const absolute = resolvePlanPath(session, "local://my-plan.md");
+		expect(() => enforcePlanModeWrite(session, `${absolute}:10-20`, { op: "update" })).not.toThrow();
+	});
+
 	it("still rejects an absolute path outside the local sandbox", () => {
 		const session = makeSession({ artifactsDir: "/tmp/agent-artifacts", cwd: "/repo", planMode });
 		expect(() => enforcePlanModeWrite(session, "/repo/src/foo.ts", { op: "update" })).toThrow(
 			/working tree is read-only/,
 		);
+	});
+
+	it("allows a realpath-form plan path under a symlinked sandbox root", async () => {
+		// Reproduces the macOS `/tmp` ↔ `/private/tmp` (and any symlinked
+		// artifacts dir) hazard: the session resolves its sandbox through a
+		// symlink while `read local://…` echoes the realpath in the edit header.
+		// Membership must survive via realpath resolution, not a literal prefix —
+		// the lexical prefix check fails here, so this exercises the realpath branch.
+		const realBase = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "plan-guard-real-")));
+		const realLocal = path.join(realBase, "local");
+		await fs.mkdir(realLocal, { recursive: true });
+		const linkBase = `${realBase}-link`;
+		await fs.symlink(realBase, linkBase);
+		const session = makeSession({ artifactsDir: linkBase, planMode });
+		const realPlanPath = path.join(realLocal, "design-plan.md");
+		await fs.writeFile(realPlanPath, "# plan\n");
+		expect(() => enforcePlanModeWrite(session, realPlanPath, { op: "update" })).not.toThrow();
+		// …and still allowed with the hashline #TAG the edit header carries.
+		expect(() => enforcePlanModeWrite(session, `${realPlanPath}#1A2B`, { op: "update" })).not.toThrow();
+	});
+
+	it("allows the [PATH#TAG] edit header for the plan file (parse → plan-mode gate)", () => {
+		// End-to-end through the real hashline parser: `read` prints
+		// `[<abs-plan-path>#TAG]`, the parser splits the tag and forwards the
+		// absolute, out-of-cwd path to the same gate `preflightWrite` calls.
+		const session = makeSession({ artifactsDir: "/tmp/agent-artifacts", cwd: "/repo", planMode });
+		const absolutePlanPath = resolvePlanPath(session, "local://design-plan.md");
+		const header = formatHashlineHeader(absolutePlanPath, "1A2B");
+		const section = Patch.parse(`${header}\nreplace 1..1:\n+# plan\n`, { cwd: session.cwd }).sections[0];
+		expect(section).toBeDefined();
+		expect(section!.path).toBe(absolutePlanPath);
+		expect(() => enforcePlanModeWrite(session, section!.path, { op: "update" })).not.toThrow();
+	});
+
+	it("denies a decorated absolute path outside the sandbox", () => {
+		// A `#tag`/selector suffix must not let an out-of-sandbox target pass:
+		// the guard authorizes the same raw path the write resolves, so the
+		// decoration stays part of the (still out-of-sandbox) path.
+		const session = makeSession({ artifactsDir: "/tmp/agent-artifacts", cwd: "/repo", planMode });
+		expect(() => enforcePlanModeWrite(session, "/repo/src/foo.ts#1A2B", { op: "update" })).toThrow(
+			/working tree is read-only/,
+		);
+		expect(() => enforcePlanModeWrite(session, "/repo/src/foo.ts:10-20", { op: "update" })).toThrow(
+			/working tree is read-only/,
+		);
+	});
+
+	it("denies a path that traverses out of the sandbox", async () => {
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "plan-guard-test-"));
+		const session = makeSession({ artifactsDir, planMode });
+		const insideAbs = resolvePlanPath(session, "local://x.md");
+		const escapes = path.join(path.dirname(insideAbs), "..", "escape.md");
+		expect(() => enforcePlanModeWrite(session, escapes, { op: "update" })).toThrow(/working tree is read-only/);
 	});
 });

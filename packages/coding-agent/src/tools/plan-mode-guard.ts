@@ -30,6 +30,18 @@ function isWithinRoot(absolutePath: string, root: string): boolean {
 	return absolutePath.startsWith(sep);
 }
 
+/** Resolve symlinks in `p`, or `null` when it can't be resolved — the path is
+ *  not yet on disk (a not-yet-written plan file) or has nothing to resolve.
+ *  Returning `null` lets the sandbox-membership test fall back to a plain
+ *  `path.resolve` comparison instead of denying a genuine in-sandbox target. */
+function tryRealpath(p: string): string | null {
+	try {
+		return fs.realpathSync.native(p);
+	} catch {
+		return null;
+	}
+}
+
 /** True when `targetPath` addresses the session-local artifact sandbox.
  *  Accepts both `local://…` URLs and absolute paths pointing inside the
  *  resolved sandbox root — the latter is what `read local://…` echoes back
@@ -41,21 +53,24 @@ function targetsLocalSandbox(session: ToolSession, targetPath: string): boolean 
 	if (!path.isAbsolute(normalized)) return false;
 	const root = localSandboxRoot(session);
 	if (!root) return false;
-	// Compare both raw and realpath-normalized forms so that
-	// `/tmp/…` vs `/private/tmp/…` (macOS) and other symlink-collapsed
-	// roots both resolve to the same sandbox identity.
+	// Compare both raw and realpath-normalized forms so that `/tmp/…` vs
+	// `/private/tmp/…` (macOS) and other symlink-collapsed roots both resolve
+	// to the same sandbox identity. A failed realpath (path not yet on disk)
+	// must never deny membership — it falls through to the plain comparison.
 	const resolved = path.resolve(normalized);
 	if (isWithinRoot(resolved, root)) return true;
-	try {
-		const realRoot = fs.realpathSync.native(root);
-		if (isWithinRoot(resolved, realRoot)) return true;
-		// `resolved` itself may live in `/tmp/...` while `realRoot` is `/private/tmp/...`;
-		// realpath the parent dir of `resolved` so we catch that direction too.
-		const realParent = fs.realpathSync.native(path.dirname(resolved));
-		return isWithinRoot(path.join(realParent, path.basename(resolved)), realRoot);
-	} catch {
-		return false;
+	const realRoot = tryRealpath(root);
+	if (realRoot && isWithinRoot(resolved, realRoot)) return true;
+	if (realRoot) {
+		// `resolved` itself may live in `/tmp/...` while `realRoot` is
+		// `/private/tmp/...`; realpath the parent dir of `resolved` so we catch
+		// that direction too.
+		const realParent = tryRealpath(path.dirname(resolved));
+		if (realParent && isWithinRoot(path.join(realParent, path.basename(resolved)), realRoot)) {
+			return true;
+		}
 	}
+	return false;
 }
 
 /**
