@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `omp purge-cache` command to clear cached model data. By default it clears the catalog model-metadata cache (the SQLite provider/model list, re-fetched cheaply on the next run); `--all` additionally deletes downloaded local model weights (fastembed, tiny-models, gpu caches); `--provider <id>` scopes the metadata purge to one provider; `--json` prints a machine-readable summary ([#2474](https://github.com/can1357/oh-my-pi/issues/2474))
+
 ## [15.12.5] - 2026-06-13
 ### Changed
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `clearModelCache(dbPath?, providerId?)` to delete cached provider/model metadata rows from the model-cache SQLite store — all rows by default, or only the given provider's rows — returning the number of rows removed ([#2474](https://github.com/can1357/oh-my-pi/issues/2474))
+
 ## [15.12.4] - 2026-06-13
 
 ### Added

@@ -135,3 +135,20 @@ export function writeModelCache<TApi extends Api>(
 		// Cache writes are best-effort; failures should not break model resolution.
 	}
 }
+
+/**
+ * Delete cached model rows and return the number removed. With `providerId`
+ * (including an empty string), deletes only rows for that exact provider id;
+ * without it (`undefined`) clears the entire cache. Unlike the best-effort
+ * {@link writeModelCache}, this backs the explicit `omp purge-cache` command,
+ * so a corrupt/locked/unwritable cache throws rather than silently reporting
+ * `0` rows cleared.
+ */
+export function clearModelCache(dbPath?: string, providerId?: string): number {
+	const db = getDb(dbPath);
+	const info =
+		providerId !== undefined
+			? db.query("DELETE FROM model_cache WHERE provider_id = ?").run(providerId)
+			: db.query("DELETE FROM model_cache").run();
+	return Number(info.changes ?? 0);
+}
