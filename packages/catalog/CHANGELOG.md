@@ -5,6 +5,7 @@
 ### Fixed
 
 - Fixed the default \`baseUrl\` for \`google-antigravity\` provider models, routing requests to the primary daily endpoint (\`https://daily-cloudcode-pa.googleapis.com\`) instead of the unstable developer sandbox endpoint (\`https://daily-cloudcode-pa.sandbox.googleapis.com\`).
+- Fixed the model cache opening with `PRAGMA journal_mode=WAL` before `PRAGMA busy_timeout`, so concurrent omp startups could crash inside `getDb()` on `SQLITE_BUSY` during WAL recovery instead of waiting through the transient lock. The busy handler is now installed before the first lock-taking statement ([#2421](https://github.com/can1357/oh-my-pi/issues/2421)).
 
 ## [15.11.8] - 2026-06-12
 
