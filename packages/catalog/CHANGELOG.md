@@ -10,6 +10,10 @@
 
 - Pinned zai `glm-5.2` to 1M context during catalog generation so endpoint discovery and older fallbacks cannot regress it to 200k.
 
+### Fixed
+
+- Scoped vLLM model cache validity to the discovery base URL so changed endpoints refetch immediately, and bounded built-in vLLM discovery requests with a timeout.
+
 ## [15.12.4] - 2026-06-13
 
 ### Added

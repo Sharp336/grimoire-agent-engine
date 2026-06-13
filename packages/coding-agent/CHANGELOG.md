@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed vLLM discovery so `providers.vllm.baseUrl` drives the built-in endpoint, additional OpenAI-compatible vLLM provider IDs work through `openai-models-list`, and discovered `max_model_len` or fallback `context_length` values set context windows instead of falling back to 128k.
+
 ## [15.12.5] - 2026-06-13
 ### Changed
 

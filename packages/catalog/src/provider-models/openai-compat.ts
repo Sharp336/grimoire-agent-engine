@@ -2394,6 +2394,8 @@ export function litellmModelManagerOptions(
 // 22. vLLM
 // ---------------------------------------------------------------------------
 
+const VLLM_DISCOVERY_TIMEOUT_MS = 10_000;
+
 export interface VllmModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -2406,6 +2408,7 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 	const references = createBundledReferenceMap<"openai-completions">("vllm" as Parameters<typeof getBundledModels>[0]);
 	return {
 		providerId: "vllm",
+		cacheProviderId: `vllm:${Bun.hash(baseUrl).toString(36)}`,
 		fetchDynamicModels: () =>
 			fetchOpenAICompatibleModels({
 				api: "openai-completions",
@@ -2420,6 +2423,7 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 					};
 				},
 				fetch: config?.fetch,
+				signal: AbortSignal.timeout(VLLM_DISCOVERY_TIMEOUT_MS),
 			}),
 	};
 }
