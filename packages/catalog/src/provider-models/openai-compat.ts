@@ -1051,13 +1051,10 @@ export function zhipuCodingPlanModelManagerOptions(
 // like `glm-5` / `glm-5-turbo` are covered and unrelated future SKUs (e.g.
 // `glm-5-preview`) do not silently flip into thinking mode.
 const ZHIPU_REASONING_MODELS: Readonly<Record<string, true>> = {
-	"glm-4.5": true,
 	"glm-4.5-air": true,
-	"glm-4.6": true,
 	"glm-4.7": true,
-	"glm-5": true,
 	"glm-5-turbo": true,
-	"glm-5.1": true,
+	"glm-5.2": true,
 };
 
 // Vision-capable GLM models follow the `glm-<N>[.<N>]v[-<variant>]` shape
