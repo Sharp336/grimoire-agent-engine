@@ -1,6 +1,10 @@
 import { describe, expect, it, vi } from "bun:test";
+import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import type { Extension, ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { InputController } from "@oh-my-pi/pi-coding-agent/modes/controllers/input-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { KeyId } from "@oh-my-pi/pi-tui";
+import { logger } from "@oh-my-pi/pi-utils";
 import manualContinuePrompt from "../src/prompts/system/manual-continue.md" with { type: "text" };
 
 type FakeEditor = {
@@ -38,6 +42,10 @@ async function createContext() {
 		"app.display.reset": ["ctrl+l"],
 		"app.model.selectTemporary": ["ctrl+y"],
 		"app.model.select": ["alt+m"],
+		"app.model.cycleForward": ["ctrl+p"],
+		"app.model.cycleBackward": ["shift+ctrl+p"],
+		"app.modelPreset.cycleForward": ["alt+shift+right"],
+		"app.modelPreset.cycleBackward": ["alt+shift+left"],
 	};
 	const customHandlers = new Map<string, () => void>();
 	const setActionKeys = vi.fn();
@@ -56,6 +64,27 @@ async function createContext() {
 	const prompt = vi.fn(async () => {});
 	const abort = vi.fn(async () => {});
 	const updatePendingMessagesDisplay = vi.fn();
+	const cycleRoleModels = vi.fn(async () => ({
+		model: { provider: "test", id: "slow-model", name: "Slow Model" },
+		role: "slow",
+		thinkingLevel: undefined,
+	}));
+	const cycleModelPreset = vi.fn(async () => ({
+		preset: "smart",
+		label: "Smart",
+		defaultModel: { provider: "test", id: "smart-model" },
+		roles: [],
+	}));
+	const getRoleModelCycle = vi.fn(() => ({
+		models: [
+			{ role: "default", model: { provider: "test", id: "default-model" } },
+			{ role: "slow", model: { provider: "test", id: "slow-model" } },
+		],
+		currentIndex: 1,
+	}));
+	const showStatus = vi.fn();
+	const showError = vi.fn();
+	const invalidateStatusLine = vi.fn();
 	const editor: FakeEditor = {
 		setText(text: string) {
 			editorText = text;
@@ -95,6 +124,14 @@ async function createContext() {
 			prompt,
 			queuedMessageCount: 0,
 			abort,
+			cycleRoleModels,
+			cycleModelPreset,
+			getRoleModelCycle,
+			settings: {
+				get(key: string) {
+					return key === "cycleOrder" ? ["default", "slow"] : undefined;
+				},
+			},
 		} as unknown as InteractiveModeContext["session"],
 		keybindings: {
 			getKeys(action: string) {
@@ -144,8 +181,10 @@ async function createContext() {
 		toggleThinkingBlockVisibility: vi.fn(),
 		showModelSelector,
 		updateEditorBorderColor: vi.fn(),
+		showStatus,
+		showError,
+		statusLine: { invalidate: invalidateStatusLine },
 		hasActiveBtw: vi.fn(() => false),
-		showError: vi.fn(),
 	} as unknown as InteractiveModeContext;
 
 	return {
@@ -161,6 +200,11 @@ async function createContext() {
 			requestRender,
 			abort,
 			resetDisplay,
+			cycleRoleModels,
+			cycleModelPreset,
+			showStatus,
+			showError,
+			invalidateStatusLine,
 		},
 	};
 }
@@ -187,6 +231,46 @@ describe("InputController keybinding setup", () => {
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(1, { temporaryOnly: true });
 		expect(spies.showModelSelector).toHaveBeenNthCalledWith(2);
 		expect(spies.resetDisplay).toHaveBeenCalledTimes(1);
+	});
+
+	it("keeps role model cycling on model keys and presets on separate keys", async () => {
+		const { InputController, ctx, editor, customHandlers, spies } = await createContext();
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		await editor.onCycleModelForward?.();
+		await editor.onCycleModelBackward?.();
+		customHandlers.get("alt+shift+right")?.();
+		customHandlers.get("alt+shift+left")?.();
+
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.cycleForward", ["ctrl+p"]);
+		expect(spies.setActionKeys).toHaveBeenCalledWith("app.model.cycleBackward", ["shift+ctrl+p"]);
+		expect(spies.cycleRoleModels).toHaveBeenNthCalledWith(1, ["default", "slow"], "forward");
+		expect(spies.cycleRoleModels).toHaveBeenNthCalledWith(2, ["default", "slow"], "backward");
+		expect(spies.cycleModelPreset).toHaveBeenNthCalledWith(1, "forward");
+		expect(spies.cycleModelPreset).toHaveBeenNthCalledWith(2, "backward");
+	});
+	it("ignores preset cycling shortcuts while a subagent is focused", async () => {
+		const { InputController, ctx, customHandlers, spies } = await createContext();
+		const focusedCtx = ctx as InteractiveModeContext & { focusedAgentId: string };
+		focusedCtx.focusedAgentId = "agent-1";
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		customHandlers.get("alt+shift+right")?.();
+		customHandlers.get("alt+shift+left")?.();
+		await Promise.resolve();
+
+		expect(spies.cycleModelPreset).not.toHaveBeenCalled();
+		expect(spies.showStatus).toHaveBeenCalledTimes(2);
+		expect(spies.showStatus).toHaveBeenNthCalledWith(
+			1,
+			"Model/thinking apply to the main session — press ←← to return first",
+		);
+		expect(spies.showStatus).toHaveBeenNthCalledWith(
+			2,
+			"Model/thinking apply to the main session — press ←← to return first",
+		);
 	});
 
 	it("empty Enter aborts the active stream when queued messages are pending", async () => {
@@ -281,6 +365,54 @@ describe("InputController keybinding setup", () => {
 				started: true,
 				synthetic: true,
 			});
+		}
+	});
+});
+
+describe("ExtensionRunner reserved shortcut keybindings", () => {
+	it("rejects reserved shortcuts with reordered modifiers", () => {
+		const reorderedReservedShortcut = "ctrl+shift+p" as KeyId;
+		const extensionPath = "/tmp/reordered-shortcut.ts";
+		const extension: Extension = {
+			path: extensionPath,
+			resolvedPath: extensionPath,
+			handlers: new Map(),
+			tools: new Map(),
+			assistantThinkingRenderers: [],
+			messageRenderers: new Map(),
+			commands: new Map(),
+			flags: new Map(),
+			shortcuts: new Map([
+				[
+					reorderedReservedShortcut,
+					{
+						shortcut: reorderedReservedShortcut,
+						description: "Tries to bind model cycling with reordered modifiers",
+						handler: () => undefined,
+						extensionPath,
+					},
+				],
+			]),
+		};
+		const runner = new ExtensionRunner(
+			[extension],
+			{} as ExtensionRuntime,
+			"/tmp",
+			{} as ConstructorParameters<typeof ExtensionRunner>[3],
+			{} as ConstructorParameters<typeof ExtensionRunner>[4],
+		);
+		const warnSpy = vi.spyOn(logger, "warn").mockImplementation(() => {});
+
+		try {
+			const shortcuts = runner.getShortcuts();
+
+			expect(warnSpy).toHaveBeenCalledWith(
+				expect.stringContaining("conflicts with built-in shortcut"),
+				expect.objectContaining({ key: reorderedReservedShortcut, extensionPath }),
+			);
+			expect(shortcuts.has(reorderedReservedShortcut)).toBe(false);
+		} finally {
+			warnSpy.mockRestore();
 		}
 	});
 });

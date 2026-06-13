@@ -65,6 +65,7 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type {
+	Api,
 	AssistantMessage,
 	Context,
 	ImageContent,
@@ -117,6 +118,16 @@ import { classifyDifficulty } from "../auto-thinking/classifier";
 import { reset as resetCapabilities } from "../capability";
 import type { Rule } from "../capability/rule";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
+import {
+	getAllModelPresetIds,
+	getModelPresetRoleMap,
+	type ModelPresetId,
+	type ResolvedModelPreset,
+	type ResolvedModelPresetOverlay,
+	type ResolvedModelPresetRole,
+	resolveModelPreset,
+	resolveModelPresetOverlay,
+} from "../config/model-presets";
 import type { ModelRegistry } from "../config/model-registry";
 import {
 	extractExplicitThinkingSelector,
@@ -492,6 +503,12 @@ export interface RoleModelCycleResult {
 	model: Model;
 	thinkingLevel: ThinkingLevel | undefined;
 	role: string;
+}
+export interface AppliedModelPreset {
+	preset: ModelPresetId;
+	label: string;
+	defaultModel: Model<Api>;
+	roles: readonly ResolvedModelPresetRole[];
 }
 
 /** A configured role resolved to a concrete model, used by role cycling and
@@ -5701,6 +5718,114 @@ export class AgentSession {
 		if (currentIndex === -1) currentIndex = 0;
 
 		return { models, currentIndex };
+	}
+
+	getResolvedModelPreset(preset: ModelPresetId): ResolvedModelPreset {
+		return resolveModelPreset(this.settings, this.#modelRegistry, this.getAvailableModels(), preset);
+	}
+
+	async applyModelPreset(preset: ModelPresetId): Promise<AppliedModelPreset> {
+		const resolved = this.getResolvedModelPreset(preset);
+		await this.#applyResolvedPreset(resolved, { pinnedKeys: new Set(), setDefault: true });
+		this.settings.set("modelPreset", preset);
+
+		return {
+			preset,
+			label: resolved.info.label,
+			defaultModel: resolved.defaultRole.model,
+			roles: resolved.roles,
+		};
+	}
+
+	/**
+	 * Apply a resolved preset as a runtime overlay. Never writes persistent
+	 * `modelRoles`. Pinned role keys are skipped so the lower config layer wins.
+	 */
+	async #applyResolvedPreset(
+		resolved: ResolvedModelPreset | ResolvedModelPresetOverlay,
+		opts: { pinnedKeys: Set<string>; setDefault: boolean },
+	): Promise<void> {
+		const overlay: Record<string, string> = {};
+		for (const role of resolved.roles) {
+			if (opts.pinnedKeys.has(role.role)) continue;
+			overlay[role.role] = formatModelSelectorValue(
+				formatModelString(role.model),
+				role.explicitThinkingLevel ? role.thinkingLevel : undefined,
+			);
+		}
+		this.settings.setSessionPresetRoles(overlay);
+
+		const defaultRole =
+			"defaultRole" in resolved ? resolved.defaultRole : resolved.roles.find(role => role.role === "default");
+		if (opts.setDefault && !opts.pinnedKeys.has("default") && defaultRole) {
+			await this.setModel(defaultRole.model, "default");
+			if (defaultRole.explicitThinkingLevel) {
+				this.setThinkingLevel(defaultRole.thinkingLevel);
+			}
+		}
+	}
+
+	/**
+	 * Apply the persisted (or explicitly requested) preset at session start.
+	 * Roles configured in YAML/CLI win — the overlay fills only the rest.
+	 * Auto-apply of the persisted default is skipped on resume.
+	 */
+	async initializeModelPreset(opts: { explicitId?: string; resuming: boolean; modelPattern?: string }): Promise<void> {
+		const explicit = !!opts.explicitId;
+		const id = opts.explicitId ?? this.settings.get("modelPreset");
+		if (!id) return;
+		if (!explicit && opts.resuming) return;
+
+		const pinnedKeys = this.settings.getBaseModelRoleKeys();
+		for (const key of this.settings.getOverrideModelRoleKeys()) {
+			pinnedKeys.add(key);
+		}
+		if (opts.modelPattern?.trim()) {
+			pinnedKeys.add("default");
+		}
+
+		let resolved: ResolvedModelPresetOverlay;
+		try {
+			resolved = resolveModelPresetOverlay(
+				this.settings,
+				this.#modelRegistry,
+				this.getAvailableModels(),
+				id,
+				pinnedKeys,
+				opts.modelPattern?.trim() ? { default: opts.modelPattern.trim() } : undefined,
+			);
+			if (!pinnedKeys.has("default") && !resolved.roles.some(role => role.role === "default")) {
+				const roleMap = getModelPresetRoleMap(this.settings, id);
+				throw new Error(`Preset ${resolved.info.label} cannot resolve role default: ${roleMap.default ?? ""}`);
+			}
+		} catch (e) {
+			if (explicit) throw e;
+			logger.debug("startup preset apply skipped", { id, error: e instanceof Error ? e.message : String(e) });
+			return;
+		}
+
+		try {
+			await this.#applyResolvedPreset(resolved, { pinnedKeys, setDefault: true });
+			if (explicit) {
+				this.settings.override("modelPreset", id);
+			}
+		} catch (e) {
+			if (explicit) throw e;
+			logger.debug("startup preset apply failed", { id, error: e instanceof Error ? e.message : String(e) });
+		}
+	}
+
+	async cycleModelPreset(direction: "forward" | "backward" = "forward"): Promise<AppliedModelPreset | undefined> {
+		const ids = getAllModelPresetIds(this.settings);
+		if (ids.length <= 1) return undefined;
+
+		const stored = this.settings.get("modelPreset");
+		const current = stored && ids.includes(stored) ? stored : "balanced";
+		const currentIndex = Math.max(0, ids.indexOf(current));
+		const step = direction === "backward" ? -1 : 1;
+		const next = ids[(currentIndex + step + ids.length) % ids.length];
+
+		return this.applyModelPreset(next);
 	}
 
 	/**

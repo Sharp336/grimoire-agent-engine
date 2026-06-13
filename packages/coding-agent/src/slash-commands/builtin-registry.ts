@@ -7,6 +7,7 @@ import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { APP_NAME, setProjectDir } from "@oh-my-pi/pi-utils";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
+import { getAllModelPresetIds, getModelPresetInfo, type ModelPresetId, resolvePresetId } from "../config/model-presets";
 import type { SettingPath, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import {
@@ -89,6 +90,30 @@ function collabLinkHint(host: CollabHost, heading: string, view = false): string
 function formatFreshSessionResult(result: FreshSessionResult): string {
 	const stateLabel = result.closedProviderSessions === 1 ? "provider state" : "provider states";
 	return `Fresh provider session started (${result.closedProviderSessions} ${stateLabel} pruned).`;
+}
+
+/**
+ * Build the "Model presets:" listing shared by the ACP (`handle`) and TUI
+ * (`handleTui`) `/preset` handlers. Each row shows the active marker (`*` when
+ * the id matches `settings.modelPreset`), the preset label/id, and either the
+ * resolved default model or a sanitized resolution error.
+ */
+function buildPresetListLines(session: AgentSession): string[] {
+	const activePreset = session.settings.get("modelPreset");
+	const lines = ["Model presets:"];
+	for (const preset of getAllModelPresetIds(session.settings)) {
+		const info = getModelPresetInfo(preset);
+		const active = activePreset === preset ? "*" : " ";
+		try {
+			const resolved = session.getResolvedModelPreset(preset);
+			lines.push(
+				`${active} ${info.label} (${preset}) - ${resolved.defaultRole.model.provider}/${resolved.defaultRole.model.id}`,
+			);
+		} catch (error) {
+			lines.push(`${active} ${info.label} (${preset}) - unavailable: ${errorMessage(error)}`);
+		}
+	}
+	return lines;
 }
 
 const shutdownHandlerTui = (_command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime): SlashCommandResult => {
@@ -320,6 +345,104 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		handleTui: (_command, runtime) => {
 			runtime.ctx.showModelSelector();
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "preset",
+		description: "Apply or list model presets",
+		acpDescription: "Apply or list model presets",
+		inlineHint: "[<name>|next|prev|list]",
+		allowArgs: true,
+		handle: async (command, runtime) => {
+			const arg = (command.args ?? "").trim().toLowerCase();
+			const usageText = "Usage: /preset [<name>|next|prev|list]";
+			const applyPreset = async (preset: ModelPresetId) => {
+				const result = await runtime.session.applyModelPreset(preset);
+				await runtime.output(
+					`Preset ${result.label} applied: ${result.defaultModel.provider}/${result.defaultModel.id}.`,
+				);
+				await runtime.notifyTitleChanged?.();
+				await runtime.notifyConfigChanged?.();
+				return commandConsumed();
+			};
+
+			if (!arg || arg === "list") {
+				await runtime.output(buildPresetListLines(runtime.session).join("\n"));
+				return commandConsumed();
+			}
+
+			try {
+				if (arg === "next") {
+					const result = await runtime.session.cycleModelPreset("forward");
+					if (!result) {
+						await runtime.output("Only one model preset available.");
+						return commandConsumed();
+					}
+					await runtime.output(
+						`Preset ${result.label} applied: ${result.defaultModel.provider}/${result.defaultModel.id}.`,
+					);
+					await runtime.notifyTitleChanged?.();
+					await runtime.notifyConfigChanged?.();
+					return commandConsumed();
+				}
+				if (arg === "prev" || arg === "previous") {
+					const result = await runtime.session.cycleModelPreset("backward");
+					if (!result) {
+						await runtime.output("Only one model preset available.");
+						return commandConsumed();
+					}
+					await runtime.output(
+						`Preset ${result.label} applied: ${result.defaultModel.provider}/${result.defaultModel.id}.`,
+					);
+					await runtime.notifyTitleChanged?.();
+					await runtime.notifyConfigChanged?.();
+					return commandConsumed();
+				}
+
+				const preset = resolvePresetId(runtime.session.settings, arg);
+				if (!preset) {
+					return usage(`Unknown preset: ${arg}. ${usageText}`, runtime);
+				}
+				return await applyPreset(preset);
+			} catch (error) {
+				return usage(`Failed to apply preset: ${errorMessage(error)}`, runtime);
+			}
+		},
+		handleTui: async (command, runtime) => {
+			const arg = (command.args ?? "").trim().toLowerCase();
+			if (!arg || arg === "list") {
+				runtime.ctx.showStatus(buildPresetListLines(runtime.ctx.session).join("\n"));
+				runtime.ctx.editor.setText("");
+				return commandConsumed();
+			}
+
+			try {
+				const direction =
+					arg === "next" ? "forward" : arg === "prev" || arg === "previous" ? "backward" : undefined;
+				let result: { label: string; defaultModel: { provider: string; id: string } } | undefined;
+				if (direction) {
+					result = await runtime.ctx.session.cycleModelPreset(direction);
+				} else {
+					const preset = resolvePresetId(runtime.ctx.session.settings, arg);
+					if (!preset) {
+						runtime.ctx.showWarning("Usage: /preset [<name>|next|prev|list]");
+						return commandConsumed();
+					}
+					result = await runtime.ctx.session.applyModelPreset(preset);
+				}
+				if (!result) {
+					runtime.ctx.showWarning("Only one model preset available");
+					return commandConsumed();
+				}
+				refreshStatusLine(runtime.ctx);
+				runtime.ctx.showStatus(
+					`Preset ${result.label} applied: ${result.defaultModel.provider}/${result.defaultModel.id}.`,
+				);
+			} catch (error) {
+				runtime.ctx.showError(errorMessage(error));
+			}
+			runtime.ctx.editor.setText("");
+			return commandConsumed();
 		},
 	},
 	{

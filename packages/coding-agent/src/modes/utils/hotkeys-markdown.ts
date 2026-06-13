@@ -41,6 +41,8 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		`| \`${appKey(bindings, "app.thinking.cycle")}\` | Cycle thinking level |`,
 		`| \`${appKey(bindings, "app.model.cycleForward")}\` | Cycle role models (slow/default/smol) |`,
 		`| \`${appKey(bindings, "app.model.cycleBackward")}\` | Cycle role models (backward) |`,
+		`| \`${appKey(bindings, "app.modelPreset.cycleForward")}\` | Cycle model presets (Budget/Balanced/Smart/Ultra) |`,
+		`| \`${appKey(bindings, "app.modelPreset.cycleBackward")}\` | Cycle model presets (backward) |`,
 		`| \`${appKey(bindings, "app.model.selectTemporary")}\` | Select model (temporary) |`,
 		`| \`${appKey(bindings, "app.model.select")}\` | Select model (set roles) |`,
 		`| \`${appKey(bindings, "app.plan.toggle")}\` | Toggle plan mode |`,

@@ -3,7 +3,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMetadata } from "@oh-my-pi/pi-ai";
-import type { KeyId } from "@oh-my-pi/pi-tui";
+import { canonicalKeyId, type KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
 import type { MemoryRuntimeContext } from "../../memory-backend";
@@ -363,18 +363,26 @@ export class ExtensionRunner {
 		"ctrl+q": true,
 		"shift+tab": true,
 		"shift+ctrl+p": true,
+		"alt+shift+right": true,
+		"alt+shift+left": true,
 		"alt+enter": true,
 		escape: true,
 		enter: true,
 	};
 
+	// Reserved chords are authored in human-readable form above; canonicalize them so lookups match
+	// the canonical ids extension shortcuts are normalized to (e.g. `shift+ctrl+p` -> `ctrl+shift+p`).
+	static readonly #RESERVED_SHORTCUT_IDS: ReadonlySet<string> = new Set(
+		Object.keys(ExtensionRunner.#RESERVED_SHORTCUTS).map(key => canonicalKeyId(key)),
+	);
+
 	getShortcuts(): Map<KeyId, ExtensionShortcut> {
 		const allShortcuts = new Map<KeyId, ExtensionShortcut>();
 		for (const ext of this.extensions) {
 			for (const [key, shortcut] of ext.shortcuts) {
-				const normalizedKey = key.toLowerCase() as KeyId;
+				const normalizedKey = canonicalKeyId(key) as KeyId;
 
-				if (ExtensionRunner.#RESERVED_SHORTCUTS[normalizedKey]) {
+				if (ExtensionRunner.#RESERVED_SHORTCUT_IDS.has(normalizedKey)) {
 					logger.warn("Extension shortcut conflicts with built-in shortcut", {
 						key,
 						extensionPath: shortcut.extensionPath,

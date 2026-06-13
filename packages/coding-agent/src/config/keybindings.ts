@@ -26,6 +26,8 @@ interface AppKeybindings {
 	"app.thinking.toggle": true;
 	"app.model.cycleForward": true;
 	"app.model.cycleBackward": true;
+	"app.modelPreset.cycleForward": true;
+	"app.modelPreset.cycleBackward": true;
 	"app.model.select": true;
 	"app.model.selectTemporary": true;
 	"app.tools.expand": true;
@@ -102,11 +104,19 @@ export const KEYBINDINGS = {
 	},
 	"app.model.cycleForward": {
 		defaultKeys: "ctrl+p",
-		description: "Cycle to next model",
+		description: "Cycle role models forward",
 	},
 	"app.model.cycleBackward": {
 		defaultKeys: "shift+ctrl+p",
-		description: "Cycle to previous model",
+		description: "Cycle role models backward",
+	},
+	"app.modelPreset.cycleForward": {
+		defaultKeys: "alt+shift+right",
+		description: "Cycle model preset forward",
+	},
+	"app.modelPreset.cycleBackward": {
+		defaultKeys: "alt+shift+left",
+		description: "Cycle model preset backward",
 	},
 	"app.model.select": {
 		defaultKeys: "alt+m",

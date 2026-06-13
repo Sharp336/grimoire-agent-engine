@@ -34,6 +34,9 @@ export default class Index extends Command {
 		plan: Flags.string({
 			description: "Plan model for architectural planning (or PI_PLAN_MODEL env)",
 		}),
+		preset: Flags.string({
+			description: 'Model preset profile (e.g. "smart"; alias --profile; "--preset list" to list)',
+		}),
 		provider: Flags.string({
 			description: "Provider to use (legacy; prefer --model)",
 		}),

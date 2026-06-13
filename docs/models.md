@@ -423,6 +423,47 @@ Role aliases like `pi/smol` expand through `settings.modelRoles`. Each role valu
 
 If a role points at another role, the target model still inherits normally and any explicit suffix on the referring role wins for that role-specific use.
 
+### Model presets
+
+A preset is a complete role profile (a `role → selector` map), not an alias for one model. Four built-ins ship in order: `budget`, `balanced`, `smart`, and `ultra`. `modelPreset` stores the active preset id (default `balanced`).
+
+Applying a preset is a **non-destructive runtime overlay**: it layers the preset's role map over the live session and updates the active `default` model, keeping role-specific thinking suffixes. It **never writes persistent `modelRoles`** — only the selected preset's id is persisted to `modelPreset` (so it becomes the default for the next start). Your configured `modelRoles` stay intact, and roles the overlay does not mention (for example `vision`) are left as-is rather than dropped. Switching between presets re-overlays cleanly and does not corrupt later role resolution.
+
+#### In-app surfaces
+
+- `/preset` to list profiles, `/preset smart` to apply one, and `/preset next` or `/preset prev` to cycle.
+- The `/model` selector has a `PRESETS` tab listing built-in and custom presets.
+
+`modelPreset`, `modelPresets`, and `modelRoles` are Settings config keys, read from the Settings config layer (`~/.omp/agent/config.yml`, project `.omp/config.yml`, or `--config` overlays). They do not belong in `models.yml`, which is only used by the model registry for provider/model definitions. `modelPreset` can also be persisted by applying a preset in-app.
+
+#### CLI and env
+
+- `--preset <name>` (alias `--profile <name>`) applies a preset at launch.
+- `PI_PRESET=<name>` selects a preset via environment.
+- `--preset list` prints the available preset names and exits.
+
+Per-role flags win over the preset: explicit `--model`, `--smol`, `--slow`, or `--plan` override the role the preset would otherwise set.
+
+#### Startup auto-apply
+
+The persisted default preset (`modelPreset`) auto-applies at startup, but explicitly configured roles win — the runtime overlay fills only the roles you have not already configured via Settings `modelRoles` or CLI role flags. Auto-apply is **skipped on `--continue` / `--resume`** so a resumed session keeps the model state it was saved with.
+
+#### Custom presets
+
+Define your own presets (or override built-in ones) with the `modelPresets` map, keyed by preset name (arbitrary names allowed) → a `role → selector` map:
+
+```yaml
+modelPresets:
+  fast-cheap:
+    default: pi/smol
+    plan: pi/slow
+  smart:
+    default: openai/gpt-5.4:high
+    task: anthropic/claude-sonnet-4-5:high
+```
+
+Custom keys (such as `fast-cheap`) appear after the built-ins in `/preset`, the `/model` PRESETS tab, and `--preset list`, and are usable with `--preset`/`--profile`/`PI_PRESET`. When a key matches a built-in (such as `smart`), only the named role entries are overridden; the rest of the built-in profile is inherited.
+
 Related settings:
 
 - `modelRoles` (record)
