@@ -124,6 +124,7 @@ export class StatusLineComponent implements Component {
 	#planModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#loopModeStatus: { enabled: boolean } | null = null;
 	#goalModeStatus: { enabled: boolean; paused: boolean } | null = null;
+	#workflowzModeStatus: { enabled: boolean } | null = null;
 	#collabStatus: CollabStatus | null = null;
 	#focusedAgentId: string | undefined;
 
@@ -216,6 +217,10 @@ export class StatusLineComponent implements Component {
 
 	setGoalModeStatus(status: { enabled: boolean; paused: boolean } | undefined): void {
 		this.#goalModeStatus = status ?? null;
+	}
+
+	setWorkflowzModeStatus(status: { enabled: boolean } | undefined): void {
+		this.#workflowzModeStatus = status ?? null;
 	}
 
 	setCollabStatus(status: CollabStatus | null): void {
@@ -595,6 +600,7 @@ export class StatusLineComponent implements Component {
 			planMode: this.#planModeStatus,
 			loopMode: this.#loopModeStatus,
 			goalMode: this.#goalModeStatus,
+			workflowzMode: this.#workflowzModeStatus,
 			collab: this.#collabStatus,
 			usageStats,
 			contextPercent,

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `/workflowz-mode` slash command that toggles a persistent, session-only workflowz posture. While active, every real turn injects the `workflowz` eval-fan-out contract — drive the task as a deterministic multi-subagent workflow via `agent()`/`parallel()`/`pipeline()` — without typing the keyword, and the status line shows a rainbow "Workflowz" badge mirroring Claude Code's "Ultra Code" indicator. The mode coexists with plan/goal mode, resets on session resume, and suppresses the duplicate keyword notice when `workflowz` is also typed.
+
 ## [15.12.5] - 2026-06-13
 ### Changed
 

@@ -283,6 +283,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "workflowz-mode",
+		description: "Toggle workflowz mode (drive tasks as parallel multi-subagent eval workflows)",
+		inlineHint: "[prompt]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			await runtime.ctx.handleWorkflowzModeCommand(command.args || undefined);
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "model",
 		aliases: ["models"],
 		description: "Select model (opens selector UI)",

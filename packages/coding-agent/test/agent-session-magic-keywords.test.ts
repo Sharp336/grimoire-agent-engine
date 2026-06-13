@@ -117,4 +117,169 @@ describe("AgentSession magic keyword settings", () => {
 		expect(session.thinkingLevel).toBe(Effort.Low);
 		expect(session.autoResolvedThinkingLevel()).toBe(Effort.Low);
 	});
+
+	it("injects the workflowz-mode context on every turn while the mode is active", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		session.setWorkflowzModeEnabled(true);
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("do the thing");
+		await session.prompt("do the next thing");
+
+		// Standing posture: exactly one context per turn, on *every* turn. A one-shot
+		// implementation that injected once and stopped would fail the second turn.
+		expect(promptSpy.mock.calls.length).toBe(2);
+		for (const call of promptSpy.mock.calls) {
+			const messages = call[0] as unknown as Array<{ customType?: string; content?: string }>;
+			const modeContext = messages.filter(message => message.customType === "workflowz-mode-context");
+			expect(modeContext).toHaveLength(1);
+			expect(modeContext[0]!.content).toContain("Workflowz mode is active");
+			expect(modeContext[0]!.content).toContain("parallel(");
+		}
+	});
+
+	it("does not duplicate the workflow notice when the keyword is typed while the mode is active", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		session.setWorkflowzModeEnabled(true);
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.prompt("please workflowz this rollout");
+
+		const promptMessages = promptSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
+		const types = promptMessages.map(message => message.customType).filter(Boolean);
+		expect(types).toContain("workflowz-mode-context");
+		expect(types).not.toContain("workflow-notice");
+		expect(types.filter(type => type === "workflowz-mode-context")).toHaveLength(1);
+	});
+
+	it("queues the workflowz-mode context for steer turns while streaming", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		session.setWorkflowzModeEnabled(true);
+		(session.agent.state as { isStreaming: boolean }).isStreaming = true;
+		const customSpy = vi.spyOn(session, "sendCustomMessage");
+
+		await session.prompt("do the thing", { streamingBehavior: "steer" });
+
+		const queued = customSpy.mock.calls.filter(call => call[0].customType === "workflowz-mode-context");
+		expect(queued).toHaveLength(1);
+		expect(String(queued[0]![0].content)).toContain("parallel(");
+		expect(queued[0]![1]).toMatchObject({ deliverAs: "steer" });
+	});
+
+	it("queues the workflowz-mode context for custom prompts while streaming", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		session.setWorkflowzModeEnabled(true);
+		(session.agent.state as { isStreaming: boolean }).isStreaming = true;
+		const customSpy = vi.spyOn(session, "sendCustomMessage");
+
+		await session.promptCustomMessage(
+			{ customType: "user-note", content: "do the thing", display: false, attribution: "user" },
+			{ streamingBehavior: "steer" },
+		);
+
+		const queued = customSpy.mock.calls
+			.map(call => call[0])
+			.filter(message => message.customType === "workflowz-mode-context");
+		expect(queued).toHaveLength(1);
+		expect(String(queued[0]!.content)).toContain("parallel(");
+	});
+
+	it("injects the workflowz-mode context for idle custom prompts", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		session.setWorkflowzModeEnabled(true);
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		await session.promptCustomMessage({
+			customType: "user-note",
+			content: "do the thing",
+			display: false,
+			attribution: "user",
+		});
+
+		const messages = promptSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
+		const modeContext = messages.filter(message => message.customType === "workflowz-mode-context");
+		expect(modeContext).toHaveLength(1);
+	});
+
+	it("queues the workflowz-mode context for public steer() turns", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		session.setWorkflowzModeEnabled(true);
+		(session.agent.state as { isStreaming: boolean }).isStreaming = true;
+		const customSpy = vi.spyOn(session, "sendCustomMessage");
+
+		// Regression guard: the public steer()/followUp() path queues user messages
+		// through #queueUserMessage without going through prompt(); while streaming the
+		// mode context must ride along, or workflowz silently no-ops on steered turns.
+		await session.steer("keep going");
+
+		const queued = customSpy.mock.calls.filter(call => call[0].customType === "workflowz-mode-context");
+		expect(queued).toHaveLength(1);
+		expect(queued[0]![1]).toMatchObject({ deliverAs: "steer" });
+	});
+
+	it("queues the workflowz-mode context for public followUp() turns", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		session.setWorkflowzModeEnabled(true);
+		(session.agent.state as { isStreaming: boolean }).isStreaming = true;
+		const customSpy = vi.spyOn(session, "sendCustomMessage");
+
+		// The follow-up delivery branch must carry the context with the matching
+		// deliverAs, not just the steer branch.
+		await session.followUp("and then continue");
+
+		const queued = customSpy.mock.calls.filter(call => call[0].customType === "workflowz-mode-context");
+		expect(queued).toHaveLength(1);
+		expect(queued[0]![1]).toMatchObject({ deliverAs: "followUp" });
+	});
+
+	it("does not append the workflowz context out-of-band on an idle steer()", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		session.setWorkflowzModeEnabled(true);
+		// Not streaming: a public steer() between turns must NOT append the mode context
+		// straight to history. sendCustomMessage ignores deliverAs when idle and would
+		// appendMessage the context, leaving a custom message as the last entry that
+		// strands the just-queued user message in the idle drain. The context rides
+		// streaming steers only; idle turns are covered by #promptWithMessage.
+		expect(session.isStreaming).toBe(false);
+
+		await session.steer("between turns");
+
+		const messages = session.agent.state.messages as unknown as Array<{ customType?: string }>;
+		const appended = messages.filter(message => message.customType === "workflowz-mode-context");
+		expect(appended).toHaveLength(0);
+	});
+
+	it("clears the session-only workflowz flag on newSession() so it never carries over", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		session.setWorkflowzModeEnabled(true);
+
+		// newSession() does not run the mode reconciler that switchSession() uses, so
+		// the session-only flag must be reset in newSession() itself; otherwise the
+		// standing context leaks into a programmatically-created fresh session.
+		await session.newSession();
+		expect(session.getWorkflowzModeEnabled()).toBe(false);
+
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+		await session.prompt("fresh session work");
+		const messages = promptSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
+		expect(messages.some(message => message.customType === "workflowz-mode-context")).toBe(false);
+	});
 });

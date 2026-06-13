@@ -26,7 +26,12 @@ afterAll(() => {
 });
 
 /** Minimal SegmentContext factory — only path/git fields matter for these tests. */
-function createCtx(overrides?: { pathMaxLength?: number; branch?: string | null }): SegmentContext {
+function createCtx(overrides?: {
+	pathMaxLength?: number;
+	branch?: string | null;
+	planMode?: { enabled: boolean; paused: boolean } | null;
+	workflowzMode?: { enabled: boolean } | null;
+}): SegmentContext {
 	return {
 		session: {
 			state: {},
@@ -42,9 +47,10 @@ function createCtx(overrides?: { pathMaxLength?: number; branch?: string | null 
 				stripWorkPrefix: false,
 			},
 		},
-		planMode: null,
+		planMode: overrides?.planMode ?? null,
 		loopMode: null,
 		goalMode: null,
+		workflowzMode: overrides?.workflowzMode ?? null,
 		collab: null,
 		usageStats: {
 			input: 0,
@@ -324,5 +330,22 @@ describe("overflow: path shrinks before git is dropped", () => {
 		} finally {
 			setProjectDir(tmpDir);
 		}
+	});
+});
+
+describe("workflowz mode badge", () => {
+	it("renders a rainbow Workflowz badge that wins priority over plan mode", () => {
+		const ctx = createCtx({
+			workflowzMode: { enabled: true },
+			planMode: { enabled: true, paused: false },
+		});
+		const rendered = renderSegment("mode", ctx);
+		expect(rendered.visible).toBe(true);
+		const visible = Bun.stripANSI(rendered.content);
+		expect(visible).toContain("Workflowz");
+		expect(visible).not.toContain("Plan");
+		// Rainbow = several distinct SGR color escapes, not one solid foreground color.
+		const colors = [...rendered.content.matchAll(/\x1b\[[0-9;]*m/g)].map(m => m[0]).filter(c => c !== "\x1b[39m");
+		expect(new Set(colors).size).toBeGreaterThan(1);
 	});
 });

@@ -1,3 +1,4 @@
+import { prompt } from "@oh-my-pi/pi-utils";
 import workflowNotice from "../prompts/system/workflow-notice.md" with { type: "text" };
 import { createGradientHighlighter, type KeywordHighlighter } from "./gradient-highlight";
 import { keywordInProse } from "./markdown-prose";
@@ -18,7 +19,14 @@ import { keywordInProse } from "./markdown-prose";
 const WORKFLOW_WORD = /(?<!\S)workflowz(?!\S)/;
 
 /** Hidden system notice appended after a user message that mentions "workflowz". */
-export const WORKFLOW_NOTICE: string = workflowNotice.trim();
+export const WORKFLOW_NOTICE: string = prompt.render(workflowNotice, { mode: false }).trim();
+
+/**
+ * Standing system context injected on every real turn while workflowz mode is
+ * active. Carries the same eval-fan-out contract as {@link WORKFLOW_NOTICE}, but
+ * opened as a session-wide posture rather than a per-message keyword reaction.
+ */
+export const WORKFLOWZ_MODE_CONTEXT: string = prompt.render(workflowNotice, { mode: true }).trim();
 
 /**
  * Whether `text` contains the standalone keyword "workflowz"

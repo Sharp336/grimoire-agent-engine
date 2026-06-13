@@ -6,6 +6,7 @@ import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePath
 import { type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath } from "../../../tools/render-utils";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
+import { type GradientSpec, paintGradient } from "../../gradient-highlight";
 import { sanitizeStatusText } from "../../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./context-thresholds";
 import type { RenderedSegment, SegmentContext, StatusLineSegment, StatusLineSegmentId } from "./types";
@@ -156,10 +157,19 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 	return { content: theme.fg(color, parts.join(" ")), visible: true };
 }
 
+/** Full-spectrum rainbow for the workflowz-mode badge (Claude Code "Ultra Code" style). */
+const WORKFLOWZ_BADGE_GRADIENT: GradientSpec = { stops: 14, hue: t => t * 330 };
+
 const modeSegment: StatusLineSegment = {
 	id: "mode",
 	render(ctx) {
 		const pauseSuffix = theme.icon.pause ? ` ${theme.icon.pause}` : " (paused)";
+
+		const workflowz = ctx.workflowzMode;
+		if (workflowz?.enabled) {
+			const content = withIcon(theme.icon.workflowz, "Workflowz");
+			return { content: paintGradient(content, WORKFLOWZ_BADGE_GRADIENT), visible: true };
+		}
 
 		const plan = ctx.planMode;
 		if (plan && (plan.enabled || plan.paused)) {

@@ -354,6 +354,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	planModePaused = false;
 	goalModeEnabled = false;
 	goalModePaused = false;
+	workflowzModeEnabled = false;
 	planModePlanFilePath: string | undefined = undefined;
 	loopModeEnabled = false;
 	loopPrompt: string | undefined = undefined;
@@ -1030,6 +1031,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 	}
 
+	async handleWorkflowzModeCommand(initialPrompt?: string): Promise<void> {
+		if (this.workflowzModeEnabled) {
+			this.workflowzModeEnabled = false;
+			this.session.setWorkflowzModeEnabled(false);
+			this.#updateWorkflowzModeStatus();
+			this.showStatus("Workflowz mode disabled.");
+			return;
+		}
+		this.workflowzModeEnabled = true;
+		this.session.setWorkflowzModeEnabled(true);
+		this.#updateWorkflowzModeStatus();
+		this.showStatus("Workflowz mode enabled — tasks run as parallel multi-subagent eval workflows.");
+		if (initialPrompt && this.onInputCallback) {
+			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt }));
+		}
+	}
+
 	recordLocalSubmission(text: string, imageCount = 0): () => void {
 		if (this.isKnownSlashCommand(text)) {
 			return () => {};
@@ -1469,6 +1487,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.ui.requestRender();
 	}
 
+	#updateWorkflowzModeStatus(): void {
+		this.statusLine.setWorkflowzModeStatus(this.workflowzModeEnabled ? { enabled: true } : undefined);
+		this.updateEditorTopBorder();
+		this.ui.requestRender();
+	}
+
 	#resetGoalContinuationSuppression(): void {
 		this.#goalSuppressNextContinuation = false;
 	}
@@ -1627,6 +1651,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#goalSuppressNextContinuation = false;
 			this.#cancelGoalContinuation();
 			this.#updateGoalModeStatus();
+		}
+
+		if (this.workflowzModeEnabled) {
+			this.workflowzModeEnabled = false;
+			this.session.setWorkflowzModeEnabled(false);
+			this.#updateWorkflowzModeStatus();
 		}
 	}
 
@@ -3152,6 +3182,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.clearPinnedError();
 		this.#hidePlanReview();
+		this.workflowzModeEnabled = false;
+		this.session.setWorkflowzModeEnabled(false);
+		this.#updateWorkflowzModeStatus();
 	}
 
 	handleClearCommand(): Promise<void> {

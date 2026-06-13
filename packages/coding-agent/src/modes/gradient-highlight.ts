@@ -8,12 +8,8 @@ export type KeywordHighlighter = (text: string, resetTo?: string) => string;
 
 const FG_RESET = "\x1b[39m";
 
-/** Declarative spec for {@link createGradientHighlighter}. */
-export interface GradientHighlightSpec {
-	/** Cheap, stateless presence probe used to skip the boundary regex on most lines. Must be non-global. */
-	probe: RegExp;
-	/** Global, word-bounded match regex walked by `.replace`. */
-	highlight: RegExp;
+/** Color-stop parameters for a gradient sweep. */
+export interface GradientSpec {
 	/** Number of color stops swept across the gradient. */
 	stops: number;
 	/** Maps a normalized position `t` in [0, 1) to an HSL hue in degrees. */
@@ -24,6 +20,62 @@ export interface GradientHighlightSpec {
 	lightness?: number;
 }
 
+/** Declarative spec for {@link createGradientHighlighter}. */
+export interface GradientHighlightSpec extends GradientSpec {
+	/** Cheap, stateless presence probe used to skip the boundary regex on most lines. Must be non-global. */
+	probe: RegExp;
+	/** Global, word-bounded match regex walked by `.replace`. */
+	highlight: RegExp;
+}
+
+/**
+ * Gradient palettes compiled per spec, then per active color mode. Keyed on the
+ * spec object so module-level specs (keyword highlighters, status badges) reuse
+ * one compiled palette per mode instead of recomputing the HSL stops every call.
+ */
+const paletteCache = new WeakMap<GradientSpec, Map<string, readonly string[]>>();
+
+function gradientPalette(spec: GradientSpec): readonly string[] {
+	const mode = theme.getColorMode();
+	let byMode = paletteCache.get(spec);
+	if (!byMode) {
+		byMode = new Map();
+		paletteCache.set(spec, byMode);
+	}
+	const cached = byMode.get(mode);
+	if (cached) return cached;
+	const { stops, hue, saturation = 90, lightness = 62 } = spec;
+	const format = mode === "truecolor" ? "ansi-16m" : "ansi-256";
+	const next: string[] = [];
+	for (let i = 0; i < stops; i++) {
+		next.push(Bun.color(`hsl(${Math.round(hue(i / stops))}, ${saturation}%, ${lightness}%)`, format) ?? "");
+	}
+	byMode.set(mode, next);
+	return next;
+}
+
+/**
+ * Paint every character of `text` with `spec`'s HSL gradient, re-emitting
+ * `resetTo` once at the end so following text keeps its color. Adds only
+ * zero-width SGR escapes — the visible width is unchanged.
+ */
+export function paintGradient(text: string, spec: GradientSpec, resetTo: string = FG_RESET): string {
+	const stopsArr = gradientPalette(spec);
+	const n = text.length;
+	let out = "";
+	let prev = "";
+	for (let i = 0; i < n; i++) {
+		const color = stopsArr[Math.floor((i / n) * stopsArr.length)] ?? stopsArr[0] ?? "";
+		// Coalesce consecutive characters that resolve to the same stop.
+		if (color !== prev) {
+			out += color;
+			prev = color;
+		}
+		out += text[i];
+	}
+	return `${out}${resetTo}`;
+}
+
 /**
  * Build a stateless highlighter that paints each standalone match of `highlight`
  * with a smooth HSL gradient for editor display. The returned function adds only
@@ -32,43 +84,7 @@ export interface GradientHighlightSpec {
  * memoized per active color mode.
  */
 export function createGradientHighlighter(spec: GradientHighlightSpec): KeywordHighlighter {
-	const { probe, highlight, stops, hue, saturation = 90, lightness = 62 } = spec;
-
-	let cachedMode: string | undefined;
-	let cachedPalette: readonly string[] | undefined;
-
-	/** Gradient foreground escapes for the active color mode, compiled once per mode. */
-	const palette = (): readonly string[] => {
-		const mode = theme.getColorMode();
-		if (cachedPalette && cachedMode === mode) return cachedPalette;
-		const format = mode === "truecolor" ? "ansi-16m" : "ansi-256";
-		const next: string[] = [];
-		for (let i = 0; i < stops; i++) {
-			next.push(Bun.color(`hsl(${Math.round(hue(i / stops))}, ${saturation}%, ${lightness}%)`, format) ?? "");
-		}
-		cachedMode = mode;
-		cachedPalette = next;
-		return next;
-	};
-
-	/** Paint each character of `word` with the next gradient stop, restoring `resetTo` after. */
-	const paint = (word: string, resetTo: string): string => {
-		const stopsArr = palette();
-		const n = word.length;
-		let out = "";
-		let prev = "";
-		for (let i = 0; i < n; i++) {
-			const color = stopsArr[Math.floor((i / n) * stopsArr.length)] ?? stopsArr[0] ?? "";
-			// Coalesce consecutive characters that resolve to the same stop.
-			if (color !== prev) {
-				out += color;
-				prev = color;
-			}
-			out += word[i];
-		}
-		return `${out}${resetTo}`;
-	};
-
+	const { probe, highlight } = spec;
 	return (text: string, resetTo: string = FG_RESET): string => {
 		if (!probe.test(text)) return text;
 		// Match against a code/markup-masked copy so keywords inside code spans,
@@ -79,7 +95,7 @@ export function createGradientHighlighter(spec: GradientHighlightSpec): KeywordH
 		for (const m of masked.matchAll(highlight)) {
 			const start = m.index ?? 0;
 			const end = start + m[0].length;
-			out += text.slice(last, start) + paint(text.slice(start, end), resetTo);
+			out += text.slice(last, start) + paintGradient(text.slice(start, end), spec, resetTo);
 			last = end;
 		}
 		return out + text.slice(last);

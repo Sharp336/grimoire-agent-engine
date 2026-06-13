@@ -183,7 +183,7 @@ import { getCurrentThemeName, theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageTokens } from "../modes/utils/context-usage";
-import { containsWorkflow, WORKFLOW_NOTICE } from "../modes/workflow";
+import { containsWorkflow, WORKFLOW_NOTICE, WORKFLOWZ_MODE_CONTEXT } from "../modes/workflow";
 import { createPlanReadMatcher } from "../plan-mode/plan-protection";
 import type { PlanModeState } from "../plan-mode/state";
 import autoContinuePrompt from "../prompts/system/auto-continue.md" with { type: "text" };
@@ -933,6 +933,7 @@ export class AgentSession {
 	#scheduledHiddenNextTurnGeneration: number | undefined = undefined;
 	#planModeState: PlanModeState | undefined;
 	#goalModeState: GoalModeState | undefined;
+	#workflowzModeEnabled = false;
 	#goalRuntime: GoalRuntime;
 	#goalTurnCounter = 0;
 	#planReferenceSent = false;
@@ -4269,6 +4270,14 @@ export class AgentSession {
 		this.#goalModeState = state;
 	}
 
+	setWorkflowzModeEnabled(enabled: boolean): void {
+		this.#workflowzModeEnabled = enabled;
+	}
+
+	getWorkflowzModeEnabled(): boolean {
+		return this.#workflowzModeEnabled;
+	}
+
 	get goalRuntime(): GoalRuntime {
 		return this.#goalRuntime;
 	}
@@ -4471,6 +4480,18 @@ export class AgentSession {
 		};
 	}
 
+	#buildWorkflowzModeMessage(): CustomMessage | null {
+		if (!this.#workflowzModeEnabled) return null;
+		return {
+			role: "custom",
+			customType: "workflowz-mode-context",
+			content: WORKFLOWZ_MODE_CONTEXT,
+			display: false,
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+	}
+
 	#normalizeImagesForModel(images: ImageContent[] | undefined): Promise<ImageContent[] | undefined> {
 		return normalizeModelContextImages(images, { model: this.model });
 	}
@@ -4525,7 +4546,7 @@ export class AgentSession {
 				timestamp,
 			});
 		}
-		if (this.#magicKeywordEnabled("workflow") && containsWorkflow(text)) {
+		if (!this.#workflowzModeEnabled && this.#magicKeywordEnabled("workflow") && containsWorkflow(text)) {
 			keywordNotices.push({
 				role: "custom",
 				customType: "workflow-notice",
@@ -4675,6 +4696,10 @@ export class AgentSession {
 				deliverAs: options.streamingBehavior,
 				queueChipText: options.queueChipText,
 			});
+			const workflowzModeMessage = this.#buildWorkflowzModeMessage();
+			if (workflowzModeMessage) {
+				await this.sendCustomMessage(workflowzModeMessage, { deliverAs: options.streamingBehavior });
+			}
 			for (const notice of keywordNotices) {
 				await this.sendCustomMessage(notice, { deliverAs: options.streamingBehavior });
 			}
@@ -4760,6 +4785,10 @@ export class AgentSession {
 			const goalModeMessage = this.#buildGoalModeMessage();
 			if (goalModeMessage) {
 				messages.push(goalModeMessage);
+			}
+			const workflowzModeMessage = this.#buildWorkflowzModeMessage();
+			if (workflowzModeMessage) {
+				messages.push(workflowzModeMessage);
 			}
 			if (options?.prependMessages) {
 				messages.push(...options.prependMessages);
@@ -5051,6 +5080,21 @@ export class AgentSession {
 				attribution: "user",
 				timestamp: Date.now(),
 			});
+		}
+		// Workflowz mode is a standing per-turn posture: queue its context alongside
+		// every real-user steer/follow-up message. #queueUserMessage is the single
+		// chokepoint for queued user messages during streaming (prompt() streaming,
+		// public steer()/followUp(), sendUserMessage()); the idle path is covered by
+		// #promptWithMessage. Only inject while streaming: sendCustomMessage queues a
+		// steer/follow-up only when streaming, and when idle it would append the context
+		// straight to history out-of-band and leave a custom message as the last entry,
+		// which strands the just-queued user message in #scheduleIdleQueueDrain. No-op
+		// when the mode is disabled.
+		if (this.isStreaming) {
+			const workflowzModeMessage = this.#buildWorkflowzModeMessage();
+			if (workflowzModeMessage) {
+				await this.sendCustomMessage(workflowzModeMessage, { deliverAs: mode });
+			}
 		}
 		this.#scheduleIdleQueueDrain();
 	}
@@ -5455,6 +5499,11 @@ export class AgentSession {
 		}
 		await this.sessionManager.newSession(options);
 		this.setTodoPhases([]);
+		// Workflowz mode is session-only; a fresh session (new/drop, including
+		// programmatic ctx.newSession()) must clear the standing posture so its context
+		// is never injected into the new session. switchSession() clears it via the
+		// mode reconciler; newSession() does not run that reconciler, so reset here.
+		this.#workflowzModeEnabled = false;
 		this.#freshProviderSessionId = undefined;
 		this.#syncAgentSessionId();
 		this.#rekeyHindsightMemoryForCurrentSessionId();

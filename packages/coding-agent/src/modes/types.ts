@@ -130,6 +130,7 @@ export interface InteractiveModeContext {
 	planModeEnabled: boolean;
 	goalModeEnabled: boolean;
 	goalModePaused: boolean;
+	workflowzModeEnabled: boolean;
 	loopModeEnabled: boolean;
 	loopPrompt?: string;
 	loopLimit?: LoopLimitRuntime;
@@ -333,6 +334,7 @@ export interface InteractiveModeContext {
 	handlePlanModeCommand(initialPrompt?: string): Promise<void>;
 	handleGoalModeCommand(rest?: string): Promise<void>;
 	handleLoopCommand(args?: string): Promise<void>;
+	handleWorkflowzModeCommand(initialPrompt?: string): Promise<void>;
 	disableLoopMode(): void;
 	pauseLoop(): void;
 	handlePlanApproval(details: PlanApprovalDetails): Promise<void>;
