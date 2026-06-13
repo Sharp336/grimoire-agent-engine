@@ -1,5 +1,4 @@
-import { afterEach, beforeAll, describe, expect, it } from "bun:test";
-import { advanceGlowPhase, resetGlowPhase } from "@oh-my-pi/pi-coding-agent/modes/gradient-highlight";
+import { beforeAll, describe, expect, it } from "bun:test";
 import { highlightMagicKeywords } from "@oh-my-pi/pi-coding-agent/modes/magic-keywords";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
@@ -47,17 +46,13 @@ describe("highlightMagicKeywords", () => {
 });
 
 describe("glow shimmer phase", () => {
-	afterEach(() => {
-		// Shared module-level phase: never leak a non-idle phase into the static-gradient tests.
-		resetGlowPhase();
-	});
-
-	it("rotates the gradient with phase, preserving visible text and width, and restores idle bytes on reset", () => {
+	it("rotates the gradient with the supplied phase, preserving visible text and width; phase 0 stays idle", () => {
 		const input = "please ultrathink now";
 		const frame0 = highlightMagicKeywords(input);
 
-		advanceGlowPhase();
-		const frame1 = highlightMagicKeywords(input);
+		// Phase is a per-call parameter (no shared module state), so a focused editor can
+		// animate without mutating the static transcript / user-message gradient.
+		const frame1 = highlightMagicKeywords(input, undefined, 1);
 
 		// Shimmer: the per-character stop indices shift, so the SGR byte stream changes…
 		expect(frame1).not.toBe(frame0);
@@ -65,8 +60,8 @@ describe("glow shimmer phase", () => {
 		expect(Bun.stripANSI(frame1)).toBe(input);
 		expect(Bun.stringWidth(Bun.stripANSI(frame1))).toBe(Bun.stringWidth(input));
 
-		// Idle (phase 0) output is byte-identical to the pre-animation gradient.
-		resetGlowPhase();
-		expect(highlightMagicKeywords(input)).toBe(frame0);
+		// Phase 0 is byte-identical to the default (un-animated) gradient — the static
+		// transcript / user-message path never picks up the editor's live shimmer.
+		expect(highlightMagicKeywords(input, undefined, 0)).toBe(frame0);
 	});
 });

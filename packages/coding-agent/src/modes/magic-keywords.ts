@@ -15,8 +15,12 @@ import { containsWorkflow, highlightWorkflow } from "./workflow";
  * a themed message bubble) so the gradient does not bleed into the rest of the
  * line. Defaults to a plain foreground reset for default-colored editor text.
  */
-export function highlightMagicKeywords(text: string, resetTo?: string): string {
-	return highlightWorkflow(highlightOrchestrate(highlightUltrathink(text, resetTo), resetTo), resetTo);
+export function highlightMagicKeywords(text: string, resetTo?: string, phase?: number): string {
+	return highlightWorkflow(
+		highlightOrchestrate(highlightUltrathink(text, resetTo, phase), resetTo, phase),
+		resetTo,
+		phase,
+	);
 }
 
 /**

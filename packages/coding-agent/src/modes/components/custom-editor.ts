@@ -1,6 +1,5 @@
 import { addKeyAliases, canonicalKeyId, Editor, type KeyId, parseKey, parseKittySequence } from "@oh-my-pi/pi-tui";
 import type { AppKeybinding } from "../../config/keybindings";
-import { advanceGlowPhase, resetGlowPhase } from "../gradient-highlight";
 import { imageReferenceHyperlink, PLACEHOLDER_REGEX, renderPlaceholders } from "../image-references";
 import { containsAnyMagicKeyword, highlightMagicKeywords } from "../magic-keywords";
 import { theme } from "../theme/theme";
@@ -145,7 +144,7 @@ export class CustomEditor extends Editor {
 	 *  pasted image placeholders visually distinct and hyperlink them once their blob file exists. */
 	decorateText = (text: string): string =>
 		renderPlaceholders(text, {
-			renderText: value => highlightMagicKeywords(value),
+			renderText: value => highlightMagicKeywords(value, undefined, this.#glowPhase),
 			renderReference: (value, kind, index) =>
 				kind === "image"
 					? imageReferenceHyperlink(value, index, this.imageLinks, label =>
@@ -189,7 +188,11 @@ export class CustomEditor extends Editor {
 	isMagicKeywordsEnabled?: () => boolean;
 
 	/** 30fps phase ticker driving the magic-keyword glow shimmer; unset while idle. */
-	#glowTimer?: ReturnType<typeof setInterval>;
+	#glowTimer?: Timer;
+	/** Editor-local shimmer phase advanced once per glow frame and threaded into the
+	 *  keyword highlighter, so only this focused editor animates; static transcript /
+	 *  user-message renders pass phase 0 and stay byte-identical to the idle gradient. */
+	#glowPhase = 0;
 	/** Cached magic-keyword presence, recomputed only on text change so the 30fps
 	 *  shimmer frame loop never re-scans the whole buffer. */
 	#hasMagicKeyword = false;
@@ -296,7 +299,7 @@ export class CustomEditor extends Editor {
 				this.onGlowTick?.();
 				return;
 			}
-			advanceGlowPhase();
+			this.#glowPhase = (this.#glowPhase + 1) >>> 0;
 			this.onGlowTick?.();
 		}, GLOW_RENDER_INTERVAL_MS);
 		// Never keep the event loop alive for the shimmer; it only animates while the TUI runs.
@@ -308,7 +311,7 @@ export class CustomEditor extends Editor {
 			clearInterval(this.#glowTimer);
 			this.#glowTimer = undefined;
 		}
-		resetGlowPhase();
+		this.#glowPhase = 0;
 	}
 
 	/** Recompute the cached magic-keyword presence and (re)sync the shimmer. Called
