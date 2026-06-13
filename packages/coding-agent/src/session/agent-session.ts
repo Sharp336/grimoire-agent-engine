@@ -5077,8 +5077,10 @@ export class AgentSession {
 
 	/**
 	 * Internal: Queue a steering message (already expanded, no extension command check).
+	 * Returns true when an active or scheduled agent turn will deliver it.
 	 */
-	async #queueSteer(text: string, images?: ImageContent[]): Promise<void> {
+	async #queueSteer(text: string, images?: ImageContent[]): Promise<boolean> {
+		const hasActiveTurn = this.isStreaming;
 		const normalizedImages = await normalizeModelContextImages(images);
 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
 		this.#steeringMessages.push({ text: displayText, images });
@@ -5098,17 +5100,21 @@ export class AgentSession {
 		// may have ended in between. Without a drain the message would strand in
 		// the queue until the next manual prompt — schedule an immediate continue,
 		// mirroring #queueFollowUp's idle-path delivery.
-		if (this.#canAutoContinueForFollowUp()) {
+		const shouldAutoContinue = this.#canAutoContinueForFollowUp();
+		if (shouldAutoContinue) {
 			this.#scheduleAgentContinue({
 				shouldContinue: () => this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages(),
 			});
 		}
+		return hasActiveTurn || shouldAutoContinue;
 	}
 
 	/**
 	 * Internal: Queue a follow-up message (already expanded, no extension command check).
+	 * Returns true when an active or scheduled agent turn will deliver it.
 	 */
-	async #queueFollowUp(text: string, images?: ImageContent[]): Promise<void> {
+	async #queueFollowUp(text: string, images?: ImageContent[]): Promise<boolean> {
+		const hasActiveTurn = this.isStreaming;
 		const normalizedImages = await normalizeModelContextImages(images);
 		const displayText = text || (images && images.length > 0 ? "[Image]" : "");
 		this.#followUpMessages.push({ text: displayText, images });
@@ -5130,11 +5136,13 @@ export class AgentSession {
 		// agent.continue() only dequeues follow-ups from an assistant-ended state;
 		// resuming from user/toolResult state runs an extra model call on the
 		// stale prompt before draining the queue.
-		if (this.#canAutoContinueForFollowUp()) {
+		const shouldAutoContinue = this.#canAutoContinueForFollowUp();
+		if (shouldAutoContinue) {
 			this.#scheduleAgentContinue({
 				shouldContinue: () => this.#canAutoContinueForFollowUp() && this.agent.hasQueuedMessages(),
 			});
 		}
+		return hasActiveTurn || shouldAutoContinue;
 	}
 
 	/**
@@ -5322,7 +5330,11 @@ export class AgentSession {
 
 	/**
 	 * Send a user message to the agent.
-	 * When deliverAs is set, queue the message instead of starting a new turn.
+	 * When deliverAs is set, queue the message instead of always starting a new turn.
+	 *
+	 * Returns true when this call starts, joins, or auto-schedules a completion-bearing
+	 * agent turn; false means the message was only queued and no agent_end will follow
+	 * until a later prompt drains it.
 	 *
 	 * @param content User message content (string or content array)
 	 * @param options.deliverAs Delivery mode: "steer" or "followUp"
@@ -5330,7 +5342,7 @@ export class AgentSession {
 	async sendUserMessage(
 		content: string | (TextContent | ImageContent)[],
 		options?: { deliverAs?: "steer" | "followUp" },
-	): Promise<void> {
+	): Promise<boolean> {
 		// Normalize content to text string + optional images
 		let text: string;
 		let images: ImageContent[] | undefined;
@@ -5352,12 +5364,10 @@ export class AgentSession {
 		}
 
 		if (options?.deliverAs === "followUp") {
-			await this.#queueFollowUp(text, images);
-			return;
+			return await this.#queueFollowUp(text, images);
 		}
 		if (options?.deliverAs === "steer") {
-			await this.#queueSteer(text, images);
-			return;
+			return await this.#queueSteer(text, images);
 		}
 
 		// Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
@@ -5365,6 +5375,7 @@ export class AgentSession {
 			expandPromptTemplates: false,
 			images,
 		});
+		return true;
 	}
 
 	/**
