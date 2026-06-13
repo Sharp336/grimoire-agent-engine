@@ -109,8 +109,7 @@ const SHELL_DASH_C = /(?:^|[;&|\n\r(]\s*)(?:\S*\/)?(?:bash|sh|zsh|dash|ash|ksh|f
 const INTERPRETER_INLINE_CODE =
 	/(?:^|[;&|\n\r(]\s*)(?:\w+=\S+\s+|(?:env|sudo|doas|time|nice|nohup|xargs|stdbuf)\s+)*(?:\S*\/)?(?:python[0-9.]*|nodejs|node|bun|deno|ruby|perl|php|luajit|lua|Rscript|R)\b[^;&|\n\r]*?\s-{1,2}(?:c|e|E|r|p|eval|exec|print)\b/;
 /** `deno eval <code>` runs inline code via a subcommand (no `-e` flag), so it needs its own probe. */
-const DENO_EVAL =
-	/(?:^|[;&|\n\r(]\s*)(?:\w+=\S+\s+|(?:env|sudo|doas|time|nice|nohup)\s+)*(?:\S*\/)?deno\s+eval\b/;
+const DENO_EVAL = /(?:^|[;&|\n\r(]\s*)(?:\w+=\S+\s+|(?:env|sudo|doas|time|nice|nohup)\s+)*(?:\S*\/)?deno\s+eval\b/;
 
 function asRecord(value: unknown): Record<string, unknown> {
 	return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
