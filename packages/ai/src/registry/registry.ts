@@ -32,6 +32,7 @@ import { nanogptProvider } from "./nanogpt";
 import { nvidiaProvider } from "./nvidia";
 import { ollamaProvider } from "./ollama";
 import { ollamaCloudProvider } from "./ollama-cloud";
+import { omlxProvider } from "./omlx";
 import { openaiProvider } from "./openai";
 import { openaiCodexProvider } from "./openai-codex";
 import { openaiCodexDeviceProvider } from "./openai-codex-device";
@@ -121,6 +122,7 @@ const ALL = [
 	parallelProvider,
 	ollamaProvider,
 	ollamaCloudProvider,
+	omlxProvider,
 	lmStudioProvider,
 	vllmProvider,
 	openaiProvider,

@@ -32,6 +32,8 @@ export const DISCOVERY_DEFAULT_MAX_TOKENS = 32_768;
 const DEFAULT_OLLAMA_BASE_URL = "http://127.0.0.1:11434";
 const OLLAMA_HOST_DEFAULT_PORT = "11434";
 
+const DEFAULT_OMLX_BASE_URL = "http://localhost:8000";
+
 function normalizeOllamaHostEnv(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	if (!trimmed) return undefined;
@@ -59,6 +61,15 @@ function normalizeOllamaHostEnv(value: string | undefined): string | undefined {
 export function getImplicitOllamaBaseUrl(): string {
 	const baseUrl = Bun.env.OLLAMA_BASE_URL?.trim();
 	return baseUrl || normalizeOllamaHostEnv(Bun.env.OLLAMA_HOST) || DEFAULT_OLLAMA_BASE_URL;
+}
+
+export function getImplicitOmlxBaseUrl(): string {
+	const baseUrl = Bun.env.OMLX_BASE_URL?.trim();
+	if (baseUrl) {
+		const trimmed = baseUrl.endsWith("/") ? baseUrl.slice(0, -1) : baseUrl;
+		return trimmed.endsWith("/v1") ? trimmed.slice(0, -3) : trimmed;
+	}
+	return DEFAULT_OMLX_BASE_URL;
 }
 
 export function getOllamaContextLengthOverride(): number | undefined {

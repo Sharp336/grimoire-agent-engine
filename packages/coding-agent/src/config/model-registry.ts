@@ -70,6 +70,7 @@ import {
 	type DiscoveryProviderConfig,
 	discoverModelsByProviderType,
 	getImplicitOllamaBaseUrl,
+	getImplicitOmlxBaseUrl,
 	getOllamaContextLengthOverride,
 } from "./model-discovery";
 import { ModelsConfigFile, type ProviderValidationModel, validateProviderConfiguration } from "./models-config";
@@ -1092,6 +1093,17 @@ export class ModelRegistry {
 				optional: true,
 			});
 			this.#keylessProviders.add("lm-studio");
+		}
+		if (!configuredProviders.has("omlx") && !disabledProviders.has("omlx")) {
+			const baseUrl = getImplicitOmlxBaseUrl();
+			this.#discoverableProviders.push({
+				provider: "omlx",
+				api: "openai-responses",
+				baseUrl: `${baseUrl}/v1`,
+				discovery: { type: "openai-models-list" },
+				optional: true,
+			});
+			this.#keylessProviders.add("omlx");
 		}
 	}
 

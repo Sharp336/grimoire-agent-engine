@@ -29,6 +29,7 @@ import {
 	nanoGptModelManagerOptions,
 	nvidiaModelManagerOptions,
 	ollamaModelManagerOptions,
+	omlxModelManagerOptions,
 	openaiModelManagerOptions,
 	opencodeGoModelManagerOptions,
 	opencodeZenModelManagerOptions,
@@ -250,6 +251,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["OLLAMA_CLOUD_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => ollamaCloudModelManagerOptions(config),
 		catalogDiscovery: { label: "Ollama Cloud", oauthProvider: "ollama-cloud" },
+	},
+	{
+		id: "omlx",
+		defaultModel: "qwen3-coder-next-8bit",
+		envVars: ["OMLX_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => omlxModelManagerOptions(config),
+		allowUnauthenticated: true,
 	},
 	{
 		id: "openai",

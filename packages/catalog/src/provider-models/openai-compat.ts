@@ -1769,7 +1769,59 @@ export function opencodeGoModelManagerOptions(config?: OpenCodeModelManagerConfi
 }
 
 // ---------------------------------------------------------------------------
-// 9. Ollama
+// 9. OMLX (MLX-based inference server for Apple Silicon)
+// ---------------------------------------------------------------------------
+
+function normalizeOmlxBaseUrl(baseUrl?: string): string {
+	const value = baseUrl?.trim();
+	if (!value) {
+		return "http://localhost:8000/v1";
+	}
+	const trimmed = value.endsWith("/") ? value.slice(0, -1) : value;
+	return trimmed.endsWith("/v1") ? trimmed : `${trimmed}/v1`;
+}
+
+export interface OmlxModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function omlxModelManagerOptions(config?: OmlxModelManagerConfig): ModelManagerOptions<"openai-responses"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeOmlxBaseUrl(config?.baseUrl);
+	const references = createBundledReferenceMap<"openai-responses">("omlx" as Parameters<typeof getBundledModels>[0]);
+	return {
+		providerId: "omlx",
+		fetchDynamicModels: async () => {
+			return fetchOpenAICompatibleModels({
+				api: "openai-responses",
+				provider: "omlx",
+				baseUrl,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					const reference = references.get(defaults.id);
+					const contextWindow = toPositiveNumber(entry.context_length, reference?.contextWindow ?? 128_000);
+					const maxTokens = Math.min(contextWindow, toPositiveNumber(entry.max_completion_tokens, 8192));
+					
+					return {
+						...defaults,
+						name: toModelName(entry.name, reference?.name ?? defaults.name),
+						reasoning: reference?.reasoning ?? false,
+						input: reference?.input ?? ["text"],
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+						contextWindow,
+						maxTokens,
+					};
+				},
+				fetch: config?.fetch,
+			});
+		},
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 10. Ollama
 // ---------------------------------------------------------------------------
 
 export interface OllamaModelManagerConfig {
@@ -1832,7 +1884,7 @@ export function ollamaModelManagerOptions(config?: OllamaModelManagerConfig): Mo
 }
 
 // ---------------------------------------------------------------------------
-// 10. OpenRouter
+// 11. OpenRouter
 // ---------------------------------------------------------------------------
 
 export interface OpenRouterModelManagerConfig {
