@@ -13,6 +13,9 @@
 - Added a `/guided-goal` slash command that interviews you to refine an objective before enabling goal mode, then seeds goal mode with the agreed objective. The bounded interview (up to six turns) runs on the plan or slow model and falls back with a hint when the goal is still too vague ([#2502](https://github.com/can1357/oh-my-pi/issues/2502)).
 - Added a large-paste menu: when a paste reaches `paste.largeMenuThreshold` lines (default 100; `0` disables), the editor offers to wrap it in a code block, wrap it in `<pasted_text>` XML tags (both collapse to a `[Paste]` marker that expands on submit), or save it to the session's `local://` store and insert a clean `local://attachment-N` reference the agent can `read` on demand. Esc keeps the previous inline-paste behavior, so the content is never lost.
 - Added `8on22-bw` (leading) and `11on16-bw` (tracking) options to the `snapcompact.shape` setting, the spacing-tuned cells that are now the per-provider defaults (Anthropic → tracking, OpenAI/Google → leading)
+- Added `skills.enableAgentsUser` and `skills.enableAgentsProject` settings (default on) so the canonical OMP-native `~/.agent[s]/skills` and project-walkup `.agent[s]/skills` are configurable independently from the third-party Claude/Codex/Pi toggles.
+- Added a read-only `ctx.models` facade for extensions: `list()` (authenticated models), `current()` (live session model), `resolve(spec)` (a model string or role alias → `Model`, using the same settings-backed aliases and match preferences as core selection), and `family(model)` (opaque canonical-identity lineage token for cross-family comparisons). Lets extension tools select models the way core does without reaching into the mutable registry ([#2406](https://github.com/can1357/oh-my-pi/issues/2406))
+
 
 ### Changed
 
@@ -126,10 +129,6 @@
 ### Fixed
 
 - Restored the intended double-Esc default to `/tree` and fixed the Esc-opened selector path to reset the terminal display instead of preserving stale scrollback when the selector opens.
-
-### Added
-
-- Added a read-only `ctx.models` facade for extensions: `list()` (authenticated models), `current()` (live session model), `resolve(spec)` (a model string or role alias → `Model`, using the same settings-backed aliases and match preferences as core selection), and `family(model)` (opaque canonical-identity lineage token for cross-family comparisons). Lets extension tools select models the way core does without reaching into the mutable registry ([#2406](https://github.com/can1357/oh-my-pi/issues/2406))
 
 ## [15.12.2] - 2026-06-12
 
