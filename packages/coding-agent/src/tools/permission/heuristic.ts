@@ -97,6 +97,20 @@ const CHDIR_FLAG = /(?:^|\s)(?:-C|--directory|--chdir|--working-directory)(?:[=\
  */
 const SHELL_REENTRY = /(?:^|[;&|\n\r(]\s*)(?:eval|source|\.)\s/;
 const SHELL_DASH_C = /(?:^|[;&|\n\r(]\s*)(?:\S*\/)?(?:bash|sh|zsh|dash|ash|ksh|fish)(?:\s+-\S+)*\s+-c\b/;
+/**
+ * A general-purpose interpreter invoked with an inline-code flag (`python -c`, `node -e`,
+ * `ruby -e`, `perl -e/-E`, `php -r`, `R -e`, …). The embedded program is arbitrary code in another
+ * language, so the shell-shaped static analysis below cannot reason about what it reads or writes
+ * (e.g. `python3 -c "open('/etc/x','w')…"` hides an absolute path inside quoted code that the
+ * whitespace path scan misreads as an in-workspace relative token). The interpreter is anchored to
+ * a segment head (after optional `VAR=…` assignments / `env`,`sudo`,… wrappers) so a mere mention
+ * inside a string never trips it.
+ */
+const INTERPRETER_INLINE_CODE =
+	/(?:^|[;&|\n\r(]\s*)(?:\w+=\S+\s+|(?:env|sudo|doas|time|nice|nohup|xargs|stdbuf)\s+)*(?:\S*\/)?(?:python[0-9.]*|nodejs|node|bun|deno|ruby|perl|php|luajit|lua|Rscript|R)\b[^;&|\n\r]*?\s-{1,2}(?:c|e|E|r|p|eval|exec|print)\b/;
+/** `deno eval <code>` runs inline code via a subcommand (no `-e` flag), so it needs its own probe. */
+const DENO_EVAL =
+	/(?:^|[;&|\n\r(]\s*)(?:\w+=\S+\s+|(?:env|sudo|doas|time|nice|nohup)\s+)*(?:\S*\/)?deno\s+eval\b/;
 
 function asRecord(value: unknown): Record<string, unknown> {
 	return value && typeof value === "object" ? (value as Record<string, unknown>) : {};
@@ -233,6 +247,8 @@ function proveBashSafe(
 		return uncertain("Cannot prove bash command stays in workspace: background job");
 	if (SHELL_REENTRY.test(rawCommand) || SHELL_DASH_C.test(rawCommand))
 		return uncertain("Cannot prove bash command stays in workspace: nested shell re-entry");
+	if (INTERPRETER_INLINE_CODE.test(rawCommand) || DENO_EVAL.test(rawCommand))
+		return uncertain("Cannot prove bash command stays in workspace: interpreter inline code");
 
 	// STEP 3: segment split (INCLUDING newlines) + relocation scan.
 	const segments = rawCommand.split(/&&|\|\||[;|\n\r]+/);

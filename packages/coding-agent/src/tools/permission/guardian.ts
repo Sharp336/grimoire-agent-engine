@@ -11,11 +11,14 @@ import type { ModelRegistry } from "../../config/model-registry";
 import { parseModelString, resolveRoleSelection } from "../../config/model-resolver";
 import type { Settings } from "../../config/settings";
 import guardianSystemPrompt from "../../prompts/system/guardian-system.md" with { type: "text" };
-import { truncateForPrompt } from "../approval";
 
 const GUARDIAN_SYSTEM_PROMPT = prompt.render(guardianSystemPrompt);
 const VERDICT_TOOL_NAME = "verdict";
-const MAX_ARGS_CHARS = 2000;
+// The Guardian is the sole authorization gate in `guardian` mode, so it must see the whole
+// security-relevant argument. Bound the prompt generously and elide only the MIDDLE on overflow
+// (head + tail) — head-only truncation could drop a trailing `; rm -rf /` and let the judge
+// authorize a destructive call it never saw.
+const MAX_ARGS_CHARS = 8000;
 const GUARDIAN_MAX_TOKENS = 200;
 const REASONING_SAFE_MAX_TOKENS = 1024;
 const DEFAULT_MAX_ATTEMPTS = 3;
@@ -72,11 +75,23 @@ function safeStringify(value: unknown): string {
 	}
 }
 
+/**
+ * Bound an argument string for the Guardian prompt while preserving BOTH ends. On overflow only
+ * the middle is elided, so a command's trailing payload (e.g. `…; rm -rf /`) always reaches the
+ * judge. The explicit elision marker also signals to the judge that content was withheld.
+ */
+function truncateArgsForJudgment(value: string, maxChars: number): string {
+	if (value.length <= maxChars) return value;
+	const half = Math.max(1, Math.floor((maxChars - 1) / 2));
+	const omitted = value.length - half * 2;
+	return `${value.slice(0, half)}\n… (${omitted} chars elided) …\n${value.slice(value.length - half)}`;
+}
+
 function buildUserMessage(req: GuardianRequest): string {
 	const lines = [`Tool: ${req.toolName}`];
 	if (req.cwd) lines.push(`Working directory: ${req.cwd}`);
 	if (req.reason) lines.push(`A safety heuristic flagged this call: ${req.reason}`);
-	lines.push("Arguments:", truncateForPrompt(safeStringify(req.args), MAX_ARGS_CHARS));
+	lines.push("Arguments:", truncateArgsForJudgment(safeStringify(req.args), MAX_ARGS_CHARS));
 	return lines.join("\n");
 }
 

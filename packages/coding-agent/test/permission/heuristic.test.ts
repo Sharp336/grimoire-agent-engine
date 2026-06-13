@@ -201,6 +201,32 @@ describe("classifyHeuristic — bash unprovable constructs (uncertain)", () => {
 	});
 });
 
+describe("classifyHeuristic — bash interpreter inline code (uncertain)", () => {
+	it("flags python -c, whose embedded code can write outside the workspace unseen", () => {
+		expect(decide("bash", { command: `python3 -c "open('/etc/omp-test','w').write('x')"` })).toBe("uncertain");
+	});
+	it("flags node -e / --eval", () => {
+		expect(decide("bash", { command: `node -e "require('fs').writeFileSync('/etc/x','y')"` })).toBe("uncertain");
+		expect(decide("bash", { command: `node --eval "1"` })).toBe("uncertain");
+	});
+	it("flags ruby -e, perl -e/-E, and php -r one-liners", () => {
+		expect(decide("bash", { command: `ruby -e 'puts 1'` })).toBe("uncertain");
+		expect(decide("bash", { command: `perl -E 'say 1'` })).toBe("uncertain");
+		expect(decide("bash", { command: `php -r 'echo 1;'` })).toBe("uncertain");
+	});
+	it("flags an interpreter one-liner behind env/wrappers, a path, or later in a pipeline", () => {
+		expect(decide("bash", { command: `env FOO=1 /usr/bin/python3 -c 'x'` })).toBe("uncertain");
+		expect(decide("bash", { command: `cat f | python3 -c 'x'` })).toBe("uncertain");
+	});
+	it("flags deno eval (inline code via subcommand, no flag)", () => {
+		expect(decide("bash", { command: `deno eval "Deno.writeTextFileSync('/etc/x','y')"` })).toBe("uncertain");
+	});
+	it("does not over-escalate a benign -c on a non-interpreter tool (grep -c) or a script-file run", () => {
+		expect(decide("bash", { command: "grep -c foo src/a.ts" })).toBe("allow");
+		expect(decide("bash", { command: "python3 script.py" })).toBe("allow");
+	});
+});
+
 describe("classifyHeuristic — bash path arguments outside the workspace (uncertain)", () => {
 	it("flags a write to a system path argument (touch /etc/...)", () => {
 		expect(decide("bash", { command: "touch /etc/omp-test" })).toBe("uncertain");
