@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added RPC prompt lifecycle hints so hosts can distinguish scheduled agent turns from local-only slash commands via `data.agentInvoked` and `prompt_result`.
+
 ## [15.12.4] - 2026-06-13
 
 ### Breaking Changes
@@ -13,8 +17,6 @@
 - Added `omp models` command to list and manage models with `ls`, `find`, `canonical`, and `refresh` actions
 - Added `--json` output plus `-e/--extension`, `--no-extensions`, and `--config` controls to `omp models` listings
 - Added `skills.enableAgentsUser` and `skills.enableAgentsProject` settings (default on) so the canonical OMP-native `~/.agent[s]/skills` and project-walkup `.agent[s]/skills` are configurable independently from the third-party Claude/Codex/Pi toggles.
-
-- Added RPC prompt lifecycle hints so hosts can distinguish scheduled agent turns from local-only slash commands via `data.agentInvoked` and `prompt_result`.
 
 ### Changed
 
