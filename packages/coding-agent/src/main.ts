@@ -28,6 +28,12 @@ import { buildInitialMessage } from "./cli/initial-message";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { findConfigFile } from "./config";
+import {
+	getAllModelPresetIds,
+	getModelPresetInfo,
+	getModelPresetRoleMap,
+	resolvePresetId,
+} from "./config/model-presets";
 import { ModelRegistry } from "./config/model-registry";
 import {
 	getModelMatchPreferences,
@@ -994,6 +1000,35 @@ export async function runRootCommand(
 	// Initialize discovery system with settings for provider persistence
 	logger.time("initializeWithSettings", initializeWithSettings, settingsInstance);
 
+	// `--preset list`: print available presets (id + label + role-map selectors from settings) and
+	// exit. Reads selectors straight from settings; does not resolve them against the model registry.
+	if (parsedArgs.preset?.trim().toLowerCase() === "list") {
+		let out = `${chalk.bold("Model presets:")}\n`;
+		for (const id of getAllModelPresetIds(settingsInstance)) {
+			out += `  ${chalk.cyan(id)} ${chalk.dim(getModelPresetInfo(id).label)}\n`;
+			for (const [role, selector] of Object.entries(getModelPresetRoleMap(settingsInstance, id))) {
+				out += `      ${role}: ${selector}\n`;
+			}
+		}
+		process.stdout.write(out);
+		process.exit(0);
+	}
+
+	// Resolve a startup model preset from --preset / PI_PRESET. The overlay is applied later by the
+	// session (initializeModelPreset); here we only validate and pass the id through.
+	let startupPresetId: string | undefined;
+	const rawPreset = parsedArgs.preset ?? $env.PI_PRESET;
+	if (rawPreset?.trim()) {
+		const resolvedPresetId = resolvePresetId(settingsInstance, rawPreset);
+		if (!resolvedPresetId) {
+			process.stderr.write(
+				`${chalk.red(`Unknown preset '${rawPreset}'. Available: ${getAllModelPresetIds(settingsInstance).join(", ")}`)}\n`,
+			);
+			process.exit(1);
+		}
+		startupPresetId = resolvedPresetId;
+	}
+
 	// Apply model role overrides from CLI args or env vars (ephemeral, not persisted)
 	const smolModel = parsedArgs.smol ?? $env.PI_SMOL_MODEL;
 	const slowModel = parsedArgs.slow ?? $env.PI_SLOW_MODEL;
@@ -1162,6 +1197,12 @@ export async function runRootCommand(
 		// discovery arms; running these concurrently contends for the event loop and stretches
 		// every parallel arm by ~30ms.
 		modelRegistry.refreshInBackground();
+		// Apply the startup model preset (CLI --preset / PI_PRESET, or the persisted default) once the
+		// session exists; non-destructive runtime overlay that never rewrites persistent modelRoles.
+		await result.session.initializeModelPreset({
+			explicitId: startupPresetId,
+			resuming: !!(parsedArgs.continue || parsedArgs.resume),
+		});
 		return result;
 	};
 
