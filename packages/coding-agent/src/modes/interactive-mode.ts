@@ -503,6 +503,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.mcpManager = mcpManager;
 		this.#eventBus = eventBus;
 		this.titleSystemPrompt = titleSystemPrompt;
+		// Register the mode reconciler up front so a session switch OR a fresh
+		// session (switchSession / newSession, including programmatic ctx.newSession())
+		// re-syncs the transient mode badges — plan/goal/workflowz — from session state.
+		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession());
 		if (eventBus) {
 			this.#eventBusUnsubscribers.push(
 				eventBus.on(LSP_STARTUP_EVENT_CHANNEL, data => {
@@ -737,7 +741,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.initHooksAndCustomTools();
 
 		// Restore mode from session (e.g. plan mode on resume)
-		this.session.setSessionSwitchReconciler?.(() => this.#reconcileModeFromSession());
 		await this.#reconcileModeFromSession();
 
 		// Restore unsent editor draft from previous session shutdown (Ctrl+D).
@@ -1043,8 +1046,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session.setWorkflowzModeEnabled(true);
 		this.#updateWorkflowzModeStatus();
 		this.showStatus("Workflowz mode enabled — tasks run as parallel multi-subagent eval workflows.");
-		if (initialPrompt && this.onInputCallback) {
-			this.onInputCallback(this.startPendingSubmission({ text: initialPrompt }));
+		if (initialPrompt) {
+			if (this.onInputCallback) {
+				this.onInputCallback(this.startPendingSubmission({ text: initialPrompt }));
+			} else if (this.session.isStreaming) {
+				// The slash command consumed the editor but the input waiter already
+				// resolved (it ran while a turn was streaming), so there is no
+				// onInputCallback to deliver the trailing prompt. Route it through
+				// prompt() as a steer so it isn't dropped and inherits the workflowz
+				// posture just enabled.
+				await this.withLocalSubmission(initialPrompt, () =>
+					this.session.prompt(initialPrompt, { streamingBehavior: "steer" }),
+				);
+			} else {
+				// Between turns (no waiter, not streaming): steer so the scheduled
+				// continue delivers it without racing a fresh turn from here.
+				await this.withLocalSubmission(initialPrompt, () => this.session.steer(initialPrompt));
+			}
 		}
 	}
 
@@ -3182,9 +3200,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#extensionUiController.clearExtensionTerminalInputListeners();
 		this.clearPinnedError();
 		this.#hidePlanReview();
-		this.workflowzModeEnabled = false;
-		this.session.setWorkflowzModeEnabled(false);
-		this.#updateWorkflowzModeStatus();
 	}
 
 	handleClearCommand(): Promise<void> {

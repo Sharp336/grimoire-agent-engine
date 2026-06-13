@@ -60,6 +60,7 @@ function gradientPalette(spec: GradientSpec): readonly string[] {
  * zero-width SGR escapes — the visible width is unchanged.
  */
 export function paintGradient(text: string, spec: GradientSpec, resetTo: string = FG_RESET): string {
+	if (text.length === 0) return "";
 	const stopsArr = gradientPalette(spec);
 	const n = text.length;
 	let out = "";

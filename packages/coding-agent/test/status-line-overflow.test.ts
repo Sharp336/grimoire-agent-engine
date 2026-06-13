@@ -334,7 +334,7 @@ describe("overflow: path shrinks before git is dropped", () => {
 });
 
 describe("workflowz mode badge", () => {
-	it("renders a rainbow Workflowz badge that wins priority over plan mode", () => {
+	it("renders the rainbow Workflowz badge alongside the active plan badge", () => {
 		const ctx = createCtx({
 			workflowzMode: { enabled: true },
 			planMode: { enabled: true, paused: false },
@@ -342,10 +342,19 @@ describe("workflowz mode badge", () => {
 		const rendered = renderSegment("mode", ctx);
 		expect(rendered.visible).toBe(true);
 		const visible = Bun.stripANSI(rendered.content);
+		// Workflowz is a standing posture that coexists with plan/goal/loop, so it
+		// renders as an additional badge rather than replacing the active mode badge.
 		expect(visible).toContain("Workflowz");
-		expect(visible).not.toContain("Plan");
+		expect(visible).toContain("Plan");
 		// Rainbow = several distinct SGR color escapes, not one solid foreground color.
 		const colors = [...rendered.content.matchAll(/\x1b\[[0-9;]*m/g)].map(m => m[0]).filter(c => c !== "\x1b[39m");
 		expect(new Set(colors).size).toBeGreaterThan(1);
+	});
+
+	it("renders only the Workflowz badge when no other mode is active", () => {
+		const ctx = createCtx({ workflowzMode: { enabled: true } });
+		const rendered = renderSegment("mode", ctx);
+		expect(rendered.visible).toBe(true);
+		expect(Bun.stripANSI(rendered.content)).toContain("Workflowz");
 	});
 });

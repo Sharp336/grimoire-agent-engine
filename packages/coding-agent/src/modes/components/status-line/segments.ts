@@ -164,33 +164,33 @@ const modeSegment: StatusLineSegment = {
 	id: "mode",
 	render(ctx) {
 		const pauseSuffix = theme.icon.pause ? ` ${theme.icon.pause}` : " (paused)";
+		const badges: string[] = [];
 
+		// Workflowz is a standing posture that coexists with plan/goal/loop, so it
+		// renders as an additional badge rather than replacing the active mode badge.
 		const workflowz = ctx.workflowzMode;
 		if (workflowz?.enabled) {
-			const content = withIcon(theme.icon.workflowz, "Workflowz");
-			return { content: paintGradient(content, WORKFLOWZ_BADGE_GRADIENT), visible: true };
+			badges.push(paintGradient(withIcon(theme.icon.workflowz, "Workflowz"), WORKFLOWZ_BADGE_GRADIENT));
 		}
 
 		const plan = ctx.planMode;
+		const goal = ctx.goalMode;
+		const loop = ctx.loopMode;
 		if (plan && (plan.enabled || plan.paused)) {
 			const label = plan.paused ? `Plan${pauseSuffix}` : "Plan";
 			const content = withIcon(theme.icon.plan, label);
 			const color = plan.paused ? "warning" : "accent";
-			return { content: theme.fg(color, content), visible: true };
+			badges.push(theme.fg(color, content));
+		} else if (goal && (goal.enabled || goal.paused)) {
+			badges.push(renderGoalMode(ctx, goal).content);
+		} else if (loop?.enabled) {
+			badges.push(theme.fg("customMessageLabel", withIcon(theme.icon.loop, "Loop")));
 		}
 
-		const goal = ctx.goalMode;
-		if (goal && (goal.enabled || goal.paused)) {
-			return renderGoalMode(ctx, goal);
+		if (badges.length === 0) {
+			return { content: "", visible: false };
 		}
-
-		const loop = ctx.loopMode;
-		if (loop?.enabled) {
-			const content = withIcon(theme.icon.loop, "Loop");
-			return { content: theme.fg("customMessageLabel", content), visible: true };
-		}
-
-		return { content: "", visible: false };
+		return { content: badges.join(" "), visible: true };
 	},
 };
 

@@ -10,6 +10,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { SKILL_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 
@@ -172,46 +173,44 @@ describe("AgentSession magic keyword settings", () => {
 		expect(queued[0]![1]).toMatchObject({ deliverAs: "steer" });
 	});
 
-	it("queues the workflowz-mode context for custom prompts while streaming", async () => {
-		const created = await createMagicKeywordSession(root);
-		session = created.session;
-		authStorage = created.authStorage;
-		session.setWorkflowzModeEnabled(true);
-		(session.agent.state as { isStreaming: boolean }).isStreaming = true;
-		const customSpy = vi.spyOn(session, "sendCustomMessage");
-
-		await session.promptCustomMessage(
-			{ customType: "user-note", content: "do the thing", display: false, attribution: "user" },
-			{ streamingBehavior: "steer" },
-		);
-
-		const queued = customSpy.mock.calls
-			.map(call => call[0])
-			.filter(message => message.customType === "workflowz-mode-context");
-		expect(queued).toHaveLength(1);
-		expect(String(queued[0]!.content)).toContain("parallel(");
-	});
-
-	it("injects the workflowz-mode context for idle custom prompts", async () => {
+	it("injects the workflowz-mode context for user-attributed skill prompts", async () => {
 		const created = await createMagicKeywordSession(root);
 		session = created.session;
 		authStorage = created.authStorage;
 		session.setWorkflowzModeEnabled(true);
 		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
 
+		// Skill invocations are real user turns, so they ride the same keyword-notice
+		// rails as a typed prompt and carry the standing posture.
 		await session.promptCustomMessage({
-			customType: "user-note",
-			content: "do the thing",
-			display: false,
+			customType: SKILL_PROMPT_MESSAGE_TYPE,
+			content: "run the skill",
+			display: true,
 			attribution: "user",
+			details: { args: "" },
 		});
 
 		const messages = promptSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
-		const modeContext = messages.filter(message => message.customType === "workflowz-mode-context");
-		expect(modeContext).toHaveLength(1);
+		expect(messages.filter(message => message.customType === "workflowz-mode-context")).toHaveLength(1);
 	});
 
-	it("queues the workflowz-mode context for public steer() turns", async () => {
+	it("does not inject the workflowz-mode context on synthetic prompts", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		session.setWorkflowzModeEnabled(true);
+		const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+
+		// Synthetic/agent-authored turns (plan-mode recovery, todo reminders) are not
+		// real user turns. The eval fan-out posture must not derail those corrective
+		// turns, so it is gated exactly like the magic-keyword notices.
+		await session.prompt("internal reminder", { synthetic: true });
+
+		const messages = promptSpy.mock.calls[0]![0] as unknown as Array<{ customType?: string }>;
+		expect(messages.some(message => message.customType === "workflowz-mode-context")).toBe(false);
+	});
+
+	it("does not inject the workflowz-mode context on public steer()/followUp() turns", async () => {
 		const created = await createMagicKeywordSession(root);
 		session = created.session;
 		authStorage = created.authStorage;
@@ -219,31 +218,14 @@ describe("AgentSession magic keyword settings", () => {
 		(session.agent.state as { isStreaming: boolean }).isStreaming = true;
 		const customSpy = vi.spyOn(session, "sendCustomMessage");
 
-		// Regression guard: the public steer()/followUp() path queues user messages
-		// through #queueUserMessage without going through prompt(); while streaming the
-		// mode context must ride along, or workflowz silently no-ops on steered turns.
+		// The posture rides the magic-keyword-notice rails (prompt()/skill prompts
+		// only), matching ultrathink/orchestrate/workflow. Programmatic steer() and
+		// followUp() queue raw user messages and intentionally do not carry it.
 		await session.steer("keep going");
-
-		const queued = customSpy.mock.calls.filter(call => call[0].customType === "workflowz-mode-context");
-		expect(queued).toHaveLength(1);
-		expect(queued[0]![1]).toMatchObject({ deliverAs: "steer" });
-	});
-
-	it("queues the workflowz-mode context for public followUp() turns", async () => {
-		const created = await createMagicKeywordSession(root);
-		session = created.session;
-		authStorage = created.authStorage;
-		session.setWorkflowzModeEnabled(true);
-		(session.agent.state as { isStreaming: boolean }).isStreaming = true;
-		const customSpy = vi.spyOn(session, "sendCustomMessage");
-
-		// The follow-up delivery branch must carry the context with the matching
-		// deliverAs, not just the steer branch.
 		await session.followUp("and then continue");
 
 		const queued = customSpy.mock.calls.filter(call => call[0].customType === "workflowz-mode-context");
-		expect(queued).toHaveLength(1);
-		expect(queued[0]![1]).toMatchObject({ deliverAs: "followUp" });
+		expect(queued).toHaveLength(0);
 	});
 
 	it("does not append the workflowz context out-of-band on an idle steer()", async () => {
@@ -251,11 +233,8 @@ describe("AgentSession magic keyword settings", () => {
 		session = created.session;
 		authStorage = created.authStorage;
 		session.setWorkflowzModeEnabled(true);
-		// Not streaming: a public steer() between turns must NOT append the mode context
-		// straight to history. sendCustomMessage ignores deliverAs when idle and would
-		// appendMessage the context, leaving a custom message as the last entry that
-		// strands the just-queued user message in the idle drain. The context rides
-		// streaming steers only; idle turns are covered by #promptWithMessage.
+		// A public steer() between turns must never push the hidden mode context into
+		// history; the posture is delivered only through prompt()'s keyword-notice rails.
 		expect(session.isStreaming).toBe(false);
 
 		await session.steer("between turns");
@@ -265,15 +244,30 @@ describe("AgentSession magic keyword settings", () => {
 		expect(appended).toHaveLength(0);
 	});
 
+	it("filters the hidden workflowz context out of restored queued messages", async () => {
+		const created = await createMagicKeywordSession(root);
+		session = created.session;
+		authStorage = created.authStorage;
+		session.setWorkflowzModeEnabled(true);
+		(session.agent.state as { isStreaming: boolean }).isStreaming = true;
+
+		// Streaming prompt() queues a visible user steer plus the hidden posture
+		// (display:false). The Esc/dequeue editor-restore path (clearQueue) must hand
+		// back only the user's text, never the hidden notice.
+		await session.prompt("ship it", { streamingBehavior: "steer" });
+		const { steering } = session.clearQueue();
+		expect(steering.map(entry => entry.text)).toEqual(["ship it"]);
+	});
+
 	it("clears the session-only workflowz flag on newSession() so it never carries over", async () => {
 		const created = await createMagicKeywordSession(root);
 		session = created.session;
 		authStorage = created.authStorage;
 		session.setWorkflowzModeEnabled(true);
 
-		// newSession() does not run the mode reconciler that switchSession() uses, so
-		// the session-only flag must be reset in newSession() itself; otherwise the
-		// standing context leaks into a programmatically-created fresh session.
+		// newSession() resets the session-only flag directly (covering headless/SDK
+		// contexts with no reconciler) so the standing context never leaks into a
+		// programmatically-created fresh session.
 		await session.newSession();
 		expect(session.getWorkflowzModeEnabled()).toBe(false);
 

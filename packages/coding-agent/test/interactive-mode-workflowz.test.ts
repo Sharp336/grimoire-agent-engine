@@ -106,4 +106,29 @@ describe("InteractiveMode workflowz mode", () => {
 		expect(borderSpy.mock.calls.length).toBeGreaterThan(disableBorderBefore);
 		expect(statusSpy).toHaveBeenLastCalledWith(undefined);
 	});
+
+	it("reconciles the TUI badge when newSession is invoked programmatically", async () => {
+		await mode.handleWorkflowzModeCommand();
+		expect(mode.workflowzModeEnabled).toBe(true);
+
+		// A tool/extension calling ctx.newSession() directly (not via /new) must still
+		// clear the badge: newSession runs the mode reconciler registered on construction.
+		await session.newSession();
+		expect(mode.workflowzModeEnabled).toBe(false);
+		expect(session.getWorkflowzModeEnabled()).toBe(false);
+	});
+
+	it("steers the trailing prompt instead of dropping it when enabled mid-stream", async () => {
+		(session.agent.state as { isStreaming: boolean }).isStreaming = true;
+		const promptSpy = vi.spyOn(session, "prompt").mockResolvedValue(true);
+		// No input waiter is active while a turn streams; the slash command already
+		// cleared the editor, so the trailing prompt must be steered (not lost) and
+		// run with the posture just enabled.
+		expect(mode.onInputCallback).toBeUndefined();
+
+		await mode.handleWorkflowzModeCommand("fix the build");
+
+		expect(mode.workflowzModeEnabled).toBe(true);
+		expect(promptSpy).toHaveBeenCalledWith("fix the build", { streamingBehavior: "steer" });
+	});
 });
