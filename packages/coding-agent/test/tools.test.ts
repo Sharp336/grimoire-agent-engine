@@ -1375,7 +1375,7 @@ function b() {
 			);
 
 			const result = await autoBackgroundBashTool.execute("test-call-9-auto-running", {
-				command: "printf 'start\\n'; sleep 0.05; printf 'done\\n'",
+				command: "printf 'start\\n'; sleep 0.5; printf 'done\\n'",
 			});
 
 			expect(result.details?.async?.state).toBe("running");
