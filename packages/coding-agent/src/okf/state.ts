@@ -18,7 +18,6 @@
 import * as path from "node:path";
 import type { Settings } from "../config/settings";
 import { getBundleRoot, loadSummaries } from "./bundle";
-import { SqliteOkfStore } from "./store/store-sqlite";
 import type { OkfStore } from "./store/types";
 
 const STATIC_INSTRUCTIONS = [
@@ -208,18 +207,10 @@ export async function startOkfLayer(options: {
 		});
 	}
 
-	// Resolve the store.
-	const bundleRoot = path.resolve((settings.get("okf.bundleDir") as string | undefined) ?? getBundleRoot(cwd));
-	const storeChoice = settings.get("okf.store") as "auto" | "hindsight" | "sqlite";
-
-	let store: OkfStore | undefined;
-	// For now, always use SQLite. Hindsight store adapter is Phase 6.
-	if (storeChoice === "sqlite" || storeChoice === "auto") {
-		store = new SqliteOkfStore(path.join(bundleRoot, "okf.db"));
-	}
-	// storeChoice === "hindsight" → Phase 6 will add the Hindsight adapter.
-
-	if (!store) return undefined;
+	// Resolve the store (auto = Hindsight if configured, else SQLite).
+	const customBundleDir = settings.get("okf.bundleDir") as string | undefined;
+	const { resolveOkfStore } = await import("./store/store-resolve");
+	const { store, backend } = await resolveOkfStore(settings, cwd, customBundleDir ?? undefined);
 
 	const state = new OkfSessionState({ sessionId, settings, cwd, store });
 
@@ -228,7 +219,7 @@ export async function startOkfLayer(options: {
 		try {
 			const count = await state.reindex();
 			if (count > 0) {
-				console.debug(`[okf] Indexed ${count} concepts from ${bundleRoot}`);
+				console.debug(`[okf] Indexed ${count} concepts via ${backend}`);
 			}
 		} catch (error) {
 			console.warn(`[okf] Reindex failed: ${error instanceof Error ? error.message : String(error)}`);

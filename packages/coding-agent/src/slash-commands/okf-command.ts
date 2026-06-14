@@ -19,6 +19,7 @@ export const okfCommand: SlashCommandSpec = {
 		{ name: "diagnose", description: "Run OKF conformance check (spec §9)" },
 		{ name: "reindex", description: "Rebuild the search index from the on-disk bundle" },
 		{ name: "visualize", description: "Generate a self-contained HTML graph viewer" },
+		{ name: "enrich", description: "Author/update concepts from the codebase" },
 	],
 	allowArgs: true,
 	handle: async (command, runtime) => {
@@ -121,8 +122,20 @@ export const okfCommand: SlashCommandSpec = {
 				);
 				return commandConsumed();
 			}
+			case "enrich": {
+				const { buildCodebaseEnrichmentPrompt } = await import("../okf/enrichment/codebase");
+				const focus = command.args.trim().split(/\s+/).slice(1).join(" ");
+				const prompt = buildCodebaseEnrichmentPrompt({ cwd, focus: focus || undefined });
+				await runtime.output(
+					"OKF enrichment: starting codebase-walking agent. Use the spawned task to author concepts.\n\n" +
+						"Prompt for the enrichment subagent:\n```\n" +
+						prompt +
+						"\n```",
+				);
+				return commandConsumed();
+			}
 			default:
-				return usage("Usage: /okf <view|list|stats|diagnose|reindex|visualize>", runtime);
+				return usage("Usage: /okf <view|list|stats|diagnose|reindex|visualize|enrich>", runtime);
 		}
 	},
 };
