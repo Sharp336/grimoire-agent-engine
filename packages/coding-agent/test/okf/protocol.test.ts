@@ -66,6 +66,11 @@ describe("okf/protocol OkfProtocolHandler.resolve", () => {
 	it("throws without cwd", async () => {
 		await expect(handler.resolve(parseUrl("okf://"))).rejects.toThrow("cwd");
 	});
+
+	it("blocks path traversal via category", async () => {
+		// okf://.. should not escape the bundle root to read .omp/index.md.
+		await expect(handler.resolve(parseUrl("okf://.."), { cwd: tmpDir })).rejects.toThrow();
+	});
 });
 
 describe("okf/protocol OkfProtocolHandler.write", () => {

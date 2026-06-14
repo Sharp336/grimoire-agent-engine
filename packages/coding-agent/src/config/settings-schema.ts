@@ -2342,28 +2342,6 @@ export const SETTINGS_SCHEMA = {
 			condition: "okfActive",
 		},
 	},
-	"okf.scoping": {
-		type: "enum",
-		values: ["global", "per-project", "per-project-tagged"] as const,
-		default: "per-project",
-		ui: {
-			tab: "memory",
-			group: "OKF",
-			label: "OKF Scoping",
-			description:
-				"global = one shared bundle; per-project = isolated bundle per cwd; per-project-tagged = project-local writes plus global recall visibility",
-			options: [
-				{ value: "global", label: "Global", description: "One shared OKF bundle" },
-				{ value: "per-project", label: "Per project", description: "Project-local bundle per cwd" },
-				{
-					value: "per-project-tagged",
-					label: "Per project (tagged)",
-					description: "Write to a project-local bundle but merge project + shared recall results",
-				},
-			],
-			condition: "okfActive",
-		},
-	},
 	"okf.bankId": {
 		type: "string",
 		default: undefined,

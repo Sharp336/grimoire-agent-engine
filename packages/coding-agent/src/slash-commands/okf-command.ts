@@ -121,6 +121,12 @@ export const okfCommand: SlashCommandSpec = {
 				return commandConsumed();
 			}
 			case "enrich": {
+				if (!runtime.settings.get("okf.enrichmentEnabled")) {
+					await runtime.output(
+						"OKF enrichment is disabled. Enable it in Settings → Memory → OKF → Enrichment Agent.",
+					);
+					return commandConsumed();
+				}
 				const focus = command.args.trim().split(/\s+/).slice(1).join(" ");
 				const prompt = buildCodebaseEnrichmentPrompt({ cwd, focus: focus || undefined });
 				await runtime.output(
