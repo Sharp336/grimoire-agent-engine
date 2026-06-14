@@ -12,6 +12,7 @@ import { IssueProtocolHandler, PrProtocolHandler } from "./issue-pr-protocol";
 import { LocalProtocolHandler } from "./local-protocol";
 import { McpProtocolHandler } from "./mcp-protocol";
 import { MemoryProtocolHandler } from "./memory-protocol";
+import { OkfProtocolHandler } from "./okf-protocol";
 import { OmpProtocolHandler } from "./omp-protocol";
 import { parseInternalUrl } from "./parse";
 import { RuleProtocolHandler } from "./rule-protocol";
@@ -37,6 +38,7 @@ export class InternalUrlRouter {
 		this.register(new IssueProtocolHandler());
 		this.register(new PrProtocolHandler());
 		this.register(new HistoryProtocolHandler());
+		this.register(new OkfProtocolHandler());
 	}
 
 	/** Process-global router instance. */
