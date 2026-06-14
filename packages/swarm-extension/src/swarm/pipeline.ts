@@ -7,7 +7,6 @@
  * - For pipeline mode, iterations repeat the full DAG execution
  */
 import type { AgentSource, ModelRegistry, Settings, SingleResult } from "@oh-my-pi/pi-coding-agent";
-import { findVoteAggregator } from "./dag";
 import { executeSwarmAgent } from "./executor";
 import type { SwarmAgent, SwarmDefinition } from "./schema";
 import type { StateTracker } from "./state";
@@ -133,10 +132,14 @@ export class PipelineController {
 		const results = new Map<string, SingleResult>();
 		let agentIndex = 0;
 
-		// In vote mode the judge/aggregator is the final-wave agent that waits_for the
-		// voters; it must reduce their outputs. We identify it structurally (validated
-		// shape) once per iteration so the wave loop can inject the voter outputs.
-		const voteAggregator = this.#def.mode === "vote" ? findVoteAggregator(this.#def) : null;
+		// In vote and mixture modes the aggregator is the final-wave agent that
+		// waits_for the fan-out members; it must REDUCE their outputs. Both share the
+		// same DAG shape (KTD-5) and the same proposer->aggregator injection seam — they
+		// differ only in the reduce instruction (vote JUDGES the consensus; mixture
+		// SYNTHESIZES a unified answer). We identify the aggregator structurally (validated
+		// shape) once per iteration so the wave loop can inject the member outputs.
+		const reduceAggregator =
+			this.#def.mode === "vote" || this.#def.mode === "mixture" ? this.#findReduceAggregator() : null;
 
 		for (let waveIdx = 0; waveIdx < this.#waves.length; waveIdx++) {
 			const wave = this.#waves[waveIdx];
@@ -161,11 +164,13 @@ export class PipelineController {
 			const waveResults = await Promise.all(
 				wave.map(async agentName => {
 					const baseAgent = this.#def.agents.get(agentName)!;
-					// Feedback seam: when this agent is the vote judge, inject every voter's
-					// output into its context and prompt it to pick/synthesize the consensus.
-					// Reuses executeSwarmAgent unchanged by deriving an agent whose extraContext
-					// carries the voter outputs (NON-deterministic, advisory — the judge decides).
-					const agent = agentName === voteAggregator ? this.#buildJudgeAgent(baseAgent, results) : baseAgent;
+					// Feedback seam: when this agent is the vote/mixture aggregator, inject every
+					// fan-out member's output into its context and prompt it to reduce. Reuses
+					// executeSwarmAgent unchanged by deriving an agent whose extraContext carries
+					// the member outputs. The reduce instruction is mode-specific: vote JUDGES the
+					// consensus, mixture SYNTHESIZES a unified answer (both NON-deterministic,
+					// advisory — the aggregator decides).
+					const agent = agentName === reduceAggregator ? this.#buildReduceAgent(baseAgent, results) : baseAgent;
 					const currentIndex = agentIndex++;
 					try {
 						const result = await executeSwarmAgent(agent, currentIndex, {
@@ -215,6 +220,33 @@ export class PipelineController {
 	}
 
 	/**
+	 * Identify the vote/mixture aggregator structurally: the single agent that
+	 * waits_for the fan-out members. Both modes share this shape (KTD-5) and it is
+	 * enforced by validateSwarmDefinition, so the lone agent with a non-empty
+	 * waits_for is unambiguously the reducer. Returns null if the shape does not hold
+	 * (zero or multiple candidates), matching dag.ts findVoteAggregator but without
+	 * the vote-only mode gate so mixture can reuse it.
+	 */
+	#findReduceAggregator(): string | null {
+		const aggregators: string[] = [];
+		for (const [name, agent] of this.#def.agents) {
+			if (agent.waitsFor.length > 0) aggregators.push(name);
+		}
+		return aggregators.length === 1 ? aggregators[0] : null;
+	}
+
+	/**
+	 * Dispatch the reduce-agent derivation by mode: vote JUDGES the consensus,
+	 * mixture SYNTHESIZES a unified answer. Both inject the member outputs into the
+	 * aggregator's extraContext via the same seam; only the prompt instruction differs.
+	 */
+	#buildReduceAgent(agent: SwarmAgent, completed: Map<string, SingleResult>): SwarmAgent {
+		return this.#def.mode === "mixture"
+			? this.#buildSynthesizerAgent(agent, completed)
+			: this.#buildJudgeAgent(agent, completed);
+	}
+
+	/**
 	 * Derive the vote judge agent by appending the voter outputs to its extraContext
 	 * plus an instruction to pick/synthesize the consensus answer. Returns the base
 	 * agent unchanged if no voter output is available yet (defensive — under the
@@ -257,6 +289,55 @@ export class PipelineController {
 			.join("\n\n");
 
 		return { ...agent, extraContext: judgeContext };
+	}
+
+	/**
+	 * Derive the mixture-of-agents aggregator by appending every proposer's output to
+	 * its extraContext plus an instruction to SYNTHESIZE a single best answer (the
+	 * mixture reduce — distinct from vote's JUDGE/consensus reduce). Returns the base
+	 * agent unchanged if no proposer output is available yet (defensive — under the
+	 * validated mixture shape proposers always complete in an earlier wave).
+	 *
+	 * The synthesis is an LLM reduce: NON-deterministic and advisory. Unlike vote,
+	 * which picks/consolidates the consensus, the aggregator here is told to combine
+	 * the complementary strengths of the proposals into one improved answer (the
+	 * mixture-of-agents pattern, arxiv 2406.04692).
+	 */
+	#buildSynthesizerAgent(agent: SwarmAgent, completed: Map<string, SingleResult>): SwarmAgent {
+		const proposers = agent.waitsFor.filter(name => this.#def.agents.has(name));
+		const sections: string[] = [];
+		let succeededProposers = 0;
+		for (const proposer of proposers) {
+			const result = completed.get(proposer);
+			if (!result) continue;
+			const succeeded = result.exitCode === 0;
+			if (succeeded) succeededProposers++;
+			const body = succeeded ? result.output : `(proposer failed: ${result.error ?? "unknown error"})`;
+			sections.push(`### Proposer: ${proposer}\n${body}`);
+		}
+
+		if (sections.length === 0) return agent;
+
+		// When every proposer failed there is nothing to synthesize; prompting the
+		// aggregator to "synthesize" over zero real answers would invent one. Downgrade
+		// the instruction to report the failures instead. (The pipeline already marks the
+		// overall run failed because each failed proposer contributes a non-zero exit.)
+		const instruction =
+			succeededProposers === 0
+				? "You are acting as the AGGREGATOR in a mixture-of-agents swarm, but EVERY proposer " +
+					"failed to produce an answer (see the failure markers below). Do NOT fabricate a " +
+					"synthesis. Report that all proposers failed and summarize the failures."
+				: "You are acting as the AGGREGATOR in a mixture-of-agents swarm. Below are the " +
+					"independent proposed answers from each proposer to the same task. Do NOT simply " +
+					"pick one and do NOT concatenate them. SYNTHESIZE a single, improved answer that " +
+					"combines the complementary strengths of the proposals, corrects their individual " +
+					"errors, and resolves any contradictions into one coherent response.";
+
+		const synthContext = [agent.extraContext, instruction, "## Proposer outputs", sections.join("\n\n")]
+			.filter((part): part is string => Boolean(part))
+			.join("\n\n");
+
+		return { ...agent, extraContext: synthContext };
 	}
 
 	#buildProgressSnapshot(): Record<string, { status: string; iteration: number }> {

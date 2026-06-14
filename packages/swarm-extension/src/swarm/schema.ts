@@ -24,7 +24,7 @@ interface RawSwarmConfig {
 // Normalized types (camelCase, defaults applied)
 // ============================================================================
 
-export type SwarmMode = "pipeline" | "parallel" | "sequential" | "vote";
+export type SwarmMode = "pipeline" | "parallel" | "sequential" | "vote" | "mixture";
 
 export interface SwarmAgent {
 	name: string;
@@ -51,7 +51,7 @@ export interface SwarmDefinition {
 // Parsing
 // ============================================================================
 
-const VALID_MODES = new Set<string>(["pipeline", "parallel", "sequential", "vote"]);
+const VALID_MODES = new Set<string>(["pipeline", "parallel", "sequential", "vote", "mixture"]);
 const VALID_SWARM_NAME = /^[a-zA-Z0-9._-]+$/;
 
 export function parseSwarmYaml(content: string): SwarmDefinition {
@@ -157,79 +157,213 @@ export function validateSwarmDefinition(def: SwarmDefinition): string[] {
 		errors.push(...validateVoteMode(def, agentNames));
 	}
 
+	if (def.mode === "mixture") {
+		errors.push(...validateMixtureMode(def, agentNames));
+	}
+
 	return errors;
 }
 
 /**
- * Vote mode requires a strict fan-in shape so the judge/aggregator is unambiguous:
- *   - exactly one aggregator (the single agent with a non-empty waits_for),
- *   - at least two voters (the remaining agents, which must have no waits_for),
- *   - the aggregator must wait_for every voter (final wave reduces all of them),
- *   - voters carry no reports_to (any reports_to among voters would inject an extra
- *     dependency edge in buildDependencyGraph and serialize the voters into separate
- *     waves, silently breaking the "voters fan out in parallel, wave 0" contract),
- *   - the aggregator carries no reports_to (reports_to makes its target depend on the
- *     aggregator; pointing it at a voter the aggregator already waits_for would form a
- *     voter<->judge cycle that vote validation must reject up front, not lean on the
- *     downstream detectCycles pass that direct PipelineController callers may skip).
+ * Non-fatal advisory warnings for a swarm definition. Kept separate from
+ * validateSwarmDefinition (whose every entry aborts the run) so a quality
+ * caveat never blocks an otherwise-valid topology. Callers surface these at
+ * "warning" severity without halting; an empty array means no caveats.
  *
- * The topology itself carries the role (KTD-5: no new DAG primitive, no new schema
- * field) — this validation is the contract that makes the shape unambiguous, so the
- * pipeline reducer can identify the aggregator structurally without heuristics. The
- * reports_to checks keep this validated partition congruent with the dependency graph
- * buildDependencyGraph actually constructs (which consumes both waits_for AND reports_to).
+ * WIRING CONTRACT (KTD-6 deliverable — must reach the operator before mixture
+ * ships): every real run path MUST invoke this AFTER validateSwarmDefinition
+ * passes and surface each returned string non-fatally —
+ *   - extension.ts /swarm run → ctx.ui.notify(msg, "warning") (non-halting),
+ *   - cli.ts → process.stderr / console.warn.
+ * Without that wiring the Self-MoA heterogeneous-proposer caveat is dead code
+ * and the −6.6pp quality regression it guards against ships silently. The
+ * wiring lands in a dedicated follow-up commit (kept out of U2's three-file
+ * atomic scope by design); do NOT leave it unwired across the milestone.
+ */
+export function collectSwarmWarnings(def: SwarmDefinition): string[] {
+	const warnings: string[] = [];
+	if (def.mode === "mixture") {
+		warnings.push(...mixtureModelWarnings(def));
+	}
+	return warnings;
+}
+
+/**
+ * KTD-6 (Self-MoA, arxiv 2502.00674): a mixture-of-agents aggregator gains the
+ * most when its proposers share ONE model (heterogeneous mixing nets −6.6pp).
+ * The aggregator should get the best available model; the proposers should be
+ * homogeneous. Mixing distinct proposer models is allowed but earns a one-line
+ * caveat so the operator knows the configuration trades quality for diversity.
+ *
+ * "Homogeneous" is judged over the EFFECTIVE proposer model — a proposer's own
+ * `model` if set, otherwise the swarm-level default `def.model`. The aggregator
+ * is excluded: it is expected to differ (best model) and is not a proposer.
+ */
+function mixtureModelWarnings(def: SwarmDefinition): string[] {
+	const aggregatorName = findFanInAggregator(def);
+	if (aggregatorName === null) return [];
+
+	const proposerModels = new Set<string>();
+	for (const [name, agent] of def.agents) {
+		if (name === aggregatorName) continue;
+		// undefined → inherits def.model; collapse to a sentinel so two proposers
+		// that both inherit the same default count as homogeneous.
+		proposerModels.add(agent.model ?? def.model ?? "<default>");
+	}
+
+	if (proposerModels.size > 1) {
+		return [
+			`mixture mode proposers use heterogeneous models [${[...proposerModels].sort().join(", ")}]; ` +
+				"Self-MoA (KTD-6) favors homogeneous proposers (same model) with the aggregator on the best model — " +
+				"heterogeneous mixing can lower quality (arxiv 2502.00674).",
+		];
+	}
+	return [];
+}
+
+/**
+ * Mixture mode shares the strict fan-in shape with vote mode: the proposers fan
+ * out in parallel (wave 0, no waits_for, no reports_to) and exactly one
+ * aggregator waits_for every proposer (final wave). The only difference is the
+ * reduce semantics at the aggregator — vote JUDGES the consensus, mixture
+ * SYNTHESIZES a unified answer — which lives in the pipeline reducer, not here.
+ * The topology validation is therefore identical, so it is delegated.
+ */
+function validateMixtureMode(def: SwarmDefinition, agentNames: Set<string>): string[] {
+	return validateFanInShape(def, agentNames, MIXTURE_VOCAB);
+}
+
+/**
+ * Vote mode requires the same strict fan-in shape, judged with vote vocabulary.
  */
 function validateVoteMode(def: SwarmDefinition, agentNames: Set<string>): string[] {
+	return validateFanInShape(def, agentNames, VOTE_VOCAB);
+}
+
+/**
+ * Per-mode message vocabulary for the shared fan-in validator. Each closure
+ * renders the exact operator-facing error string for that violation so the two
+ * modes keep their own wording (vote speaks of a "judge"/"voters", mixture of an
+ * "aggregator"/"proposers") while sharing one structural check.
+ */
+interface FanInVocab {
+	mode: SwarmMode;
+	/** No agent has a non-empty waits_for → no aggregator to reduce. */
+	missingAggregator(): string;
+	/** More than one agent has waits_for → the reducer would be ambiguous. */
+	multipleAggregators(names: string[]): string;
+	/** Fewer than the 2-member fan-in minimum. */
+	tooFewMembers(count: number): string;
+	/** The aggregator fails to wait_for one of the members. */
+	missingMemberEdge(aggregator: string, member: string): string;
+	/** A member declares reports_to, which would serialize it out of wave 0. */
+	memberReportsTo(member: string): string;
+	/** The aggregator declares reports_to, forming an aggregator<->member cycle. */
+	aggregatorReportsTo(aggregator: string): string;
+}
+
+const VOTE_VOCAB: FanInVocab = {
+	mode: "vote",
+	missingAggregator: () => "vote mode requires a judge/aggregator agent (one agent that waits_for the voters)",
+	multipleAggregators: names =>
+		`vote mode requires exactly one judge/aggregator agent, found ${names.length}: [${names.join(", ")}]`,
+	tooFewMembers: count => `vote mode requires at least 2 voter agents, found ${count}`,
+	missingMemberEdge: (aggregator, member) =>
+		`vote mode judge '${aggregator}' must wait_for every voter; missing voter '${member}'`,
+	memberReportsTo: member =>
+		`vote mode voter '${member}' must not declare reports_to; voters fan out in parallel with no implicit chain`,
+	aggregatorReportsTo: aggregator =>
+		`vote mode judge '${aggregator}' must not declare reports_to; the judge depends on voters via waits_for only`,
+};
+
+const MIXTURE_VOCAB: FanInVocab = {
+	mode: "mixture",
+	missingAggregator: () =>
+		"mixture mode requires an aggregator agent (one agent that waits_for the proposers and synthesizes their answers)",
+	multipleAggregators: names =>
+		`mixture mode requires exactly one aggregator agent, found ${names.length}: [${names.join(", ")}]`,
+	tooFewMembers: count => `mixture mode requires at least 2 proposer agents, found ${count}`,
+	missingMemberEdge: (aggregator, member) =>
+		`mixture mode aggregator '${aggregator}' must wait_for every proposer; missing proposer '${member}'`,
+	memberReportsTo: member =>
+		`mixture mode proposer '${member}' must not declare reports_to; proposers fan out in parallel with no implicit chain`,
+	aggregatorReportsTo: aggregator =>
+		`mixture mode aggregator '${aggregator}' must not declare reports_to; the aggregator depends on proposers via waits_for only`,
+};
+
+/**
+ * The strict fan-in shape shared by vote and mixture (KTD-5 — no new DAG
+ * primitive, the topology itself carries the role):
+ *   - exactly one aggregator (the single agent with a non-empty waits_for),
+ *   - at least two members (the rest, which must have no waits_for),
+ *   - the aggregator must wait_for every member (final wave reduces all of them),
+ *   - members carry no reports_to (any reports_to among members would inject an
+ *     extra dependency edge in buildDependencyGraph and serialize them into
+ *     separate waves, silently breaking the "members fan out, wave 0" contract),
+ *   - the aggregator carries no reports_to (reports_to makes its target depend on
+ *     the aggregator; pointing it at a member the aggregator already waits_for
+ *     forms a cycle this validation must reject up front, not lean on the
+ *     downstream detectCycles pass that direct PipelineController callers may skip).
+ *
+ * This validation is the contract that makes the shape unambiguous so the pipeline
+ * reducer can identify the aggregator structurally without heuristics. The
+ * reports_to checks keep the validated partition congruent with the dependency
+ * graph buildDependencyGraph constructs (which consumes waits_for AND reports_to).
+ */
+function validateFanInShape(def: SwarmDefinition, agentNames: Set<string>, vocab: FanInVocab): string[] {
 	const errors: string[] = [];
 
 	const aggregators: string[] = [];
-	const voters: string[] = [];
+	const members: string[] = [];
 	for (const [name, agent] of def.agents) {
 		if (agent.waitsFor.length > 0) {
 			aggregators.push(name);
 		} else {
-			voters.push(name);
+			members.push(name);
 		}
 	}
 
 	if (aggregators.length === 0) {
-		errors.push("vote mode requires a judge/aggregator agent (one agent that waits_for the voters)");
+		errors.push(vocab.missingAggregator());
 		return errors;
 	}
 	if (aggregators.length > 1) {
-		errors.push(
-			`vote mode requires exactly one judge/aggregator agent, found ${aggregators.length}: [${aggregators.join(", ")}]`,
-		);
+		errors.push(vocab.multipleAggregators(aggregators));
 		return errors;
 	}
 
 	const aggregatorName = aggregators[0];
-	if (voters.length < 2) {
-		errors.push(`vote mode requires at least 2 voter agents, found ${voters.length}`);
+	if (members.length < 2) {
+		errors.push(vocab.tooFewMembers(members.length));
 	}
 
 	const aggregatorDeps = new Set(def.agents.get(aggregatorName)!.waitsFor.filter(d => agentNames.has(d)));
-	for (const voter of voters) {
-		if (!aggregatorDeps.has(voter)) {
-			errors.push(`vote mode judge '${aggregatorName}' must wait_for every voter; missing voter '${voter}'`);
+	for (const member of members) {
+		if (!aggregatorDeps.has(member)) {
+			errors.push(vocab.missingMemberEdge(aggregatorName, member));
 		}
-		// Voters must fan out in parallel: reports_to adds an extra dependency edge in
-		// the graph that would serialize them out of wave 0, so the partition validation
-		// enforces here would no longer match the waves that get built.
-		if (def.agents.get(voter)!.reportsTo.length > 0) {
-			errors.push(
-				`vote mode voter '${voter}' must not declare reports_to; voters fan out in parallel with no implicit chain`,
-			);
+		if (def.agents.get(member)!.reportsTo.length > 0) {
+			errors.push(vocab.memberReportsTo(member));
 		}
 	}
 
-	// The aggregator's only edges come from waits_for. A reports_to on the judge would
-	// make its target depend on the judge while the judge waits_for that voter — a cycle.
 	if (def.agents.get(aggregatorName)!.reportsTo.length > 0) {
-		errors.push(
-			`vote mode judge '${aggregatorName}' must not declare reports_to; the judge depends on voters via waits_for only`,
-		);
+		errors.push(vocab.aggregatorReportsTo(aggregatorName));
 	}
 
 	return errors;
+}
+
+/**
+ * Identify the single fan-in aggregator (the lone agent with a non-empty
+ * waits_for) for vote/mixture definitions. Relies on the strict shape enforced by
+ * validateSwarmDefinition; returns null when the shape does not hold (e.g. an
+ * invalid definition that skipped validation, or zero/multiple candidates).
+ */
+function findFanInAggregator(def: SwarmDefinition): string | null {
+	const aggregators: string[] = [];
+	for (const [name, agent] of def.agents) {
+		if (agent.waitsFor.length > 0) aggregators.push(name);
+	}
+	return aggregators.length === 1 ? aggregators[0] : null;
 }
