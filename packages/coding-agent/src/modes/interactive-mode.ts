@@ -69,6 +69,7 @@ import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
 import { LSP_STARTUP_EVENT_CHANNEL, type LspStartupEvent } from "../lsp/startup-events";
 import type { MCPManager } from "../mcp";
+import { formatMCPConnectingMessage, isMcpConnectingEvent, MCP_CONNECTING_EVENT_CHANNEL } from "../mcp/startup-events";
 import {
 	humanizePlanTitle,
 	type PlanApprovalDetails,
@@ -97,6 +98,7 @@ import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import { type ResolveToolDetails, runResolveInvocation } from "../tools/resolve";
 import { formatPhaseDisplayName, selectStickyTodoWindow, todoMatchesAnyDescription } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
+import { vocalizer } from "../tts/vocalizer";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
@@ -537,6 +539,15 @@ export class InteractiveMode implements InteractiveModeContext {
 					this.#handleLspStartupEvent(data as LspStartupEvent);
 				}),
 			);
+			this.#eventBusUnsubscribers.push(
+				eventBus.on(MCP_CONNECTING_EVENT_CHANNEL, data => {
+					if (!isMcpConnectingEvent(data)) {
+						logger.warn("Ignoring malformed mcp:connecting event", { data });
+						return;
+					}
+					this.showStatus(formatMCPConnectingMessage(data.serverNames));
+				}),
+			);
 		}
 
 		this.ui = new TUI(new ProcessTerminal(), settings.get("showHardwareCursor"));
@@ -843,13 +854,19 @@ export class InteractiveMode implements InteractiveModeContext {
 			description: cmd.description,
 		}));
 		// Surface discovered prompt templates in the picker. AgentSession.prompt() expands
-		// `expandSlashCommand` before `expandPromptTemplate`, so a file-based slash command
-		// of the same name shadows the template at runtime — mirror that here by skipping
-		// templates whose names already appear in builtins/hooks/custom/skill/file commands.
-		const reservedNames = new Set<string>([
-			...this.#pendingSlashCommands.map(cmd => cmd.name),
-			...fileSlashCommands.map(cmd => cmd.name),
-		]);
+		// `expandSlashCommand` before `expandPromptTemplate`, and builtin command
+		// execution resolves aliases before template expansion. Mirror that command
+		// resolution order by skipping templates whose names already appear in any
+		// builtin/hook/custom/skill/file command token.
+		const reservedNames = new Set<string>();
+		for (const command of this.#pendingSlashCommands) {
+			reservedNames.add(command.name);
+			for (const alias of command.aliases ?? []) reservedNames.add(alias);
+		}
+		for (const command of fileSlashCommands) {
+			reservedNames.add(command.name);
+			for (const alias of command.aliases ?? []) reservedNames.add(alias);
+		}
 		const promptTemplateCommands: SlashCommand[] = this.session.promptTemplates
 			.filter(template => !reservedNames.has(template.name))
 			.map(template => ({
@@ -953,6 +970,14 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.#goalContinuationTimer = undefined;
 			if (!this.onInputCallback) return;
 			if (!this.goalModeEnabled || this.goalModePaused) return;
+			// The 800ms timer can outlive the idle window that scheduled it: a
+			// `/goal set` taken via the streaming branch (or any extension/hook
+			// path that starts a turn while we wait) leaves the agent busy. Firing
+			// the continuation now would route through `submitInteractiveInput` →
+			// `promptCustomMessage` with no `streamingBehavior` and resurface
+			// `AgentBusyError`. Drop this tick; `#handleGoalSessionEvent` reschedules
+			// on the next `agent_end`.
+			if (this.#isAutoSubmitBlocked()) return;
 			if (this.#pendingSubmittedInput) return;
 			if (this.editor.getText().trim().length > 0) return;
 			if ((this.pendingImages?.length ?? 0) > 0) return;
@@ -976,7 +1001,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	#isLoopAutoSubmitBlocked(): boolean {
+	#isAutoSubmitBlocked(): boolean {
 		return this.session.isStreaming || this.session.isCompacting || this.session.hasPostPromptWork;
 	}
 
@@ -986,7 +1011,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.disableLoopMode("Loop time limit reached. Loop mode disabled.");
 			return;
 		}
-		if (this.#isLoopAutoSubmitBlocked()) {
+		if (this.#isAutoSubmitBlocked()) {
 			this.#deferLoopAutoSubmit(() => this.#submitLoopPromptWhenReady(prompt));
 			return;
 		}
@@ -995,7 +1020,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	async #runLoopIteration(action: "prompt" | "compact" | "reset", prompt: string): Promise<void> {
 		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return;
-		if (this.#isLoopAutoSubmitBlocked()) {
+		if (this.#isAutoSubmitBlocked()) {
 			this.#deferLoopAutoSubmit(() => {
 				void this.#runLoopIteration(action, prompt);
 			});
@@ -2355,12 +2380,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			await this.#exitPlanMode({ paused: true });
 			return;
 		}
-		if (this.planModePaused) {
-			// Third toggle: paused → off. Tools, model, and plan state were already
-			// restored by the prior #exitPlanMode({ paused: true }); only the
+		if (this.planModePaused && !initialPrompt) {
+			// No-arg third toggle: paused → off. Tools, model, and plan state were
+			// already restored by the prior #exitPlanMode({ paused: true }); only the
 			// paused flag, the reentry marker, and the session mode entry remain.
-			// Without this branch the handler fell through to #enterPlanMode and
-			// the session was stuck cycling plan ↔ plan_paused (issue #2510).
+			// Prompted /plan invocations fall through to #enterPlanMode below so the
+			// supplied prompt is still submitted as the first plan-mode turn.
 			this.planModePaused = false;
 			this.#planModeHasEntered = false;
 			this.#updatePlanModeStatus();
@@ -3395,7 +3420,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#sttController.toggle(this.editor, {
 			showWarning: (msg: string) => this.showWarning(msg),
 			showStatus: (msg: string) => this.showStatus(msg),
+			requestRender: () => this.ui.requestRender(),
 			onStateChange: (state: SttState) => {
+				// Duck assistant speech while the user is talking (push-to-talk); restore after.
+				if (state === "recording") vocalizer.duck();
+				else vocalizer.unduck();
 				if (state === "recording") {
 					this.#voicePreviousShowHardwareCursor = this.ui.getShowHardwareCursor();
 					this.#voicePreviousUseTerminalCursor = this.editor.getUseTerminalCursor();

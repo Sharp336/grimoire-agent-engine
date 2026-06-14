@@ -45,7 +45,7 @@ const OpenAICompatFieldsSchema = z.object({
 	cacheControlFormat: z.enum(["anthropic"]).optional(),
 	supportsStrictMode: z.boolean().optional(),
 	toolStrictMode: z.enum(["all_strict", "none"]).optional(),
-	streamIdleTimeoutMs: z.number().positive().optional(),
+	streamIdleTimeoutMs: z.number().nonnegative().optional(),
 	supportsLongPromptCacheRetention: z.boolean().optional(),
 	supportsReasoningParams: z.boolean().optional(),
 	alwaysSendMaxTokens: z.boolean().optional(),
@@ -125,6 +125,7 @@ const ModelDefinitionSchema = z.object({
 			"azure-openai-responses",
 			"anthropic-messages",
 			"google-generative-ai",
+			"google-gemini-cli",
 			"google-vertex",
 		])
 		.optional(),
@@ -193,6 +194,7 @@ const ProviderConfigSchema = z.object({
 			"azure-openai-responses",
 			"anthropic-messages",
 			"google-generative-ai",
+			"google-gemini-cli",
 			"google-vertex",
 		])
 		.optional(),

@@ -2,6 +2,7 @@ import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
+import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
 import {
 	TINY_MODEL_DEVICE_DEFAULT,
@@ -24,6 +25,14 @@ import {
 	TINY_TITLE_MODEL_OPTIONS,
 	TINY_TITLE_MODEL_VALUES,
 } from "../tiny/models";
+import {
+	DEFAULT_TTS_LOCAL_MODEL_KEY,
+	DEFAULT_TTS_VOICE,
+	TTS_LOCAL_MODEL_OPTIONS,
+	TTS_LOCAL_MODEL_VALUES,
+	TTS_LOCAL_VOICE_OPTIONS,
+	TTS_LOCAL_VOICE_VALUES,
+} from "../tts/models";
 import { EDIT_MODES } from "../utils/edit-mode";
 import { SEARCH_PROVIDER_OPTIONS, SEARCH_PROVIDER_PREFERENCES } from "../web/search/types";
 
@@ -109,7 +118,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Power (macOS)",
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Mnemopi", "Hindsight", "OKF"],
+	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "OKF"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Python"],
 	tools: [
@@ -1441,24 +1450,15 @@ export const SETTINGS_SCHEMA = {
 
 	"stt.modelName": {
 		type: "enum",
-		values: ["tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en", "large"] as const,
-		default: "base.en",
+		values: STT_MODEL_VALUES,
+		default: DEFAULT_STT_MODEL_KEY,
 		ui: {
 			tab: "interaction",
 			group: "Speech",
 			label: "Speech Model",
-			description: "Whisper model size (larger = more accurate but slower)",
-			options: [
-				{ value: "tiny", label: "tiny", description: "Multilingual; fastest, lowest accuracy" },
-				{ value: "tiny.en", label: "tiny.en", description: "English-only; fastest" },
-				{ value: "base", label: "base", description: "Multilingual; small and fast" },
-				{ value: "base.en", label: "base.en", description: "English-only; default" },
-				{ value: "small", label: "small", description: "Multilingual; balanced" },
-				{ value: "small.en", label: "small.en", description: "English-only; balanced" },
-				{ value: "medium", label: "medium", description: "Multilingual; accurate but slower" },
-				{ value: "medium.en", label: "medium.en", description: "English-only; accurate but slower" },
-				{ value: "large", label: "large", description: "Multilingual; most accurate" },
-			],
+			description:
+				"Local on-device speech model. Parakeet TDT v3 (sherpa-onnx) is the SoTA default; Whisper base/small/large-v3-turbo tiers (transformers.js) trade size for multilingual coverage. Downloaded on first use.",
+			options: STT_MODEL_OPTIONS,
 		},
 	},
 
@@ -1897,6 +1897,35 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+
+	// Auto-Learn (experimental): post-stop nudge to capture lessons to memory
+	// and mint/enhance isolated managed skills under ~/.omp/agent/managed-skills.
+	// Master flag is default-off → zero footprint; sub-flags gate behaviour.
+	"autolearn.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Auto-Learn",
+			label: "Auto-Learn (experimental)",
+			description:
+				"After the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills",
+		},
+	},
+	"autolearn.autoContinue": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Auto-Learn",
+			label: "Auto-run capture at stop",
+			description:
+				"When on, auto-run one capture turn at stop (uses extra tokens). Off = passive reminder on your next turn.",
+			condition: "autolearnActive",
+		},
+	},
+	// Config-file-only knob (numbers without `options` are hidden from the UI).
+	"autolearn.minToolCalls": { type: "number", default: 5 },
 
 	// Mnemopi local SQLite memory backend.
 	"mnemopi.dbPath": {
@@ -2966,13 +2995,23 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	"todo.eager": {
-		type: "boolean",
-		default: false,
+		type: "enum",
+		values: ["default", "preferred", "always"] as const,
+		default: "default",
 		ui: {
 			tab: "tools",
 			group: "Todos",
 			label: "Create Todos Automatically",
-			description: "Automatically create a comprehensive todo list after the first message",
+			description: "How strongly to push automatic todo-list creation after the first message",
+			options: [
+				{ value: "default", label: "Default", description: "Model decides; no automatic todo list" },
+				{
+					value: "preferred",
+					label: "Preferred",
+					description: "Suggests a todo list on the first message (reminder, not forced)",
+				},
+				{ value: "always", label: "Always", description: "Forces a comprehensive todo list on the first message" },
+			],
 		},
 	},
 
@@ -3082,14 +3121,14 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	"tts.enabled": {
+	"speechgen.enabled": {
 		type: "boolean",
 		default: false,
 		ui: {
 			tab: "tools",
 			group: "Available Tools",
-			label: "Text-to-Speech",
-			description: "Enable the tts tool for xAI Grok Voice speech synthesis",
+			label: "Speech Generation",
+			description: "Enable the tts tool for on-device (Kokoro) or xAI Grok Voice speech-file synthesis",
 		},
 	},
 
@@ -3548,13 +3587,19 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	"task.eager": {
-		type: "boolean",
-		default: false,
+		type: "enum",
+		values: ["default", "preferred", "always"] as const,
+		default: "default",
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
 			label: "Prefer Task Delegation",
-			description: "Encourage the agent to delegate work to subagents unless changes are trivial",
+			description: "How strongly to push delegating work to subagents",
+			options: [
+				{ value: "default", label: "Default", description: "Model decides when to delegate" },
+				{ value: "preferred", label: "Preferred", description: "Adds delegation guidance to the system prompt" },
+				{ value: "always", label: "Always", description: "Prompt guidance plus a first-turn delegation reminder" },
+			],
 		},
 	},
 
@@ -3848,6 +3893,93 @@ export const SETTINGS_SCHEMA = {
 				{ value: "gemini", label: "Gemini", description: "Requires GEMINI_API_KEY" },
 				{ value: "openrouter", label: "OpenRouter", description: "Requires OPENROUTER_API_KEY" },
 			],
+		},
+	},
+	"providers.tts": {
+		type: "enum",
+		values: ["auto", "local", "xai"] as const,
+		default: "auto",
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Text-to-Speech Provider",
+			description: "Backend for the tts tool: local on-device neural TTS (Kokoro-82M) or xAI Grok Voice",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Prefer local on-device TTS; route .mp3 output to xAI when credentials exist",
+				},
+				{ value: "local", label: "Local", description: "On-device neural TTS (Kokoro-82M); output is WAV/PCM16" },
+				{
+					value: "xai",
+					label: "xAI Grok Voice",
+					description: "Requires xAI Grok OAuth or XAI_API_KEY; MP3 or WAV",
+				},
+			],
+		},
+	},
+	"tts.localModel": {
+		type: "enum",
+		values: TTS_LOCAL_MODEL_VALUES,
+		default: DEFAULT_TTS_LOCAL_MODEL_KEY,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Local TTS Model",
+			description: "On-device neural TTS model (Kokoro-82M) used by the local TTS backend",
+			options: TTS_LOCAL_MODEL_OPTIONS,
+		},
+	},
+	"tts.localVoice": {
+		type: "enum",
+		values: TTS_LOCAL_VOICE_VALUES,
+		default: DEFAULT_TTS_VOICE,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Local TTS Voice",
+			description: "Kokoro voice used by the local TTS backend (American/British, female/male)",
+			options: TTS_LOCAL_VOICE_OPTIONS,
+		},
+	},
+	"speech.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Speech Vocalization",
+			description: "Speak the assistant's output aloud through the speakers as it streams",
+		},
+	},
+	"speech.mode": {
+		type: "enum",
+		values: ["all", "assistant", "yield"] as const,
+		default: "assistant",
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Speech Vocalization Mode",
+			description:
+				"What to speak: all = assistant messages + thinking; assistant = messages only; yield = only the final message at turn end",
+			options: [
+				{ value: "all", label: "All (messages + thinking)" },
+				{ value: "assistant", label: "Assistant messages" },
+				{ value: "yield", label: "Final message only" },
+			],
+		},
+	},
+	"speech.voice": {
+		type: "enum",
+		values: TTS_LOCAL_VOICE_VALUES,
+		default: DEFAULT_TTS_VOICE,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "Speech Vocalization Voice",
+			description: "Kokoro voice used when speaking the assistant's output aloud",
+			options: TTS_LOCAL_VOICE_OPTIONS,
 		},
 	},
 	"providers.tinyModel": {
@@ -4407,8 +4539,7 @@ export interface SttSettings {
 	enabled: boolean;
 	language: string | undefined;
 	modelName: string;
-	whisperPath: string | undefined;
-	modelPath: string | undefined;
+	streaming: boolean;
 }
 
 export interface BashInterceptorRule {
