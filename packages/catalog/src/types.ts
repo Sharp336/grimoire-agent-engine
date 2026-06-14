@@ -418,6 +418,80 @@ export type CompatOf<TApi extends Api> = TApi extends "openai-completions"
 			? ResolvedAnthropicCompat
 			: undefined;
 
+/**
+ * One member of a blended (synthetic) model. A member is either a leaf model
+ * (`kind: "model"`, the default) streamed through `streamSimple`, or a full
+ * subagent (`kind: "subagent"`) run through the in-package subagent runner.
+ * `model` is a model id or `provider/id` string resolved against the registry
+ * (so each member fails over independently via the provider order).
+ */
+export interface SwarmMember {
+	/**
+	 * The member's role within the blend. Strategy-specific:
+	 * - `router`: candidate targets (`selector` picks one);
+	 * - `sequence`/`draft-refine`: ordered stages (e.g. `draft`, `refine`);
+	 * - `moa`: `proposer` members fan out; an `aggregator` synthesizes/votes.
+	 */
+	role: string;
+	/** Model id or `provider/id` to resolve for this member. */
+	model: string;
+	/**
+	 * Effect edge for this member. `"model"` (default) streams the resolved
+	 * model via `streamSimple`; `"subagent"` runs a full subagent.
+	 */
+	kind?: "model" | "subagent";
+	/**
+	 * When `true`, this member's content events are forwarded to the outer
+	 * blended stream (the user-visible surface). Exactly one member is the
+	 * surface; if none sets it, the strategy's natural terminal member surfaces.
+	 */
+	surface?: boolean;
+}
+
+/**
+ * How a `router` strategy chooses a single member. `"classifier"` asks a
+ * classifier model to pick by difficulty/intent; `"rule"` applies a static
+ * heuristic. The chosen member is the one whose `role` matches the result.
+ */
+export interface SwarmSelector {
+	/** Selection mechanism: an LLM classifier or a static rule. */
+	kind: "classifier" | "rule";
+	/** Model id / `provider/id` used to classify when `kind === "classifier"`. */
+	model?: string;
+}
+
+/**
+ * Declarative spec for a synthetic blended model (`api: "omp-swarm"`). Blends
+ * several members' streams into one coherent `AssistantMessageEventStream`:
+ * - `router`: classify the request, dispatch to exactly one member;
+ * - `draft-refine`/`sequence`: pipe each member's output into the next;
+ * - `moa`: run `proposer` members in parallel, then an `aggregator` synthesizes.
+ *
+ * The executor reads this off `Model.swarm`; `buildModel` preserves it via
+ * spread, so no build step or wire serialization touches it.
+ */
+export interface SwarmSpec {
+	/** Blend strategy selecting the reduce semantics over `members`. */
+	strategy: "router" | "draft-refine" | "sequence" | "moa";
+	/** The blend members, in order (order is significant for `sequence`). */
+	members: SwarmMember[];
+	/** How a `router` strategy picks the single member to run. */
+	selector?: SwarmSelector;
+	/**
+	 * Role of the member whose content is surfaced to the user. Falls back to
+	 * any member's `surface: true`, else the strategy's terminal member.
+	 */
+	surface?: string;
+	/** Hard cap on members actually run (guards runaway blends; default 5). */
+	maxMembers?: number;
+	/**
+	 * Watchdog budget for the first content event of the surfaced stream. A
+	 * parallel/`moa` blend emits an early `start` + status so the agent-loop
+	 * first-event watchdog doesn't misfire on pre-aggregation latency.
+	 */
+	firstEventTimeoutMs?: number;
+}
+
 // Model interface for the unified model system
 export interface Model<TApi extends Api = Api> {
 	id: string;
@@ -482,6 +556,13 @@ export interface Model<TApi extends Api = Api> {
 	priority?: number;
 	/** Canonical thinking capability metadata for this model. */
 	thinking?: ThinkingConfig;
+	/**
+	 * Blend spec for a synthetic model (`api: "omp-swarm"`). When present, this
+	 * model is virtual: its `streamSimple` fans out across `swarm.members` and
+	 * reduces their streams into one. Preserved verbatim through `buildModel`'s
+	 * spread; the blend executor reads it at dispatch time.
+	 */
+	swarm?: SwarmSpec;
 	/**
 	 * Fully-resolved compatibility record, materialized once by `buildModel`.
 	 * Protocol handlers read fields; they never detect, resolve, or allocate.
