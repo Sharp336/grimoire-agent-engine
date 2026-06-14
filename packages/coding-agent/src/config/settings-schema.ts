@@ -109,7 +109,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Power (macOS)",
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Mnemopi", "Hindsight"],
+	memory: ["General", "Mnemopi", "Hindsight", "OKF"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Python"],
 	tools: [
@@ -2269,6 +2269,117 @@ export const SETTINGS_SCHEMA = {
 	},
 	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
 	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
+
+	// OKF (Open Knowledge Format) — additive knowledge layer.
+	// A directory of markdown concept documents (`.omp/knowledge/`) that the
+	// agent reads, writes, curates, recalls over, and visualises. Coexists with
+	// the active memory backend (hindsight/mnemopi/local) or runs standalone.
+	"okf.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "OKF",
+			label: "OKF Knowledge Layer",
+			description: "Enable the Open Knowledge Format bundle (`.omp/knowledge/`) as an additive knowledge layer",
+		},
+	},
+	"okf.store": {
+		type: "enum",
+		values: ["auto", "hindsight", "sqlite"] as const,
+		default: "auto",
+		ui: {
+			tab: "memory",
+			group: "OKF",
+			label: "OKF Index Store",
+			description:
+				"auto = Hindsight (pg0) when configured, else local SQLite; hindsight = always use Hindsight; sqlite = always use local SQLite FTS5",
+			options: [
+				{ value: "auto", label: "Auto", description: "Hindsight (pg0) when configured, else local SQLite" },
+				{ value: "hindsight", label: "Hindsight (pg0)", description: "Always use the Hindsight server" },
+				{ value: "sqlite", label: "SQLite", description: "Always use a local SQLite FTS5 index" },
+			],
+			condition: "okfActive",
+		},
+	},
+	"okf.bundleDir": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "OKF",
+			label: "OKF Bundle Directory",
+			description: "Optional override for the OKF bundle root. Defaults to <cwd>/.omp/knowledge.",
+			condition: "okfActive",
+		},
+	},
+	"okf.scoping": {
+		type: "enum",
+		values: ["global", "per-project", "per-project-tagged"] as const,
+		default: "per-project",
+		ui: {
+			tab: "memory",
+			group: "OKF",
+			label: "OKF Scoping",
+			description:
+				"global = one shared bundle; per-project = isolated bundle per cwd; per-project-tagged = project-local writes plus global recall visibility",
+			options: [
+				{ value: "global", label: "Global", description: "One shared OKF bundle" },
+				{ value: "per-project", label: "Per project", description: "Project-local bundle per cwd" },
+				{
+					value: "per-project-tagged",
+					label: "Per project (tagged)",
+					description: "Write to a project-local bundle but merge project + shared recall results",
+				},
+			],
+			condition: "okfActive",
+		},
+	},
+	"okf.bankId": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "OKF",
+			label: "OKF Hindsight Bank",
+			description: "Optional shared bank name for OKF concepts in Hindsight (when store is hindsight or auto).",
+			condition: "okfActive",
+		},
+	},
+	"okf.autoRecall": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "OKF",
+			label: "OKF Auto Recall",
+			description: "Recall relevant OKF concepts into the first turn of each session",
+			condition: "okfActive",
+		},
+	},
+	"okf.recallMaxTokens": { type: "number", default: 2000 },
+	"okf.reindexOnStart": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "OKF",
+			label: "OKF Reindex on Start",
+			description: "Reconcile the search index with the on-disk bundle at session start",
+			condition: "okfActive",
+		},
+	},
+	"okf.enrichmentEnabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "OKF",
+			label: "OKF Enrichment Agent",
+			description: "Enable the curator agent that authors/updates concepts from sessions and the codebase",
+			condition: "okfActive",
+		},
+	},
 
 	// TTSR
 	"ttsr.enabled": {

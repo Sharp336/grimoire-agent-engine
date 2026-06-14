@@ -90,6 +90,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	okfActive: () => {
+		try {
+			return Settings.instance.get("okf.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
 	autoThinkingActive: () => {
 		try {
 			return Settings.instance.get("defaultThinkingLevel") === "auto";
