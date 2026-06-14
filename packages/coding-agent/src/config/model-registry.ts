@@ -18,6 +18,7 @@ import {
 	openaiCodexModelManagerOptions,
 	PROVIDER_DESCRIPTORS,
 } from "@oh-my-pi/pi-catalog/provider-models";
+import type { SwarmSpec } from "@oh-my-pi/pi-catalog/types";
 import {
 	collapseBuiltModelVariants,
 	getVariantAliasSources,
@@ -431,6 +432,7 @@ interface CustomModelDefinitionLike extends ModelPatch {
 	api?: Api;
 	baseUrl?: string;
 	cost?: Model<Api>["cost"];
+	swarm?: SwarmSpec;
 }
 
 interface CustomModelBuildOptions {
@@ -444,6 +446,7 @@ interface CustomModelOverlay extends ModelPatch {
 	baseUrl: string;
 	cost?: Model<Api>["cost"];
 	isOAuth?: boolean;
+	swarm?: SwarmSpec;
 }
 
 function mergeCustomModelHeaders(
@@ -516,6 +519,7 @@ function buildCustomModelOverlay(
 		contextPromotionTarget: modelDef.contextPromotionTarget,
 		premiumMultiplier: modelDef.premiumMultiplier,
 		isOAuth: resolveCustomModelIsOAuth(api, providerAuth),
+		swarm: modelDef.swarm,
 	};
 }
 
@@ -554,6 +558,7 @@ function finalizeCustomModel(model: CustomModelOverlay, options: CustomModelBuil
 		contextPromotionTarget: resolvedModel.contextPromotionTarget,
 		premiumMultiplier: resolvedModel.premiumMultiplier,
 		isOAuth: resolvedModel.isOAuth,
+		swarm: resolvedModel.swarm,
 	} as ModelSpec<Api>);
 }
 
@@ -1065,6 +1070,11 @@ export class ModelRegistry {
 			});
 			this.#keylessProviders.add("lm-studio");
 		}
+		// The synthetic-blend provider `omp` (api: "omp-swarm") needs no credentials
+		// of its own — each blend member resolves and authenticates independently.
+		// Mark it keyless unconditionally (re-applied on every reload, so it survives
+		// refresh()) so getAvailable() surfaces runtime-registered `omp/*` models.
+		this.#keylessProviders.add("omp");
 	}
 
 	#loadCustomModels(): CustomModelsResult {
@@ -2246,5 +2256,6 @@ export interface ProviderConfigInput {
 		compat?: ModelSpec<Api>["compat"];
 		contextPromotionTarget?: string;
 		premiumMultiplier?: number;
+		swarm?: SwarmSpec;
 	}>;
 }
