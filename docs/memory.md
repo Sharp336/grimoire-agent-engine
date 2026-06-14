@@ -96,3 +96,7 @@ Additional tuning knobs (concurrency, lease durations, token budgets) are availa
 - `packages/coding-agent/src/memories/storage.ts` — SQLite-backed job queue and thread registry
 - `packages/coding-agent/src/prompts/memories/` — memory prompt templates
 - `packages/coding-agent/src/internal-urls/memory-protocol.ts` — `memory://` URL handler
+
+## See also
+
+- [Open Knowledge Format (OKF)](./okf.md) — an additive knowledge layer that runs alongside any memory backend
