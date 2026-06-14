@@ -15,12 +15,13 @@
 
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { Settings } from "../config/settings";
 import {
 	conceptIdToPath,
 	ensureWithinRoot,
-	getBundleRoot,
 	normalizeConceptId,
 	renderIndex,
+	resolveBundleRoot,
 	writeConcept,
 } from "../okf/bundle";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, WriteContext } from "./types";
@@ -79,8 +80,15 @@ function resolveOkfUrl(
 ): { root: string; parsed: ParsedOkfUrl } {
 	const cwd = context?.cwd;
 	if (!cwd) throw new Error("okf:// requires a session cwd");
-	const root = path.resolve(getBundleRoot(cwd));
+	// Honor okf.bundleDir when available in the context settings.
+	const settings = (context as ResolveContext & { settings?: Settings })?.settings;
+	const bundleDir = settings ? (settings.get("okf.bundleDir") as string | undefined) : undefined;
+	const root = resolveBundleRoot(cwd, bundleDir);
 	const parsed = parseOkfUrlPath(url);
+	// Path-traversal safety: validate the category segment.
+	if (parsed.category && (parsed.category.includes("..") || parsed.category.includes("\0"))) {
+		throw new Error(`okf:// category must not contain path traversal: ${url.href}`);
+	}
 	return { root, parsed };
 }
 

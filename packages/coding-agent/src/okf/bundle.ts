@@ -81,6 +81,11 @@ export function getBundleRoot(cwd: string): string {
 	return path.join(cwd, DEFAULT_BUNDLE_DIRNAME);
 }
 
+/** Resolve the bundle root, honoring the `okf.bundleDir` setting when set. */
+export function resolveBundleRoot(cwd: string, bundleDir?: string): string {
+	return path.resolve(bundleDir ?? getBundleRoot(cwd));
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Concept ID normalisation
 // ─────────────────────────────────────────────────────────────────────────────

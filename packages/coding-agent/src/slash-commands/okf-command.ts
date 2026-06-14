@@ -5,10 +5,12 @@
  */
 
 import * as path from "node:path";
-import { buildGraph, getBundleRoot, loadConcept, loadSummaries, renderIndex, walkBundle } from "../okf/bundle";
+import { buildGraph, loadConcept, loadSummaries, renderIndex, resolveBundleRoot, walkBundle } from "../okf/bundle";
 import { OkfDocumentError, validate } from "../okf/document";
 import { buildCodebaseEnrichmentPrompt } from "../okf/enrichment/codebase";
+import { getOkfSessionState } from "../okf/state";
 import { SqliteOkfStore } from "../okf/store/store-sqlite";
+import type { OkfStore } from "../okf/store/types";
 import { generateViewer } from "../okf/viewer/generator";
 import { commandConsumed, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
@@ -31,7 +33,11 @@ export const okfCommand: SlashCommandSpec = {
 	handle: async (command, runtime) => {
 		const verb = (command.args.trim().split(/\s+/)[0] ?? "").toLowerCase() || "view";
 		const cwd = runtime.cwd;
-		const root = getBundleRoot(cwd);
+		const bundleDir = runtime.settings.get("okf.bundleDir") as string | undefined;
+		const root = resolveBundleRoot(cwd, bundleDir);
+		// Resolve the active store from the session state (honors hindsight/sqlite/auto).
+		const okfState = getOkfSessionState(runtime.session);
+		const activeStore: OkfStore | undefined = okfState?.store;
 
 		switch (verb) {
 			case "view": {
@@ -82,7 +88,10 @@ export const okfCommand: SlashCommandSpec = {
 				return commandConsumed();
 			}
 			case "reindex": {
-				const store = new SqliteOkfStore(path.join(root, "okf.db"));
+				// Use the active session store (Hindsight or SQLite); fall back to a
+				// temporary SQLite store if the session hasn't started the OKF layer yet.
+				const ownsStore = !activeStore;
+				const store: OkfStore = activeStore ?? new SqliteOkfStore(path.join(root, "okf.db"));
 				try {
 					const ids = await walkBundle(root);
 					const summaries = await loadSummaries(root, { autoUpdate: false });
@@ -101,7 +110,7 @@ export const okfCommand: SlashCommandSpec = {
 					}
 					await runtime.output(`OKF reindex: ${indexed}/${ids.length} concepts indexed.`);
 				} finally {
-					await store.close();
+					if (ownsStore) await store.close();
 				}
 				return commandConsumed();
 			}

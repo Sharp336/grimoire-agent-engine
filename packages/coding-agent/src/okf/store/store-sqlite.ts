@@ -11,6 +11,8 @@
  */
 
 import { Database } from "bun:sqlite";
+import * as fs from "node:fs";
+import * as path from "node:path";
 import type { OkfConceptSummary } from "../bundle";
 import type { OkfListOptions, OkfSearchOptions, OkfSearchResult, OkfStore } from "./types";
 
@@ -19,6 +21,8 @@ export class SqliteOkfStore implements OkfStore {
 	readonly #db: Database;
 
 	constructor(dbPath: string) {
+		const dir = path.dirname(dbPath);
+		fs.mkdirSync(dir, { recursive: true });
 		this.#db = new Database(dbPath, { create: true });
 		this.#db.exec("PRAGMA journal_mode = WAL;");
 		this.#db.exec("PRAGMA synchronous = NORMAL;");
