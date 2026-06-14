@@ -484,6 +484,18 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 										partial: output,
 									});
 								}
+							} else if (part.thoughtSignature && currentBlock) {
+								if (currentBlock.type === "thinking") {
+									currentBlock.thinkingSignature = retainThoughtSignature(
+										currentBlock.thinkingSignature,
+										part.thoughtSignature,
+									);
+								} else {
+									currentBlock.textSignature = retainThoughtSignature(
+										currentBlock.textSignature,
+										part.thoughtSignature,
+									);
+								}
 							}
 
 							if (part.functionCall) {

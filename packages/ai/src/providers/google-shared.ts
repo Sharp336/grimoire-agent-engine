@@ -650,6 +650,18 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 							partial: output,
 						});
 					}
+				} else if (part.thoughtSignature && currentBlock) {
+					if (currentBlock.type === "thinking") {
+						currentBlock.thinkingSignature = retainThoughtSignature(
+							currentBlock.thinkingSignature,
+							part.thoughtSignature,
+						);
+					} else if (retainTextSignature) {
+						currentBlock.textSignature = retainThoughtSignature(
+							currentBlock.textSignature,
+							part.thoughtSignature,
+						);
+					}
 				}
 
 				if (part.functionCall) {
