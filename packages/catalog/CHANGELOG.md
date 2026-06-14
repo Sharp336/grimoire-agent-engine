@@ -8,6 +8,10 @@
 
 - Added the Umans AI Coding Plan provider catalog with Anthropic-compatible model metadata and dynamic discovery ([#2636](https://github.com/can1357/oh-my-pi/pull/2636) by [@oldschoola](https://github.com/oldschoola)).
 
+### Changed
+
+- Extended `modelFamilyToken(modelId)` to also classify GLM ids (`glm-*`) so provider mirrors fold onto one `glm` lineage (e.g. `zai/glm-5.2` and `zhipu-coding-plan/glm-5.2`), which `parseKnownModel` excludes ([#2406](https://github.com/can1357/oh-my-pi/issues/2406))
+
 ## [16.0.0] - 2026-06-15
 
 ### Breaking Changes

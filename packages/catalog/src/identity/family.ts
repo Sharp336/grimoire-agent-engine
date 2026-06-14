@@ -110,6 +110,7 @@ export function isReasoningGlmModelId(modelId: string): boolean {
 export function isGlmVisionModelId(modelId: string): boolean {
 	return parseGlmModel(bareModelId(modelId))?.vision === true;
 }
+
 /**
  * Coarse vendor-lineage token for "are two models the same family?" checks
  * (e.g. picking a cross-family reviewer). All Claude point releases share a token,

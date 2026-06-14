@@ -59,6 +59,7 @@ describe("createExtensionModelQuery", () => {
 	test("resolve() honors configured role aliases via the same settings-backed path as core", () => {
 		const settings = {
 			getModelRole: (role: string) => (role === "slow" ? "anthropic/claude-opus-4-8" : undefined),
+			get: () => undefined,
 		} as unknown as Settings;
 		const q = createExtensionModelQuery(registry(), settings, () => undefined);
 		expect(q.resolve("pi/slow")).toBe(claude);
@@ -80,5 +81,27 @@ describe("createExtensionModelQuery", () => {
 		} as unknown as ModelRegistry;
 		const q = createExtensionModelQuery(reg, undefined, () => undefined);
 		expect(q.family(proxy)).toBe(q.family(claude));
+	});
+
+	test("list() and resolve() honor the session enabledModels allow-list", () => {
+		const settings = {
+			get: (key: string) => (key === "enabledModels" ? ["anthropic/*"] : undefined),
+			getModelRole: () => undefined,
+		} as unknown as Settings;
+		const reg = {
+			getAvailable: () => available,
+			getCanonicalId: (m: Model<Api>) => m.id,
+			getCanonicalVariants: () => [],
+		} as unknown as ModelRegistry;
+		const q = createExtensionModelQuery(reg, settings, () => undefined);
+		// gpt is authenticated but outside the anthropic-only scope: hidden + unresolvable.
+		expect(q.list()).toEqual([claude]);
+		expect(q.resolve("gpt-5.4")).toBeUndefined();
+		expect(q.resolve("anthropic/claude-opus-4-8")).toBe(claude);
+		// An explicit session model outside the scope (e.g. a `--model` override, which
+		// core honors over enabledModels) stays listable and resolvable.
+		const qOverride = createExtensionModelQuery(reg, settings, () => gpt);
+		expect(qOverride.list()).toContain(gpt);
+		expect(qOverride.resolve("openai/gpt-5.4")).toBe(gpt);
 	});
 });
