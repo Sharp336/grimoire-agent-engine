@@ -24,7 +24,7 @@ interface RawSwarmConfig {
 // Normalized types (camelCase, defaults applied)
 // ============================================================================
 
-export type SwarmMode = "pipeline" | "parallel" | "sequential";
+export type SwarmMode = "pipeline" | "parallel" | "sequential" | "vote";
 
 export interface SwarmAgent {
 	name: string;
@@ -51,7 +51,7 @@ export interface SwarmDefinition {
 // Parsing
 // ============================================================================
 
-const VALID_MODES = new Set<string>(["pipeline", "parallel", "sequential"]);
+const VALID_MODES = new Set<string>(["pipeline", "parallel", "sequential", "vote"]);
 const VALID_SWARM_NAME = /^[a-zA-Z0-9._-]+$/;
 
 export function parseSwarmYaml(content: string): SwarmDefinition {
@@ -151,6 +151,84 @@ export function validateSwarmDefinition(def: SwarmDefinition): string[] {
 	}
 	if (def.mode !== "pipeline" && def.targetCount !== 1) {
 		errors.push("target_count is only supported in pipeline mode");
+	}
+
+	if (def.mode === "vote") {
+		errors.push(...validateVoteMode(def, agentNames));
+	}
+
+	return errors;
+}
+
+/**
+ * Vote mode requires a strict fan-in shape so the judge/aggregator is unambiguous:
+ *   - exactly one aggregator (the single agent with a non-empty waits_for),
+ *   - at least two voters (the remaining agents, which must have no waits_for),
+ *   - the aggregator must wait_for every voter (final wave reduces all of them),
+ *   - voters carry no reports_to (any reports_to among voters would inject an extra
+ *     dependency edge in buildDependencyGraph and serialize the voters into separate
+ *     waves, silently breaking the "voters fan out in parallel, wave 0" contract),
+ *   - the aggregator carries no reports_to (reports_to makes its target depend on the
+ *     aggregator; pointing it at a voter the aggregator already waits_for would form a
+ *     voter<->judge cycle that vote validation must reject up front, not lean on the
+ *     downstream detectCycles pass that direct PipelineController callers may skip).
+ *
+ * The topology itself carries the role (KTD-5: no new DAG primitive, no new schema
+ * field) — this validation is the contract that makes the shape unambiguous, so the
+ * pipeline reducer can identify the aggregator structurally without heuristics. The
+ * reports_to checks keep this validated partition congruent with the dependency graph
+ * buildDependencyGraph actually constructs (which consumes both waits_for AND reports_to).
+ */
+function validateVoteMode(def: SwarmDefinition, agentNames: Set<string>): string[] {
+	const errors: string[] = [];
+
+	const aggregators: string[] = [];
+	const voters: string[] = [];
+	for (const [name, agent] of def.agents) {
+		if (agent.waitsFor.length > 0) {
+			aggregators.push(name);
+		} else {
+			voters.push(name);
+		}
+	}
+
+	if (aggregators.length === 0) {
+		errors.push("vote mode requires a judge/aggregator agent (one agent that waits_for the voters)");
+		return errors;
+	}
+	if (aggregators.length > 1) {
+		errors.push(
+			`vote mode requires exactly one judge/aggregator agent, found ${aggregators.length}: [${aggregators.join(", ")}]`,
+		);
+		return errors;
+	}
+
+	const aggregatorName = aggregators[0];
+	if (voters.length < 2) {
+		errors.push(`vote mode requires at least 2 voter agents, found ${voters.length}`);
+	}
+
+	const aggregatorDeps = new Set(def.agents.get(aggregatorName)!.waitsFor.filter(d => agentNames.has(d)));
+	for (const voter of voters) {
+		if (!aggregatorDeps.has(voter)) {
+			errors.push(`vote mode judge '${aggregatorName}' must wait_for every voter; missing voter '${voter}'`);
+		}
+		// Voters must fan out in parallel: reports_to adds an extra dependency edge in
+		// the graph that would serialize them out of wave 0, so the partition validation
+		// enforces here would no longer match the waves that get built.
+		if (def.agents.get(voter)!.reportsTo.length > 0) {
+			errors.push(
+				`vote mode voter '${voter}' must not declare reports_to; voters fan out in parallel with no implicit chain`,
+			);
+		}
+	}
+
+	// The aggregator's only edges come from waits_for. A reports_to on the judge would
+	// make its target depend on the judge while the judge waits_for that voter — a cycle.
+	if (def.agents.get(aggregatorName)!.reportsTo.length > 0) {
+		errors.push(
+			`vote mode judge '${aggregatorName}' must not declare reports_to; the judge depends on voters via waits_for only`,
+		);
 	}
 
 	return errors;

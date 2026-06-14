@@ -7,8 +7,9 @@
  * - For pipeline mode, iterations repeat the full DAG execution
  */
 import type { AgentSource, ModelRegistry, Settings, SingleResult } from "@oh-my-pi/pi-coding-agent";
+import { findVoteAggregator } from "./dag";
 import { executeSwarmAgent } from "./executor";
-import type { SwarmDefinition } from "./schema";
+import type { SwarmAgent, SwarmDefinition } from "./schema";
 import type { StateTracker } from "./state";
 
 // ============================================================================
@@ -132,6 +133,11 @@ export class PipelineController {
 		const results = new Map<string, SingleResult>();
 		let agentIndex = 0;
 
+		// In vote mode the judge/aggregator is the final-wave agent that waits_for the
+		// voters; it must reduce their outputs. We identify it structurally (validated
+		// shape) once per iteration so the wave loop can inject the voter outputs.
+		const voteAggregator = this.#def.mode === "vote" ? findVoteAggregator(this.#def) : null;
+
 		for (let waveIdx = 0; waveIdx < this.#waves.length; waveIdx++) {
 			const wave = this.#waves[waveIdx];
 
@@ -154,7 +160,12 @@ export class PipelineController {
 			// Execute all agents in wave in parallel, catching per-agent errors
 			const waveResults = await Promise.all(
 				wave.map(async agentName => {
-					const agent = this.#def.agents.get(agentName)!;
+					const baseAgent = this.#def.agents.get(agentName)!;
+					// Feedback seam: when this agent is the vote judge, inject every voter's
+					// output into its context and prompt it to pick/synthesize the consensus.
+					// Reuses executeSwarmAgent unchanged by deriving an agent whose extraContext
+					// carries the voter outputs (NON-deterministic, advisory — the judge decides).
+					const agent = agentName === voteAggregator ? this.#buildJudgeAgent(baseAgent, results) : baseAgent;
 					const currentIndex = agentIndex++;
 					try {
 						const result = await executeSwarmAgent(agent, currentIndex, {
@@ -201,6 +212,51 @@ export class PipelineController {
 		}
 
 		return results;
+	}
+
+	/**
+	 * Derive the vote judge agent by appending the voter outputs to its extraContext
+	 * plus an instruction to pick/synthesize the consensus answer. Returns the base
+	 * agent unchanged if no voter output is available yet (defensive — under the
+	 * validated vote shape voters always complete in an earlier wave).
+	 *
+	 * The judge is an LLM reduce: explicitly NON-deterministic and advisory. There is
+	 * no deterministic exact-match-majority contract in this slice (no vote_key field).
+	 */
+	#buildJudgeAgent(agent: SwarmAgent, completed: Map<string, SingleResult>): SwarmAgent {
+		const voters = agent.waitsFor.filter(name => this.#def.agents.has(name));
+		const sections: string[] = [];
+		let succeededVoters = 0;
+		for (const voter of voters) {
+			const result = completed.get(voter);
+			if (!result) continue;
+			const succeeded = result.exitCode === 0;
+			if (succeeded) succeededVoters++;
+			const body = succeeded ? result.output : `(voter failed: ${result.error ?? "unknown error"})`;
+			sections.push(`### Voter: ${voter}\n${body}`);
+		}
+
+		if (sections.length === 0) return agent;
+
+		// When every voter failed there is nothing to reach consensus over; prompting the
+		// judge to "produce a consensus" over zero real answers would invent one. Downgrade
+		// the instruction to report the failures instead. (The pipeline already marks the
+		// overall run failed because each failed voter contributes a non-zero exit.)
+		const instruction =
+			succeededVoters === 0
+				? "You are acting as the JUDGE in a majority-vote swarm, but EVERY voter failed to " +
+					"produce an answer (see the failure markers below). Do NOT fabricate a consensus. " +
+					"Report that all voters failed and summarize the failures."
+				: "You are acting as the JUDGE in a majority-vote swarm. Below are the independent " +
+					"answers from each voter to the same task. Compare them, identify the majority/consensus " +
+					"position, and produce a single consolidated answer. If voters disagree, pick the most " +
+					"strongly supported answer and briefly note the disagreement. Do not simply concatenate.";
+
+		const judgeContext = [agent.extraContext, instruction, "## Voter outputs", sections.join("\n\n")]
+			.filter((part): part is string => Boolean(part))
+			.join("\n\n");
+
+		return { ...agent, extraContext: judgeContext };
 	}
 
 	#buildProgressSnapshot(): Record<string, { status: string; iteration: number }> {

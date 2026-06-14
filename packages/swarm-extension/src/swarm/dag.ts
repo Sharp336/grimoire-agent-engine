@@ -39,7 +39,10 @@ export function buildDependencyGraph(def: SwarmDefinition): Map<string, Set<stri
 		}
 	}
 
-	// For pipeline/sequential with no explicit deps, chain by declaration order
+	// For pipeline/sequential with no explicit deps, chain by declaration order.
+	// Vote mode is intentionally excluded: voters fan out in parallel (no implicit
+	// chain) and only the aggregator waits_for them via the explicit edges above,
+	// so buildExecutionWaves naturally places voters in wave 0, the judge in wave 1.
 	if ((def.mode === "pipeline" || def.mode === "sequential") && !hasExplicitDeps(deps)) {
 		for (let i = 1; i < def.agentOrder.length; i++) {
 			deps.get(def.agentOrder[i])!.add(def.agentOrder[i - 1]);
@@ -47,6 +50,22 @@ export function buildDependencyGraph(def: SwarmDefinition): Map<string, Set<stri
 	}
 
 	return deps;
+}
+
+/**
+ * Identify the vote-mode judge/aggregator: the single agent that waits_for the voters.
+ *
+ * Relies on the strict shape enforced by `validateSwarmDefinition` for vote mode
+ * (exactly one agent with a non-empty waits_for). Returns its name, or null if the
+ * shape does not hold (e.g. an invalid definition that skipped validation).
+ */
+export function findVoteAggregator(def: SwarmDefinition): string | null {
+	if (def.mode !== "vote") return null;
+	const aggregators: string[] = [];
+	for (const [name, agent] of def.agents) {
+		if (agent.waitsFor.length > 0) aggregators.push(name);
+	}
+	return aggregators.length === 1 ? aggregators[0] : null;
 }
 
 function hasExplicitDeps(deps: Map<string, Set<string>>): boolean {
