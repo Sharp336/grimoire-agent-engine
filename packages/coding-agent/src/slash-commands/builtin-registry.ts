@@ -41,6 +41,7 @@ import { launchStatsDashboard, parseStatsDashboardArgs } from "./helpers/stats-d
 import { handleTodoAcp } from "./helpers/todo";
 import { buildUsageReportText } from "./helpers/usage-report";
 import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
+import { okfCommand } from "./okf-command";
 import type {
 	BuiltinSlashCommand,
 	ParsedSlashCommand,
@@ -1364,6 +1365,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			await runtime.ctx.handleMemoryCommand(command.text);
 		},
 	},
+	okfCommand,
 	{
 		name: "rename",
 		description: "Rename the current session",
