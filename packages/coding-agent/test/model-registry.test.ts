@@ -463,6 +463,84 @@ describe("ModelRegistry", () => {
 		});
 	});
 
+	describe("rankCanonicalVariantsFor", () => {
+		// Three custom providers all aliasing the same bundled canonical id, so the
+		// equivalence index groups them WITHOUT pulling in bundled anthropic
+		// variants (no anthropic auth is configured here).
+		function writeThreeProviderCanonical() {
+			writeRawModelsJson({
+				demo: providerConfig("https://demo.example.com/v1", [{ id: "anthropic/claude-sonnet-4.5" }]),
+				proxy: providerConfig("https://proxy.example.com/v1", [{ id: "anthropic/claude-sonnet-4.5" }]),
+				gateway: providerConfig("https://gateway.example.com/v1", [{ id: "anthropic/claude-sonnet-4.5" }]),
+			});
+		}
+
+		test("ranks fallback siblings by configured modelProviderOrder, excluding the primary", async () => {
+			await Settings.init({
+				inMemory: true,
+				overrides: {
+					modelProviderOrder: ["demo", "proxy", "gateway"],
+				},
+			});
+			writeThreeProviderCanonical();
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const primary = registry.find("demo", "anthropic/claude-sonnet-4.5");
+			expect(primary).toBeDefined();
+
+			const ranked = registry.rankCanonicalVariantsFor(primary as Model);
+			// The primary (demo) is excluded; siblings follow modelProviderOrder.
+			expect(ranked.map(model => model.provider)).toEqual(["proxy", "gateway"]);
+		});
+
+		test("reorders the fallback chain when modelProviderOrder changes", async () => {
+			await Settings.init({
+				inMemory: true,
+				overrides: {
+					modelProviderOrder: ["gateway", "proxy", "demo"],
+				},
+			});
+			writeThreeProviderCanonical();
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const primary = registry.find("demo", "anthropic/claude-sonnet-4.5");
+			expect(primary).toBeDefined();
+
+			const ranked = registry.rankCanonicalVariantsFor(primary as Model);
+			expect(ranked.map(model => model.provider)).toEqual(["gateway", "proxy"]);
+		});
+
+		test("returns [] for a singleton-canonical model (no fallback siblings)", () => {
+			writeRawModelsJson({
+				solo: providerConfig("https://solo.example.com/v1", [{ id: "my-private-llm-v1" }]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			const primary = registry.find("solo", "my-private-llm-v1");
+			expect(primary).toBeDefined();
+
+			// The canonical group contains only the model itself, so excluding the
+			// primary leaves an empty failover chain (no empty-chain hazard).
+			const variants = registry.getCanonicalVariants(registry.getCanonicalId(primary as Model) ?? "", {
+				availableOnly: true,
+			});
+			expect(variants.map(variant => variant.model.provider)).toEqual(["solo"]);
+			expect(registry.rankCanonicalVariantsFor(primary as Model)).toEqual([]);
+		});
+
+		test("returns [] for an unknown-canonical model (not in the equivalence index)", () => {
+			writeRawModelsJson({
+				demo: providerConfig("https://demo.example.com/v1", [{ id: "anthropic/claude-sonnet-4.5" }]),
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			// A model that is not registered has no canonical id at all.
+			const unknown = { provider: "ghost", id: "not-a-real-model" } as Model;
+			expect(registry.getCanonicalId(unknown)).toBeUndefined();
+			expect(registry.rankCanonicalVariantsFor(unknown)).toEqual([]);
+		});
+	});
+
 	describe("OpenRouter routed suffix fallback", () => {
 		test("find synthesizes a routed model id from the base OpenRouter metadata", () => {
 			writeRawModelsJson({

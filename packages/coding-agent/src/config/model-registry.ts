@@ -56,6 +56,7 @@ import {
 	getBundledCanonicalReferenceData,
 	getBundledModelReferenceIndex,
 	type ModelEquivalenceConfig,
+	rankCanonicalVariants,
 	resolveCanonicalVariant,
 	resolveModelReference,
 } from "@oh-my-pi/pi-catalog/identity";
@@ -1770,6 +1771,39 @@ export class ModelRegistry {
 
 	getCanonicalId(model: Model<Api>): string | undefined {
 		return this.#ensureCanonicalIndex().bySelector.get(formatCanonicalVariantSelector(model).toLowerCase());
+	}
+
+	/**
+	 * Rank the available canonical-equivalent *siblings* of a model — the
+	 * failover chain — ordered by the configured `modelProviderOrder` (and
+	 * candidate order), most-preferred first.
+	 *
+	 * The input `model` is its own canonical equivalent, so it is excluded from
+	 * the result: the chain is the set of OTHER providers/variants serving the
+	 * same canonical id that a caller can fall back to. Consequences:
+	 *   - a singleton-canonical model (only its own provider serves the id)
+	 *     yields `[]` — there is nothing to fail over to, so callers never face
+	 *     an empty-chain hazard nor a chain that retries the primary first;
+	 *   - an unknown-canonical model (not in the equivalence index, so
+	 *     {@link getCanonicalId} returns `undefined`) also yields `[]`.
+	 *
+	 * Availability is always enforced (`availableOnly`), so the chain only ever
+	 * contains models whose provider currently has auth configured.
+	 */
+	rankCanonicalVariantsFor(model: Model<Api>, options?: CanonicalModelQueryOptions): Model<Api>[] {
+		const canonicalId = this.getCanonicalId(model);
+		if (!canonicalId) {
+			return [];
+		}
+		const variants = this.getCanonicalVariants(canonicalId, { ...options, availableOnly: true });
+		if (variants.length === 0) {
+			return [];
+		}
+		const candidates = options?.candidates ?? this.getAvailable();
+		const selfSelector = formatCanonicalVariantSelector(model).toLowerCase();
+		return rankCanonicalVariants(variants, this.#variantPreferences(candidates))
+			.map(variant => variant.model)
+			.filter(candidate => formatCanonicalVariantSelector(candidate).toLowerCase() !== selfSelector);
 	}
 
 	/**
