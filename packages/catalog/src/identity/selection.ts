@@ -29,17 +29,16 @@ const SOURCE_RANK: Record<CanonicalModelVariant["source"], number> = {
 };
 
 /**
- * Pick the preferred variant. Sort order: configured provider rank →
+ * Rank the variants, best-first. Sort order: configured provider rank →
  * exact-id match → variant source (override/bundled > heuristic > fallback)
- * → shorter id → candidate-list order.
+ * → shorter id → candidate-list order. Returns the full ranked chain so
+ * callers can fall through to lower-ranked variants when the top pick is
+ * unavailable.
  */
-export function resolveCanonicalVariant(
+export function rankCanonicalVariants(
 	variants: readonly CanonicalModelVariant[],
 	preferences: CanonicalVariantPreferences,
-): CanonicalModelVariant | undefined {
-	if (variants.length === 0) {
-		return undefined;
-	}
+): CanonicalModelVariant[] {
 	const { providerRank, modelOrder } = preferences;
 	return [...variants].sort((left, right) => {
 		const leftProviderRank = providerRank.get(left.model.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER;
@@ -61,5 +60,21 @@ export function resolveCanonicalVariant(
 		const leftOrder = modelOrder.get(left.selector) ?? Number.MAX_SAFE_INTEGER;
 		const rightOrder = modelOrder.get(right.selector) ?? Number.MAX_SAFE_INTEGER;
 		return leftOrder - rightOrder;
-	})[0];
+	});
+}
+
+/**
+ * Pick the preferred variant — the top of {@link rankCanonicalVariants}.
+ * Sort order: configured provider rank → exact-id match → variant source
+ * (override/bundled > heuristic > fallback) → shorter id → candidate-list
+ * order.
+ */
+export function resolveCanonicalVariant(
+	variants: readonly CanonicalModelVariant[],
+	preferences: CanonicalVariantPreferences,
+): CanonicalModelVariant | undefined {
+	if (variants.length === 0) {
+		return undefined;
+	}
+	return rankCanonicalVariants(variants, preferences)[0];
 }
