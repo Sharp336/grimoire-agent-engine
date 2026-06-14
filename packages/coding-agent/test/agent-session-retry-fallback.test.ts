@@ -83,6 +83,7 @@ describe("AgentSession retry fallback", () => {
 		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
 		authStorage.setRuntimeApiKey("openai", "openai-test-key");
 		authStorage.setRuntimeApiKey("google", "google-test-key");
+		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
 		sharedRegistry = new ModelRegistry(authStorage);
 	});
 
@@ -213,6 +214,120 @@ describe("AgentSession retry fallback", () => {
 				role: "default",
 			},
 		]);
+	});
+
+	it("fails over to a ranked canonical variant with no explicit chain, then restores the primary on cooldown", async () => {
+		// Multi-provider canonical model: claude-sonnet-4-5 is served by both
+		// anthropic and openrouter. With retry.modelFallback on and NO explicit
+		// retry.fallbackChains entry, the implicit canonical-variant chain must
+		// carry a terminal error onto the ranked next variant.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const openrouterVariant = getBundledModel("openrouter", "anthropic/claude-sonnet-4.5");
+		if (!primaryModel || !openrouterVariant) {
+			throw new Error("Expected bundled canonical-variant test models to exist");
+		}
+
+		const requestedModels: string[] = [];
+		const fallbackAppliedEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const fallbackSucceededEvents: Array<Extract<AgentSessionEvent, { type: "retry_fallback_succeeded" }>> = [];
+		const mock = createMockModel();
+		// Flips true once the primary's quota window has elapsed so the cooldown
+		// leg actually exercises a healthy primary (not a queued generic success).
+		let primaryRecovered = false;
+		const agent = new Agent({
+			getApiKey: provider => `${provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				const isPrimary = model.provider === primaryModel.provider && model.id === primaryModel.id;
+				if (model.provider === openrouterVariant.provider && model.id === openrouterVariant.id) {
+					mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+				} else if (isPrimary && primaryRecovered) {
+					mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+				} else {
+					// The primary's account quota is exhausted; the only cross-provider
+					// canonical sibling is the openrouter variant. "quota exceeded"
+					// classifies as QUOTA_EXHAUSTED, which gates the implicit
+					// canonical-variant failover.
+					mock.push({ throw: "quota exceeded for this account retry-after-ms=200" });
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.modelFallback": true,
+			"retry.fallbackRevertPolicy": "cooldown-expiry",
+			// Intentionally NO retry.fallbackChains: failover must come purely
+			// from canonical-variant ranking.
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") {
+				fallbackAppliedEvents.push(event);
+			}
+			if (event.type === "retry_fallback_succeeded") {
+				fallbackSucceededEvents.push(event);
+			}
+		});
+
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+
+		await session.prompt("Recover via canonical failover");
+		await session.waitForIdle();
+
+		// The error walks the implicit canonical chain straight to the cross-provider
+		// sibling; the primary's same-provider dated alias is intentionally skipped
+		// (it shares the exhausted account and would not recover).
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${openrouterVariant.provider}/${openrouterVariant.id}`,
+		]);
+
+		// The single hop fires the existing retry_fallback_applied event with role
+		// "default", landing on the cross-provider sibling.
+		expect(fallbackAppliedEvents).toEqual([
+			{
+				type: "retry_fallback_applied",
+				from: `${primaryModel.provider}/${primaryModel.id}`,
+				to: `${openrouterVariant.provider}/${openrouterVariant.id}`,
+				role: "default",
+			},
+		]);
+		expect(fallbackSucceededEvents.at(-1)).toEqual({
+			type: "retry_fallback_succeeded",
+			model: `${openrouterVariant.provider}/${openrouterVariant.id}`,
+			role: "default",
+		});
+		expect(session.model?.provider).toBe(openrouterVariant.provider);
+		expect(session.model?.id).toBe(openrouterVariant.id);
+
+		// After the primary's cooldown expires and its quota recovers, the next
+		// turn restores and uses the primary directly.
+		now += 60 * 60 * 1000;
+		primaryRecovered = true;
+		requestedModels.length = 0;
+		await session.prompt("Primary should be restored after cooldown");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([`${primaryModel.provider}/${primaryModel.id}`]);
+		expect(session.model?.provider).toBe(primaryModel.provider);
+		expect(session.model?.id).toBe(primaryModel.id);
 	});
 
 	it("falls back on structured classifier refusals and pins the fallback", async () => {

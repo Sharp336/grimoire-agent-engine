@@ -8578,7 +8578,15 @@ export class AgentSession {
 		const parsedCurrent = parseRetryFallbackSelector(currentSelector);
 		if (!parsedCurrent) return undefined;
 		const currentBaseSelector = formatRetryFallbackBaseSelector(parsedCurrent);
-		for (const role of Object.keys(this.#getRetryFallbackChains())) {
+		// Consider every role that has a configured model assignment, not only
+		// those with an explicit `fallbackChains` entry: implicit canonical
+		// failover (appended in #getRetryFallbackEffectiveChain) lets a role with
+		// a multi-provider primary fail over with no hand-authored chain.
+		const roles = new Set<string>([
+			...Object.keys(this.#getRetryFallbackChains()),
+			...Object.keys(this.settings.getModelRoles()),
+		]);
+		for (const role of roles) {
 			const primarySelector = this.#getRetryFallbackPrimarySelector(role);
 			if (!primarySelector) continue;
 			if (primarySelector.raw === currentSelector) return role;
@@ -8587,7 +8595,7 @@ export class AgentSession {
 		return undefined;
 	}
 
-	#getRetryFallbackEffectiveChain(role: string): RetryFallbackSelector[] {
+	#getRetryFallbackEffectiveChain(role: string, options?: { includeCanonical?: boolean }): RetryFallbackSelector[] {
 		const primarySelector = this.#getRetryFallbackPrimarySelector(role);
 		if (!primarySelector) return [];
 		const chain = [primarySelector];
@@ -8598,11 +8606,38 @@ export class AgentSession {
 			seen.add(parsed.raw);
 			chain.push(parsed);
 		}
+		// Implicit canonical-variant failover: after the explicit user chain,
+		// append the ranked CROSS-PROVIDER siblings of the primary canonical model
+		// (bedrock/openrouter/… of the same model), ordered by `modelProviderOrder`.
+		// The explicit chain takes precedence via `seen`, so users who hand-authored
+		// a chain are unaffected; singleton-canonical models contribute nothing
+		// (`rankCanonicalVariantsFor` returns []). Same-provider variants (e.g. a
+		// dated alias of the active model) are skipped: they share the account and
+		// credentials, so they can't recover an account-level quota block and would
+		// pre-empt the existing sibling-credential wait. Only included when the
+		// caller opts in (the QUOTA_EXHAUSTED path), so transient errors with no
+		// explicit chain keep retrying the same model.
+		if (options?.includeCanonical) {
+			const primaryModel = this.#modelRegistry.find(primarySelector.provider, primarySelector.id);
+			if (primaryModel) {
+				for (const variant of this.#modelRegistry.rankCanonicalVariantsFor(primaryModel, { availableOnly: true })) {
+					if (variant.provider === primarySelector.provider) continue;
+					const parsed = parseRetryFallbackSelector(formatModelString(variant));
+					if (!parsed || seen.has(parsed.raw)) continue;
+					seen.add(parsed.raw);
+					chain.push(parsed);
+				}
+			}
+		}
 		return chain;
 	}
 
-	#findRetryFallbackCandidates(role: string, currentSelector: string): RetryFallbackSelector[] {
-		const chain = this.#getRetryFallbackEffectiveChain(role);
+	#findRetryFallbackCandidates(
+		role: string,
+		currentSelector: string,
+		options?: { includeCanonical?: boolean },
+	): RetryFallbackSelector[] {
+		const chain = this.#getRetryFallbackEffectiveChain(role, options);
 		if (chain.length <= 1) return [];
 		const parsedCurrent = parseRetryFallbackSelector(currentSelector);
 		const currentBaseSelector = parsedCurrent ? formatRetryFallbackBaseSelector(parsedCurrent) : undefined;
@@ -8659,11 +8694,16 @@ export class AgentSession {
 		});
 	}
 
-	async #tryRetryModelFallback(currentSelector: string, options?: { pinFallback?: boolean }): Promise<boolean> {
+	async #tryRetryModelFallback(
+		currentSelector: string,
+		options?: { pinFallback?: boolean; includeCanonical?: boolean },
+	): Promise<boolean> {
 		const role = this.#activeRetryFallback?.role ?? this.#resolveRetryFallbackRole(currentSelector);
 		if (!role) return false;
 
-		for (const selector of this.#findRetryFallbackCandidates(role, currentSelector)) {
+		for (const selector of this.#findRetryFallbackCandidates(role, currentSelector, {
+			includeCanonical: options?.includeCanonical,
+		})) {
 			if (this.#isRetryFallbackSelectorSuppressed(selector)) continue;
 			const candidate = this.#modelRegistry.find(selector.provider, selector.id);
 			if (!candidate) continue;
@@ -8805,6 +8845,12 @@ export class AgentSession {
 		const errorMessage = message.errorMessage || "Unknown error";
 		const staleOpenAIResponsesReplayError = this.#isStaleOpenAIResponsesReplayError(message);
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
+		// QUOTA_EXHAUSTED is a long, account-level block (not a transient blip):
+		// prefer switching to a ranked canonical sibling over sleeping out the
+		// window. Transient rate-limit/error reasons keep the current backoff and
+		// only fail over along an explicit chain.
+		const quotaExhausted =
+			isUsageLimitError(errorMessage) && parseRateLimitReason(errorMessage) === "QUOTA_EXHAUSTED";
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
@@ -8867,7 +8913,10 @@ export class AgentSession {
 				if (!classifierRefusal) {
 					this.#noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
-				switchedModel = await this.#tryRetryModelFallback(currentSelector, { pinFallback: classifierRefusal });
+				switchedModel = await this.#tryRetryModelFallback(currentSelector, {
+					pinFallback: classifierRefusal,
+					includeCanonical: quotaExhausted,
+				});
 			}
 			if (switchedModel) {
 				delayMs = 0;
