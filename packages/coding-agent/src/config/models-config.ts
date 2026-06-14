@@ -32,6 +32,15 @@ export interface ProviderValidationConfig {
 	disableStrictTools?: boolean;
 	modelOverrides?: Record<string, unknown>;
 	models: ProviderValidationModel[];
+	/**
+	 * The provider authenticates with no credentials of its own (it is in the
+	 * registry's keyless set, e.g. the synthetic `omp` provider whose blend members
+	 * authenticate independently). When true, the `apiKey`/`oauth`-required-when-
+	 * `models[]`-defined check is relaxed: a keyless provider can declare models
+	 * (built-in blend presets) without carrying a credential. This mirrors the
+	 * `models-config` path, which already exempts `auth: "none"` providers.
+	 */
+	keyless?: boolean;
 }
 
 export function validateProviderConfiguration(
@@ -66,7 +75,7 @@ export function validateProviderConfiguration(
 		}
 		const requiresAuth =
 			mode === "runtime-register"
-				? !config.apiKey && !config.oauthConfigured
+				? !config.apiKey && !config.oauthConfigured && !config.keyless
 				: !config.apiKey && (config.auth ?? "apiKey") !== "none";
 		if (requiresAuth) {
 			throw new Error(

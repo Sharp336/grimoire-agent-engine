@@ -1,6 +1,6 @@
 import { execSync } from "node:child_process";
 import * as path from "node:path";
-import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { getCustomApi, registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, Model, ModelSpec, SimpleStreamOptions, ThinkingConfig } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
@@ -65,7 +65,14 @@ import {
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { parseModelString, resolveModelFromString, resolveProviderModelReference } from "../config/model-resolver";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
-import { OMP_PROVIDER_SOURCE_ID, registerSwarmApi } from "../swarm/executor";
+import {
+	OMP_BASE_URL,
+	OMP_PROVIDER_NAME,
+	OMP_PROVIDER_SOURCE_ID,
+	OMP_SWARM_API,
+	registerSwarmApi,
+} from "../swarm/executor";
+import { OMP_PRESET_MODELS, OMP_PRESET_SOURCE_ID } from "../swarm/presets";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
 import type { ConfigError, ConfigFile } from "./config-file";
 import {
@@ -707,6 +714,9 @@ export class ModelRegistry {
 		// neither rebinds nor breaks an existing owner), so this is safe on every
 		// construction.
 		this.#registerOmpSwarmApi();
+		// Register the built-in `omp/*` blend presets (U9). Runtime overlays so they
+		// survive refresh(); a DISTINCT source id keeps them off the dispatcher's slot.
+		this.#registerOmpPresets();
 	}
 
 	/**
@@ -744,6 +754,50 @@ export class ModelRegistry {
 			return streamSimple(model, context, { ...options, apiKey });
 		};
 		registerSwarmApi({ resolveModel, streamSimple: memberStreamSimple }, OMP_PROVIDER_SOURCE_ID);
+	}
+
+	/**
+	 * Register the built-in `omp/*` blend presets (U9): `omp/router-balanced`,
+	 * `omp/draft-refine`, `omp/moa-synthesis`. Each carries a {@link SwarmSpec} and
+	 * surfaces via `getAvailable()` / `resolveModelFromString` like any model.
+	 *
+	 * Deferred concern #1 (keyless registration): the `omp` provider is keyless
+	 * (added to `#keylessProviders` in `#addImplicitDiscoverableProviders`, run by
+	 * the preceding `#loadModels()`), so `registerProvider` passes `keyless: true`
+	 * into `validateProviderConfiguration` and the "apiKey/oauth required when
+	 * models[] defined" check is relaxed — these presets register with no credential
+	 * (members authenticate independently). No non-secret sentinel key is needed;
+	 * relaxing the check for keyless providers is the cleaner of the two options
+	 * because it (a) avoids a fake credential that the resolver would otherwise try
+	 * to use, and (b) reuses the registry's existing keyless concept rather than
+	 * inventing a sentinel string the rest of the auth path must learn to ignore.
+	 *
+	 * Deferred concern #2 (source-id collision): presets register under
+	 * {@link OMP_PRESET_SOURCE_ID} (`"omp-presets"`), DISTINCT from the dispatcher's
+	 * `OMP_PROVIDER_SOURCE_ID` (`"omp-builtin"`). The `omp-swarm` custom-API
+	 * dispatcher is a process-global, instance-free, first-writer-wins singleton
+	 * registered under `"omp-builtin"`; if the presets shared that id, a
+	 * `clearSourceRegistrations("omp-builtin")` would `unregisterCustomApis` and
+	 * tear the live dispatcher down. Keeping the per-registry preset PROVIDER
+	 * lifecycle separate from the dispatcher API lifecycle decouples the two. As a
+	 * defensive belt-and-suspenders, we also re-assert the dispatcher here if its
+	 * slot is somehow empty (`getCustomApi` self-heal), mirroring `registerSwarmApi`.
+	 *
+	 * Per-`Model` deps binding (so several live registries each attribute their own
+	 * member resolver/auth) remains the optional follow-up noted on the dispatcher.
+	 */
+	#registerOmpPresets(): void {
+		// Self-heal: if the dispatcher slot was torn down (e.g. a prior
+		// clearSourceRegistrations on its source), re-assert it before the presets go
+		// live so a resolved `omp/*` model can actually dispatch.
+		if (getCustomApi(OMP_SWARM_API) === undefined) {
+			this.#registerOmpSwarmApi();
+		}
+		this.registerProvider(
+			OMP_PROVIDER_NAME,
+			{ api: OMP_SWARM_API, baseUrl: OMP_BASE_URL, models: OMP_PRESET_MODELS },
+			OMP_PRESET_SOURCE_ID,
+		);
 	}
 
 	/**
@@ -2058,6 +2112,10 @@ export class ModelRegistry {
 				apiKey: config.apiKey,
 				api: config.api,
 				oauthConfigured: Boolean(config.oauth),
+				// Keyless providers (the synthetic `omp` blend shell) may declare models
+				// with no credential: each blend member authenticates independently. This
+				// relaxes the "apiKey/oauth required when models[] defined" check for them.
+				keyless: this.#keylessProviders.has(providerName),
 				models: (config.models ?? []) as ProviderValidationModel[],
 			},
 			"runtime-register",
