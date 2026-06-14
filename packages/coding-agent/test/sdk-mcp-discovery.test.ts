@@ -159,6 +159,48 @@ describe("createAgentSession MCP discovery prompt gating", () => {
 		expect(searchTool?.description).toContain("Total discoverable tools available:");
 	});
 
+	it("exposes task under tools.discoveryMode all when task.eager is on", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.discoveryMode": "all", "task.eager": true }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		expect(session.getActiveToolNames()).toContain("task");
+		await session.dispose();
+	});
+
+	it("hides task under tools.discoveryMode all when task.eager is off", async () => {
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			modelRegistry,
+			sessionManager: SessionManager.inMemory(),
+			settings: Settings.isolated({ "tools.discoveryMode": "all" }),
+			model: getBundledModel("openai", "gpt-4o-mini"),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+
+		expect(session.getActiveToolNames()).not.toContain("task");
+		await session.dispose();
+	});
+
 	it("preserves explicitly requested MCP tools in discovery mode", async () => {
 		const { session } = await createAgentSession({
 			cwd: tempDir,

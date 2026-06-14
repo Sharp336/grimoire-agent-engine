@@ -2247,10 +2247,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (effectiveDiscoveryMode === "all") {
 			// Tools a forced tool_choice will target must stay active, or the named
 			// choice references a tool absent from the request (provider 400). Eager
-			// todos force a named `todo` choice on the first turn.
+			// todos force a named `todo` choice on the first turn. `task` is also kept
+			// active under discovery-all when `task.eager` is on, so eager delegation is
+			// possible and the Eager Tasks prompt section renders, even though nothing
+			// forces a `task` tool_choice.
 			const forceActive = new Set<string>();
 			if (settings.get("todo.eager") && settings.get("todo.enabled") && toolRegistry.has("todo")) {
 				forceActive.add("todo");
+			}
+			if (settings.get("task.eager") && toolRegistry.has("task")) {
+				forceActive.add("task");
 			}
 			initialToolNames = filterInitialToolsForDiscoveryAll(initialToolNames, {
 				loadModeOf: name => toolRegistry.get(name)?.loadMode,

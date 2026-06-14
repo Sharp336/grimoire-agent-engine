@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `task.eager` ("Prefer Task Delegation") now actively reinforces delegation instead of only emitting a prompt hint: a first-turn delegation reminder is injected for the main agent, and the `task` tool is force-exposed under `tools.discoveryMode: "all"` so the setting takes effect in every discovery mode ([#2534](https://github.com/can1357/oh-my-pi/issues/2534)).
+
 ### Fixed
 
 - Fixed session JSONL persistence so the first assistant turn materializes the file synchronously, leaves the append writer open, and writes later entries with a sync append writer even during writer-close races instead of waiting on a queued rewrite.
