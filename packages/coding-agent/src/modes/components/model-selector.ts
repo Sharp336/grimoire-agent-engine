@@ -1,5 +1,14 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import {
+	isClaudeModelId,
+	isDeepseekModelIdOrName,
+	isKimiModelId,
+	isMimoModelIdOrName,
+	isMinimaxM2FamilyModelId,
+	isOpenAIGptOssModelId,
+	isQwenModelId,
+} from "@oh-my-pi/pi-catalog/identity";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -65,6 +74,91 @@ function compactSearchText(value: string): string {
 
 function getAlphaSearchTokens(query: string): string[] {
 	return [...normalizeSearchText(query).matchAll(/[a-z]+/g)].map(match => match[0]).filter(token => token.length > 0);
+}
+
+/**
+ * Orthogonal grouping dimensions for the picker's group view. `null` is the
+ * default (provider-tab / MRU / recency) view, left untouched. The `g` keybind
+ * cycles through the non-null dimensions and back to `null`.
+ */
+type GroupDimension = "provider" | "family" | "cost-tier" | "capability";
+
+const GROUP_DIMENSIONS: ReadonlyArray<GroupDimension> = ["provider", "family", "cost-tier", "capability"];
+
+const GROUP_DIMENSION_LABEL: Record<GroupDimension, string> = {
+	provider: "Provider",
+	family: "Family",
+	"cost-tier": "Cost tier",
+	capability: "Capability",
+};
+
+/** Classify a model into a coarse family bucket via the shared identity predicates. */
+function familyGroupKey(model: Model): string {
+	const id = `${model.provider}/${model.id}`;
+	if (isClaudeModelId(id)) return "Claude";
+	if (isKimiModelId(id)) return "Kimi";
+	if (isQwenModelId(id)) return "Qwen";
+	if (isDeepseekModelIdOrName(id) || isDeepseekModelIdOrName(model.name)) return "DeepSeek";
+	if (isMimoModelIdOrName(id) || isMimoModelIdOrName(model.name)) return "MiMo";
+	if (isMinimaxM2FamilyModelId(id)) return "MiniMax";
+	if (isOpenAIGptOssModelId(id)) return "GPT-OSS";
+	if (/(^|\/)(gpt|o\d|chatgpt)/i.test(id)) return "OpenAI";
+	if (/(^|\/)gemini/i.test(id)) return "Gemini";
+	if (/(^|\/)grok/i.test(id)) return "Grok";
+	if (/(^|\/)llama/i.test(id)) return "Llama";
+	if (/(^|\/)glm/i.test(id)) return "GLM";
+	return "Other";
+}
+
+/** Bucket a model by blended ($/1M) cost into free / low / mid / high tiers. */
+function costTierGroupKey(model: Model): string {
+	const blended = (model.cost?.input ?? 0) + (model.cost?.output ?? 0);
+	if (blended <= 0) return "Free / local";
+	if (blended < 2) return "Low cost";
+	if (blended < 15) return "Mid cost";
+	return "High cost";
+}
+
+/** Bucket a model by capability: reasoning support and context-window size. */
+function capabilityGroupKey(model: Model): string {
+	const reasoning = model.reasoning || model.thinking !== undefined;
+	const context = model.contextWindow ?? 0;
+	const longContext = context >= 200_000;
+	if (reasoning && longContext) return "Reasoning + long context";
+	if (reasoning) return "Reasoning";
+	if (longContext) return "Long context";
+	return "Standard";
+}
+
+function groupKeyFor(model: Model, dimension: GroupDimension): string {
+	switch (dimension) {
+		case "provider":
+			return model.provider;
+		case "family":
+			return familyGroupKey(model);
+		case "cost-tier":
+			return costTierGroupKey(model);
+		case "capability":
+			return capabilityGroupKey(model);
+	}
+}
+
+/**
+ * Stable reorder so all items sharing a group key are contiguous, in first-seen
+ * group order (which inherits the upstream sort), preserving within-group order.
+ */
+function groupContiguously<T extends { model: Model }>(items: ReadonlyArray<T>, dimension: GroupDimension): T[] {
+	const buckets = new Map<string, T[]>();
+	for (const item of items) {
+		const key = groupKeyFor(item.model, dimension);
+		const bucket = buckets.get(key);
+		if (bucket) {
+			bucket.push(item);
+		} else {
+			buckets.set(key, [item]);
+		}
+	}
+	return Array.from(buckets.values()).flat();
 }
 
 function computeModelRank(model: Model, roles: Record<string, RoleAssignment | undefined>): number {
@@ -162,6 +256,10 @@ export class ModelSelectorComponent extends Container {
 	#canonicalModels: CanonicalModelItem[] = [];
 	#filteredCanonicalModels: CanonicalModelItem[] = [];
 	#selectedIndex: number = 0;
+	// Orthogonal group view. `null` keeps the default provider-tab/MRU/recency
+	// ordering untouched; non-null values render section headers within the
+	// already-filtered list and reorder it so each group is contiguous.
+	#groupDimension: GroupDimension | null = null;
 	#roles = {} as Record<string, RoleAssignment | undefined>;
 	#settings = null as unknown as Settings;
 	#modelRegistry = null as unknown as ModelRegistry;
@@ -836,6 +934,14 @@ export class ModelSelectorComponent extends Container {
 			this.#filteredCanonicalModels = baseCanonicalModels;
 		}
 
+		// Group view is orthogonal to the default sort: it only reorders the
+		// already-sorted/filtered list so each group is contiguous, preserving
+		// the within-group order the comparators produced.
+		if (this.#groupDimension) {
+			this.#filteredModels = groupContiguously(this.#filteredModels, this.#groupDimension);
+			this.#filteredCanonicalModels = groupContiguously(this.#filteredCanonicalModels, this.#groupDimension);
+		}
+
 		const visibleItems = isCanonicalTab ? this.#filteredCanonicalModels : this.#filteredModels;
 		this.#selectedIndex = this.#coerceSelectedIndex(
 			Math.min(this.#selectedIndex, Math.max(0, visibleItems.length - 1)),
@@ -847,6 +953,29 @@ export class ModelSelectorComponent extends Container {
 	#applyTabFilter(): void {
 		const query = this.#searchInput.getValue();
 		this.#filterModels(query);
+	}
+
+	/**
+	 * Advance the orthogonal group view: null -> provider -> family -> cost-tier
+	 * -> capability -> null. Re-applies the current filter so the grouped
+	 * reordering and section headers refresh, pinning the highlighted item by
+	 * selector so cycling never yanks the selection.
+	 */
+	#cycleGroupDimension(): void {
+		const selectedKey = this.#getSelectedItem()?.selector;
+		const current = this.#groupDimension;
+		const currentIndex = current ? GROUP_DIMENSIONS.indexOf(current) : -1;
+		this.#groupDimension = GROUP_DIMENSIONS[currentIndex + 1] ?? null;
+		this.#applyTabFilter();
+		if (selectedKey) {
+			const visibleItems = this.#getVisibleItems();
+			const restoredIndex = visibleItems.findIndex(item => item.selector === selectedKey);
+			if (restoredIndex >= 0) {
+				this.#selectedIndex = this.#coerceSelectedIndex(restoredIndex, visibleItems);
+			}
+		}
+		this.#updateList();
+		this.#tui.requestRender();
 	}
 
 	#formatDiscoveryAge(fetchedAt: number | undefined): string | undefined {
@@ -921,6 +1050,11 @@ export class ModelSelectorComponent extends Container {
 
 		const showProvider = this.#getActiveTabId() === ALL_TAB;
 
+		const groupDimension = this.#groupDimension;
+		// Undefined seed means the first visible row always prints its section
+		// header, so a viewport scrolled into the middle of a group keeps context.
+		let lastGroupKey: string | undefined;
+
 		const rows: string[] = [];
 		// Show visible slice of filtered models
 		for (let i = startIndex; i < endIndex; i++) {
@@ -928,6 +1062,14 @@ export class ModelSelectorComponent extends Container {
 			if (!item) continue;
 			const canonicalItem = isCanonicalTab ? (item as CanonicalModelItem) : undefined;
 			const providerItem = isCanonicalTab ? undefined : (item as ModelItem);
+
+			if (groupDimension) {
+				const groupKey = groupKeyFor(item.model, groupDimension);
+				if (groupKey !== lastGroupKey) {
+					rows.push(theme.fg("dim", `  ${GROUP_DIMENSION_LABEL[groupDimension]}: ${theme.bold(groupKey)}`));
+					lastGroupKey = groupKey;
+				}
+			}
 
 			const isSelected = i === this.#selectedIndex;
 			const isDisabled = this.#isItemDisabled(item);
@@ -1025,6 +1167,7 @@ export class ModelSelectorComponent extends Container {
 			);
 		}
 	}
+
 	#getThinkingLevelsForModel(model: Model): ReadonlyArray<ConfiguredThinkingLevel> {
 		return [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(model)];
 	}
@@ -1206,6 +1349,14 @@ export class ModelSelectorComponent extends Container {
 		// Escape or Ctrl+C - close selector
 		if (getKeybindings().matches(keyData, "tui.select.cancel")) {
 			this.#onCancelCallback();
+			return;
+		}
+
+		// 'g' cycles the orthogonal group view. Only intercepted while the search
+		// box is empty so a 'g' typed into a query (e.g. "glm", "grok") still
+		// reaches the search input and the default view stays untouched.
+		if (keyData === "g" && this.#searchInput.getValue().length === 0) {
+			this.#cycleGroupDimension();
 			return;
 		}
 
