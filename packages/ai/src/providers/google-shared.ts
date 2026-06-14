@@ -609,7 +609,7 @@ export async function consumeGoogleStream<T extends GoogleApiType>(args: {
 		const candidate = chunk.candidates?.[0];
 		if (candidate?.content?.parts) {
 			for (const part of candidate.content.parts) {
-				if (part.text !== undefined) {
+				if (part.text !== undefined && part.text !== "") {
 					if (!firstTokenSeen) {
 						firstTokenSeen = true;
 						onFirstToken?.();

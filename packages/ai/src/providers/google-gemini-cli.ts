@@ -447,7 +447,7 @@ export const streamGoogleGeminiCli: StreamFunction<"google-gemini-cli"> = (
 					const candidate = responseData.candidates?.[0];
 					if (candidate?.content?.parts) {
 						for (const part of candidate.content.parts) {
-							if (part.text !== undefined) {
+							if (part.text !== undefined && part.text !== "") {
 								const isThinking = isThinkingPart(part);
 								if (
 									!currentBlock ||
