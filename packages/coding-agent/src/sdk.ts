@@ -99,6 +99,7 @@ import {
 } from "./mcp";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import { getOkfSessionState, setOkfSessionState, startOkfLayer } from "./okf/state";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -2114,13 +2115,20 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const memoryBackend = await resolveMemoryBackend(settings);
 			const memoryInstructions = await memoryBackend.buildDeveloperInstructions(agentDir, settings, session);
 
-			// Build combined append prompt: memory instructions + MCP server instructions.
+			// Also collect OKF developer instructions (additive knowledge layer).
+			const okfState = getOkfSessionState(session);
+			const okfInstructions = okfState ? await okfState.buildDeveloperInstructions() : undefined;
+
+			// Build combined append prompt: memory instructions + OKF instructions + MCP server instructions.
 			// For UI sessions MCP discovery is deferred, so `getServerInstructions()` is
 			// empty until the background connect completes; the rebuild that
 			// `refreshMCPTools` triggers post-discovery then picks up the now-connected
 			// servers' instructions, so they join the prompt for the rest of the session.
 			const serverInstructions = mcpManager?.getServerInstructions();
 			let appendPrompt: string | undefined = memoryInstructions ?? undefined;
+			if (okfInstructions) {
+				appendPrompt = appendPrompt ? `${appendPrompt}\n\n${okfInstructions}` : okfInstructions;
+			}
 			if (serverInstructions && serverInstructions.size > 0) {
 				const parts: string[] = [];
 				if (appendPrompt) parts.push(appendPrompt);
@@ -2669,6 +2677,24 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
 			});
+		});
+
+		// Start the additive OKF knowledge layer (runs alongside any memory backend).
+		logger.time("startOkfLayer", async () => {
+			try {
+				const okfState = await startOkfLayer({
+					sessionId: session.sessionId ?? "",
+					settings,
+					cwd,
+					taskDepth,
+					parentOkfState: options.parentOkfState,
+				});
+				setOkfSessionState(session, okfState);
+			} catch (error) {
+				logger.warn("OKF layer startup failed", {
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
 		});
 
 		// Wire MCP manager callbacks to session for reactive tool updates.

@@ -3872,19 +3872,34 @@ export class AgentSession {
 
 	async #buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
 		const backend = await resolveMemoryBackend(this.settings);
-		if (!backend.beforeAgentStartPrompt) return this.#baseSystemPrompt;
+		const injections: string[] = [];
 
-		try {
-			const injected = await backend.beforeAgentStartPrompt(this, promptText);
-			if (!injected) return this.#baseSystemPrompt;
-			return [...this.#baseSystemPrompt, injected];
-		} catch (err) {
-			logger.debug("Memory backend beforeAgentStartPrompt failed", {
-				backend: backend.id,
-				error: String(err),
-			});
-			return this.#baseSystemPrompt;
+		// Memory backend injection (existing).
+		if (backend.beforeAgentStartPrompt) {
+			try {
+				const injected = await backend.beforeAgentStartPrompt(this, promptText);
+				if (injected) injections.push(injected);
+			} catch (err) {
+				logger.debug("Memory backend beforeAgentStartPrompt failed", {
+					backend: backend.id,
+					error: String(err),
+				});
+			}
 		}
+
+		// OKF additive layer injection.
+		try {
+			const { getOkfSessionState } = await import("../okf/state");
+			const okfState = getOkfSessionState(this);
+			if (okfState) {
+				const okfInjected = await okfState.beforeAgentStartPrompt(promptText);
+				if (okfInjected) injections.push(okfInjected);
+			}
+		} catch (err) {
+			logger.debug("OKF beforeAgentStartPrompt failed", { error: String(err) });
+		}
+
+		return injections.length > 0 ? [...this.#baseSystemPrompt, ...injections] : this.#baseSystemPrompt;
 	}
 
 	/**
