@@ -33,11 +33,11 @@ const PI_PACKAGE_ALTERNATION = PI_PACKAGE_NAMES.join("|");
 // bundled copy. Add new entries as `pkg/from -> pkg/to` whenever a plugin
 // surfaces another upstream-only subpath that breaks resolution.
 const PI_SUBPATH_REMAPS: ReadonlyMap<string, string> = new Map<string, string>([
-	// (currently empty) Upstream `@mariozechner/pi-ai/oauth` re-exported
-	// `./utils/oauth/index.js`. Our pi-ai now exposes the same surface at the
-	// real `@oh-my-pi/pi-ai/oauth` export, so the legacy subpath canonicalizes
-	// straight to it with no rewrite. Add `from -> to` entries here whenever a
-	// future upstream-only subpath surfaces that breaks resolution.
+	// Upstream `@oh-my-pi/pi-ai` 15.12 relocated the OAuth providers from
+	// `utils/oauth` to `registry/oauth`. The runtime interceptor below handles
+	// any dynamic subpath under `utils/oauth/` (both with and without `src/`).
+	// Add static `from -> to` entries here whenever a future upstream-only
+	// subpath surfaces that breaks resolution.
 ]);
 
 const LEGACY_PI_SPECIFIER_FILTER = new RegExp(`^@(?:${PI_SCOPE_ALTERNATION})/(?:${PI_PACKAGE_ALTERNATION})(?:/.*)?$`);
@@ -208,7 +208,12 @@ function remapLegacyPiSpecifier(specifier: string): string | null {
 		return null;
 	}
 	const rest = specifier.slice(slashIdx + 1);
-	const remappedSubpath = PI_SUBPATH_REMAPS.get(rest) ?? rest;
+	let remappedSubpath = PI_SUBPATH_REMAPS.get(rest) ?? rest;
+	if (remappedSubpath.startsWith("src/utils/oauth/")) {
+		remappedSubpath = "src/registry/oauth/" + remappedSubpath.slice(16);
+	} else if (remappedSubpath.startsWith("utils/oauth/")) {
+		remappedSubpath = "registry/oauth/" + remappedSubpath.slice(12);
+	}
 	return `${CANONICAL_PI_SCOPE}/${remappedSubpath}`;
 }
 
