@@ -1,5 +1,5 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Model, SwarmSpec } from "@oh-my-pi/pi-ai";
 import {
 	isClaudeModelId,
 	isDeepseekModelIdOrName,
@@ -117,6 +117,98 @@ function costTierGroupKey(model: Model): string {
 	if (blended < 2) return "Low cost";
 	if (blended < 15) return "Mid cost";
 	return "High cost";
+}
+
+/** Blended ($/1M) cost of one member, summing input + output rates. */
+export interface MemberCostRate {
+	input: number;
+	output: number;
+}
+
+/**
+ * Resolve a member's `model` selector (a model id or `provider/id`) to its
+ * per-million-token input/output rates, or `undefined` when the member can't be
+ * resolved (unknown model, no credentials). Injected so the cost helper stays
+ * pure and unit-testable without a `ModelRegistry`.
+ */
+export type MemberCostLookup = (modelId: string) => MemberCostRate | undefined;
+
+/** Summed blend cost plus the resolution tally that produced it. */
+export interface SwarmSummedCost {
+	/** Summed $/1M input rate across the counted members. */
+	input: number;
+	/** Summed $/1M output rate across the counted members. */
+	output: number;
+	/** `input + output` — the blended $/1M figure the picker row renders. */
+	blended: number;
+	/** How many member/selector calls were counted toward the sum. */
+	counted: number;
+	/** How many of those calls resolved to a known cost (the rest contributed 0). */
+	resolved: number;
+}
+
+/**
+ * PURE helper: compute the summed (~Nx) member cost of a blended model from its
+ * {@link SwarmSpec} and a {@link MemberCostLookup}, mirroring the executor's
+ * per-strategy spend (KTD-7) so the picker can surface it up front:
+ *
+ *   - `router` ≈ ONE member + the classifier. Only one member runs per turn, but
+ *     which one is data-dependent, so the row shows the worst case: the single
+ *     most expensive candidate member plus the classifier's selector call.
+ *   - `sequence` / `draft-refine` / `moa` = Σ members. Every member runs (moa
+ *     proposers fan out, the aggregator synthesizes), so the sum is over all of
+ *     them (after `maxMembers` capping, matching `capMembers`).
+ *
+ * Members that don't resolve contribute 0 (and are tallied in `resolved`) rather
+ * than aborting, so a partially-uncredentialed blend still shows a lower-bound
+ * figure. Returns `undefined` only when the cap leaves no members to count.
+ */
+export function computeSwarmSummedCost(swarm: SwarmSpec, lookup: MemberCostLookup): SwarmSummedCost | undefined {
+	const cap = swarm.maxMembers !== undefined && swarm.maxMembers > 0 ? swarm.maxMembers : 5;
+	const members = swarm.members.slice(0, cap);
+	if (members.length === 0) {
+		return undefined;
+	}
+
+	let input = 0;
+	let output = 0;
+	let counted = 0;
+	let resolved = 0;
+
+	const count = (rate: MemberCostRate | undefined): void => {
+		counted++;
+		if (rate) {
+			input += rate.input;
+			output += rate.output;
+			resolved++;
+		}
+	};
+
+	if (swarm.strategy === "router") {
+		// One member runs per turn; surface the worst case (priciest candidate).
+		let worst: MemberCostRate | undefined;
+		let worstBlended = -1;
+		for (const member of members) {
+			const rate = lookup(member.model);
+			const blended = rate ? rate.input + rate.output : 0;
+			if (blended > worstBlended) {
+				worstBlended = blended;
+				worst = rate;
+			}
+		}
+		count(worst);
+		const selectorModel = swarm.selector?.kind === "classifier" ? swarm.selector.model : undefined;
+		if (selectorModel !== undefined) {
+			count(lookup(selectorModel));
+		}
+	} else {
+		// sequence / draft-refine / moa: every (capped) member runs → sum all.
+		for (const member of members) {
+			count(lookup(member.model));
+		}
+	}
+
+	return { input, output, blended: input + output, counted, resolved };
 }
 
 /** Bucket a model by capability: reasoning support and context-window size. */
@@ -812,6 +904,36 @@ export class ModelSelectorComponent extends Container {
 		return ` ${theme.status.disabled} context>${formatNumber(model.contextWindow ?? 0).toLowerCase()}`;
 	}
 
+	/** Index every known model's $/1M rate by `provider/id` AND bare `id`. */
+	#buildMemberCostLookup(): MemberCostLookup {
+		const rates = new Map<string, MemberCostRate>();
+		for (const model of this.#modelRegistry.getAll()) {
+			const rate: MemberCostRate = { input: model.cost?.input ?? 0, output: model.cost?.output ?? 0 };
+			rates.set(`${model.provider}/${model.id}`, rate);
+			if (!rates.has(model.id)) {
+				rates.set(model.id, rate);
+			}
+		}
+		return modelId => rates.get(modelId);
+	}
+
+	/**
+	 * Render the summed (~Nx) member-cost suffix for a blended model. Returns "" for
+	 * non-blended models and blends with no resolvable members, leaving the row
+	 * unchanged (additive contract). `lookup` is built once per `#updateList` pass.
+	 */
+	#formatSwarmCostSuffix(model: Model, lookup: MemberCostLookup): string {
+		const swarm = model.swarm;
+		if (swarm === undefined) {
+			return "";
+		}
+		const summed = computeSwarmSummedCost(swarm, lookup);
+		if (summed === undefined || summed.resolved === 0) {
+			return "";
+		}
+		return ` ${theme.fg("dim", `~$${summed.blended.toFixed(2)}/1M`)}`;
+	}
+
 	#getVisibleItems(): ReadonlyArray<ModelItem | CanonicalModelItem> {
 		return this.#isCanonicalTab() ? this.#filteredCanonicalModels : this.#filteredModels;
 	}
@@ -1056,6 +1178,8 @@ export class ModelSelectorComponent extends Container {
 		let lastGroupKey: string | undefined;
 
 		const rows: string[] = [];
+		// Built once per render pass; reused for every visible blended row's cost.
+		const memberCostLookup = this.#buildMemberCostLookup();
 		// Show visible slice of filtered models
 		for (let i = startIndex; i < endIndex; i++) {
 			const item = visibleItems[i];
@@ -1074,6 +1198,10 @@ export class ModelSelectorComponent extends Container {
 			const isSelected = i === this.#selectedIndex;
 			const isDisabled = this.#isItemDisabled(item);
 			const disabledSuffix = this.#formatContextLimitSuffix(item.model);
+			// Additive: blended models render their summed (~Nx) member cost so the
+			// picker shows the real per-turn spend up front. Empty for normal models,
+			// leaving their existing row formatting byte-identical.
+			const swarmCostSuffix = this.#formatSwarmCostSuffix(item.model, memberCostLookup);
 
 			// Build role badges. Solid badges are configured; outlined badges are auto-selected defaults.
 			const roleBadgeTokens: string[] = [];
@@ -1100,24 +1228,24 @@ export class ModelSelectorComponent extends Container {
 				if (isCanonicalTab) {
 					const variants = theme.fg("dim", ` [${canonicalItem?.variantCount ?? 0}]`);
 					const backing = theme.fg("dim", ` -> ${item.model.provider}/${item.model.id}`);
-					line = `${prefix}${theme.fg("accent", item.id)}${variants}${backing}${badgeText}${disabledSuffix}`;
+					line = `${prefix}${theme.fg("accent", item.id)}${variants}${backing}${badgeText}${swarmCostSuffix}${disabledSuffix}`;
 				} else if (showProvider) {
 					const providerPrefix = theme.fg("dim", `${providerItem?.provider ?? ""}/`);
-					line = `${prefix}${providerPrefix}${theme.fg("accent", providerItem?.id ?? item.id)}${badgeText}${disabledSuffix}`;
+					line = `${prefix}${providerPrefix}${theme.fg("accent", providerItem?.id ?? item.id)}${badgeText}${swarmCostSuffix}${disabledSuffix}`;
 				} else {
-					line = `${prefix}${theme.fg("accent", item.id)}${badgeText}${disabledSuffix}`;
+					line = `${prefix}${theme.fg("accent", item.id)}${badgeText}${swarmCostSuffix}${disabledSuffix}`;
 				}
 			} else {
 				const prefix = "  ";
 				if (isCanonicalTab) {
 					const variants = theme.fg("dim", ` [${canonicalItem?.variantCount ?? 0}]`);
 					const backing = theme.fg("dim", ` -> ${item.model.provider}/${item.model.id}`);
-					line = `${prefix}${item.id}${variants}${backing}${badgeText}${disabledSuffix}`;
+					line = `${prefix}${item.id}${variants}${backing}${badgeText}${swarmCostSuffix}${disabledSuffix}`;
 				} else if (showProvider) {
 					const providerPrefix = theme.fg("dim", `${providerItem?.provider ?? ""}/`);
-					line = `${prefix}${providerPrefix}${providerItem?.id ?? item.id}${badgeText}${disabledSuffix}`;
+					line = `${prefix}${providerPrefix}${providerItem?.id ?? item.id}${badgeText}${swarmCostSuffix}${disabledSuffix}`;
 				} else {
-					line = `${prefix}${item.id}${badgeText}${disabledSuffix}`;
+					line = `${prefix}${item.id}${badgeText}${swarmCostSuffix}${disabledSuffix}`;
 				}
 			}
 
