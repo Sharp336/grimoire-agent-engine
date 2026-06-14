@@ -13,7 +13,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { buildDependencyGraph, buildExecutionWaves, detectCycles } from "./swarm/dag";
 import { PipelineController } from "./swarm/pipeline";
 import { renderSwarmProgress } from "./swarm/render";
-import { parseSwarmYaml, validateSwarmDefinition } from "./swarm/schema";
+import { collectSwarmWarnings, parseSwarmYaml, validateSwarmDefinition } from "./swarm/schema";
 import { StateTracker } from "./swarm/state";
 
 const yamlPath = process.argv[2];
@@ -38,6 +38,12 @@ const errors = validateSwarmDefinition(def);
 if (errors.length > 0) {
 	console.error("Validation errors:", errors);
 	process.exit(1);
+}
+
+// Surface non-fatal advisory caveats (KTD-6 Self-MoA heterogeneous-proposer
+// warning) to stderr so the operator sees the quality trade-off; non-halting.
+for (const warning of collectSwarmWarnings(def)) {
+	console.warn(`Warning: ${warning}`);
 }
 
 // Build DAG

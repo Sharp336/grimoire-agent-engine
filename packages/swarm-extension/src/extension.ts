@@ -16,7 +16,7 @@ import { formatDuration } from "@oh-my-pi/pi-utils";
 import { buildDependencyGraph, buildExecutionWaves, detectCycles } from "./swarm/dag";
 import { PipelineController } from "./swarm/pipeline";
 import { renderSwarmProgress } from "./swarm/render";
-import { parseSwarmYaml, type SwarmDefinition, validateSwarmDefinition } from "./swarm/schema";
+import { collectSwarmWarnings, parseSwarmYaml, type SwarmDefinition, validateSwarmDefinition } from "./swarm/schema";
 import { StateTracker } from "./swarm/state";
 
 export default function swarmExtension(pi: ExtensionAPI): void {
@@ -94,6 +94,12 @@ async function handleRun(yamlPath: string, ctx: ExtensionCommandContext, pi: Ext
 	if (validationErrors.length > 0) {
 		ctx.ui.notify(`Validation errors:\n${validationErrors.map(e => `  - ${e}`).join("\n")}`, "error");
 		return;
+	}
+
+	// 3a. Surface non-fatal advisory caveats (KTD-6 Self-MoA heterogeneous-proposer
+	// warning) so an operator sees the quality trade-off without halting the run.
+	for (const warning of collectSwarmWarnings(def)) {
+		ctx.ui.notify(warning, "warning");
 	}
 
 	// 4. Build DAG
