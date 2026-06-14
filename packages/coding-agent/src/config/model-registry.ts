@@ -1,6 +1,7 @@
 import { execSync } from "node:child_process";
 import * as path from "node:path";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
+import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import type { Api, Context, Model, ModelSpec, SimpleStreamOptions, ThinkingConfig } from "@oh-my-pi/pi-ai/types";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -62,8 +63,9 @@ import {
 	resolveModelReference,
 } from "@oh-my-pi/pi-catalog/identity";
 import { isRecord, logger } from "@oh-my-pi/pi-utils";
-import { parseModelString, resolveProviderModelReference } from "../config/model-resolver";
+import { parseModelString, resolveModelFromString, resolveProviderModelReference } from "../config/model-resolver";
 import type { AuthStorage, OAuthCredential } from "../session/auth-storage";
+import { OMP_PROVIDER_SOURCE_ID, registerSwarmApi } from "../swarm/executor";
 import { type ApiKeyResolverModel, type ApiKeyResolverOptions, createApiKeyResolver } from "./api-key-resolver";
 import type { ConfigError, ConfigFile } from "./config-file";
 import {
@@ -700,6 +702,48 @@ export class ModelRegistry {
 		});
 		// Load models synchronously in constructor.
 		this.#loadModels();
+		// Register the synthetic-blend `omp-swarm` custom API. The global dispatcher
+		// is installed once and is instance-free (first-writer-wins: re-construction
+		// neither rebinds nor breaks an existing owner), so this is safe on every
+		// construction.
+		this.#registerOmpSwarmApi();
+	}
+
+	/**
+	 * Register the `omp-swarm` blend executor as a custom streaming API. The
+	 * executor resolves each blend member id against this registry and streams it
+	 * with the member's own per-model API-key resolver, so members fail over and
+	 * authenticate independently (the synthetic `omp` provider itself is keyless).
+	 *
+	 * The custom-API slot is keyed by the literal `"omp-swarm"` string, so it is
+	 * shared process-wide. The instance-free global dispatcher ({@link registerSwarmApi})
+	 * is installed once and is first-writer-wins: the first registry to register
+	 * owns the slot and its deps, and a later (possibly transient) registry neither
+	 * rebinds it (no hijack of a live blend's members/auth) nor breaks it (no
+	 * poison-latch). One active owner per process; per-`Model` deps binding for the
+	 * multi-registry case is a follow-up (U9). Members still authenticate and fail
+	 * over independently via the owner's per-member resolver; the `omp` shell itself
+	 * is keyless.
+	 */
+	#registerOmpSwarmApi(): void {
+		const resolveModel = (modelId: string): Model<Api> => {
+			const resolved = resolveModelFromString(modelId, this.getAll(), undefined, this);
+			if (!resolved) {
+				throw new Error(`omp-swarm: cannot resolve blend member model "${modelId}".`);
+			}
+			return resolved;
+		};
+		// Per-member transport: stream each member with its own provider resolver so
+		// auth/baseUrl follow the member, not the keyless `omp` shell.
+		const memberStreamSimple = (
+			model: Model<Api>,
+			context: Context,
+			options?: SimpleStreamOptions,
+		): AssistantMessageEventStream => {
+			const apiKey = this.resolver(model);
+			return streamSimple(model, context, { ...options, apiKey });
+		};
+		registerSwarmApi({ resolveModel, streamSimple: memberStreamSimple }, OMP_PROVIDER_SOURCE_ID);
 	}
 
 	/**
