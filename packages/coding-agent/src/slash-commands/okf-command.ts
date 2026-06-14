@@ -1,9 +1,15 @@
 /**
  * `/okf` slash command — manage the OKF knowledge bundle.
  *
- * Subcommands: view, list, stats, diagnose, reindex, visualize.
+ * Subcommands: view, list, stats, diagnose, reindex, visualize, enrich.
  */
 
+import * as path from "node:path";
+import { buildGraph, getBundleRoot, loadConcept, loadSummaries, renderIndex, walkBundle } from "../okf/bundle";
+import { OkfDocumentError, validate } from "../okf/document";
+import { buildCodebaseEnrichmentPrompt } from "../okf/enrichment/codebase";
+import { SqliteOkfStore } from "../okf/store/store-sqlite";
+import { generateViewer } from "../okf/viewer/generator";
 import { commandConsumed, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
 
@@ -25,9 +31,6 @@ export const okfCommand: SlashCommandSpec = {
 	handle: async (command, runtime) => {
 		const verb = (command.args.trim().split(/\s+/)[0] ?? "").toLowerCase() || "view";
 		const cwd = runtime.cwd;
-		const { getBundleRoot, loadSummaries, renderIndex, buildGraph, walkBundle, loadConcept } = await import(
-			"../okf/bundle"
-		);
 		const root = getBundleRoot(cwd);
 
 		switch (verb) {
@@ -37,7 +40,7 @@ export const okfCommand: SlashCommandSpec = {
 				return commandConsumed();
 			}
 			case "list": {
-				const summaries = await loadSummaries(root);
+				const summaries = await loadSummaries(root, { autoUpdate: false });
 				if (summaries.length === 0) {
 					await runtime.output("No OKF concepts in the bundle.");
 					return commandConsumed();
@@ -47,7 +50,7 @@ export const okfCommand: SlashCommandSpec = {
 				return commandConsumed();
 			}
 			case "stats": {
-				const summaries = await loadSummaries(root);
+				const summaries = await loadSummaries(root, { autoUpdate: false });
 				const { graph, brokenLinks } = await buildGraph(root);
 				const types = new Map<string, number>();
 				for (const s of summaries) types.set(s.type, (types.get(s.type) ?? 0) + 1);
@@ -58,7 +61,6 @@ export const okfCommand: SlashCommandSpec = {
 				return commandConsumed();
 			}
 			case "diagnose": {
-				const { validate, OkfDocumentError } = await import("../okf/document");
 				const ids = await walkBundle(root);
 				if (ids.length === 0) {
 					await runtime.output("OKF bundle is empty — no concepts to diagnose.");
@@ -80,8 +82,6 @@ export const okfCommand: SlashCommandSpec = {
 				return commandConsumed();
 			}
 			case "reindex": {
-				const { SqliteOkfStore } = await import("../okf/store/store-sqlite");
-				const path = await import("node:path");
 				const store = new SqliteOkfStore(path.join(root, "okf.db"));
 				try {
 					const ids = await walkBundle(root);
@@ -106,8 +106,6 @@ export const okfCommand: SlashCommandSpec = {
 				return commandConsumed();
 			}
 			case "visualize": {
-				const { generateViewer } = await import("../okf/viewer/generator");
-				const path = await import("node:path");
 				const { graph, brokenLinks } = await buildGraph(root);
 				if (graph.nodes.length === 0) {
 					await runtime.output("OKF bundle is empty — nothing to visualise.");
@@ -123,7 +121,6 @@ export const okfCommand: SlashCommandSpec = {
 				return commandConsumed();
 			}
 			case "enrich": {
-				const { buildCodebaseEnrichmentPrompt } = await import("../okf/enrichment/codebase");
 				const focus = command.args.trim().split(/\s+/).slice(1).join(" ");
 				const prompt = buildCodebaseEnrichmentPrompt({ cwd, focus: focus || undefined });
 				await runtime.output(

@@ -84,7 +84,7 @@ export class SqliteOkfStore implements OkfStore {
 	async list(options: OkfListOptions = {}): Promise<OkfConceptSummary[]> {
 		const limit = Math.min(options.limit ?? 1000, 10000);
 		let sql = "SELECT id, type, title, description, tags, mtime FROM okf_meta";
-		const params: unknown[] = [];
+		const params: (string | number)[] = [];
 
 		const conditions: string[] = [];
 		if (options.type) {

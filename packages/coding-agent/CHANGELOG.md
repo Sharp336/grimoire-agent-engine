@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added **OKF (Open Knowledge Format) knowledge layer** — an additive markdown-based knowledge bundle (`.omp/knowledge/`) that runs alongside any memory backend. Includes: document model (spec §9 conformance), bundle I/O (walk/read/write/delete/cross-link/graph/index/fingerprint), `okf://` internal-URL protocol, SQLite FTS5 store with bm25 ranking, Hindsight pg0 store adapter with auto-resolution, session layer with auto-recall injection, self-contained interactive HTML graph viewer, enrichment agent (session-extraction + codebase-walking), and `/okf` slash command (view/list/stats/diagnose/reindex/visualize/enrich).
 - Fixed paste and image placeholders crashing when the editor renders before theme initialization.
 - Added `ModelRegistry.create(authStorage, modelsPath?)` async factory that runs the JSON → YAML migration step on `models.{yml,yaml}` asynchronously ahead of the sync constructor's bundled-model load. The sync `new ModelRegistry(...)` constructor still works (tests rely on it); production boot paths now use the factory so the migration's I/O lands off the event-loop hot path.
 - Added `ConfigFile.tryLoadAsync()`, `ConfigFile.loadAsync()`, `ConfigFile.loadOrDefaultAsync()`, `ConfigFile.getMtimeMsAsync()`, and `ConfigFile.warmup(file)` so the rest of the codebase can migrate config reads off the sync path.

@@ -10,7 +10,7 @@
  */
 
 import * as path from "node:path";
-import { getBundleRoot, loadSummaries, writeConcept } from "../bundle";
+import { deleteConcept, getBundleRoot, loadSummaries, writeConcept } from "../bundle";
 
 const MAX_EXISTING_CONCEPTS = 80;
 const MAX_EXISTING_BYTES = 120_000;
@@ -71,7 +71,6 @@ export async function applyEnrichmentOps(cwd: string, ops: OkfEnrichmentOp[]): P
 				await writeConcept(root, op.id, op.content);
 				upserted.push(op.id);
 			} else if (op.op === "delete") {
-				const { deleteConcept } = await import("../bundle");
 				const ok = await deleteConcept(root, op.id);
 				if (ok) deleted.push(op.id);
 				else skipped++;

@@ -13,26 +13,17 @@
 import type * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import { ensureConformance, type OkfConcept, parse, RESERVED_FILENAMES } from "./document";
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Local utilities (kept self-contained — no pi-utils native-addon dependency)
+// Local utilities
 // ─────────────────────────────────────────────────────────────────────────────
 
 /** Check if a filesystem error is ENOENT (file/directory not found). */
 function isEnoent(error: unknown): boolean {
 	return error instanceof Error && (error as NodeJS.ErrnoException).code === "ENOENT";
 }
-
-/** Minimal structured logger for OKF modules. */
-const log = {
-	warn(message: string, context?: Record<string, unknown>): void {
-		console.warn(`[okf] WARN: ${message}`, context ?? "");
-	},
-	debug(message: string, context?: Record<string, unknown>): void {
-		if (process.env.OKF_DEBUG) console.debug(`[okf] ${message}`, context ?? "");
-	},
-};
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Types
@@ -201,6 +192,7 @@ export async function loadSummaries(
 	root: string,
 	options: { autoUpdate?: boolean } = {},
 ): Promise<OkfConceptSummary[]> {
+	const autoUpdate = options.autoUpdate === true;
 	const ids = await walkBundle(root);
 	const summaries: OkfConceptSummary[] = [];
 	for (const id of ids) {
@@ -208,7 +200,7 @@ export async function loadSummaries(
 		try {
 			const text = await Bun.file(filePath).text();
 			const ensured = ensureConformance(id, text);
-			if (options.autoUpdate !== false && ensured.changed) {
+			if (autoUpdate && ensured.changed) {
 				await Bun.write(filePath, ensured.content);
 			}
 			const doc = parse(ensured.content, id);
@@ -228,7 +220,7 @@ export async function loadSummaries(
 				mtime,
 			});
 		} catch (error) {
-			log.warn("OKF: failed to load concept", {
+			logger.warn("OKF: failed to load concept", {
 				id,
 				error: error instanceof Error ? error.message : String(error),
 			});
@@ -323,7 +315,7 @@ async function appendToLog(root: string, conceptId: string, action: string): Pro
 		const updated = mergeLogEntry(existing, date, entry);
 		await Bun.write(logPath, updated);
 	} catch (error) {
-		log.debug("OKF: failed to append log entry", { conceptId, error: String(error) });
+		logger.debug("OKF: failed to append log entry", { conceptId, error: String(error) });
 	}
 }
 
@@ -479,11 +471,15 @@ export async function buildGraph(root: string): Promise<{
  * its description.
  */
 export async function renderIndex(root: string, options: { category?: string } = {}): Promise<string> {
-	const summaries = await loadSummaries(root);
+	const summaries = await loadSummaries(root, { autoUpdate: false });
 	const visible = options.category ? summaries.filter(s => s.id.startsWith(`${options.category}/`)) : summaries;
 
 	// If a real index.md exists at the target level, defer to it.
-	const indexPath = options.category ? path.join(root, options.category, "index.md") : path.join(root, "index.md");
+	const resolvedRoot = path.resolve(root);
+	const indexPath = options.category
+		? path.resolve(resolvedRoot, options.category, "index.md")
+		: path.resolve(resolvedRoot, "index.md");
+	ensureWithinRoot(indexPath, resolvedRoot);
 	try {
 		const content = await Bun.file(indexPath).text();
 		if (content.trim()) return content;

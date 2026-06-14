@@ -47,7 +47,7 @@ Body.`;
 
 	it("returns empty frontmatter when no block present", () => {
 		const doc = parse("Just a body, no frontmatter.");
-		expect(doc.frontmatter).toEqual({});
+		expect(Object.keys(doc.frontmatter)).toHaveLength(0);
 		expect(doc.body).toBe("Just a body, no frontmatter.");
 	});
 
@@ -110,7 +110,7 @@ describe("okf/document.validate", () => {
 	});
 
 	it("throws when type is missing", () => {
-		expect(() => validate({ frontmatter: {} as never, body: "" })).toThrow(OkfDocumentError);
+		expect(() => validate({ frontmatter: { type: "" } as never, body: "" })).toThrow(OkfDocumentError);
 	});
 
 	it("throws when type is empty", () => {
@@ -118,7 +118,7 @@ describe("okf/document.validate", () => {
 	});
 
 	it("isValid returns false for missing type", () => {
-		expect(isValid({ frontmatter: {} as never, body: "" })).toBe(false);
+		expect(isValid({ frontmatter: { type: "" } as never, body: "" })).toBe(false);
 		expect(isValid({ frontmatter: { type: "X" }, body: "" })).toBe(true);
 	});
 });

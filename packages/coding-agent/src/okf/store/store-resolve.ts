@@ -10,6 +10,7 @@
  */
 
 import * as path from "node:path";
+import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { Settings } from "../../config/settings";
 import { createHindsightClient } from "../../hindsight/client";
 import { isHindsightConfigured, loadHindsightConfig } from "../../hindsight/config";
@@ -66,7 +67,7 @@ export async function resolveOkfStore(
 		}
 		if (choice === "hindsight") {
 			// Explicitly requested but not configured — log and fall back.
-			console.warn("[okf] Hindsight store requested but not configured; falling back to SQLite.");
+			logger.warn("OKF: Hindsight store requested but not configured; falling back to SQLite.");
 		}
 	}
 

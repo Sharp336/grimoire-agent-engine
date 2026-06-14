@@ -100,7 +100,7 @@ import {
 import { MCP_CONNECTING_EVENT_CHANNEL, type McpConnectingEvent } from "./mcp/startup-events";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import type { MnemopiSessionState } from "./mnemopi/state";
-import { getOkfSessionState, setOkfSessionState, startOkfLayer } from "./okf/state";
+import { getOkfSessionState, type OkfSessionState, setOkfSessionState, startOkfLayer } from "./okf/state";
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -495,6 +495,8 @@ export interface CreateAgentSessionOptions {
 	parentHindsightSessionState?: HindsightSessionState;
 	/** Parent Mnemopi state to alias for subagent memory tools. */
 	parentMnemopiSessionState?: MnemopiSessionState;
+	/** Parent OKF state to alias for subagent knowledge layer. */
+	parentOkfState?: OkfSessionState;
 	/** Pre-allocated agent identity for IRC routing. Default: "Main" for top-level, parentTaskPrefix-derived for sub. */
 	agentId?: string;
 	/** Display name for the agent in IRC. Default: "main" or "sub". */
