@@ -30,6 +30,8 @@ import type {
 	Usage,
 } from "@oh-my-pi/pi-ai";
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import type { ExecutorOptions } from "../task/executor";
+import type { AgentDefinition, SingleResult } from "../task/types";
 
 /** Default hard cap on members actually run when `swarm.maxMembers` is unset. */
 export const DEFAULT_MAX_MEMBERS = 5;
@@ -361,6 +363,211 @@ export function modelLeafDriveNode(
 		const stream = streamSimple(model, memberContext, options);
 		const message = await stream.result();
 		return { message, usage: message.usage, output: messageText(message), stream };
+	};
+}
+
+/**
+ * The subagent runner the {@link subagentLeafDriveNode} drives. Structurally this
+ * is the in-package `runSubprocess` (`task/executor.ts`) — injected (not imported
+ * at the call site) so the leaf is testable with a mock that never spawns a real
+ * process or builds a `ModelRegistry`. KTD-2: the subagent leaf calls this
+ * directly — it NEVER imports `@oh-my-pi/swarm-extension` (no cross-package cycle),
+ * uses no global runner registry, and needs no bootstrap shim.
+ */
+export type SubagentRunner = (options: ExecutorOptions) => Promise<SingleResult>;
+
+/**
+ * Dependencies for the subagent-leaf effect edge. The base `context` supplies the
+ * stable prompt prefix (KTD-8); `input` becomes the subagent's `task` (a fresh
+ * user turn for piped members, or the original user prompt for the first/router
+ * member). `taskDepth`/`maxRecursionDepth` drive the same recursion guard
+ * `runSubprocess` honors internally: the at-cap task-tool strip is delegated to
+ * `runSubprocess` (it marks `atMaxDepth` at `childDepth >= cap` and drops `task`
+ * so the child still runs); the leaf only adds a defensive guard that refuses to
+ * spawn a member already past the cap (`childDepth > cap`, reachable solely via an
+ * explicitly-injected over-deep `taskDepth`).
+ */
+export interface SubagentLeafDeps {
+	/** The subagent runner (injected; structurally `runSubprocess`). */
+	runSubprocess: SubagentRunner;
+	/** The subagent definition each `kind: "subagent"` member runs as. */
+	agent: AgentDefinition;
+	/** Working directory handed to the subagent. */
+	cwd: string;
+	/** Base conversation context — supplies the original prompt for {@link ORIGINAL_INPUT}. */
+	context: Context;
+	/** Parent recursion depth (0 = top-level). The child runs at `taskDepth + 1`. */
+	taskDepth?: number;
+	/**
+	 * Recursion cap (mirrors `settings.get("task.maxRecursionDepth")`, default 2).
+	 * A negative value disables the guard, matching `runSubprocess`. The leaf
+	 * refuses when the child's depth would exceed this cap.
+	 */
+	maxRecursionDepth?: number;
+	/** Passthroughs forwarded verbatim so the subagent shares the parent's runtime. */
+	modelRegistry?: ExecutorOptions["modelRegistry"];
+	authStorage?: ExecutorOptions["authStorage"];
+	settings?: ExecutorOptions["settings"];
+	/**
+	 * Base spawn index for telemetry/ordering (defaults to 0). Each `drive()` call
+	 * is given a DISTINCT index — `index + n` for the nth spawn off this leaf — so
+	 * concurrent members and repeated turns never share an `ExecutorOptions.index`.
+	 */
+	index?: number;
+	/**
+	 * Allocate a registry-unique spawn id. Called once per `drive()`; the returned
+	 * id is used verbatim as {@link ExecutorOptions.id}. The process-global
+	 * `AgentRegistry` is keyed by this id, so every spawn — including same-role moa
+	 * proposers in one blend and repeated turns of the same blend — MUST get a
+	 * distinct value or registers collide (overwrite, cross-talk `setStatus`, lost
+	 * teardown). Defaults to {@link defaultSubagentIdAllocator} (`crypto.randomUUID`),
+	 * mirroring the real task tool's per-spawn `outputManager.allocate`. Inject the
+	 * session's allocator when one exists to keep ids unique across the whole session.
+	 */
+	idAllocator?: () => string;
+}
+
+/** Default recursion cap when {@link SubagentLeafDeps.maxRecursionDepth} is unset. */
+export const DEFAULT_MAX_RECURSION_DEPTH = 2;
+
+/**
+ * Default {@link SubagentLeafDeps.idAllocator}: a fresh `crypto.randomUUID` per
+ * spawn. Guarantees registry-unique ids without threading a session allocator,
+ * mirroring the real task tool's per-spawn id allocation ("to prevent artifact
+ * collisions"). Hosts with a session-scoped allocator should inject it instead.
+ */
+export function defaultSubagentIdAllocator(): string {
+	return crypto.randomUUID();
+}
+
+/**
+ * Resolve the textual `task` for a subagent member. {@link ORIGINAL_INPUT} maps to
+ * the most recent user-turn text in the base context (the subagent answers the
+ * user's original prompt); any string input (a piped member output, even empty)
+ * is used verbatim as the task. This keeps the stable prefix in the base context
+ * and threads only the variable tail (KTD-8).
+ */
+function subagentTask(context: Context, input: DriveInput): string {
+	if (input !== ORIGINAL_INPUT) return input;
+	for (let i = context.messages.length - 1; i >= 0; i--) {
+		const message = context.messages[i];
+		if (message.role !== "user") continue;
+		if (typeof message.content === "string") return message.content;
+		let text = "";
+		for (const block of message.content) {
+			if (block.type === "text") text += block.text;
+		}
+		return text;
+	}
+	return "";
+}
+
+/**
+ * Map a {@link SingleResult} (the subagent runner's output) onto a
+ * {@link DriveResult}. The subagent's `output` text threads into the next member
+ * and is wrapped in a synthesized {@link AssistantMessage} so the surface path
+ * treats a subagent member exactly like a model member. Usage falls back to a
+ * zero record when the runner reported none. A failed/aborted run maps to the
+ * matching terminal `stopReason` so the executor's `isFailedResult` check (which
+ * keys on `stopReason`) detects it — failed subagents resolve here, they do not
+ * reject (mirroring the model-leaf / event-stream contract).
+ */
+function singleResultToDriveResult(member: SwarmMember, result: SingleResult): DriveResult {
+	const usage = result.usage ?? {
+		input: 0,
+		output: 0,
+		cacheRead: 0,
+		cacheWrite: 0,
+		totalTokens: 0,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+	};
+	const output = result.output ?? "";
+	const stopReason: AssistantMessage["stopReason"] = result.aborted
+		? "aborted"
+		: result.error !== undefined || result.exitCode !== 0
+			? "error"
+			: "stop";
+	const message: AssistantMessage = {
+		role: "assistant",
+		content: output === "" ? [] : [{ type: "text", text: output }],
+		api: "omp-swarm",
+		provider: "omp",
+		model: member.model,
+		usage,
+		stopReason,
+		errorMessage: result.error,
+		timestamp: Date.now(),
+	};
+	return { message, usage, output };
+}
+
+/**
+ * The subagent-leaf effect edge: drive a `kind: "subagent"` member by mapping it
+ * to an {@link ExecutorOptions} and calling the injected runner (`runSubprocess`)
+ * DIRECTLY (KTD-2 — same package, no `swarm-extension` import, no registry, no
+ * shim). The member's {@link DriveInput} becomes the subagent `task`; the base
+ * context supplies the original prompt + stable prefix. Honors `signal` (fatal —
+ * checked before and forwarded into the run).
+ *
+ * Recursion depth: the at-cap task-tool strip is `runSubprocess`'s job — it marks
+ * `atMaxDepth` at `childDepth >= cap` and drops the `task` tool while still running
+ * the child — so the leaf does NOT pre-empt that boundary. The leaf only adds a
+ * defensive guard refusing a member whose depth is already PAST the cap
+ * (`childDepth > cap`), which is reachable solely via an explicitly-injected
+ * over-deep `taskDepth` (normal recursion can't get here: a child at the cap loses
+ * its `task` tool and so can never spawn a swarm one level deeper).
+ *
+ * Identity: each `drive()` is allocated a UNIQUE id (and a distinct `index`) via
+ * {@link SubagentLeafDeps.idAllocator} (default `crypto.randomUUID`). The
+ * process-global `AgentRegistry` is keyed by id, so a constant role/index would
+ * collide for same-role moa proposers in one blend and for repeated turns of the
+ * same blend — mirroring the real task tool, which allocates a unique id per spawn.
+ *
+ * The {@link SingleResult} is mapped back to a {@link DriveResult}; the pure
+ * combinators above only ever see that result.
+ */
+export function subagentLeafDriveNode(deps: SubagentLeafDeps): DriveNode {
+	const allocateId = deps.idAllocator ?? defaultSubagentIdAllocator;
+	const baseIndex = deps.index ?? 0;
+	// Monotonic per-leaf spawn counter: distinct `index` per `drive()` so concurrent
+	// blend members and repeated turns never share an `ExecutorOptions.index`.
+	let spawnCount = 0;
+	return async (member, input, signal) => {
+		signal?.throwIfAborted();
+		const parentDepth = deps.taskDepth ?? 0;
+		const childDepth = parentDepth + 1;
+		const cap = deps.maxRecursionDepth ?? DEFAULT_MAX_RECURSION_DEPTH;
+		// A negative cap disables the guard (matching runSubprocess). This is a
+		// defensive over-deep guard ONLY: the at-cap (`childDepth >= cap`) task-tool
+		// strip is delegated to runSubprocess; the leaf refuses only when the depth is
+		// already PAST the cap (`childDepth > cap`), unreachable via normal recursion.
+		if (cap >= 0 && childDepth > cap) {
+			throw new Error(
+				`subagent blend member "${member.role}" refused: recursion depth ${childDepth} exceeds cap ${cap}`,
+			);
+		}
+		const index = baseIndex + spawnCount;
+		spawnCount += 1;
+		const task = subagentTask(deps.context, input);
+		const options: ExecutorOptions = {
+			agent: deps.agent,
+			task,
+			cwd: deps.cwd,
+			index,
+			// Registry-unique per spawn (NOT `${agent}-${role}-${index}`, which collides
+			// for same-role members / repeated turns in the process-global AgentRegistry).
+			id: allocateId(),
+			role: member.role,
+			modelOverride: member.model,
+			taskDepth: parentDepth,
+			signal,
+			modelRegistry: deps.modelRegistry,
+			authStorage: deps.authStorage,
+			settings: deps.settings,
+		};
+		const result = await deps.runSubprocess(options);
+		signal?.throwIfAborted();
+		return singleResultToDriveResult(member, result);
 	};
 }
 

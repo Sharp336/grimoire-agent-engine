@@ -59,6 +59,8 @@ import {
 	runParallelAggregate,
 	runRouter,
 	runSequence,
+	type SubagentLeafDeps,
+	subagentLeafDriveNode,
 	sumUsage,
 } from "./primitives";
 
@@ -72,12 +74,26 @@ export type StreamSimpleFn = (
 	options?: SimpleStreamOptions,
 ) => AssistantMessageEventStream;
 
+/**
+ * Everything the subagent-leaf needs EXCEPT the per-call `context` (which the
+ * executor injects from each blend invocation). Carried on
+ * {@link SwarmExecutorDeps.subagent}; absent when the host registered no subagent
+ * runner, in which case a `kind: "subagent"` member fails with a clear error.
+ */
+export type SwarmSubagentDeps = Omit<SubagentLeafDeps, "context">;
+
 /** Dependencies the blend executor closes over (injected by the registry). */
 export interface SwarmExecutorDeps {
 	/** Resolve a member model id to a built model (registry-backed in prod). */
 	resolveModel: SwarmModelResolver;
 	/** The transport edge for `kind: "model"` members. Defaults to ai `streamSimple`. */
 	streamSimple: StreamSimpleFn;
+	/**
+	 * The subagent-leaf edge for `kind: "subagent"` members (KTD-2: direct
+	 * `runSubprocess`). Optional — when unset, a subagent member fails fast rather
+	 * than silently downgrading to a model call.
+	 */
+	subagent?: SwarmSubagentDeps;
 }
 
 /** The API string the `omp` provider serves. */
@@ -397,6 +413,35 @@ async function runBlendMoa(
 }
 
 /**
+ * Build the per-member {@link DriveNode}: `kind: "subagent"` members go to the
+ * subagent-leaf (direct `runSubprocess`, KTD-2), everything else to the
+ * model-leaf (`streamSimple`). Both leaves close over the SAME base `context`, so
+ * every member call shares the byte-identical stable prefix and appends only the
+ * variable tail (KTD-8). A subagent member with no configured runner
+ * ({@link SwarmExecutorDeps.subagent} unset) fails fast rather than silently
+ * routing to the model edge.
+ */
+function makeDrive(deps: SwarmExecutorDeps, context: Context, options: SimpleStreamOptions | undefined): DriveNode {
+	const model = modelLeafDriveNode(deps.streamSimple, deps.resolveModel, context, options);
+	const subagentConfig = deps.subagent;
+	const subagent: DriveNode | undefined =
+		subagentConfig === undefined ? undefined : subagentLeafDriveNode({ ...subagentConfig, context });
+	return (member, input, signal) => {
+		if (member.kind === "subagent") {
+			if (subagent === undefined) {
+				return Promise.reject(
+					new Error(
+						`swarm member "${member.role}" is kind:"subagent" but no subagent runner is configured for this blend.`,
+					),
+				);
+			}
+			return subagent(member, input, signal);
+		}
+		return model(member, input, signal);
+	};
+}
+
+/**
  * Build the `omp-swarm` {@link CustomStreamSimpleFn} from explicit deps. The
  * returned function reads `model.swarm`, maps the strategy onto the matching
  * pure primitive (driven by {@link modelLeafDriveNode}), and reduces the members
@@ -439,7 +484,7 @@ function runBlend(
 		queueMicrotask(() => outer.fail(new Error(`omp-swarm model "${model.id}" has no members.`)));
 		return outer;
 	}
-	const drive = modelLeafDriveNode(deps.streamSimple, deps.resolveModel, context, options);
+	const drive = makeDrive(deps, context, options);
 	void (async () => {
 		try {
 			if (spec.strategy === "moa") {
