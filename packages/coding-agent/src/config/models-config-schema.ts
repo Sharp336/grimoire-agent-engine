@@ -59,6 +59,36 @@ export const OpenAICompatSchema = OpenAICompatFieldsSchema.extend({
 	whenThinking: OpenAICompatFieldsSchema.optional(),
 });
 
+/**
+ * Zod mirror of the catalog `SwarmSpec`/`SwarmMember`/`SwarmSelector`
+ * (`packages/catalog/src/types.ts`). Required so user-authored `swarm:` blocks
+ * in the models config survive parsing — `ModelsConfigSchema` strips unknown
+ * keys, so without this mirror the field is silently dropped before it reaches
+ * the custom-model build pipeline (KTD-4). Members are bounded by `.min(1)`
+ * (an empty blend has nothing to run); the strategy enum and selector kind are
+ * closed enums so an invalid blend fails parse rather than silently mis-routing.
+ */
+const SwarmMemberSchema = z.object({
+	role: z.string().min(1),
+	model: z.string().min(1),
+	kind: z.enum(["model", "subagent"]).optional(),
+	surface: z.boolean().optional(),
+});
+
+const SwarmSelectorSchema = z.object({
+	kind: z.enum(["classifier", "rule"]),
+	model: z.string().min(1).optional(),
+});
+
+const SwarmSpecSchema = z.object({
+	strategy: z.enum(["router", "draft-refine", "sequence", "moa"]),
+	members: z.array(SwarmMemberSchema).min(1),
+	selector: SwarmSelectorSchema.optional(),
+	surface: z.string().min(1).optional(),
+	maxMembers: z.number().optional(),
+	firstEventTimeoutMs: z.number().optional(),
+});
+
 const EffortSchema = z.enum(["minimal", "low", "medium", "high", "xhigh"]);
 
 const ThinkingControlModeSchema = z.enum([
@@ -127,11 +157,13 @@ const ModelDefinitionSchema = z.object({
 			"google-generative-ai",
 			"google-gemini-cli",
 			"google-vertex",
+			"omp-swarm",
 		])
 		.optional(),
 	baseUrl: z.string().min(1).optional(),
 	reasoning: z.boolean().optional(),
 	thinking: ModelThinkingSchema.optional(),
+	swarm: SwarmSpecSchema.optional(),
 	input: z.array(z.enum(["text", "image"])).optional(),
 	cost: z
 		.object({
@@ -196,6 +228,7 @@ const ProviderConfigSchema = z.object({
 			"google-generative-ai",
 			"google-gemini-cli",
 			"google-vertex",
+			"omp-swarm",
 		])
 		.optional(),
 	headers: z.record(z.string(), z.string()).optional(),
