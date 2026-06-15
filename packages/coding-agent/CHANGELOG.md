@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `/steer <message>` and `/followup <message>` slash commands as a typed alternative to the steer / follow-up keybindings (the command name forces its behavior regardless of which key submits it).
+
 ## [15.13.3] - 2026-06-15
 
 ### Added

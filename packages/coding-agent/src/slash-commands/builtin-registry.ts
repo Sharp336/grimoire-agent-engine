@@ -110,6 +110,63 @@ const shutdownHandlerTui = (_command: ParsedSlashCommand, runtime: TuiSlashComma
 	return commandConsumed();
 };
 
+/**
+ * Builds the `handleTui` for the `/steer` and `/followup` commands. The command
+ * name is authoritative: it forces `streamingBehavior` regardless of which key
+ * submitted the line (plain Enter would steer, Ctrl+Q would follow up — here the
+ * command wins by fully consuming the submission). Mirrors the streaming-submit
+ * blocks in `InputController.setupEditorSubmitHandler` / `handleFollowUp`.
+ */
+const makeQueueSlashHandler =
+	(behavior: "steer" | "followUp", displayName: string) =>
+	async (command: ParsedSlashCommand, runtime: TuiSlashCommandRuntime): Promise<void> => {
+		const ctx = runtime.ctx;
+		const message = command.args.trim();
+		if (!message) {
+			ctx.showStatus(`Usage: /${displayName} <message>`);
+			ctx.editor.setText("");
+			return;
+		}
+		// Compaction in progress: queue exactly like the keybinding paths so a
+		// message typed mid-compaction is not lost. The slash dispatcher does not
+		// clear the editor for `handleTui`, so clear it here.
+		if (ctx.session.isCompacting) {
+			const images = ctx.pendingImages.length > 0 ? [...ctx.pendingImages] : undefined;
+			ctx.editor.addToHistory(message);
+			ctx.editor.setText("");
+			ctx.editor.imageLinks = undefined;
+			ctx.pendingImages = [];
+			ctx.pendingImageLinks = [];
+			ctx.queueCompactionMessage(message, behavior, images);
+			return;
+		}
+		// No active turn: reject — there is nothing to steer/queue behind.
+		if (!ctx.session.isStreaming) {
+			ctx.showStatus(
+				behavior === "steer"
+					? "Nothing to steer — the agent is not running."
+					: "Nothing to queue — the agent is not running.",
+			);
+			ctx.editor.setText("");
+			return;
+		}
+		// Active turn: force this behavior. Record the local-submission signature
+		// so the queued message's eventual delivery leaves any later draft intact.
+		ctx.editor.addToHistory(message);
+		ctx.editor.setText("");
+		ctx.editor.imageLinks = undefined;
+		const images = ctx.pendingImages.length > 0 ? [...ctx.pendingImages] : undefined;
+		ctx.pendingImages = [];
+		ctx.pendingImageLinks = [];
+		await ctx.withLocalSubmission(
+			message,
+			() => ctx.session.prompt(message, { streamingBehavior: behavior, images }),
+			{ imageCount: images?.length ?? 0 },
+		);
+		ctx.updatePendingMessagesDisplay();
+		ctx.ui.requestRender();
+	};
+
 async function handleUsageResetCommand(
 	arg: string,
 	session: AgentSession,
@@ -2011,6 +2068,21 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			// If a prompt was provided, pass it through as input
 			if (prompt) return { prompt };
 		},
+	},
+	{
+		name: "steer",
+		description: "Interrupt the running turn with a message",
+		inlineHint: "<message>",
+		allowArgs: true,
+		handleTui: makeQueueSlashHandler("steer", "steer"),
+	},
+	{
+		name: "followup",
+		aliases: ["follow-up"],
+		description: "Queue a message to send after the current turn",
+		inlineHint: "<message>",
+		allowArgs: true,
+		handleTui: makeQueueSlashHandler("followUp", "followup"),
 	},
 	{
 		name: "quit",
