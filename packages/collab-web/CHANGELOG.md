@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Preserved assistant soft line breaks in the collab web transcript Markdown renderer so tree-shaped prose no longer collapses into one paragraph.
+
 ## [15.13.1] - 2026-06-15
 
 ### Added
