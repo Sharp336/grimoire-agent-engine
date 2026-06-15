@@ -10,6 +10,7 @@ import { Text } from "@oh-my-pi/pi-tui";
 import { getRemoteDir, logger, prompt, readImageMetadata, untilAborted } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "lru-cache/raw";
 import { z } from "zod/v4";
+import { InjectionCache, injectDirectoryContext } from "../context/nested-agents-md";
 import {
 	canonicalSnapshotKey,
 	getFileSnapshotStore,
@@ -125,6 +126,20 @@ function getSummaryParseCache(session: object): LRUCache<string, SummaryResult |
 	if (!cache) {
 		cache = new LRUCache<string, SummaryResult | false>({ max: SUMMARY_CACHE_MAX });
 		summaryParseCaches.set(session, cache);
+	}
+	return cache;
+}
+
+// Per-session cache of which ancestor AGENTS.md directories have already been
+// injected into a file-read result, so a nested directory's context appears at
+// most once per session. Aged out with the session via WeakMap.
+const NESTED_AGENTS_SESSION_KEY = "session";
+const nestedAgentsCaches = new WeakMap<object, InjectionCache>();
+function getNestedAgentsCache(session: object): InjectionCache {
+	let cache = nestedAgentsCaches.get(session);
+	if (!cache) {
+		cache = new InjectionCache();
+		nestedAgentsCaches.set(session, cache);
 	}
 	return cache;
 }
@@ -2413,6 +2428,30 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				firstText.text = `${notice}\n${firstText.text}`;
 			} else {
 				content = [{ type: "text", text: notice }, ...content];
+			}
+		}
+		// Append ancestor AGENTS.md context (nested directories strictly between cwd
+		// and the file) once per session. Skips raw reads — verbatim output must stay
+		// clean — and the repo-root AGENTS.md, which findAgentsMdUp excludes (the
+		// system prompt already carries it).
+		if (!isRawSelector(parsed) && this.session.settings.get("nestedAgents.enabled") !== false) {
+			const injection = await injectDirectoryContext({
+				filePath: absolutePath,
+				rootDir: this.session.cwd,
+				cache: getNestedAgentsCache(this.session),
+				sessionKey: NESTED_AGENTS_SESSION_KEY,
+				config: {
+					maxBytesPerFile: this.session.settings.get("nestedAgents.maxBytesPerFile"),
+					maxBytesPerRead: this.session.settings.get("nestedAgents.maxBytesPerRead"),
+				},
+			});
+			if (injection.injectedText) {
+				const firstText = content.find((c): c is TextContent => c.type === "text");
+				if (firstText) {
+					firstText.text += injection.injectedText;
+				} else {
+					content.push({ type: "text", text: injection.injectedText });
+				}
 			}
 		}
 		const resultBuilder = toolResult(details).content(content);

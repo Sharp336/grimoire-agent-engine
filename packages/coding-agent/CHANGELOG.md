@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added nested `AGENTS.md` context injection: a successful file read appends the content of `AGENTS.md` files in directories between the project root and the file (once per directory per session, byte-budgeted, skipped for `:raw` reads), gated by the `nestedAgents.enabled` setting.
+
 ## [15.13.3] - 2026-06-15
 
 ### Added

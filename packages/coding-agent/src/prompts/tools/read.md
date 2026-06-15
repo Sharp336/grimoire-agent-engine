@@ -3,6 +3,7 @@ Read files, directories, archives, SQLite databases, images, documents, internal
 <instruction>
 - You SHOULD parallelize independent reads when exploring related files.
 - You SHOULD reach for `read` — not a browser/puppeteer tool — for web content; browser only when `read` cannot deliver it.
+- A successful file read may append the content of `AGENTS.md` files in directories between the project root and the file (nested directory context), once per directory per session. Skipped for `:raw` reads.
 </instruction>
 
 ## Parameters

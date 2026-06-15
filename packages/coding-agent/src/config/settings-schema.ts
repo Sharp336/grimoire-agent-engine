@@ -2636,6 +2636,22 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"nestedAgents.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "files",
+			group: "Reading",
+			label: "Nested AGENTS.md Context",
+			description:
+				"On a file read, append the content of AGENTS.md files in directories between the project root and the file (once per directory per session)",
+		},
+	},
+
+	// Config-file-only byte budgets for nested AGENTS.md injection.
+	"nestedAgents.maxBytesPerFile": { type: "number", default: 32 * 1024 },
+	"nestedAgents.maxBytesPerRead": { type: "number", default: 128 * 1024 },
+
 	// LSP
 	"lsp.enabled": {
 		type: "boolean",
