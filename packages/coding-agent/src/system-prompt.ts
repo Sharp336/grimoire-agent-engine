@@ -16,6 +16,7 @@ import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile
 import { expandAtImports } from "./discovery/at-imports";
 import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
+import { type ModelOverlayMode, resolveModelOverlay } from "./prompts/model-overlay";
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
 import defaultPersonality from "./prompts/system/personalities/default.md" with { type: "text" };
 import friendlyPersonality from "./prompts/system/personalities/friendly.md" with { type: "text" };
@@ -415,6 +416,8 @@ export interface BuildSystemPromptOptions {
 	model?: string;
 	/** Personality preset rendered into the default system prompt. "none" omits the block. Default: "default" */
 	personality?: Personality;
+	/** Model-family prompt overlay mode. "auto" detects the family from `model`; "off" disables. Default: "auto" */
+	modelOverlay?: ModelOverlayMode;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -453,6 +456,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		memoryRootEnabled = false,
 		model,
 		personality = "default",
+		modelOverlay = "auto",
 	} = options;
 	const resolvedCwd = cwd ?? getProjectDir();
 
@@ -654,7 +658,8 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		hasObsidian: hasObsidian(),
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
-	const systemPrompt = [rendered];
+	const overlaySection = resolveModelOverlay(model, modelOverlay);
+	const systemPrompt = [overlaySection ? `${rendered}\n\n${overlaySection}` : rendered];
 	const projectPrompt = resolvedCustomPrompt ? "" : prompt.render(projectPromptTemplate, data).trim();
 	if (projectPrompt) {
 		systemPrompt.push(projectPrompt);

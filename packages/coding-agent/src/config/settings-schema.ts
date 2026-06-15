@@ -834,6 +834,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"prompt.modelOverlay": {
+		type: "enum",
+		values: ["auto", "off", "gpt-5", "claude-opus", "kimi-k2"] as const,
+		default: "auto",
+		ui: {
+			tab: "model",
+			group: "Prompt",
+			label: "Model Prompt Overlay",
+			description:
+				"Append a short model-family tuning section to the system prompt. Auto detects the family from the active model; off disables it; the named values force one family's overlay.",
+			options: [
+				{ value: "auto", label: "Auto", description: "Detect the family from the active model" },
+				{ value: "off", label: "Off", description: "No model-family overlay" },
+				{ value: "gpt-5", label: "GPT-5", description: "Force the GPT-5 overlay" },
+				{ value: "claude-opus", label: "Claude Opus", description: "Force the Claude Opus overlay" },
+				{ value: "kimi-k2", label: "Kimi K2", description: "Force the Kimi K2 overlay" },
+			],
+		},
+	},
+
 	personality: {
 		type: "enum",
 		values: ["default", "friendly", "pragmatic", "none"] as const,

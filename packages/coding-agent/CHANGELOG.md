@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a model-family prompt overlay: a short family-specific tuning section (GPT-5, Claude Opus, or Kimi K2) is appended to the system prompt based on the active model, controlled by the `prompt.modelOverlay` setting (`auto` detects the family, `off` disables, or force a specific family; default `auto`).
+
 ## [15.13.3] - 2026-06-15
 
 ### Added

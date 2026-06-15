@@ -2188,6 +2188,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				memoryRootEnabled: memoryBackend.id === "local",
 				model: settings.get("includeModelInPrompt") ? getActiveModelString() : undefined,
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
+				modelOverlay: settings.get("prompt.modelOverlay"),
 			});
 
 			if (options.systemPrompt === undefined) {
