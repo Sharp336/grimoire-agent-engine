@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed OKF auto-recall to inject the first-turn snippet only once, and fixed `write okf://…` to honor the active session's `okf.bundleDir` setting.
+- Fixed OKF auto-recall to inject the first-turn snippet only once per agent, fixed root-level recall links, filtered Hindsight stale-row cleanup to OKF-tagged documents, and fixed `write okf://…` to honor the active session's `okf.bundleDir` setting.
 
 ## [15.13.1] - 2026-06-15
 

@@ -116,7 +116,10 @@ export class OkfSessionState {
 		const results = await store.search(query, { limit: effectiveLimit });
 		if (results.length === 0) return undefined;
 
-		const lines = results.map(r => `- ${r.type}: [${r.title ?? r.id}](${`okf://${r.id}.md`}) — ${r.description}`);
+		const lines = results.map(r => {
+			const href = r.id.includes("/") ? `okf://${r.id}.md` : `okf:///${r.id}.md`;
+			return `- ${r.type}: [${r.title ?? r.id}](${href}) — ${r.description}`;
+		});
 		const snippet = okfRecallSnippet.replace("{{concepts}}", lines.join("\n"));
 
 		this.#lastRecallSnippet = snippet;
@@ -129,9 +132,6 @@ export class OkfSessionState {
 	 * relevant concepts.
 	 */
 	async beforeAgentStartPrompt(promptText: string): Promise<string | undefined> {
-		if (this.#aliasOf) {
-			return await this.#aliasOf.beforeAgentStartPrompt(promptText);
-		}
 		if (this.#hasRecalledForFirstTurn) return undefined;
 		this.#hasRecalledForFirstTurn = true;
 

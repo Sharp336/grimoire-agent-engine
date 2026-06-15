@@ -6,6 +6,7 @@ import type { OkfSearchResult, OkfStore } from "../../src/okf/store/types";
 class FakeOkfStore implements OkfStore {
 	readonly searchQueries: string[] = [];
 
+	constructor(readonly resultId = "architecture/auth") {}
 	async upsert(): Promise<void> {}
 
 	async get(): Promise<undefined> {
@@ -22,9 +23,9 @@ class FakeOkfStore implements OkfStore {
 		this.searchQueries.push(query);
 		return [
 			{
-				id: "architecture/auth",
+				id: this.resultId,
 				type: "Architecture",
-				title: "Auth",
+				title: this.resultId.includes("/") ? "Auth" : "Deploy",
 				description: "Auth flow overview",
 				tags: ["auth"],
 				score: 0,
@@ -55,5 +56,34 @@ describe("okf/state OkfSessionState", () => {
 		expect(second).toBeUndefined();
 		expect(store.searchQueries).toHaveLength(1);
 		expect(developerInstructions).not.toContain("Auth flow overview");
+	});
+
+	it("keeps first-turn auto-recall independent for alias states", async () => {
+		const settings = Settings.isolated();
+		settings.set("okf.autoRecall", true);
+		settings.set("okf.recallMaxTokens", 800);
+		const store = new FakeOkfStore();
+		const parent = new OkfSessionState({ sessionId: "parent", settings, cwd: process.cwd(), store });
+		const alias = new OkfSessionState({ sessionId: "subagent", settings, cwd: process.cwd(), aliasOf: parent });
+
+		const parentSnippet = await parent.beforeAgentStartPrompt("debug the auth login flow");
+		const aliasSnippet = await alias.beforeAgentStartPrompt("summarize the auth middleware");
+
+		expect(parentSnippet).toContain("Auth flow overview");
+		expect(aliasSnippet).toContain("Auth flow overview");
+		expect(store.searchQueries).toHaveLength(2);
+	});
+
+	it("uses path-only okf links for root-level recalled concepts", async () => {
+		const settings = Settings.isolated();
+		settings.set("okf.autoRecall", true);
+		settings.set("okf.recallMaxTokens", 800);
+		const store = new FakeOkfStore("deploy");
+		const state = new OkfSessionState({ sessionId: "session", settings, cwd: process.cwd(), store });
+
+		const snippet = await state.beforeAgentStartPrompt("deploy checklist");
+
+		expect(snippet).toContain("(okf:///deploy.md)");
+		expect(snippet).not.toContain("(okf://deploy.md)");
 	});
 });

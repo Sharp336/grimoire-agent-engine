@@ -59,8 +59,8 @@ export class HindsightOkfStore implements OkfStore {
 
 	async get(id: string): Promise<OkfConceptSummary | undefined> {
 		await this.#ensureBank();
-		const doc = await this.#api.getDocument(this.#bankId, id);
-		if (!doc) return undefined;
+		const doc = (await this.#api.getDocument(this.#bankId, id)) as Record<string, unknown> | null;
+		if (!documentHasOkfTag(doc)) return undefined;
 		return documentToSummary(doc, id);
 	}
 
@@ -75,7 +75,8 @@ export class HindsightOkfStore implements OkfStore {
 		const response = await this.#api.listDocuments(this.#bankId, { limit });
 		const docs = (response as { items?: unknown[] }).items ?? [];
 		return docs
-			.map((doc, i) => documentToSummary(doc as Record<string, unknown>, `doc-${i}`))
+			.filter((doc): doc is Record<string, unknown> => documentHasOkfTag(doc as Record<string, unknown>))
+			.map((doc, i) => documentToSummary(doc, `doc-${i}`))
 			.filter((s): s is OkfConceptSummary => s !== undefined)
 			.filter(s => {
 				if (options.type && s.type !== options.type) return false;
@@ -116,9 +117,7 @@ export class HindsightOkfStore implements OkfStore {
 
 	async count(): Promise<number> {
 		await this.#ensureBank();
-		const response = await this.#api.listDocuments(this.#bankId, { limit: 1 });
-		const total = (response as { total?: number }).total;
-		return typeof total === "number" ? total : 0;
+		return (await this.list({ limit: 10000 })).length;
 	}
 
 	async close(): Promise<void> {
@@ -127,11 +126,21 @@ export class HindsightOkfStore implements OkfStore {
 }
 
 /** Coerce a Hindsight document response into an OkfConceptSummary. */
+function documentHasOkfTag(doc: Record<string, unknown> | null): doc is Record<string, unknown> {
+	if (!doc) return false;
+	return documentTags(doc).includes(OKF_TAG);
+}
+
+function documentTags(doc: Record<string, unknown>): string[] {
+	const metadata = (doc.metadata ?? {}) as Record<string, unknown>;
+	const tagsValue = metadata.tags ?? doc.tags;
+	return Array.isArray(tagsValue) ? tagsValue.filter((t): t is string => typeof t === "string") : [];
+}
+
 function documentToSummary(doc: Record<string, unknown>, fallbackId: string): OkfConceptSummary | undefined {
 	const metadata = (doc.metadata ?? {}) as Record<string, unknown>;
 	const id = String(metadata.okf_id ?? doc.id ?? fallbackId);
-	const tagsValue = metadata.tags ?? doc.tags;
-	const tags = Array.isArray(tagsValue) ? tagsValue.filter((t): t is string => typeof t === "string") : [];
+	const tags = documentTags(doc).filter(tag => tag !== OKF_TAG);
 	return {
 		id,
 		type: String(metadata.type ?? "Reference"),
