@@ -171,6 +171,33 @@ describe("guided goal setup", () => {
 		expect(result).toEqual({ kind: "question", question: "What is done?", objective: "Ship the feature." });
 	});
 
+	it("passes repo context as a second untrusted system block", async () => {
+		const complete = spyOn(core, "instrumentedCompleteSimple").mockResolvedValue(
+			mockResponse({ kind: "question", question: "Which module?" }) as never,
+		);
+
+		await runGuidedGoalTurn(createSession(), {
+			messages: [{ role: "user", content: "add a cache" }],
+			repoContext: "src/cache.ts\nsrc/index.ts",
+		});
+
+		const ctx = complete.mock.calls[0]?.[1] as { systemPrompt: string[] };
+		expect(ctx.systemPrompt).toHaveLength(2);
+		expect(ctx.systemPrompt[1]).toContain("<repository_context>");
+		expect(ctx.systemPrompt[1]).toContain("src/cache.ts");
+	});
+
+	it("omits the repo block when no repo context is provided", async () => {
+		const complete = spyOn(core, "instrumentedCompleteSimple").mockResolvedValue(
+			mockResponse({ kind: "question", question: "Which module?" }) as never,
+		);
+
+		await runGuidedGoalTurn(createSession(), { messages: [{ role: "user", content: "add a cache" }] });
+
+		const ctx = complete.mock.calls[0]?.[1] as { systemPrompt: string[] };
+		expect(ctx.systemPrompt).toHaveLength(1);
+	});
+
 	it("obfuscates secrets in the transcript before the request and deobfuscates the echoed objective", async () => {
 		const obfuscator = {
 			hasSecrets: () => true,

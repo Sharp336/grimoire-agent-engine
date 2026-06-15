@@ -103,6 +103,7 @@ import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
+import { buildWorkspaceTree } from "../workspace-tree";
 import type { AssistantMessageComponent } from "./components/assistant-message";
 import type { BashExecutionComponent } from "./components/bash-execution";
 import { ChatBlock, type ChatBlockHost } from "./components/chat-block";
@@ -2505,9 +2506,24 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (!initial) return;
 
 			const messages: GuidedGoalMessage[] = [{ role: "user", content: initial }];
+			// Gather a compact, capped repo snapshot once so the interview is codebase-aware.
+			// buildWorkspaceTree swallows scan failures (returns an empty tree), so this never throws.
+			const cwd = this.session.sessionManager.getCwd();
+			const tree = await buildWorkspaceTree(cwd, { timeoutMs: 5000 });
+			const repoParts: string[] = [];
+			if (tree.rendered.trim()) repoParts.push(tree.rendered);
+			// Read the actual ROOT AGENTS.md directly: tree.agentsMdFiles only surfaces nested
+			// (depth 1–4) AGENTS.md files, never the root's, and they are process-cwd-relative.
+			try {
+				const agentsText = (await Bun.file(path.join(cwd, "AGENTS.md")).text()).trim();
+				if (agentsText) repoParts.push(`## AGENTS.md\n${agentsText.slice(0, 4000)}`);
+			} catch {
+				// No readable root AGENTS.md — the tree alone is enough context.
+			}
+			const repoContext = repoParts.join("\n\n").slice(0, 8000) || undefined;
 			let latestDraftObjective: string | undefined;
 			for (let turn = 0; turn < 6; turn++) {
-				const result = await runGuidedGoalTurn(this.session, { messages });
+				const result = await runGuidedGoalTurn(this.session, { messages, repoContext });
 				if (result.objective?.trim()) latestDraftObjective = result.objective.trim();
 				if (result.kind === "question") {
 					messages.push({ role: "assistant", content: result.question });

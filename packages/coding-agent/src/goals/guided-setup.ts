@@ -37,6 +37,8 @@ export type GuidedGoalTurnResult =
 export interface GuidedGoalTurnOptions {
 	messages: readonly GuidedGoalMessage[];
 	signal?: AbortSignal;
+	/** Compact, untrusted repo snapshot (workspace tree + root AGENTS.md) for codebase-aware interviewing. */
+	repoContext?: string;
 }
 
 function parseGuidedGoalPayload(value: unknown): GuidedGoalTurnResult {
@@ -84,10 +86,18 @@ export async function runGuidedGoalTurn(
 	// never sent verbatim to the plan/slow provider. Deobfuscated again below before display/use.
 	const obfuscator = session.obfuscator;
 	const promptText = obfuscator?.hasSecrets() ? obfuscator.obfuscate(userPrompt) : userPrompt;
+	// When the caller supplies a repo snapshot, pass it as a second system block of untrusted DATA so
+	// the interview is codebase-aware. Route it through the same obfuscator as the transcript.
+	const systemBlocks = [prompt.render(guidedGoalSystemPrompt)];
+	const repoContext = options.repoContext?.trim();
+	if (repoContext) {
+		const repoBlock = `<repository_context>\n${repoContext}\n</repository_context>`;
+		systemBlocks.push(obfuscator?.hasSecrets() ? obfuscator.obfuscate(repoBlock) : repoBlock);
+	}
 	const response = await instrumentedCompleteSimple(
 		resolved.model,
 		{
-			systemPrompt: [prompt.render(guidedGoalSystemPrompt)],
+			systemPrompt: systemBlocks,
 			messages: [{ role: "user", content: [{ type: "text", text: promptText }], timestamp: Date.now() }],
 			tools: [RESPOND_TOOL],
 		},

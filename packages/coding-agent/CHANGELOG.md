@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/guided-goal` now gathers a compact, capped repo snapshot (workspace tree + root AGENTS.md) once before interviewing and passes it as an untrusted `<repository_context>` system block, so the interview questions and drafted objective are codebase-aware. Empty repos or scan timeouts fall back to the prior context-free behavior.
+
 ## [15.13.2] - 2026-06-15
 
 ### Added
