@@ -519,11 +519,18 @@ describe("ModelRegistry", () => {
 			const primary = registry.find("solo", "my-private-llm-v1");
 			expect(primary).toBeDefined();
 
+			// A REGISTERED-but-unaliased custom id is its OWN canonical: resolveCanonicalIdForModel
+			// falls through to the "fallback" source and returns the bare model id, so
+			// getCanonicalId() is NEVER undefined here. That is the load-bearing distinction from
+			// the unregistered-model case below (where getCanonicalId() *does* return undefined).
+			// Assert it directly so a regression in the self-fallback path fails on THIS line, not
+			// indirectly via the empty variants list.
+			const canonicalId = registry.getCanonicalId(primary as Model);
+			expect(canonicalId).toBe("my-private-llm-v1");
+
 			// The canonical group contains only the model itself, so excluding the
 			// primary leaves an empty failover chain (no empty-chain hazard).
-			const variants = registry.getCanonicalVariants(registry.getCanonicalId(primary as Model) ?? "", {
-				availableOnly: true,
-			});
+			const variants = registry.getCanonicalVariants(canonicalId ?? "", { availableOnly: true });
 			expect(variants.map(variant => variant.model.provider)).toEqual(["solo"]);
 			expect(registry.rankCanonicalVariantsFor(primary as Model)).toEqual([]);
 		});
