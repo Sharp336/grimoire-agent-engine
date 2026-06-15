@@ -116,8 +116,10 @@ async function callKeenableMcpSearch(
 						throw new SearchProviderError("keenable", `MCP error: ${parsed.error.message}`, parsed.error.code);
 					}
 					return { data: parsed, sessionId: sessionId_ };
-				} catch {
-					// Fall through to empty result
+				} catch (err) {
+					// Let SearchProviderError (auth/rate-limit errors) propagate;
+					// swallow JSON parse errors only.
+					if (err instanceof SearchProviderError) throw err;
 				}
 			}
 			return { data: {}, sessionId: sessionId_ };
