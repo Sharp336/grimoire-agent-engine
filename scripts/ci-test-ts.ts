@@ -49,6 +49,9 @@ const codingAgentBucketPlans: Record<CodingAgentBucket, { label: string; paralle
 // Smaller workspace packages stay separate from native/TUI/integration suites so
 // their short TS suites can run together. CI still downloads the Linux x64 native
 // addon before this bucket: shared utility barrels may load native-backed modules.
+// mnemopi is intentionally excluded — its embedding suites depend on a ~270MB
+// fastembed model absent from CI runners, so they flake/time out under the parallel
+// bucket; run `bun --cwd=packages/mnemopi test` locally instead.
 const fastWorkspacePackages = [
 	"packages/hashline",
 	"packages/wire",
@@ -57,7 +60,6 @@ const fastWorkspacePackages = [
 	"packages/ai",
 	"packages/snapcompact",
 	"packages/agent",
-	"packages/mnemopi",
 ];
 
 // These suites cover the native package, TUI/browser-ish behavior, local servers,
@@ -278,7 +280,7 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 	switch (mode) {
 		case "workspace":
 			return [
-				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 4)),
+				...fastWorkspacePackages.map(pkg => workspaceTestCommand(pkg, 8)),
 				{
 					label: "scripts",
 					cwd: ".",
@@ -311,6 +313,35 @@ async function commandsForMode(mode: Mode): Promise<TestCommand[]> {
 	}
 }
 
+// The omp-kata runner pods inject sccache S3 credentials (`AWS_*`) and config
+// (`SCCACHE_*`) pod-wide via `envFrom`, GitHub Actions injects `GITHUB_TOKEN`,
+// and a host may carry provider API keys. Any of these make env-sensitive code
+// non-deterministic in tests — e.g. leaked AWS creds make `amazon-bedrock` look
+// authenticated and win the provider startup fallback over `anthropic`. Run the
+// suites in a hermetic environment with all credential / cloud-config variables
+// stripped so resolution depends only on the test's own fixtures.
+const SCRUBBED_ENV_PREFIXES = ["AWS_", "SCCACHE_", "GOOGLE_CLOUD_"];
+const SCRUBBED_ENV_NAMES = new Set([
+	"RUSTC_WRAPPER",
+	"GITHUB_TOKEN",
+	"GH_TOKEN",
+	"COPILOT_GITHUB_TOKEN",
+	"GOOGLE_APPLICATION_CREDENTIALS",
+	"ANTHROPIC_OAUTH_TOKEN",
+	"XAI_OAUTH_TOKEN",
+]);
+
+function isScrubbedEnvVar(key: string): boolean {
+	if (SCRUBBED_ENV_NAMES.has(key)) {
+		return true;
+	}
+	if (SCRUBBED_ENV_PREFIXES.some(prefix => key.startsWith(prefix))) {
+		return true;
+	}
+	// Any provider credential, e.g. ANTHROPIC_API_KEY / XAI_OAUTH_TOKEN / bedrock bearer.
+	return /_(API_KEY|OAUTH_TOKEN)$/.test(key) || key.includes("BEARER_TOKEN");
+}
+
 async function runTestCommand(testCommand: TestCommand): Promise<void> {
 	const cwd = path.join(repoRoot, testCommand.cwd);
 	const renderedCommand = testCommand.command.map(shellQuote).join(" ");
@@ -321,12 +352,15 @@ async function runTestCommand(testCommand: TestCommand): Promise<void> {
 		return;
 	}
 
+	const env: Record<string, string | undefined> = { ...Bun.env, GITHUB_ACTIONS: "" };
+	for (const key of Object.keys(env)) {
+		if (isScrubbedEnvVar(key)) {
+			delete env[key];
+		}
+	}
 	const proc = Bun.spawn(testCommand.command, {
 		cwd,
-		env: {
-			...Bun.env,
-			GITHUB_ACTIONS: "",
-		},
+		env,
 		stdout: "inherit",
 		stderr: "inherit",
 	});
