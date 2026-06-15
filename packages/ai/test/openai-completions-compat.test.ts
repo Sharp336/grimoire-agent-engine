@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import {
 	applyOpenRouterRoutingVariant,
 	convertMessages,
+	mergeOpenAIObjectToolArgs,
 	streamOpenAICompletions,
 } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import type {
@@ -120,6 +121,128 @@ function getLastTextPart(content: unknown): object | undefined {
 	}
 	return undefined;
 }
+
+describe("mergeOpenAIObjectToolArgs", () => {
+	it("preserves nested keys and appends fragmented task arrays", () => {
+		const merged = mergeOpenAIObjectToolArgs(
+			{ context: "shared", tasks: [{ assignment: "A" }], metadata: { first: true } },
+			{ tasks: [{ assignment: "B" }], metadata: { second: true } },
+		);
+		expect(merged).toEqual({
+			context: "shared",
+			tasks: [{ assignment: "A" }, { assignment: "B" }],
+			metadata: { first: true, second: true },
+		});
+	});
+
+	it("uses cumulative array snapshots without duplicating prior elements", () => {
+		const merged = mergeOpenAIObjectToolArgs(
+			{ tasks: [{ assignment: "A" }] },
+			{ tasks: [{ assignment: "A" }, { assignment: "B" }] },
+		);
+		expect(merged).toEqual({ tasks: [{ assignment: "A" }, { assignment: "B" }] });
+	});
+
+	it("does not pollute Object.prototype via a streamed __proto__ key", () => {
+		// JSON.parse keeps `__proto__` as an own data property (an object literal would
+		// instead invoke the prototype setter), matching how a provider's bytes arrive.
+		const hostile = JSON.parse('{"__proto__":{"polluted":true},"agent":"explore"}') as Record<string, unknown>;
+		const merged = mergeOpenAIObjectToolArgs({ tasks: [{ assignment: "A" }] }, hostile);
+		expect((merged as Record<string, unknown>).polluted).toBeUndefined();
+		expect(({} as Record<string, unknown>).polluted).toBeUndefined();
+		expect(Object.getPrototypeOf(merged)).toBe(Object.prototype);
+		expect(merged).toEqual({ tasks: [{ assignment: "A" }], agent: "explore" });
+	});
+});
+
+describe("openai-completions object-shaped tool args (streaming)", () => {
+	it("preserves earlier object-arg keys when a host fragments arguments across deltas", async () => {
+		const model: Model<"openai-completions"> = buildModel({
+			...gpt4oMiniSpec,
+			api: "openai-completions",
+		} as ModelSpec<"openai-completions">);
+		// MiniMax-style host: `function.arguments` arrives as an OBJECT, fragmented across
+		// two deltas. Pre-fix the second delta replaced the first, dropping agent/context and
+		// the first metadata key. The merge must keep omitted keys, deep-merge nested objects,
+		// and treat the cumulative `tasks` snapshot as a supersede (not an append-dup).
+		const fetchMock = createMockFetch([
+			{
+				id: "c1",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [
+					{
+						index: 0,
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									id: "call_task",
+									function: {
+										name: "task",
+										arguments: {
+											agent: "explore",
+											context: "ctx",
+											tasks: [{ assignment: "A" }],
+											metadata: { first: true },
+										},
+									},
+								},
+							],
+						},
+					},
+				],
+			},
+			{
+				id: "c1",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [
+					{
+						index: 0,
+						delta: {
+							tool_calls: [
+								{
+									index: 0,
+									function: {
+										arguments: {
+											tasks: [{ assignment: "A" }, { assignment: "B" }],
+											metadata: { second: true },
+										},
+									},
+								},
+							],
+						},
+					},
+				],
+			},
+			{
+				id: "c1",
+				object: "chat.completion.chunk",
+				created: 0,
+				model: model.id,
+				choices: [{ index: 0, delta: {}, finish_reason: "tool_calls" }],
+			},
+			"[DONE]",
+		]);
+
+		const result = await streamOpenAICompletions(model, baseContext(), {
+			apiKey: "test-key",
+			fetch: fetchMock,
+		}).result();
+		const toolCall = result.content.find(block => block.type === "toolCall");
+		if (toolCall?.type !== "toolCall") throw new Error("expected a finalized toolCall block");
+		expect(toolCall.name).toBe("task");
+		expect(toolCall.arguments).toEqual({
+			agent: "explore",
+			context: "ctx",
+			tasks: [{ assignment: "A" }, { assignment: "B" }],
+			metadata: { first: true, second: true },
+		});
+	});
+});
 
 describe("openai-completions compatibility", () => {
 	it("serializes assistant text content as a plain string", () => {

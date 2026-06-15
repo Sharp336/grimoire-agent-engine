@@ -103,6 +103,59 @@ function normalizeMistralToolId(id: string, isMistral: boolean): string {
 	}
 	return normalized;
 }
+
+function sameJsonValue(left: unknown, right: unknown): boolean {
+	if (Object.is(left, right)) return true;
+	try {
+		return JSON.stringify(left) === JSON.stringify(right);
+	} catch {
+		return false;
+	}
+}
+
+function arrayStartsWith(candidate: readonly unknown[], prefix: readonly unknown[]): boolean {
+	if (candidate.length < prefix.length) return false;
+	for (let i = 0; i < prefix.length; i += 1) {
+		if (!sameJsonValue(candidate[i], prefix[i])) return false;
+	}
+	return true;
+}
+
+function mergeOpenAIObjectToolArgValue(prev: unknown, value: unknown): unknown {
+	if (typeof prev === "string" && typeof value === "string") {
+		return value.startsWith(prev) ? value : prev + value;
+	}
+	if (Array.isArray(prev) && Array.isArray(value)) {
+		return arrayStartsWith(value, prev) ? value : [...prev, ...value];
+	}
+	if (
+		prev !== null &&
+		value !== null &&
+		typeof prev === "object" &&
+		typeof value === "object" &&
+		!Array.isArray(prev) &&
+		!Array.isArray(value)
+	) {
+		return mergeOpenAIObjectToolArgs(prev as Record<string, unknown>, value as Record<string, unknown>);
+	}
+	return value;
+}
+
+export function mergeOpenAIObjectToolArgs(
+	prev: Record<string, unknown> | undefined,
+	next: Record<string, unknown>,
+): Record<string, unknown> {
+	const merged: Record<string, unknown> = prev ? { ...prev } : {};
+	for (const [key, value] of Object.entries(next)) {
+		// Skip prototype-polluting keys: tool args are model/provider-controlled, and a
+		// `merged["__proto__"] = …` bracket-assign rewrites the arguments object's prototype
+		// instead of storing a data property. `Object.hasOwn` avoids the same walk via `in`.
+		if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+		merged[key] = Object.hasOwn(merged, key) ? mergeOpenAIObjectToolArgValue(merged[key], value) : value;
+	}
+	return merged;
+}
+
 // Direct DeepSeek model ids on NanoGPT are routed via the default tools-capable
 // path. We deliberately do NOT append `:tools` here: with `:tools`, NanoGPT
 // performs server-side tool-call parsing on the upstream DeepSeek stream and
@@ -987,10 +1040,10 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 								// OpenAI JSON-string contract. Most chunks carry the complete object in one delta,
 								// but cannot rely on that: replacing per-chunk drops earlier keys (and earlier
 								// string content for the same key) when the host fragments the args across deltas.
-								// Shallow-merge into the accumulated object; for shared string keys, detect
-								// cumulative-vs-delta semantics with `startsWith` so we neither duplicate cumulative
-								// payloads nor lose delta fragments. Degenerates to the previous "last wins"
-								// behaviour for the common single-chunk shape (no prior value to merge with).
+								// Deep-merge into the accumulated object; for shared string keys, detect
+								// cumulative-vs-delta semantics with `startsWith`, and for array keys preserve
+								// cumulative snapshots while appending true fragments. This avoids losing nested
+								// keys or earlier `tasks` array elements when a host fragments object args.
 								//
 								// `delta` stays empty here: emitting `JSON.stringify(rawArgs)` per chunk feeds
 								// downstream concat-based accumulators (proxy.ts, openai-chat-server,
@@ -1003,15 +1056,7 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 									!Array.isArray(block.partialArgs)
 										? (block.partialArgs as Record<string, unknown>)
 										: undefined;
-								const merged: Record<string, unknown> = prev ? { ...prev } : {};
-								for (const [key, value] of Object.entries(rawArgs)) {
-									const prevValue = merged[key];
-									if (typeof prevValue === "string" && typeof value === "string") {
-										merged[key] = value.startsWith(prevValue) ? value : prevValue + value;
-									} else {
-										merged[key] = value;
-									}
-								}
+								const merged = mergeOpenAIObjectToolArgs(prev, rawArgs);
 								block.partialArgs = merged;
 								block.arguments = merged;
 							}

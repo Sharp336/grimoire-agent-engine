@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI-compatible chat-completions object-arg streams replacing fragmented `tasks` arrays mid-stream; nested objects and arrays are now deep-merged across streamed argument fragments instead of the latest fragment overwriting earlier keys.
+
 ## [15.13.1] - 2026-06-15
 
 ### Fixed
