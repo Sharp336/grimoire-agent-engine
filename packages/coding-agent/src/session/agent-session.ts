@@ -6944,8 +6944,11 @@ export class AgentSession {
 					model: this.model,
 					shape: snapcompact.resolveShape(this.model, this.settings.get("snapcompact.shape")),
 					// Providers with hard image caps (OpenRouter: 8) silently drop
-					// frames past the cap — keep the archive within budget.
-					maxFrames: snapcompact.providerFrameBudget(this.model?.provider),
+					// frames past the cap; the user setting is a local policy cap.
+					maxFrames: snapcompact.providerFrameBudget(
+						this.model?.provider,
+						this.settings.get("snapcompact.maxFrames"),
+					),
 				});
 				const ctxWindow = this.model?.contextWindow ?? 0;
 				const budget =

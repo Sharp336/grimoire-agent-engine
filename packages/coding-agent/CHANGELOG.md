@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `snapcompact.maxFrames`, a context setting for raising or lowering the rolling snapcompact compaction archive frame cap while still respecting provider image limits.
+
 ## [16.0.1] - 2026-06-15
 
 ### Breaking Changes

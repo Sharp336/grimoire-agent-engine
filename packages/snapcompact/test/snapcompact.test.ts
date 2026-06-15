@@ -784,13 +784,16 @@ describe("archive helpers", () => {
 		// Unknown providers fall to the safe floor.
 		expect(snapcompact.providerImageBudget(undefined)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 		expect(snapcompact.providerImageBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
-		// Archive frames never exceed MAX_FRAMES even on permissive providers,
+		// Archive frames never exceed the requested cap on permissive providers,
 		// and never exceed the provider's own cap on strict ones.
 		expect(snapcompact.providerFrameBudget("anthropic")).toBe(snapcompact.MAX_FRAMES);
 		expect(snapcompact.providerFrameBudget("openrouter")).toBeLessThanOrEqual(8);
 		expect(snapcompact.providerFrameBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 		expect(snapcompact.providerImageBudget("openai-codex")).toBe(200);
 		expect(snapcompact.providerFrameBudget("openai-codex")).toBe(snapcompact.MAX_FRAMES);
+		expect(snapcompact.providerFrameBudget("anthropic", 16)).toBe(16);
+		expect(snapcompact.providerFrameBudget("openrouter", 16)).toBe(8);
+		expect(snapcompact.providerFrameBudget("some-new-router", 16)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 	});
 });
 

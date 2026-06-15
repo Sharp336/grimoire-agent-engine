@@ -61,9 +61,10 @@ describe("Settings", () => {
 		testDir = "";
 	});
 	describe("defaults", () => {
-		it("keeps eight inline images live by default", async () => {
+		it("keeps UI and snapcompact frame caps at their defaults", async () => {
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
 			expect(settings.get("tui.maxInlineImages")).toBe(8);
+			expect(settings.get("snapcompact.maxFrames")).toBe(getDefault("snapcompact.maxFrames"));
 		});
 
 		it("exposes all tool calling mode options", () => {

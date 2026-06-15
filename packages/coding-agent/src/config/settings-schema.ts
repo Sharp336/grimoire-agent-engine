@@ -1,6 +1,6 @@
 import { THINKING_EFFORTS } from "@oh-my-pi/pi-ai";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
-import { SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
+import { MAX_FRAMES, SHAPE_VARIANT_NAMES } from "@oh-my-pi/snapcompact";
 import { DEFAULT_RELAY_URL } from "../collab/protocol";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
@@ -1898,6 +1898,24 @@ export const SETTINGS_SCHEMA = {
 					label: "Doc 8on16, sentence hues + dimmed stopwords",
 					description: "Two-column doc layout, sentence-hue ink, function words dimmed gray.",
 				},
+			],
+		},
+	},
+
+	"snapcompact.maxFrames": {
+		type: "number",
+		default: MAX_FRAMES,
+		ui: {
+			tab: "context",
+			group: "Experimental",
+			label: "Snapcompact Archive Frames",
+			description:
+				"Maximum snapcompact compaction frames carried forward. Provider hard caps still apply; higher values preserve more old history at higher image-token cost.",
+			options: [
+				{ value: "8", label: "8", description: "Default" },
+				{ value: "16", label: "16" },
+				{ value: "32", label: "32" },
+				{ value: "64", label: "64" },
 			],
 		},
 	},

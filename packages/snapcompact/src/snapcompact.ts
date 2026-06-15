@@ -412,9 +412,9 @@ export function providerImageBudget(provider: string | undefined): number {
 	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
 }
 
-/** Archive frame budget for `provider`: its image budget clamped to {@link MAX_FRAMES}. */
-export function providerFrameBudget(provider: string | undefined): number {
-	return Math.min(MAX_FRAMES, providerImageBudget(provider));
+/** Archive frame budget for `provider`: requested frames clamped to the provider image cap. */
+export function providerFrameBudget(provider: string | undefined, requestedFrames = MAX_FRAMES): number {
+	return Math.min(Math.max(1, Math.floor(requestedFrames)), providerImageBudget(provider));
 }
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */
