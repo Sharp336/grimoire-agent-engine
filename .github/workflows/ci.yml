@@ -506,19 +506,23 @@ jobs:
               version: "0.15.0"
          - name: Enable sccache for cargo
            # Conditional backend: self-hosted omp-kata injects a shared S3
-           # (RustFS) sccache via pod env; GitHub-hosted runners keep the GHA
-           # cache. CARGO_INCREMENTAL=0 keeps sccache from silently no-oping.
+           # (RustFS) sccache via pod env. GitHub-hosted PR smoke jobs only use
+           # sccache when the runner exposes the GHA cache runtime variables;
+           # otherwise build directly instead of failing before cargo starts.
            shell: bash
            run: |
-              {
-                echo "RUSTC_WRAPPER=sccache"
-                echo "CARGO_INCREMENTAL=0"
-              } >> "$GITHUB_ENV"
+              echo "CARGO_INCREMENTAL=0" >> "$GITHUB_ENV"
               if [ -n "${SCCACHE_BUCKET:-}" ]; then
+                echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
                 echo "sccache backend: shared S3 ($SCCACHE_BUCKET @ $SCCACHE_ENDPOINT)"
-              else
-                echo "SCCACHE_GHA_ENABLED=true" >> "$GITHUB_ENV"
+              elif { [ -n "${ACTIONS_CACHE_URL:-}" ] || [ -n "${ACTIONS_RESULTS_URL:-}" ]; } && [ -n "${ACTIONS_RUNTIME_TOKEN:-}" ]; then
+                {
+                  echo "RUSTC_WRAPPER=sccache"
+                  echo "SCCACHE_GHA_ENABLED=true"
+                } >> "$GITHUB_ENV"
                 echo "sccache backend: GitHub Actions cache"
+              else
+                echo "sccache backend unavailable; building without compiler wrapper"
               fi
          - uses: ./.github/actions/setup-system-deps
          - uses: ./.github/actions/bun-install
