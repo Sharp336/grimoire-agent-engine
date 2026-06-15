@@ -15,7 +15,13 @@ import {
 	validateToolArguments,
 	zodToWireSchema,
 } from "@oh-my-pi/pi-ai";
-import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import {
+	encodeInbandToolHistory,
+	renderInbandToolPrompt,
+	renderToolExamples,
+	type ToolCallSyntax,
+	wrapInbandToolStream,
+} from "@oh-my-pi/pi-ai/grammar";
 import {
 	createHarmonyAuditEvent,
 	detectHarmonyLeakInAssistantMessage,
@@ -25,7 +31,9 @@ import {
 	isHarmonyLeakMitigationTarget,
 	recoverHarmonyToolCall,
 	signalListLabel,
-} from "./harmony-leak";
+} from "@oh-my-pi/pi-ai/utils/harmony-leak";
+import { preferredToolSyntax } from "@oh-my-pi/pi-catalog/identity";
+import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {
 	type AgentTelemetry,
@@ -74,6 +82,25 @@ class HarmonyLeakInterruption extends Error {
 	) {
 		super(`Detected GPT-5 Harmony protocol leakage (${signalListLabel(detection.signals)})`);
 		this.name = "HarmonyLeakInterruption";
+	}
+}
+function resolveOwnedToolSyntaxFromEnv(value: string | undefined): ToolCallSyntax | undefined {
+	switch (value) {
+		case "1":
+		case "true":
+			return "glm";
+		case "glm":
+		case "hermes":
+		case "kimi":
+		case "xml":
+		case "anthropic":
+		case "deepseek":
+		case "harmony":
+		case "pi":
+		case "qwen3":
+			return value;
+		default:
+			return undefined;
 	}
 }
 
@@ -491,7 +518,11 @@ function injectIntentIntoSchema(schema: unknown, mode: "require" | "optional" = 
 	};
 }
 
-export function normalizeTools(tools: AgentContext["tools"], injectIntent: boolean): Context["tools"] {
+export function normalizeTools(
+	tools: AgentContext["tools"],
+	injectIntent: boolean,
+	exampleSyntax?: ToolCallSyntax,
+): Context["tools"] {
 	injectIntent = injectIntent && Bun.env.PI_NO_INTENT !== "1";
 	return tools?.map(t => {
 		const intentMode = resolveIntentMode(t.intent);
@@ -505,7 +536,12 @@ export function normalizeTools(tools: AgentContext["tools"], injectIntent: boole
 			}
 		}
 		const description = t.description ?? "";
-		return { ...t, parameters, description };
+		const injectExampleIntent = injectIntent && intentMode !== "omit";
+		const examplesBlock = exampleSyntax
+			? renderToolExamples({ ...t, parameters }, exampleSyntax, injectExampleIntent ? INTENT_FIELD : undefined)
+			: "";
+		const finalDescription = examplesBlock ? `${description}\n\n${examplesBlock}` : description;
+		return { ...t, parameters, description: finalDescription };
 	});
 }
 
@@ -884,16 +920,35 @@ async function streamAssistantResponse(
 	let llmContext: Context;
 	if (config.appendOnlyContext) {
 		config.appendOnlyContext.syncMessages(normalizedMessages);
-		llmContext = config.appendOnlyContext.build(context, { intentTracing: !!config.intentTracing });
+		llmContext = config.appendOnlyContext.build(context, {
+			intentTracing: !!config.intentTracing,
+			exampleSyntax: preferredToolSyntax(config.model.id),
+		});
 	} else {
 		llmContext = {
 			systemPrompt: context.systemPrompt,
 			messages: normalizedMessages,
-			tools: normalizeTools(context.tools, !!config.intentTracing),
+			tools: normalizeTools(context.tools, !!config.intentTracing, preferredToolSyntax(config.model.id)),
 		};
 	}
 	if (config.transformProviderContext) {
 		llmContext = config.transformProviderContext(llmContext, config.model);
+	}
+
+	// Owned tool calling: take tool calls away from the provider and run them
+	// through the selected in-band prompt syntax. `PI_OWNED_TOOLS=1` still
+	// force-enables GLM; `PI_OWNED_TOOLS=<syntax>` force-enables that syntax.
+	const ownedSyntax: ToolCallSyntax | undefined =
+		config.toolCallSyntax ?? resolveOwnedToolSyntaxFromEnv(Bun.env.PI_OWNED_TOOLS);
+	let promptToolWireTools: Context["tools"];
+	if (ownedSyntax && llmContext.tools && llmContext.tools.length > 0) {
+		promptToolWireTools = llmContext.tools;
+		llmContext = {
+			...llmContext,
+			systemPrompt: [...(llmContext.systemPrompt ?? []), renderInbandToolPrompt(promptToolWireTools, ownedSyntax)],
+			messages: encodeInbandToolHistory(llmContext.messages, ownedSyntax, promptToolWireTools),
+			tools: undefined,
+		};
 	}
 
 	const streamFunction = streamFn || streamSimple;
@@ -920,12 +975,22 @@ async function streamAssistantResponse(
 			: harmonyAbortController.signal
 		: signal;
 	const repetitionAbortController = new AbortController();
-	const finalRequestSignal = requestSignal
-		? AbortSignal.any([requestSignal, repetitionAbortController.signal])
-		: repetitionAbortController.signal;
+	// Owned tool calling: aborted by the stream wrapper when the model starts
+	// fabricating a `<tool_response>`, so the provider stops generating the rest of
+	// the hallucinated turn. Merged into the provider signal ONLY (not
+	// `requestSignal`), so it cancels the request without tripping the loop's
+	// external-abort handling (`abortRacePromise` / `requestSignal.aborted`).
+	const promptToolAbortController = ownedSyntax ? new AbortController() : undefined;
+	const providerAbortSignals: AbortSignal[] = [];
+	if (requestSignal) providerAbortSignals.push(requestSignal);
+	providerAbortSignals.push(repetitionAbortController.signal);
+	if (promptToolAbortController) providerAbortSignals.push(promptToolAbortController.signal);
+	const finalRequestSignal =
+		providerAbortSignals.length === 1 ? providerAbortSignals[0]! : AbortSignal.any(providerAbortSignals);
 	const effectiveTemperature =
 		harmonyRetryAttempt > 0 && config.temperature !== undefined ? config.temperature + 0.05 : config.temperature;
-	const effectiveToolChoice = dynamicToolChoice ?? config.toolChoice;
+	// Owned tool calling sends no native tools, so any tool_choice would error.
+	const effectiveToolChoice = ownedSyntax ? undefined : (dynamicToolChoice ?? config.toolChoice);
 	const effectiveReasoning = dynamicReasoning ?? config.reasoning;
 	const effectiveDisableReasoning = dynamicDisableReasoning ?? config.disableReasoning;
 
@@ -970,7 +1035,7 @@ async function streamAssistantResponse(
 
 	try {
 		return await runInActiveSpan(chatSpan, async () => {
-			const response = await streamFunction(config.model, llmContext, {
+			let response = await streamFunction(config.model, llmContext, {
 				...config,
 				// Hand streamSimple a resolver so its central auth-retry policy can
 				// re-resolve on 401 / usage-limit: the initial step reuses the key
@@ -993,6 +1058,14 @@ async function streamAssistantResponse(
 				signal: finalRequestSignal,
 				onResponse: captureOnResponse,
 			});
+			if (promptToolWireTools && ownedSyntax) {
+				// Re-materialize in-band tool-call text as native toolCall content blocks
+				// so the rest of the loop executes them unchanged. The abort callback
+				// cancels the provider when the model starts fabricating tool results.
+				response = wrapInbandToolStream(response, promptToolWireTools, ownedSyntax, () =>
+					promptToolAbortController?.abort(),
+				);
+			}
 
 			let partialMessage: AssistantMessage | null = null;
 			let addedPartial = false;
