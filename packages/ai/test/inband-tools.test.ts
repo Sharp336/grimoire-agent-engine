@@ -143,8 +143,8 @@ describe("in-band tool grammars", () => {
 		);
 		expectRawBlock(
 			"harmony",
-			'<|start|>assistant<|channel|>commentary to=functions.read <|constrain|>json<|message|>{"path":"src/a.ts"}<|call|>',
-			'<|start|>assistant<|channel|>commentary to=functions.read <|constrain|>json<|message|>{"path":"src/a.ts"}<|call|>',
+			'<|start|>assistant<|channel|>commentary to=functions.read<|message|>{"path":"src/a.ts"}<|call|>',
+			'<|start|>assistant<|channel|>commentary to=functions.read<|message|>{"path":"src/a.ts"}<|call|>',
 		);
 		expectRawBlock(
 			"pi",
@@ -154,8 +154,7 @@ describe("in-band tool grammars", () => {
 	});
 
 	it("projects raw tool blocks onto parsed ToolCall content", () => {
-		const raw =
-			'<|start|>assistant<|channel|>commentary to=functions.read <|constrain|>json<|message|>{"path":"src/a.ts"}<|call|>';
+		const raw = '<|start|>assistant<|channel|>commentary to=functions.read<|message|>{"path":"src/a.ts"}<|call|>';
 		const parsed = parseInbandToolMessage(assistant([{ type: "text", text: raw }]), "harmony", TOOLS);
 		const call = parsed.content.find((block): block is ToolCall => block.type === "toolCall");
 
@@ -167,7 +166,7 @@ describe("in-band tool grammars", () => {
 			assistant([
 				{
 					type: "text",
-					text: '<invoke name="read"><parameter name="path">rubygems.ts:85-93</parameter></invoke>\n<function_results>\n<result>\n<tool_name>read</tool_name>\n<stdout>[rubygems.ts#A1B2]</stdout>\n</result>\n</function_results>\n<invoke name="edit"><parameter name="input">[rubygems.ts#A1B2]\nXCHG 89..89:\n+ fake</parameter></invoke>',
+					text: '<invoke name="read"><parameter name="path">rubygems.ts:85-93</parameter></invoke>\n<function_results>\n<result>\n<tool_name>read</tool_name>\n<stdout>[rubygems.ts#A1B2]</stdout>\n</result>\n</function_results>\n<invoke name="edit"><parameter name="input">[rubygems.ts#A1B2]\nSWAP 89..89:\n+ fake</parameter></invoke>',
 				},
 			]),
 			"anthropic",

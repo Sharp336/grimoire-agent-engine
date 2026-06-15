@@ -83,7 +83,7 @@ export function getBundleRoot(cwd: string): string {
 
 /** Resolve the bundle root, honoring the `okf.bundleDir` setting when set. */
 export function resolveBundleRoot(cwd: string, bundleDir?: string): string {
-	return path.resolve(bundleDir ?? getBundleRoot(cwd));
+	return bundleDir ? path.resolve(cwd, bundleDir) : path.resolve(getBundleRoot(cwd));
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -265,6 +265,7 @@ export async function writeConcept(
 ): Promise<{ wrote: string; type: string; description: string }> {
 	const relativePath = conceptIdToPath(id);
 	const fullPath = path.join(root, relativePath);
+	await assertRealWithinRoot(path.dirname(fullPath), root);
 	await fs.mkdir(path.dirname(fullPath), { recursive: true });
 
 	await assertRealWithinRoot(fullPath, root);

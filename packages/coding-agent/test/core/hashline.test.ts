@@ -45,7 +45,7 @@ function header(filePath: string, tag: string): string {
 }
 
 function sameLineRange(anchor: string): string {
-	return `XCHG ${anchor}..${anchor}:`;
+	return `SWAP ${anchor}..${anchor}:`;
 }
 
 async function withTempDir(fn: (tempDir: string) => Promise<void>): Promise<void> {

@@ -4,24 +4,32 @@
 
 ### Fixed
 
-- Fixed OKF auto-recall to inject the first-turn snippet only once per agent, fixed root-level recall links, filtered Hindsight stale-row cleanup to OKF-tagged documents, and fixed `write okf://…` to honor the active session's `okf.bundleDir` setting.
+- Fixed OKF auto-recall to inject the first-turn snippet only once per agent, fixed root-level recall links, filtered Hindsight stale-row cleanup to OKF-tagged documents, resolved relative `okf.bundleDir` overrides from the session cwd, hardened symlinked bundle-root and parent-directory handling, and fixed `write okf://…` to honor the active session's `okf.bundleDir` setting.
+
+## [15.13.2] - 2026-06-15
+
 ### Added
 
+- Added tool examples data to exported RPC session tool metadata, so tool dumps and other clients can receive model-call examples
 - Added `supportsTools` to model definitions and overrides so custom model configs can declare whether a model supports native tool calls
 - Added `tools.format` for choosing native tool calling or a specific owned in-band format (`glm`, `hermes`, `kimi`, `xml`), with `auto` falling back to GLM only for models marked as not supporting native tools.
 - Added a conditional easter-egg tip recommending nerd fonts when using the unicode symbol preset.
+- Added the `tools.abortOnFabricatedResult` setting (default on): with in-band tool calls, stop the model the moment it starts hallucinating a tool result mid-turn, or disable it to let the model finish and discard the fabricated continuation instead.
 
 ### Changed
 
+- Changed `/dump` tool catalog output to render tools through the shared inventory renderer with readable TypeScript-style signatures and native-syntax `<examples>` blocks
 - Changed todo tool result rendering so that collapsed phases truncate from the beginning, showing the latest/active tasks and displaying the "more todos" summary at the top.
 - Expanded `tools.format` to support additional in-band tool-call syntaxes, including `anthropic`, `deepseek`, `harmony`, `pi`, and `qwen3`
 - Changed the 13 tools that documented hand-written `<examples>` blocks (`eval`, `browser`, `todo`, `irc`, `ssh`, `ast_edit`, `ast_grep`, `debug`, `find`, `inspect_image`, `ask`, plus the `patch`/`apply_patch` edit modes) to define examples as typed `examples` data on the tool (`ToolExample<z.input<typeof schema>>`); the AI layer now renders them in the model's native tool-call syntax and the markdown `<examples>` blocks were removed.
 - Changed the experimental owned tool-calling prompt from a GLM-only toggle to syntax-specific grammar prompts and result formats. `PI_OWNED_TOOLS=1` still forces GLM; `PI_OWNED_TOOLS=<syntax>` forces that syntax.
 - Changed the large-paste menu to offer attachment XML blocks (`<attachment>`), local-file attachments, or inline paste as explicit actions.
+- Changed the system-prompt tool inventory: moved the `# Inventory` block to the bottom of the TOOLS section, and it now renders a compact tool-name list only when native tool calling is active and tool descriptions are not repeated; otherwise it emits full `# Tool: <name>` sections.
 
 ### Fixed
 
 - Fixed Auto-Promote Context being pre-empted by compaction: the pre-prompt context check ran compaction directly, so snapcompact (or any strategy) fired before promotion ever got a chance. It now tries promotion to a larger-context model first — mirroring the post-turn threshold path — and only compacts when no larger-context target is available. Snapcompact (auto and manual) also falls back to a context-full LLM summary when its frame archive plus kept history would still overflow the model's usable window, instead of leaving the session over the limit.
+- Fixed `eval` JS cells intermittently failing after ~15s with exit code 1 under load (e.g. `bun test --parallel`, where each file runs in a worker subprocess and the eval worker is nested). The host swallowed asynchronous worker spawn/load/crash failures — `new Worker` reports module-load errors via an async `error` event, not a synchronous throw, so the spawn `try/catch` (and its inline-worker fallback) never fired, and no `error`/`messageerror` listener was wired — leaving a dead worker indistinguishable from a slow one and blocking the full worker-init timeout. The init handshake now rejects immediately on a worker `error`/`messageerror` event and falls back to the inline worker, and the `ready` listener is attached synchronously after `new Worker` (Bun does not buffer messages posted before a listener exists) so a fast worker's `ready` can no longer be dropped.
 
 ## [15.13.1] - 2026-06-15
 

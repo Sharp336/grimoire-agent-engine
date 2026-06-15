@@ -138,7 +138,7 @@ async function readConcept(url: InternalUrl, root: string, relativePath: string)
 	}
 
 	const resolvedPath = path.resolve(filePath);
-	ensureWithinRoot(resolvedPath, realRoot);
+	ensureWithinRoot(resolvedPath, path.resolve(root));
 
 	try {
 		const realTarget = await fs.realpath(resolvedPath);

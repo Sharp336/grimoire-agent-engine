@@ -149,6 +149,24 @@ describe("okf/bundle.writeConcept + loadSummaries", () => {
 			await rm(outside, { recursive: true, force: true });
 		}
 	});
+
+	it("does not create nested parents through symlinked category directories", async () => {
+		const outside = await fs.mkdtemp(path.join(path.dirname(tmpDir), ".okf-outside-"));
+		try {
+			await fs.symlink(outside, path.join(tmpDir, "linked"), process.platform === "win32" ? "junction" : "dir");
+		} catch {
+			await rm(outside, { recursive: true, force: true });
+			return;
+		}
+		try {
+			await expect(
+				writeConcept(tmpDir, "linked/sub/topic", "---\ntype: Reference\ndescription: topic\n---\n"),
+			).rejects.toThrow("Path escapes the OKF bundle root");
+			await expect(fs.stat(path.join(outside, "sub"))).rejects.toThrow();
+		} finally {
+			await rm(outside, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("okf/bundle.deleteConcept", () => {
