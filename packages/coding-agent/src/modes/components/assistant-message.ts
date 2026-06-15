@@ -4,7 +4,7 @@ import type { AssistantThinkingRenderer } from "../../extensibility/extensions/t
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { resolveAbortLabel, shouldRenderAbortReason } from "../../session/messages";
 import { getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
-import { getVisibleThinkingText, hasVisibleThinking } from "../../utils/thinking-display";
+import { canonicalizeMessage } from "../../utils/thinking-display";
 
 /**
  * Max lines of a turn-ending provider error rendered inline in the transcript.
@@ -14,6 +14,15 @@ import { getVisibleThinkingText, hasVisibleThinking } from "../../utils/thinking
  * the persisted session.
  */
 const MAX_TRANSCRIPT_ERROR_LINES = 8;
+
+/**
+ * Frames for the streaming "thinking" pulse rendered in place of a hidden
+ * thinking block while the model is still producing it. A single fixed-width
+ * glyph that rises ▁▃▄▃ so the indicator animates without shifting the line.
+ * Advanced every {@link THINKING_DOTS_FRAME_MS}.
+ */
+const THINKING_DOTS_FRAMES = ["▁", "▃", "▄", "▃"] as const;
+const THINKING_DOTS_FRAME_MS = 320;
 
 /**
  * Component that renders a complete assistant message
@@ -50,6 +59,11 @@ export class AssistantMessageComponent extends Container {
 	#fastPathItems:
 		| Array<{ md: Markdown; contentIndex: number; blockType: "text" | "thinking"; lastText: string }>
 		| undefined;
+	/** Live "thinking" pulse shown in place of a hidden thinking block while it
+	 *  streams; undefined when not animating. Driven by {@link #thinkingDotsTimer}. */
+	#thinkingDots: Text | undefined;
+	#thinkingDotsTimer: NodeJS.Timeout | undefined;
+	#thinkingDotsFrame = 0;
 
 	constructor(
 		message?: AssistantMessage,
@@ -87,6 +101,60 @@ export class AssistantMessageComponent extends Container {
 		this.hideThinkingBlock = hide;
 	}
 
+	override dispose(): void {
+		this.#stopThinkingAnimation();
+		super.dispose();
+	}
+
+	/**
+	 * Whether to render the animated "thinking" pulse in place of the suppressed
+	 * reasoning: only while this block is still streaming (not yet finalized — the
+	 * in-flight message always carries `stopReason: "stop"`, so finalization is the
+	 * only reliable live signal), thinking is hidden, no tool call has started, and
+	 * the active tail block is a thinking block (the model is reasoning right now).
+	 * Once text starts, a tool call streams, or the block is sealed, the pulse ends.
+	 */
+	#shouldAnimateThinking(message: AssistantMessage): boolean {
+		if (!this.hideThinkingBlock || this.#transcriptBlockFinalized) return false;
+		let tail: "text" | "thinking" | undefined;
+		for (const content of message.content) {
+			if (content.type === "toolCall") return false;
+			if (content.type === "text" && canonicalizeMessage(content.text)) tail = "text";
+			else if (content.type === "thinking" && canonicalizeMessage(content.thinking)) tail = "thinking";
+		}
+		return tail === "thinking";
+	}
+
+	#thinkingDotsLabel(): string {
+		const glyph = THINKING_DOTS_FRAMES[this.#thinkingDotsFrame % THINKING_DOTS_FRAMES.length] ?? "…";
+		return theme.fg("thinkingText", glyph);
+	}
+
+	#startThinkingAnimation(): void {
+		if (this.#thinkingDotsTimer) return;
+		this.#thinkingDotsTimer = setInterval(() => this.#advanceThinkingDots(), THINKING_DOTS_FRAME_MS);
+		this.#thinkingDotsTimer.unref?.();
+	}
+
+	#advanceThinkingDots(): void {
+		if (!this.#thinkingDots) {
+			this.#stopThinkingAnimation();
+			return;
+		}
+		this.#thinkingDotsFrame = (this.#thinkingDotsFrame + 1) % THINKING_DOTS_FRAMES.length;
+		if (this.#thinkingDots.setText(this.#thinkingDotsLabel())) {
+			this.onImageUpdate?.();
+		}
+	}
+
+	#stopThinkingAnimation(): void {
+		if (this.#thinkingDotsTimer) {
+			clearInterval(this.#thinkingDotsTimer);
+			this.#thinkingDotsTimer = undefined;
+		}
+		this.#thinkingDotsFrame = 0;
+	}
+
 	/**
 	 * Toggle suppression of the inline `Error: …` line while the same error is
 	 * pinned in the banner above the editor. Re-renders so the change is visible.
@@ -109,6 +177,14 @@ export class AssistantMessageComponent extends Container {
 
 	markTranscriptBlockFinalized(): void {
 		this.#transcriptBlockFinalized = true;
+		this.#stopThinkingAnimation();
+		// If the live pulse was on screen when the block sealed, drop the fast path
+		// and rebuild so the placeholder is removed — finalized blocks never animate.
+		if (this.#thinkingDots) {
+			this.#fastPathKey = undefined;
+			this.#fastPathItems = undefined;
+			if (this.#lastMessage) this.updateContent(this.#lastMessage, { transient: this.#lastUpdateTransient });
+		}
 	}
 
 	/**
@@ -232,9 +308,10 @@ export class AssistantMessageComponent extends Container {
 		const parts: string[] = [`htb:${this.hideThinkingBlock ? 1 : 0}`];
 		for (const content of message.content) {
 			if (content.type === "text") {
-				parts.push(content.text.trim() ? "T1" : "T0");
+				parts.push(canonicalizeMessage(content.text) ? "T1" : "T0");
 			} else if (content.type === "thinking") {
-				if (!hasVisibleThinking(content)) parts.push("K0");
+				const canon = canonicalizeMessage(content.thinking);
+				if (!canon) parts.push("K0");
 				else if (this.hideThinkingBlock) parts.push("KH");
 				else parts.push("KV");
 			} else {
@@ -267,7 +344,8 @@ export class AssistantMessageComponent extends Container {
 			for (const item of this.#fastPathItems) {
 				if (item.blockType === "thinking") {
 					const content = message.content[item.contentIndex];
-					if (content?.type === "thinking" && getVisibleThinkingText(content) !== item.lastText) return false;
+					if (content?.type === "thinking" && canonicalizeMessage(content.thinking) !== item.lastText)
+						return false;
 				}
 			}
 		}
@@ -291,13 +369,17 @@ export class AssistantMessageComponent extends Container {
 		for (const item of this.#fastPathItems) {
 			item.md.transientRenderCache = transient;
 			const content = message.content[item.contentIndex];
+			if (!content) {
+				this.#fastPathKey = undefined;
+				this.#fastPathItems = undefined;
+				return false;
+			}
 			let newText: string;
-			if (item.blockType === "text" && content?.type === "text") {
+			if (item.blockType === "text" && content.type === "text") {
 				newText = content.text.trim();
-			} else if (item.blockType === "thinking" && content?.type === "thinking") {
-				newText = getVisibleThinkingText(content);
+			} else if (item.blockType === "thinking" && content.type === "thinking") {
+				newText = canonicalizeMessage(content.thinking);
 			} else {
-				// Block at this index is gone or changed type (index shift) — fail closed.
 				this.#fastPathKey = undefined;
 				this.#fastPathItems = undefined;
 				return false;
@@ -320,6 +402,7 @@ export class AssistantMessageComponent extends Container {
 
 		// Clear content container
 		this.#contentContainer.clear();
+		this.#thinkingDots = undefined;
 
 		// Determine if we should capture Markdown instances for next fast path
 		const shouldCapture = this.#canFastPath(message);
@@ -329,24 +412,23 @@ export class AssistantMessageComponent extends Container {
 
 		const hasVisibleContent = message.content.some(
 			c =>
-				(c.type === "text" && c.text.trim()) ||
-				(!this.hideThinkingBlock && c.type === "thinking" && hasVisibleThinking(c)),
+				(c.type === "text" && canonicalizeMessage(c.text)) ||
+				(!this.hideThinkingBlock && c.type === "thinking" && canonicalizeMessage(c.thinking)),
 		);
 
 		// Render content in order
 		let thinkingIndex = 0;
 		for (let i = 0; i < message.content.length; i++) {
 			const content = message.content[i];
-			if (content.type === "text" && content.text.trim()) {
-				// Assistant text messages with no background - trim the text
+			if (content.type === "text" && canonicalizeMessage(content.text)) {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
 				const md = new Markdown(trimmed, 1, 0, getMarkdownTheme());
 				md.transientRenderCache = this.#lastUpdateTransient;
 				this.#contentContainer.addChild(md);
 				captureItems?.push({ md, contentIndex: i, blockType: "text", lastText: trimmed });
-			} else if (content.type === "thinking" && hasVisibleThinking(content)) {
-				const thinkingText = getVisibleThinkingText(content);
+			} else if (content.type === "thinking" && canonicalizeMessage(content.thinking)) {
+				const thinkingText = canonicalizeMessage(content.thinking);
 				if (this.hideThinkingBlock) {
 					thinkingIndex += 1;
 					continue;
@@ -355,7 +437,11 @@ export class AssistantMessageComponent extends Container {
 				// This avoids a superfluous blank line before separately-rendered tool execution blocks.
 				const hasVisibleContentAfter = message.content
 					.slice(i + 1)
-					.some(c => (c.type === "text" && c.text.trim()) || (c.type === "thinking" && hasVisibleThinking(c)));
+					.some(
+						c =>
+							(c.type === "text" && canonicalizeMessage(c.text)) ||
+							(c.type === "thinking" && canonicalizeMessage(c.thinking)),
+					);
 
 				// Thinking traces in thinkingText color, italic
 				const md = new Markdown(thinkingText, 1, 0, getMarkdownTheme(), {
@@ -371,6 +457,15 @@ export class AssistantMessageComponent extends Container {
 					this.#contentContainer.addChild(new Spacer(1));
 				}
 			}
+		}
+
+		if (this.#shouldAnimateThinking(message)) {
+			if (hasVisibleContent) this.#contentContainer.addChild(new Spacer(1));
+			this.#thinkingDots = new Text(this.#thinkingDotsLabel(), 1, 0);
+			this.#contentContainer.addChild(this.#thinkingDots);
+			this.#startThinkingAnimation();
+		} else {
+			this.#stopThinkingAnimation();
 		}
 
 		this.#renderToolImages();

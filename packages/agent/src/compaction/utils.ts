@@ -2,7 +2,8 @@
  * Shared utilities for compaction and branch summarization.
  */
 
-import type { Message } from "@oh-my-pi/pi-ai";
+import type { Message, ToolCall } from "@oh-my-pi/pi-ai";
+import { type Dialect, getDialectDefinition } from "@oh-my-pi/pi-ai/dialect";
 import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
 import fileOperationsTemplate from "./prompts/file-operations.md" with { type: "text" };
@@ -188,9 +189,7 @@ function truncateForSummary(text: string, maxChars: number): string {
  * This prevents the model from treating it as a conversation to continue.
  * Call convertToLlm() first to handle custom message types.
  */
-export function serializeConversation(messages: Message[]): string {
-	const parts: string[] = [];
-
+export function serializeConversation(messages: Message[], dialect?: Dialect): string {
 	// Tool results flagged contextually useless (and their paired calls) are
 	// dropped from the serialized text: the source region is discarded after
 	// summarization anyway, so excluding them costs nothing and keeps garbage
@@ -201,7 +200,33 @@ export function serializeConversation(messages: Message[]): string {
 			uselessCallIds.add(msg.toolCallId);
 		}
 	}
+	if (dialect) {
+		const processed: Message[] = [];
+		for (const msg of messages) {
+			if (msg.role === "assistant") {
+				const content = msg.content.filter(block => block.type !== "toolCall" || !uselessCallIds.has(block.id));
+				if (content.length > 0) processed.push(content.length === msg.content.length ? msg : { ...msg, content });
+				continue;
+			}
+			if (msg.role === "toolResult") {
+				if (uselessCallIds.has(msg.toolCallId)) continue;
+				const text = msg.content
+					.filter((c): c is { type: "text"; text: string } => c.type === "text")
+					.map(c => c.text)
+					.join("");
+				if (!text) continue;
+				processed.push({
+					...msg,
+					content: [{ type: "text", text: truncateForSummary(text, TOOL_RESULT_MAX_CHARS) }],
+				});
+				continue;
+			}
+			processed.push(msg);
+		}
+		return getDialectDefinition(dialect).renderTranscript(processed);
+	}
 
+	const parts: string[] = [];
 	for (const msg of messages) {
 		if (msg.role === "user") {
 			const content =
@@ -215,7 +240,7 @@ export function serializeConversation(messages: Message[]): string {
 		} else if (msg.role === "assistant") {
 			const textParts: string[] = [];
 			const thinkingParts: string[] = [];
-			const toolCalls: string[] = [];
+			const toolCalls: ToolCall[] = [];
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
@@ -224,22 +249,18 @@ export function serializeConversation(messages: Message[]): string {
 					thinkingParts.push(block.thinking);
 				} else if (block.type === "toolCall") {
 					if (uselessCallIds.has(block.id)) continue;
-					const args = block.arguments as Record<string, unknown>;
-					const argsStr = Object.entries(args)
-						.map(([k, v]) => `${k}=${JSON.stringify(v)}`)
-						.join(", ");
-					toolCalls.push(`${block.name}(${argsStr})`);
+					toolCalls.push(block);
 				}
 			}
 
 			if (thinkingParts.length > 0) {
-				parts.push(`[Assistant thinking]: ${thinkingParts.join("\n")}`);
+				parts.push(`[Think]: ${thinkingParts.join("\n")}`);
 			}
 			if (textParts.length > 0) {
 				parts.push(`[Assistant]: ${textParts.join("\n")}`);
 			}
 			if (toolCalls.length > 0) {
-				parts.push(`[Assistant tool calls]: ${toolCalls.join("; ")}`);
+				parts.push(`[Tool Call]: ${renderToolCalls(toolCalls)}`);
 			}
 		} else if (msg.role === "toolResult") {
 			if (uselessCallIds.has(msg.toolCallId)) continue;
@@ -248,12 +269,28 @@ export function serializeConversation(messages: Message[]): string {
 				.map(c => c.text)
 				.join("");
 			if (content) {
-				parts.push(`[Tool result]: ${truncateForSummary(content, TOOL_RESULT_MAX_CHARS)}`);
+				const text = truncateForSummary(content, TOOL_RESULT_MAX_CHARS);
+				parts.push(`[Tool Result]: ${text}`);
 			}
 		}
 	}
 
 	return parts.join("\n\n");
+}
+
+/**
+ * Render an assistant turn's tool calls as a compact `name(args)` list for the
+ * legacy serializer.
+ */
+function renderToolCalls(calls: ToolCall[]): string {
+	return calls
+		.map(call => {
+			const argsStr = Object.entries(call.arguments as Record<string, unknown>)
+				.map(([k, v]) => `${k}=${JSON.stringify(v)}`)
+				.join(", ");
+			return `${call.name}(${argsStr})`;
+		})
+		.join("; ");
 }
 
 // ============================================================================

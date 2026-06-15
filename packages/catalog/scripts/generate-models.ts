@@ -290,6 +290,36 @@ function dropUnusableZaiContextTierIds(models: readonly ModelSpec[]): ModelSpec[
 	return models.filter(model => !(model.provider === "zai" && model.id.endsWith("[1m]")));
 }
 
+/**
+ * Fireworks discovery and prior snapshots can surface internal control-plane
+ * resource ids (`accounts/fireworks/{models,routers}/...`) alongside the public
+ * request ids (`kimi-k2.7-code`, `deepseek-v4-flash`, ...). The wire ids are an
+ * implementation detail the request path reconstructs from the public id, so
+ * drop them from the bundle outright.
+ */
+function dropFireworksWireIds(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.filter(
+		model =>
+			!(
+				(model.provider === "fireworks" || model.provider === "firepass") &&
+				model.id.startsWith("accounts/fireworks/")
+			),
+	);
+}
+
+/**
+ * Xiaomi's `/v1/models` can advertise ASR/TTS ids alongside chat/completions
+ * models. Runtime discovery filters them, but previous bundled snapshots can
+ * still resurrect those stale ids via the fallback merge. Drop them here so the
+ * committed catalog matches the runtime surface.
+ */
+function dropXiaomiAudioOnlyIds(models: readonly ModelSpec[]): ModelSpec[] {
+	return models.filter(model => {
+		const isXiaomiProvider = model.provider === "xiaomi" || model.provider.startsWith("xiaomi-token-plan-");
+		return !isXiaomiProvider || (!model.id.includes("-tts") && !model.id.includes("-asr"));
+	});
+}
+
 const ANTIGRAVITY_ENDPOINT = "https://daily-cloudcode-pa.sandbox.googleapis.com";
 
 async function getOAuthAccessFromStorage(provider: OAuthProvider): Promise<OAuthAccess | null> {
@@ -477,7 +507,9 @@ async function generateModels() {
 	allModels = applyCodexPricingFallback(allModels);
 	allModels = applyFireworksKimiMaxTokensCap(allModels);
 	allModels = applyFireworksDeepSeekReasoningShape(allModels);
+	allModels = dropFireworksWireIds(allModels);
 	allModels = dropUnusableZaiContextTierIds(allModels);
+	allModels = dropXiaomiAudioOnlyIds(allModels);
 	// Normalize display names: gateway author prefixes ("OpenAI: …"), alias
 	// markers ("(latest)"), provider attribution ("(Antigravity)"), and
 	// price/promo tags are model-extrinsic — strip them from the bundle.

@@ -140,6 +140,10 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	// memory should opt in explicitly through their own settings layer.
 	"memory.backend",
 	"memories.enabled",
+	// Advisor is interactive-session assistance. Protocol hosts opt in explicitly
+	// instead of inheriting a user's globally-enabled local preference.
+	"advisor.enabled",
+	"advisor.subagents",
 ];
 
 const RPC_BACKGROUND_DEFAULTED_SETTING_PATHS: SettingPath[] = [
@@ -274,7 +278,19 @@ export async function submitInteractiveInput(
 
 	try {
 		using _keepalive = new EventLoopKeepalive();
-		const streamingBehavior = session.isStreaming ? ("followUp" as const) : undefined;
+		// Honor the submission's queue intent, defaulting to followUp. Reading
+		// `session.isStreaming` to decide queue-vs-fresh is NOT atomic with the
+		// eventual `agent.prompt()` call inside `session.prompt()`: a background turn
+		// (queued-message drain, idle compaction, goal/loop continuation timer) can
+		// flip the agent busy in the gap, and a bare prompt() would then throw
+		// AgentBusyError straight to an error toast even though the UI shows no
+		// "Working…". Passing a behavior unconditionally is a no-op when the session
+		// is genuinely idle (a fresh turn runs and the option is ignored) and queues
+		// the message instead of erroring when a turn is already underway. Normal
+		// user Enter carries "steer" (interrupt, matching the streaming-branch Enter);
+		// background/continuation submits omit it and fall back to "followUp". The
+		// synthetic branch below opts out by design.
+		const streamingBehavior = input.streamingBehavior ?? ("followUp" as const);
 		// Continue shortcuts submit an already-started synthetic developer prompt with
 		// no optimistic user message.
 		if (!input.started && !mode.markPendingSubmissionStarted(input)) {
@@ -287,9 +303,7 @@ export async function submitInteractiveInput(
 				display: input.display ?? false,
 				attribution: "agent" as const,
 			};
-			await (streamingBehavior
-				? session.promptCustomMessage(message, { streamingBehavior })
-				: session.promptCustomMessage(message));
+			await session.promptCustomMessage(message, { streamingBehavior });
 		} else if (input.synthetic) {
 			// Synthetic continue shortcuts are hidden developer prompts. The streaming
 			// queue (#queueUserMessage) only carries user-attributed messages, so we do
@@ -297,9 +311,13 @@ export async function submitInteractiveInput(
 			// developer directive to a visible user message. A synthetic submit while
 			// streaming keeps its prior behavior (rejected as busy) rather than changing
 			// its role.
-			await session.prompt(input.text, { synthetic: true, expandPromptTemplates: false });
+			await session.prompt(input.text, {
+				synthetic: true,
+				expandPromptTemplates: false,
+				userInitiated: input.userInitiated,
+			});
 		} else {
-			await session.prompt(input.text, { images: input.images, ...(streamingBehavior && { streamingBehavior }) });
+			await session.prompt(input.text, { images: input.images, streamingBehavior });
 		}
 	} catch (error: unknown) {
 		const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
