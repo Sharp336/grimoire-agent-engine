@@ -1829,6 +1829,55 @@ function decodeMcpArgsMap(args?: Record<string, Uint8Array>): Record<string, unk
 	}
 	return decoded;
 }
+/**
+ * Accumulates Cursor `args_text_delta` frames into the running tool-arg JSON buffer.
+ *
+ * `PartialToolCallUpdate.args_text_delta` is documented as "Aggregated args text so
+ * far", i.e. each frame MAY carry the full cumulative snapshot rather than an
+ * increment. Blindly concatenating cumulative snapshots corrupts the JSON once a
+ * call spans more than one frame (large args), which then parses to a truncated
+ * prefix that silently drops trailing parameters. Detect cumulative snapshots
+ * without treating prefix-shaped incremental fragments as duplicates:
+ *   - incoming extends prev -> cumulative snapshot, supersede
+ *   - incoming equals prev  -> duplicate snapshot, keep prev
+ *   - otherwise            -> true incremental fragment, append
+ */
+export function accumulateArgsText(prev: string, incoming: string): string {
+	if (!incoming) return prev;
+	if (!prev) return incoming;
+	if (incoming === prev) return prev;
+	if (incoming.startsWith(prev)) return incoming;
+	return prev + incoming;
+}
+
+/**
+ * Merges args decoded from `tool_call_completed` with args recovered from the
+ * streamed `args_text_delta` text. The completion frame is authoritative for
+ * scalars, but Cursor omits large parameters from the structured map (and
+ * `decodeMcpArgValue` falls back to raw text when a `Value` fails to parse), so a
+ * blind overwrite drops or downgrades big params like `task`'s `tasks` array —
+ * surfacing as a Zod "expected array, received undefined". Use the streamed parse
+ * as the base and overlay decoded values, but never let the completion frame
+ * remove a key or downgrade a structured value to a string.
+ */
+export function mergeCompletedMcpArgs(
+	streamed: Record<string, unknown>,
+	decoded: Record<string, unknown> | undefined,
+): Record<string, unknown> {
+	if (!decoded || Object.keys(decoded).length === 0) return streamed;
+	const merged: Record<string, unknown> = { ...streamed };
+	for (const [key, value] of Object.entries(decoded)) {
+		if (value === undefined) continue;
+		// Skip prototype-polluting keys: decoded args are model/provider-controlled, and a
+		// `merged["__proto__"] = …` bracket-assign rewrites the arguments object's prototype.
+		if (key === "__proto__" || key === "constructor" || key === "prototype") continue;
+		const current = merged[key];
+		// Don't downgrade a structured streamed value to a string/primitive fallback.
+		if (current !== null && typeof current === "object" && typeof value !== "object") continue;
+		merged[key] = value;
+	}
+	return merged;
+}
 
 function decodeMcpCall(args: {
 	name: string;
@@ -1940,7 +1989,7 @@ function buildMcpErrorResult(error: string) {
 	});
 }
 
-function processInteractionUpdate(
+export function processInteractionUpdate(
 	update: any,
 	output: AssistantMessage,
 	stream: AssistantMessageEventStream,
@@ -2035,19 +2084,22 @@ function processInteractionUpdate(
 	} else if (updateCase === "toolCallDelta" || updateCase === "partialToolCall") {
 		if (state.currentToolCall?.kind === "mcp") {
 			const delta = update.message.value.argsTextDelta || "";
-			state.currentToolCall.partialJson = `${state.currentToolCall.partialJson ?? ""}${delta}`;
+			const prevPartialJson = state.currentToolCall.partialJson ?? "";
+			state.currentToolCall.partialJson = accumulateArgsText(prevPartialJson, delta);
 			state.currentToolCall.arguments = parseStreamingJson(state.currentToolCall.partialJson ?? "");
+			const emittedDelta = state.currentToolCall.partialJson.startsWith(prevPartialJson)
+				? state.currentToolCall.partialJson.slice(prevPartialJson.length)
+				: delta;
 			const idx = output.content.indexOf(state.currentToolCall);
-			stream.push({ type: "toolcall_delta", contentIndex: idx, delta, partial: output });
+			stream.push({ type: "toolcall_delta", contentIndex: idx, delta: emittedDelta, partial: output });
 		}
 	} else if (updateCase === "toolCallCompleted") {
 		if (state.currentToolCall) {
 			const toolCall = update.message.value.toolCall;
 			if (state.currentToolCall.kind === "mcp") {
+				const streamed = parseStreamingJson<Record<string, unknown>>(state.currentToolCall.partialJson ?? "");
 				const decodedArgs = decodeMcpArgsMap(toolCall?.mcpToolCall?.args?.args);
-				if (decodedArgs) {
-					state.currentToolCall.arguments = decodedArgs;
-				}
+				state.currentToolCall.arguments = mergeCompletedMcpArgs(streamed, decodedArgs);
 			} else if (state.currentToolCall.kind === "todo" && toolCall) {
 				const todoArgs = buildTodoArgs(toolCall);
 				if (todoArgs) {

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Cursor (`cursor-agent` API) dropping the `task` tool's `tasks` array on multi-subagent dispatches when the `tool_call_completed` frame's structured `McpArgs` map omits oversized parameters. Streamed args are now merged with the decoded completion map without downgrading structured values to their string fallback, and cumulative `args_text_delta` snapshots emit append-only deltas instead of being concatenated.
+
 ## [15.13.1] - 2026-06-15
 
 ### Fixed
