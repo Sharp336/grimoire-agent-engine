@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Refreshed the hidden `workflowz` orchestration notice with two patterns: an "Advisor consult" (consult the `advisor` tool at a hard fork before committing) and "Provenance-rich context" (brief each subagent on which files/commits and what "done" means via a `local://` brief).
+
 ## [15.13.2] - 2026-06-15
 
 ### Added

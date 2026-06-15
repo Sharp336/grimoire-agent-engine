@@ -57,6 +57,8 @@ Compose the harness the task calls for:
 - **Completeness critic** — a final agent that asks "what's missing — modality not run, claim unverified, file unread?"; its answer is the next round.
 - **Budget/count loops** — `while len(bugs) < 10:` to hit a target, or `while budget.total and budget.remaining() > 50_000:` to scale depth to the turn budget; `log()` each round.
 - **No silent caps** — if you bound coverage (top-N, no-retry, sampling), `log()` what you dropped; silent truncation reads as "covered everything" when it didn't.
+- **Advisor consult** — at a hard fork or when stuck, if the `advisor` tool is enabled, consult it for a second opinion from a more-capable paired model before committing to a direction; cheaper than a full judge panel for a single decision.
+- **Provenance-rich context** — hand each subagent which files/commits to touch, why, and what "done" looks like via a `local://` brief; never assume a subagent shares your context.
 
 Scale to the ask: "find any bugs" → a few finders, single-vote verify. "thoroughly audit / be comprehensive" → larger finder pool, 3–5-vote adversarial pass, a synthesis stage.
 </patterns>
