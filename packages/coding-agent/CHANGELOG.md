@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `/guided-goal` now investigates the repository with read-only tools (`read`/`search`/`find`) during the interview, so its questions and the drafted objective are grounded in the actual code ([#2677](https://github.com/can1357/oh-my-pi/issues/2677)).
+
 ## [15.13.3] - 2026-06-15
 
 ### Added
