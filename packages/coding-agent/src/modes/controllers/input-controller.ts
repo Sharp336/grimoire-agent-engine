@@ -339,6 +339,9 @@ export class InputController {
 		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copyLine")) {
 			this.ctx.editor.setCustomKeyHandler(key, () => this.handleCopyCurrentLine());
 		}
+		for (const key of this.ctx.keybindings.getKeys("app.clipboard.copy")) {
+			this.ctx.editor.setCustomKeyHandler(key, () => this.ctx.showCopySelector());
+		}
 		const hubKeys = new Set([
 			...this.ctx.keybindings.getKeys("app.agents.hub"),
 			...this.ctx.keybindings.getKeys("app.session.observe"),

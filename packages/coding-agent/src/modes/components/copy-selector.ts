@@ -1,4 +1,13 @@
-import { type Component, matchesKey, padding, Text, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import {
+	type Component,
+	matchesKey,
+	padding,
+	parseSgrMouse,
+	type SgrMouseEvent,
+	Text,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
 import { replaceTabs } from "../../tools/render-utils";
 import { highlightCode, theme } from "../theme/theme";
 import type { CopyTarget } from "../utils/copy-targets";
@@ -54,6 +63,9 @@ export class CopySelectorComponent implements Component {
 	#roots: CopyTarget[];
 	#cursorId: string;
 	#treeRows = MIN_TREE_ROWS;
+	// Per-render hit map: 0-based screen row -> flattened node index. Rebuilt by
+	// every #renderTree call so a click row resolves to the node painted there.
+	#rowToFlatIndex = new Map<number, number>();
 	// Reused across renders to wrap preview content to the pane width.
 	#previewText = new Text("", 0, 0);
 
@@ -81,6 +93,11 @@ export class CopySelectorComponent implements Component {
 	}
 
 	handleInput(keyData: string): void {
+		// SGR mouse reports arrive while the fullscreen overlay holds the alt
+		// screen. Parse failures fall through to keyboard handling (plan-review
+		// pattern), so a malformed partial never gets dropped silently.
+		if (keyData.startsWith("\x1b[<") && this.#handleMouse(keyData)) return;
+
 		if (matchesSelectCancel(keyData)) {
 			this.callbacks.onCancel();
 			return;
@@ -107,10 +124,45 @@ export class CopySelectorComponent implements Component {
 		}
 	}
 
+	/**
+	 * Hit-test an SGR mouse report against the last render. Wheel moves the
+	 * selection one row per notch (clamped, no wrap); a left click on a tree row
+	 * selects that node and copies it when it carries content (the Enter path);
+	 * motion/release and non-left buttons are consumed as no-ops. Returns false
+	 * only when `data` is not an SGR report, so the caller falls back to keys.
+	 */
+	#handleMouse(data: string): boolean {
+		const event: SgrMouseEvent | null = parseSgrMouse(data);
+		if (!event) return false;
+		const flat = this.#flatten();
+		if (flat.length === 0) return true;
+		if (event.wheel !== null) {
+			const idx = Math.max(
+				0,
+				flat.findIndex(n => n.target.id === this.#cursorId),
+			);
+			const next = Math.min(flat.length - 1, Math.max(0, idx + event.wheel));
+			this.#cursorId = flat[next]!.target.id;
+			return true;
+		}
+		if (event.release || event.motion) return true;
+		if (!event.leftClick) return true;
+		const flatIdx = this.#rowToFlatIndex.get(event.row);
+		if (flatIdx === undefined) return true;
+		const node = flat[flatIdx];
+		if (!node) return true;
+		this.#cursorId = node.target.id;
+		if (node.target.content !== undefined) this.callbacks.onPick(node.target);
+		return true;
+	}
+
 	#renderTree(width: number, flat: FlatNode[], cursorIdx: number, rows: number): string[] {
 		const inner = Math.max(0, width - 4);
 		const start = Math.max(0, Math.min(cursorIdx - Math.floor(rows / 2), Math.max(0, flat.length - rows)));
 		const out: string[] = [];
+		// Rebuild the click map for this frame. Tree rows paint starting at screen
+		// row 1 (row 0 is the top border), so row r maps to screen row 1 + r.
+		this.#rowToFlatIndex.clear();
 		for (let r = 0; r < rows; r++) {
 			const i = start + r;
 			const node = flat[i];
@@ -118,6 +170,7 @@ export class CopySelectorComponent implements Component {
 				out.push(row("", width));
 				continue;
 			}
+			this.#rowToFlatIndex.set(1 + r, i);
 			const target = node.target;
 			const isSelected = i === cursorIdx;
 

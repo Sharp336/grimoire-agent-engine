@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Mouse support in the `/copy` picker: it now opens fullscreen (alternate screen) so the terminal reports mouse, letting you left-click a block to copy it and scroll the wheel to move the selection. Keyboard navigation is unchanged. Added an `app.clipboard.copy` keybinding (default `Alt+Shift+Y`) to open the picker.
+
 ## [16.0.1] - 2026-06-15
 
 ### Breaking Changes

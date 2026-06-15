@@ -662,6 +662,10 @@ export class SelectorController {
 			width: "100%",
 			maxHeight: "100%",
 			margin: 0,
+			// Fullscreen mounts the picker on the alternate screen, which is what
+			// enables SGR mouse tracking (tui #wantsAltScreen) so block rows can be
+			// clicked. Without this flag no mouse reports reach the component.
+			fullscreen: true,
 		});
 		this.ctx.ui.setFocus(selector);
 		this.ctx.ui.requestRender();

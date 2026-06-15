@@ -132,4 +132,64 @@ describe("CopySelectorComponent", () => {
 
 		expect(onCancel).toHaveBeenCalledTimes(1);
 	});
+
+	// Mouse: the fullscreen overlay enables SGR tracking. Wire row is 1-based and
+	// parseSgrMouse converts to 0-based; the top border is screen row 0, so the
+	// first tree row (msg:1) is screen row 1 == wire row 2.
+	it("copies the block under a left click", () => {
+		const onPick = vi.fn();
+		const component = new CopySelectorComponent(makeRoots(), { onPick, onCancel: vi.fn() });
+		render(component); // builds the per-row hit map
+		component.handleInput("\x1b[<0;4;3M"); // wire row 3 -> screen row 2 -> Block 1
+		expect(onPick).toHaveBeenCalledTimes(1);
+		expect(onPick.mock.calls[0]![0].content).toBe("BLOCK0");
+	});
+
+	it("moves the selection with the wheel and clamps at the top", () => {
+		const onPick = vi.fn();
+		const component = new CopySelectorComponent(makeRoots(), { onPick, onCancel: vi.fn() });
+		render(component);
+		component.handleInput("\x1b[<65;4;2M"); // wheel down -> Block 1
+		expect(render(component)).toContain("alpha()");
+		component.handleInput("\x1b[<64;4;2M"); // wheel up -> msg:1
+		component.handleInput("\x1b[<64;4;2M"); // already at top, clamps (no wrap)
+		component.handleInput(ENTER);
+		expect(onPick.mock.calls.at(-1)![0].content).toBe("FULL_MESSAGE");
+	});
+
+	it("ignores a click outside the tree rows", () => {
+		const onPick = vi.fn();
+		const component = new CopySelectorComponent(makeRoots(), { onPick, onCancel: vi.fn() });
+		render(component);
+		component.handleInput("\x1b[<0;4;1M"); // wire row 1 -> screen row 0 (top border)
+		component.handleInput("\x1b[<0;4;39M"); // far below the tree
+		expect(onPick).not.toHaveBeenCalled();
+	});
+
+	it("does not copy a node that carries no content", () => {
+		const onPick = vi.fn();
+		const roots: CopyTarget[] = [
+			{
+				id: "group",
+				label: "Group",
+				preview: "",
+				children: [{ id: "leaf", label: "Leaf", preview: "x", content: "LEAF", copyMessage: "c" }],
+			},
+		];
+		const component = new CopySelectorComponent(roots, { onPick, onCancel: vi.fn() });
+		render(component);
+		component.handleInput("\x1b[<0;4;2M"); // screen row 1 -> the contentless group
+		expect(onPick).not.toHaveBeenCalled();
+		component.handleInput("\x1b[<0;4;3M"); // screen row 2 -> the leaf
+		expect(onPick).toHaveBeenCalledTimes(1);
+		expect(onPick.mock.calls[0]![0].content).toBe("LEAF");
+	});
+
+	it("falls through on a non-SGR-mouse sequence without copying", () => {
+		const onPick = vi.fn();
+		const component = new CopySelectorComponent(makeRoots(), { onPick, onCancel: vi.fn() });
+		render(component);
+		expect(() => component.handleInput("\x1b[<garbage")).not.toThrow();
+		expect(onPick).not.toHaveBeenCalled();
+	});
 });
