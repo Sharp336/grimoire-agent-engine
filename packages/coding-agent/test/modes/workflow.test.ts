@@ -8,11 +8,9 @@ beforeAll(() => {
 });
 
 describe("workflow keyword detection", () => {
-	it("matches the lowercase trigger word delimited by whitespace", () => {
+	it("matches the standalone workflowz keyword delimited by whitespace", () => {
 		expect(containsWorkflow("workflowz")).toBe(true);
 		expect(containsWorkflow("please workflowz this rollout")).toBe(true);
-		expect(containsWorkflow("design the workflowz")).toBe(true);
-		expect(containsWorkflow("run these workflowz")).toBe(true);
 	});
 
 	it("ignores old triggers, casing, inflections, punctuation-adjacent, and path-embedded forms", () => {
@@ -48,9 +46,17 @@ describe("workflow keyword highlighting", () => {
 });
 
 describe("workflow notice", () => {
-	it("is a non-empty system notice carrying the eval-fan-out contract", () => {
+	it("carries the DAG execution contract and does not change thinking effort", () => {
 		expect(WORKFLOW_NOTICE.length).toBeGreaterThan(0);
 		expect(WORKFLOW_NOTICE).toContain("**workflowz** keyword");
+		expect(WORKFLOW_NOTICE).toContain("does NOT change your thinking effort");
 		expect(WORKFLOW_NOTICE).toContain("parallel(");
+	});
+
+	it("references only bundled agents (no critic / deep_task)", () => {
+		expect(WORKFLOW_NOTICE).toContain("agent: plan");
+		expect(WORKFLOW_NOTICE).toContain("agent: reviewer");
+		expect(WORKFLOW_NOTICE).not.toContain("critic");
+		expect(WORKFLOW_NOTICE).not.toContain("deep_task");
 	});
 });

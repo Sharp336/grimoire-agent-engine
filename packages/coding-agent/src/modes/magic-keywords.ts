@@ -31,7 +31,7 @@ export function highlightMagicKeywords(text: string, resetTo?: string, phase?: n
 /**
  * Cheap test for "does this text contain any magic keyword as standalone prose?".
  * Short-circuits on a substring probe before paying for the markdown-aware
- * prose check, so the common "no keyword in buffer" path is just three
+ * prose check, so the common "no keyword in buffer" path is three
  * `String#indexOf`s. Used by the live editor to gate the shimmer timer.
  */
 export function hasMagicKeyword(text: string): boolean {

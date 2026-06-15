@@ -1341,7 +1341,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "interaction",
 			group: "Magic Keywords",
 			label: "Workflow Keyword",
-			description: "Let standalone workflowz append its hidden eval workflow notice",
+			description:
+				"Let a standalone workflowz keyword enter the delegate-first DAG execution mode (decompose and fan work over subagents as an acyclic graph; scenario contract, evidence-bound QA, reviewer gate)",
 		},
 	},
 

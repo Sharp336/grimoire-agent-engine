@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed the `workflowz` hidden notice into a delegate-first DAG execution contract (certainty-before-code, skill survey, plan-agent gate, delegate-as-a-DAG with `eval` `pipeline`/`parallel`, scenario contract, evidence-bound manual QA, TDD, reviewer gate). It references only bundled agents and does not change thinking effort.
+
 ## [15.13.3] - 2026-06-15
 
 ### Added
