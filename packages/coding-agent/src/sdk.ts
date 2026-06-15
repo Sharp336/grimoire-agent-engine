@@ -101,6 +101,7 @@ import {
 import { MCP_CONNECTING_EVENT_CHANNEL, type McpConnectingEvent } from "./mcp/startup-events";
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import advisorNudgePrompt from "./prompts/system/advisor-nudge.md" with { type: "text" };
 import asyncResultTemplate from "./prompts/tools/async-result.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -1492,6 +1493,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
+			getAgentSession: () => session,
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
@@ -2145,6 +2147,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const appendParts: string[] = [];
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
+			// Advisor nudge: only when enabled (opt-in), the user turned the nudge on, AND the tool is
+			// active for this agent. The `advisor.enabled` conjunct stops a stale nudge value from firing
+			// against a same-named custom tool while the feature is off.
+			if (settings.get("advisor.nudge") && settings.get("advisor.enabled") && toolNames.includes("advisor"))
+				appendParts.push(advisorNudgePrompt);
 			let appendPrompt: string | undefined = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 			if (serverInstructions && serverInstructions.size > 0) {
 				const parts: string[] = [];

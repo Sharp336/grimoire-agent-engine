@@ -19,6 +19,7 @@ import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentRegistry } from "../registry/agent-registry";
+import type { AgentSession } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
@@ -32,6 +33,7 @@ import type { DiscoverableTool, DiscoverableToolSearchIndex } from "../tool-disc
 import type { EventBus } from "../utils/event-bus";
 import { WebSearchTool } from "../web/search";
 import type { WorkspaceTree } from "../workspace-tree";
+import { AdvisorTool } from "./advisor";
 import { AskTool } from "./ask";
 import { AstEditTool } from "./ast-edit";
 import { AstGrepTool } from "./ast-grep";
@@ -72,6 +74,7 @@ export * from "../lsp";
 export * from "../session/streaming-output";
 export * from "../task";
 export * from "../web/search";
+export * from "./advisor";
 export * from "./ask";
 export * from "./ast-edit";
 export * from "./ast-grep";
@@ -213,6 +216,8 @@ export interface ToolSession {
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
 	/** Get Mnemopi runtime state for this agent session. */
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
+	/** Get the full agent session for model-pairing side requests (e.g. the advisor tool). */
+	getAgentSession?: () => AgentSession;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
@@ -446,6 +451,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
+	advisor: AdvisorTool.createIf,
 };
 
 export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
@@ -582,6 +588,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				["hindsight", "mnemopi", "local"].includes(session.settings.get("memory.backend") ?? "")
 			);
 		}
+		if (name === "advisor") return session.settings.get("advisor.enabled");
 		if (name === "task") {
 			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
 		}

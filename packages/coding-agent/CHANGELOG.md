@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an opt-in `advisor` tool (`advisor.enabled`, default off): the agent can consult a separately-paired advisor model — any provider, selected via the new `advisor` model role — for a concise second opinion on the current task. For the generic two-model strategy, pairing a `compactor` model role (a cheap, fast, long-context model via the new `compactor` role) first digests the transcript into a dense brief so an expensive or shorter-context advisor stays affordable. Both side-calls are prompt-cache-friendly (stable prompt-cache key, isolated per-call request lineage) and never block the turn on failure; `advisor.nudge` adds system-prompt guidance to consult the advisor aggressively.
+
 ## [15.13.2] - 2026-06-15
 
 ### Added

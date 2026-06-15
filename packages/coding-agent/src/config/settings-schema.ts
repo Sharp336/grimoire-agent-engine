@@ -106,7 +106,7 @@ export const TAB_METADATA: Record<SettingTab, { label: string; icon: `tab.${stri
  */
 export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 	appearance: ["Theme", "Status Line", "Display", "Images"],
-	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback"],
+	model: ["Thinking", "Sampling", "Prompt", "Retry & Fallback", "Advisor"],
 	interaction: [
 		"Input",
 		"Approvals",
@@ -1954,6 +1954,32 @@ export const SETTINGS_SCHEMA = {
 			label: "Auto-Learn (experimental)",
 			description:
 				"After the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills",
+		},
+	},
+	// Advisor (experimental): expose the model-invoked `advisor` tool. Opt-in only
+	// (default off). The advisor model is paired via the "Advisor" model role, so
+	// it surfaces in the standard model selector with no separate config key.
+	"advisor.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Tool (experimental)",
+			description:
+				'Expose the `advisor` tool so the agent can consult a separately-paired advisor model for a second opinion. Choose which model answers via the "Advisor" role in the model selector (/model).',
+		},
+	},
+	"advisor.nudge": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Nudge",
+			description:
+				"When on, the system prompt urges the agent to consult the advisor aggressively — at hard forks, when stuck, and before committing to a direction. Off = the advisor is available but called at the agent's discretion.",
+			condition: "advisorActive",
 		},
 	},
 	"autolearn.autoContinue": {

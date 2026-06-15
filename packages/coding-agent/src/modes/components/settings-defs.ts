@@ -97,6 +97,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	advisorActive: () => {
+		try {
+			return Settings.instance.get("advisor.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
 	autoThinkingActive: () => {
 		try {
 			return Settings.instance.get("defaultThinkingLevel") === "auto";
