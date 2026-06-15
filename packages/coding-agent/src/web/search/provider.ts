@@ -84,6 +84,11 @@ const PROVIDER_META: Record<SearchProviderId, ProviderMeta> = {
 		label: SEARCH_PROVIDER_LABELS.kagi,
 		load: async () => new (await import("./providers/kagi")).KagiProvider(),
 	},
+	keenable: {
+		id: "keenable",
+		label: SEARCH_PROVIDER_LABELS.keenable,
+		load: async () => new (await import("./providers/keenable")).KeenableProvider(),
+	},
 	synthetic: {
 		id: "synthetic",
 		label: SEARCH_PROVIDER_LABELS.synthetic,

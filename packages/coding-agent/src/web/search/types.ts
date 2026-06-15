@@ -4,6 +4,7 @@
  * Unified types for web search responses across supported providers.
  */
 
+
 export const SEARCH_PROVIDER_OPTIONS = [
 	{
 		value: "auto",
@@ -40,6 +41,7 @@ export const SEARCH_PROVIDER_OPTIONS = [
 	{ value: "parallel", label: "Parallel", description: "Requires PARALLEL_API_KEY" },
 	{ value: "synthetic", label: "Synthetic", description: "Requires SYNTHETIC_API_KEY" },
 	{ value: "searxng", label: "SearXNG", description: "Requires SEARXNG_ENDPOINT or searxng.endpoint" },
+	{ value: "keenable", label: "Keenable", description: "Works without an API key (1,000 req/hr free via MCP); set KEENABLE_API_KEY for higher limits" },
 ] as const;
 
 /** Supported web search providers (every option except `auto`). */
