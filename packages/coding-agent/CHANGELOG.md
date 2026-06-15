@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added in-band `/update` and `/restart` TUI commands, reusable update-flow helpers, update changelog printing, installed-version markers, and stale running-session warnings for issue #2712.
+
 ## [16.0.1] - 2026-06-15
 
 ### Breaking Changes

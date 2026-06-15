@@ -44,7 +44,7 @@ import { limitMatchesActiveAccount } from "../../slash-commands/helpers/active-o
 import { outputMeta } from "../../tools/output-meta";
 import { resolveToCwd, stripOuterDoubleQuotes } from "../../tools/path-utils";
 import { replaceTabs } from "../../tools/render-utils";
-import { getChangelogPath, parseChangelog } from "../../utils/changelog";
+import { formatChangelogMarkdown, getChangelogPath, parseChangelog } from "../../utils/changelog";
 import { copyToClipboard } from "../../utils/clipboard";
 import { openPath } from "../../utils/open";
 import { setSessionTerminalTitle } from "../../utils/title-generator";
@@ -452,10 +452,7 @@ export class CommandController {
 		const entriesToShow = showFull ? allEntries : allEntries.slice(0, 3);
 		const changelogMarkdown =
 			entriesToShow.length > 0
-				? [...entriesToShow]
-						.reverse()
-						.map(e => e.content)
-						.join("\n\n")
+				? formatChangelogMarkdown(entriesToShow, { reverse: true })
 				: "No changelog entries found.";
 		const title = showFull ? "Full Changelog" : "Recent Changes";
 		const hint = showFull

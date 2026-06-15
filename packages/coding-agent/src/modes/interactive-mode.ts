@@ -3,6 +3,7 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
 	type Agent,
@@ -36,6 +37,7 @@ import {
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import {
+	$which,
 	APP_NAME,
 	adjustHsv,
 	formatNumber,
@@ -47,6 +49,7 @@ import {
 	prompt,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import chalk from "chalk";
 import { reset as resetCapabilities } from "../capability";
 import type { CollabGuestLink } from "../collab/guest";
@@ -451,6 +454,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#cleanupUnsubscribe?: () => void;
 	readonly #version: string;
 	readonly #changelogMarkdown: string | undefined;
+	readonly #restartLaunchArgs: string[];
 	#planModePreviousTools: string[] | undefined;
 	#goalModePreviousTools: string[] | undefined;
 	#goalContinuationTimer: NodeJS.Timeout | undefined;
@@ -533,6 +537,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		mcpManager?: MCPManager,
 		eventBus?: EventBus,
 		titleSystemPrompt?: string,
+		restartLaunchArgs: string[] = [],
 	) {
 		this.session = session;
 		this.sessionManager = session.sessionManager;
@@ -546,6 +551,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.mcpManager = mcpManager;
 		this.#eventBus = eventBus;
 		this.titleSystemPrompt = titleSystemPrompt;
+		this.#restartLaunchArgs = restartLaunchArgs;
 		if (eventBus) {
 			this.#eventBusUnsubscribers.push(
 				eventBus.on(LSP_STARTUP_EVENT_CHANNEL, data => {
@@ -3011,16 +3017,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async shutdown(): Promise<void> {
-		if (this.#isShuttingDown) return;
-		this.#isShuttingDown = true;
-
-		// Snapshot the editor before any teardown empties it. Persisting the draft
-		// here covers Ctrl+D shutdown with non-empty text; for /exit the editor is
-		// already cleared so saveDraft("") just removes any stale sidecar.
-		const draftText = this.editor.getText();
-
-		// Flush pending session writes before shutdown
+	async #prepareForProcessExit(draftText: string): Promise<void> {
+		// Flush pending session writes before shutdown/restart
 		await this.sessionManager.flush();
 		try {
 			await this.sessionManager.saveDraft(draftText);
@@ -3043,6 +3041,17 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.ui.terminal.drainInput(1000);
 		popTerminalTitle();
 		this.stop();
+	}
+
+	async shutdown(): Promise<void> {
+		if (this.#isShuttingDown) return;
+		this.#isShuttingDown = true;
+
+		// Snapshot the editor before any teardown empties it. Persisting the draft
+		// here covers Ctrl+D shutdown with non-empty text; for /exit the editor is
+		// already cleared so saveDraft("") just removes any stale sidecar.
+		const draftText = this.editor.getText();
+		await this.#prepareForProcessExit(draftText);
 
 		// Print resumption hint if this is a persisted session
 		const sessionId = this.sessionManager.getSessionId();
@@ -3052,6 +3061,87 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		await postmortem.quit(0);
+	}
+
+	async #writeRestartChangelog(markdown: string): Promise<string> {
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-update-changelog-"));
+		const file = path.join(dir, "CHANGELOG.md");
+		await Bun.write(file, markdown);
+		return file;
+	}
+
+	async restartCurrentSession(options: { showChangelog?: boolean; changelogMarkdown?: string } = {}): Promise<void> {
+		if (this.#isShuttingDown) return;
+		if (
+			this.session.isStreaming ||
+			this.session.isCompacting ||
+			this.session.isBashRunning ||
+			this.session.isEvalRunning
+		) {
+			this.showWarning("Wait for current work to finish before restarting.");
+			return;
+		}
+
+		const sessionFile = this.sessionManager.getSessionFile();
+		const sessionId = this.sessionManager.getSessionId();
+		if (!sessionFile || !sessionId) {
+			this.showWarning("Cannot restart an in-memory session. Start omp again manually.");
+			return;
+		}
+
+		const ompPath = $which(APP_NAME);
+		if (!ompPath) {
+			this.showWarning(
+				`Cannot restart because ${APP_NAME} is not on PATH. Run ${APP_NAME} --resume ${sessionId} manually.`,
+			);
+			return;
+		}
+
+		this.#isShuttingDown = true;
+		const profile = getActiveProfile();
+		const cwdArgs = ["--cwd", getProjectDir()];
+		const profileArgs = profile ? ["--profile", profile] : [];
+		const changelogArgs = options.changelogMarkdown
+			? ["--changelog-on-resume-path", await this.#writeRestartChangelog(options.changelogMarkdown)]
+			: options.showChangelog
+				? ["--show-changelog-on-resume"]
+				: [];
+		const restartCmd = [
+			ompPath,
+			...profileArgs,
+			...cwdArgs,
+			"--resume",
+			sessionFile,
+			...changelogArgs,
+			...this.#restartLaunchArgs,
+		];
+		const fallbackCommand = [APP_NAME, ...restartCmd.slice(1)]
+			.map(arg => (/[\s"'\\]/.test(arg) ? JSON.stringify(arg) : arg))
+			.join(" ");
+		const draftText = this.editor.getText();
+		let teardownComplete = false;
+		try {
+			await this.#prepareForProcessExit(draftText);
+			teardownComplete = true;
+			const child = Bun.spawn({
+				cmd: restartCmd,
+				stdin: "inherit",
+				stdout: "inherit",
+				stderr: "inherit",
+				env: process.env,
+			});
+			const exitCode = await child.exited;
+			await postmortem.quit(exitCode ?? 0);
+		} catch (error) {
+			const message = `Restart failed: ${error instanceof Error ? error.message : String(error)}. Run ${fallbackCommand} manually.`;
+			if (!teardownComplete) {
+				this.#isShuttingDown = false;
+				this.showError(message);
+				return;
+			}
+			process.stderr.write(`\n${chalk.red(message)}\n`);
+			await postmortem.quit(1);
+		}
 	}
 
 	async checkShutdownRequested(): Promise<void> {

@@ -664,6 +664,24 @@ export function getLastChangelogVersionPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "last-changelog-version", "state");
 }
 
+function getDefaultProfileLastInstalledVersionPath(): string {
+	const defaultDirs = new DirResolver({
+		agentDirOverride: resolvePreProfileAgentDir(
+			undefined,
+			process.env.PI_CODING_AGENT_DIR,
+			readPiProfileFromEnvSafe(),
+		),
+	});
+	return defaultDirs.agentSubdir(undefined, "last-installed-version", "state");
+}
+
+/** Get the global last successfully installed omp version marker (~/.omp/agent/last-installed-version). */
+export function getLastInstalledVersionPath(agentDir?: string): string {
+	return agentDir
+		? dirs.agentSubdir(agentDir, "last-installed-version", "state")
+		: getDefaultProfileLastInstalledVersionPath();
+}
+
 /** Get the path to history.db (SQLite database for session history). */
 export function getHistoryDbPath(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "history.db", "data");

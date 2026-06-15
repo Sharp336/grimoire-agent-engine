@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -7,9 +7,14 @@ import {
 	buildHomebrewUpdateArgs,
 	buildMiseForceInstallArgs,
 	buildMiseUpgradeArgs,
+	getOutdatedProcessInfo,
+	readLastInstalledVersion,
 	replaceBinaryForUpdate,
 	resolveUpdateMethodForTest,
+	runUpdateFlow,
+	writeLastInstalledVersion,
 } from "@oh-my-pi/pi-coding-agent/cli/update-cli";
+import { getEntriesInVersionRange, parseChangelogContent } from "@oh-my-pi/pi-coding-agent/utils/changelog";
 
 const tempDirs: string[] = [];
 
@@ -20,6 +25,7 @@ async function makeTempDir(): Promise<string> {
 }
 
 afterEach(async () => {
+	vi.restoreAllMocks();
 	await Promise.all(tempDirs.splice(0).map(dir => fs.rm(dir, { recursive: true, force: true })));
 });
 describe("update-cli install target detection", () => {
@@ -179,5 +185,158 @@ describe("update-cli binary replacement", () => {
 		expect(await Bun.file(targetPath).text()).toBe("new binary");
 		expect(await Bun.file(tempPath).exists()).toBe(false);
 		expect(await Bun.file(backupPath).exists()).toBe(false);
+	});
+});
+
+describe("update-cli changelog helpers", () => {
+	it("selects only changelog entries newer than the running version and not newer than the installed release", () => {
+		const entries = parseChangelogContent(
+			[
+				"## [15.14.0]",
+				"- Future",
+				"",
+				"## [15.13.2]",
+				"- Patch two",
+				"",
+				"## [15.13.1]",
+				"- Patch one",
+				"",
+				"## [15.13.0]",
+				"- Baseline",
+			].join("\n"),
+		);
+
+		const selected = getEntriesInVersionRange(entries, "15.13.0", "15.13.2");
+
+		expect(selected.map(entry => `${entry.major}.${entry.minor}.${entry.patch}`)).toEqual(["15.13.2", "15.13.1"]);
+	});
+});
+
+describe("runUpdateFlow", () => {
+	it("prints release notes for the installed range and records update markers", async () => {
+		const messages: string[] = [];
+		const installedVersions: string[] = [];
+		const seenChangelogVersions: string[] = [];
+
+		const result = await runUpdateFlow(
+			{ force: false, check: false, showChangelog: true, currentVersion: "15.13.0" },
+			{
+				log: message => {
+					messages.push(message);
+				},
+				error: message => {
+					messages.push(message);
+				},
+			},
+			{
+				getLatestRelease: async () => ({ version: "15.13.2", tag: "v15.13.2", tarball: "fixture" }),
+				resolveUpdateTarget: async () => ({ method: "binary", path: "/tmp/omp" }),
+				installUpdate: vi.fn(async () => {}),
+				loadReleaseChangelog: async () =>
+					[
+						"## [15.14.0]",
+						"- Future",
+						"",
+						"## [15.13.2]",
+						"- Patch two",
+						"",
+						"## [15.13.1]",
+						"- Patch one",
+						"",
+						"## [15.13.0]",
+						"- Baseline",
+					].join("\n"),
+				writeInstalledVersion: async version => {
+					installedVersions.push(version);
+				},
+				writeSeenChangelogVersion: async version => {
+					seenChangelogVersions.push(version);
+				},
+			},
+		);
+
+		const output = messages.join("\n");
+		expect(result).toEqual({
+			kind: "updated",
+			previousVersion: "15.13.0",
+			version: "15.13.2",
+			forced: false,
+			changelogPrinted: true,
+		});
+		expect(output).toContain("What's new:");
+		expect(output).toContain("## [15.13.1]");
+		expect(output).toContain("## [15.13.2]");
+		expect(output).not.toContain("## [15.13.0]");
+		expect(output).not.toContain("## [15.14.0]");
+		expect(installedVersions).toEqual(["15.13.2"]);
+		expect(seenChangelogVersions).toEqual(["15.13.2"]);
+	});
+
+	it("does not install when check is combined with force", async () => {
+		const installUpdate = vi.fn(async () => {});
+		const messages: string[] = [];
+
+		const result = await runUpdateFlow(
+			{ force: true, check: true, showChangelog: true, currentVersion: "15.13.2" },
+			{
+				log: message => {
+					messages.push(message);
+				},
+				error: () => {},
+			},
+			{
+				getLatestRelease: async () => ({ version: "15.13.2", tag: "v15.13.2" }),
+				resolveUpdateTarget: async () => ({ method: "binary", path: "/tmp/omp" }),
+				installUpdate,
+			},
+		);
+
+		expect(result).toEqual({ kind: "no-update", currentVersion: "15.13.2", latestVersion: "15.13.2" });
+		expect(installUpdate).not.toHaveBeenCalled();
+		expect(messages.join("\n")).not.toContain("Forcing reinstall");
+	});
+
+	it("does not write the installed-version marker when installation fails", async () => {
+		const writeInstalledVersion = vi.fn(async () => {});
+
+		await expect(
+			runUpdateFlow(
+				{ force: false, check: false, showChangelog: true, currentVersion: "15.13.0" },
+				{ log: () => {}, error: () => {} },
+				{
+					getLatestRelease: async () => ({ version: "15.13.2", tag: "v15.13.2", tarball: "fixture" }),
+					resolveUpdateTarget: async () => ({ method: "binary", path: "/tmp/omp" }),
+					installUpdate: async () => {
+						throw new Error("installer exploded");
+					},
+					writeInstalledVersion,
+				},
+			),
+		).rejects.toThrow("Update failed: installer exploded");
+		expect(writeInstalledVersion).not.toHaveBeenCalled();
+	});
+});
+
+describe("update-cli installed-version marker", () => {
+	it("reads and writes the installed version marker in an agent dir", async () => {
+		const dir = await makeTempDir();
+
+		expect(await readLastInstalledVersion(dir)).toBeUndefined();
+		await writeLastInstalledVersion("15.13.2", dir);
+
+		expect(await readLastInstalledVersion(dir)).toBe("15.13.2");
+	});
+
+	it("reports outdated process info only when the installed marker is newer", async () => {
+		const dir = await makeTempDir();
+
+		await writeLastInstalledVersion("15.13.2", dir);
+
+		expect(await getOutdatedProcessInfo("15.13.1", dir)).toEqual({
+			currentVersion: "15.13.1",
+			installedVersion: "15.13.2",
+		});
+		expect(await getOutdatedProcessInfo("15.13.2", dir)).toBeUndefined();
+		expect(await getOutdatedProcessInfo("15.13.3", dir)).toBeUndefined();
 	});
 });

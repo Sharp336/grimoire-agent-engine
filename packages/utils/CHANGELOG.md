@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `getLastInstalledVersionPath()` for the update flow's global installed-version marker.
+
 ## [15.13.3] - 2026-06-15
 
 ### Added

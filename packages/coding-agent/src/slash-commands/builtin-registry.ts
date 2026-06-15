@@ -3,8 +3,9 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { setNextRequestDebugPath } from "@oh-my-pi/pi-ai/utils/request-debug";
-import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
+import { type AutocompleteItem, Markdown, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { APP_NAME, setProjectDir } from "@oh-my-pi/pi-utils";
+import * as updateCli from "../cli/update-cli";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
 import type { SettingPath, SettingValue } from "../config/settings";
@@ -24,12 +25,14 @@ import {
 	MarketplaceManager,
 } from "../extensibility/plugins/marketplace";
 import { resolveMemoryBackend } from "../memory-backend";
-import { theme } from "../modes/theme/theme";
+import { DynamicBorder } from "../modes/components/dynamic-border";
+import { TranscriptBlock } from "../modes/components/transcript-container";
+import { getMarkdownTheme, theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
 import { urlHyperlinkAlways } from "../tui";
-import { getChangelogPath, parseChangelog } from "../utils/changelog";
+import { formatChangelogMarkdown, getChangelogPath, parseChangelog } from "../utils/changelog";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
 import { createMarketplaceManager } from "./helpers/marketplace-manager";
@@ -55,6 +58,18 @@ export type { BuiltinSlashCommand, SubcommandDef } from "./types";
 
 /** TUI-specific runtime accepted by `executeBuiltinSlashCommand`. */
 export type BuiltinSlashCommandRuntime = TuiSlashCommandRuntime;
+
+function showUpdateChangelog(ctx: InteractiveModeContext, message: string): string {
+	const changelog = message.replace(/^\nWhat's new:\n\n/, "").trim();
+	const block = new TranscriptBlock();
+	block.addChild(new DynamicBorder());
+	block.addChild(new Text(theme.fg("accent", "What's new"), 1, 0));
+	block.addChild(new Spacer(1));
+	block.addChild(new Markdown(changelog, 1, 1, getMarkdownTheme()));
+	block.addChild(new DynamicBorder());
+	ctx.present(block);
+	return changelog;
+}
 
 function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
@@ -978,12 +993,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				await runtime.output("No changelog entries found.");
 				return commandConsumed();
 			}
-			await runtime.output(
-				[...entriesToShow]
-					.reverse()
-					.map(entry => entry.content)
-					.join("\n\n"),
-			);
+			await runtime.output(formatChangelogMarkdown(entriesToShow, { reverse: true }));
 			return commandConsumed();
 		},
 		handleTui: async (command, runtime) => {
@@ -1538,6 +1548,77 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		name: "exit",
 		description: "Exit the application",
 		handleTui: shutdownHandlerTui,
+	},
+	{
+		name: "restart",
+		description: "Restart OMP and resume this session",
+		handleTui: async (_command, runtime) => {
+			runtime.ctx.editor.setText("");
+			await runtime.ctx.restartCurrentSession();
+		},
+	},
+	{
+		name: "update",
+		description: "Check for and install OMP updates",
+		inlineHint: "[--check] [--force]",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			let check = false;
+			let force = false;
+			for (const token of command.args.split(/\s+/).filter(Boolean)) {
+				if (token === "--check" || token === "-c") {
+					check = true;
+				} else if (token === "--force" || token === "-f") {
+					force = true;
+				} else {
+					runtime.ctx.showStatus("Usage: /update [--check] [--force]");
+					runtime.ctx.editor.setText("");
+					return;
+				}
+			}
+
+			if (
+				!check &&
+				(runtime.ctx.session.isStreaming ||
+					runtime.ctx.session.isCompacting ||
+					runtime.ctx.session.isBashRunning ||
+					runtime.ctx.session.isEvalRunning)
+			) {
+				runtime.ctx.showStatus("Wait for current work to finish before updating.");
+				return;
+			}
+
+			let updateChangelogMarkdown: string | undefined;
+
+			try {
+				const result = await updateCli.runUpdateFlow(
+					{ force, check, showChangelog: !check },
+					{
+						log: message => {
+							if (message.startsWith("\nWhat's new:\n\n")) {
+								updateChangelogMarkdown = showUpdateChangelog(runtime.ctx, message);
+							} else {
+								runtime.ctx.showStatus(message);
+							}
+						},
+						error: message => runtime.ctx.showWarning(message),
+					},
+				);
+				if (result.kind === "updated") {
+					runtime.ctx.editor.setText("");
+					runtime.ctx.showStatus(`Restarting OMP to use v${result.version}...`);
+					await runtime.ctx.restartCurrentSession({
+						showChangelog: !result.changelogPrinted || !updateChangelogMarkdown,
+						changelogMarkdown: result.changelogPrinted ? updateChangelogMarkdown : undefined,
+					});
+					return;
+				}
+				runtime.ctx.editor.setText("");
+			} catch (error) {
+				runtime.ctx.showError(errorMessage(error));
+				runtime.ctx.editor.setText("");
+			}
+		},
 	},
 	{
 		name: "marketplace",

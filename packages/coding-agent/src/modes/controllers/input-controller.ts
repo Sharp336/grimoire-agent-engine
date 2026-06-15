@@ -3,6 +3,7 @@ import * as path from "node:path";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type AutocompleteProvider, matchesKey, type SlashCommand } from "@oh-my-pi/pi-tui";
 import { $env, isEnoent, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { getOutdatedProcessInfo } from "../../cli/update-cli";
 import { isSettingsInitialized, settings } from "../../config/settings";
 import { resolveLocalRoot } from "../../internal-urls";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
@@ -85,6 +86,21 @@ export class InputController {
 	// Sequential index for `local://attachment-N` references created by the large-paste local-file
 	// action. Seeded from 0 and bumped past any existing attachment files in #attachPasteAsFile.
 	#attachmentCounter = 0;
+	#outdatedVersionWarningShownFor: string | undefined;
+
+	async #warnIfProcessIsOutdated(): Promise<void> {
+		try {
+			const info = await getOutdatedProcessInfo();
+			if (info && info.installedVersion !== this.#outdatedVersionWarningShownFor) {
+				this.#outdatedVersionWarningShownFor = info.installedVersion;
+				this.ctx.showWarning(
+					`OMP was updated from v${info.currentVersion} to v${info.installedVersion}. Run /restart to resume this session on the new version.`,
+				);
+			}
+		} catch {
+			// Stale-version checks must never block prompt submission.
+		}
+	}
 
 	#showTinyTitleDownloadProgress(modelKey: string): void {
 		if (!isTinyTitleLocalModelKey(modelKey)) return;
@@ -603,6 +619,8 @@ export class InputController {
 				}
 			}
 
+			await this.#warnIfProcessIsOutdated();
+
 			// While loop mode is on, every user-typed prompt becomes the new loop
 			// prompt that auto-resubmits after each yield.
 			if (this.ctx.loopModeEnabled) {
@@ -939,6 +957,9 @@ export class InputController {
 		// the queued entry is later re-parsed into a skill invocation is a
 		// separate concern owned by the compaction-resume path.
 		if (this.ctx.session.isCompacting) {
+			if (!text.startsWith("/")) {
+				await this.#warnIfProcessIsOutdated();
+			}
 			const images = this.ctx.pendingImages.length > 0 ? [...this.ctx.pendingImages] : undefined;
 			this.ctx.queueCompactionMessage(text, "followUp", images);
 			return;
@@ -960,6 +981,8 @@ export class InputController {
 		if (await this.#invokeSkillCommand(text, "followUp")) {
 			return;
 		}
+
+		await this.#warnIfProcessIsOutdated();
 
 		// Forward any pending clipboard-pasted images alongside the queued text;
 		// otherwise the follow-up would drop the image (mirrors the Enter/steer path).

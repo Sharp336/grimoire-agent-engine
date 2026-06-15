@@ -132,6 +132,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--provider-session-id": (result, value) => {
 		result.providerSessionId = value;
 	},
+	"--changelog-on-resume-path": (result, value) => {
+		result.changelogOnResumePath = value;
+	},
 	"--session-dir": (result, value) => {
 		result.sessionDir = value;
 	},
@@ -255,6 +258,7 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--version",
 	"--allow-home",
 	"--continue",
+	"--show-changelog-on-resume",
 	"--no-session",
 	"--no-tools",
 	"--no-lsp",

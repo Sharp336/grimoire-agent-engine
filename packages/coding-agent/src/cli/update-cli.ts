@@ -8,10 +8,16 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { pipeline } from "node:stream/promises";
-import { $which, APP_NAME, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
+import { $which, APP_NAME, getLastInstalledVersionPath, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import chalk from "chalk";
 import { theme } from "../modes/theme/theme";
+import {
+	formatChangelogMarkdown,
+	getEntriesInVersionRange,
+	parseChangelogContent,
+	writeLastChangelogVersion,
+} from "../utils/changelog";
 
 const REPO = "can1357/oh-my-pi";
 const PACKAGE = "@oh-my-pi/pi-coding-agent";
@@ -57,9 +63,10 @@ function currentNativeTag(): string {
 	return `${process.platform}-${process.arch}`;
 }
 
-interface ReleaseInfo {
+export interface ReleaseInfo {
 	tag: string;
 	version: string;
+	tarball?: string;
 }
 
 /** Result from running the installed binary and parsing its reported version. */
@@ -193,7 +200,42 @@ interface UpdateMethodResolutionOptions {
 	miseDataDir?: string;
 }
 
-type UpdateTarget = { method: "brew" } | { method: "mise" } | { method: "bun" } | { method: "binary"; path: string };
+export type UpdateTarget =
+	| { method: "brew" }
+	| { method: "mise" }
+	| { method: "bun" }
+	| { method: "binary"; path: string };
+
+export interface UpdateFlowOptions {
+	force: boolean;
+	check: boolean;
+	showChangelog: boolean;
+	currentVersion?: string;
+}
+
+export interface UpdateFlowOutput {
+	log(message: string): void | Promise<void>;
+	error(message: string): void | Promise<void>;
+}
+
+export type UpdateFlowResult =
+	| { kind: "no-update"; currentVersion: string; latestVersion: string }
+	| { kind: "update-available"; currentVersion: string; latestVersion: string; checkOnly: true }
+	| { kind: "updated"; previousVersion: string; version: string; forced: boolean; changelogPrinted: boolean };
+
+export interface UpdateFlowDependencies {
+	getLatestRelease?: () => Promise<ReleaseInfo>;
+	resolveUpdateTarget?: () => Promise<UpdateTarget>;
+	installUpdate?: (
+		target: UpdateTarget,
+		expectedVersion: string,
+		force: boolean,
+		output: UpdateFlowOutput,
+	) => Promise<void>;
+	loadReleaseChangelog?: (release: ReleaseInfo) => Promise<string | undefined>;
+	writeInstalledVersion?: (version: string) => Promise<void>;
+	writeSeenChangelogVersion?: (version: string) => Promise<void>;
+}
 
 function resolveUpdateMethod(
 	ompPath: string,
@@ -244,13 +286,14 @@ async function getLatestRelease(): Promise<ReleaseInfo> {
 		throw new Error(`Failed to fetch release info: ${response.statusText}`);
 	}
 
-	const data = (await response.json()) as { version: string };
+	const data = (await response.json()) as { version: string; dist?: { tarball?: string } };
 	const version = data.version;
 	const tag = `v${version}`;
 
 	return {
 		tag,
 		version,
+		tarball: data.dist?.tarball,
 	};
 }
 
@@ -260,16 +303,20 @@ async function getLatestRelease(): Promise<ReleaseInfo> {
  * - 0 if a == b
  * - positive if a > b
  */
-function compareVersions(a: string, b: string): number {
-	const pa = a.split(".").map(Number);
-	const pb = b.split(".").map(Number);
+export function compareSemver(a: string, b: string): number {
+	try {
+		return Bun.semver.order(a, b);
+	} catch {
+		const pa = a.split(".").map(Number);
+		const pb = b.split(".").map(Number);
 
-	for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-		const na = pa[i] || 0;
-		const nb = pb[i] || 0;
-		if (na !== nb) return na - nb;
+		for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+			const na = pa[i] || 0;
+			const nb = pb[i] || 0;
+			if (na !== nb) return na - nb;
+		}
+		return 0;
 	}
-	return 0;
 }
 
 /**
@@ -338,8 +385,8 @@ async function verifyInstalledVersion(expectedVersion: string): Promise<Installe
 	}
 }
 
-function printVerifiedVersion(expectedVersion: string): void {
-	console.log(chalk.green(`\n${theme.status.success} Updated to ${expectedVersion}`));
+async function printVerifiedVersion(expectedVersion: string, output: UpdateFlowOutput): Promise<void> {
+	await output.log(chalk.green(`\n${theme.status.success} Updated to ${expectedVersion}`));
 }
 
 function formatVerificationFailure(result: InstalledVersionVerification, expectedVersion: string): string {
@@ -352,14 +399,16 @@ function formatVerificationFailure(result: InstalledVersionVerification, expecte
 /**
  * Print post-update verification result.
  */
-async function printVerification(expectedVersion: string): Promise<void> {
+async function printVerification(expectedVersion: string, output: UpdateFlowOutput): Promise<void> {
 	const result = await verifyInstalledVersion(expectedVersion);
 	if (result.ok) {
-		printVerifiedVersion(expectedVersion);
+		await printVerifiedVersion(expectedVersion, output);
 		return;
 	}
-	console.log(chalk.yellow(`\nWarning: ${formatVerificationFailure(result, expectedVersion)}`));
-	console.log(chalk.yellow(`You may need to reinstall: curl -fsSL https://omp.sh/install | sh`));
+	const failure = formatVerificationFailure(result, expectedVersion);
+	await output.error(chalk.yellow(`\nWarning: ${failure}`));
+	await output.error(chalk.yellow(`You may need to reinstall: curl -fsSL https://omp.sh/install | sh`));
+	throw new Error(failure);
 }
 
 async function unlinkIfExists(filePath: string): Promise<void> {
@@ -461,64 +510,64 @@ export function buildMiseForceInstallArgs(expectedVersion: string): string[] {
 /**
  * Update via bun package manager.
  */
-async function updateViaBun(expectedVersion: string): Promise<void> {
-	console.log(chalk.dim("Updating via bun..."));
+async function updateViaBun(expectedVersion: string, output: UpdateFlowOutput): Promise<void> {
+	await output.log(chalk.dim("Updating via bun..."));
 	const args = buildBunInstallArgs(expectedVersion);
-	const result = await $`bun ${args}`.nothrow();
+	const result = await $`bun ${args}`.quiet().nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`bun install failed with exit code ${result.exitCode}`);
 	}
 
-	await printVerification(expectedVersion);
+	await printVerification(expectedVersion, output);
 }
 
-async function updateViaHomebrew(expectedVersion: string, force: boolean): Promise<void> {
-	console.log(chalk.dim("Updating Homebrew formulae..."));
-	const update = await $`brew update`.nothrow();
+async function updateViaHomebrew(expectedVersion: string, force: boolean, output: UpdateFlowOutput): Promise<void> {
+	await output.log(chalk.dim("Updating Homebrew formulae..."));
+	const update = await $`brew update`.quiet().nothrow();
 	if (update.exitCode !== 0) {
 		throw new Error(`brew update failed with exit code ${update.exitCode}`);
 	}
 
-	console.log(chalk.dim("Updating via Homebrew..."));
+	await output.log(chalk.dim("Updating via Homebrew..."));
 	const args = buildHomebrewUpdateArgs(force);
-	const result = await $`brew ${args}`.nothrow();
+	const result = await $`brew ${args}`.quiet().nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`brew ${args[0]} failed with exit code ${result.exitCode}`);
 	}
 
-	await printVerification(expectedVersion);
+	await printVerification(expectedVersion, output);
 }
 
-async function updateViaMise(expectedVersion: string, force: boolean): Promise<void> {
-	console.log(chalk.dim("Updating via mise..."));
+async function updateViaMise(expectedVersion: string, force: boolean, output: UpdateFlowOutput): Promise<void> {
+	await output.log(chalk.dim("Updating via mise..."));
 	const args = buildMiseUpgradeArgs();
-	const result = await $`mise ${args}`.nothrow();
+	const result = await $`mise ${args}`.quiet().nothrow();
 	if (result.exitCode !== 0) {
 		throw new Error(`mise upgrade failed with exit code ${result.exitCode}`);
 	}
 
 	if (force) {
 		const forceArgs = buildMiseForceInstallArgs(expectedVersion);
-		const forceResult = await $`mise ${forceArgs}`.nothrow();
+		const forceResult = await $`mise ${forceArgs}`.quiet().nothrow();
 		if (forceResult.exitCode !== 0) {
 			throw new Error(`mise install --force failed with exit code ${forceResult.exitCode}`);
 		}
 	}
 
-	await printVerification(expectedVersion);
+	await printVerification(expectedVersion, output);
 }
 
 /**
  * Download a release binary to a target path, replacing an existing file.
  */
-async function updateViaBinaryAt(targetPath: string, expectedVersion: string): Promise<void> {
+async function updateViaBinaryAt(targetPath: string, expectedVersion: string, output: UpdateFlowOutput): Promise<void> {
 	const binaryName = getBinaryName();
 	const tag = `v${expectedVersion}`;
 	const url = `https://github.com/${REPO}/releases/download/${tag}/${binaryName}`;
 
 	const tempPath = `${targetPath}.new`;
 	const backupPath = `${targetPath}.bak`;
-	console.log(chalk.dim(`Downloading ${binaryName}…`));
+	await output.log(chalk.dim(`Downloading ${binaryName}…`));
 
 	const response = await fetch(url, { redirect: "follow" });
 	if (!response.ok || !response.body) {
@@ -527,7 +576,7 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 	const fileStream = fs.createWriteStream(tempPath, { mode: 0o755 });
 	await pipeline(response.body, fileStream);
 
-	console.log(chalk.dim("Installing update..."));
+	await output.log(chalk.dim("Installing update..."));
 	await replaceBinaryForUpdate({
 		targetPath,
 		tempPath,
@@ -535,57 +584,161 @@ async function updateViaBinaryAt(targetPath: string, expectedVersion: string): P
 		expectedVersion,
 		verifyInstalledVersion,
 	});
-	printVerifiedVersion(expectedVersion);
-	console.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
+	await printVerifiedVersion(expectedVersion, output);
+	await output.log(chalk.dim(`Restart ${APP_NAME} to use the new version`));
+}
+
+async function loadReleaseChangelog(release: ReleaseInfo): Promise<string | undefined> {
+	if (!release.tarball) return undefined;
+
+	try {
+		const response = await fetch(release.tarball, { signal: AbortSignal.timeout(15_000) });
+		if (!response.ok || !response.body) return undefined;
+
+		const archive = new Bun.Archive(new Uint8Array(await response.arrayBuffer()));
+		const files = await archive.files();
+		return (await files.get("package/CHANGELOG.md")?.text()) ?? (await files.get("CHANGELOG.md")?.text());
+	} catch {
+		return undefined;
+	}
+}
+
+export async function readLastInstalledVersion(agentDir?: string): Promise<string | undefined> {
+	try {
+		const value = (await Bun.file(getLastInstalledVersionPath(agentDir)).text()).trim();
+		return value || undefined;
+	} catch (error) {
+		if (!isEnoent(error)) {
+			logger.warn("Failed to read last-installed-version marker", { error: String(error) });
+		}
+		return undefined;
+	}
+}
+
+export async function writeLastInstalledVersion(version: string, agentDir?: string): Promise<void> {
+	try {
+		await Bun.write(getLastInstalledVersionPath(agentDir), version);
+	} catch (error) {
+		logger.warn("Failed to persist last-installed-version marker", { error: String(error) });
+	}
+}
+
+export async function getOutdatedProcessInfo(
+	currentVersion: string = VERSION,
+	agentDir?: string,
+): Promise<{ currentVersion: string; installedVersion: string } | undefined> {
+	const installedVersion = await readLastInstalledVersion(agentDir);
+	if (installedVersion && compareSemver(installedVersion, currentVersion) > 0) {
+		return { currentVersion, installedVersion };
+	}
+	return undefined;
+}
+
+/**
+ * Run the update command.
+ */
+async function installUpdateForTarget(
+	target: UpdateTarget,
+	expectedVersion: string,
+	force: boolean,
+	output: UpdateFlowOutput,
+): Promise<void> {
+	if (target.method === "brew") {
+		await updateViaHomebrew(expectedVersion, force, output);
+	} else if (target.method === "mise") {
+		await updateViaMise(expectedVersion, force, output);
+	} else if (target.method === "bun") {
+		await updateViaBun(expectedVersion, output);
+	} else {
+		await updateViaBinaryAt(target.path, expectedVersion, output);
+	}
+}
+
+function errorMessage(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+export async function runUpdateFlow(
+	options: UpdateFlowOptions,
+	output: UpdateFlowOutput,
+	deps: UpdateFlowDependencies = {},
+): Promise<UpdateFlowResult> {
+	const currentVersion = options.currentVersion ?? VERSION;
+	await output.log(chalk.dim(`Current version: ${currentVersion}`));
+
+	let release: ReleaseInfo;
+	try {
+		release = await (deps.getLatestRelease ?? getLatestRelease)();
+	} catch (err) {
+		throw new Error(`Failed to check for updates: ${errorMessage(err)}`);
+	}
+
+	const comparison = compareSemver(release.version, currentVersion);
+
+	if (comparison <= 0 && !options.force) {
+		await output.log(chalk.green(`${theme.status.success} Already up to date`));
+		return { kind: "no-update", currentVersion, latestVersion: release.version };
+	}
+
+	if (comparison > 0) {
+		await output.log(chalk.cyan(`New version available: ${release.version}`));
+		if (options.check) {
+			return { kind: "update-available", currentVersion, latestVersion: release.version, checkOnly: true };
+		}
+	} else if (options.check) {
+		return { kind: "no-update", currentVersion, latestVersion: release.version };
+	} else {
+		await output.log(chalk.yellow(`Forcing reinstall of ${release.version}`));
+	}
+
+	try {
+		const target = await (deps.resolveUpdateTarget ?? resolveUpdateTarget)();
+		await (deps.installUpdate ?? installUpdateForTarget)(target, release.version, options.force, output);
+		await (deps.writeInstalledVersion ?? writeLastInstalledVersion)(release.version);
+	} catch (err) {
+		throw new Error(`Update failed: ${errorMessage(err)}`);
+	}
+
+	let changelogPrinted = false;
+	if (options.showChangelog && comparison > 0) {
+		try {
+			const changelogContent = await (deps.loadReleaseChangelog ?? loadReleaseChangelog)(release);
+			if (changelogContent) {
+				const entries = parseChangelogContent(changelogContent);
+				const entriesToShow = getEntriesInVersionRange(entries, currentVersion, release.version);
+				const changelogMarkdown = formatChangelogMarkdown(entriesToShow, { reverse: true });
+				if (changelogMarkdown) {
+					await output.log(`\nWhat's new:\n\n${changelogMarkdown}`);
+					changelogPrinted = true;
+					await (deps.writeSeenChangelogVersion ?? writeLastChangelogVersion)(release.version);
+				}
+			}
+		} catch {
+			// Changelog loading is best-effort and must never fail an update.
+		}
+	}
+
+	return {
+		kind: "updated",
+		previousVersion: currentVersion,
+		version: release.version,
+		forced: options.force,
+		changelogPrinted,
+	};
 }
 
 /**
  * Run the update command.
  */
 export async function runUpdateCommand(opts: { force: boolean; check: boolean }): Promise<void> {
-	console.log(chalk.dim(`Current version: ${VERSION}`));
-
-	// Check for updates
-	let release: ReleaseInfo;
+	const consoleOutput: UpdateFlowOutput = {
+		log: message => console.log(message),
+		error: message => console.log(message),
+	};
 	try {
-		release = await getLatestRelease();
+		await runUpdateFlow({ force: opts.force, check: opts.check, showChangelog: true }, consoleOutput);
 	} catch (err) {
-		console.error(chalk.red(`Failed to check for updates: ${err}`));
-		process.exit(1);
-	}
-
-	const comparison = compareVersions(release.version, VERSION);
-
-	if (comparison <= 0 && !opts.force) {
-		console.log(chalk.green(`${theme.status.success} Already up to date`));
-		return;
-	}
-
-	if (comparison > 0) {
-		console.log(chalk.cyan(`New version available: ${release.version}`));
-	} else {
-		console.log(chalk.yellow(`Forcing reinstall of ${release.version}`));
-	}
-
-	if (opts.check) {
-		// Just check, don't install
-		return;
-	}
-
-	// Choose update method based on the prioritized omp binary in PATH
-	try {
-		const target = await resolveUpdateTarget();
-		if (target.method === "brew") {
-			await updateViaHomebrew(release.version, opts.force);
-		} else if (target.method === "mise") {
-			await updateViaMise(release.version, opts.force);
-		} else if (target.method === "bun") {
-			await updateViaBun(release.version);
-		} else {
-			await updateViaBinaryAt(target.path, release.version);
-		}
-	} catch (err) {
-		console.error(chalk.red(`Update failed: ${err}`));
+		console.error(chalk.red(errorMessage(err)));
 		process.exit(1);
 	}
 }

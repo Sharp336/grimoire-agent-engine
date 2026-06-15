@@ -10,6 +10,7 @@ import {
 	getAgentDir,
 	getConfigAgentDirName,
 	getConfigRootDir,
+	getLastInstalledVersionPath,
 	getPythonGatewayDir,
 	getSessionsDir,
 	getStatsDbPath,
@@ -129,6 +130,15 @@ describe("profile directories", () => {
 		expect(getAgentDbPath()).toBe(path.join(agent, "agent.db"));
 		expect(getSessionsDir()).toBe(path.join(agent, "sessions"));
 		expect(getStatsDbPath()).toBe(path.join(root, "stats.db"));
+	});
+
+	it("keeps installed-version marker global across named profiles", () => {
+		const root = path.join(os.homedir(), configDir);
+		const marker = path.join(root, "agent", "last-installed-version");
+
+		expect(getLastInstalledVersionPath()).toBe(marker);
+		setProfile("work");
+		expect(getLastInstalledVersionPath()).toBe(marker);
 	});
 
 	it("treats the default profile as regular mode", () => {

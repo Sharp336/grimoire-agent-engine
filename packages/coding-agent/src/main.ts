@@ -6,6 +6,7 @@
  */
 import * as fsSync from "node:fs";
 import * as os from "node:os";
+import * as path from "node:path";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
@@ -375,6 +376,71 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 	};
 }
 
+export function buildRestartLaunchArgs(parsed: Args, baseCwd: string = getProjectDir()): string[] {
+	const args: string[] = [];
+	const pushString = (flag: string, value: string | undefined) => {
+		if (value) args.push(flag, value);
+	};
+	const expandHome = (value: string): string => {
+		if (value === "~") return os.homedir();
+		if (value.startsWith("~/") || value.startsWith("~\\")) return path.join(os.homedir(), value.slice(2));
+		return value;
+	};
+	const resolveFromProjectDir = (value: string): string => {
+		const expanded = expandHome(value);
+		return path.isAbsolute(expanded) ? expanded : path.resolve(baseCwd, expanded);
+	};
+	const resolvePromptArg = (value: string | undefined): string | undefined => {
+		if (!value || value.includes("\n")) return value;
+		const expanded = expandHome(value);
+		const resolved = path.isAbsolute(expanded) ? expanded : path.resolve(baseCwd, expanded);
+		if (expanded !== value || fsSync.existsSync(resolved)) return resolved;
+		return value;
+	};
+	const pushResolvedStrings = (flag: string, values: string[] | undefined) => {
+		for (const value of values ?? []) {
+			args.push(flag, resolveFromProjectDir(value));
+		}
+	};
+
+	pushResolvedStrings("--config", parsed.config);
+	pushString("--plan", parsed.plan);
+	pushString("--provider-session-id", parsed.providerSessionId);
+	if (parsed.models && parsed.models.length > 0) args.push("--models", parsed.models.join(","));
+	pushString("--api-key", parsed.apiKey);
+	pushString("--smol", parsed.smol);
+	pushString("--slow", parsed.slow);
+	if (parsed.noTools) args.push("--no-tools");
+	if (parsed.tools && parsed.tools.length > 0) args.push("--tools", parsed.tools.join(","));
+	if (parsed.noLsp) args.push("--no-lsp");
+	if (parsed.noPty) args.push("--no-pty");
+	pushResolvedStrings("--extension", parsed.extensions);
+	pushResolvedStrings("--hook", parsed.hooks);
+	pushResolvedStrings("--plugin-dir", parsed.pluginDirs);
+	if (parsed.noExtensions) args.push("--no-extensions");
+	if (parsed.noSkills) args.push("--no-skills");
+	if (parsed.skills && parsed.skills.length > 0) args.push("--skills", parsed.skills.join(","));
+	if (parsed.noRules) args.push("--no-rules");
+	if (parsed.noTitle) args.push("--no-title");
+	if (parsed.autoApprove) args.push("--auto-approve");
+	pushString("--approval-mode", parsed.approvalMode);
+	pushString("--system-prompt", resolvePromptArg(parsed.systemPrompt));
+	pushString("--append-system-prompt", resolvePromptArg(parsed.appendSystemPrompt));
+	for (const [name, value] of parsed.unknownFlags) {
+		if (value === true) {
+			args.push(`--${name}`);
+		} else if (typeof value === "string") {
+			if (value.startsWith("-")) {
+				args.push(`--${name}=${value}`);
+			} else {
+				args.push(`--${name}`, value);
+			}
+		}
+	}
+
+	return args;
+}
+
 async function runInteractiveMode(
 	session: AgentSession,
 	version: string,
@@ -392,6 +458,7 @@ async function runInteractiveMode(
 	initialImages?: ImageContent[],
 	titleSystemPrompt?: string,
 	joinLink?: string,
+	restartLaunchArgs: string[] = [],
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -402,6 +469,7 @@ async function runInteractiveMode(
 		mcpManager,
 		eventBus,
 		titleSystemPrompt,
+		restartLaunchArgs,
 	);
 
 	// Cold-launch gate: the full setup wizard (every scene + the overlay and
@@ -576,8 +644,27 @@ async function moveMissingCwdSessionIfNeeded(
 	return { status: "moved", manager };
 }
 
+function isRestartChangelogHandoffPath(value: string): boolean {
+	const dir = path.resolve(path.dirname(value));
+	const tmpDir = path.resolve(os.tmpdir());
+	return path.dirname(dir) === tmpDir && path.basename(dir).startsWith("omp-update-changelog-");
+}
+
 async function getChangelogForDisplay(parsed: Args): Promise<string | undefined> {
-	if (parsed.continue || parsed.resume) {
+	if (parsed.changelogOnResumePath) {
+		try {
+			const changelog = (await fsSync.promises.readFile(parsed.changelogOnResumePath, "utf8")).trim();
+			return changelog || undefined;
+		} catch (error) {
+			logger.warn("Failed to load update changelog handoff", { error: String(error) });
+		} finally {
+			if (isRestartChangelogHandoffPath(parsed.changelogOnResumePath)) {
+				await fsSync.promises.rm(path.dirname(parsed.changelogOnResumePath), { recursive: true, force: true });
+			}
+		}
+	}
+
+	if (parsed.continue || (parsed.resume && !parsed.showChangelogOnResume)) {
 		return undefined;
 	}
 
@@ -991,6 +1078,7 @@ export async function runRootCommand(
 	}
 
 	let cwd = getProjectDir();
+	const startupCwd = cwd;
 	const settingsInstance =
 		deps.settings ?? (await logger.time("settings:init", Settings.init, { cwd, configFiles: parsedArgs.config }));
 	if (parsedArgs.approvalMode) {
@@ -1333,6 +1421,7 @@ export async function runRootCommand(
 				initialImages,
 				titleSystemPrompt,
 				parsedArgs.join,
+				buildRestartLaunchArgs(initialArgs, startupCwd),
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
