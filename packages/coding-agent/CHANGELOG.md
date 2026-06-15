@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an Intent Gate section to the system prompt: a surface-form → true-intent routing table (research / implementation / investigation / evaluation / fix / open-ended), a required one-line routing statement, turn-local intent reset, and a context-completion gate.
+
 ## [15.13.3] - 2026-06-15
 
 ### Added
