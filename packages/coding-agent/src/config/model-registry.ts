@@ -5,7 +5,7 @@ import type { Api, Context, Model, ModelSpec, SimpleStreamOptions, ThinkingConfi
 import type { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { isVertexExpressOpenAIUrl } from "@oh-my-pi/pi-catalog/hosts";
-import { readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { closeModelCache, readModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
 	createModelManager,
 	type ModelManagerOptions,
@@ -701,6 +701,12 @@ export class ModelRegistry {
 		});
 		// Load models synchronously in constructor.
 		this.#loadModels();
+	}
+
+	dispose(): void {
+		if (this.#cacheDbPath) {
+			closeModelCache(this.#cacheDbPath);
+		}
 	}
 
 	/**

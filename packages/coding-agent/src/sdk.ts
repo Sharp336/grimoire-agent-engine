@@ -1100,6 +1100,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
 	// / session would silently miss credential_disabled events.
 	let ownedAuthStorage: AuthStorage | undefined;
+	let ownedModelRegistry: ModelRegistry | undefined;
 	let modelRegistry: ModelRegistry;
 	if (options.modelRegistry) {
 		modelRegistry = options.modelRegistry;
@@ -1108,6 +1109,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			options.authStorage ?? (await logger.time("discoverModels", discoverAuthStorage, agentDir));
 		if (!options.authStorage) ownedAuthStorage = registryAuthStorage;
 		modelRegistry = new ModelRegistry(registryAuthStorage);
+		ownedModelRegistry = modelRegistry;
 	}
 	const authStorage = modelRegistry.authStorage;
 	if (options.authStorage && options.authStorage !== authStorage) {
@@ -2568,6 +2570,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skillWarnings,
 			skillsSettings: settings.getGroup("skills"),
 			modelRegistry,
+			ownedModelRegistry,
 			ownedAuthStorage,
 			toolRegistry,
 			transformContext,
@@ -2870,6 +2873,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					await asyncJobManager.dispose({ timeoutMs: 3_000 });
 				}
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);
+				ownedModelRegistry?.dispose();
 				ownedAuthStorage?.close();
 			}
 		} catch (cleanupError) {

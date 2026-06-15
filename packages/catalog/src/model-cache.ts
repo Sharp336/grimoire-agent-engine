@@ -119,8 +119,6 @@ export function readModelCache<TApi extends Api>(
 		};
 	} catch {
 		return null;
-	} finally {
-		if (dbPath) closeDb(dbPath);
 	}
 }
 
@@ -148,7 +146,5 @@ export function writeModelCache<TApi extends Api>(
 		);
 	} catch {
 		// Cache is best-effort.
-	} finally {
-		if (dbPath) closeDb(dbPath);
 	}
 }
