@@ -434,6 +434,13 @@ export function buildCwdReportSequence(
  * Report the working directory to the host terminal via
  * {@link buildCwdReportSequence}. No-op when stdout is not a TTY (print/RPC
  * modes, pipes) — matching {@link setTerminalTitle}.
+ *
+ * Like the OSC 0 title write, this is gated only by TTY, NOT by `--no-title`
+ * (`PI_NO_TITLE`): that flag disables AI title *auto-generation* only (see its
+ * description and the single gate in `input-controller.ts`), and the terminal
+ * title is still asserted under it. Suppressing cwd on `--no-title` would be
+ * inconsistent — title written, cwd withheld. The rpc/acp/protocol modes that
+ * also set `PI_NO_TITLE` are already silenced here by the non-TTY check.
  */
 export function setTerminalWorkingDirectory(cwd: string | undefined): void {
 	if (!process.stdout.isTTY) return;
