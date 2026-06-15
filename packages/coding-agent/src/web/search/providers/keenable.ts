@@ -5,7 +5,7 @@
  * Set KEENABLE_API_KEY for higher rate limits.
  */
 
-import { type AuthStorage, type FetchImpl } from "@oh-my-pi/pi-ai";
+import { type AuthStorage, type FetchImpl, getEnvApiKey } from "@oh-my-pi/pi-ai";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
 import type { SearchParams } from "./base";
@@ -25,21 +25,27 @@ interface KeenableMcpResult {
 	result?: {
 		content?: KeenableMcpContent[];
 	};
+	error?: { code: number; message: string };
+}
+
+interface JsonSearchResult {
+	title?: string;
+	url?: string;
+	description?: string;
+	snippet?: string;
+	published_at?: string;
 }
 
 /** @visible_for_testing */
 export function recencyToDate(recency?: "day" | "week" | "month" | "year"): string | undefined {
 	const now = Date.now();
-	let ms: number;
 	switch (recency) {
-		case "day": ms = 86_400_000; break;
-		case "week": ms = 604_800_000; break;
-		case "month": ms = 2_592_000_000; break;
-		case "year": ms = 31_536_000_000; break;
+		case "day": return new Date(now - 86_400_000).toISOString().slice(0, 10);
+		case "week": return new Date(now - 604_800_000).toISOString().slice(0, 10);
+		case "month": return new Date(now - 2_592_000_000).toISOString().slice(0, 10);
+		case "year": return new Date(now - 31_536_000_000).toISOString().slice(0, 10);
 		default: return undefined;
 	}
-	const d = new Date(now - ms);
-	return d.toISOString().slice(0, 10);
 }
 
 /**
@@ -48,6 +54,7 @@ export function recencyToDate(recency?: "day" | "week" | "month" | "year"): stri
 async function callKeenableMcpSearch(
 	query: string,
 	publishedAfter: string | undefined,
+	apiKey: string | undefined,
 	signal: AbortSignal | undefined,
 	fetchImpl: FetchImpl,
 ): Promise<string> {
@@ -58,6 +65,9 @@ async function callKeenableMcpSearch(
 			"Content-Type": "application/json",
 			Accept: "application/json, text/event-stream",
 		};
+		if (apiKey) {
+			headers["X-API-Key"] = apiKey;
+		}
 		if (sessionId) {
 			headers["Mcp-Session-Id"] = sessionId;
 		}
@@ -67,12 +77,44 @@ async function callKeenableMcpSearch(
 			body: JSON.stringify(body),
 			signal: timeoutSignal,
 		});
+
+		const sessionId_ = resp.headers.get("Mcp-Session-Id");
+
+		// MCP Streamable HTTP: notifications/initialized and empty responses may
+		// return 202 with no body, or responses may come as text/event-stream.
+		// Handle gracefully instead of forcing JSON parsing on every response.
+		const contentType = (resp.headers.get("content-type") ?? "").toLowerCase();
+		const bodyText = await resp.text();
+
 		if (!resp.ok) {
-			const text = await resp.text();
-			throw new SearchProviderError("keenable", `MCP error (${resp.status}): ${text}`, resp.status);
+			throw new SearchProviderError(
+				"keenable",
+				`MCP error (${resp.status}): ${bodyText || "(empty body)"}`,
+				resp.status,
+			);
 		}
-		const data = await resp.json() as KeenableMcpResult;
-		return { data, sessionId: resp.headers.get("Mcp-Session-Id") };
+
+		// For empty bodies (e.g. 202 Accepted) or SSE streams, return empty result.
+		if (!bodyText || contentType.includes("text/event-stream")) {
+			return { data: {}, sessionId: sessionId_ };
+		}
+
+		let data: KeenableMcpResult;
+		try {
+			data = JSON.parse(bodyText) as KeenableMcpResult;
+		} catch {
+			data = {};
+		}
+
+		if (data.error) {
+			throw new SearchProviderError(
+				"keenable",
+				`MCP error: ${data.error.message}`,
+				data.error.code,
+			);
+		}
+
+		return { data, sessionId: sessionId_ };
 	}
 
 	// Step 1: initialize handshake
@@ -90,7 +132,7 @@ async function callKeenableMcpSearch(
 		throw new SearchProviderError("keenable", "MCP server did not return a session ID", 500);
 	}
 
-	// Step 2: initialized notification (fire-and-forget)
+	// Step 2: initialized notification (fire-and-forget, may return 202 with no body)
 	await mcpPost({
 		jsonrpc: "2.0",
 		method: "notifications/initialized",
@@ -121,21 +163,40 @@ async function callKeenableMcpSearch(
 }
 
 /**
- * Parse Keenable's MCP text response into SearchSource[].
+ * Parse Keenable's MCP response into SearchSource[].
  *
- * Format per result:
- *   Title: ...
- *   URL: ...
- *   Published: YYYY-MM-DD
- *   Acquired: YYYY-MM-DD
- *
- *   ...description/snippet...
- *   ---
+ * Handles two formats:
+ *   1. JSON structure: [{ title, url, description, published_at }]
+ *   2. Text format with "Title:", "URL:", "Published:" fields separated by "---"
  */
-/** @visible_for_testing */
 export function parseKeenableResponse(text: string): SearchSource[] {
-	const sources: SearchSource[] = [];
+	if (!text) return [];
 
+	// Try parsing as JSON first (defensive — current MCP returns text format,
+	// but JSON responses are documented and may be returned in the future).
+	const trimmed = text.trim();
+	if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
+		try {
+			const jsonResults = JSON.parse(trimmed) as JsonSearchResult | JsonSearchResult[];
+			const arr = Array.isArray(jsonResults) ? jsonResults : [jsonResults];
+			const sources: SearchSource[] = [];
+			for (const r of arr) {
+				if (!r.url) continue;
+				sources.push({
+					title: r.title ?? r.url,
+					url: r.url,
+					snippet: r.snippet ?? r.description ?? undefined,
+					publishedDate: r.published_at ?? undefined,
+				});
+			}
+			return sources;
+		} catch {
+			// Not valid JSON — fall through to text parsing
+		}
+	}
+
+	// Text format: "Title: ...\nURL: ...\nPublished: ...\n\n...\n---"
+	const sources: SearchSource[] = [];
 	const blocks = text.split(/\n---\n/);
 	for (const block of blocks) {
 		const lines = block.split("\n");
@@ -146,18 +207,18 @@ export function parseKeenableResponse(text: string): SearchSource[] {
 		const bodyLines: string[] = [];
 
 		for (const line of lines) {
-			const trimmed = line.trim();
-			if (trimmed.startsWith("Title: ")) {
-				title = trimmed.slice(7).trim();
-			} else if (trimmed.startsWith("URL: ")) {
-				url = trimmed.slice(5).trim();
-			} else if (trimmed.startsWith("Published: ")) {
-				const val = trimmed.slice(11).trim();
+			const trimmed_ = line.trim();
+			if (trimmed_.startsWith("Title: ")) {
+				title = trimmed_.slice(7).trim();
+			} else if (trimmed_.startsWith("URL: ")) {
+				url = trimmed_.slice(5).trim();
+			} else if (trimmed_.startsWith("Published: ")) {
+				const val = trimmed_.slice(11).trim();
 				if (val) publishedDate = val;
-			} else if (trimmed === "") {
+			} else if (trimmed_ === "") {
 				if (title && url) inBody = true;
 			} else if (inBody) {
-				bodyLines.push(trimmed);
+				bodyLines.push(trimmed_);
 			}
 		}
 
@@ -165,11 +226,10 @@ export function parseKeenableResponse(text: string): SearchSource[] {
 
 		if (bodyLines.length > 0) {
 			const snippet = bodyLines.join(" ").replace(/\s+/g, " ").trim();
-			const finalSnippet = snippet.length > 500 ? snippet.slice(0, 500) + "..." : snippet;
 			sources.push({
 				title: title || url,
 				url,
-				snippet: finalSnippet,
+				snippet: snippet.length > 500 ? snippet.slice(0, 500) + "..." : snippet,
 				publishedDate,
 			});
 			continue;
@@ -190,7 +250,8 @@ export function parseKeenableResponse(text: string): SearchSource[] {
 export async function searchKeenable(params: SearchParamsWithFetch): Promise<SearchResponse> {
 	const fetchImpl = params.fetch ?? fetch;
 	const publishedAfter = recencyToDate(params.recency);
-	const text = await callKeenableMcpSearch(params.query, publishedAfter, params.signal, fetchImpl);
+	const apiKey = await findApiKey(params.authStorage, params.sessionId, params.signal);
+	const text = await callKeenableMcpSearch(params.query, publishedAfter, apiKey, params.signal, fetchImpl);
 	const allSources = parseKeenableResponse(text);
 	const numResults = params.numSearchResults ?? params.limit;
 	const sources = numResults ? allSources.slice(0, numResults) : allSources;
@@ -199,6 +260,17 @@ export async function searchKeenable(params: SearchParamsWithFetch): Promise<Sea
 		provider: "keenable",
 		sources,
 	};
+}
+
+/** Resolve Keenable API key from env or agent.db. */
+async function findApiKey(
+	authStorage: AuthStorage,
+	sessionId?: string,
+	signal?: AbortSignal,
+): Promise<string | undefined> {
+	const envKey = getEnvApiKey("keenable");
+	if (envKey) return envKey;
+	return authStorage.getApiKey("keenable", sessionId, { signal });
 }
 
 /** Search provider for Keenable. */
