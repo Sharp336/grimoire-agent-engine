@@ -15,7 +15,7 @@ import type { Settings } from "../../config/settings";
 import { projectLabel } from "../../hindsight/bank";
 import { createHindsightClient } from "../../hindsight/client";
 import { type HindsightConfig, isHindsightConfigured, loadHindsightConfig } from "../../hindsight/config";
-import { getBundleRoot } from "../bundle";
+import { resolveBundleRoot } from "../bundle";
 import { HindsightOkfStore } from "./store-hindsight";
 import { SqliteOkfStore } from "./store-sqlite";
 import type { OkfStore } from "./types";
@@ -59,7 +59,9 @@ export async function resolveOkfStore(
 	customBundleDir?: string,
 ): Promise<ResolveOkfStoreResult> {
 	const choice = settings.get("okf.store") as "auto" | "hindsight" | "sqlite";
-	const bundleRoot = path.resolve(customBundleDir ?? getBundleRoot(cwd));
+	// Resolve a relative `okf.bundleDir` against the SESSION cwd (not process
+	// cwd) so reindex/auto-recall target the same bundle as `okf://` reads/writes.
+	const bundleRoot = resolveBundleRoot(cwd, customBundleDir);
 
 	// Try Hindsight if requested or auto-detected.
 	if (choice === "hindsight" || choice === "auto") {

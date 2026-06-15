@@ -15,12 +15,11 @@
  *     auto-recall against the first user message.
  */
 
-import * as path from "node:path";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { Settings } from "../config/settings";
 import okfInstructions from "../prompts/okf/okf-instructions.md" with { type: "text" };
 import okfRecallSnippet from "../prompts/okf/okf-recall-snippet.md" with { type: "text" };
-import { getBundleRoot, loadConcept, loadSummaries } from "./bundle";
+import { loadConcept, loadSummaries, resolveBundleRoot } from "./bundle";
 import { resolveOkfStore } from "./store/store-resolve";
 import type { OkfStore } from "./store/types";
 
@@ -64,7 +63,9 @@ export class OkfSessionState {
 		// parent's — not the child session's cwd.
 		if (this.#aliasOf) return this.#aliasOf.bundleRoot;
 		const custom = this.#settings.get("okf.bundleDir") as string | undefined;
-		return path.resolve(custom ? custom : getBundleRoot(this.#cwd));
+		// Resolve a relative `okf.bundleDir` against the session cwd (not the
+		// process cwd) so reindex/auto-recall match `okf://` reads/writes.
+		return resolveBundleRoot(this.#cwd, custom);
 	}
 
 	get store(): OkfStore | undefined {

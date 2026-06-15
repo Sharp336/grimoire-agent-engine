@@ -1,4 +1,6 @@
 import { describe, expect, it } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
 import { OkfSessionState } from "../../src/okf/state";
 import type { OkfSearchResult, OkfStore } from "../../src/okf/store/types";
@@ -85,6 +87,20 @@ describe("okf/state OkfSessionState", () => {
 
 		expect(snippet).toContain("(okf:///deploy.md)");
 		expect(snippet).not.toContain("(okf://deploy.md)");
+	});
+
+	it("resolves a relative okf.bundleDir against the session cwd, not the process cwd", () => {
+		// A session cwd outside the process cwd (mimics ACP/subagent/embedded hosts
+		// where the process dir differs from the active project).
+		const sessionCwd = path.join(os.tmpdir(), "okf-session-root");
+		const settings = Settings.isolated();
+		settings.set("okf.bundleDir", "custom/knowledge");
+		const state = new OkfSessionState({ sessionId: "session", settings, cwd: sessionCwd, store: new FakeOkfStore() });
+
+		// Must resolve against the session cwd — matching `okf://` reads/writes —
+		// never against the process cwd.
+		expect(state.bundleRoot).toBe(path.resolve(sessionCwd, "custom/knowledge"));
+		expect(state.bundleRoot.startsWith(sessionCwd)).toBe(true);
 	});
 
 	it("re-runs auto-recall after resetFirstTurnRecall for a new transcript", async () => {
