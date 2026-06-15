@@ -12,8 +12,9 @@
 import * as path from "node:path";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { Settings } from "../../config/settings";
+import { projectLabel } from "../../hindsight/bank";
 import { createHindsightClient } from "../../hindsight/client";
-import { isHindsightConfigured, loadHindsightConfig } from "../../hindsight/config";
+import { type HindsightConfig, isHindsightConfigured, loadHindsightConfig } from "../../hindsight/config";
 import { getBundleRoot } from "../bundle";
 import { HindsightOkfStore } from "./store-hindsight";
 import { SqliteOkfStore } from "./store-sqlite";
@@ -22,6 +23,26 @@ import type { OkfStore } from "./types";
 export interface ResolveOkfStoreResult {
 	store: OkfStore;
 	backend: "sqlite" | "hindsight";
+}
+
+/**
+ * Derive the OKF Hindsight bank id for a session.
+ *
+ * When `okf.bankId` is explicitly set it is used verbatim (the user opts into a
+ * specific, possibly shared, bank). Otherwise the bank is scoped **per project**
+ * so concurrent projects land in isolated banks — without this, every project
+ * without an explicit bank shares one `okf` bank and `OkfSessionState.reindex()`
+ * deletes every concept that is not in the current cwd's bundle, wiping the
+ * other projects' documents (and oscillating recall between them).
+ *
+ * The project label reuses the Hindsight bank convention (git-repo-aware cwd
+ * basename), matching how the memory backend scopes `per-project` banks.
+ */
+export function deriveOkfBankId(settings: Settings, config: HindsightConfig, cwd: string): string {
+	const explicit = (settings.get("okf.bankId") as string | undefined)?.trim();
+	const prefix = config.bankIdPrefix?.trim() || "";
+	const base = explicit || `okf-${projectLabel(cwd)}`;
+	return prefix ? `${prefix}-${base}` : base;
 }
 
 /**
@@ -46,11 +67,7 @@ export async function resolveOkfStore(
 		if (isHindsightConfigured(hindsightConfig)) {
 			try {
 				const client = createHindsightClient(hindsightConfig);
-				// Derive a dedicated OKF bank from the hindsight bank settings.
-				const okfBankSetting = settings.get("okf.bankId") as string | undefined;
-				const bankPrefix = hindsightConfig.bankIdPrefix ?? "";
-				const baseBank = okfBankSetting?.trim() || "okf";
-				const bankId = bankPrefix ? `${bankPrefix}-${baseBank}` : baseBank;
+				const bankId = deriveOkfBankId(settings, hindsightConfig, cwd);
 				const store = new HindsightOkfStore(client, bankId);
 
 				// Health probe for auto mode.

@@ -68,7 +68,7 @@ function baseBankId(config: HindsightConfig): string {
  * `git.repo.primaryRootSync` walks `.git`/`commondir` with sync file reads —
  * no subprocess — so the cost is one or two `stat`s and a small `readFile`.
  */
-function projectLabel(directory: string): string {
+export function projectLabel(directory: string): string {
 	if (!directory) return UNKNOWN_PROJECT;
 	const primary = git.repo.primaryRootSync(directory);
 	return path.basename(primary ?? directory) || UNKNOWN_PROJECT;
