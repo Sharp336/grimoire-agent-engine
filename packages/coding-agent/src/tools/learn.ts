@@ -15,6 +15,7 @@ const learnSchema = z.object({
 			name: z.string().describe("kebab-case skill name"),
 			description: z.string().describe("one-line description of when to use the skill"),
 			body: z.string().describe("the SKILL.md body in markdown (no frontmatter)"),
+			files: z.array(z.object({ path: z.string(), content: z.string() })).optional(),
 		})
 		.describe("also create or enhance a managed skill in the same call")
 		.optional(),

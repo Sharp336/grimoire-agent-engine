@@ -7,3 +7,5 @@ Managed skills are for repeatable procedures worth codifying: a setup sequence, 
 - `action: "delete"` — requires `name`. Fails if the skill does not exist.
 
 `name` is kebab-case (lowercase letters, digits, hyphens). `description` is a single line stating when to use the skill — it drives discovery, so make it specific. `body` is the SKILL.md content in markdown; do not include frontmatter (it is generated from `name` and `description`).
+
+Optional `files` may bundle reference or script files under the skill directory. Paths must be relative (no absolute paths or `..`); use `scripts/` for executables and `.md` files such as `REFERENCE.md` for longer material loaded on demand via `skill://<name>/<path>`. On update, only listed files are overwritten or added; unlisted existing files remain.

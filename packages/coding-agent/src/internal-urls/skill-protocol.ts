@@ -9,6 +9,7 @@
  */
 import * as path from "node:path";
 import { getActiveSkills } from "../extensibility/skills";
+import { validateRelativePath } from "./path-safety";
 import type { InternalResource, InternalUrl, ProtocolHandler, UrlCompletion } from "./types";
 
 function getContentType(filePath: string): InternalResource["contentType"] {
@@ -17,19 +18,10 @@ function getContentType(filePath: string): InternalResource["contentType"] {
 	return "text/plain";
 }
 
-/**
- * Validate that a path is safe (no traversal, no absolute paths).
- */
-export function validateRelativePath(relativePath: string): void {
-	if (path.isAbsolute(relativePath)) {
-		throw new Error("Absolute paths are not allowed in skill:// URLs");
-	}
-
-	const normalized = path.normalize(relativePath);
-	if (normalized.startsWith("..") || normalized.includes("/../") || normalized.includes("/..")) {
-		throw new Error("Path traversal (..) is not allowed in skill:// URLs");
-	}
-}
+// Re-exported from ./path-safety (a dependency-free leaf) so the local://, memory://, and
+// vault:// handlers can keep importing it from here. managed-skills imports the leaf directly
+// to avoid a module-init cycle through this handler's skill-discovery imports.
+export { validateRelativePath };
 
 /**
  * Handler for skill:// URLs.

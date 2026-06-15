@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Managed skills (`manage_skill`, `learn`) now validate against the Agent Skills standard (reserved-word name check, description capped at 1024 chars) and can bundle reference/script files: both tools accept an optional `files` array written under the skill directory (relative paths only, traversal- and symlink-safe, count- and byte-capped), readable on demand via `skill://<name>/<path>`.
+
 ## [15.13.2] - 2026-06-15
 
 ### Added

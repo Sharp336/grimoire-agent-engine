@@ -23,6 +23,7 @@ const manageSkillSchema = z
 			.string()
 			.describe("the SKILL.md body in markdown, no frontmatter (required for create/update)")
 			.optional(),
+		files: z.array(z.object({ path: z.string(), content: z.string() })).optional(),
 	})
 	// Enforce the action/field contract at validation time rather than only in
 	// execute. Kept as a cross-field refine (not a discriminated union) so the
@@ -93,6 +94,7 @@ export class ManageSkillTool implements AgentTool<typeof manageSkillSchema> {
 			name: params.name,
 			description: params.description,
 			body: params.body,
+			files: params.files,
 		});
 		const relativePath = path.relative(getManagedSkillsDir(), skillPath);
 		const verb = params.action === "create" ? "Created" : "Updated";

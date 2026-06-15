@@ -31,6 +31,7 @@ describe("managed-skills primitives", () => {
 	});
 
 	const skillFile = (name: string) => path.join(getManagedSkillsDir(), name, "SKILL.md");
+	const skillPath = (name: string, relativePath: string) => path.join(getManagedSkillsDir(), name, relativePath);
 
 	describe("sanitizeSkillName", () => {
 		it("rejects traversal, slashes, and empty names", () => {
@@ -42,6 +43,11 @@ describe("managed-skills primitives", () => {
 
 		it("normalizes and accepts a valid kebab name", () => {
 			expect(sanitizeSkillName("  Demo-Skill ")).toBe("demo-skill");
+		});
+
+		it("rejects names containing reserved Agent-Skills vendor words", () => {
+			expect(() => sanitizeSkillName("claude-helper")).toThrow(/reserved/);
+			expect(() => sanitizeSkillName("anthropic-helper")).toThrow(/reserved/);
 		});
 	});
 
@@ -66,6 +72,66 @@ describe("managed-skills primitives", () => {
 			await expect(
 				writeManagedSkill({ action: "create", name: "foo", description: "x", body: "y" }),
 			).rejects.toThrow(/already exists/);
+		});
+
+		it("rejects a create name containing reserved Agent-Skills vendor words", async () => {
+			await expect(
+				writeManagedSkill({ action: "create", name: "claude-helper", description: "d", body: "b" }),
+			).rejects.toThrow(/reserved/);
+		});
+
+		it("writes bundled reference and script files under the skill directory", async () => {
+			await writeManagedSkill({
+				action: "create",
+				name: "bundle",
+				description: "When bundled files help.",
+				body: "# Bundle\nUse the reference.",
+				files: [
+					{ path: "REFERENCE.md", content: "# Reference\nDetails" },
+					{ path: "scripts/run.sh", content: "#!/bin/sh\nprintf '%s\\n' ok\n" },
+				],
+			});
+
+			expect(await Bun.file(skillFile("bundle")).exists()).toBe(true);
+			expect(await Bun.file(skillPath("bundle", "REFERENCE.md")).text()).toBe("# Reference\nDetails");
+			expect(await Bun.file(skillPath("bundle", "scripts/run.sh")).text()).toBe("#!/bin/sh\nprintf '%s\\n' ok\n");
+		});
+
+		it("rejects bundled traversal and absolute paths", async () => {
+			await expect(
+				writeManagedSkill({
+					action: "create",
+					name: "bad-ref",
+					description: "d",
+					body: "b",
+					files: [{ path: "../escape.md", content: "nope" }],
+				}),
+			).rejects.toThrow(/traversal|invalid/i);
+			expect(await Bun.file(path.join(getManagedSkillsDir(), "escape.md")).exists()).toBe(false);
+
+			await expect(
+				writeManagedSkill({
+					action: "create",
+					name: "abs-ref",
+					description: "d",
+					body: "b",
+					files: [{ path: path.join(tempHome, "escape.md"), content: "nope" }],
+				}),
+			).rejects.toThrow(/absolute|invalid/i);
+			expect(await Bun.file(path.join(tempHome, "escape.md")).exists()).toBe(false);
+		});
+
+		it("rejects a bundled file that clobbers the SKILL.md manifest case-insensitively", async () => {
+			await expect(
+				writeManagedSkill({
+					action: "create",
+					name: "caseclash",
+					description: "d",
+					body: "b",
+					files: [{ path: "skill.md", content: "nope" }],
+				}),
+			).rejects.toThrow(/reserved/i);
+			expect(await Bun.file(skillPath("caseclash", "skill.md")).exists()).toBe(false);
 		});
 
 		it("update overwrites the body; update of a missing skill throws", async () => {
@@ -103,6 +169,13 @@ describe("managed-skills primitives", () => {
 			const description = "b".repeat(500); // body + description + frontmatter exceeds it
 			await expect(writeManagedSkill({ action: "create", name: "fin", description, body })).rejects.toThrow(/bytes/);
 			expect(await Bun.file(skillFile("fin")).exists()).toBe(false);
+		});
+
+		it("rejects descriptions over the Agent-Skills 1024 character limit", async () => {
+			await expect(
+				writeManagedSkill({ action: "create", name: "longdesc", description: "d".repeat(1025), body: "b" }),
+			).rejects.toThrow(/1024/);
+			expect(await Bun.file(skillFile("longdesc")).exists()).toBe(false);
 		});
 
 		it("neutralizes prompt-injection metacharacters in the persisted description", async () => {

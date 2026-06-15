@@ -12,6 +12,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getAgentDir, isEnoent } from "@oh-my-pi/pi-utils";
 import { YAML } from "bun";
+import { validateRelativePath } from "../internal-urls/path-safety";
 
 /** Provider id stamped on discovered managed skills (distinguishes them from authored). */
 export const MANAGED_SKILLS_PROVIDER_ID = "omp-managed";
@@ -19,7 +20,11 @@ export const MANAGED_SKILLS_PROVIDER_ID = "omp-managed";
 /** Hard cap on a managed SKILL.md body to keep generated skills bounded. */
 export const MAX_MANAGED_SKILL_BYTES = 64_000;
 
+/** Hard cap on bundled reference/script files per managed skill. */
+export const MAX_MANAGED_SKILL_FILES = 32;
+
 const SKILL_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,63}$/;
+const SKILL_NAME_RESERVED_PATTERN = /anthropic|claude/;
 
 /** Resolve the isolated managed-skills directory (`~/.omp/agent/managed-skills`). */
 export function getManagedSkillsDir(agentDir: string = getAgentDir()): string {
@@ -38,6 +43,9 @@ export function sanitizeSkillName(raw: string): string {
 			`Invalid skill name "${raw}". Use lowercase letters, digits, and hyphens (1-64 chars, starting with a letter or digit).`,
 		);
 	}
+	if (SKILL_NAME_RESERVED_PATTERN.test(name)) {
+		throw new Error('Skill name must not contain reserved words "anthropic" or "claude".');
+	}
 	return name;
 }
 
@@ -48,7 +56,7 @@ export function sanitizeSkillName(raw: string): string {
  * (e.g. hand-placed) must not render unescaped into the system prompt.
  */
 export function isValidManagedSkillName(name: string): boolean {
-	return SKILL_NAME_PATTERN.test(name);
+	return SKILL_NAME_PATTERN.test(name) && !SKILL_NAME_RESERVED_PATTERN.test(name);
 }
 
 /**
@@ -86,6 +94,7 @@ export interface WriteManagedSkillInput {
 	name: string;
 	description: string;
 	body: string;
+	files?: ReadonlyArray<{ path: string; content: string }>;
 }
 
 /**
@@ -126,25 +135,155 @@ async function assertManagedRootSafe(): Promise<void> {
 
 const UPDATE_FILE_OPEN_FLAGS = fsConstants.O_WRONLY | fsConstants.O_NOFOLLOW;
 
-function assertManagedSkillFileSafeForUpdate(name: string, fileStat: Stats): void {
+function assertManagedSkillFileSafeForUpdate(name: string, fileStat: Stats, relativePath = "SKILL.md"): void {
 	if (!fileStat.isFile()) {
-		throw new Error(`Managed skill "${name}" SKILL.md is not a regular file; refusing to overwrite it.`);
+		throw new Error(`Managed skill "${name}" ${relativePath} is not a regular file; refusing to overwrite it.`);
 	}
 	if (fileStat.nlink > 1) {
 		throw new Error(
-			`Managed skill "${name}" SKILL.md has ${fileStat.nlink} hard links; refusing to overwrite a file that may be user-authored elsewhere.`,
+			`Managed skill "${name}" ${relativePath} has ${fileStat.nlink} hard links; refusing to overwrite a file that may be user-authored elsewhere.`,
 		);
 	}
 }
 
-async function openManagedSkillFileForUpdate(name: string, file: string) {
+async function openManagedSkillFileForUpdate(name: string, file: string, relativePath = "SKILL.md") {
 	try {
 		return await fs.open(file, UPDATE_FILE_OPEN_FLAGS);
 	} catch (err) {
 		if ((err as { code?: string }).code === "ELOOP") {
-			throw new Error(`Managed skill "${name}" SKILL.md is a symlink; refusing to overwrite it.`);
+			throw new Error(`Managed skill "${name}" ${relativePath} is a symlink; refusing to overwrite it.`);
 		}
 		throw err;
+	}
+}
+
+interface PreparedManagedSkillFile {
+	relativePath: string;
+	targetPath: string;
+	content: string;
+}
+
+function prepareManagedSkillFiles(
+	name: string,
+	dir: string,
+	files: ReadonlyArray<{ path: string; content: string }> | undefined,
+): PreparedManagedSkillFile[] {
+	if (!files?.length) return [];
+	if (files.length > MAX_MANAGED_SKILL_FILES) {
+		throw new Error(`Managed skill "${name}" has ${files.length} files; the limit is ${MAX_MANAGED_SKILL_FILES}.`);
+	}
+
+	const seen = new Set<string>();
+	return files.map(file => {
+		try {
+			validateRelativePath(file.path);
+		} catch (err) {
+			const reason = err instanceof Error ? err.message : String(err);
+			throw new Error(`Managed skill "${name}" file path "${file.path}" is invalid: ${reason}`);
+		}
+
+		const relativePath = path.normalize(file.path);
+		if (!relativePath || relativePath === ".") {
+			throw new Error(`Managed skill "${name}" file path must name a file.`);
+		}
+		if (relativePath.toLowerCase() === "skill.md") {
+			throw new Error(`Managed skill "${name}" file path "SKILL.md" is reserved for the skill manifest.`);
+		}
+		if (seen.has(relativePath)) {
+			throw new Error(`Managed skill "${name}" includes duplicate bundled file "${relativePath}".`);
+		}
+		seen.add(relativePath);
+
+		const targetPath = path.join(dir, relativePath);
+		const resolvedTarget = path.resolve(targetPath);
+		const resolvedDir = path.resolve(dir);
+		if (!resolvedTarget.startsWith(resolvedDir + path.sep) && resolvedTarget !== resolvedDir) {
+			throw new Error(`Managed skill "${name}" file path "${file.path}" escapes the skill directory.`);
+		}
+
+		const bytes = Buffer.byteLength(file.content, "utf8");
+		if (bytes > MAX_MANAGED_SKILL_BYTES) {
+			throw new Error(
+				`Managed skill "${name}" file "${relativePath}" is ${bytes} bytes; the per-file limit is ${MAX_MANAGED_SKILL_BYTES}.`,
+			);
+		}
+
+		return { relativePath, targetPath, content: file.content };
+	});
+}
+
+async function ensureManagedSkillParentDirsSafe(name: string, dir: string, relativePath: string): Promise<void> {
+	const parts = relativePath.split(path.sep).slice(0, -1);
+	let current = dir;
+	for (const part of parts) {
+		if (!part || part === ".") continue;
+		current = path.join(current, part);
+		let stat = await fs.lstat(current).catch(err => {
+			if (isEnoent(err)) return null;
+			throw err;
+		});
+		if (stat === null) {
+			try {
+				await fs.mkdir(current);
+			} catch (err) {
+				if ((err as { code?: string }).code !== "EEXIST") throw err;
+			}
+			stat = await fs.lstat(current);
+		}
+		if (stat.isSymbolicLink()) {
+			throw new Error(`Managed skill "${name}" parent directory for "${relativePath}" is a symlink.`);
+		}
+		if (!stat.isDirectory()) {
+			throw new Error(`Managed skill "${name}" parent for "${relativePath}" is not a directory.`);
+		}
+	}
+}
+
+async function writeManagedSkillBundledFile(
+	name: string,
+	dir: string,
+	file: PreparedManagedSkillFile,
+	action: "create" | "update",
+): Promise<void> {
+	await ensureManagedSkillParentDirsSafe(name, dir, file.relativePath);
+	if (action === "create") {
+		try {
+			await fs.writeFile(file.targetPath, file.content, { flag: "wx" });
+		} catch (err) {
+			if ((err as { code?: string }).code === "EEXIST") {
+				throw new Error(`Managed skill "${name}" file "${file.relativePath}" already exists.`);
+			}
+			throw err;
+		}
+		return;
+	}
+
+	const fileStat = await fs.lstat(file.targetPath).catch(err => {
+		if (isEnoent(err)) return null;
+		throw err;
+	});
+	if (fileStat === null) {
+		try {
+			await fs.writeFile(file.targetPath, file.content, { flag: "wx" });
+			return;
+		} catch (err) {
+			if ((err as { code?: string }).code !== "EEXIST") throw err;
+		}
+	}
+
+	const latestStat = fileStat ?? (await fs.lstat(file.targetPath));
+	if (latestStat.isSymbolicLink()) {
+		throw new Error(`Managed skill "${name}" ${file.relativePath} is a symlink; refusing to overwrite it.`);
+	}
+	assertManagedSkillFileSafeForUpdate(name, latestStat, file.relativePath);
+	const handle = await openManagedSkillFileForUpdate(name, file.targetPath, file.relativePath);
+	try {
+		const openStat = await handle.stat();
+		assertManagedSkillFileSafeForUpdate(name, openStat, file.relativePath);
+		await handle.truncate(0);
+		await handle.writeFile(file.content);
+	} finally {
+		await handle.close();
 	}
 }
 
@@ -152,6 +291,11 @@ async function openManagedSkillFileForUpdate(name: string, file: string) {
 export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<{ path: string }> {
 	const name = sanitizeSkillName(input.name);
 	const description = sanitizeManagedDescription(input.description);
+	if (description.length > 1024) {
+		throw new Error(
+			`Managed skill "${name}" description is ${description.length} characters; Agent-Skills descriptions are limited to 1024 characters.`,
+		);
+	}
 	const body = input.body.trim();
 	// Reject empty content: an all-whitespace/control description sanitizes to ""
 	// and the `requireDescription` discovery scan then silently drops the skill,
@@ -175,6 +319,7 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 		await assertManagedRootSafe();
 		const dir = path.join(getManagedSkillsDir(), name);
 		const file = path.join(dir, "SKILL.md");
+		const bundledFiles = prepareManagedSkillFiles(name, dir, input.files);
 		// Reject a symlinked skill directory: an intermediate symlink would let the
 		// write escape the isolated managed root. lstat does not follow the final
 		// component, so a symlinked `dir` is caught here.
@@ -185,6 +330,19 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 		if (dirStat?.isSymbolicLink()) {
 			throw new Error(
 				`Managed skill "${name}" resolves through a symlink; refusing to write outside the managed directory.`,
+			);
+		}
+		if (input.action === "create" && bundledFiles.length > 0) {
+			await Promise.all(
+				bundledFiles.map(async bundledFile => {
+					const existing = await fs.lstat(bundledFile.targetPath).catch(err => {
+						if (isEnoent(err)) return null;
+						throw err;
+					});
+					if (existing !== null) {
+						throw new Error(`Managed skill "${name}" file "${bundledFile.relativePath}" already exists.`);
+					}
+				}),
 			);
 		}
 		if (input.action === "create") {
@@ -198,6 +356,9 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 					throw new Error(`Managed skill "${name}" already exists. Use action "update" to change it.`);
 				}
 				throw err;
+			}
+			for (const bundledFile of bundledFiles) {
+				await writeManagedSkillBundledFile(name, dir, bundledFile, "create");
 			}
 			return { path: file };
 		}
@@ -224,6 +385,9 @@ export async function writeManagedSkill(input: WriteManagedSkillInput): Promise<
 			await handle.writeFile(content);
 		} finally {
 			await handle.close();
+		}
+		for (const bundledFile of bundledFiles) {
+			await writeManagedSkillBundledFile(name, dir, bundledFile, "update");
 		}
 		return { path: file };
 	});
