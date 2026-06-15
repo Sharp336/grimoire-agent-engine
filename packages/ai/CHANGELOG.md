@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex Responses mis-routing interleaved function-call argument deltas through a singleton current block; deltas are now routed by item id / output index so concurrent tool calls retain their own arguments, and stale deltas for an already-closed call are dropped instead of corrupting a sibling.
+
 ## [15.13.1] - 2026-06-15
 
 ### Fixed

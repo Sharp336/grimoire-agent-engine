@@ -5,7 +5,14 @@ import {
 	prewarmOpenAICodexResponses,
 	streamOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
-import type { Context, FetchImpl, Model, ModelSpec, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type {
+	AssistantMessage,
+	Context,
+	FetchImpl,
+	Model,
+	ModelSpec,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -378,6 +385,90 @@ describe("openai-codex streaming", () => {
 		expect(toolCall.arguments).toEqual({ path: "README.md" });
 		expect("partialJson" in toolCall).toBe(false);
 		expect("lastParseLen" in toolCall).toBe(false);
+	});
+
+	it("routes interleaved function-call argument deltas by item id", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const context = createCodexTestContext();
+		const firstArgs = '{"agent":"explore","context":"ctx","tasks":[{"assignment":"A"}]}';
+		const secondArgs = '{"agent":"explore","context":"ctx","tasks":[{"assignment":"B"}]}';
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_a", call_id: "call_a", name: "task", arguments: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.added", output_index: 1, item: { type: "function_call", id: "fc_b", call_id: "call_b", name: "task", arguments: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_a", delta: firstArgs.slice(0, 32) })}`,
+			`data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 1, item_id: "fc_b", delta: secondArgs.slice(0, 32) })}`,
+			`data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_a", delta: firstArgs.slice(32) })}`,
+			`data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 1, item_id: "fc_b", delta: secondArgs.slice(32) })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "fc_a", call_id: "call_a", name: "task", arguments: firstArgs } })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", output_index: 1, item: { type: "function_call", id: "fc_b", call_id: "call_b", name: "task", arguments: secondArgs } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		);
+
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const result = await streamOpenAICodexResponses(model, context, {
+			apiKey: token,
+			fetch: fetchMock as FetchImpl,
+		}).result();
+
+		const toolCalls = result.content.filter(c => c.type === "toolCall");
+		expect(toolCalls).toHaveLength(2);
+		expect(toolCalls.map(call => call.arguments)).toEqual([
+			{ agent: "explore", context: "ctx", tasks: [{ assignment: "A" }] },
+			{ agent: "explore", context: "ctx", tasks: [{ assignment: "B" }] },
+		]);
+		expect(toolCalls.map(call => call.id)).toEqual(["call_a|fc_a", "call_b|fc_b"]);
+	});
+
+	it("drops a stale keyed delta for a closed call and routes live deltas by item", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const token = createCodexTestToken();
+		const context = createCodexTestContext();
+		const aArgs = '{"agent":"explore","tasks":[{"assignment":"A"}]}';
+		const bArgs = '{"agent":"explore","tasks":[{"assignment":"B"}]}';
+		// A opens and closes; a stale late delta keyed to the now-closed A must be dropped
+		// rather than appended to the still-open sibling B (the pre-hardening singleton
+		// fallback routed it to the last open item, corrupting B's live arg stream).
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", output_index: 0, item: { type: "function_call", id: "fc_a", call_id: "call_a", name: "task", arguments: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.added", output_index: 1, item: { type: "function_call", id: "fc_b", call_id: "call_b", name: "task", arguments: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_a", delta: aArgs })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", output_index: 0, item: { type: "function_call", id: "fc_a", call_id: "call_a", name: "task", arguments: aArgs } })}`,
+			`data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 0, item_id: "fc_a", delta: "STALE" })}`,
+			`data: ${JSON.stringify({ type: "response.function_call_arguments.delta", output_index: 1, item_id: "fc_b", delta: bArgs })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", output_index: 1, item: { type: "function_call", id: "fc_b", call_id: "call_b", name: "task", arguments: bArgs } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock = vi.fn(
+			async () => new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } }),
+		);
+
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+		const streamResult = streamOpenAICodexResponses(model, context, { apiKey: token, fetch: fetchMock as FetchImpl });
+		const deltas: Array<{ contentIndex: number; delta: string }> = [];
+		let final: AssistantMessage | undefined;
+		for await (const event of streamResult) {
+			if (event.type === "toolcall_delta") deltas.push({ contentIndex: event.contentIndex, delta: event.delta });
+			if (event.type === "done") final = event.message;
+		}
+
+		// Only the two live deltas are emitted, each routed to its own block; the STALE
+		// frame for the closed A produced no event (dropped, not appended to B).
+		expect(deltas).toEqual([
+			{ contentIndex: 0, delta: aArgs },
+			{ contentIndex: 1, delta: bArgs },
+		]);
+		const toolCalls = (final?.content ?? []).filter(c => c.type === "toolCall");
+		expect(toolCalls).toHaveLength(2);
+		expect(toolCalls.map(call => call.arguments)).toEqual([
+			{ agent: "explore", tasks: [{ assignment: "A" }] },
+			{ agent: "explore", tasks: [{ assignment: "B" }] },
+		]);
 	});
 
 	it("waits for caller abort when SSE streams only no-progress status events", async () => {
