@@ -132,7 +132,7 @@ export class OkfSessionState {
 		if (this.#aliasOf) {
 			return await this.#aliasOf.beforeAgentStartPrompt(promptText);
 		}
-		if (this.#hasRecalledForFirstTurn) return this.#lastRecallSnippet;
+		if (this.#hasRecalledForFirstTurn) return undefined;
 		this.#hasRecalledForFirstTurn = true;
 
 		if (!this.#settings.get("okf.autoRecall")) return undefined;
@@ -154,13 +154,10 @@ export class OkfSessionState {
 	}
 
 	/**
-	 * Static instructions + last recall snippet, appended to the base system prompt.
+	 * Static OKF instructions appended to the base system prompt.
 	 */
 	async buildDeveloperInstructions(): Promise<string | undefined> {
-		const parts = [okfInstructions];
-		const snippet = this.lastRecallSnippet;
-		if (snippet) parts.push(snippet);
-		const rendered = parts.join("\n\n").trim();
+		const rendered = okfInstructions.trim();
 		return rendered || undefined;
 	}
 

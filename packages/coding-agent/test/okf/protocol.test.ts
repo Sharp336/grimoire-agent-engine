@@ -1,10 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
-import { rm } from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import { Settings } from "../../src/config/settings";
 import { OkfProtocolHandler } from "../../src/internal-urls/okf-protocol";
 import { parseInternalUrl } from "../../src/internal-urls/parse";
 import type { InternalUrl } from "../../src/internal-urls/types";
-import { getBundleRoot, writeConcept } from "../../src/okf/bundle";
+import { getBundleRoot, loadConcept, writeConcept } from "../../src/okf/bundle";
+import type { ToolSession } from "../../src/tools";
+import { WriteTool } from "../../src/tools/write";
 
 let tmpDir: string;
 let bundleRoot: string;
@@ -27,13 +30,24 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-	await rm(tmpDir, { recursive: true, force: true });
+	await fs.rm(tmpDir, { recursive: true, force: true });
 });
-
-import * as fs from "node:fs/promises";
 
 function parseUrl(input: string): InternalUrl {
 	return parseInternalUrl(input);
+}
+
+function createToolSession(cwd: string, settings: Settings): ToolSession {
+	return {
+		cwd,
+		hasUI: false,
+		getSessionFile: () => path.join(cwd, "session.jsonl"),
+		getSessionSpawns: () => "*",
+		getArtifactsDir: () => path.join(cwd, "artifacts"),
+		allocateOutputArtifact: async () => ({ id: "artifact-1", path: path.join(cwd, "artifact-1.log") }),
+		settings,
+		enableLsp: false,
+	};
 }
 
 describe("okf/protocol OkfProtocolHandler.resolve", () => {
@@ -83,6 +97,22 @@ describe("okf/protocol OkfProtocolHandler.write", () => {
 		const res = await handler.resolve(parseUrl("okf://tables/customers.md"), { cwd: tmpDir });
 		expect(res.content).toContain("customers");
 		expect(res.content).toContain("# Schema");
+	});
+
+	it("uses session settings for write-tool okf:// writes", async () => {
+		const customRoot = path.join(tmpDir, "custom-knowledge");
+		const settings = Settings.isolated();
+		settings.set("okf.bundleDir", customRoot);
+		const tool = new WriteTool(createToolSession(tmpDir, settings));
+
+		await tool.execute("call-1", {
+			path: "okf://tables/customers.md",
+			content: "---\ntype: Table\ndescription: customers, crm\n---\n\n# Schema",
+		});
+
+		const concept = await loadConcept(customRoot, "tables/customers");
+		expect(concept.body).toContain("# Schema");
+		expect(await Bun.file(path.join(bundleRoot, "tables", "customers.md")).exists()).toBe(false);
 	});
 
 	it("throws for bare okf:// write", async () => {

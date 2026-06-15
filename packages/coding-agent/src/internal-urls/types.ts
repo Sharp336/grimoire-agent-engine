@@ -100,6 +100,8 @@ export interface ResolveContext {
 export interface WriteContext {
 	/** Working directory of the calling session. */
 	cwd?: string;
+	/** Settings of the calling session. */
+	settings?: unknown;
 	/** Caller's abort signal. */
 	signal?: AbortSignal;
 	/** Calling session's `local://` root mapping — see {@link ResolveContext.localProtocolOptions}. */

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OKF auto-recall to inject the first-turn snippet only once, and fixed `write okf://…` to honor the active session's `okf.bundleDir` setting.
+
 ## [15.13.1] - 2026-06-15
 
 ### Added
