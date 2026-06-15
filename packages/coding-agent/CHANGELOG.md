@@ -1,6 +1,10 @@
 # Changelog
 
 ## [Unreleased]
+### Added
+
+- Added Keenable (https://keenable.ai) web search provider (zero-config, 1,000 req/hr free via MCP; set KEENABLE_API_KEY for higher limits)
+
 
 ## [16.0.6] - 2026-06-18
 

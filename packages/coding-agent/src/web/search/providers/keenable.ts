@@ -28,12 +28,19 @@ interface KeenableMcpResult {
 	error?: { code: number; message: string };
 }
 
+/** Individual Keenable search result from JSON format. */
 interface JsonSearchResult {
 	title?: string;
 	url?: string;
 	description?: string;
 	snippet?: string;
 	published_at?: string;
+}
+
+/** Wrapper response with a `results` array. */
+interface JsonSearchResponse {
+	query?: string;
+	results?: JsonSearchResult[];
 }
 
 /** @visible_for_testing */
@@ -94,8 +101,25 @@ async function callKeenableMcpSearch(
 			);
 		}
 
-		// For empty bodies (e.g. 202 Accepted) or SSE streams, return empty result.
-		if (!bodyText || contentType.includes("text/event-stream")) {
+		// For empty bodies (e.g. 202 Accepted from notifications), return empty.
+		if (!bodyText) {
+			return { data: {}, sessionId: sessionId_ };
+		}
+
+		// For SSE responses, extract JSON from data: lines.
+		if (contentType.includes("text/event-stream")) {
+			const sseData = parseSseBody(bodyText);
+			if (sseData) {
+				try {
+					const parsed = JSON.parse(sseData) as KeenableMcpResult;
+					if (parsed.error) {
+						throw new SearchProviderError("keenable", `MCP error: ${parsed.error.message}`, parsed.error.code);
+					}
+					return { data: parsed, sessionId: sessionId_ };
+				} catch {
+					// Fall through to empty result
+				}
+			}
 			return { data: {}, sessionId: sessionId_ };
 		}
 
@@ -158,8 +182,36 @@ async function callKeenableMcpSearch(
 	if (!content || content.length === 0) {
 		return "";
 	}
-
 	return content.map(c => c.text ?? "").join("\n");
+}
+
+/** Convert Keenable JSON results to SearchSource[]. */
+/** Extract JSON payload from SSE body (strips data: prefix, joins multi-line). */
+function parseSseBody(body: string): string | undefined {
+	const dataLines: string[] = [];
+	for (const line of body.split("\n")) {
+		if (line.startsWith("data: ")) {
+			dataLines.push(line.slice(6));
+		} else if (line.startsWith("data:")) {
+			dataLines.push(line.slice(5));
+		}
+	}
+	if (dataLines.length === 0) return undefined;
+	return dataLines.join("\n");
+}
+/** Convert Keenable JSON results to SearchSource[]. */
+function parseJsonResults(results: JsonSearchResult[]): SearchSource[] {
+	const sources: SearchSource[] = [];
+	for (const r of results) {
+		if (!r.url) continue;
+		sources.push({
+			title: r.title ?? r.url,
+			url: r.url,
+			snippet: r.snippet ?? r.description ?? undefined,
+			publishedDate: r.published_at ?? undefined,
+		});
+	}
+	return sources;
 }
 
 /**
@@ -170,30 +222,27 @@ async function callKeenableMcpSearch(
  *   2. Text format with "Title:", "URL:", "Published:" fields separated by "---"
  */
 export function parseKeenableResponse(text: string): SearchSource[] {
-	if (!text) return [];
-
 	// Try parsing as JSON first (defensive — current MCP returns text format,
 	// but JSON responses are documented and may be returned in the future).
 	const trimmed = text.trim();
 	if (trimmed.startsWith("[") || trimmed.startsWith("{")) {
 		try {
-			const jsonResults = JSON.parse(trimmed) as JsonSearchResult | JsonSearchResult[];
-			const arr = Array.isArray(jsonResults) ? jsonResults : [jsonResults];
-			const sources: SearchSource[] = [];
-			for (const r of arr) {
-				if (!r.url) continue;
-				sources.push({
-					title: r.title ?? r.url,
-					url: r.url,
-					snippet: r.snippet ?? r.description ?? undefined,
-					publishedDate: r.published_at ?? undefined,
-				});
+			const parsed = JSON.parse(trimmed) as unknown;
+			// Handle wrapper: { query, results: [{ title, url, ... }] }
+			if (typeof parsed === "object" && parsed !== null) {
+				const wrapper = parsed as JsonSearchResponse;
+				if (Array.isArray(wrapper.results) && wrapper.results.length > 0) {
+					return parseJsonResults(wrapper.results);
+				}
 			}
-			return sources;
+			// Handle bare array or single result
+			const jsonResults = parsed as JsonSearchResult | JsonSearchResult[];
+			return parseJsonResults(Array.isArray(jsonResults) ? jsonResults : [jsonResults]);
 		} catch {
 			// Not valid JSON — fall through to text parsing
 		}
-	}
+
+	} // End of JSON parse block — fall through to text format
 
 	// Text format: "Title: ...\nURL: ...\nPublished: ...\n\n...\n---"
 	const sources: SearchSource[] = [];
@@ -262,13 +311,16 @@ export async function searchKeenable(params: SearchParamsWithFetch): Promise<Sea
 	};
 }
 
-/** Resolve Keenable API key from env or agent.db. */
+/** Resolve Keenable API key from env, process.env, or agent.db. */
 async function findApiKey(
 	authStorage: AuthStorage,
 	sessionId?: string,
 	signal?: AbortSignal,
 ): Promise<string | undefined> {
-	const envKey = getEnvApiKey("keenable");
+	// Try standard env resolver first (checks CATALOG_PROVIDERS, PROVIDER_REGISTRY,
+	// and LEGACY_ENV_KEYS mapping). If keenable is not registered there, fall back
+	// to direct process.env check.
+	const envKey = getEnvApiKey("keenable") ?? (typeof process !== "undefined" ? process.env.KEENABLE_API_KEY : undefined);
 	if (envKey) return envKey;
 	return authStorage.getApiKey("keenable", sessionId, { signal });
 }

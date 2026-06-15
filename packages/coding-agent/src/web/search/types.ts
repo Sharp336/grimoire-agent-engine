@@ -5,6 +5,7 @@
  */
 
 
+
 export const SEARCH_PROVIDER_OPTIONS = [
 	{
 		value: "auto",
