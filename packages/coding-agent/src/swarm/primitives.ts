@@ -200,9 +200,21 @@ export async function runRouter(
 }
 
 /** A {@link runParallelAggregate} run: every proposer result plus the aggregator's. */
+/** A surviving proposal paired with the proposer that produced it. */
+export interface SwarmProposal {
+	member: SwarmMember;
+	result: DriveResult;
+}
+
 export interface ParallelAggregateResult {
-	/** One entry per proposer, in declaration order (failed proposers omitted). */
-	proposals: DriveResult[];
+	/**
+	 * Surviving proposals, each paired with its proposer, in declaration order
+	 * (failed proposers omitted). Pairing the member with the result here — rather
+	 * than returning a bare `DriveResult[]` zipped against the original `proposers`
+	 * by index — is what prevents a rejected proposer from misattributing a
+	 * survivor's result to the wrong member.
+	 */
+	proposals: SwarmProposal[];
 	/** The aggregator's synthesized/voted result. */
 	aggregate: DriveResult;
 }
@@ -233,10 +245,16 @@ export async function runParallelAggregate(
 	signal?: AbortSignal,
 ): Promise<ParallelAggregateResult> {
 	signal?.throwIfAborted();
-	const settled = await Promise.allSettled(proposers.map(member => drive(member, ORIGINAL_INPUT, signal)));
+	// Settle {member, result} pairs (not bare results) so a rejected proposer —
+	// dropped below — never misattributes a survivor's result to the wrong member
+	// via index zipping. (Index access would also be `| undefined` under
+	// noUncheckedIndexedAccess; carrying the member in the value avoids both.)
+	const settled = await Promise.allSettled(
+		proposers.map(async member => ({ member, result: await drive(member, ORIGINAL_INPUT, signal) })),
+	);
 	// An abort is fatal: surface it instead of degrading to a partial reduce.
 	if (signal?.aborted) signal.throwIfAborted();
-	const proposals: DriveResult[] = [];
+	const proposals: SwarmProposal[] = [];
 	let lastError: unknown;
 	for (const outcome of settled) {
 		if (outcome.status === "fulfilled") proposals.push(outcome.value);
@@ -249,7 +267,10 @@ export async function runParallelAggregate(
 			}`,
 		);
 	}
-	const aggregatorInput = buildAggregatorInput(userPrompt, proposals);
+	const aggregatorInput = buildAggregatorInput(
+		userPrompt,
+		proposals.map(p => p.result),
+	);
 	const aggregate = await drive(aggregator, aggregatorInput, signal);
 	return { proposals, aggregate };
 }

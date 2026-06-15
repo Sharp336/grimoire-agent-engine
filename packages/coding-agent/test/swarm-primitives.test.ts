@@ -254,8 +254,13 @@ describe("runParallelAggregate", () => {
 			return "agg";
 		};
 		const { proposals, aggregate } = await runParallelAggregate(proposers, aggregator, "q", buildAgg, drive);
-		// Failed proposer dropped; survivors still reduce.
-		expect(proposals.map(p => p.output).sort()).toEqual(["p1", "p3"]);
+		// Failed proposer (p2) dropped; survivors still reduce, and each surviving
+		// proposal stays paired with its OWN proposer — the alignment fix: a dropped
+		// proposer must not shift p3's result onto p2's member slot.
+		expect(proposals.map(p => p.result.output).sort()).toEqual(["p1", "p3"]);
+		expect(proposals.map(p => p.member.role).sort()).toEqual(["p1", "p3"]);
+		// The stub sets result(m.role), so a correctly-aligned pair has output === role.
+		for (const p of proposals) expect(p.result.output).toBe(p.member.role);
 		expect(seenProposals.sort()).toEqual(["p1", "p3"]);
 		// `aggregate` is the aggregator member's DriveResult; the stub returns
 		// result(m.role), so its output is its role ("aggregator"). buildAgg's "agg"
@@ -294,7 +299,8 @@ describe("runParallelAggregate", () => {
 			drive,
 		);
 		expect(proposals).toHaveLength(1);
-		expect(proposals[0].output).toBe("solo");
+		expect(proposals[0]?.result.output).toBe("solo");
+		expect(proposals[0]?.member.role).toBe("solo");
 	});
 });
 

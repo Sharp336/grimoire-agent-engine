@@ -404,11 +404,15 @@ async function runBlendMoa(
 		drive,
 		signal,
 	);
-	const ordered: { member: SwarmMember; result: DriveResult }[] = [];
-	for (let i = 0; i < proposals.length; i++) ordered.push({ member: proposers[i], result: proposals[i] });
-	ordered.push({ member: aggregator, result: aggregate });
+	// Each proposal already carries its proposer (rejected proposers are omitted
+	// from `proposals`), so no index zip against `proposers` can misattribute a
+	// survivor's result to the wrong member.
+	const ordered: { member: SwarmMember; result: DriveResult }[] = [
+		...proposals,
+		{ member: aggregator, result: aggregate },
+	];
 	const surface = pickSurface(spec, ordered);
-	const totalUsage = sumUsage([...proposals.map(p => p.usage), aggregate.usage]);
+	const totalUsage = sumUsage([...proposals.map(p => p.result.usage), aggregate.usage]);
 	forwardSurfaceBody(outer, surface.message, totalUsage);
 }
 
