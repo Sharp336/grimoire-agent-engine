@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Claude Code plugin skills no longer register as bare `/<name>` slash commands; they surface only as skills (reachable via the `/skill:<name>` command or a `skill://` URL). Reverses the bare-slash mirroring added in #2415.
+
 ## [15.13.2] - 2026-06-15
 
 ### Added
