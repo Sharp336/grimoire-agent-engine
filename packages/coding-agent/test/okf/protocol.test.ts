@@ -137,3 +137,38 @@ describe("okf/protocol OkfProtocolHandler.write", () => {
 		await expect(handler.write(parseUrl("okf://"), "content", { cwd: tmpDir })).rejects.toThrow();
 	});
 });
+
+describe("okf/protocol alias (okfBundleRoot) resolution", () => {
+	it("resolves reads against okfBundleRoot instead of the cwd-derived root", async () => {
+		// A child cwd has its own bundle with a different concept at the same id.
+		const childCwd = await fs.mkdtemp(path.join(tmpDir, "child-"));
+		await writeConcept(
+			getBundleRoot(childCwd),
+			"tables/orders",
+			"---\ntype: Table\ndescription: child\n---\n\n# Child Schema",
+		);
+
+		// okfBundleRoot points at the parent bundle, so the parent's concept wins —
+		// this is the aliased-subagent case where recall + read must share a bundle.
+		const res = await handler.resolve(parseUrl("okf://tables/orders.md"), {
+			cwd: childCwd,
+			okfBundleRoot: bundleRoot,
+		});
+		expect(res.content).toContain("# Schema");
+		expect(res.content).not.toContain("# Child Schema");
+	});
+
+	it("writes against okfBundleRoot instead of the cwd-derived root", async () => {
+		const childCwd = await fs.mkdtemp(path.join(tmpDir, "child-"));
+
+		await handler.write(
+			parseUrl("okf://tables/aliased.md"),
+			"---\ntype: Table\ndescription: aliased\n---\n\n# Aliased",
+			{ cwd: childCwd, okfBundleRoot: bundleRoot },
+		);
+
+		const concept = await loadConcept(bundleRoot, "tables/aliased");
+		expect(concept.body).toContain("# Aliased");
+		expect(await Bun.file(path.join(getBundleRoot(childCwd), "tables", "aliased.md")).exists()).toBe(false);
+	});
+});

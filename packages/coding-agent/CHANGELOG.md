@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed OKF auto-recall to inject the first-turn snippet only once per agent, fixed root-level recall links, filtered Hindsight stale-row cleanup to OKF-tagged documents, resolved relative `okf.bundleDir` overrides from the session cwd, hardened symlinked bundle-root and parent-directory handling, and fixed `write okf://…` to honor the active session's `okf.bundleDir` setting.
+- Fixed OKF auto-recall to inject the first-turn snippet only once per agent, fixed root-level recall links, filtered Hindsight stale-row cleanup to OKF-tagged documents, resolved relative `okf.bundleDir` overrides from the session cwd, hardened symlinked bundle-root and parent-directory handling, and fixed `write okf://…` to honor the active session's `okf.bundleDir` setting. Also reset OKF auto-recall when a new transcript starts (`/new`, handoff, fork, branch, or session switch) within the same `AgentSession`, validated a symlinked `log.md` before appending update entries so it cannot escape the bundle, and resolved `okf://` reads/writes against the aliased subagent's bundle root so recalled concepts are read/written in the same bundle they came from.
 
 ## [15.13.2] - 2026-06-15
 

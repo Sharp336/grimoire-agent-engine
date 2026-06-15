@@ -86,4 +86,25 @@ describe("okf/state OkfSessionState", () => {
 		expect(snippet).toContain("(okf:///deploy.md)");
 		expect(snippet).not.toContain("(okf://deploy.md)");
 	});
+
+	it("re-runs auto-recall after resetFirstTurnRecall for a new transcript", async () => {
+		const settings = Settings.isolated();
+		settings.set("okf.autoRecall", true);
+		settings.set("okf.recallMaxTokens", 800);
+		const store = new FakeOkfStore();
+		const state = new OkfSessionState({ sessionId: "session", settings, cwd: process.cwd(), store });
+
+		const first = await state.beforeAgentStartPrompt("debug the auth login flow");
+		const later = await state.beforeAgentStartPrompt("now inspect billing webhooks");
+		expect(first).toContain("Auth flow overview");
+		expect(later).toBeUndefined();
+		expect(store.searchQueries).toHaveLength(1);
+
+		// A new transcript (/new, handoff, branch, session switch) must reset the
+		// first-turn guard so the new conversation's opening turn re-recalls.
+		state.resetFirstTurnRecall();
+		const afterReset = await state.beforeAgentStartPrompt("fresh auth question");
+		expect(afterReset).toContain("Auth flow overview");
+		expect(store.searchQueries).toHaveLength(2);
+	});
 });

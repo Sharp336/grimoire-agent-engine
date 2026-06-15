@@ -133,6 +133,27 @@ describe("okf/bundle.writeConcept + loadSummaries", () => {
 		expect(log).toContain("Update");
 	});
 
+	it("does not follow a symlinked log.md that escapes the bundle", async () => {
+		// A bundle whose log.md is a symlink to a file outside the root must not
+		// be mutated when a concept is written (the log append is skipped).
+		const outside = await fs.mkdtemp(path.join(path.dirname(tmpDir), ".okf-outside-"));
+		const outsideLog = path.join(outside, "captured.md");
+		await writeFile(outsideLog, "ORIGINAL-OUTSIDE-CONTENT");
+		try {
+			await fs.symlink(outsideLog, path.join(tmpDir, "log.md"), "file");
+		} catch {
+			await rm(outside, { recursive: true, force: true });
+			return;
+		}
+		try {
+			await writeConcept(tmpDir, "tables/orders", "---\ntype: Table\n---\nBody.");
+			const captured = await Bun.file(outsideLog).text();
+			expect(captured).toBe("ORIGINAL-OUTSIDE-CONTENT");
+		} finally {
+			await rm(outside, { recursive: true, force: true });
+		}
+	});
+
 	it("rejects writes through symlinked category directories", async () => {
 		const outside = await fs.mkdtemp(path.join(path.dirname(tmpDir), ".okf-outside-"));
 		try {

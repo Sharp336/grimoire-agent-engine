@@ -308,6 +308,10 @@ async function appendToLog(root: string, conceptId: string, action: string): Pro
 	const logPath = path.join(root, "log.md");
 	const entry = `* **${action}**: ${conceptId} (${date})\n`;
 	try {
+		// `log.md` may be a symlink; validate its real target stays under the
+		// bundle root before reading/writing so a maliciously-linked update log
+		// cannot mutate a file outside the bundle (OKF §7 path-safety).
+		await assertRealWithinRoot(logPath, root);
 		let existing = "";
 		try {
 			existing = await Bun.file(logPath).text();

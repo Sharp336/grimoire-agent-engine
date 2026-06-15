@@ -3153,6 +3153,15 @@ export class AgentSession {
 		state.resetConversationTracking();
 	}
 
+	/**
+	 * Reset OKF auto-recall for a new transcript. Unlike the memory backends, the
+	 * OKF first-turn recall guard is per session (aliases keep their own guard),
+	 * so it is reset unconditionally when a new conversation begins.
+	 */
+	#resetOkfConversationTracking(): void {
+		getOkfSessionState(this)?.resetFirstTurnRecall();
+	}
+
 	/** True once dispose() has begun; deferred background work (e.g. the deferred
 	 *  MCP discovery task in sdk.ts) must not touch the session past this point. */
 	get isDisposed(): boolean {
@@ -5568,6 +5577,7 @@ export class AgentSession {
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
 		this.#resetHindsightConversationTrackingIfHindsight();
 		this.#resetMnemopiConversationTrackingIfMnemopi();
+		this.#resetOkfConversationTracking();
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 
@@ -5664,6 +5674,7 @@ export class AgentSession {
 		this.#rekeyHindsightMemoryForCurrentSessionId();
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
 		this.#resetMnemopiConversationTrackingIfMnemopi();
+		this.#resetOkfConversationTracking();
 
 		// Emit session_switch event with reason "fork" to hooks
 		if (this.#extensionRunner) {
@@ -6741,6 +6752,7 @@ export class AgentSession {
 			this.#rekeyMnemopiMemoryForCurrentSessionId();
 			this.#resetHindsightConversationTrackingIfHindsight();
 			this.#resetMnemopiConversationTrackingIfMnemopi();
+			this.#resetOkfConversationTracking();
 			this.#pendingNextTurnMessages = [];
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#todoReminderCount = 0;
@@ -9901,6 +9913,7 @@ export class AgentSession {
 			if (switchingToDifferentSession) {
 				this.#resetHindsightConversationTrackingIfHindsight();
 				this.#resetMnemopiConversationTrackingIfMnemopi();
+				this.#resetOkfConversationTracking();
 			}
 			this.#reconnectToAgent();
 			try {
@@ -10015,6 +10028,7 @@ export class AgentSession {
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
 		this.#resetHindsightConversationTrackingIfHindsight();
 		this.#resetMnemopiConversationTrackingIfMnemopi();
+		this.#resetOkfConversationTracking();
 
 		// Reload messages from entries (works for both file and in-memory mode)
 		const sessionContext = this.buildDisplaySessionContext();

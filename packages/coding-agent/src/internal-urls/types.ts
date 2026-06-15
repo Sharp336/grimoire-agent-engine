@@ -90,6 +90,13 @@ export interface ResolveContext {
 	 * [#1608](https://github.com/can1357/oh-my-pi/issues/1608).
 	 */
 	localProtocolOptions?: LocalProtocolOptions;
+	/**
+	 * Calling session's resolved OKF bundle root (alias-aware). When present,
+	 * the `okf://` handler resolves concepts against THIS root instead of the
+	 * cwd-derived default, so an aliased subagent reads/writes the same bundle
+	 * its recall came from rather than its isolated worktree's bundle.
+	 */
+	okfBundleRoot?: string;
 }
 
 /**
@@ -106,6 +113,8 @@ export interface WriteContext {
 	signal?: AbortSignal;
 	/** Calling session's `local://` root mapping — see {@link ResolveContext.localProtocolOptions}. */
 	localProtocolOptions?: LocalProtocolOptions;
+	/** Calling session's resolved OKF bundle root — see {@link ResolveContext.okfBundleRoot}. */
+	okfBundleRoot?: string;
 }
 
 /**

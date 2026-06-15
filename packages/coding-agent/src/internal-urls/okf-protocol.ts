@@ -80,15 +80,19 @@ function resolveOkfUrl(
 ): { root: string; parsed: ParsedOkfUrl } {
 	const cwd = context?.cwd;
 	if (!cwd) throw new Error("okf:// requires a session cwd");
-	// Honor okf.bundleDir when available in the context settings.
-	const settings = (context as ResolveContext & { settings?: Settings })?.settings;
-	const bundleDir = settings ? (settings.get("okf.bundleDir") as string | undefined) : undefined;
-	const root = resolveBundleRoot(cwd, bundleDir);
 	const parsed = parseOkfUrlPath(url);
 	// Path-traversal safety: validate the category segment.
 	if (parsed.category && (parsed.category.includes("..") || parsed.category.includes("\0"))) {
 		throw new Error(`okf:// category must not contain path traversal: ${url.href}`);
 	}
+	// An aliased subagent shares the parent's bundle/store, so prefer the
+	// caller-resolved (alias-aware) bundle root when present; otherwise derive
+	// the root from the session cwd + `okf.bundleDir` setting.
+	if (context?.okfBundleRoot) return { root: context.okfBundleRoot, parsed };
+	// Honor okf.bundleDir when available in the context settings.
+	const settings = (context as ResolveContext & { settings?: Settings })?.settings;
+	const bundleDir = settings ? (settings.get("okf.bundleDir") as string | undefined) : undefined;
+	const root = resolveBundleRoot(cwd, bundleDir);
 	return { root, parsed };
 }
 

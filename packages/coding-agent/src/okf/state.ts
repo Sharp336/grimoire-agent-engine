@@ -60,6 +60,9 @@ export class OkfSessionState {
 	}
 
 	get bundleRoot(): string {
+		// An alias shares the parent's bundle/store, so its bundle root is the
+		// parent's — not the child session's cwd.
+		if (this.#aliasOf) return this.#aliasOf.bundleRoot;
 		const custom = this.#settings.get("okf.bundleDir") as string | undefined;
 		return path.resolve(custom ? custom : getBundleRoot(this.#cwd));
 	}
@@ -151,6 +154,18 @@ export class OkfSessionState {
 		} catch {
 			return undefined;
 		}
+	}
+
+	/**
+	 * Reset the first-turn auto-recall guard for a new transcript/conversation
+	 * (e.g. `/new`, handoff, fork, branch, or switching sessions within the same
+	 * `AgentSession`). Without this, `#hasRecalledForFirstTurn` stays true from
+	 * the previous conversation and the new one's first turn skips OKF
+	 * auto-recall entirely.
+	 */
+	resetFirstTurnRecall(): void {
+		this.#hasRecalledForFirstTurn = false;
+		this.#lastRecallSnippet = undefined;
 	}
 
 	/**

@@ -213,6 +213,13 @@ export interface ToolSession {
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
 	/** Get Mnemopi runtime state for this agent session. */
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
+	/**
+	 * Resolved OKF bundle root for this session (alias-aware: an aliased
+	 * subagent returns the parent's bundle root, matching the shared store).
+	 * Used by the `okf://` protocol so reads/writes target the same bundle the
+	 * session's recall came from.
+	 */
+	getOkfBundleRoot?: () => string | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */

@@ -2537,6 +2537,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			settings: this.session.settings,
 			signal,
 			localProtocolOptions: this.session.localProtocolOptions,
+			okfBundleRoot: this.session.getOkfBundleRoot?.(),
 		});
 		const details: ReadToolDetails = { resolvedPath: resource.sourcePath, contentType: resource.contentType };
 
