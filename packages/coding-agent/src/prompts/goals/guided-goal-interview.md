@@ -5,4 +5,4 @@ Interview transcript:
 {{#list messages join="\n\n"}}{{label}}: {{content}}{{/list}}
 ```
 
-Return exactly one structured response by calling `respond`.
+Inspect the repository with the read-only tools if it helps, then return exactly one structured response by calling `respond`.

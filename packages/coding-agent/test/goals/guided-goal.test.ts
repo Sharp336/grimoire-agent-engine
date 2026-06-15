@@ -1,5 +1,6 @@
 import { afterEach, beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import * as path from "node:path";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import * as core from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -32,6 +33,7 @@ function createSession(options?: { plan?: boolean; slow?: boolean }): AgentSessi
 		},
 		sessionId: "session-1",
 		agent: { telemetry: undefined },
+		getToolByName: () => undefined,
 	} as unknown as AgentSession;
 }
 
@@ -255,5 +257,45 @@ describe("guided goal setup", () => {
 		} finally {
 			await harness.cleanup();
 		}
+	});
+
+	it("executes a read-only tool then feeds the result back before responding", async () => {
+		const executed: Array<{ id: string; args: unknown }> = [];
+		const fakeRead = {
+			name: "read",
+			description: "read",
+			parameters: { type: "object", properties: {}, additionalProperties: true },
+			async execute(id: string, args: unknown) {
+				executed.push({ id, args });
+				return { content: [{ type: "text", text: "FILE BODY" }] };
+			},
+		} as unknown as AgentTool;
+		const session = {
+			...createSession(),
+			getToolByName: (name: string) => (name === "read" ? fakeRead : undefined),
+		} as unknown as AgentSession;
+
+		let call = 0;
+		const complete = spyOn(core, "instrumentedCompleteSimple").mockImplementation(async () => {
+			call += 1;
+			if (call === 1) {
+				return {
+					stopReason: "toolUse",
+					content: [{ type: "toolCall", id: "c1", name: "read", arguments: { path: "x", _i: "Reading" } }],
+				} as never;
+			}
+			return mockResponse({ kind: "question", question: "Which module?" }) as never;
+		});
+
+		const result = await runGuidedGoalTurn(session, { messages: [{ role: "user", content: "Improve parsing" }] });
+
+		expect(result).toEqual({ kind: "question", question: "Which module?" });
+		expect(executed).toEqual([{ id: "c1", args: { path: "x", _i: "Reading" } }]);
+		// Second completion saw the tool result fed back into the message history.
+		const secondCtx = complete.mock.calls[1]?.[1] as { messages: Array<{ role: string; toolName?: string }> };
+		expect(secondCtx.messages.some(m => m.role === "toolResult" && m.toolName === "read")).toBe(true);
+		// First completion was offered the read tool alongside respond.
+		const firstCtx = complete.mock.calls[0]?.[1] as { tools: Array<{ name: string }> };
+		expect(firstCtx.tools.map(t => t.name)).toEqual(["read", "respond"]);
 	});
 });
