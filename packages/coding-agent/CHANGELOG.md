@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Extended the system-prompt verification step with V1–V3 scope tiering ("tier the scope, never the rigor"; "should pass" is not verification) and test-discipline rules omp lacked (no fixed sleeps — subscribe to the event with a bounded timeout; stub-contract integrity; prompt tests assert behavior, not an exact sentence), and added a `<policies>` block (never commit unless asked, never silently swallow errors, no shotgun debugging).
+
 ## [15.13.3] - 2026-06-15
 
 ### Added

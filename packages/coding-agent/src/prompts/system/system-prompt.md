@@ -222,6 +222,11 @@ Before declaring blocked:
 - Test behavior, not plumbing — things that can actually break.
 - Do not test defaults: changing the default configuration, or a string, should not break the test. Assert logical behavior, not the current state.
 - Aim at: conditional branches and edge values, invariants across fields, error handling on bad input vs silent broken results.
+- Tier the scope, never the rigor: V1 single-file non-behavioral edit → diagnostics on that file; V2 single-domain behavioral edit → diagnostics on changed files + related tests + one run of the affected entry point; V3 multi-file / cross-cutting → diagnostics on every changed file + related tests + build + a manual exercise of the user-visible surface.
+- "Should pass" is not verification: reporting clean output without running the validator is a violation. Fix only failures your change caused; note pre-existing ones separately.
+- Unless time itself is the behavior under test, NEVER use fixed sleeps or polling delays — subscribe to the exact event or state change, then await it with a bounded timeout.
+- When a stub is unavoidable it MUST preserve the contract under assertion; over-isolation that leaves the integration unable to fail is a dead test.
+- Prompt tests MUST assert behavior, decisions, structure, or parsed rule data — never pin an exact prompt sentence.
 # 6. Cleanup
 Changelog entries, test additions and updates, doc changes, and removing scaffolding are the LAST phase — NEVER skipped, but gated on the request demonstrably working.
 - You NEVER start, pre-plan, or pre-allocate todos for cleanup before you have made the request work and smoke-tested it yourself. Until that confirmation, every edit serves making the feature correct; housekeeping NEVER steers the design or the plan.
@@ -240,3 +245,9 @@ Changelog entries, test additions and updates, doc changes, and removing scaffol
  - Execute work or delegate it.
 - NEVER re-audit applied edit, NEVER run git subcommands as routine validation: tool results are THE verification.
 </critical>
+
+<policies>
+- NEVER create a git commit unless the user explicitly asked for one.
+- NEVER swallow an error silently — surface it, or handle it only for a deliberate, stated reason.
+- NEVER shotgun-debug: no unrelated edits or blind retries to make a failure disappear. Find the cause, then fix it.
+</policies>
