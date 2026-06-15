@@ -1,7 +1,10 @@
 /**
  * Generate session titles using a smol, fast model.
  */
+
+import * as os from "node:os";
 import * as path from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { type Api, type AssistantMessage, completeSimple, type Model, type Tool } from "@oh-my-pi/pi-ai";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
@@ -397,6 +400,45 @@ export function setTerminalTitle(title: string): void {
 
 export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: string): void {
 	setTerminalTitle(formatSessionTerminalTitle(sessionName, cwd));
+	setTerminalWorkingDirectory(cwd);
+}
+
+/**
+ * Build the OSC escape(s) that report `cwd` to the host terminal so new
+ * tabs/panes — and Windows Terminal's persisted-layout restore — reuse it.
+ *
+ * - OSC 7 (`file://host/path`) is the cross-platform standard, honored by the
+ *   xterm/VTE family and recent Windows Terminal builds.
+ * - OSC 9;9 (`"<native path>"`) is the ConEmu / Windows Terminal convention and
+ *   the only form stable Windows Terminal understands. It is gated on
+ *   `WT_SESSION` because OSC 9 is iTerm2's notification sequence — emitting it
+ *   unconditionally would spam notifications there.
+ *
+ * Returns "" when no cwd is given.
+ */
+export function buildCwdReportSequence(
+	cwd: string | undefined,
+	opts?: { hostname?: string; wtSession?: boolean },
+): string {
+	if (!cwd) return "";
+	const resolved = path.resolve(cwd);
+	const host = opts?.hostname ?? os.hostname();
+	let seq = `\x1b]7;file://${host}${pathToFileURL(resolved).pathname}\x1b\\`;
+	const wtSession = opts?.wtSession ?? Boolean(Bun.env.WT_SESSION);
+	// Windows paths cannot contain `"`, so the quoted form needs no escaping.
+	if (wtSession) seq += `\x1b]9;9;"${resolved}"\x1b\\`;
+	return seq;
+}
+
+/**
+ * Report the working directory to the host terminal via
+ * {@link buildCwdReportSequence}. No-op when stdout is not a TTY (print/RPC
+ * modes, pipes) — matching {@link setTerminalTitle}.
+ */
+export function setTerminalWorkingDirectory(cwd: string | undefined): void {
+	if (!process.stdout.isTTY) return;
+	const seq = buildCwdReportSequence(cwd);
+	if (seq) process.stdout.write(seq);
 }
 
 /**

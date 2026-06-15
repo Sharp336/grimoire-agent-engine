@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Report the working directory to the host terminal on session start and `/move` via OSC 7 (`file://`), plus OSC 9;9 when running under Windows Terminal, so new tabs/panes — and Windows Terminal's persisted-layout restore — open in the session's current directory instead of the profile default. OSC 9;9 is gated on `WT_SESSION` because OSC 9 is iTerm2's notification sequence.
+
 ## [16.0.1] - 2026-06-15
 
 ### Breaking Changes

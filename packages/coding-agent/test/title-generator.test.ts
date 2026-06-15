@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
-import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
+import { buildCwdReportSequence, generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { logger } from "@oh-my-pi/pi-utils";
 
 function getModelOrThrow(id: string): Model<Api> {
@@ -455,5 +455,36 @@ describe("title generator", () => {
 		await generateSessionTitle("Some message", registry, currentSettings);
 		expect(mockComplete).toHaveBeenCalled();
 		expect(mockComplete.mock.calls[0]?.[0]).toBe(smolModel);
+	});
+});
+
+describe("buildCwdReportSequence", () => {
+	const ST = "\x1b\\";
+	const absPath = process.platform === "win32" ? "C:\\tmp\\a b" : "/tmp/a b";
+	// OSC 7 percent-encodes the path; Windows drive paths keep the literal colon.
+	const expectedOsc7Path = process.platform === "win32" ? "/C:/tmp/a%20b" : "/tmp/a%20b";
+
+	it("returns an empty string when no cwd is provided", () => {
+		expect(buildCwdReportSequence(undefined)).toBe("");
+		expect(buildCwdReportSequence("")).toBe("");
+	});
+
+	it("always emits an ST-terminated OSC 7 file:// sequence with the host authority", () => {
+		const seq = buildCwdReportSequence(absPath, { hostname: "myhost", wtSession: false });
+		expect(seq).toBe(`\x1b]7;file://myhost${expectedOsc7Path}${ST}`);
+	});
+
+	it("omits OSC 9;9 unless WT_SESSION is signalled (OSC 9 is iTerm2's notification)", () => {
+		expect(buildCwdReportSequence(absPath, { hostname: "h", wtSession: false })).not.toContain("]9;9;");
+	});
+
+	it("appends a quoted, unencoded OSC 9;9 native path under Windows Terminal", () => {
+		const seq = buildCwdReportSequence(absPath, { hostname: "h", wtSession: true });
+		// OSC 7 still present and percent-encoded...
+		expect(seq).toContain(`\x1b]7;file://h${expectedOsc7Path}${ST}`);
+		// ...followed by OSC 9;9 carrying the resolved native path verbatim, quoted.
+		expect(seq.endsWith(`\x1b]9;9;"${absPath}"${ST}`)).toBe(true);
+		// The native form keeps the literal space, not %20.
+		expect(seq).toContain(`"${absPath}"`);
 	});
 });
