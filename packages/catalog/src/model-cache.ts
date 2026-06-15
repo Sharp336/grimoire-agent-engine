@@ -74,6 +74,19 @@ function getDb(dbPath?: string): Database {
 	return db;
 }
 
+function closeDb(dbPath?: string): void {
+	const resolvedPath = dbPath ?? getModelDbPath();
+	if (!sharedDb || sharedDbPath !== resolvedPath) return;
+	sharedDb.close();
+	sharedDb = null;
+	sharedDbPath = null;
+	if (process.platform === "win32") Bun.gc(true);
+}
+
+export function closeModelCache(dbPath?: string): void {
+	closeDb(dbPath);
+}
+
 function migrateCacheSchema(db: Database): void {
 	const columns = db.prepare("PRAGMA table_info(model_cache)").all() as TableInfoRow[];
 	if (!columns.some(column => column.name === "static_fingerprint")) {
@@ -106,6 +119,8 @@ export function readModelCache<TApi extends Api>(
 		};
 	} catch {
 		return null;
+	} finally {
+		if (dbPath) closeDb(dbPath);
 	}
 }
 
@@ -132,6 +147,8 @@ export function writeModelCache<TApi extends Api>(
 			],
 		);
 	} catch {
-		// Cache writes are best-effort; failures should not break model resolution.
+		// Cache is best-effort.
+	} finally {
+		if (dbPath) closeDb(dbPath);
 	}
 }

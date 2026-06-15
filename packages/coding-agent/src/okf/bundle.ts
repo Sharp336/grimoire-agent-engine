@@ -267,10 +267,7 @@ export async function writeConcept(
 	const fullPath = path.join(root, relativePath);
 	await fs.mkdir(path.dirname(fullPath), { recursive: true });
 
-	// Path-traversal safety: the resolved path must stay under root.
-	const resolvedRoot = path.resolve(root);
-	const resolvedPath = path.resolve(fullPath);
-	ensureWithinRoot(resolvedPath, resolvedRoot);
+	await assertRealWithinRoot(fullPath, root);
 
 	// Determine whether this is a creation or update.
 	let existed = false;
@@ -293,8 +290,7 @@ export async function writeConcept(
 /** Delete a concept from disk. */
 export async function deleteConcept(root: string, id: string): Promise<boolean> {
 	const fullPath = path.join(root, conceptIdToPath(id));
-	const resolvedRoot = path.resolve(root);
-	ensureWithinRoot(path.resolve(fullPath), resolvedRoot);
+	await assertRealWithinRoot(fullPath, root);
 	try {
 		await fs.unlink(fullPath);
 		await appendToLog(root, id, "Deprecation");
@@ -480,11 +476,10 @@ export async function renderIndex(root: string, options: { category?: string } =
 	const visible = options.category ? summaries.filter(s => s.id.startsWith(`${options.category}/`)) : summaries;
 
 	// If a real index.md exists at the target level, defer to it.
-	const resolvedRoot = path.resolve(root);
 	const indexPath = options.category
-		? path.resolve(resolvedRoot, options.category, "index.md")
-		: path.resolve(resolvedRoot, "index.md");
-	ensureWithinRoot(indexPath, resolvedRoot);
+		? path.resolve(root, options.category, "index.md")
+		: path.resolve(root, "index.md");
+	await assertRealWithinRoot(indexPath, root);
 	try {
 		const content = await Bun.file(indexPath).text();
 		if (content.trim()) return content;
@@ -555,5 +550,37 @@ export async function fingerprint(root: string): Promise<string> {
 export function ensureWithinRoot(targetPath: string, rootPath: string): void {
 	if (targetPath !== rootPath && !targetPath.startsWith(`${rootPath}${path.sep}`)) {
 		throw new Error("Path escapes the OKF bundle root");
+	}
+}
+
+/** Resolve target + root through symlinks and assert the real target stays
+ *  under the real root. If target doesn't exist yet (concept being created),
+ *  resolve its nearest existing ancestor so a symlinked parent is still caught. */
+async function assertRealWithinRoot(targetPath: string, rootPath: string): Promise<void> {
+	let realRoot: string;
+	try {
+		realRoot = await fs.realpath(rootPath);
+	} catch (error) {
+		if (!isEnoent(error)) throw error;
+		ensureWithinRoot(path.resolve(targetPath), path.resolve(rootPath));
+		return;
+	}
+
+	const pendingSegments: string[] = [];
+	let existingPath = targetPath;
+	while (true) {
+		try {
+			const realExisting = await fs.realpath(existingPath);
+			const realTarget =
+				pendingSegments.length === 0 ? realExisting : path.join(realExisting, ...pendingSegments.reverse());
+			ensureWithinRoot(realTarget, realRoot);
+			return;
+		} catch (error) {
+			if (!isEnoent(error)) throw error;
+			const parent = path.dirname(existingPath);
+			if (parent === existingPath) throw error;
+			pendingSegments.push(path.basename(existingPath));
+			existingPath = parent;
+		}
 	}
 }

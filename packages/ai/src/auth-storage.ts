@@ -5109,5 +5109,8 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#listUsageHistoryStmt.finalize();
 		this.#updateUsageHistoryStmt.finalize();
 		this.#db.close();
+		// Bun's SQLite finalizers can hold the database file handle briefly after
+		// `close()` on Windows; force finalizers so temp-dir cleanup is deterministic.
+		if (process.platform === "win32") Bun.gc(true);
 	}
 }

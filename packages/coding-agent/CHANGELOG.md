@@ -9,7 +9,13 @@
 - Added `ModelRegistry.create(authStorage, modelsPath?)` async factory that runs the JSON → YAML migration step on `models.{yml,yaml}` asynchronously ahead of the sync constructor's bundled-model load. The sync `new ModelRegistry(...)` constructor still works (tests rely on it); production boot paths now use the factory so the migration's I/O lands off the event-loop hot path.
 - Added `ConfigFile.tryLoadAsync()`, `ConfigFile.loadAsync()`, `ConfigFile.loadOrDefaultAsync()`, `ConfigFile.getMtimeMsAsync()`, and `ConfigFile.warmup(file)` so the rest of the codebase can migrate config reads off the sync path.
 
+### Changed
+
+- Changed `/okf enrich` to spawn a forced `task` subagent instead of only printing the enrichment prompt, and OKF-enabled sessions now await OKF startup before the first turn.
+
 ### Fixed
+
+- Fixed OKF recall to search FTS5 terms with OR semantics, `/okf reindex` to remove stale concepts, OKF bundle reads/writes to resolve symlinks before the root guard, `/okf visualize` to reject output paths outside the working directory, and task/eval subagents to inherit the parent's OKF state.
 
 - Fixed `Test & smoke (TS)` CI timeouts caused by parallel test files racing on the process-global Settings singleton. `CustomEditor` now accepts a `magicKeywordsEnabledOverride` injection point so the shimmer-gate test can assert behaviour without calling `resetSettingsForTest()` / `Settings.init()`; the "streaming tool call preview height" describe drops its gratuitous Settings reset+init. Production wiring is unchanged ([#2582](https://github.com/can1357/oh-my-pi/issues/2582))
 - Fixed MCP OAuth fallback rendering to show a short terminal hyperlink and keep the raw authorization URL on one unwrapped copy line ([#2121](https://github.com/can1357/oh-my-pi/issues/2121)).
@@ -17,6 +23,10 @@
 - Fixed selector-style UI components to honor `tui.select.up` and `tui.select.down` keybindings instead of hard-coding raw Up/Down arrow bytes ([#1535](https://github.com/can1357/oh-my-pi/issues/1535)).
 - Fixed a collapsed, still-streaming tool preview (an `eval`/`bash`/`ssh` box with output streaming in) reading as "weirdly truncated" — top border and head rows missing — once its box outgrew the viewport, snapping back to whole only while expanded with `ctrl+o` and breaking again when collapsed. A streaming preview was classified commit-unstable whenever collapsed, so the transcript offered none of its rows to native scrollback; once the box outgrew the window its head fell into the gap between the commit boundary and the window top, committed nowhere and repainted nowhere. The `provisionalPendingPreview` flag now applies only to the pending call preview (before any result) — once a streaming result exists the result renderer is the live, top-anchored shape and the block is commit-stable in both collapsed and expanded states, so its durable head always reaches scrollback.
 - Fixed a crash in subagent task execution and extensions when a string (instead of a string array) was returned or set for the system prompt. Gracefully wrap string values in arrays.
+
+### Removed
+
+- Removed the `okf.enrichmentEnabled` setting; explicitly running `/okf enrich` is the opt-in.
 
 ## [15.13.0] - 2026-06-14
 

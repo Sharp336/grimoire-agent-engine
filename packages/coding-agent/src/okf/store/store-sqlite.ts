@@ -194,8 +194,8 @@ function parseTagString(tags: string): string[] {
 /**
  * Build an FTS5 MATCH expression from a free-text query.
  *
- * Wraps each term in double quotes (to handle special chars) and joins with
- * spaces (implicit AND in FTS5). Example: `lsp config` → `"lsp" "config"`.
+ * OR operators so multi-term recalls can surface partial matches.
+ * Example: `lsp config` → `"lsp" OR "config"`.
  */
 function buildMatchExpr(query: string): string {
 	return query
@@ -203,5 +203,5 @@ function buildMatchExpr(query: string): string {
 		.split(/\s+/)
 		.filter(Boolean)
 		.map(term => `"${term.replace(/"/g, '""')}"`)
-		.join(" ");
+		.join(" OR ");
 }

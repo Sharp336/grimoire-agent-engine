@@ -28,3 +28,11 @@ Rules:
 - Do NOT duplicate content from README.md or AGENTS.md verbatim — synthesise.
 
 Target: aim for 5-15 high-quality concepts that cover the project's non-obvious architecture and conventions. Quality over quantity.
+
+---
+
+Target: {{#if focus}}Focus on: {{focus}}.{{else}}Explore the whole codebase.{{/if}}
+Aim for up to {{maxConcepts}} high-quality concepts.
+Working directory: {{{cwd}}}
+
+Start by reading the project structure (README, package.json/Cargo.toml/pyproject.toml, main entry points), then explore key modules. Use `read okf://` to check existing concepts, then `write okf://<category>/<topic>.md` to author new ones. Finish with `/okf stats` to verify.

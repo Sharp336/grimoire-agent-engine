@@ -20,6 +20,7 @@ import {
 import type { Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import {
 	ACP_BOOTSTRAP_RACE_GUARD_MS,
 	AcpAgent,
@@ -390,6 +391,12 @@ function getChunkMessageId(notification: SessionNotification): string | undefine
 	return typeof update.messageId === "string" ? update.messageId : undefined;
 }
 
+function resolveSessionLocalPath(session: FakeAgentSession, localUrl: string): string {
+	return resolveLocalUrlToPath(localUrl, {
+		getArtifactsDir: () => session.sessionManager.getArtifactsDir(),
+		getSessionId: () => session.sessionManager.getSessionId(),
+	});
+}
 function expectAcpNotifications(updates: SessionNotification[]): void {
 	for (const update of updates) {
 		expectAcpStructure(zSessionNotification, update);
@@ -633,11 +640,7 @@ describe("ACP agent", () => {
 		const session = harness.findSession(created.sessionId)!;
 		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
 
-		const artifactsDir = session.sessionManager.getArtifactsDir();
-		expect(artifactsDir).not.toBeNull();
-		// The agent writes to its chosen `local://<slug>-plan.md` and resolves with
-		// the matching slug — the file is never renamed.
-		const planPath = path.join(artifactsDir!, "local", "words-counter-plan.md");
+		const planPath = resolveSessionLocalPath(session, "local://words-counter-plan.md");
 		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
 
 		const updatesBefore = harness.updates.length;
@@ -703,8 +706,7 @@ describe("ACP agent", () => {
 		const session = harness.findSession(created.sessionId)!;
 		await harness.agent.setSessionMode({ sessionId: created.sessionId, modeId: "plan" });
 
-		const artifactsDir = session.sessionManager.getArtifactsDir();
-		const planPath = path.join(artifactsDir!, "local", "PLAN.md");
+		const planPath = resolveSessionLocalPath(session, "local://PLAN.md");
 		await Bun.write(planPath, "# Words Counter\n\nFile contents.");
 
 		const updatesBefore = harness.updates.length;
@@ -718,7 +720,7 @@ describe("ACP agent", () => {
 		expect(result.content[0]?.text).toMatch(/refinement requested/i);
 		// Plan file stays put; no rename, no write-access grant.
 		expect(await Bun.file(planPath).exists()).toBe(true);
-		expect(await Bun.file(path.join(artifactsDir!, "local", "words-counter.md")).exists()).toBe(false);
+		expect(await Bun.file(resolveSessionLocalPath(session, "local://words-counter.md")).exists()).toBe(false);
 		// Plan mode + standing handler stay active so the agent can iterate.
 		expect(session.planModeState?.enabled).toBe(true);
 		expect(typeof session.standingResolveHandler).toBe("function");

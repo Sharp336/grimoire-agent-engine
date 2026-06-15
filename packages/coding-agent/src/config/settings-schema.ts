@@ -2376,17 +2376,6 @@ export const SETTINGS_SCHEMA = {
 			condition: "okfActive",
 		},
 	},
-	"okf.enrichmentEnabled": {
-		type: "boolean",
-		default: false,
-		ui: {
-			tab: "memory",
-			group: "OKF",
-			label: "OKF Enrichment Agent",
-			description: "Enable the curator agent that authors/updates concepts from sessions and the codebase",
-			condition: "okfActive",
-		},
-	},
 
 	// TTSR
 	"ttsr.enabled": {

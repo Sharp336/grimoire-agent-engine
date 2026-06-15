@@ -86,6 +86,15 @@ describe("okf/store-sqlite search", () => {
 		expect(results[0].id).toBe("a/relevant");
 	});
 
+	it("matches any query term instead of requiring every term", async () => {
+		await store.upsert(makeSummary("a/auth", "Ref", "auth"), "authentication middleware sessions");
+		await store.upsert(makeSummary("b/webhooks", "Ref", "webhooks"), "billing webhook delivery");
+
+		const results = await store.search("authentication webhook");
+
+		expect(results.map(result => result.id)).toEqual(expect.arrayContaining(["a/auth", "b/webhooks"]));
+	});
+
 	it("returns empty for no matches", async () => {
 		await store.upsert(makeSummary("cat/topic", "Ref", "desc"), "body text");
 		expect(await store.search("zzzznonexistent")).toEqual([]);

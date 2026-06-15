@@ -93,6 +93,12 @@ describe("compile cache", () => {
 	it("renders templates with 3+ closing braces unambiguously", () => {
 		expect(prompt.render("{{#if a}}{ {{b}}}{{/if}}", { a: true, b: "v" })).toBe("{ v}");
 	});
+
+	it("preserves real triple-stash templates", () => {
+		expect(prompt.render("Working directory: {{{cwd}}}", { cwd: "C:\\tmp\\x&y" })).toBe(
+			"Working directory: C:\\tmp\\x&y",
+		);
+	});
 });
 
 describe("helpers: join", () => {

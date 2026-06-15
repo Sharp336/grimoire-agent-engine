@@ -5,13 +5,14 @@
  */
 
 import * as path from "node:path";
+import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import { buildGraph, loadConcept, loadSummaries, renderIndex, resolveBundleRoot, walkBundle } from "../okf/bundle";
 import { OkfDocumentError, validate } from "../okf/document";
 import { buildCodebaseEnrichmentPrompt } from "../okf/enrichment/codebase";
 import { getOkfSessionState } from "../okf/state";
 import { SqliteOkfStore } from "../okf/store/store-sqlite";
-import type { OkfStore } from "../okf/store/types";
 import { generateViewer } from "../okf/viewer/generator";
+import okfEnrichmentDispatch from "../prompts/okf/enrichment-dispatch.md" with { type: "text" };
 import { commandConsumed, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
 
@@ -35,9 +36,7 @@ export const okfCommand: SlashCommandSpec = {
 		const cwd = runtime.cwd;
 		const bundleDir = runtime.settings.get("okf.bundleDir") as string | undefined;
 		const root = resolveBundleRoot(cwd, bundleDir);
-		// Resolve the active store from the session state (honors hindsight/sqlite/auto).
 		const okfState = getOkfSessionState(runtime.session);
-		const activeStore: OkfStore | undefined = okfState?.store;
 
 		switch (verb) {
 			case "view": {
@@ -88,29 +87,35 @@ export const okfCommand: SlashCommandSpec = {
 				return commandConsumed();
 			}
 			case "reindex": {
-				// Use the active session store (Hindsight or SQLite); fall back to a
-				// temporary SQLite store if the session hasn't started the OKF layer yet.
-				const ownsStore = !activeStore;
-				const store: OkfStore = activeStore ?? new SqliteOkfStore(path.join(root, "okf.db"));
+				if (okfState) {
+					const count = await okfState.reindex();
+					await runtime.output(`OKF reindex: ${count} concept(s) indexed; stale entries removed.`);
+					return commandConsumed();
+				}
+				// Fallback: session hasn't started the OKF layer — temp SQLite store.
+				const store = new SqliteOkfStore(path.join(root, "okf.db"));
 				try {
-					const ids = await walkBundle(root);
+					const ids = new Set(await walkBundle(root));
 					const summaries = await loadSummaries(root, { autoUpdate: false });
 					let indexed = 0;
 					for (const id of ids) {
 						try {
-							const concept = await loadConcept(root, id);
 							const summary = summaries.find(s => s.id === id);
 							if (summary) {
-								await store.upsert(summary, concept.body);
+								await store.upsert(summary, (await loadConcept(root, id)).body);
 								indexed++;
 							}
 						} catch {
 							// Skip concepts that fail to load.
 						}
 					}
-					await runtime.output(`OKF reindex: ${indexed}/${ids.length} concepts indexed.`);
+					const existing = await store.list({ limit: 10000 });
+					for (const item of existing) {
+						if (!ids.has(item.id)) await store.delete(item.id);
+					}
+					await runtime.output(`OKF reindex: ${indexed}/${ids.size} concepts indexed; stale entries removed.`);
 				} finally {
-					if (ownsStore) await store.close();
+					await store.close();
 				}
 				return commandConsumed();
 			}
@@ -122,7 +127,17 @@ export const okfCommand: SlashCommandSpec = {
 				}
 				const html = generateViewer(graph, { title: "OKF Knowledge Graph" });
 				const outArg = command.args.trim().split(/\s+/).slice(1).join(" ");
-				const outPath = outArg || path.join(root, "okf-graph.html");
+				let outPath: string;
+				if (outArg) {
+					const resolved = path.resolve(runtime.cwd, outArg);
+					const cwdAbs = path.resolve(runtime.cwd);
+					if (resolved !== cwdAbs && !resolved.startsWith(`${cwdAbs}${path.sep}`)) {
+						return usage("OKF visualize: output path must be inside the working directory.", runtime);
+					}
+					outPath = resolved;
+				} else {
+					outPath = path.join(root, "okf-graph.html");
+				}
 				await Bun.write(outPath, html);
 				await runtime.output(
 					`OKF graph viewer: ${outPath} (${graph.nodes.length} nodes, ${graph.edges.length} edges${brokenLinks.length > 0 ? `, ${brokenLinks.length} broken links` : ""}).`,
@@ -130,21 +145,19 @@ export const okfCommand: SlashCommandSpec = {
 				return commandConsumed();
 			}
 			case "enrich": {
-				if (!runtime.settings.get("okf.enrichmentEnabled")) {
-					await runtime.output(
-						"OKF enrichment is disabled. Enable it in Settings → Memory → OKF → Enrichment Agent.",
-					);
-					return commandConsumed();
-				}
 				const focus = command.args.trim().split(/\s+/).slice(1).join(" ");
-				const prompt = buildCodebaseEnrichmentPrompt({ cwd, focus: focus || undefined });
-				await runtime.output(
-					"OKF enrichment: starting codebase-walking agent. Use the spawned task to author concepts.\n\n" +
-						"Prompt for the enrichment subagent:\n```\n" +
-						prompt +
-						"\n```",
-				);
-				return commandConsumed();
+				const assignment = buildCodebaseEnrichmentPrompt({ cwd, focus: focus || undefined });
+				const dispatch = prompt.render(okfEnrichmentDispatch, { assignment });
+				try {
+					runtime.session.setForcedToolChoice("task");
+				} catch (error) {
+					return usage(
+						`Could not start OKF enrichment agent: ${error instanceof Error ? error.message : String(error)}`,
+						runtime,
+					);
+				}
+				await runtime.output("OKF enrichment: spawning a codebase-walking task subagent…");
+				return { prompt: dispatch };
 			}
 			default:
 				return usage("Usage: /okf <view|list|stats|diagnose|reindex|visualize|enrich>", runtime);

@@ -127,8 +127,9 @@ describe("AgentSession auto-compaction queue resume", () => {
 	afterEach(async () => {
 		await session.dispose();
 		authStorage.close();
-		tempDir.removeSync();
 		vi.useRealTimers();
+		// Bun keeps dynamically imported extension source files locked on Windows until process exit.
+		if (process.platform !== "win32") await tempDir.remove();
 		getRuntimeSignals().length = 0;
 		vi.restoreAllMocks();
 	});

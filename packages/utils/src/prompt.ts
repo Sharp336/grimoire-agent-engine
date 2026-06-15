@@ -526,19 +526,39 @@ export function registerPartial(name: string, fn: Template): void {
 }
 
 /**
- * Handlebars' lexer greedily matches `}}}` as `CLOSE_UNESCAPED` (the close of a
- * triple-stash `{{{ ... }}}`). When a regular helper close `}}` is immediately
- * followed by a literal `}` (common in compact JSON examples like
- * `{del:{{href ...}}}`), the lexer mistakes the trailing `}}}` for a triple-close
- * and rejects the input.
+ * Handlebars' lexer greedily matches `}}}` as `CLOSE_UNESCAPED`. When a regular
+ * helper close `}}` is immediately followed by a literal `}` (common in compact
+ * JSON examples like `{del:{{href ...}}}`), the lexer mistakes the trailing
+ * `}}}` for a triple-close and rejects the input.
  *
- * We never use triple-stash (it's redundant under `noEscape: true`), so any run
- * of 3+ closing braces is unambiguously "helper close `}}`" + "literal `}`s".
- * Inject a no-op comment between them so the lexer tokenizes the helper close
- * cleanly and treats the rest as content.
+ * Leave real triple-stash blocks (`{{{raw}}}`) intact; `noEscape: true` makes
+ * them redundant but valid. Split only helper closes followed by literal braces.
  */
 function disambiguateClosingBraces(template: string): string {
-	return template.replace(/\}\}(\}+)/g, "}}{{!---}}$1");
+	let result: string | undefined;
+	let segmentStart = 0;
+	for (let i = 0; i < template.length - 2; i++) {
+		const ch = template.charCodeAt(i);
+		if (ch === 123 /* { */ && template.charCodeAt(i + 1) === 123 && template.charCodeAt(i + 2) === 123) {
+			const close = template.indexOf("}}}", i + 3);
+			if (close !== -1) i = close + 2;
+			continue;
+		}
+		if (ch !== 125 /* } */ || template.charCodeAt(i + 1) !== 125 || template.charCodeAt(i + 2) !== 125) {
+			continue;
+		}
+
+		let end = i + 3;
+		while (end < template.length && template.charCodeAt(end) === 125 /* } */) end++;
+		result ??= "";
+		result += template.slice(segmentStart, i + 2);
+		result += "{{!---}}";
+		result += template.slice(i + 2, end);
+		segmentStart = end;
+		i = end - 1;
+	}
+	if (result === undefined) return template;
+	return result + template.slice(segmentStart);
 }
 
 const compiledTemplateCache = new Map<string, (context: TemplateContext) => string>();

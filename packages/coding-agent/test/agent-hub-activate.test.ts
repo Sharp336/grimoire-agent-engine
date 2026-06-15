@@ -4,6 +4,7 @@
  * focus failure keeps the hub open and surfaces the error as a notice.
  */
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentHubOverlayComponent } from "@oh-my-pi/pi-coding-agent/modes/components/agent-hub";
@@ -89,9 +90,9 @@ describe("Agent hub Enter activation", () => {
 
 	it("lists persisted subagent session files after restart", async () => {
 		using tempDir = TempDir.createSync("@omp-agent-hub-persisted-");
-		const sessionFile = `${tempDir.path()}/main.jsonl`;
+		const sessionFile = path.join(tempDir.path(), "main.jsonl");
 		await Bun.write(sessionFile, "");
-		await Bun.write(`${tempDir.path()}/main/Worker.jsonl`, "");
+		await Bun.write(path.join(tempDir.path(), "main", "Worker.jsonl"), "");
 		const agents = new AgentRegistry();
 		const hub = new AgentHubOverlayComponent({
 			observers: new SessionObserverRegistry(),
@@ -107,7 +108,7 @@ describe("Agent hub Enter activation", () => {
 		const rendered = Bun.stripANSI(hub.render(120).join("\n"));
 		expect(rendered).toContain("Worker");
 		expect(rendered).toContain("parked");
-		expect(agents.get("Worker")?.sessionFile).toBe(`${tempDir.path()}/main/Worker.jsonl`);
+		expect(agents.get("Worker")?.sessionFile).toBe(path.join(tempDir.path(), "main", "Worker.jsonl"));
 		hub.dispose();
 	});
 

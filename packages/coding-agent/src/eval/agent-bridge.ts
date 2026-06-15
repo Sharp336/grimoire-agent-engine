@@ -9,6 +9,7 @@ import { z } from "zod/v4";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { MCPManager } from "../mcp/manager";
+import { getOkfSessionState } from "../okf/state";
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import * as taskDiscovery from "../task/discovery";
 import * as taskExecutor from "../task/executor";
@@ -287,6 +288,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 			parentArtifactManager,
 			parentHindsightSessionState: options.session.getHindsightSessionState?.(),
 			parentMnemopiSessionState: options.session.getMnemopiSessionState?.(),
+			parentOkfState: getOkfSessionState(options.session),
 			parentTelemetry: options.session.getTelemetry?.(),
 			// Deliberately omit parentEvalSessionId: the parent's Python kernel is
 			// blocked on this bridge call, so sharing the eval session would deadlock

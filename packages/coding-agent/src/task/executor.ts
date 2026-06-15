@@ -25,6 +25,7 @@ import type { LocalProtocolOptions } from "../internal-urls";
 import { callTool } from "../mcp/client";
 import type { MCPManager } from "../mcp/manager";
 import type { MnemopiSessionState } from "../mnemopi/state";
+import type { OkfSessionState } from "../okf/state";
 import subagentSystemPromptTemplate from "../prompts/system/subagent-system-prompt.md" with { type: "text" };
 import submitReminderTemplate from "../prompts/system/subagent-yield-reminder.md" with { type: "text" };
 import { AgentLifecycleManager } from "../registry/agent-lifecycle";
@@ -265,6 +266,7 @@ export interface ExecutorOptions {
 	parentArtifactManager?: ArtifactManager;
 	parentHindsightSessionState?: HindsightSessionState;
 	parentMnemopiSessionState?: MnemopiSessionState;
+	parentOkfState?: OkfSessionState;
 	/** Parent agent's eval executor session id. Subagents reuse it so eval state is shared. */
 	parentEvalSessionId?: string;
 	/**
@@ -1918,6 +1920,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				taskDepth: childDepth,
 				parentHindsightSessionState: options.parentHindsightSessionState,
 				parentMnemopiSessionState: options.parentMnemopiSessionState,
+				parentOkfState: options.parentOkfState,
 				parentTaskPrefix: id,
 				agentId: id,
 				agentDisplayName: subagentDisplayName,

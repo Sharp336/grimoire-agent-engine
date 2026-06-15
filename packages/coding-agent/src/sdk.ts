@@ -1087,9 +1087,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
 	// / session would silently miss credential_disabled events.
-	const modelRegistry =
-		options.modelRegistry ??
-		new ModelRegistry(options.authStorage ?? (await logger.time("discoverModels", discoverAuthStorage, agentDir)));
+	let ownedAuthStorage: AuthStorage | undefined;
+	let modelRegistry: ModelRegistry;
+	if (options.modelRegistry) {
+		modelRegistry = options.modelRegistry;
+	} else {
+		const registryAuthStorage =
+			options.authStorage ?? (await logger.time("discoverModels", discoverAuthStorage, agentDir));
+		if (!options.authStorage) ownedAuthStorage = registryAuthStorage;
+		modelRegistry = new ModelRegistry(registryAuthStorage);
+	}
 	const authStorage = modelRegistry.authStorage;
 	if (options.authStorage && options.authStorage !== authStorage) {
 		throw new Error(
@@ -2548,6 +2555,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skillWarnings,
 			skillsSettings: settings.getGroup("skills"),
 			modelRegistry,
+			ownedAuthStorage,
 			toolRegistry,
 			transformContext,
 			onPayload,
@@ -2738,7 +2746,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 
 		// Start the additive OKF knowledge layer (runs alongside any memory backend).
-		logger.time("startOkfLayer", async () => {
+		const okfStartup = async () => {
 			try {
 				const okfState = await startOkfLayer({
 					sessionId: session.sessionId ?? "",
@@ -2748,12 +2756,18 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					parentOkfState: options.parentOkfState,
 				});
 				setOkfSessionState(session, okfState);
+				if (okfState) await session.refreshBaseSystemPrompt();
 			} catch (error) {
 				logger.warn("OKF layer startup failed", {
 					error: error instanceof Error ? error.message : String(error),
 				});
 			}
-		});
+		};
+		if (settings.get("okf.enabled")) {
+			await logger.time("startOkfLayer", okfStartup);
+		} else {
+			void logger.time("startOkfLayer", okfStartup);
+		}
 
 		// Wire MCP manager callbacks to session for reactive tool updates.
 		// Skip when reusing a parent's manager — the parent owns the callbacks.
@@ -2843,6 +2857,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					await asyncJobManager.dispose({ timeoutMs: 3_000 });
 				}
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);
+				ownedAuthStorage?.close();
 			}
 		} catch (cleanupError) {
 			logger.warn("Failed to clean up createAgentSession resources after startup error", {

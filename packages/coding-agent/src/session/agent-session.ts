@@ -380,6 +380,8 @@ export interface AgentSessionConfig {
 	skillsSettings?: SkillsSettings;
 	/** Model registry for API key resolution and model discovery */
 	modelRegistry: ModelRegistry;
+	/** Auth storage opened by the SDK for this session and closed during dispose. */
+	ownedAuthStorage?: AuthStorage;
 	/** Tool registry for LSP and settings */
 	toolRegistry?: Map<string, AgentTool>;
 	/** Current session pre-LLM message transform pipeline */
@@ -982,6 +984,7 @@ export class AgentSession {
 	 * this undefined and **MUST NOT** dispose the global instance on teardown.
 	 */
 	readonly #ownedAsyncJobManager: AsyncJobManager | undefined;
+	readonly #ownedAuthStorage: AuthStorage | undefined;
 	/**
 	 * AsyncJobManager scoped to this session for introspection/cancellation.
 	 *
@@ -1194,6 +1197,7 @@ export class AgentSession {
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
 		this.#parentEvalSessionId = config.parentEvalSessionId;
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
+		this.#ownedAuthStorage = config.ownedAuthStorage;
 		this.#asyncJobManager = config.asyncJobManager ?? config.ownedAsyncJobManager;
 		this.#scopedModels = config.scopedModels ?? [];
 		if (config.thinkingLevel === AUTO_THINKING) {
@@ -3212,6 +3216,7 @@ export class AgentSession {
 		this.#releasePowerAssertion();
 		await this.sessionManager.close();
 		this.#closeAllProviderSessions("dispose");
+		this.#ownedAuthStorage?.close();
 		// Flush the retain queue BEFORE clearing the session's pointer so
 		// `HindsightRetainQueue.#doFlush` still sees `session.getHindsightSessionState() === state`.
 		// Reversed, the spliced batch survives just long enough to fail the

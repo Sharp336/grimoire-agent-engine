@@ -226,7 +226,7 @@ export async function startOkfLayer(options: {
  */
 const okfStates = new WeakMap<object, OkfSessionState | undefined>();
 
-export function getOkfSessionState(session: { sessionId?: string }): OkfSessionState | undefined {
+export function getOkfSessionState(session: object): OkfSessionState | undefined {
 	return okfStates.get(session);
 }
 
@@ -247,7 +247,7 @@ export function disposeOkfSessionState(session: object): void {
 	okfStates.delete(session);
 }
 
-const STOPWORDS = new ReadonlySet([
+const STOPWORDS: ReadonlySet<string> = new Set([
 	"the",
 	"a",
 	"an",

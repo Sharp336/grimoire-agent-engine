@@ -23,6 +23,7 @@ import type { ToolSession } from "..";
 import { resolveAgentModelPatterns } from "../config/model-resolver";
 import { MCPManager } from "../mcp/manager";
 import type { Theme } from "../modes/theme/theme";
+import { getOkfSessionState } from "../okf/state";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
@@ -1238,6 +1239,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				parentArtifactManager,
 				parentHindsightSessionState: this.session.getHindsightSessionState?.(),
 				parentMnemopiSessionState: this.session.getMnemopiSessionState?.(),
+				parentOkfState: getOkfSessionState(this.session),
 				parentTelemetry: this.session.getTelemetry?.(),
 				parentEvalSessionId,
 			};

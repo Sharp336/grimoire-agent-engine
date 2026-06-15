@@ -32,7 +32,7 @@ describe("AgentSession user shortcut hooks", () => {
 		await pythonExecutor.disposeAllKernelSessions();
 		authStorage?.close();
 		authStorage = undefined;
-		tempDir.removeSync();
+		await tempDir.remove();
 	});
 
 	function createSession(extensionRunner?: ExtensionRunner): AgentSession {
