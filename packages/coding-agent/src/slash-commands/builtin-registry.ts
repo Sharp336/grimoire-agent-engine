@@ -286,7 +286,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "guided-goal",
-		description: "Interview and refine a goal before enabling goal mode",
+		description: "Run a short guided interview on the plan/slow model to produce and enable a goal",
 		inlineHint: "[rough objective]",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
@@ -355,7 +355,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "fast",
-		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
+		description: "Toggle priority service tier; fastModeScope controls target family (both/OpenAI/Claude)",
 		acpDescription: "Toggle fast mode",
 		acpInputHint: "[on|off|status]",
 		subcommands: [

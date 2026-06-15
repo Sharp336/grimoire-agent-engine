@@ -133,6 +133,8 @@ export type SymbolKey =
 	| "icon.mic"
 	// Compaction divider
 	| "icon.camera"
+	| "icon.speak"
+	| "icon.learn"
 	// Thinking Levels
 	| "thinking.minimal"
 	| "thinking.low"
@@ -332,6 +334,8 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.mic": "🎤",
 	// Compaction divider
 	"icon.camera": "📷",
+	"icon.speak": "🔊",
+	"icon.learn": "🧠",
 	// Thinking levels
 	"thinking.minimal": "◔ min",
 	"thinking.low": "◑ low",
@@ -617,6 +621,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.mic": "\uf130",
 	// Compaction divider - fa-camera-retro
 	"icon.camera": "\uf083",
+	"icon.speak": "\uf028",
+	"icon.learn": "\uf5dc",
 	// Thinking Levels - emoji labels
 	// pick: 🤨 min | alt:  min  min
 	"thinking.minimal": "\u{F0E7} min",
@@ -832,6 +838,8 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.mic": "MIC",
 	// Compaction divider
 	"icon.camera": "[o]",
+	"icon.speak": "TTS",
+	"icon.learn": "AL",
 	// Thinking Levels
 	"thinking.minimal": "[min]",
 	"thinking.low": "[low]",
@@ -1798,6 +1806,8 @@ export class Theme {
 			extensionInstruction: this.#symbols["icon.extensionInstruction"],
 			mic: this.#symbols["icon.mic"],
 			camera: this.#symbols["icon.camera"],
+			speak: this.#symbols["icon.speak"],
+			learn: this.#symbols["icon.learn"],
 		};
 	}
 

@@ -26,7 +26,7 @@
 
 ## Inputs
 
-The wire schema is shape-swapped by `task.batch` (default on). One unit of work is the task item `{ id?, description?, assignment, isolated? }` (`isolated` only when `task.isolation.mode` is not `none`):
+The wire schema is shape-swapped by `task.batch` (default on). One unit of work is the task item `{ id?, description?, role?, assignment, isolated? }` (`isolated` only when `task.isolation.mode` is not `none`):
 
 - **Batch shape** (`task.batch` on): `{ agent, context, tasks: item[] }` — one subagent per item, all run under the same fan-out rules. `context` is **required** shared background rendered into every spawned subagent's system prompt (`CONTEXT` section); `isolated` is per item.
 - **Flat shape** (`task.batch` off): `{ agent, ...item }` — exactly one spawn per call. Shared background goes into a `local://` file (e.g. `local://ctx.md`) that each assignment references; subagents share the parent's `local://` root.
@@ -38,6 +38,7 @@ The wire schema is shape-swapped by `task.batch` (default on). One unit of work 
 | `tasks` | `array` | Yes (batch) | One task item per subagent. Provided ids must be unique within the call (case-insensitive). Rejected when `task.batch` is off. |
 | `id` | `string` | No | Stable agent id, schema max length 48. Defaults to a generated AdjectiveNoun name. Uniquified per session by `AgentOutputManager`. Item field in batch shape, top-level in flat shape. |
 | `description` | `string` | No | UI label only; the subagent never sees it. Item field in batch shape, top-level in flat shape. |
+| `role` | `string` | No | Specialist role/expertise this subagent embodies; shapes its system-prompt identity/persona and roster display name. Schema max length 256. Item field in batch shape, top-level in flat shape. |
 | `assignment` | `string` | Yes | The work — complete, self-contained instructions. Empty-after-trim is rejected. Item field in batch shape, top-level in flat shape. |
 | `isolated` | `boolean` | No | Run in an isolated workspace and return patches. Exists only when `task.isolation.mode` is not `none`; per item in batch shape, top-level in flat shape. Isolated agents are torn down at completion — not revivable. |
 

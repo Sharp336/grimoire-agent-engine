@@ -22,7 +22,7 @@ export function buildHotkeysMarkdown(bindings: HotkeysMarkdownBindings): string 
 		"| Key | Action |",
 		"|-----|--------|",
 		"| `Enter` | Send message |",
-		"| `Shift+Enter` / `Alt+Enter` | New line |",
+		"| `Shift+Enter` / `Ctrl+J` / `Alt+Enter` | New line |",
 		"| `Ctrl+W` / `Option+Backspace` | Delete word backwards |",
 		"| `Ctrl+U` | Delete to start of line |",
 		"| `Ctrl+K` | Delete to end of line |",

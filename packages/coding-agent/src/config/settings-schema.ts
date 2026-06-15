@@ -380,7 +380,16 @@ export const SETTINGS_SCHEMA = {
 			description: "Keep the display from idle-sleeping while a session is open (caffeinate -d)",
 		},
 	},
-	shellPath: { type: "string", default: undefined },
+	shellPath: {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "shell",
+			group: "Bash",
+			label: "Shell Path",
+			description: "Path to the shell binary used for bash command execution (default: system shell)",
+		},
+	},
 
 	extensions: { type: "array", default: EMPTY_STRING_ARRAY },
 
@@ -1036,7 +1045,16 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Retries
-	"retry.enabled": { type: "boolean", default: true },
+	"retry.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Auto Retry",
+			description: "Automatically retry transient API errors before failing the request",
+		},
+	},
 
 	"retry.maxRetries": {
 		type: "number",
@@ -1448,6 +1466,12 @@ export const SETTINGS_SCHEMA = {
 	"stt.language": {
 		type: "string",
 		default: "en",
+		ui: {
+			tab: "interaction",
+			group: "Speech",
+			label: "Speech Language",
+			description: "Language hint for speech-to-text transcription (e.g. en, es, de)",
+		},
 	},
 
 	"stt.modelName": {
@@ -1600,9 +1624,28 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.keepRecentTokens": { type: "number", default: 20000 },
 
-	"compaction.autoContinue": { type: "boolean", default: true },
+	"compaction.autoContinue": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Auto-Continue After Compaction",
+			description: "Automatically continue the turn after a compaction completes",
+		},
+	},
 
-	"compaction.remoteEndpoint": { type: "string", default: undefined },
+	"compaction.remoteEndpoint": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Remote Compaction Endpoint",
+			description: "Endpoint URL for remote compaction; used when Remote Compaction is enabled",
+			condition: "compactionRemoteActive",
+		},
+	},
 
 	// Idle compaction
 	"compaction.idleEnabled": {
@@ -2071,7 +2114,7 @@ export const SETTINGS_SCHEMA = {
 			label: "Mnemopi Embedding Model",
 			description:
 				"Advanced: explicit embedding model id that overrides the variant. Leave empty to use mnemopi.embeddingVariant.",
-			condition: "mnemopiActive",
+			condition: "mnemopiEmbeddingsActive",
 		},
 	},
 	"mnemopi.embeddingApiUrl": {
@@ -2082,7 +2125,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Mnemopi",
 			label: "Mnemopi Embedding API URL",
 			description: "Optional OpenAI-compatible embedding endpoint passed to Mnemopi",
-			condition: "mnemopiActive",
+			condition: "mnemopiEmbeddingsActive",
 		},
 	},
 	"mnemopi.embeddingApiKey": {
@@ -2093,7 +2136,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Mnemopi",
 			label: "Mnemopi Embedding API Key",
 			description: "Optional embedding API key passed to Mnemopi",
-			condition: "mnemopiActive",
+			condition: "mnemopiEmbeddingsActive",
 		},
 	},
 	"mnemopi.llmMode": {
@@ -2121,7 +2164,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Mnemopi",
 			label: "Mnemopi LLM Base URL",
 			description: "Optional OpenAI-compatible LLM endpoint for Mnemopi remote mode",
-			condition: "mnemopiActive",
+			condition: "mnemopiRemoteLlm",
 		},
 	},
 	"mnemopi.llmApiKey": {
@@ -2132,7 +2175,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Mnemopi",
 			label: "Mnemopi LLM API Key",
 			description: "Optional LLM API key for Mnemopi remote mode",
-			condition: "mnemopiActive",
+			condition: "mnemopiRemoteLlm",
 		},
 	},
 	"mnemopi.llmModel": {
@@ -2143,7 +2186,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Mnemopi",
 			label: "Mnemopi LLM Model",
 			description: "Optional LLM model name for Mnemopi remote mode",
-			condition: "mnemopiActive",
+			condition: "mnemopiRemoteLlm",
 		},
 	},
 	"mnemopi.retainEveryNTurns": { type: "number", default: 4 },
@@ -2212,8 +2255,29 @@ export const SETTINGS_SCHEMA = {
 			condition: "hindsightActive",
 		},
 	},
-	"hindsight.bankMission": { type: "string", default: undefined },
-	"hindsight.retainMission": { type: "string", default: undefined },
+	"hindsight.bankMission": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Bank Mission",
+			description:
+				"Reflect mission for the Hindsight bank; guides mental-model and reflection generation. Blank uses the server default",
+			condition: "hindsightActive",
+		},
+	},
+	"hindsight.retainMission": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Retain Mission",
+			description: "Retain mission for the Hindsight bank; guides what gets retained",
+			condition: "hindsightActive",
+		},
+	},
 
 	"hindsight.autoRecall": {
 		type: "boolean",
@@ -2260,12 +2324,34 @@ export const SETTINGS_SCHEMA = {
 	},
 	"hindsight.retainEveryNTurns": { type: "number", default: 3 },
 	"hindsight.retainOverlapTurns": { type: "number", default: 2 },
-	"hindsight.retainContext": { type: "string", default: "omp" },
+	"hindsight.retainContext": {
+		type: "string",
+		default: "omp",
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Retain Context",
+			description: "Context label attached to retained memories (default: omp)",
+			condition: "hindsightActive",
+		},
+	},
 
 	"hindsight.recallBudget": {
 		type: "enum",
 		values: ["low", "mid", "high"] as const,
 		default: "mid",
+		ui: {
+			tab: "memory",
+			group: "Hindsight",
+			label: "Hindsight Recall Budget",
+			description: "How much memory to pull on recall",
+			options: [
+				{ value: "low", label: "Low", description: "Fewer memories, less context" },
+				{ value: "mid", label: "Mid", description: "Balanced (default)" },
+				{ value: "high", label: "High", description: "More memories, more context" },
+			],
+			condition: "hindsightActive",
+		},
 	},
 	"hindsight.recallMaxTokens": { type: "number", default: 1024 },
 	"hindsight.recallContextTurns": { type: "number", default: 1 },
@@ -3016,8 +3102,8 @@ export const SETTINGS_SCHEMA = {
 		type: "boolean",
 		default: false,
 		ui: {
-			tab: "tools",
-			group: "Available Tools",
+			tab: "interaction",
+			group: "Speech",
 			label: "Speech Generation",
 			description: "Enable the tts tool for on-device (Kokoro) or xAI Grok Voice speech-file synthesis",
 		},
@@ -3305,12 +3391,6 @@ export const SETTINGS_SCHEMA = {
 	"mcp.discoveryMode": {
 		type: "boolean",
 		default: false,
-		ui: {
-			tab: "tools",
-			group: "Discovery & MCP",
-			label: "MCP Tool Discovery",
-			description: "Hide MCP tools by default and expose them through a tool discovery tool",
-		},
 	},
 
 	"mcp.discoveryDefaultServers": {
@@ -3648,7 +3728,16 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Skills
-	"skills.enabled": { type: "boolean", default: true },
+	"skills.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Commands & Skills",
+			label: "Skills",
+			description: "Master toggle for loading skills (skill files, /skill commands, and skill tools)",
+		},
+	},
 
 	"skills.enableSkillCommands": {
 		type: "boolean",
@@ -3791,8 +3880,8 @@ export const SETTINGS_SCHEMA = {
 		values: ["auto", "local", "xai"] as const,
 		default: "auto",
 		ui: {
-			tab: "providers",
-			group: "Services",
+			tab: "interaction",
+			group: "Speech",
 			label: "Text-to-Speech Provider",
 			description: "Backend for the tts tool: local on-device neural TTS (Kokoro-82M) or xAI Grok Voice",
 			options: [
@@ -3815,11 +3904,12 @@ export const SETTINGS_SCHEMA = {
 		values: TTS_LOCAL_MODEL_VALUES,
 		default: DEFAULT_TTS_LOCAL_MODEL_KEY,
 		ui: {
-			tab: "providers",
-			group: "Services",
+			tab: "interaction",
+			group: "Speech",
 			label: "Local TTS Model",
 			description: "On-device neural TTS model (Kokoro-82M) used by the local TTS backend",
 			options: TTS_LOCAL_MODEL_OPTIONS,
+			condition: "localTtsModelActive",
 		},
 	},
 	"tts.localVoice": {
@@ -3827,19 +3917,20 @@ export const SETTINGS_SCHEMA = {
 		values: TTS_LOCAL_VOICE_VALUES,
 		default: DEFAULT_TTS_VOICE,
 		ui: {
-			tab: "providers",
-			group: "Services",
+			tab: "interaction",
+			group: "Speech",
 			label: "Local TTS Voice",
 			description: "Kokoro voice used by the local TTS backend (American/British, female/male)",
 			options: TTS_LOCAL_VOICE_OPTIONS,
+			condition: "localTtsActive",
 		},
 	},
 	"speech.enabled": {
 		type: "boolean",
 		default: false,
 		ui: {
-			tab: "providers",
-			group: "Services",
+			tab: "interaction",
+			group: "Speech",
 			label: "Speech Vocalization",
 			description: "Speak the assistant's output aloud through the speakers as it streams",
 		},
@@ -3849,8 +3940,8 @@ export const SETTINGS_SCHEMA = {
 		values: ["all", "assistant", "yield"] as const,
 		default: "assistant",
 		ui: {
-			tab: "providers",
-			group: "Services",
+			tab: "interaction",
+			group: "Speech",
 			label: "Speech Vocalization Mode",
 			description:
 				"What to speak: all = assistant messages + thinking; assistant = messages only; yield = only the final message at turn end",
@@ -3859,6 +3950,7 @@ export const SETTINGS_SCHEMA = {
 				{ value: "assistant", label: "Assistant messages" },
 				{ value: "yield", label: "Final message only" },
 			],
+			condition: "speechEnabled",
 		},
 	},
 	"speech.voice": {
@@ -3866,11 +3958,12 @@ export const SETTINGS_SCHEMA = {
 		values: TTS_LOCAL_VOICE_VALUES,
 		default: DEFAULT_TTS_VOICE,
 		ui: {
-			tab: "providers",
-			group: "Services",
+			tab: "interaction",
+			group: "Speech",
 			label: "Speech Vocalization Voice",
 			description: "Kokoro voice used when speaking the assistant's output aloud",
 			options: TTS_LOCAL_VOICE_OPTIONS,
+			condition: "speechEnabled",
 		},
 	},
 	"providers.tinyModel": {
@@ -4096,6 +4189,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Exa Search",
 			description: "Enable Exa basic search, deep search, code search, and crawl tools",
+			condition: "exaEnabled",
 		},
 	},
 
@@ -4107,6 +4201,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Exa Researcher",
 			description: "Enable the Exa researcher tool for AI-powered deep research",
+			condition: "exaEnabled",
 		},
 	},
 
@@ -4118,6 +4213,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Services",
 			label: "Exa Websets",
 			description: "Enable Exa webset management and enrichment tools",
+			condition: "exaEnabled",
 		},
 	},
 
@@ -4151,11 +4247,23 @@ export const SETTINGS_SCHEMA = {
 	"searxng.categories": {
 		type: "string",
 		default: undefined,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "SearXNG Categories",
+			description: "Comma-separated SearXNG categories to search (e.g. general,news)",
+		},
 	},
 
 	"searxng.language": {
 		type: "string",
 		default: undefined,
+		ui: {
+			tab: "providers",
+			group: "Services",
+			label: "SearXNG Language",
+			description: "Search language code passed to SearXNG (e.g. en)",
+		},
 	},
 
 	"commit.mapReduceEnabled": { type: "boolean", default: true },

@@ -31,7 +31,7 @@
 ## Outputs
 - Single-shot `AgentToolResult`; no streaming updates.
 - `content` is one text block:
-  - `list`: `No other agents.` or `<n> peer(s):` bullets — `id [displayName · kind · status]` plus unread count, parent, and last-activity age; a footer notes that parked agents are revived automatically when messaged.
+  - `list`: `No other agents.` or `<n> peer(s):` bullets — `id [displayName · kind · status]` plus current activity (the peer's task), unread count, parent, and last-activity age; a footer notes that parked agents are revived automatically when messaged.
   - `send`: per-recipient delivery receipts (`injected` / `woken` / `revived` / `failed — <error>`); with `await: true`, the reply body or a clean no-reply timeout note.
   - `wait`: the consumed message as `[<msgId>] <from>: <body>` (with a reply-to tag), or `No message within <duration>.`
   - `inbox`: `Inbox empty.` or `<n> message(s):` bullets.
@@ -40,7 +40,7 @@
 ## Flow
 1. `IrcTool.createIf` constructs the tool only when `isIrcEnabled` passes and the session has both an `AgentRegistry` and `getAgentId`. There is no `irc.enabled` setting: availability is derived — true for every subagent (`taskDepth > 0`; a parent always exists) and for any session that can still spawn subagents through the task tool. Only a top-level session with task spawning unavailable has no peers, hence no irc.
 2. `execute` resolves the registry and sender id; missing either returns a text error result instead of throwing.
-3. `op: "list"`: `registry.list()` minus self and minus `aborted` agents — `parked` peers ARE listed. Each row includes the unread count from `IrcBus.unreadCount(...)` and last activity.
+3. `op: "list"`: `registry.list()` minus self and minus `aborted` agents — `parked` peers ARE listed. Each row includes the peer activity (`ref.activity`, its current task), unread count from `IrcBus.unreadCount(...)`, and last activity.
 4. `op: "send"` validates `to`/`message`, rejects self-sends, and rejects `await` with `to: "all"`.
 5. Target resolution: broadcasts fan out to `registry.listVisibleTo(senderId)` (live peers only — `running`/`idle`; reviving every parked agent on a broadcast would be a stampede). Direct sends go through the bus unfiltered, so a parked recipient is revived.
 6. `IrcBus.send(...)` is fire-and-forget — it never blocks on the recipient generating anything. Delivery by recipient status:
@@ -54,7 +54,7 @@
 10. Timeouts resolve as `params.timeoutMs ?? irc.timeoutMs`, normalized: `0` disables the timeout, negative/non-finite values fall back to the default `120_000`, positive values are truncated and clamped to ≥ 1 ms.
 
 ## Modes / Variants
-- `list`: enumerate peers with status (`running`/`idle`/`parked`), unread counts, and last activity.
+- `list`: enumerate peers with status (`running`/`idle`/`parked`), current activity, unread counts, and last activity.
 - `send` direct: one exact peer id; wakes idle peers, revives parked ones.
 - `send` broadcast: `to: "all"` to every live peer; parked peers are skipped.
 - `send` + `await: true`: round-trip convenience — send, then wait for the next message from that peer. Marks the send `expectsReply`, enabling the busy-recipient auto-reply path when async execution is disabled.

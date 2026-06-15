@@ -2,7 +2,7 @@ Sends short text messages to other agents in this process and receives theirs.
 
 <instruction>
 - Main agent is `Main`; subagents reuse their task id (`AuthLoader`, or `AuthLoader-2` when the name repeats).
-- `op: "list"` — peers with status (`running` | `idle` | `parked`), unread count, parent, last activity. Use when unsure who exists.
+- `op: "list"` — peers with status (`running` | `idle` | `parked`), activity (current task), unread count, parent, last activity. Use when unsure who exists.
 - `op: "send"` — fire-and-forget `message` to `to` (peer id, or `"all"` to broadcast to live peers). Returns per-recipient receipts immediately; NEVER waits for the recipient to act. Outcomes: `injected` (mid-turn; folded in at next step boundary), `woken` (idle peer started a turn), `revived` (parked peer brought back and woken), `failed`.
 - Messaging an `idle`/`parked` peer is how you wake it — there is no separate revive call.
 - `send` + `await: true` — round-trip: send, then block until that peer's next message (or timeout). Invalid with `to: "all"`.
@@ -38,7 +38,7 @@ Applies to sending and replying.
 - `send`: per-recipient receipts; with `await: true`, also the reply (or timeout notice).
 - `wait`: the consumed message, or a clean timeout notice.
 - `inbox`: pending messages, oldest first.
-- `list`: peers with status, unread count, parent, last activity.
+- `list`: peers with status, activity (current task), unread count, parent, last activity.
 </output>
 
 <examples>

@@ -345,6 +345,7 @@ A value of `-1` means "use the provider/model default" — `omp` does not send t
 | `presencePenalty` | number | `-1` | Presence penalty. |
 | `repetitionPenalty` | number | `-1` | Repetition penalty. |
 | `serviceTier` | enum | `none` | `none`, `auto`, `default`, `flex`, `scale`, `priority`, `openai-only`, `claude-only`. |
+| `fastModeScope` | enum | `both` | `both`, `openai`, `claude`. Which providers `/fast on` and the fast-mode toggle target; `openai`/`claude` scope priority to one provider family. |
 | `personality` | enum | `default` | `default`, `friendly`, `pragmatic`, `none`. |
 
 ### Retry and fallback
@@ -397,6 +398,21 @@ tools:
 | `tools.artifactTailLines` | number | `500` | Max tail lines kept inline on spill. |
 
 Individual built-in tools are toggled by their own keys, e.g. `bash.enabled`, `eval.py`, `eval.js`, `find.enabled`, `search.enabled`, `fetch.enabled`, `browser.enabled`, `astEdit.enabled`, `astGrep.enabled`, `web_search.enabled`, `inspect_image.enabled`, `renderMermaid.enabled`.
+
+### Tasks and todos
+
+```yaml
+task:
+  eager: default       # default, preferred, always
+
+todo:
+  eager: default       # default, preferred, always
+```
+
+| Key | Type | Default | Notes |
+|---|---|---|---|
+| `task.eager` | enum | `default` | `default`, `preferred`, `always`. How strongly to push delegating work to subagents. |
+| `todo.eager` | enum | `default` | `default`, `preferred`, `always`. How strongly to push automatic todo-list creation after the first message. |
 
 ### Shell, eval, and LSP
 

@@ -5,11 +5,12 @@ import {
 	type SettingTab,
 	TAB_GROUPS,
 } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
-import { getSettingsForTab } from "@oh-my-pi/pi-coding-agent/modes/components/settings-defs";
+import { CONDITIONS, getSettingsForTab } from "@oh-my-pi/pi-coding-agent/modes/components/settings-defs";
 
 interface UiShape {
 	tab: SettingTab;
 	group?: string;
+	condition?: string;
 }
 
 describe("settings layout", () => {
@@ -47,5 +48,18 @@ describe("settings layout", () => {
 			const expected = TAB_GROUPS[tab].filter(group => grouped.includes(group));
 			expect(grouped).toEqual(expected);
 		}
+	});
+
+	it("every ui.condition resolves to a CONDITIONS predicate", () => {
+		const unknown: string[] = [];
+		for (const path in SETTINGS_SCHEMA) {
+			const ui = (SETTINGS_SCHEMA[path as keyof typeof SETTINGS_SCHEMA] as { ui?: UiShape }).ui;
+			const condition = ui?.condition;
+			if (!condition) continue;
+			if (typeof CONDITIONS[condition] !== "function") {
+				unknown.push(`${path}: condition "${condition}" has no CONDITIONS predicate`);
+			}
+		}
+		expect(unknown).toEqual([]);
 	});
 });

@@ -74,7 +74,7 @@ export type SettingDef = BooleanSettingDef | EnumSettingDef | SubmenuSettingDef 
 // Condition Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-const CONDITIONS: Record<string, () => boolean> = {
+export const CONDITIONS: Record<string, () => boolean> = {
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
 	hindsightActive: () => {
 		try {
@@ -100,6 +100,61 @@ const CONDITIONS: Record<string, () => boolean> = {
 	autoThinkingActive: () => {
 		try {
 			return Settings.instance.get("defaultThinkingLevel") === "auto";
+		} catch {
+			return false;
+		}
+	},
+	speechEnabled: () => {
+		try {
+			return Settings.instance.get("speech.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
+	localTtsActive: () => {
+		try {
+			return Settings.instance.get("providers.tts") !== "xai";
+		} catch {
+			return false;
+		}
+	},
+	localTtsModelActive: () => {
+		try {
+			return Settings.instance.get("providers.tts") !== "xai" || Settings.instance.get("speech.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
+	mnemopiRemoteLlm: () => {
+		try {
+			return (
+				Settings.instance.get("memory.backend") === "mnemopi" &&
+				Settings.instance.get("mnemopi.llmMode") === "remote"
+			);
+		} catch {
+			return false;
+		}
+	},
+	mnemopiEmbeddingsActive: () => {
+		try {
+			return (
+				Settings.instance.get("memory.backend") === "mnemopi" &&
+				Settings.instance.get("mnemopi.noEmbeddings") !== true
+			);
+		} catch {
+			return false;
+		}
+	},
+	exaEnabled: () => {
+		try {
+			return Settings.instance.get("exa.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
+	compactionRemoteActive: () => {
+		try {
+			return Settings.instance.get("compaction.remoteEnabled") === true;
 		} catch {
 			return false;
 		}

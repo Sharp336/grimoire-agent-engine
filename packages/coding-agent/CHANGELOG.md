@@ -2,6 +2,25 @@
 
 ## [Unreleased]
 
+### Added
+
+- Surfaced previously config-file-only settings in the `/settings` panel: Auto Retry (`retry.enabled`), the Skills master toggle (`skills.enabled`), Speech Language (`stt.language`), Shell Path (`shellPath`), SearXNG Categories and Language, Auto-Continue After Compaction (`compaction.autoContinue`), Remote Compaction Endpoint (`compaction.remoteEndpoint`, shown when Remote Compaction is enabled), and the Hindsight recall/retain knobs — recall budget, bank mission, retain mission, and retain context (shown when the Hindsight backend is active).
+- Added status-line indicators for speech vocalization (`speech.enabled`) and auto-learn (`autolearn.enabled`), rendered after the model name with theme-aware speaker/brain glyphs (unicode/nerd-font/ascii).
+- Documented the `Ctrl+J` newline shortcut in the in-app hotkeys reference and `docs/keybindings.md`.
+
+### Changed
+
+- Consolidated the speech settings into Interaction → Speech and gated dependent rows: Speech Vocalization Mode/Voice appear only when Speech Vocalization is on, Local TTS Voice hides under the xAI TTS provider, and Local TTS Model stays while the local provider or vocalization is active.
+- Mnemopi remote-LLM fields (base URL / API key / model) now appear only in remote LLM mode, and the embedding endpoint fields (model / URL / key) only when embeddings are enabled.
+- Exa search sub-tools (search, researcher, websets) are now hidden when the Exa master toggle is off.
+- Removed the redundant `mcp.discoveryMode` settings-panel row, which duplicated `tools.discoveryMode`; the config key is still honored for existing configs.
+
+### Fixed
+
+- `/fast` help now notes that `fastModeScope` controls the target provider family (both / OpenAI / Claude), and `/guided-goal` help now describes the short guided interview that produces a goal.
+- Synced tool docs: added the per-item `role` parameter to `docs/tools/task.md`, the work-aware `activity` field to `docs/tools/irc.md` (and the model-facing prompt), and added the missing `docs/tools/learn.md` and `docs/tools/manage-skill.md` references.
+- Added `docs/settings.md` catalog entries for `fastModeScope`, `task.eager`, and `todo.eager`.
+
 ## [15.13.1] - 2026-06-15
 
 ### Added

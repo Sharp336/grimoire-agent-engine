@@ -91,6 +91,12 @@ const modelSegment: StatusLineSegment = {
 		if (ctx.session.isFastModeActive() && theme.icon.fast) {
 			content += ` ${theme.icon.fast}`;
 		}
+		if (ctx.session.settings.get("speech.enabled") && theme.icon.speak) {
+			content += ` ${theme.icon.speak}`;
+		}
+		if (ctx.session.settings.get("autolearn.enabled") && theme.icon.learn) {
+			content += ` ${theme.icon.learn}`;
+		}
 
 		// Add thinking level with dot separator
 		if (opts.showThinkingLevel !== false && state.model?.thinking) {
