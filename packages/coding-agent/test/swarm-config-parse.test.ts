@@ -154,7 +154,7 @@ describe("U8 swarm config zod mirror", () => {
 				openai: {
 					api: "openai-completions" as const,
 					baseUrl: "https://api.openai.com/v1",
-					apiKey: "sk-test",
+					apiKey: "test-placeholder",
 					models: [{ id: "gpt-4o" }],
 				},
 			},

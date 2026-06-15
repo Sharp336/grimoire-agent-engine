@@ -58,7 +58,8 @@ describe("ModelRegistry swarm threading + keyless omp", () => {
 		return {
 			// apiKey is required by validateProviderConfiguration in runtime-register
 			// mode when models are defined; the keyless surfacing is independent of it.
-			apiKey: "OMP_RUNTIME_KEY",
+			// Value is an inert non-secret placeholder (avoids tripping secret scanners).
+			apiKey: "test-placeholder",
 			api: "omp-swarm",
 			baseUrl: "omp://",
 			streamSimple,
