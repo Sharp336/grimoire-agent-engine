@@ -11,6 +11,8 @@ Performs structural AST-aware rewrites via native ast-grep.
 - For TS declarations/methods, tolerate unknown annotations: `async function $NAME($$$ARGS): $_ { $$$BODY }` or `class $_ { method($ARG: $_): $_ { $$$BODY } }`
 - Delete matched code with empty `out`: `{"pat":"console.log($$$)","out":""}`
 - Each rewrite is a 1:1 structural substitution — cannot split one capture across multiple nodes or merge multiple captures into one
+- **Regex does NOT work in the rewrite either** — both `pat` and `out` are AST. Captures reuse matched nodes (`{"pat":"console.log($MSG)","out":"logger.info($MSG)"}` carries `$MSG` through), but `|`, `.*`, `\w`, `[a-z]` are literal. For text-only replacement use `edit`
+- **Dry-run, then `resolve`.** The call previews the rewrite and stages a pending action; `resolve` applies (or discards) it. No files change until you apply
 </instruction>
 
 <output>
@@ -21,4 +23,5 @@ Performs structural AST-aware rewrites via native ast-grep.
 <critical>
 - Parse issues mean the rewrite is malformed or mis-scoped — fix the pattern before assuming a clean no-op
 - For one-off local text edits, you SHOULD prefer the Edit tool
+- The apply re-runs the rewrite against the files at apply time and is rejected as a **stale preview** if the match set drifted since the preview (e.g. the file was edited in between) — re-run `ast_edit` to refresh, then `resolve`
 </critical>

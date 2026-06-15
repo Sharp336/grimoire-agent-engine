@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an advisory hint on zero-match `ast_grep` results that names the likely mistake — regex leaking into an AST pattern (`foo|bar`, `.*`, `\w`, `[a-z]`) or a structurally incomplete declaration (a Python pattern with a trailing colon, a bare `function $NAME`) — and routes text/alternation/cross-language searches to `search`.
+
+### Changed
+
+- Enriched the `ast_grep` and `ast_edit` tool descriptions (anti-regex routing, per-language `ast_grep` examples, the `ast_edit` dry-run → `resolve` apply flow with its stale-preview guard) and added AST shape-routing and parallel-exploration guidance to the system prompt.
+
 ## [15.13.3] - 2026-06-15
 
 ### Added

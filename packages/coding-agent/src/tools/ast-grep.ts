@@ -14,6 +14,7 @@ import astGrepDescription from "../prompts/tools/ast-grep.md" with { type: "text
 import { Ellipsis, fileHyperlink, renderStatusLine, renderTreeList, truncateToWidth } from "../tui";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import type { ToolSession } from ".";
+import { getPatternHint, inferAstLanguage } from "./ast-pattern-hints";
 import { createFileRecorder, formatResultPath } from "./file-recorder";
 import { classifyGroupedLines, formatGroupedFiles, groupLineIndicesByBlank } from "./grouped-file-output";
 import { formatMatchLine } from "./match-line-format";
@@ -153,6 +154,18 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 			caption: "Loosest existence check for a symbol in one file",
 			call: { pat: "processItems", paths: ["src/worker.ts"] },
 		},
+		{
+			caption: "Python function definition (no trailing colon)",
+			call: { pat: "def $FUNC($$$)", paths: ["src/**/*.py"] },
+		},
+		{
+			caption: "Go function declaration (params and body required)",
+			call: { pat: "func $NAME($$$) { $$$ }", paths: ["cmd/**/*.go"] },
+		},
+		{
+			caption: "Rust function with a return type",
+			call: { pat: "fn $NAME($$$) -> $RET { $$$ }", paths: ["src/**/*.rs"] },
+		},
 	];
 	readonly loadMode = "discoverable";
 
@@ -245,9 +258,11 @@ export class AstGrepTool implements AgentTool<typeof astGrepSchema, AstGrepToolD
 				const parseMessage = cappedParseErrors.length
 					? `\n${formatParseErrors(cappedParseErrors, parseErrorsTotal).join("\n")}`
 					: "";
+				const hint = getPatternHint(pattern, inferAstLanguage(params.paths));
+				const hintMessage = hint ? `\n${hint}` : "";
 				// Zero matches is useless even with parse issues: the follow-up
 				// call has already corrected course by the time compaction runs.
-				return toolResult(baseDetails).text(`${noMatchMessage}${parseMessage}`).useless().done();
+				return toolResult(baseDetails).text(`${noMatchMessage}${hintMessage}${parseMessage}`).useless().done();
 			}
 
 			const useHashLines = resolveFileDisplayMode(this.session).hashLines;

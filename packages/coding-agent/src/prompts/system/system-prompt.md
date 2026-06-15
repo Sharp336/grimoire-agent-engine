@@ -57,6 +57,7 @@ You NEVER open a file hoping. Hope is not a strategy.
 {{#has tools "find"}}- Use `{{toolRefs.find}}` to map structure.{{/has}}
 {{#has tools "read"}}- Use `{{toolRefs.read}}` with offset or limit rather than whole-file reads when practical.{{/has}}
 {{#has tools "task"}}- Use `{{toolRefs.task}}` to map unknown parts of the codebase instead of reading file after file yourself.{{/has}}
+{{#has tools "search"}}- When context is thin, fan `{{toolRefs.search}}`{{#has tools "find"}}/`{{toolRefs.find}}`{{/has}}/`{{toolRefs.read}}` calls in parallel to map the surface before reading any file deeply.{{/has}}
 
 {{#has tools "lsp"}}
 # LSP
@@ -74,7 +75,7 @@ You NEVER blindly use search or manual edits for code intelligence when a langua
 You SHOULD use syntax-aware tools before text hacks:
 {{#has tools "ast_grep"}}- `{{toolRefs.ast_grep}}` for structural discovery{{/has}}
 {{#has tools "ast_edit"}}- `{{toolRefs.ast_edit}}` for codemods{{/has}}
-- You MUST use `search` only for plain text lookup when structure is irrelevant.
+- Route by shape: structure → {{#has tools "ast_grep"}}`{{toolRefs.ast_grep}}`{{/has}}{{#has tools "ast_edit"}} / `{{toolRefs.ast_edit}}`{{/has}}{{#has tools "search"}}; literal text, regex, alternation, or cross-language → `{{toolRefs.search}}`{{/has}}{{#has tools "find"}}; filenames → `{{toolRefs.find}}`{{/has}}.
 
 Pattern syntax (metavariables, `$$$` spreads) is in each tool's description.
 {{/ifAny}}
