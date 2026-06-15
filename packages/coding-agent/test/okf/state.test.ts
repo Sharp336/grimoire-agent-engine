@@ -1,15 +1,20 @@
 import { describe, expect, it } from "bun:test";
+import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
+import { getBundleRoot, type OkfConceptSummary, writeConcept } from "../../src/okf/bundle";
 import { OkfSessionState } from "../../src/okf/state";
 import type { OkfSearchResult, OkfStore } from "../../src/okf/store/types";
 
 class FakeOkfStore implements OkfStore {
 	readonly searchQueries: string[] = [];
+	readonly upserts: { summary: OkfConceptSummary; body: string }[] = [];
 
 	constructor(readonly resultId = "architecture/auth") {}
-	async upsert(): Promise<void> {}
+	async upsert(summary: OkfConceptSummary, body: string): Promise<void> {
+		this.upserts.push({ summary, body });
+	}
 
 	async get(): Promise<undefined> {
 		return undefined;
@@ -101,6 +106,30 @@ describe("okf/state OkfSessionState", () => {
 		// never against the process cwd.
 		expect(state.bundleRoot).toBe(path.resolve(sessionCwd, "custom/knowledge"));
 		expect(state.bundleRoot.startsWith(sessionCwd)).toBe(true);
+	});
+
+	it("indexConcept upserts a just-written concept into the active store", async () => {
+		const tmpDir = await mkdtemp(path.join(os.tmpdir(), "okf-index-"));
+		try {
+			const settings = Settings.isolated();
+			const store = new FakeOkfStore();
+			const state = new OkfSessionState({ sessionId: "session", settings, cwd: tmpDir, store });
+
+			// Simulate an okf:// write landing on disk, then index it.
+			await writeConcept(
+				getBundleRoot(tmpDir),
+				"tables/orders",
+				"---\ntype: Table\ndescription: orders\n---\n\n# Schema",
+			);
+			await state.indexConcept("tables/orders");
+
+			expect(store.upserts).toHaveLength(1);
+			expect(store.upserts[0]!.summary.id).toBe("tables/orders");
+			expect(store.upserts[0]!.summary.type).toBe("Table");
+			expect(store.upserts[0]!.body).toContain("# Schema");
+		} finally {
+			await rm(tmpDir, { recursive: true, force: true });
+		}
 	});
 
 	it("re-runs auto-recall after resetFirstTurnRecall for a new transcript", async () => {

@@ -1517,6 +1517,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			getOkfBundleRoot: () => (session ? getOkfSessionState(session)?.bundleRoot : undefined),
+			indexOkfConcept: (id: string) => {
+				const okf = session ? getOkfSessionState(session) : undefined;
+				return okf ? okf.indexConcept(id) : Promise.resolve();
+			},
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,

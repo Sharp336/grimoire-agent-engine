@@ -850,6 +850,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 						settings: this.session.settings,
 						signal,
 						okfBundleRoot: this.session.getOkfBundleRoot?.(),
+						indexOkfConcept: this.session.indexOkfConcept,
 					});
 					let resultText = `Successfully wrote ${cleanContent.length} bytes to ${path}`;
 					if (stripped) {

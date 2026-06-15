@@ -188,6 +188,41 @@ export async function loadConcept(root: string, id: string): Promise<OkfConcept>
 }
 
 /**
+ * Load a single concept summary from disk, lazily normalising its frontmatter.
+ *
+ * @throws if the file does not exist or cannot be parsed.
+ */
+export async function loadSummary(
+	root: string,
+	id: string,
+	options: { autoUpdate?: boolean } = {},
+): Promise<OkfConceptSummary> {
+	const autoUpdate = options.autoUpdate === true;
+	const filePath = path.join(root, conceptIdToPath(id));
+	const text = await Bun.file(filePath).text();
+	const ensured = ensureConformance(id, text);
+	if (autoUpdate && ensured.changed) {
+		await Bun.write(filePath, ensured.content);
+	}
+	const doc = parse(ensured.content, id);
+	let mtime = 0;
+	try {
+		mtime = (await fs.stat(filePath)).mtimeMs;
+	} catch {
+		// mtime is best-effort.
+	}
+	return {
+		id,
+		type: ensured.type,
+		title: typeof doc.frontmatter.title === "string" ? doc.frontmatter.title : undefined,
+		description: ensured.description,
+		tags: parseTags(doc.frontmatter.tags),
+		filePath,
+		mtime,
+	};
+}
+
+/**
  * Load all concept summaries from a bundle.
  *
  * Each file is parsed and its frontmatter is lazily normalised (written back
@@ -197,33 +232,11 @@ export async function loadSummaries(
 	root: string,
 	options: { autoUpdate?: boolean } = {},
 ): Promise<OkfConceptSummary[]> {
-	const autoUpdate = options.autoUpdate === true;
 	const ids = await walkBundle(root);
 	const summaries: OkfConceptSummary[] = [];
 	for (const id of ids) {
-		const filePath = path.join(root, conceptIdToPath(id));
 		try {
-			const text = await Bun.file(filePath).text();
-			const ensured = ensureConformance(id, text);
-			if (autoUpdate && ensured.changed) {
-				await Bun.write(filePath, ensured.content);
-			}
-			const doc = parse(ensured.content, id);
-			let mtime = 0;
-			try {
-				mtime = (await fs.stat(filePath)).mtimeMs;
-			} catch {
-				// mtime is best-effort.
-			}
-			summaries.push({
-				id,
-				type: ensured.type,
-				title: typeof doc.frontmatter.title === "string" ? doc.frontmatter.title : undefined,
-				description: ensured.description,
-				tags: parseTags(doc.frontmatter.tags),
-				filePath,
-				mtime,
-			});
+			summaries.push(await loadSummary(root, id, options));
 		} catch (error) {
 			logger.warn("OKF: failed to load concept", {
 				id,

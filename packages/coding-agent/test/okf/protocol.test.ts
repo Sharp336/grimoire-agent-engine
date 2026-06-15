@@ -171,4 +171,19 @@ describe("okf/protocol alias (okfBundleRoot) resolution", () => {
 		expect(concept.body).toContain("# Aliased");
 		expect(await Bun.file(path.join(getBundleRoot(childCwd), "tables", "aliased.md")).exists()).toBe(false);
 	});
+
+	it("indexes the concept into the active store after a write", async () => {
+		const indexed: string[] = [];
+		await handler.write(parseUrl("okf://tables/new.md"), "---\ntype: Table\ndescription: new\n---\n\n# New", {
+			cwd: tmpDir,
+			indexOkfConcept: async id => {
+				indexed.push(id);
+			},
+		});
+		// The concept lands on disk…
+		const concept = await loadConcept(bundleRoot, "tables/new");
+		expect(concept.body).toContain("# New");
+		// …and the store index hook is invoked with the concept id.
+		expect(indexed).toEqual(["tables/new"]);
+	});
 });

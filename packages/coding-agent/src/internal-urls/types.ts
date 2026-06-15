@@ -115,6 +115,12 @@ export interface WriteContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's resolved OKF bundle root — see {@link ResolveContext.okfBundleRoot}. */
 	okfBundleRoot?: string;
+	/**
+	 * Upsert a just-written OKF concept into the active store index. Called by
+	 * the `okf://` write handler after the concept lands on disk so recall/search
+	 * stay in sync without a full reindex. No-op/undefined when OKF is inactive.
+	 */
+	indexOkfConcept?: (id: string) => Promise<void>;
 }
 
 /**

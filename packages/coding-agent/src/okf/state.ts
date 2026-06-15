@@ -19,7 +19,7 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import type { Settings } from "../config/settings";
 import okfInstructions from "../prompts/okf/okf-instructions.md" with { type: "text" };
 import okfRecallSnippet from "../prompts/okf/okf-recall-snippet.md" with { type: "text" };
-import { loadConcept, loadSummaries, resolveBundleRoot } from "./bundle";
+import { loadConcept, loadSummaries, loadSummary, resolveBundleRoot } from "./bundle";
 import { resolveOkfStore } from "./store/store-resolve";
 import type { OkfStore } from "./store/types";
 
@@ -154,6 +154,28 @@ export class OkfSessionState {
 			return await this.recall(query, limit);
 		} catch {
 			return undefined;
+		}
+	}
+
+	/**
+	 * Index (upsert) a single concept into the active store after it has been
+	 * written to disk — e.g. via `write okf://…` — so recall/search stay in sync
+	 * with the on-disk bundle without waiting for a full reindex. Best-effort:
+	 * failures are swallowed (the write itself already succeeded).
+	 */
+	async indexConcept(id: string): Promise<void> {
+		const store = this.store;
+		if (!store) return;
+		try {
+			const root = this.bundleRoot;
+			const summary = await loadSummary(root, id);
+			const concept = await loadConcept(root, id);
+			await store.upsert(summary, concept.body);
+		} catch (error) {
+			logger.debug("OKF: failed to index concept after write", {
+				id,
+				error: error instanceof Error ? error.message : String(error),
+			});
 		}
 	}
 

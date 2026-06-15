@@ -220,6 +220,11 @@ export interface ToolSession {
 	 * session's recall came from.
 	 */
 	getOkfBundleRoot?: () => string | undefined;
+	/**
+	 * Upsert a just-written OKF concept into the active store index, keeping
+	 * recall/search in sync with `okf://` writes. No-op when OKF is inactive.
+	 */
+	indexOkfConcept?: (id: string) => Promise<void>;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */

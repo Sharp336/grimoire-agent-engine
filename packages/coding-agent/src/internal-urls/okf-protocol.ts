@@ -62,6 +62,9 @@ export class OkfProtocolHandler implements ProtocolHandler {
 			throw new Error(`Invalid OKF concept path: ${parsed.relativePath}`);
 		}
 		await writeConcept(root, id, content);
+		// Keep the active store index in sync so the just-written concept is
+		// recallable without waiting for a full reindex.
+		await context?.indexOkfConcept?.(id);
 	}
 }
 
