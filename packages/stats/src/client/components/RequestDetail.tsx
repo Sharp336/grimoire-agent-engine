@@ -1,16 +1,17 @@
 import { Clock, Coins, FileJson, Gauge, Hash, Star, X, Zap } from "lucide-react";
 import { useEffect, useState } from "react";
 import { getRequestDetails } from "../api";
-import type { RequestDetails } from "../types";
+import { useTranslation } from "../i18n";
+import type { RequestDetails, Usage } from "../types";
 
 interface RequestDetailProps {
 	id: number;
 	onClose: () => void;
 }
-
 export function RequestDetail({ id, onClose }: RequestDetailProps) {
 	const [details, setDetails] = useState<RequestDetails | null>(null);
 	const [loading, setLoading] = useState(true);
+	const { t } = useTranslation();
 
 	useEffect(() => {
 		getRequestDetails(id)
@@ -25,7 +26,7 @@ export function RequestDetail({ id, onClose }: RequestDetailProps) {
 				<div className="surface px-8 py-6">
 					<div className="flex items-center gap-3 text-[var(--text-secondary)]">
 						<div className="w-5 h-5 border-2 border-[var(--border-default)] border-t-[var(--accent-cyan)] rounded-full spin" />
-						<span>Loading...</span>
+						<span>{t("common.loading")}</span>
 					</div>
 				</div>
 			</div>
@@ -52,7 +53,7 @@ export function RequestDetail({ id, onClose }: RequestDetailProps) {
 						<div className="w-8 h-8 rounded-[var(--radius-sm)] bg-gradient-to-br from-[var(--accent-pink)]/20 to-[var(--accent-cyan)]/20 flex items-center justify-center">
 							<FileJson size={16} className="text-[var(--accent-cyan)]" />
 						</div>
-						<h2 className="text-lg font-semibold text-[var(--text-primary)]">Request Details</h2>
+						<h2 className="text-lg font-semibold text-[var(--text-primary)]">{t("requestDetail.title")}</h2>
 					</div>
 					<button
 						type="button"
@@ -72,9 +73,9 @@ export function RequestDetail({ id, onClose }: RequestDetailProps) {
 								<div className="text-sm text-[var(--text-muted)]">{details.provider}</div>
 							</div>
 							{details.errorMessage ? (
-								<span className="badge badge-error">Error</span>
+								<span className="badge badge-error">{t("requestDetail.error")}</span>
 							) : (
-								<span className="badge badge-success">Success</span>
+								<span className="badge badge-success">{t("requestDetail.success")}</span>
 							)}
 						</div>
 					</div>
@@ -84,7 +85,7 @@ export function RequestDetail({ id, onClose }: RequestDetailProps) {
 						<div className="surface p-4">
 							<div className="flex items-center gap-2 text-[var(--text-muted)] mb-2">
 								<Coins size={14} />
-								<span className="text-xs uppercase tracking-wide">Cost</span>
+								<span className="text-xs uppercase tracking-wide">{t("requestDetail.cost")}</span>
 							</div>
 							<div className="text-xl font-semibold text-[var(--text-primary)]">
 								${details.usage.cost.total.toFixed(4)}
@@ -94,7 +95,7 @@ export function RequestDetail({ id, onClose }: RequestDetailProps) {
 						<div className="surface p-4">
 							<div className="flex items-center gap-2 text-[var(--text-muted)] mb-2">
 								<Star size={14} />
-								<span className="text-xs uppercase tracking-wide">Premium Reqs</span>
+								<span className="text-xs uppercase tracking-wide">{t("requestDetail.premiumReqs")}</span>
 							</div>
 							<div className="text-xl font-semibold text-[var(--text-primary)]">
 								{(details.usage.premiumRequests ?? 0).toLocaleString()}
@@ -103,20 +104,26 @@ export function RequestDetail({ id, onClose }: RequestDetailProps) {
 						<div className="surface p-4">
 							<div className="flex items-center gap-2 text-[var(--text-muted)] mb-2">
 								<Hash size={14} />
-								<span className="text-xs uppercase tracking-wide">Tokens</span>
+								<span className="text-xs uppercase tracking-wide">{t("requestDetail.tokens")}</span>
 							</div>
 							<div className="text-xl font-semibold text-[var(--text-primary)]">
 								{details.usage.totalTokens.toLocaleString()}
 							</div>
-							<div className="text-xs text-[var(--text-muted)] mt-1">
-								{details.usage.input.toLocaleString()} in · {details.usage.output.toLocaleString()} out
+							<div className="text-xs text-[var(--text-muted)] mt-1 space-y-0.5">
+								<div>{t("requestDetail.inputTokens")}: {details.usage.input.toLocaleString()}</div>
+								<div>{t("requestDetail.outputTokens")}: {details.usage.output.toLocaleString()}</div>
+								<div>{t("requestDetail.cacheReadTokens")}: {details.usage.cacheRead.toLocaleString()}</div>
+								<div>{t("requestDetail.cacheWriteTokens")}: {details.usage.cacheWrite.toLocaleString()}</div>
+								{(details.usage.reasoningTokens ?? 0) > 0 && (
+									<div>{t("requestDetail.reasoningTokens")}: {(details.usage.reasoningTokens ?? 0).toLocaleString()}</div>
+								)}
 							</div>
 						</div>
 
 						<div className="surface p-4">
 							<div className="flex items-center gap-2 text-[var(--text-muted)] mb-2">
 								<Clock size={14} />
-								<span className="text-xs uppercase tracking-wide">Duration</span>
+								<span className="text-xs uppercase tracking-wide">{t("requestDetail.duration")}</span>
 							</div>
 							<div className="text-xl font-semibold text-[var(--text-primary)]">
 								{details.duration ? `${(details.duration / 1000).toFixed(2)}s` : "-"}
@@ -126,7 +133,7 @@ export function RequestDetail({ id, onClose }: RequestDetailProps) {
 						<div className="surface p-4">
 							<div className="flex items-center gap-2 text-[var(--text-muted)] mb-2">
 								<Zap size={14} />
-								<span className="text-xs uppercase tracking-wide">TTFT</span>
+								<span className="text-xs uppercase tracking-wide">{t("requestDetail.ttft")}</span>
 							</div>
 							<div className="text-xl font-semibold text-[var(--text-primary)]">
 								{details.ttft ? `${(details.ttft / 1000).toFixed(2)}s` : "-"}
@@ -140,19 +147,19 @@ export function RequestDetail({ id, onClose }: RequestDetailProps) {
 							<div className="flex items-center justify-between">
 								<div className="flex items-center gap-2 text-[var(--text-muted)]">
 									<Gauge size={14} />
-									<span className="text-xs uppercase tracking-wide">Throughput</span>
+									<span className="text-xs uppercase tracking-wide">{t("requestDetail.throughput")}</span>
 								</div>
 								<span className="text-2xl font-bold gradient-text">
 									{((details.usage.output * 1000) / details.duration).toFixed(1)}
 								</span>
 							</div>
-							<div className="text-xs text-[var(--text-muted)] mt-1 text-right">tokens/second</div>
+							<div className="text-xs text-[var(--text-muted)] mt-1 text-right">{t("requestDetail.tokensPerSecond")}</div>
 						</div>
 					)}
 
 					{/* Output */}
 					<div>
-						<h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Output</h3>
+						<h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">{t("requestDetail.output")}</h3>
 						<pre className="surface bg-[var(--bg-elevated)] p-4 rounded-[var(--radius-md)] text-sm font-mono text-[var(--text-secondary)] overflow-x-auto">
 							{JSON.stringify(details.output, null, 2)}
 						</pre>
@@ -160,7 +167,7 @@ export function RequestDetail({ id, onClose }: RequestDetailProps) {
 
 					{/* Raw Metadata */}
 					<div>
-						<h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">Raw Metadata</h3>
+						<h3 className="text-sm font-semibold text-[var(--text-primary)] mb-3">{t("requestDetail.rawMetadata")}</h3>
 						<pre className="surface bg-[var(--bg-elevated)] p-4 rounded-[var(--radius-md)] text-xs font-mono text-[var(--text-muted)] overflow-x-auto">
 							{JSON.stringify(details, null, 2)}
 						</pre>

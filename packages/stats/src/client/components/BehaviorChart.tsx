@@ -13,6 +13,7 @@ import {
 } from "chart.js";
 import { useMemo, useState } from "react";
 import { Bar, Line } from "react-chartjs-2";
+import { useTranslation } from "../i18n";
 import type { BehaviorTimeSeriesPoint } from "../types";
 import { useSystemTheme } from "../useSystemTheme";
 import {
@@ -31,17 +32,19 @@ import {
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, LineElement, PointElement, Title, Tooltip, Legend, Filler);
 
-const METRIC_OPTIONS = [
-	{ value: "yelling", label: "Yelling" },
-	{ value: "profanity", label: "Profanity" },
-	{ value: "anguish", label: "Anguish (!!!, nooo, dude, ..)" },
-	{ value: "negation", label: "Negation (no/nope/wrong)" },
-	{ value: "repetition", label: "Repetition (i meant, still doesnt)" },
-	{ value: "blame", label: "Blame (you didnt, stop X-ing)" },
-	{ value: "frustration", label: "Frustration (neg + rep + blame)" },
-	{ value: "total", label: "All signals combined" },
-] as const;
-type Metric = (typeof METRIC_OPTIONS)[number]["value"];
+function getMetricOptions(t: (key: string) => string) {
+	return [
+		{ value: "yelling", label: t("behaviorMetric.yelling") },
+		{ value: "profanity", label: t("behaviorMetric.profanity") },
+		{ value: "anguish", label: t("behaviorMetric.anguish") },
+		{ value: "negation", label: t("behaviorMetric.negation") },
+		{ value: "repetition", label: t("behaviorMetric.repetition") },
+		{ value: "blame", label: t("behaviorMetric.blame") },
+		{ value: "frustration", label: t("behaviorMetric.frustration") },
+		{ value: "total", label: t("behaviorMetric.total") },
+	] as const;
+}
+type Metric = "yelling" | "profanity" | "anguish" | "negation" | "repetition" | "blame" | "frustration" | "total";
 
 function formatRateAxis(value: number): string {
 	if (!Number.isFinite(value)) return "-";
@@ -73,8 +76,8 @@ interface DailyBucket {
 	messages: number;
 }
 
-function buildAggregateSeries(points: BehaviorTimeSeriesPoint[], metric: Metric): ChartSeries {
-	const label = METRIC_OPTIONS.find(m => m.value === metric)?.label ?? "Hits";
+function buildAggregateSeries(points: BehaviorTimeSeriesPoint[], metric: Metric, t: (key: string) => string): ChartSeries {
+	const label = getMetricOptions(t).find(m => m.value === metric)?.label ?? t("behaviorChart.hits");
 	return buildAggregateTimeSeries<BehaviorTimeSeriesPoint, DailyBucket>(points, label, {
 		initBucket: () => ({ hits: 0, messages: 0 }),
 		accumulate: (bucket, point) => {
@@ -85,7 +88,7 @@ function buildAggregateSeries(points: BehaviorTimeSeriesPoint[], metric: Metric)
 	});
 }
 
-function buildByModelSeries(points: BehaviorTimeSeriesPoint[], metric: Metric): ChartSeries {
+function buildByModelSeries(points: BehaviorTimeSeriesPoint[], metric: Metric, t: (key: string) => string): ChartSeries {
 	// Rank by message volume so the models you actually use surface first,
 	// matching the Behavior-by-Model table. Per-bucket math tracks hits +
 	// messages separately so the final rate isn't skewed by low-volume days.
@@ -97,33 +100,35 @@ function buildByModelSeries(points: BehaviorTimeSeriesPoint[], metric: Metric): 
 			bucket.messages += point.messages;
 		},
 		bucketToValue: bucket => ratePercent(bucket.hits, bucket.messages),
+		otherLabel: t("charts.other"),
 	});
 }
 
 export function BehaviorChart({ behaviorSeries }: BehaviorChartProps) {
+	const { t } = useTranslation();
 	const [byModel, setByModel] = useState(false);
 	const [metric, setMetric] = useState<Metric>("total");
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
 
 	const chartData = useMemo(
-		() => (byModel ? buildByModelSeries(behaviorSeries, metric) : buildAggregateSeries(behaviorSeries, metric)),
-		[behaviorSeries, byModel, metric],
+		() => (byModel ? buildByModelSeries(behaviorSeries, metric, t) : buildAggregateSeries(behaviorSeries, metric, t)),
+		[behaviorSeries, byModel, metric, t],
 	);
 
 	const sharedPlugins = buildSharedPlugins({
 		chartTheme,
 		showLegend: byModel,
-		defaultLabel: "Hits",
+		defaultLabel: t("behaviorChart.hits"),
 		formatValue: formatRateAxis,
 	});
 
 	const { sharedScaleBase, yScale } = buildSharedScales({ chartTheme, formatY: formatRateAxis });
 
-	const metricLabel = METRIC_OPTIONS.find(m => m.value === metric)?.label ?? "";
+	const metricLabel = getMetricOptions(t).find(m => m.value === metric)?.label ?? "";
 	const metricTabs = (
 		<div className="flex bg-[var(--bg-surface)] rounded-[var(--radius-sm)] p-0.5 border border-[var(--border-subtle)]">
-			{METRIC_OPTIONS.map(opt => (
+			{getMetricOptions(t).map(opt => (
 				<button
 					key={opt.value}
 					type="button"
@@ -175,10 +180,12 @@ export function BehaviorChart({ behaviorSeries }: BehaviorChartProps) {
 
 	return (
 		<ChartFrame
-			title="User Tantrums"
-			subtitle={`${metricLabel} as % of user messages per day`}
+			title={t("behaviorChart.tantrums")}
+			subtitle={byModel
+				? t("behaviorChart.subtitleByModel").replace("{metric}", metricLabel)
+				: t("behaviorChart.subtitle").replace("{metric}", metricLabel)}
 			empty={chartData.labels.length === 0}
-			emptyMessage="No behavioral data yet. Sync to scan your sessions."
+			emptyMessage={t("behaviorChart.noData")}
 			controls={metricTabs}
 			byModel={byModel}
 			onByModelChange={setByModel}

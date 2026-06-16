@@ -689,25 +689,40 @@ function rowToMessageStats(row: any): MessageStats {
 	};
 }
 
-export function getRecentRequests(limit = 100): MessageStats[] {
+export function getRecentRequests(limit = 100, offset = 0): MessageStats[] {
 	if (!db) return [];
 	const stmt = db.prepare(`
 		SELECT * FROM messages 
+		WHERE stop_reason NOT IN ('error', 'aborted')
 		ORDER BY timestamp DESC 
-		LIMIT ?
+		LIMIT ? OFFSET ?
 	`);
-	return (stmt.all(limit) as any[]).map(rowToMessageStats);
+	return (stmt.all(limit, offset) as any[]).map(rowToMessageStats);
 }
 
-export function getRecentErrors(limit = 100): MessageStats[] {
+export function getRecentErrors(limit = 100, offset = 0): MessageStats[] {
 	if (!db) return [];
 	const stmt = db.prepare(`
 		SELECT * FROM messages 
 		WHERE stop_reason = 'error'
 		ORDER BY timestamp DESC 
-		LIMIT ?
+		LIMIT ? OFFSET ?
 	`);
-	return (stmt.all(limit) as any[]).map(rowToMessageStats);
+	return (stmt.all(limit, offset) as any[]).map(rowToMessageStats);
+}
+
+export function getRequestCount(): number {
+	if (!db) return 0;
+	const stmt = db.prepare(`SELECT COUNT(*) as count FROM messages WHERE stop_reason NOT IN ('error', 'aborted')`);
+	const row = stmt.get() as any;
+	return row?.count ?? 0;
+}
+
+export function getErrorCount(): number {
+	if (!db) return 0;
+	const stmt = db.prepare(`SELECT COUNT(*) as count FROM messages WHERE stop_reason = 'error'`);
+	const row = stmt.get() as any;
+	return row?.count ?? 0;
 }
 
 export function getMessageById(id: number): MessageStats | null {

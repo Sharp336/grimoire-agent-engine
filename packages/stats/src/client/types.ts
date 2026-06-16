@@ -30,6 +30,7 @@ export interface Usage {
 	cacheWrite: number;
 	totalTokens: number;
 	premiumRequests?: number;
+	reasoningTokens?: number;
 	cost: {
 		input: number;
 		output: number;
@@ -75,4 +76,9 @@ export interface ModelDashboardStats {
 
 export interface CostDashboardStats {
 	costSeries: CostTimeSeriesPoint[];
+}
+
+export interface PaginatedResponse<T> {
+	data: T[];
+	total: number;
 }

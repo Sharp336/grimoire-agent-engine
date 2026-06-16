@@ -11,7 +11,7 @@ import {
 import { format } from "date-fns";
 import { useMemo, useState } from "react";
 import { Line } from "react-chartjs-2";
-import type { ModelPerformancePoint, ModelStats, TimeRange } from "../types";
+import { useTranslation } from "../i18n";
 import { useSystemTheme } from "../useSystemTheme";
 import {
 	DetailChartEmpty,
@@ -52,6 +52,7 @@ type ModelPerformanceSeries = {
 };
 
 export function ModelsTable({ models, performanceSeries, timeRange }: ModelsTableProps) {
+	const { t } = useTranslation();
 	const [expandedKey, setExpandedKey] = useState<string | null>(null);
 	const meta = rangeMeta(timeRange);
 
@@ -66,16 +67,16 @@ export function ModelsTable({ models, performanceSeries, timeRange }: ModelsTabl
 	);
 
 	return (
-		<ModelTableShell title="Model Statistics">
+		<ModelTableShell title={t("modelsTable.title")}>
 			<ModelTableHeader
 				gridTemplate={GRID_TEMPLATE}
 				columns={[
-					{ label: "Model" },
-					{ label: "Requests", align: "right" },
-					{ label: "Cost", align: "right" },
-					{ label: "Tokens", align: "right" },
-					{ label: "Tokens/s", align: "right" },
-					{ label: "TTFT", align: "right" },
+					{ label: t("modelsTable.model") },
+					{ label: t("modelsTable.requests"), align: "right" },
+					{ label: t("modelsTable.cost"), align: "right" },
+					{ label: t("modelsTable.tokens"), align: "right" },
+					{ label: t("modelsTable.tokensPerSec"), align: "right" },
+					{ label: t("modelsTable.ttft"), align: "right" },
 					{ label: meta.trendLabel, align: "center" },
 				]}
 			/>

@@ -1,4 +1,5 @@
 import { useMemo } from "react";
+import { useTranslation } from "../i18n";
 import type { BehaviorOverallStats, BehaviorTimeSeriesPoint } from "../types";
 
 interface BehaviorSummaryProps {
@@ -21,7 +22,7 @@ function perMsg(total: number, messages: number): string | undefined {
 }
 
 export function BehaviorSummary({ overall, behaviorSeries }: BehaviorSummaryProps) {
-	// Top "ranted-at" model: model that absorbed the most caps + profanity +
+	const { t } = useTranslation();
 	// anguish + frustration (negation/repetition/blame).
 	const topModel = useMemo(() => {
 		const totals = new Map<string, { model: string; provider: string; score: number }>();
@@ -48,34 +49,34 @@ export function BehaviorSummary({ overall, behaviorSeries }: BehaviorSummaryProp
 
 	const cards: Array<{ label: string; value: string; sub?: string }> = [
 		{
-			label: "Messages",
+			label: t("behaviorSummary.messages"),
 			value: formatInt(overall.totalMessages),
-			sub: messages > 0 ? "in selected range" : undefined,
+			sub: messages > 0 ? t("behaviorSummary.inRange") : undefined,
 		},
 		{
-			label: "Yelling",
+			label: t("behaviorSummary.yelling"),
 			value: formatInt(overall.totalYelling),
 			sub: perMsg(overall.totalYelling, messages),
 		},
 		{
-			label: "Profanity hits",
+			label: t("behaviorSummary.profanity"),
 			value: formatInt(overall.totalProfanity),
 			sub: perMsg(overall.totalProfanity, messages),
 		},
 		{
-			label: "Anguish",
+			label: t("behaviorSummary.anguish"),
 			value: formatInt(overall.totalAnguish),
 			sub: perMsg(overall.totalAnguish, messages),
 		},
 		{
-			label: "Frustration",
+			label: t("behaviorSummary.frustration"),
 			value: formatInt(totalFrustration),
 			sub: perMsg(totalFrustration, messages),
 		},
 		{
-			label: "Most yelled-at",
+			label: t("behaviorSummary.mostYelledAt"),
 			value: topModel?.model ?? "\u2014",
-			sub: topModel ? `${formatInt(topModel.score)} hits` : undefined,
+			sub: topModel ? `${formatInt(topModel.score)} ${t("behaviorSummary.hits")}` : undefined,
 		},
 	];
 

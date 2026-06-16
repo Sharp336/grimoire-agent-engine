@@ -1,111 +1,124 @@
 import { Activity, AlertCircle, BarChart3, Database, Download, Server, Star, Upload, Zap } from "lucide-react";
+import { useTranslation, type TranslationKey } from "../i18n";
 import type { AggregatedStats } from "../types";
 
 interface StatsGridProps {
 	stats: AggregatedStats;
 }
 
-const compactNumberFormatter = new Intl.NumberFormat(undefined, {
-	notation: "compact",
-	maximumFractionDigits: 1,
-});
-
-function formatCompactNumber(value: number): string {
-	return compactNumberFormatter.format(value);
+function formatCompactNumber(value: number, locale: string): string {
+	return new Intl.NumberFormat(locale, {
+		notation: "compact",
+		maximumFractionDigits: 1,
+	}).format(value);
 }
 
-function formatExactNumber(value: number): string {
-	return value.toLocaleString();
+function formatExactNumber(value: number, locale: string): string {
+	return value.toLocaleString(locale);
 }
+
+const localeMap: Record<string, string> = { en: "en-US", zh: "zh-CN" };
 
 const totalPromptCompletionTokens = (stats: AggregatedStats) => stats.totalInputTokens + stats.totalOutputTokens;
 
-const statConfig = [
+interface StatDef {
+	key: string;
+	titleKey: string;
+	icon: typeof Server;
+	color: string;
+	getValue: (s: AggregatedStats, locale: string) => string;
+	getDetail: (s: AggregatedStats, t: (key: string, params?: Record<string, string | number>) => string, locale: string) => string;
+}
+
+const statConfig: StatDef[] = [
 	{
 		key: "requests",
-		title: "Total Requests",
+		titleKey: "statsGrid.totalRequests",
 		icon: Server,
 		color: "var(--accent-violet)",
-		getValue: (s: AggregatedStats) => s.totalRequests.toLocaleString(),
-		getDetail: (s: AggregatedStats) =>
-			`${s.successfulRequests.toLocaleString()} success · ${s.failedRequests.toLocaleString()} errors`,
+		getValue: (s, locale) => formatExactNumber(s.totalRequests, locale),
+		getDetail: (s, t, locale) =>
+			`${formatExactNumber(s.successfulRequests, locale)} ${t("statsGrid.successErrors", { "0": formatExactNumber(s.failedRequests, locale) })}`,
 	},
 	{
 		key: "cost",
-		title: "Total Cost",
+		titleKey: "statsGrid.totalCost",
 		icon: Activity,
 		color: "var(--accent-pink)",
-		getValue: (s: AggregatedStats) => `$${s.totalCost.toFixed(2)}`,
-		getDetail: (s: AggregatedStats) =>
-			s.totalRequests > 0 ? `$${(s.totalCost / s.totalRequests).toFixed(4)} avg/req` : "-",
+		getValue: s => `$${s.totalCost.toFixed(2)}`,
+		getDetail: (s, t) =>
+			s.totalRequests > 0 ? t("statsGrid.avgCostPerReq", { "0": (s.totalCost / s.totalRequests).toFixed(4) }) : "-",
 	},
 	{
 		key: "premiumRequests",
-		title: "Premium Reqs",
+		titleKey: "requestDetail.premiumReqs",
 		icon: Star,
 		color: "var(--accent-amber)",
-		getValue: (s: AggregatedStats) => formatExactNumber(s.totalPremiumRequests),
-		getDetail: (s: AggregatedStats) =>
-			s.totalRequests > 0 ? `${((s.totalPremiumRequests / s.totalRequests) * 100).toFixed(1)}% of requests` : "-",
+		getValue: (s, locale) => formatExactNumber(s.totalPremiumRequests, locale),
+		getDetail: (s, t) =>
+			s.totalRequests > 0 ? `${((s.totalPremiumRequests / s.totalRequests) * 100).toFixed(1)}% ${t("statsGrid.ofRequests")}` : "-",
 	},
 	{
 		key: "cache",
-		title: "Cache Rate",
+		titleKey: "statsGrid.cacheRead",
 		icon: Database,
 		color: "var(--accent-cyan)",
-		getValue: (s: AggregatedStats) => `${(s.cacheRate * 100).toFixed(1)}%`,
-		getDetail: (s: AggregatedStats) => `${formatCompactNumber(s.totalCacheReadTokens)} cached tokens`,
+		getValue: s => `${(s.cacheRate * 100).toFixed(1)}%`,
+		getDetail: (s, t, locale) => `${formatCompactNumber(s.totalCacheReadTokens, locale)} ${t("statsGrid.cachedTokens")}`,
 	},
 	{
 		key: "inputTokens",
-		title: "Input Tokens",
+		titleKey: "statsGrid.inputTokens",
 		icon: Download,
 		color: "var(--accent-violet)",
-		getValue: (s: AggregatedStats) => formatExactNumber(s.totalInputTokens),
-		getDetail: (s: AggregatedStats) =>
+		getValue: (s, locale) => formatCompactNumber(s.totalInputTokens, locale),
+		getDetail: (s, t) =>
 			totalPromptCompletionTokens(s) > 0
-				? `${((s.totalInputTokens / totalPromptCompletionTokens(s)) * 100).toFixed(1)}% of prompt+completion`
+				? `${((s.totalInputTokens / totalPromptCompletionTokens(s)) * 100).toFixed(1)}% ${t("statsGrid.ofPromptCompletion")}`
 				: "-",
 	},
 	{
 		key: "outputTokens",
-		title: "Output Tokens",
+		titleKey: "statsGrid.outputTokens",
 		icon: Upload,
 		color: "var(--accent-pink)",
-		getValue: (s: AggregatedStats) => formatExactNumber(s.totalOutputTokens),
-		getDetail: (s: AggregatedStats) =>
+		getValue: (s, locale) => formatCompactNumber(s.totalOutputTokens, locale),
+		getDetail: (s, t) =>
 			totalPromptCompletionTokens(s) > 0
-				? `${((s.totalOutputTokens / totalPromptCompletionTokens(s)) * 100).toFixed(1)}% of prompt+completion`
+				? `${((s.totalOutputTokens / totalPromptCompletionTokens(s)) * 100).toFixed(1)}% ${t("statsGrid.ofPromptCompletion")}`
 				: "-",
 	},
 	{
 		key: "errors",
-		title: "Error Rate",
+		titleKey: "requestDetail.error",
 		icon: AlertCircle,
 		color: "var(--accent-red)",
-		getValue: (s: AggregatedStats) => `${(s.errorRate * 100).toFixed(1)}%`,
-		getDetail: (s: AggregatedStats) => `${s.failedRequests.toLocaleString()} failed requests`,
+		getValue: s => `${(s.errorRate * 100).toFixed(1)}%`,
+		getDetail: (s, t, locale) => `${formatExactNumber(s.failedRequests, locale)} ${t("statsGrid.failedRequests")}`,
 	},
 	{
 		key: "tokens",
-		title: "Tokens/Sec",
+		titleKey: "statsGrid.avgThroughput",
 		icon: BarChart3,
 		color: "var(--accent-green)",
-		getValue: (s: AggregatedStats) => s.avgTokensPerSecond?.toFixed(1) ?? "-",
-		getDetail: (s: AggregatedStats) =>
-			`${formatCompactNumber(totalPromptCompletionTokens(s))} total prompt+completion`,
+		getValue: s => s.avgTokensPerSecond?.toFixed(1) ?? "-",
+		getDetail: (s, t, locale) =>
+			`${formatCompactNumber(totalPromptCompletionTokens(s), locale)} ${t("statsGrid.totalPromptCompletion")}`,
 	},
 	{
 		key: "ttft",
-		title: "TTFT",
+		titleKey: "statsGrid.avgTTFT",
 		icon: Zap,
 		color: "var(--accent-amber)",
-		getValue: (s: AggregatedStats) => (s.avgTtft ? `${(s.avgTtft / 1000).toFixed(2)}s` : "-"),
-		getDetail: () => "Time to first token",
+		getValue: s => (s.avgTtft ? `${(s.avgTtft / 1000).toFixed(2)}s` : "-"),
+		getDetail: (_s, t) => t("statsGrid.timeToFirstToken"),
 	},
 ];
 
 export function StatsGrid({ stats }: StatsGridProps) {
+	const { t, locale } = useTranslation();
+	const intlLocale = localeMap[locale] ?? locale;
+
 	return (
 		<div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-9 gap-4 mb-8">
 			{statConfig.map(stat => {
@@ -113,7 +126,7 @@ export function StatsGrid({ stats }: StatsGridProps) {
 				return (
 					<div key={stat.key} className="stat-card group">
 						<div className="flex items-center justify-between mb-3">
-							<span className="text-sm font-medium text-[var(--text-secondary)]">{stat.title}</span>
+							<span className="text-sm font-medium text-[var(--text-secondary)]">{t(stat.titleKey as TranslationKey)}</span>
 							<div
 								className="p-2 rounded-[var(--radius-sm)] transition-colors"
 								style={{ backgroundColor: `${stat.color}15` }}
@@ -125,8 +138,8 @@ export function StatsGrid({ stats }: StatsGridProps) {
 								/>
 							</div>
 						</div>
-						<div className="text-2xl font-bold text-[var(--text-primary)] mb-1">{stat.getValue(stats)}</div>
-						<div className="text-xs text-[var(--text-muted)] truncate">{stat.getDetail(stats)}</div>
+						<div className="text-2xl font-bold text-[var(--text-primary)] mb-1 truncate">{stat.getValue(stats, intlLocale)}</div>
+						<div className="text-xs text-[var(--text-muted)] truncate">{stat.getDetail(stats, t, intlLocale)}</div>
 					</div>
 				);
 			})}

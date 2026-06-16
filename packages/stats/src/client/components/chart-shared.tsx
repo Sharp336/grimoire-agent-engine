@@ -6,6 +6,7 @@
  */
 
 import { format } from "date-fns";
+import { useTranslation } from "../i18n";
 
 export const MODEL_COLORS = [
 	"#a78bfa", // violet
@@ -194,10 +195,11 @@ export function buildTopNByModelSeries<T extends ModelKeyedPoint, B>(
 		initBucket: () => B;
 		accumulate: (bucket: B, point: T) => void;
 		bucketToValue: (bucket: B) => number;
+		otherLabel?: string;
 	},
 ): ChartSeries {
 	if (points.length === 0) return { labels: [], datasets: [] };
-	const { topN = 5, rankWeight, initBucket, accumulate, bucketToValue } = opts;
+	const { topN = 5, rankWeight, initBucket, accumulate, bucketToValue, otherLabel = "Other" } = opts;
 
 	const totals = new Map<string, { model: string; provider: string; weight: number }>();
 	for (const point of points) {
@@ -225,14 +227,19 @@ export function buildTopNByModelSeries<T extends ModelKeyedPoint, B>(
 
 	const allDays = [...new Set(points.map(p => p.timestamp))].sort((a, b) => a - b);
 	const seriesNames = topEntries.map(([key]) => labelByKey.get(key) ?? key);
-	const hasOther = points.some(p => !topKeys.has(`${p.model}::${p.provider}`));
-	if (hasOther) seriesNames.push("Other");
+	
+	// Check if there are any points not in top entries (need "Other" category)
+	const hasOther = points.some(p => {
+		const key = `${p.model}::${p.provider}`;
+		return !topKeys.has(key);
+	});
+	if (hasOther) seriesNames.push(otherLabel);
 
 	const dayMap = new Map<number, Record<string, B>>();
 	for (const day of allDays) dayMap.set(day, {});
 	for (const point of points) {
 		const key = `${point.model}::${point.provider}`;
-		const label = topKeys.has(key) ? (labelByKey.get(key) ?? point.model) : "Other";
+		const label = topKeys.has(key) ? (labelByKey.get(key) ?? point.model) : otherLabel;
 		const row = dayMap.get(point.timestamp);
 		if (!row) continue;
 		const bucket = row[label] ?? initBucket();
@@ -254,6 +261,7 @@ export function buildTopNByModelSeries<T extends ModelKeyedPoint, B>(
 
 /** All Models / By Model segmented toggle — identical UI in every time chart. */
 function ByModelToggle({ byModel, onChange }: { byModel: boolean; onChange: (v: boolean) => void }) {
+	const { t } = useTranslation();
 	return (
 		<div className="flex bg-[var(--bg-surface)] rounded-[var(--radius-sm)] p-0.5 border border-[var(--border-subtle)]">
 			<button
@@ -261,10 +269,10 @@ function ByModelToggle({ byModel, onChange }: { byModel: boolean; onChange: (v: 
 				onClick={() => onChange(false)}
 				className={`tab-btn text-xs ${!byModel ? "active" : ""}`}
 			>
-				All Models
+				{t("chart.allModels")}
 			</button>
 			<button type="button" onClick={() => onChange(true)} className={`tab-btn text-xs ${byModel ? "active" : ""}`}>
-				By Model
+				{t("chart.byModel")}
 			</button>
 		</div>
 	);

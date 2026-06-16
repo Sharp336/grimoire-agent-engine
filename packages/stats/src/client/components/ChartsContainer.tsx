@@ -11,52 +11,25 @@ import {
 } from "chart.js";
 import { useMemo } from "react";
 import { Line } from "react-chartjs-2";
+import { useTranslation } from "../i18n";
 import type { ModelTimeSeriesPoint, TimeRange } from "../types";
 import { useSystemTheme } from "../useSystemTheme";
+import { CHART_THEMES, MODEL_COLORS } from "./chart-shared";
 import { formatRangeTick, rangeMeta } from "./range-meta";
 
 ChartJS.register(CategoryScale, LinearScale, PointElement, LineElement, Title, Tooltip, Legend, Filler);
 
-const MODEL_COLORS = [
-	"#a78bfa", // violet
-	"#22d3ee", // cyan
-	"#ec4899", // pink
-	"#4ade80", // green
-	"#fbbf24", // amber
-	"#f87171", // red
-	"#60a5fa", // blue
-];
-
-const CHART_THEMES = {
-	dark: {
-		legendLabel: "#94a3b8",
-		tooltipBackground: "#16161e",
-		tooltipTitle: "#f8fafc",
-		tooltipBody: "#94a3b8",
-		tooltipBorder: "rgba(255, 255, 255, 0.1)",
-		grid: "rgba(255, 255, 255, 0.06)",
-		tick: "#64748b",
-	},
-	light: {
-		legendLabel: "#475569",
-		tooltipBackground: "#ffffff",
-		tooltipTitle: "#0f172a",
-		tooltipBody: "#334155",
-		tooltipBorder: "rgba(15, 23, 42, 0.18)",
-		grid: "rgba(15, 23, 42, 0.08)",
-		tick: "#64748b",
-	},
-} as const;
 interface ChartsContainerProps {
 	modelSeries: ModelTimeSeriesPoint[];
 	timeRange: TimeRange;
 }
 
 export function ChartsContainer({ modelSeries, timeRange }: ChartsContainerProps) {
-	const chartData = useMemo(() => buildModelPreferenceSeries(modelSeries), [modelSeries]);
+	const { t } = useTranslation();
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
 	const meta = rangeMeta(timeRange);
+	const chartData = useMemo(() => buildModelPreferenceSeries(modelSeries, 5, t("charts.other")), [modelSeries, t]);
 	const data = {
 		labels: chartData.data.map(d => formatRangeTick(d.timestamp, timeRange)),
 		datasets: chartData.series.map((seriesName, index) => ({
@@ -138,13 +111,13 @@ export function ChartsContainer({ modelSeries, timeRange }: ChartsContainerProps
 	return (
 		<div className="surface overflow-hidden">
 			<div className="px-5 py-4 border-b border-[var(--border-subtle)]">
-				<h3 className="text-sm font-semibold text-[var(--text-primary)]">Model Preference</h3>
-				<p className="text-xs text-[var(--text-muted)] mt-1">Share of requests over {meta.windowLabel}</p>
+				<h3 className="text-sm font-semibold text-[var(--text-primary)]">{t("charts.modelPreference")}</h3>
+				<p className="text-xs text-[var(--text-muted)] mt-1">{t("charts.shareOfRequests", { "0": meta.windowLabel })}</p>
 			</div>
 			<div className="p-5 min-h-[320px]">
 				{chartData.data.length === 0 ? (
 					<div className="h-full flex items-center justify-center text-[var(--text-muted)] text-sm">
-						No data available
+						{t("common.noData")}
 					</div>
 				) : (
 					<div className="h-[280px]">
@@ -155,10 +128,10 @@ export function ChartsContainer({ modelSeries, timeRange }: ChartsContainerProps
 		</div>
 	);
 }
-
 function buildModelPreferenceSeries(
 	points: ModelTimeSeriesPoint[],
 	topN = 5,
+	otherLabel = "Other",
 ): {
 	data: Array<Record<string, number>>;
 	series: string[];
@@ -196,15 +169,14 @@ function buildModelPreferenceSeries(
 	for (const point of points) {
 		const key = `${point.model}::${point.provider}`;
 		const bucket = dataMap.get(point.timestamp) ?? { timestamp: point.timestamp, total: 0 };
-		bucket.total += point.requests;
-		const seriesLabel = topKeys.has(key) ? (labelByKey.get(key) ?? point.model) : "Other";
+		const seriesLabel = topKeys.has(key) ? (labelByKey.get(key) ?? point.model) : otherLabel;
 		bucket[seriesLabel] = (bucket[seriesLabel] ?? 0) + point.requests;
 		dataMap.set(point.timestamp, bucket);
 	}
 
 	const series = topEntries.map(entry => labelByKey.get(entry.key) ?? entry.model);
-	if ([...dataMap.values()].some(row => (row.Other ?? 0) > 0)) {
-		series.push("Other");
+	if ([...dataMap.values()].some(row => (row[otherLabel] ?? 0) > 0)) {
+		series.push(otherLabel);
 	}
 
 	const data = [...dataMap.values()]

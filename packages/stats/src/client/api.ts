@@ -5,6 +5,7 @@ import type {
 	MessageStats,
 	ModelDashboardStats,
 	OverviewStats,
+	PaginatedResponse,
 	RequestDetails,
 } from "./types";
 
@@ -34,16 +35,16 @@ export async function getCostDashboardStats(range = "24h"): Promise<CostDashboar
 	return res.json() as Promise<CostDashboardStats>;
 }
 
-export async function getRecentRequests(limit = 50): Promise<MessageStats[]> {
-	const res = await fetch(`${API_BASE}/stats/recent?limit=${limit}`);
+export async function getRecentRequests(limit = 50, offset = 0): Promise<PaginatedResponse<MessageStats>> {
+	const res = await fetch(`${API_BASE}/stats/recent?limit=${limit}&offset=${offset}`);
 	if (!res.ok) throw new Error("Failed to fetch recent requests");
-	return res.json() as Promise<MessageStats[]>;
+	return res.json() as Promise<PaginatedResponse<MessageStats>>;
 }
 
-export async function getRecentErrors(limit = 50): Promise<MessageStats[]> {
-	const res = await fetch(`${API_BASE}/stats/errors?limit=${limit}`);
+export async function getRecentErrors(limit = 50, offset = 0): Promise<PaginatedResponse<MessageStats>> {
+	const res = await fetch(`${API_BASE}/stats/errors?limit=${limit}&offset=${offset}`);
 	if (!res.ok) throw new Error("Failed to fetch recent errors");
-	return res.json() as Promise<MessageStats[]>;
+	return res.json() as Promise<PaginatedResponse<MessageStats>>;
 }
 
 export async function getRequestDetails(id: number): Promise<RequestDetails> {

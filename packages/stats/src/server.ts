@@ -216,13 +216,21 @@ async function handleApi(req: Request): Promise<Response> {
 
 	if (path === "/api/stats/recent") {
 		const limit = url.searchParams.get("limit");
-		const stats = await getRecentRequests(limit ? parseInt(limit, 10) : undefined);
+		const offset = url.searchParams.get("offset");
+		const stats = await getRecentRequests(
+			limit ? parseInt(limit, 10) : undefined,
+			offset ? parseInt(offset, 10) : undefined,
+		);
 		return Response.json(stats);
 	}
 
 	if (path === "/api/stats/errors") {
 		const limit = url.searchParams.get("limit");
-		const stats = await getRecentErrors(limit ? parseInt(limit, 10) : undefined);
+		const offset = url.searchParams.get("offset");
+		const stats = await getRecentErrors(
+			limit ? parseInt(limit, 10) : undefined,
+			offset ? parseInt(offset, 10) : undefined,
+		);
 		return Response.json(stats);
 	}
 

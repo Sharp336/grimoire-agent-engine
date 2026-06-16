@@ -1,3 +1,4 @@
+import { useTranslation } from "../i18n";
 import type { CostTimeSeriesPoint } from "../types";
 
 interface CostSummaryProps {
@@ -9,6 +10,7 @@ function formatCost(value: number): string {
 }
 
 export function CostSummary({ costSeries }: CostSummaryProps) {
+	const { t } = useTranslation();
 	const totalCost = costSeries.reduce((sum, p) => sum + p.cost, 0);
 	const dayBuckets = new Set(costSeries.map(p => p.timestamp)).size;
 	const avgDaily = dayBuckets > 0 ? totalCost / dayBuckets : 0;
@@ -28,10 +30,10 @@ export function CostSummary({ costSeries }: CostSummaryProps) {
 	}
 
 	const cards = [
-		{ label: "Total", value: formatCost(totalCost) },
-		{ label: "Avg / day", value: formatCost(avgDaily) },
+		{ label: t("costSummary.total"), value: formatCost(totalCost) },
+		{ label: t("costSummary.avgPerDay"), value: formatCost(avgDaily) },
 		{
-			label: "Top model",
+			label: t("costSummary.topModel"),
 			value: topModel || "—",
 			sub: topModel ? formatCost(topModelCost) : undefined,
 		},

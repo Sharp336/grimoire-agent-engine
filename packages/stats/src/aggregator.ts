@@ -3,6 +3,8 @@ import { workerHostEntry } from "@oh-my-pi/pi-utils";
 import {
 	getRecentErrors as dbGetRecentErrors,
 	getRecentRequests as dbGetRecentRequests,
+	getRequestCount as dbGetRequestCount,
+	getErrorCount as dbGetErrorCount,
 	getBehaviorByModel,
 	getBehaviorOverall,
 	getBehaviorTimeSeries,
@@ -402,14 +404,18 @@ export async function getCostDashboardStats(range?: string | null): Promise<Pick
 		costSeries: getCostTimeSeries(costSeriesDays, cutoff),
 	};
 }
-export async function getRecentRequests(limit?: number): Promise<MessageStats[]> {
+export async function getRecentRequests(limit?: number, offset?: number): Promise<{ data: MessageStats[]; total: number }> {
 	await initDb();
-	return dbGetRecentRequests(limit);
+	const data = dbGetRecentRequests(limit, offset);
+	const total = dbGetRequestCount();
+	return { data, total };
 }
 
-export async function getRecentErrors(limit?: number): Promise<MessageStats[]> {
+export async function getRecentErrors(limit?: number, offset?: number): Promise<{ data: MessageStats[]; total: number }> {
 	await initDb();
-	return dbGetRecentErrors(limit);
+	const data = dbGetRecentErrors(limit, offset);
+	const total = dbGetErrorCount();
+	return { data, total };
 }
 
 export async function getRequestDetails(id: number): Promise<RequestDetails | null> {

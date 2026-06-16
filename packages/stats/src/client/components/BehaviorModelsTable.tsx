@@ -11,6 +11,7 @@ import {
 import { format } from "date-fns";
 import { useMemo, useState } from "react";
 import { Line } from "react-chartjs-2";
+import { useTranslation } from "../i18n";
 import type { BehaviorModelStats, BehaviorTimeSeriesPoint } from "../types";
 import { useSystemTheme } from "../useSystemTheme";
 import {
@@ -87,6 +88,7 @@ function formatRate(total: number, messages: number): string {
 }
 
 export function BehaviorModelsTable({ models, behaviorSeries }: BehaviorModelsTableProps) {
+	const { t } = useTranslation();
 	const [expandedKey, setExpandedKey] = useState<string | null>(null);
 	const theme = useSystemTheme();
 	const chartTheme = TABLE_CHART_THEMES[theme];
@@ -102,20 +104,20 @@ export function BehaviorModelsTable({ models, behaviorSeries }: BehaviorModelsTa
 
 	return (
 		<ModelTableShell
-			title="Behavior by Model"
-			subtitle="How often each model elicited a tantrum — rates are per user message"
+			title={t("behaviorModelsTable.title")}
+			subtitle={t("behaviorModelsTable.subtitle")}
 		>
 			<ModelTableHeader
 				gridTemplate={GRID_TEMPLATE}
 				columns={[
-					{ label: "Model" },
-					{ label: "Messages", align: "right" },
-					{ label: "CAPS %", align: "right" },
-					{ label: "Profanity %", align: "right" },
-					{ label: "Anguish %", align: "right" },
-					{ label: "Frustration %", align: "right" },
-					{ label: "Hits %", align: "right" },
-					{ label: "Trend", align: "center" },
+					{ label: t("behaviorModelsTable.model") },
+					{ label: t("behaviorModelsTable.messages"), align: "right" },
+					{ label: t("behaviorModelsTable.capsPercent"), align: "right" },
+					{ label: t("behaviorModelsTable.profanityPercent"), align: "right" },
+					{ label: t("behaviorModelsTable.anguishPercent"), align: "right" },
+					{ label: t("behaviorModelsTable.frustrationPercent"), align: "right" },
+					{ label: t("behaviorModelsTable.hitsPercent"), align: "right" },
+					{ label: t("behaviorModelsTable.trend"), align: "center" },
 				]}
 			/>
 
@@ -169,49 +171,49 @@ export function BehaviorModelsTable({ models, behaviorSeries }: BehaviorModelsTa
 							expandedContent={
 								<div className="grid gap-4" style={{ gridTemplateColumns: "220px 1fr" }}>
 									<div className="space-y-4 text-sm">
-										<DetailRow
-											label="Yelling (CAPS)"
-											total={model.totalYelling}
-											messages={model.totalMessages}
-											valueClass="text-[var(--accent-amber,#fbbf24)]"
-										/>
-										<DetailRow
-											label="Profanity"
-											total={model.totalProfanity}
-											messages={model.totalMessages}
-											valueClass="text-[var(--accent-red,#f87171)]"
-										/>
-										<DetailRow
-											label="Anguish (!!!, nooo, dude, ..)"
-											total={model.totalAnguish}
-											messages={model.totalMessages}
-											valueClass="text-[var(--accent-violet,#a78bfa)]"
-										/>
-										<DetailRow
-											label="Negation (no/nope/wrong)"
-											total={model.totalNegation}
-											messages={model.totalMessages}
-											valueClass="text-[var(--accent-cyan,#22d3ee)]"
-										/>
-										<DetailRow
-											label="Repetition (i meant, still doesnt)"
-											total={model.totalRepetition}
-											messages={model.totalMessages}
-											valueClass="text-[var(--accent-cyan,#22d3ee)]"
-										/>
-										<DetailRow
-											label="Blame (you didnt, stop X-ing)"
-											total={model.totalBlame}
-											messages={model.totalMessages}
-											valueClass="text-[var(--accent-cyan,#22d3ee)]"
-										/>
-										<DetailRow
-											label="Avg chars / msg"
-											total={model.totalChars}
-											messages={model.totalMessages}
-											valueClass="text-[var(--text-secondary)]"
-											mode="average"
-										/>
+									<DetailRow
+										label={t("behaviorModelsTable.yellingCaps")}
+										total={model.totalYelling}
+										messages={model.totalMessages}
+										valueClass="text-[var(--accent-amber,#fbbf24)]"
+									/>
+									<DetailRow
+										label={t("behaviorModelsTable.profanity")}
+										total={model.totalProfanity}
+										messages={model.totalMessages}
+										valueClass="text-[var(--accent-red,#f87171)]"
+									/>
+									<DetailRow
+										label={t("behaviorModelsTable.anguish")}
+										total={model.totalAnguish}
+										messages={model.totalMessages}
+										valueClass="text-[var(--accent-violet,#a78bfa)]"
+									/>
+									<DetailRow
+										label={t("behaviorModelsTable.negation")}
+										total={model.totalNegation}
+										messages={model.totalMessages}
+										valueClass="text-[var(--accent-cyan,#22d3ee)]"
+									/>
+									<DetailRow
+										label={t("behaviorModelsTable.repetition")}
+										total={model.totalRepetition}
+										messages={model.totalMessages}
+										valueClass="text-[var(--accent-cyan,#22d3ee)]"
+									/>
+									<DetailRow
+										label={t("behaviorModelsTable.blame")}
+										total={model.totalBlame}
+										messages={model.totalMessages}
+										valueClass="text-[var(--accent-cyan,#22d3ee)]"
+									/>
+									<DetailRow
+										label={t("behaviorModelsTable.avgCharsPerMsg")}
+										total={model.totalChars}
+										messages={model.totalMessages}
+										valueClass="text-[var(--text-secondary)]"
+										mode="average"
+									/>
 									</div>
 									<div className="h-[200px]">
 										{trend.length === 0 ? (
@@ -227,7 +229,7 @@ export function BehaviorModelsTable({ models, behaviorSeries }: BehaviorModelsTa
 				})}
 				{sortedModels.length === 0 ? (
 					<div className="border-t border-[var(--border-subtle)] px-5 py-8 text-center text-[var(--text-muted)] text-sm">
-						No user behavior recorded for this range yet.
+					{t("behaviorModelsTable.noData")}
 					</div>
 				) : null}
 			</ModelTableBody>
@@ -248,7 +250,8 @@ function DetailRow({
 	valueClass: string;
 	mode?: "rate" | "average";
 }) {
-	const perMsgLabel = mode === "rate" ? "% of msgs" : "Per msg";
+	const { t } = useTranslation();
+	const perMsgLabel = mode === "rate" ? t("behaviorModelsTable.percentOfMsgs") : t("behaviorModelsTable.perMsg");
 	const perMsgValue =
 		messages > 0 ? (mode === "rate" ? formatRate(total, messages) : (total / messages).toFixed(0)) : "-";
 	return (
@@ -256,7 +259,7 @@ function DetailRow({
 			<div className="text-[var(--text-primary)] font-medium mb-2">{label}</div>
 			<div className="space-y-1 text-[var(--text-secondary)]">
 				<div className="flex items-center justify-between">
-					<span>Total</span>
+					<span>{t("behaviorModelsTable.total")}</span>
 					<span className={`font-mono ${valueClass}`}>{formatInt(total)}</span>
 				</div>
 				<div className="flex items-center justify-between">
@@ -269,13 +272,14 @@ function DetailRow({
 }
 
 function BreakdownChart({ data, chartTheme }: { data: DailyPoint[]; chartTheme: TableChartTheme }) {
+	const { t } = useTranslation();
 	const chartData = {
 		labels: data.map(d => format(new Date(d.timestamp), "MMM d")),
 		datasets: [
-			{ label: "CAPS", data: data.map(d => d.yelling), ...lineSeriesStyle(SERIES_COLORS.yelling) },
-			{ label: "Profanity", data: data.map(d => d.profanity), ...lineSeriesStyle(SERIES_COLORS.profanity) },
-			{ label: "Anguish", data: data.map(d => d.anguish), ...lineSeriesStyle(SERIES_COLORS.anguish) },
-			{ label: "Frustration", data: data.map(d => d.frustration), ...lineSeriesStyle(SERIES_COLORS.frustration) },
+			{ label: t("behaviorModelsTable.caps"), data: data.map(d => d.yelling), ...lineSeriesStyle(SERIES_COLORS.yelling) },
+			{ label: t("behaviorModelsTable.profanity"), data: data.map(d => d.profanity), ...lineSeriesStyle(SERIES_COLORS.profanity) },
+			{ label: t("behaviorModelsTable.anguish"), data: data.map(d => d.anguish), ...lineSeriesStyle(SERIES_COLORS.anguish) },
+			{ label: t("behaviorModelsTable.frustration"), data: data.map(d => d.frustration), ...lineSeriesStyle(SERIES_COLORS.frustration) },
 		],
 	};
 

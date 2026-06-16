@@ -14,6 +14,7 @@ import {
 } from "chart.js";
 import { useMemo, useState } from "react";
 import { Bar, Line } from "react-chartjs-2";
+import { useTranslation } from "../i18n";
 import type { CostTimeSeriesPoint } from "../types";
 import { useSystemTheme } from "../useSystemTheme";
 import {
@@ -68,8 +69,8 @@ function makeBarLabelPlugin(color: string): Plugin<"bar"> {
 	};
 }
 
-function buildAggregateSeries(points: CostTimeSeriesPoint[]): ChartSeries {
-	return buildAggregateTimeSeries<CostTimeSeriesPoint, { total: number }>(points, "Cost", {
+function buildAggregateSeries(points: CostTimeSeriesPoint[], t: (key: string) => string): ChartSeries {
+	return buildAggregateTimeSeries<CostTimeSeriesPoint, { total: number }>(points, t("costChart.cost"), {
 		initBucket: () => ({ total: 0 }),
 		accumulate: (bucket, point) => {
 			bucket.total += point.cost;
@@ -78,7 +79,7 @@ function buildAggregateSeries(points: CostTimeSeriesPoint[]): ChartSeries {
 	});
 }
 
-function buildByModelSeries(points: CostTimeSeriesPoint[]): ChartSeries {
+function buildByModelSeries(points: CostTimeSeriesPoint[], otherLabel: string): ChartSeries {
 	// Rank models by total cost; per-day buckets are simple cost sums.
 	return buildTopNByModelSeries<CostTimeSeriesPoint, { total: number }>(points, {
 		rankWeight: point => point.cost,
@@ -87,28 +88,30 @@ function buildByModelSeries(points: CostTimeSeriesPoint[]): ChartSeries {
 			bucket.total += point.cost;
 		},
 		bucketToValue: bucket => bucket.total,
+		otherLabel,
 	});
 }
 
 export function CostChart({ costSeries }: CostChartProps) {
+	const { t } = useTranslation();
 	const [byModel, setByModel] = useState(false);
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
 
 	const chartData = useMemo(
-		() => (byModel ? buildByModelSeries(costSeries) : buildAggregateSeries(costSeries)),
-		[costSeries, byModel],
+		() => (byModel ? buildByModelSeries(costSeries, t("charts.other")) : buildAggregateSeries(costSeries, t)),
+		[costSeries, byModel, t],
 	);
 
 	const sharedPlugins = buildSharedPlugins({
 		chartTheme,
 		showLegend: byModel,
-		defaultLabel: "Cost",
+		defaultLabel: t("costChart.cost"),
 		formatValue: v => `$${Math.round(v)}`,
 		footer: items => {
 			if (!byModel || items.length < 2) return undefined;
 			const total = items.reduce((sum, item) => sum + (item.parsed.y ?? 0), 0);
-			return `Total: $${Math.round(total)}`;
+			return `${t("costChart.total")}: $${Math.round(total)}`;
 		},
 	});
 
@@ -158,10 +161,10 @@ export function CostChart({ costSeries }: CostChartProps) {
 
 	return (
 		<ChartFrame
-			title="Daily Cost"
-			subtitle="API spending over time"
+			title={t("costChart.dailyCost")}
+			subtitle={t("costChart.subtitle")}
 			empty={chartData.labels.length === 0}
-			emptyMessage="No cost data available"
+			emptyMessage={t("costChart.noData")}
 			byModel={byModel}
 			onByModelChange={setByModel}
 		>

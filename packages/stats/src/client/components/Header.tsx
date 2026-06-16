@@ -1,4 +1,5 @@
 import { Activity, RefreshCw } from "lucide-react";
+import { useTranslation } from "../i18n";
 import type { TimeRange } from "../types";
 
 type Tab = "overview" | "requests" | "errors" | "models" | "costs" | "behavior";
@@ -23,6 +24,17 @@ interface HeaderProps {
 }
 
 export function Header({ activeTab, onTabChange, onSync, syncing, timeRange, onTimeRangeChange }: HeaderProps) {
+	const { t, locale, setLocale } = useTranslation();
+
+	const tabLabels: Record<Tab, string> = {
+		overview: t("header.tab.overview"),
+		requests: t("header.tab.requests"),
+		errors: t("header.tab.errors"),
+		models: t("header.tab.models"),
+		costs: t("header.tab.costs"),
+		behavior: t("header.tab.behavior"),
+	};
+
 	return (
 		<header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 mb-8 border-b border-[var(--border-subtle)]">
 			<div className="flex items-center gap-3">
@@ -30,8 +42,8 @@ export function Header({ activeTab, onTabChange, onSync, syncing, timeRange, onT
 					<Activity className="w-5 h-5 text-white" />
 				</div>
 				<div>
-					<h1 className="text-xl font-semibold text-[var(--text-primary)]">AI Usage</h1>
-					<p className="text-sm text-[var(--text-muted)]">Statistics & Analytics</p>
+					<h1 className="text-xl font-semibold text-[var(--text-primary)]">{t("header.title")}</h1>
+					<p className="text-sm text-[var(--text-muted)]">{t("header.subtitle")}</p>
 				</div>
 			</div>
 
@@ -42,9 +54,9 @@ export function Header({ activeTab, onTabChange, onSync, syncing, timeRange, onT
 							key={tab}
 							type="button"
 							onClick={() => onTabChange(tab)}
-							className={`tab-btn capitalize ${activeTab === tab ? "active" : ""}`}
+							className={`tab-btn ${activeTab === tab ? "active" : ""}`}
 						>
-							{tab}
+							{tabLabels[tab]}
 						</button>
 					))}
 				</div>
@@ -55,16 +67,33 @@ export function Header({ activeTab, onTabChange, onSync, syncing, timeRange, onT
 							type="button"
 							onClick={() => onTimeRangeChange(range.value)}
 							className={`tab-btn ${timeRange === range.value ? "active" : ""}`}
-							title={range.value === "all" ? "All time" : `Last ${range.label}`}
+							title={range.value === "all" ? t("header.range.all") : `${t("header.range.last")} ${range.label}`}
 						>
 							{range.label}
 						</button>
 					))}
 				</div>
 
+				<div className="flex bg-[var(--bg-surface)] rounded-[var(--radius-md)] p-1 border border-[var(--border-subtle)]">
+					<button
+						type="button"
+						onClick={() => setLocale("en")}
+						className={`tab-btn ${locale === "en" ? "active" : ""}`}
+					>
+						EN
+					</button>
+					<button
+						type="button"
+						onClick={() => setLocale("zh")}
+						className={`tab-btn ${locale === "zh" ? "active" : ""}`}
+					>
+						中文
+					</button>
+				</div>
+
 				<button type="button" onClick={onSync} disabled={syncing} className="btn btn-primary">
 					<RefreshCw size={16} className={syncing ? "spin" : ""} />
-					{syncing ? "Syncing..." : "Sync"}
+					{syncing ? t("header.syncing") : t("header.sync")}
 				</button>
 			</div>
 		</header>
