@@ -8,6 +8,7 @@
 - Fixed OKF stats to report type counts and concept links for enrichment-authored concepts that used bracketed absolute concept paths, and clarified the enrichment prompt to require block YAML frontmatter plus standard Markdown links ([#2585](https://github.com/can1357/oh-my-pi/pull/2585) by [@oldschoola](https://github.com/oldschoola)).
 - Fixed OKF startup so the initial reindex runs in the background instead of blocking session creation, normalized Windows bundle-root path checks, and tightened Hindsight OKF recall to strict `okf` tag matches while linking results through `metadata.okf_id` ([#2585](https://github.com/can1357/oh-my-pi/pull/2585) by [@oldschoola](https://github.com/oldschoola)).
 - Fixed OKF concept serialization to preserve block-style YAML frontmatter instead of rewriting normalized concepts into flow-style inline mappings ([#2585](https://github.com/can1357/oh-my-pi/pull/2585) by [@oldschoola](https://github.com/oldschoola)).
+- Fixed session shutdown to keep SDK-owned auth storage and model registry alive until Hindsight, Mnemopi, and OKF memory teardown completes, so shutdown retention can still resolve model credentials ([#2585](https://github.com/can1357/oh-my-pi/pull/2585) by [@oldschoola](https://github.com/oldschoola)).
 
 ## [16.0.1] - 2026-06-15
 

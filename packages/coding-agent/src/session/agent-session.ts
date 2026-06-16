@@ -3711,8 +3711,6 @@ export class AgentSession {
 		this.#releasePowerAssertion();
 		await this.sessionManager.close();
 		this.#closeAllProviderSessions("dispose");
-		this.#ownedModelRegistry?.dispose();
-		this.#ownedAuthStorage?.close();
 		// Flush the retain queue BEFORE clearing the session's pointer so
 		// `HindsightRetainQueue.#doFlush` still sees `session.getHindsightSessionState() === state`.
 		// Reversed, the spliced batch survives just long enough to fail the
@@ -3724,6 +3722,8 @@ export class AgentSession {
 		const mnemopiState = setMnemopiSessionState(this, undefined);
 		await mnemopiState?.dispose();
 		disposeOkfSessionState(this);
+		this.#ownedModelRegistry?.dispose();
+		this.#ownedAuthStorage?.close();
 		this.#disconnectFromAgent();
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();
