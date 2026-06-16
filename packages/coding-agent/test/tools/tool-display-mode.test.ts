@@ -260,5 +260,10 @@ describe("concise tool display mode", () => {
 		expect(customToolCollapsed).not.toContain("Sources: pending");
 		expect(customToolCollapsed).not.toContain("WEB_QUERY_SECRET");
 		expect(customToolCollapsed).not.toContain("WEB_ANSWER_SECRET");
+
+		component.setExpanded(true);
+		const customToolExpanded = clean(component.render(120));
+		expect(customToolExpanded).toContain("WEB_QUERY_SECRET");
+		expect(customToolExpanded).toContain("WEB_ANSWER_SECRET");
 	});
 });

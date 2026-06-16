@@ -906,8 +906,8 @@ function customToolToDefinition(tool: CustomTool): ToolDefinition {
 		mergeCallAndResult: tool.mergeCallAndResult,
 		renderCall: tool.renderCall,
 		renderResult: tool.renderResult
-			? (result, options, theme): Component => {
-					const component = tool.renderResult?.(result, options, theme);
+			? (result, options, theme, args): Component => {
+					const component = tool.renderResult?.(result, options, theme, args);
 					// Return empty component if undefined to match Component type requirement
 					return component ?? ({ render: () => [] } as unknown as Component);
 				}
