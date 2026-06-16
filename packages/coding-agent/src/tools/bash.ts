@@ -31,7 +31,7 @@ import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-ski
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import { formatStyledTruncationWarning, type OutputMeta, stripOutputNotice } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
-import { capPreviewLines, formatToolWorkingDirectory, previewWindowRows, replaceTabs } from "./render-utils";
+import { capPreviewLines, formatExpandHint, formatToolWorkingDirectory, previewWindowRows, replaceTabs } from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
@@ -1166,27 +1166,85 @@ function toBashRenderArgs<TArgs>(args: TArgs | undefined, config: ShellRendererC
 	};
 }
 
+function isConciseCollapsed(options: Pick<RenderResultOptions, "displayMode">, expanded: boolean | undefined): boolean {
+	return options.displayMode === "concise" && expanded !== true;
+}
+
+function formatConciseShellLines(
+	uiTheme: Theme,
+	options: { intent?: string; metadata?: readonly string[] },
+): string[] {
+	const lines: string[] = [];
+	const append = (text: string) => {
+		lines.push(`${uiTheme.fg("dim", uiTheme.tree.branch)} ${uiTheme.fg("dim", text)}`);
+	};
+	if (options.intent) append(options.intent);
+	for (const item of options.metadata ?? []) {
+		if (item) append(item);
+	}
+	lines.push(`${uiTheme.fg("dim", uiTheme.tree.last)} ${formatExpandHint(uiTheme, false, true)}`);
+	return lines;
+}
+
+function formatBashConciseMetadata(details: BashToolDetails | undefined, isError: boolean): string[] {
+	const statsParts: string[] = [];
+	if (typeof details?.exitCode === "number") {
+		statsParts.push(`Exit: ${details.exitCode}`);
+	} else if (isError) {
+		statsParts.push("Failed");
+	}
+	if (details?.wallTimeMs !== undefined) {
+		statsParts.push(`Wall: ${formatWallTimeSeconds(details.wallTimeMs)}s`);
+	}
+	const timeoutSeconds = details?.timeoutSeconds;
+	if (typeof timeoutSeconds === "number") {
+		const requested = details?.requestedTimeoutSeconds;
+		statsParts.push(
+			requested !== undefined && requested !== timeoutSeconds
+				? `Timeout: ${timeoutSeconds}s (requested ${requested}s clamped)`
+				: `Timeout: ${timeoutSeconds}s`,
+		);
+	}
+	const artifactId = details?.meta?.truncation?.artifactId;
+	if (artifactId) {
+		statsParts.push(`Artifact: ${artifactId}`);
+	}
+	if (details?.async) {
+		statsParts.push(`Job: ${details.async.jobId} (${details.async.state})`);
+	}
+	return statsParts.length > 0 ? [statsParts.join(" | ")] : [];
+}
+
 export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 	return {
 		renderCall(args: TArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 			const renderArgs = toBashRenderArgs(args, config);
-			const cmdLines = formatBashCommandLines(renderArgs, uiTheme);
+			let cmdLines: string[] | undefined;
+			const getCmdLines = () => (cmdLines ??= formatBashCommandLines(renderArgs, uiTheme));
 			const header =
 				config.showHeader === false
 					? undefined
 					: renderStatusLine({ icon: "pending", title: config.resolveTitle(args, options) }, uiTheme);
 			const outputBlock = new CachedOutputBlock();
 			return markFramedBlockComponent({
-				render: (width: number): readonly string[] =>
-					outputBlock.render(
+				render: (width: number): readonly string[] => {
+					const expanded = options.expanded;
+					return outputBlock.render(
 						{
 							header,
 							state: "pending",
-							sections: [{ lines: capPreviewLines(cmdLines, uiTheme, { expanded: options.expanded }) }],
+							sections: [
+								{
+									lines: isConciseCollapsed(options, expanded)
+										? formatConciseShellLines(uiTheme, { intent: options.intent })
+										: capPreviewLines(getCmdLines(), uiTheme, { expanded }),
+								},
+							],
 							width,
 						},
 						uiTheme,
-					),
+					);
+				},
 				invalidate: () => {
 					outputBlock.invalidate();
 				},
@@ -1250,12 +1308,31 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					const expanded = renderContext?.expanded ?? options.expanded;
 					const previewLines = renderContext?.previewLines ?? BASH_DEFAULT_PREVIEW_LINES;
 
+					const isPartial = options.isPartial === true;
+					if (isConciseCollapsed(options, expanded)) {
+						return outputBlock.render(
+							{
+								header,
+								state: isPartial ? "pending" : isError ? "error" : "success",
+								sections: [
+									{
+										lines: formatConciseShellLines(uiTheme, {
+											intent: options.intent,
+											metadata: formatBashConciseMetadata(details, isError),
+										}),
+									},
+								],
+								width,
+							},
+							uiTheme,
+						);
+					}
+
 					// Get output from context (preferred) or fall back to result content.
 					// Strip the LLM-facing notice appended by wrappedExecute so we don't
 					// double-print it alongside the styled warning line below.
 					const rawOutput = renderContext?.output ?? result.content?.find(c => c.type === "text")?.text ?? "";
 
-					const isPartial = options.isPartial === true;
 					const previewWindow = previewWindowRows();
 
 					if (

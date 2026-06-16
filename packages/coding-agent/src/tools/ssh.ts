@@ -18,7 +18,7 @@ import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block
 import type { ToolSession } from ".";
 import { truncateForPrompt } from "./approval";
 import { formatStyledTruncationWarning, type OutputMeta, stripOutputNotice } from "./output-meta";
-import { capPreviewLines, replaceTabs } from "./render-utils";
+import { capPreviewLines, formatExpandHint, replaceTabs } from "./render-utils";
 import { ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout } from "./tool-timeouts";
@@ -253,24 +253,46 @@ function formatSshCommandLines(command: string, uiTheme: Theme): string[] {
 	return rawLines.map((line, i) => (i === 0 ? `${prefix}${line}` : line));
 }
 
+function isConciseCollapsed(options: Pick<RenderResultOptions, "displayMode">, expanded: boolean | undefined): boolean {
+	return options.displayMode === "concise" && expanded !== true;
+}
+
+function formatConciseSshLines(uiTheme: Theme, intent?: string): string[] {
+	const lines: string[] = [];
+	if (intent) {
+		lines.push(`${uiTheme.fg("dim", uiTheme.tree.branch)} ${uiTheme.fg("dim", intent)}`);
+	}
+	lines.push(`${uiTheme.fg("dim", uiTheme.tree.last)} ${formatExpandHint(uiTheme, false, true)}`);
+	return lines;
+}
+
 export const sshToolRenderer = {
 	renderCall(args: SshRenderArgs, _options: RenderResultOptions, uiTheme: Theme): Component {
 		const host = args.host || "…";
 		const command = args.command ?? "";
 		const header = renderStatusLine({ icon: "pending", title: "SSH", description: `[${host}]` }, uiTheme);
-		const cmdLines = formatSshCommandLines(command, uiTheme);
+		let cmdLines: string[] | undefined;
+		const getCmdLines = () => (cmdLines ??= formatSshCommandLines(command, uiTheme));
 		const outputBlock = new CachedOutputBlock();
 		return markFramedBlockComponent({
-			render: (width: number): readonly string[] =>
-				outputBlock.render(
+			render: (width: number): readonly string[] => {
+				const expanded = _options.expanded;
+				return outputBlock.render(
 					{
 						header,
 						state: "pending",
-						sections: [{ lines: capPreviewLines(cmdLines, uiTheme, { expanded: _options.expanded }) }],
+						sections: [
+							{
+								lines: isConciseCollapsed(_options, expanded)
+									? formatConciseSshLines(uiTheme, _options.intent)
+									: capPreviewLines(getCmdLines(), uiTheme, { expanded }),
+							},
+						],
 						width,
 					},
 					uiTheme,
-				),
+				);
+			},
 			invalidate: () => {
 				outputBlock.invalidate();
 			},
@@ -281,6 +303,7 @@ export const sshToolRenderer = {
 		result: {
 			content: Array<{ type: string; text?: string }>;
 			details?: SSHToolDetails;
+			isError?: boolean;
 		},
 		options: RenderResultOptions & { renderContext?: SshRenderContext },
 		uiTheme: Theme,
@@ -293,16 +316,34 @@ export const sshToolRenderer = {
 			{ iconOverride: uiTheme.styledSymbol("tool.ssh", "accent"), title: "SSH", description: `[${host}]` },
 			uiTheme,
 		);
-		const cmdLines = formatSshCommandLines(command, uiTheme);
-		const textContent = result.content?.find(c => c.type === "text")?.text ?? "";
+		let cmdLines: string[] | undefined;
+		let textContent: string | undefined;
+		const getCmdLines = () => (cmdLines ??= formatSshCommandLines(command, uiTheme));
 		const outputBlock = new CachedOutputBlock();
 
 		return markFramedBlockComponent({
 			render: (width: number): readonly string[] => {
 				// REACTIVE: read mutable options at render time
 				const { expanded, renderContext } = options;
+				const isPartial = options.isPartial === true;
+				const isError = result.isError === true;
+				if (isConciseCollapsed(options, expanded)) {
+					return outputBlock.render(
+						{
+							header,
+							state: isPartial ? "pending" : isError ? "error" : "success",
+							sections: [{ lines: formatConciseSshLines(uiTheme, options.intent) }],
+							width,
+						},
+						uiTheme,
+					);
+				}
+
 				// Strip LLM-facing notice so we don't echo it next to the styled warning.
-				const output = stripOutputNotice(textContent, details?.meta).trimEnd();
+				const output = stripOutputNotice(
+					(textContent ??= result.content?.find(c => c.type === "text")?.text ?? ""),
+					details?.meta,
+				).trimEnd();
 				const outputLines: string[] = [];
 
 				if (output) {
@@ -347,7 +388,7 @@ export const sshToolRenderer = {
 							{
 								// Viewport-sized tail window in every state — streaming and final
 								// render identically; only ctrl+o uncaps.
-								lines: capPreviewLines(cmdLines, uiTheme, { expanded }),
+								lines: capPreviewLines(getCmdLines(), uiTheme, { expanded }),
 							},
 							{ label: uiTheme.fg("toolTitle", "Output"), lines: outputLines },
 						],
