@@ -1,6 +1,12 @@
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { Markit, StreamInfo } from "markit-ai";
 import { ToolAbortError } from "../tools/tool-errors";
+import { installMupdfQuietHook } from "./mupdf-quiet";
+
+// MuPDF (pulled in transitively via markit-ai for PDF/document extraction)
+// writes its WASM warnings to console.error, which corrupts the TUI. Route
+// them to the file logger before markit-ai (and thus mupdf) first loads below.
+installMupdfQuietHook();
 
 export interface MarkitConversionResult {
 	content: string;
