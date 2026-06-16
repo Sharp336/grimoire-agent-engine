@@ -1896,6 +1896,7 @@
 
 - Fixed plan-mode re-entry after approval reopening a fresh `local://PLAN.md` instead of the approved titled plan artifact, which could duplicate plan content and fail approval on an existing destination.
 - Fixed `read` URL reader mode aborting after a stalled Jina request instead of falling back to trafilatura/lynx/native: Jina (and Parallel extract) now have their own per-attempt sub-budget capped at 10s, the catch handler honours only real user cancellation, and the in-process native renderer is always attempted on already-loaded HTML ([#1449](https://github.com/can1357/oh-my-pi/issues/1449))
+- Fixed `omp plugin list` omitting successfully linked local plugins when the plugin runtime lockfile existed but the plugins package manifest had not been bootstrapped yet ([#2742](https://github.com/can1357/oh-my-pi/issues/2742))
 
 ## [15.5.6] - 2026-05-27
 

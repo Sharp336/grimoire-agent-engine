@@ -490,21 +490,22 @@ export class PluginManager {
 	 */
 	async list(): Promise<InstalledPlugin[]> {
 		const pkgJsonPath = getPluginsPackageJson();
-		let pkg: { dependencies?: Record<string, string> };
+		let pkg: { dependencies?: Record<string, string> } = { dependencies: {} };
 		try {
 			pkg = await Bun.file(pkgJsonPath).json();
 		} catch (err) {
-			if (isEnoent(err)) return [];
-			throw err;
+			if (!isEnoent(err)) throw err;
 		}
 
-		const deps = pkg.dependencies || {};
+		const dependencyNames = Object.keys(pkg.dependencies || {});
 		const projectOverrides = await this.#loadProjectOverrides();
 		const config = await this.#ensureConfigLoaded();
+		const pluginNames = new Set([...dependencyNames, ...Object.keys(config.plugins)]);
 		const plugins: InstalledPlugin[] = [];
 
-		for (const [name] of Object.entries(deps)) {
-			const pluginPkgPath = path.join(getPluginsNodeModules(), name, "package.json");
+		for (const name of pluginNames) {
+			const pluginDir = path.join(getPluginsNodeModules(), name);
+			const pluginPkgPath = path.join(pluginDir, "package.json");
 			let pluginPkg: { version: string; omp?: PluginManifest; pi?: PluginManifest };
 			try {
 				pluginPkg = await Bun.file(pluginPkgPath).json();
@@ -528,7 +529,7 @@ export class PluginManager {
 			plugins.push({
 				name,
 				version: pluginPkg.version,
-				path: path.join(getPluginsNodeModules(), name),
+				path: pluginDir,
 				manifest,
 				enabledFeatures: projectFeatures ?? runtimeState.enabledFeatures,
 				enabled: runtimeState.enabled && !isDisabledInProject,
@@ -556,6 +557,7 @@ export class PluginManager {
 			throw new Error("package.json must have a name field");
 		}
 
+		await this.#ensurePackageJson();
 		await this.#ensurePluginsDir();
 
 		const linkPath = path.join(getPluginsNodeModules(), pkg.name);
