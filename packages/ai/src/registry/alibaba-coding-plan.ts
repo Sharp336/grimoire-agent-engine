@@ -3,17 +3,46 @@ import type { OAuthController, OAuthLoginCallbacks } from "./oauth/types";
 import type { ProviderDefinition } from "./types";
 
 const AUTH_URL = "https://modelstudio.console.alibabacloud.com/";
-const API_BASE_URL = "https://coding-intl.dashscope.aliyuncs.com/v1";
+const DEFAULT_API_BASE_URL = "https://coding-intl.dashscope.aliyuncs.com/v1";
+const CHINA_API_BASE_URL = "https://coding.dashscope.aliyuncs.com/v1";
 const VALIDATION_MODEL = "qwen3.5-plus";
-
 export async function loginAlibabaCodingPlan(options: OAuthController): Promise<string> {
 	if (!options.onPrompt) {
 		throw new Error("Alibaba Coding Plan login requires onPrompt callback");
 	}
 
+	// Ask which endpoint to use
+	const endpointChoice = await options.onPrompt({
+		message: `Select Alibaba Coding Plan endpoint:
+1. International (coding-intl.dashscope.aliyuncs.com) [default]
+2. China mainland (coding.dashscope.aliyuncs.com)
+3. Custom URL
+
+Enter 1, 2, or 3`,
+		placeholder: "1",
+	});
+
+	const choice = endpointChoice.trim();
+	let baseUrl: string;
+	if (choice === "2") {
+		baseUrl = CHINA_API_BASE_URL;
+	} else if (choice === "3") {
+		const customUrl = await options.onPrompt({
+			message: "Enter custom base URL",
+			placeholder: "https://your-proxy.com/v1",
+		});
+		const trimmedUrl = customUrl.trim();
+		if (!trimmedUrl) {
+			throw new Error("Custom URL is required for option 3");
+		}
+		baseUrl = trimmedUrl;
+	} else {
+		baseUrl = DEFAULT_API_BASE_URL;
+	}
+
 	options.onAuth?.({
 		url: AUTH_URL,
-		instructions: "Copy your API key from the Alibaba Cloud DashScope console",
+		instructions: `Copy your API key from the Alibaba Cloud DashScope console`,
 	});
 
 	const apiKey = await options.onPrompt({
@@ -34,7 +63,7 @@ export async function loginAlibabaCodingPlan(options: OAuthController): Promise<
 	await validateOpenAICompatibleApiKey({
 		provider: "Alibaba Coding Plan",
 		apiKey: trimmed,
-		baseUrl: API_BASE_URL,
+		baseUrl,
 		model: VALIDATION_MODEL,
 		signal: options.signal,
 	});
