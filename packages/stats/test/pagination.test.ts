@@ -7,6 +7,7 @@ import type { MessageStats } from "@oh-my-pi/omp-stats/types";
 import { getAgentDir, setAgentDir, TempDir } from "@oh-my-pi/pi-utils";
 
 const originalAgentDir = getAgentDir();
+const originalConfigDir = process.env.PI_CONFIG_DIR;
 let tempDir: TempDir | null = null;
 
 beforeEach(() => {
@@ -19,6 +20,11 @@ beforeEach(() => {
 afterEach(() => {
 	closeDb();
 	setAgentDir(originalAgentDir);
+	if (originalConfigDir === undefined) {
+		delete process.env.PI_CONFIG_DIR;
+	} else {
+		process.env.PI_CONFIG_DIR = originalConfigDir;
+	}
 	tempDir?.removeSync();
 	tempDir = null;
 });
