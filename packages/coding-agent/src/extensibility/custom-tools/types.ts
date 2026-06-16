@@ -35,6 +35,8 @@ export type { ExecOptions, ExecResult } from "../../exec/exec";
 /** Re-export for custom tools to use in execute signature */
 export type { AgentToolResult, AgentToolUpdateCallback, ToolApproval, ToolApprovalDecision, ToolTier };
 
+export type ToolDisplayMode = "detailed" | "concise";
+
 /** Pending action entry consumed by the hidden resolve tool */
 export interface CustomToolPendingAction {
 	/** Human-readable preview label shown in resolve flow */
@@ -149,6 +151,10 @@ export interface RenderResultOptions {
 	isPartial: boolean;
 	/** Current spinner frame index for animated elements (0-9, only provided during partial results) */
 	spinnerFrame?: number;
+	/** Tool display density selected for this render */
+	displayMode?: ToolDisplayMode;
+	/** Normalized tool-call intent, when available */
+	intent?: string;
 }
 
 export type CustomToolResult<TDetails = any> = AgentToolResult<TDetails>;

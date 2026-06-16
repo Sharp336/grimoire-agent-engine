@@ -84,6 +84,12 @@ describe("Settings", () => {
 				"gemma",
 			]);
 		});
+
+		it("exposes concise tool display mode options", () => {
+			expect(getDefault("tools.displayMode")).toBe("detailed");
+			expect(getEnumValues("tools.displayMode")).toEqual(["detailed", "concise"]);
+			expect(Settings.isolated({ "tools.displayMode": "concise" }).get("tools.displayMode")).toBe("concise");
+		});
 	});
 
 	describe("get()", () => {

@@ -556,6 +556,7 @@ export class EventController {
 							showImages: settings.get("terminal.showImages"),
 							editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 							editAllowFuzzy: settings.get("edit.fuzzyMatch"),
+							initialIntent: content.intent,
 						},
 						tool,
 						this.ctx.ui,
@@ -570,6 +571,7 @@ export class EventController {
 					const component = this.ctx.pendingTools.get(content.id);
 					if (component) {
 						component.updateArgs(renderArgs, content.id);
+						if (component instanceof ToolExecutionComponent) component.updateIntent(content.intent);
 						this.#toolArgsReveal.bind(content.id, component);
 					}
 				}
@@ -715,6 +717,7 @@ export class EventController {
 					editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
 					editAllowFuzzy: settings.get("edit.fuzzyMatch"),
 					liveRegion: this.ctx.chatContainer,
+					initialIntent: event.intent,
 				},
 				tool,
 				this.ctx.ui,
@@ -725,6 +728,9 @@ export class EventController {
 			this.ctx.chatContainer.addChild(component);
 			this.ctx.pendingTools.set(event.toolCallId, component);
 			this.ctx.ui.requestRender();
+		} else {
+			const component = this.ctx.pendingTools.get(event.toolCallId);
+			if (component instanceof ToolExecutionComponent) component.updateIntent(event.intent);
 		}
 	}
 

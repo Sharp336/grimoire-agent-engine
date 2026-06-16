@@ -3253,6 +3253,22 @@ export const SETTINGS_SCHEMA = {
 	},
 
 	// Tool execution
+	"tools.displayMode": {
+		type: "enum",
+		values: ["detailed", "concise"] as const,
+		default: "detailed",
+		ui: {
+			tab: "tools",
+			group: "Execution",
+			label: "Tool Display Mode",
+			description:
+				"Detailed shows normal tool arguments and results. Concise keeps collapsed noisy tool rows to name, intent, status, and minimal metadata; expand to inspect details.",
+			options: [
+				{ value: "detailed", label: "Detailed", description: "Show current detailed tool previews" },
+				{ value: "concise", label: "Concise", description: "Hide details in collapsed noisy tool rows" },
+			],
+		},
+	},
 	"tools.intentTracing": {
 		type: "boolean",
 		default: true,

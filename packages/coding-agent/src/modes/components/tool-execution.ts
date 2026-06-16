@@ -1,5 +1,5 @@
 import type { SnapshotStore } from "@oh-my-pi/hashline";
-import type { AgentTool } from "@oh-my-pi/pi-agent-core";
+import { INTENT_FIELD, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import {
 	Box,
 	type Component,
@@ -15,6 +15,7 @@ import {
 	type TUI,
 } from "@oh-my-pi/pi-tui";
 import { getProjectDir, logger, sanitizeText } from "@oh-my-pi/pi-utils";
+import { settings } from "../../config/settings";
 import { EDIT_MODE_STRATEGIES, type EditMode, type PerFileDiffPreview } from "../../edit";
 import type { Theme } from "../../modes/theme/theme";
 import { getThemeEpoch, theme } from "../../modes/theme/theme";
@@ -129,6 +130,7 @@ export interface ToolExecutionOptions {
 	/** Live-region probe used to settle detached task progress once the block
 	 * leaves the repaintable transcript region. */
 	liveRegion?: TranscriptLiveRegionProbe;
+	initialIntent?: string;
 }
 
 export interface ToolExecutionHandle {
@@ -182,6 +184,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 	#editFuzzyThreshold: number | undefined;
 	#editAllowFuzzy: boolean | undefined;
 	#snapshots?: SnapshotStore;
+	#initialIntent?: string;
 	#isPartial = true;
 	#resultVersion = 0;
 	#lastDisplayKey: string | undefined;
@@ -245,6 +248,8 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		spinnerFrame?: number;
 		expanded: boolean;
 		isPartial: boolean;
+		displayMode?: "detailed" | "concise";
+		intent?: string;
 		renderContext?: Record<string, unknown>;
 	} = {
 		expanded: false,
@@ -268,6 +273,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#editAllowFuzzy = options.editAllowFuzzy;
 		this.#snapshots = options.snapshots;
 		this.#liveRegion = options.liveRegion;
+		this.#initialIntent = this.#normalizeIntent(options.initialIntent);
 		this.#tool = tool;
 		this.#ui = ui;
 		this.#cwd = cwd;
@@ -306,6 +312,14 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		this.#displayInputVersion++;
 		this.#updateSpinnerAnimation();
 		this.#editDiffInFlight = this.#runPreviewDiff();
+		this.#updateDisplay();
+	}
+
+	updateIntent(intent: unknown): void {
+		const normalized = this.#normalizeIntent(intent);
+		if (!normalized || normalized === this.#initialIntent) return;
+		this.#initialIntent = normalized;
+		this.#displayInputVersion++;
 		this.#updateDisplay();
 	}
 
@@ -705,7 +719,8 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		// TUI startup, so a result rendered before it lands must re-shape once it
 		// does (it gates Image children vs text fallback in #rebuildDisplay); keyed
 		// here for the same reason markdown.ts keys its render cache on it.
-		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${this.#backgroundTaskFrozen}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}`;
+		const displayMode = this.#toolDisplayMode();
+		const key = `${this.#resultVersion}|${this.#expanded}|${this.#isPartial}|${this.#spinnerFrame ?? "-"}|${this.#showImages}|${getThemeEpoch()}|${this.#displayInputVersion}|${this.#backgroundTaskFrozen}|${TERMINAL.imageProtocol ?? "-"}|${this.#imageSizeKey()}|${displayMode}`;
 		if (key === this.#lastDisplayKey && this.#displayBuilt) return;
 		this.#lastDisplayKey = key;
 
@@ -723,11 +738,56 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		return `${o.maxWidthCells}:${o.maxHeightCells ?? "-"}`;
 	}
 
+	#toolDisplayMode(): "detailed" | "concise" {
+		try {
+			return settings.get("tools.displayMode");
+		} catch (err) {
+			if (err instanceof Error && err.message.includes("Settings not initialized")) {
+				return "detailed";
+			}
+			throw err;
+		}
+	}
+
+	#normalizeIntent(value: unknown): string | undefined {
+		if (typeof value !== "string") return undefined;
+		const intent = value.replace(/\s+/g, " ").trim();
+		if (!intent) return undefined;
+		return intent.length > 80 ? `${intent.slice(0, 79)}…` : intent;
+	}
+
+	#toolIntent(): string | undefined {
+		if (this.#initialIntent) return this.#initialIntent;
+		if (!this.#args || typeof this.#args !== "object") return undefined;
+		const args = this.#args as Record<string, unknown>;
+		const explicitIntent = this.#normalizeIntent(args[INTENT_FIELD]);
+		if (explicitIntent) return explicitIntent;
+
+		const deriveIntent = this.#tool?.intent;
+		if (typeof deriveIntent !== "function") return undefined;
+		try {
+			return this.#normalizeIntent(deriveIntent(this.#args as never));
+		} catch (err) {
+			logger.warn("Tool intent derivation failed", { tool: this.#toolName, error: String(err) });
+			return undefined;
+		}
+	}
+
+	#conciseCollapsed(): boolean {
+		return this.#renderState.displayMode === "concise" && !this.#expanded;
+	}
+
+	#usesGenericFallback(): boolean {
+		return !(this.#tool && (this.#tool.renderCall || this.#tool.renderResult)) && !(this.#toolName in toolRenderers);
+	}
+
 	#rebuildDisplay(): void {
 		// Sync shared mutable render state for component closures
 		this.#renderState.expanded = this.#expanded;
 		this.#renderState.isPartial = this.#isPartial;
 		this.#renderState.spinnerFrame = this.#spinnerFrame;
+		this.#renderState.displayMode = this.#toolDisplayMode();
+		this.#renderState.intent = this.#toolIntent();
 
 		// Non-self-framing tools (custom/extension renderers and the generic
 		// fallback) get a padded, state-tinted block — built-ins that draw their
@@ -937,7 +997,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		}
 		this.#imageSpacers = [];
 
-		if (this.#result) {
+		if (this.#result && !(this.#usesGenericFallback() && this.#conciseCollapsed())) {
 			const imageBlocks = this.#getAllImageBlocks();
 
 			for (let i = 0; i < imageBlocks.length; i++) {
@@ -1080,6 +1140,19 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		const lines: string[] = [];
 		const icon = this.#isPartial ? "pending" : this.#result?.isError ? "error" : "done";
 		lines.push(renderStatusLine({ icon, title: this.#toolLabel }, theme));
+
+		const conciseCollapsed = this.#conciseCollapsed();
+		if (conciseCollapsed) {
+			const intent = this.#toolIntent();
+			if (intent) {
+				lines.push(` ${theme.fg("dim", theme.tree.branch)} ${theme.fg("dim", intent)}`);
+			}
+			if (this.#result?.isError) {
+				lines.push(` ${theme.fg("dim", theme.tree.branch)} ${theme.fg("error", "Failed")}`);
+			}
+			lines.push(` ${theme.fg("dim", theme.tree.last)} ${formatExpandHint(theme, false, true)}`);
+			return lines.join("\n");
+		}
 
 		const argsObject = this.#args && typeof this.#args === "object" ? (this.#args as Record<string, unknown>) : null;
 		if (!this.#expanded && argsObject && Object.keys(argsObject).length > 0) {

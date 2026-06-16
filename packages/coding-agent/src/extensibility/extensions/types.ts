@@ -402,6 +402,10 @@ export interface ToolRenderResultOptions {
 	isPartial: boolean;
 	/** Current spinner frame index for animated elements (optional) */
 	spinnerFrame?: number;
+	/** Tool display density selected for this render */
+	displayMode?: "detailed" | "concise";
+	/** Normalized tool-call intent, when available */
+	intent?: string;
 }
 
 /** Session event for tool onSession lifecycle */
