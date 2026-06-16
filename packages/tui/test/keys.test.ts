@@ -1,5 +1,24 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { extractPrintableText, matchesKey, parseKey, setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
+
+const originalTermProgram = process.env.TERM_PROGRAM;
+
+function setVSCodeTerminal(active: boolean): void {
+	if (active) {
+		process.env.TERM_PROGRAM = "vscode";
+	} else {
+		process.env.TERM_PROGRAM = "kitty";
+	}
+}
+
+afterEach(() => {
+	if (originalTermProgram === undefined) {
+		delete process.env.TERM_PROGRAM;
+	} else {
+		process.env.TERM_PROGRAM = originalTermProgram;
+	}
+	setKittyProtocolActive(false);
+});
 
 describe("matchesKey", () => {
 	it("matches ctrl+letter sequences", () => {
@@ -68,15 +87,26 @@ describe("matchesKey", () => {
 		setKittyProtocolActive(false);
 	});
 
-	it("keeps keypad digits as text with or without NumLock modifier", () => {
+	it("keeps bare keypad digits as text only in VS Code", () => {
 		setKittyProtocolActive(true);
-		for (const data of ["\x1b[57400u", "\x1b[57400;129u"]) {
-			expect(matchesKey(data, "1")).toBe(true);
-			expect(matchesKey(data, "end")).toBe(false);
-		}
+		setVSCodeTerminal(true);
+		expect(matchesKey("\x1b[57400u", "1")).toBe(true);
+		expect(matchesKey("\x1b[57400u", "end")).toBe(false);
 		expect(matchesKey("\x1b[57404u", "5")).toBe(true);
 		expect(matchesKey("\x1b[57404u", "clear")).toBe(false);
-		setKittyProtocolActive(false);
+
+		setVSCodeTerminal(false);
+		expect(matchesKey("\x1b[57400u", "1")).toBe(false);
+		expect(matchesKey("\x1b[57400u", "end")).toBe(true);
+		expect(matchesKey("\x1b[57404u", "5")).toBe(false);
+		expect(matchesKey("\x1b[57404u", "clear")).toBe(true);
+	});
+
+	it("keeps NumLock keypad digits as text in every terminal", () => {
+		setKittyProtocolActive(true);
+		setVSCodeTerminal(false);
+		expect(matchesKey("\x1b[57400;129u", "1")).toBe(true);
+		expect(matchesKey("\x1b[57400;129u", "end")).toBe(false);
 	});
 
 	it("matches keypad operators as their printable symbols", () => {
@@ -139,12 +169,21 @@ describe("parseKey", () => {
 		setKittyProtocolActive(false);
 	});
 
-	it("parses keypad digits as digits with or without NumLock modifier", () => {
+	it("parses bare keypad digits as digits only in VS Code", () => {
 		setKittyProtocolActive(true);
+		setVSCodeTerminal(true);
 		expect(parseKey("\x1b[57400u")).toBe("1");
-		expect(parseKey("\x1b[57400;129u")).toBe("1");
 		expect(parseKey("\x1b[57404u")).toBe("5");
-		setKittyProtocolActive(false);
+
+		setVSCodeTerminal(false);
+		expect(parseKey("\x1b[57400u")).toBe("end");
+		expect(parseKey("\x1b[57404u")).toBe("clear");
+	});
+
+	it("parses NumLock keypad digits as digits in every terminal", () => {
+		setKittyProtocolActive(true);
+		setVSCodeTerminal(false);
+		expect(parseKey("\x1b[57400;129u")).toBe("1");
 	});
 
 	it("parses keypad operators as printable keys", () => {
@@ -170,10 +209,19 @@ describe("parseKey", () => {
 });
 
 describe("extractPrintableText", () => {
-	it("extracts keypad digits from Kitty CSI-u sequences", () => {
+	it("extracts bare keypad digits from Kitty CSI-u sequences only in VS Code", () => {
+		setVSCodeTerminal(true);
 		expect(extractPrintableText("\x1b[57407u")).toBe("8");
-		expect(extractPrintableText("\x1b[57407;129u")).toBe("8");
 		expect(extractPrintableText("\x1b[57404u")).toBe("5");
+
+		setVSCodeTerminal(false);
+		expect(extractPrintableText("\x1b[57407u")).toBeUndefined();
+		expect(extractPrintableText("\x1b[57404u")).toBeUndefined();
+	});
+
+	it("extracts NumLock keypad digits from Kitty CSI-u sequences in every terminal", () => {
+		setVSCodeTerminal(false);
+		expect(extractPrintableText("\x1b[57407;129u")).toBe("8");
 	});
 
 	it("extracts keypad operators from Kitty CSI-u sequences", () => {

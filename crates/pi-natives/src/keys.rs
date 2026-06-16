@@ -607,10 +607,12 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 				parsed_codepoint = text_codepoint;
 				parsed_base = None;
 			} else if actual_mod == 0 {
-				if let Some(text_codepoint) = keypad_num_lock_text_codepoint(parsed_codepoint) {
-					parsed_codepoint = text_codepoint;
-					parsed_base = None;
-				} else if p.modifier & MOD_NUM_LOCK != 0 {
+				if p.modifier & MOD_NUM_LOCK != 0 {
+					if let Some(text_codepoint) = keypad_num_lock_text_codepoint(parsed_codepoint) {
+						parsed_codepoint = text_codepoint;
+						parsed_base = None;
+					}
+				} else {
 					if let Some(mapped) = map_keypad_nav(parsed_codepoint) {
 						parsed_codepoint = mapped;
 					}
@@ -1408,7 +1410,8 @@ fn format_kitty_key(parsed: &ParsedKittySequence) -> Option<Cow<'static, str>> {
 		{
 			return Some(Cow::Borrowed(key_name));
 		}
-		if let Some(text_codepoint) = keypad_num_lock_text_codepoint(parsed.codepoint)
+		if parsed.modifier & MOD_NUM_LOCK != 0
+			&& let Some(text_codepoint) = keypad_num_lock_text_codepoint(parsed.codepoint)
 			&& let Some(key_name) = format_key_name(text_codepoint)
 		{
 			return Some(Cow::Borrowed(key_name));

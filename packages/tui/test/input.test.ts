@@ -1,9 +1,28 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
 import { CURSOR_MARKER } from "@oh-my-pi/pi-tui";
 import { Input } from "@oh-my-pi/pi-tui/components/input";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { getIndentation } from "@oh-my-pi/pi-utils";
+
+const originalTermProgram = process.env.TERM_PROGRAM;
+
+function setVSCodeTerminal(active: boolean): void {
+	if (active) {
+		process.env.TERM_PROGRAM = "vscode";
+	} else {
+		process.env.TERM_PROGRAM = "kitty";
+	}
+}
+
+afterEach(() => {
+	if (originalTermProgram === undefined) {
+		delete process.env.TERM_PROGRAM;
+	} else {
+		process.env.TERM_PROGRAM = originalTermProgram;
+	}
+	setKittyProtocolActive(false);
+});
 
 function renderedWidth(input: Input, width: number): number {
 	const [line] = input.render(width);
@@ -133,16 +152,23 @@ describe("Input component", () => {
 		setKittyProtocolActive(false);
 	});
 
-	it("inserts keypad digits from Kitty CSI-u input with or without NumLock modifier", () => {
+	it("inserts bare keypad digits from Kitty CSI-u input only in VS Code", () => {
 		setKittyProtocolActive(true);
+		setVSCodeTerminal(true);
 		const input = setupAtEnd("a");
 
 		input.handleInput("\x1b[57407u");
-		input.handleInput("\x1b[57407;129u");
 		input.handleInput("\x1b[57404u");
-		expect(input.getValue()).toBe("a885");
+		expect(input.getValue()).toBe("a85");
+	});
 
-		setKittyProtocolActive(false);
+	it("inserts NumLock keypad digits from Kitty CSI-u input in every terminal", () => {
+		setKittyProtocolActive(true);
+		setVSCodeTerminal(false);
+		const input = setupAtEnd("a");
+
+		input.handleInput("\x1b[57407;129u");
+		expect(input.getValue()).toBe("a8");
 	});
 
 	it("inserts keypad operators from Kitty CSI-u input", () => {

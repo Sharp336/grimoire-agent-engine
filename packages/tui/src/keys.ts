@@ -53,6 +53,10 @@ function matchesRawBackspace(data: string, expectedModifier: number): boolean {
 
 export { isWindowsTerminalSession, matchesRawBackspace };
 
+function isVSCodeIntegratedTerminal(): boolean {
+	return process.env.TERM_PROGRAM === "vscode";
+}
+
 // =============================================================================
 // Global Kitty Protocol State
 // =============================================================================
@@ -302,6 +306,7 @@ const KITTY_MOD_SHIFT = 1;
 const KITTY_MOD_ALT = 2;
 const KITTY_MOD_CTRL = 4;
 const KITTY_MOD_SUPER = 8;
+const KITTY_MOD_NUM_LOCK = 128;
 const KITTY_LOCK_MASK = 64 + 128; // Caps Lock + Num Lock
 const MODIFY_OTHER_KEYS_PATTERN = /^\x1b\[27;(\d+);(\d+)~$/;
 const KITTY_KEYPAD_OPERATOR_TEXT: Record<number, string> = {
@@ -420,7 +425,7 @@ function decodeKittyPrintable(data: string): string | undefined {
 	const keypadOperatorText = KITTY_KEYPAD_OPERATOR_TEXT[codepoint];
 	if (keypadOperatorText) return keypadOperatorText;
 
-	if (effectiveMod === 0) {
+	if (effectiveMod === 0 && ((modifier & KITTY_MOD_NUM_LOCK) !== 0 || isVSCodeIntegratedTerminal())) {
 		const numpadText = KITTY_NUMPAD_TEXT[codepoint];
 		if (numpadText) return numpadText;
 	}
@@ -512,7 +517,9 @@ function decodeKeypadDigitKey(data: string): string | undefined {
 	const modValue = match[4] ? Number.parseInt(match[4], 10) : 1;
 	const modifier = Number.isFinite(modValue) ? modValue - 1 : 0;
 	const effectiveMod = modifier & ~KITTY_LOCK_MASK;
+	const hasNumLock = (modifier & KITTY_MOD_NUM_LOCK) !== 0;
 	if (effectiveMod !== 0) return undefined;
+	if (!hasNumLock && !isVSCodeIntegratedTerminal()) return undefined;
 	return KITTY_NUMPAD_TEXT[codepoint];
 }
 

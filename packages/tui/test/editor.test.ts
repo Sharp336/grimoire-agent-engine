@@ -9,9 +9,25 @@ import { visibleWidth } from "@oh-my-pi/pi-tui/utils";
 import { setDefaultTabWidth } from "@oh-my-pi/pi-utils";
 import { defaultEditorTheme } from "./test-themes";
 
+const originalTermProgram = process.env.TERM_PROGRAM;
+
+function setVSCodeTerminal(active: boolean): void {
+	if (active) {
+		process.env.TERM_PROGRAM = "vscode";
+	} else {
+		process.env.TERM_PROGRAM = "kitty";
+	}
+}
+
 describe("Editor component", () => {
 	afterEach(() => {
 		setKeybindings(new KeybindingsManager(TUI_KEYBINDINGS));
+		if (originalTermProgram === undefined) {
+			delete process.env.TERM_PROGRAM;
+		} else {
+			process.env.TERM_PROGRAM = originalTermProgram;
+		}
+		setKittyProtocolActive(false);
 	});
 
 	describe("Prompt history navigation", () => {
@@ -419,14 +435,35 @@ describe("Editor component", () => {
 			expect(text).toBe("Hello äöü 😀");
 		});
 
-		it("inserts keypad digits instead of treating them as navigation", () => {
+		it("inserts bare keypad digits instead of navigation in VS Code", () => {
+			setVSCodeTerminal(true);
 			const editor = new Editor(defaultEditorTheme);
 
 			editor.handleInput("a");
 			editor.handleInput("\x1b[57400u");
+
+			expect(editor.getText()).toBe("a1");
+		});
+
+		it("keeps bare keypad digits as navigation outside VS Code", () => {
+			setVSCodeTerminal(false);
+			const editor = new Editor(defaultEditorTheme);
+
+			editor.handleInput("abc");
+			editor.handleInput("\x1b[57400u");
+			editor.handleInput("x");
+
+			expect(editor.getText()).toBe("abcx");
+		});
+
+		it("inserts NumLock keypad digits in every terminal", () => {
+			setVSCodeTerminal(false);
+			const editor = new Editor(defaultEditorTheme);
+
+			editor.handleInput("a");
 			editor.handleInput("\x1b[57400;129u");
 
-			expect(editor.getText()).toBe("a11");
+			expect(editor.getText()).toBe("a1");
 		});
 
 		it("inserts a newline for Ctrl+Enter variants with NumLock or keypad Enter metadata", () => {
