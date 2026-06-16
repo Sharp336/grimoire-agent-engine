@@ -1618,15 +1618,22 @@ mod tests {
 	}
 
 	#[test]
-	fn keypad_digits_stay_text_with_or_without_num_lock_modifier() {
-		for bytes in [b"\x1b[57400u".as_slice(), b"\x1b[57400;129u".as_slice()] {
-			assert_eq!(parse_key_inner(bytes, true).as_deref(), Some("1"));
-			assert!(matches_key_inner(bytes, "1", true));
-			assert!(!matches_key_inner(bytes, "end", true));
-		}
-		assert_eq!(parse_key_inner(b"\x1b[57404u", true).as_deref(), Some("5"));
-		assert!(matches_key_inner(b"\x1b[57404u", "5", true));
-		assert!(!matches_key_inner(b"\x1b[57404u", "clear", true));
+	fn num_lock_keypad_digits_stay_text() {
+		let bytes = b"\x1b[57400;129u";
+		assert_eq!(parse_key_inner(bytes, true).as_deref(), Some("1"));
+		assert!(matches_key_inner(bytes, "1", true));
+		assert!(!matches_key_inner(bytes, "end", true));
+	}
+
+	#[test]
+	fn bare_keypad_digits_stay_navigation_without_num_lock_modifier() {
+		assert_eq!(parse_key_inner(b"\x1b[57400u", true).as_deref(), Some("end"));
+		assert!(matches_key_inner(b"\x1b[57400u", "end", true));
+		assert!(!matches_key_inner(b"\x1b[57400u", "1", true));
+
+		assert_eq!(parse_key_inner(b"\x1b[57404u", true).as_deref(), Some("clear"));
+		assert!(matches_key_inner(b"\x1b[57404u", "clear", true));
+		assert!(!matches_key_inner(b"\x1b[57404u", "5", true));
 	}
 
 	#[test]
