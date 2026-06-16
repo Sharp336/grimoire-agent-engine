@@ -13,18 +13,32 @@ function makeContextFile(overrides: Partial<ContextFile> & Pick<ContextFile, "pa
 describe("contextFileCapability.key", () => {
 	const key = contextFileCapability.key.bind(contextFileCapability);
 
-	test("user-level files share the same key regardless of depth", () => {
+	test("user-level files with the same filename share a key", () => {
 		const a = makeContextFile({ path: "/home/user/.omp/agent/AGENTS.md", level: "user" });
-		const b = makeContextFile({ path: "/home/user/.claude/CLAUDE.md", level: "user" });
-		expect(key(a)).toBe("user");
-		expect(key(b)).toBe("user");
+		const b = makeContextFile({ path: "/home/user/.config/AGENTS.md", level: "user" });
+		expect(key(a)).toBe("user:AGENTS.md");
+		expect(key(b)).toBe("user:AGENTS.md");
 		expect(key(a)).toBe(key(b));
 	});
 
-	test("project-level files at the same depth share the same key", () => {
+	test("user-level files with different filenames have different keys", () => {
+		const a = makeContextFile({ path: "/home/user/.omp/agent/AGENTS.md", level: "user" });
+		const b = makeContextFile({ path: "/home/user/.claude/CLAUDE.md", level: "user" });
+		expect(key(a)).toBe("user:AGENTS.md");
+		expect(key(b)).toBe("user:CLAUDE.md");
+		expect(key(a)).not.toBe(key(b));
+	});
+
+	test("project-level files with the same filename at the same depth share a key", () => {
+		const a = makeContextFile({ path: "/repo/AGENTS.md", level: "project", depth: 0 });
+		const b = makeContextFile({ path: "/repo/subdir/AGENTS.md", level: "project", depth: 0 });
+		expect(key(a)).toBe(key(b));
+	});
+
+	test("project-level files with different filenames at the same depth have different keys", () => {
 		const a = makeContextFile({ path: "/repo/AGENTS.md", level: "project", depth: 0 });
 		const b = makeContextFile({ path: "/repo/.claude/CLAUDE.md", level: "project", depth: 0 });
-		expect(key(a)).toBe(key(b));
+		expect(key(a)).not.toBe(key(b));
 	});
 
 	test("project-level files at different depths have different keys", () => {
