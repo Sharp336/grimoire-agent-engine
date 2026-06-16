@@ -118,6 +118,19 @@ describe("concise tool display mode", () => {
 		expect(collapsed).not.toContain("SSH_COMMAND_SECRET");
 		expect(collapsed).not.toContain("SSH_OUTPUT_SECRET");
 
+		const failedCollapsed = clean(
+			sshToolRenderer
+				.renderResult(
+					{ ...result, isError: true },
+					{ expanded: false, isPartial: false, displayMode: "concise", intent: "Running hidden remote" },
+					theme,
+					args,
+				)
+				.render(120),
+		);
+
+		expect(failedCollapsed).toContain("Failed");
+		expect(failedCollapsed).not.toContain("SSH_OUTPUT_SECRET");
 		const expanded = clean(
 			sshToolRenderer
 				.renderResult(
