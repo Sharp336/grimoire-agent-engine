@@ -52,32 +52,40 @@ export default function App() {
 	const [activeTab, setActiveTab] = useState<Tab>("overview");
 	const [timeRange, setTimeRange] = useState<TimeRange>("24h");
 	const { t } = useTranslation();
+	const [requestSeq, setRequestSeq] = useState(0);
+	const [errorSeq, setErrorSeq] = useState(0);
 
 	const loadRecentRequests = useCallback(async () => {
+		const seq = requestSeq + 1;
+		setRequestSeq(seq);
 		try {
 			const isOverview = activeTab === "overview";
 			const page = isOverview ? overviewRequestPage : requestPage;
 			const pageSize = isOverview ? OVERVIEW_PAGE_SIZE : requestPageSize;
 			const res = await getRecentRequests(pageSize, page * pageSize);
+			if (seq !== requestSeq + 1) return;
 			setRecentRequests(res.data);
 			setRequestTotal(res.total);
 		} catch (err) {
 			console.error(err);
 		}
-	}, [activeTab, requestPage, overviewRequestPage, requestPageSize]);
+	}, [activeTab, requestPage, overviewRequestPage, requestPageSize, requestSeq]);
 
 	const loadRecentErrors = useCallback(async () => {
+		const seq = errorSeq + 1;
+		setErrorSeq(seq);
 		try {
 			const isOverview = activeTab === "overview";
 			const page = isOverview ? overviewErrorPage : errorPage;
 			const pageSize = isOverview ? OVERVIEW_PAGE_SIZE : errorPageSize;
 			const res = await getRecentErrors(pageSize, page * pageSize);
+			if (seq !== errorSeq + 1) return;
 			setRecentErrors(res.data);
 			setErrorTotal(res.total);
 		} catch (err) {
 			console.error(err);
 		}
-	}, [activeTab, errorPage, overviewErrorPage, errorPageSize]);
+	}, [activeTab, errorPage, overviewErrorPage, errorPageSize, errorSeq]);
 
 	const loadRecentLists = useCallback(async () => {
 		await Promise.all([loadRecentRequests(), loadRecentErrors()]);
