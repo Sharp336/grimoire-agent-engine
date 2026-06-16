@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
 	getBehaviorDashboardStats,
 	getCostDashboardStats,
@@ -52,40 +52,38 @@ export default function App() {
 	const [activeTab, setActiveTab] = useState<Tab>("overview");
 	const [timeRange, setTimeRange] = useState<TimeRange>("24h");
 	const { t } = useTranslation();
-	const [requestSeq, setRequestSeq] = useState(0);
-	const [errorSeq, setErrorSeq] = useState(0);
+	const requestSeqRef = useRef(0);
+	const errorSeqRef = useRef(0);
 
 	const loadRecentRequests = useCallback(async () => {
-		const seq = requestSeq + 1;
-		setRequestSeq(seq);
+		const seq = ++requestSeqRef.current;
 		try {
 			const isOverview = activeTab === "overview";
 			const page = isOverview ? overviewRequestPage : requestPage;
 			const pageSize = isOverview ? OVERVIEW_PAGE_SIZE : requestPageSize;
 			const res = await getRecentRequests(pageSize, page * pageSize);
-			if (seq !== requestSeq + 1) return;
+			if (seq !== requestSeqRef.current) return;
 			setRecentRequests(res.data);
 			setRequestTotal(res.total);
 		} catch (err) {
 			console.error(err);
 		}
-	}, [activeTab, requestPage, overviewRequestPage, requestPageSize, requestSeq]);
+	}, [activeTab, requestPage, overviewRequestPage, requestPageSize]);
 
 	const loadRecentErrors = useCallback(async () => {
-		const seq = errorSeq + 1;
-		setErrorSeq(seq);
+		const seq = ++errorSeqRef.current;
 		try {
 			const isOverview = activeTab === "overview";
 			const page = isOverview ? overviewErrorPage : errorPage;
 			const pageSize = isOverview ? OVERVIEW_PAGE_SIZE : errorPageSize;
 			const res = await getRecentErrors(pageSize, page * pageSize);
-			if (seq !== errorSeq + 1) return;
+			if (seq !== errorSeqRef.current) return;
 			setRecentErrors(res.data);
 			setErrorTotal(res.total);
 		} catch (err) {
 			console.error(err);
 		}
-	}, [activeTab, errorPage, overviewErrorPage, errorPageSize, errorSeq]);
+	}, [activeTab, errorPage, overviewErrorPage, errorPageSize]);
 
 	const loadRecentLists = useCallback(async () => {
 		await Promise.all([loadRecentRequests(), loadRecentErrors()]);
