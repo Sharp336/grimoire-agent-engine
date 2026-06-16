@@ -245,6 +245,9 @@ export interface CustomTool<TParams extends TSchema = TSchema, TDetails = any> {
 		theme: Theme,
 		args?: Static<TParams>,
 	) => Component;
+
+	/** If true, result rendering replaces the pending call preview once a result exists. */
+	mergeCallAndResult?: boolean;
 }
 
 /** Factory function that creates a custom tool or array of tools */

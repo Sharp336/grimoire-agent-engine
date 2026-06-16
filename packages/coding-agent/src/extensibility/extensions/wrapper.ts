@@ -19,6 +19,7 @@ export class RegisteredToolAdapter implements AgentTool<any, any, any> {
 	declare parameters: any;
 	declare label: string;
 	declare strict: boolean;
+	declare mergeCallAndResult?: boolean;
 
 	renderCall?: (args: any, options: any, theme: any) => any;
 	renderResult?: (result: any, options: any, theme: any, args?: any) => any;

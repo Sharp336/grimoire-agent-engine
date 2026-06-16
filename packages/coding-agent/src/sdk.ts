@@ -903,6 +903,7 @@ function customToolToDefinition(tool: CustomTool): ToolDefinition {
 		execute: (toolCallId, params, signal, onUpdate, ctx) =>
 			tool.execute(toolCallId, params, onUpdate, createCustomToolContext(ctx), signal),
 		onSession: tool.onSession ? (event, ctx) => tool.onSession?.(event, createCustomToolContext(ctx)) : undefined,
+		mergeCallAndResult: tool.mergeCallAndResult,
 		renderCall: tool.renderCall,
 		renderResult: tool.renderResult
 			? (result, options, theme): Component => {

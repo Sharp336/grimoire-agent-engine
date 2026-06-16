@@ -294,6 +294,7 @@ export const webSearchCustomTool: CustomTool<typeof webSearchSchema, SearchRende
 	renderResult(result, options: RenderResultOptions, theme: Theme, args) {
 		return renderSearchResult(result, options, theme, args);
 	},
+	mergeCallAndResult: true,
 };
 
 export function getSearchTools(): CustomTool<any, any>[] {

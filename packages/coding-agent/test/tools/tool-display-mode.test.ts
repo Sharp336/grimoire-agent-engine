@@ -6,6 +6,7 @@ import { getThemeByName, initTheme, setThemeInstance, type Theme } from "@oh-my-
 import { bashToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { evalToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/eval-render";
 import { sshToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ssh";
+import { webSearchCustomTool } from "@oh-my-pi/pi-coding-agent/web/search";
 import { renderSearchResult, type SearchRenderDetails } from "@oh-my-pi/pi-coding-agent/web/search/render";
 import type { SearchResponse } from "@oh-my-pi/pi-coding-agent/web/search/types";
 import type { TUI } from "@oh-my-pi/pi-tui";
@@ -197,7 +198,7 @@ describe("concise tool display mode", () => {
 		expect(expanded).toContain("EVAL_OUTPUT_SECRET");
 	});
 
-	it("keeps web search concise when collapsed and reveals query/answer/sources when expanded", () => {
+	it("keeps web search concise when collapsed and reveals query/answer/sources when expanded", async () => {
 		const response: SearchResponse = {
 			provider: "perplexity",
 			answer: "WEB_ANSWER_SECRET",
@@ -238,5 +239,26 @@ describe("concise tool display mode", () => {
 		expect(expanded).toContain("WEB_QUERY_SECRET");
 		expect(expanded).toContain("WEB_ANSWER_SECRET");
 		expect(expanded).toContain("WEB_SOURCE_TITLE_SECRET");
+
+		resetSettingsForTest();
+		await Settings.init({ inMemory: true, cwd: process.cwd(), overrides: { "tools.displayMode": "concise" } });
+		const ui = { requestRender() {} } as unknown as TUI;
+		const component = new ToolExecutionComponent(
+			"web_search",
+			{ _i: "Searching hidden web", query: "WEB_QUERY_SECRET" },
+			{},
+			webSearchCustomTool as never,
+			ui,
+			process.cwd(),
+		);
+		component.updateResult(result, false);
+
+		const customToolCollapsed = clean(component.render(120));
+		expect(customToolCollapsed).toContain("Web Search");
+		expect(customToolCollapsed).toContain("2 sources");
+		expect(customToolCollapsed).not.toContain("Provider: pending");
+		expect(customToolCollapsed).not.toContain("Sources: pending");
+		expect(customToolCollapsed).not.toContain("WEB_QUERY_SECRET");
+		expect(customToolCollapsed).not.toContain("WEB_ANSWER_SECRET");
 	});
 });

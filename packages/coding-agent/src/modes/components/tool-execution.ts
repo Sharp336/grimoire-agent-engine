@@ -781,6 +781,16 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		return !(this.#tool && (this.#tool.renderCall || this.#tool.renderResult)) && !(this.#toolName in toolRenderers);
 	}
 
+	#hidesResultDetailsInConcise(): boolean {
+		return (
+			this.#usesGenericFallback() ||
+			this.#toolName === "bash" ||
+			this.#toolName === "ssh" ||
+			this.#toolName === "eval" ||
+			this.#toolName === "web_search"
+		);
+	}
+
 	#rebuildDisplay(): void {
 		// Sync shared mutable render state for component closures
 		this.#renderState.expanded = this.#expanded;
@@ -997,7 +1007,7 @@ export class ToolExecutionComponent extends Container implements NativeScrollbac
 		}
 		this.#imageSpacers = [];
 
-		if (this.#result && !(this.#usesGenericFallback() && this.#conciseCollapsed())) {
+		if (this.#result && !(this.#hidesResultDetailsInConcise() && this.#conciseCollapsed())) {
 			const imageBlocks = this.#getAllImageBlocks();
 
 			for (let i = 0; i < imageBlocks.length; i++) {
