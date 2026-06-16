@@ -323,6 +323,13 @@ describe("okf/bundle.ensureWithinRoot", () => {
 		expect(() => ensureWithinRoot(child, root)).not.toThrow();
 	});
 
+	it("accepts equivalent Windows path casing and namespace prefixes", () => {
+		if (process.platform !== "win32") return;
+		const root = path.resolve(tmpDir);
+		const child = `\\\\?\\${path.join(root.toLowerCase(), "a", "b.md")}`;
+		expect(() => ensureWithinRoot(child, root.toUpperCase())).not.toThrow();
+	});
+
 	it("rejects paths outside root", () => {
 		const root = path.resolve(tmpDir);
 		const outside = path.resolve(tmpDir, "..", "escape.md");

@@ -1,10 +1,10 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Settings } from "../../src/config/settings";
 import { getBundleRoot, type OkfConceptSummary, writeConcept } from "../../src/okf/bundle";
-import { OkfSessionState } from "../../src/okf/state";
+import { OkfSessionState, startOkfLayer } from "../../src/okf/state";
 import type { OkfSearchResult, OkfStore } from "../../src/okf/store/types";
 
 class FakeOkfStore implements OkfStore {
@@ -22,7 +22,7 @@ class FakeOkfStore implements OkfStore {
 
 	async delete(): Promise<void> {}
 
-	async list(): Promise<[]> {
+	async list(): Promise<OkfConceptSummary[]> {
 		return [];
 	}
 
@@ -47,7 +47,34 @@ class FakeOkfStore implements OkfStore {
 	async close(): Promise<void> {}
 }
 
+afterEach(() => {
+	vi.restoreAllMocks();
+});
+
 describe("okf/state OkfSessionState", () => {
+	it("does not block startup on the initial reindex", async () => {
+		const cwd = await mkdtemp(path.join(os.tmpdir(), "okf-start-"));
+		const finishReindex = Promise.withResolvers<number>();
+		const reindexSpy = vi
+			.spyOn(OkfSessionState.prototype, "reindex")
+			.mockImplementation(async () => await finishReindex.promise);
+		const settings = Settings.isolated();
+		settings.set("okf.enabled", true);
+		settings.set("okf.reindexOnStart", true);
+		settings.set("okf.store", "sqlite");
+		const startup = startOkfLayer({ sessionId: "session", settings, cwd, taskDepth: 0 });
+		try {
+			const result = await Promise.race([startup, Bun.sleep(100).then(() => "blocked" as const)]);
+
+			expect(result).toBeInstanceOf(OkfSessionState);
+			expect(reindexSpy).toHaveBeenCalledTimes(1);
+		} finally {
+			finishReindex.resolve(0);
+			const state = await startup.catch(() => undefined);
+			state?.dispose();
+			await rm(cwd, { recursive: true, force: true });
+		}
+	});
 	it("injects auto-recall only for the first user turn", async () => {
 		const settings = Settings.isolated();
 		settings.set("okf.autoRecall", true);

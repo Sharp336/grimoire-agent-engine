@@ -1,10 +1,12 @@
 import { describe, expect, it } from "bun:test";
-import type { HindsightApi } from "../../src/hindsight/client";
+import type { HindsightApi, RecallOptions } from "../../src/hindsight/client";
 import { HindsightOkfStore } from "../../src/okf/store/store-hindsight";
 
 class FakeHindsightApi {
 	readonly documents = new Map<string, Record<string, unknown>>();
 	readonly deletedIds: string[] = [];
+	readonly recallRequests: { query: string; options?: RecallOptions }[] = [];
+	recallResults: unknown[] = [];
 
 	async createBank(): Promise<void> {}
 
@@ -26,8 +28,9 @@ class FakeHindsightApi {
 		return { items, total: items.length };
 	}
 
-	async recall(): Promise<{ results: unknown[] }> {
-		return { results: [] };
+	async recall(_bankId: string, query: string, options?: RecallOptions): Promise<{ results: unknown[] }> {
+		this.recallRequests.push({ query, options });
+		return { results: this.recallResults };
 	}
 }
 
@@ -62,5 +65,36 @@ describe("okf/store HindsightOkfStore", () => {
 		expect(listed[0]?.tags).toEqual(["auth"]);
 		expect(missing).toBeUndefined();
 		expect(count).toBe(1);
+	});
+
+	it("recalls only strict OKF-tagged Hindsight memories", async () => {
+		const api = new FakeHindsightApi();
+		const store = new HindsightOkfStore(api as unknown as HindsightApi, "knowledge");
+
+		await store.search("orders", { limit: 3 });
+
+		expect(api.recallRequests[0]?.options?.tags).toEqual(["okf"]);
+		expect(api.recallRequests[0]?.options?.tagsMatch).toBe("all_strict");
+	});
+
+	it("links recall results with the stored OKF concept id", async () => {
+		const api = new FakeHindsightApi();
+		api.recallResults = [
+			{
+				id: "fact-123",
+				metadata: {
+					okf_id: "tables/orders",
+					type: "Table",
+					title: "Orders",
+					description: "Orders schema",
+				},
+			},
+		];
+		const store = new HindsightOkfStore(api as unknown as HindsightApi, "knowledge");
+
+		const results = await store.search("orders");
+
+		expect(results[0]?.id).toBe("tables/orders");
+		expect(results[0]?.title).toBe("Orders");
 	});
 });

@@ -240,16 +240,20 @@ export async function startOkfLayer(options: {
 
 	const state = new OkfSessionState({ sessionId, settings, cwd, store });
 
-	// Reindex on start if enabled.
+	// Reindex on start if enabled. This must never block CLI startup: large
+	// bundles and Hindsight-backed stores can take seconds to reconcile. The
+	// store is available immediately, and the index catches up in the background.
 	if (settings.get("okf.reindexOnStart")) {
-		try {
-			const count = await state.reindex();
-			if (count > 0) {
-				logger.debug("OKF: concepts indexed", { count, backend });
+		void (async () => {
+			try {
+				const count = await state.reindex();
+				if (count > 0) {
+					logger.debug("OKF: concepts indexed", { count, backend });
+				}
+			} catch (error) {
+				logger.warn("OKF: reindex failed", { error: error instanceof Error ? error.message : String(error) });
 			}
-		} catch (error) {
-			logger.warn("OKF: reindex failed", { error: error instanceof Error ? error.message : String(error) });
-		}
+		})();
 	}
 
 	return state;

@@ -591,9 +591,34 @@ export async function fingerprint(root: string): Promise<string> {
 
 /** Throw if `targetPath` escapes `rootPath` (path-traversal guard). */
 export function ensureWithinRoot(targetPath: string, rootPath: string): void {
-	if (targetPath !== rootPath && !targetPath.startsWith(`${rootPath}${path.sep}`)) {
+	const target = comparablePath(targetPath);
+	const root = comparablePath(rootPath);
+	const relative = path.relative(root, target);
+	if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
 		throw new Error("Path escapes the OKF bundle root");
 	}
+}
+
+function comparablePath(value: string): string {
+	const normalized = trimTrailingSeparators(stripWindowsNamespace(path.normalize(path.resolve(value))));
+	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function stripWindowsNamespace(value: string): string {
+	if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
+	if (value.startsWith("\\\\?\\")) return value.slice(4);
+	return value;
+}
+
+function trimTrailingSeparators(value: string): string {
+	const root = path.parse(value).root;
+	let end = value.length;
+	while (end > root.length) {
+		const char = value[end - 1];
+		if (char !== "/" && char !== "\\") break;
+		end--;
+	}
+	return end === value.length ? value : value.slice(0, end);
 }
 
 /** Resolve target + root through symlinks and assert the real target stays

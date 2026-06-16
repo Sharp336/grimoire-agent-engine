@@ -93,19 +93,24 @@ export class HindsightOkfStore implements OkfStore {
 		try {
 			const response = await this.#api.recall(this.#bankId, query, {
 				tags: [OKF_TAG],
-				tagsMatch: "all",
+				tagsMatch: "all_strict",
 				maxTokens: limit * 500,
 				budget: "mid",
 			});
 			const results = (response as { results?: unknown[] }).results ?? [];
 			return results.slice(0, limit).map((r, i) => {
 				const item = r as Record<string, unknown>;
-				const id = String(item.document_id ?? item.id ?? `result-${i}`);
+				const metadata = asRecord(item.metadata);
+				const id =
+					optionalString(metadata.okf_id) ??
+					optionalString(item.document_id) ??
+					optionalString(item.id) ??
+					`result-${i}`;
 				return {
 					id,
-					type: String((item.metadata as Record<string, unknown>)?.type ?? "Reference"),
-					title: (item.metadata as Record<string, unknown>)?.title as string | undefined,
-					description: String((item.metadata as Record<string, unknown>)?.description ?? ""),
+					type: optionalString(metadata.type) ?? "Reference",
+					title: optionalString(metadata.title),
+					description: optionalString(metadata.description) ?? "",
 					tags: [],
 					score: i,
 				};
@@ -131,15 +136,23 @@ function documentHasOkfTag(doc: Record<string, unknown> | null): doc is Record<s
 	return documentTags(doc).includes(OKF_TAG);
 }
 
+function asRecord(value: unknown): Record<string, unknown> {
+	return value !== null && typeof value === "object" ? (value as Record<string, unknown>) : {};
+}
+
+function optionalString(value: unknown): string | undefined {
+	return typeof value === "string" && value ? value : undefined;
+}
+
 function documentTags(doc: Record<string, unknown>): string[] {
-	const metadata = (doc.metadata ?? {}) as Record<string, unknown>;
+	const metadata = asRecord(doc.metadata);
 	const tagsValue = metadata.tags ?? doc.tags;
 	return Array.isArray(tagsValue) ? tagsValue.filter((t): t is string => typeof t === "string") : [];
 }
 
 function documentToSummary(doc: Record<string, unknown>, fallbackId: string): OkfConceptSummary | undefined {
-	const metadata = (doc.metadata ?? {}) as Record<string, unknown>;
-	const id = String(metadata.okf_id ?? doc.id ?? fallbackId);
+	const metadata = asRecord(doc.metadata);
+	const id = optionalString(metadata.okf_id) ?? optionalString(doc.id) ?? fallbackId;
 	const tags = documentTags(doc).filter(tag => tag !== OKF_TAG);
 	return {
 		id,
