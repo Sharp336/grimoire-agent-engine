@@ -57,10 +57,25 @@ describe("matchesKey", () => {
 		setKittyProtocolActive(false);
 	});
 
-	it("keeps NumLock keypad digits as text instead of navigation keys", () => {
+	it("keeps encoded named keys on the native normalized path", () => {
 		setKittyProtocolActive(true);
-		expect(matchesKey("\x1b[57400;129u", "1")).toBe(true);
-		expect(matchesKey("\x1b[57400;129u", "end")).toBe(false);
+		expect(matchesKey("\x1b[32u", "space")).toBe(true);
+		expect(matchesKey("\x1b[27;1;32~", "space")).toBe(true);
+		expect(matchesKey("\x1b[27;1;127~", "backspace")).toBe(true);
+		expect(parseKey("\x1b[32u")).toBe("space");
+		expect(parseKey("\x1b[27;1;32~")).toBe("space");
+		expect(parseKey("\x1b[27;1;127~")).toBe("backspace");
+		setKittyProtocolActive(false);
+	});
+
+	it("keeps keypad digits as text with or without NumLock modifier", () => {
+		setKittyProtocolActive(true);
+		for (const data of ["\x1b[57400u", "\x1b[57400;129u"]) {
+			expect(matchesKey(data, "1")).toBe(true);
+			expect(matchesKey(data, "end")).toBe(false);
+		}
+		expect(matchesKey("\x1b[57404u", "5")).toBe(true);
+		expect(matchesKey("\x1b[57404u", "clear")).toBe(false);
 		setKittyProtocolActive(false);
 	});
 
@@ -124,9 +139,11 @@ describe("parseKey", () => {
 		setKittyProtocolActive(false);
 	});
 
-	it("parses NumLock keypad digits as digits", () => {
+	it("parses keypad digits as digits with or without NumLock modifier", () => {
 		setKittyProtocolActive(true);
+		expect(parseKey("\x1b[57400u")).toBe("1");
 		expect(parseKey("\x1b[57400;129u")).toBe("1");
+		expect(parseKey("\x1b[57404u")).toBe("5");
 		setKittyProtocolActive(false);
 	});
 
@@ -153,8 +170,10 @@ describe("parseKey", () => {
 });
 
 describe("extractPrintableText", () => {
-	it("extracts NumLock keypad digits from Kitty CSI-u sequences", () => {
+	it("extracts keypad digits from Kitty CSI-u sequences", () => {
+		expect(extractPrintableText("\x1b[57407u")).toBe("8");
 		expect(extractPrintableText("\x1b[57407;129u")).toBe("8");
+		expect(extractPrintableText("\x1b[57404u")).toBe("5");
 	});
 
 	it("extracts keypad operators from Kitty CSI-u sequences", () => {

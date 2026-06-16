@@ -606,13 +606,11 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 			if let Some(text_codepoint) = keypad_operator_text_codepoint(parsed_codepoint) {
 				parsed_codepoint = text_codepoint;
 				parsed_base = None;
-			} else if p.modifier & MOD_NUM_LOCK != 0 {
-				if actual_mod == 0
-					&& let Some(text_codepoint) = keypad_num_lock_text_codepoint(parsed_codepoint)
-				{
+			} else if actual_mod == 0 {
+				if let Some(text_codepoint) = keypad_num_lock_text_codepoint(parsed_codepoint) {
 					parsed_codepoint = text_codepoint;
 					parsed_base = None;
-				} else {
+				} else if p.modifier & MOD_NUM_LOCK != 0 {
 					if let Some(mapped) = map_keypad_nav(parsed_codepoint) {
 						parsed_codepoint = mapped;
 					}
@@ -674,7 +672,7 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 		}
 
 		if modifier == 0 {
-			return bytes == b" " || kitty_matches(CP_SPACE, 0);
+			return bytes == b" " || kitty_matches(CP_SPACE, 0) || mok_matches(CP_SPACE, 0);
 		}
 		return kitty_matches(CP_SPACE, modifier) || mok_matches(CP_SPACE, modifier);
 	}
@@ -695,7 +693,7 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 
 		// plain tab (treat LF/CR elsewhere)
 		if modifier == 0 {
-			return bytes == b"\t" || kitty_matches(CP_TAB, 0);
+			return bytes == b"\t" || kitty_matches(CP_TAB, 0) || mok_matches(CP_TAB, 0);
 		}
 
 		// ctrl+tab etc are only distinguishable in enhanced modes (CSI-u /
@@ -716,7 +714,9 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 				|| bytes == b"\n"
 				|| bytes == b"\x1bOM"
 				|| kitty_matches(CP_ENTER, 0)
-				|| kitty_matches(CP_KP_ENTER, 0);
+				|| kitty_matches(CP_KP_ENTER, 0)
+				|| mok_matches(CP_ENTER, 0)
+				|| mok_matches(CP_KP_ENTER, 0);
 		}
 
 		// modified enter is only reliably representable when encoded (CSI-u /
@@ -738,7 +738,7 @@ fn matches_key_inner(bytes: &[u8], key_id: &str, kitty_protocol_active: bool) ->
 		}
 
 		if modifier == 0 {
-			return bytes == b"\x7f" || bytes == b"\x08" || kitty_matches(CP_BACKSPACE, 0);
+			return bytes == b"\x7f" || bytes == b"\x08" || kitty_matches(CP_BACKSPACE, 0) || mok_matches(CP_BACKSPACE, 0);
 		}
 
 		return kitty_matches(CP_BACKSPACE, modifier) || mok_matches(CP_BACKSPACE, modifier);
@@ -1408,8 +1408,7 @@ fn format_kitty_key(parsed: &ParsedKittySequence) -> Option<Cow<'static, str>> {
 		{
 			return Some(Cow::Borrowed(key_name));
 		}
-		if parsed.modifier & MOD_NUM_LOCK != 0
-			&& let Some(text_codepoint) = keypad_num_lock_text_codepoint(parsed.codepoint)
+		if let Some(text_codepoint) = keypad_num_lock_text_codepoint(parsed.codepoint)
 			&& let Some(key_name) = format_key_name(text_codepoint)
 		{
 			return Some(Cow::Borrowed(key_name));
@@ -1608,10 +1607,23 @@ mod tests {
 	}
 
 	#[test]
-	fn num_lock_keypad_digits_stay_text() {
-		assert_eq!(parse_key_inner(b"\x1b[57400;129u", true).as_deref(), Some("1"));
-		assert!(matches_key_inner(b"\x1b[57400;129u", "1", true));
-		assert!(!matches_key_inner(b"\x1b[57400;129u", "end", true));
+	fn modify_other_keys_named_keys_stay_normalized() {
+		assert!(matches_key_inner(b"\x1b[27;1;32~", "space", true));
+		assert!(matches_key_inner(b"\x1b[27;1;127~", "backspace", true));
+		assert_eq!(parse_key_inner(b"\x1b[27;1;32~", true).as_deref(), Some("space"));
+		assert_eq!(parse_key_inner(b"\x1b[27;1;127~", true).as_deref(), Some("backspace"));
+	}
+
+	#[test]
+	fn keypad_digits_stay_text_with_or_without_num_lock_modifier() {
+		for bytes in [b"\x1b[57400u".as_slice(), b"\x1b[57400;129u".as_slice()] {
+			assert_eq!(parse_key_inner(bytes, true).as_deref(), Some("1"));
+			assert!(matches_key_inner(bytes, "1", true));
+			assert!(!matches_key_inner(bytes, "end", true));
+		}
+		assert_eq!(parse_key_inner(b"\x1b[57404u", true).as_deref(), Some("5"));
+		assert!(matches_key_inner(b"\x1b[57404u", "5", true));
+		assert!(!matches_key_inner(b"\x1b[57404u", "clear", true));
 	}
 
 	#[test]

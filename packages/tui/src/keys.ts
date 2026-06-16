@@ -302,7 +302,6 @@ const KITTY_MOD_SHIFT = 1;
 const KITTY_MOD_ALT = 2;
 const KITTY_MOD_CTRL = 4;
 const KITTY_MOD_SUPER = 8;
-const KITTY_MOD_NUM_LOCK = 128;
 const KITTY_LOCK_MASK = 64 + 128; // Caps Lock + Num Lock
 const MODIFY_OTHER_KEYS_PATTERN = /^\x1b\[27;(\d+);(\d+)~$/;
 const KITTY_KEYPAD_OPERATOR_TEXT: Record<number, string> = {
@@ -409,7 +408,7 @@ function decodeKittyPrintable(data: string): string | undefined {
 			.split(":")
 			.filter(Boolean)
 			.map(value => Number.parseInt(value, 10))
-			.filter(value => Number.isFinite(value) && value >= 32);
+			.filter(value => Number.isFinite(value) && value >= 32 && value !== 127);
 		if (codepoints.length > 0) {
 			try {
 				return String.fromCodePoint(...codepoints);
@@ -421,7 +420,7 @@ function decodeKittyPrintable(data: string): string | undefined {
 	const keypadOperatorText = KITTY_KEYPAD_OPERATOR_TEXT[codepoint];
 	if (keypadOperatorText) return keypadOperatorText;
 
-	if (effectiveMod === 0 && modifier & KITTY_MOD_NUM_LOCK) {
+	if (effectiveMod === 0) {
 		const numpadText = KITTY_NUMPAD_TEXT[codepoint];
 		if (numpadText) return numpadText;
 	}
@@ -435,7 +434,7 @@ function decodeKittyPrintable(data: string): string | undefined {
 		return undefined;
 	}
 
-	if (!Number.isFinite(effectiveCodepoint) || effectiveCodepoint < 32) return undefined;
+	if (!Number.isFinite(effectiveCodepoint) || effectiveCodepoint < 32 || effectiveCodepoint === 127) return undefined;
 
 	try {
 		return String.fromCodePoint(effectiveCodepoint);
@@ -486,7 +485,7 @@ function decodeModifyOtherKeysPrintable(data: string): string | undefined {
 	if (!parsed) return undefined;
 	const modifier = parsed.modifier & ~KITTY_LOCK_MASK;
 	if ((modifier & ~KITTY_MOD_SHIFT) !== 0) return undefined;
-	if (!Number.isFinite(parsed.codepoint) || parsed.codepoint < 32) return undefined;
+	if (!Number.isFinite(parsed.codepoint) || parsed.codepoint < 32 || parsed.codepoint === 127) return undefined;
 	try {
 		return String.fromCodePoint(parsed.codepoint);
 	} catch {
@@ -502,6 +501,45 @@ function decodeModifyOtherKeysPrintable(data: string): string | undefined {
  */
 export function decodePrintableKey(data: string): string | undefined {
 	return decodeKittyPrintable(data) ?? decodeModifyOtherKeysPrintable(data);
+}
+
+function decodeKeypadDigitKey(data: string): string | undefined {
+	const match = data.match(KITTY_CSI_U_PATTERN);
+	if (!match) return undefined;
+	if (match[5] === "3") return undefined;
+	const codepoint = Number.parseInt(match[1] ?? "", 10);
+	if (!Number.isFinite(codepoint)) return undefined;
+	const modValue = match[4] ? Number.parseInt(match[4], 10) : 1;
+	const modifier = Number.isFinite(modValue) ? modValue - 1 : 0;
+	const effectiveMod = modifier & ~KITTY_LOCK_MASK;
+	if (effectiveMod !== 0) return undefined;
+	return KITTY_NUMPAD_TEXT[codepoint];
+}
+
+function decodeEncodedNamedKey(data: string): string | undefined {
+	const kittyMatch = data.match(KITTY_CSI_U_PATTERN);
+	if (kittyMatch) {
+		if (kittyMatch[5] === "3") return undefined;
+		const codepoint = Number.parseInt(kittyMatch[1] ?? "", 10);
+		if (!Number.isFinite(codepoint)) return undefined;
+		const modValue = kittyMatch[4] ? Number.parseInt(kittyMatch[4], 10) : 1;
+		const modifier = Number.isFinite(modValue) ? modValue - 1 : 0;
+		if ((modifier & ~KITTY_LOCK_MASK) !== 0) return undefined;
+		if (codepoint === 32) return "space";
+		if (codepoint === 127) return "backspace";
+		if (codepoint === 9) return "tab";
+		if (codepoint === 13 || codepoint === 57414) return "enter";
+		return undefined;
+	}
+
+	const modifyOtherKeys = parseModifyOtherKeysSequence(data);
+	if (!modifyOtherKeys) return undefined;
+	if ((modifyOtherKeys.modifier & ~KITTY_LOCK_MASK) !== 0) return undefined;
+	if (modifyOtherKeys.codepoint === 32) return "space";
+	if (modifyOtherKeys.codepoint === 127) return "backspace";
+	if (modifyOtherKeys.codepoint === 9) return "tab";
+	if (modifyOtherKeys.codepoint === 13 || modifyOtherKeys.codepoint === 57414) return "enter";
+	return undefined;
 }
 
 /**
@@ -521,6 +559,10 @@ export function decodePrintableKey(data: string): string | undefined {
  * @param keyId - Key identifier (e.g., "ctrl+c", "escape", Key.ctrl("c"))
  */
 export function matchesKey(data: string, keyId: KeyId): boolean {
+	const keypadDigit = decodeKeypadDigitKey(data);
+	if (keypadDigit !== undefined) return keyId === keypadDigit;
+	const encodedNamedKey = decodeEncodedNamedKey(data);
+	if (encodedNamedKey !== undefined && keyId === encodedNamedKey) return true;
 	return matchesKeyNative(data, keyId, kittyProtocolActive);
 }
 
@@ -533,5 +575,5 @@ export function matchesKey(data: string, keyId: KeyId): boolean {
  * @param data - Raw input data from terminal
  */
 export function parseKey(data: string): string | undefined {
-	return parseKeyNative(data, kittyProtocolActive) ?? undefined;
+	return decodeKeypadDigitKey(data) ?? parseKeyNative(data, kittyProtocolActive) ?? undefined;
 }
