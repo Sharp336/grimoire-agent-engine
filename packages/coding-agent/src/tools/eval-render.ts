@@ -17,7 +17,7 @@ import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { formatContextUsage } from "../modes/components/status-line/context-thresholds";
 import { truncateToVisualLines } from "../modes/components/visual-truncate";
 import { getMarkdownTheme, type Theme } from "../modes/theme/theme";
-import { markFramedBlockComponent, renderCodeCell } from "../tui";
+import { CachedOutputBlock, markFramedBlockComponent, renderCodeCell, renderStatusLine } from "../tui";
 import {
 	JSON_TREE_MAX_DEPTH_COLLAPSED,
 	JSON_TREE_MAX_DEPTH_EXPANDED,
@@ -30,7 +30,9 @@ import {
 import { formatStyledTruncationWarning, stripOutputNotice } from "./output-meta";
 import {
 	formatBadge,
+	formatCount,
 	formatDuration,
+	formatExpandHint,
 	formatStatusIcon,
 	formatTitle,
 	previewWindowRows,
@@ -87,6 +89,82 @@ function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
 		});
 	}
 	return out;
+}
+
+function isConciseCollapsed(options: Pick<RenderResultOptions, "displayMode">, expanded: boolean | undefined): boolean {
+	return options.displayMode === "concise" && expanded !== true;
+}
+
+function formatEvalLanguageLabel(languages: readonly EvalLanguage[]): string | undefined {
+	if (languages.length === 0) return undefined;
+	if (languages.length === 1) return languages[0] === "js" ? "JavaScript" : "Python";
+	return "Python, JavaScript";
+}
+
+function collectEvalLanguages(cells: readonly { language?: EvalLanguage }[], fallback?: EvalLanguage): EvalLanguage[] {
+	let hasPython = fallback === "python";
+	let hasJs = fallback === "js";
+	for (const cell of cells) {
+		if (cell.language === "js") hasJs = true;
+		else if (cell.language === "python") hasPython = true;
+	}
+	const languages: EvalLanguage[] = [];
+	if (hasPython) languages.push("python");
+	if (hasJs) languages.push("js");
+	return languages;
+}
+
+function formatConciseEvalMetadata(
+	cellCount: number | undefined,
+	languages: readonly EvalLanguage[],
+): readonly string[] {
+	const languageLabel = formatEvalLanguageLabel(languages);
+	if (cellCount !== undefined) {
+		const cellLabel = formatCount("cell", cellCount);
+		return [languageLabel ? `${cellLabel} · ${languageLabel}` : cellLabel];
+	}
+	return languageLabel ? [languageLabel] : [];
+}
+
+function formatConciseEvalLines(
+	uiTheme: Theme,
+	options: { intent?: string; metadata?: readonly string[] },
+): string[] {
+	const lines: string[] = [];
+	const append = (text: string) => {
+		lines.push(`${uiTheme.fg("dim", uiTheme.tree.branch)} ${uiTheme.fg("dim", text)}`);
+	};
+	if (options.intent) append(options.intent);
+	for (const item of options.metadata ?? []) {
+		if (item) append(item);
+	}
+	lines.push(`${uiTheme.fg("dim", uiTheme.tree.last)} ${formatExpandHint(uiTheme, false, true)}`);
+	return lines;
+}
+
+function renderConciseEvalBlock(
+	header: string,
+	state: "pending" | "success" | "error",
+	uiTheme: Theme,
+	options: { intent?: string; metadata?: readonly string[] },
+): Component {
+	const outputBlock = new CachedOutputBlock();
+	return markFramedBlockComponent({
+		render(width: number): readonly string[] {
+			return outputBlock.render(
+				{
+					header,
+					state,
+					sections: [{ lines: formatConciseEvalLines(uiTheme, options) }],
+					width,
+				},
+				uiTheme,
+			);
+		},
+		invalidate() {
+			outputBlock.invalidate();
+		},
+	});
 }
 
 type AgentEventStatus = "pending" | "running" | "completed" | "failed" | "aborted";
@@ -484,6 +562,14 @@ export const evalToolRenderer = {
 	renderCall(args: EvalRenderArgs, options: RenderResultOptions, uiTheme: Theme): Component {
 		const cells = getRenderCells(args);
 
+		if (isConciseCollapsed(options, options.expanded)) {
+			const header = renderStatusLine({ icon: "pending", title: "Eval" }, uiTheme);
+			return renderConciseEvalBlock(header, "pending", uiTheme, {
+				intent: options.intent,
+				metadata: formatConciseEvalMetadata(cells.length, collectEvalLanguages(cells)),
+			});
+		}
+
 		if (cells.length === 0) {
 			const promptSym = uiTheme.fg("accent", ">>>");
 			const text = formatTitle(`${promptSym} …`, uiTheme);
@@ -535,12 +621,42 @@ export const evalToolRenderer = {
 	},
 
 	renderResult(
-		result: { content: Array<{ type: string; text?: string }>; details?: EvalToolDetails },
+		result: {
+			content: Array<{ type: string; text?: string }>;
+			details?: EvalToolDetails;
+			isError?: boolean;
+		},
 		options: RenderResultOptions & { renderContext?: EvalRenderContext },
 		uiTheme: Theme,
-		_args?: EvalRenderArgs,
+		args?: EvalRenderArgs,
 	): Component {
 		const details = result.details;
+		const resultExpanded = options.renderContext?.expanded ?? options.expanded;
+		if (isConciseCollapsed(options, resultExpanded)) {
+			const cellResults = details?.cells ?? [];
+			const renderCells = cellResults.length > 0 ? [] : getRenderCells(args);
+			const cellCount = cellResults.length > 0 ? cellResults.length : renderCells.length || undefined;
+			const isError =
+				result.isError === true || details?.isError === true || cellResults.some(cell => cell.status === "error");
+			const header = renderStatusLine(
+				options.isPartial
+					? { icon: "pending", title: "Eval" }
+					: isError
+						? { icon: "error", title: "Eval" }
+						: { iconOverride: uiTheme.styledSymbol("tool.eval", "accent"), title: "Eval" },
+				uiTheme,
+			);
+			const languages =
+				details?.languages && details.languages.length > 0
+					? details.languages
+					: cellResults.length > 0
+						? collectEvalLanguages(cellResults, details?.language)
+						: collectEvalLanguages(renderCells, details?.language);
+			return renderConciseEvalBlock(header, options.isPartial ? "pending" : isError ? "error" : "success", uiTheme, {
+				intent: options.intent,
+				metadata: [...(isError ? ["Failed"] : []), ...formatConciseEvalMetadata(cellCount, languages)],
+			});
+		}
 
 		const rawOutput =
 			options.renderContext?.output ?? (result.content?.find(c => c.type === "text")?.text ?? "").trimEnd();

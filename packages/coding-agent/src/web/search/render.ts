@@ -26,6 +26,60 @@ import type { SearchResponse } from "./types";
 
 const MAX_COLLAPSED_ITEMS = PREVIEW_LIMITS.COLLAPSED_ITEMS;
 
+function isConciseCollapsed(options: Pick<RenderResultOptions, "displayMode" | "expanded">): boolean {
+	return options.displayMode === "concise" && options.expanded !== true;
+}
+
+function formatConciseSearchLines(
+	theme: Theme,
+	options: { intent?: string; metadata?: readonly string[] },
+): string[] {
+	const lines: string[] = [];
+	const append = (text: string) => {
+		lines.push(`${theme.fg("dim", theme.tree.branch)} ${theme.fg("dim", text)}`);
+	};
+	if (options.intent) append(options.intent);
+	for (const item of options.metadata ?? []) {
+		if (item) append(item);
+	}
+	lines.push(`${theme.fg("dim", theme.tree.last)} ${formatExpandHint(theme, false, true)}`);
+	return lines;
+}
+
+function renderConciseSearchPanel(
+	header: string,
+	state: "pending" | "success" | "warning" | "error",
+	theme: Theme,
+	options: { intent?: string; metadata?: readonly string[] },
+): Component {
+	const outputBlock = new CachedOutputBlock();
+	return markFramedBlockComponent({
+		render(width: number): readonly string[] {
+			return outputBlock.render(
+				{
+					header,
+					state,
+					sections: [{ lines: formatConciseSearchLines(theme, options) }],
+					width,
+				},
+				theme,
+			);
+		},
+		invalidate() {
+			outputBlock.invalidate();
+		},
+	});
+}
+
+function getProviderLabel(provider: SearchResponse["provider"] | undefined): string | undefined {
+	if (!provider) return undefined;
+	return provider !== "none" ? getSearchProviderLabel(provider) : "None";
+}
+
+function getErrorProviderLabel(provider: SearchResponse["provider"] | undefined): string | undefined {
+	return provider && provider !== "none" ? getSearchProviderLabel(provider) : undefined;
+}
+
 function renderFallbackText(contentText: string, expanded: boolean, theme: Theme): Component {
 	const lines = contentText.split("\n").filter(line => line.trim());
 	const maxLines = expanded ? lines.length : 6;
@@ -76,7 +130,11 @@ function renderSearchErrorPanel(message: string, providerLabel: string | undefin
 
 /** Render web search result with tree-based layout */
 export function renderSearchResult(
-	result: { content: Array<{ type: string; text?: string }>; details?: SearchRenderDetails },
+	result: {
+		content: Array<{ type: string; text?: string }>;
+		details?: SearchRenderDetails;
+		isError?: boolean;
+	},
 	options: RenderResultOptions,
 	theme: Theme,
 	args?: {
@@ -85,17 +143,52 @@ export function renderSearchResult(
 	},
 ): Component {
 	const details = result.details;
+	const response = details?.response;
+
+	if (isConciseCollapsed(options)) {
+		const sources = response && Array.isArray(response.sources) ? response.sources : undefined;
+		const sourceCount = sources?.length;
+		const providerLabel = getProviderLabel(response?.provider);
+		const isError = result.isError === true || details?.error !== undefined;
+		const state: "pending" | "success" | "warning" | "error" = isError
+			? "error"
+			: options.isPartial
+				? "pending"
+				: sourceCount !== undefined && sourceCount > 0
+					? "success"
+					: "warning";
+		const header = renderStatusLine(
+			state === "success"
+				? {
+						iconOverride: theme.styledSymbol("tool.webSearch", "accent"),
+						title: "Web Search",
+						description: providerLabel,
+						meta: sourceCount !== undefined ? [formatCount("source", sourceCount)] : undefined,
+					}
+				: {
+						icon: state,
+						title: "Web Search",
+						description: providerLabel,
+						meta: sourceCount !== undefined ? [formatCount("source", sourceCount)] : undefined,
+					},
+			theme,
+		);
+		return renderConciseSearchPanel(header, state, theme, {
+			intent: options.intent,
+			metadata: [
+				...(isError ? ["Failed"] : []),
+				...(providerLabel ? [] : ["Provider: pending"]),
+				...(sourceCount === undefined ? ["Sources: pending"] : []),
+			],
+		});
+	}
 
 	// Handle error case as a framed panel, matching the success layout.
 	if (details?.error) {
-		const errorProvider = details.response?.provider;
-		const errorProviderLabel =
-			errorProvider && errorProvider !== "none" ? getSearchProviderLabel(errorProvider) : undefined;
-		return renderSearchErrorPanel(details.error, errorProviderLabel, theme);
+		return renderSearchErrorPanel(details.error, getErrorProviderLabel(response?.provider), theme);
 	}
 
 	const rawText = result.content?.find(block => block.type === "text")?.text?.trim() ?? "";
-	const response = details?.response;
 	if (!response) {
 		return renderFallbackText(rawText, options.expanded, theme);
 	}
@@ -111,7 +204,7 @@ export function renderSearchResult(
 	const answerText = typeof response.answer === "string" ? response.answer.trim() : "";
 	const contentText = answerText || rawText;
 
-	const providerLabel = provider !== "none" ? getSearchProviderLabel(provider) : "None";
+	const providerLabel = getProviderLabel(provider) ?? "None";
 	const queryPreview = args?.query
 		? truncateToWidth(args.query, 80)
 		: searchQueries[0]
@@ -247,9 +340,16 @@ export function renderSearchResult(
 /** Render web search call (query preview) */
 export function renderSearchCall(
 	args: { query?: string; [key: string]: unknown },
-	_options: RenderResultOptions,
+	options: RenderResultOptions,
 	theme: Theme,
 ): Component {
+	if (isConciseCollapsed(options)) {
+		const header = renderStatusLine({ icon: "pending", title: "Web Search" }, theme);
+		return renderConciseSearchPanel(header, "pending", theme, {
+			intent: options.intent,
+			metadata: ["Provider: pending", "Sources: pending"],
+		});
+	}
 	const query = truncateToWidth(args.query ?? "", 80);
 	const text = renderStatusLine({ icon: "pending", title: "Web Search", description: query }, theme);
 	return new Text(text, 0, 0);
