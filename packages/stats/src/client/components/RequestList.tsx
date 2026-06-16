@@ -24,7 +24,7 @@ export function RequestList({ requests, total, page, pageSize, onPageChange, onS
 	};
 
 	return (
-		<div className="surface overflow-hidden flex flex-col h-full">
+		<div className="surface overflow-hidden flex flex-col" style={{ height: "calc(100vh - 200px)" }}>
 			<div className="px-5 py-4 border-b border-[var(--border-subtle)]">
 				<h3 className="text-sm font-semibold text-[var(--text-primary)]">{title}</h3>
 			</div>
@@ -103,7 +103,7 @@ export function RequestList({ requests, total, page, pageSize, onPageChange, onS
 			</div>
 			<div className="px-5 py-3 border-t border-[var(--border-subtle)] flex items-center justify-between">
 				<div className="text-sm text-[var(--text-muted)]">
-					{t("requestList.showing", { start: page * pageSize + 1, end: Math.min((page + 1) * pageSize, total), total })}
+				{total === 0 ? t("requestList.noRequests") : t("requestList.showing", { start: page * pageSize + 1, end: Math.min((page + 1) * pageSize, total), total })}
 				</div>
 				<div className="flex gap-2 items-center">
 					<button

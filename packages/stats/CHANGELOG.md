@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+### Added
+
+- Added i18n support (English/Chinese) to the stats dashboard with locale persistence and browser-language detection
+- Added server-side pagination to the requests and errors tabs with configurable page size and total count
+
 
 ## [15.13.3] - 2026-06-15
 

@@ -714,16 +714,17 @@ export function getRecentErrors(limit = 100, offset = 0): MessageStats[] {
 export function getRequestCount(): number {
 	if (!db) return 0;
 	const stmt = db.prepare(`SELECT COUNT(*) as count FROM messages WHERE stop_reason NOT IN ('error', 'aborted')`);
-	const row = stmt.get() as any;
+	const row = stmt.get() as { count: number } | undefined;
 	return row?.count ?? 0;
 }
 
 export function getErrorCount(): number {
 	if (!db) return 0;
 	const stmt = db.prepare(`SELECT COUNT(*) as count FROM messages WHERE stop_reason = 'error'`);
-	const row = stmt.get() as any;
+	const row = stmt.get() as { count: number } | undefined;
 	return row?.count ?? 0;
 }
+
 
 export function getMessageById(id: number): MessageStats | null {
 	if (!db) return null;

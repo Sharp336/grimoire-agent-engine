@@ -114,6 +114,7 @@ const translations = {
 		"behaviorMetric.repetition": "Repetition (i meant, still doesnt)",
 		"behaviorMetric.blame": "Blame (you didnt, stop X-ing)",
 		"behaviorMetric.frustration": "Frustration (neg + rep + blame)",
+		"behaviorMetric.total": "All signals combined",
 		"statsGrid.avgTTFT": "Avg TTFT",
 		"statsGrid.ofRequests": "of requests",
 		"statsGrid.cachedTokens": "cached tokens",
@@ -167,6 +168,7 @@ const translations = {
 		"behaviorModelsTable.frustrationPercent": "Frustration %",
 		"behaviorModelsTable.hitsPercent": "Hits %",
 		"behaviorModelsTable.trend": "Trend",
+		"behaviorModelsTable.yellingCaps": "Yelling (CAPS)",
 
 		// Common
 		"common.loading": "Loading...",
