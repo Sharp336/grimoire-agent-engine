@@ -170,6 +170,7 @@ function buildModelPreferenceSeries(
 		const key = `${point.model}::${point.provider}`;
 		const bucket = dataMap.get(point.timestamp) ?? { timestamp: point.timestamp, total: 0 };
 		const seriesLabel = topKeys.has(key) ? (labelByKey.get(key) ?? point.model) : otherLabel;
+		bucket.total += point.requests;
 		bucket[seriesLabel] = (bucket[seriesLabel] ?? 0) + point.requests;
 		dataMap.set(point.timestamp, bucket);
 	}
