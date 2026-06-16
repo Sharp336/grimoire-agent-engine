@@ -1228,13 +1228,15 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 				config.showHeader === false
 					? undefined
 					: renderStatusLine({ icon: "pending", title: config.resolveTitle(args, options) }, uiTheme);
+			const conciseHeader =
+				header ?? renderStatusLine({ icon: "pending", title: config.resolveTitle(args, options) }, uiTheme);
 			const outputBlock = new CachedOutputBlock();
 			return markFramedBlockComponent({
 				render: (width: number): readonly string[] => {
 					const expanded = options.expanded;
 					return outputBlock.render(
 						{
-							header,
+							header: isConciseCollapsed(options, expanded) ? conciseHeader : header,
 							state: "pending",
 							sections: [
 								{
@@ -1284,6 +1286,20 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 									},
 							uiTheme,
 						);
+			const conciseHeader =
+				header ??
+				renderStatusLine(
+					success
+						? {
+								iconOverride: uiTheme.styledSymbol("tool.bash", "accent"),
+								title: config.resolveTitle(args, options),
+							}
+						: {
+								icon: isPartial ? "pending" : "error",
+								title: config.resolveTitle(args, options),
+							},
+					uiTheme,
+				);
 			const details = result.details;
 			const outputBlock = new CachedOutputBlock();
 
@@ -1315,7 +1331,7 @@ export function createShellRenderer<TArgs>(config: ShellRendererConfig<TArgs>) {
 					if (isConciseCollapsed(options, expanded)) {
 						return outputBlock.render(
 							{
-								header,
+								header: conciseHeader,
 								state: isPartial ? "pending" : isError ? "error" : "success",
 								sections: [
 									{
