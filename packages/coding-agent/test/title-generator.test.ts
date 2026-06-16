@@ -478,13 +478,39 @@ describe("buildCwdReportSequence", () => {
 		expect(buildCwdReportSequence(absPath, { hostname: "h", wtSession: false })).not.toContain("]9;9;");
 	});
 
-	it("appends a quoted, unencoded OSC 9;9 native path under Windows Terminal", () => {
-		const seq = buildCwdReportSequence(absPath, { hostname: "h", wtSession: true });
+	it("appends a quoted Windows OSC 9;9 path under Windows Terminal", () => {
+		// Inject the native-path resolver so the emission is deterministic across
+		// platforms (the default resolver is Win32-native / `wslpath -w` under WSL).
+		const winPath = "C:\\proj\\a b";
+		const seq = buildCwdReportSequence(absPath, { hostname: "h", wtSession: true, osc99Path: () => winPath });
 		// OSC 7 still present and percent-encoded...
 		expect(seq).toContain(`\x1b]7;file://h${expectedOsc7Path}${ST}`);
-		// ...followed by OSC 9;9 carrying the resolved native path verbatim, quoted.
-		expect(seq.endsWith(`\x1b]9;9;"${absPath}"${ST}`)).toBe(true);
-		// The native form keeps the literal space, not %20.
-		expect(seq).toContain(`"${absPath}"`);
+		// ...followed by OSC 9;9 carrying the Windows path verbatim, quoted, with
+		// the literal space (not %20).
+		expect(seq.endsWith(`\x1b]9;9;"${winPath}"${ST}`)).toBe(true);
+	});
+
+	it("omits OSC 9;9 when no Windows path is available (WSL without interop, or a POSIX host)", () => {
+		const seq = buildCwdReportSequence(absPath, { hostname: "h", wtSession: true, osc99Path: () => undefined });
+		expect(seq).toContain("\x1b]7;file://h");
+		expect(seq).not.toContain("]9;9;");
+	});
+
+	it("drops OSC 9;9 rather than emit a path containing a double quote", () => {
+		// A real Windows path can't contain `"`, but a translated WSL path or edge
+		// value might — emitting it unescaped would truncate the OSC payload.
+		const seq = buildCwdReportSequence(absPath, { hostname: "h", wtSession: true, osc99Path: () => 'C:\\a"b' });
+		expect(seq).not.toContain("]9;9;");
+	});
+
+	it("reports the native resolved path on Windows via the default resolver", () => {
+		const seq = buildCwdReportSequence(absPath, { hostname: "h", wtSession: true });
+		if (process.platform === "win32") {
+			// Win32: resolved path is already Windows-shaped, emitted verbatim.
+			expect(seq.endsWith(`\x1b]9;9;"${absPath}"${ST}`)).toBe(true);
+		} else {
+			// A non-WSL POSIX host has no Windows path to report.
+			expect(seq).not.toContain("]9;9;");
+		}
 	});
 });

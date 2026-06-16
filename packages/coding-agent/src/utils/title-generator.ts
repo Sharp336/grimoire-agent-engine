@@ -412,22 +412,46 @@ export function setSessionTerminalTitle(sessionName: string | undefined, cwd?: s
  * - OSC 9;9 (`"<native path>"`) is the ConEmu / Windows Terminal convention and
  *   the only form stable Windows Terminal understands. It is gated on
  *   `WT_SESSION` because OSC 9 is iTerm2's notification sequence — emitting it
- *   unconditionally would spam notifications there.
+ *   unconditionally would spam notifications there. The payload must be a
+ *   *Windows* path: native on Win32, and `wslpath -w`-translated under WSL
+ *   (where `WT_SESSION` is inherited but `cwd` is a POSIX path Windows Terminal
+ *   can't restore into). When no Windows path is available it is omitted — OSC 7
+ *   already covers the cross-platform case, and a raw POSIX path would send the
+ *   layout restore to the wrong directory.
  *
  * Returns "" when no cwd is given.
  */
 export function buildCwdReportSequence(
 	cwd: string | undefined,
-	opts?: { hostname?: string; wtSession?: boolean },
+	opts?: { hostname?: string; wtSession?: boolean; osc99Path?: (resolved: string) => string | undefined },
 ): string {
 	if (!cwd) return "";
 	const resolved = path.resolve(cwd);
 	const host = opts?.hostname ?? os.hostname();
 	let seq = `\x1b]7;file://${host}${pathToFileURL(resolved).pathname}\x1b\\`;
 	const wtSession = opts?.wtSession ?? Boolean(Bun.env.WT_SESSION);
-	// Windows paths cannot contain `"`, so the quoted form needs no escaping.
-	if (wtSession) seq += `\x1b]9;9;"${resolved}"\x1b\\`;
+	if (wtSession) {
+		const native = (opts?.osc99Path ?? resolveOsc99WindowsPath)(resolved);
+		// A Windows path can't contain `"`, but a translated/edge value might —
+		// dropping it beats emitting an unescaped payload that truncates the OSC.
+		if (native && !native.includes('"')) seq += `\x1b]9;9;"${native}"\x1b\\`;
+	}
 	return seq;
+}
+
+/**
+ * Resolve the OSC 9;9 native-path payload for {@link buildCwdReportSequence}.
+ * Win32 reports the resolved path verbatim; WSL translates it to its Windows
+ * form via `wslpath -w` (omitting OSC 9;9 if interop is unavailable); any other
+ * host has no Windows path to report.
+ */
+function resolveOsc99WindowsPath(resolved: string): string | undefined {
+	if (process.platform === "win32") return resolved;
+	if (process.platform !== "linux" || !(Bun.env.WSL_DISTRO_NAME || Bun.env.WSL_INTEROP)) return undefined;
+	const result = Bun.spawnSync(["wslpath", "-w", resolved], { stdout: "pipe", stderr: "pipe", windowsHide: true });
+	if (result.exitCode !== 0) return undefined;
+	const win = new TextDecoder().decode(result.stdout).trim();
+	return win.length > 0 ? win : undefined;
 }
 
 /**
