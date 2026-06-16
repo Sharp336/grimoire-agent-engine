@@ -30,10 +30,7 @@ function isConciseCollapsed(options: Pick<RenderResultOptions, "displayMode" | "
 	return options.displayMode === "concise" && options.expanded !== true;
 }
 
-function formatConciseSearchLines(
-	theme: Theme,
-	options: { intent?: string; metadata?: readonly string[] },
-): string[] {
+function formatConciseSearchLines(theme: Theme, options: { intent?: string; metadata?: readonly string[] }): string[] {
 	const lines: string[] = [];
 	const append = (text: string) => {
 		lines.push(`${theme.fg("dim", theme.tree.branch)} ${theme.fg("dim", text)}`);

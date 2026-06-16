@@ -126,10 +126,7 @@ function formatConciseEvalMetadata(
 	return languageLabel ? [languageLabel] : [];
 }
 
-function formatConciseEvalLines(
-	uiTheme: Theme,
-	options: { intent?: string; metadata?: readonly string[] },
-): string[] {
+function formatConciseEvalLines(uiTheme: Theme, options: { intent?: string; metadata?: readonly string[] }): string[] {
 	const lines: string[] = [];
 	const append = (text: string) => {
 		lines.push(`${uiTheme.fg("dim", uiTheme.tree.branch)} ${uiTheme.fg("dim", text)}`);

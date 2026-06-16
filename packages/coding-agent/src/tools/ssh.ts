@@ -340,10 +340,8 @@ export const sshToolRenderer = {
 				}
 
 				// Strip LLM-facing notice so we don't echo it next to the styled warning.
-				const output = stripOutputNotice(
-					(textContent ??= result.content?.find(c => c.type === "text")?.text ?? ""),
-					details?.meta,
-				).trimEnd();
+				textContent ??= result.content?.find(c => c.type === "text")?.text ?? "";
+				const output = stripOutputNotice(textContent, details?.meta).trimEnd();
 				const outputLines: string[] = [];
 
 				if (output) {

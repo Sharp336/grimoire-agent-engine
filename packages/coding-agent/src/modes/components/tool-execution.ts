@@ -1,5 +1,5 @@
 import type { SnapshotStore } from "@oh-my-pi/hashline";
-import { INTENT_FIELD, type AgentTool } from "@oh-my-pi/pi-agent-core";
+import { type AgentTool, INTENT_FIELD } from "@oh-my-pi/pi-agent-core";
 import {
 	Box,
 	type Component,

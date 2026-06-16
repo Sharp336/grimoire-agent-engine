@@ -31,7 +31,13 @@ import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-ski
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import { formatStyledTruncationWarning, type OutputMeta, stripOutputNotice } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
-import { capPreviewLines, formatExpandHint, formatToolWorkingDirectory, previewWindowRows, replaceTabs } from "./render-utils";
+import {
+	capPreviewLines,
+	formatExpandHint,
+	formatToolWorkingDirectory,
+	previewWindowRows,
+	replaceTabs,
+} from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
@@ -1170,10 +1176,7 @@ function isConciseCollapsed(options: Pick<RenderResultOptions, "displayMode">, e
 	return options.displayMode === "concise" && expanded !== true;
 }
 
-function formatConciseShellLines(
-	uiTheme: Theme,
-	options: { intent?: string; metadata?: readonly string[] },
-): string[] {
+function formatConciseShellLines(uiTheme: Theme, options: { intent?: string; metadata?: readonly string[] }): string[] {
 	const lines: string[] = [];
 	const append = (text: string) => {
 		lines.push(`${uiTheme.fg("dim", uiTheme.tree.branch)} ${uiTheme.fg("dim", text)}`);
