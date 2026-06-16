@@ -232,6 +232,24 @@ describe("okf/bundle.buildGraph", () => {
 		expect(result.brokenLinks).toEqual([]);
 	});
 
+	it("counts bracketed absolute concept paths as graph links", async () => {
+		await writeConcept(
+			tmpDir,
+			"architecture/assembly-split",
+			"---\ntype: Architecture\ndescription: assembly, split\n---\nSee also: [/pitfalls/hotload-semantics.md].",
+		);
+		await writeConcept(
+			tmpDir,
+			"pitfalls/hotload-semantics",
+			"---\ntype: Pitfall\ndescription: hotload, reload\n---\nCold-start after changing hooks.",
+		);
+
+		const result = await buildGraph(tmpDir);
+
+		expect(result.graph.edges).toEqual([{ from: "architecture/assembly-split", to: "pitfalls/hotload-semantics" }]);
+		expect(result.brokenLinks).toEqual([]);
+	});
+
 	it("reports broken links", async () => {
 		await writeConcept(tmpDir, "tables/orders", "---\ntype: Table\n---\nSee [ghost](/tables/nonexistent.md).");
 		const result = await buildGraph(tmpDir);

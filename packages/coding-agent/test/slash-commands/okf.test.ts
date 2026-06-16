@@ -66,6 +66,31 @@ describe("/okf slash command", () => {
 		expect(harness.setText).toHaveBeenCalledWith("");
 	});
 
+	it("reports stats links and type counts for enriched concepts", async () => {
+		const cwd = await makeTempCwd();
+		const root = path.join(cwd, ".omp", "knowledge");
+		await writeConcept(
+			root,
+			"architecture/assembly-split",
+			"---\ntype: Architecture\ndescription: assembly, split\n---\nSee also: [/pitfalls/hotload-semantics.md].",
+		);
+		await writeConcept(
+			root,
+			"pitfalls/hotload-semantics",
+			"---\ntype: Pitfall\ndescription: hotload, reload\n---\nCold-start after changing hooks.",
+		);
+		const harness = createRuntimeHarness(cwd);
+
+		const result = await executeBuiltinSlashCommand("/okf stats", harness.runtime);
+
+		expect(result).toBe(true);
+		const output = harness.showStatus.mock.calls.at(-1)?.[0] ?? "";
+		expect(output).toContain("Concepts: 2");
+		expect(output).toContain("Links: 1");
+		expect(output).toContain("  Architecture: 1");
+		expect(output).toContain("  Pitfall: 1");
+	});
+
 	it("rejects visualize output paths outside the working directory", async () => {
 		const parent = await makeTempCwd();
 		const cwd = path.join(parent, "project");

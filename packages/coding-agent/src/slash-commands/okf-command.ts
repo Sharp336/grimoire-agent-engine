@@ -59,9 +59,12 @@ export const okfCommand: SlashCommandSpec = {
 				const { graph, brokenLinks } = await buildGraph(root);
 				const types = new Map<string, number>();
 				for (const s of summaries) types.set(s.type, (types.get(s.type) ?? 0) + 1);
-				const typeLines = [...types.entries()].map(([t, n]) => `  ${t}: ${n}`).join("\n");
+				const typeLines = [...types.entries()]
+					.sort((a, b) => a[0].localeCompare(b[0]))
+					.map(([t, n]) => `  ${t}: ${n}`);
+				const typeBlock = typeLines.length > 0 ? typeLines.join("\n") : "  (none)";
 				await runtime.output(
-					`OKF Bundle Stats\n  Bundle: ${root}\n  Concepts: ${summaries.length}\n  Links: ${graph.edges.length}\n  Broken links: ${brokenLinks.length}\n  Types:\n${typeLines}`,
+					`OKF Bundle Stats\n  Bundle: ${root}\n  Concepts: ${summaries.length}\n  Links: ${graph.edges.length}\n  Broken links: ${brokenLinks.length}\n  Types:\n${typeBlock}`,
 				);
 				return commandConsumed();
 			}

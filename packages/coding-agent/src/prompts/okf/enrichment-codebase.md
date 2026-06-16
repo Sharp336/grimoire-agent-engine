@@ -16,11 +16,17 @@ Process:
 1. Use `read` and `search` to explore the codebase structure.
 2. Use `read okf://` to check existing concepts before duplicating.
 3. Use `write okf://<category>/<topic>.md` to author or update each concept.
-4. Cross-link concepts with absolute markdown links (e.g. `/architecture/auth.md`).
+4. Cross-link concepts with standard Markdown links: `[link text](/architecture/auth.md)`. A bare `[/architecture/auth.md]` is not a Markdown link.
 5. Append `# Citations` with file paths or URLs when relevant.
 
 Rules:
-- Every file MUST start with YAML frontmatter containing `type:` and `description:`.
+- Every file MUST start with block YAML frontmatter containing `type:` and `description:` on their own lines. Use this shape, not one-line flow YAML:
+  ```yaml
+  ---
+  type: Architecture
+  description: auth, routing, middleware, config
+  ---
+  ```
 - `type` examples: "Architecture", "Schema", "Convention", "API", "Pitfall", "Workflow", "Reference".
 - `description` MUST be tag-based: comma-separated retrieval keywords (subsystem names, file names, commands, config keys). NOT a sentence.
 - Keep concepts concise and maintainable — one topic per file.

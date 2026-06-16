@@ -96,7 +96,7 @@ timestamp: 2026-05-28T14:30:00Z
 
 **Reserved filenames:** `index.md` (directory listing), `log.md` (update history). These are structural, not concepts.
 
-**Cross-links:** Use absolute markdown links (`/tables/orders.md`) or relative (`./other.md`). Broken links are tolerated.
+**Cross-links:** Use standard Markdown links with absolute bundle paths (`[orders](/tables/orders.md)`) or relative paths (`[other](./other.md)`). Bare `[/tables/orders.md]` text is tolerated by the graph builder but should not be authored intentionally. Broken links are tolerated.
 
 **Citations:** Add a `# Citations` heading with numbered references.
 

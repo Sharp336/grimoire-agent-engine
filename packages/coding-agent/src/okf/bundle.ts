@@ -388,6 +388,15 @@ function mergeLogEntry(existing: string, date: string, entry: string): string {
 const MARKDOWN_LINK_RE = /\[([^\]]*)\]\(([^)]+)\)/g;
 
 /**
+ * Regex for bare internal concept path references such as `/a/b.md`,
+ * `./sibling.md`, or `../parent.md`.
+ *
+ * The leading delimiter is consumed so URLs like `https://host/a.md` do not
+ * accidentally produce a `/a.md` concept edge.
+ */
+const BARE_CONCEPT_PATH_RE = /(?:^|[\s([<{`])((?:\.{1,2}\/|\/)[^\s<>()\]}`'"]+?\.md)(?=$|[\s)\]}>`'".,;:!?])/g;
+
+/**
  * Resolve a markdown link target to a concept ID (or `undefined` if broken).
  *
  * Handles two forms (spec §5):
@@ -417,17 +426,33 @@ export function resolveLinkTarget(link: string, fromConceptId: string): string |
 }
 
 /**
- * Find all internal markdown links in a concept body and resolve them to concept IDs.
+ * Find all internal concept links in a concept body and resolve them to concept IDs.
+ *
+ * Standard Markdown links (`[label](/category/topic.md)`) are preferred, but
+ * enrichment agents sometimes produce bracketed or bare absolute concept paths
+ * (`[/category/topic.md]`, `` `/category/topic.md` ``) after seeing terse prompt
+ * examples. Treat those path references as graph edges too so `/okf stats` and
+ * the visualizer reflect the bundle humans can navigate.
+ *
  * @returns Array of `{ target, resolvedId }` pairs (resolvedId may be undefined for broken links).
  */
 export function findLinks(body: string, fromConceptId: string): { target: string; resolvedId: string | undefined }[] {
 	const links: { target: string; resolvedId: string | undefined }[] = [];
-	for (const match of body.matchAll(MARKDOWN_LINK_RE)) {
-		const target = match[2];
+	const seenTargets = new Set<string>();
+	const addLink = (target: string): void => {
+		if (seenTargets.has(target)) return;
+		seenTargets.add(target);
 		const resolvedId = resolveLinkTarget(target, fromConceptId);
 		if (resolvedId !== undefined) {
 			links.push({ target, resolvedId });
 		}
+	};
+
+	for (const match of body.matchAll(MARKDOWN_LINK_RE)) {
+		addLink(match[2]);
+	}
+	for (const match of body.matchAll(BARE_CONCEPT_PATH_RE)) {
+		addLink(match[1]);
 	}
 	return links;
 }
