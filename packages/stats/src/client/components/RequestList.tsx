@@ -24,7 +24,7 @@ export function RequestList({ requests, total, page, pageSize, onPageChange, onS
 	};
 
 	return (
-		<div className="surface overflow-hidden flex flex-col">
+		<div className="surface overflow-hidden flex flex-col h-full">
 			<div className="px-5 py-4 border-b border-[var(--border-subtle)]">
 				<h3 className="text-sm font-semibold text-[var(--text-primary)]">{title}</h3>
 			</div>
