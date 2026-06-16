@@ -40,6 +40,7 @@ import { type AsyncJob, AsyncJobManager } from "./async";
 import { AutoLearnController, buildAutoLearnInstructions } from "./autolearn/controller";
 import { loadCapability } from "./capability";
 import { type Rule, ruleCapability, setActiveRules } from "./capability/rule";
+import { type Hook, hookCapability } from "./capability/hook";
 import { bucketRules } from "./capability/rule-buckets";
 import { createApiKeyResolver } from "./config/api-key-resolver";
 import { shouldEnableAppendOnlyContext } from "./config/append-only-context-mode";
@@ -717,7 +718,13 @@ export async function discoverSessionExtensionPaths(
 	if (options.disableExtensionDiscovery) {
 		return options.additionalExtensionPaths ?? [];
 	}
-	const configuredPaths = [...(options.additionalExtensionPaths ?? []), ...(settings.get("extensions") ?? [])];
+	const discoveredHooks = await loadCapability<Hook>(hookCapability.id, { cwd });
+	const hookPaths = discoveredHooks.items.filter(h => h.type === "pre").map(h => h.path);
+	const configuredPaths = [
+		...(options.additionalExtensionPaths ?? []),
+		...hookPaths,
+		...(settings.get("extensions") ?? []),
+	];
 	const disabledExtensionIds = settings.get("disabledExtensions") ?? [];
 	return discoverExtensionPaths(configuredPaths, cwd, disabledExtensionIds);
 }
