@@ -257,10 +257,13 @@ function isConciseCollapsed(options: Pick<RenderResultOptions, "displayMode">, e
 	return options.displayMode === "concise" && expanded !== true;
 }
 
-function formatConciseSshLines(uiTheme: Theme, intent?: string): string[] {
+function formatConciseSshLines(uiTheme: Theme, intent: string | undefined, isError: boolean): string[] {
 	const lines: string[] = [];
 	if (intent) {
 		lines.push(`${uiTheme.fg("dim", uiTheme.tree.branch)} ${uiTheme.fg("dim", intent)}`);
+	}
+	if (isError) {
+		lines.push(`${uiTheme.fg("dim", uiTheme.tree.branch)} ${uiTheme.fg("error", "Failed")}`);
 	}
 	lines.push(`${uiTheme.fg("dim", uiTheme.tree.last)} ${formatExpandHint(uiTheme, false, true)}`);
 	return lines;
@@ -284,7 +287,7 @@ export const sshToolRenderer = {
 						sections: [
 							{
 								lines: isConciseCollapsed(_options, expanded)
-									? formatConciseSshLines(uiTheme, _options.intent)
+									? formatConciseSshLines(uiTheme, _options.intent, false)
 									: capPreviewLines(getCmdLines(), uiTheme, { expanded }),
 							},
 						],
@@ -328,11 +331,18 @@ export const sshToolRenderer = {
 				const isPartial = options.isPartial === true;
 				const isError = result.isError === true;
 				if (isConciseCollapsed(options, expanded)) {
+					const conciseHeader =
+						isPartial || isError
+							? renderStatusLine(
+									{ icon: isPartial ? "pending" : "error", title: "SSH", description: `[${host}]` },
+									uiTheme,
+								)
+							: header;
 					return outputBlock.render(
 						{
-							header,
+							header: conciseHeader,
 							state: isPartial ? "pending" : isError ? "error" : "success",
-							sections: [{ lines: formatConciseSshLines(uiTheme, options.intent) }],
+							sections: [{ lines: formatConciseSshLines(uiTheme, options.intent, isError) }],
 							width,
 						},
 						uiTheme,
