@@ -181,7 +181,7 @@ export function parse(text: string, source?: string): OkfDocument {
  */
 export function serialize(doc: OkfDocument): string {
 	const ordered = orderFrontmatter(doc.frontmatter);
-	const fmYaml = YAML.stringify(ordered).trim();
+	const fmYaml = YAML.stringify(ordered, null, 2).trim();
 	const body = doc.body.trim();
 	return body.length > 0
 		? `${FRONTMATTER_DELIM}\n${fmYaml}\n${FRONTMATTER_DELIM}\n\n${body}\n`

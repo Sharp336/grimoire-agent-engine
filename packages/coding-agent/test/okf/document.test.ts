@@ -80,6 +80,22 @@ describe("okf/document.serialize", () => {
 		expect(fmBlock.indexOf("apple_key")).toBeLessThan(fmBlock.indexOf("zebra_key"));
 	});
 
+	it("serializes frontmatter in block YAML style", () => {
+		const out = serialize({
+			frontmatter: {
+				type: "Table",
+				description: "orders, schema",
+				tags: ["orders", "schema"],
+			},
+			body: "Body.",
+		});
+		const fmBlock = out.slice(0, out.indexOf("\n---", 4));
+		expect(fmBlock).toContain("\ntype: Table");
+		expect(fmBlock).toContain('\ndescription: "orders, schema"');
+		expect(fmBlock).toContain("tags: \n  - orders\n  - schema");
+		expect(fmBlock).not.toContain("{type:");
+	});
+
 	it("round-trips parse → serialize → parse", () => {
 		const original = `---
 type: Reference
