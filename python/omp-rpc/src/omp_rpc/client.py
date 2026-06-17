@@ -14,6 +14,7 @@ from typing import Any, Callable, Generic, Mapping, Sequence, TypeVar, cast
 from .host_tools import HostTool, HostToolContext
 from .host_uris import HostUri, HostUriContext, normalize_read_result
 from .protocol import (
+    _TODO_STATUS_VALUES,
     AgentStartEvent,
     AgentEndEvent,
     AgentMessage,
@@ -110,7 +111,6 @@ THistoryItem = TypeVar("THistoryItem")
 
 _ASYNC_COMMANDS = frozenset({"prompt", "abort_and_prompt"})
 _DEFAULT_ERROR_HISTORY_LIMIT = 128
-_TODO_STATUS_VALUES = frozenset({"pending", "in_progress", "completed", "abandoned"})
 
 
 def _process_group_id(process: subprocess.Popen[Any]) -> int | None:
