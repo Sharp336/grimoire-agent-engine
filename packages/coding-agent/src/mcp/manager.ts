@@ -383,15 +383,31 @@ export class MCPManager {
 		if (reconnecting) {
 			const result = await reconnecting;
 			if (result) return result;
+			// A failed in-flight reconnection just settled; another caller may have
+			// already established or queued a connection — reuse it before spawning.
+			const settled = this.#connections.get(name);
+			if (settled) return settled;
+			const queued = this.#pendingConnections.get(name);
+			if (queued) return queued;
 		}
 		const config = this.#serverConfigs.get(name);
 		if (!config) throw new Error(`MCP server not connected: ${name}`);
+		// Respect the crash-burst breaker on the on-demand path too, so a down
+		// lazy server stops spawning a subprocess per tool call once it trips.
+		if (this.#reconnectBreakerOpen(name)) {
+			throw new Error(`MCP server "${name}" is suspended after repeated connection failures`);
+		}
 		const source = this.#sources.get(name);
 		const epoch = this.#epoch;
 		const attempt = this.#connectAndWireServer(name, config, source, epoch);
 		this.#pendingConnections.set(name, attempt);
 		try {
 			return await attempt;
+		} catch (error) {
+			// Record the failed on-demand connect so the breaker governs the lazy
+			// path; once tripped, the pre-check above short-circuits later calls.
+			this.#tripReconnectBreaker(name);
+			throw error;
 		} finally {
 			if (this.#pendingConnections.get(name) === attempt) {
 				this.#pendingConnections.delete(name);
@@ -1090,6 +1106,18 @@ export class MCPManager {
 			return true;
 		}
 		return false;
+	}
+
+	/**
+	 * Whether the crash-burst breaker is currently open for a server, WITHOUT
+	 * recording an attempt. Use for a pre-flight check (e.g. the on-demand lazy
+	 * connect) so a tripped breaker short-circuits before spawning;
+	 * {@link #tripReconnectBreaker} both records an attempt and reports the state.
+	 */
+	#reconnectBreakerOpen(name: string): boolean {
+		const now = Date.now();
+		const recent = (this.#reconnectHistory.get(name) ?? []).filter(ts => now - ts < RECONNECT_BURST_WINDOW_MS);
+		return recent.length > RECONNECT_BURST_LIMIT;
 	}
 
 	async #doReconnect(name: string): Promise<MCPServerConnection | null> {

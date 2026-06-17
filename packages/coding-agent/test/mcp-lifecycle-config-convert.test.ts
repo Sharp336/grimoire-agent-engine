@@ -6,6 +6,8 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as path from "node:path";
+import type { MCPServer } from "../src/capability/mcp";
+import { convertToLegacyConfig } from "../src/mcp/config";
 import { MCPManager } from "../src/mcp/manager";
 import { hasServerTool, inMemoryToolCache, lazyConfig, makeWorkDir, spawnCount, TOOL_DEF, waitFor } from "./mcp-lifecycle-harness";
 
@@ -53,4 +55,68 @@ describe("MCP lifecycle precedence: per-server overrides the default", () => {
 			await manager.disconnectAll();
 		}
 	}, 15_000);
+});
+
+describe("convertToLegacyConfig threads lifecycle + idleTimeout", () => {
+	it("carries both fields onto a stdio legacy config", () => {
+		const legacy = convertToLegacyConfig({
+			name: "s",
+			command: "cmd",
+			lifecycle: "lazy",
+			idleTimeout: 1000,
+		} as unknown as MCPServer);
+		expect(legacy.type).toBe("stdio");
+		expect(legacy.lifecycle).toBe("lazy");
+		expect(legacy.idleTimeout).toBe(1000);
+	});
+
+	it("carries both fields onto an http legacy config", () => {
+		const legacy = convertToLegacyConfig({
+			name: "h",
+			transport: "http",
+			url: "https://example.test/mcp",
+			lifecycle: "eager",
+			idleTimeout: 0,
+		} as unknown as MCPServer);
+		expect(legacy.type).toBe("http");
+		expect(legacy.lifecycle).toBe("eager");
+		// idleTimeout 0 ("never reap") must survive, not be dropped as falsy.
+		expect(legacy.idleTimeout).toBe(0);
+	});
+
+	it("carries both fields onto an sse legacy config", () => {
+		const legacy = convertToLegacyConfig({
+			name: "e",
+			transport: "sse",
+			url: "https://example.test/sse",
+			lifecycle: "lazy",
+			idleTimeout: 5000,
+		} as unknown as MCPServer);
+		expect(legacy.type).toBe("sse");
+		expect(legacy.lifecycle).toBe("lazy");
+		expect(legacy.idleTimeout).toBe(5000);
+	});
+
+	it("leaves both fields undefined when the canonical server omits them", () => {
+		const legacy = convertToLegacyConfig({ name: "s", command: "cmd" } as unknown as MCPServer);
+		expect(legacy.lifecycle).toBeUndefined();
+		expect(legacy.idleTimeout).toBeUndefined();
+	});
+});
+
+describe("mcp-schema.json constrains lifecycle", () => {
+	const schema = JSON.parse(
+		fs.readFileSync(path.join(import.meta.dir, "..", "src", "config", "mcp-schema.json"), "utf8"),
+	);
+	const props = schema.$defs.serverBase.properties;
+
+	it("accepts only eager and lazy for lifecycle (rejects other values)", () => {
+		expect(props.lifecycle.enum).toEqual(["eager", "lazy"]);
+		expect(props.lifecycle.enum).not.toContain("keep-alive");
+	});
+
+	it("declares idleTimeout as a non-negative number", () => {
+		expect(props.idleTimeout.type).toBe("number");
+		expect(props.idleTimeout.minimum).toBe(0);
+	});
 });
