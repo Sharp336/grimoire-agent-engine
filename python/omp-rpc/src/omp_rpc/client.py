@@ -1186,13 +1186,6 @@ class RpcClient:
         process = self._require_process()
         self._write_json(process, payload)
 
-    def _normalize_host_tool_result(self, result: object) -> JsonObject:
-        if isinstance(result, str):
-            return {"content": [{"type": "text", "text": result}]}
-        if isinstance(result, Mapping):
-            return cast(JsonObject, dict(result))
-        raise RpcError("Host tool handlers must return a string or a result mapping")
-
     def _handle_host_tool_call(self, payload: JsonObject) -> None:
         request_id = payload.get("id")
         tool_name = payload.get("toolName")
@@ -1274,7 +1267,7 @@ class RpcClient:
                     {
                         "type": "host_tool_result",
                         "id": request_id,
-                        "result": self._normalize_host_tool_result(result),
+                        "result": tool.normalize_result(result),
                     }
                 )
             except Exception as exc:
