@@ -363,6 +363,20 @@ def reset_settings_cache() -> None:
     get_settings.cache_clear()
 
 
+def require_proxy_mode(cfg: Settings) -> tuple[str, bytes]:
+    if cfg.github_token is not None:
+        raise SystemExit(
+            "robomp orchestrator refuses to start with GITHUB_TOKEN set in env. "
+            "The PAT must live only in the gh-proxy container."
+        )
+    if cfg.gh_proxy_url is None or cfg.gh_proxy_hmac_key is None:
+        raise SystemExit(
+            "robomp orchestrator requires ROBOMP_GH_PROXY_URL and "
+            "ROBOMP_GH_PROXY_HMAC_KEY (run gh-proxy in a sibling container)."
+        )
+    return cfg.gh_proxy_url, cfg.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
+
+
 class _ProxyEnvLoader(BaseSettings):
     """Minimal env loader for `python -m robomp.proxy serve`.
 

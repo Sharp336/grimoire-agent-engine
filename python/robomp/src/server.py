@@ -16,7 +16,7 @@ from fastapi.staticfiles import StaticFiles
 
 from robomp import github_events
 from robomp.autoclose import AutocloseScheduler
-from robomp.config import Settings, get_settings
+from robomp.config import Settings, get_settings, require_proxy_mode
 from robomp.dashboard import render_index, static_dir, tail_jsonl
 from robomp.db import (
     INACTIVE_EVENT_STATES,
@@ -214,22 +214,8 @@ def _issue_browse_payload(
     }
 
 
-def _require_proxy_mode(cfg: Settings) -> tuple[str, bytes]:
-    if cfg.github_token is not None:
-        raise SystemExit(
-            "robomp orchestrator refuses to start with GITHUB_TOKEN set in env. "
-            "The PAT must live only in the gh-proxy container."
-        )
-    if cfg.gh_proxy_url is None or cfg.gh_proxy_hmac_key is None:
-        raise SystemExit(
-            "robomp orchestrator requires ROBOMP_GH_PROXY_URL and "
-            "ROBOMP_GH_PROXY_HMAC_KEY (run gh-proxy in a sibling container)."
-        )
-    return cfg.gh_proxy_url, cfg.gh_proxy_hmac_key.get_secret_value().encode("utf-8")
-
-
 def _build_orchestrator(cfg: Settings) -> tuple[GitHubBackend, ProxyGitTransport]:
-    base_url, key = _require_proxy_mode(cfg)
+    base_url, key = require_proxy_mode(cfg)
     github = GitHubProxyClient(base_url=base_url, hmac_key=key)
     transport = ProxyGitTransport(base_url=base_url, hmac_key=key)
     return github, transport
