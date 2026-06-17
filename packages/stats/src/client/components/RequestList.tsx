@@ -15,7 +15,15 @@ export function RequestList({ requests, onSelect, title }: RequestListProps) {
 				<h3 className="text-sm font-semibold text-[var(--text-primary)]">{title}</h3>
 			</div>
 			<div className="overflow-auto flex-1">
-				<table className="w-full">
+				<table className="w-full min-w-[560px] table-fixed">
+					<colgroup>
+						<col className="w-[28%]" />
+						<col className="w-[16%]" />
+						<col className="w-[17%]" />
+						<col className="w-[15%]" />
+						<col className="w-[15%]" />
+						<col className="w-[9%]" />
+					</colgroup>
 					<thead className="bg-[var(--bg-elevated)] sticky top-0 z-10">
 						<tr>
 							<th className="text-left py-3 px-4 table-header">Model</th>
@@ -33,9 +41,13 @@ export function RequestList({ requests, onSelect, title }: RequestListProps) {
 								onClick={() => onSelect(req)}
 								className="table-row cursor-pointer border-b border-[var(--border-subtle)] last:border-b-0"
 							>
-								<td className="py-3 px-4">
-									<div className="font-medium text-[var(--text-primary)] text-sm">{req.model}</div>
-									<div className="text-xs text-[var(--text-muted)]">{req.provider}</div>
+								<td className="py-3 px-4 min-w-0">
+									<div className="font-medium text-[var(--text-primary)] text-sm leading-snug break-words">
+										{req.model}
+									</div>
+									<div className="text-xs text-[var(--text-muted)] truncate" title={req.provider}>
+										{req.provider}
+									</div>
 								</td>
 								<td className="py-3 px-4 text-sm text-[var(--text-secondary)]">
 									{formatDistanceToNow(req.timestamp, { addSuffix: true })}

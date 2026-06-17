@@ -116,7 +116,7 @@ export default function App() {
 							<LoadingState label="Loading overview..." />
 						)}
 
-						<div className="grid lg:grid-cols-2 gap-6">
+						<div className="grid 2xl:grid-cols-2 gap-6">
 							<RequestList
 								title="Recent Requests"
 								requests={recentRequests.slice(0, 10)}

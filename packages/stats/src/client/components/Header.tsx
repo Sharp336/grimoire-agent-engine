@@ -24,7 +24,7 @@ interface HeaderProps {
 
 export function Header({ activeTab, onTabChange, onSync, syncing, timeRange, onTimeRangeChange }: HeaderProps) {
 	return (
-		<header className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-6 mb-8 border-b border-[var(--border-subtle)]">
+		<header className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 pb-6 mb-8 border-b border-[var(--border-subtle)]">
 			<div className="flex items-center gap-3">
 				<div className="w-10 h-10 rounded-[var(--radius-md)] bg-gradient-to-br from-[var(--accent-pink)] to-[var(--accent-cyan)] flex items-center justify-center shadow-lg">
 					<Activity className="w-5 h-5 text-white" />
@@ -35,8 +35,8 @@ export function Header({ activeTab, onTabChange, onSync, syncing, timeRange, onT
 				</div>
 			</div>
 
-			<div className="flex items-center gap-3">
-				<div className="flex bg-[var(--bg-surface)] rounded-[var(--radius-md)] p-1 border border-[var(--border-subtle)]">
+			<div className="flex w-full min-w-0 flex-col gap-3 sm:flex-row sm:flex-wrap sm:items-center xl:w-auto">
+				<div className="flex max-w-full overflow-x-auto bg-[var(--bg-surface)] rounded-[var(--radius-md)] p-1 border border-[var(--border-subtle)]">
 					{tabs.map(tab => (
 						<button
 							key={tab}
@@ -48,7 +48,7 @@ export function Header({ activeTab, onTabChange, onSync, syncing, timeRange, onT
 						</button>
 					))}
 				</div>
-				<div className="flex bg-[var(--bg-surface)] rounded-[var(--radius-md)] p-1 border border-[var(--border-subtle)]">
+				<div className="flex max-w-full overflow-x-auto bg-[var(--bg-surface)] rounded-[var(--radius-md)] p-1 border border-[var(--border-subtle)]">
 					{timeRanges.map(range => (
 						<button
 							key={range.value}
@@ -62,7 +62,7 @@ export function Header({ activeTab, onTabChange, onSync, syncing, timeRange, onT
 					))}
 				</div>
 
-				<button type="button" onClick={onSync} disabled={syncing} className="btn btn-primary">
+				<button type="button" onClick={onSync} disabled={syncing} className="btn btn-primary shrink-0">
 					<RefreshCw size={16} className={syncing ? "spin" : ""} />
 					{syncing ? "Syncing..." : "Sync"}
 				</button>

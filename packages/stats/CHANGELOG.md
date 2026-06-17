@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed stats dashboard overflow by letting summary cards reflow at usable widths and keeping dense request tables contained inside their cards.
+
 ## [15.13.3] - 2026-06-15
 
 ### Changed
