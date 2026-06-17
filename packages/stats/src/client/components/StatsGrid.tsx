@@ -24,6 +24,13 @@ const preciseCurrencyFormatter = new Intl.NumberFormat(undefined, {
 	style: "currency",
 });
 
+const compactCurrencyFormatter = new Intl.NumberFormat(undefined, {
+	currency: "USD",
+	maximumFractionDigits: 1,
+	notation: "compact",
+	style: "currency",
+});
+
 function formatCompactNumber(value: number): string {
 	return compactNumberFormatter.format(value);
 }
@@ -38,6 +45,10 @@ function formatCurrency(value: number): string {
 
 function formatPreciseCurrency(value: number): string {
 	return preciseCurrencyFormatter.format(value);
+}
+
+function formatCompactCurrency(value: number): string {
+	return compactCurrencyFormatter.format(value);
 }
 
 interface StatCardConfig {
@@ -68,7 +79,8 @@ const statConfig: StatCardConfig[] = [
 		title: "Total Cost",
 		icon: Activity,
 		color: "var(--accent-pink)",
-		getValue: (s: AggregatedStats) => formatCurrency(s.totalCost),
+		getValue: (s: AggregatedStats) => formatCompactCurrency(s.totalCost),
+		getTitle: (s: AggregatedStats) => formatCurrency(s.totalCost),
 		getDetail: (s: AggregatedStats) =>
 			s.totalRequests > 0 ? `${formatPreciseCurrency(s.totalCost / s.totalRequests)} avg/req` : "-",
 	},
@@ -142,7 +154,7 @@ const statConfig: StatCardConfig[] = [
 
 export function StatsGrid({ stats }: StatsGridProps) {
 	return (
-		<div className="grid [grid-template-columns:repeat(auto-fit,minmax(210px,1fr))] gap-4 mb-8">
+		<div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-9 gap-4 mb-8">
 			{statConfig.map(stat => {
 				const Icon = stat.icon;
 				const value = stat.getValue(stats);

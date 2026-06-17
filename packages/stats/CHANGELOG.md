@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed stats dashboard overflow by letting summary cards reflow at usable widths and keeping dense request tables contained inside their cards.
+- Fixed stats dashboard overflow by compacting large summary-card values (full precision preserved in the hover tooltip) and keeping dense request tables contained inside their cards.
 
 ## [15.13.3] - 2026-06-15
 
