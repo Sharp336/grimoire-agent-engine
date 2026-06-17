@@ -360,10 +360,9 @@ export interface AuthCredentialStore {
 	 */
 	markCredentialSuspect?(credentialId: number, opts?: { signal?: AbortSignal }): Promise<void>;
 	/**
-	 * Optional async write hook for upserting a single credential. When present,
-	 * `AuthStorage.#upsertOAuthCredential` routes through this instead of the
-	 * sync `upsertAuthCredentialForProvider`. `RemoteAuthCredentialStore` uses
-	 * it to send the upsert to the broker via `POST /v1/credential`.
+	 * Optional async write hook for upserting a single credential. Remote stores
+	 * can implement this to send single-row uploads to the broker via
+	 * `POST /v1/credential`.
 	 *
 	 * Implementations MUST update the in-memory snapshot before returning so the
 	 * post-write read path is consistent.
@@ -1505,17 +1504,6 @@ export class AuthStorage {
 		const stored = this.#store.replaceAuthCredentialsRemote
 			? await this.#store.replaceAuthCredentialsRemote(provider, deduped)
 			: this.#store.replaceAuthCredentialsForProvider(provider, deduped);
-		this.#setStoredCredentials(
-			provider,
-			stored.map(record => ({ id: record.id, credential: record.credential })),
-		);
-		this.#resetProviderAssignments(provider);
-	}
-
-	async #upsertOAuthCredential(provider: string, credential: OAuthCredential): Promise<void> {
-		const stored = this.#store.upsertAuthCredentialRemote
-			? await this.#store.upsertAuthCredentialRemote(provider, credential)
-			: this.#store.upsertAuthCredentialForProvider(provider, credential);
 		this.#setStoredCredentials(
 			provider,
 			stored.map(record => ({ id: record.id, credential: record.credential })),

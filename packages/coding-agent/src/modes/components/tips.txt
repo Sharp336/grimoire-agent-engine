@@ -3,8 +3,6 @@ You can /btw to ask a side question
 Use /tan to fork the current conversation into a background agent
 Ctrl+D can be used to exit, but with your draft saved!
 Find out which model you emotionally abuse the most with `omp stats`
-Try task isolation to create CoW worktrees
-Need a cheap nested model call? Use `completion(x...)`. Have a big batch of tasks? Ask clanker to use it!
 Spaghetti code? Try complaining with /omfg
 Did you know? Each kitty/tmux/cmux/zellij/wezterm split keeps its own session — `omp -c` resumes the right one
 Drop the word `ultrathink` in your message for harder multi-step reasoning — watch it glow rainbow as you type
@@ -21,3 +19,84 @@ Pair up live: `/collab` shares your session through an end-to-end encrypted rela
 Press ← ← to drill into a running or finished agent and inspect its tool calls and transcript
 Hit a Codex rate limit? `/usage reset` spends a saved reset credit to immediately restore your quota
 No native tool_calling? Inference provider botches parsing them? `PI_DIALECT=glm|kimi|anthropic…` rolls it locally for them!
+Compare two models head-to-head — `omp bench opus sonnet --runs 3` reports time-to-first-token and tokens/s, averaged across the runs
+Skip the commit-message struggle — `omp commit` drafts the message and updates changelogs; add `--push` to ship it or `--dry-run` to preview first
+`omp gallery` renders every built-in tool across streaming, in-progress, success, and failure states — add `--screenshot` to capture PNGs (needs `vhs`) for bug reports
+`omp grep` runs the exact search the agent uses — preview matches and `.gitignore` handling before delegating (`-c` counts, `-f` files-only, `-C N` context)
+Tool misbehaving? `omp grievances` lists the auto-QA issues captured from your sessions — `clean --all` wipes them, `push` submits them to the backend
+`omp install ./my-ext` symlinks a local directory into your plugin set and watches it for changes; `omp install pkg@1.2.3` pulls from npm — same surface as `plugin link`/`plugin install`
+`omp models find minimax` searches provider/id/name by substring — and `omp models openai-codex` lists one provider, since any provider name doubles as a filter
+`omp plugin doctor --fix` health-checks every installed plugin and auto-repairs what it can — reach for it when extensions act weird after an update
+Curious what the agent's `read` tool actually returns? `omp read issue://123` (or a URL, `archive.zip:dir/file.ts`, even `db.sqlite:users:42`) shows the exact parsed output
+Let omp talk back — `omp say "build failed"` synthesizes speech on-device with the local TTS engine; `--out file.wav` saves it instead of playing
+Preview what the agent's web search returns before you trust it — `omp q "rust async channels" --recency week --limit 5` (alias of `omp search`)
+Re-run onboarding any time with `omp setup`; `omp setup python` checks Python reachability, `omp setup speech` installs speech models/recorder, and `--check` reports what's missing
+Need the raw credential for a provider, say to pipe into another tool? `omp token anthropic` prints it; `--force-refresh` grabs a fresh OAuth token first
+`omp usage --history --days 30` charts your usage-limit trend from hourly snapshots, and `--redact` masks account emails so you can safely share the screenshot
+Agent worktrees piling up in `~/.omp/wt`? `omp worktree` (alias `omp wt`) lists them; `omp wt clear --dry-run` previews removal, `--all` sweeps live PR checkouts too
+`/agents` opens the Agent Control Center — oversee every spawned subagent in one dashboard
+`/changelog full` prints the entire changelog — bare `/changelog` only shows the latest 3 entries
+`/context` breaks down what's eating your context window before you reach for `/compact`
+`/extensions` (alias `/status`) pops open the Extension Control Center dashboard
+`/hotkeys` lays out every default keyboard shortcut on one screen — and yes, they're all remappable
+`/jobs` tracks async background work (long bash, debug runs, task subagents) — they linger there ~5 min after finishing
+`/marketplace add <owner/repo>` then `/marketplace discover` — browse and install plugins straight from a registry
+`/mcp add <name> --url <url>` wires up an MCP server; `/mcp test <name>` pings the connection
+`/mcp smithery-search <keyword>` browses the Smithery registry and deploys a server in one shot — add `--semantic` for meaning-based matches
+`/memory mm refresh` updates the auto-mental-models bank; `/memory mm history` diffs one model's change log
+`/memory` shows the injected memory payload; `/memory clear` wipes it and refreshes the system prompt
+`/plugins enable <name@marketplace>` (or `disable`) toggles a plugin without uninstalling — `/plugins list` shows npm and marketplace installs
+`/reload-plugins` hot-reloads every plugin kind — skills, commands, hooks, tools, agents, MCP — with no restart
+`/settings` opens the settings menu; `/setup` (alias `/providers`) configures sign-in and web search providers
+`/ssh add <name> --host <host>` registers an SSH host the agent can shell into — then it shows up as a tool
+`/todo append`, `/todo start`, `/todo done` — drive the agent's checklist yourself instead of waiting on it
+`/todo edit` cracks open the agent's todos in `$EDITOR` as Markdown — round-trips cleanly
+`/tools` lists every tool the agent can see — `*` marks the active ones, `-` the disabled
+Typed a message while omp was still running? `alt+up` pulls your queued draft back into the editor to tweak or resend
+`alt+shift+p` flips plan mode on — omp explores read-only and drafts a plan before it touches your files
+`shift+tab` cycles the thinking level without retyping a magic word — dial reasoning up or down per turn
+Thinking block eating the screen? `ctrl+t` hides (or shows) it mid-stream
+Long tool output got truncated? `ctrl+o` toggles full expansion so you can read every line inline
+Leap across words instead of single chars — `alt+left` / `alt+right` hop the cursor a word at a time
+`ctrl+u` wipes back to the line start and `ctrl+k` forward to the end — emacs-style line surgery
+`ctrl+w` (or `alt+backspace`) chops the whole last word off your draft — skip the backspace mashing
+`omp --profile work` runs a fully isolated agent tree (auth, sessions, settings, memory) — `--alias` mints an `omp-work` shell shortcut
+`/advisor on` brings in a second model that reviews each turn and drops severity-tagged notes — blocker, concern, or nit
+Paste a GitHub PR URL after `/review` and it fetches the diff for a full code review — no checkout required
+Hold Space to dictate your prompt — push-to-talk STT (enable `stt.enabled` first), release to transcribe
+`/logout` opens an account picker when you've got several OAuth logins — drop just one, keep the rest
+`/dump` exports the full verbose session — system prompt, model + thinking config, tool inventory, and the whole transcript as markdown headings
+Your terminal can't send shift+enter? `ctrl+j` inserts a newline too — it's a default binding, no config needed
+`/branch` pivots the conversation — on default installs it opens the tree navigator, and in non-tree mode it lets you branch from an earlier message
+Reclaim context tokens with `/compact` — pass focus like `/compact keep the database schema` so the summary preserves what matters
+`/fork` duplicates the current session/current leaf into a new fork — use `/branch` when you need to start from an earlier message
+Provider stream got wedged but your transcript is fine? `/fresh` resets the stream state and leaves the conversation untouched
+Cap how many tokens a goal may burn with `/goal budget 50000`, or `/goal budget off` to let it run unbounded
+Set a persistent autonomous objective with `/goal set ship the migration` — the agent keeps driving toward it across turns until you `/goal drop`
+Not sure how to phrase the objective? `/guided-goal` interviews you, refines the rough idea, then flips on goal mode
+Hand the whole session off to a fresh one with `/handoff` — add focus like `/handoff focus on the test suite` to steer the handoff summary
+Turn on `/loop` and your next prompt re-submits itself after every yield — `Esc` cancels the current iteration, `/loop` again disables it
+`/new` starts a fresh session and keeps the old one; `/drop` deletes the current session and starts clean for a real blank slate
+Flip on `/plan` mode and the agent drafts a plan before it touches a single file — start it primed with `/plan refactor the auth flow`
+`/rename my-feature` titles the session so you can find it later; `/move ../other-repo` relocates it to a different working directory
+`/resume` opens the session picker so you can jump straight back into any past session without leaving the TUI
+Last agent turn failed mid-stream? `/retry` reruns it — no need to retype the prompt
+`/session info` prints the session id, title, and cwd at a glance; `/session delete` wipes the session and returns to the selector
+`/tree` opens the session tree navigator — switch branches of your conversation and jump between timelines
+`/browser visible` puts the agent's browser on screen so you can watch it click and type — plain `/browser` toggles, `/browser headless` hides it again
+`/collab status` shows the live link plus everyone connected; `/collab stop` ends the session and drops all guests
+`/collab view` shares a read-only relay link — guests watch your tool calls stream live but can't send prompts of their own
+`/export report.html` renders the whole session to a self-contained HTML file you can email or attach to a ticket
+`/fast on` rides your provider's priority tier (OpenAI service_tier=priority, Anthropic speed=fast) when you need throughput — `/fast status` to check where you stand
+Done spectating? `/leave` drops you out of a guest session cleanly — or stops hosting if the session is yours
+`/share` posts an end-to-end encrypted snapshot of your session as a link (secret gist or share server) — perfect when a teammate just needs to see where you got to, not pair live
+Prefix a message with `!` to run it straight in the shell — output streams inline and the editor border flips to bash mode as you type
+Type `#` in the prompt to fuzzy-search editor actions — copy line, copy whole prompt, undo, jump cursor — without memorizing any shortcut
+Prefix a message with `$` to run it as a Python cell in the shared kernel the agent's `eval` tool uses — `$$` runs it without spending context
+Type `:joy` (or any `:shortcode`) to pop an emoji picker — on by default, kill it with the `emojiAutocomplete` setting
+`ctrl+g` yanks your draft into `$EDITOR` — inside the plan-review overlay it edits the whole plan or your in-flight annotation instead
+`ctrl+shift+v` pastes clipboard text raw, skipping the collapse-to-`[Paste]`-marker so the full text lands verbatim in your draft
+`ctrl+v` drops a clipboard image straight into your prompt — it's auto-resized and shown as an `[Image #N]` chip the model can see
+Start typing `skill://`, `rule://`, `local://`, or `omp://` and the path fuzzy-completes from your registry as you go
+`/plan-review` reopens the plan-review overlay in plan mode — even after a restart, it tracks down your newest plan so you can edit or approve it
+Inside the plan-review overlay, `d` drops a section into your Refine feedback, `a` annotates it, and `u` undoes — Tab cycles outline → body → actions

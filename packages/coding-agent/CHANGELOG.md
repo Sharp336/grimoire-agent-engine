@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Expanded the welcome-screen tip pool from 23 to 102 entries — added 81 source-verified tips covering slash commands (`/goal`, `/advisor`, `/review <PR URL>`, `/mcp`, `/collab view`, `/handoff`, `/tree`, …), `omp` CLI subcommands (`omp bench`, `omp models`, `omp usage`, `omp token`, `omp worktree`, …), and default keyboard shortcuts (`ctrl+o`, `alt+up`, `shift+tab`, `ctrl+t`, `ctrl+j`, …), and removed 2 pre-existing non-command tips (`completion()` eval helper, task-isolation worktree note) to keep the pool focused on commands and keybinds. Fixed the `/plan-review` tip to qualify it as plan-mode-only, and updated `/fork` copy to describe duplicating the current session/current leaf. Each new tip was independently re-checked against current source before inclusion.
+
 ## [16.0.4] - 2026-06-17
 
 ### Fixed
