@@ -981,6 +981,18 @@ const streamOpenAICompletionsOnce = (
 			for await (const chunk of terminalAwareStream) {
 				if (!chunk || typeof chunk !== "object") continue;
 
+				// Some OpenAI-compatible hosts stream a failure as an `event: error`
+				// payload over an HTTP 200 body (e.g. OMLX/LM Studio context-overflow
+				// or chat-template errors). Surface it instead of letting the loop skip
+				// the choice-less chunk and end the turn with no output.
+				const streamedError = getStreamedChunkErrorMessage(chunk);
+				if (streamedError) {
+					output.stopReason = "error";
+					output.errorMessage = streamedError;
+					streamFinishedAt ??= Date.now();
+					break;
+				}
+
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
 				output.responseId ||= chunk.id;
@@ -1499,6 +1511,33 @@ function buildParams(
 	});
 
 	return { params, toolStrictMode, strictToolsApplied };
+}
+
+/**
+ * Detect a streamed error envelope on a chunk. OpenAI-compatible servers
+ * (LM Studio, OMLX, vLLM, …) frequently answer with HTTP 200 and then emit the
+ * failure mid-stream as `event: error` / `data: {"error": …}` instead of a
+ * non-2xx status. `readSseJson` ignores the `event:` name and hands us the
+ * parsed `data` payload as a "chunk" with no `choices`, so without this check
+ * the error is silently dropped and the turn ends with no output.
+ *
+ * Returns the human-readable message when the chunk is an error envelope,
+ * otherwise `undefined`.
+ */
+function getStreamedChunkErrorMessage(chunk: object): string | undefined {
+	const error = Reflect.get(chunk, "error");
+	if (error === undefined || error === null) return undefined;
+	if (typeof error === "string") {
+		return error.length > 0 ? error : "Provider streamed an error event";
+	}
+	if (typeof error === "object") {
+		const nested = Reflect.get(error, "message");
+		if (typeof nested === "string" && nested.length > 0) return nested;
+		const top = Reflect.get(chunk, "message");
+		if (typeof top === "string" && top.length > 0) return top;
+		return "Provider streamed an error event";
+	}
+	return undefined;
 }
 
 export function parseChunkUsage(

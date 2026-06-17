@@ -254,7 +254,7 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "omlx",
-		defaultModel: "qwen3-coder-next-8bit",
+		defaultModel: "qwen/qwen3-coder-30b",
 		envVars: ["OMLX_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => omlxModelManagerOptions(config),
 		allowUnauthenticated: true,

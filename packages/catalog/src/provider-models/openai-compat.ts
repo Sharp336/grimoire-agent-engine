@@ -1772,6 +1772,16 @@ export function opencodeGoModelManagerOptions(config?: OpenCodeModelManagerConfi
 // 9. OMLX (MLX-based inference server for Apple Silicon)
 // ---------------------------------------------------------------------------
 
+/**
+ * Identifies OMLX model ids that are embeddings or rerankers rather than chat
+ * LLMs. OMLX exposes all model types from a single OpenAI-compatible
+ * `/v1/models` list, so these must be filtered out of chat-model discovery.
+ */
+function isOmlxNonChatModelId(id: string): boolean {
+	const lower = id.toLowerCase();
+	return lower.includes("embed") || lower.includes("rerank");
+}
+
 function normalizeOmlxBaseUrl(baseUrl?: string): string {
 	const value = baseUrl?.trim();
 	if (!value) {
@@ -1799,11 +1809,20 @@ export function omlxModelManagerOptions(config?: OmlxModelManagerConfig): ModelM
 				provider: "omlx",
 				baseUrl,
 				apiKey,
+				// OMLX serves embeddings and rerankers alongside chat LLMs from the
+				// same /v1/models endpoint; exclude the non-chat ones so they don't
+				// show up as selectable chat models.
+				filterModel: (_entry, model) => !isOmlxNonChatModelId(model.id),
 				mapModel: (entry, defaults) => {
 					const reference = references.get(defaults.id);
-					const contextWindow = toPositiveNumber(entry.context_length, reference?.contextWindow ?? 128_000);
+					const contextWindow = toPositiveNumber(
+							// OMLX reports the loaded context length as `max_model_len`
+							// (vLLM-style); fall back to `context_length`, then defaults.
+							entry.max_model_len ?? entry.context_length,
+							reference?.contextWindow ?? 128_000,
+						);
 					const maxTokens = Math.min(contextWindow, toPositiveNumber(entry.max_completion_tokens, 8192));
-					
+
 					return {
 						...defaults,
 						name: toModelName(entry.name, reference?.name ?? defaults.name),

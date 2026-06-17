@@ -39,84 +39,21 @@ OMLX (https://github.com/jundot/omlx) is a high-performance inference server for
 
 **Discovery**: Automatic via `/v1/models` endpoint
 
-## Setup Instructions
+OLMX server is hosted on a different machine in the local network.
+http://jupiter.local:2524
 
-### 1. Install OMLX
+The omp client is configured to connect to the OMLX server .
 
-**macOS App** (recommended):
-```bash
-# Download from https://github.com/jundot/omlx/releases
-# Drag to Applications folder
-```
 
-**Homebrew**:
-```bash
-brew tap jundot/omlx https://github.com/jundot/omlx
-brew install omlx
-```
+### Use with oh-my-pi
 
-**From Source**:
-```bash
-git clone https://github.com/jundot/omlx.git
-cd omlx
-pip install -e .
-```
-
-### 2. Start OMLX Server
-
-**Default setup** (localhost:8000):
-```bash
-omlx serve --model-dir ~/models
-```
-
-**Custom port** (e.g., 2524):
-```bash
-omlx serve --model-dir ~/models --port 2524
-```
-
-**With authentication**:
-```bash
-omlx serve --model-dir ~/models --api-key your-secret-key
-```
-
-**Background service** (Homebrew):
-```bash
-omlx start  # Start via brew services
-omlx stop   # Stop
-omlx restart # Restart
-```
-
-### 3. Configure Environment Variables
-
-**For custom base URL**:
-```bash
-export OMLX_BASE_URL="http://jupiter.local:2524"
-```
-
-**For authentication** (optional):
-```bash
-export OMLX_API_KEY="your-api-key"
-```
-
-**Persistent configuration** (add to ~/.zshrc or ~/.bashrc):
-```bash
-echo 'export OMLX_BASE_URL="http://jupiter.local:2524"' >> ~/.zshrc
-source ~/.zshrc
-```
-
-### 4. Use with oh-my-pi
-
-OMLX is automatically discovered if running on the default port or if `OMLX_BASE_URL` is set.
+First step is to discover the list of model available on the OMLX server. The discovery is done automatically when the OMLX server is running and omp is launched.
 
 **Launch omp**:
 ```bash
 omp
 ```
 
-**Select OMLX model**:
-```bash
-omp --model "omlx/qwen3-coder-next-8bit"
-```
 
 **Login to OMLX** (if authentication required):
 ```bash
