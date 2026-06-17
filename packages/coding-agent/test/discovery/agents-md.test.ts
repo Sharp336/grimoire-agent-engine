@@ -12,6 +12,7 @@ import * as path from "node:path";
 import { loadCapability } from "@oh-my-pi/pi-coding-agent/capability";
 import type { ContextFile } from "@oh-my-pi/pi-coding-agent/capability/context-file";
 import { clearCache } from "@oh-my-pi/pi-coding-agent/capability/fs";
+import { loadProjectContextFiles } from "@oh-my-pi/pi-coding-agent/system-prompt";
 import "@oh-my-pi/pi-coding-agent/capability/context-file";
 import "@oh-my-pi/pi-coding-agent/discovery/agents-md";
 
@@ -43,7 +44,7 @@ describe("agents-md discovery", () => {
 			providers: ["agents-md"],
 		});
 
-		const found = result.all.find(f => path.basename(f.path) === "CLAUDE.md");
+		const found = result.items.find(f => path.basename(f.path) === "CLAUDE.md");
 		expect(found).toBeDefined();
 		expect(found?.content).toBe("claude instructions");
 		expect(found?.level).toBe("project");
@@ -86,8 +87,8 @@ describe("agents-md discovery", () => {
 			providers: ["agents-md"],
 		});
 
-		const agents = result.all.find(f => path.basename(f.path) === "AGENTS.md");
-		const claude = result.all.find(f => path.basename(f.path) === "CLAUDE.md");
+		const agents = result.items.find(f => path.basename(f.path) === "AGENTS.md");
+		const claude = result.items.find(f => path.basename(f.path) === "CLAUDE.md");
 
 		expect(agents).toBeDefined();
 		expect(agents?.content).toBe("inner agents");
@@ -121,5 +122,25 @@ describe("agents-md discovery", () => {
 		const visibleAgents = result.all.find(f => path.basename(f.path) === "AGENTS.md");
 		expect(visibleAgents).toBeDefined();
 		expect(visibleAgents?.content).toBe("visible agents");
+	});
+
+	test("loadProjectContextFiles includes both AGENTS.md and CLAUDE.md at same depth", async () => {
+		const project = path.join(tempDir, "project");
+		fs.mkdirSync(path.join(project, ".git"), { recursive: true });
+		write(path.join(project, "AGENTS.md"), "agents via runtime");
+		write(path.join(project, "CLAUDE.md"), "claude via runtime");
+
+		const files = await loadProjectContextFiles({ cwd: project });
+
+		const basenames = files.map(f => path.basename(f.path));
+		expect(basenames).toContain("AGENTS.md");
+		expect(basenames).toContain("CLAUDE.md");
+
+		const agentsFile = files.find(f => path.basename(f.path) === "AGENTS.md");
+		const claudeFile = files.find(f => path.basename(f.path) === "CLAUDE.md");
+		expect(agentsFile?.content).toBe("agents via runtime");
+		expect(claudeFile?.content).toBe("claude via runtime");
+		// Both at the same depth (project root = depth 0)
+		expect(agentsFile?.depth).toBe(claudeFile?.depth);
 	});
 });
