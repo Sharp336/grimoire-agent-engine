@@ -43,6 +43,8 @@ function convertToLegacyConfig(server: MCPServer): MCPServerConfig {
 		timeout: server.timeout,
 		auth: server.auth,
 		oauth: server.oauth,
+		lifecycle: server.lifecycle,
+		idleTimeout: server.idleTimeout,
 	};
 
 	if (transport === "stdio") {

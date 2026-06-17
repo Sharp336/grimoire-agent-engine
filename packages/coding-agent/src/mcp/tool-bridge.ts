@@ -25,6 +25,12 @@ import type { MCPContent, MCPServerConnection, MCPToolCallParams, MCPToolCallRes
 /** Reconnect callback: tears down stale connection, returns new one or null. */
 export type MCPReconnect = () => Promise<MCPServerConnection | null>;
 
+/** Hooks the manager uses to refcount in-flight tool calls for idle-disconnect. */
+export interface MCPActivityHooks {
+	begin(): void;
+	end(): void;
+}
+
 /**
  * Network-level and stale-session errors that warrant a reconnect + single retry.
  * Conservative: only catches errors where the server is likely alive but the
@@ -283,14 +289,20 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 	readonly mergeCallAndResult = true;
 
 	/** Create MCPTool instances for all tools from an MCP server connection */
-	static fromTools(connection: MCPServerConnection, tools: MCPToolDefinition[], reconnect?: MCPReconnect): MCPTool[] {
-		return tools.map(tool => new MCPTool(connection, tool, reconnect));
+	static fromTools(
+		connection: MCPServerConnection,
+		tools: MCPToolDefinition[],
+		reconnect?: MCPReconnect,
+		onActivity?: MCPActivityHooks,
+	): MCPTool[] {
+		return tools.map(tool => new MCPTool(connection, tool, reconnect, onActivity));
 	}
 
 	constructor(
 		private connection: MCPServerConnection,
 		private readonly tool: MCPToolDefinition,
 		private readonly reconnect?: MCPReconnect,
+		private readonly onActivity?: MCPActivityHooks,
 	) {
 		this.name = createMCPToolName(connection.name, tool.name);
 		this.label = `${connection.name}/${tool.name}`;
@@ -320,34 +332,39 @@ export class MCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		const provider = this.connection._source?.provider;
 		const providerName = this.connection._source?.providerName;
 
+		this.onActivity?.begin();
 		try {
-			const result = await callTool(this.connection, this.tool.name, args, { signal });
-			return buildResult(result, this.connection.name, this.tool.name, provider, providerName);
-		} catch (error) {
-			rethrowIfAborted(error, signal);
-			if (this.reconnect && isRetriableConnectionError(error)) {
-				const newConn = await reconnectWithAbort(this.reconnect, signal);
-				if (newConn) {
-					// Rebind so subsequent calls on this instance use the fresh connection
-					this.connection = newConn;
-					const retryProvider = newConn._source?.provider ?? provider;
-					const retryProviderName = newConn._source?.providerName ?? providerName;
-					try {
-						const result = await callTool(newConn, this.tool.name, args, { signal });
-						return buildResult(result, newConn.name, this.tool.name, retryProvider, retryProviderName);
-					} catch (retryError) {
-						rethrowIfAborted(retryError, signal);
-						return buildErrorResult(
-							retryError,
-							this.connection.name,
-							this.tool.name,
-							retryProvider,
-							retryProviderName,
-						);
+			try {
+				const result = await callTool(this.connection, this.tool.name, args, { signal });
+				return buildResult(result, this.connection.name, this.tool.name, provider, providerName);
+			} catch (error) {
+				rethrowIfAborted(error, signal);
+				if (this.reconnect && isRetriableConnectionError(error)) {
+					const newConn = await reconnectWithAbort(this.reconnect, signal);
+					if (newConn) {
+						// Rebind so subsequent calls on this instance use the fresh connection
+						this.connection = newConn;
+						const retryProvider = newConn._source?.provider ?? provider;
+						const retryProviderName = newConn._source?.providerName ?? providerName;
+						try {
+							const result = await callTool(newConn, this.tool.name, args, { signal });
+							return buildResult(result, newConn.name, this.tool.name, retryProvider, retryProviderName);
+						} catch (retryError) {
+							rethrowIfAborted(retryError, signal);
+							return buildErrorResult(
+								retryError,
+								this.connection.name,
+								this.tool.name,
+								retryProvider,
+								retryProviderName,
+							);
+						}
 					}
 				}
+				return buildErrorResult(error, this.connection.name, this.tool.name, provider, providerName);
 			}
-			return buildErrorResult(error, this.connection.name, this.tool.name, provider, providerName);
+		} finally {
+			this.onActivity?.end();
 		}
 	}
 }
@@ -378,8 +395,9 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
 		reconnect?: MCPReconnect,
+		onActivity?: MCPActivityHooks,
 	): DeferredMCPTool[] {
-		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect));
+		return tools.map(tool => new DeferredMCPTool(serverName, tool, getConnection, source, reconnect, onActivity));
 	}
 
 	constructor(
@@ -388,6 +406,7 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		private readonly getConnection: () => Promise<MCPServerConnection>,
 		source?: SourceMeta,
 		private readonly reconnect?: MCPReconnect,
+		private readonly onActivity?: MCPActivityHooks,
 	) {
 		this.name = createMCPToolName(serverName, tool.name);
 		this.label = `${serverName}/${tool.name}`;
@@ -419,66 +438,71 @@ export class DeferredMCPTool implements CustomTool<TSchema, MCPToolDetails> {
 		const provider = this.#fallbackProvider;
 		const providerName = this.#fallbackProviderName;
 
+		this.onActivity?.begin();
 		try {
-			const connection = await untilAborted(signal, () => this.getConnection());
-			throwIfAborted(signal);
 			try {
-				const result = await callTool(connection, this.tool.name, args, { signal });
-				return buildResult(
-					result,
-					this.serverName,
-					this.tool.name,
-					connection._source?.provider ?? provider,
-					connection._source?.providerName ?? providerName,
-				);
-			} catch (callError) {
-				rethrowIfAborted(callError, signal);
-				if (this.reconnect && isRetriableConnectionError(callError)) {
+				const connection = await untilAborted(signal, () => this.getConnection());
+				throwIfAborted(signal);
+				try {
+					const result = await callTool(connection, this.tool.name, args, { signal });
+					return buildResult(
+						result,
+						this.serverName,
+						this.tool.name,
+						connection._source?.provider ?? provider,
+						connection._source?.providerName ?? providerName,
+					);
+				} catch (callError) {
+					rethrowIfAborted(callError, signal);
+					if (this.reconnect && isRetriableConnectionError(callError)) {
+						const newConn = await reconnectWithAbort(this.reconnect, signal);
+						if (newConn) {
+							const retryProvider = newConn._source?.provider ?? provider;
+							const retryProviderName = newConn._source?.providerName ?? providerName;
+							try {
+								const result = await callTool(newConn, this.tool.name, args, { signal });
+								return buildResult(result, this.serverName, this.tool.name, retryProvider, retryProviderName);
+							} catch (retryError) {
+								rethrowIfAborted(retryError, signal);
+								return buildErrorResult(
+									retryError,
+									this.serverName,
+									this.tool.name,
+									retryProvider,
+									retryProviderName,
+								);
+							}
+						}
+					}
+					return buildErrorResult(callError, this.serverName, this.tool.name, provider, providerName);
+				}
+			} catch (connError) {
+				// getConnection() failed — server never connected or connection lost.
+				// This is always worth a reconnect attempt for deferred tools, since the
+				// error ("MCP server not connected") isn't a network error from callTool.
+				rethrowIfAborted(connError, signal);
+				if (this.reconnect) {
 					const newConn = await reconnectWithAbort(this.reconnect, signal);
 					if (newConn) {
-						const retryProvider = newConn._source?.provider ?? provider;
-						const retryProviderName = newConn._source?.providerName ?? providerName;
 						try {
 							const result = await callTool(newConn, this.tool.name, args, { signal });
-							return buildResult(result, this.serverName, this.tool.name, retryProvider, retryProviderName);
-						} catch (retryError) {
-							rethrowIfAborted(retryError, signal);
-							return buildErrorResult(
-								retryError,
+							return buildResult(
+								result,
 								this.serverName,
 								this.tool.name,
-								retryProvider,
-								retryProviderName,
+								newConn._source?.provider ?? provider,
+								newConn._source?.providerName ?? providerName,
 							);
+						} catch (retryError) {
+							rethrowIfAborted(retryError, signal);
+							return buildErrorResult(retryError, this.serverName, this.tool.name, provider, providerName);
 						}
 					}
 				}
-				return buildErrorResult(callError, this.serverName, this.tool.name, provider, providerName);
+				return buildErrorResult(connError, this.serverName, this.tool.name, provider, providerName);
 			}
-		} catch (connError) {
-			// getConnection() failed — server never connected or connection lost.
-			// This is always worth a reconnect attempt for deferred tools, since the
-			// error ("MCP server not connected") isn't a network error from callTool.
-			rethrowIfAborted(connError, signal);
-			if (this.reconnect) {
-				const newConn = await reconnectWithAbort(this.reconnect, signal);
-				if (newConn) {
-					try {
-						const result = await callTool(newConn, this.tool.name, args, { signal });
-						return buildResult(
-							result,
-							this.serverName,
-							this.tool.name,
-							newConn._source?.provider ?? provider,
-							newConn._source?.providerName ?? providerName,
-						);
-					} catch (retryError) {
-						rethrowIfAborted(retryError, signal);
-						return buildErrorResult(retryError, this.serverName, this.tool.name, provider, providerName);
-					}
-				}
-			}
-			return buildErrorResult(connError, this.serverName, this.tool.name, provider, providerName);
+		} finally {
+			this.onActivity?.end();
 		}
 	}
 }

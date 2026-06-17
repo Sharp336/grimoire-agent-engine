@@ -49,6 +49,10 @@ export interface MCPServer {
 	};
 	/** Transport type */
 	transport?: "stdio" | "sse" | "http";
+	/** Connection lifecycle: "eager" (default) connects at session start; "lazy" connects on first tool use and idle-disconnects after idleTimeout. */
+	lifecycle?: "eager" | "lazy";
+	/** Idle-disconnect timeout in milliseconds for lazy servers. 0 disables idle disconnect. */
+	idleTimeout?: number;
 	/** Source metadata (added by loader) */
 	_source: SourceMeta;
 }

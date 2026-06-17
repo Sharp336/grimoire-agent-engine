@@ -59,6 +59,9 @@ export interface MCPAuthConfig {
 	resource?: string;
 }
 
+/** Connection lifecycle for an MCP server. */
+export type MCPLifecycle = "lazy" | "eager";
+
 /** Base server config with shared options */
 interface MCPServerConfigBase {
 	/** Whether this server is enabled (default: true) */
@@ -77,6 +80,10 @@ interface MCPServerConfigBase {
 		/** `prompt` param for the authorization request (default "consent"; "" to omit) */
 		prompt?: string;
 	};
+	/** Connection lifecycle: "eager" (default) connects at session start; "lazy" connects on first tool use and idle-disconnects after idleTimeout. */
+	lifecycle?: MCPLifecycle;
+	/** Idle-disconnect timeout in milliseconds for lazy servers. 0 disables idle disconnect. */
+	idleTimeout?: number;
 }
 
 /** Stdio server configuration */
