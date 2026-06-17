@@ -34,11 +34,12 @@ import {
 } from "./oauth-credentials";
 import { type MCPStoredOAuthCredential, refreshMCPOAuthToken } from "./oauth-flow";
 import type { McpConnectionStatusEvent } from "./startup-events";
-import type { MCPToolDetails } from "./tool-bridge";
+import type { MCPActivityHooks, MCPToolDetails } from "./tool-bridge";
 import { DeferredMCPTool, MCPTool } from "./tool-bridge";
 import type { MCPToolCache } from "./tool-cache";
 import type {
 	MCPGetPromptResult,
+	MCPLifecycle,
 	MCPPrompt,
 	MCPRequestOptions,
 	MCPResource,
@@ -207,11 +208,196 @@ export class MCPManager {
 	#reconnectHistory = new Map<string, number[]>();
 	/** Monotonic epoch incremented on disconnectAll to invalidate stale reconnections. */
 	#epoch = 0;
+	/** Default lifecycle applied to servers without an explicit `lifecycle`. */
+	#defaultLifecycle: MCPLifecycle = "eager";
+	/** Default idle-disconnect timeout (ms) for lazy servers without an explicit `idleTimeout`. */
+	#defaultIdleTimeoutMs = 300_000;
+	/** In-flight tool-call refcount per server; guards lazy idle-disconnect. */
+	#activeCalls = new Map<string, number>();
+	/** Timestamp (ms) of the last tool-call activity per server. */
+	#lastActivityAt = new Map<string, number>();
+	/** Pending idle-disconnect timers per lazy server. */
+	#idleTimers = new Map<string, ReturnType<typeof setTimeout>>();
 
 	constructor(
 		private cwd: string,
 		private toolCache: MCPToolCache | null = null,
 	) {}
+
+	/**
+	 * Set the default lifecycle and idle-disconnect timeout for servers that do
+	 * not specify their own. Wired from settings (`mcp.defaultLifecycle`,
+	 * `mcp.defaultIdleTimeoutMs`) before servers are connected.
+	 */
+	setLifecycleDefaults(defaultLifecycle: MCPLifecycle, defaultIdleTimeoutMs: number): void {
+		this.#defaultLifecycle = defaultLifecycle;
+		this.#defaultIdleTimeoutMs =
+			Number.isFinite(defaultIdleTimeoutMs) && defaultIdleTimeoutMs >= 0 ? defaultIdleTimeoutMs : 300_000;
+	}
+
+	/** Effective lifecycle for a server config (per-server overrides the default). */
+	#effectiveLifecycle(config: MCPServerConfig | undefined): MCPLifecycle {
+		return config?.lifecycle ?? this.#defaultLifecycle;
+	}
+
+	/** Effective idle-disconnect timeout (ms) for a server config. */
+	#effectiveIdleTimeout(config: MCPServerConfig | undefined): number {
+		return config?.idleTimeout ?? this.#defaultIdleTimeoutMs;
+	}
+
+	/** Activity hooks handed to a server's tools so the manager can refcount calls. */
+	#activityHooks(name: string): MCPActivityHooks {
+		return {
+			begin: () => this.#beginCall(name),
+			end: () => this.#endCall(name),
+		};
+	}
+
+	/** Mark a tool call started: bump the refcount and cancel any pending idle reap. */
+	#beginCall(name: string): void {
+		this.#activeCalls.set(name, (this.#activeCalls.get(name) ?? 0) + 1);
+		this.#lastActivityAt.set(name, Date.now());
+		const timer = this.#idleTimers.get(name);
+		if (timer) {
+			clearTimeout(timer);
+			this.#idleTimers.delete(name);
+		}
+	}
+
+	/** Mark a tool call finished: drop the refcount and (re)arm the idle reaper. */
+	#endCall(name: string): void {
+		const next = (this.#activeCalls.get(name) ?? 1) - 1;
+		if (next <= 0) {
+			this.#activeCalls.delete(name);
+		} else {
+			this.#activeCalls.set(name, next);
+		}
+		this.#lastActivityAt.set(name, Date.now());
+		this.#scheduleIdleCheck(name);
+	}
+
+	/**
+	 * Arm an idle-disconnect timer for a lazy server with idle work remaining.
+	 * No-op for eager servers, disabled idle timeouts (`idleTimeout <= 0`), or a
+	 * server with an in-flight call (a later `#endCall` reschedules). The timer
+	 * is `unref`'d so it never keeps the process alive.
+	 */
+	#scheduleIdleCheck(name: string): void {
+		const existing = this.#idleTimers.get(name);
+		if (existing) {
+			clearTimeout(existing);
+			this.#idleTimers.delete(name);
+		}
+		const config = this.#connections.get(name)?.config ?? this.#serverConfigs.get(name);
+		if (this.#effectiveLifecycle(config) !== "lazy") return;
+		const idleTimeout = this.#effectiveIdleTimeout(config);
+		if (!(idleTimeout > 0)) return;
+		if ((this.#activeCalls.get(name) ?? 0) > 0) return;
+		const timer = setTimeout(() => {
+			void this.#maybeIdleDisconnect(name);
+		}, idleTimeout);
+		timer.unref?.();
+		this.#idleTimers.set(name, timer);
+	}
+
+	/** Drop all idle/activity tracking for a server (called on disconnect). */
+	#clearIdleState(name: string): void {
+		const timer = this.#idleTimers.get(name);
+		if (timer) clearTimeout(timer);
+		this.#idleTimers.delete(name);
+		this.#activeCalls.delete(name);
+		this.#lastActivityAt.delete(name);
+	}
+
+	/**
+	 * Idle-disconnect a lazy server: close its transport (terminating any stdio
+	 * child) and re-register its tools as {@link DeferredMCPTool} so the next
+	 * call lazily reconnects. Re-checks the idle preconditions to avoid racing a
+	 * call that started after the timer was armed.
+	 */
+	async #maybeIdleDisconnect(name: string): Promise<void> {
+		this.#idleTimers.delete(name);
+		const connection = this.#connections.get(name);
+		if (!connection) return;
+		if ((this.#activeCalls.get(name) ?? 0) > 0) return;
+		const config = connection.config ?? this.#serverConfigs.get(name);
+		if (this.#effectiveLifecycle(config) !== "lazy") return;
+		const idleTimeout = this.#effectiveIdleTimeout(config);
+		if (!(idleTimeout > 0)) return;
+		if (Date.now() - (this.#lastActivityAt.get(name) ?? 0) < idleTimeout) {
+			// Activity landed after the timer was armed; re-arm instead of reaping.
+			this.#scheduleIdleCheck(name);
+			return;
+		}
+
+		// Tool definitions to re-advertise. Prefer the live connection's cached
+		// list; fall back to the persistent tool cache. If neither is available we
+		// keep the server connected rather than strip live tools from the registry.
+		let defs = connection.tools ?? null;
+		if (!defs && this.toolCache && config) {
+			defs = await this.toolCache.get(name, config);
+		}
+		if (!defs) return;
+
+		// Detach onClose first so the close() below does not trigger a reconnect.
+		connection.transport.onClose = undefined;
+		const subscribedUris = this.#subscribedResources.get(name);
+		if (subscribedUris && subscribedUris.size > 0) {
+			void unsubscribeFromResources(connection, Array.from(subscribedUris)).catch(() => {});
+		}
+		this.#subscribedResources.delete(name);
+		const hadPrompts = (connection.prompts?.length ?? 0) > 0;
+		await disconnectServer(connection);
+		this.#connections.delete(name);
+		this.#activeCalls.delete(name);
+
+		// Re-register as deferred tools that lazily reconnect on next use.
+		const source = this.#sources.get(name) ?? connection._source;
+		const reconnect = () => this.reconnectServer(name);
+		const onActivity = this.#activityHooks(name);
+		const deferred = DeferredMCPTool.fromTools(
+			name,
+			defs,
+			() => this.#ensureLazyConnection(name),
+			source,
+			reconnect,
+			onActivity,
+		);
+		this.#replaceServerTools(name, deferred);
+		this.#onToolsChanged?.(this.#tools);
+		if (hadPrompts) this.#onPromptsChanged?.(name);
+		logger.debug("MCP server idle-disconnected", { path: `mcp:${name}`, idleTimeoutMs: idleTimeout });
+	}
+
+	/**
+	 * Connect a lazy server on demand, single-flighting concurrent first calls
+	 * through `#pendingConnections`. Used as the `getConnection` callback for a
+	 * lazy server's {@link DeferredMCPTool}s.
+	 */
+	async #ensureLazyConnection(name: string): Promise<MCPServerConnection> {
+		const existing = this.#connections.get(name);
+		if (existing) return existing;
+		const pending = this.#pendingConnections.get(name);
+		if (pending) return pending;
+		const reconnecting = this.#pendingReconnections.get(name);
+		if (reconnecting) {
+			const result = await reconnecting;
+			if (result) return result;
+		}
+		const config = this.#serverConfigs.get(name);
+		if (!config) throw new Error(`MCP server not connected: ${name}`);
+		const source = this.#sources.get(name);
+		const epoch = this.#epoch;
+		const attempt = this.#connectAndWireServer(name, config, source, epoch);
+		this.#pendingConnections.set(name, attempt);
+		try {
+			return await attempt;
+		} finally {
+			if (this.#pendingConnections.get(name) === attempt) {
+				this.#pendingConnections.delete(name);
+			}
+		}
+	}
 
 	/**
 	 * Set a callback to receive all server notifications.
@@ -401,6 +587,30 @@ export class MCPManager {
 			// and falls back to cached/deferred tools.
 			this.#serverConfigs.set(name, config);
 
+			// Lazy servers do not connect at startup. Advertise cached tools as
+			// DeferredMCPTool (which lazily connects on first use); on a cold cache
+			// fall through to a one-time eager connect this session to populate it.
+			if (this.#effectiveLifecycle(config) === "lazy") {
+				const cached = this.toolCache ? await this.toolCache.get(name, config) : null;
+				if (cached && cached.length > 0) {
+					const source = this.#sources.get(name) ?? sources[name];
+					const reconnect = () => this.reconnectServer(name);
+					const onActivity = this.#activityHooks(name);
+					allTools.push(
+						...DeferredMCPTool.fromTools(
+							name,
+							cached,
+							() => this.#ensureLazyConnection(name),
+							source,
+							reconnect,
+							onActivity,
+						),
+					);
+					continue;
+				}
+				// Cold cache: fall through to the eager connect below to populate it.
+			}
+
 			// Resolve auth config before connecting, but do so per-server in parallel.
 			const connectionPromise = (async () => {
 				const resolvedConfig = await this.#resolveAuthConfig(config);
@@ -475,13 +685,14 @@ export class MCPManager {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
 					this.#pendingToolLoads.delete(name);
 					const reconnect = () => this.reconnectServer(name);
-					const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
+					const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#activityHooks(name));
 					this.#replaceServerTools(name, customTools);
 					this.#onToolsChanged?.(this.#tools);
 					void this.toolCache?.set(name, config, serverTools);
 
 					onStatus?.({ type: "connected", serverName: name });
 					await this.#loadServerResourcesAndPrompts(name, connection);
+					this.#scheduleIdleCheck(name);
 				})
 				.catch(error => {
 					if (this.#pendingToolLoads.get(name) !== toolsPromise) return;
@@ -537,7 +748,7 @@ export class MCPManager {
 					const { connection, serverTools } = value;
 					connectedServers.add(name);
 					const reconnect = () => this.reconnectServer(name);
-					allTools.push(...MCPTool.fromTools(connection, serverTools, reconnect));
+					allTools.push(...MCPTool.fromTools(connection, serverTools, reconnect, this.#activityHooks(name)));
 				} else if (task.tracked.status === "rejected") {
 					const message =
 						task.tracked.reason instanceof Error ? task.tracked.reason.message : String(task.tracked.reason);
@@ -549,7 +760,14 @@ export class MCPManager {
 						const source = this.#sources.get(name);
 						const reconnect = () => this.reconnectServer(name);
 						allTools.push(
-							...DeferredMCPTool.fromTools(name, cached, () => this.waitForConnection(name), source, reconnect),
+							...DeferredMCPTool.fromTools(
+								name,
+								cached,
+								() => this.waitForConnection(name),
+								source,
+								reconnect,
+								this.#activityHooks(name),
+							),
 						);
 					}
 				}
@@ -745,6 +963,7 @@ export class MCPManager {
 		this.#serverConfigs.delete(name);
 		this.#pendingResourceRefresh.delete(name);
 		this.#reconnectHistory.delete(name);
+		this.#clearIdleState(name);
 
 		const connection = this.#connections.get(name);
 
@@ -794,6 +1013,12 @@ export class MCPManager {
 		this.#tools = [];
 		this.#subscribedResources.clear();
 		this.#reconnectHistory.clear();
+		for (const timer of this.#idleTimers.values()) {
+			clearTimeout(timer);
+		}
+		this.#idleTimers.clear();
+		this.#activeCalls.clear();
+		this.#lastActivityAt.clear();
 	}
 
 	/**
@@ -982,11 +1207,12 @@ export class MCPManager {
 		try {
 			const serverTools = await listTools(connection);
 			const reconnect = () => this.reconnectServer(name);
-			const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
+			const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#activityHooks(name));
 			void this.toolCache?.set(name, config, serverTools);
 			this.#replaceServerTools(name, customTools);
 			this.#onToolsChanged?.(this.#tools);
 			void this.#loadServerResourcesAndPrompts(name, connection);
+			this.#scheduleIdleCheck(name);
 			return connection;
 		} catch (error) {
 			// Clean up the connection to avoid zombie transports
@@ -1039,7 +1265,7 @@ export class MCPManager {
 		// Reload tools
 		const serverTools = await listTools(connection);
 		const reconnect = () => this.reconnectServer(name);
-		const customTools = MCPTool.fromTools(connection, serverTools, reconnect);
+		const customTools = MCPTool.fromTools(connection, serverTools, reconnect, this.#activityHooks(name));
 		void this.toolCache?.set(name, connection.config, serverTools);
 
 		// Replace tools from this server

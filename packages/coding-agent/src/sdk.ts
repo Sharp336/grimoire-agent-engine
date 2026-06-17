@@ -1681,6 +1681,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const cacheStorage = settings.getStorage();
 				mcpManager = new MCPManager(cwd, cacheStorage ? new MCPToolCache(cacheStorage) : null);
 				mcpManager.setAuthStorage(authStorage);
+				mcpManager.setLifecycleDefaults(
+					settings.get("mcp.defaultLifecycle"),
+					settings.get("mcp.defaultIdleTimeoutMs"),
+				);
 				toolSession.mcpManager = mcpManager;
 
 				if (settings.get("mcp.notifications")) {
@@ -1761,6 +1765,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					...mcpDiscoverOptions,
 					cacheStorage: settings.getStorage(),
 					authStorage,
+					lifecycleDefaults: {
+						lifecycle: settings.get("mcp.defaultLifecycle"),
+						idleTimeoutMs: settings.get("mcp.defaultIdleTimeoutMs"),
+					},
 				});
 				mcpManager = mcpResult.manager;
 				toolSession.mcpManager = mcpManager;
