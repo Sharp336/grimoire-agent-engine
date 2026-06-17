@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the status-line `cost` segment inflating far beyond actual API billing. `cacheRead` cost (full cached context re-read every turn) was accumulated across turns, producing N×context_size cost inflation — the same pattern already fixed for token totals. The cost segment now sums `input + output + cacheWrite` costs, matching the `token_total` segment behavior. Cache-read cost data is still preserved in the full `UsageStatistics` ledger for programmatic access. ([#2475](https://github.com/can1357/oh-my-pi/issues/2475))
+
 ## [16.0.1] - 2026-06-15
 
 ### Breaking Changes

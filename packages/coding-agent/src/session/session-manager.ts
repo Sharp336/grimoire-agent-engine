@@ -96,7 +96,7 @@ function addUsage(target: UsageStatistics, usage: Usage | undefined): void {
 	target.cacheRead += usage.cacheRead;
 	target.cacheWrite += usage.cacheWrite;
 	target.premiumRequests += usage.premiumRequests ?? 0;
-	target.cost += usage.cost.total;
+	target.cost += usage.cost.input + usage.cost.output + usage.cost.cacheWrite;
 }
 
 function isAssistantEntry(entry: SessionEntry): boolean {
