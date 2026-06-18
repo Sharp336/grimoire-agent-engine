@@ -435,6 +435,9 @@ export interface AssistantAudioContent {
 	mimeType: string;
 	/** Optional transcript of the spoken audio, when the provider returns one. */
 	transcript?: string;
+	/** Absolute path the generated clip was materialized to (set by the session
+	 * after the turn completes); undefined until written to disk. */
+	path?: string;
 }
 
 /** Options for requesting model-generated audio output. */

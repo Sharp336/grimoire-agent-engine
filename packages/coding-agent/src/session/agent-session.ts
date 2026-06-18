@@ -2478,6 +2478,22 @@ export class AgentSession {
 				// Regular LLM message - persist as SessionMessageEntry
 				if (event.message.role === "assistant") {
 					const assistantMsg = event.message as AssistantMessage;
+					// Materialize model-generated audio to a real file the user can open.
+					// Best-effort: the clip is also persisted to the session blob store.
+					for (const block of assistantMsg.content) {
+						if (block.type !== "audio_output" || block.path || !block.data) continue;
+						try {
+							const ext = block.mimeType === "audio/mpeg" ? "mp3" : "wav";
+							const filePath = path.join(
+								this.sessionManager.getCwd(),
+								`audio-output-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`,
+							);
+							fs.writeFileSync(filePath, Buffer.from(block.data, "base64"));
+							block.path = filePath;
+						} catch {
+							// Best-effort: leave the clip in the session blob only.
+						}
+					}
 					if (assistantMsg.stopReason !== "aborted" && assistantMsg.stopReason !== "error" && assistantMsg.usage) {
 						assistantMsg.contextSnapshot = {
 							promptTokens: calculatePromptTokens(assistantMsg.usage),

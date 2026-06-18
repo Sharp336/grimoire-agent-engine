@@ -858,16 +858,16 @@ export class UiHelpers {
 
 	extractAssistantText(message: AssistantMessage): string {
 		let text = "";
-		let audioCount = 0;
+		const audioPaths: string[] = [];
 		for (const content of message.content) {
 			if (content.type === "text") {
 				text += content.text;
 			} else if (content.type === "audio_output") {
-				audioCount++;
+				if (content.path) audioPaths.push(content.path);
 			}
 		}
-		if (audioCount > 0) {
-			const note = `[generated ${audioCount} audio clip${audioCount === 1 ? "" : "s"}; saved to session]`;
+		if (audioPaths.length > 0) {
+			const note = `[generated ${audioPaths.length} audio clip${audioPaths.length === 1 ? "" : "s"}: ${audioPaths.join(", ")}]`;
 			text = text.length > 0 ? `${text.trim()}\n\n${note}` : note;
 		}
 		return text.trim();
