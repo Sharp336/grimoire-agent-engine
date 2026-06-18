@@ -348,19 +348,33 @@ const RETRY_BACKOFF_MAX_DELAY_MS = 8_000;
 type CompactionCheckResult = Readonly<{
 	deferredHandoff: boolean;
 	continuationScheduled: boolean;
+	/** Set when #checkCompaction removed the trailing assistant from agent.state
+	 *  (e.g. context overflow / length stop with no recovery path) but returned
+	 *  without scheduling continuation. Periodic shake must NOT run in this case —
+	 *  it would rebuild agent.state from persisted entries and reintroduce the
+	 *  pruned assistant into the next turn's prompt. */
+	tailPruned: boolean;
 }>;
 
 const COMPACTION_CHECK_NONE: CompactionCheckResult = {
 	deferredHandoff: false,
 	continuationScheduled: false,
+	tailPruned: false,
+};
+const COMPACTION_CHECK_NONE_TAIL_PRUNED: CompactionCheckResult = {
+	deferredHandoff: false,
+	continuationScheduled: false,
+	tailPruned: true,
 };
 const COMPACTION_CHECK_DEFERRED_HANDOFF: CompactionCheckResult = {
 	deferredHandoff: true,
 	continuationScheduled: true,
+	tailPruned: false,
 };
 const COMPACTION_CHECK_CONTINUATION: CompactionCheckResult = {
 	deferredHandoff: false,
 	continuationScheduled: true,
+	tailPruned: false,
 };
 export type CommandMetadataChangedListener = () => void | Promise<void>;
 export type AsyncJobSnapshotItem = Pick<AsyncJob, "id" | "type" | "status" | "label" | "startTime">;
@@ -2684,7 +2698,14 @@ export class AgentSession {
 			// rewind/todo/session_stop passes: any reminder or hook continuation
 			// we append here would race the handoff, retry, auto-continue prompt,
 			// or queued-message drain that already owns the next turn.
-			if (compactionResult.deferredHandoff || compactionResult.continuationScheduled) {
+			// Also skip when compaction pruned the trailing assistant (overflow / length
+			// stop with no recovery path) — periodic shake would rebuild agent.state from
+			// persisted entries and reintroduce the pruned assistant into the prompt.
+			if (
+				compactionResult.deferredHandoff ||
+				compactionResult.continuationScheduled ||
+				compactionResult.tailPruned
+			) {
 				await emitAgentEndNotification();
 				return;
 			}
@@ -7902,7 +7923,7 @@ export class AgentSession {
 			if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
 				return await this.#runAutoCompaction("overflow", true, false, allowDefer, { autoContinue });
 			}
-			return COMPACTION_CHECK_NONE;
+			return COMPACTION_CHECK_NONE_TAIL_PRUNED;
 		}
 
 		// Case 3: Output-side incomplete — `response.incomplete` from OpenAI Responses
@@ -7942,7 +7963,7 @@ export class AgentSession {
 			logger.warn("response.incomplete with no recovery path (promotion + compaction both unavailable)", {
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
-			return COMPACTION_CHECK_NONE;
+			return COMPACTION_CHECK_NONE_TAIL_PRUNED;
 		}
 
 		// Stale-result pass runs every turn, before any threshold gating: it is
