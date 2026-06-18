@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `issue_create` operation to the `github` tool for creating GitHub issues directly from the tool ([#2963](https://github.com/can1357/oh-my-pi/pull/2963))
+
 ## [16.0.6] - 2026-06-18
 
 ### Added
