@@ -1,5 +1,5 @@
 import type { InMemorySnapshotStore } from "@oh-my-pi/hashline";
-import type { AgentTelemetryConfig, AgentTool } from "@oh-my-pi/pi-agent-core";
+import type { AgentMessage, AgentTelemetryConfig, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { FetchImpl, ImageContent, Model, ToolChoice } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AsyncJobManager } from "../async/job-manager";
@@ -19,6 +19,7 @@ import type { MCPManager } from "../mcp";
 import type { MnemopiSessionState } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentRegistry } from "../registry/agent-registry";
+import type { ContextUsageBreakdown } from "../session/agent-session";
 import type { ArtifactManager } from "../session/artifacts";
 import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
@@ -39,6 +40,7 @@ import { BashTool } from "./bash";
 import { BrowserTool } from "./browser";
 import type { BuiltinToolName } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
+import { ContextAuditTool } from "./context-audit";
 import { DebugTool } from "./debug";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
@@ -77,6 +79,7 @@ export * from "./ast-grep";
 export * from "./bash";
 export * from "./browser";
 export * from "./checkpoint";
+export * from "./context-audit";
 export * from "./debug";
 export * from "./eval";
 export * from "./eval-backends";
@@ -362,6 +365,10 @@ export interface ToolSession {
 	getTelemetry?: () => AgentTelemetryConfig | undefined;
 	/** Return image attachments visible to tools for resolving labels such as `Image #1`. */
 	getImageAttachments?: () => ImageAttachmentEntry[];
+	/** Authoritative per-category context-window breakdown (system prompt, tools, skills, messages). */
+	getContextBreakdown?: () => ContextUsageBreakdown | undefined;
+	/** Provider-visible messages: the post-`transformContext` + `convertToLlm` list that actually goes to the provider (excluded entries dropped, @file mentions expanded into developer content). Reconciles with the breakdown's message-token total. */
+	getProviderMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 }
 
 export type ToolFactory = (session: ToolSession) => Tool | null | Promise<Tool | null>;
@@ -452,6 +459,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
+	context_audit: s => new ContextAuditTool(s),
 };
 
 export const HIDDEN_TOOLS: Record<string, ToolFactory> = {

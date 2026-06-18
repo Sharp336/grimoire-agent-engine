@@ -72,6 +72,9 @@
 
 - Fixed `/model` in the TUI to open the model setup picker again, leaving `/switch` as the temporary session model switcher ([#2933](https://github.com/can1357/oh-my-pi/issues/2933)).
 - Fixed OpenCode Go sessions recording per-request cost history so `/usage` can show local cap utilization. ([#2942](https://github.com/can1357/oh-my-pi/issues/2942))
+### Added
+
+- Added the `context_audit` built-in tool, which lets the model audit what is consuming its context window: it reports the authoritative per-category breakdown (system prompt, tool schemas, system context, skills, conversation messages) and ranks the heaviest provider-visible message rows, with `min_tokens`/`query`/`max_items` filtering. Exposed via two new optional `ToolSession` accessors — `getContextBreakdown` and `getProviderMessages` (the post-transform message list that actually goes to the provider) — wired at the session tool-context boundary.
 
 ## [16.0.6] - 2026-06-18
 

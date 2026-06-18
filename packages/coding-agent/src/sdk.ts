@@ -16,7 +16,7 @@ import {
 	type SimpleStreamOptions,
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
-import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
+import { type Dialect, encodeInbandToolHistory } from "@oh-my-pi/pi-ai/dialect";
 import {
 	getOpenAICodexTransportDetails,
 	prewarmOpenAICodexResponses,
@@ -1549,6 +1549,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
 			getUsageStatistics: () => sessionManager.getUsageStatistics(),
+			getContextBreakdown: () => session?.getContextBreakdown(),
+			getProviderMessages: async signal => {
+				if (!session) return [];
+				let messages = await session.convertMessagesToLlm(session.messages, signal);
+				// Mirror the provider send path: when an owned (non-native) tool dialect is
+				// active, fold assistant tool calls and tool-result runs into dialect text
+				// so the audit ranks/searches the same in-band text the provider receives.
+				const dialect = resolveDialect(settings.get("tools.format"), agent?.state.model ?? model);
+				if (dialect) {
+					const activeTools = session
+						.getActiveToolNames()
+						.map(name => session.getToolByName(name))
+						.filter((t): t is AgentTool => t !== undefined);
+					if (activeTools.length > 0) {
+						messages = encodeInbandToolHistory(messages, dialect, activeTools);
+					}
+				}
+				return messages;
+			},
 			getTurnBudget: () => sessionManager.getTurnBudget(),
 			recordEvalSubagentUsage: output => sessionManager.recordEvalSubagentOutput(output),
 			getClientBridge: () => session?.clientBridge,
