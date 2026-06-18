@@ -1427,12 +1427,18 @@ async function fetchFireworksServerlessModels(options: {
 	return Array.from(collected.values());
 }
 
+function toSharedModelsDevReference<TApi extends Api>(model: ModelSpec<Api>): ModelSpec<TApi> {
+	const reference = { ...model };
+	delete reference.omitMaxOutputTokens;
+	return reference as ModelSpec<TApi>;
+}
+
 function createModelsDevReferenceMap<TApi extends Api>(
 	models: readonly ModelSpec<Api>[],
 ): Map<string, ModelSpec<TApi>> {
 	const references = new Map<string, ModelSpec<TApi>>();
 	for (const model of models) {
-		const candidate = model as ModelSpec<TApi>;
+		const candidate = toSharedModelsDevReference<TApi>(model);
 		const existing = references.get(candidate.id);
 		if (!existing) {
 			references.set(candidate.id, candidate);

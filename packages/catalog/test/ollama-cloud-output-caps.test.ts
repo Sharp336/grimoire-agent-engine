@@ -2,6 +2,7 @@ import { expect, test, vi } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { ollamaCloudModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/ollama";
 import {
+	fireworksModelManagerOptions,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
@@ -70,6 +71,55 @@ test("ollama-cloud discovery does not inherit unsafe cross-provider maxTokens", 
 		MODELS_DEV_PROVIDER_DESCRIPTORS,
 	).find(candidate => candidate.provider === "ollama-cloud" && candidate.id === "deepseek-v4-flash");
 	expect(bundled?.omitMaxOutputTokens).toBe(true);
+});
+
+test("shared models.dev references do not leak Ollama Cloud max-token omission", async () => {
+	const fetchMock: FetchImpl = vi.fn(async (input, _init) => {
+		const url = String(input);
+		if (url === "https://models.dev/api.json") {
+			return new Response(
+				JSON.stringify({
+					"ollama-cloud": {
+						models: {
+							"deepseek-v4-flash": {
+								name: "DeepSeek V4 Flash",
+								tool_call: true,
+								reasoning: true,
+								modalities: { input: ["text"], output: ["text"] },
+								cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+								limit: { context: 1_048_576, output: 1_048_576 },
+							},
+						},
+					},
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		}
+		if (url.startsWith("https://api.fireworks.ai/v1/accounts/fireworks/models?")) {
+			return new Response(
+				JSON.stringify({
+					models: [
+						{
+							name: "accounts/fireworks/models/deepseek-v4-flash",
+							displayName: "DeepSeek V4 Flash",
+							contextLength: 262_144,
+							supportsServerless: true,
+							state: "READY",
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		}
+		throw new Error(`Unexpected URL: ${url}`);
+	});
+
+	const options = fireworksModelManagerOptions({ apiKey: "fw-test-key", fetch: fetchMock });
+	const models = await options.fetchDynamicModels?.();
+	const model = models?.find(candidate => candidate.id === "deepseek-v4-flash");
+
+	expect(model?.provider).toBe("fireworks");
+	expect(model?.omitMaxOutputTokens).toBeUndefined();
 });
 
 test("ollama-chat omits num_predict when model opts out of max output tokens", async () => {
