@@ -20,6 +20,7 @@ import {
 	VERSION,
 } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { AutonomousController } from "./autonomous/controller";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
@@ -388,6 +389,7 @@ async function runInteractiveMode(
 	initialImages?: ImageContent[],
 	titleSystemPrompt?: string,
 	joinLink?: string,
+	autonomousController?: AutonomousController,
 ): Promise<void> {
 	const mode = new InteractiveMode(
 		session,
@@ -488,6 +490,13 @@ async function runInteractiveMode(
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
 		}
+	}
+	// Autonomous mode with no initial user message: start the first turn so
+	// `--auto-next-idea` (or `--auto-next-steps --auto-next-idea`) can begin
+	// ideating from scratch. Steps-only mode with no objective has nothing to
+	// continue, so kickoff() is a no-op there.
+	if (autonomousController && initialMessage === undefined && initialMessages.length === 0) {
+		autonomousController.kickoff();
 	}
 
 	while (true) {
@@ -1304,6 +1313,18 @@ export async function runRootCommand(
 		if (parsedArgs.apiKey && !sessionOptions.model && session.model) {
 			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
 		}
+		// Autonomous continuation (--auto-next-steps / --auto-next-idea): armed only
+		// for interactive sessions — print/protocol modes are one-shot. The controller
+		// subscribes to the session event stream for its lifetime; runInteractiveMode
+		// calls kickoff() to start the first turn when no initial user message is given.
+		const autonomousController =
+			isInteractive && (parsedArgs.autoNextSteps || parsedArgs.autoNextIdea)
+				? new AutonomousController({
+						session,
+						autoNextSteps: parsedArgs.autoNextSteps === true,
+						autoNextIdea: parsedArgs.autoNextIdea === true,
+					})
+				: undefined;
 
 		if (modelFallbackMessage) {
 			notifs.push({ kind: "warn", message: modelFallbackMessage });
@@ -1373,6 +1394,7 @@ export async function runRootCommand(
 				initialImages,
 				titleSystemPrompt,
 				parsedArgs.join,
+				autonomousController,
 			);
 		} else {
 			// Branch-only single-shot runner: keep print-mode code out of normal interactive startup.
