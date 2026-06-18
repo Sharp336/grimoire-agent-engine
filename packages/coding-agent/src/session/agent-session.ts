@@ -116,6 +116,7 @@ import {
 	prompt,
 	relativePathWithinRoot,
 	Snowflake,
+	withTimeout,
 } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
 import {
@@ -235,6 +236,7 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	clampAutoThinkingEffort,
+	parseConfiguredThinkingLevel,
 	resolveProvisionalAutoLevel,
 	resolveThinkingLevelForModel,
 	shouldDisableReasoning,
@@ -511,6 +513,13 @@ export interface AgentSessionConfig {
 	advisorReadOnlyTools?: AgentTool[];
 	/** Preloaded watchdog prompt content for the advisor. */
 	advisorWatchdogPrompt?: string;
+	/**
+	 * Disconnect this session's OWNED MCP manager on dispose. Provided only when
+	 * the session created the manager (top-level sessions); subagents reuse a
+	 * parent's manager via `options.mcpManager` and omit this so a child's
+	 * teardown never tears down the shared servers.
+	 */
+	disconnectOwnedMcpManager?: () => Promise<void>;
 }
 
 /** Options for AgentSession.prompt() */
@@ -664,10 +673,16 @@ interface ActiveRetryFallbackState {
 	pinned: boolean;
 }
 
-function parseRetryFallbackSelector(selector: string): RetryFallbackSelector | undefined {
+function parseRetryFallbackSelector(
+	selector: string,
+	modelLookup?: { find(provider: string, id: string): Model | undefined },
+): RetryFallbackSelector | undefined {
 	const trimmed = selector.trim();
 	if (!trimmed) return undefined;
-	const parsed = parseModelString(trimmed);
+	const parsed = parseModelString(trimmed, {
+		allowMaxAlias: true,
+		isLiteralModelId: (provider, id) => modelLookup?.find(provider, id) !== undefined,
+	});
 	if (!parsed) return undefined;
 	return {
 		raw: trimmed,
@@ -1195,6 +1210,7 @@ export class AgentSession {
 		| undefined;
 	#getMcpServerInstructions: (() => Map<string, string> | undefined) | undefined;
 	#reloadSshTool: (() => Promise<AgentTool | null>) | undefined;
+	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 	#requestedToolNames: ReadonlySet<string> | undefined;
 	#baseSystemPrompt: string[];
 	/**
@@ -1561,6 +1577,7 @@ export class AgentSession {
 		this.#rebuildSystemPrompt = config.rebuildSystemPrompt;
 		this.#getMcpServerInstructions = config.getMcpServerInstructions;
 		this.#reloadSshTool = config.reloadSshTool;
+		this.#disconnectOwnedMcpManager = config.disconnectOwnedMcpManager;
 		this.#baseSystemPrompt = this.agent.state.systemPrompt;
 		this.#promptModelKey = this.#currentPromptModelKey();
 		this.#mcpDiscoveryEnabled = config.mcpDiscoveryEnabled ?? false;
@@ -4044,6 +4061,30 @@ export class AgentSession {
 		this.#releasePowerAssertion();
 		await this.sessionManager.close();
 		this.#closeAllProviderSessions("dispose");
+		// Disconnect the MCP manager this session OWNS so its stdio servers are
+		// not orphaned at exit. Best-effort: a failure here must never throw out
+		// of dispose. Only owning (top-level) sessions provide this callback;
+		// subagents reuse a parent's manager and must not tear it down. Idempotent
+		// with the deferred-discovery disconnect in `createAgentSession`.
+		//
+		// BOUNDED: an owned manager may hold an HTTP/SSE server whose session-
+		// termination DELETE blocks up to the MCP request timeout (30s default,
+		// unbounded when OMP_MCP_TIMEOUT_MS=0), so awaiting `disconnectAll()`
+		// unbounded would stall /exit and print-mode shutdown on a broken remote
+		// endpoint. Race it against a short deadline — stdio close (the subprocess
+		// reap this targets) completes well within the bound; a slow transport
+		// close is left to finish detached. Mirrors the bounded async-job teardown.
+		if (this.#disconnectOwnedMcpManager) {
+			try {
+				await withTimeout(
+					this.#disconnectOwnedMcpManager(),
+					3_000,
+					"Timed out disconnecting owned MCP manager during dispose",
+				);
+			} catch (error) {
+				logger.warn("Failed to disconnect owned MCP manager during dispose", { error: String(error) });
+			}
+		}
 		// Flush the retain queue BEFORE clearing the session's pointer so
 		// `HindsightRetainQueue.#doFlush` still sees `session.getHindsightSessionState() === state`.
 		// Reversed, the spliced batch survives just long enough to fail the
@@ -4936,6 +4977,24 @@ export class AgentSession {
 	/** All messages including custom types like BashExecutionMessage */
 	get messages(): AgentMessage[] {
 		return this.agent.state.messages;
+	}
+
+	/** Latest image attachments addressable by tools as `Image #N` or `attachment://N`. */
+	getImageAttachments(): { label: string; uri: string; image: ImageContent }[] {
+		for (let i = this.agent.state.messages.length - 1; i >= 0; i--) {
+			const message = this.agent.state.messages[i];
+			if (!message || (message.role !== "user" && message.role !== "developer") || !Array.isArray(message.content)) {
+				continue;
+			}
+			const images = message.content.filter((part): part is ImageContent => part.type === "image");
+			if (images.length === 0) continue;
+			return images.map((image, index) => ({
+				label: `Image #${index + 1}`,
+				uri: `attachment://${index + 1}`,
+				image,
+			}));
+		}
+		return [];
 	}
 
 	buildDisplaySessionContext(): SessionContext {
@@ -7729,7 +7788,17 @@ export class AgentSession {
 			await this.sessionManager.flush();
 			this.#cancelOwnAsyncJobs();
 			await this.sessionManager.newSession(previousSessionFile ? { parentSession: previousSessionFile } : undefined);
+			// agent.reset() clears the core steering/follow-up queues. Preserve any queued
+			// steers/follow-ups (RPC/SDK steer()/followUp() issued during the handoff, or a
+			// pre-loader TUI steer) so they survive into the post-handoff session instead of
+			// being silently dropped. Capture is synchronous immediately before reset and
+			// restore is synchronous immediately after — no await gap — so a steer arriving
+			// later (during ensureOnDisk/Bun.write below) appends to the restored queue
+			// rather than being clobbered.
+			const preservedSteering = this.agent.peekSteeringQueue().slice();
+			const preservedFollowUp = this.agent.peekFollowUpQueue().slice();
 			this.agent.reset();
+			this.agent.replaceQueues(preservedSteering, preservedFollowUp);
 			this.#freshProviderSessionId = undefined;
 			this.#syncAgentSessionId();
 			this.#rekeyHindsightMemoryForCurrentSessionId();
@@ -8785,14 +8854,20 @@ export class AgentSession {
 		const existingRoleValue = this.settings.getModelRole(role);
 		if (!existingRoleValue) return modelKey;
 
-		const thinkingLevel = extractExplicitThinkingSelector(existingRoleValue, this.settings);
+		const thinkingLevel = extractExplicitThinkingSelector(existingRoleValue, this.settings, {
+			isLiteralModelId: (provider, id) => this.#modelRegistry.find(provider, id) !== undefined,
+		});
 		return formatModelSelectorValue(modelKey, thinkingLevel);
 	}
 	#resolveContextPromotionConfiguredTarget(currentModel: Model, availableModels: Model[]): Model | undefined {
 		const configuredTarget = currentModel.contextPromotionTarget?.trim();
 		if (!configuredTarget) return undefined;
 
-		const parsed = parseModelString(configuredTarget);
+		const parsed = parseModelString(configuredTarget, {
+			allowMaxAlias: true,
+			isLiteralModelId: (provider, id) =>
+				availableModels.some(model => model.provider === provider && model.id === id),
+		});
 		if (parsed) {
 			const explicitModel = availableModels.find(m => m.provider === parsed.provider && m.id === parsed.id);
 			if (explicitModel) return explicitModel;
@@ -9087,7 +9162,6 @@ export class AgentSession {
 				);
 			}
 		}
-		await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 		// Abort any older auto-compaction before installing this run's controller.
 		this.#autoCompactionAbortController?.abort();
 		const autoCompactionAbortController = new AbortController();
@@ -9095,11 +9169,16 @@ export class AgentSession {
 		const autoCompactionSignal = autoCompactionAbortController.signal;
 
 		try {
+			// Emit start AFTER the controller is installed so isCompacting is already true
+			// for any listener — and for input routed during this emit's event-loop yield:
+			// a message typed as the compaction loader appears must land in the compaction
+			// queue, not the core steering queue (which handoff's agent.reset() would wipe).
+			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			if (compactionSettings.strategy === "handoff" && reason !== "overflow") {
 				const handoffFocus = AUTO_HANDOFF_THRESHOLD_FOCUS;
 				const handoffResult = await this.handoff(handoffFocus, {
 					autoTriggered: true,
-					signal: this.#autoCompactionAbortController.signal,
+					signal: autoCompactionSignal,
 				});
 				if (!handoffResult) {
 					const aborted = autoCompactionSignal.aborted;
@@ -9531,12 +9610,12 @@ export class AgentSession {
 		triggerContextTokens?: number,
 	): Promise<CompactionCheckResult | "fallback"> {
 		const action = "shake";
-		await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 		this.#autoCompactionAbortController?.abort();
 		const controller = new AbortController();
 		this.#autoCompactionAbortController = controller;
 		const signal = controller.signal;
 		try {
+			await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 			const result = await this.shake("elide", { config: DEFAULT_SHAKE_CONFIG, signal });
 			if (signal.aborted) {
 				await this.#emitSessionEvent({
@@ -9834,7 +9913,7 @@ export class AgentSession {
 					this.configWarnings.push(msg);
 					continue;
 				}
-				const parsed = parseRetryFallbackSelector(selectorStr);
+				const parsed = parseRetryFallbackSelector(selectorStr, this.#modelRegistry);
 				if (!parsed) {
 					const msg = `Invalid fallback selector format in role '${role}': ${selectorStr}`;
 					logger.warn(msg);
@@ -9857,7 +9936,7 @@ export class AgentSession {
 
 	#getRetryFallbackPrimarySelector(role: string): RetryFallbackSelector | undefined {
 		const configuredSelector = this.settings.getModelRole(role);
-		return configuredSelector ? parseRetryFallbackSelector(configuredSelector) : undefined;
+		return configuredSelector ? parseRetryFallbackSelector(configuredSelector, this.#modelRegistry) : undefined;
 	}
 
 	#clearActiveRetryFallback(): void {
@@ -9878,7 +9957,7 @@ export class AgentSession {
 	}
 
 	#resolveRetryFallbackRole(currentSelector: string): string | undefined {
-		const parsedCurrent = parseRetryFallbackSelector(currentSelector);
+		const parsedCurrent = parseRetryFallbackSelector(currentSelector, this.#modelRegistry);
 		if (!parsedCurrent) return undefined;
 		const currentBaseSelector = formatRetryFallbackBaseSelector(parsedCurrent);
 		const currentPlainSelector = this.model
@@ -9910,7 +9989,7 @@ export class AgentSession {
 		const chain = [primarySelector];
 		const seen = new Set<string>([primarySelector.raw]);
 		for (const selector of this.#getRetryFallbackChains()[role] ?? []) {
-			const parsed = parseRetryFallbackSelector(selector);
+			const parsed = parseRetryFallbackSelector(selector, this.#modelRegistry);
 			if (!parsed || seen.has(parsed.raw)) continue;
 			seen.add(parsed.raw);
 			chain.push(parsed);
@@ -9921,7 +10000,7 @@ export class AgentSession {
 	#findRetryFallbackCandidates(role: string, currentSelector: string): RetryFallbackSelector[] {
 		const chain = this.#getRetryFallbackEffectiveChain(role);
 		if (chain.length <= 1) return [];
-		const parsedCurrent = parseRetryFallbackSelector(currentSelector);
+		const parsedCurrent = parseRetryFallbackSelector(currentSelector, this.#modelRegistry);
 		const currentBaseSelector = parsedCurrent ? formatRetryFallbackBaseSelector(parsedCurrent) : undefined;
 		const currentPlainSelector =
 			this.model && parsedCurrent
@@ -10018,7 +10097,7 @@ export class AgentSession {
 			originalThinkingLevel,
 			lastAppliedFallbackThinkingLevel,
 		} = this.#activeRetryFallback;
-		const originalSelector = parseRetryFallbackSelector(originalSelectorRaw);
+		const originalSelector = parseRetryFallbackSelector(originalSelectorRaw, this.#modelRegistry);
 		if (!originalSelector) {
 			this.#clearActiveRetryFallback();
 			return;
@@ -11070,7 +11149,7 @@ export class AgentSession {
 			const hasServiceTierEntry = this.sessionManager
 				.getBranch()
 				.some(entry => entry.type === "service_tier_change");
-			const defaultThinkingLevel = this.settings.get("defaultThinkingLevel");
+			const defaultThinkingLevel = parseConfiguredThinkingLevel(this.settings.get("defaultThinkingLevel"));
 			const configuredServiceTier = this.settings.get("serviceTier");
 			// Session log entries store only concrete levels. When `auto` has resolved
 			// for a turn, the persisted context may already carry that concrete level
