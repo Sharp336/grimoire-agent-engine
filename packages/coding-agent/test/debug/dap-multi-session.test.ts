@@ -274,8 +274,9 @@ describe("DAP multi-session debugging", () => {
 		expect(spawnSpy).toHaveBeenCalledTimes(1);
 		expect(connectSpy).toHaveBeenCalledTimes(1);
 
-		await manager.terminate();
+		const terminateSummary = await manager.terminate();
 
+		expect(terminateSummary?.status).toBe("terminated");
 		expect(manager.listSessions().length).toBe(0);
 		expect(parentClient.isAlive()).toBe(false);
 		expect(childClient.isAlive()).toBe(false);

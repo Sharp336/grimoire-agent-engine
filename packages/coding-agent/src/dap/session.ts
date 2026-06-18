@@ -1247,6 +1247,7 @@ export class DapSessionManager {
 			if (!parent) break;
 			rootSession = parent;
 		}
+		rootSession.status = "terminated";
 		const summary = buildSummary(rootSession);
 		await this.#terminateSessionAndChildren(rootSession, signal, timeoutMs);
 		return summary;
