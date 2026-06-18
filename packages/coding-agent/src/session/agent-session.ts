@@ -1108,6 +1108,9 @@ export class AgentSession {
 	#compactionAbortController: AbortController | undefined = undefined;
 	#autoCompactionAbortController: AbortController | undefined = undefined;
 
+	// Periodic shake state (shake.interval setting)
+	#shakeTurnCounter = 0;
+
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
 
@@ -2660,6 +2663,9 @@ export class AgentSession {
 				await emitAgentEndNotification();
 				return;
 			}
+
+			// Periodic shake — independent of compaction strategy/auto-compaction
+			await this.#runPeriodicShake();
 			if (msg.stopReason !== "error") {
 				if (this.#enforceRewindBeforeYield()) {
 					await emitAgentEndNotification();
@@ -9628,6 +9634,32 @@ export class AgentSession {
 			if (this.#autoCompactionAbortController === controller) {
 				this.#autoCompactionAbortController = undefined;
 			}
+		}
+	}
+
+	/**
+	 * Periodic tool-output pruning (shake) every N turns, independent of the
+	 * compaction strategy. Ignores the current compaction setting — it always
+	 * runs shake("elide") when the turn counter reaches the configured interval.
+	 *
+	 * Setting `shake.interval` to 0 (default) or a non-positive number disables.
+	 */
+	async #runPeriodicShake(): Promise<void> {
+		const interval = this.settings.get("shake.interval") as number;
+		if (!Number.isFinite(interval) || interval <= 0) {
+			this.#shakeTurnCounter = 0;
+			return;
+		}
+		this.#shakeTurnCounter++;
+		if (this.#shakeTurnCounter < interval) return;
+		this.#shakeTurnCounter = 0;
+
+		if (this.isCompacting || this.isStreaming) return;
+
+		try {
+			await this.shake("elide");
+		} catch (error) {
+			logger.warn("Periodic shake failed", { error: error instanceof Error ? error.message : String(error) });
 		}
 	}
 
