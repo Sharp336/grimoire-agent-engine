@@ -1,6 +1,10 @@
 import { expect, test, vi } from "bun:test";
 import { streamSimple } from "@oh-my-pi/pi-ai/stream";
 import { ollamaCloudModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/ollama";
+import {
+	MODELS_DEV_PROVIDER_DESCRIPTORS,
+	mapModelsDevToModels,
+} from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl, Model } from "@oh-my-pi/pi-catalog/types";
 
 const cloudModel: Model<"ollama-chat"> = {
@@ -46,6 +50,26 @@ test("ollama-cloud discovery does not inherit unsafe cross-provider maxTokens", 
 
 	expect(model?.contextWindow).toBe(128000);
 	expect(model?.maxTokens).toBe(8192);
+	expect(model?.omitMaxOutputTokens).toBe(true);
+
+	const bundled = mapModelsDevToModels(
+		{
+			"ollama-cloud": {
+				models: {
+					"deepseek-v4-flash": {
+						name: "DeepSeek V4 Flash",
+						tool_call: true,
+						reasoning: true,
+						modalities: { input: ["text"], output: ["text"] },
+						cost: { input: 0, output: 0, cache_read: 0, cache_write: 0 },
+						limit: { context: 1_048_576, output: 1_048_576 },
+					},
+				},
+			},
+		},
+		MODELS_DEV_PROVIDER_DESCRIPTORS,
+	).find(candidate => candidate.provider === "ollama-cloud" && candidate.id === "deepseek-v4-flash");
+	expect(bundled?.omitMaxOutputTokens).toBe(true);
 });
 
 test("ollama-chat omits num_predict when model opts out of max output tokens", async () => {

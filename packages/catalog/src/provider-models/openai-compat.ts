@@ -3676,7 +3676,9 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_SPECIALIZED: readonly ModelsDevProviderDes
 		},
 	}),
 	// --- Ollama Cloud ---
-	simpleModelsDevDescriptor("ollama-cloud", "ollama-cloud", "ollama-chat", "https://ollama.com"),
+	simpleModelsDevDescriptor("ollama-cloud", "ollama-cloud", "ollama-chat", "https://ollama.com", {
+		transformModel: model => ({ ...model, omitMaxOutputTokens: true }),
+	}),
 	// --- Xiaomi Token Plan ---
 	openAiCompletionsDescriptor(
 		"xiaomi-token-plan-ams",
