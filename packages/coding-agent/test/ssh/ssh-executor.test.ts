@@ -25,6 +25,22 @@ function createBlockedChild<In extends TestStdin>(exited?: Promise<number>): Chi
 	} as unknown as ChildProcess<In>;
 }
 
+function createPipeThrowingChild<In extends TestStdin>(onDispose: () => void): ChildProcess<In> {
+	const { promise } = Promise.withResolvers<number>();
+	const stdout = {
+		pipeTo() {
+			throw new Error("stream setup failed");
+		},
+	} as unknown as ReadableStream<Uint8Array>;
+
+	return {
+		stdout,
+		stderr: undefined,
+		exited: promise,
+		[Symbol.dispose]: onDispose,
+	} as unknown as ChildProcess<In>;
+}
+
 async function flushMicrotasks(count: number): Promise<void> {
 	for (let i = 0; i < count; i++) {
 		await Promise.resolve();
@@ -91,5 +107,16 @@ describe("executeSSH", () => {
 		expect(result.cancelled).toBe(true);
 		expect(result.exitCode).toBeUndefined();
 		expect(result.output).toContain("Command aborted");
+	});
+
+	it("disposes the ssh child when output stream setup throws", async () => {
+		vi.spyOn(connectionManager, "ensureConnection").mockResolvedValue();
+		vi.spyOn(connectionManager, "buildRemoteCommand").mockResolvedValue(["remote", "sleep 60"]);
+		vi.spyOn(sshfsMount, "hasSshfs").mockReturnValue(false);
+		const dispose = vi.fn();
+		vi.spyOn(ptree, "spawn").mockImplementation(<In extends TestStdin>() => createPipeThrowingChild<In>(dispose));
+
+		await expect(executeSSH({ name: "remote", host: "remote" }, "sleep 60")).rejects.toThrow("stream setup failed");
+		expect(dispose).toHaveBeenCalledTimes(1);
 	});
 });

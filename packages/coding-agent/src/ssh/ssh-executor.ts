@@ -44,6 +44,8 @@ export interface SSHResult {
 
 type SSHExitEvent = { kind: "exit"; exitCode: number } | { kind: "error"; error: unknown };
 
+type AbortWaiter = { promise: Promise<ptree.AbortError> | undefined; cleanup: () => void };
+
 function sshExitEvent(exitCode: number): SSHExitEvent {
 	return { kind: "exit", exitCode };
 }
@@ -52,10 +54,7 @@ function sshErrorEvent(error: unknown): SSHExitEvent {
 	return { kind: "error", error };
 }
 
-function createAbortWaiter(
-	signal: AbortSignal | undefined,
-	streamAbort: AbortController,
-): { promise: Promise<ptree.AbortError> | undefined; cleanup: () => void } {
+function createAbortWaiter(signal: AbortSignal | undefined, streamAbort: AbortController): AbortWaiter {
 	if (!signal) {
 		return { promise: undefined, cleanup: () => {} };
 	}
@@ -114,13 +113,6 @@ export async function executeSSH(
 		}
 	}
 
-	const child = ptree.spawn(["ssh", ...(await buildRemoteCommand(host, resolvedCommand))], {
-		signal: options?.signal,
-		timeout: options?.timeout,
-		stdin: "pipe",
-		stderr: "full",
-	});
-
 	const settings = await Settings.init();
 	const sink = new OutputSink({
 		onChunk: options?.onChunk,
@@ -129,17 +121,24 @@ export async function executeSSH(
 		headBytes: resolveOutputSinkHeadBytes(settings),
 		maxColumns: resolveOutputMaxColumns(settings),
 	});
-
 	const streamAbort = new AbortController();
-	const abortWaiter = createAbortWaiter(options?.signal, streamAbort);
-	const streamOptions = { signal: streamAbort.signal };
-	const streams = [child.stdout.pipeTo(sink.createInput(), streamOptions)];
-	if (child.stderr) {
-		streams.push(child.stderr.pipeTo(sink.createInput(), streamOptions));
-	}
-	const streamsSettled = Promise.allSettled(streams).then(() => {});
+	const child = ptree.spawn(["ssh", ...(await buildRemoteCommand(host, resolvedCommand))], {
+		signal: options?.signal,
+		timeout: options?.timeout,
+		stdin: "pipe",
+		stderr: "full",
+	});
+
+	let abortWaiter: AbortWaiter | undefined;
 
 	try {
+		abortWaiter = createAbortWaiter(options?.signal, streamAbort);
+		const streamOptions = { signal: streamAbort.signal };
+		const streams = [child.stdout.pipeTo(sink.createInput(), streamOptions)];
+		if (child.stderr) {
+			streams.push(child.stderr.pipeTo(sink.createInput(), streamOptions));
+		}
+		const streamsSettled = Promise.allSettled(streams).then(() => {});
 		const exitEvent = child.exited.then(sshExitEvent, sshErrorEvent);
 		const abortEvent = abortWaiter.promise?.then(sshErrorEvent);
 		const event = await (abortEvent ? Promise.race([exitEvent, abortEvent]) : exitEvent);
@@ -160,7 +159,6 @@ export async function executeSSH(
 		if (!streamAbort.signal.aborted) {
 			streamAbort.abort(err);
 		}
-		void streamsSettled;
 		if (err instanceof ptree.Exception) {
 			if (err instanceof ptree.TimeoutError) {
 				return {
@@ -185,6 +183,6 @@ export async function executeSSH(
 		throw err;
 	} finally {
 		child[Symbol.dispose]();
-		abortWaiter.cleanup();
+		abortWaiter?.cleanup();
 	}
 }
