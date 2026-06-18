@@ -418,6 +418,11 @@ impl SupportLang {
 		from_extension(path)
 	}
 
+	/// File extensions (without the leading dot) associated with this language.
+	pub const fn file_extensions(self) -> &'static [&'static str] {
+		extensions(self)
+	}
+
 	pub fn sorted_aliases() -> &'static [&'static str] {
 		&SORTED_ALIASES
 	}

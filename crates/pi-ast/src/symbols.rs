@@ -138,6 +138,56 @@ pub fn outline_code(options: OutlineOptions) -> Result<OutlineResult> {
 	})
 }
 
+/// The languages [`outline_code`] emits symbols for: the bespoke-emitter set
+/// plus every language routed through the generic table-driven emitter with a
+/// populated [`symbol_kind`] table. Data / markup / config languages (JSON,
+/// YAML, TOML, CSS, HTML, Markdown, Diff, ...) are intentionally excluded —
+/// they have no addressable code symbols, so widening a file scan to them
+/// would only inflate file counts with empty outlines. The `symbol` TS tool
+/// derives its supported file extensions from this set (through the NAPI
+/// layer) so the two never drift.
+pub const fn outline_languages() -> &'static [SupportLang] {
+	use SupportLang::*;
+	&[
+		// Bespoke emitters (contextual classification).
+		TypeScript,
+		Tsx,
+		JavaScript,
+		Python,
+		Rust,
+		Go,
+		Java,
+		// Generic table-driven emitter.
+		CSharp,
+		Kotlin,
+		C,
+		Cpp,
+		ObjC,
+		Scala,
+		Swift,
+		Dart,
+		Php,
+		Ruby,
+		Lua,
+		Perl,
+		Odin,
+		Bash,
+		Solidity,
+		Starlark,
+		// Bespoke emitters (delegated grammar-specific logic).
+		R,
+		Julia,
+		Zig,
+		Haskell,
+		Ocaml,
+		Elixir,
+		Erlang,
+		Clojure,
+		EmacsLisp,
+		Powershell,
+	]
+}
+
 // ── Extractor ───────────────────────────────────────────────────────────
 
 struct Walker<'a> {
@@ -290,8 +340,101 @@ impl<'a> Walker<'a> {
 			SupportLang::Rust => self.emit_rust(node, kind, depth, parent, start_line),
 			SupportLang::Go => self.emit_go(node, kind, depth, parent, start_line),
 			SupportLang::Java => self.emit_java(node, kind, depth, parent, start_line),
-			_ => None,
+			SupportLang::R => self.emit_r(node, kind, depth, parent, start_line),
+			SupportLang::Julia => self.emit_julia(node, kind, depth, parent, start_line),
+			SupportLang::Zig => self.emit_zig(node, kind, depth, parent, start_line),
+			SupportLang::Haskell => self.emit_haskell(node, kind, depth, parent, start_line),
+			SupportLang::Ocaml => self.emit_ocaml(node, kind, depth, parent, start_line),
+			SupportLang::Elixir => self.emit_elixir(node, kind, depth, parent, start_line),
+			SupportLang::Erlang => self.emit_erlang(node, kind, depth, parent, start_line),
+			SupportLang::Clojure => self.emit_clojure(node, kind, depth, parent, start_line),
+			SupportLang::EmacsLisp => self.emit_emacslisp(node, kind, depth, parent, start_line),
+			SupportLang::Powershell => self.emit_powershell(node, kind, depth, parent, start_line),
+			_ => self.emit_generic(node, kind, depth, parent, start_line),
 		}
+	}
+
+	/// Generic table-driven emitter for languages without a bespoke emitter.
+	/// Maps the node kind via [`symbol_kind`]; resolves the name through the
+	/// [`Walker::generic_name_node`] cascade; refines a `function` to a
+	/// `method` when it nests directly in an OO container symbol. Nesting and
+	/// container are conveyed by the `parent` index — generic languages need
+	/// no per-language container attribution.
+	fn emit_generic(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		let domain = symbol_kind(self.language, kind)?;
+		// A type-specifier with no `body` field is a type *reference*
+		// (C/C++/ObjC `struct Foo x;`, `enum E param`), not a definition — skip
+		// it so type-use sites do not emit spurious symbols.
+		if kind.ends_with("_specifier") && node.child_by_field_name("body").is_none() {
+			return None;
+		}
+		// `typedef struct Foo { .. } Foo;`: the inner specifier (body + name) is
+		// already emitted as the struct/enum, so skip the typedef wrapper to
+		// avoid a duplicate symbol of the same name. `typedef int Distance;`
+		// (type field is not a body-bearing specifier) still emits via the table.
+		if kind == "type_definition" {
+			if let Some(ty) = node.child_by_field_name("type") {
+				if ty.kind().ends_with("_specifier")
+					&& ty.child_by_field_name("body").is_some()
+					&& ty.child_by_field_name("name").is_some()
+				{
+					return None;
+				}
+			}
+		}
+		let name_node = self.generic_name_node(node)?;
+		let name = self.text(name_node);
+		if name.is_empty() {
+			return None;
+		}
+		let domain = if domain == "function" && self.parent_is_method_container(parent) {
+			"method"
+		} else {
+			domain
+		};
+		let selection_line = node_start_line(name_node);
+		let detail = self.detail(node, Some("body"));
+		Some(self.push(name, domain, node, start_line, selection_line, detail, depth, parent))
+	}
+
+	/// Cascade name resolver for [`Walker::emit_generic`]:
+	/// 1. explicit `name` field (C#, C `struct`/`enum`, most modern grammars);
+	/// 2. recursive `declarator`-field descent (C/C++/ObjC nest the name under
+	///    `declarator`), via [`declarator_name`];
+	/// 3. the first identifier-ish direct child (Kotlin/Scala put the name
+	///    before params/return), descending one level through a declaration
+	///    wrapper (`property_declaration` -> `variable_declaration` ->
+	///    `simple_identifier`).
+	fn generic_name_node<'t>(&self, node: Node<'t>) -> Option<Node<'t>> {
+		if let Some(n) = node.child_by_field_name("name") {
+			return Some(n);
+		}
+		if let Some(decl) = node.child_by_field_name("declarator") {
+			if let Some(n) = declarator_name(decl) {
+				return Some(n);
+			}
+		}
+		first_name_in_decl(node)
+	}
+
+	/// True when the `parent` symbol (index) is an OO container whose direct
+	/// `function` children are methods. Namespaces/modules are excluded — a
+	/// function in a namespace stays a function.
+	fn parent_is_method_container(&self, parent: i32) -> bool {
+		if parent < 0 {
+			return false;
+		}
+		matches!(
+			self.symbols[parent as usize].kind.as_str(),
+			"class" | "struct" | "interface" | "trait" | "enum"
+		)
 	}
 
 	/// Text of a node (source is valid UTF-8 from the TS tool).
@@ -413,6 +556,55 @@ impl<'a> Walker<'a> {
 	}
 }
 
+/// A node kind that *is* the identifier token of a declaration (the name
+/// itself): `identifier`, `name`, or any `*_identifier`
+/// (`type_identifier`, `simple_identifier`, `field_identifier`, ...).
+fn is_name_token(kind: &str) -> bool {
+	kind == "identifier" || kind == "name" || kind.ends_with("_identifier")
+}
+
+/// Follow the `declarator` field recursively to the underlying name token.
+/// C/C++/ObjC nest `function_definition.declarator -> function_declarator
+/// .declarator -> identifier`; pointer/array declarators wrap the same
+/// `declarator` field. Returns `None` for an abstract declarator (no name).
+fn declarator_name(node: Node<'_>) -> Option<Node<'_>> {
+	if is_name_token(node.kind()) {
+		return Some(node);
+	}
+	declarator_name(node.child_by_field_name("declarator")?)
+}
+
+/// Find the first identifier-ish token among a declaration's children,
+/// descending through declarator/variable wrappers that carry the name one or
+/// more levels down (Kotlin `property_declaration` -> `variable_declaration` ->
+/// `simple_identifier`; ObjC `property_declaration` -> `struct_declaration` ->
+/// `struct_declarator` -> `identifier`). Recurses ONLY through known
+/// declaration wrappers, so an unrelated nested identifier (a type, an
+/// initializer) is never mistaken for the declared name.
+fn first_name_in_decl(node: Node<'_>) -> Option<Node<'_>> {
+	let mut cur = node.walk();
+	for child in node.named_children(&mut cur) {
+		if is_name_token(child.kind()) {
+			return Some(child);
+		}
+		if is_decl_wrapper(child.kind()) {
+			if let Some(found) = first_name_in_decl(child) {
+				return Some(found);
+			}
+		}
+	}
+	None
+}
+
+/// Declaration wrapper kinds whose payload is the declared name one level
+/// deeper (see [`first_name_in_decl`]).
+fn is_decl_wrapper(kind: &str) -> bool {
+	matches!(
+		kind,
+		"variable_declaration" | "variable_declarator" | "struct_declaration" | "struct_declarator"
+	)
+}
+
 /// Immediate parent node kind.
 fn parent_kind(node: Node<'_>) -> Option<&'static str> {
 	node.parent().map(|p| p.kind())
@@ -497,7 +689,6 @@ fn is_export_default_value(node: Node<'_>) -> bool {
 /// scoping overrides above) rather than calling this function; this table is
 /// the stable kind-contract the assignment requires and a reference for the
 /// NAPI/TS layers. Kept `#[allow(dead_code)]` as the documented kind table.
-#[allow(dead_code)]
 fn symbol_kind(language: SupportLang, node_kind: &str) -> Option<&'static str> {
 	match language {
 		SupportLang::TypeScript | SupportLang::Tsx | SupportLang::JavaScript => match node_kind {
@@ -551,6 +742,153 @@ fn symbol_kind(language: SupportLang, node_kind: &str) -> Option<&'static str> {
 			"method_declaration" | "annotation_type_element_declaration" => Some("method"),
 			"constructor_declaration" | "compact_constructor_declaration" => Some("constructor"),
 			"field_declaration" => Some("field"),
+			_ => None,
+		},
+		SupportLang::CSharp => match node_kind {
+			"class_declaration" | "record_declaration" | "record_struct_declaration" => {
+				Some("class")
+			},
+			"struct_declaration" => Some("struct"),
+			"interface_declaration" => Some("interface"),
+			"enum_declaration" => Some("enum"),
+			"enum_member_declaration" => Some("enum_member"),
+			"method_declaration" => Some("method"),
+			"constructor_declaration" => Some("constructor"),
+			"property_declaration" => Some("property"),
+			"delegate_declaration" => Some("type_alias"),
+			"namespace_declaration" | "file_scoped_namespace_declaration" => Some("namespace"),
+			_ => None,
+		},
+		SupportLang::Kotlin => match node_kind {
+			"class_declaration" | "object_declaration" => Some("class"),
+			"function_declaration" => Some("function"),
+			"property_declaration" => Some("property"),
+			"enum_entry" => Some("enum_member"),
+			"type_alias" => Some("type_alias"),
+			"secondary_constructor" => Some("constructor"),
+			_ => None,
+		},
+		SupportLang::C => match node_kind {
+			"preproc_def" => Some("macro"),
+			"function_definition" => Some("function"),
+			"struct_specifier" => Some("struct"),
+			"union_specifier" => Some("union"),
+			"enum_specifier" => Some("enum"),
+			"enumerator" => Some("enum_member"),
+			"field_declaration" => Some("field"),
+			"type_definition" => Some("type_alias"),
+			_ => None,
+		},
+		SupportLang::Cpp => match node_kind {
+			"preproc_def" => Some("macro"),
+			"function_definition" => Some("function"),
+			"namespace_definition" => Some("namespace"),
+			"class_specifier" => Some("class"),
+			"struct_specifier" => Some("struct"),
+			"union_specifier" => Some("union"),
+			"enum_specifier" => Some("enum"),
+			"enumerator" => Some("enum_member"),
+			"field_declaration" => Some("field"),
+			"type_definition" => Some("type_alias"),
+			_ => None,
+		},
+		SupportLang::ObjC => match node_kind {
+			"preproc_def" => Some("macro"),
+			"function_definition" => Some("function"),
+			"enum_specifier" => Some("enum"),
+			"enumerator" => Some("enum_member"),
+			"class_interface" | "class_implementation" => Some("class"),
+			"protocol_declaration" => Some("interface"),
+			"method_declaration" | "method_definition" => Some("method"),
+			"property_declaration" => Some("property"),
+			"instance_variable" => Some("field"),
+			_ => None,
+		},
+		SupportLang::Scala => match node_kind {
+			"class_definition" => Some("class"),
+			"trait_definition" => Some("trait"),
+			"object_definition" => Some("class"),
+			"enum_definition" => Some("enum"),
+			"simple_enum_case" => Some("enum_member"),
+			"function_definition" | "function_declaration" => Some("function"),
+			"val_definition" => Some("field"),
+			_ => None,
+		},
+		SupportLang::Swift => match node_kind {
+			"class_declaration" => Some("class"),
+			"protocol_declaration" => Some("interface"),
+			"property_declaration" => Some("property"),
+			"function_declaration" => Some("function"),
+			"protocol_function_declaration" => Some("method"),
+			"enum_entry" => Some("enum_member"),
+			_ => None,
+		},
+		SupportLang::Dart => match node_kind {
+			"class_declaration" => Some("class"),
+			"mixin_declaration" => Some("trait"),
+			"enum_declaration" => Some("enum"),
+			"enum_constant" => Some("enum_member"),
+			"function_signature" => Some("function"),
+			"getter_signature" => Some("property"),
+			"constructor_signature" => Some("constructor"),
+			"static_final_declaration" => Some("constant"),
+			"initialized_identifier" => Some("field"),
+			_ => None,
+		},
+		SupportLang::Php => match node_kind {
+			"namespace_definition" => Some("namespace"),
+			"class_declaration" => Some("class"),
+			"interface_declaration" => Some("interface"),
+			"trait_declaration" => Some("trait"),
+			"method_declaration" => Some("method"),
+			"function_definition" => Some("function"),
+			"property_element" => Some("property"),
+			"const_element" => Some("constant"),
+			_ => None,
+		},
+		SupportLang::Ruby => match node_kind {
+			"module" => Some("module"),
+			"class" => Some("class"),
+			"method" => Some("function"),
+			"singleton_method" => Some("method"),
+			_ => None,
+		},
+		SupportLang::Lua => match node_kind {
+			"function_declaration" => Some("function"),
+			_ => None,
+		},
+		SupportLang::Perl => match node_kind {
+			"package_statement" => Some("module"),
+			"subroutine_declaration_statement" => Some("function"),
+			_ => None,
+		},
+		SupportLang::Odin => match node_kind {
+			"procedure_declaration" => Some("function"),
+			"struct_declaration" => Some("struct"),
+			"enum_declaration" => Some("enum"),
+			"const_declaration" => Some("constant"),
+			"field" => Some("field"),
+			_ => None,
+		},
+		SupportLang::Bash => match node_kind {
+			"function_definition" => Some("function"),
+			_ => None,
+		},
+		SupportLang::Solidity => match node_kind {
+			"contract_declaration" => Some("class"),
+			"interface_declaration" => Some("interface"),
+			"library_declaration" => Some("class"),
+			"struct_declaration" => Some("struct"),
+			"struct_member" => Some("field"),
+			"enum_declaration" => Some("enum"),
+			"function_definition" => Some("function"),
+			"modifier_definition" => Some("method"),
+			"state_variable_declaration" => Some("property"),
+			"event_definition" => Some("macro"),
+			_ => None,
+		},
+		SupportLang::Starlark => match node_kind {
+			"function_definition" => Some("function"),
 			_ => None,
 		},
 		_ => None,
@@ -1408,6 +1746,742 @@ impl<'a> Walker<'a> {
 
 // ── Tests ────────────────────────────────────────────────────────────────
 
+// ── Bespoke emitters: R / Julia / Zig / Haskell / OCaml / Elixir / Erlang / ─
+// ── Clojure / Emacs-Lisp / PowerShell ──────────────────────────────────────
+
+impl<'a> Walker<'a> {
+	/// R: declarations are assignment `binary_operator`s; the name is the LHS
+	/// (RHS for `->`/`->>`), the kind comes from the RHS shape.
+	fn emit_r(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		if kind != "binary_operator" {
+			return None;
+		}
+		let op = node.child_by_field_name("operator")?;
+		let op_text = self.text(op);
+		let is_forward = matches!(op_text.as_str(), "<-" | "<<-" | "=");
+		let is_reverse = matches!(op_text.as_str(), "->" | "->>");
+		if !is_forward && !is_reverse {
+			return None;
+		}
+		let lhs = node.child_by_field_name("lhs")?;
+		let rhs = node.child_by_field_name("rhs")?;
+		let (name_node, value_node) = if is_forward { (lhs, rhs) } else { (rhs, lhs) };
+		if name_node.kind() != "identifier" {
+			return None;
+		}
+		let name = self.text(name_node);
+		if name.is_empty() {
+			return None;
+		}
+		let kind_str = match value_node.kind() {
+			"function_definition" => "function",
+			"integer" | "float" | "complex" | "string" | "true" | "false" | "null" | "inf"
+			| "nan" | "na" => "constant",
+			_ => "variable",
+		};
+		let sel = node_start_line(name_node);
+		let detail = self.detail(node, None);
+		Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
+	}
+
+	/// Julia: module/function/struct/abstract/const, names under
+	/// signature/type_head/assignment wrappers.
+	fn emit_julia(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		match kind {
+			"module_definition" => {
+				let name = self.name_text(node, "name")?;
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, Some("body"));
+				Some(self.push(name, "module", node, start_line, sel, detail, depth, parent))
+			},
+			"function_definition" => {
+				let name_node = julia_function_name(node)?;
+				let name = self.text(name_node);
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "function", node, start_line, sel, detail, depth, parent))
+			},
+			"struct_definition" => {
+				let name_node = julia_type_name(node)?;
+				let name = self.text(name_node);
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, Some("body"));
+				Some(self.push(name, "struct", node, start_line, sel, detail, depth, parent))
+			},
+			"abstract_definition" => {
+				let name_node = julia_type_name(node)?;
+				let name = self.text(name_node);
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, Some("body"));
+				Some(self.push(name, "type_alias", node, start_line, sel, detail, depth, parent))
+			},
+			"const_statement" => {
+				let assign = node.named_child(0).filter(|c| c.kind() == "assignment")?;
+				let name_node = assign.named_child(0).filter(|c| c.kind() == "identifier")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(assign, None);
+				Some(self.push(name, "constant", assign, start_line, sel, detail, depth, parent))
+			},
+			_ => None,
+		}
+	}
+
+	/// Zig: top-level `fn` -> function/method; const-bound struct/enum -> the
+	/// container; `container_field` -> field/enum_member.
+	fn emit_zig(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		match kind {
+			"function_declaration" => {
+				let name = self.name_text(node, "name")?;
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, Some("body"));
+				let kind_str = if self.parent_is_method_container(parent) {
+					"method"
+				} else {
+					"function"
+				};
+				Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
+			},
+			"variable_declaration" => {
+				let name_node = zig_var_name(node)?;
+				let rhs = zig_var_rhs(node)?;
+				let kind_str = match rhs.kind() {
+					"struct_declaration" => "struct",
+					"enum_declaration" => "enum",
+					_ => "constant",
+				};
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
+			},
+			"container_field" => {
+				let kind_str = match parent_kind(node) {
+					Some("struct_declaration") => "field",
+					Some("enum_declaration") => "enum_member",
+					_ => return None,
+				};
+				let name = self.name_text(node, "name")?;
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, None);
+				Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
+			},
+			_ => None,
+		}
+	}
+
+	/// Haskell: module/data/type/class plus equation-coalesced functions.
+	fn emit_haskell(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		match kind {
+			"module" => {
+				let module_id = node.named_child(0).filter(|n| n.kind() == "module_id")?;
+				let name = self.text(module_id);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(module_id);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "module", node, start_line, sel, detail, depth, parent))
+			},
+			"function" | "bind" => {
+				if parent_kind(node) != Some("declarations") {
+					return None;
+				}
+				let name = self.name_text(node, "name")?;
+				if self.haskell_has_equation_predecessor(node) {
+					return None;
+				}
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, Some("match"));
+				Some(self.push(name, "function", node, start_line, sel, detail, depth, parent))
+			},
+			"signature" => None,
+			"data_type" => {
+				let name = self.name_text(node, "name")?;
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, None);
+				Some(self.push(name, "struct", node, start_line, sel, detail, depth, parent))
+			},
+			"data_constructor" => {
+				let name = self.name_text(node, "name")?;
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, None);
+				Some(self.push(name, "enum_member", node, start_line, sel, detail, depth, parent))
+			},
+			"type_synomym" => {
+				let name = self.name_text(node, "name")?;
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, None);
+				Some(self.push(name, "type_alias", node, start_line, sel, detail, depth, parent))
+			},
+			"class" => {
+				let name = self.name_text(node, "name")?;
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, None);
+				Some(self.push(name, "interface", node, start_line, sel, detail, depth, parent))
+			},
+			_ => None,
+		}
+	}
+
+	/// True when a prior sibling equation already emitted this Haskell
+	/// function/bind name (skip duplicate equations; `signature` is hopped).
+	fn haskell_has_equation_predecessor(&self, node: Node<'_>) -> bool {
+		let name = match self.name_text(node, "name") {
+			Some(n) if !n.is_empty() => n,
+			_ => return false,
+		};
+		let mut cursor = node.prev_named_sibling();
+		while let Some(prev) = cursor {
+			match prev.kind() {
+				"function" | "bind" => {
+					if self.name_text(prev, "name").map(|n| n == name).unwrap_or(false) {
+						return true;
+					}
+					break;
+				},
+				"signature" => cursor = prev.prev_named_sibling(),
+				_ => break,
+			}
+		}
+		false
+	}
+
+	/// OCaml: module/let/type/variant; emits the inner binding nodes, not the
+	/// `value_definition`/`type_definition` wrappers.
+	fn emit_ocaml(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		match kind {
+			"module_definition" => {
+				let binding = node
+					.child_by_field_name("module_binding")
+					.or_else(|| node.named_child(0))?;
+				let name_node = binding
+					.child_by_field_name("module_name")
+					.or_else(|| binding.named_child(0).filter(|n| n.kind() == "module_name"))?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "module", node, start_line, sel, detail, depth, parent))
+			},
+			"let_binding" => {
+				if !is_ocaml_top_level_let(node) {
+					return None;
+				}
+				let name_node = node.named_child(0).filter(|n| n.kind() == "value_name")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let mut cur = node.walk();
+				let has_params = node.named_children(&mut cur).any(|c| c.kind() == "parameter");
+				let kind_str = if has_params { "function" } else { "constant" };
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
+			},
+			"type_binding" => {
+				let name = self.name_text(node, "name")?;
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, None);
+				Some(self.push(name, "type_alias", node, start_line, sel, detail, depth, parent))
+			},
+			"constructor_declaration" => {
+				let name_node = node.named_child(0).filter(|n| n.kind() == "constructor_name")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "enum_member", node, start_line, sel, detail, depth, parent))
+			},
+			_ => None,
+		}
+	}
+
+	/// Elixir: every declaration is a `call` whose head identifier is a
+	/// def-macro; ordinary calls pass through.
+	fn emit_elixir(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		if kind != "call" {
+			return None;
+		}
+		let head = node.named_child(0)?;
+		let head_text = self.text(head);
+		let (name, kind_str, name_node): (String, &str, Node<'_>) = match head_text.as_str() {
+			"defmodule" | "defprotocol" => {
+				let args = node
+					.child_by_field_name("arguments")
+					.or_else(|| node.named_child(1))?;
+				let alias = elixir_first_alias(args)?;
+				(
+					self.text(alias),
+					if head_text == "defmodule" { "module" } else { "interface" },
+					alias,
+				)
+			},
+			"defimpl" => {
+				let args = node
+					.child_by_field_name("arguments")
+					.or_else(|| node.named_child(1))?;
+				let alias = elixir_first_alias(args)?;
+				(self.text(alias), "class", alias)
+			},
+			"defstruct" => {
+				let module = (parent >= 0)
+					.then(|| self.symbols.get(parent as usize))
+					.flatten()?;
+				if module.kind != "module" {
+					return None;
+				}
+				(module.name.clone(), "struct", head)
+			},
+			"def" | "defp" | "defmacro" => {
+				let args = node
+					.child_by_field_name("arguments")
+					.or_else(|| node.named_child(1))?;
+				let sig = elixir_signature_name(args)?;
+				(
+					self.text(sig),
+					if head_text == "defmacro" { "macro" } else { "function" },
+					sig,
+				)
+			},
+			_ => return None,
+		};
+		if name.is_empty() {
+			return None;
+		}
+		let sel = node_start_line(name_node);
+		let detail = self.detail(node, Some("do_block"));
+		Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
+	}
+
+	/// Erlang: module/record/macro attributes plus clause-coalesced functions.
+	fn emit_erlang(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		match kind {
+			"module_attribute" => {
+				let name = self.name_text(node, "name")?;
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, None);
+				Some(self.push(name, "module", node, start_line, sel, detail, depth, parent))
+			},
+			"record_decl" => {
+				let name = self.name_text(node, "name")?;
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, None);
+				Some(self.push(name, "struct", node, start_line, sel, detail, depth, parent))
+			},
+			"macro_lhs" => {
+				let name = self.name_text(node, "name")?;
+				let sel = self.selection_line(node, "name");
+				let detail = self.detail(node, None);
+				Some(self.push(name, "macro", node, start_line, sel, detail, depth, parent))
+			},
+			"fun_decl" => {
+				if erlang_is_duplicate_clause(self.source, node) {
+					return None;
+				}
+				let clause = node.named_child(0).filter(|c| c.kind() == "function_clause")?;
+				let name_node = clause.child_by_field_name("name")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "function", node, start_line, sel, detail, depth, parent))
+			},
+			_ => None,
+		}
+	}
+
+	/// Clojure: a `list_lit` whose head `sym_lit` is a def-form; the second
+	/// `sym_lit` is the name.
+	fn emit_clojure(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		if kind != "list_lit" {
+			return None;
+		}
+		let mut cursor = node.walk();
+		let values: Vec<Node<'_>> = node.children_by_field_name("value", &mut cursor).collect();
+		if values.len() < 2 {
+			return None;
+		}
+		let head = values[0];
+		let name_node = values[1];
+		if head.kind() != "sym_lit" || name_node.kind() != "sym_lit" {
+			return None;
+		}
+		let domain = match self.text(head).as_str() {
+			"defn" | "defn-" => "function",
+			"defmacro" => "macro",
+			"def" => "variable",
+			"defrecord" | "deftype" => "struct",
+			"defprotocol" => "interface",
+			"ns" => "namespace",
+			_ => return None,
+		};
+		let name = self.text(name_node);
+		if name.is_empty() {
+			return None;
+		}
+		let selection_line = node_start_line(name_node);
+		let detail = self.detail(node, None);
+		Some(self.push(name, domain, node, start_line, selection_line, detail, depth, parent))
+	}
+
+	/// Emacs Lisp: defun/defmacro have a name field; defconst/defvar/defstruct/
+	/// defclass are `special_form`/`list` with a head keyword + name symbol.
+	fn emit_emacslisp(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		match kind {
+			"function_definition" => {
+				let name = self.elisp_name(node)?;
+				let selection_line = node_start_line(name);
+				let detail = self.detail(node, None);
+				Some(self.push(
+					self.text(name),
+					"function",
+					node,
+					start_line,
+					selection_line,
+					detail,
+					depth,
+					parent,
+				))
+			},
+			"macro_definition" => {
+				let name = self.elisp_name(node)?;
+				let selection_line = node_start_line(name);
+				let detail = self.detail(node, None);
+				Some(self.push(
+					self.text(name),
+					"macro",
+					node,
+					start_line,
+					selection_line,
+					detail,
+					depth,
+					parent,
+				))
+			},
+			"special_form" | "list" => {
+				let head = node.child(1)?;
+				let domain = match self.text(head).trim() {
+					"defconst" => "constant",
+					"defvar" => "variable",
+					"defmacro" => "macro",
+					"defstruct" => "struct",
+					"defclass" => "class",
+					_ => return None,
+				};
+				let name = self.elisp_name(node)?;
+				let selection_line = node_start_line(name);
+				let detail = self.detail(node, None);
+				Some(self.push(
+					self.text(name),
+					domain,
+					node,
+					start_line,
+					selection_line,
+					detail,
+					depth,
+					parent,
+				))
+			},
+			_ => None,
+		}
+	}
+
+	/// Resolve the declared name of an Emacs Lisp form: explicit `name` field,
+	/// else the first named `symbol` after the head token (child 1).
+	fn elisp_name<'b>(&self, node: Node<'b>) -> Option<Node<'b>> {
+		if let Some(n) = node.child_by_field_name("name") {
+			return Some(n);
+		}
+		for i in 2..node.child_count() {
+			let c = node.child(i)?;
+			if c.is_named() && c.kind() == "symbol" {
+				return Some(c);
+			}
+		}
+		None
+	}
+
+	/// PowerShell: function/class/enum/method/property/enum_member, with names
+	/// in function_name/simple_name/variable children; a method whose name
+	/// equals the enclosing class is a constructor.
+	fn emit_powershell(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		let class_name = (parent >= 0)
+			.then(|| &self.symbols[parent as usize])
+			.filter(|s| s.kind == "class")
+			.map(|s| s.name.clone());
+		match kind {
+			"function_statement" => {
+				let name_node = powershell_child(node, "function_name")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "function", node, start_line, sel, detail, depth, parent))
+			},
+			"class_statement" => {
+				let name_node = powershell_child(node, "simple_name")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "class", node, start_line, sel, detail, depth, parent))
+			},
+			"class_method_definition" => {
+				let name_node = powershell_child(node, "simple_name")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let kind_str = if class_name.as_deref() == Some(&name) {
+					"constructor"
+				} else {
+					"method"
+				};
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
+			},
+			"class_property_definition" => {
+				let var = powershell_child(node, "variable")?;
+				let raw = self.text(var);
+				let name = raw.strip_prefix('$').unwrap_or(&raw).to_string();
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(var);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "property", node, start_line, sel, detail, depth, parent))
+			},
+			"enum_statement" => {
+				let name_node = powershell_child(node, "simple_name")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "enum", node, start_line, sel, detail, depth, parent))
+			},
+			"enum_member" => {
+				let name_node = powershell_child(node, "simple_name")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "enum_member", node, start_line, sel, detail, depth, parent))
+			},
+			_ => None,
+		}
+	}
+}
+
+/// Julia `function_definition` name via `signature -> call_expression ->
+/// function` (bare identifier, or trailing identifier of `Base.area`).
+fn julia_function_name(node: Node<'_>) -> Option<Node<'_>> {
+	let signature = node
+		.child_by_field_name("signature")
+		.or_else(|| node.named_child(0).filter(|c| c.kind() == "signature"))?;
+	let call = signature
+		.child_by_field_name("call_expression")
+		.or_else(|| signature.named_child(0).filter(|c| c.kind() == "call_expression"))?;
+	let callee = call
+		.child_by_field_name("function")
+		.or_else(|| call.named_child(0))?;
+	match callee.kind() {
+		"identifier" => Some(callee),
+		"field_expression" => {
+			let mut cursor = callee.walk();
+			callee
+				.children(&mut cursor)
+				.filter(|c| c.is_named())
+				.last()
+				.filter(|c| c.kind() == "identifier")
+		},
+		_ => None,
+	}
+}
+
+/// Julia `struct_definition`/`abstract_definition` name via `type_head`.
+fn julia_type_name(node: Node<'_>) -> Option<Node<'_>> {
+	let type_head = node
+		.child_by_field_name("type_head")
+		.or_else(|| node.named_child(0).filter(|c| c.kind() == "type_head"))?;
+	type_head
+		.child_by_field_name("name")
+		.or_else(|| type_head.named_child(0).filter(|c| c.kind() == "identifier"))
+}
+
+/// Declared-name identifier of a Zig `variable_declaration` (first child).
+fn zig_var_name(node: Node<'_>) -> Option<Node<'_>> {
+	node.named_child(0).filter(|c| c.kind() == "identifier")
+}
+
+/// Right-hand side of a Zig `variable_declaration` (last named child).
+fn zig_var_rhs(node: Node<'_>) -> Option<Node<'_>> {
+	let mut cursor = node.walk();
+	node.children(&mut cursor).filter(|c| c.is_named()).last()
+}
+
+/// First `alias` child of an Elixir `arguments` node (module/protocol name).
+fn elixir_first_alias(node: Node<'_>) -> Option<Node<'_>> {
+	let mut cursor = node.walk();
+	for child in node.children(&mut cursor) {
+		if child.is_named() && child.kind() == "alias" {
+			return Some(child);
+		}
+	}
+	None
+}
+
+/// Leading name node of an Elixir `def`/`defp`/`defmacro` signature: a bare
+/// `identifier`, or the head identifier of a `call` (`def foo(args)`).
+fn elixir_signature_name(node: Node<'_>) -> Option<Node<'_>> {
+	let first = node.named_child(0)?;
+	match first.kind() {
+		"identifier" => Some(first),
+		"call" => first.named_child(0).filter(|c| c.kind() == "identifier"),
+		_ => None,
+	}
+}
+
+/// True when an Erlang `fun_decl` continues a preceding same-named `fun_decl`
+/// (a later clause of an already-emitted function).
+fn erlang_is_duplicate_clause(source: &[u8], node: Node<'_>) -> bool {
+	let Some(clause) = node.named_child(0).filter(|c| c.kind() == "function_clause") else {
+		return false;
+	};
+	let Some(name_node) = clause.child_by_field_name("name") else {
+		return false;
+	};
+	let name_bytes = &source[name_node.start_byte()..name_node.end_byte()];
+	let mut sib = node.prev_sibling();
+	while let Some(s) = sib {
+		if s.kind() == "fun_decl" {
+			if let Some(s_clause) = s.named_child(0).filter(|c| c.kind() == "function_clause") {
+				if let Some(s_name) = s_clause.child_by_field_name("name") {
+					if &source[s_name.start_byte()..s_name.end_byte()] == name_bytes {
+						return true;
+					}
+				}
+			}
+		}
+		sib = s.prev_sibling();
+	}
+	false
+}
+
+/// True when an OCaml `let_binding` sits directly at module/structure scope
+/// (excludes `let ... in` expression locals).
+fn is_ocaml_top_level_let(node: Node<'_>) -> bool {
+	let mut cursor = node;
+	while let Some(parent) = cursor.parent() {
+		if parent.kind() == "value_definition" {
+			return matches!(
+				parent.parent().map(|p| p.kind()),
+				Some("structure") | Some("compilation_unit")
+			);
+		}
+		cursor = parent;
+	}
+	false
+}
+
+/// First direct child of `node` with the given kind (PowerShell name lookup).
+fn powershell_child<'b>(node: Node<'b>, kind: &str) -> Option<Node<'b>> {
+	let mut cursor = node.walk();
+	node.children(&mut cursor).find(|c| c.kind() == kind)
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1431,6 +2505,162 @@ mod tests {
 			.symbols
 			.iter()
 			.position(|s| s.name == name && s.kind == kind)
+	}
+
+	/// Ad-hoc node-kind explorer for authoring new-language `symbol_kind`
+	/// tables. Run with:
+	///   cargo test -p pi-ast dump_fixture_node_kinds -- --ignored --nocapture
+	/// Prints the named-node tree (with `name` fields) for every file under
+	/// `tests/fixtures/symbols/`. Ignored by default — a derivation aid, not
+	/// an assertion.
+	#[test]
+	#[ignore]
+	fn dump_fixture_node_kinds() {
+		let dir = format!("{}/tests/fixtures/symbols", env!("CARGO_MANIFEST_DIR"));
+		let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+			.expect("fixtures dir")
+			.filter_map(|e| e.ok().map(|e| e.path()))
+			.filter(|p| p.is_file())
+			.collect();
+		paths.sort();
+		for path in paths {
+			let Ok(code) = std::fs::read_to_string(&path) else {
+				println!("\n===== {} (SKIPPED: unreadable) =====", path.display());
+				continue;
+			};
+			let Some(lang) = resolve_language(None, path.to_str()) else {
+				println!("\n===== {} (SKIPPED: unresolved language) =====", path.display());
+				continue;
+			};
+			let mut parser = Parser::new();
+			if parser.set_language(&lang.get_ts_language()).is_err() {
+				println!("\n===== {} (SKIPPED: grammar load failed) =====", path.display());
+				continue;
+			}
+			let Some(tree) = parser.parse(code.as_bytes(), None) else {
+				println!("\n===== {} (SKIPPED: parse failed) =====", path.display());
+				continue;
+			};
+			println!(
+				"\n===== {} ({}) =====",
+				path.file_name().unwrap().to_string_lossy(),
+				lang.canonical_name()
+			);
+			dump_node(tree.root_node(), code.as_bytes(), 0);
+		}
+	}
+
+	fn dump_node(node: Node<'_>, src: &[u8], depth: usize) {
+		if node.is_named() {
+			let name = node
+				.child_by_field_name("name")
+				.map(|n| String::from_utf8_lossy(&src[n.start_byte()..n.end_byte()]).into_owned());
+			let suffix = name.map(|n| format!("  name={n:?}")).unwrap_or_default();
+			println!("{:indent$}{}{}", "", node.kind(), suffix, indent = depth * 2);
+		}
+		let mut c = node.walk();
+		for child in node.children(&mut c) {
+			dump_node(child, src, depth + 1);
+		}
+	}
+
+	fn fixture(name: &str) -> String {
+		std::fs::read_to_string(format!(
+			"{}/tests/fixtures/symbols/{name}",
+			env!("CARGO_MANIFEST_DIR")
+		))
+		.expect("read fixture")
+	}
+
+	/// Drift guard: every fixture resolves to an `outline_languages()` member
+	/// and yields a non-empty outline. A generic language listed without a
+	/// working table — or a grammar that regressed to empty — fails here.
+	#[test]
+	fn fixture_languages_are_supported_and_nonempty() {
+		let dir = format!("{}/tests/fixtures/symbols", env!("CARGO_MANIFEST_DIR"));
+		let mut paths: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)
+			.expect("fixtures dir")
+			.filter_map(|e| e.ok().map(|e| e.path()))
+			.filter(|p| p.is_file())
+			.collect();
+		paths.sort();
+		assert!(!paths.is_empty(), "no symbol fixtures present");
+		for path in paths {
+			let code = std::fs::read_to_string(&path).expect("read fixture");
+			let lang = resolve_language(None, path.to_str())
+				.unwrap_or_else(|| panic!("unresolved fixture language: {}", path.display()));
+			assert!(
+				outline_languages().contains(&lang),
+				"fixture {} -> {} is not in outline_languages()",
+				path.display(),
+				lang.canonical_name()
+			);
+			let result = outline(&code, path.to_str().expect("utf8 path"));
+			assert!(result.parsed, "fixture {} did not parse", path.display());
+			assert!(
+				!result.symbols.is_empty(),
+				"fixture {} produced an empty outline",
+				path.display()
+			);
+		}
+	}
+
+	/// Programming-vs-data boundary: data languages are excluded from
+	/// `outline_languages()` and yield no symbols.
+	#[test]
+	fn data_languages_are_excluded() {
+		for (code, path) in [
+			("{\"a\": 1, \"b\": [2, 3]}", "data.json"),
+			("a: 1\nb:\n  - 2\n", "data.yaml"),
+		] {
+			let lang = resolve_language(None, Some(path)).expect("resolves");
+			assert!(
+				!outline_languages().contains(&lang),
+				"{} should not be an outline language",
+				lang.canonical_name()
+			);
+			let result = outline(code, path);
+			assert!(
+				result.symbols.is_empty(),
+				"{} should produce no symbols",
+				lang.canonical_name()
+			);
+		}
+	}
+
+	#[test]
+	fn outlines_csharp_class_method_property_enum_struct() {
+		let code = fixture("csharp.cs");
+		let r = outline(&code, "csharp.cs");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("csharp"));
+		assert_eq!(find(&r, "Greeter").map(|s| s.kind.as_str()), Some("class"));
+		assert_eq!(find(&r, "Greet").map(|s| s.kind.as_str()), Some("method"));
+		assert_eq!(find(&r, "Count").map(|s| s.kind.as_str()), Some("property"));
+		assert_eq!(find(&r, "IThing").map(|s| s.kind.as_str()), Some("interface"));
+		assert_eq!(find(&r, "Color").map(|s| s.kind.as_str()), Some("enum"));
+		assert_eq!(find(&r, "Red").map(|s| s.kind.as_str()), Some("enum_member"));
+		assert_eq!(find(&r, "Point").map(|s| s.kind.as_str()), Some("struct"));
+		let greet = find(&r, "Greet").expect("Greet present");
+		assert!(greet.parent >= 0);
+		assert_eq!(r.symbols[greet.parent as usize].name, "Greeter");
+	}
+
+	#[test]
+	fn outlines_kotlin_class_function_method_property_enum_object() {
+		let code = fixture("kotlin.kt");
+		let r = outline(&code, "kotlin.kt");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("kotlin"));
+		assert_eq!(find(&r, "Greeter").map(|s| s.kind.as_str()), Some("class"));
+		assert_eq!(find(&r, "topLevel").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "greet").map(|s| s.kind.as_str()), Some("method"));
+		assert_eq!(find(&r, "count").map(|s| s.kind.as_str()), Some("property"));
+		assert_eq!(find(&r, "RED").map(|s| s.kind.as_str()), Some("enum_member"));
+		assert_eq!(find(&r, "Singleton").map(|s| s.kind.as_str()), Some("class"));
+		let greet = find(&r, "greet").expect("greet present");
+		assert!(greet.parent >= 0);
+		assert_eq!(r.symbols[greet.parent as usize].name, "Greeter");
 	}
 
 	#[test]
@@ -2081,6 +3311,337 @@ class Outer {
 		let green = find(&result, "Green").expect("Green");
 		if let Some(d) = &green.detail {
 			assert!(!d.contains("Red"), "member detail must not include other members");
+		}
+	}
+
+	#[test]
+	fn every_outline_language_has_a_fixture() {
+		let dir = format!("{}/tests/fixtures/symbols", env!("CARGO_MANIFEST_DIR"));
+		let langs: Vec<SupportLang> = std::fs::read_dir(&dir)
+			.expect("fixtures dir")
+			.filter_map(|e| e.ok().map(|e| e.path()))
+			.filter(|p| p.is_file())
+			.filter_map(|p| resolve_language(None, p.to_str()))
+			.collect();
+		for &lang in outline_languages() {
+			assert!(
+				langs.contains(&lang),
+				"outline language {} has no fixture under tests/fixtures/symbols/",
+				lang.canonical_name()
+			);
+		}
+	}
+
+	#[test]
+	fn outlines_c_typedef_struct_no_double_emit_and_specifier_body_guard() {
+		let code = fixture("c.c");
+		let r = outline(&code, "c.c");
+		assert!(r.parsed);
+		// `typedef struct Point {..} Point;` emits the struct ONCE — the typedef
+		// wrapper is skipped because the inner specifier carries body + name.
+		let points: Vec<&SymbolEntry> = r.symbols.iter().filter(|s| s.name == "Point").collect();
+		assert_eq!(points.len(), 1, "typedef struct must not double-emit");
+		assert_eq!(points[0].kind, "struct");
+		// `typedef int Distance;` (no body-bearing specifier) still emits.
+		assert_eq!(find(&r, "Distance").map(|s| s.kind.as_str()), Some("type_alias"));
+		// The `enum Color c` parameter reference must NOT emit a second Color
+		// (body-presence guard); only the top-level definition emits.
+		let colors: Vec<&SymbolEntry> = r.symbols.iter().filter(|s| s.name == "Color").collect();
+		assert_eq!(colors.len(), 1, "enum reference at a param site must not emit");
+		assert_eq!(colors[0].kind, "enum");
+		assert_eq!(colors[0].parent, -1, "the single Color is the top-level definition");
+		assert_eq!(find(&r, "x").map(|s| s.kind.as_str()), Some("field"));
+		assert_eq!(find(&r, "RED").map(|s| s.kind.as_str()), Some("enum_member"));
+		assert_eq!(find(&r, "add").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "MAX_SIZE").map(|s| s.kind.as_str()), Some("macro"));
+		// `static const int TIMEOUT` is a bare declaration — intentionally not mapped.
+		assert!(find(&r, "TIMEOUT").is_none(), "C bare declarations are not emitted");
+	}
+
+	#[test]
+	fn outlines_cpp_namespace_struct_method_template_function() {
+		let code = fixture("cpp.cpp");
+		let r = outline(&code, "cpp.cpp");
+		assert!(r.parsed);
+		assert_eq!(find(&r, "app").map(|s| s.kind.as_str()), Some("namespace"));
+		assert_eq!(find(&r, "Vec").map(|s| s.kind.as_str()), Some("struct"));
+		// A function inside a struct is refined to a method.
+		assert_eq!(find(&r, "length").map(|s| s.kind.as_str()), Some("method"));
+		assert_eq!(find(&r, "Counter").map(|s| s.kind.as_str()), Some("class"));
+		// A template function in a namespace stays a function (namespace is not
+		// a method container).
+		assert_eq!(find(&r, "identity").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "main").map(|s| s.kind.as_str()), Some("function"));
+		assert!(find(&r, "kLimit").is_none(), "C++ bare declarations are not emitted");
+	}
+
+	#[test]
+	fn outlines_objc_property_and_ivar_via_wrapper_descent() {
+		let code = fixture("objc.m");
+		let r = outline(&code, "objc.m");
+		assert!(r.parsed);
+		// `@property (...) int count;` name resolves through
+		// property_declaration -> struct_declaration -> struct_declarator.
+		assert_eq!(find(&r, "count").map(|s| s.kind.as_str()), Some("property"));
+		// `{ int _count; }` instance variable via the same wrapper descent.
+		assert_eq!(find(&r, "_count").map(|s| s.kind.as_str()), Some("field"));
+		// @interface + @implementation each emit the class (ObjC two-part model).
+		let greeters = r
+			.symbols
+			.iter()
+			.filter(|s| s.name == "Greeter" && s.kind == "class")
+			.count();
+		assert_eq!(greeters, 2, "interface + implementation each emit the class");
+		assert_eq!(find(&r, "greet").map(|s| s.kind.as_str()), Some("method"));
+		assert_eq!(find(&r, "Direction").map(|s| s.kind.as_str()), Some("enum"));
+		assert_eq!(find(&r, "North").map(|s| s.kind.as_str()), Some("enum_member"));
+		assert_eq!(find(&r, "main").map(|s| s.kind.as_str()), Some("function"));
+	}
+
+	#[test]
+	fn outlines_r_function_constant_variable_nested() {
+		let code = fixture("r.r");
+		let r = outline(&code, "r.r");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("r"));
+		assert_eq!(find(&r, "add").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "const_num").map(|s| s.kind.as_str()), Some("constant"));
+		assert_eq!(find(&r, "const_str").map(|s| s.kind.as_str()), Some("constant"));
+		assert_eq!(find(&r, "result").map(|s| s.kind.as_str()), Some("variable"));
+		assert_eq!(find(&r, "nested_fn").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "arrow").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "cache").map(|s| s.kind.as_str()), Some("variable"));
+		assert_eq!(find(&r, "cache2").map(|s| s.kind.as_str()), Some("variable"));
+		assert_eq!(find(&r, "target").map(|s| s.kind.as_str()), Some("constant"));
+		let nested_idx = idx_of(&r, "nested_fn", "function").expect("nested_fn idx");
+		let inner = find(&r, "inner").expect("inner");
+		assert_eq!(inner.kind, "function");
+		assert_eq!(inner.parent, nested_idx as i32);
+	}
+
+	#[test]
+	fn outlines_julia_module_function_struct_abstract_const() {
+		let code = fixture("julia.jl");
+		let r = outline(&code, "julia.jl");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("julia"));
+		let module_idx = idx_of(&r, "Shapes", "module").expect("module idx");
+		assert_eq!(r.symbols[module_idx].parent, -1);
+		let area = find(&r, "area").expect("area");
+		assert_eq!(area.kind, "function");
+		assert_eq!(area.parent, module_idx as i32);
+		let circle_idx = idx_of(&r, "Circle", "struct").expect("Circle idx");
+		assert_eq!(r.symbols[circle_idx].parent, module_idx as i32);
+		let point_idx = idx_of(&r, "Point", "struct").expect("Point idx");
+		assert_eq!(r.symbols[point_idx].parent, module_idx as i32);
+		let abstract_shape = find(&r, "AbstractShape").expect("AbstractShape");
+		assert_eq!(abstract_shape.kind, "type_alias");
+		assert_eq!(abstract_shape.parent, module_idx as i32);
+		let pi_approx = find(&r, "PI_APPROX").expect("PI_APPROX");
+		assert_eq!(pi_approx.kind, "constant");
+		assert_eq!(pi_approx.parent, module_idx as i32);
+	}
+
+	#[test]
+	fn outlines_zig_function_struct_enum_method_field_const() {
+		let code = fixture("zig.zig");
+		let r = outline(&code, "zig.zig");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("zig"));
+		let std = find(&r, "std").expect("std");
+		assert_eq!(std.kind, "constant");
+		assert_eq!(std.parent, -1);
+		let greet = find(&r, "greet").expect("greet");
+		assert_eq!(greet.kind, "function");
+		assert_eq!(greet.parent, -1);
+		let circle_idx = idx_of(&r, "Circle", "struct").expect("Circle idx");
+		let radius = find(&r, "radius").expect("radius");
+		assert_eq!(radius.kind, "field");
+		assert_eq!(radius.parent, circle_idx as i32);
+		let area = find(&r, "area").expect("area");
+		assert_eq!(area.kind, "method");
+		assert_eq!(area.parent, circle_idx as i32);
+		let color_idx = idx_of(&r, "Color", "enum").expect("Color idx");
+		let red = find(&r, "red").expect("red");
+		assert_eq!(red.kind, "enum_member");
+		assert_eq!(red.parent, color_idx as i32);
+		assert!(find(&r, "green").is_some());
+		assert!(find(&r, "blue").is_some());
+		let literal = find(&r, "LITERAL").expect("LITERAL");
+		assert_eq!(literal.kind, "constant");
+		assert_eq!(literal.parent, -1);
+		let helper = find(&r, "helper").expect("helper");
+		assert_eq!(helper.kind, "function");
+		assert_eq!(helper.parent, -1);
+	}
+
+	#[test]
+	fn outlines_haskell_module_function_data_type_class() {
+		let code = fixture("haskell.hs");
+		let r = outline(&code, "haskell.hs");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("haskell"));
+		let module_idx = idx_of(&r, "Symbols", "module").expect("module");
+		assert_eq!(r.symbols[module_idx].parent, -1);
+		let factorials = r
+			.symbols
+			.iter()
+			.filter(|s| s.name == "factorial" && s.kind == "function")
+			.count();
+		assert_eq!(factorials, 1, "factorial equations must coalesce");
+		assert_eq!(find(&r, "pi").map(|s| s.kind.as_str()), Some("function"));
+		let shape_idx = idx_of(&r, "Shape", "struct").expect("Shape");
+		let circle = find(&r, "Circle").expect("Circle");
+		assert_eq!(circle.kind, "enum_member");
+		assert_eq!(circle.parent, shape_idx as i32);
+		assert_eq!(find(&r, "Name").map(|s| s.kind.as_str()), Some("type_alias"));
+		assert_eq!(find(&r, "Drawable").map(|s| s.kind.as_str()), Some("interface"));
+		assert!(!r.symbols.iter().any(|s| s.name == "double"), "local binding must not emit");
+	}
+
+	#[test]
+	fn outlines_ocaml_module_function_type_variant() {
+		let code = fixture("ocaml.ml");
+		let r = outline(&code, "ocaml.ml");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("ocaml"));
+		let math_idx = idx_of(&r, "Math", "module").expect("Math");
+		let pi = find(&r, "pi").expect("pi");
+		assert_eq!(pi.kind, "constant");
+		assert_eq!(pi.parent, math_idx as i32);
+		let fact = find(&r, "factorial").expect("factorial");
+		assert_eq!(fact.kind, "function");
+		assert_eq!(fact.parent, math_idx as i32);
+		assert!(!r.symbols.iter().any(|s| s.name == "local"), "nested local must not emit");
+		let shape_idx = idx_of(&r, "shape", "type_alias").expect("shape");
+		let circle = find(&r, "Circle").expect("Circle");
+		assert_eq!(circle.kind, "enum_member");
+		assert_eq!(circle.parent, shape_idx as i32);
+		let fib = find(&r, "fib").expect("fib");
+		assert_eq!(fib.kind, "function");
+		assert_eq!(fib.parent, -1);
+	}
+
+	#[test]
+	fn outlines_elixir_module_protocol_impl_macro_functions() {
+		let code = fixture("elixir.ex");
+		let r = outline(&code, "elixir.ex");
+		assert!(r.parsed, "elixir fixture must parse");
+		assert!(find(&r, "puts").is_none(), "ordinary calls must not emit");
+		assert!(find(&r, "inspect").is_none(), "ordinary calls must not emit");
+		let module_idx = idx_of(&r, "Math.Shapes", "module").expect("module");
+		assert_eq!(r.symbols[module_idx].parent, -1);
+		assert_eq!(find(&r, "Area").map(|s| s.kind.as_str()), Some("interface"));
+		assert_eq!(find(&r, "twice").map(|s| s.kind.as_str()), Some("macro"));
+		assert_eq!(find(&r, "private_helper").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "rectangle").map(|s| s.kind.as_str()), Some("function"));
+		let rectangle = find(&r, "rectangle").expect("rectangle");
+		assert_eq!(rectangle.parent, module_idx as i32);
+	}
+
+	#[test]
+	fn outlines_erlang_module_record_macro_functions_coalesce_clauses() {
+		let code = fixture("erlang.erl");
+		let r = outline(&code, "erlang.erl");
+		assert!(r.parsed, "erlang fixture must parse");
+		assert_eq!(find(&r, "shapes").map(|s| s.kind.as_str()), Some("module"));
+		assert_eq!(find(&r, "rectangle").map(|s| s.kind.as_str()), Some("struct"));
+		assert_eq!(find(&r, "PI").map(|s| s.kind.as_str()), Some("macro"));
+		assert_eq!(find(&r, "area").map(|s| s.kind.as_str()), Some("function"));
+		let perimeter_count = r
+			.symbols
+			.iter()
+			.filter(|s| s.name == "perimeter" && s.kind == "function")
+			.count();
+		assert_eq!(perimeter_count, 1, "perimeter clauses must coalesce into one symbol");
+		assert_eq!(find(&r, "internal_debug").map(|s| s.kind.as_str()), Some("function"));
+		assert!(find(&r, "shape()").is_none(), "-type attribute must not emit");
+	}
+
+	#[test]
+	fn outlines_clojure_ns_defn_macro_record_type_protocol() {
+		let code = fixture("clojure.clj");
+		let r = outline(&code, "clojure.clj");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("clojure"));
+		assert_eq!(find(&r, "myapp.core").map(|s| s.kind.as_str()), Some("namespace"));
+		assert_eq!(find(&r, "MAX-SIZE").map(|s| s.kind.as_str()), Some("variable"));
+		assert_eq!(find(&r, "greet").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "helper").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "unless").map(|s| s.kind.as_str()), Some("macro"));
+		assert_eq!(find(&r, "Person").map(|s| s.kind.as_str()), Some("struct"));
+		assert_eq!(find(&r, "Point").map(|s| s.kind.as_str()), Some("struct"));
+		assert_eq!(find(&r, "Drawable").map(|s| s.kind.as_str()), Some("interface"));
+		assert!(find(&r, "draw").is_none(), "protocol method sig must not emit");
+		assert!(find(&r, "println").is_none(), "bare call must not emit");
+	}
+
+	#[test]
+	fn outlines_emacslisp_const_var_macro_struct_function_class() {
+		let code = fixture("emacslisp.el");
+		let r = outline(&code, "emacslisp.el");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("emacs-lisp"));
+		assert_eq!(find(&r, "pi").map(|s| s.kind.as_str()), Some("constant"));
+		assert_eq!(find(&r, "counter").map(|s| s.kind.as_str()), Some("variable"));
+		assert_eq!(find(&r, "with-log").map(|s| s.kind.as_str()), Some("macro"));
+		assert_eq!(find(&r, "employee").map(|s| s.kind.as_str()), Some("struct"));
+		assert_eq!(find(&r, "add").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "my-class").map(|s| s.kind.as_str()), Some("class"));
+		assert!(find(&r, "some-call").is_none(), "bare call must not emit");
+	}
+
+	#[test]
+	fn outlines_powershell_function_class_constructor_method_property_enum() {
+		let code = fixture("powershell.ps1");
+		let r = outline(&code, "powershell.ps1");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("powershell"));
+		let func = find(&r, "Get-Greeting").expect("function");
+		assert_eq!(func.kind, "function");
+		assert_eq!(func.parent, -1);
+		let class_idx = idx_of(&r, "Person", "class").expect("class Person");
+		let ctor = r
+			.symbols
+			.iter()
+			.find(|s| s.name == "Person" && s.kind == "constructor")
+			.expect("constructor");
+		assert_eq!(ctor.parent, class_idx as i32);
+		let get_name = find(&r, "GetName").expect("method");
+		assert_eq!(get_name.kind, "method");
+		assert_eq!(get_name.parent, class_idx as i32);
+		let name_prop = find(&r, "Name").expect("property");
+		assert_eq!(name_prop.kind, "property");
+		assert_eq!(name_prop.parent, class_idx as i32);
+		let enum_idx = idx_of(&r, "Color", "enum").expect("enum");
+		let red = find(&r, "Red").expect("enum member");
+		assert_eq!(red.kind, "enum_member");
+		assert_eq!(red.parent, enum_idx as i32);
+		assert!(find(&r, "Version").is_none(), "top-level assignment must not emit");
+	}
+
+	/// Boundary lock: every `SupportLang` is EITHER an outline language OR an
+	/// explicitly-excluded data/markup/config/DSL language — never both, never
+	/// neither. A newly added `SupportLang` variant fails this test until it is
+	/// consciously classified.
+	#[test]
+	fn all_languages_are_classified_supported_or_excluded() {
+		use SupportLang::*;
+		// Data / markup / config / schema / DSL / HDL / spec languages: no
+		// addressable *code* symbols for an outline. Every programming language
+		// lives in outline_languages() instead.
+		const EXCLUDED: &[SupportLang] = &[
+			Astro, Cmake, Css, Diff, Dockerfile, Graphql, Hcl, Html, Ini, Json, Just, Make,
+			Markdown, Nix, Proto, Regex, Sql, Svelte, Tlaplus, Toml, Verilog, Vue, Xml, Yaml,
+		];
+		for &lang in SupportLang::all_langs() {
+			let supported = outline_languages().contains(&lang);
+			let excluded = EXCLUDED.contains(&lang);
+			assert!(
+				supported ^ excluded,
+				"{} must be EITHER an outline language OR explicitly excluded (not both, not neither)",
+				lang.canonical_name()
+			);
 		}
 	}
 }

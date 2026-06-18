@@ -997,6 +997,14 @@ export declare function isoStart(kind: IsoBackendKind | undefined | null, lower:
 /** Tear down a previously started backend at `merged`. */
 export declare function isoStop(kind: IsoBackendKind | undefined | null, merged: string): Promise<void>
 
+/**
+ * True when the outline extractor emits symbols for the language `path`
+ * resolves to (by extension AND special-name rules, e.g. shell rc files).
+ * The `symbol` TS tool uses this for per-file gating so extensionless
+ * supported files are not rejected by a bare extension check.
+ */
+export declare function isOutlineSupportedPath(path: string): boolean
+
 /** Event types from Kitty keyboard protocol (flag 2). */
 export declare enum KeyEventType {
   /** Key press event. */
@@ -1200,6 +1208,20 @@ export interface MinimizerResult {
 }
 
 export declare function outlineCode(options: OutlineOptions): OutlineResult
+
+export interface OutlineLanguage {
+  /** Canonical language name (e.g. "rust", "typescript"). */
+  name: string
+  /** File extensions (without the leading dot) that resolve to this language. */
+  extensions: Array<string>
+}
+
+/**
+ * The languages [`outline_code`] emits symbols for, with their file
+ * extensions. The `symbol` TS tool derives its supported-file set from this so
+ * the Rust extractor and the TS scan filter never drift.
+ */
+export declare function outlineLanguages(): Array<OutlineLanguage>
 
 export interface OutlineOptions {
   /** Source code to outline. */

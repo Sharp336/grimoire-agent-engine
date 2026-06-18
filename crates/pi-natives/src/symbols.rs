@@ -89,3 +89,36 @@ pub fn outline_code(options: OutlineOptions) -> Result<OutlineResult> {
 	.map(Into::into)
 	.map_err(|error| Error::from_reason(error.to_string()))
 }
+
+#[napi(object)]
+pub struct OutlineLanguage {
+	/// Canonical language name (e.g. "rust", "typescript").
+	pub name:       String,
+	/// File extensions (without the leading dot) that resolve to this language.
+	pub extensions: Vec<String>,
+}
+
+/// The languages [`outline_code`] emits symbols for, with their file
+/// extensions. The `symbol` TS tool derives its supported-file set from this so
+/// the Rust extractor and the TS scan filter never drift.
+#[napi]
+pub fn outline_languages() -> Vec<OutlineLanguage> {
+	pi_ast::symbols::outline_languages()
+		.iter()
+		.map(|&lang| OutlineLanguage {
+			name:       lang.canonical_name().to_string(),
+			extensions: lang.file_extensions().iter().map(|&e| e.to_string()).collect(),
+		})
+		.collect()
+}
+
+/// True when the outline extractor emits symbols for the language `path`
+/// resolves to (by extension AND special-name rules, e.g. shell rc files).
+/// The `symbol` TS tool uses this for per-file gating so extensionless
+/// supported files are not rejected by a bare extension check.
+#[napi]
+pub fn is_outline_supported_path(path: String) -> bool {
+	pi_ast::SupportLang::from_path(std::path::Path::new(&path))
+		.map(|lang| pi_ast::symbols::outline_languages().contains(&lang))
+		.unwrap_or(false)
+}

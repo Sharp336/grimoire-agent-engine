@@ -7,7 +7,7 @@
 
 ### Added
 
-- Added the `outlineCode` native binding (backed by `pi_ast::symbols::outline_code`) — a flat, pre-order tree-sitter symbol outline (name, kind, line ranges, container, depth/parent index) for TypeScript/TSX/JavaScript/Python/Rust/Go/Java, powering the coding-agent `symbol` tool.
+- Added the `outlineCode` native binding (backed by `pi_ast::symbols::outline_code`) — a flat, pre-order tree-sitter symbol outline (name, kind, line ranges, container, depth/parent index) for 33 programming languages, powering the coding-agent `symbol` tool. Data / markup / config / DSL grammars (JSON, YAML, CSS, HTML, Markdown, GraphQL, SQL, Proto, Verilog, …) are intentionally excluded — they carry no addressable code symbols — and a Rust exhaustiveness test locks every `SupportLang` into exactly one of the supported/excluded buckets. Also added the `outlineLanguages` and `isOutlineSupportedPath` bindings so the TS layer derives its supported-file set and per-file gate from the native extractor (single source of truth, no drift).
 
 ## [16.0.4] - 2026-06-17
 
