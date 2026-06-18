@@ -6,19 +6,18 @@ import type { ToolExample } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	createLspWritethrough,
-	type FileDiagnosticsResult,
 	type WritethroughCallback,
-	type WritethroughDeferredHandle,
 	writethroughNoop,
 } from "../lsp";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import applyPatchDescription from "../prompts/tools/apply-patch.md" with { type: "text" };
 import patchDescription from "../prompts/tools/patch.md" with { type: "text" };
 import replaceDescription from "../prompts/tools/replace.md" with { type: "text" };
-import type { DeferredDiagnosticsEntry, ToolSession } from "../tools";
+import type { ToolSession } from "../tools";
 import { truncateForPrompt } from "../tools/approval";
 import { isInternalUrlPath } from "../tools/path-utils";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
+import { EditDiagnosticsTracker } from "./deferred-diagnostics";
 import { executeHashlineSingle, hashlineEditParamsSchema } from "./hashline";
 import { type ApplyPatchParams, applyPatchSchema, expandApplyPatchToEntries } from "./modes/apply-patch";
 import applyPatchGrammar from "./modes/apply-patch.lark" with { type: "text" };
@@ -30,6 +29,7 @@ import { EDIT_MODE_STRATEGIES } from "./streaming";
 export * from "@oh-my-pi/hashline";
 export { DEFAULT_EDIT_MODE, type EditMode, normalizeEditMode } from "../utils/edit-mode";
 export * from "./apply-patch";
+export * from "./deferred-diagnostics";
 export * from "./diff";
 export * from "./file-snapshot-store";
 export * from "./hashline";
@@ -104,7 +104,7 @@ function resolveFuzzyThreshold(session: ToolSession, rawValue: string): number {
 	return threshold;
 }
 
-function createEditWritethrough(session: ToolSession): WritethroughCallback {
+export function createEditWritethrough(session: ToolSession): WritethroughCallback {
 	const enableLsp = session.enableLsp ?? true;
 	const enableDiagnostics = enableLsp && session.settings.get("lsp.diagnosticsOnEdit");
 	const enableFormat = enableLsp && session.settings.get("lsp.formatOnWrite");
@@ -323,12 +323,7 @@ export class EditTool implements AgentTool<TInput> {
 	readonly #fuzzyThreshold: number;
 	readonly #writethrough: WritethroughCallback;
 	readonly #editMode?: EditMode;
-	readonly #dedupDiagnostics: boolean;
-	readonly #pendingDeferredFetches = new Map<string, AbortController>();
-	/** Fallback per-path mutation counter used only when the session does not expose
-	 *  a shared one. Prefer `session.bumpFileMutationVersion` so write (and any other
-	 *  tool) mutating the same file also invalidates pending late-diagnostics. */
-	readonly #editVersionByPath = new Map<string, number>();
+	readonly #diagnostics: EditDiagnosticsTracker;
 
 	constructor(private readonly session: ToolSession) {
 		const {
@@ -340,10 +335,7 @@ export class EditTool implements AgentTool<TInput> {
 		this.#editMode = resolveConfiguredEditMode(envEditVariant);
 		this.#allowFuzzy = resolveAllowFuzzy(session, editFuzzy);
 		this.#fuzzyThreshold = resolveFuzzyThreshold(session, editFuzzyThreshold);
-		this.#dedupDiagnostics =
-			(session.enableLsp ?? true) &&
-			session.settings.get("lsp.diagnosticsOnEdit") &&
-			session.settings.get("lsp.diagnosticsDeduplicate");
+		this.#diagnostics = new EditDiagnosticsTracker(session);
 		this.#writethrough = createEditWritethrough(session);
 	}
 
@@ -464,7 +456,7 @@ export class EditTool implements AgentTool<TInput> {
 								allowFuzzy: tool.#allowFuzzy,
 								fuzzyThreshold: tool.#fuzzyThreshold,
 								writethrough: tool.#writethrough,
-								beginDeferredDiagnosticsForPath: p => tool.#beginDeferredDiagnosticsForPath(p),
+								beginDeferredDiagnosticsForPath: p => tool.#diagnostics.beginDeferredDiagnosticsForPath(p),
 							}),
 					);
 					return executeSinglePathEntries(path, runs, batchRequest, onUpdate);
@@ -503,7 +495,7 @@ export class EditTool implements AgentTool<TInput> {
 									allowFuzzy: tool.#allowFuzzy,
 									fuzzyThreshold: tool.#fuzzyThreshold,
 									writethrough: tool.#writethrough,
-									beginDeferredDiagnosticsForPath: p => tool.#beginDeferredDiagnosticsForPath(p),
+									beginDeferredDiagnosticsForPath: p => tool.#diagnostics.beginDeferredDiagnosticsForPath(p),
 								}),
 						};
 					});
@@ -527,7 +519,7 @@ export class EditTool implements AgentTool<TInput> {
 						signal,
 						batchRequest,
 						writethrough: tool.#writethrough,
-						beginDeferredDiagnosticsForPath: p => tool.#beginDeferredDiagnosticsForPath(p),
+						beginDeferredDiagnosticsForPath: p => tool.#diagnostics.beginDeferredDiagnosticsForPath(p),
 					});
 				},
 			},
@@ -553,68 +545,12 @@ export class EditTool implements AgentTool<TInput> {
 								allowFuzzy: tool.#allowFuzzy,
 								fuzzyThreshold: tool.#fuzzyThreshold,
 								writethrough: tool.#writethrough,
-								beginDeferredDiagnosticsForPath: p => tool.#beginDeferredDiagnosticsForPath(p),
+								beginDeferredDiagnosticsForPath: p => tool.#diagnostics.beginDeferredDiagnosticsForPath(p),
 							}),
 					);
 					return executeSinglePathEntries(path, runs, batchRequest, onUpdate);
 				},
 			},
 		}[this.mode];
-	}
-
-	#beginDeferredDiagnosticsForPath(path: string): WritethroughDeferredHandle {
-		const existingDeferred = this.#pendingDeferredFetches.get(path);
-		if (existingDeferred) {
-			existingDeferred.abort();
-			this.#pendingDeferredFetches.delete(path);
-		}
-
-		const deferredController = new AbortController();
-		const editVersion = this.#bumpFileVersion(path);
-		return {
-			onDeferredDiagnostics: (lateDiagnostics: FileDiagnosticsResult) => {
-				this.#pendingDeferredFetches.delete(path);
-				this.#injectLateDiagnostics(path, lateDiagnostics, editVersion);
-			},
-			signal: deferredController.signal,
-			finalize: (diagnostics: FileDiagnosticsResult | undefined) => {
-				if (!diagnostics) {
-					this.#pendingDeferredFetches.set(path, deferredController);
-				} else {
-					deferredController.abort();
-				}
-			},
-		};
-	}
-
-	#injectLateDiagnostics(path: string, diagnostics: FileDiagnosticsResult, editVersion: number): void {
-		const effective = this.#dedupDiagnostics
-			? getDiagnosticsLedger(this.session).reduce(path, diagnostics)
-			: diagnostics;
-		if (this.#dedupDiagnostics && effective.messages.length === 0) return;
-
-		const entry: DeferredDiagnosticsEntry = {
-			path,
-			summary: effective.summary ?? "",
-			messages: effective.messages ?? [],
-			errored: effective.errored,
-			// Drop at flush time if a later edit to the same file superseded this fetch.
-			isStale: () => this.#fileVersion(path) !== editVersion,
-		};
-		this.session.queueDeferredDiagnostics?.(entry);
-	}
-
-	/** Bump the file's mutation counter (session-global when available). */
-	#bumpFileVersion(path: string): number {
-		if (this.session.bumpFileMutationVersion) return this.session.bumpFileMutationVersion(path);
-		const next = (this.#editVersionByPath.get(path) ?? 0) + 1;
-		this.#editVersionByPath.set(path, next);
-		return next;
-	}
-
-	/** Read the file's current mutation counter (session-global when available). */
-	#fileVersion(path: string): number {
-		if (this.session.getFileMutationVersion) return this.session.getFileMutationVersion(path);
-		return this.#editVersionByPath.get(path) ?? 0;
 	}
 }
