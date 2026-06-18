@@ -16,6 +16,7 @@ import {
 const allToolsSettings = Settings.isolated({
 	"astGrep.enabled": true,
 	"astEdit.enabled": true,
+	"symbol.enabled": true,
 	"debug.enabled": true,
 	"find.enabled": true,
 	"search.enabled": true,

@@ -62,4 +62,4 @@ Supported languages: the native extractor (`pi-ast`) emits symbols for 44 langua
 
 ## Notes
 - The `manipulate` symbol spec (name + disambiguators) is authoritative, not a frozen line range: re-resolving at apply prevents the hashline textual recovery from relocating a stale edit onto the wrong code after unrelated edits land between preview and apply.
-- `symbol.enabled` (default `true`) gates the tool; `loadMode` is `discoverable`, so it surfaces via tool discovery rather than being force-loaded.
+- `symbol.enabled` (default `false`) gates the tool — it is **opt-in**. Enable it in `/settings` (Tools → Available Tools) or with `omp config set symbol.enabled true`. Like every built-in tool toggle, the change is applied when a session builds its tool registry, so start a new session for it to take effect. `loadMode` is `discoverable`, so once enabled it surfaces via tool discovery rather than being force-loaded.

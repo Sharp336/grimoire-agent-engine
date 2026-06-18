@@ -3124,7 +3124,7 @@ export const SETTINGS_SCHEMA = {
 
 	"symbol.enabled": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "tools",
 			group: "Available Tools",

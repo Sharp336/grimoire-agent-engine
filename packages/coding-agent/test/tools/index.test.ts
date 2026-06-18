@@ -82,9 +82,25 @@ describe("createTools", () => {
 		expect(names).toContain("todo");
 		expect(names).toContain("web_search");
 		expect(names).toContain("resolve");
-		expect(names).toContain("symbol");
+		// symbol is opt-in (default off) — covered by the dedicated tests below
+		expect(names).not.toContain("symbol");
 		expect(names).not.toContain("fetch");
 		expect(names).not.toContain("vim");
+	});
+
+	it("includes symbol only when symbol.enabled is opted in", async () => {
+		const enabled = await createTools(
+			createTestSession({ settings: createSettingsWithOverrides({ "symbol.enabled": true }) }),
+		);
+		expect(enabled.map(t => t.name)).toContain("symbol");
+	});
+
+	it("keeps symbol filtered when explicitly requested but disabled", async () => {
+		const session = createTestSession({
+			settings: createSettingsWithOverrides({ "symbol.enabled": false }),
+		});
+		const tools = await createTools(session, ["read", "symbol"]);
+		expect(tools.map(t => t.name)).not.toContain("symbol");
 	});
 
 	it("includes bash and eval when both eval backends are allowed", async () => {

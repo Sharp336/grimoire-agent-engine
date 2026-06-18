@@ -410,7 +410,9 @@ tools:
 | `tools.artifactTailBytes` | number | `20` | KB of tail kept inline on spill. |
 | `tools.artifactTailLines` | number | `500` | Max tail lines kept inline on spill. |
 
-Individual built-in tools are toggled by their own keys, e.g. `bash.enabled`, `eval.py`, `eval.js`, `find.enabled`, `search.enabled`, `fetch.enabled`, `browser.enabled`, `astEdit.enabled`, `astGrep.enabled`, `web_search.enabled`, `inspect_image.enabled`.
+Individual built-in tools are toggled by their own keys, e.g. `bash.enabled`, `eval.py`, `eval.js`, `find.enabled`, `search.enabled`, `fetch.enabled`, `browser.enabled`, `astEdit.enabled`, `astGrep.enabled`, `symbol.enabled`, `web_search.enabled`, `inspect_image.enabled`. Most default on; `symbol.enabled` is **opt-in** (default off).
+
+These toggles are applied when a session builds its tool registry, so a change made in `/settings` takes effect for new sessions — start a new session to add or remove an active tool.
 
 ### Shell, eval, and LSP
 
