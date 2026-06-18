@@ -103,9 +103,10 @@
 - Fixed RPC/ACP startup forcing todo settings back to host defaults, so project-level `todo.enabled`, `todo.reminders`, and `todo.eager` opt-outs now suppress protocol-mode todo prompt injection; enabled todo reminders are now persisted to the JSONL transcript so the log matches the model-visible context ([#2824](https://github.com/can1357/oh-my-pi/issues/2824)).
 - Fixed default prompts to instruct the agent to read applicable `skill://<name>` content before starting work, so discovered skills influence broad task requests like frontend generation ([#2829](https://github.com/can1357/oh-my-pi/issues/2829)).
 - Fixed hashline visible-line validation for ACP editor reads so `INS.POST` anchors displayed by bridge-backed range and multi-range `read` output are merged into the session snapshot before `edit` validates them ([#2773](https://github.com/can1357/oh-my-pi/issues/2773)).
+
 ### Added
 
-- Discover standalone `AGENTS.md` and `CLAUDE.md` files in ancestor directory walk (not just config directories like `.claude/` or `.agents/`)
+- Added CLAUDE.md discovery alongside AGENTS.md: the `agents-md` provider now discovers both `AGENTS.md` and `CLAUDE.md` during the ancestor-path walk, with `AGENTS.md` ordered before `CLAUDE.md` at each depth level. Both files at the same depth are preserved in the capability output. ([#2612](https://github.com/can1357/oh-my-pi/issues/2612))
 
 ## [16.0.3] - 2026-06-16
 
@@ -176,9 +177,6 @@
 - Fixed `omp plugin list --json` omitting locally linked plugins that exist only in `omp-plugins.lock.json` and `node_modules` symlinks. ([#2742](https://github.com/can1357/oh-my-pi/issues/2742))
 - Fixed task subagents to install their configured ordered model candidates as child-session retry fallback chains, so retryable provider failures can advance to the next subagent model instead of failing the worker ([#2750](https://github.com/can1357/oh-my-pi/issues/2750)).
 - Fixed empty reasonless aborted assistant turns to auto-retry without switching model fallback, so transient provider-side aborts after tool results do not end headless sessions ([#2685](https://github.com/can1357/oh-my-pi/issues/2685)).
-### Added
-
-- Added CLAUDE.md discovery alongside AGENTS.md: the `agents-md` provider now discovers both AGENTS.md and CLAUDE.md during the ancestor-path walk, with AGENTS.md ordered before CLAUDE.md at each depth level. Both files at the same depth are preserved in the capability output. ([#2764](https://github.com/can1357/oh-my-pi/pull/2764))
 
 ## [16.0.1] - 2026-06-15
 
