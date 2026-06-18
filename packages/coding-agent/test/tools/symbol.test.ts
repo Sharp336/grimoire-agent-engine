@@ -104,6 +104,23 @@ describe("symbol overview", () => {
 		}
 	});
 
+	it("outlines a DSL/schema language (GraphQL) through the native gate", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-gql-"));
+		try {
+			const gql = path.join(tmp, "schema.graphql");
+			await fs.writeFile(
+				gql,
+				["type Person {", "  id: ID!", "  name: String!", "}", "", "enum Status {", "  ACTIVE", "  INACTIVE", "}", ""].join("\n"),
+			);
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const text = textOf(await tool.execute("t", { action: "overview", path: gql }));
+			expect(text).toContain("struct Person");
+			expect(text).toContain("enum Status");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("groups a directory scope and excludes unsupported files", async () => {
 		const result = await symbolTool().execute("t", { action: "overview", path: dir });
 		const text = textOf(result);
