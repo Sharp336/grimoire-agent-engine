@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the npm CLI bundle so installs launched by Bun 1.3.8 no longer fail during parse on explicit resource-management `using` declarations ([#2962](https://github.com/can1357/oh-my-pi/issues/2962)).
+
 ## [16.0.6] - 2026-06-18
 
 ### Added

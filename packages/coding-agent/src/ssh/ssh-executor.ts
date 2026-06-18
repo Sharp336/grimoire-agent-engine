@@ -114,7 +114,7 @@ export async function executeSSH(
 		}
 	}
 
-	using child = ptree.spawn(["ssh", ...(await buildRemoteCommand(host, resolvedCommand))], {
+	const child = ptree.spawn(["ssh", ...(await buildRemoteCommand(host, resolvedCommand))], {
 		signal: options?.signal,
 		timeout: options?.timeout,
 		stdin: "pipe",
@@ -184,6 +184,7 @@ export async function executeSSH(
 		}
 		throw err;
 	} finally {
+		child[Symbol.dispose]();
 		abortWaiter.cleanup();
 	}
 }

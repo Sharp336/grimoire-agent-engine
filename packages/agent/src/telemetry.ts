@@ -1643,7 +1643,7 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 	// long-lived completion promise, freezing any host spinner (e.g. the
 	// `/handoff` Loader) until an unrelated I/O event (a terminal resize)
 	// pokes the loop. Keep the loop healthy for the duration of the call.
-	using _keepalive = new EventLoopKeepalive();
+	const keepalive = new EventLoopKeepalive();
 	const { telemetry, parent, oneshotKind } = span;
 	const stepNumber = span.stepNumber ?? -1;
 	const reasoning = options.reasoning;
@@ -1700,6 +1700,8 @@ export async function instrumentedCompleteSimple<TApi extends Api>(
 			baseUrl: model.baseUrl,
 		});
 		throw err;
+	} finally {
+		keepalive[Symbol.dispose]();
 	}
 }
 

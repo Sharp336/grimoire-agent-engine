@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
 import * as path from "node:path";
 
 describe("stats dashboard assets in distributed CLI builds", () => {
@@ -27,4 +28,36 @@ describe("stats dashboard assets in distributed CLI builds", () => {
 		expect(cliSource).toContain("127.0.0.1");
 		expect(cliSource).toContain("dashboard HTML was not served");
 	});
+
+	it("keeps npm bundle sources parseable by Bun 1.3.8", async () => {
+		const bundledSourceRoots = [
+			path.join(repoRoot, "packages/agent/src"),
+			path.join(repoRoot, "packages/coding-agent/src"),
+			path.join(repoRoot, "packages/utils/src"),
+		];
+		const sourceFiles = (await Promise.all(bundledSourceRoots.map(root => collectTypeScriptFiles(root)))).flat();
+		const offenders: string[] = [];
+		for (const file of sourceFiles) {
+			const source = await Bun.file(file).text();
+			if (explicitResourceManagementDeclaration.test(source)) {
+				offenders.push(path.relative(repoRoot, file));
+			}
+		}
+		expect(offenders).toEqual([]);
+	});
 });
+
+const explicitResourceManagementDeclaration = /^\s*(?:await\s+)?using\s+[$A-Z_a-z][$\w]*\s*=/m;
+
+async function collectTypeScriptFiles(dir: string, files: string[] = []): Promise<string[]> {
+	for (const entry of await fs.readdir(dir, { withFileTypes: true })) {
+		if (entry.name === "__tests__") continue;
+		const fullPath = path.join(dir, entry.name);
+		if (entry.isDirectory()) {
+			await collectTypeScriptFiles(fullPath, files);
+		} else if (entry.isFile() && entry.name.endsWith(".ts")) {
+			files.push(fullPath);
+		}
+	}
+	return files;
+}

@@ -982,8 +982,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#scheduleLoopAutoSubmit();
 		this.#scheduleGoalContinuation();
 
-		using _ = new EventLoopKeepalive();
-		return await promise;
+		const keepalive = new EventLoopKeepalive();
+		try {
+			return await promise;
+		} finally {
+			keepalive[Symbol.dispose]();
+		}
 	}
 
 	#scheduleLoopAutoSubmit(): void {

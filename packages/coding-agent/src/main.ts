@@ -268,8 +268,8 @@ export async function submitInteractiveInput(
 		return;
 	}
 
+	const keepalive = new EventLoopKeepalive();
 	try {
-		using _keepalive = new EventLoopKeepalive();
 		// Honor the submission's queue intent, defaulting to followUp. Reading
 		// `session.isStreaming` to decide queue-vs-fresh is NOT atomic with the
 		// eventual `agent.prompt()` call inside `session.prompt()`: a background turn
@@ -315,6 +315,7 @@ export async function submitInteractiveInput(
 		const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 		mode.showError(errorMessage);
 	} finally {
+		keepalive[Symbol.dispose]();
 		mode.finishPendingSubmission(input);
 		await mode.checkShutdownRequested();
 	}
@@ -468,22 +469,26 @@ async function runInteractiveMode(
 	}
 
 	if (initialMessage !== undefined) {
+		const keepalive = new EventLoopKeepalive();
 		try {
-			using _keepalive = new EventLoopKeepalive();
 			await session.prompt(initialMessage, { images: initialImages });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
+		} finally {
+			keepalive[Symbol.dispose]();
 		}
 	}
 
 	for (const message of initialMessages) {
+		const keepalive = new EventLoopKeepalive();
 		try {
-			using _keepalive = new EventLoopKeepalive();
 			await session.prompt(message);
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
+		} finally {
+			keepalive[Symbol.dispose]();
 		}
 	}
 

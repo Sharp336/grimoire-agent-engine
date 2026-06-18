@@ -966,7 +966,7 @@ export class Agent {
 		if (!model) throw new Error("No model configured");
 
 		let skipInitialSteeringPoll = options?.skipInitialSteeringPoll === true;
-		using _ = new EventLoopKeepalive();
+		const keepalive = new EventLoopKeepalive();
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#runningPrompt = promise;
 		this.#resolveRunningPrompt = resolve;
@@ -1208,6 +1208,7 @@ export class Agent {
 				this.#emit({ type: "agent_end", messages: [errorMsg] });
 			}
 		} finally {
+			keepalive[Symbol.dispose]();
 			this.#state.isStreaming = false;
 			this.#state.streamMessage = null;
 			this.#state.pendingToolCalls.clear();

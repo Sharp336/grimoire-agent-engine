@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `ptree.exec()` to avoid explicit resource-management syntax in shipped sources while preserving child-process disposal on errors ([#2962](https://github.com/can1357/oh-my-pi/issues/2962)).
+
 ## [16.0.3] - 2026-06-16
 
 ### Added
