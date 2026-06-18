@@ -1,3 +1,5 @@
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { hasRootMarkers, resolveCommand } from "../lsp/config";
@@ -5,6 +7,7 @@ import DEFAULTS from "./defaults.json" with { type: "json" };
 import type { DapAdapterConfig, DapResolvedAdapter } from "./types";
 
 const EXTENSIONLESS_DEBUGGER_ORDER = ["gdb", "lldb-dap"] as const;
+const DAP_PORT_ARGUMENT = "$" + "{port}";
 
 function normalizeStringArray(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
@@ -18,7 +21,10 @@ function normalizeObject(value: unknown): Record<string, unknown> {
 function normalizeAdapterConfig(config: unknown): DapAdapterConfig | null {
 	if (!isRecord(config)) return null;
 	if (typeof config.command !== "string" || config.command.length === 0) return null;
-	const connectMode = config.connectMode === "socket" ? ("socket" as const) : undefined;
+	const connectMode =
+		config.connectMode === "socket" || config.connectMode === "tcp"
+			? (config.connectMode as "socket" | "tcp")
+			: undefined;
 	return {
 		command: config.command,
 		args: normalizeStringArray(config.args),
@@ -49,9 +55,47 @@ export function getAdapterConfigs(): Record<string, DapAdapterConfig> {
 	return { ...DEFAULT_ADAPTERS };
 }
 
+function resolveDapDebugServerPath(): string | null {
+	if (process.env.JS_DEBUG_DAP_SERVER) {
+		return process.env.JS_DEBUG_DAP_SERVER;
+	}
+	const home = os.homedir();
+	const candidate = path.join(
+		home,
+		".local/share/nvim/mason/packages/js-debug-adapter/js-debug/src/dapDebugServer.js",
+	);
+	if (fs.existsSync(candidate)) {
+		return candidate;
+	}
+	return null;
+}
+
 export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAdapter | null {
 	const config = DEFAULT_ADAPTERS[adapterName];
 	if (!config) return null;
+
+	if (adapterName === "js-debug-adapter") {
+		const serverPath = resolveDapDebugServerPath();
+		if (serverPath) {
+			const nodeResolved = resolveCommand("node", cwd);
+			if (nodeResolved) {
+				return {
+					name: adapterName,
+					command: "node",
+					args: [serverPath, DAP_PORT_ARGUMENT, "127.0.0.1"],
+					resolvedCommand: nodeResolved,
+					languages: config.languages ?? [],
+					fileTypes: config.fileTypes ?? [],
+					rootMarkers: config.rootMarkers ?? [],
+					launchDefaults: config.launchDefaults ?? {},
+					attachDefaults: config.attachDefaults ?? {},
+					connectMode: "tcp",
+					acceptsDirectoryProgram: config.acceptsDirectoryProgram === true,
+				};
+			}
+		}
+	}
+
 	const resolvedCommand = resolveCommand(config.command, cwd);
 	if (!resolvedCommand) return null;
 	return {

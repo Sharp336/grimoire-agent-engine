@@ -487,7 +487,7 @@ export interface DapAdapterConfig {
 	 *  "socket": adapter uses a network socket instead of stdio.
 	 *  On Linux, connects via a unix domain socket.
 	 *  On macOS, the adapter dials into a local TCP listener (--client-addr). */
-	connectMode?: "stdio" | "socket";
+	connectMode?: "stdio" | "socket" | "tcp";
 	/** When true, the adapter accepts a directory as the launch `program`
 	 *  (e.g. dlv treats it as a Go package path). When false/undefined, the
 	 *  debug tool rejects directory programs upfront. */
@@ -504,7 +504,7 @@ export interface DapResolvedAdapter {
 	rootMarkers: string[];
 	launchDefaults: Record<string, unknown>;
 	attachDefaults: Record<string, unknown>;
-	connectMode: "stdio" | "socket";
+	connectMode: "stdio" | "socket" | "tcp";
 	acceptsDirectoryProgram: boolean;
 }
 
@@ -581,6 +581,8 @@ export interface DapSessionSummary {
 	outputTruncated: boolean;
 	exitCode?: number;
 	needsConfigurationDone: boolean;
+	parentSessionId?: string;
+	childSessionIds?: string[];
 }
 
 export interface DapContinueOutcome {
@@ -599,6 +601,7 @@ export interface DapLaunchSessionOptions {
 	 *  (e.g. dlv's `mode` switches between `debug` and `exec` based on
 	 *  whether `program` is a Go package path or a compiled binary). */
 	extraLaunchArguments?: Record<string, unknown>;
+	parentSessionId?: string;
 }
 
 export interface DapAttachSessionOptions {
@@ -607,4 +610,6 @@ export interface DapAttachSessionOptions {
 	pid?: number;
 	port?: number;
 	host?: string;
+	extraAttachArguments?: Record<string, unknown>;
+	parentSessionId?: string;
 }

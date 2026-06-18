@@ -1,4 +1,5 @@
 import * as fs from "node:fs/promises";
+import * as net from "node:net";
 import { isEnoent, logger, ptree } from "@oh-my-pi/pi-utils";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
 import { ToolAbortError } from "../tools/tool-errors";
@@ -108,6 +109,7 @@ export class DapClient {
 	readonly adapter: DapResolvedAdapter;
 	readonly cwd: string;
 	readonly proc: DapClientState["proc"];
+	port?: number;
 	/** ReadableStream of DAP bytes — from proc.stdout (stdio) or a socket (socket mode). */
 	readonly #readable: ReadableStream<Uint8Array>;
 	/** Write sink — proc.stdin (stdio) or a socket (socket mode). */
@@ -143,6 +145,9 @@ export class DapClient {
 		if (adapter.connectMode === "socket") {
 			return DapClient.#spawnSocket({ adapter, cwd });
 		}
+		if (adapter.connectMode === "tcp") {
+			return DapClient.#spawnTcp({ adapter, cwd });
+		}
 		// Merge non-interactive env and start in a new session (detached → setsid)
 		// so the adapter process tree has no controlling terminal. Without this,
 		// debuggee children can reach /dev/tty and trigger SIGTTIN, suspending
@@ -165,6 +170,64 @@ export class DapClient {
 		return client;
 	}
 
+	static async connect({
+		adapter,
+		cwd,
+		host,
+		port,
+	}: {
+		adapter: DapResolvedAdapter;
+		cwd: string;
+		host: string;
+		port: number;
+	}): Promise<DapClient> {
+		const exited = Promise.withResolvers<void>();
+		const { readable, writeSink, socket } = await connectTcpSocket(host, port, exited);
+		const mockProc = {
+			exited: exited.promise,
+			exitCode: null,
+			stdin: { write: () => 0, flush: () => undefined },
+			stdout: new ReadableStream<Uint8Array>(),
+			stderr: new ReadableStream<Uint8Array>(),
+			peekStderr: () => "",
+			kill: () => {
+				exited.resolve();
+				return true;
+			},
+		} as unknown as DapClientState["proc"];
+		const client = new DapClient(adapter, cwd, mockProc, { readable, writeSink, socket });
+		client.port = port;
+		exited.promise.then(() => client.#handleProcessExit());
+		void client.#startMessageReader();
+		return client;
+	}
+
+	static async #spawnTcp({ adapter, cwd }: DapSpawnOptions): Promise<DapClient> {
+		const host = "127.0.0.1";
+		const port = await getFreePort(host);
+		const resolvedArgs = adapter.args.map(arg => arg.replace(/\$\{port\}/g, String(port)));
+		const env = { ...Bun.env, ...NON_INTERACTIVE_ENV };
+		const proc = ptree.spawn([adapter.resolvedCommand, ...resolvedArgs], {
+			cwd,
+			stdin: "pipe",
+			env,
+			detached: true,
+		});
+
+		try {
+			await waitForPortReady(host, port, 10_000, proc);
+		} catch (err) {
+			proc.kill();
+			throw err;
+		}
+
+		const { readable, writeSink, socket } = await connectTcpSocket(host, port);
+		const client = new DapClient(adapter, cwd, proc, { readable, writeSink, socket });
+		client.port = port;
+		proc.exited.then(() => client.#handleProcessExit());
+		void client.#startMessageReader();
+		return client;
+	}
 	/**
 	 * Spawn a socket-mode adapter (e.g. dlv).
 	 * Linux: connect to a unix domain socket via --listen=unix:<path>
@@ -757,4 +820,147 @@ function wrapBunSocket(rawSocket: Bun.Socket<undefined>): SocketTransport {
 		writeSink: socketToSink(rawSocket),
 		socket: rawSocket,
 	};
+}
+
+function getFreePort(host: string): Promise<number> {
+	const { promise, resolve, reject } = Promise.withResolvers<number>();
+	const server = net.createServer();
+	const cleanup = () => {
+		server.removeAllListeners();
+	};
+	server.once("error", error => {
+		cleanup();
+		reject(error);
+	});
+	server.listen(0, host, () => {
+		const address = server.address();
+		if (!address || typeof address === "string") {
+			server.close(() => {
+				cleanup();
+				reject(new Error(`Unable to reserve a TCP port on ${host}`));
+			});
+			return;
+		}
+		server.close(error => {
+			cleanup();
+			if (error) {
+				reject(error);
+				return;
+			}
+			resolve(address.port);
+		});
+	});
+	return promise;
+}
+
+function tryConnectTcp(host: string, port: number): Promise<void> {
+	const { promise, resolve, reject } = Promise.withResolvers<void>();
+	const socket = net.createConnection({ host, port });
+	socket.once("connect", () => {
+		socket.destroy();
+		resolve();
+	});
+	socket.once("error", error => {
+		socket.destroy();
+		reject(error);
+	});
+	return promise;
+}
+
+async function waitForPortReady(
+	host: string,
+	port: number,
+	timeoutMs: number,
+	proc: DapClientState["proc"],
+): Promise<void> {
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		if (proc.exitCode !== null) {
+			throw new Error(`Adapter process exited before TCP port ${host}:${port} was ready`);
+		}
+		try {
+			await tryConnectTcp(host, port);
+			return;
+		} catch {
+			await Bun.sleep(50);
+		}
+	}
+	throw new Error(`Timeout waiting for TCP port ${host}:${port} to be ready`);
+}
+
+async function connectTcpSocket(host: string, port: number, exited?: { resolve(): void }): Promise<SocketTransport> {
+	const { promise, resolve, reject } = Promise.withResolvers<SocketTransport>();
+	let streamController: ReadableStreamDefaultController<Uint8Array>;
+	const readable = new ReadableStream<Uint8Array>({
+		start(controller) {
+			streamController = controller;
+		},
+	});
+
+	let opened = false;
+	let rawSocket: Promise<Bun.Socket<undefined>> | undefined;
+	const timeout = setTimeout(() => {
+		if (!opened) {
+			rawSocket?.then(socket => socket.end()).catch(() => {});
+			reject(new Error(`Connection to TCP port ${host}:${port} timed out`));
+		}
+	}, 5000);
+
+	rawSocket = Bun.connect({
+		hostname: host,
+		port,
+		socket: {
+			open(socket) {
+				opened = true;
+				clearTimeout(timeout);
+				resolve({
+					readable,
+					writeSink: socketToSink(socket),
+					socket,
+				});
+			},
+			data(_socket, data) {
+				streamController.enqueue(new Uint8Array(data));
+			},
+			close() {
+				exited?.resolve();
+				clearTimeout(timeout);
+				if (!opened) {
+					reject(new Error(`Connection to TCP port ${host}:${port} closed before opening`));
+				}
+				try {
+					streamController.close();
+				} catch {
+					/* already closed */
+				}
+			},
+			error(_socket, err) {
+				exited?.resolve();
+				clearTimeout(timeout);
+				if (!opened) {
+					reject(err);
+				}
+				try {
+					streamController.error(err);
+				} catch {
+					/* already closed */
+				}
+			},
+		},
+	});
+	rawSocket.catch(error => {
+		exited?.resolve();
+		clearTimeout(timeout);
+		if (!opened) {
+			reject(error);
+			return;
+		}
+		try {
+			streamController.error(error);
+		} catch {
+			/* already closed */
+		}
+	});
+
+	return promise;
 }

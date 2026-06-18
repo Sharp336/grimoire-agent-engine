@@ -2,7 +2,9 @@ import * as path from "node:path";
 import * as timers from "node:timers/promises";
 import { logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
+import { ToolAbortError } from "../tools/tool-errors";
 import { DapClient } from "./client";
+import { resolveAdapter } from "./config";
 import type {
 	DapAttachArguments,
 	DapAttachSessionOptions,
@@ -93,6 +95,15 @@ interface DapSession {
 	initializedSeen: boolean;
 	needsConfigurationDone: boolean;
 	configurationDoneSent: boolean;
+	parentSessionId?: string;
+	childSessionIds: Set<string>;
+	port?: number;
+}
+
+interface DapGlobalStopResolver {
+	resolve(value: unknown): void;
+	reject(reason?: unknown): void;
+	rootSessionId: string;
 }
 
 export interface DapOutputSnapshot {
@@ -243,6 +254,8 @@ function buildSummary(session: DapSession): DapSessionSummary {
 		outputTruncated: session.outputTruncated,
 		exitCode: session.exitCode,
 		needsConfigurationDone: session.needsConfigurationDone && !session.configurationDoneSent,
+		parentSessionId: session.parentSessionId,
+		childSessionIds: session.childSessionIds.size > 0 ? Array.from(session.childSessionIds) : undefined,
 	};
 }
 
@@ -251,7 +264,11 @@ export class DapSessionManager {
 	#activeSessionId: string | null = null;
 	#cleanupLoopPromise?: Promise<void>;
 	#nextId = 0;
-
+	#pendingBreakpoints = new Map<string, DapBreakpointRecord[]>();
+	#pendingFunctionBreakpoints: DapFunctionBreakpointRecord[] = [];
+	#pendingInstructionBreakpoints: DapInstructionBreakpoint[] = [];
+	#pendingDataBreakpoints: DapDataBreakpoint[] = [];
+	#globalStopResolvers = new Set<DapGlobalStopResolver>();
 	constructor() {
 		this.#startCleanupTimer();
 	}
@@ -276,7 +293,13 @@ export class DapSessionManager {
 	): Promise<DapSessionSummary> {
 		await this.#ensureLaunchSlot();
 		const client = await DapClient.spawn({ adapter: options.adapter, cwd: options.cwd });
-		const session = this.#registerSession(client, options.adapter, options.cwd, options.program);
+		const session = this.#registerSession(
+			client,
+			options.adapter,
+			options.cwd,
+			options.program,
+			options.parentSessionId,
+		);
 		try {
 			session.capabilities = await client.initialize(
 				this.#buildInitializeArguments(options.adapter),
@@ -344,7 +367,7 @@ export class DapSessionManager {
 	): Promise<DapSessionSummary> {
 		await this.#ensureLaunchSlot();
 		const client = await DapClient.spawn({ adapter: options.adapter, cwd: options.cwd });
-		const session = this.#registerSession(client, options.adapter, options.cwd);
+		const session = this.#registerSession(client, options.adapter, options.cwd, undefined, options.parentSessionId);
 		try {
 			session.capabilities = await client.initialize(
 				this.#buildInitializeArguments(options.adapter),
@@ -354,6 +377,7 @@ export class DapSessionManager {
 			session.needsConfigurationDone = session.capabilities.supportsConfigurationDoneRequest === true;
 			const attachArguments: DapAttachArguments = {
 				...options.adapter.attachDefaults,
+				...(options.extraAttachArguments ?? {}),
 				cwd: options.cwd,
 				...(options.pid !== undefined ? { pid: options.pid, processId: options.pid } : {}),
 				...(options.port !== undefined ? { port: options.port } : {}),
@@ -415,6 +439,288 @@ export class DapSessionManager {
 		return run;
 	}
 
+	async #applyPendingBreakpointsToSession(
+		session: DapSession,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	): Promise<void> {
+		for (const [sourcePath, record] of this.#pendingBreakpoints.entries()) {
+			try {
+				const response = await session.client.sendRequest<{ breakpoints?: DapBreakpoint[] }>(
+					"setBreakpoints",
+					{
+						source: { path: sourcePath, name: path.basename(sourcePath) },
+						breakpoints: record.map<DapSourceBreakpoint>(entry => ({
+							line: entry.line,
+							...(entry.condition ? { condition: entry.condition } : {}),
+						})),
+					},
+					signal,
+					timeoutMs,
+				);
+				session.breakpoints.set(sourcePath, this.#mapSourceBreakpoints(record, response?.breakpoints));
+			} catch (err) {
+				logger.warn("Failed to propagate source breakpoints to session", {
+					sessionId: session.id,
+					sourcePath,
+					error: toErrorMessage(err),
+				});
+			}
+		}
+
+		if (this.#pendingFunctionBreakpoints.length > 0) {
+			try {
+				const response = await session.client.sendRequest<{ breakpoints?: DapBreakpoint[] }>(
+					"setFunctionBreakpoints",
+					{
+						breakpoints: this.#pendingFunctionBreakpoints.map<DapFunctionBreakpoint>(entry => ({
+							name: entry.name,
+							...(entry.condition ? { condition: entry.condition } : {}),
+						})),
+					},
+					signal,
+					timeoutMs,
+				);
+				session.functionBreakpoints = this.#mapFunctionBreakpoints(
+					this.#pendingFunctionBreakpoints,
+					response?.breakpoints,
+				);
+			} catch (err) {
+				logger.warn("Failed to propagate function breakpoints to session", {
+					sessionId: session.id,
+					error: toErrorMessage(err),
+				});
+			}
+		}
+
+		if (this.#pendingInstructionBreakpoints.length > 0) {
+			try {
+				await session.client.sendRequest(
+					"setInstructionBreakpoints",
+					{
+						breakpoints: this.#pendingInstructionBreakpoints,
+					},
+					signal,
+					timeoutMs,
+				);
+				session.instructionBreakpoints = [...this.#pendingInstructionBreakpoints];
+			} catch (err) {
+				logger.warn("Failed to propagate instruction breakpoints to session", {
+					sessionId: session.id,
+					error: toErrorMessage(err),
+				});
+			}
+		}
+
+		if (this.#pendingDataBreakpoints.length > 0) {
+			try {
+				await session.client.sendRequest(
+					"setDataBreakpoints",
+					{
+						breakpoints: this.#pendingDataBreakpoints,
+					},
+					signal,
+					timeoutMs,
+				);
+				session.dataBreakpoints = [...this.#pendingDataBreakpoints];
+			} catch (err) {
+				logger.debug("Best-effort data breakpoints propagation to session failed (ignored)", {
+					sessionId: session.id,
+					error: toErrorMessage(err),
+				});
+			}
+		}
+	}
+
+	async #updateSourceBreakpointsGlobally(
+		sourcePath: string,
+		line: number,
+		op: "add" | "remove",
+		condition?: string,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	): Promise<void> {
+		const sessions = Array.from(this.#sessions.values());
+		await Promise.all(
+			sessions.map(session =>
+				this.#serializeBreakpointMutation(
+					session,
+					async () => {
+						const current = [...(session.breakpoints.get(sourcePath) ?? [])];
+						const deduped = current.filter(entry => entry.line !== line);
+						if (op === "add") {
+							deduped.push({ verified: false, line, condition });
+							deduped.sort((left, right) => left.line - right.line);
+						}
+						const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
+							session,
+							"setBreakpoints",
+							{
+								source: { path: sourcePath, name: path.basename(sourcePath) },
+								breakpoints: deduped.map<DapSourceBreakpoint>(entry => ({
+									line: entry.line,
+									...(entry.condition ? { condition: entry.condition } : {}),
+								})),
+							},
+							signal,
+							timeoutMs,
+						);
+						if (deduped.length === 0) {
+							session.breakpoints.delete(sourcePath);
+						} else {
+							session.breakpoints.set(sourcePath, this.#mapSourceBreakpoints(deduped, response?.breakpoints));
+						}
+					},
+					signal,
+				),
+			),
+		);
+	}
+
+	async #updateFunctionBreakpointsGlobally(
+		name: string,
+		op: "add" | "remove",
+		condition?: string,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	): Promise<void> {
+		const sessions = Array.from(this.#sessions.values());
+		await Promise.all(
+			sessions.map(session =>
+				this.#serializeBreakpointMutation(
+					session,
+					async () => {
+						const current = session.functionBreakpoints.filter(entry => entry.name !== name);
+						if (op === "add") {
+							current.push({ verified: false, name, condition });
+							current.sort((left, right) => left.name.localeCompare(right.name));
+						}
+						const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
+							session,
+							"setFunctionBreakpoints",
+							{
+								breakpoints: current.map<DapFunctionBreakpoint>(entry => ({
+									name: entry.name,
+									...(entry.condition ? { condition: entry.condition } : {}),
+								})),
+							},
+							signal,
+							timeoutMs,
+						);
+						session.functionBreakpoints = this.#mapFunctionBreakpoints(current, response?.breakpoints);
+					},
+					signal,
+				),
+			),
+		);
+	}
+
+	async #updateInstructionBreakpointsGlobally(
+		instructionReference: string,
+		offset: number | undefined,
+		op: "add" | "remove",
+		condition?: string,
+		hitCondition?: string,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	): Promise<DapInstructionBreakpointRecord[]> {
+		const sessions = Array.from(this.#sessions.values());
+		let activeSessionRecord: DapInstructionBreakpointRecord[] = [];
+		await Promise.all(
+			sessions.map(async session => {
+				let responseBreakpoints: DapBreakpoint[] | undefined;
+				await this.#serializeBreakpointMutation(
+					session,
+					async () => {
+						const current = session.instructionBreakpoints.filter(
+							entry => entry.instructionReference !== instructionReference || entry.offset !== offset,
+						);
+						if (op === "add") {
+							current.push({ instructionReference, offset, condition, hitCondition });
+							current.sort((left, right) => {
+								const referenceOrder = left.instructionReference.localeCompare(right.instructionReference);
+								if (referenceOrder !== 0) {
+									return referenceOrder;
+								}
+								return (left.offset ?? 0) - (right.offset ?? 0);
+							});
+						}
+						const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
+							session,
+							"setInstructionBreakpoints",
+							{
+								breakpoints: current,
+							} satisfies DapSetInstructionBreakpointsArguments,
+							signal,
+							timeoutMs,
+						);
+						session.instructionBreakpoints = current;
+						responseBreakpoints = response?.breakpoints;
+					},
+					signal,
+				);
+				const mapped = this.#mapInstructionBreakpoints(session.instructionBreakpoints, responseBreakpoints);
+				if (session.id === this.#activeSessionId) {
+					activeSessionRecord = mapped;
+				}
+			}),
+		);
+
+		if (activeSessionRecord.length === 0) {
+			activeSessionRecord = this.#mapInstructionBreakpoints(this.#pendingInstructionBreakpoints, undefined);
+		}
+		return activeSessionRecord;
+	}
+
+	async #updateDataBreakpointsGlobally(
+		dataId: string,
+		op: "add" | "remove",
+		accessType?: "read" | "write" | "readWrite",
+		condition?: string,
+		hitCondition?: string,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	): Promise<DapDataBreakpointRecord[]> {
+		const sessions = Array.from(this.#sessions.values());
+		let activeSessionRecord: DapDataBreakpointRecord[] = [];
+		await Promise.all(
+			sessions.map(async session => {
+				let responseBreakpoints: DapBreakpoint[] | undefined;
+				await this.#serializeBreakpointMutation(
+					session,
+					async () => {
+						const current = session.dataBreakpoints.filter(entry => entry.dataId !== dataId);
+						if (op === "add") {
+							current.push({ dataId, accessType, condition, hitCondition });
+							current.sort((left, right) => left.dataId.localeCompare(right.dataId));
+						}
+						const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
+							session,
+							"setDataBreakpoints",
+							{
+								breakpoints: current,
+							} satisfies DapSetDataBreakpointsArguments,
+							signal,
+							timeoutMs,
+						);
+						session.dataBreakpoints = current;
+						responseBreakpoints = response?.breakpoints;
+					},
+					signal,
+				);
+				const mapped = this.#mapDataBreakpoints(session.dataBreakpoints, responseBreakpoints);
+				if (session.id === this.#activeSessionId) {
+					activeSessionRecord = mapped;
+				}
+			}),
+		);
+
+		if (activeSessionRecord.length === 0) {
+			activeSessionRecord = this.#mapDataBreakpoints(this.#pendingDataBreakpoints, undefined);
+		}
+		return activeSessionRecord;
+	}
+
 	async setBreakpoint(
 		file: string,
 		line: number,
@@ -422,124 +728,67 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	) {
-		const session = this.#touchActiveSession();
-		return this.#serializeBreakpointMutation(
-			session,
-			async () => {
-				const sourcePath = normalizePath(file);
-				const current = [...(session.breakpoints.get(sourcePath) ?? [])];
-				const deduped = current.filter(entry => entry.line !== line);
-				deduped.push({ verified: false, line, condition });
-				deduped.sort((left, right) => left.line - right.line);
-				const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
-					session,
-					"setBreakpoints",
-					{
-						source: { path: sourcePath, name: path.basename(sourcePath) },
-						breakpoints: deduped.map<DapSourceBreakpoint>(entry => ({
-							line: entry.line,
-							...(entry.condition ? { condition: entry.condition } : {}),
-						})),
-					},
-					signal,
-					timeoutMs,
-				);
-				session.breakpoints.set(sourcePath, this.#mapSourceBreakpoints(deduped, response?.breakpoints));
-				return {
-					snapshot: buildSummary(session),
-					breakpoints: session.breakpoints.get(sourcePath) ?? [],
-					sourcePath,
-				};
-			},
-			signal,
-		);
+		const sourcePath = normalizePath(file);
+		const current = [...(this.#pendingBreakpoints.get(sourcePath) ?? [])];
+		const deduped = current.filter(entry => entry.line !== line);
+		deduped.push({ verified: false, line, condition });
+		deduped.sort((left, right) => left.line - right.line);
+		this.#pendingBreakpoints.set(sourcePath, deduped);
+
+		await this.#updateSourceBreakpointsGlobally(sourcePath, line, "add", condition, signal, timeoutMs);
+
+		const session = this.#getActiveSessionOrNull();
+		return {
+			snapshot: session ? buildSummary(session) : undefined,
+			breakpoints: session?.breakpoints.get(sourcePath) ?? this.#pendingBreakpoints.get(sourcePath) ?? [],
+			sourcePath,
+		};
 	}
 
 	async removeBreakpoint(file: string, line: number, signal?: AbortSignal, timeoutMs: number = 30_000) {
-		const session = this.#touchActiveSession();
-		return this.#serializeBreakpointMutation(
-			session,
-			async () => {
-				const sourcePath = normalizePath(file);
-				const current = [...(session.breakpoints.get(sourcePath) ?? [])].filter(entry => entry.line !== line);
-				const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
-					session,
-					"setBreakpoints",
-					{
-						source: { path: sourcePath, name: path.basename(sourcePath) },
-						breakpoints: current.map<DapSourceBreakpoint>(entry => ({
-							line: entry.line,
-							...(entry.condition ? { condition: entry.condition } : {}),
-						})),
-					},
-					signal,
-					timeoutMs,
-				);
-				if (current.length === 0) {
-					session.breakpoints.delete(sourcePath);
-				} else {
-					session.breakpoints.set(sourcePath, this.#mapSourceBreakpoints(current, response?.breakpoints));
-				}
-				return {
-					snapshot: buildSummary(session),
-					breakpoints: session.breakpoints.get(sourcePath) ?? [],
-					sourcePath,
-				};
-			},
-			signal,
-		);
+		const sourcePath = normalizePath(file);
+		const current = [...(this.#pendingBreakpoints.get(sourcePath) ?? [])].filter(entry => entry.line !== line);
+		if (current.length === 0) {
+			this.#pendingBreakpoints.delete(sourcePath);
+		} else {
+			this.#pendingBreakpoints.set(sourcePath, current);
+		}
+
+		await this.#updateSourceBreakpointsGlobally(sourcePath, line, "remove", undefined, signal, timeoutMs);
+
+		const session = this.#getActiveSessionOrNull();
+		return {
+			snapshot: session ? buildSummary(session) : undefined,
+			breakpoints: session?.breakpoints.get(sourcePath) ?? this.#pendingBreakpoints.get(sourcePath) ?? [],
+			sourcePath,
+		};
 	}
 
 	async setFunctionBreakpoint(name: string, condition?: string, signal?: AbortSignal, timeoutMs: number = 30_000) {
-		const session = this.#touchActiveSession();
-		return this.#serializeBreakpointMutation(
-			session,
-			async () => {
-				const current = session.functionBreakpoints.filter(entry => entry.name !== name);
-				current.push({ verified: false, name, condition });
-				current.sort((left, right) => left.name.localeCompare(right.name));
-				const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
-					session,
-					"setFunctionBreakpoints",
-					{
-						breakpoints: current.map<DapFunctionBreakpoint>(entry => ({
-							name: entry.name,
-							...(entry.condition ? { condition: entry.condition } : {}),
-						})),
-					},
-					signal,
-					timeoutMs,
-				);
-				session.functionBreakpoints = this.#mapFunctionBreakpoints(current, response?.breakpoints);
-				return { snapshot: buildSummary(session), breakpoints: session.functionBreakpoints };
-			},
-			signal,
-		);
+		const current = this.#pendingFunctionBreakpoints.filter(entry => entry.name !== name);
+		current.push({ verified: false, name, condition });
+		current.sort((left, right) => left.name.localeCompare(right.name));
+		this.#pendingFunctionBreakpoints = current;
+
+		await this.#updateFunctionBreakpointsGlobally(name, "add", condition, signal, timeoutMs);
+
+		const session = this.#getActiveSessionOrNull();
+		return {
+			snapshot: session ? buildSummary(session) : undefined,
+			breakpoints: session ? session.functionBreakpoints : this.#pendingFunctionBreakpoints,
+		};
 	}
 
 	async removeFunctionBreakpoint(name: string, signal?: AbortSignal, timeoutMs: number = 30_000) {
-		const session = this.#touchActiveSession();
-		return this.#serializeBreakpointMutation(
-			session,
-			async () => {
-				const current = session.functionBreakpoints.filter(entry => entry.name !== name);
-				const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
-					session,
-					"setFunctionBreakpoints",
-					{
-						breakpoints: current.map<DapFunctionBreakpoint>(entry => ({
-							name: entry.name,
-							...(entry.condition ? { condition: entry.condition } : {}),
-						})),
-					},
-					signal,
-					timeoutMs,
-				);
-				session.functionBreakpoints = this.#mapFunctionBreakpoints(current, response?.breakpoints);
-				return { snapshot: buildSummary(session), breakpoints: session.functionBreakpoints };
-			},
-			signal,
-		);
+		this.#pendingFunctionBreakpoints = this.#pendingFunctionBreakpoints.filter(entry => entry.name !== name);
+
+		await this.#updateFunctionBreakpointsGlobally(name, "remove", undefined, signal, timeoutMs);
+
+		const session = this.#getActiveSessionOrNull();
+		return {
+			snapshot: session ? buildSummary(session) : undefined,
+			breakpoints: session ? session.functionBreakpoints : this.#pendingFunctionBreakpoints,
+		};
 	}
 
 	async setInstructionBreakpoint(
@@ -550,38 +799,27 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	) {
-		const session = this.#touchActiveSession();
-		return this.#serializeBreakpointMutation(
-			session,
-			async () => {
-				const current = session.instructionBreakpoints.filter(
-					entry => entry.instructionReference !== instructionReference || entry.offset !== offset,
-				);
-				current.push({ instructionReference, offset, condition, hitCondition });
-				current.sort((left, right) => {
-					const referenceOrder = left.instructionReference.localeCompare(right.instructionReference);
-					if (referenceOrder !== 0) {
-						return referenceOrder;
-					}
-					return (left.offset ?? 0) - (right.offset ?? 0);
-				});
-				const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
-					session,
-					"setInstructionBreakpoints",
-					{
-						breakpoints: current,
-					} satisfies DapSetInstructionBreakpointsArguments,
-					signal,
-					timeoutMs,
-				);
-				session.instructionBreakpoints = current;
-				return {
-					snapshot: buildSummary(session),
-					breakpoints: this.#mapInstructionBreakpoints(current, response?.breakpoints),
-				};
-			},
-			signal,
+		const current = this.#pendingInstructionBreakpoints.filter(
+			entry => entry.instructionReference !== instructionReference || entry.offset !== offset,
 		);
+		current.push({ instructionReference, offset, condition, hitCondition });
+		this.#pendingInstructionBreakpoints = current;
+
+		const breakpoints = await this.#updateInstructionBreakpointsGlobally(
+			instructionReference,
+			offset,
+			"add",
+			condition,
+			hitCondition,
+			signal,
+			timeoutMs,
+		);
+
+		const session = this.#getActiveSessionOrNull();
+		return {
+			snapshot: session ? buildSummary(session) : undefined,
+			breakpoints,
+		};
 	}
 
 	async removeInstructionBreakpoint(
@@ -590,36 +828,81 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	) {
-		const session = this.#touchActiveSession();
-		return this.#serializeBreakpointMutation(
-			session,
-			async () => {
-				const current = session.instructionBreakpoints.filter(entry => {
-					if (entry.instructionReference !== instructionReference) {
-						return true;
-					}
-					if (offset === undefined) {
-						return false;
-					}
-					return entry.offset !== offset;
-				});
-				const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
-					session,
-					"setInstructionBreakpoints",
-					{
-						breakpoints: current,
-					} satisfies DapSetInstructionBreakpointsArguments,
-					signal,
-					timeoutMs,
-				);
-				session.instructionBreakpoints = current;
-				return {
-					snapshot: buildSummary(session),
-					breakpoints: this.#mapInstructionBreakpoints(current, response?.breakpoints),
-				};
-			},
+		this.#pendingInstructionBreakpoints = this.#pendingInstructionBreakpoints.filter(entry => {
+			if (entry.instructionReference !== instructionReference) {
+				return true;
+			}
+			if (offset === undefined) {
+				return false;
+			}
+			return entry.offset !== offset;
+		});
+
+		const breakpoints = await this.#updateInstructionBreakpointsGlobally(
+			instructionReference,
+			offset,
+			"remove",
+			undefined,
+			undefined,
 			signal,
+			timeoutMs,
 		);
+
+		const session = this.#getActiveSessionOrNull();
+		return {
+			snapshot: session ? buildSummary(session) : undefined,
+			breakpoints,
+		};
+	}
+
+	async setDataBreakpoint(
+		dataId: string,
+		accessType?: "read" | "write" | "readWrite",
+		condition?: string,
+		hitCondition?: string,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	) {
+		const current = this.#pendingDataBreakpoints.filter(entry => entry.dataId !== dataId);
+		current.push({ dataId, accessType, condition, hitCondition });
+		current.sort((left, right) => left.dataId.localeCompare(right.dataId));
+		this.#pendingDataBreakpoints = current;
+
+		const breakpoints = await this.#updateDataBreakpointsGlobally(
+			dataId,
+			"add",
+			accessType,
+			condition,
+			hitCondition,
+			signal,
+			timeoutMs,
+		);
+
+		const session = this.#getActiveSessionOrNull();
+		return {
+			snapshot: session ? buildSummary(session) : undefined,
+			breakpoints,
+		};
+	}
+
+	async removeDataBreakpoint(dataId: string, signal?: AbortSignal, timeoutMs: number = 30_000) {
+		this.#pendingDataBreakpoints = this.#pendingDataBreakpoints.filter(entry => entry.dataId !== dataId);
+
+		const breakpoints = await this.#updateDataBreakpointsGlobally(
+			dataId,
+			"remove",
+			undefined,
+			undefined,
+			undefined,
+			signal,
+			timeoutMs,
+		);
+
+		const session = this.#getActiveSessionOrNull();
+		return {
+			snapshot: session ? buildSummary(session) : undefined,
+			breakpoints,
+		};
 	}
 
 	async dataBreakpointInfo(
@@ -643,66 +926,6 @@ export class DapSessionManager {
 		);
 		return { snapshot: buildSummary(session), info };
 	}
-
-	async setDataBreakpoint(
-		dataId: string,
-		accessType?: "read" | "write" | "readWrite",
-		condition?: string,
-		hitCondition?: string,
-		signal?: AbortSignal,
-		timeoutMs: number = 30_000,
-	) {
-		const session = this.#touchActiveSession();
-		return this.#serializeBreakpointMutation(
-			session,
-			async () => {
-				const current = session.dataBreakpoints.filter(entry => entry.dataId !== dataId);
-				current.push({ dataId, accessType, condition, hitCondition });
-				current.sort((left, right) => left.dataId.localeCompare(right.dataId));
-				const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
-					session,
-					"setDataBreakpoints",
-					{
-						breakpoints: current,
-					} satisfies DapSetDataBreakpointsArguments,
-					signal,
-					timeoutMs,
-				);
-				session.dataBreakpoints = current;
-				return {
-					snapshot: buildSummary(session),
-					breakpoints: this.#mapDataBreakpoints(current, response?.breakpoints),
-				};
-			},
-			signal,
-		);
-	}
-
-	async removeDataBreakpoint(dataId: string, signal?: AbortSignal, timeoutMs: number = 30_000) {
-		const session = this.#touchActiveSession();
-		return this.#serializeBreakpointMutation(
-			session,
-			async () => {
-				const current = session.dataBreakpoints.filter(entry => entry.dataId !== dataId);
-				const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
-					session,
-					"setDataBreakpoints",
-					{
-						breakpoints: current,
-					} satisfies DapSetDataBreakpointsArguments,
-					signal,
-					timeoutMs,
-				);
-				session.dataBreakpoints = current;
-				return {
-					snapshot: buildSummary(session),
-					breakpoints: this.#mapDataBreakpoints(current, response?.breakpoints),
-				};
-			},
-			signal,
-		);
-	}
-
 	async disassemble(
 		memoryReference: string,
 		instructionCount: number,
@@ -832,13 +1055,25 @@ export class DapSessionManager {
 
 	async continue(signal?: AbortSignal, timeoutMs: number = 30_000): Promise<DapContinueOutcome> {
 		const session = this.#touchActiveSession();
-		const threadId = await this.#resolveThreadId(session, signal, timeoutMs);
-		// Reset state and subscribe BEFORE sending continue to avoid missing
-		// events that arrive in the same buffer as the response.
+		// Reset state and subscribe BEFORE resolving threads or sending continue.
+		// js-debug root launcher sessions may have no threads while worker child
+		// sessions are still being registered via startDebugging. The global waiter
+		// must already be armed when that child stop event arrives.
 		session.stop = {};
 		session.lastStackFrames = [];
 		session.status = "running";
 		const outcomePromise = this.#prepareStopOutcome(session, signal, timeoutMs);
+
+		let threadId: number;
+		try {
+			threadId = await this.#resolveThreadId(session, signal, timeoutMs);
+		} catch (error) {
+			if (this.#shouldWaitForChildStopAfterThreadlessContinue(session, error)) {
+				return this.#awaitStopOutcome(session, outcomePromise, signal, timeoutMs);
+			}
+			throw error;
+		}
+
 		await this.#sendRequestWithConfig<DapContinueResponse>(
 			session,
 			"continue",
@@ -999,23 +1234,14 @@ export class DapSessionManager {
 		const session = this.#getActiveSessionOrNull();
 		if (!session) return null;
 		session.lastUsedAt = Date.now();
-		if (session.status !== "terminated") {
-			if (session.capabilities?.supportsTerminateRequest) {
-				await untilAborted(
-					signal,
-					session.client.sendRequest("terminate", undefined, signal, timeoutMs).catch(() => undefined),
-				);
-			}
-			await untilAborted(
-				signal,
-				session.client
-					.sendRequest("disconnect", { terminateDebuggee: true }, signal, timeoutMs)
-					.catch(() => undefined),
-			);
+		let rootSession = session;
+		while (rootSession.parentSessionId) {
+			const parent = this.#sessions.get(rootSession.parentSessionId);
+			if (!parent) break;
+			rootSession = parent;
 		}
-		session.status = "terminated";
-		const summary = buildSummary(session);
-		await this.#disposeSession(session);
+		const summary = buildSummary(rootSession);
+		await this.#terminateSessionAndChildren(rootSession, signal, timeoutMs);
 		return summary;
 	}
 
@@ -1048,6 +1274,192 @@ export class DapSessionManager {
 		}
 	}
 
+	#resolveChildAdapter(
+		configType: string | undefined,
+		parentAdapter: DapResolvedAdapter,
+		cwd: string,
+	): DapResolvedAdapter {
+		if (!configType) {
+			return parentAdapter;
+		}
+		if (
+			parentAdapter.name === "js-debug-adapter" &&
+			(configType.startsWith("pwa-") ||
+				configType === "node" ||
+				configType === "chrome" ||
+				configType === "node-terminal" ||
+				configType === "msedge")
+		) {
+			return parentAdapter;
+		}
+		let targetAdapterName: string | undefined;
+		if (configType === "python" || configType === "debugpy") {
+			targetAdapterName = "debugpy";
+		} else if (configType === "go" || configType === "dlv") {
+			targetAdapterName = "dlv";
+		} else if (configType === "cppdbg" || configType === "lldb") {
+			targetAdapterName = "lldb-dap";
+		}
+		if (targetAdapterName) {
+			const resolved = resolveAdapter(targetAdapterName, cwd);
+			if (resolved) {
+				return resolved;
+			}
+		}
+		return parentAdapter;
+	}
+
+	async #startChildSession(
+		parentSession: DapSession,
+		options: {
+			adapter: DapResolvedAdapter;
+			request: "launch" | "attach";
+			cwd: string;
+			program?: string;
+			args?: string[];
+			extraArguments?: Record<string, unknown>;
+		},
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	): Promise<DapSessionSummary> {
+		const parentPort = parentSession.port;
+		let client: DapClient;
+		if (
+			parentPort !== undefined &&
+			parentSession.adapter.connectMode === "tcp" &&
+			options.adapter.name === parentSession.adapter.name
+		) {
+			client = await DapClient.connect({
+				adapter: options.adapter,
+				cwd: options.cwd,
+				host: "127.0.0.1",
+				port: parentPort,
+			});
+		} else {
+			client = await DapClient.spawn({ adapter: options.adapter, cwd: options.cwd });
+		}
+		const session = this.#registerSession(client, options.adapter, options.cwd, options.program, parentSession.id);
+		try {
+			session.capabilities = await client.initialize(
+				this.#buildInitializeArguments(options.adapter),
+				signal,
+				timeoutMs,
+			);
+			session.needsConfigurationDone = session.capabilities.supportsConfigurationDoneRequest === true;
+
+			const initialStopPromise = this.#prepareStopOutcome(
+				session,
+				signal,
+				Math.min(timeoutMs, STOP_CAPTURE_TIMEOUT_MS),
+			);
+
+			let startPromise: Promise<unknown>;
+			const startFailure: DapStartRequestFailure = { rejected: false };
+
+			if (options.request === "launch") {
+				const launchArguments: DapLaunchArguments = {
+					...(options.extraArguments ?? {}),
+					...(options.program !== undefined && options.program !== "" ? { program: options.program } : {}),
+					...(options.args !== undefined ? { args: options.args } : {}),
+				} as DapLaunchArguments;
+				startPromise = trackDapStartRequest(
+					client.sendRequest("launch", launchArguments, signal, timeoutMs),
+					startFailure,
+				);
+			} else {
+				const attachArguments: DapAttachArguments = {
+					...(options.extraArguments ?? {}),
+				};
+				startPromise = trackDapStartRequest(
+					client.sendRequest("attach", attachArguments, signal, timeoutMs),
+					startFailure,
+				);
+			}
+
+			startPromise.catch(() => {});
+
+			try {
+				await this.#completeChildConfigurationHandshake(session, signal, timeoutMs);
+			} catch (error) {
+				await throwPreferredDapStartError(options.request, startFailure, error);
+			}
+
+			await startPromise;
+
+			try {
+				await untilAborted(signal, initialStopPromise);
+				if (session.status === "stopped") {
+					await this.#fetchTopFrame(session, signal, Math.min(timeoutMs, STOP_CAPTURE_TIMEOUT_MS));
+				}
+			} catch {
+				if (session.initializedSeen && session.status === "launching") {
+					session.status = session.configurationDoneSent ? "running" : "configuring";
+				}
+			}
+
+			return buildSummary(session);
+		} catch (error) {
+			await this.#disposeSession(session);
+			const mapped = mapDebugpyMissingModule(options.adapter.name, error);
+			if (mapped) throw mapped;
+			throw error;
+		}
+	}
+
+	async #completeChildConfigurationHandshake(
+		childSession: DapSession,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	): Promise<void> {
+		if (!childSession.needsConfigurationDone || childSession.configurationDoneSent) {
+			return;
+		}
+		if (!childSession.initializedSeen) {
+			try {
+				await untilAborted(signal, childSession.client.waitForEvent("initialized", undefined, signal, timeoutMs));
+			} catch {
+				return;
+			}
+		}
+
+		await this.#applyPendingBreakpointsToSession(childSession, signal, timeoutMs);
+
+		await childSession.client.sendRequest("configurationDone", {}, signal, timeoutMs);
+		childSession.configurationDoneSent = true;
+		if (childSession.status === "configuring") {
+			childSession.status = "running";
+		}
+	}
+
+	async #terminateSessionAndChildren(
+		session: DapSession,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	): Promise<void> {
+		session.status = "terminated";
+
+		for (const childId of [...session.childSessionIds]) {
+			const child = this.#sessions.get(childId);
+			if (child) {
+				await this.#terminateSessionAndChildren(child, signal, timeoutMs);
+			}
+		}
+
+		if (session.capabilities?.supportsTerminateRequest) {
+			await untilAborted(
+				signal,
+				session.client.sendRequest("terminate", undefined, signal, timeoutMs).catch(() => undefined),
+			);
+		}
+		await untilAborted(
+			signal,
+			session.client
+				.sendRequest("disconnect", { terminateDebuggee: true }, signal, timeoutMs)
+				.catch(() => undefined),
+		);
+		await this.#disposeSession(session);
+	}
+
 	async #ensureLaunchSlot(): Promise<void> {
 		const active = this.#getActiveSessionOrNull();
 		if (!active) return;
@@ -1058,7 +1470,13 @@ export class DapSessionManager {
 		throw new Error(`Debug session ${active.id} is still active. Terminate it before launching another.`);
 	}
 
-	#registerSession(client: DapClient, adapter: DapResolvedAdapter, cwd: string, program?: string): DapSession {
+	#registerSession(
+		client: DapClient,
+		adapter: DapResolvedAdapter,
+		cwd: string,
+		program?: string,
+		parentSessionId?: string,
+	): DapSession {
 		const session: DapSession = {
 			id: `debug-${++this.#nextId}`,
 			adapter,
@@ -1083,6 +1501,9 @@ export class DapSessionManager {
 			initializedSeen: false,
 			needsConfigurationDone: false,
 			configurationDoneSent: false,
+			parentSessionId,
+			childSessionIds: new Set(),
+			port: client.port,
 		};
 		client.onReverseRequest("runInTerminal", async rawArgs => {
 			const args = (rawArgs ?? {}) as DapRunInTerminalArguments;
@@ -1115,6 +1536,39 @@ export class DapSessionManager {
 				request,
 				name: typeof configuration.name === "string" ? configuration.name : undefined,
 			});
+
+			const childAdapter = this.#resolveChildAdapter(
+				typeof configuration.type === "string" ? configuration.type : undefined,
+				session.adapter,
+				session.cwd,
+			);
+
+			const cwd = typeof configuration.cwd === "string" ? configuration.cwd : session.cwd;
+
+			const extraArguments = { ...configuration };
+
+			try {
+				await this.#startChildSession(
+					session,
+					{
+						adapter: childAdapter,
+						request,
+						cwd,
+						program: typeof configuration.program === "string" ? configuration.program : undefined,
+						args: Array.isArray(configuration.args) ? configuration.args.map(String) : undefined,
+						extraArguments,
+					},
+					undefined,
+					30_000,
+				);
+			} catch (error) {
+				logger.error("Failed to start child debug session", {
+					parentSessionId: session.id,
+					error: toErrorMessage(error),
+				});
+				throw error;
+			}
+
 			return {};
 		});
 		client.onEvent("output", body => {
@@ -1126,6 +1580,8 @@ export class DapSessionManager {
 		});
 		client.onEvent("stopped", body => {
 			this.#handleStoppedEvent(session, body as DapStoppedEventBody);
+			this.#activeSessionId = session.id;
+			this.#resolveGlobalStop(session);
 		});
 		client.onEvent("continued", body => {
 			const continued = body as { threadId?: number } | undefined;
@@ -1135,11 +1591,19 @@ export class DapSessionManager {
 		});
 		client.onEvent("exited", body => {
 			session.exitCode = (body as DapExitedEventBody | undefined)?.exitCode;
+			this.#resolveGlobalStop(session);
 		});
 		client.onEvent("terminated", () => {
 			session.status = "terminated";
+			this.#resolveGlobalStop(session);
 		});
 		this.#sessions.set(session.id, session);
+		if (parentSessionId) {
+			const parent = this.#sessions.get(parentSessionId);
+			if (parent) {
+				parent.childSessionIds.add(session.id);
+			}
+		}
 		this.#activeSessionId = session.id;
 		const heartbeat = setInterval(() => {
 			if (!client.isAlive()) {
@@ -1181,16 +1645,16 @@ export class DapSessionManager {
 		if (!session.needsConfigurationDone || session.configurationDoneSent) {
 			return;
 		}
-		// Wait for the initialized event if we haven't seen it yet.
 		if (!session.initializedSeen) {
 			try {
 				await untilAborted(signal, session.client.waitForEvent("initialized", undefined, signal, timeoutMs));
 			} catch {
-				// Adapter may not send initialized (e.g. it already terminated).
-				// Proceed anyway — the launch/attach response will surface any real error.
 				return;
 			}
 		}
+
+		await this.#applyPendingBreakpointsToSession(session, signal, timeoutMs);
+
 		await session.client.sendRequest("configurationDone", {}, signal, timeoutMs);
 		session.configurationDoneSent = true;
 		if (session.status === "configuring") {
@@ -1261,24 +1725,66 @@ export class DapSessionManager {
 	 * MUST be called before the command that triggers the event.
 	 */
 	#prepareStopOutcome(session: DapSession, signal?: AbortSignal, timeoutMs: number = 30_000): Promise<unknown> {
-		const promises = [
-			session.client.waitForEvent("stopped", undefined, signal, timeoutMs),
-			session.client.waitForEvent("terminated", undefined, signal, timeoutMs),
-			session.client.waitForEvent("exited", undefined, signal, timeoutMs),
-		];
-		// Promise.race leaves the losing waiters pending; their timeouts would
-		// otherwise surface as unhandled rejections once they fire.
-		for (const p of promises) {
-			p.catch(() => {});
+		const isStopped = () => session.status === "stopped";
+		if (isStopped()) {
+			return Promise.resolve({ type: "stop", summary: buildSummary(session) });
 		}
-		const outcome = Promise.race(promises);
-		outcome.catch(() => {});
-		return outcome;
+
+		const localPromise = (async () => {
+			const promises = [
+				session.client.waitForEvent("stopped", undefined, signal, timeoutMs),
+				session.client.waitForEvent("terminated", undefined, signal, timeoutMs),
+				session.client.waitForEvent("exited", undefined, signal, timeoutMs),
+			];
+			for (const p of promises) {
+				p.catch(() => {});
+			}
+			const outcome = await Promise.race(promises);
+			return outcome;
+		})();
+
+		const rootId = this.#getRootSessionId(session);
+		const { promise: globalPromise, resolve, reject } = Promise.withResolvers<unknown>();
+		let timeout: NodeJS.Timeout | undefined;
+		let onAbort: (() => void) | undefined;
+		const cleanup = () => {
+			clearTimeout(timeout);
+			if (signal && onAbort) {
+				signal.removeEventListener("abort", onAbort);
+			}
+			this.#globalStopResolvers.delete(resolver);
+		};
+		const resolver: DapGlobalStopResolver = {
+			rootSessionId: rootId,
+			resolve: value => {
+				cleanup();
+				resolve(value);
+			},
+			reject: reason => {
+				cleanup();
+				reject(reason);
+			},
+		};
+		this.#globalStopResolvers.add(resolver);
+
+		timeout = setTimeout(() => {
+			resolver.reject(new Error("Timeout waiting for stop outcome"));
+		}, timeoutMs);
+
+		if (signal) {
+			onAbort = () => resolver.reject(new ToolAbortError());
+			if (signal.aborted) {
+				onAbort();
+			} else {
+				signal.addEventListener("abort", onAbort);
+			}
+		}
+
+		const result = Promise.race([localPromise, globalPromise]);
+		result.catch(() => {});
+		return result;
 	}
 
-	/**
-	 * Await a pre-subscribed stop outcome, then fetch the top frame if stopped.
-	 */
 	async #awaitStopOutcome(
 		session: DapSession,
 		outcomePromise: Promise<unknown>,
@@ -1287,17 +1793,27 @@ export class DapSessionManager {
 	): Promise<DapContinueOutcome> {
 		try {
 			await untilAborted(signal, outcomePromise);
-			if (session.status === "stopped") {
-				await this.#fetchTopFrame(session, signal, Math.min(timeoutMs, 5_000));
+			const activeSession = this.#getActiveSessionOrNull() ?? session;
+			if (activeSession.status === "stopped") {
+				await this.#fetchTopFrame(activeSession, signal, Math.min(timeoutMs, 5_000));
 			}
 			const state =
-				session.status === "stopped" ? "stopped" : session.status === "terminated" ? "terminated" : "running";
-			return { snapshot: buildSummary(session), state, timedOut: false };
+				activeSession.status === "stopped"
+					? "stopped"
+					: activeSession.status === "terminated"
+						? "terminated"
+						: "running";
+			return { snapshot: buildSummary(activeSession), state, timedOut: false };
 		} catch (error) {
 			if (signal?.aborted) {
 				throw error;
 			}
-			return { snapshot: buildSummary(session), state: "running", timedOut: session.status === "running" };
+			const activeSession = this.#getActiveSessionOrNull() ?? session;
+			return {
+				snapshot: buildSummary(activeSession),
+				state: "running",
+				timedOut: activeSession.status === "running",
+			};
 		}
 	}
 
@@ -1315,6 +1831,14 @@ export class DapSessionManager {
 			throw new Error("Debugger reported no threads.");
 		}
 		return threadId;
+	}
+
+	#shouldWaitForChildStopAfterThreadlessContinue(session: DapSession, error: unknown): boolean {
+		return (
+			session.parentSessionId === undefined &&
+			session.adapter.name === "js-debug-adapter" &&
+			toErrorMessage(error) === "Debugger reported no threads."
+		);
 	}
 
 	async #sendRequestWithConfig<TBody>(
@@ -1338,6 +1862,7 @@ export class DapSessionManager {
 		if (!session.needsConfigurationDone || session.configurationDoneSent) {
 			return;
 		}
+		await this.#applyPendingBreakpointsToSession(session, signal, timeoutMs);
 		await session.client.sendRequest("configurationDone", {}, signal, timeoutMs);
 		session.configurationDoneSent = true;
 		if (session.status === "configuring") {
@@ -1430,11 +1955,53 @@ export class DapSessionManager {
 	}
 
 	#disposeSession(session: DapSession) {
-		if (this.#activeSessionId === session.id) {
-			this.#activeSessionId = null;
+		if (!this.#sessions.has(session.id)) return;
+		for (const childId of [...session.childSessionIds]) {
+			const child = this.#sessions.get(childId);
+			if (child) {
+				this.#disposeSession(child);
+			}
 		}
+
 		this.#sessions.delete(session.id);
+
+		if (session.parentSessionId) {
+			const parent = this.#sessions.get(session.parentSessionId);
+			if (parent) {
+				parent.childSessionIds.delete(session.id);
+			}
+		}
+
+		if (
+			this.#activeSessionId === session.id ||
+			!this.#activeSessionId ||
+			!this.#sessions.has(this.#activeSessionId)
+		) {
+			this.#activeSessionId =
+				session.parentSessionId && this.#sessions.has(session.parentSessionId)
+					? session.parentSessionId
+					: (this.#sessions.keys().next().value ?? null);
+		}
+
 		void session.client.dispose().catch(() => {});
+	}
+	#getRootSessionId(session: DapSession): string {
+		let root = session;
+		while (root.parentSessionId) {
+			const parent = this.#sessions.get(root.parentSessionId);
+			if (!parent) break;
+			root = parent;
+		}
+		return root.id;
+	}
+
+	#resolveGlobalStop(session: DapSession): void {
+		const eventRootId = this.#getRootSessionId(session);
+		for (const resolver of [...this.#globalStopResolvers]) {
+			if (resolver.rootSessionId === eventRootId) {
+				resolver.resolve(undefined);
+			}
+		}
 	}
 }
 
