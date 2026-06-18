@@ -122,6 +122,39 @@ test("shared models.dev references do not leak Ollama Cloud max-token omission",
 	expect(model?.omitMaxOutputTokens).toBeUndefined();
 });
 
+test("bundled shared references do not leak Ollama Cloud max-token omission", async () => {
+	const fetchMock: FetchImpl = vi.fn(async (input, _init) => {
+		const url = String(input);
+		if (url === "https://models.dev/api.json") {
+			return new Response("unavailable", { status: 503 });
+		}
+		if (url.startsWith("https://api.fireworks.ai/v1/accounts/fireworks/models?")) {
+			return new Response(
+				JSON.stringify({
+					models: [
+						{
+							name: "accounts/fireworks/models/devstral-2:123b",
+							displayName: "Devstral 2 123B",
+							contextLength: 262_144,
+							supportsServerless: true,
+							state: "READY",
+						},
+					],
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		}
+		throw new Error(`Unexpected URL: ${url}`);
+	});
+
+	const options = fireworksModelManagerOptions({ apiKey: "fw-test-key", fetch: fetchMock });
+	const models = await options.fetchDynamicModels?.();
+	const model = models?.find(candidate => candidate.id === "devstral-2:123b");
+
+	expect(model?.provider).toBe("fireworks");
+	expect(model?.omitMaxOutputTokens).toBeUndefined();
+});
+
 test("ollama-chat omits num_predict when model opts out of max output tokens", async () => {
 	let requestBody: Record<string, unknown> | undefined;
 	const fetchMock: FetchImpl = vi.fn(async (_input, init) => {

@@ -13,6 +13,12 @@ export function toModelSpec<TApi extends Api>(model: Model<TApi>): ModelSpec<TAp
 	return { ...rest, compat: compatConfig } as ModelSpec<TApi>;
 }
 
+function toSharedModelSpec<TApi extends Api>(model: Model<Api>): ModelSpec<TApi> {
+	const reference = toModelSpec(model as Model<TApi>);
+	delete reference.omitMaxOutputTokens;
+	return reference;
+}
+
 export function createBundledReferenceMap<TApi extends Api>(
 	provider: Parameters<typeof getBundledModels>[0],
 ): Map<string, ModelSpec<TApi>> {
@@ -53,6 +59,6 @@ export function createReferenceResolver<TApi extends Api>(
 		const providerRef = providerRefs.get(modelId);
 		if (providerRef) return providerRef;
 		const globalRef = globalRefs.get(modelId);
-		return globalRef ? toModelSpec(globalRef as Model<TApi>) : undefined;
+		return globalRef ? toSharedModelSpec<TApi>(globalRef) : undefined;
 	};
 }
