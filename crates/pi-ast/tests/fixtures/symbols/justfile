@@ -1,0 +1,11 @@
+set shell := ["bash", "-c"]
+
+name := "world"
+
+# Build the project
+build:
+    cargo build --release
+
+# Run the tests
+test:
+    cargo test

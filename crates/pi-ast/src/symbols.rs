@@ -193,6 +193,11 @@ pub const fn outline_languages() -> &'static [SupportLang] {
 		Verilog,
 		Hcl,
 		Nix,
+		// Build / task-orchestration file languages.
+		Dockerfile,
+		Cmake,
+		Make,
+		Just,
 	]
 }
 
@@ -363,6 +368,10 @@ impl<'a> Walker<'a> {
 			SupportLang::Verilog => self.emit_verilog(node, kind, depth, parent, start_line),
 			SupportLang::Hcl => self.emit_hcl(node, kind, depth, parent, start_line),
 			SupportLang::Nix => self.emit_nix(node, kind, depth, parent, start_line),
+			SupportLang::Dockerfile => self.emit_dockerfile(node, kind, depth, parent, start_line),
+			SupportLang::Cmake => self.emit_cmake(node, kind, depth, parent, start_line),
+			SupportLang::Make => self.emit_make(node, kind, depth, parent, start_line),
+			SupportLang::Just => self.emit_just(node, kind, depth, parent, start_line),
 			_ => self.emit_generic(node, kind, depth, parent, start_line),
 		}
 	}
@@ -2610,6 +2619,131 @@ impl<'a> Walker<'a> {
 		let detail = self.detail(node, None);
 		Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
 	}
+	/// Dockerfile: a multi-stage build names a stage via `FROM ... AS <alias>`
+	/// (the `as` field of a `from_instruction` is an `image_alias`). Only named
+	/// stages emit, mapped to `namespace` (a named build-stage grouping).
+	fn emit_dockerfile(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		if kind != "from_instruction" {
+			return None;
+		}
+		let alias = node.child_by_field_name("as")?;
+		let name = self.text(alias);
+		if name.is_empty() {
+			return None;
+		}
+		let sel = node_start_line(alias);
+		let detail = self.detail(node, None);
+		Some(self.push(name, "namespace", node, start_line, sel, detail, depth, parent))
+	}
+
+	/// CMake: `function_def` -> function, `macro_def` -> macro. The name is the
+	/// first argument of the opening `function_command`/`macro_command`'s
+	/// `argument_list` (the def node has no `name` field).
+	fn emit_cmake(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		let command_kind = match kind {
+			"function_def" => "function_command",
+			"macro_def" => "macro_command",
+			_ => return None,
+		};
+		let command = first_named_child_of_kind(node, command_kind)?;
+		let args = first_named_child_of_kind(command, "argument_list")?;
+		let name_node = first_named_child_of_kind(args, "argument")?;
+		let name = self.text(name_node);
+		if name.is_empty() {
+			return None;
+		}
+		let domain = if kind == "function_def" { "function" } else { "macro" };
+		let sel = node_start_line(name_node);
+		let detail = self.detail(node, None);
+		Some(self.push(name, domain, node, start_line, sel, detail, depth, parent))
+	}
+
+	/// Make: a `rule` -> function named by its first target (the `targets`
+	/// child, not the prerequisite fields). `variable_assignment` -> constant.
+	fn emit_make(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		match kind {
+			"rule" => {
+				let targets = first_named_child_of_kind(node, "targets")?;
+				let name_node = targets.named_child(0)?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "function", node, start_line, sel, detail, depth, parent))
+			},
+			"variable_assignment" => {
+				let name_node = node.child_by_field_name("name")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "constant", node, start_line, sel, detail, depth, parent))
+			},
+			_ => None,
+		}
+	}
+
+	/// Just: a `recipe` -> function (named by its `recipe_header`'s `name`);
+	/// the whole recipe node is emitted so `end_line` covers the body.
+	/// `assignment` -> constant (its `left` identifier).
+	fn emit_just(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		match kind {
+			"recipe" => {
+				let header = first_named_child_of_kind(node, "recipe_header")?;
+				let name_node = header.child_by_field_name("name")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "function", node, start_line, sel, detail, depth, parent))
+			},
+			"assignment" => {
+				let name_node = node.child_by_field_name("left")?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "constant", node, start_line, sel, detail, depth, parent))
+			},
+			_ => None,
+		}
+	}
 }
 
 /// First direct named child of `node` with the given kind (SQL object
@@ -4217,6 +4351,109 @@ class Outer {
 		assert_eq!(find(&r2, "name").map(|s| s.kind.as_str()), Some("constant"));
 		assert_eq!(find(&r2, "version").map(|s| s.kind.as_str()), Some("constant"));
 	}
+	#[test]
+	fn outlines_dockerfile_named_stages() {
+		let code = fixture("dockerfile.dockerfile");
+		let r = outline(&code, "dockerfile.dockerfile");
+		assert!(r.parsed, "dockerfile fixture must parse with no ERROR nodes");
+		assert_eq!(r.language.as_deref(), Some("dockerfile"));
+		assert_eq!(find(&r, "builder").map(|s| s.kind.as_str()), Some("namespace"));
+		assert_eq!(find(&r, "runtime").map(|s| s.kind.as_str()), Some("namespace"));
+		assert!(find(&r, "ubuntu").is_none(), "image name must not emit");
+		assert!(
+			r.symbols.iter().all(|s| s.kind == "namespace"),
+			"only named build stages emit"
+		);
+	}
+
+	#[test]
+	fn outlines_cmake_function_and_macro() {
+		let code = fixture("cmake.cmake");
+		let r = outline(&code, "cmake.cmake");
+		assert!(r.parsed, "cmake fixture must parse with no ERROR nodes");
+		assert_eq!(r.language.as_deref(), Some("cmake"));
+		assert_eq!(find(&r, "greet").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "warn").map(|s| s.kind.as_str()), Some("macro"));
+		assert!(find(&r, "project").is_none(), "project() command must not emit");
+		assert_eq!(
+			r.symbols.iter().filter(|s| s.kind == "function").count(),
+			1,
+			"only the function_def emits a function"
+		);
+	}
+
+	#[test]
+	fn outlines_make_rules_and_variables() {
+		let code = fixture("make.mk");
+		let r = outline(&code, "make.mk");
+		assert!(r.parsed, "make fixture must parse with no ERROR nodes");
+		assert_eq!(r.language.as_deref(), Some("make"));
+		assert_eq!(find(&r, "all").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "build").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "clean").map(|s| s.kind.as_str()), Some("function"));
+		assert!(r.symbols.iter().all(|s| s.parent == -1), "make symbols are all top-level");
+		assert_eq!(find(&r, "CC").map(|s| s.kind.as_str()), Some("constant"));
+		assert_eq!(find(&r, "CFLAGS").map(|s| s.kind.as_str()), Some("constant"));
+		assert_eq!(find(&r, ".PHONY").map(|s| s.kind.as_str()), Some("function"));
+	}
+
+	#[test]
+	fn outlines_just_recipes_and_assignments() {
+		let code = fixture("justfile");
+		let r = outline(&code, "justfile");
+		assert!(r.parsed, "just fixture must parse with no ERROR nodes");
+		assert_eq!(r.language.as_deref(), Some("just"));
+		assert_eq!(find(&r, "build").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "test").map(|s| s.kind.as_str()), Some("function"));
+		let build = find(&r, "build").expect("build recipe");
+		assert!(build.end_line > build.start_line, "recipe end_line covers the body");
+		assert_eq!(find(&r, "name").map(|s| s.kind.as_str()), Some("constant"));
+		assert!(find(&r, "shell").is_none(), "set directive must not emit");
+	}
+
+	/// Canonical (name-based) build-file paths resolve to the right language
+	/// and are outline-supported — `SupportLang::from_path` handles them with
+	/// no file extension, the real path users hit.
+	#[test]
+	fn build_file_canonical_names_resolve_and_are_supported() {
+		for (path, canonical) in [
+			("Dockerfile", "dockerfile"),
+			("Containerfile", "dockerfile"),
+			("Makefile", "make"),
+			("GNUmakefile", "make"),
+			("CMakeLists.txt", "cmake"),
+			("justfile", "just"),
+			("Justfile", "just"),
+		] {
+			let lang = resolve_language(None, Some(path))
+				.unwrap_or_else(|| panic!("{path} must resolve to a language"));
+			assert_eq!(lang.canonical_name(), canonical, "{path} resolves to {canonical}");
+			assert!(
+				outline_languages().contains(&lang),
+				"{canonical} must be an outline language"
+			);
+		}
+	}
+	/// Every name advertised by `special_filenames()` (the discovery-glob name
+	/// set) resolves to its language via `from_path` — narrowing it to
+	/// non-dotfile names must never list a name `from_path` would not accept.
+	#[test]
+	fn special_filenames_resolve_to_their_language() {
+		for &lang in SupportLang::all_langs() {
+			for &name in lang.special_filenames() {
+				let probe = match name.strip_suffix(".*") {
+					Some(prefix) => format!("{prefix}.example"),
+					None => name.to_string(),
+				};
+				assert_eq!(
+					SupportLang::from_path(std::path::Path::new(&probe)),
+					Some(lang),
+					"special filename {probe:?} must resolve to {}",
+					lang.canonical_name()
+				);
+			}
+		}
+	}
 	/// Boundary lock: every `SupportLang` is EITHER an outline language OR an
 	/// explicitly-excluded data/markup/config/DSL language — never both, never
 	/// neither. A newly added `SupportLang` variant fails this test until it is
@@ -4228,8 +4465,7 @@ class Outer {
 		// addressable *code* symbols for an outline. Every programming language
 		// lives in outline_languages() instead.
 		const EXCLUDED: &[SupportLang] = &[
-			Astro, Cmake, Css, Diff, Dockerfile, Html, Ini, Json, Just, Make, Markdown, Regex,
-			Svelte, Toml, Vue, Xml, Yaml,
+			Astro, Css, Diff, Html, Ini, Json, Markdown, Regex, Svelte, Toml, Vue, Xml, Yaml,
 		];
 		for &lang in SupportLang::all_langs() {
 			let supported = outline_languages().contains(&lang);

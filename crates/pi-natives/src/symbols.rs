@@ -96,11 +96,16 @@ pub struct OutlineLanguage {
 	pub name:       String,
 	/// File extensions (without the leading dot) that resolve to this language.
 	pub extensions: Vec<String>,
+	/// Non-dotfile fixed-name files that resolve to this language (e.g.
+	/// "Dockerfile", "Makefile", "CMakeLists.txt"); a trailing `.*` is a name
+	/// glob. Lets the TS scan glob discover extensionless build files.
+	pub filenames:  Vec<String>,
 }
 
 /// The languages [`outline_code`] emits symbols for, with their file
-/// extensions. The `symbol` TS tool derives its supported-file set from this so
-/// the Rust extractor and the TS scan filter never drift.
+/// extensions and fixed-name files. The `symbol` TS tool derives its
+/// supported-file scan glob from this so the Rust extractor and the TS filter
+/// never drift.
 #[napi]
 pub fn outline_languages() -> Vec<OutlineLanguage> {
 	pi_ast::symbols::outline_languages()
@@ -108,6 +113,7 @@ pub fn outline_languages() -> Vec<OutlineLanguage> {
 		.map(|&lang| OutlineLanguage {
 			name:       lang.canonical_name().to_string(),
 			extensions: lang.file_extensions().iter().map(|&e| e.to_string()).collect(),
+			filenames:  lang.special_filenames().iter().map(|&f| f.to_string()).collect(),
 		})
 		.collect()
 }

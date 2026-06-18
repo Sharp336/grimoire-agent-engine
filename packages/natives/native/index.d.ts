@@ -1214,12 +1214,19 @@ export interface OutlineLanguage {
   name: string
   /** File extensions (without the leading dot) that resolve to this language. */
   extensions: Array<string>
+  /**
+   * Non-dotfile fixed-name files that resolve to this language (e.g.
+   * "Dockerfile", "Makefile", "CMakeLists.txt"); a trailing `.*` is a name
+   * glob. Lets the TS scan glob discover extensionless build files.
+   */
+  filenames: Array<string>
 }
 
 /**
  * The languages [`outline_code`] emits symbols for, with their file
- * extensions. The `symbol` TS tool derives its supported-file set from this so
- * the Rust extractor and the TS scan filter never drift.
+ * extensions and fixed-name files. The `symbol` TS tool derives its
+ * supported-file scan glob from this so the Rust extractor and the TS filter
+ * never drift.
  */
 export declare function outlineLanguages(): Array<OutlineLanguage>
 

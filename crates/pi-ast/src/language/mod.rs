@@ -423,6 +423,32 @@ impl SupportLang {
 		extensions(self)
 	}
 
+	/// Non-dotfile, fixed-name files that resolve to this language via
+	/// [`SupportLang::from_path`] with no extension — `Dockerfile`, `Makefile`,
+	/// `CMakeLists.txt`, `justfile`, and the like. A trailing `.*` entry is a
+	/// name glob (`Dockerfile.*`). This drives the `symbol` tool's directory
+	/// scan glob, so it lists ONLY discoverable (non-dotfile) names: shell rc
+	/// dotfiles (`.bashrc`) and `.emacs` still resolve via `from_path` for an
+	/// explicit path target, but a `hidden:false` directory walk never returns
+	/// them. Empty for extension-only languages; a unit test keeps every entry
+	/// in sync with `from_path`.
+	pub const fn special_filenames(self) -> &'static [&'static str] {
+		match self {
+			Self::Make => &["Makefile", "makefile", "GNUmakefile"],
+			Self::Just => &["Justfile", "justfile"],
+			Self::Cmake => &["CMakeLists.txt"],
+			Self::Dockerfile => &[
+				"Dockerfile",
+				"dockerfile",
+				"Dockerfile.*",
+				"dockerfile.*",
+				"Containerfile",
+				"containerfile",
+			],
+			_ => &[],
+		}
+	}
+
 	pub fn sorted_aliases() -> &'static [&'static str] {
 		&SORTED_ALIASES
 	}
