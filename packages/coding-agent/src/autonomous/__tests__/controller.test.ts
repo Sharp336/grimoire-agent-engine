@@ -160,6 +160,27 @@ describe("AutonomousController loop", () => {
 		expect(sent).toHaveLength(0);
 	});
 
+	it("does not re-queue a deadline-style agent_end with no assistant message", () => {
+		const { controller, emit, sent } = setup({ autoNextSteps: true });
+		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		emit(agentEndEvent([assistantActing("stop")])); // working turn -> queue
+		expect(sent).toHaveLength(1);
+		emit(agentEndEvent([])); // --max-time expiry: agent_end with no assistant message
+		expect(sent).toHaveLength(1); // no spin (idea/combined would otherwise loop past the deadline)
+		// The failed path clears the autonomous marker, so the next clean no-action
+		// turn re-queues instead of being false-halted as a completed objective.
+		emit(agentEndEvent([assistant("stop")]));
+		expect(sent).toHaveLength(2);
+	});
+
+	it("idea mode does not spin past --max-time (no-assistant agent_end)", () => {
+		const { controller, emit, sent } = setup({ autoNextIdea: true });
+		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false }); // queues first
+		expect(sent).toHaveLength(1);
+		emit(agentEndEvent([])); // deadline expiry: no assistant message
+		expect(sent).toHaveLength(1); // idea would otherwise loop forever appending continuations
+	});
+
 	it("does not re-queue while a new turn is already streaming", () => {
 		const { controller, emit, sent, setStreaming } = setup({ autoNextSteps: true });
 		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });

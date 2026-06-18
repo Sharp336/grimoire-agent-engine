@@ -206,19 +206,23 @@ export class AutonomousController {
 }
 
 /**
- * True when the most recent assistant message ended in a non-clean stop — a user
- * interrupt / internal abort (`aborted`) or a failed turn (`error`). Read from
- * the public event payload so the controller needs no private session state.
+ * True when the turn did not end with a clean assistant message: a user
+ * interrupt / internal abort (`aborted`), a failed turn (`error`), or no
+ * assistant message at all. That last case is the `--max-time` deadline path
+ * (the agent loop exits with an empty/degenerate `agent_end`), which must not
+ * trigger another continuation — idea/combined would otherwise spin past the
+ * deadline. Read from the public event payload so the controller needs no
+ * private session state.
  */
 function lastAssistantTurnFailed(messages: readonly AgentMessage[] | undefined): boolean {
-	if (!messages) return false;
+	if (!messages || messages.length === 0) return true;
 	for (let i = messages.length - 1; i >= 0; i--) {
 		const message = messages[i]!;
 		if (message.role === "assistant") {
 			return message.stopReason === "aborted" || message.stopReason === "error";
 		}
 	}
-	return false;
+	return true;
 }
 
 /**
