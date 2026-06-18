@@ -69,8 +69,8 @@ function containsAscii(bytes: Uint8Array, needle: string, maxScan = bytes.length
 function detectSupportedAudioMimeType(bytes: Uint8Array): string | null {
 	if (startsWith(bytes, "RIFF") && startsWith(bytes, "WAVE", 8)) return "audio/wav";
 	if (startsWith(bytes, "ID3")) return "audio/mpeg";
-	if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return "audio/mpeg";
 	if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xf6) === 0xf0) return "audio/aac";
+	if (bytes.length >= 2 && bytes[0] === 0xff && (bytes[1] & 0xe0) === 0xe0) return "audio/mpeg";
 	if (startsWith(bytes, "FORM") && (startsWith(bytes, "AIFF", 8) || startsWith(bytes, "AIFC", 8))) {
 		return "audio/aiff";
 	}
@@ -102,6 +102,20 @@ export function audioFormatFromMimeType(mimeType: string): string | undefined {
 	if (subtype === "x-aiff") return "aiff";
 	if (subtype === "mp4") return "m4a";
 	return subtype;
+}
+
+/**
+ * OpenAI-family transports only accept MP3/WAV audio *input* (the
+ * `input_audio` format field). Other containers (M4A/AAC/AIFF/OGG/FLAC)
+ * would be accepted by the loader then silently downgraded to a text
+ * placeholder by the adapter — reject them up front for these transports.
+ */
+const OPENAI_AUDIO_INPUT_MIME_TYPES = new Set(["audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav"]);
+const OPENAI_FAMILY_APIS = new Set(["openai-completions", "openai-responses", "openai-codex-responses", "openrouter"]);
+
+export function audioInputSupportedByApi(mimeType: string, api: string): boolean {
+	if (!OPENAI_FAMILY_APIS.has(api)) return true;
+	return OPENAI_AUDIO_INPUT_MIME_TYPES.has(mimeType.toLowerCase());
 }
 
 export async function detectSupportedAudioMimeTypeFromFile(path: string): Promise<string | null> {

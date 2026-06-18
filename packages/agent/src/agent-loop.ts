@@ -246,6 +246,14 @@ function coerceToolResult(raw: unknown): { result: AgentToolResult<unknown>; mal
 		if (block.type === "text" && typeof (block as { text?: unknown }).text === "string") {
 			content.push({ type: "text", text: sanitizeText((block as { text: string }).text) });
 		} else if (
+			block.type === "audio" &&
+			"data" in block &&
+			typeof block.data === "string" &&
+			"mimeType" in block &&
+			typeof block.mimeType === "string"
+		) {
+			content.push({ type: "audio", data: block.data, mimeType: block.mimeType });
+		} else if (
 			block.type === "image" &&
 			typeof (block as { data?: unknown }).data === "string" &&
 			typeof (block as { mimeType?: unknown }).mimeType === "string"

@@ -256,7 +256,12 @@ function inferInputFromGeminiId(id: string): ModelInputModality[] {
 	if (normalized.includes("vision") || normalized.includes("image") || normalized.includes("gemini")) {
 		input.push("image");
 	}
-	if (normalized.includes("audio") || normalized.includes("live")) {
+	if (
+		normalized.includes("audio") ||
+		normalized.includes("live") ||
+		normalized.includes("gemini-2.") ||
+		normalized.includes("gemini 2.")
+	) {
 		input.push("audio");
 	}
 	return input;

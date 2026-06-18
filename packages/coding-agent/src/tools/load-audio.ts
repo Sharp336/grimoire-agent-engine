@@ -3,6 +3,7 @@ import { type } from "arktype";
 import { expandRoleAlias, getModelMatchPreferences, resolveModelFromString } from "../config/model-resolver";
 import {
 	AudioInputTooLargeError,
+	audioInputSupportedByApi,
 	type LoadedAudioInput,
 	loadAudioInput,
 	MAX_AUDIO_INPUT_BYTES,
@@ -85,6 +86,12 @@ export class LoadAudioTool implements AgentTool<typeof loadAudioSchema, Record<s
 		if (!audioInput) {
 			throw new ToolError(
 				"load_audio only supports WAV, MP3, AAC, AIFF, OGG, FLAC, and M4A files detected by content.",
+			);
+		}
+
+		if (!audioInputSupportedByApi(audioInput.mimeType, activeModel.api)) {
+			throw new ToolError(
+				`${activeModel.provider}/${activeModel.id} only accepts MP3/WAV audio input, but the file is ${audioInput.mimeType}. Convert the clip to MP3 or WAV, or use an audio-capable model that accepts this format.`,
 			);
 		}
 

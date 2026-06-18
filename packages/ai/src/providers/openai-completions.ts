@@ -1221,6 +1221,13 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
 			if (audioDataBuffer.length > 0) {
 				const audioFormat = options?.audioOutput?.format ?? "wav";
+				// Emit the transcript as a normal text block too: the completions
+				// history builder reconstructs assistant turns from text/thinking/tool
+				// blocks and ignores audio_output, so without this the next turn would
+				// lose what the model just "said".
+				if (audioTranscriptBuffer.length > 0) {
+					output.content.push({ type: "text", text: audioTranscriptBuffer });
+				}
 				output.content.push({
 					type: "audio_output",
 					data: audioDataBuffer,
