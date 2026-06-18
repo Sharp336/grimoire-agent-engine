@@ -109,7 +109,7 @@
 - Fixed OpenCode Go sessions recording per-request cost history so `/usage` can show local cap utilization. ([#2942](https://github.com/can1357/oh-my-pi/issues/2942))
 ### Added
 
-- Added `--auto-next-steps` and `--auto-next-idea` CLI flags for autonomous operation. After each completed turn the agent automatically queues a follow-up so it keeps working without user input: `--auto-next-steps` continues the current objective (including running tests), `--auto-next-idea` brainstorms and implements a new improvement, and both together cycle indefinitely. The loop halts on a user interrupt (Esc) or a failed turn and re-arms on the next clean turn; it is armed only in interactive mode (disabled for `--print`/rpc/acp).
+- Added `--auto-next-steps` and `--auto-next-idea` CLI flags for autonomous operation. After each completed turn the agent automatically queues a follow-up so it keeps working without user input: `--auto-next-steps` continues the current objective (including running tests), `--auto-next-idea` brainstorms and implements a new improvement, and both together cycle indefinitely. The controller arms only after startup prompts drain and is restricted to interactive mode (disabled for `--print`/rpc/acp). It halts on a user interrupt (Esc) or a failed turn, leaves plan/goal mode to their own drivers, and `--auto-next-steps` (alone) also stops once an autonomous turn performs no further action (objective complete); idea/combined run until interrupted.
 
 ## [16.0.6] - 2026-06-18
 

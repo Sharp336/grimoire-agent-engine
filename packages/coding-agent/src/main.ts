@@ -472,11 +472,13 @@ async function runInteractiveMode(
 		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 	}
 
+	let startupPromptFailed = false;
 	if (initialMessage !== undefined) {
 		try {
 			using _keepalive = new EventLoopKeepalive();
 			await session.prompt(initialMessage, { images: initialImages });
 		} catch (error: unknown) {
+			startupPromptFailed = true;
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
 		}
@@ -487,16 +489,25 @@ async function runInteractiveMode(
 			using _keepalive = new EventLoopKeepalive();
 			await session.prompt(message);
 		} catch (error: unknown) {
+			startupPromptFailed = true;
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
 		}
 	}
-	// Autonomous mode with no initial user message: start the first turn so
-	// `--auto-next-idea` (or `--auto-next-steps --auto-next-idea`) can begin
-	// ideating from scratch. Steps-only mode with no objective has nothing to
-	// continue, so kickoff() is a no-op there.
-	if (autonomousController && initialMessage === undefined && initialMessages.length === 0) {
-		autonomousController.kickoff();
+	// Arm autonomous mode only after every startup message has been submitted,
+	// so the first startup turn's agent_end can't race the remaining
+	// session.prompt(...) calls. begin() then starts the first continuation:
+	// idea/combined self-starts even with no message; steps-only self-starts on
+	// resume (the transcript already holds an objective) or after an initial
+	// message, and otherwise idles until the user gives it work. A startup prompt
+	// that threw (no agent_end) is passed through so begin() won't re-queue a
+	// failing turn.
+	if (autonomousController) {
+		autonomousController.begin({
+			hadInitialMessage: initialMessage !== undefined || initialMessages.length > 0,
+			resuming,
+			startupFailed: startupPromptFailed,
+		});
 	}
 
 	while (true) {
