@@ -347,6 +347,15 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "roles",
+		aliases: ["role"],
+		description: "Assign models to roles (default/smol/slow/plan/…) — same as alt+m",
+		handleTui: (_command, runtime) => {
+			runtime.ctx.showModelSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "fast",
 		description: "Toggle priority service tier (OpenAI service_tier=priority, Anthropic speed=fast)",
 		acpDescription: "Toggle fast mode",

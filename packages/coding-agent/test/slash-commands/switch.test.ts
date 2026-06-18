@@ -40,3 +40,26 @@ describe("/switch slash command", () => {
 		expect(harness.setText).toHaveBeenCalledWith("");
 	});
 });
+
+describe("/roles slash command", () => {
+	it("opens the persistent role-assignment picker (mirrors alt+m), not the temporary switcher", async () => {
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/roles", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.showModelSelector).toHaveBeenCalledWith();
+		expect(harness.showModelSelector).not.toHaveBeenCalledWith({ temporaryOnly: true });
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+
+	it("resolves the /role alias to the same role-assignment picker", async () => {
+		const harness = createRuntime();
+
+		const handled = await executeBuiltinSlashCommand("/role", harness.runtime);
+
+		expect(handled).toBe(true);
+		expect(harness.showModelSelector).toHaveBeenCalledWith();
+		expect(harness.setText).toHaveBeenCalledWith("");
+	});
+});

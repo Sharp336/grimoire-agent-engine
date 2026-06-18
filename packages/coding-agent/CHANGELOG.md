@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a `/roles` slash command (alias `/role`) that opens the persistent model role-assignment picker (the `app.model.select` / `Alt+M` view), restoring discoverable slash-command access to role assignment after `/model` was repurposed to the temporary session switcher.
+
 ## [16.0.6] - 2026-06-18
 
 ### Added
