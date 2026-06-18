@@ -364,7 +364,7 @@ describe("DAP multi-session debugging", () => {
 		expect(childClient.isAlive()).toBe(false);
 	});
 
-	it("disposes the session tree when the root debuggee exits naturally", async () => {
+	it("waits for termination before disposing a session tree after the root debuggee exits", async () => {
 		const manager = new DapSessionManager();
 
 		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
@@ -392,9 +392,88 @@ describe("DAP multi-session debugging", () => {
 		parentClient.emitEvent("exited", { exitCode: 0 });
 		await Bun.sleep(10);
 
+		expect(manager.listSessions().length).toBe(2);
+		expect(parentClient.isAlive()).toBe(true);
+		expect(childClient.isAlive()).toBe(true);
+
+		parentClient.emitEvent("terminated", {});
+		await Bun.sleep(10);
+
 		expect(manager.listSessions().length).toBe(0);
 		expect(parentClient.isAlive()).toBe(false);
 		expect(childClient.isAlive()).toBe(false);
+	});
+
+	it("keeps trailing output after exited until the terminated event arrives", async () => {
+		const manager = new DapSessionManager();
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClient as unknown as DapClient);
+
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		parentClient.emitEvent("exited", { exitCode: 0 });
+		parentClient.emitEvent("output", { output: "final vitest line\n" });
+		await Bun.sleep(10);
+
+		expect(manager.getOutput().output).toContain("final vitest line");
+		expect(manager.listSessions().length).toBe(1);
+		expect(parentClient.isAlive()).toBe(true);
+
+		parentClient.emitEvent("terminated", {});
+		await Bun.sleep(10);
+
+		expect(manager.listSessions().length).toBe(0);
+		expect(parentClient.isAlive()).toBe(false);
+	});
+
+	it("rolls back pending source breakpoints when live sync fails", async () => {
+		const manager = new DapSessionManager();
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
+		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
+
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		const bpFile = path.resolve(process.cwd(), "src/failed-sync.ts");
+		parentClient.stalledCommands.add("setBreakpoints");
+
+		await expect(manager.setBreakpoint(bpFile, 12, undefined, AbortSignal.timeout(5), 30_000)).rejects.toThrow(
+			"aborted",
+		);
+
+		parentClient.stalledCommands.delete("setBreakpoints");
+
+		await parentClient.triggerReverseRequest("startDebugging", {
+			request: "attach",
+			configuration: {
+				type: "pwa-node",
+				name: "child-worker",
+			},
+		});
+
+		expect(childClient.sentRequests).not.toContainEqual(
+			expect.objectContaining({
+				command: "setBreakpoints",
+				args: expect.objectContaining({
+					source: expect.objectContaining({ path: bpFile }),
+				}),
+			}),
+		);
+
+		await manager.terminate();
 	});
 
 	it("removes all live instruction breakpoints for a reference when offset is omitted", async () => {

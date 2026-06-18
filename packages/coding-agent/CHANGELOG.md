@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed DAP hierarchical multi-session debugging by implementing support for `startDebugging` reverse requests and spawning child debug sessions.
+- Fixed debugger breakpoint synchronization by copying pending breakpoints to the root debug session and propagating them to all dynamically spawned child sessions during the configuration handshake, ensuring breakpoints inside worker threads or child processes are bound and hit before the program executes.
+- Fixed debugger termination by propagating terminate and disconnect requests recursively to all active child debug sessions in the tree.
+- Fixed debugger `continue` on threadless JS debug root launcher sessions to wait for stopped child sessions instead of timing out while a child has already hit a breakpoint.
+
 ## [16.0.10] - 2026-06-18
 
 ### Added
@@ -34,10 +41,6 @@
 ### Fixed
 
 - Fixed active `/goal` mode being paused by internal compaction and session-switch lifecycle aborts, and made those switches persist wall-clock goal usage without charging time spent in another session to a preserved goal.
-- Fixed DAP hierarchical multi-session debugging by implementing support for `startDebugging` reverse requests and spawning child debug sessions.
-- Fixed debugger breakpoint synchronization by copying pending breakpoints to the root debug session and propagating them to all dynamically spawned child sessions during the configuration handshake, ensuring breakpoints inside worker threads or child processes are bound and hit before the program executes.
-- Fixed debugger termination by propagating terminate and disconnect requests recursively to all active child debug sessions in the tree.
-- Fixed debugger `continue` on threadless JS debug root launcher sessions to wait for stopped child sessions instead of timing out while a child has already hit a breakpoint.
 
 ## [16.0.8] - 2026-06-18
 

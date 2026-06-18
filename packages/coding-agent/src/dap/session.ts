@@ -736,13 +736,19 @@ export class DapSessionManager {
 		timeoutMs: number = 30_000,
 	) {
 		const sourcePath = normalizePath(file);
+		const previous = this.#pendingBreakpoints.get(sourcePath);
 		const current = [...(this.#pendingBreakpoints.get(sourcePath) ?? [])];
 		const deduped = current.filter(entry => entry.line !== line);
 		deduped.push({ verified: false, line, condition });
 		deduped.sort((left, right) => left.line - right.line);
-		this.#pendingBreakpoints.set(sourcePath, deduped);
 
-		await this.#updateSourceBreakpointsGlobally(sourcePath, line, "add", condition, signal, timeoutMs);
+		this.#setPendingSourceBreakpoints(sourcePath, deduped);
+		try {
+			await this.#updateSourceBreakpointsGlobally(sourcePath, line, "add", condition, signal, timeoutMs);
+		} catch (error) {
+			this.#restorePendingSourceBreakpoints(sourcePath, previous);
+			throw error;
+		}
 
 		const session = this.#getActiveSessionOrNull();
 		return {
@@ -754,14 +760,16 @@ export class DapSessionManager {
 
 	async removeBreakpoint(file: string, line: number, signal?: AbortSignal, timeoutMs: number = 30_000) {
 		const sourcePath = normalizePath(file);
+		const previous = this.#pendingBreakpoints.get(sourcePath);
 		const current = [...(this.#pendingBreakpoints.get(sourcePath) ?? [])].filter(entry => entry.line !== line);
-		if (current.length === 0) {
-			this.#pendingBreakpoints.delete(sourcePath);
-		} else {
-			this.#pendingBreakpoints.set(sourcePath, current);
-		}
 
-		await this.#updateSourceBreakpointsGlobally(sourcePath, line, "remove", undefined, signal, timeoutMs);
+		this.#setPendingSourceBreakpoints(sourcePath, current);
+		try {
+			await this.#updateSourceBreakpointsGlobally(sourcePath, line, "remove", undefined, signal, timeoutMs);
+		} catch (error) {
+			this.#restorePendingSourceBreakpoints(sourcePath, previous);
+			throw error;
+		}
 
 		const session = this.#getActiveSessionOrNull();
 		return {
@@ -1628,9 +1636,7 @@ export class DapSessionManager {
 		});
 		client.onEvent("exited", body => {
 			session.exitCode = (body as DapExitedEventBody | undefined)?.exitCode;
-			session.status = "terminated";
 			this.#resolveGlobalStop(session);
-			this.#scheduleTerminalSessionDisposal(session);
 		});
 		client.onEvent("terminated", () => {
 			session.status = "terminated";
@@ -1651,7 +1657,16 @@ export class DapSessionManager {
 			}
 		}, HEARTBEAT_INTERVAL_MS);
 		heartbeat.unref?.();
-		client.proc.exited.finally(() => clearInterval(heartbeat));
+		void client.proc.exited.finally(() => {
+			clearInterval(heartbeat);
+			const current = this.#sessions.get(session.id);
+			if (!current) {
+				return;
+			}
+			current.status = "terminated";
+			this.#resolveGlobalStop(current);
+			this.#scheduleTerminalSessionDisposal(current);
+		});
 		return session;
 	}
 
@@ -1986,6 +2001,22 @@ export class DapSessionManager {
 			}
 			current = this.#sessions.get(current.parentSessionId);
 		}
+	}
+
+	#setPendingSourceBreakpoints(sourcePath: string, breakpoints: DapBreakpointRecord[]): void {
+		if (breakpoints.length === 0) {
+			this.#pendingBreakpoints.delete(sourcePath);
+			return;
+		}
+		this.#pendingBreakpoints.set(sourcePath, breakpoints);
+	}
+
+	#restorePendingSourceBreakpoints(sourcePath: string, breakpoints: DapBreakpointRecord[] | undefined): void {
+		if (!breakpoints) {
+			this.#pendingBreakpoints.delete(sourcePath);
+			return;
+		}
+		this.#pendingBreakpoints.set(sourcePath, breakpoints);
 	}
 
 	#scheduleTerminalSessionDisposal(session: DapSession): void {
