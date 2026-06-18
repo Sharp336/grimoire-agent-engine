@@ -300,7 +300,6 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	},
 	{
 		name: "model",
-		aliases: ["models"],
 		description: "Switch model for this session",
 		acpDescription: "Show current model selection",
 		handle: async (command, runtime) => {
@@ -339,10 +338,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
-		name: "switch",
-		description: "Switch model for this session (same as alt+p)",
+		name: "models",
+		description: "Set up models and roles for this session (same as alt+m)",
 		handleTui: (_command, runtime) => {
-			runtime.ctx.showModelSelector({ temporaryOnly: true });
+			runtime.ctx.showModelSelector();
 			runtime.ctx.editor.setText("");
 		},
 	},

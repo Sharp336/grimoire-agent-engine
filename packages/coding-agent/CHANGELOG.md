@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `/models` slash command now opens the permanent model setup (role-assignment) picker instead of acting as an alias for `/model`'s session switcher. This restores a slash-command path to the role/thinking picker that was lost when `/model` was rerouted to the temporary switcher in [#2849](https://github.com/can1357/oh-my-pi/pull/2849); `/model` remains the quick session switcher (same as `Alt+P`). ([#2933](https://github.com/can1357/oh-my-pi/issues/2933))
+
+### Removed
+
+- `/switch` slash command; it was redundant with `/model` and `Alt+P`. Use `/model` or `Alt+P` to switch the session model. ([#2933](https://github.com/can1357/oh-my-pi/issues/2933))
+
 ## [16.0.6] - 2026-06-18
 
 ### Added
