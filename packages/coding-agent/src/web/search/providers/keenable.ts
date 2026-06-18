@@ -24,6 +24,9 @@ interface KeenableMcpContent {
 interface KeenableMcpResult {
 	result?: {
 		content?: KeenableMcpContent[];
+		protocolVersion?: string;
+		capabilities?: Record<string, unknown>;
+		serverInfo?: Record<string, string>;
 	};
 	error?: { code: number; message: string };
 }
@@ -66,6 +69,7 @@ async function callKeenableMcpSearch(
 	fetchImpl: FetchImpl,
 ): Promise<string> {
 	const timeoutSignal = withHardTimeout(signal);
+	let protocolVersion: string | undefined;
 
 	async function mcpPost(body: unknown, sessionId?: string): Promise<{ data: KeenableMcpResult; sessionId: string | null }> {
 		const headers: Record<string, string> = {
@@ -77,6 +81,9 @@ async function callKeenableMcpSearch(
 		}
 		if (sessionId) {
 			headers["Mcp-Session-Id"] = sessionId;
+		}
+		if (protocolVersion) {
+			headers["MCP-Protocol-Version"] = protocolVersion;
 		}
 		const resp = await fetchImpl(KEENABLE_MCP_URL, {
 			method: "POST",
@@ -157,6 +164,10 @@ async function callKeenableMcpSearch(
 	if (!init.sessionId) {
 		throw new SearchProviderError("keenable", "MCP server did not return a session ID", 500);
 	}
+	// Store negotiated protocol version for subsequent requests.
+	if (init.data?.result?.protocolVersion) {
+		protocolVersion = init.data.result.protocolVersion;
+	}
 
 	// Step 2: initialized notification (fire-and-forget, may return 202 with no body)
 	await mcpPost({
@@ -187,19 +198,35 @@ async function callKeenableMcpSearch(
 	return content.map(c => c.text ?? "").join("\n");
 }
 
-/** Convert Keenable JSON results to SearchSource[]. */
-/** Extract JSON payload from SSE body (strips data: prefix, joins multi-line). */
+/** Parse SSE events individually and return the JSON from the one matching id "search". */
 function parseSseBody(body: string): string | undefined {
-	const dataLines: string[] = [];
-	for (const line of body.split("\n")) {
-		if (line.startsWith("data: ")) {
-			dataLines.push(line.slice(6));
-		} else if (line.startsWith("data:")) {
-			dataLines.push(line.slice(5));
+	// SSE events separated by blank lines.
+	const events = body.split(/\n\n/);
+	for (const event of events) {
+		const trimmed = event.trim();
+		if (!trimmed) continue;
+		// Collect data: lines for this event.
+		const dataLines: string[] = [];
+		for (const line of trimmed.split("\n")) {
+			if (line.startsWith("data: ")) {
+				dataLines.push(line.slice(6));
+			} else if (line.startsWith("data:")) {
+				dataLines.push(line.slice(5));
+			}
+		}
+		if (dataLines.length === 0) continue;
+		const jsonStr = dataLines.join("\n");
+		try {
+			const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
+			// Look for a JSON-RPC response with an id (tool call result).
+			if (parsed && typeof parsed === "object" && parsed.jsonrpc && parsed.id) {
+				return jsonStr;
+			}
+		} catch {
+			// Skip unparseable events (priming events, notifications, etc.)
 		}
 	}
-	if (dataLines.length === 0) return undefined;
-	return dataLines.join("\n");
+	return undefined;
 }
 /** Convert Keenable JSON results to SearchSource[]. */
 function parseJsonResults(results: JsonSearchResult[]): SearchSource[] {
