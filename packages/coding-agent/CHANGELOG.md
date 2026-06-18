@@ -2199,6 +2199,14 @@
 - Accepted `max` as an alias for the top thinking level (`xhigh`) in selectors and `--thinking`, so DeepSeek V4 Pro can be selected with its provider-facing maximum effort ([#2727](https://github.com/can1357/oh-my-pi/issues/2727)).
 - Fixed `--provider=amazon-bedrock --model <application-inference-profile ARN>` being rejected as an unknown model before the Bedrock provider could send the ARN to Converse Stream. ([#3004](https://github.com/can1357/oh-my-pi/issues/3004))
 
+### Added
+
+- Added `shake.interval` setting for periodic tool-result elision in long sessions, independent of compaction strategy ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
+
+### Fixed
+
+- Fixed periodic shake running after compaction pruned the trailing assistant and recovery failed, which would re-introduce the failed/truncated assistant into the next prompt ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
+
 ## [16.0.9] - 2026-06-18
 
 ### Added

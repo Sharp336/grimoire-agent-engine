@@ -80,6 +80,12 @@ import type { ShakeMode, ShakeResult } from "./shake-types";
 export type CompactionCheckResult = Readonly<{
 	deferredHandoff: boolean;
 	continuationScheduled: boolean;
+	/** Set when #checkCompaction removed the trailing assistant from agent.state
+	 *  (e.g. context overflow / length stop with no recovery path) but returned
+	 *  without scheduling continuation. Periodic shake must NOT run in this case —
+	 *  it would rebuild agent.state from persisted entries and reintroduce the
+	 *  pruned assistant into the next turn's prompt. */
+	tailPruned?: boolean;
 	automaticContinuationBlocked?: boolean;
 	historyRewritten?: boolean;
 }>;
@@ -88,18 +94,27 @@ export type CompactionCheckResult = Readonly<{
 export const COMPACTION_CHECK_NONE: CompactionCheckResult = {
 	deferredHandoff: false,
 	continuationScheduled: false,
+	tailPruned: false,
+};
+export const COMPACTION_CHECK_NONE_TAIL_PRUNED: CompactionCheckResult = {
+	deferredHandoff: false,
+	continuationScheduled: false,
+	tailPruned: true,
 };
 const COMPACTION_CHECK_DEFERRED_HANDOFF: CompactionCheckResult = {
 	deferredHandoff: true,
 	continuationScheduled: false,
+	tailPruned: false,
 };
 const COMPACTION_CHECK_CONTINUATION: CompactionCheckResult = {
 	deferredHandoff: false,
 	continuationScheduled: true,
+	tailPruned: false,
 };
 const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
 	deferredHandoff: false,
 	continuationScheduled: false,
+	tailPruned: false,
 	automaticContinuationBlocked: true,
 };
 
@@ -1155,7 +1170,7 @@ export class SessionMaintenance {
 					autoContinue,
 				});
 			}
-			return COMPACTION_CHECK_NONE;
+			return COMPACTION_CHECK_NONE_TAIL_PRUNED;
 		}
 		// A context promotion can land while the failing call is already in
 		// flight (or on a run whose loop predates the switch): the overflow
@@ -1238,7 +1253,7 @@ export class SessionMaintenance {
 			logger.warn("response.incomplete with no recovery path (promotion + compaction both unavailable)", {
 				model: `${assistantMessage.provider}/${assistantMessage.model}`,
 			});
-			return COMPACTION_CHECK_NONE;
+			return COMPACTION_CHECK_NONE_TAIL_PRUNED;
 		}
 
 		// Stale-result pass runs every turn, before any threshold gating: it is
