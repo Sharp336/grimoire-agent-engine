@@ -3486,8 +3486,7 @@ function formatIssueCreateResult(options: {
 		lines.push(bodyText);
 	}
 
-	return lines.join("
-").trim();
+	return lines.join("\n").trim();
 }
 
 async function executeSearchIssues(
