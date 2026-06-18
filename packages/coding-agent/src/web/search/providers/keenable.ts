@@ -112,10 +112,11 @@ async function callKeenableMcpSearch(
 		if (!bodyText) {
 			return { data: {}, sessionId: sessionId_ };
 		}
-
-		// For SSE responses, extract JSON from data: lines.
+		// For SSE responses, extract JSON from data: lines, matching the request id.
 		if (contentType.includes("text/event-stream")) {
-			const sseData = parseSseBody(bodyText);
+			const reqBody = body as Record<string, unknown>;
+			const expectedId = typeof reqBody.id === "string" ? reqBody.id : undefined;
+			const sseData = parseSseBody(bodyText, expectedId);
 			if (sseData) {
 				try {
 					const parsed = JSON.parse(sseData) as KeenableMcpResult;
@@ -198,8 +199,8 @@ async function callKeenableMcpSearch(
 	return content.map(c => c.text ?? "").join("\n");
 }
 
-/** Parse SSE events individually and return the JSON from the one matching id "search". */
-function parseSseBody(body: string): string | undefined {
+/** Parse SSE events individually and return the JSON-RPC response with the matching id. */
+function parseSseBody(body: string, expectedId?: string): string | undefined {
 	// SSE events separated by blank lines.
 	const events = body.split(/\n\n/);
 	for (const event of events) {
@@ -218,9 +219,13 @@ function parseSseBody(body: string): string | undefined {
 		const jsonStr = dataLines.join("\n");
 		try {
 			const parsed = JSON.parse(jsonStr) as Record<string, unknown>;
-			// Look for a JSON-RPC response with an id (tool call result).
+			// Accept only the event whose id matches the expected request id.
+			// This avoids misinterpreting priming events or server-initiated
+			// JSON-RPC requests as the tool-call response.
 			if (parsed && typeof parsed === "object" && parsed.jsonrpc && parsed.id) {
-				return jsonStr;
+				if (expectedId === undefined || parsed.id === expectedId) {
+					return jsonStr;
+				}
 			}
 		} catch {
 			// Skip unparseable events (priming events, notifications, etc.)
