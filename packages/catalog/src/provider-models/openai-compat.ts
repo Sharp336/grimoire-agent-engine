@@ -8,7 +8,7 @@ import { toFireworksPublicModelId } from "../fireworks-model-id";
 import { isGlmVisionModelId, isGrokReasoningEffortCapable, isReasoningGlmModelId } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModels } from "../models";
-import type { Api, FetchImpl, Model, ModelSpec, Provider, ThinkingConfig } from "../types";
+import type { Api, FetchImpl, Model, ModelInputModality, ModelSpec, Provider, ThinkingConfig } from "../types";
 import { isAnthropicOAuthToken, isRecord, toBoolean, toNumber, toPositiveNumber } from "../utils";
 import { COPILOT_API_HEADERS, getGitHubCopilotBaseUrl, parseGitHubCopilotApiKey } from "../wire/github-copilot";
 import { createBundledReferenceMap, createReferenceResolver, toModelSpec } from "./bundled-references";
@@ -48,12 +48,18 @@ function toModelName(value: unknown, fallback: string): string {
 	return trimmed.length > 0 ? trimmed : fallback;
 }
 
-function toInputCapabilities(value: unknown): ("text" | "image")[] {
+function toInputCapabilities(value: unknown): ModelInputModality[] {
 	if (!Array.isArray(value)) {
 		return ["text"];
 	}
-	const supportsImage = value.some(item => item === "image");
-	return supportsImage ? ["text", "image"] : ["text"];
+	const set = new Set<ModelInputModality>(["text"]);
+	for (const item of value) {
+		if (item === "image" || item === "audio") set.add(item);
+	}
+	const input: ModelInputModality[] = ["text"];
+	if (set.has("image")) input.push("image");
+	if (set.has("audio")) input.push("audio");
+	return input;
 }
 
 async function fetchModelsDevPayload(fetchImpl: FetchImpl = fetch): Promise<unknown> {
@@ -289,7 +295,7 @@ interface OllamaResolvedMetadata {
 	capabilities?: string[];
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
-	input?: ("text" | "image")[];
+	input?: ModelInputModality[];
 }
 
 interface OllamaShowMetadata {
@@ -298,7 +304,7 @@ interface OllamaShowMetadata {
 	capabilities?: string[];
 	reasoning?: boolean;
 	thinking?: ThinkingConfig;
-	input?: ("text" | "image")[];
+	input?: ModelInputModality[];
 }
 
 function getOllamaContextWindow(modelInfo: Record<string, unknown> | undefined): number | undefined {
@@ -359,8 +365,8 @@ async function fetchOllamaShowMetadata(
 			thinking: getOllamaThinkingConfig(capabilities),
 			input: capabilities
 				? capabilities.includes("vision")
-					? (["text", "image"] as Array<"text" | "image">)
-					: (["text"] as Array<"text">)
+					? (["text", "image"] as ModelInputModality[])
+					: (["text"] as ModelInputModality[])
 				: undefined,
 		};
 	} catch {
@@ -841,7 +847,7 @@ interface XAICuratedModel {
 	 * overrides `fetchOpenAICompatibleModels`' default of `["text"]` (which
 	 * otherwise strips image capability on every online refresh).
 	 */
-	input?: ("text" | "image")[];
+	input?: ModelInputModality[];
 }
 
 // Source of truth for the xai-oauth chat picker. Top of list = headline.

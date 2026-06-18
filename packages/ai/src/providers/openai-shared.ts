@@ -18,6 +18,7 @@ import { $env, extractHttpStatusFromError, logger, structuredCloneJSON } from "@
 import {
 	type Api,
 	type AssistantMessage,
+	type AudioContent,
 	type CacheRetention,
 	type Context,
 	type ImageContent,
@@ -38,6 +39,7 @@ import {
 	type Tool,
 	type ToolCall,
 	type ToolResultMessage,
+	type UserContent,
 } from "../types";
 import {
 	getOpenAIResponsesHistoryItems,
@@ -64,6 +66,7 @@ import type {
 	ResponseCustomToolCall,
 	ResponseFunctionToolCall,
 	ResponseInput,
+	ResponseInputAudio,
 	ResponseInputContent,
 	ResponseInputImage,
 	ResponseInputText,
@@ -74,7 +77,19 @@ import type {
 	ResponseStreamEvent,
 } from "./openai-responses-wire";
 import { transformMessages } from "./transform-messages";
-import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER, partitionVisionContent } from "./vision-guard";
+import { joinTextWithImagePlaceholder, NON_VISION_IMAGE_PLACEHOLDER } from "./vision-guard";
+
+export type OpenAIInputAudioFormat = "mp3" | "wav";
+
+export function getOpenAIInputAudioFormat(mimeType: string, format?: string): OpenAIInputAudioFormat | undefined {
+	const normalized = format?.trim().toLowerCase();
+	if (normalized === "mp3" || normalized === "wav") return normalized;
+	const subtype = mimeType.split("/")[1]?.toLowerCase().split(";")[0];
+	if (!subtype) return undefined;
+	if (subtype === "mpeg" || subtype === "mp3") return "mp3";
+	if (subtype === "wav" || subtype === "wave" || subtype === "x-wav") return "wav";
+	return undefined;
+}
 
 export interface OpenAIModelIdentity {
 	provider: string;
@@ -1193,36 +1208,67 @@ function clampResponsesImageDetail(
 }
 
 export function convertResponsesInputContent(
-	content: string | Array<TextContent | ImageContent>,
+	content: string | UserContent[],
 	supportsImages: boolean,
 	supportsImageDetailOriginal: boolean,
+	supportsAudio = false,
 ): ResponseInputContent[] | undefined {
 	if (typeof content === "string") {
 		if (content.trim().length === 0) return undefined;
 		return [{ type: "input_text", text: content.toWellFormed() } satisfies ResponseInputText];
 	}
 
-	const { textBlocks, imageBlocks, omittedImages } = partitionVisionContent(content, supportsImages);
 	const normalizedContent: ResponseInputContent[] = [];
-	for (const item of textBlocks) {
-		const text = item.text.toWellFormed();
-		if (text.trim().length === 0) continue;
-		normalizedContent.push({
-			type: "input_text",
-			text,
-		} satisfies ResponseInputText);
-	}
-	for (const item of imageBlocks) {
-		normalizedContent.push({
-			type: "input_image",
-			detail: clampResponsesImageDetail(item.detail, supportsImageDetailOriginal),
-			image_url: `data:${item.mimeType};base64,${item.data}`,
-		} satisfies ResponseInputImage);
+	let omittedImages = false;
+	let omittedAudio = false;
+	for (const item of content) {
+		if (item.type === "text") {
+			const text = item.text.toWellFormed();
+			if (text.trim().length === 0) continue;
+			normalizedContent.push({
+				type: "input_text",
+				text,
+			} satisfies ResponseInputText);
+		} else if (item.type === "image") {
+			if (supportsImages) {
+				normalizedContent.push({
+					type: "input_image",
+					detail: clampResponsesImageDetail(item.detail, supportsImageDetailOriginal),
+					image_url: `data:${item.mimeType};base64,${item.data}`,
+				} satisfies ResponseInputImage);
+			} else {
+				omittedImages = true;
+			}
+		} else {
+			const audioFormat = getOpenAIInputAudioFormat(item.mimeType, item.format);
+			if (supportsAudio && audioFormat) {
+				normalizedContent.push({
+					type: "input_audio",
+					input_audio: {
+						data: item.data,
+						format: audioFormat,
+					},
+				} satisfies ResponseInputAudio);
+			} else if (supportsAudio) {
+				normalizedContent.push({
+					type: "input_text",
+					text: `[unsupported audio: ${item.mimeType}]`,
+				} satisfies ResponseInputText);
+			} else {
+				omittedAudio = true;
+			}
+		}
 	}
 	if (omittedImages) {
 		normalizedContent.push({
 			type: "input_text",
 			text: NON_VISION_IMAGE_PLACEHOLDER,
+		} satisfies ResponseInputText);
+	}
+	if (omittedAudio) {
+		normalizedContent.push({
+			type: "input_text",
+			text: "[audio omitted: model does not support audio input]",
 		} satisfies ResponseInputText);
 	}
 	return normalizedContent.length > 0 ? normalizedContent : undefined;
@@ -1287,6 +1333,7 @@ export function buildResponsesInput<TApi extends Api>(options: BuildResponsesInp
 				msg.content,
 				options.model.input.includes("image"),
 				options.supportsImageDetailOriginal,
+				options.model.input.includes("audio"),
 			);
 			if (!content) continue;
 			messages.push({
@@ -1445,19 +1492,28 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 	customCallIds?: ReadonlySet<string>,
 ): void {
 	const supportsImages = model.input.includes("image");
+	const supportsAudio = model.input.includes("audio");
 	const textResult = toolResult.content
 		.filter((block): block is TextContent => block.type === "text")
 		.map(block => block.text)
 		.join("\n");
 	const hasImages = toolResult.content.some((block): block is ImageContent => block.type === "image");
+	const hasAudio = toolResult.content.some((block): block is AudioContent => block.type === "audio");
 	const omittedImages = hasImages && !supportsImages;
+	const omittedAudio = hasAudio && !supportsAudio;
 	const normalized = normalizeResponsesToolCallId(toolResult.toolCallId);
 	const output = (
 		omittedImages
 			? joinTextWithImagePlaceholder(textResult, true)
-			: textResult.length > 0
-				? textResult
-				: "(see attached image)"
+			: omittedAudio
+				? [textResult, "[audio omitted: model does not support audio input]"].filter(Boolean).join("\n")
+				: textResult.length > 0
+					? textResult
+					: hasImages
+						? "(see attached image)"
+						: hasAudio
+							? "(see attached audio)"
+							: ""
 	).toWellFormed();
 	if (strictResponsesPairing && !knownCallIds.has(normalized.callId)) {
 		// Strict backends (Azure, Copilot) reject unpaired outputs outright, but
@@ -1486,20 +1542,40 @@ export function appendResponsesToolResultMessages<TApi extends Api>(
 		});
 	}
 
-	if (!hasImages || !supportsImages) {
+	if ((!hasImages || !supportsImages) && (!hasAudio || !supportsAudio)) {
 		return;
 	}
 
 	const contentParts: ResponseInputContent[] = [
-		{ type: "input_text", text: "Attached image(s) from tool result:" } satisfies ResponseInputText,
+		{ type: "input_text", text: "Attached media from tool result:" } satisfies ResponseInputText,
 	];
-	for (const block of toolResult.content) {
-		if (block.type === "image") {
-			contentParts.push({
-				type: "input_image",
-				detail: clampResponsesImageDetail(block.detail, supportsImageDetailOriginal),
-				image_url: `data:${block.mimeType};base64,${block.data}`,
-			} satisfies ResponseInputImage);
+	if (hasImages && supportsImages) {
+		for (const block of toolResult.content) {
+			if (block.type === "image") {
+				contentParts.push({
+					type: "input_image",
+					detail: clampResponsesImageDetail(block.detail, supportsImageDetailOriginal),
+					image_url: `data:${block.mimeType};base64,${block.data}`,
+				} satisfies ResponseInputImage);
+			}
+		}
+	}
+	if (hasAudio && supportsAudio) {
+		for (const block of toolResult.content) {
+			if (block.type === "audio") {
+				const audioFormat = getOpenAIInputAudioFormat(block.mimeType, block.format);
+				contentParts.push(
+					audioFormat
+						? ({
+								type: "input_audio",
+								input_audio: { data: block.data, format: audioFormat },
+							} satisfies ResponseInputAudio)
+						: ({
+								type: "input_text",
+								text: `[unsupported audio: ${block.mimeType}]`,
+							} satisfies ResponseInputText),
+				);
+			}
 		}
 	}
 	messages.push({ role: "user", content: contentParts });

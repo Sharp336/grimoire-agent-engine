@@ -66,6 +66,7 @@ export interface Args {
 	approvalMode?: "always-ask" | "write" | "yolo";
 	messages: string[];
 	fileArgs: string[];
+	audio: string[];
 	/** Extension-registered flags this parse recognized — name to value. */
 	unknownFlags: Map<string, boolean | string>;
 	/**
@@ -103,6 +104,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 	const result: Args = {
 		messages: [],
 		fileArgs: [],
+		audio: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
 	};
@@ -331,6 +333,8 @@ ${chalk.bold("Available Tools (default-enabled unless noted):")}
   python        - Execute Python code (requires: ${APP_NAME} setup python)
   notebook      - Edit Jupyter notebooks
   inspect_image - Analyze images with a vision model
+  inspect_audio - Analyze audio with an audio-capable model
+  load_audio    - Attach audio to the conversation context
   browser       - Browser automation (Puppeteer)
   task          - Launch sub-agents for parallel tasks
   todo          - Manage todo/task lists

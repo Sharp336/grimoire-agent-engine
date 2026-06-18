@@ -42,6 +42,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 	Usage,
+	UserContent,
 } from "../types";
 import { resolveServiceTier } from "../types";
 import { isRecord, normalizeSystemPrompts, normalizeToolCallId, resolveCacheRetention } from "../utils";
@@ -855,10 +856,10 @@ async function resizeAnthropicManyImageBlock(block: ImageContent): Promise<Image
 }
 
 async function resizeAnthropicManyImageContent(
-	content: (TextContent | ImageContent)[],
+	content: UserContent[],
 	state: { resized: number },
 	limit: ResizeLimiter,
-): Promise<(TextContent | ImageContent)[]> {
+): Promise<UserContent[]> {
 	let changed = false;
 	const next = await Promise.all(
 		content.map(async block => {
@@ -936,10 +937,7 @@ type AnthropicToolResultContent =
 /**
  * Convert content blocks to Anthropic API format
  */
-function convertContentBlocks(
-	content: (TextContent | ImageContent)[],
-	supportsImages = true,
-): AnthropicToolResultContent {
+function convertContentBlocks(content: UserContent[], supportsImages = true): AnthropicToolResultContent {
 	const blocks: Array<
 		| { type: "text"; text: string }
 		| {
@@ -960,6 +958,11 @@ function convertContentBlocks(
 			if (text.trim().length === 0) continue;
 			sawText = true;
 			blocks.push({ type: "text", text });
+			continue;
+		}
+
+		if (block.type === "audio") {
+			blocks.push({ type: "text", text: `[audio: ${block.mimeType}]` });
 			continue;
 		}
 

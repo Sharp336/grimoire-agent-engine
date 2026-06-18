@@ -220,6 +220,8 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 		model.contextWindow = 1_000_000;
 	}
 
+	applyAudioInputPolicy(model);
+
 	if (
 		model.api === "openai-completions" &&
 		(model.provider === "minimax-code" || model.provider === "minimax-code-cn")
@@ -270,6 +272,50 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 	if (parsedModel.family === "openai") {
 		applyOpenAICatalogPolicy(model, parsedModel);
 	}
+}
+
+/**
+ * Provider transports whose adapters actually serialize audio input blocks.
+ * Audio inferred for models on other transports (e.g. Gemini served via the
+ * Anthropic messages API) would be silently downgraded to a text placeholder
+ * by the adapter, so do not advertise it there.
+ */
+const AUDIO_CAPABLE_APIS: ReadonlySet<Api> = new Set<Api>([
+	"openai-completions",
+	"openai-responses",
+	"openai-codex-responses",
+	"openrouter",
+	"google-generative-ai",
+	"google-vertex",
+	"google-gemini-cli",
+]);
+
+/**
+ * Audio input modality is under-reported by upstream metadata. Infer it from
+ * the model id/name: explicitly audio-named models (ids containing "audio" or
+ * "live") and Gemini 2.x models (which accept audio via `inlineData`). Only
+ * applied on transports whose adapters serialize audio.
+ */
+function applyAudioInputPolicy(model: ModelSpec<Api>): void {
+	if (!AUDIO_CAPABLE_APIS.has(model.api)) return;
+	if (!inferAudioInput(model) || model.input.includes("audio")) {
+		return;
+	}
+	model.input.push("audio");
+}
+
+function inferAudioInput(model: ModelSpec<Api>): boolean {
+	const id = model.id.toLowerCase();
+	const name = model.name.toLowerCase();
+	return hasAudioModelMarker(id) || hasAudioModelMarker(name) || isGemini2Model(id) || isGemini2Model(name);
+}
+
+function hasAudioModelMarker(value: string): boolean {
+	return value.includes("audio") || value.includes("live");
+}
+
+function isGemini2Model(value: string): boolean {
+	return value.includes("gemini-2.") || value.includes("gemini 2.");
 }
 
 function applyAnthropicCatalogPolicy(model: ModelSpec<Api>, parsedModel: AnthropicModel): void {

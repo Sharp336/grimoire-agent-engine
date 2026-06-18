@@ -12,10 +12,11 @@ import {
 } from "@oh-my-pi/pi-agent-core/compaction/messages";
 import type {
 	AssistantMessage,
+	AudioContent,
 	ImageContent,
 	Message,
 	MessageAttribution,
-	TextContent,
+	UserContent,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
@@ -163,7 +164,7 @@ function renderSteeringEnvelope(message: string): string {
 	return prompt.render(userInterjectionTemplate, { message });
 }
 
-function getArrayContentText(content: (TextContent | ImageContent)[]): string {
+function getArrayContentText(content: UserContent[]): string {
 	let firstText: string | undefined;
 	let textParts: string[] | undefined;
 	for (const part of content) {
@@ -180,7 +181,7 @@ function getArrayContentText(content: (TextContent | ImageContent)[]): string {
 	return textParts === undefined ? (firstText ?? "") : textParts.join("\n");
 }
 
-function getArrayContentImages(content: (TextContent | ImageContent)[]): ImageContent[] {
+function getArrayContentImages(content: UserContent[]): ImageContent[] {
 	let images: ImageContent[] | undefined;
 	for (const part of content) {
 		if (part.type !== "image") continue;
@@ -188,6 +189,16 @@ function getArrayContentImages(content: (TextContent | ImageContent)[]): ImageCo
 		images.push(part);
 	}
 	return images ?? [];
+}
+
+function getArrayContentAudio(content: UserContent[]): AudioContent[] {
+	let audio: AudioContent[] | undefined;
+	for (const part of content) {
+		if (part.type !== "audio") continue;
+		if (audio === undefined) audio = [];
+		audio.push(part);
+	}
+	return audio ?? [];
 }
 
 function wrapSteeringUserMessage(message: UserMessage): UserMessage {
@@ -198,8 +209,8 @@ function wrapSteeringUserMessage(message: UserMessage): UserMessage {
 
 	const text = getArrayContentText(message.content);
 	if (text.length === 0) return message;
-	const content: (TextContent | ImageContent)[] = [{ type: "text", text: renderSteeringEnvelope(text) }];
-	content.push(...getArrayContentImages(message.content));
+	const content: UserContent[] = [{ type: "text", text: renderSteeringEnvelope(text) }];
+	content.push(...getArrayContentImages(message.content), ...getArrayContentAudio(message.content));
 	return { ...userMessageWithoutSteering(message), content };
 }
 
@@ -226,15 +237,15 @@ export function wrapSteeringForModel(messages: AgentMessage[]): AgentMessage[] {
 	return wrappedMessages ?? messages;
 }
 
-/** Result of filtering image blocks out of a `(TextContent | ImageContent)[]` array. */
+/** Result of filtering image blocks out of a content array. */
 interface StripContentResult {
-	content: (TextContent | ImageContent)[];
+	content: UserContent[];
 	removed: number;
 }
 
-function stripImagesFromArrayContent(content: (TextContent | ImageContent)[]): StripContentResult {
+function stripImagesFromArrayContent(content: UserContent[]): StripContentResult {
 	let removed = 0;
-	const kept: (TextContent | ImageContent)[] = [];
+	const kept: UserContent[] = [];
 	for (const part of content) {
 		if (part.type === "image") {
 			removed++;
@@ -271,7 +282,7 @@ export function stripImagesFromMessage(message: AgentMessage): number {
 			if (typeof message.content === "string") return 0;
 			const { content, removed } = stripImagesFromArrayContent(message.content);
 			if (removed > 0) {
-				// All four roles type `content` as `string | (TextContent | ImageContent)[]`;
+				// All four roles type `content` as `string | UserContent[]`;
 				// TypeScript can't narrow the assignment across the union, so cast once.
 				(message as { content: typeof content }).content = content;
 			}
@@ -357,7 +368,7 @@ export interface PythonExecutionMessage {
 export interface CustomMessage<T = unknown> {
 	role: "custom";
 	customType: string;
-	content: string | (TextContent | ImageContent)[];
+	content: string | UserContent[];
 	display: boolean;
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -371,7 +382,7 @@ export interface CustomMessage<T = unknown> {
 export interface HookMessage<T = unknown> {
 	role: "hookMessage";
 	customType: string;
-	content: string | (TextContent | ImageContent)[];
+	content: string | UserContent[];
 	display: boolean;
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -514,7 +525,7 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 							return `<file path="${file.path}">${inner}</file>`;
 						})
 						.join("\n");
-					const content: (TextContent | ImageContent)[] = [{ type: "text" as const, text: fileContents }];
+					const content: UserContent[] = [{ type: "text" as const, text: fileContents }];
 					for (const file of m.files) {
 						if (file.image) {
 							content.push(file.image);

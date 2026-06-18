@@ -1,5 +1,5 @@
 import { type } from "arktype";
-import type { ModelSpec } from "../types";
+import type { ModelInputModality, ModelSpec } from "../types";
 import { isRecord } from "../utils";
 import { CODEX_BASE_URL, OPENAI_HEADER_VALUES, OPENAI_HEADERS } from "../wire/codex";
 
@@ -301,15 +301,15 @@ function supportsReasoning(defaultReasoningLevel: unknown, supportedReasoningLev
 	return false;
 }
 
-function normalizeInputModalities(inputModalities: unknown): ("text" | "image")[] {
+function normalizeInputModalities(inputModalities: unknown): ModelInputModality[] {
 	if (!Array.isArray(inputModalities)) {
 		return ["text", "image"];
 	}
 
-	const set = new Set<"text" | "image">();
+	const set = new Set<ModelInputModality>();
 	for (const modality of inputModalities) {
 		const normalized = toNonEmptyString(modality)?.toLowerCase();
-		if (normalized === "text" || normalized === "image") {
+		if (normalized === "text" || normalized === "image" || normalized === "audio") {
 			set.add(normalized);
 		}
 	}
@@ -318,7 +318,7 @@ function normalizeInputModalities(inputModalities: unknown): ("text" | "image")[
 		return ["text", "image"];
 	}
 
-	const canonical: ("text" | "image")[] = ["text", "image"];
+	const canonical: ModelInputModality[] = ["text", "image", "audio"];
 	return canonical.filter(modality => set.has(modality));
 }
 

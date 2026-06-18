@@ -1,4 +1,4 @@
-import type { ImageContent, MessageAttribution, ServiceTier, TextContent } from "@oh-my-pi/pi-ai";
+import type { MessageAttribution, ServiceTier, UserContent } from "@oh-my-pi/pi-ai";
 import type { AgentMessage } from "../types";
 
 export interface SessionEntryBase {
@@ -58,7 +58,7 @@ export interface BranchSummaryEntry<T = unknown> extends SessionEntryBase {
 export interface CustomMessageEntry<T = unknown> extends SessionEntryBase {
 	type: "custom_message";
 	customType: string;
-	content: string | (TextContent | ImageContent)[];
+	content: string | UserContent[];
 	details?: T;
 	display: boolean;
 	/** Who initiated this message for billing/attribution semantics. */

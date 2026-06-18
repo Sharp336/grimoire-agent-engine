@@ -85,6 +85,8 @@ export interface ThinkingConfig {
 export type Provider = string;
 
 /** Token budgets for each thinking level (token-based providers only) */
+
+export type ModelInputModality = "text" | "image" | "audio";
 export type ThinkingBudgets = { [key in Effort]?: number };
 
 /**
@@ -593,7 +595,7 @@ export interface Model<TApi extends Api = Api> {
 	provider: Provider;
 	baseUrl: string;
 	reasoning: boolean;
-	input: ("text" | "image")[];
+	input: ModelInputModality[];
 	/**
 	 * Native provider tool-call support. `false` is the only unsupported signal:
 	 * `true` and `undefined` both mean callers may use native tools. Catalog and

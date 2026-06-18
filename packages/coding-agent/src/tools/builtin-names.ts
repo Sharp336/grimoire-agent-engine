@@ -13,6 +13,8 @@ export const BUILTIN_TOOL_NAMES = [
 	"search",
 	"lsp",
 	"inspect_image",
+	"inspect_audio",
+	"load_audio",
 	"browser",
 	"checkpoint",
 	"rewind",

@@ -3,11 +3,12 @@
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { AudioContent, ImageContent } from "@oh-my-pi/pi-ai";
 import { getProjectDir, isEnoent, readImageMetadata } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatBytes } from "../tools/render-utils";
+import { detectSupportedAudioMimeTypeFromFile, loadAudioInput, MAX_AUDIO_INPUT_BYTES } from "../utils/audio-input";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { convertFileWithMarkit } from "../utils/markit";
 
@@ -20,6 +21,7 @@ const CONVERTIBLE_EXTENSIONS = new Set([".pdf", ".doc", ".docx", ".ppt", ".pptx"
 export interface ProcessedFiles {
 	text: string;
 	images: ImageContent[];
+	audio: AudioContent[];
 }
 
 export interface ProcessFileOptions {
@@ -32,7 +34,7 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 	const autoResizeImages = options?.autoResizeImages ?? true;
 	let text = "";
 	const images: ImageContent[] = [];
-
+	const audio: AudioContent[] = [];
 	for (const fileArg of fileArgs) {
 		// Expand and resolve path (handles ~ expansion and macOS screenshot Unicode spaces)
 		const absolutePath = path.resolve(resolveReadPath(fileArg, getProjectDir()));
@@ -45,8 +47,9 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 
 		const imageMetadata = await readImageMetadata(absolutePath);
 		const mimeType = imageMetadata?.mimeType;
+		const audioMimeType = mimeType ? null : await detectSupportedAudioMimeTypeFromFile(absolutePath);
 		const ext = path.extname(absolutePath).toLowerCase();
-		const maxBytes = mimeType ? MAX_CLI_IMAGE_BYTES : MAX_CLI_TEXT_BYTES;
+		const maxBytes = mimeType ? MAX_CLI_IMAGE_BYTES : audioMimeType ? MAX_AUDIO_INPUT_BYTES : MAX_CLI_TEXT_BYTES;
 		if (stat.size > maxBytes) {
 			console.error(
 				chalk.yellow(`Warning: Skipping file contents (too large: ${formatBytes(stat.size)}): ${absolutePath}`),
@@ -55,6 +58,31 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 			continue;
 		}
 
+		if (audioMimeType) {
+			try {
+				const audioInput = await loadAudioInput({
+					path: fileArg,
+					cwd: getProjectDir(),
+					resolvedPath: absolutePath,
+					detectedMimeType: audioMimeType,
+					maxBytes,
+				});
+				if (audioInput) {
+					audio.push({
+						type: "audio",
+						data: audioInput.data,
+						mimeType: audioInput.mimeType,
+						...(audioInput.format ? { format: audioInput.format } : {}),
+					});
+					text += `<file name="${absolutePath}">${audioInput.textNote}</file>\n`;
+				}
+				continue;
+			} catch (err) {
+				const message = err instanceof Error ? err.message : String(err);
+				console.error(chalk.red(`Error: Could not read audio file ${absolutePath}: ${message}`));
+				process.exit(1);
+			}
+		}
 		// Read file, handling not-found gracefully
 		let buffer: Uint8Array;
 		try {
@@ -129,5 +157,57 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 		}
 	}
 
-	return { text, images };
+	return { text, images, audio };
+}
+
+/**
+ * Process explicit `--audio` arguments strictly through the audio loader.
+ * Unlike generic @file args, an unrecognized/unsupported audio container is an
+ * error rather than a silent fallback to text decoding.
+ */
+export async function processAudioArguments(audioArgs: string[]): Promise<AudioContent[]> {
+	const audio: AudioContent[] = [];
+	for (const fileArg of audioArgs) {
+		const absolutePath = path.resolve(resolveReadPath(fileArg, getProjectDir()));
+		const stat = fs.statSync(absolutePath, { throwIfNoEntry: false });
+		if (!stat) {
+			console.error(chalk.red(`Error: Audio file not found: ${fileArg}`));
+			process.exit(1);
+		}
+		if (stat.size > MAX_AUDIO_INPUT_BYTES) {
+			console.error(
+				chalk.red(
+					`Error: Audio file too large: ${fileArg} (${formatBytes(stat.size)} exceeds ${formatBytes(MAX_AUDIO_INPUT_BYTES)})`,
+				),
+			);
+			process.exit(1);
+		}
+		const detected = await detectSupportedAudioMimeTypeFromFile(absolutePath);
+		if (!detected) {
+			console.error(
+				chalk.red(
+					`Error: Could not load audio from ${fileArg}: unsupported or unrecognized audio format. Supported: WAV, MP3, AAC, AIFF, OGG, FLAC, M4A.`,
+				),
+			);
+			process.exit(1);
+		}
+		const loaded = await loadAudioInput({
+			path: fileArg,
+			cwd: getProjectDir(),
+			resolvedPath: absolutePath,
+			detectedMimeType: detected,
+			maxBytes: MAX_AUDIO_INPUT_BYTES,
+		});
+		if (!loaded) {
+			console.error(chalk.red(`Error: Could not load audio from ${fileArg}.`));
+			process.exit(1);
+		}
+		audio.push({
+			type: "audio",
+			data: loaded.data,
+			mimeType: loaded.mimeType,
+			...(loaded.format ? { format: loaded.format } : {}),
+		});
+	}
+	return audio;
 }

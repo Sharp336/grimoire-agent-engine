@@ -9,6 +9,7 @@ import { ProviderHttpError } from "../errors";
 import type {
 	Api,
 	AssistantMessage,
+	AudioContent,
 	Context,
 	FetchImpl,
 	ImageContent,
@@ -156,6 +157,25 @@ function isGemini3Model(modelId: string): boolean {
 }
 
 /**
+ * Gemini's Generative Language API caps the total inline request body around
+ * ~20 MB (prompt + inline files combined). Base64 audio expands raw bytes
+ * ~1.34x and the agent's system prompt/history already consume part of that
+ * budget, so an oversized inline clip would fail with an opaque provider
+ * 400/413. Cap each inline audio block conservatively and surface a clear
+ * note otherwise (full support would require the Files API).
+ */
+const GEMINI_INLINE_AUDIO_MAX_BYTES = 10 * 1024 * 1024;
+
+function geminiAudioInlinePart(block: AudioContent): Part {
+	if (block.data.length > GEMINI_INLINE_AUDIO_MAX_BYTES) {
+		return {
+			text: "[audio omitted: exceeds Gemini's inline request size limit; use a shorter clip]",
+		};
+	}
+	return { inlineData: { mimeType: block.mimeType, data: block.data } };
+}
+
+/**
  * Convert internal messages to Gemini Content[] format.
  */
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
@@ -190,26 +210,37 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				});
 			} else {
 				const supportsImages = model.input.includes("image");
+				const supportsAudio = model.input.includes("audio");
 				const parts: Part[] = [];
 				let omittedImages = false;
+				let omittedAudio = false;
 				for (const item of msg.content) {
 					if (item.type === "text") {
 						const text = item.text.toWellFormed();
 						if (text.trim().length === 0) continue;
 						parts.push({ text });
-					} else if (supportsImages) {
-						parts.push({
-							inlineData: {
-								mimeType: item.mimeType,
-								data: item.data,
-							},
-						});
+					} else if (item.type === "image") {
+						if (supportsImages) {
+							parts.push({
+								inlineData: {
+									mimeType: item.mimeType,
+									data: item.data,
+								},
+							});
+						} else {
+							omittedImages = true;
+						}
+					} else if (supportsAudio) {
+						parts.push(geminiAudioInlinePart(item));
 					} else {
-						omittedImages = true;
+						omittedAudio = true;
 					}
 				}
 				if (omittedImages) {
 					parts.push({ text: NON_VISION_IMAGE_PLACEHOLDER });
+				}
+				if (omittedAudio) {
+					parts.push({ text: "[audio omitted: model does not support audio input]" });
 				}
 				if (parts.length === 0) continue;
 				contents.push({
@@ -276,29 +307,42 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				parts,
 			});
 		} else if (msg.role === "toolResult") {
-			// Extract text and image content
+			// Extract text and media content
 			const supportsImages = model.input.includes("image");
+			const supportsAudio = model.input.includes("audio");
 			const textContent = msg.content.filter((c): c is TextContent => c.type === "text");
 			const textResult = textContent.map(c => c.text).join("\n");
 			const imageContent = supportsImages ? msg.content.filter((c): c is ImageContent => c.type === "image") : [];
+			const audioContent = supportsAudio ? msg.content.filter((c): c is AudioContent => c.type === "audio") : [];
 			const omittedImages = !supportsImages && msg.content.some((c): c is ImageContent => c.type === "image");
+			const omittedAudio = !supportsAudio && msg.content.some((c): c is AudioContent => c.type === "audio");
 
 			const hasText = textResult.length > 0;
 			const hasImages = imageContent.length > 0;
+			const hasAudio = audioContent.length > 0;
 
-			// Gemini 3+ models support multimodal function responses with images nested inside
+			// Gemini 3+ models support multimodal function responses with media nested inside
 			// functionResponse.parts. Claude and other non-Gemini models behind Cloud Code Assist /
-			// Antigravity also accept this shape. Gemini < 3 still needs a separate user image turn.
+			// Antigravity also accept this shape. Gemini < 3 still needs a separate user media turn.
 			const modelSupportsMultimodalFunctionResponse = supportsMultimodalFunctionResponse(model.id);
 
 			// Use "output" key for success, "error" key for errors as per SDK documentation
-			const responseValue = omittedImages
-				? [hasText ? textResult.toWellFormed() : "", NON_VISION_IMAGE_PLACEHOLDER].filter(Boolean).join("\n")
-				: hasText
-					? textResult.toWellFormed()
-					: hasImages
-						? "(see attached image)"
-						: "";
+			const responseValue =
+				omittedImages || omittedAudio
+					? [
+							hasText ? textResult.toWellFormed() : "",
+							omittedImages ? NON_VISION_IMAGE_PLACEHOLDER : "",
+							omittedAudio ? "[audio omitted: model does not support audio input]" : "",
+						]
+							.filter(Boolean)
+							.join("\n")
+					: hasText
+						? textResult.toWellFormed()
+						: hasImages
+							? "(see attached image)"
+							: hasAudio
+								? "(see attached audio)"
+								: "";
 
 			const imageParts: Part[] = imageContent.map(imageBlock => ({
 				inlineData: {
@@ -306,13 +350,15 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					data: imageBlock.data,
 				},
 			}));
+			const audioParts: Part[] = audioContent.map(audioBlock => geminiAudioInlinePart(audioBlock));
+			const mediaParts = [...imageParts, ...audioParts];
 
 			const includeId = requiresToolCallId(model.id);
 			const functionResponsePart: Part = {
 				functionResponse: {
 					name: msg.toolName,
 					response: msg.isError ? { error: responseValue } : { output: responseValue },
-					...(hasImages && modelSupportsMultimodalFunctionResponse && { parts: imageParts }),
+					...((hasImages || hasAudio) && modelSupportsMultimodalFunctionResponse && { parts: mediaParts }),
 					...(includeId ? { id: msg.toolCallId } : {}),
 				},
 			};
@@ -333,9 +379,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 				});
 			}
 
-			// For Gemini < 3, buffer images for a separate user message after the functionResponse turn
-			if (hasImages && !modelSupportsMultimodalFunctionResponse) {
-				pendingToolImageParts.push({ text: "Tool result image:" }, ...imageParts);
+			// For Gemini < 3, buffer media for a separate user message after the functionResponse turn
+			if ((hasImages || hasAudio) && !modelSupportsMultimodalFunctionResponse) {
+				pendingToolImageParts.push({ text: "Tool result media:" }, ...mediaParts);
 			}
 		}
 	}

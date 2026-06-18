@@ -122,6 +122,7 @@ import type {
 	Tool,
 	ToolCall,
 	ToolResultMessage,
+	UserContent,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -1890,7 +1891,9 @@ function buildMcpResultFromToolResult(_mcpCall: CursorMcpCall, toolResult: ToolR
 		return create(McpToolResultContentItemSchema, {
 			content: {
 				case: "text",
-				value: create(McpTextContentSchema, { text: item.text }),
+				value: create(McpTextContentSchema, {
+					text: item.type === "audio" ? `[audio: ${item.mimeType}]` : item.text,
+				}),
 			},
 		});
 	});
@@ -2197,8 +2200,8 @@ function extractUserMessageText(msg: Message): string {
 	const content = msg.content;
 	if (typeof content === "string") return content.trim();
 	const text = content
-		.filter((c): c is TextContent => c.type === "text")
-		.map(c => c.text)
+		.map(c => (c.type === "text" ? c.text : c.type === "audio" ? `[audio: ${c.mimeType}]` : ""))
+		.filter(Boolean)
 		.join("\n");
 	return text.trim();
 }
@@ -2213,7 +2216,7 @@ function hasUserMessageImages(msg: Message): boolean {
 
 type CursorRootPromptContentPart = { type: "text"; text: string } | { type: "image"; image: string; mediaType: string };
 
-function buildCursorRootPromptContent(content: string | (TextContent | ImageContent)[]): CursorRootPromptContentPart[] {
+function buildCursorRootPromptContent(content: string | UserContent[]): CursorRootPromptContentPart[] {
 	if (typeof content === "string") {
 		const text = content.trim();
 		return text ? [{ type: "text", text }] : [];
@@ -2225,14 +2228,16 @@ function buildCursorRootPromptContent(content: string | (TextContent | ImageCont
 			if (text) {
 				parts.push({ type: "text", text });
 			}
-		} else {
+		} else if (item.type === "image") {
 			parts.push({ type: "image", image: item.data, mediaType: item.mimeType });
+		} else {
+			parts.push({ type: "text", text: `[audio: ${item.mimeType}]` });
 		}
 	}
 	return parts;
 }
 
-function cursorUserContentKey(content: string | (TextContent | ImageContent)[]): string {
+function cursorUserContentKey(content: string | UserContent[]): string {
 	if (typeof content === "string") {
 		return content.trim();
 	}
@@ -2487,11 +2492,7 @@ export function buildCursorHistoryForTest(
 	}
 	return { rootPromptMessagesJson, turnUserMessagesJson, turnStepMessagesJson };
 }
-function createCursorUserMessage(
-	content: string | (TextContent | ImageContent)[],
-	text: string,
-	messageId = crypto.randomUUID(),
-) {
+function createCursorUserMessage(content: string | UserContent[], text: string, messageId = crypto.randomUUID()) {
 	const images = typeof content === "string" ? [] : extractImages(content);
 	return create(UserMessageSchema, {
 		text,
@@ -2506,7 +2507,7 @@ function createCursorUserMessage(
 	});
 }
 
-function extractImages(content: (TextContent | ImageContent)[]) {
+function extractImages(content: UserContent[]) {
 	return content
 		.filter((item): item is ImageContent => item.type === "image")
 		.map(image =>
@@ -2545,7 +2546,7 @@ function buildGrpcRequest(
 	const activeMessage = context.messages[activeUserMessageIndex];
 	const activeUserMessage =
 		activeMessage?.role === "user" || activeMessage?.role === "developer" ? activeMessage : undefined;
-	let userContent: string | (TextContent | ImageContent)[] | undefined;
+	let userContent: string | UserContent[] | undefined;
 	let userText = "";
 	let hasUserImages = false;
 	if (activeUserMessage?.role === "user" || activeUserMessage?.role === "developer") {
@@ -2663,12 +2664,12 @@ function buildGrpcRequest(
 	return { requestBytes, blobStore, conversationState };
 }
 
-function hasImages(content: (TextContent | ImageContent)[]): boolean {
+function hasImages(content: UserContent[]): boolean {
 	return content.some(item => item.type === "image");
 }
-function extractText(content: (TextContent | ImageContent)[]): string {
+function extractText(content: UserContent[]): string {
 	return content
-		.filter((c): c is TextContent => c.type === "text")
-		.map(c => c.text)
+		.map(c => (c.type === "text" ? c.text : c.type === "audio" ? `[audio: ${c.mimeType}]` : ""))
+		.filter(Boolean)
 		.join("\n");
 }

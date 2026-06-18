@@ -2853,7 +2853,7 @@ export declare namespace ResponseInputAudio {
 /**
  * A text input to the model.
  */
-export type ResponseInputContent = ResponseInputText | ResponseInputImage | ResponseInputFile;
+export type ResponseInputContent = ResponseInputText | ResponseInputImage | ResponseInputFile | ResponseInputAudio;
 /**
  * A file input to the model.
  */

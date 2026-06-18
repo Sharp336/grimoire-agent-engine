@@ -13,6 +13,7 @@ import type {
 	Tool,
 	ToolChoice,
 	ToolResultMessage,
+	UserContent,
 	UserMessage,
 } from "../types";
 import { normalizeSystemPrompts } from "../utils";
@@ -174,7 +175,7 @@ function selectToolsForToolChoice(tools: Tool[] | undefined, toolChoice: ToolCho
 	return [];
 }
 
-function toPlainContent(content: string | Array<{ type: "text" | "image"; text?: string; data?: string }>): {
+function toPlainContent(content: string | UserContent[]): {
 	content: string;
 	images?: string[];
 } {
@@ -184,11 +185,12 @@ function toPlainContent(content: string | Array<{ type: "text" | "image"; text?:
 	const textParts: string[] = [];
 	const images: string[] = [];
 	for (const block of content) {
-		if (block.type === "text" && typeof block.text === "string") {
+		if (block.type === "text") {
 			textParts.push(block.text);
-		}
-		if (block.type === "image" && typeof block.data === "string") {
+		} else if (block.type === "image") {
 			images.push(block.data);
+		} else {
+			textParts.push(`[audio: ${block.mimeType}]`);
 		}
 	}
 	return {

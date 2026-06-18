@@ -1,5 +1,6 @@
 import {
 	type BlobStore,
+	externalizeAudioDataSync,
 	externalizeImageDataSync,
 	externalizeImageDataUrlSync,
 	isBlobRef,
@@ -36,6 +37,17 @@ export function isImageBlock(value: unknown): value is { type: "image"; data: st
 	);
 }
 
+export function isAudioBlock(value: unknown): value is { type: "audio"; data: string; mimeType?: string } {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		"type" in value &&
+		value.type === "audio" &&
+		"data" in value &&
+		typeof value.data === "string"
+	);
+}
+
 function isImageMimeType(value: unknown): value is string {
 	return typeof value === "string" && value.toLowerCase().startsWith("image/");
 }
@@ -59,6 +71,15 @@ function shouldExternalizeImagePayload(
 	return (key === TEXT_CONTENT_KEY && isImageBlock(value)) || key === "images";
 }
 
+function shouldExternalizeAudioPayload(
+	value: unknown,
+	key: string | undefined,
+): value is { data: string; mimeType?: string } {
+	if (!isAudioBlock(value)) return false;
+	if (isBlobRef(value.data) || value.data.length < BLOB_EXTERNALIZE_THRESHOLD) return false;
+	return key === TEXT_CONTENT_KEY || key === "audio";
+}
+
 /**
  * Recursively truncate large strings in an object for session persistence.
  * - Truncates any oversized string fields (key-agnostic)
@@ -75,6 +96,9 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 	if (obj === null || obj === undefined) return obj;
 	if (shouldExternalizeImagePayload(obj, key)) {
 		return { ...obj, data: externalizeImageDataSync(blobStore, obj.data, obj.mimeType) };
+	}
+	if (shouldExternalizeAudioPayload(obj, key)) {
+		return { ...obj, data: externalizeAudioDataSync(blobStore, obj.data, obj.mimeType) };
 	}
 
 	if (typeof obj === "string") {

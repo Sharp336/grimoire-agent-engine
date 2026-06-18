@@ -2682,7 +2682,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -2711,7 +2712,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -2740,7 +2742,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -2769,7 +2772,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -15580,7 +15584,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -16853,7 +16858,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -16873,7 +16879,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.075,
@@ -16893,7 +16900,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.3,
@@ -16922,7 +16930,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -16951,7 +16960,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -16980,7 +16990,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -17009,7 +17020,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.15,
@@ -17038,7 +17050,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.15,
@@ -17067,7 +17080,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.3,
@@ -17096,7 +17110,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -17126,7 +17141,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -17156,7 +17172,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -17448,7 +17465,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.5,
@@ -17476,7 +17494,8 @@
 			"baseUrl": "https://generativelanguage.googleapis.com/v1beta",
 			"reasoning": true,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0.5,
@@ -17878,7 +17897,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -17914,7 +17934,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -18091,7 +18112,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -18111,7 +18133,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -18147,7 +18170,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -18599,7 +18623,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.3,
@@ -18628,7 +18653,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -18657,7 +18683,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -22670,7 +22697,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -22690,7 +22718,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.075,
@@ -22710,7 +22739,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.3,
@@ -22738,7 +22768,8 @@
 			"baseUrl": "https://api.kilo.ai/api/gateway",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -22758,7 +22789,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -22787,7 +22819,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -22816,7 +22849,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -22846,7 +22880,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -22876,7 +22911,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -26258,7 +26294,8 @@
 			"baseUrl": "https://api.kilo.ai/api/gateway",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 2.5,
@@ -27081,7 +27118,8 @@
 			"baseUrl": "https://api.kilo.ai/api/gateway",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -27100,7 +27138,8 @@
 			"baseUrl": "https://api.kilo.ai/api/gateway",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -37095,7 +37134,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1003,
@@ -37115,7 +37155,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.075,
@@ -37134,7 +37175,8 @@
 			"baseUrl": "https://nano-gpt.com/api/v1",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -37153,7 +37195,8 @@
 			"baseUrl": "https://nano-gpt.com/api/v1",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -37172,7 +37215,8 @@
 			"baseUrl": "https://nano-gpt.com/api/v1",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -37191,7 +37235,8 @@
 			"baseUrl": "https://nano-gpt.com/api/v1",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -37211,7 +37256,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.3,
@@ -37240,7 +37286,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -37269,7 +37316,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -37298,7 +37346,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -37333,7 +37382,8 @@
 			"baseUrl": "https://nano-gpt.com/api/v1",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -37353,7 +37403,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.15,
@@ -37382,7 +37433,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.15,
@@ -37411,7 +37463,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.3,
@@ -37447,7 +37500,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -37484,7 +37538,8 @@
 			"baseUrl": "https://nano-gpt.com/api/v1",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -37503,7 +37558,8 @@
 			"baseUrl": "https://nano-gpt.com/api/v1",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0,
@@ -37523,7 +37579,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -37553,7 +37610,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -60501,7 +60559,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.09999999999999999,
@@ -60521,7 +60580,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.075,
@@ -60541,7 +60601,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.3,
@@ -60570,7 +60631,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.09999999999999999,
@@ -60599,7 +60661,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.09999999999999999,
@@ -60628,7 +60691,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.3,
@@ -60657,7 +60721,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -60687,7 +60752,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -60717,7 +60783,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,
@@ -63225,7 +63292,8 @@
 			"provider": "openrouter",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 2.5,
@@ -63973,7 +64041,8 @@
 			"baseUrl": "https://openrouter.ai/api/v1",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 2.5,
@@ -63992,7 +64061,8 @@
 			"baseUrl": "https://openrouter.ai/api/v1",
 			"reasoning": false,
 			"input": [
-				"text"
+				"text",
+				"audio"
 			],
 			"cost": {
 				"input": 0.6,
@@ -80898,7 +80968,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.15,
@@ -80918,7 +80989,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.075,
@@ -80938,7 +81010,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.3,
@@ -80967,7 +81040,8 @@
 			"reasoning": false,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 0.1,
@@ -80987,7 +81061,8 @@
 			"reasoning": true,
 			"input": [
 				"text",
-				"image"
+				"image",
+				"audio"
 			],
 			"cost": {
 				"input": 1.25,

@@ -5,17 +5,16 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	Effort,
-	ImageContent,
 	Message,
 	Model,
 	SimpleStreamOptions,
 	Static,
 	streamSimple,
-	TextContent,
 	Tool,
 	ToolChoice,
 	ToolResultMessage,
 	TSchema,
+	UserContent,
 } from "@oh-my-pi/pi-ai";
 import type { Dialect } from "@oh-my-pi/pi-ai/dialect";
 import type { HarmonyAuditEvent } from "@oh-my-pi/pi-ai/utils/harmony-leak";
@@ -367,7 +366,7 @@ export interface BeforeToolCallResult {
  */
 export interface AfterToolCallResult {
 	/** If provided, replaces the tool result content array in full. */
-	content?: (TextContent | ImageContent)[];
+	content?: UserContent[];
 	/** If provided, replaces the tool result details payload in full. */
 	details?: unknown;
 	/** If provided, replaces the error flag carried with the tool result. */
@@ -450,7 +449,7 @@ export interface AgentState {
 
 export interface AgentToolResult<T = any, _TInput = unknown> {
 	// Content blocks supporting text and images
-	content: (TextContent | ImageContent)[];
+	content: UserContent[];
 	// Details to be displayed in a UI or logged
 	details?: T;
 	// Marks a non-throwing failure (e.g. an aggregator catching per-entry errors).

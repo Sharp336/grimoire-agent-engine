@@ -9,6 +9,7 @@ import type { AuthGatewayStreamControl, AuthGatewayParsedRequest as ParsedReques
 import type {
 	AssistantMessage,
 	AssistantMessageEventStream,
+	AudioContent,
 	Context,
 	ImageContent,
 	Message,
@@ -19,6 +20,7 @@ import type {
 	ToolCall,
 	ToolResultMessage,
 	TSchema,
+	UserContent,
 } from "../types";
 import {
 	type OpenAIChatContentPart,
@@ -186,21 +188,29 @@ function stringifyContent(content: string | OpenAIChatContentPart[] | undefined)
 	return out.join("");
 }
 
-function parseUserLikeContent(
-	content: string | OpenAIChatContentPart[] | undefined,
-): string | (TextContent | ImageContent)[] {
+function audioMimeTypeFromOpenAIFormat(format: "mp3" | "wav"): string {
+	return format === "mp3" ? "audio/mpeg" : "audio/wav";
+}
+
+function parseUserLikeContent(content: string | OpenAIChatContentPart[] | undefined): string | UserContent[] {
 	if (content === undefined) return "";
 	if (typeof content === "string") return content;
-	const parts: (TextContent | ImageContent)[] = [];
+	const parts: UserContent[] = [];
 	for (const part of content) {
 		if (part.type === "text") {
 			parts.push({ type: "text", text: part.text });
 			continue;
 		}
+		if (part.type === "input_audio") {
+			parts.push({
+				type: "audio",
+				data: part.input_audio.data,
+				mimeType: audioMimeTypeFromOpenAIFormat(part.input_audio.format),
+				format: part.input_audio.format,
+			});
+			continue;
+		}
 		if (part.type !== "image_url") continue;
-		// input_audio / file / refusal / unknown-type parts are accepted by the
-		// schema for forward-compat but dropped here — pi-ai's canonical user
-		// content only models text and image today.
 		const url = typeof part.image_url === "string" ? part.image_url : part.image_url.url;
 		const decoded = decodeDataUri(url);
 		if (decoded) {
@@ -299,6 +309,7 @@ function pushToolResultMessages(
 ): void {
 	const textParts: TextContent[] = [];
 	const imageParts: ImageContent[] = [];
+	const audioParts: AudioContent[] = [];
 
 	if (typeof content === "string") {
 		if (content.length > 0) textParts.push({ type: "text", text: content });
@@ -306,6 +317,15 @@ function pushToolResultMessages(
 		for (const part of content) {
 			if (part.type === "text") {
 				textParts.push({ type: "text", text: part.text });
+				continue;
+			}
+			if (part.type === "input_audio") {
+				audioParts.push({
+					type: "audio",
+					data: part.input_audio.data,
+					mimeType: audioMimeTypeFromOpenAIFormat(part.input_audio.format),
+					format: part.input_audio.format,
+				});
 				continue;
 			}
 			if (part.type !== "image_url") continue;
@@ -332,10 +352,10 @@ function pushToolResultMessages(
 	};
 	messages.push(toolMsg);
 
-	if (imageParts.length > 0) {
+	if (imageParts.length > 0 || audioParts.length > 0) {
 		messages.push({
 			role: "user",
-			content: imageParts,
+			content: [...imageParts, ...audioParts],
 			timestamp: now,
 		});
 	}

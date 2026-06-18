@@ -14,7 +14,7 @@ import {
 	stripBracketedModelIdAffixes,
 } from "@oh-my-pi/pi-catalog/identity";
 import { fetchLmStudioNativeModelMetadata } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import type { ModelInputModality, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ProviderDiscovery } from "./models-config-schema";
 
@@ -108,13 +108,13 @@ export interface DiscoveryContext {
 
 type OllamaDiscoveredModelMetadata = {
 	reasoning: boolean;
-	input: ("text" | "image")[];
+	input: ModelInputModality[];
 	contextWindow?: number;
 };
 
 type LlamaCppDiscoveredServerMetadata = {
 	contextWindow?: number;
-	input?: ("text" | "image")[];
+	input?: ModelInputModality[];
 };
 
 function toPositiveNumberOrUndefined(value: unknown): number | undefined {
@@ -162,12 +162,15 @@ function extractLlamaCppContextWindow(payload: Record<string, unknown>): number 
 	return toPositiveNumberOrUndefined(payload.n_ctx);
 }
 
-function extractLlamaCppInputCapabilities(payload: Record<string, unknown>): ("text" | "image")[] | undefined {
+function extractLlamaCppInputCapabilities(payload: Record<string, unknown>): ModelInputModality[] | undefined {
 	const modalities = payload.modalities;
 	if (!isRecord(modalities)) {
 		return undefined;
 	}
-	return modalities.vision === true ? ["text", "image"] : ["text"];
+	const input: ModelInputModality[] = ["text"];
+	if (modalities.vision === true || modalities.image === true) input.push("image");
+	if (modalities.audio === true) input.push("audio");
+	return input;
 }
 
 export function discoverModelsByProviderType(
@@ -215,9 +218,11 @@ async function discoverOllamaModelMetadata(
 				capabilities.flatMap(capability => (typeof capability === "string" ? [capability.toLowerCase()] : [])),
 			);
 			const supportsVision = normalized.has("vision") || normalized.has("image");
+			const input: ModelInputModality[] = ["text"];
+			if (supportsVision) input.push("image");
 			return {
 				reasoning: normalized.has("thinking"),
-				input: supportsVision ? ["text", "image"] : ["text"],
+				input,
 				contextWindow,
 			};
 		}
@@ -229,9 +234,11 @@ async function discoverOllamaModelMetadata(
 			};
 		}
 		const supportsVision = capabilities.vision === true || capabilities.image === true;
+		const input: ModelInputModality[] = ["text"];
+		if (supportsVision) input.push("image");
 		return {
 			reasoning: capabilities.thinking === true,
-			input: supportsVision ? ["text", "image"] : ["text"],
+			input,
 			contextWindow,
 		};
 	} catch {

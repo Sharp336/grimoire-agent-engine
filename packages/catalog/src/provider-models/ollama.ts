@@ -2,7 +2,7 @@ import { fetchWithRetry } from "@oh-my-pi/pi-utils";
 import { Effort } from "../effort";
 import { isGlm52ReasoningEffortModelId } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
-import type { FetchImpl, ThinkingConfig } from "../types";
+import type { FetchImpl, ModelInputModality, ThinkingConfig } from "../types";
 import { createBundledReferenceMap, createReferenceResolver } from "./bundled-references";
 
 export interface OllamaCloudModelManagerConfig {
@@ -140,9 +140,9 @@ export function ollamaCloudModelManagerOptions(
 					const thinking = capabilities ? getThinkingConfig(id, capabilities) : reference?.thinking;
 					const input = capabilities
 						? capabilities.includes("vision")
-							? (["text", "image"] as Array<"text" | "image">)
-							: (["text"] as Array<"text">)
-						: ((reference?.input as Array<"text" | "image"> | undefined) ?? (["text"] as Array<"text">));
+							? (["text", "image"] as ModelInputModality[])
+							: (["text"] as ModelInputModality[])
+						: ((reference?.input as ModelInputModality[] | undefined) ?? (["text"] as ModelInputModality[]));
 					const resolvedName = entry.name && entry.name !== id ? entry.name : (reference?.name ?? id);
 					return {
 						id,

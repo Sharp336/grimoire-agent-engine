@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { TextContent, UserContent } from "@oh-my-pi/pi-ai";
 import { createSessionRuntime } from "@oh-my-pi/pi-coding-agent/autoresearch/state";
 import {
 	type AutoresearchStorage,
@@ -23,7 +23,7 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-function firstTextBlockText(content: Array<TextContent | ImageContent>): string {
+function firstTextBlockText(content: UserContent[]): string {
 	const block = content.find((c): c is TextContent => c.type === "text");
 	if (!block) throw new Error("expected a text tool content block");
 	return block.text;

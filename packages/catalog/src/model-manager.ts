@@ -1,7 +1,7 @@
 import { buildModel } from "./build";
 import { readModelCache, writeModelCache } from "./model-cache";
 import { type GeneratedProvider, getBundledModels } from "./models";
-import type { Api, Model, ModelSpec, Provider } from "./types";
+import type { Api, Model, ModelInputModality, ModelSpec, Provider } from "./types";
 import { isRecord } from "./utils";
 import { collapseBuiltModelVariants } from "./variant-collapse";
 
@@ -324,8 +324,19 @@ function fingerprintStatic<TApi extends Api>(
 	return fingerprint;
 }
 
+function mergeModelInput(
+	existing: readonly ModelInputModality[],
+	dynamic: readonly ModelInputModality[],
+): ModelInputModality[] {
+	const merged = new Set<ModelInputModality>([...existing, ...dynamic]);
+	const input: ModelInputModality[] = ["text"];
+	if (merged.has("image")) input.push("image");
+	if (merged.has("audio")) input.push("audio");
+	return input;
+}
+
 function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamicModel: Model<TApi>): Model<TApi> {
-	const supportsImage = existingModel.input.includes("image") || dynamicModel.input.includes("image");
+	const input = mergeModelInput(existingModel.input, dynamicModel.input);
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
 	// verbatim override vocabulary), never the resolved `compat` record.
 	return buildModel({
@@ -333,7 +344,7 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 		...dynamicModel,
 		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning: existingModel.reasoning || dynamicModel.reasoning,
-		input: supportsImage ? ["text", "image"] : ["text"],
+		input,
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),
 			output: preferDiscoveryCost(dynamicModel.cost.output, existingModel.cost.output),
@@ -443,13 +454,13 @@ function isModelLike(value: unknown): value is ModelSpec<Api> {
 	return true;
 }
 
-function isModelInputArray(value: unknown): value is ("text" | "image")[] {
+function isModelInputArray(value: unknown): value is Model<Api>["input"] {
 	if (!Array.isArray(value) || value.length === 0) {
 		return false;
 	}
 	for (let i = 0; i < value.length; i++) {
 		const item = value[i];
-		if (item !== "text" && item !== "image") {
+		if (item !== "text" && item !== "image" && item !== "audio") {
 			return false;
 		}
 	}

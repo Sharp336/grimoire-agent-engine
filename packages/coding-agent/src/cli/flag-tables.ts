@@ -188,6 +188,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 		result.pluginDirs = result.pluginDirs ?? [];
 		result.pluginDirs.push(value);
 	},
+	"--audio": (result, value) => {
+		result.audio.push(value);
+	},
 	"--skills": (result, value) => {
 		result.skills = value.split(",").map(s => s.trim());
 	},

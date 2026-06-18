@@ -1,16 +1,18 @@
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { AudioContent, ImageContent } from "@oh-my-pi/pi-ai";
 import type { Args } from "./args";
 
 export interface InitialMessageInput {
 	parsed: Args;
 	fileText?: string;
 	fileImages?: ImageContent[];
+	fileAudio?: AudioContent[];
 	stdinContent?: string;
 }
 
 export interface InitialMessageResult {
 	initialMessage?: string;
 	initialImages?: ImageContent[];
+	initialAudio?: AudioContent[];
 }
 
 /**
@@ -21,12 +23,18 @@ export function buildInitialMessage({
 	parsed,
 	fileText,
 	fileImages,
+	fileAudio,
 	stdinContent,
 }: InitialMessageInput): InitialMessageResult {
-	const hasInitialContext = stdinContent !== undefined || fileText !== undefined || (fileImages?.length ?? 0) > 0;
+	const hasInitialContext =
+		stdinContent !== undefined ||
+		fileText !== undefined ||
+		(fileImages?.length ?? 0) > 0 ||
+		(fileAudio?.length ?? 0) > 0;
 	if (!hasInitialContext) {
 		return {
 			initialImages: undefined,
+			initialAudio: undefined,
 		};
 	}
 
@@ -49,10 +57,13 @@ export function buildInitialMessage({
 				? body
 				: fileImages && fileImages.length > 0
 					? ""
-					: undefined;
+					: fileAudio && fileAudio.length > 0
+						? ""
+						: undefined;
 
 	return {
 		initialMessage,
 		initialImages: fileImages && fileImages.length > 0 ? fileImages : undefined,
+		initialAudio: fileAudio && fileAudio.length > 0 ? fileAudio : undefined,
 	};
 }

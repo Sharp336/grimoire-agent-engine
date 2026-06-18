@@ -7,6 +7,7 @@ function createArgs(messages: string[]): Args {
 	return {
 		messages,
 		fileArgs: [],
+		audio: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
 	};

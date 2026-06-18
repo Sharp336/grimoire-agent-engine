@@ -1,7 +1,7 @@
 import { type } from "arktype";
 import { getBundledModels } from "../models";
 import { toModelSpec } from "../provider-models/bundled-references";
-import type { FetchImpl, Model, ModelSpec } from "../types";
+import type { FetchImpl, Model, ModelInputModality, ModelSpec } from "../types";
 
 const GOOGLE_GENERATIVE_AI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta";
 const DEFAULT_PAGE_SIZE = 100;
@@ -250,10 +250,14 @@ function inferReasoningFromGeminiId(id: string): boolean {
 	return false;
 }
 
-function inferInputFromGeminiId(id: string): ("text" | "image")[] {
+function inferInputFromGeminiId(id: string): ModelInputModality[] {
 	const normalized = id.toLowerCase();
+	const input: ModelInputModality[] = ["text"];
 	if (normalized.includes("vision") || normalized.includes("image") || normalized.includes("gemini")) {
-		return ["text", "image"];
+		input.push("image");
 	}
-	return ["text"];
+	if (normalized.includes("audio") || normalized.includes("live")) {
+		input.push("audio");
+	}
+	return input;
 }

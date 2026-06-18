@@ -8,7 +8,7 @@ import * as fsSync from "node:fs";
 import * as os from "node:os";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent } from "@oh-my-pi/pi-ai";
+import type { AudioContent, ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	$env,
 	getLogPath,
@@ -23,7 +23,7 @@ import chalk from "chalk";
 import { reset as resetCapabilities } from "./capability";
 import { type Args, reportUnrecognizedFlags } from "./cli/args";
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
-import { processFileArguments } from "./cli/file-processor";
+import { processAudioArguments, processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
@@ -383,6 +383,7 @@ async function runInteractiveMode(
 	eventBus?: EventBus,
 	initialMessage?: string,
 	initialImages?: ImageContent[],
+	initialAudio?: AudioContent[],
 	titleSystemPrompt?: string,
 	joinLink?: string,
 ): Promise<void> {
@@ -470,7 +471,7 @@ async function runInteractiveMode(
 	if (initialMessage !== undefined) {
 		try {
 			using _keepalive = new EventLoopKeepalive();
-			await session.prompt(initialMessage, { images: initialImages });
+			await session.prompt(initialMessage, { images: initialImages, audio: initialAudio });
 		} catch (error: unknown) {
 			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
 			mode.showError(errorMessage);
@@ -1250,18 +1251,23 @@ export async function runRootCommand(
 		if (reportUnrecognizedFlags(initialArgs)) {
 			process.exit(2);
 		}
+		const fileArgs = initialArgs.fileArgs;
 		const processedFiles =
-			initialArgs.fileArgs.length > 0
+			fileArgs.length > 0
 				? await logger.time("processFileArguments", () =>
-						processFileArguments(initialArgs.fileArgs, {
+						processFileArguments(fileArgs, {
 							autoResizeImages: settingsInstance.get("images.autoResize"),
 						}),
 					)
 				: undefined;
-		const { initialMessage, initialImages } = buildInitialMessage({
+		// --audio paths are loaded strictly through the audio loader: an
+		// unsupported container is an error, not a silent text fallback.
+		const processedAudio = initialArgs.audio.length > 0 ? await processAudioArguments(initialArgs.audio) : undefined;
+		const { initialMessage, initialImages, initialAudio } = buildInitialMessage({
 			parsed: initialArgs,
 			fileText: processedFiles?.text,
 			fileImages: processedFiles?.images,
+			fileAudio: [...(processedFiles?.audio ?? []), ...(processedAudio ?? [])],
 			stdinContent: pipedInput,
 		});
 
@@ -1323,6 +1329,18 @@ export async function runRootCommand(
 			process.exit(1);
 		}
 
+		// Fail fast when audio was attached but the active model can't hear it:
+		// otherwise the provider adapter silently replaces the clip with a text
+		// placeholder and the turn proceeds as if the audio was delivered.
+		if (initialAudio && initialAudio.length > 0 && session.model && !session.model.input.includes("audio")) {
+			process.stderr.write(
+				chalk.red(
+					`The active model (${session.model.provider}/${session.model.id}) does not support audio input. Use --model to select an audio-capable model.\n`,
+				),
+			);
+			process.exit(1);
+		}
+
 		if (mode === "rpc" || mode === "rpc-ui") {
 			// Branch-only protocol runner: keep RPC host code out of normal interactive startup.
 			const runRpcMode: RunRpcMode = (await import("./modes/rpc/rpc-mode")).runRpcMode;
@@ -1368,6 +1386,7 @@ export async function runRootCommand(
 				eventBus,
 				initialMessage,
 				initialImages,
+				initialAudio,
 				titleSystemPrompt,
 				parsedArgs.join,
 			);
@@ -1381,6 +1400,7 @@ export async function runRootCommand(
 				initialMessage,
 				initialImages,
 				printThoughts: initialArgs.printThoughts,
+				initialAudio,
 			});
 			if ($env.PI_TIMING) {
 				logger.printTimings();

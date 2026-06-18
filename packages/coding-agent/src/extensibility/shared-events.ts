@@ -14,7 +14,7 @@
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionPreparation, CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
-import type { ImageContent, TextContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { ToolResultMessage, UserContent } from "@oh-my-pi/pi-ai";
 import type { Rule } from "../capability/rule";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { BranchSummaryEntry, CompactionEntry, SessionEntry } from "../session/session-entries";
@@ -287,7 +287,7 @@ export interface ToolCallEventResult {
  */
 export interface ToolResultEventResult {
 	/** Replacement content array (text and images) */
-	content?: (TextContent | ImageContent)[];
+	content?: UserContent[];
 	/** Replacement details */
 	details?: unknown;
 	/** Override isError flag */

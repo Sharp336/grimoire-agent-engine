@@ -6,6 +6,7 @@ import type {
 	ProviderPayload,
 	TextContent,
 	ToolResultMessage,
+	UserContent,
 } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { AgentMessage } from "../types";
@@ -18,7 +19,7 @@ const BRANCH_SUMMARY_TEMPLATE = branchSummaryContextPrompt;
 export interface CustomMessage<T = unknown> {
 	role: "custom";
 	customType: string;
-	content: string | (TextContent | ImageContent)[];
+	content: string | UserContent[];
 	display: boolean;
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -30,7 +31,7 @@ export interface CustomMessage<T = unknown> {
 export interface HookMessage<T = unknown> {
 	role: "hookMessage";
 	customType: string;
-	content: string | (TextContent | ImageContent)[];
+	content: string | UserContent[];
 	display: boolean;
 	details?: T;
 	/** Who initiated this message for billing/attribution semantics. */
@@ -68,7 +69,7 @@ declare module "../types" {
 }
 export type ConvertToLlm = (messages: AgentMessage[]) => Message[];
 
-function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | ImageContent)[] {
+function getPrunedToolResultContent(message: ToolResultMessage): UserContent[] {
 	if (message.prunedAt === undefined) {
 		return message.content;
 	}
@@ -115,7 +116,7 @@ export function createCompactionSummaryMessage(
 
 export function createCustomMessage(
 	customType: string,
-	content: string | (TextContent | ImageContent)[],
+	content: string | UserContent[],
 	display: boolean,
 	details: unknown | undefined,
 	timestamp: string,

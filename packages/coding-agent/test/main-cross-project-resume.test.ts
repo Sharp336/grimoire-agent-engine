@@ -27,6 +27,7 @@ function buildArgs(resume: string, sessionDir?: string): Args {
 		sessionDir,
 		messages: [],
 		fileArgs: [],
+		audio: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
 	};

@@ -10,6 +10,7 @@ export type ModelRole =
 	| "smol"
 	| "slow"
 	| "vision"
+	| "audio"
 	| "plan"
 	| "designer"
 	| "commit"
@@ -30,6 +31,7 @@ export const MODEL_ROLES: Record<ModelRole, ModelRoleInfo> = {
 	smol: { tag: "SMOL", name: "Fast", color: "warning" },
 	slow: { tag: "SLOW", name: "Thinking", color: "accent" },
 	vision: { tag: "VISION", name: "Vision", color: "error" },
+	audio: { tag: "AUDIO", name: "Audio", color: "muted", hidden: true },
 	plan: { tag: "PLAN", name: "Architect", color: "muted" },
 	designer: { tag: "DESIGNER", name: "Designer", color: "muted" },
 	commit: { tag: "COMMIT", name: "Commit", color: "dim" },
@@ -43,6 +45,7 @@ export const MODEL_ROLE_IDS: ModelRole[] = [
 	"smol",
 	"slow",
 	"vision",
+	"audio",
 	"plan",
 	"designer",
 	"commit",

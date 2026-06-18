@@ -89,6 +89,30 @@ export function blobExtensionForImageMimeType(mimeType: string | undefined): str
 	return normalizeBlobExtension(subtype);
 }
 
+const AUDIO_EXTENSION_BY_MIME: Record<string, string> = {
+	"audio/wav": "wav",
+	"audio/x-wav": "wav",
+	"audio/mpeg": "mp3",
+	"audio/mp3": "mp3",
+	"audio/aac": "aac",
+	"audio/mp4": "m4a",
+	"audio/x-aiff": "aiff",
+	"audio/aiff": "aiff",
+	"audio/ogg": "ogg",
+	"audio/flac": "flac",
+	"audio/webm": "weba",
+};
+
+export function blobExtensionForAudioMimeType(mimeType: string | undefined): string | undefined {
+	if (!mimeType) return undefined;
+	const lower = mimeType.toLowerCase();
+	const known = AUDIO_EXTENSION_BY_MIME[lower];
+	if (known) return known;
+	if (!lower.startsWith("audio/")) return undefined;
+	const subtype = lower.slice("audio/".length).split(";")[0]?.split("+")[0];
+	return normalizeBlobExtension(subtype);
+}
+
 export class BlobStore {
 	constructor(readonly dir: string) {}
 
@@ -217,6 +241,14 @@ export function externalizeImageDataSync(blobStore: BlobStore, base64Data: strin
 	if (isBlobRef(base64Data)) return base64Data;
 	return blobStore.putSync(Buffer.from(base64Data, "base64"), {
 		extension: blobExtensionForImageMimeType(mimeType),
+	}).ref;
+}
+
+/** Synchronous variant of {@link externalizeAudioData}. Externalizes audio base64 to the blob store. */
+export function externalizeAudioDataSync(blobStore: BlobStore, base64Data: string, mimeType?: string): string {
+	if (isBlobRef(base64Data)) return base64Data;
+	return blobStore.putSync(Buffer.from(base64Data, "base64"), {
+		extension: blobExtensionForAudioMimeType(mimeType),
 	}).ref;
 }
 

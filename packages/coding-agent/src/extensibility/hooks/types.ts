@@ -1,4 +1,4 @@
-import type { ImageContent, Message, Model, TextContent } from "@oh-my-pi/pi-ai";
+import type { ImageContent, Message, Model, UserContent } from "@oh-my-pi/pi-ai";
 import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { logger as PiLogger } from "@oh-my-pi/pi-utils";
 import type { Type } from "arktype";
@@ -323,7 +323,7 @@ interface ToolResultEventBase {
 	/** Tool input parameters */
 	input: Record<string, unknown>;
 	/** Full content array (text and images) */
-	content: (TextContent | ImageContent)[];
+	content: UserContent[];
 	/** Whether the tool execution was an error */
 	isError?: boolean;
 }

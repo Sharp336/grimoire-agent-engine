@@ -35,7 +35,7 @@ import { buildCompat, buildModel } from "./build";
 import { Effort } from "./effort";
 import { stripThinkingVariantToken } from "./identity/family";
 import { resolveModelThinking } from "./model-thinking";
-import type { Api, Model, ModelSpec, Provider, ThinkingConfig } from "./types";
+import type { Api, Model, ModelInputModality, ModelSpec, Provider, ThinkingConfig } from "./types";
 
 /**
  * Structural bound for collapse inputs: both raw `ModelSpec`s and built
@@ -533,9 +533,10 @@ export function collapseEffortVariants<TSpec extends VariantSpecLike>(
 		if (hasRouting) thinking.effortRouting = routing;
 		if (family.suppressWhenOff) thinking.suppressWhenOff = true;
 
-		const input: ("text" | "image")[] = [];
+		const input: ModelInputModality[] = [];
 		if (memberSpecs.some(spec => spec.input.includes("text"))) input.push("text");
 		if (memberSpecs.some(spec => spec.input.includes("image"))) input.push("image");
+		if (memberSpecs.some(spec => spec.input.includes("audio"))) input.push("audio");
 
 		const collapsed: TSpec = {
 			...(memberSpecs[0] as TSpec),

@@ -72,6 +72,7 @@ import {
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
 import type {
 	AssistantMessage,
+	AudioContent,
 	Context,
 	ImageContent,
 	Message,
@@ -89,6 +90,7 @@ import type {
 	ToolChoice,
 	Usage,
 	UsageReport,
+	UserContent,
 } from "@oh-my-pi/pi-ai";
 import {
 	calculateRateLimitBackoffMs,
@@ -519,6 +521,8 @@ export interface PromptOptions {
 	expandPromptTemplates?: boolean;
 	/** Image attachments */
 	images?: ImageContent[];
+	/** Audio attachments */
+	audio?: AudioContent[];
 	/** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). */
 	streamingBehavior?: "steer" | "followUp";
 	/** Optional tool choice override for the next LLM call. */
@@ -964,7 +968,7 @@ function extractPermissionLocations(
 // ============================================================================
 
 /** Entry returned by {@link AgentSession.clearQueue} / {@link AgentSession.popLastQueuedMessage}. */
-export type RestoredQueuedMessage = { text: string; images?: ImageContent[] };
+export type RestoredQueuedMessage = { text: string; images?: ImageContent[]; audio?: AudioContent[] };
 
 function queuedTextContent(message: AgentMessage): string | undefined {
 	if (!("content" in message)) return undefined;
@@ -980,6 +984,15 @@ function queuedImageContent(message: AgentMessage): ImageContent[] | undefined {
 			part.type === "image" && typeof part.data === "string" && typeof part.mimeType === "string",
 	);
 	return images.length > 0 ? images : undefined;
+}
+
+function queuedAudioContent(message: AgentMessage): AudioContent[] | undefined {
+	if (!("content" in message) || typeof message.content === "string") return undefined;
+	const audio = message.content.filter(
+		(part): part is AudioContent =>
+			part.type === "audio" && typeof part.data === "string" && typeof part.mimeType === "string",
+	);
+	return audio.length > 0 ? audio : undefined;
 }
 
 function isDisplayableQueuedMessage(message: AgentMessage): boolean {
@@ -1038,11 +1051,11 @@ function queueChipText(message: AgentMessage): string {
 	}
 	const text = queuedTextContent(message) ?? "";
 	if (text) return text;
-	return queuedImageContent(message) ? "[Image]" : "";
+	return queuedImageContent(message) || queuedAudioContent(message) ? "[Media]" : "";
 }
 
 function toRestoredQueuedMessage(message: AgentMessage): RestoredQueuedMessage {
-	return { text: queueChipText(message), images: queuedImageContent(message) };
+	return { text: queueChipText(message), images: queuedImageContent(message), audio: queuedAudioContent(message) };
 }
 
 export class AgentSession {
@@ -2534,7 +2547,7 @@ export class AgentSession {
 					toolName?: string;
 					details?: { path?: string; phases?: TodoPhase[]; report?: string; startedAt?: string };
 					isError?: boolean;
-					content?: Array<TextContent | ImageContent>;
+					content?: UserContent[];
 				};
 				// A tool actually ran. Clear the post-reminder suppression: the agent did
 				// productive work in response to the prior nudge, so the next text-only stop
@@ -5398,9 +5411,7 @@ export class AgentSession {
 		};
 	}
 
-	async #normalizeMessageContentImages(
-		content: string | (TextContent | ImageContent)[],
-	): Promise<string | (TextContent | ImageContent)[]> {
+	async #normalizeMessageContentImages(content: string | UserContent[]): Promise<string | UserContent[]> {
 		if (typeof content === "string") return content;
 		const images = content.filter((part): part is ImageContent => part.type === "image");
 		if (images.length === 0) return content;
@@ -5414,7 +5425,7 @@ export class AgentSession {
 		if (!("content" in message)) return message;
 		const content = message.content;
 		if (typeof content !== "string" && !Array.isArray(content)) return message;
-		const normalized = await this.#normalizeMessageContentImages(content as string | (TextContent | ImageContent)[]);
+		const normalized = await this.#normalizeMessageContentImages(content as string | UserContent[]);
 		if (normalized === content) return message;
 		return { ...message, content: normalized } as T;
 	}
@@ -5529,9 +5540,9 @@ export class AgentSession {
 				await this.sendCustomMessage(notice, { deliverAs: options.streamingBehavior });
 			}
 			if (options.streamingBehavior === "followUp") {
-				await this.#queueUserMessage(expandedText, options?.images, "followUp");
+				await this.#queueUserMessage(expandedText, options?.images, options?.audio, "followUp");
 			} else {
-				await this.#queueUserMessage(expandedText, options?.images, "steer");
+				await this.#queueUserMessage(expandedText, options?.images, options?.audio, "steer");
 			}
 			return true;
 		}
@@ -5544,9 +5555,12 @@ export class AgentSession {
 			!options?.synthetic && !hasPendingUserDirective ? this.#createEagerTaskPrelude(expandedText) : undefined;
 		const normalizedImages = await this.#normalizeImagesForModel(options?.images);
 
-		const userContent: (TextContent | ImageContent)[] = [{ type: "text", text: expandedText }];
+		const userContent: UserContent[] = [{ type: "text", text: expandedText }];
 		if (normalizedImages?.length) {
 			userContent.push(...normalizedImages);
+		}
+		if (options?.audio?.length) {
+			userContent.push(...options.audio);
 		}
 		// Text-only model + image attachment: describe via a vision model and inject the
 		// description as a hidden companion (the image stays in the visible user message).
@@ -5965,30 +5979,31 @@ export class AgentSession {
 	/**
 	 * Queue a steering message to interrupt the agent mid-run.
 	 */
-	async steer(text: string, images?: ImageContent[]): Promise<void> {
+	async steer(text: string, images?: ImageContent[], audio?: AudioContent[]): Promise<void> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		await this.#queueUserMessage(expandedText, images, "steer");
+		await this.#queueUserMessage(expandedText, images, audio, "steer");
 	}
 
 	/**
 	 * Queue a follow-up message to process after the agent would otherwise stop.
 	 */
-	async followUp(text: string, images?: ImageContent[]): Promise<void> {
+	async followUp(text: string, images?: ImageContent[], audio?: AudioContent[]): Promise<void> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
 
 		const expandedText = expandPromptTemplate(text, [...this.#promptTemplates]);
-		await this.#queueUserMessage(expandedText, images, "followUp");
+		await this.#queueUserMessage(expandedText, images, audio, "followUp");
 	}
 
 	async #queueUserMessage(
 		text: string,
 		images: ImageContent[] | undefined,
+		audio: AudioContent[] | undefined,
 		mode: "steer" | "followUp",
 	): Promise<void> {
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
@@ -5996,9 +6011,12 @@ export class AgentSession {
 		// a user interrupt suppressed.
 		this.#advisorAutoResumeSuppressed = false;
 		const normalizedImages = await this.#normalizeImagesForModel(images);
-		const content: (TextContent | ImageContent)[] = [{ type: "text", text }];
+		const content: UserContent[] = [{ type: "text", text }];
 		if (normalizedImages?.length) {
 			content.push(...normalizedImages);
+		}
+		if (audio?.length) {
+			content.push(...audio);
 		}
 		// Text-only model + image attachment: describe via a vision model and enqueue the
 		// description as a hidden companion immediately before the user message.
@@ -6276,35 +6294,40 @@ export class AgentSession {
 	 * @param options.deliverAs Delivery mode: "steer" or "followUp"
 	 */
 	async sendUserMessage(
-		content: string | (TextContent | ImageContent)[],
+		content: string | UserContent[],
 		options?: { deliverAs?: "steer" | "followUp" },
 	): Promise<void> {
-		// Normalize content to text string + optional images
+		// Normalize content to text string + optional media.
 		let text: string;
 		let images: ImageContent[] | undefined;
+		let audio: AudioContent[] | undefined;
 
 		if (typeof content === "string") {
 			text = content;
 		} else {
 			const textParts: string[] = [];
 			images = [];
+			audio = [];
 			for (const part of content) {
 				if (part.type === "text") {
 					textParts.push(part.text);
-				} else {
+				} else if (part.type === "image") {
 					images.push(part);
+				} else {
+					audio.push(part);
 				}
 			}
 			text = textParts.join("\n");
 			if (images.length === 0) images = undefined;
+			if (audio.length === 0) audio = undefined;
 		}
 
 		if (options?.deliverAs === "followUp") {
-			await this.#queueUserMessage(text, images, "followUp");
+			await this.#queueUserMessage(text, images, audio, "followUp");
 			return;
 		}
 		if (options?.deliverAs === "steer") {
-			await this.#queueUserMessage(text, images, "steer");
+			await this.#queueUserMessage(text, images, audio, "steer");
 			return;
 		}
 
@@ -6312,6 +6335,7 @@ export class AgentSession {
 		await this.prompt(text, {
 			expandPromptTemplates: false,
 			images,
+			audio,
 		});
 	}
 

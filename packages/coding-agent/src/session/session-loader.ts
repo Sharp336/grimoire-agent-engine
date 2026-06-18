@@ -4,7 +4,7 @@ import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./b
 import { buildSessionContext } from "./session-context";
 import type { FileEntry, SessionEntry, SessionHeader } from "./session-entries";
 import { migrateToCurrentVersion } from "./session-migrations";
-import { isImageBlock, isImageDataPayload } from "./session-persistence";
+import { isAudioBlock, isImageBlock, isImageDataPayload } from "./session-persistence";
 import { FileSessionStorage, type SessionStorage } from "./session-storage";
 
 /** Exported for compaction.test.ts */
@@ -49,8 +49,17 @@ function shouldResolveImagePayload(value: unknown, key: string | undefined): val
 	return (key === "content" && isImageBlock(value)) || key === "images";
 }
 
+function shouldResolveAudioPayload(value: unknown, key: string | undefined): value is { data: string } {
+	if (!isAudioBlock(value) || !isBlobRef(value.data)) return false;
+	return key === "content" || key === "audio";
+}
+
 async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, key?: string): Promise<void> {
 	if (shouldResolveImagePayload(value, key)) {
+		value.data = await resolveImageData(blobStore, value.data);
+		return;
+	}
+	if (shouldResolveAudioPayload(value, key)) {
 		value.data = await resolveImageData(blobStore, value.data);
 		return;
 	}

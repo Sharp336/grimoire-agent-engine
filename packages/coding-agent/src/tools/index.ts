@@ -44,10 +44,12 @@ import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
 import { FindTool } from "./find";
 import { GithubTool } from "./gh";
+import { InspectAudioTool } from "./inspect-audio";
 import { InspectImageTool } from "./inspect-image";
 import { IrcTool, isIrcEnabled } from "./irc";
 import { JobTool } from "./job";
 import { LearnTool } from "./learn";
+import { LoadAudioTool } from "./load-audio";
 import { ManageSkillTool } from "./manage-skill";
 import { MemoryEditTool } from "./memory-edit";
 import { MemoryRecallTool } from "./memory-recall";
@@ -83,10 +85,12 @@ export * from "./eval-backends";
 export * from "./find";
 export * from "./gh";
 export * from "./image-gen";
+export * from "./inspect-audio";
 export * from "./inspect-image";
 export * from "./irc";
 export * from "./job";
 export * from "./learn";
+export * from "./load-audio";
 export * from "./manage-skill";
 export * from "./memory-edit";
 export * from "./memory-recall";
@@ -427,6 +431,8 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	search: s => new SearchTool(s),
 	lsp: LspTool.createIf,
 	inspect_image: s => new InspectImageTool(s),
+	inspect_audio: s => new InspectAudioTool(s),
+	load_audio: s => new LoadAudioTool(s),
 	browser: s => new BrowserTool(s),
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,

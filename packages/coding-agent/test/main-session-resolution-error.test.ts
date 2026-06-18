@@ -16,6 +16,7 @@ function buildResumeArgs(resume: string): Args {
 		resume,
 		messages: [],
 		fileArgs: [],
+		audio: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
 	};
@@ -27,6 +28,7 @@ function buildForkArgs(fork: string, noSession = false): Args {
 		noSession: noSession || undefined,
 		messages: [],
 		fileArgs: [],
+		audio: [],
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
 	};

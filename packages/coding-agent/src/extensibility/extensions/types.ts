@@ -28,6 +28,7 @@ import type {
 	Static,
 	TextContent,
 	TSchema,
+	UserContent,
 } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
 import type { AutocompleteItem, Component, EditorTheme, KeyId, TUI } from "@oh-my-pi/pi-tui";
@@ -719,7 +720,7 @@ interface ToolResultEventBase {
 	type: "tool_result";
 	toolCallId: string;
 	input: Record<string, unknown>;
-	content: (TextContent | ImageContent)[];
+	content: UserContent[];
 	isError: boolean;
 }
 

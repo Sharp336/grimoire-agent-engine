@@ -4,7 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { formatHashlineHeader, formatNumberedLine, formatNumberedLines } from "@oh-my-pi/hashline";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { AudioContent, ImageContent, TextContent, UserContent } from "@oh-my-pi/pi-ai";
 import { glob, type SummaryResult, summarizeCode } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Text } from "@oh-my-pi/pi-tui";
@@ -39,6 +39,12 @@ import {
 } from "../session/streaming-output";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine, tryResolveInternalUrlSync } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block";
+import {
+	AudioInputTooLargeError,
+	detectSupportedAudioMimeTypeFromFile,
+	loadAudioInput,
+	MAX_AUDIO_INPUT_BYTES,
+} from "../utils/audio-input";
 import { buildLineEntriesWithBlockContext, type LineEntry, lineEntriesToPlainText } from "../utils/block-context";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import {
@@ -852,7 +858,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const notice = `Note: interpreted as ${parts.length} paths: ${parts.join(", ")}`;
 		const notes = [notice];
-		const content: Array<TextContent | ImageContent> = [];
+		const content: UserContent[] = [];
 		const displayReadTargets: string[] = [];
 		let pendingText = notice;
 		const flushText = () => {
@@ -2121,10 +2127,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 
 		const imageMetadata = await readImageMetadata(absolutePath);
 		const mimeType = imageMetadata?.mimeType;
+		const audioMimeType = mimeType ? null : await detectSupportedAudioMimeTypeFromFile(absolutePath);
 		const ext = path.extname(absolutePath).toLowerCase();
 		const shouldConvertWithMarkit = CONVERTIBLE_EXTENSIONS.has(ext);
 		// Read the file based on type
-		let content: Array<TextContent | ImageContent> | undefined;
+		let content: Array<TextContent | ImageContent | AudioContent> | undefined;
 		let details: ReadToolDetails = {};
 		let sourcePath: string | undefined;
 		let columnTruncated = 0;
@@ -2132,7 +2139,36 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			| { result: TruncationResult; options: { direction: "head"; startLine?: number; totalFileLines?: number } }
 			| undefined;
 
-		if (mimeType) {
+		if (audioMimeType) {
+			try {
+				const audioInput = await loadAudioInput({
+					path: readPath,
+					cwd: this.session.cwd,
+					resolvedPath: absolutePath,
+					detectedMimeType: audioMimeType,
+					maxBytes: MAX_AUDIO_INPUT_BYTES,
+				});
+				if (!audioInput) {
+					throw new ToolError(`Read audio file [${audioMimeType}] failed: unsupported audio format.`);
+				}
+				content = [
+					{ type: "text", text: audioInput.textNote },
+					{
+						type: "audio",
+						data: audioInput.data,
+						mimeType: audioInput.mimeType,
+						...(audioInput.format ? { format: audioInput.format } : {}),
+					},
+				];
+				details = {};
+				sourcePath = audioInput.resolvedPath;
+			} catch (error) {
+				if (error instanceof AudioInputTooLargeError) {
+					throw new ToolError(error.message);
+				}
+				throw error;
+			}
+		} else if (mimeType) {
 			if (this.#inspectImageEnabled) {
 				const metadata = imageMetadata;
 				const outputMime = metadata?.mimeType ?? mimeType;

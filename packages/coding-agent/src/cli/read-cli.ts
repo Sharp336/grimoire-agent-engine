@@ -48,6 +48,11 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 				process.stdout.write(
 					chalk.dim(`[image content: ${block.mimeType}, ${decodedBytes} bytes base64-decoded]\n`),
 				);
+			} else if (block.type === "audio") {
+				const decodedBytes = Buffer.from(block.data, "base64").byteLength;
+				process.stdout.write(
+					chalk.dim(`[audio content: ${block.mimeType}, ${decodedBytes} bytes base64-decoded]\n`),
+				);
 			}
 		}
 	} catch (err) {

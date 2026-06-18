@@ -430,6 +430,16 @@ export interface ImageContent {
 	detail?: "auto" | "low" | "high" | "original";
 }
 
+export interface AudioContent {
+	type: "audio";
+	data: string; // base64 encoded audio data
+	mimeType: string; // e.g., "audio/wav", "audio/mpeg", "audio/flac"
+	/** Transport encoding hint for providers that require a short audio format token. */
+	format?: string;
+}
+
+export type UserContent = TextContent | ImageContent | AudioContent;
+
 export interface ToolCall {
 	type: "toolCall";
 	id: string;
@@ -465,7 +475,7 @@ export type ProviderPayload = OpenAIResponsesHistoryPayload;
 
 export interface UserMessage {
 	role: "user";
-	content: string | (TextContent | ImageContent)[];
+	content: string | UserContent[];
 	/** True if the message was injected by the system (e.g., auto-continue). */
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
@@ -479,7 +489,7 @@ export interface UserMessage {
 
 export interface DeveloperMessage {
 	role: "developer";
-	content: string | (TextContent | ImageContent)[];
+	content: string | UserContent[];
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
@@ -534,7 +544,7 @@ export interface ToolResultMessage<TDetails = any> {
 	role: "toolResult";
 	toolCallId: string;
 	toolName: string;
-	content: (TextContent | ImageContent)[]; // Supports text and images
+	content: UserContent[]; // Supports text, images, and audio
 	details?: TDetails;
 	isError: boolean;
 	/** Who initiated this message for billing/attribution semantics. */

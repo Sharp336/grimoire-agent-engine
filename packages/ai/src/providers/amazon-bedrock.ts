@@ -656,8 +656,9 @@ function convertMessages(
 							case "image":
 								contentBlocks.push({ image: createImageBlock(c.mimeType, c.data) });
 								break;
-							default:
-								throw new Error("Unknown user content type");
+							case "audio":
+								contentBlocks.push({ text: `[audio: ${c.mimeType}]` });
+								break;
 						}
 					}
 					// Skip message if all blocks filtered out
@@ -727,7 +728,7 @@ function convertMessages(
 						content: m.content.map(c =>
 							c.type === "image"
 								? { image: createImageBlock(c.mimeType, c.data) }
-								: { text: c.text.toWellFormed() },
+								: { text: (c.type === "audio" ? `[audio: ${c.mimeType}]` : c.text).toWellFormed() },
 						),
 						status: m.isError ? "error" : "success",
 					},
@@ -742,7 +743,7 @@ function convertMessages(
 							content: nextMsg.content.map(c =>
 								c.type === "image"
 									? { image: createImageBlock(c.mimeType, c.data) }
-									: { text: c.text.toWellFormed() },
+									: { text: (c.type === "audio" ? `[audio: ${c.mimeType}]` : c.text).toWellFormed() },
 							),
 							status: nextMsg.isError ? "error" : "success",
 						},
