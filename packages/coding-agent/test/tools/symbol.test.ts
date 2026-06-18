@@ -27,9 +27,14 @@ beforeAll(async () => {
 	);
 	await fs.writeFile(
 		path.join(dir, "geo.rs"),
-		["struct Point { x: u32 }", "impl Point {", "    fn norm(&self) -> u32 { self.x }", "}", "fn helper() {}", ""].join(
-			"\n",
-		),
+		[
+			"struct Point { x: u32 }",
+			"impl Point {",
+			"    fn norm(&self) -> u32 { self.x }",
+			"}",
+			"fn helper() {}",
+			"",
+		].join("\n"),
 	);
 	// Unsupported file whose text contains a symbol name — must be excluded from
 	// both overview enumeration and find candidates.
@@ -110,7 +115,18 @@ describe("symbol overview", () => {
 			const gql = path.join(tmp, "schema.graphql");
 			await fs.writeFile(
 				gql,
-				["type Person {", "  id: ID!", "  name: String!", "}", "", "enum Status {", "  ACTIVE", "  INACTIVE", "}", ""].join("\n"),
+				[
+					"type Person {",
+					"  id: ID!",
+					"  name: String!",
+					"}",
+					"",
+					"enum Status {",
+					"  ACTIVE",
+					"  INACTIVE",
+					"}",
+					"",
+				].join("\n"),
 			);
 			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
 			const text = textOf(await tool.execute("t", { action: "overview", path: gql }));
@@ -280,9 +296,9 @@ describe("symbol manipulate", () => {
 			const file = path.join(tmp, "dup.ts");
 			await fs.writeFile(file, "function dup() {}\nclass C { dup() {} }\n");
 			const { tool } = manipulateHarness(tmp);
-			await expect(tool.execute("m", { action: "manipulate", path: file, name: "dup", op: "delete" })).rejects.toThrow(
-				/matches 2 symbols/,
-			);
+			await expect(
+				tool.execute("m", { action: "manipulate", path: file, name: "dup", op: "delete" }),
+			).rejects.toThrow(/matches 2 symbols/);
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
@@ -410,7 +426,10 @@ describe("symbol manipulate", () => {
 			const mutated = "function g() {\n  return 2;\n}\n";
 			await fs.writeFile(file, mutated);
 			queue.nextToolChoice();
-			const applied = (await queue.peekInFlightInvoker()!({ action: "apply", reason: "stale" })) as InvokedToolResult;
+			const applied = (await queue.peekInFlightInvoker()!({
+				action: "apply",
+				reason: "stale",
+			})) as InvokedToolResult;
 			expect(applied.isError).toBe(true);
 			expect(applied.content.find(c => c.type === "text")?.text ?? "").toMatch(/changed since the preview/);
 			// The stale payload was NOT applied; the concurrent edit is preserved.
@@ -426,9 +445,9 @@ describe("symbol manipulate", () => {
 			const file = path.join(tmp, "m.ts");
 			await fs.writeFile(file, "const a = 1, b = 2;\n");
 			const { tool } = manipulateHarness(tmp);
-			await expect(
-				tool.execute("m", { action: "manipulate", path: file, name: "a", op: "delete" }),
-			).rejects.toThrow(/shares a line/);
+			await expect(tool.execute("m", { action: "manipulate", path: file, name: "a", op: "delete" })).rejects.toThrow(
+				/shares a line/,
+			);
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
@@ -462,7 +481,10 @@ describe("symbol manipulate", () => {
 				text: "function f() { return 0; }\n",
 			});
 			queue.nextToolChoice();
-			const applied = (await queue.peekInFlightInvoker()!({ action: "apply", reason: "apply" })) as InvokedToolResult;
+			const applied = (await queue.peekInFlightInvoker()!({
+				action: "apply",
+				reason: "apply",
+			})) as InvokedToolResult;
 			expect(applied.isError).toBeUndefined();
 			// The trailing newline in `text` must not insert a blank line between the
 			// replaced function and the following statement.
@@ -488,7 +510,10 @@ describe("symbol manipulate", () => {
 				text: "function dup() {\n  return 22;\n}",
 			});
 			queue.nextToolChoice();
-			const applied = (await queue.peekInFlightInvoker()!({ action: "apply", reason: "apply" })) as InvokedToolResult;
+			const applied = (await queue.peekInFlightInvoker()!({
+				action: "apply",
+				reason: "apply",
+			})) as InvokedToolResult;
 			expect(applied.isError).toBeUndefined();
 			const updated = await fs.readFile(file, "utf8");
 			expect(updated).toContain("return 22;");
@@ -509,9 +534,284 @@ describe("symbol manipulate", () => {
 			// `m` shares its whole line with its ancestor `class C { ... }`; a
 			// whole-line edit would clobber the class wrapper, so it is refused.
 			await expect(
-				tool.execute("m", { action: "manipulate", path: file, name: "m", op: "replace", text: "m() { return 2; }" }),
+				tool.execute("m", {
+					action: "manipulate",
+					path: file,
+					name: "m",
+					op: "replace",
+					text: "m() { return 2; }",
+				}),
 			).rejects.toThrow(/not isolated on its own line/);
 			expect(await fs.readFile(file, "utf8")).toBe(original);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("symbol lang override on a non-auto-detected file (FIX 1)", () => {
+	// A `.txt` file is not an outline-supported extension, so without an
+	// explicit `lang` it is rejected at the path-extension gate. With a
+	// supported `lang`, the file reaches `outlineCode` which honors `lang`
+	// over path inference.
+	it("outlines a .txt file as rust with an explicit lang", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-lang-ovr-"));
+		try {
+			const file = path.join(tmp, "code.txt");
+			await fs.writeFile(
+				file,
+				[
+					"struct Point { x: u32 }",
+					"impl Point {",
+					"    fn norm(&self) -> u32 { self.x }",
+					"}",
+					"fn helper() {}",
+					"",
+				].join("\n"),
+			);
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const text = textOf(await tool.execute("t", { action: "overview", path: file, lang: "rust" }));
+			expect(text).toContain("struct Point");
+			expect(text).toContain("method norm");
+			expect(text).toContain("function helper");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it('accepts a non-extension alias lang (e.g. "c++") via the native resolver', async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-lang-alias-"));
+		try {
+			const file = path.join(tmp, "code.txt");
+			await fs.writeFile(file, ["struct Point { int x; };", "void helper() {}", ""].join("\n"));
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			// `c++` is a from_alias alias but NOT a file extension, so it resolves
+			// ONLY through the native predicate — proving the gate uses the
+			// authoritative resolver, not a names∪extensions approximation.
+			const text = textOf(await tool.execute("t", { action: "overview", path: file, lang: "c++" }));
+			expect(text).toContain("Point");
+			expect(text).toContain("helper");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects the same .txt file without an explicit lang (unsupported language)", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-lang-nolang-"));
+		try {
+			const file = path.join(tmp, "code.txt");
+			await fs.writeFile(file, "struct Point { x: u32 }\n");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const text = textOf(await tool.execute("t", { action: "overview", path: file }));
+			expect(text).toContain("No files in scope.");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("finds a symbol by name on a .txt file with an explicit lang (exact-file find path)", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-lang-find-"));
+		try {
+			const file = path.join(tmp, "code.txt");
+			await fs.writeFile(
+				file,
+				[
+					"struct Point { x: u32 }",
+					"impl Point {",
+					"    fn norm(&self) -> u32 { self.x }",
+					"}",
+					"fn helper() {}",
+					"",
+				].join("\n"),
+			);
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const text = textOf(await tool.execute("t", { action: "find", name: "helper", path: file, lang: "rust" }));
+			expect(text).toContain('Found 1 symbol(s) matching "helper":');
+			expect(text).toContain("function helper @ code.txt:5");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("manipulates a symbol on a .txt file with an explicit lang", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-lang-manip-"));
+		try {
+			const file = path.join(tmp, "code.txt");
+			const original = ["function greet() {", "  return 1;", "}", ""].join("\n");
+			await fs.writeFile(file, original);
+			const { tool, queue } = manipulateHarness(tmp);
+			await tool.execute("m", {
+				action: "manipulate",
+				path: file,
+				name: "greet",
+				op: "replace",
+				lang: "javascript",
+				text: "function greet() {\n  return 99;\n}",
+			});
+			queue.nextToolChoice();
+			const applied = (await queue.peekInFlightInvoker()!({
+				action: "apply",
+				reason: "apply lang override",
+			})) as InvokedToolResult;
+			expect(applied.isError).toBeUndefined();
+			const updated = await fs.readFile(file, "utf8");
+			expect(updated).toContain("return 99;");
+			expect(updated).not.toContain("return 1;");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("does not broaden the lang override to a multi-path scope", async () => {
+		// A multi-path input where neither file's extension auto-resolves must
+		// NOT be accepted as rust via the lang override — the bypass is scoped
+		// to a SINGLE explicit file only.
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-lang-multipath-"));
+		try {
+			const a = path.join(tmp, "a.txt");
+			const b = path.join(tmp, "b.txt");
+			await fs.writeFile(a, "struct A {}\n");
+			await fs.writeFile(b, "struct B {}\n");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const text = textOf(await tool.execute("t", { action: "overview", path: [a, b], lang: "rust" }));
+			expect(text).toContain("No files in scope.");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects a bogus lang even on a single explicit file", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-lang-bogus-"));
+		try {
+			const file = path.join(tmp, "code.txt");
+			await fs.writeFile(file, "struct Point {}\n");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const text = textOf(await tool.execute("t", { action: "overview", path: file, lang: "not-a-language" }));
+			expect(text).toContain("No files in scope.");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("symbol manipulate rejects multi-path input (FIX 2)", () => {
+	it("throws when path is a 2-element array, before scope resolution", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-manip-multipath-"));
+		try {
+			const a = path.join(tmp, "a.ts");
+			const missing = path.join(tmp, "missing.ts");
+			await fs.writeFile(a, "function keep() {}\n");
+			const { tool } = manipulateHarness(tmp);
+			await expect(
+				tool.execute("m", {
+					action: "manipulate",
+					path: [a, missing],
+					name: "keep",
+					op: "delete",
+				}),
+			).rejects.toThrow(/manipulate requires a single target file/);
+			// The existing file is left untouched (no silent collapse to it).
+			expect(await fs.readFile(a, "utf8")).toBe("function keep() {}\n");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("symbol manipulate stale-apply identity guard (FIX 3a)", () => {
+	it("rejects apply when the symbol was DELETED between preview and apply", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-stale-del-"));
+		try {
+			const file = path.join(tmp, "s.ts");
+			const original = "function keep() {}\nfunction drop() {}\n";
+			await fs.writeFile(file, original);
+			const { tool, queue } = manipulateHarness(tmp);
+			await tool.execute("m", {
+				action: "manipulate",
+				path: file,
+				name: "drop",
+				op: "replace",
+				text: "function drop() { return 1; }",
+			});
+			// Delete the symbol entirely between preview and apply — it no
+			// longer resolves, so the re-resolve identity guard (not the
+			// previewRangeText path) must reject the apply.
+			const mutated = "function keep() {}\n";
+			await fs.writeFile(file, mutated);
+			queue.nextToolChoice();
+			const applied = (await queue.peekInFlightInvoker()!({
+				action: "apply",
+				reason: "stale delete",
+			})) as InvokedToolResult;
+			expect(applied.isError).toBe(true);
+			expect(applied.content.find(c => c.type === "text")?.text ?? "").toMatch(/no longer uniquely resolves/);
+			expect(await fs.readFile(file, "utf8")).toBe(mutated);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects apply when the symbol became AMBIGUOUS between preview and apply", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-stale-amb-"));
+		try {
+			const file = path.join(tmp, "s.ts");
+			const original = "function target() {\n  return 1;\n}\n";
+			await fs.writeFile(file, original);
+			const { tool, queue } = manipulateHarness(tmp);
+			await tool.execute("m", {
+				action: "manipulate",
+				path: file,
+				name: "target",
+				op: "replace",
+				text: "function target() {\n  return 2;\n}",
+			});
+			// Add a second `target` so the symbol is no longer unique. Same
+			// line count for the original, so only the re-resolve guard catches
+			// the ambiguity (previewRangeText would still match).
+			const mutated = "function target() {\n  return 1;\n}\nfunction target() {\n  return 3;\n}\n";
+			await fs.writeFile(file, mutated);
+			queue.nextToolChoice();
+			const applied = (await queue.peekInFlightInvoker()!({
+				action: "apply",
+				reason: "stale ambiguous",
+			})) as InvokedToolResult;
+			expect(applied.isError).toBe(true);
+			expect(applied.content.find(c => c.type === "text")?.text ?? "").toMatch(/no longer uniquely resolves/);
+			expect(await fs.readFile(file, "utf8")).toBe(mutated);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("symbol empty supported file is not unsupported (FIX 3b)", () => {
+	it("overview shows an empty .ts file with zero symbols (not 'unsupported language')", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-empty-"));
+		try {
+			const file = path.join(tmp, "empty.ts");
+			await fs.writeFile(file, "");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const text = textOf(await tool.execute("t", { action: "overview", path: file }));
+			// The empty supported file is enumerated (not rejected as
+			// unsupported) and shows zero symbols.
+			expect(text).toContain("empty.ts");
+			expect(text).toContain("no symbols");
+			expect(text).not.toContain("unsupported language");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("find returns the no-symbols message for an empty supported file", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-empty-find-"));
+		try {
+			const file = path.join(tmp, "empty.ts");
+			await fs.writeFile(file, "");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const text = textOf(await tool.execute("t", { action: "find", name: "anything", path: file }));
+			// An empty supported file is in scope (not "unsupported language"),
+			// so find reports no symbols found.
+			expect(text).toContain("No symbols found.");
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}

@@ -18,6 +18,7 @@ import {
 	outlineCode,
 	outlineLanguages,
 	isOutlineSupportedPath,
+	isOutlineSupportedLang as nativeIsOutlineSupportedLang,
 	type OutlineResult,
 	type SymbolEntry,
 } from "@oh-my-pi/pi-natives";
@@ -141,6 +142,16 @@ function supportedGlob(): string {
 	}
 	return supportedGlobCache;
 }
+/** True when an explicit `lang` override resolves (through the native alias
+ *  table — the same `SupportLang::from_alias` path `outlineCode` uses) to an
+ *  outline-supported language. Delegates to the native predicate so the accept
+ *  set never drifts from the extractor (canonical names AND aliases like `rs`,
+ *  `c++`, `golang`, `elisp`). Used to bypass the path-extension gate for a
+ *  SINGLE explicit file whose own extension does not auto-resolve (e.g.
+ *  `foo.txt lang=rust`). Multi-path fanout never benefits from the bypass. */
+function isOutlineSupportedLang(lang: string | undefined): boolean {
+	return lang !== undefined && nativeIsOutlineSupportedLang(lang);
+}
 
 // =============================================================================
 // Path normalization
@@ -169,9 +180,17 @@ async function listScopeFiles(
 	_cwd: string,
 	signal: AbortSignal | undefined,
 	maxResults: number,
+	lang: string | undefined,
 ): Promise<{ files: string[]; truncated: boolean }> {
 	if (!scope.isDirectory && !scope.multiTargets && !scope.exactFilePaths) {
-		return { files: isOutlineSupportedPath(scope.searchPath) ? [scope.searchPath] : [], truncated: false };
+		// Single explicit file: accept it when its extension resolves to an
+		// outline language, OR when the caller supplied an explicit supported
+		// `lang` override (e.g. `foo.txt lang=rust`) — the extractor honors
+		// `lang` over path inference. Multi-path fanout (exactFilePaths /
+		// multiTargets) never reaches this branch, so the override cannot
+		// broaden a multi-file scope.
+		const supported = isOutlineSupportedPath(scope.searchPath) || isOutlineSupportedLang(lang);
+		return { files: supported ? [scope.searchPath] : [], truncated: false };
 	}
 	const collected: string[] = [];
 	let truncated = false;
@@ -184,13 +203,9 @@ async function listScopeFiles(
 			// A fan-out target may be a plain file (basePath is the file path),
 			// which native `glob` cannot walk (it expects a directory). Stat it
 			// and add the file directly; otherwise glob the directory.
-			let stat;
-			try {
-				stat = await Bun.file(target.basePath).stat();
-			} catch {
-				// Missing target — skip (the scope resolver already reported missing paths).
-				continue;
-			}
+			const stat = await Bun.file(target.basePath).stat().catch(() => undefined);
+			// Missing target — skip (the scope resolver already reported missing paths).
+			if (!stat) continue;
 			if (stat.isFile()) {
 				collected.push(target.basePath);
 				continue;
@@ -492,6 +507,14 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		return untilAborted(signal, async () => {
 			const cwd = this.session.cwd;
 			const rawPaths = normalizePaths(params.path);
+			// `manipulate` edits exactly one file: reject a multi-path input BEFORE
+			// scope resolution so a missing/rewritten second target cannot collapse
+			// to the one resolved file and be edited silently. (Delimited
+			// single-string expansion and directory/multi-target scopes are still
+			// caught by the guards in runManipulate.)
+			if (params.action === "manipulate" && rawPaths.length > 1) {
+				throw new ToolError("manipulate requires a single target file in `path`");
+			}
 
 			const scope = await resolveToolSearchScope({
 				rawPaths,
@@ -523,7 +546,7 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		signal: AbortSignal | undefined,
 	): Promise<AgentToolResult<SymbolToolDetails>> {
 		// cap+1 so a too-large scope is detected without walking the whole tree.
-		const { files, truncated } = await listScopeFiles(scope, cwd, signal, OVERVIEW_FILE_CAP + 1);
+		const { files, truncated } = await listScopeFiles(scope, cwd, signal, OVERVIEW_FILE_CAP + 1, params.lang);
 		if (truncated || files.length > OVERVIEW_FILE_CAP) {
 			throw new ToolError("symbol overview scope too large (>50 files); narrow the path or glob");
 		}
@@ -554,7 +577,7 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 
 		const buildBody = (relPath: string, symbols: SymbolEntry[]): { model: string[]; display: string[] } => {
 			if (symbols.length === 0) {
-				const line = `${relPath} — no symbols (unsupported language or parse error)`;
+				const line = `${relPath} — no symbols (empty file or parse error)`;
 				return { model: [line], display: [line] };
 			}
 			const model = [`${relPath} — ${symbols.length} symbol(s)`];
@@ -633,7 +656,7 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		// native grep prefilter only for genuinely large scopes (faster, but skips
 		// files over grep's size cap — acceptable once the scope is already too big
 		// to read in full).
-		const scopeList = await listScopeFiles(scope, cwd, signal, FIND_PARSE_CAP + 1);
+		const scopeList = await listScopeFiles(scope, cwd, signal, FIND_PARSE_CAP + 1, params.lang);
 		const scopeFiles = scopeList.files;
 		const contentCache = new Map<string, string>();
 		let candidates: string[];
@@ -686,12 +709,8 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 			}
 			if (scope.multiTargets) {
 				for (const target of scope.multiTargets) {
-					let stat;
-					try {
-						stat = await Bun.file(target.basePath).stat();
-					} catch {
-						continue;
-					}
+					const stat = await Bun.file(target.basePath).stat().catch(() => undefined);
+					if (!stat) continue;
 					if (stat.isFile()) {
 						const abs = path.resolve(cwd, target.basePath);
 						if (isOutlineSupportedPath(abs) && (await fileMatchesName(abs))) candidateSet.add(abs);
@@ -718,7 +737,8 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		const substring: MatchedSymbol[] = [];
 		for (const abs of candidates) {
 			const cached = contentCache.get(abs);
-			const symbols = cached !== undefined ? outlineFromCode(cached, abs, params.lang) : await outlineFile(abs, params.lang);
+			const symbols =
+				cached !== undefined ? outlineFromCode(cached, abs, params.lang) : await outlineFile(abs, params.lang);
 			const relPath = formatPathRelativeToCwd(abs, cwd);
 			for (const s of symbols) {
 				if (s.name === name) {
@@ -790,7 +810,7 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		}
 		const abs = scope.searchPath;
 		const relPath = formatPathRelativeToCwd(abs, cwd);
-		if (!isOutlineSupportedPath(abs)) {
+		if (!isOutlineSupportedPath(abs) && !isOutlineSupportedLang(params.lang)) {
 			throw new ToolError(`symbol manipulate does not support ${relPath} (unsupported language)`);
 		}
 		if (/[\r\n]/.test(relPath)) {
@@ -835,7 +855,10 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		}
 		// Capture the symbol's source text now so the apply can reject if the body
 		// changed since the preview even when the line range is unchanged.
-		const previewRangeText = code.split("\n").slice(startLine - 1, endLine).join("\n");
+		const previewRangeText = code
+			.split("\n")
+			.slice(startLine - 1, endLine)
+			.join("\n");
 
 		const tag = await recordFileSnapshot(this.session, abs);
 		if (!tag) throw new ToolError(`Cannot snapshot ${relPath} for editing (file too large or unreadable)`);
@@ -890,16 +913,23 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 				if (fresh.startLine !== startLine || fresh.endLine !== endLine) {
 					return {
 						...toolResult(details)
-							.text(`Symbol '${name}' moved or changed in ${relPath} since the preview; re-run \`symbol\` and retry.`)
+							.text(
+								`Symbol '${name}' moved or changed in ${relPath} since the preview; re-run \`symbol\` and retry.`,
+							)
 							.done(),
 						isError: true,
 					};
 				}
-				const freshRangeText = freshCode.split("\n").slice(fresh.startLine - 1, fresh.endLine).join("\n");
+				const freshRangeText = freshCode
+					.split("\n")
+					.slice(fresh.startLine - 1, fresh.endLine)
+					.join("\n");
 				if (freshRangeText !== previewRangeText) {
 					return {
 						...toolResult(details)
-							.text(`Symbol '${name}' content in ${relPath} changed since the preview; re-run \`symbol\` and retry.`)
+							.text(
+								`Symbol '${name}' content in ${relPath} changed since the preview; re-run \`symbol\` and retry.`,
+							)
 							.done(),
 						isError: true,
 					};
@@ -1007,9 +1037,7 @@ export const symbolToolRenderer = {
 			}
 			return uiTheme.fg("toolOutput", sanitized);
 		});
-		const symbolGroups = groupLineIndicesByBlank(allLines).map(indices =>
-			indices.map(index => styledLines[index]!),
-		);
+		const symbolGroups = groupLineIndicesByBlank(allLines).map(indices => indices.map(index => styledLines[index]!));
 		// Drop the leading summary line from the tree body (it is already on
 		// the status line) so the block does not duplicate it.
 		const bodyGroups = symbolGroups.filter(group => {
@@ -1027,7 +1055,12 @@ export const symbolToolRenderer = {
 					const separator = shown > 0 ? 1 : 0;
 					const remainingAfter = bodyGroups.length - (i + 1);
 					const reserved = !options.expanded && remainingAfter > 0 ? 1 : 0;
-					if (!options.expanded && shown > 0 && lines.length + separator + group.length + reserved > COLLAPSED_SYMBOL_LIMIT) break;
+					if (
+						!options.expanded &&
+						shown > 0 &&
+						lines.length + separator + group.length + reserved > COLLAPSED_SYMBOL_LIMIT
+					)
+						break;
 					if (separator) lines.push("");
 					lines.push(...group);
 					shown++;
