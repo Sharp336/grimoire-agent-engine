@@ -7555,6 +7555,10 @@ export class AgentSession {
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			// Compaction discarded the conversation history that carried the approved
+			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
+			// the plan from disk and re-injects it on the next turn (issue #1246).
+			this.#planReferenceSent = false;
 			this.#advisorRuntime?.reset();
 			this.#syncTodoPhasesFromBranch();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
@@ -9421,6 +9425,10 @@ export class AgentSession {
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			// Compaction discarded the conversation history that carried the approved
+			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
+			// the plan from disk and re-injects it on the next turn (issue #1246).
+			this.#planReferenceSent = false;
 			this.#advisorRuntime?.reset();
 			this.#syncTodoPhasesFromBranch();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
