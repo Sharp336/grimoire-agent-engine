@@ -858,10 +858,17 @@ export class UiHelpers {
 
 	extractAssistantText(message: AssistantMessage): string {
 		let text = "";
+		let audioCount = 0;
 		for (const content of message.content) {
 			if (content.type === "text") {
 				text += content.text;
+			} else if (content.type === "audio_output") {
+				audioCount++;
 			}
+		}
+		if (audioCount > 0) {
+			const note = `[generated ${audioCount} audio clip${audioCount === 1 ? "" : "s"}; saved to session]`;
+			text = text.length > 0 ? `${text.trim()}\n\n${note}` : note;
 		}
 		return text.trim();
 	}

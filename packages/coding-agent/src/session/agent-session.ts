@@ -8567,6 +8567,9 @@ export class AgentSession {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 		}
 		this.agent.setModel(model);
+		// Enable model-generated audio output implicitly for audio-capable models
+		// (e.g. gpt-4o-audio). A user-facing toggle can override this later.
+		this.agent.audioOutput = model.id.toLowerCase().includes("audio") ? { format: "wav" } : undefined;
 
 		// Re-evaluate append-only context mode — provider or setting may have changed
 		this.#syncAppendOnlyContext(model);

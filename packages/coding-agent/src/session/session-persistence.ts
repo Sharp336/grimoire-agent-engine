@@ -37,12 +37,14 @@ export function isImageBlock(value: unknown): value is { type: "image"; data: st
 	);
 }
 
-export function isAudioBlock(value: unknown): value is { type: "audio"; data: string; mimeType?: string } {
+export function isAudioBlock(
+	value: unknown,
+): value is { type: "audio" | "audio_output"; data: string; mimeType?: string } {
 	return (
 		typeof value === "object" &&
 		value !== null &&
 		"type" in value &&
-		value.type === "audio" &&
+		(value.type === "audio" || value.type === "audio_output") &&
 		"data" in value &&
 		typeof value.data === "string"
 	);

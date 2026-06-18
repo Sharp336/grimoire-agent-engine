@@ -149,6 +149,8 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 			return { ...block };
 		case "redactedThinking":
 			return { ...block };
+		case "audio_output":
+			return { ...block };
 		case "toolCall":
 			return { ...block, arguments: cloneToolArguments(block.arguments) };
 	}

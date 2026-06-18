@@ -6,6 +6,7 @@ import {
 	type ApiKey,
 	type AssistantMessage,
 	type AssistantMessageEvent,
+	type AudioOutputOptions,
 	type Context,
 	type CursorExecHandlers,
 	type CursorToolResultHandler,
@@ -319,6 +320,7 @@ export class Agent {
 	#providerSessionState?: Map<string, ProviderSessionState>;
 	#thinkingBudgets?: ThinkingBudgets;
 	#temperature?: number;
+	#audioOutput?: AudioOutputOptions;
 	#topP?: number;
 	#topK?: number;
 	#minP?: number;
@@ -550,6 +552,15 @@ export class Agent {
 	 */
 	set temperature(value: number | undefined) {
 		this.#temperature = value;
+	}
+
+	/** Opt-in audio output (gpt-4o-audio); undefined disables it. */
+	get audioOutput(): AudioOutputOptions | undefined {
+		return this.#audioOutput;
+	}
+
+	set audioOutput(value: AudioOutputOptions | undefined) {
+		this.#audioOutput = value;
 	}
 
 	get topP(): number | undefined {
@@ -1022,6 +1033,7 @@ export class Agent {
 			reasoning,
 			disableReasoning: this.#state.disableReasoning,
 			temperature: this.#temperature,
+			audioOutput: this.#audioOutput,
 			topP: this.#topP,
 			topK: this.#topK,
 			minP: this.#minP,

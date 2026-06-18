@@ -910,6 +910,8 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			// `sawUsagePayload` flips when a usage payload was parsed.
 			let streamFinishedAt: number | undefined;
 			let sawUsagePayload = false;
+			let audioDataBuffer = "";
+			let audioTranscriptBuffer = "";
 			const timedOpenaiStream = iterateWithIdleTimeout(openaiStream, {
 				idleTimeoutMs,
 				firstItemTimeoutMs: firstEventTimeoutMs,
@@ -1137,6 +1139,14 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 							}
 						}
 					}
+					const audioDelta = choice.delta.audio;
+					if (audioDelta) {
+						if (typeof audioDelta.data === "string") audioDataBuffer += audioDelta.data;
+						if (typeof audioDelta.transcript === "string") audioTranscriptBuffer += audioDelta.transcript;
+					}
+					if (typeof choice.delta.audio_transcript === "string") {
+						audioTranscriptBuffer += choice.delta.audio_transcript;
+					}
 				}
 
 				// `finish_reason` + usage both observed: the chat-completions
@@ -1209,6 +1219,15 @@ export const streamOpenAICompletions: StreamFunction<"openai-completions"> = (
 			output.errorMessage = undefined;
 			output.duration = Date.now() - startTime;
 			if (firstTokenTime) output.ttft = firstTokenTime - startTime;
+			if (audioDataBuffer.length > 0) {
+				const audioFormat = options?.audioOutput?.format ?? "wav";
+				output.content.push({
+					type: "audio_output",
+					data: audioDataBuffer,
+					mimeType: audioFormat === "mp3" ? "audio/mpeg" : "audio/wav",
+					...(audioTranscriptBuffer.length > 0 ? { transcript: audioTranscriptBuffer } : {}),
+				});
+			}
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
 		} catch (error) {
@@ -1347,6 +1366,16 @@ function buildParams(
 		params.frequency_penalty = options.frequencyPenalty;
 	}
 	applyOpenAIServiceTier(params, options?.serviceTier, model.provider);
+
+	// Opt-in audio output (gpt-4o-audio). Only advertised for audio models;
+	// other models reject the `modalities`/`audio` fields.
+	if (options?.audioOutput && model.id.toLowerCase().includes("audio")) {
+		params.modalities = ["text", "audio"];
+		params.audio = {
+			voice: options.audioOutput.voice ?? "alloy",
+			format: options.audioOutput.format ?? "wav",
+		};
+	}
 
 	if (context.tools?.length) {
 		const builtTools = convertTools(context.tools, initialCompat, toolStrictModeOverride);
