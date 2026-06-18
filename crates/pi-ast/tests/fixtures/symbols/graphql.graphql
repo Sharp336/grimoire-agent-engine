@@ -1,0 +1,30 @@
+type Person {
+  id: ID!
+  name: String!
+  age: Int
+}
+
+interface Node {
+  id: ID!
+}
+
+type Article implements Node {
+  id: ID!
+  title: String!
+}
+
+enum Status {
+  ACTIVE
+  INACTIVE
+}
+
+input PersonInput {
+  name: String!
+  age: Int
+}
+
+scalar DateTime
+
+union SearchResult = Person | Article
+
+directive @deprecated(reason: String) on FIELD_DEFINITION

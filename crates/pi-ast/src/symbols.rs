@@ -185,6 +185,14 @@ pub const fn outline_languages() -> &'static [SupportLang] {
 		Clojure,
 		EmacsLisp,
 		Powershell,
+		// DSL / HDL / schema languages.
+		Graphql,
+		Proto,
+		Tlaplus,
+		Sql,
+		Verilog,
+		Hcl,
+		Nix,
 	]
 }
 
@@ -350,6 +358,11 @@ impl<'a> Walker<'a> {
 			SupportLang::Clojure => self.emit_clojure(node, kind, depth, parent, start_line),
 			SupportLang::EmacsLisp => self.emit_emacslisp(node, kind, depth, parent, start_line),
 			SupportLang::Powershell => self.emit_powershell(node, kind, depth, parent, start_line),
+			SupportLang::Tlaplus => self.emit_tlaplus(node, kind, depth, parent, start_line),
+			SupportLang::Sql => self.emit_sql(node, kind, depth, parent, start_line),
+			SupportLang::Verilog => self.emit_verilog(node, kind, depth, parent, start_line),
+			SupportLang::Hcl => self.emit_hcl(node, kind, depth, parent, start_line),
+			SupportLang::Nix => self.emit_nix(node, kind, depth, parent, start_line),
 			_ => self.emit_generic(node, kind, depth, parent, start_line),
 		}
 	}
@@ -601,7 +614,14 @@ fn first_name_in_decl(node: Node<'_>) -> Option<Node<'_>> {
 fn is_decl_wrapper(kind: &str) -> bool {
 	matches!(
 		kind,
-		"variable_declaration" | "variable_declarator" | "struct_declaration" | "struct_declarator"
+		"variable_declaration"
+			| "variable_declarator"
+			| "struct_declaration"
+			| "struct_declarator"
+			| "message_name"
+			| "enum_name"
+			| "service_name"
+			| "rpc_name"
 	)
 }
 
@@ -889,6 +909,32 @@ fn symbol_kind(language: SupportLang, node_kind: &str) -> Option<&'static str> {
 		},
 		SupportLang::Starlark => match node_kind {
 			"function_definition" => Some("function"),
+			_ => None,
+		},
+		SupportLang::Graphql => match node_kind {
+			"object_type_definition" | "input_object_type_definition" => Some("struct"),
+			"interface_type_definition" => Some("interface"),
+			"enum_type_definition" => Some("enum"),
+			"enum_value" => Some("enum_member"),
+			"scalar_type_definition" | "union_type_definition" => Some("type_alias"),
+			"directive_definition" => Some("macro"),
+			"field_definition" => Some("field"),
+			_ => None,
+		},
+		SupportLang::Proto => match node_kind {
+			"message" => Some("struct"),
+			"enum" => Some("enum"),
+			"enum_field" => Some("enum_member"),
+			"service" => Some("interface"),
+			"rpc" => Some("method"),
+			"field" => Some("field"),
+			_ => None,
+		},
+		SupportLang::Tlaplus => match node_kind {
+			"module" | "module_definition" => Some("module"),
+			"operator_definition" | "function_definition" => Some("function"),
+			"constant_declaration" => Some("constant"),
+			"variable_declaration" => Some("variable"),
 			_ => None,
 		},
 		_ => None,
@@ -2363,6 +2409,380 @@ impl<'a> Walker<'a> {
 			_ => None,
 		}
 	}
+	/// TLA+: module/operator/function defs go through the generic cascade
+	/// (`name` field); only `constant_declaration`/`variable_declaration`
+	/// (comma-lists like `CONSTANTS A, B, C`) need a multi-name emitter.
+	fn emit_tlaplus(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		if kind != "constant_declaration" && kind != "variable_declaration" {
+			return self.emit_generic(node, kind, depth, parent, start_line);
+		}
+		let domain = symbol_kind(self.language, kind)?;
+		let mut first: Option<usize> = None;
+		let mut cursor = node.walk();
+		for child in node.named_children(&mut cursor) {
+			let name_node = match child.kind() {
+				"identifier" => Some(child),
+				"operator_declaration" => child.child_by_field_name("name"),
+				_ => None,
+			};
+			let Some(name_node) = name_node else { continue };
+			let name = self.text(name_node);
+			if name.is_empty() {
+				continue;
+			}
+			let idx = self.push(
+				name,
+				domain,
+				node,
+				start_line,
+				node_start_line(name_node),
+				self.detail(node, None),
+				depth,
+				parent,
+			);
+			if first.is_none() {
+				first = Some(idx);
+			}
+		}
+		first
+	}
+
+	/// SQL (tree-sitter-sequel): CREATE-style DDL only. Table/view/function
+	/// names live in an `object_reference` child's `name` field (not a `name`
+	/// field on the statement). DML/query statements emit nothing.
+	fn emit_sql(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		let (name_node, domain) = match kind {
+			"create_table" | "create_view" => {
+				let obj = sql_first_object_reference(node)?;
+				(obj.child_by_field_name("name")?, "struct")
+			},
+			"create_function" | "create_procedure" => {
+				let obj = sql_first_object_reference(node)?;
+				(obj.child_by_field_name("name")?, "function")
+			},
+			"column_definition" if parent_kind(node) == Some("column_definitions") => {
+				(node.child_by_field_name("name")?, "field")
+			},
+			_ => return None,
+		};
+		let name = self.text(name_node);
+		if name.is_empty() {
+			return None;
+		}
+		let selection_line = node_start_line(name_node);
+		let detail = self.detail(node, None);
+		Some(self.push(name, domain, node, start_line, selection_line, detail, depth, parent))
+	}
+
+	/// Verilog/SystemVerilog: module/function/task declarations. Module names
+	/// sit in `module_header`; function/task names nest under
+	/// `*_body_declaration -> *_identifier`. Ports/nets are not emitted (their
+	/// identifiers interleave with widths/types and would be spurious).
+	fn emit_verilog(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		let (name_node, domain) = match kind {
+			"module_declaration" => {
+				let header = verilog_first_child(node, "module_header")?;
+				(verilog_name_token(header)?, "module")
+			},
+			"function_declaration" => {
+				let body = verilog_first_child(node, "function_body_declaration")?;
+				let fid = verilog_first_child(body, "function_identifier")?;
+				(verilog_name_token(fid)?, "function")
+			},
+			"task_declaration" => {
+				let body = verilog_first_child(node, "task_body_declaration")?;
+				let tid = verilog_first_child(body, "task_identifier")?;
+				(verilog_name_token(tid)?, "function")
+			},
+			_ => return None,
+		};
+		let name = self.text(name_node);
+		if name.is_empty() {
+			return None;
+		}
+		let selection_line = node_start_line(name_node);
+		let detail = self.detail(node, None);
+		Some(self.push(name, domain, node, start_line, selection_line, detail, depth, parent))
+	}
+
+	/// HCL: a `block` maps to `struct`, named by its type identifier + labels
+	/// (the canonical `type.label...` address). Only file-scope `attribute`s
+	/// emit (constant for a literal RHS, else field); block-internal
+	/// attributes are config values, not symbols.
+	fn emit_hcl(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		match kind {
+			"block" => {
+				let (type_ident, labels) = hcl_block_ident_and_labels(node)?;
+				let type_text = self.text(type_ident);
+				let name_node = labels.last().copied().unwrap_or(type_ident);
+				let name = if labels.is_empty() {
+					type_text
+				} else {
+					let mut parts = vec![type_text];
+					for lbl in &labels {
+						parts.push(hcl_label_text(self.source, *lbl));
+					}
+					parts.join(".")
+				};
+				if name.is_empty() {
+					return None;
+				}
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, "struct", node, start_line, sel, detail, depth, parent))
+			},
+			"attribute" => {
+				if !hcl_is_top_level_attr(node) {
+					return None;
+				}
+				let name_node = hcl_attr_name(node)?;
+				let name = self.text(name_node);
+				if name.is_empty() {
+					return None;
+				}
+				let is_literal = hcl_attr_expr(node)
+					.and_then(|e| e.named_child(0))
+					.map(|c| c.kind() == "literal_value")
+					.unwrap_or(false);
+				let kind_str = if is_literal { "constant" } else { "field" };
+				let sel = node_start_line(name_node);
+				let detail = self.detail(node, None);
+				Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
+			},
+			_ => None,
+		}
+	}
+
+	/// Nix: a file-scope `binding` (`attrpath = expr;`) maps to `function`
+	/// (RHS a `function_expression`) or `constant`. Deep/local bindings are
+	/// skipped via [`nix_is_file_scope_binding`].
+	fn emit_nix(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		if kind != "binding" || !nix_is_file_scope_binding(node) {
+			return None;
+		}
+		let path = node.child_by_field_name("attrpath")?;
+		let name = nix_attrpath_text(self.source, path)?;
+		if name.is_empty() {
+			return None;
+		}
+		let expr = node.child_by_field_name("expression")?;
+		let kind_str = if nix_rhs_is_function(&expr) {
+			"function"
+		} else {
+			"constant"
+		};
+		let sel = node_start_line(path);
+		let detail = self.detail(node, None);
+		Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
+	}
+}
+
+/// First direct named child of `node` with the given kind (SQL object
+/// references and Verilog header/body wrappers have no field names).
+fn first_named_child_of_kind<'b>(node: Node<'b>, kind: &str) -> Option<Node<'b>> {
+	let mut cursor = node.walk();
+	node.children(&mut cursor).find(|c| c.is_named() && c.kind() == kind)
+}
+
+/// The `object_reference` child naming a SQL `CREATE TABLE/VIEW/FUNCTION`.
+fn sql_first_object_reference(node: Node<'_>) -> Option<Node<'_>> {
+	first_named_child_of_kind(node, "object_reference")
+}
+
+/// First direct named child of a Verilog node with the given kind.
+fn verilog_first_child<'b>(node: Node<'b>, kind: &str) -> Option<Node<'b>> {
+	first_named_child_of_kind(node, kind)
+}
+
+/// The declared name token of a Verilog declaration header/identifier node.
+/// `function_identifier`/`task_identifier` wrap a same-kind child one level
+/// down (`function_identifier -> function_identifier -> simple_identifier`),
+/// so descend through those wrappers before picking the name token.
+fn verilog_name_token<'b>(node: Node<'b>) -> Option<Node<'b>> {
+	let mut cur = node;
+	loop {
+		let mut cursor = cur.walk();
+		if let Some(name) = cur
+			.children(&mut cursor)
+			.find(|c| c.kind() == "simple_identifier" || c.kind() == "escaped_identifier")
+		{
+			return Some(name);
+		}
+		let mut cursor2 = cur.walk();
+		let inner = cur.children(&mut cursor2).find(|c| c.kind() == cur.kind());
+		match inner {
+			Some(n) => cur = n,
+			None => return None,
+		}
+	}
+}
+
+/// The type `identifier` (first named child) and the label nodes of an HCL
+/// `block`. The grammar gives `block` no fields, so parts are read
+/// positionally: a leading type `identifier`, then zero+ labels (each a
+/// `string_lit` or a bare `identifier`), then the structural body tokens.
+fn hcl_block_ident_and_labels(node: Node<'_>) -> Option<(Node<'_>, Vec<Node<'_>>)> {
+	let mut cursor = node.walk();
+	let mut type_ident = None;
+	let mut labels = Vec::new();
+	for child in node.children(&mut cursor) {
+		if !child.is_named() {
+			continue;
+		}
+		match child.kind() {
+			"identifier" if type_ident.is_none() => type_ident = Some(child),
+			"identifier" | "string_lit" => labels.push(child),
+			_ => break,
+		}
+	}
+	Some((type_ident?, labels))
+}
+
+/// Unquoted text of an HCL block label (a bare `identifier`, or a `string_lit`
+/// wrapping a `template_literal`).
+fn hcl_label_text(source: &[u8], node: Node<'_>) -> String {
+	if node.kind() == "identifier" {
+		return String::from_utf8_lossy(&source[node.start_byte()..node.end_byte()]).into_owned();
+	}
+	let mut cursor = node.walk();
+	for child in node.children(&mut cursor) {
+		if child.kind() == "template_literal" {
+			return String::from_utf8_lossy(&source[child.start_byte()..child.end_byte()]).into_owned();
+		}
+	}
+	let raw = String::from_utf8_lossy(&source[node.start_byte()..node.end_byte()]);
+	raw.trim_matches('"').to_string()
+}
+
+/// True when an HCL `attribute` sits at file scope (parent `body` under the
+/// `config_file` root); block-internal attributes are config values.
+fn hcl_is_top_level_attr(node: Node<'_>) -> bool {
+	let body = match node.parent() {
+		Some(p) if p.kind() == "body" => p,
+		_ => return false,
+	};
+	matches!(body.parent().map(|p| p.kind()), Some("config_file"))
+}
+
+/// The `identifier` name of an HCL `attribute` (first named child).
+fn hcl_attr_name(node: Node<'_>) -> Option<Node<'_>> {
+	let mut cursor = node.walk();
+	node.children(&mut cursor)
+		.find(|c| c.is_named() && c.kind() == "identifier")
+}
+
+/// The `expression` child of an HCL `attribute`.
+fn hcl_attr_expr(node: Node<'_>) -> Option<Node<'_>> {
+	let mut cursor = node.walk();
+	node.children(&mut cursor)
+		.find(|c| c.is_named() && c.kind() == "expression")
+}
+
+/// True when a Nix `binding` is at file scope: its enclosing `binding_set`'s
+/// container (`attrset_expression`/`rec_attrset_expression`/`let_expression`)
+/// sits directly under `source_code`, or is the body of a file-level
+/// `function_expression` (the `{ args }: ...` file wrapper). Deeper bindings
+/// are local scope and skipped.
+fn nix_is_file_scope_binding(node: Node<'_>) -> bool {
+	let binding_set = match node.parent() {
+		Some(p) if p.kind() == "binding_set" => p,
+		_ => return false,
+	};
+	let Some(container) = binding_set.parent() else {
+		return false;
+	};
+	if !matches!(
+		container.kind(),
+		"attrset_expression" | "rec_attrset_expression" | "let_expression"
+	) {
+		return false;
+	}
+	if matches!(container.parent().map(|p| p.kind()), Some("source_code")) {
+		return true;
+	}
+	if let Some(func) = container.parent() {
+		if func.kind() == "function_expression"
+			&& matches!(func.parent().map(|p| p.kind()), Some("source_code"))
+		{
+			return true;
+		}
+	}
+	false
+}
+
+/// Dotted name of a Nix `attrpath` (its `attr` children joined with `.`).
+/// Plain identifiers and string-literal keys contribute; a dynamic
+/// interpolation key is not addressable, so the whole path is rejected.
+fn nix_attrpath_text(source: &[u8], node: Node<'_>) -> Option<String> {
+	let mut cursor = node.walk();
+	let mut parts = Vec::new();
+	for child in node.children_by_field_name("attr", &mut cursor) {
+		match child.kind() {
+			"identifier" => parts.push(
+				String::from_utf8_lossy(&source[child.start_byte()..child.end_byte()]).into_owned(),
+			),
+			"string_expression" => parts.push(nix_string_text(source, child)),
+			_ => return None,
+		}
+	}
+	if parts.is_empty() {
+		return None;
+	}
+	Some(parts.join("."))
+}
+
+/// Literal text of a Nix `string_expression` (concatenated `string_fragment`s),
+/// for quoted attr keys like `."foo-bar"`.
+fn nix_string_text(source: &[u8], node: Node<'_>) -> String {
+	let mut cursor = node.walk();
+	let mut out = String::new();
+	for child in node.children(&mut cursor) {
+		if child.kind() == "string_fragment" {
+			out.push_str(&String::from_utf8_lossy(&source[child.start_byte()..child.end_byte()]));
+		}
+	}
+	out
+}
+
+/// True when a Nix binding's RHS is a direct `function_expression`
+/// (conservative — a curried apply or a stored-function call is not a lambda).
+fn nix_rhs_is_function(expr: &Node<'_>) -> bool {
+	expr.kind() == "function_expression"
 }
 
 /// Julia `function_definition` name via `signature -> call_expression ->
@@ -3620,6 +4040,183 @@ class Outer {
 		assert!(find(&r, "Version").is_none(), "top-level assignment must not emit");
 	}
 
+	#[test]
+	fn outlines_graphql_types_interface_enum_scalar_union_directive() {
+		let code = fixture("graphql.graphql");
+		let r = outline(&code, "graphql.graphql");
+		assert!(r.parsed);
+		let person_idx = idx_of(&r, "Person", "struct").expect("Person");
+		let id = find(&r, "id").expect("id field");
+		assert_eq!(id.kind, "field");
+		assert_eq!(id.parent, person_idx as i32);
+		assert_eq!(find(&r, "Node").map(|s| s.kind.as_str()), Some("interface"));
+		assert_eq!(find(&r, "Article").map(|s| s.kind.as_str()), Some("struct"));
+		let status_idx = idx_of(&r, "Status", "enum").expect("Status");
+		let active = find(&r, "ACTIVE").expect("ACTIVE");
+		assert_eq!(active.kind, "enum_member");
+		assert_eq!(active.parent, status_idx as i32);
+		let members = r
+			.symbols
+			.iter()
+			.filter(|s| s.kind == "enum_member" && s.parent == status_idx as i32)
+			.count();
+		assert_eq!(members, 2, "Status has exactly two enum members");
+		assert_eq!(find(&r, "PersonInput").map(|s| s.kind.as_str()), Some("struct"));
+		assert_eq!(find(&r, "DateTime").map(|s| s.kind.as_str()), Some("type_alias"));
+		assert_eq!(find(&r, "SearchResult").map(|s| s.kind.as_str()), Some("type_alias"));
+		assert_eq!(find(&r, "deprecated").map(|s| s.kind.as_str()), Some("macro"));
+	}
+
+	#[test]
+	fn outlines_proto_message_enum_service_rpc_fields() {
+		let code = fixture("proto.proto");
+		let r = outline(&code, "proto.proto");
+		assert!(r.parsed);
+		let person_idx = idx_of(&r, "Person", "struct").expect("Person");
+		let name = find(&r, "name").expect("name field");
+		assert_eq!(name.kind, "field");
+		assert_eq!(name.parent, person_idx as i32);
+		let status_idx = idx_of(&r, "Status", "enum").expect("Status");
+		let unknown = find(&r, "UNKNOWN").expect("UNKNOWN");
+		assert_eq!(unknown.kind, "enum_member");
+		assert_eq!(unknown.parent, status_idx as i32);
+		let greeter_idx = idx_of(&r, "Greeter", "interface").expect("Greeter");
+		let say = find(&r, "SayHello").expect("SayHello");
+		assert_eq!(say.kind, "method");
+		assert_eq!(say.parent, greeter_idx as i32);
+		assert_eq!(find(&r, "StreamGreetings").map(|s| s.kind.as_str()), Some("method"));
+		assert_eq!(find(&r, "Address").map(|s| s.kind.as_str()), Some("struct"));
+		assert_eq!(find(&r, "HelloReply").map(|s| s.kind.as_str()), Some("struct"));
+	}
+
+	#[test]
+	fn outlines_tlaplus_module_constants_variables_operators() {
+		let code = fixture("tlaplus.tla");
+		let r = outline(&code, "tlaplus.tla");
+		assert!(r.parsed);
+		let module_idx = idx_of(&r, "Counter", "module").expect("Counter module");
+		assert_eq!(find(&r, "MaxCount").map(|s| s.kind.as_str()), Some("constant"));
+		assert_eq!(find(&r, "counter").map(|s| s.kind.as_str()), Some("variable"));
+		let init = find(&r, "Init").expect("Init");
+		assert_eq!(init.kind, "function");
+		assert_eq!(init.parent, module_idx as i32);
+		assert_eq!(find(&r, "Increment").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "Spec").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "MaxVal").map(|s| s.kind.as_str()), Some("function"));
+	}
+
+	#[test]
+	fn outlines_tlaplus_multi_name_constants_variables() {
+		let code = "---- MODULE Multi ----\nCONSTANTS A, B, C\nVARIABLES x, y\nInit == x = 0\n====\n";
+		let r = outline(code, "multi.tla");
+		assert!(r.parsed);
+		assert_eq!(
+			r.symbols.iter().filter(|s| s.kind == "constant").count(),
+			3,
+			"CONSTANTS A, B, C -> 3 constants"
+		);
+		assert_eq!(
+			r.symbols.iter().filter(|s| s.kind == "variable").count(),
+			2,
+			"VARIABLES x, y -> 2 variables"
+		);
+		assert_eq!(find(&r, "Init").map(|s| s.kind.as_str()), Some("function"));
+	}
+
+	#[test]
+	fn outlines_sql_table_view_function_columns() {
+		let code = fixture("sql.sql");
+		let r = outline(&code, "sql.sql");
+		assert!(r.parsed, "sql fixture must parse with no ERROR nodes");
+		assert_eq!(r.language.as_deref(), Some("sql"));
+		let table_idx = idx_of(&r, "users", "struct").expect("table users");
+		assert_eq!(r.symbols[table_idx].parent, -1);
+		let id = find(&r, "id").expect("column id");
+		assert_eq!(id.kind, "field");
+		assert_eq!(id.parent, table_idx as i32);
+		let email = find(&r, "email").expect("column email");
+		assert_eq!(email.kind, "field");
+		assert_eq!(email.parent, table_idx as i32);
+		assert_eq!(find(&r, "active_users").map(|s| s.kind.as_str()), Some("struct"));
+		assert_eq!(find(&r, "add").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "greet").map(|s| s.kind.as_str()), Some("function"));
+		assert!(find(&r, "who").is_none(), "function parameter must not emit");
+		assert_eq!(
+			r.symbols.iter().filter(|s| s.name == "users").count(),
+			1,
+			"table reference in view must not duplicate the symbol"
+		);
+	}
+
+	#[test]
+	fn outlines_verilog_module_function_task() {
+		let code = fixture("verilog.sv");
+		let r = outline(&code, "verilog.sv");
+		assert!(r.parsed, "verilog fixture must parse with no ERROR nodes");
+		assert_eq!(r.language.as_deref(), Some("verilog"));
+		let module_idx = idx_of(&r, "Adder", "module").expect("module Adder");
+		assert_eq!(r.symbols[module_idx].parent, -1);
+		let func = find(&r, "double").expect("function double");
+		assert_eq!(func.kind, "function");
+		assert_eq!(func.parent, module_idx as i32);
+		let task = find(&r, "clear").expect("task clear");
+		assert_eq!(task.kind, "function");
+		assert_eq!(task.parent, module_idx as i32);
+		assert!(find(&r, "a").is_none(), "module ports must not emit");
+		assert!(find(&r, "carry").is_none(), "module nets must not emit");
+	}
+
+	#[test]
+	fn outlines_hcl_block_and_top_level_attr() {
+		let code = fixture("hcl.hcl");
+		let r = outline(&code, "hcl.hcl");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("hcl"));
+		let ver = find(&r, "terraform_required_version").expect("top-level attr");
+		assert_eq!(ver.kind, "constant");
+		assert_eq!(ver.parent, -1);
+		assert_eq!(find(&r, "variable.instance_count").map(|s| s.kind.as_str()), Some("struct"));
+		assert_eq!(find(&r, "resource.aws_instance.web").map(|s| s.kind.as_str()), Some("struct"));
+		assert_eq!(find(&r, "output.instance_ip").map(|s| s.kind.as_str()), Some("struct"));
+		assert!(find(&r, "region").is_none(), "block-internal attr must not emit");
+		assert!(find(&r, "ami").is_none(), "block-internal attr must not emit");
+		assert!(
+			r.symbols.iter().all(|s| matches!(s.kind.as_str(), "struct" | "constant")),
+			"only blocks (struct) and file-scope attrs (constant) emit"
+		);
+	}
+
+	#[test]
+	fn outlines_nix_file_scope_bindings() {
+		let code = fixture("nix.nix");
+		let r = outline(&code, "nix.nix");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("nix"));
+		assert_eq!(find(&r, "greeting").map(|s| s.kind.as_str()), Some("constant"));
+		assert_eq!(find(&r, "mkShell").map(|s| s.kind.as_str()), Some("function"));
+		assert_eq!(find(&r, "tools").map(|s| s.kind.as_str()), Some("constant"));
+		assert_eq!(find(&r, "builder").map(|s| s.kind.as_str()), Some("function"));
+		assert!(find(&r, "formatter").is_none(), "nested attrset binding must not emit");
+		assert!(find(&r, "combined").is_none(), "nested attrset binding must not emit");
+		assert!(
+			r.symbols.iter().all(|s| matches!(s.kind.as_str(), "function" | "constant")),
+			"only file-scope bindings (function/constant) emit"
+		);
+	}
+
+	#[test]
+	fn outlines_nix_attrset_body_bindings() {
+		let code = "{ pkgs }:\n\n{\n  description = \"dev shell\";\n  formatter = pkgs.nixfmt;\n}";
+		let r = outline(code, "flake.nix");
+		assert!(r.parsed);
+		assert_eq!(find(&r, "description").map(|s| s.kind.as_str()), Some("constant"));
+		assert_eq!(find(&r, "formatter").map(|s| s.kind.as_str()), Some("constant"));
+		let bare = "{\n  name = \"pkg\";\n  version = \"0.1.0\";\n}";
+		let r2 = outline(bare, "module.nix");
+		assert!(r2.parsed);
+		assert_eq!(find(&r2, "name").map(|s| s.kind.as_str()), Some("constant"));
+		assert_eq!(find(&r2, "version").map(|s| s.kind.as_str()), Some("constant"));
+	}
 	/// Boundary lock: every `SupportLang` is EITHER an outline language OR an
 	/// explicitly-excluded data/markup/config/DSL language — never both, never
 	/// neither. A newly added `SupportLang` variant fails this test until it is
@@ -3631,8 +4228,8 @@ class Outer {
 		// addressable *code* symbols for an outline. Every programming language
 		// lives in outline_languages() instead.
 		const EXCLUDED: &[SupportLang] = &[
-			Astro, Cmake, Css, Diff, Dockerfile, Graphql, Hcl, Html, Ini, Json, Just, Make,
-			Markdown, Nix, Proto, Regex, Sql, Svelte, Tlaplus, Toml, Verilog, Vue, Xml, Yaml,
+			Astro, Cmake, Css, Diff, Dockerfile, Html, Ini, Json, Just, Make, Markdown, Regex,
+			Svelte, Toml, Vue, Xml, Yaml,
 		];
 		for &lang in SupportLang::all_langs() {
 			let supported = outline_languages().contains(&lang);
