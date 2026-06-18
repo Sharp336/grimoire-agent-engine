@@ -24,7 +24,11 @@ enum Color {
 }
 
 void topLevel() {
-	print('hi');
+	var localMsg = 'hi';
+	print(localMsg);
 }
+
+final String greeting = 'hello';
+var counter = 0;
 
 const double pi = 3.14;

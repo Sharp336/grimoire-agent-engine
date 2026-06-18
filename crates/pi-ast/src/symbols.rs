@@ -353,6 +353,8 @@ impl<'a> Walker<'a> {
 			SupportLang::Rust => self.emit_rust(node, kind, depth, parent, start_line),
 			SupportLang::Go => self.emit_go(node, kind, depth, parent, start_line),
 			SupportLang::Java => self.emit_java(node, kind, depth, parent, start_line),
+			SupportLang::Swift => self.emit_swift(node, kind, depth, parent, start_line),
+			SupportLang::Dart => self.emit_dart(node, kind, depth, parent, start_line),
 			SupportLang::R => self.emit_r(node, kind, depth, parent, start_line),
 			SupportLang::Julia => self.emit_julia(node, kind, depth, parent, start_line),
 			SupportLang::Zig => self.emit_zig(node, kind, depth, parent, start_line),
@@ -698,6 +700,33 @@ fn is_export_default_value(node: Node<'_>) -> bool {
 	false
 }
 
+/// The enclosing `export_statement` for a named default-export value node
+/// (`export default (class Foo {})` / `export default (function bar {})`),
+/// walking up through any wrapping `parenthesized_expression`. Used to extend
+/// the emitted symbol's `end_line` to cover the trailing `)`/`;` wrapper so a
+/// `symbol manipulate` replace/delete does not leave a dangling `);`. Returns
+/// `None` when the node is not a default-export value (caller should fall back
+/// to the node itself).
+fn export_default_statement(node: Node<'_>) -> Option<Node<'_>> {
+	let mut cur = node.parent();
+	while let Some(p) = cur {
+		match p.kind() {
+			"parenthesized_expression" => cur = p.parent(),
+			"export_statement" => {
+				let Some(value) = p.child_by_field_name("value") else {
+					return None;
+				};
+				if value.start_byte() <= node.start_byte() && node.end_byte() <= value.end_byte() {
+					return Some(p);
+				}
+				return None;
+			},
+			_ => return None,
+		}
+	}
+	None
+}
+
 /// Map a tree-sitter node kind to its domain kind string for the supported
 /// languages. Returns `None` for node kinds that are not named symbols
 /// (list/container nodes, non-symbol nodes) or that require *contextual*
@@ -713,6 +742,11 @@ fn is_export_default_value(node: Node<'_>) -> bool {
 /// - TS `method_definition` (`method` vs `constructor` depends on the name).
 /// - TS `enum_body` bare members (emitted directly from the `name` field, not
 ///   via a node kind).
+/// - Swift `class_declaration` (`struct`/`enum`/`class` depends on the
+///   declaration keyword / body kind — tree-sitter-swift parses all three as
+///   `class_declaration`).
+/// - Dart `initialized_identifier` (`field` at class-body scope vs `variable`
+///   at top level depends on the enclosing scope).
 ///
 /// The contextual `emit_*` emitters encode these mappings inline (with the
 /// scoping overrides above) rather than calling this function; this table is
@@ -844,7 +878,8 @@ fn symbol_kind(language: SupportLang, node_kind: &str) -> Option<&'static str> {
 			_ => None,
 		},
 		SupportLang::Swift => match node_kind {
-			"class_declaration" => Some("class"),
+			// `class_declaration` is contextual (struct/enum/class): handled by
+			// `emit_swift`, not this table.
 			"protocol_declaration" => Some("interface"),
 			"property_declaration" => Some("property"),
 			"function_declaration" => Some("function"),
@@ -861,7 +896,8 @@ fn symbol_kind(language: SupportLang, node_kind: &str) -> Option<&'static str> {
 			"getter_signature" => Some("property"),
 			"constructor_signature" => Some("constructor"),
 			"static_final_declaration" => Some("constant"),
-			"initialized_identifier" => Some("field"),
+			// `initialized_identifier` is contextual (field vs variable):
+			// handled by `emit_dart`, not this table.
 			_ => None,
 		},
 		SupportLang::Php => match node_kind {
@@ -983,18 +1019,25 @@ impl<'a> Walker<'a> {
 			// `parenthesized_expression`) down to this node. The
 			// `is_export_default_value` guard ensures we fire ONLY for that
 			// path — a named expression nested in a `const`/`variable_declarator`
-			// is already emitted by the declarator arm and must NOT duplicate.
 			"class" if is_export_default_value(node) => {
 				let name = self.name_text(node, "name")?;
 				let sel = self.selection_line(node, "name");
 				let detail = self.detail(node, Some("body"));
-				Some(self.push(name, "class", node, start_line, sel, detail, depth, parent))
+				// Extend `end_line` to the enclosing `export_statement` so the
+				// range covers the trailing `)`/`;` wrapper (`export default
+				// (class Foo {});`), preventing a dangling `);` on replace.
+				let range_node = export_default_statement(node).unwrap_or(node);
+				Some(self.push(name, "class", range_node, start_line, sel, detail, depth, parent))
 			},
 			"function_expression" if is_export_default_value(node) => {
 				let name = self.name_text(node, "name")?;
 				let sel = self.selection_line(node, "name");
 				let detail = self.detail(node, Some("body"));
-				Some(self.push(name, "function", node, start_line, sel, detail, depth, parent))
+				// Extend `end_line` to the enclosing `export_statement` so the
+				// range covers the trailing `)`/`;` wrapper (`export default
+				// (function bar {});`), preventing a dangling `);` on replace.
+				let range_node = export_default_statement(node).unwrap_or(node);
+				Some(self.push(name, "function", range_node, start_line, sel, detail, depth, parent))
 			},
 			"method_definition" => {
 				// Only class-body methods; skip object-literal methods (whose
@@ -1797,6 +1840,138 @@ impl<'a> Walker<'a> {
 			_ => None,
 		}
 	}
+}
+
+// ── Swift ────────────────────────────────────────────────────────────────
+
+impl<'a> Walker<'a> {
+	/// Swift emitter. tree-sitter-swift parses `struct`, `enum`, `class`, and
+	/// `actor` declarations ALL as `class_declaration`; only the declaration
+	/// keyword (an unnamed child) and the body kind (`enum_class_body` vs
+	/// `class_body`) distinguish them, so the generic `symbol_kind` table
+	/// cannot classify them. `class_declaration` is resolved here; every other
+	/// Swift symbol kind falls through to the generic table-driven emitter.
+	fn emit_swift(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		if kind != "class_declaration" {
+			return self.emit_generic(node, kind, depth, parent, start_line);
+		}
+		let name = self.name_text(node, "name")?;
+		// `enum Direction { ... }` parses as `class_declaration` with an
+		// `enum_class_body` child; the declaration keyword is `enum`.
+		let body_is_enum = node
+			.children(&mut node.walk())
+			.any(|c| c.is_named() && c.kind() == "enum_class_body");
+		let kind_str = if body_is_enum {
+			"enum"
+		} else {
+			// Scan ALL direct children for the declaration keyword token
+			// (unnamed): `struct`, `actor`, or `class`. Modifiers, attributes,
+			// and generic-parameter children can precede the keyword, so do not
+			// stop at the first child.
+			match swift_decl_keyword(self.source, node) {
+				Some("struct") => "struct",
+				// `actor` and `class` (and any unrecognized keyword) default to
+				// `class` — `actor` is a reference type, closest to `class`.
+				_ => "class",
+			}
+		};
+		let sel = self.selection_line(node, "name");
+		let detail = self.detail(node, Some("body"));
+		Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
+	}
+}
+
+/// The declaration keyword of a Swift `class_declaration`: scan its direct
+/// children for an unnamed token whose text is `struct`, `class`, `actor`, or
+/// `enum`. Returns the keyword text, or `None` if none is found (treated as
+/// `class` by the caller).
+fn swift_decl_keyword(source: &[u8], node: Node<'_>) -> Option<&'static str> {
+	let mut cursor = node.walk();
+	for child in node.children(&mut cursor) {
+		if child.is_named() {
+			continue;
+		}
+		let txt = std::str::from_utf8(&source[child.start_byte()..child.end_byte()]).ok()?;
+		match txt {
+			"struct" => return Some("struct"),
+			"class" => return Some("class"),
+			"actor" => return Some("actor"),
+			"enum" => return Some("enum"),
+			_ => {},
+		}
+	}
+	None
+}
+
+// ── Dart ─────────────────────────────────────────────────────────────────
+
+impl<'a> Walker<'a> {
+	/// Dart emitter. `initialized_identifier` is contextual: it appears both
+	/// as a class-body member (`final String name;` -> `field`) and as a
+	/// top-level `var counter = 0;` (`top_level_variable_declaration` ->
+	/// `variable`). Inside a function body the same node is a local and must
+	/// NOT be emitted. `initialized_identifier` is resolved here by enclosing
+	/// scope; every other Dart symbol kind falls through to the generic
+	/// table-driven emitter.
+	fn emit_dart(
+		&mut self,
+		node: Node<'_>,
+		kind: &str,
+		depth: u32,
+		parent: i32,
+		start_line: u32,
+	) -> Option<usize> {
+		if kind != "initialized_identifier" {
+			return self.emit_generic(node, kind, depth, parent, start_line);
+		}
+		// Class-body members (parent `initialized_identifier_list` under a
+		// `class_body` chain) are fields; top-level declarations
+		// (`top_level_variable_declaration`) are variables. Anything inside a
+		// function body is a local and is skipped.
+		let scope = dart_initialized_identifier_scope(node);
+		let kind_str = match scope {
+			DartVarScope::ClassMember => "field",
+			DartVarScope::TopLevel => "variable",
+			DartVarScope::Local => return None,
+		};
+		let name = self.name_text(node, "name")?;
+		let sel = self.selection_line(node, "name");
+		let detail = self.detail(node, None);
+		Some(self.push(name, kind_str, node, start_line, sel, detail, depth, parent))
+	}
+}
+
+/// Enclosing scope of a Dart `initialized_identifier`.
+enum DartVarScope {
+	ClassMember,
+	TopLevel,
+	Local,
+}
+
+/// Classify a Dart `initialized_identifier` by walking up its ancestors. A
+/// class-body member reaches a `class_body` (or `enum_body`/`mixin` body)
+/// before any `function_body`/`block`; a top-level variable reaches
+/// `top_level_variable_declaration` directly; a local is nested under a
+/// `function_body`/`block` (though the grammar uses a distinct
+/// `initialized_variable_definition` for locals, this guard is defensive).
+fn dart_initialized_identifier_scope(node: Node<'_>) -> DartVarScope {
+	let mut cur = node.parent();
+	while let Some(p) = cur {
+		match p.kind() {
+			"function_body" | "block" => return DartVarScope::Local,
+			"class_body" | "enum_body" => return DartVarScope::ClassMember,
+			"top_level_variable_declaration" => return DartVarScope::TopLevel,
+			_ => cur = p.parent(),
+		}
+	}
+	DartVarScope::TopLevel
 }
 
 // ── Tests ────────────────────────────────────────────────────────────────
@@ -3218,6 +3393,99 @@ mod tests {
 	}
 
 	#[test]
+	fn outlines_swift_struct_enum_class_protocol() {
+		// tree-sitter-swift parses `struct`/`enum`/`class`/`actor` ALL as
+		// `class_declaration`; the bespoke `emit_swift` distinguishes them by
+		// body kind (`enum_class_body`) and the declaration keyword token.
+		let code = fixture("swift.swift");
+		let r = outline(&code, "swift.swift");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("swift"));
+		assert_eq!(find(&r, "Point").map(|s| s.kind.as_str()), Some("struct"));
+		assert_eq!(find(&r, "Direction").map(|s| s.kind.as_str()), Some("enum"));
+		assert_eq!(find(&r, "Counter").map(|s| s.kind.as_str()), Some("class"));
+		assert_eq!(find(&r, "Drawable").map(|s| s.kind.as_str()), Some("interface"));
+		assert_eq!(find(&r, "topLevel").map(|s| s.kind.as_str()), Some("function"));
+		// Enum cases parent to the enum and are `enum_member`.
+		let dir_idx = idx_of(&r, "Direction", "enum").expect("Direction enum");
+		for &member in &["north", "south", "east", "west"] {
+			let m = find(&r, member).unwrap_or_else(|| panic!("{member} member"));
+			assert_eq!(m.kind, "enum_member");
+			assert_eq!(m.parent, dir_idx as i32, "{member} parented to Direction");
+		}
+		// Struct members parent to the struct.
+		let point_idx = idx_of(&r, "Point", "struct").expect("Point struct");
+		assert_eq!(find(&r, "distance").map(|s| s.kind.as_str()), Some("method"));
+		let distance = find(&r, "distance").expect("distance");
+		assert_eq!(distance.parent, point_idx as i32);
+	}
+
+	#[test]
+	fn outlines_dart_class_mixin_enum_top_level_and_local_var_scope() {
+		// Dart `initialized_identifier` is contextual: class-body members are
+		// `field`, top-level `var` is `variable`, function locals are skipped.
+		let code = fixture("dart.dart");
+		let r = outline(&code, "dart.dart");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("dart"));
+		assert_eq!(find(&r, "Greeter").map(|s| s.kind.as_str()), Some("class"));
+		assert_eq!(find(&r, "Animal").map(|s| s.kind.as_str()), Some("class"));
+		assert_eq!(find(&r, "Walker").map(|s| s.kind.as_str()), Some("trait"));
+		assert_eq!(find(&r, "Color").map(|s| s.kind.as_str()), Some("enum"));
+		assert_eq!(find(&r, "red").map(|s| s.kind.as_str()), Some("enum_member"));
+		assert_eq!(find(&r, "topLevel").map(|s| s.kind.as_str()), Some("function"));
+		// Class-body `final String name;` -> field.
+		assert_eq!(find(&r, "name").map(|s| s.kind.as_str()), Some("field"));
+		// Class-body `static const int max = 100;` -> constant.
+		assert_eq!(find(&r, "max").map(|s| s.kind.as_str()), Some("constant"));
+		// Top-level `final String greeting` -> constant (static_final_declaration).
+		assert_eq!(find(&r, "greeting").map(|s| s.kind.as_str()), Some("constant"));
+		// Top-level `var counter = 0;` -> variable (NOT field).
+		assert_eq!(find(&r, "counter").map(|s| s.kind.as_str()), Some("variable"));
+		// Function-local `var localMsg` must NOT be emitted.
+		assert!(find(&r, "localMsg").is_none(), "function-local var must not emit");
+		// Top-level `const double pi` -> constant.
+		assert_eq!(find(&r, "pi").map(|s| s.kind.as_str()), Some("constant"));
+	}
+
+	#[test]
+	fn outlines_rust_fixture_trait_module_const_static_type_alias() {
+		// The rs.rs fixture exercises every Rust-emitter kind: function,
+		// macro, struct, field, method, enum, enum_member, trait, module,
+		// constant, variable (static), and type_alias.
+		let code = fixture("rs.rs");
+		let r = outline(&code, "rs.rs");
+		assert!(r.parsed);
+		assert_eq!(r.language.as_deref(), Some("rust"));
+		assert_eq!(find(&r, "Greeter").map(|s| s.kind.as_str()), Some("struct"));
+		assert_eq!(find(&r, "Color").map(|s| s.kind.as_str()), Some("enum"));
+		assert_eq!(find(&r, "Red").map(|s| s.kind.as_str()), Some("enum_member"));
+		// trait + trait method.
+		let trait_idx = idx_of(&r, "Hello", "trait").expect("trait Hello");
+		let hello = find(&r, "hello").expect("hello");
+		assert_eq!(hello.kind, "method");
+		assert_eq!(hello.parent, trait_idx as i32);
+		// module + its children (const/static/type_alias nested inside mod).
+		let mod_idx = idx_of(&r, "network", "module").expect("network module");
+		let max_conn = find(&r, "MAX_CONN").expect("MAX_CONN const");
+		assert_eq!(max_conn.kind, "constant");
+		assert_eq!(max_conn.parent, mod_idx as i32);
+		let version = find(&r, "VERSION").expect("VERSION static");
+		assert_eq!(version.kind, "variable");
+		assert_eq!(version.parent, mod_idx as i32);
+		let id = find(&r, "Id").expect("Id type alias");
+		assert_eq!(id.kind, "type_alias");
+		assert_eq!(id.parent, mod_idx as i32);
+		// function (top-level) + struct field.
+		assert_eq!(find(&r, "greet").map(|s| s.kind.as_str()), Some("function"));
+		assert!(idx_of(&r, "count", "field").is_some(), "count struct field");
+		// macro (macro_rules!) at top level.
+		let bail = find(&r, "bail").expect("bail macro");
+		assert_eq!(bail.kind, "macro");
+		assert_eq!(bail.parent, -1);
+	}
+
+	#[test]
 	fn outlines_typescript_function_class_methods_enum_decorated_export() {
 		let code = "\
 export function greet(name: string): string {
@@ -3749,6 +4017,31 @@ class Outer {
 			named_fn.start_line, 9,
 			"parenthesized named default function start_line must be the export line"
 		);
+	}
+
+	#[test]
+	fn typescript_named_default_export_end_line_covers_wrapper() {
+		// Fix #4: for `export default (class Foo {})` the emitted symbol's
+		// `end_line` must extend to the wrapping `export_statement`'s closing
+		// `)`/`;`, so a `symbol manipulate` replace/delete does not leave a
+		// dangling `);`. The inner class `}` is on line 3 but the wrapper's
+		// `);` is on line 4 — `end_line` must be 4, not 3.
+		let code = "export default (\n    class Foo {\n        greet() {}\n    }\n);\n";
+		let result = outline(code, "fixture.ts");
+		assert!(result.parsed);
+		let foo = find(&result, "Foo").expect("Foo");
+		assert_eq!(foo.kind, "class");
+		assert_eq!(foo.start_line, 1, "start_line must be the `export` line");
+		assert_eq!(foo.end_line, 5, "end_line must cover the trailing `);` wrapper line");
+
+		// Same for a parenthesized named function expression.
+		let code = "export default (\n    function bar() {\n        return 1;\n    }\n);\n";
+		let result = outline(code, "fixture.ts");
+		assert!(result.parsed);
+		let bar = find(&result, "bar").expect("bar");
+		assert_eq!(bar.kind, "function");
+		assert_eq!(bar.start_line, 1);
+		assert_eq!(bar.end_line, 5, "end_line must cover the trailing `);` wrapper line");
 	}
 
 	#[test]
@@ -4431,6 +4724,22 @@ class Outer {
 			assert!(
 				outline_languages().contains(&lang),
 				"{canonical} must be an outline language"
+			);
+		}
+	}
+
+	/// `.bzl` resolves to Starlark (not Python): the Starlark extension list
+	/// owns `bzl`, and Python's list must not double-list it (cosmetic
+	/// double-listing that shadowed the resolver's first-match winner).
+	#[test]
+	fn bzl_extension_resolves_to_starlark_not_python() {
+		for path in ["build.bzl", "defs.bzl", "repo.star"] {
+			let lang = resolve_language(None, Some(path))
+				.unwrap_or_else(|| panic!("{path} must resolve to a language"));
+			assert_eq!(
+				lang.canonical_name(),
+				"starlark",
+				"{path} must resolve to starlark, not python"
 			);
 		}
 	}
