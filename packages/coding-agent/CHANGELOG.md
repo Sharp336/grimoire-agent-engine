@@ -18,6 +18,7 @@
 - Fixed transcript scrollback stability on terminals with eager erase risk so completed assistant messages remain stable while new streaming lines are rendering
 - Fixed Hindsight retain (and the shared mnemopi/Hindsight recall paths) framing assistant turns whose only content was punctuation/whitespace — most commonly the lone `.` some providers emit for tool-call-only or thinking-only turns — into `[role: assistant]\n.\n[assistant:end]` blocks that polluted the bank, wasted retain tokens, and degraded recall. `prepareRetentionTranscript`, `extractMessages`, and `flattenMessagesForRecall` now require at least one letter or digit per message via a shared `hasSubstantiveContent` predicate ([#1806](https://github.com/can1357/oh-my-pi/issues/1806)).
 - Fixed `/resume` rendering forked child sessions without a fork tag, making them indistinguishable from their parent when titles match ([#1792](https://github.com/can1357/oh-my-pi/issues/1792)).
+- Fixed on-demand tool downloads (and `read` on YouTube URLs) hanging: stream the download to disk instead of `Bun.write(dest, response)`, which deadlocks on a streaming body in Bun 1.3.14 ([oven-sh/bun#30594](https://github.com/oven-sh/bun/pull/30594)).
 
 ## [16.1.10] - 2026-06-21
 

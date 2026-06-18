@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { pipeline } from "node:stream/promises";
 import { $which, APP_NAME, getToolsDir, logger, ptree, TempDir } from "@oh-my-pi/pi-utils";
 import { extractArchive } from "./zip";
 
@@ -155,7 +156,7 @@ async function getLatestVersion(repo: string, signal?: AbortSignal): Promise<str
 }
 
 // Download a file from URL
-async function downloadFile(url: string, dest: string, signal?: AbortSignal): Promise<void> {
+export async function downloadFile(url: string, dest: string, signal?: AbortSignal): Promise<void> {
 	let response: Response;
 	try {
 		response = await fetch(url, {
@@ -172,7 +173,8 @@ async function downloadFile(url: string, dest: string, signal?: AbortSignal): Pr
 	} else if (!response.body) {
 		throw new Error("No response body");
 	}
-	await Bun.write(dest, response);
+	// Stream to disk — Bun.write(dest, response) deadlocks on a streaming body (oven-sh/bun#30594).
+	await pipeline(response.body, fs.createWriteStream(dest));
 }
 
 // Download and install a tool
