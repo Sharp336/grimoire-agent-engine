@@ -24,6 +24,8 @@ interface KeenableMcpContent {
 interface KeenableMcpResult {
 	result?: {
 		content?: KeenableMcpContent[];
+		structuredContent?: unknown;
+		isError?: boolean;
 		protocolVersion?: string;
 		capabilities?: Record<string, unknown>;
 		serverInfo?: Record<string, string>;
@@ -191,8 +193,22 @@ async function callKeenableMcpSearch(
 			arguments: args,
 		},
 	}, init.sessionId);
+	const result = search.data?.result;
+	if (!result) return "";
 
-	const content = search.data?.result?.content;
+	// MCP tool execution error (e.g. API quota/auth/input failure).
+	if (result.isError) {
+		const errText = result.content?.map(c => c.text ?? "").join("\n") || "MCP tool execution error";
+		throw new SearchProviderError("keenable", errText, 500);
+	}
+
+	// Prefer structuredContent (documented JSON format with results array).
+	if (result.structuredContent != null) {
+		return JSON.stringify(result.structuredContent);
+	}
+
+	// Fall back to text content blocks.
+	const content = result.content;
 	if (!content || content.length === 0) {
 		return "";
 	}
