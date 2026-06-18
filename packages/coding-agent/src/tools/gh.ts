@@ -257,7 +257,7 @@ const GITHUB_READONLY_OPS: ReadonlySet<string> = new Set([
 
 const githubSchema = type({
 	op: type(
-		"'repo_view' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
+		"'repo_view' | 'pr_create' | 'pr_checkout' | 'pr_push' | 'issue_create' | 'search_issues' | 'search_prs' | 'search_code' | 'search_commits' | 'search_repos' | 'run_watch'",
 	).describe("github operation"),
 	"repo?": type("string").describe("owner/repo"),
 	"branch?": type("string").describe("branch"),
@@ -2484,6 +2484,8 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 					return executePrCheckout(this.session, params, signal);
 				case "pr_push":
 					return executePrPush(this.session, params, signal);
+				case "issue_create":
+					return executeIssueCreate(this.session, params, signal);
 				case "search_issues":
 					return executeSearchIssues(this.session, params, signal);
 				case "search_prs":
@@ -3371,6 +3373,121 @@ function formatPrCreateResult(options: {
 	}
 
 	return lines.join("\n").trim();
+}
+
+
+async function executeIssueCreate(
+	session: ToolSession,
+	params: GithubInput,
+	signal: AbortSignal | undefined,
+): Promise<AgentToolResult<GhToolDetails>> {
+	const repo = normalizeOptionalString(params.repo);
+	const title = normalizeOptionalString(params.title);
+	const body = params.body;
+	const assignees = normalizePrIdentifierList(params.assignee);
+	const labels = normalizePrIdentifierList(params.label);
+
+	if (!title) {
+		throw new ToolError("title is required");
+	}
+
+	const args = ["issue", "create"];
+	appendRepoFlag(args, repo);
+	args.push("--title", title);
+	for (const assignee of assignees) args.push("--assignee", assignee);
+	for (const label of labels) args.push("--label", label);
+
+	let bodyDir: string | undefined;
+	try {
+		if (body !== undefined && body.length > 0) {
+			// Route through a temp file so multi-KB bodies stay clear of any
+			// argv-length limits and shell-quoting hazards on uncommon platforms.
+			bodyDir = await fs.mkdtemp(path.join(os.tmpdir(), "gh-issue-body-"));
+			const bodyFile = path.join(bodyDir, "body.md");
+			await Bun.write(bodyFile, body);
+			args.push("--body-file", bodyFile);
+		} else {
+			// Avoid gh dropping into an interactive editor when no body is given.
+			args.push("--body", "");
+		}
+
+		const output = await git.github.text(session.cwd, args, signal, {
+			repoProvided: Boolean(repo),
+		});
+		const url =
+			output
+				.split("
+")
+				.map(line => line.trim())
+				.find(line => line.startsWith("https://github.com/")) ?? output.trim();
+		const parsed = parseIssueUrl(url);
+		const resolvedRepo = repo ?? parsed.repo;
+
+		let issueView: GhIssueViewData | undefined;
+		if (resolvedRepo && parsed.issueNumber !== undefined) {
+			try {
+				issueView = await githubIssueJsonWithStateReasonFallback<GhIssueViewData>(
+					session.cwd,
+					[
+						"issue",
+						"view",
+						String(parsed.issueNumber),
+						"--repo",
+						resolvedRepo,
+						"--json",
+						GH_ISSUE_FIELDS_NO_COMMENTS.join(","),
+					],
+					signal,
+					{ repoProvided: true },
+				);
+			} catch {
+				// Best-effort summary; issue creation already succeeded.
+			}
+		}
+
+		const text = formatIssueCreateResult({
+			url,
+			issueNumber: parsed.issueNumber,
+			data: issueView,
+			title,
+		});
+		return buildTextResult(text, url || issueView?.url);
+	} finally {
+		if (bodyDir) {
+			await fs.rm(bodyDir, { recursive: true, force: true }).catch(() => {});
+		}
+	}
+}
+
+function formatIssueCreateResult(options: {
+	url: string;
+	issueNumber?: number;
+	data?: GhIssueViewData;
+	title?: string;
+}): string {
+	const number = options.issueNumber ?? options.data?.number;
+	const headerTitle = options.data?.title ?? options.title ?? "Untitled";
+	const header =
+		number !== undefined
+			? `# Created Issue #${number}: ${headerTitle}`
+			: `# Created Issue: ${headerTitle}`;
+	const lines: string[] = [header, ""];
+	pushLine(lines, "URL", options.url || options.data?.url);
+	pushLine(lines, "State", options.data?.state);
+	pushLine(lines, "Author", formatAuthor(options.data?.author));
+	pushLine(lines, "Created", options.data?.createdAt);
+	pushLine(lines, "Labels", formatLabels(options.data?.labels));
+
+	const bodyText = normalizeText(options.data?.body);
+	if (bodyText) {
+		lines.push("");
+		lines.push("## Body");
+		lines.push("");
+		lines.push(bodyText);
+	}
+
+	return lines.join("
+").trim();
 }
 
 async function executeSearchIssues(
