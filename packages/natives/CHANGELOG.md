@@ -5,6 +5,10 @@
 
 - Removed the `cache` option from `GrepOptions`
 
+### Added
+
+- Added the `outlineCode` native binding (backed by `pi_ast::symbols::outline_code`) — a flat, pre-order tree-sitter symbol outline (name, kind, line ranges, container, depth/parent index) for TypeScript/TSX/JavaScript/Python/Rust/Go/Java, powering the coding-agent `symbol` tool.
+
 ## [16.0.4] - 2026-06-17
 
 ### Fixed

@@ -1,0 +1,91 @@
+//! Flat tree-sitter symbol outlines powered by [`pi_ast::symbols`].
+
+use napi::bindgen_prelude::*;
+use napi_derive::napi;
+
+#[napi(object)]
+pub struct OutlineOptions {
+	/// Source code to outline.
+	pub code:      String,
+	/// Language alias (e.g. "rust", "typescript") used before path inference.
+	pub lang:      Option<String>,
+	/// File path used to infer language by extension when `lang` is omitted.
+	pub path:      Option<String>,
+	/// Caps emitted nesting depth; `None` = unlimited. 0 = file top level.
+	pub max_depth: Option<u32>,
+}
+
+#[napi(object)]
+pub struct SymbolEntry {
+	/// Identifier text of the symbol.
+	pub name:           String,
+	/// Domain kind string (e.g. "function", "method", "class"); stable wire
+	/// value mapped to an LSP `SymbolKind` by the TS layer.
+	pub kind:           String,
+	/// 1-based first line of the construct, INCLUDING attached
+	/// decorators/attributes/annotations.
+	pub start_line:     u32,
+	/// 1-based last content line of the declaration.
+	pub end_line:       u32,
+	/// 1-based line of the name identifier (display/navigation anchor).
+	pub selection_line: u32,
+	/// One-line signature: trimmed source slice from the node's start byte to
+	/// the body's start byte; falls back to the first source line.
+	pub detail:         Option<String>,
+	/// Logical container for symbols whose real container is NOT an emitted
+	/// parent symbol (Rust associated items inside an `impl_item`, Go
+	/// `method_declaration` receivers). `None` elsewhere.
+	pub container:      Option<String>,
+	/// 0 = file top level.
+	pub depth:          u32,
+	/// Index into the flat symbol list, `-1` for top level.
+	pub parent:         i32,
+}
+
+#[napi(object)]
+pub struct OutlineResult {
+	/// Canonical language name when parsing succeeded.
+	pub language: Option<String>,
+	/// True when tree-sitter parsed the source without syntax errors.
+	pub parsed:   bool,
+	/// Named declarations in depth-first pre-order (container before children).
+	pub symbols:  Vec<SymbolEntry>,
+}
+
+impl From<pi_ast::symbols::SymbolEntry> for SymbolEntry {
+	fn from(value: pi_ast::symbols::SymbolEntry) -> Self {
+		Self {
+			name:           value.name,
+			kind:           value.kind,
+			start_line:     value.start_line,
+			end_line:       value.end_line,
+			selection_line: value.selection_line,
+			detail:         value.detail,
+			container:      value.container,
+			depth:          value.depth,
+			parent:         value.parent,
+		}
+	}
+}
+
+impl From<pi_ast::symbols::OutlineResult> for OutlineResult {
+	fn from(value: pi_ast::symbols::OutlineResult) -> Self {
+		Self {
+			language: value.language,
+			parsed:   value.parsed,
+			symbols:  value.symbols.into_iter().map(Into::into).collect(),
+		}
+	}
+}
+
+#[napi]
+pub fn outline_code(options: OutlineOptions) -> Result<OutlineResult> {
+	pi_ast::symbols::outline_code(pi_ast::symbols::OutlineOptions {
+		code:      options.code,
+		lang:      options.lang,
+		path:      options.path,
+		max_depth: options.max_depth,
+	})
+	.map(Into::into)
+	.map_err(|error| Error::from_reason(error.to_string()))
+}

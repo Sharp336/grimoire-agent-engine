@@ -47,6 +47,7 @@ pub mod ps;
 pub mod pty;
 pub mod shell;
 pub mod summary;
+pub mod symbols;
 pub mod task;
 pub mod text;
 pub mod tokens;

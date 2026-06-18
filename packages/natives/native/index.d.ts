@@ -1199,6 +1199,28 @@ export interface MinimizerResult {
   outputBytes: number
 }
 
+export declare function outlineCode(options: OutlineOptions): OutlineResult
+
+export interface OutlineOptions {
+  /** Source code to outline. */
+  code: string
+  /** Language alias (e.g. "rust", "typescript") used before path inference. */
+  lang?: string
+  /** File path used to infer language by extension when `lang` is omitted. */
+  path?: string
+  /** Caps emitted nesting depth; `None` = unlimited. 0 = file top level. */
+  maxDepth?: number
+}
+
+export interface OutlineResult {
+  /** Canonical language name when parsing succeeded. */
+  language?: string
+  /** True when tree-sitter parsed the source without syntax errors. */
+  parsed: boolean
+  /** Named declarations in depth-first pre-order (container before children). */
+  symbols: Array<SymbolEntry>
+}
+
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
   /** Primary codepoint associated with the key. */
@@ -1550,6 +1572,40 @@ export interface SummarySegment {
  * mapping.
  */
 export declare function supportsLanguage(lang: string): boolean
+
+export interface SymbolEntry {
+  /** Identifier text of the symbol. */
+  name: string
+  /**
+   * Domain kind string (e.g. "function", "method", "class"); stable wire
+   * value mapped to an LSP `SymbolKind` by the TS layer.
+   */
+  kind: string
+  /**
+   * 1-based first line of the construct, INCLUDING attached
+   * decorators/attributes/annotations.
+   */
+  startLine: number
+  /** 1-based last content line of the declaration. */
+  endLine: number
+  /** 1-based line of the name identifier (display/navigation anchor). */
+  selectionLine: number
+  /**
+   * One-line signature: trimmed source slice from the node's start byte to
+   * the body's start byte; falls back to the first source line.
+   */
+  detail?: string
+  /**
+   * Logical container for symbols whose real container is NOT an emitted
+   * parent symbol (Rust associated items inside an `impl_item`, Go
+   * `method_declaration` receivers). `None` elsewhere.
+   */
+  container?: string
+  /** 0 = file top level. */
+  depth: number
+  /** Index into the flat symbol list, `-1` for top level. */
+  parent: number
+}
 
 /**
  * Truncate text to a visible width, preserving ANSI codes.
