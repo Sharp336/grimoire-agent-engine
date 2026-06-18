@@ -181,9 +181,14 @@ export class AutonomousController {
 	}
 
 	#queueContinuation(): void {
-		// Mark the next turn as controller-driven before the async send resolves;
-		// cleared if no turn actually starts (deferred/queued/failed) so the flag
-		// can't swallow a later turn's halt check.
+		// Mark the next turn as controller-driven before the async send resolves.
+		// The marker is consumed by the next non-superseded agent_end. If the send
+		// resolves started=false the message was queued as a follow-up behind
+		// another in-flight turn (e.g. AutoLearnController.autoContinue's capture
+		// turn) and WILL still run — so keep the marker for that follow-up's
+		// eventual agent_end; only a failed send clears it (the catch below).
+		// Clearing on !started would make the queued turn's agent_end look manual
+		// and skip the steps-mode completion halt.
 		this.#pendingAutonomousTurn = true;
 		this.#session
 			.sendCustomMessage(
@@ -195,9 +200,6 @@ export class AutonomousController {
 				},
 				{ deliverAs: "followUp", triggerTurn: true },
 			)
-			.then(started => {
-				if (!started) this.#pendingAutonomousTurn = false;
-			})
 			.catch(err => {
 				this.#pendingAutonomousTurn = false;
 				logger.warn("autonomous continuation failed", { err: String(err) });

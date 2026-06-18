@@ -36,6 +36,8 @@ function setup(options: FakeOptions) {
 	let streaming = false;
 	let planEnabled = options.planMode ?? false;
 	let goalEnabled = options.goalMode ?? false;
+	const history = options.history ?? [];
+	let queueFollowUps = false;
 	let handler: ((event: AgentSessionEvent) => void) | undefined;
 	const sent: Array<{ content: string; triggerTurn?: boolean; deliverAs?: string }> = [];
 	const session: AutonomousSession = {
@@ -53,7 +55,7 @@ function setup(options: FakeOptions) {
 		sendCustomMessage: async (message, opts) => {
 			const content = typeof message.content === "string" ? message.content : "";
 			sent.push({ content, triggerTurn: opts?.triggerTurn, deliverAs: opts?.deliverAs });
-			return true;
+			return !queueFollowUps;
 		},
 	};
 	const controller = new AutonomousController({
@@ -73,6 +75,9 @@ function setup(options: FakeOptions) {
 		},
 		setGoalMode: (value: boolean) => {
 			goalEnabled = value;
+		},
+		setQueueFollowUps: (value: boolean) => {
+			queueFollowUps = value;
 		},
 	};
 }
@@ -222,6 +227,19 @@ describe("AutonomousController steps completion", () => {
 		emit(agentEndEvent([assistant("stop")])); // autonomous turn, no action -> halt
 		expect(sent).toHaveLength(1);
 		emit(agentEndEvent([assistantActing("stop")])); // disarmed: no further queue
+		expect(sent).toHaveLength(1);
+	});
+
+	it("keeps the autonomous marker when a continuation is queued behind another turn", () => {
+		const { controller, emit, sent, setQueueFollowUps } = setup({ autoNextSteps: true });
+		controller.begin({ startupFailed: false }); // arm
+		setQueueFollowUps(true); // sendCustomMessage resolves false (queued, e.g. behind autolearn's capture turn)
+		emit(agentEndEvent([assistantActing("stop")])); // working turn -> queue, marker preserved
+		expect(sent).toHaveLength(1);
+		setQueueFollowUps(false);
+		// The queued follow-up eventually runs; its no-action agent_end must still be
+		// classified autonomous and halt (would re-queue to 2 if !started cleared the marker).
+		emit(agentEndEvent([assistant("stop")]));
 		expect(sent).toHaveLength(1);
 	});
 
