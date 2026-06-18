@@ -4,6 +4,8 @@
 ### Added
 
 - Added explicit ArkType schema descriptions to parameters across all agent tools to improve model tool-calling instructions and parameter guidance
+- Added selector-based handoff to the `symbol` tool: `overview` and `find` now emit a copyable `selector` (`sym:v1:<encoded>`) for each uniquely addressable symbol, and `manipulate` accepts `selector` as an alternative to explicit `path`+`name`+disambiguators — the selector is decoded before scope resolution so the model skips reconstructing addressing fields by hand. Stale or ambiguous selectors fail closed, falling back to name-addressing
+- Added `kind` and `container` filters to the `symbol` tool `find` action — after outlining candidates, `find` now narrows the result set by exact `kind` and resolved `container` matches before exact-vs-substring name selection, making the existing disambiguator fields useful for search and not only for `manipulate`
 - Added support for inline evaluation macros (`@[[py.name]]` and `@[[js.name]]`) that dynamically splice values or function results from live kernel namespaces into assistant messages and tool arguments
 - Added documentation detailing inline macro syntax, argument parsing, and placement rules to the eval instruction prompts
 - Added evaluation macro syntactic parsing, evaluation, and expander integration tests (`macro-syntax`, `macro-evaluator`, and `macro-expand`)

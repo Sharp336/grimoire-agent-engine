@@ -14,7 +14,6 @@ import { webSearchToolRenderer } from "../web/search/render";
 import { askToolRenderer } from "./ask";
 import { astEditToolRenderer } from "./ast-edit";
 import { astGrepToolRenderer } from "./ast-grep";
-import { symbolToolRenderer } from "./symbol";
 import { bashToolRenderer } from "./bash";
 import { browserToolRenderer } from "./browser/render";
 import { debugToolRenderer } from "./debug";
@@ -30,6 +29,7 @@ import { resolveToolRenderer } from "./resolve";
 import { searchToolRenderer } from "./search";
 import { searchToolBm25Renderer } from "./search-tool-bm25";
 import { sshToolRenderer } from "./ssh";
+import { symbolToolRenderer } from "./symbol";
 import { todoToolRenderer } from "./todo";
 import { writeToolRenderer } from "./write";
 

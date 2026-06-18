@@ -1,25 +1,21 @@
+import { createHash } from "node:crypto";
 import * as path from "node:path";
 import { formatHashlineHeader } from "@oh-my-pi/hashline";
-import {
-	type AgentTool,
-	type AgentToolContext,
-	type AgentToolResult,
-	type AgentToolUpdateCallback,
-} from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
 import {
 	FileType,
 	type GlobResult,
-	glob,
-	type GrepResult,
 	GrepOutputMode,
+	type GrepResult,
+	glob,
 	grep,
 	hasMatch,
-	outlineCode,
-	outlineLanguages,
 	isOutlineSupportedPath,
 	isOutlineSupportedLang as nativeIsOutlineSupportedLang,
 	type OutlineResult,
+	outlineCode,
+	outlineLanguages,
 	type SymbolEntry,
 } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
@@ -61,22 +57,273 @@ import { toolResult } from "./tool-result";
 const symbolSchema = type({
 	action: type("'overview' | 'find' | 'manipulate'").describe("symbol operation to perform"),
 	"path?": type("string | string[]").describe(
-		"file, directory, glob, or internal URL (array allowed); scopes overview/find, single file for manipulate",
+		"file, directory, glob, or internal URL (array allowed); scopes overview/find, single file for manipulate. Required for name-mode manipulate (omit when using selector)",
 	),
-	"name?": type("string").describe("symbol name to find or manipulate (required for find/manipulate)"),
-	"op?": type("'replace' | 'delete' | 'insert_before' | 'insert_after'").describe("manipulate operation"),
+	"name?": type("string").describe(
+		"symbol name to find or manipulate (required for find; required for name-mode manipulate; forbidden when selector is set)",
+	),
+	"selector?": type("string").describe(
+		"opaque selector emitted by find/overview (sym:v1:…); alternative to name+path for manipulate; selector already carries the source address, name, kind, container, and fingerprint",
+	),
+	"op?": type("'replace' | 'delete' | 'insert_before' | 'insert_after'").describe(
+		"manipulate operation (required for manipulate)",
+	),
 	"text?": type("string").describe(
-		"replacement/insert payload for manipulate replace/insert (verbatim; owns its indentation)",
+		"replacement/insert payload for manipulate replace/insert (required for replace/insert_before/insert_after; forbidden for delete)",
 	),
 	"kind?": type("string").describe(
-		"disambiguator: raw domain kind string the outline emits (e.g. function, method, class, trait, struct)",
+		"find: filter results to this kind. name-mode manipulate: disambiguator. Forbidden when selector is set",
 	),
-	"container?": type("string").describe("disambiguator: enclosing type name (e.g. impl/trait/receiver type)"),
-	"line?": type("number").describe("disambiguator: symbol selectionLine"),
+	"container?": type("string").describe(
+		"find: filter results to this resolved container. name-mode manipulate: disambiguator. Forbidden when selector is set",
+	),
+	"line?": type("number").describe(
+		"name-mode manipulate disambiguator: symbol selectionLine. Forbidden when selector is set",
+	),
 	"lang?": type("string").describe("explicit language override forwarded to the tree-sitter extractor"),
-	"skip?": type("number").describe("find: symbols to skip before collecting results (pagination)"),
-	"limit?": type("number").describe("find: max symbols to return (default 100)"),
+	"skip?": type("number").describe("find only: symbols to skip before collecting results (pagination)"),
+	"limit?": type("number").describe("find only: max symbols to return (default 100)"),
+}).narrow((p, ctx) => {
+	// Cross-field validation: pure parameter facts only. Filesystem, scope,
+	// outline, symbol-existence, and freshness checks remain in execute().
+	const action = p.action as string;
+
+	// Selector + path is contradictory: selector already carries the source address.
+	if (p.selector !== undefined && p.path !== undefined) {
+		return ctx.mustBe("used without `path` when `selector` is set (the selector carries the source address)");
+	}
+	// Selector + name is contradictory.
+	if (p.selector !== undefined && p.name !== undefined) {
+		return ctx.mustBe("used without `name` when `selector` is set (the selector carries the symbol identity)");
+	}
+	// Selector + disambiguators: the selector already encodes kind/container.
+	if (p.selector !== undefined && (p.kind !== undefined || p.container !== undefined || p.line !== undefined)) {
+		return ctx.mustBe("used without `kind`, `container`, or `line` when `selector` is set");
+	}
+	// Selector syntax and payload shape are pure parameter facts.
+	if (p.selector !== undefined) {
+		const decoded = decodeSelector(p.selector);
+		if (typeof decoded === "string") {
+			return ctx.mustBe(`a valid selector emitted by find/overview (${decoded})`);
+		}
+	}
+
+	// Action-scoped field rejections: reject fields that belong to other actions.
+	if (action === "overview") {
+		const bad: string[] = [];
+		if (p.name !== undefined) bad.push("`name`");
+		if (p.selector !== undefined) bad.push("`selector`");
+		if (p.op !== undefined) bad.push("`op`");
+		if (p.text !== undefined) bad.push("`text`");
+		if (p.kind !== undefined) bad.push("`kind`");
+		if (p.container !== undefined) bad.push("`container`");
+		if (p.line !== undefined) bad.push("`line`");
+		if (p.skip !== undefined) bad.push("`skip`");
+		if (p.limit !== undefined) bad.push("`limit`");
+		if (bad.length > 0) {
+			return ctx.mustBe(`used without ${bad.join(", ")} for overview`);
+		}
+	}
+	if (action === "find") {
+		const bad: string[] = [];
+		if (p.selector !== undefined) bad.push("`selector`");
+		if (p.op !== undefined) bad.push("`op`");
+		if (p.text !== undefined) bad.push("`text`");
+		if (p.line !== undefined) bad.push("`line`");
+		if (bad.length > 0) {
+			return ctx.mustBe(`used without ${bad.join(", ")} for find`);
+		}
+	}
+
+	// find requires name.
+	if (action === "find" && (p.name === undefined || (p.name as string).length === 0)) {
+		return ctx.mustBe("used with `name` for find");
+	}
+	// manipulate requires op.
+	if (action === "manipulate" && p.op === undefined) {
+		return ctx.mustBe("used with `op` for manipulate");
+	}
+	// Name-mode manipulate requires a non-empty name (or selector must be set).
+	if (action === "manipulate" && p.selector === undefined && (p.name === undefined || p.name.length === 0)) {
+		return ctx.mustBe("used with either non-empty `name`+`path` or `selector` for manipulate");
+	}
+	// Name-mode manipulate requires exactly one explicit path entry.
+	if (action === "manipulate" && p.selector === undefined) {
+		if (p.path === undefined) {
+			return ctx.mustBe("used with `path` for name-mode manipulate (or use `selector` instead)");
+		}
+		const pathCount = Array.isArray(p.path) ? p.path.length : 1;
+		if (pathCount !== 1) {
+			return ctx.mustBe("used with exactly one `path` entry for name-mode manipulate");
+		}
+		const pathValue = Array.isArray(p.path) ? p.path[0] : p.path;
+		if (typeof pathValue !== "string" || pathValue.length === 0) {
+			return ctx.mustBe("used with a non-empty `path` for name-mode manipulate");
+		}
+	}
+
+	// Text rules: replace/insert_* require non-empty text; delete forbids text.
+	if (action === "manipulate") {
+		const op = p.op as string | undefined;
+		if (op !== "delete" && op !== undefined && (p.text === undefined || (p.text as string).length === 0)) {
+			return ctx.mustBe(`used with non-empty \`text\` for op ${JSON.stringify(op)}`);
+		}
+		if (op === "delete" && p.text !== undefined) {
+			return ctx.mustBe('used without `text` for op "delete" (omit it)');
+		}
+	}
+
+	// skip/limit are find-only (manipulate check above, overview already covered).
+	if (action === "manipulate" && p.skip !== undefined) {
+		return ctx.mustBe("used only with find");
+	}
+	if (action === "manipulate" && p.limit !== undefined) {
+		return ctx.mustBe("used only with find");
+	}
+	return true;
 });
+
+// =============================================================================
+// Selector encode/decode (sym:v1:<base64url-json>)
+// =============================================================================
+
+const SELECTOR_VERSION = "v1";
+const SELECTOR_PREFIX = `sym:${SELECTOR_VERSION}:`;
+
+/** Fields stored in the opaque selector payload. `a` is the source address fed
+ *  back through scope resolution; `p` is the display relpath; `g` is the
+ *  effective lang override (omitted when absent); `n`/`k`/`c` are structural
+ *  identity filters; `f` is the range-text fingerprint (SHA-256); `o`/`l` are
+ *  diagnostic observations (ordinal, selectionLine) — never used for selection. */
+interface SelectorPayload {
+	a: string;
+	p: string;
+	g?: string;
+	n: string;
+	k: string;
+	c?: string;
+	f: string;
+	o: number;
+	l: number;
+}
+
+/** Canonical range text for fingerprinting: exactly lines startLine..endLine
+ *  joined by newline, same split/slice/join convention as previewRangeText.
+ *  Accepts pre-split lines to avoid re-splitting per symbol. */
+function canonicalRangeText(lines: string[], startLine: number, endLine: number): string {
+	return lines.slice(startLine - 1, endLine).join("\n");
+}
+
+/** SHA-256 of canonical range text, encoded as base64url (no padding).
+ *  Accepts pre-split lines to avoid re-splitting per symbol. */
+function rangeTextFingerprint(lines: string[], startLine: number, endLine: number): string {
+	return createHash("sha256")
+		.update(canonicalRangeText(lines, startLine, endLine))
+		.digest("base64url");
+}
+
+/** Encode a selector payload into the `sym:v1:<base64url>` envelope. */
+function encodeSelector(payload: SelectorPayload): string {
+	const json = JSON.stringify(payload);
+	const b64 = Buffer.from(json, "utf8").toString("base64url");
+	return `${SELECTOR_PREFIX}${b64}`;
+}
+
+/** Decode a selector envelope. Returns the payload or a string error message. */
+function decodeSelector(raw: string): SelectorPayload | string {
+	if (!raw.startsWith(SELECTOR_PREFIX)) {
+		return "malformed selector (expected sym:v1:… format — selectors are emitted by find/overview)";
+	}
+	const b64 = raw.slice(SELECTOR_PREFIX.length);
+	if (b64.length === 0) return "empty selector payload";
+	try {
+		const json = Buffer.from(b64, "base64url").toString("utf8");
+		const obj = JSON.parse(json) as Record<string, unknown>;
+		if (
+			typeof obj.a !== "string" ||
+			obj.a.length === 0 ||
+			typeof obj.p !== "string" ||
+			obj.p.length === 0 ||
+			typeof obj.n !== "string" ||
+			obj.n.length === 0 ||
+			typeof obj.k !== "string" ||
+			obj.k.length === 0 ||
+			typeof obj.f !== "string" ||
+			obj.f.length === 0 ||
+			typeof obj.o !== "number" ||
+			!Number.isInteger(obj.o) ||
+			typeof obj.l !== "number" ||
+			!Number.isInteger(obj.l) ||
+			(obj.g !== undefined && typeof obj.g !== "string") ||
+			(obj.c !== undefined && typeof obj.c !== "string")
+		) {
+			return "selector payload missing required fields";
+		}
+		return obj as unknown as SelectorPayload;
+	} catch {
+		return "selector payload is not valid base64url-encoded JSON";
+	}
+}
+
+/** Pre-computed per-file selector data: splits code once, fingerprints every
+ *  symbol once, builds the structural bucket map once. Container is included
+ *  in the bucket key so distinct-container siblings are not falsely ambiguous. */
+interface FileSelectorCache {
+	lines: string[];
+	/** Fingerprint per symbol index. */
+	fingerprints: string[];
+	/** Structural+container+fingerprint bucket key → count. */
+	buckets: Map<string, number>;
+}
+
+/** Build selector cache for a file's symbols. Call once per file, then pass
+ *  the result to `maybeEncodeSymbolSelector` for each symbol. */
+function buildFileSelectorCache(symbols: SymbolEntry[], code: string): FileSelectorCache {
+	const lines = code.split("\n");
+	const fingerprints: string[] = new Array(symbols.length);
+	const buckets = new Map<string, number>();
+	for (let i = 0; i < symbols.length; i++) {
+		const s = symbols[i]!;
+		const fp = rangeTextFingerprint(lines, s.startLine, s.endLine);
+		fingerprints[i] = fp;
+		const container = s.container ?? (s.parent >= 0 ? symbols[s.parent]?.name : undefined) ?? "";
+		const key = `${s.name}\0${s.kind}\0${container}\0${fp}`;
+		buckets.set(key, (buckets.get(key) ?? 0) + 1);
+	}
+	return { lines, fingerprints, buckets };
+}
+
+/** Encode a selector for a symbol if it is uniquely addressable (structural
+ *  fields + fingerprint). Returns the encoded selector string, or
+ *  "ambiguous" if byte-identical structural+fingerprint siblings exist,
+ *  or undefined on unexpected error. */
+function maybeEncodeSymbolSelector(
+	s: SymbolEntry,
+	symbols: SymbolEntry[],
+	symbolIndex: number,
+	relPath: string,
+	sourceAddress: string,
+	lang: string | undefined,
+	cache: FileSelectorCache,
+): string | undefined {
+	const container = resolveContainer(s, symbols);
+	const fp = cache.fingerprints[symbolIndex]!;
+	const bucketContainer = container ?? "";
+	const bucketKey = `${s.name}\0${s.kind}\0${bucketContainer}\0${fp}`;
+	const bucketSize = cache.buckets.get(bucketKey) ?? 0;
+	if (bucketSize > 1) return "ambiguous";
+	return encodeSelector({
+		a: sourceAddress,
+		p: relPath,
+		g: lang,
+		n: s.name,
+		k: s.kind,
+		c: container,
+		f: fp,
+		o: symbolIndex,
+		l: s.selectionLine,
+	});
+}
 
 // =============================================================================
 // Kind mapping (domain kind string -> LSP SymbolKind numeric)
@@ -162,6 +409,31 @@ function normalizePaths(p: string | string[] | undefined): string[] {
 	return Array.isArray(p) ? p : [p];
 }
 
+/** Non-copyable selector marker for files whose provenance cannot be
+ *  preserved (descendants of an internal-URL-backed directory scope). */
+const SELECTOR_SUPPRESSED_INTERNAL = "internal";
+
+/**
+ * Resolve the source address for selector emission.  Three cases:
+ *  1. Exact match in the scope's URL map → return the original internal URL
+ *     (preserves provenance; selector decode re-resolves through policy).
+ *  2. Descendant of a mapped directory root → return `undefined` (caller must
+ *     suppress selector emission with a non-copyable marker).
+ *  3. Not in the map → plain filesystem file → return the abs path as-is.
+ */
+function resolveSelectorSourceAddress(absPath: string, scope: ToolScopeResolution): string | undefined {
+	const resolvedAbs = path.resolve(absPath);
+	const exact = scope.sourceUrlByResolvedPath.get(resolvedAbs);
+	if (exact !== undefined) return exact;
+	if (scope.sourceUrlByResolvedPath.size > 0) {
+		const sep = path.sep;
+		for (const dirPath of scope.sourceUrlByResolvedPath.keys()) {
+			if (resolvedAbs.startsWith(dirPath + sep)) return undefined;
+		}
+	}
+	return absPath;
+}
+
 // =============================================================================
 // Scope file enumeration (shared by overview + find)
 // =============================================================================
@@ -203,7 +475,9 @@ async function listScopeFiles(
 			// A fan-out target may be a plain file (basePath is the file path),
 			// which native `glob` cannot walk (it expects a directory). Stat it
 			// and add the file directly; otherwise glob the directory.
-			const stat = await Bun.file(target.basePath).stat().catch(() => undefined);
+			const stat = await Bun.file(target.basePath)
+				.stat()
+				.catch(() => undefined);
 			// Missing target — skip (the scope resolver already reported missing paths).
 			if (!stat) continue;
 			if (stat.isFile()) {
@@ -264,12 +538,18 @@ function escapeRegExp(value: string): string {
 
 interface FileOutline {
 	relPath: string;
+	absPath: string;
 	symbols: SymbolEntry[];
+	code: string;
+	selectorCache: FileSelectorCache;
 }
 
 interface MatchedSymbol {
 	symbol: SymbolEntry;
 	relPath: string;
+	absPath: string;
+	code: string;
+	symbolIndex: number;
 	container: string | undefined;
 }
 
@@ -285,15 +565,6 @@ function outlineFromCode(code: string, abs: string, lang: string | undefined): S
 	try {
 		const result: OutlineResult = outlineCode({ code, path: abs, lang });
 		return result.symbols;
-	} catch {
-		return [];
-	}
-}
-
-/** Outline a single file, tolerating read/parse failures (returns [] on error). */
-async function outlineFile(abs: string, lang: string | undefined): Promise<SymbolEntry[]> {
-	try {
-		return outlineFromCode(await Bun.file(abs).text(), abs, lang);
 	} catch {
 		return [];
 	}
@@ -341,6 +612,34 @@ function resolveManipulateMatches(symbols: SymbolEntry[], spec: ManipulateSpec):
 				(spec.container === undefined || container === spec.container) &&
 				(spec.line === undefined || symbol.selectionLine === spec.line),
 		);
+}
+
+/** Resolve exactly one symbol by selector structural fields plus SHA-256
+ *  range-text fingerprint. Returns the single match, or a string error.
+ *  Selector mode never uses `line` or ordinal for selection. */
+function resolveSelectorMatch(
+	symbols: SymbolEntry[],
+	payload: SelectorPayload,
+	code: string,
+): ManipulateMatch | string {
+	const cache = buildFileSelectorCache(symbols, code);
+	const matches: ManipulateMatch[] = [];
+	for (let i = 0; i < symbols.length; i++) {
+		const s = symbols[i]!;
+		if (s.name !== payload.n) continue;
+		if (s.kind !== payload.k) continue;
+		const container = resolveContainer(s, symbols);
+		if ((container ?? "") !== (payload.c ?? "")) continue;
+		if (cache.fingerprints[i] !== payload.f) continue;
+		matches.push({ symbol: s, index: i, container });
+	}
+	if (matches.length === 0) {
+		return `selector did not match any current symbol in the file (name=${payload.n}, kind=${payload.k}); the symbol may have changed — re-run \`symbol find\`/\`overview\` and retry`;
+	}
+	if (matches.length > 1) {
+		return `selector matches ${matches.length} ambiguous symbols (name=${payload.n}, kind=${payload.k}); re-run \`symbol find\`/\`overview\` and use name-addressing with \`line\``;
+	}
+	return matches[0]!;
 }
 
 /** Hashline body rows: each line prefixed with `+`, which also escapes literal
@@ -485,7 +784,7 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 				path: "src/utils/greet.ts",
 				name: "greet",
 				op: "replace",
-				text: "function greet(name: string) {\n  return `Hello, ${name}`\n}",
+				text: 'function greet(name: string) {\n  return "Hello, " + name\n}',
 			},
 		},
 	];
@@ -506,21 +805,48 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 	): Promise<AgentToolResult<SymbolToolDetails>> {
 		return untilAborted(signal, async () => {
 			const cwd = this.session.cwd;
-			const rawPaths = normalizePaths(params.path);
+
+			// U3: Decode selector before path normalization so the embedded source
+			// address and language context become the effective target. Selector mode
+			// was already validated (no explicit path/name/kind/container/line).
+			let effectiveParams = params;
+			if (params.selector !== undefined) {
+				const decoded = decodeSelector(params.selector);
+				if (typeof decoded === "string") throw new ToolError(decoded);
+				const merged: typeof symbolSchema.infer = {
+					...params,
+					path: decoded.a,
+					name: decoded.n,
+					kind: decoded.k,
+					container: decoded.c ?? undefined,
+				};
+				// Preserve selector lang; reject contradictory explicit lang.
+				if (decoded.g !== undefined) {
+					if (params.lang !== undefined && params.lang !== decoded.g) {
+						throw new ToolError(
+							`selector language (${decoded.g}) contradicts explicit \`lang\` (${params.lang}); omit \`lang\` when using a selector`,
+						);
+					}
+					merged.lang = decoded.g;
+				}
+				effectiveParams = merged;
+			}
+
+			const rawPaths = normalizePaths(effectiveParams.path);
 			// `manipulate` edits exactly one file: reject a multi-path input BEFORE
 			// scope resolution so a missing/rewritten second target cannot collapse
 			// to the one resolved file and be edited silently. (Delimited
 			// single-string expansion and directory/multi-target scopes are still
 			// caught by the guards in runManipulate.)
-			if (params.action === "manipulate" && rawPaths.length > 1) {
+			if (effectiveParams.action === "manipulate" && rawPaths.length > 1) {
 				throw new ToolError("manipulate requires a single target file in `path`");
 			}
 
 			const scope = await resolveToolSearchScope({
 				rawPaths,
 				cwd,
-				internalUrlAction: params.action === "manipulate" ? "rewrite" : "read",
-				trackImmutableSources: params.action === "manipulate",
+				internalUrlAction: effectiveParams.action === "manipulate" ? "rewrite" : "read",
+				trackImmutableSources: effectiveParams.action === "manipulate",
 				surfaceExactFilePaths: true,
 				fanOutFileTargets: true,
 				settings: this.session.settings,
@@ -528,13 +854,13 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 				localProtocolOptions: this.session.localProtocolOptions,
 			});
 
-			switch (params.action) {
+			switch (effectiveParams.action) {
 				case "overview":
-					return this.runOverview(scope, params, cwd, signal);
+					return this.runOverview(scope, effectiveParams, cwd, signal);
 				case "find":
-					return this.runFind(scope, params, cwd, signal);
+					return this.runFind(scope, effectiveParams, cwd, signal);
 				case "manipulate":
-					return this.runManipulate(scope, params, cwd);
+					return this.runManipulate(scope, effectiveParams, cwd, params.selector);
 			}
 		});
 	}
@@ -561,7 +887,6 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 				.text("No files in scope.")
 				.done();
 		}
-
 		const { record: recordFile, list: fileList } = createFileRecorder();
 		const outlineByRel = new Map<string, SymbolEntry[]>();
 		const outlines: FileOutline[] = [];
@@ -569,22 +894,51 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		for (const abs of files) {
 			const relPath = formatPathRelativeToCwd(abs, cwd);
 			recordFile(relPath);
-			const symbols = await outlineFile(abs, params.lang);
+			// Read code once: use it for both outlining and selector fingerprinting.
+			let code: string;
+			try {
+				code = await Bun.file(abs).text();
+			} catch {
+				code = "";
+			}
+			const symbols = outlineFromCode(code, abs, params.lang);
+			const selectorCache = buildFileSelectorCache(symbols, code);
 			outlineByRel.set(relPath, symbols);
-			outlines.push({ relPath, symbols });
+			outlines.push({ relPath, absPath: abs, symbols, code, selectorCache });
 			totalSymbols += symbols.length;
 		}
 
-		const buildBody = (relPath: string, symbols: SymbolEntry[]): { model: string[]; display: string[] } => {
+		const buildBody = (
+			relPath: string,
+			absPath: string,
+			symbols: SymbolEntry[],
+			selectorCache: FileSelectorCache,
+		): { model: string[]; display: string[] } => {
 			if (symbols.length === 0) {
 				const line = `${relPath} — no symbols (empty file or parse error)`;
 				return { model: [line], display: [line] };
 			}
 			const model = [`${relPath} — ${symbols.length} symbol(s)`];
 			const display = [`${relPath} — ${symbols.length} symbol(s)`];
-			for (const s of symbols) {
-				model.push(formatOverviewModelLine(s));
-				display.push(formatOverviewDisplayLine(s));
+			const sourceAddress = resolveSelectorSourceAddress(absPath, scope);
+			for (let i = 0; i < symbols.length; i++) {
+				const s = symbols[i]!;
+				const modelBase = formatOverviewModelLine(s);
+				const displayBase = formatOverviewDisplayLine(s);
+				if (sourceAddress === undefined) {
+					// Descendant of internal-URL-backed dir — suppress selector.
+					model.push(`${modelBase} selector=${SELECTOR_SUPPRESSED_INTERNAL}`);
+					display.push(`${displayBase} selector=${SELECTOR_SUPPRESSED_INTERNAL}`);
+				} else {
+					const sel = maybeEncodeSymbolSelector(s, symbols, i, relPath, sourceAddress, params.lang, selectorCache);
+					if (sel !== undefined) {
+						model.push(`${modelBase} selector=${sel}`);
+						display.push(`${displayBase} selector=${sel}`);
+					} else {
+						model.push(modelBase);
+						display.push(displayBase);
+					}
+				}
 			}
 			return { model, display };
 		};
@@ -594,8 +948,14 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 
 		if (scope.isDirectory) {
 			const grouped = formatGroupedFiles(fileList, relPath => {
-				const symbols = outlineByRel.get(relPath) ?? [];
-				const body = buildBody(relPath, symbols);
+				const outline = outlines.find(o => o.relPath === relPath);
+				const symbols = outline?.symbols ?? [];
+				const body = buildBody(
+					relPath,
+					outline?.absPath ?? "",
+					symbols,
+					outline?.selectorCache ?? buildFileSelectorCache([], ""),
+				);
 				return {
 					modelLines: body.model,
 					displayLines: body.display,
@@ -605,12 +965,12 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 			modelLines.push(...grouped.model);
 			displayLines.push(...grouped.display);
 		} else {
-			for (const { relPath, symbols } of outlines) {
+			for (const { relPath, absPath, symbols, selectorCache } of outlines) {
 				if (modelLines.length > 0) {
 					modelLines.push("");
 					displayLines.push("");
 				}
-				const body = buildBody(relPath, symbols);
+				const body = buildBody(relPath, absPath, symbols, selectorCache);
 				modelLines.push(...body.model);
 				displayLines.push(...body.display);
 			}
@@ -709,7 +1069,9 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 			}
 			if (scope.multiTargets) {
 				for (const target of scope.multiTargets) {
-					const stat = await Bun.file(target.basePath).stat().catch(() => undefined);
+					const stat = await Bun.file(target.basePath)
+						.stat()
+						.catch(() => undefined);
 					if (!stat) continue;
 					if (stat.isFile()) {
 						const abs = path.resolve(cwd, target.basePath);
@@ -735,20 +1097,60 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		// matches the name exactly, so an exact hit is never buried under noise.
 		const exact: MatchedSymbol[] = [];
 		const substring: MatchedSymbol[] = [];
+		// Per-file selector cache: built once from the SAME symbols array used for
+		// matching, so symbolIndex is a stable reference into that array.
+		const selCacheByAbs = new Map<string, { symbols: SymbolEntry[]; cache: FileSelectorCache }>();
 		for (const abs of candidates) {
 			const cached = contentCache.get(abs);
-			const symbols =
-				cached !== undefined ? outlineFromCode(cached, abs, params.lang) : await outlineFile(abs, params.lang);
+			let code: string;
+			let symbols: SymbolEntry[];
+			if (cached !== undefined) {
+				code = cached;
+				symbols = outlineFromCode(cached, abs, params.lang);
+			} else {
+				try {
+					code = await Bun.file(abs).text();
+				} catch {
+					continue;
+				}
+				symbols = outlineFromCode(code, abs, params.lang);
+			}
 			const relPath = formatPathRelativeToCwd(abs, cwd);
-			for (const s of symbols) {
+			// Build selector cache from THIS symbols array (once per file).
+			if (!selCacheByAbs.has(abs)) {
+				selCacheByAbs.set(abs, { symbols, cache: buildFileSelectorCache(symbols, code) });
+			}
+			for (let i = 0; i < symbols.length; i++) {
+				const s = symbols[i]!;
+				const entry = {
+					symbol: s,
+					relPath,
+					absPath: abs,
+					code,
+					symbolIndex: i,
+					container: resolveContainer(s, symbols),
+				};
 				if (s.name === name) {
-					exact.push({ symbol: s, relPath, container: resolveContainer(s, symbols) });
+					exact.push(entry);
 				} else if (s.name.toLowerCase().includes(needle)) {
-					substring.push({ symbol: s, relPath, container: resolveContainer(s, symbols) });
+					substring.push(entry);
 				}
 			}
 		}
-		const matched = exact.length > 0 ? exact : substring;
+		// U4: Apply kind/container filters before exact-vs-substring selection.
+		const applyFilters = (items: MatchedSymbol[]): MatchedSymbol[] => {
+			let result = items;
+			if (params.kind !== undefined) {
+				result = result.filter(m => m.symbol.kind === params.kind);
+			}
+			if (params.container !== undefined) {
+				result = result.filter(m => m.container === params.container);
+			}
+			return result;
+		};
+		const filteredExact = applyFilters(exact);
+		const filteredSubstring = applyFilters(substring);
+		const matched = filteredExact.length > 0 ? filteredExact : filteredSubstring;
 
 		if (matched.length === 0) {
 			return toolResult<SymbolToolDetails>({
@@ -769,10 +1171,39 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 
 		const modelLines: string[] = [`Found ${matched.length} symbol(s) matching "${name}":`];
 		const displayLines: string[] = [`Found ${matched.length} symbol(s) matching "${name}":`];
-		for (const { symbol: s, relPath, container } of visible) {
+		for (const { symbol: s, relPath, absPath, symbolIndex, container } of visible) {
 			const containerSuffix = container ? ` (${container})` : "";
-			modelLines.push(`${s.kind} ${s.name}${containerSuffix} @ ${relPath}:${s.selectionLine}`);
-			displayLines.push(`${kindIcon(s.kind)} ${s.name}${containerSuffix} @ ${relPath}:${s.selectionLine}`);
+			const baseModel = `${s.kind} ${s.name}${containerSuffix} @ ${relPath}:${s.selectionLine}`;
+			const baseDisplay = `${kindIcon(s.kind)} ${s.name}${containerSuffix} @ ${relPath}:${s.selectionLine}`;
+			const sourceAddress = resolveSelectorSourceAddress(absPath, scope);
+			if (sourceAddress === undefined) {
+				// Descendant of internal-URL-backed dir — suppress selector.
+				modelLines.push(`${baseModel} selector=${SELECTOR_SUPPRESSED_INTERNAL}`);
+				displayLines.push(`${baseDisplay} selector=${SELECTOR_SUPPRESSED_INTERNAL}`);
+			} else {
+				const selEntry = selCacheByAbs.get(absPath);
+				const sel = selEntry
+					? maybeEncodeSymbolSelector(
+							s,
+							selEntry.symbols,
+							symbolIndex,
+							relPath,
+							sourceAddress,
+							params.lang,
+							selEntry.cache,
+						)
+					: undefined;
+				if (sel === "ambiguous") {
+					modelLines.push(`${baseModel} selector=ambiguous`);
+					displayLines.push(`${baseDisplay} selector=ambiguous`);
+				} else if (sel !== undefined) {
+					modelLines.push(`${baseModel} selector=${sel}`);
+					displayLines.push(`${baseDisplay} selector=${sel}`);
+				} else {
+					modelLines.push(baseModel);
+					displayLines.push(baseDisplay);
+				}
+			}
 		}
 		if (remaining > 0) {
 			const more = `… ${remaining} more; pass skip=${skip + limit}`;
@@ -795,18 +1226,23 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		scope: ToolScopeResolution,
 		params: typeof symbolSchema.infer,
 		cwd: string,
+		rawSelector?: string,
 	): Promise<AgentToolResult<SymbolToolDetails>> {
 		const { name, op } = params;
-		if (!name) throw new ToolError("`name` is required for manipulate");
 		if (!op) throw new ToolError("`op` is required for manipulate");
 		if (op !== "delete" && (params.text === undefined || params.text.length === 0)) {
 			throw new ToolError(`\`text\` is required for op '${op}'`);
 		}
-		if (op === "delete" && params.text !== undefined && params.text.length > 0) {
+		if (op === "delete" && params.text !== undefined) {
 			throw new ToolError("`text` is not allowed for op 'delete' (it is ignored — omit it)");
 		}
-		if (scope.isDirectory || scope.multiTargets || (scope.exactFilePaths?.length ?? 0) > 1) {
-			throw new ToolError("manipulate requires a single target file in `path`");
+		if (
+			scope.isDirectory ||
+			scope.multiTargets ||
+			(scope.exactFilePaths?.length ?? 0) > 1 ||
+			scope.missingPaths.length > 0
+		) {
+			throw new ToolError("manipulate requires a single existing target file in `path`");
 		}
 		const abs = scope.searchPath;
 		const relPath = formatPathRelativeToCwd(abs, cwd);
@@ -820,7 +1256,6 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 			throw new ToolError(`${relPath} resolves to a read-only resource and cannot be edited`);
 		}
 		const text = params.text ?? "";
-		const spec: ManipulateSpec = { name, kind: params.kind, container: params.container, line: params.line };
 
 		let code: string;
 		try {
@@ -829,26 +1264,48 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 			throw new ToolError(`Cannot read ${relPath}`);
 		}
 		const symbols = outlineCode({ code, path: abs, lang: params.lang }).symbols;
-		const matches = resolveManipulateMatches(symbols, spec);
-		if (matches.length === 0) {
-			const quals: string[] = [];
-			if (params.kind) quals.push(`kind=${params.kind}`);
-			if (params.container) quals.push(`container=${params.container}`);
-			if (params.line !== undefined) quals.push(`line=${params.line}`);
-			const suffix = quals.length > 0 ? ` (${quals.join(", ")})` : "";
-			throw new ToolError(`No symbol named '${name}'${suffix} in ${relPath}`);
+
+		// --- Resolve the target symbol: selector mode vs name mode ---
+		let resolvedMatch: ManipulateMatch;
+		let selectorPayload: SelectorPayload | undefined;
+
+		if (rawSelector !== undefined) {
+			// U3: Selector mode — resolve by structural fields + fingerprint.
+			if (!name) throw new ToolError("`name` is required for manipulate");
+			const decoded = decodeSelector(rawSelector);
+			if (typeof decoded === "string") throw new ToolError(decoded);
+			selectorPayload = decoded;
+			const result = resolveSelectorMatch(symbols, decoded, code);
+			if (typeof result === "string") throw new ToolError(result);
+			resolvedMatch = result;
+		} else {
+			// Name mode: existing spec-based resolution.
+			if (!name) throw new ToolError("`name` is required for manipulate");
+			const spec: ManipulateSpec = { name, kind: params.kind, container: params.container, line: params.line };
+			const matches = resolveManipulateMatches(symbols, spec);
+			if (matches.length === 0) {
+				const quals: string[] = [];
+				if (params.kind) quals.push(`kind=${params.kind}`);
+				if (params.container) quals.push(`container=${params.container}`);
+				if (params.line !== undefined) quals.push(`line=${params.line}`);
+				const suffix = quals.length > 0 ? ` (${quals.join(", ")})` : "";
+				throw new ToolError(`No symbol named '${name}'${suffix} in ${relPath}`);
+			}
+			if (matches.length > 1) {
+				const candidateLines = matches.map(
+					({ symbol, container }) =>
+						`  ${symbol.kind} ${symbol.name}${container ? ` (${container})` : ""} @ line ${symbol.selectionLine}`,
+				);
+				throw new ToolError(
+					`'${name}' matches ${matches.length} symbols in ${relPath} — add \`kind\`, \`container\`, or \`line\` to disambiguate:\n${candidateLines.join("\n")}`,
+				);
+			}
+			resolvedMatch = matches[0]!;
 		}
-		if (matches.length > 1) {
-			const candidateLines = matches.map(
-				({ symbol, container }) =>
-					`  ${symbol.kind} ${symbol.name}${container ? ` (${container})` : ""} @ line ${symbol.selectionLine}`,
-			);
-			throw new ToolError(
-				`'${name}' matches ${matches.length} symbols in ${relPath} — add \`kind\`, \`container\`, or \`line\` to disambiguate:\n${candidateLines.join("\n")}`,
-			);
-		}
-		const { startLine, endLine } = matches[0].symbol;
-		if (wholeLineEditUnsafe(symbols, matches[0].index)) {
+
+		const { symbol: matchedSymbol, index: matchIndex } = resolvedMatch;
+		const { startLine, endLine } = matchedSymbol;
+		if (wholeLineEditUnsafe(symbols, matchIndex)) {
 			throw new ToolError(
 				`'${name}' is not isolated on its own line(s) in ${relPath} (it shares a line with another declaration); a line-based edit would clobber it — use \`edit\` or \`ast_edit\` for sub-line changes`,
 			);
@@ -879,12 +1336,10 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		};
 
 		// Stage the apply through the hashline pipeline. At apply time the symbol is
-		// re-read and re-resolved by spec, then required to occupy the SAME range the
+		// re-read and re-resolved, then required to occupy the SAME range the
 		// preview showed; if it moved, changed, or no longer uniquely resolves, the
-		// apply rejects so the model re-previews against current code. Re-resolving by
-		// identity (rather than trusting a frozen range) is what stops hashline's
-		// textual recovery from relocating a stale edit onto the wrong code; the fresh
-		// per-apply tag makes the Patcher validate against live content.
+		// apply rejects so the model re-previews against current code.
+		const selPayload = selectorPayload; // capture for apply closure
 		queueResolveHandler(this.session, {
 			label: `Symbol ${op}: ${name} in ${relPath}`,
 			sourceToolName: this.name,
@@ -895,21 +1350,40 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 				} catch {
 					return { ...toolResult(details).text(`Cannot read ${relPath}`).done(), isError: true };
 				}
-				const freshMatches = resolveManipulateMatches(
-					outlineCode({ code: freshCode, path: abs, lang: params.lang }).symbols,
-					spec,
-				);
-				if (freshMatches.length !== 1) {
-					return {
-						...toolResult(details)
-							.text(
-								`Symbol '${name}' no longer uniquely resolves in ${relPath} since the preview (${freshMatches.length} match(es)); re-run \`symbol find\`/\`overview\` and retry.`,
-							)
-							.done(),
-						isError: true,
+				const freshSymbols = outlineCode({ code: freshCode, path: abs, lang: params.lang }).symbols;
+				let freshMatch: ManipulateMatch | undefined;
+				if (selPayload !== undefined) {
+					// Selector mode: re-resolve by structural fields + fingerprint.
+					const result = resolveSelectorMatch(freshSymbols, selPayload, freshCode);
+					if (typeof result === "string") {
+						return {
+							...toolResult(details).text(`Selector stale at apply time: ${result}`).done(),
+							isError: true,
+						};
+					}
+					freshMatch = result;
+				} else {
+					// Name mode: re-resolve by spec.
+					const spec: ManipulateSpec = {
+						name: name!,
+						kind: params.kind,
+						container: params.container,
+						line: params.line,
 					};
+					const freshMatches = resolveManipulateMatches(freshSymbols, spec);
+					if (freshMatches.length !== 1) {
+						return {
+							...toolResult(details)
+								.text(
+									`Symbol '${name}' no longer uniquely resolves in ${relPath} since the preview (${freshMatches.length} match(es)); re-run \`symbol find\`/\`overview\` and retry.`,
+								)
+								.done(),
+							isError: true,
+						};
+					}
+					freshMatch = freshMatches[0]!;
 				}
-				const fresh = freshMatches[0].symbol;
+				const fresh = freshMatch.symbol;
 				if (fresh.startLine !== startLine || fresh.endLine !== endLine) {
 					return {
 						...toolResult(details)

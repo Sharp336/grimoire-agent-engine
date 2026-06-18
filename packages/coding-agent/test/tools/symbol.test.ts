@@ -1,11 +1,13 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import { validateToolArguments } from "@oh-my-pi/pi-ai/utils/validation";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { SymbolTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { InternalUrlRouter, type ProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { ToolChoiceQueue } from "@oh-my-pi/pi-coding-agent/session/tool-choice-queue";
+import { SymbolTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 let dir: string;
 
@@ -268,6 +270,7 @@ describe("symbol manipulate", () => {
 				path: file,
 				name: "greet",
 				op: "replace",
+				// biome-ignore lint/suspicious/noTemplateCurlyInString: replacement payload intentionally contains a template placeholder.
 				text: "function greet(name: string) {\n  return `hi ${name}`;\n}",
 			});
 			// Preview stages a resolve but must not touch disk.
@@ -281,6 +284,7 @@ describe("symbol manipulate", () => {
 			expect(applied.isError).toBeUndefined();
 
 			const updated = await fs.readFile(file, "utf8");
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: assertion checks the literal replacement payload.
 			expect(updated).toContain("return `hi ${name}`;");
 			expect(updated).not.toContain("return name;");
 			// Neighboring statement untouched.
@@ -313,6 +317,28 @@ describe("symbol manipulate", () => {
 			await expect(
 				tool.execute("m", { action: "manipulate", path: file, name: "absent", op: "delete" }),
 			).rejects.toThrow(/No symbol named 'absent'/);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects delimited multi-target name-mode paths even when one target is missing", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-manip-delim-"));
+		try {
+			const file = path.join(tmp, "one.ts");
+			const missing = path.join(tmp, "missing.ts");
+			const original = "function one() {}\n";
+			await fs.writeFile(file, original);
+			const { tool } = manipulateHarness(tmp);
+			await expect(
+				tool.execute("m", {
+					action: "manipulate",
+					path: `${file},${missing}`,
+					name: "one",
+					op: "delete",
+				}),
+			).rejects.toThrow(/single existing target file/);
+			expect(await fs.readFile(file, "utf8")).toBe(original);
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
@@ -815,5 +841,499 @@ describe("symbol empty supported file is not unsupported (FIX 3b)", () => {
 		} finally {
 			await fs.rm(tmp, { recursive: true, force: true });
 		}
+	});
+});
+
+// ── helpers shared by U1/U3/U4 tests ──────────────────────────────────────
+
+function validationTool(): SymbolTool {
+	return new SymbolTool({ cwd: dir, settings: Settings.isolated() } as unknown as ToolSession);
+}
+
+function validateSymbolArgs(args: Record<string, unknown>): Record<string, unknown> {
+	return validateToolArguments(validationTool(), {
+		type: "toolCall",
+		id: "t",
+		name: "symbol",
+		arguments: args,
+	}) as Record<string, unknown>;
+}
+
+function validSelectorForValidation(): string {
+	const payload = { a: "sample.ts", p: "sample.ts", n: "f", k: "function", f: "fingerprint", o: 0, l: 1 };
+	return `sym:v1:${Buffer.from(JSON.stringify(payload), "utf8").toString("base64url")}`;
+}
+
+/** Extract the first `sym:v1:<…>` selector token from tool output text. */
+function extractSelector(text: string): string {
+	const match = text.match(/sym:v1:\S+/);
+	if (!match) throw new Error(`No selector found in output:\n${text}`);
+	return match[0];
+}
+
+// ── U1. Validation contract (validateToolArguments) ────────────────────────
+
+describe("symbol validation (U1)", () => {
+	it("rejects find without name", () => {
+		expect(() => validateSymbolArgs({ action: "find", path: dir })).toThrow(/name/);
+	});
+
+	it("rejects name-mode manipulate without path", () => {
+		expect(() => validateSymbolArgs({ action: "manipulate", name: "f", op: "delete" })).toThrow(/path/);
+	});
+
+	it("rejects name-mode manipulate with empty name", () => {
+		expect(() => validateSymbolArgs({ action: "manipulate", path: "/x", name: "", op: "delete" })).toThrow(/name/);
+	});
+
+	it("rejects selector combined with path", () => {
+		expect(() =>
+			validateSymbolArgs({ action: "manipulate", selector: "sym:v1:abc", path: "/x", op: "delete" }),
+		).toThrow(/path/);
+	});
+
+	it("rejects selector combined with name", () => {
+		expect(() =>
+			validateSymbolArgs({ action: "manipulate", selector: "sym:v1:abc", name: "f", op: "delete" }),
+		).toThrow(/name/);
+	});
+
+	it("rejects selector combined with kind, container, or line", () => {
+		for (const extra of [{ kind: "function" }, { container: "Point" }, { line: 5 }] as const) {
+			expect(() =>
+				validateSymbolArgs({ action: "manipulate", selector: "sym:v1:abc", op: "delete", ...extra }),
+			).toThrow(/kind.*container.*line|container.*line|kind.*container/);
+		}
+	});
+
+	it("rejects malformed selector payloads", () => {
+		const missingDiagnostics = `sym:v1:${Buffer.from(
+			JSON.stringify({ a: "sample.ts", p: "sample.ts", n: "f", k: "function", f: "fingerprint" }),
+			"utf8",
+		).toString("base64url")}`;
+		for (const selector of ["bogus", "sym:v1:", "sym:v1:abc", missingDiagnostics]) {
+			expect(() => validateSymbolArgs({ action: "manipulate", selector, op: "delete" })).toThrow(/selector/);
+		}
+	});
+
+	it("rejects manipulate replace/insert without text", () => {
+		expect(() => validateSymbolArgs({ action: "manipulate", path: "/x", name: "f", op: "replace" })).toThrow(/text/);
+	});
+
+	it("rejects delete with text, even when empty", () => {
+		for (const text of ["nope", ""]) {
+			expect(() => validateSymbolArgs({ action: "manipulate", path: "/x", name: "f", op: "delete", text })).toThrow(
+				/delete/,
+			);
+		}
+	});
+
+	it("rejects name-mode manipulate with zero or multiple path entries", () => {
+		for (const pathArg of [[], ["/x.ts", "/y.ts"]] as const) {
+			expect(() => validateSymbolArgs({ action: "manipulate", path: pathArg, name: "f", op: "delete" })).toThrow(
+				/exactly one `path`/,
+			);
+		}
+	});
+
+	it("rejects invalid action-scoped fields for overview", () => {
+		for (const extra of [
+			{ name: "x" },
+			{ selector: validSelectorForValidation() },
+			{ op: "delete" },
+			{ text: "x" },
+			{ skip: 1 },
+			{ limit: 5 },
+		] as const) {
+			expect(() => validateSymbolArgs({ action: "overview", ...extra })).toThrow(/overview/);
+		}
+	});
+
+	it("rejects invalid action-scoped fields for find", () => {
+		for (const extra of [{ op: "delete" }, { text: "x" }, { line: 5 }] as const) {
+			expect(() => validateSymbolArgs({ action: "find", name: "x", path: dir, ...extra })).toThrow(/find/);
+		}
+	});
+
+	it("rejects selector for find (action-scoped rejection, not malformed-selector rejection)", () => {
+		expect(() => validateSymbolArgs({ action: "find", selector: validSelectorForValidation() })).toThrow(/find/);
+	});
+
+	it("accepts find with kind and container filters", () => {
+		const args = validateSymbolArgs({ action: "find", name: "norm", path: dir, kind: "method", container: "Point" });
+		expect(args.kind).toBe("method");
+		expect(args.container).toBe("Point");
+	});
+});
+
+// ── U3. Selector handoff from actual find/overview output ──────────────────
+
+describe("symbol selector handoff (U3)", () => {
+	it("selector-only manipulate decodes source without explicit path", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "sel-handoff-"));
+		try {
+			await fs.writeFile(path.join(tmp, "greet.ts"), "function greet() {\n  return 1;\n}\n");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const overview = textOf(await tool.execute("t", { action: "overview", path: path.join(tmp, "greet.ts") }));
+			const selector = extractSelector(overview);
+			const { tool: mTool, queue } = manipulateHarness(tmp);
+			await mTool.execute("m", {
+				action: "manipulate",
+				selector,
+				op: "replace",
+				text: "function greet() {\n  return 99;\n}",
+			});
+			queue.nextToolChoice();
+			const applied = (await queue.peekInFlightInvoker()!({
+				action: "apply",
+				reason: "selector handoff",
+			})) as InvokedToolResult;
+			expect(applied.isError).toBeUndefined();
+			expect(await fs.readFile(path.join(tmp, "greet.ts"), "utf8")).toContain("return 99;");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("selector-only manipulate preserves explicit lang context and rejects contradictory lang", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "sel-lang-"));
+		try {
+			const file = path.join(tmp, "code.txt");
+			await fs.writeFile(file, "fn helper() -> u32 {\n    1\n}\n");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const found = textOf(await tool.execute("t", { action: "find", name: "helper", path: file, lang: "rust" }));
+			const selector = extractSelector(found);
+			const { tool: mTool, queue } = manipulateHarness(tmp);
+			await expect(
+				mTool.execute("bad-lang", { action: "manipulate", selector, op: "delete", lang: "javascript" }),
+			).rejects.toThrow(/contradicts explicit `lang`/);
+			await mTool.execute("m", {
+				action: "manipulate",
+				selector,
+				op: "replace",
+				text: "fn helper() -> u32 {\n    2\n}\n",
+			});
+			queue.nextToolChoice();
+			const applied = (await queue.peekInFlightInvoker()!({
+				action: "apply",
+				reason: "selector lang",
+			})) as InvokedToolResult;
+			expect(applied.isError).toBeUndefined();
+			expect(await fs.readFile(file, "utf8")).toContain("2");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("selector mode rejects stale fingerprint before preview", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "sel-stale-"));
+		try {
+			await fs.writeFile(path.join(tmp, "f.ts"), "function target() {\n  return 1;\n}\n");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const result = textOf(await tool.execute("t", { action: "find", name: "target", path: tmp }));
+			const selector = extractSelector(result);
+			await fs.writeFile(path.join(tmp, "f.ts"), "function target() {\n  return 999;\n}\n");
+			const { tool: mTool } = manipulateHarness(tmp);
+			await expect(mTool.execute("m", { action: "manipulate", selector, op: "delete" })).rejects.toThrow(
+				/did not match any current symbol/,
+			);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("selector mode rejects missing symbol before preview", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "sel-missing-"));
+		try {
+			await fs.writeFile(path.join(tmp, "f.ts"), "function target() {\n  return 1;\n}\n");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const result = textOf(await tool.execute("t", { action: "find", name: "target", path: tmp }));
+			const selector = extractSelector(result);
+			await fs.writeFile(path.join(tmp, "f.ts"), "function other() {\n  return 1;\n}\n");
+			const { tool: mTool } = manipulateHarness(tmp);
+			await expect(mTool.execute("m", { action: "manipulate", selector, op: "delete" })).rejects.toThrow(
+				/did not match any current symbol/,
+			);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("selector mode rejects ambiguous byte-identical candidates before preview", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "sel-amb-"));
+		try {
+			await fs.writeFile(path.join(tmp, "f.ts"), "function dup() {\n  return 1;\n}\n");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const result = textOf(await tool.execute("t", { action: "find", name: "dup", path: tmp }));
+			const selector = extractSelector(result);
+			await fs.writeFile(
+				path.join(tmp, "f.ts"),
+				"function dup() {\n  return 1;\n}\nfunction dup() {\n  return 1;\n}\n",
+			);
+			const { tool: mTool } = manipulateHarness(tmp);
+			await expect(mTool.execute("m", { action: "manipulate", selector, op: "delete" })).rejects.toThrow(
+				/ambiguous/,
+			);
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("pure line drift still works when structural fields and fingerprint remain unique", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "sel-drift-"));
+		try {
+			await fs.writeFile(path.join(tmp, "f.ts"), "function stable() {\n  return 1;\n}\n");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const result = textOf(await tool.execute("t", { action: "find", name: "stable", path: tmp }));
+			const selector = extractSelector(result);
+			await fs.writeFile(path.join(tmp, "f.ts"), "// inserted above\nfunction stable() {\n  return 1;\n}\n");
+			const { tool: mTool, queue } = manipulateHarness(tmp);
+			await mTool.execute("m", {
+				action: "manipulate",
+				selector,
+				op: "replace",
+				text: "function stable() {\n  return 2;\n}",
+			});
+			queue.nextToolChoice();
+			const applied = (await queue.peekInFlightInvoker()!({
+				action: "apply",
+				reason: "line drift",
+			})) as InvokedToolResult;
+			expect(applied.isError).toBeUndefined();
+			expect(await fs.readFile(path.join(tmp, "f.ts"), "utf8")).toContain("return 2;");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("selector never uses selectionLine as the target key", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "sel-noline-"));
+		try {
+			await fs.writeFile(path.join(tmp, "f.ts"), "function target() {\n  return 1;\n}\n");
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const overview = textOf(await tool.execute("t", { action: "overview", path: path.join(tmp, "f.ts") }));
+			const selector = extractSelector(overview);
+			const lineMatch = overview.match(/:(\d+)/);
+			const originalLine = lineMatch ? Number(lineMatch[1]) : 0;
+			await fs.writeFile(
+				path.join(tmp, "f.ts"),
+				"// line 1\n// line 2\n// line 3\nfunction target() {\n  return 1;\n}\n",
+			);
+			const { tool: mTool, queue } = manipulateHarness(tmp);
+			await mTool.execute("m", {
+				action: "manipulate",
+				selector,
+				op: "replace",
+				text: "function target() {\n  return 2;\n}",
+			});
+			queue.nextToolChoice();
+			const applied = (await queue.peekInFlightInvoker()!({
+				action: "apply",
+				reason: "line shift",
+			})) as InvokedToolResult;
+			expect(applied.isError).toBeUndefined();
+			const updated = await fs.readFile(path.join(tmp, "f.ts"), "utf8");
+			expect(updated).toContain("return 2;");
+			// The symbol moved down by 3 lines; the selector resolved by
+			// structural fields + fingerprint, NOT by the emitted line number.
+			expect(updated).toContain("// line 3");
+			if (originalLine > 0) {
+				const newLine = updated.split("\n").findIndex(l => l.includes("function target()")) + 1;
+				expect(newLine).toBeGreaterThan(originalLine);
+			}
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+});
+
+// ── U4. Find kind/container filters ───────────────────────────────────────
+
+describe("symbol find kind/container filters (U4)", () => {
+	it("kind=function excludes class or method with the same name", async () => {
+		const result = await symbolTool().execute("t", {
+			action: "find",
+			name: "norm",
+			path: dir,
+			kind: "function",
+		});
+		expect(textOf(result)).toContain("No symbols found.");
+	});
+
+	it("kind=method matches a Rust impl method via resolved container", async () => {
+		const result = await symbolTool().execute("t", {
+			action: "find",
+			name: "norm",
+			path: dir,
+			kind: "method",
+		});
+		const text = textOf(result);
+		expect(text).toContain("method norm (Point)");
+	});
+
+	it("container=Point matches a Rust impl method via resolved container semantics", async () => {
+		const result = await symbolTool().execute("t", {
+			action: "find",
+			name: "norm",
+			path: dir,
+			container: "Point",
+		});
+		expect(textOf(result)).toContain("method norm (Point)");
+	});
+
+	it("both kind and container required together", async () => {
+		const result = await symbolTool().execute("t", {
+			action: "find",
+			name: "norm",
+			path: dir,
+			kind: "method",
+			container: "Point",
+		});
+		const text = textOf(result);
+		expect(text).toContain('Found 1 symbol(s) matching "norm":');
+		expect(text).toContain("method norm (Point)");
+	});
+
+	it("wrong filter returns No symbols found", async () => {
+		const result = await symbolTool().execute("t", {
+			action: "find",
+			name: "norm",
+			path: dir,
+			kind: "function",
+		});
+		expect(textOf(result)).toContain("No symbols found.");
+	});
+
+	it("substring fallback still works after filters", async () => {
+		const result = await symbolTool().execute("t", {
+			action: "find",
+			name: "shapel",
+			path: dir,
+			kind: "function",
+		});
+		expect(textOf(result)).toContain("Shapeless");
+	});
+});
+
+// ── AE7. Selector provenance bypass guard ──────────────────────────────────
+
+describe("selector provenance — internal URL not downgraded to filesystem path (AE7)", () => {
+	let ae7Tmp: string;
+	let ae7DirTmp: string;
+
+	beforeAll(async () => {
+		// Single-file-backed immutable source
+		ae7Tmp = await fs.mkdtemp(path.join(os.tmpdir(), "ae7-prov-"));
+		await fs.writeFile(
+			path.join(ae7Tmp, "target.ts"),
+			"export function alpha() {\n  return 1;\n}\nexport function beta() {\n  return 2;\n}\n",
+		);
+
+		// Directory-backed immutable source (tests descendant suppression)
+		ae7DirTmp = await fs.mkdtemp(path.join(os.tmpdir(), "ae7-dir-"));
+		await fs.mkdir(path.join(ae7DirTmp, "sub"));
+		await fs.writeFile(path.join(ae7DirTmp, "sub", "child.ts"), "export function childFn() {\n  return 42;\n}\n");
+	});
+
+	afterAll(async () => {
+		await fs.rm(ae7Tmp, { recursive: true, force: true });
+		await fs.rm(ae7DirTmp, { recursive: true, force: true });
+	});
+
+	/** Register a test handler that resolves ae7test:// to a specific file. */
+	function registerImmutableFileHandler(filePath: string): void {
+		const handler: ProtocolHandler = {
+			scheme: "ae7test",
+			immutable: true,
+			async resolve(url) {
+				const content = await Bun.file(filePath).text();
+				return {
+					url: url.href,
+					content,
+					contentType: "text/plain",
+					sourcePath: filePath,
+				};
+			},
+		};
+		InternalUrlRouter.instance().register(handler);
+	}
+
+	/** Register a test handler that resolves ae7dir:// to a directory. */
+	function registerImmutableDirHandler(dirPath: string): void {
+		const handler: ProtocolHandler = {
+			scheme: "ae7dir",
+			immutable: true,
+			async resolve(url) {
+				// Return directory listing content; sourcePath points to the dir root.
+				const entries = await fs.readdir(dirPath, { recursive: true });
+				return {
+					url: url.href,
+					content: entries.join("\n"),
+					contentType: "text/plain",
+					sourcePath: dirPath,
+				};
+			},
+		};
+		InternalUrlRouter.instance().register(handler);
+	}
+
+	afterEach(() => {
+		InternalUrlRouter.resetForTests();
+	});
+
+	it("selector from immutable single-file source carries internal URL, not filesystem path", async () => {
+		const targetFile = path.join(ae7Tmp, "target.ts");
+		registerImmutableFileHandler(targetFile);
+
+		const tool = new SymbolTool({
+			cwd: ae7Tmp,
+			settings: Settings.isolated(),
+		} as unknown as ToolSession);
+
+		// overview via internal URL
+		const overview = textOf(await tool.execute("t", { action: "overview", path: "ae7test://immutable" }));
+		expect(overview).toContain("alpha");
+		expect(overview).toContain("beta");
+
+		// Extract a selector and verify it contains the internal URL, not the
+		// filesystem path.  Decoding the base64url payload is the ground truth.
+		const selector = extractSelector(overview);
+		const b64 = selector.replace(/^sym:v1:/, "");
+		const payload = JSON.parse(Buffer.from(b64, "base64url").toString("utf8"));
+		expect(payload.a).toBe("ae7test://immutable");
+
+		// The selector is valid and the symbol tool can decode it for manipulate.
+		// The key assertion: when the selector's `a` is an internal URL, manipulate
+		// re-resolves through the internal URL router, which enforces immutability.
+		// With the OLD behavior, `a` would be the filesystem path and manipulate
+		// would succeed — bypassing the immutable-source guard entirely.
+		const { tool: mTool } = manipulateHarness(ae7Tmp);
+		await expect(
+			mTool.execute("m", {
+				action: "manipulate",
+				selector,
+				op: "replace",
+				text: "export function alpha() {\n  return 99;\n}\n",
+			}),
+		).rejects.toThrow(/read-only/);
+	});
+
+	it("selector from directory-backed internal source is suppressed (non-copyable marker)", async () => {
+		registerImmutableDirHandler(ae7DirTmp);
+
+		const tool = new SymbolTool({
+			cwd: ae7DirTmp,
+			settings: Settings.isolated(),
+		} as unknown as ToolSession);
+
+		// overview via directory-backed internal URL
+		const overview = textOf(await tool.execute("t", { action: "overview", path: "ae7dir://scoped" }));
+		expect(overview).toContain("childFn");
+
+		// The child file is a descendant of the internal-URL-backed directory.
+		// Its selector must be suppressed with the non-copyable marker, NOT a
+		// valid sym:v1:… selector that would downgrade provenance to a filesystem path.
+		expect(overview).toContain("selector=internal");
+		expect(overview).not.toMatch(/child\.ts.*selector=sym:v1:/);
 	});
 });

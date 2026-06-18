@@ -10,7 +10,7 @@ import {
 	validateStrictSchemaEnforcement,
 } from "@oh-my-pi/pi-ai/utils/schema";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { createTools, HIDDEN_TOOLS, SymbolTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 interface ToolSchemaEntry {
 	name: string;
@@ -127,5 +127,37 @@ describe("builtin tool schemas provider compatibility", () => {
 		}
 
 		expect(failures).toEqual([]);
+	});
+});
+
+describe("symbol tool schema shape", () => {
+	it("keeps symbol as a strict root object with no top-level schema combinators", () => {
+		// Obtain the symbol schema directly — symbol.enabled defaults to false,
+		// so collectToolSchemas() never includes it.
+		const schema = toolWireSchema(new SymbolTool(createTestSession())) as Record<string, unknown>;
+
+		// Must be a plain object schema — no root-level oneOf/anyOf/allOf.
+		expect(schema.type).toBe("object");
+		expect(schema.oneOf).toBeUndefined();
+		expect(schema.anyOf).toBeUndefined();
+		expect(schema.allOf).toBeUndefined();
+
+		// Must pass strict-mode enforcement for OpenAI-style providers.
+		const strictResult = adaptSchemaForStrict(schema, true);
+		expect(strictResult.strict).toBe(true);
+		const strictCompatibility = validateStrictSchemaEnforcement(schema, strictResult);
+		expect(strictCompatibility.compatible).toBe(true);
+	});
+
+	it("passes Google and Cloud Code Assist schema normalization for symbol", () => {
+		const schema = toolWireSchema(new SymbolTool(createTestSession())) as Record<string, unknown>;
+
+		const googleSchema = normalizeSchemaForGoogle(schema);
+		const googleResult = validateSchemaCompatibility(googleSchema, "google");
+		expect(googleResult.compatible).toBe(true);
+
+		const ccaSchema = normalizeSchemaForCCA(schema);
+		const ccaResult = validateSchemaCompatibility(ccaSchema, "cloud-code-assist-claude");
+		expect(ccaResult.compatible).toBe(true);
 	});
 });

@@ -997,6 +997,11 @@ export interface ToolScopeResolution {
 	exactFilePaths?: string[];
 	missingPaths: string[];
 	immutableSourcePaths: Set<string>;
+	/** Map from resolved absolute backing-file/dir paths to the original
+	 *  internal URL inputs. Callers can use this to recover provenance for
+	 *  selector payloads so internal URLs are not downgraded to filesystem
+	 *  paths.  Keys are always `path.resolve()`d. */
+	sourceUrlByResolvedPath: ReadonlyMap<string, string>;
 }
 
 /**
@@ -1029,6 +1034,7 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 	const internalRouter = InternalUrlRouter.instance();
 	const resolvedPathInputs: string[] = [];
 	const immutableSourcePaths = new Set<string>();
+	const sourceUrlByResolvedPath = new Map<string, string>();
 	for (const rawPath of rawPaths) {
 		if (!internalRouter.canHandle(rawPath)) {
 			resolvedPathInputs.push(rawPath);
@@ -1046,9 +1052,11 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		if (!resource.sourcePath) {
 			throw new ToolError(`Cannot ${internalUrlAction} internal URL without a backing file: ${rawPath}`);
 		}
+		const resolvedAbs = path.resolve(resource.sourcePath);
 		if (opts.trackImmutableSources && resource.immutable) {
-			immutableSourcePaths.add(path.resolve(resource.sourcePath));
+			immutableSourcePaths.add(resolvedAbs);
 		}
+		sourceUrlByResolvedPath.set(resolvedAbs, rawPath);
 		resolvedPathInputs.push(resource.sourcePath);
 	}
 
@@ -1112,5 +1120,6 @@ export async function resolveToolSearchScope(opts: ToolScopeOptions): Promise<To
 		exactFilePaths,
 		missingPaths,
 		immutableSourcePaths,
+		sourceUrlByResolvedPath,
 	};
 }
