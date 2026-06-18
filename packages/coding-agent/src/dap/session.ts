@@ -1438,36 +1438,65 @@ export class DapSessionManager {
 	): Promise<void> {
 		session.status = "terminated";
 
-		for (const childId of [...session.childSessionIds]) {
-			const child = this.#sessions.get(childId);
-			if (child) {
-				await this.#terminateSessionAndChildren(child, signal, timeoutMs);
+		try {
+			for (const childId of [...session.childSessionIds]) {
+				const child = this.#sessions.get(childId);
+				if (child) {
+					await this.#terminateSessionAndChildren(child, signal, timeoutMs);
+				}
 			}
-		}
 
-		if (session.capabilities?.supportsTerminateRequest) {
+			if (session.capabilities?.supportsTerminateRequest) {
+				await this.#sendBestEffortTerminationRequest(session, "terminate", undefined, signal, timeoutMs);
+			}
+			await this.#sendBestEffortTerminationRequest(
+				session,
+				"disconnect",
+				{ terminateDebuggee: true },
+				signal,
+				timeoutMs,
+			);
+		} finally {
+			await this.#disposeSession(session);
+		}
+	}
+
+	async #sendBestEffortTerminationRequest(
+		session: DapSession,
+		command: string,
+		args: unknown,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	): Promise<void> {
+		try {
 			await untilAborted(
 				signal,
-				session.client.sendRequest("terminate", undefined, signal, timeoutMs).catch(() => undefined),
+				session.client.sendRequest(command, args, signal, timeoutMs).catch(() => undefined),
 			);
+		} catch {
+			/* Cleanup continues even if the tool timeout aborts a best-effort DAP request. */
 		}
-		await untilAborted(
-			signal,
-			session.client
-				.sendRequest("disconnect", { terminateDebuggee: true }, signal, timeoutMs)
-				.catch(() => undefined),
-		);
-		await this.#disposeSession(session);
 	}
 
 	async #ensureLaunchSlot(): Promise<void> {
-		const active = this.#getActiveSessionOrNull();
-		if (!active) return;
-		if (active.status === "terminated" || !active.client.isAlive()) {
-			await this.#disposeSession(active);
-			return;
+		for (const session of [...this.#sessions.values()]) {
+			if (session.status === "terminated" || !session.client.isAlive()) {
+				await this.#disposeSession(session);
+			}
 		}
-		throw new Error(`Debug session ${active.id} is still active. Terminate it before launching another.`);
+
+		const blocking = [...this.#sessions.values()].find(
+			session => session.status !== "terminated" && session.client.isAlive(),
+		);
+		if (!blocking) return;
+
+		let rootSession = blocking;
+		while (rootSession.parentSessionId) {
+			const parent = this.#sessions.get(rootSession.parentSessionId);
+			if (!parent) break;
+			rootSession = parent;
+		}
+		throw new Error(`Debug session ${rootSession.id} is still active. Terminate it before launching another.`);
 	}
 
 	#registerSession(

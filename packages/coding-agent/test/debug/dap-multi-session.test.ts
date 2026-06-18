@@ -51,6 +51,7 @@ class FakeDapClient {
 	readonly #handlers = new Map<string, Set<DapEventHandler>>();
 	readonly #reverseHandlers = new Map<string, DapReverseRequestHandler>();
 	#alive = true;
+	readonly stalledCommands = new Set<string>();
 	readonly sentRequests: SentDapRequest[] = [];
 
 	constructor(
@@ -80,8 +81,18 @@ class FakeDapClient {
 		return { supportsConfigurationDoneRequest: true };
 	}
 
-	async sendRequest<TBody = unknown>(command: string, args?: unknown): Promise<TBody> {
+	async sendRequest<TBody = unknown>(command: string, args?: unknown, signal?: AbortSignal): Promise<TBody> {
 		this.sentRequests.push({ command, args });
+		if (this.stalledCommands.has(command)) {
+			const { promise, reject } = Promise.withResolvers<TBody>();
+			const abort = () => reject(new Error("aborted"));
+			if (signal?.aborted) {
+				abort();
+			} else {
+				signal?.addEventListener("abort", abort, { once: true });
+			}
+			return await promise;
+		}
 		if (command === "setBreakpoints") {
 			return {
 				breakpoints: getSourceBreakpoints(args).map(breakpoint => ({
@@ -135,6 +146,10 @@ class FakeDapClient {
 			return await handler(args);
 		}
 		throw new Error(`No handler registered for reverse request: ${command}`);
+	}
+
+	emitEvent(event: string, body: unknown): void {
+		this.#emit(event, body);
 	}
 
 	isAlive(): boolean {
@@ -311,5 +326,81 @@ describe("DAP multi-session debugging", () => {
 				command: "stackTrace",
 			}),
 		);
+	});
+
+	it("disposes the session tree when termination requests time out", async () => {
+		const manager = new DapSessionManager();
+
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
+		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
+
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		await parentClient.triggerReverseRequest("startDebugging", {
+			request: "attach",
+			configuration: {
+				type: "pwa-node",
+				name: "child-worker",
+			},
+		});
+
+		parentClient.stalledCommands.add("disconnect");
+		childClient.stalledCommands.add("disconnect");
+
+		await manager.terminate(AbortSignal.timeout(5), 30_000);
+
+		expect(manager.listSessions().length).toBe(0);
+		expect(parentClient.isAlive()).toBe(false);
+		expect(childClient.isAlive()).toBe(false);
+	});
+
+	it("blocks new top-level launches when the active child has terminated but its root is alive", async () => {
+		const manager = new DapSessionManager();
+
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+
+		const spawnSpy = spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
+		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
+
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		await parentClient.triggerReverseRequest("startDebugging", {
+			request: "attach",
+			configuration: {
+				type: "pwa-node",
+				name: "child-worker",
+			},
+		});
+
+		childClient.emitEvent("terminated", {});
+
+		await expect(
+			manager.launch({
+				adapter: TEST_ADAPTER,
+				program: "other.js",
+				cwd: process.cwd(),
+			}),
+		).rejects.toThrow("Debug session debug-1 is still active. Terminate it before launching another.");
+
+		expect(spawnSpy).toHaveBeenCalledTimes(1);
+
+		await manager.terminate();
+		expect(manager.listSessions().length).toBe(0);
 	});
 });
