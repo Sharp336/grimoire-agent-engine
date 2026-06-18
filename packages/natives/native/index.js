@@ -53,6 +53,7 @@ export const isoProbe = nativeBindings.isoProbe;
 export const isoResolve = nativeBindings.isoResolve;
 export const isoStart = nativeBindings.isoStart;
 export const isoStop = nativeBindings.isoStop;
+export const isOutlineSupportedLang = nativeBindings.isOutlineSupportedLang;
 export const isOutlineSupportedPath = nativeBindings.isOutlineSupportedPath;
 export const listWorkspace = nativeBindings.listWorkspace;
 export const matchesKey = nativeBindings.matchesKey;

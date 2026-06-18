@@ -998,6 +998,15 @@ export declare function isoStart(kind: IsoBackendKind | undefined | null, lower:
 export declare function isoStop(kind: IsoBackendKind | undefined | null, merged: string): Promise<void>
 
 /**
+ * True when an explicit `lang` override resolves (through the same alias table
+ * `outline_code` uses, [`SupportLang::from_alias`]) to a language the outline
+ * extractor emits symbols for. The `symbol` TS tool uses this to honor a
+ * `lang` override on a file whose own extension does not auto-resolve, without
+ * re-deriving the alias set in TS (which would drift from the extractor).
+ */
+export declare function isOutlineSupportedLang(lang: string): boolean
+
+/**
  * True when the outline extractor emits symbols for the language `path`
  * resolves to (by extension AND special-name rules, e.g. shell rc files).
  * The `symbol` TS tool uses this for per-file gating so extensionless

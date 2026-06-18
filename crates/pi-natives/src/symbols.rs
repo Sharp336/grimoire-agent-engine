@@ -128,3 +128,15 @@ pub fn is_outline_supported_path(path: String) -> bool {
 		.map(|lang| pi_ast::symbols::outline_languages().contains(&lang))
 		.unwrap_or(false)
 }
+
+/// True when an explicit `lang` override resolves (through the same alias table
+/// `outline_code` uses, [`SupportLang::from_alias`]) to a language the outline
+/// extractor emits symbols for. The `symbol` TS tool uses this to honor a
+/// `lang` override on a file whose own extension does not auto-resolve, without
+/// re-deriving the alias set in TS (which would drift from the extractor).
+#[napi]
+pub fn is_outline_supported_lang(lang: String) -> bool {
+	pi_ast::SupportLang::from_alias(&lang)
+		.map(|lang| pi_ast::symbols::outline_languages().contains(&lang))
+		.unwrap_or(false)
+}
