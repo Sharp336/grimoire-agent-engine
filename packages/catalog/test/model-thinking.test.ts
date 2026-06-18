@@ -268,6 +268,24 @@ describe("model thinking derivation", () => {
 		).toBe(true);
 	});
 
+	it("uses budget transport for Antigravity Gemini 3 models outside collapsed families", () => {
+		const antigravity = createModel({
+			id: "gemini-3.1-flash-lite",
+			api: "google-gemini-cli",
+			provider: "google-antigravity",
+			baseUrl: "https://daily-cloudcode-pa.googleapis.com",
+		});
+		const geminiCli = createModel({
+			id: "gemini-3.1-flash-lite",
+			api: "google-gemini-cli",
+			provider: "google-gemini-cli",
+			baseUrl: "https://cloudcode-pa.googleapis.com",
+		});
+
+		expect(antigravity.thinking?.mode).toBe("budget");
+		expect(geminiCli.thinking?.mode).toBe("google-level");
+	});
+
 	it("encodes anthropic transport mode and adaptive wire maps in metadata", () => {
 		const opus45 = createModel({ id: "claude-opus-4-5", api: "anthropic-messages", provider: "anthropic" });
 		const opus46 = createModel({ id: "claude-opus-4.6", api: "anthropic-messages", provider: "anthropic" });

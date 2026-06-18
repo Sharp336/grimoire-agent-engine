@@ -18080,7 +18080,7 @@
 			"contextWindow": 1048576,
 			"maxTokens": 65535,
 			"thinking": {
-				"mode": "google-level",
+				"mode": "budget",
 				"efforts": [
 					"minimal",
 					"low",
@@ -59044,13 +59044,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.6799999999999999,
-				"output": 3.41,
-				"cacheRead": 0.33999999999999997,
+				"input": 0.67,
+				"output": 3.5,
+				"cacheRead": 0.19999999999999998,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 262142,
+			"maxTokens": 262144,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -61391,7 +61391,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 8192,
+			"maxTokens": 32768,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -61654,8 +61654,8 @@
 				"cacheRead": 0.06,
 				"cacheWrite": 0
 			},
-			"contextWindow": 256000,
-			"maxTokens": 80000
+			"contextWindow": 262144,
+			"maxTokens": 144000
 		},
 		"liquid/lfm-2.5-1.2b-thinking:free": {
 			"id": "liquid/lfm-2.5-1.2b-thinking:free",
@@ -62653,7 +62653,7 @@
 			"cost": {
 				"input": 0.6,
 				"output": 2.5,
-				"cacheRead": 0.15,
+				"cacheRead": 0.6,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
@@ -62710,13 +62710,13 @@
 				"image"
 			],
 			"cost": {
-				"input": 0.6799999999999999,
-				"output": 3.41,
-				"cacheRead": 0.33999999999999997,
+				"input": 0.67,
+				"output": 3.5,
+				"cacheRead": 0.19999999999999998,
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 262142,
+			"maxTokens": 262144,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -63721,7 +63721,7 @@
 			"cost": {
 				"input": 0.25,
 				"output": 2,
-				"cacheRead": 0.024999999999999998,
+				"cacheRead": 0.03,
 				"cacheWrite": 0
 			},
 			"contextWindow": 400000,
@@ -63837,11 +63837,11 @@
 			"cost": {
 				"input": 1.25,
 				"output": 10,
-				"cacheRead": 0.13,
+				"cacheRead": 0.125,
 				"cacheWrite": 0
 			},
 			"contextWindow": 128000,
-			"maxTokens": 32000
+			"maxTokens": 16384
 		},
 		"openai/gpt-5.1-codex": {
 			"id": "openai/gpt-5.1-codex",
@@ -63975,7 +63975,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 128000,
-			"maxTokens": 16384
+			"maxTokens": 32000
 		},
 		"openai/gpt-5.2-codex": {
 			"id": "openai/gpt-5.2-codex",
@@ -66037,7 +66037,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 262144,
-			"maxTokens": 262144,
+			"maxTokens": 81920,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -66094,8 +66094,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
-			"maxTokens": 262144,
+			"contextWindow": 256000,
+			"maxTokens": 32768,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -67709,12 +67709,12 @@
 			],
 			"cost": {
 				"input": 1.2,
-				"output": 4.199999999999999,
+				"output": 3.1999999999999997,
 				"cacheRead": 0.19999999999999998,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 16384,
+			"maxTokens": 65536,
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
@@ -69844,7 +69844,8 @@
 					"medium",
 					"high",
 					"xhigh"
-				]
+				],
+				"requiresEffort": true
 			},
 			"compat": {
 				"escapeBuiltinToolNames": true

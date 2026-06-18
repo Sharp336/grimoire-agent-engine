@@ -171,6 +171,32 @@ describe("collapseEffortVariants", () => {
 		expect(resolveWireModelId(sonnet, Effort.High)).toBe("claude-sonnet-4-6-thinking");
 	});
 
+	it("refreshes stale cached claude collapsed rows with hidden-twin routes", () => {
+		const stale: ModelSpec<"google-gemini-cli"> = {
+			...memberSpec("claude-opus-4-6"),
+			reasoning: true,
+			requestModelId: "claude-opus-4-6-thinking",
+			thinking: {
+				mode: "budget",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				effortRouting: { high: "claude-opus-4-6-thinking" },
+			},
+		};
+		const out = collapseEffortVariants([stale], ANTIGRAVITY_VARIANT_COLLAPSE_TABLE);
+		const opus = buildModel(out[0] as ModelSpec<"google-gemini-cli">);
+
+		expect(out[0]?.id).toBe("claude-opus-4-6");
+		expect(out[0]?.thinking?.effortRouting).toEqual({
+			off: "claude-opus-4-6",
+			minimal: "claude-opus-4-6-thinking",
+			low: "claude-opus-4-6-thinking",
+			medium: "claude-opus-4-6-thinking",
+			high: "claude-opus-4-6-thinking",
+		});
+		expect(resolveWireModelId(opus, undefined)).toBe("claude-opus-4-6");
+		expect(resolveWireModelId(opus, Effort.Low)).toBe("claude-opus-4-6-thinking");
+	});
+
 	it("renames single-member families through requestModelId with no routing", () => {
 		const out = collapseEffortVariants(
 			[memberSpec("gpt-oss-120b-medium", { input: ["text"] })],

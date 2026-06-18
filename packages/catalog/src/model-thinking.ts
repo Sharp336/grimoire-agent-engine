@@ -490,6 +490,10 @@ function inferFallbackEfforts<TApi extends Api>(spec: ModelSpec<TApi>, compat: C
 	return DEFAULT_REASONING_EFFORTS;
 }
 
+function usesAntigravityBudgetTransport<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
+	return spec.api === "google-gemini-cli" && spec.provider === "google-antigravity";
+}
+
 function inferThinkingControlMode<TApi extends Api>(
 	spec: ModelSpec<TApi>,
 	parsedModel: ParsedModel,
@@ -498,6 +502,7 @@ function inferThinkingControlMode<TApi extends Api>(
 		case "google-generative-ai":
 		case "google-gemini-cli":
 		case "google-vertex":
+			if (usesAntigravityBudgetTransport(spec)) return "budget";
 			return parsedModel.family === "gemini" &&
 				semverGte(parsedModel.version, "3.0") &&
 				parsedModel.version.major === 3

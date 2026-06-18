@@ -433,11 +433,10 @@ function refreshCollapsedThinking<TSpec extends VariantSpecLike>(
 	retired: ReadonlySet<string> | undefined,
 ): TSpec {
 	// Scope snapshot self-heal to families carrying a curated per-effort budget
-	// contract (Antigravity gemini-3.x). Their routing targets are all verified
-	// live, so rebuilding routing here is safe; families without `effortBudgets`
-	// (derived `X`/`X-thinking` pairs, claude pairs) keep their presence-filtered
-	// snapshot routing untouched.
-	if (!spec.reasoning || family.thinking.effortBudgets === undefined) return spec;
+	// contract (Antigravity gemini-3.x) or a curated hidden-twin route contract
+	// (Antigravity Claude bare/thinking pairs). Derived pairs still keep their
+	// presence-filtered snapshot routing untouched.
+	if (!spec.reasoning || (family.thinking.effortBudgets === undefined && !family.preserveAbsentRoutes)) return spec;
 	const routing: Partial<Record<Effort | "off", string>> = {};
 	let hasRouting = false;
 	for (const effortKey in family.routing) {
