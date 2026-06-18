@@ -434,6 +434,53 @@ describe("DAP multi-session debugging", () => {
 		await manager.terminate();
 	});
 
+	it("skips closed child sessions during global breakpoint sync", async () => {
+		const manager = new DapSessionManager();
+
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
+		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
+
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		await parentClient.triggerReverseRequest("startDebugging", {
+			request: "attach",
+			configuration: {
+				type: "pwa-node",
+				name: "child-worker",
+			},
+		});
+
+		const childRequestCount = childClient.sentRequests.length;
+		const parentRequestCount = parentClient.sentRequests.length;
+
+		await childClient.dispose();
+
+		await manager.setBreakpoint(path.resolve(process.cwd(), "src/worker.ts"), 12);
+		await manager.setFunctionBreakpoint("workerMain");
+		await manager.setInstructionBreakpoint("instruction-1", 4);
+		await manager.setDataBreakpoint("data-1");
+
+		expect(childClient.sentRequests.length).toBe(childRequestCount);
+		expect(manager.listSessions().map(session => session.id)).toEqual(["debug-1"]);
+		expect(parentClient.sentRequests.slice(parentRequestCount).map(request => request.command)).toEqual([
+			"setBreakpoints",
+			"setFunctionBreakpoints",
+			"setInstructionBreakpoints",
+			"setDataBreakpoints",
+		]);
+
+		await manager.terminate();
+	});
+
 	it("blocks new top-level launches when the active child has terminated but its root is alive", async () => {
 		const manager = new DapSessionManager();
 

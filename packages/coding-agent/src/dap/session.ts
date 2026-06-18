@@ -540,7 +540,7 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<void> {
-		const sessions = Array.from(this.#sessions.values());
+		const sessions = this.#getLiveSessionsForBreakpointSync();
 		await Promise.all(
 			sessions.map(session =>
 				this.#serializeBreakpointMutation(
@@ -584,7 +584,7 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<void> {
-		const sessions = Array.from(this.#sessions.values());
+		const sessions = this.#getLiveSessionsForBreakpointSync();
 		await Promise.all(
 			sessions.map(session =>
 				this.#serializeBreakpointMutation(
@@ -624,7 +624,7 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<DapInstructionBreakpointRecord[]> {
-		const sessions = Array.from(this.#sessions.values());
+		const sessions = this.#getLiveSessionsForBreakpointSync();
 		let activeSessionRecord: DapInstructionBreakpointRecord[] = [];
 		await Promise.all(
 			sessions.map(async session => {
@@ -687,7 +687,7 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<DapDataBreakpointRecord[]> {
-		const sessions = Array.from(this.#sessions.values());
+		const sessions = this.#getLiveSessionsForBreakpointSync();
 		let activeSessionRecord: DapDataBreakpointRecord[] = [];
 		await Promise.all(
 			sessions.map(async session => {
@@ -1981,6 +1981,17 @@ export class DapSessionManager {
 			}
 			current = this.#sessions.get(current.parentSessionId);
 		}
+	}
+
+	#getLiveSessionsForBreakpointSync(): DapSession[] {
+		for (const session of [...this.#sessions.values()]) {
+			if (session.status === "terminated" || !session.client.isAlive()) {
+				this.#disposeSession(session);
+			}
+		}
+		return [...this.#sessions.values()].filter(session => {
+			return session.status !== "terminated" && session.client.isAlive();
+		});
 	}
 
 	#getActiveSessionOrNull(): DapSession | null {
