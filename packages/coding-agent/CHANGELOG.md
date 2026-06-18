@@ -26,6 +26,7 @@
 - Added `shake.interval` setting (default `0`, disabled) for periodic tool-output pruning (shake) every N tool calls, independent of the compaction strategy. Uses conservative auto-shake config and runs before the hasToolCalls guard so long-running tool-heavy sessions still get periodic maintenance without competing with compaction-owned turns ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
 
 ### Fixed
+- Fixed active `/goal` mode being paused by internal compaction and session-switch lifecycle aborts, and made those switches persist wall-clock goal usage without charging time spent in another session to a preserved goal.
 
 - Fixed settings overlay crash when scrolling past the last row in list views
 - Improved tool result formatting by correctly wrapping `<out>` blocks in dim-ink toggles
