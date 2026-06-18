@@ -363,6 +363,77 @@ describe("DAP multi-session debugging", () => {
 		expect(childClient.isAlive()).toBe(false);
 	});
 
+	it("removes all live instruction breakpoints for a reference when offset is omitted", async () => {
+		const manager = new DapSessionManager();
+
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClient as unknown as DapClient);
+
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		await manager.setInstructionBreakpoint("instruction-1", 4);
+		await manager.setInstructionBreakpoint("instruction-1", 8);
+
+		const removeResult = await manager.removeInstructionBreakpoint("instruction-1");
+
+		expect(removeResult.breakpoints).toEqual([]);
+		expect(
+			parentClient.sentRequests.filter(request => request.command === "setInstructionBreakpoints").at(-1),
+		).toEqual({
+			command: "setInstructionBreakpoints",
+			args: { breakpoints: [] },
+		});
+
+		await manager.terminate();
+	});
+
+	it("refreshes the root session timestamp when the active child is used", async () => {
+		const manager = new DapSessionManager();
+
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
+		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
+
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		await parentClient.triggerReverseRequest("startDebugging", {
+			request: "attach",
+			configuration: {
+				type: "pwa-node",
+				name: "child-worker",
+			},
+		});
+
+		const rootBefore = manager.listSessions().find(session => session.id === "debug-1")?.lastUsedAt;
+		if (rootBefore === undefined) {
+			throw new Error("Expected root debug session to exist");
+		}
+
+		await Bun.sleep(20);
+		manager.getOutput();
+
+		const rootAfter = manager.listSessions().find(session => session.id === "debug-1")?.lastUsedAt;
+		if (rootAfter === undefined) {
+			throw new Error("Expected root debug session to exist");
+		}
+		expect(Date.parse(rootAfter)).toBeGreaterThan(Date.parse(rootBefore));
+
+		await manager.terminate();
+	});
+
 	it("blocks new top-level launches when the active child has terminated but its root is alive", async () => {
 		const manager = new DapSessionManager();
 

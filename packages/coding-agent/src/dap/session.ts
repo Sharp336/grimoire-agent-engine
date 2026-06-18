@@ -632,9 +632,15 @@ export class DapSessionManager {
 				await this.#serializeBreakpointMutation(
 					session,
 					async () => {
-						const current = session.instructionBreakpoints.filter(
-							entry => entry.instructionReference !== instructionReference || entry.offset !== offset,
-						);
+						const current = session.instructionBreakpoints.filter(entry => {
+							if (entry.instructionReference !== instructionReference) {
+								return true;
+							}
+							if (op === "remove" && offset === undefined) {
+								return false;
+							}
+							return entry.offset !== offset;
+						});
 						if (op === "add") {
 							current.push({ instructionReference, offset, condition, hitCondition });
 							current.sort((left, right) => {
@@ -1233,7 +1239,7 @@ export class DapSessionManager {
 	async terminate(signal?: AbortSignal, timeoutMs: number = 30_000): Promise<DapSessionSummary | null> {
 		const session = this.#getActiveSessionOrNull();
 		if (!session) return null;
-		session.lastUsedAt = Date.now();
+		this.#touchSessionAndAncestors(session);
 		let rootSession = session;
 		while (rootSession.parentSessionId) {
 			const parent = this.#sessions.get(rootSession.parentSessionId);
@@ -1693,6 +1699,7 @@ export class DapSessionManager {
 
 	#handleStoppedEvent(session: DapSession, stopped: DapStoppedEventBody): void {
 		session.status = "stopped";
+		this.#touchSessionAndAncestors(session);
 		session.stop = {
 			threadId: stopped.threadId,
 			reason: stopped.reason,
@@ -1879,7 +1886,7 @@ export class DapSessionManager {
 	): Promise<TBody> {
 		await this.#ensureConfigurationDone(session, signal, timeoutMs);
 		const body = await session.client.sendRequest<TBody>(command, args, signal, timeoutMs);
-		session.lastUsedAt = Date.now();
+		this.#touchSessionAndAncestors(session);
 		return body;
 	}
 
@@ -1957,11 +1964,23 @@ export class DapSessionManager {
 
 	#touchActiveSession(): DapSession {
 		const session = this.#getActiveSessionOrThrow();
-		session.lastUsedAt = Date.now();
+		this.#touchSessionAndAncestors(session);
 		if (session.status !== "terminated" && !session.client.isAlive()) {
 			session.status = "terminated";
 		}
 		return session;
+	}
+
+	#touchSessionAndAncestors(session: DapSession): void {
+		const now = Date.now();
+		let current: DapSession | undefined = session;
+		while (current) {
+			current.lastUsedAt = now;
+			if (!current.parentSessionId) {
+				return;
+			}
+			current = this.#sessions.get(current.parentSessionId);
+		}
 	}
 
 	#getActiveSessionOrNull(): DapSession | null {
