@@ -19,8 +19,10 @@ import {
 	buildRuleFromMarkdown,
 	calculateDepth,
 	createSourceMeta,
+	getUserAgentMd,
 	loadFilesFromDir,
 	scanSkillsFromDir,
+	shouldSuppressProjectAgentMds,
 } from "./helpers";
 
 const PROVIDER_ID = "agents";
@@ -188,13 +190,26 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 		const depth = level === "project" ? calculateDepth(ctx.cwd, ancestorDir, path.sep) : undefined;
 		return { path: filePath, content, level, depth, _source: createSourceMeta(PROVIDER_ID, filePath, level) };
 	};
+	const agentMd = await getUserAgentMd(ctx);
+	const authorityFile: ContextFile | null =
+		agentMd === null
+			? null
+			: {
+					path: agentMd.path,
+					content: agentMd.content,
+					level: "user",
+					_source: createSourceMeta(PROVIDER_ID, agentMd.path, "user"),
+				};
 
+	const projectCandidates = (await shouldSuppressProjectAgentMds(ctx))
+		? []
+		: getProjectPathCandidates(ctx, "AGENTS.md");
 	const results = await Promise.all([
-		...getProjectPathCandidates(ctx, "AGENTS.md").map(p => load(p, "project")),
+		...projectCandidates.map(p => load(p, "project")),
 		...getUserPathCandidates(ctx, "AGENTS.md").map(p => load(p, "user")),
 	]);
 
-	return { items: results.filter((r): r is ContextFile => r !== null), warnings: [] };
+	return { items: [authorityFile, ...results].filter((r): r is ContextFile => r !== null), warnings: [] };
 }
 
 registerProvider<ContextFile>(contextFileCapability.id, {

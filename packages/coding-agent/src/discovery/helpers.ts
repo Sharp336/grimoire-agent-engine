@@ -118,6 +118,25 @@ export function resolveCopilotHome(home: string): string {
 	return override ? override : path.join(home, ".copilot");
 }
 
+type UserAgentMd = { path: string; content: string };
+
+export async function getUserAgentMd(ctx: LoadContext): Promise<UserAgentMd | null> {
+	const variations = ["AGENT.md", "agent.md", "AGENT.MD", "Agent.md"];
+	for (const filename of variations) {
+		const agentMdPath = path.join(ctx.home, ".agent", filename);
+		const content = await readFile(agentMdPath);
+		if (content !== null) {
+			return { path: agentMdPath, content };
+		}
+	}
+
+	return null;
+}
+
+export async function shouldSuppressProjectAgentMds(ctx: LoadContext): Promise<boolean> {
+	return (await getUserAgentMd(ctx)) !== null;
+}
+
 /**
  * Create source metadata for an item.
  */

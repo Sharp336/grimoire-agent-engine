@@ -14,6 +14,7 @@ import { findConfigFile } from "./config";
 import type { Personality, SkillsSettings } from "./config/settings";
 import { type ContextFile, loadCapability, type SystemPrompt as SystemPromptFile } from "./discovery";
 import { expandAtImports } from "./discovery/at-imports";
+import { shouldSuppressProjectAgentMds } from "./discovery/helpers";
 import { loadSkills, type Skill } from "./extensibility/skills";
 import { hasObsidian } from "./internal-urls/vault-protocol";
 import customSystemPromptTemplate from "./prompts/system/custom-system-prompt.md" with { type: "text" };
@@ -505,6 +506,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	const contextFilesPromise = providedContextFiles
 		? Promise.resolve(providedContextFiles)
 		: logger.time("loadProjectContextFiles", loadProjectContextFiles, { cwd: resolvedCwd });
+	const suppressProjectAgentMdsPromise = shouldSuppressProjectAgentMds({
+		cwd: resolvedCwd,
+		home: os.homedir(),
+		repoRoot: null,
+	});
 	const workspaceTreePromise =
 		providedWorkspaceTree !== undefined
 			? Promise.resolve(providedWorkspaceTree)
@@ -518,30 +524,36 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 				? loadSkills({ ...skillsSettings, cwd: resolvedCwd }).then(result => result.skills)
 				: Promise.resolve([]);
 
-	const [resolvedCustomPrompt, resolvedAppendPrompt, systemPromptCustomization, contextFiles, skills, workspaceTree] =
-		await Promise.all([
-			withDeadline(
-				"customPrompt",
-				resolvePromptInput(customPrompt, "system prompt"),
-				prepDefaults.resolvedCustomPrompt,
-			),
-			withDeadline(
-				"appendSystemPrompt",
-				resolvePromptInput(appendSystemPrompt, "append system prompt"),
-				prepDefaults.resolvedAppendPrompt,
-			),
-			withDeadline(
-				"loadSystemPromptFiles",
-				systemPromptCustomizationPromise,
-				prepDefaults.systemPromptCustomization,
-			),
-			withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles).then(
-				dedupeExactContextFiles,
-			),
-			withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
-			withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
-		]);
-	const agentsMdFiles = Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);
+	const [
+		resolvedCustomPrompt,
+		resolvedAppendPrompt,
+		systemPromptCustomization,
+		contextFiles,
+		skills,
+		workspaceTree,
+		suppressProjectAgentMds,
+	] = await Promise.all([
+		withDeadline(
+			"customPrompt",
+			resolvePromptInput(customPrompt, "system prompt"),
+			prepDefaults.resolvedCustomPrompt,
+		),
+		withDeadline(
+			"appendSystemPrompt",
+			resolvePromptInput(appendSystemPrompt, "append system prompt"),
+			prepDefaults.resolvedAppendPrompt,
+		),
+		withDeadline("loadSystemPromptFiles", systemPromptCustomizationPromise, prepDefaults.systemPromptCustomization),
+		withDeadline("loadProjectContextFiles", contextFilesPromise, prepDefaults.contextFiles).then(
+			dedupeExactContextFiles,
+		),
+		withDeadline("loadSkills", skillsPromise, prepDefaults.skills),
+		withDeadline("buildWorkspaceTree", workspaceTreePromise, prepDefaults.workspaceTree),
+		withDeadline("shouldSuppressProjectAgentMds", suppressProjectAgentMdsPromise, false),
+	]);
+	const agentsMdFiles = suppressProjectAgentMds
+		? []
+		: Array.from(new Set(workspaceTree.agentsMdFiles)).sort().slice(0, AGENTS_MD_LIMIT);
 
 	if (timedOut.length > 0) {
 		logger.warn("System prompt preparation steps timed out; using minimal fallback for those steps", {

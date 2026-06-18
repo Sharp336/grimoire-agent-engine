@@ -13,12 +13,17 @@ function makeContextFile(overrides: Partial<ContextFile> & Pick<ContextFile, "pa
 describe("contextFileCapability.key", () => {
 	const key = contextFileCapability.key.bind(contextFileCapability);
 
-	test("user-level files share the same key regardless of depth", () => {
-		const a = makeContextFile({ path: "/home/user/.omp/agent/AGENTS.md", level: "user" });
-		const b = makeContextFile({ path: "/home/user/.claude/CLAUDE.md", level: "user" });
-		expect(key(a)).toBe("user");
-		expect(key(b)).toBe("user");
-		expect(key(a)).toBe(key(b));
+	test("user-level files are keyed by basename", () => {
+		const authority = makeContextFile({ path: "/home/user/.agent/AGENT.md", level: "user" });
+		const agents = makeContextFile({ path: "/home/user/.omp/agent/AGENTS.md", level: "user" });
+		const claude = makeContextFile({ path: "/home/user/.claude/CLAUDE.md", level: "user" });
+		const duplicateAgents = makeContextFile({ path: "/home/user/.agent/AGENTS.md", level: "user" });
+
+		expect(key(authority)).toBe("user:AGENT.md");
+		expect(key(agents)).toBe("user:AGENTS.md");
+		expect(key(claude)).toBe("user:CLAUDE.md");
+		expect(key(agents)).toBe(key(duplicateAgents));
+		expect(key(authority)).not.toBe(key(agents));
 	});
 
 	test("project-level files at the same depth share the same key", () => {
