@@ -1109,7 +1109,7 @@ export class AgentSession {
 	#autoCompactionAbortController: AbortController | undefined = undefined;
 
 	// Periodic shake state (shake.interval setting)
-	#shakeTurnCounter = 0;
+	#shakeToolCallCounter = 0;
 
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
@@ -1603,7 +1603,11 @@ export class AgentSession {
 			this.#maybeAbortStreamingEdit(event);
 		});
 		// Per-tool TTSR reminders are folded into the matched tool's result via this hook.
-		this.agent.afterToolCall = ctx => this.#ttsrAfterToolCall(ctx);
+		// Also increment the periodic shake counter per tool call.
+		this.agent.afterToolCall = ctx => {
+			this.#shakeToolCallCounter++;
+			return this.#ttsrAfterToolCall(ctx);
+		};
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
 		this.#syncTodoPhasesFromBranch();
@@ -2649,19 +2653,21 @@ export class AgentSession {
 			const compactionTask = this.#checkCompaction(msg);
 			this.#trackPostPromptTask(compactionTask);
 			const compactionResult = await compactionTask;
+
+			// When compaction queued recovery, skip periodic shake and any
+			// rewind/todo/session_stop passes: any reminder or hook continuation
+			// we append here would race the handoff, retry, auto-continue prompt,
+			// or queued-message drain that already owns the next turn.
+			if (compactionResult.deferredHandoff || compactionResult.continuationScheduled) {
+				await emitAgentEndNotification();
+				return;
+			}
+
 			// Periodic shake — independent of compaction strategy/auto-compaction
 			await this.#runPeriodicShake();
 			// Check for incomplete todos only after a final assistant stop, not intermediate tool-use turns.
 			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
 			if (hasToolCalls) {
-				await emitAgentEndNotification();
-				return;
-			}
-			// When compaction queued recovery, skip the rewind/todo/session_stop passes:
-			// any reminder or hook continuation we append here would race the handoff,
-			// retry, auto-continue prompt, or queued-message drain that already owns the
-			// next turn.
-			if (compactionResult.deferredHandoff || compactionResult.continuationScheduled) {
 				await emitAgentEndNotification();
 				return;
 			}
@@ -9638,32 +9644,32 @@ export class AgentSession {
 	}
 
 	/**
-	 * Periodic tool-output pruning (shake) every N turns, independent of the
-	 * compaction strategy. Ignores the current compaction setting — it always
-	 * runs shake("elide") when the turn counter reaches the configured interval.
+	 * Periodic tool-output pruning (shake) every N tool calls, independent of the
+	 * compaction strategy. The counter is incremented per tool call via the
+	 * afterToolCall hook; this method fires shake("elide") when the counter
+	 * reaches the configured interval during the agent_end handler.
 	 *
 	 * Setting `shake.interval` to 0 (default) or a non-positive number disables.
 	 */
 	async #runPeriodicShake(): Promise<void> {
 		const interval = this.settings.get("shake.interval") as number;
 		if (!Number.isFinite(interval) || interval <= 0) {
-			this.#shakeTurnCounter = 0;
+			this.#shakeToolCallCounter = 0;
 			return;
 		}
-		this.#shakeTurnCounter++;
-		if (this.#shakeTurnCounter < interval) return;
+		if (this.#shakeToolCallCounter < interval) return;
 
 		if (this.isCompacting || this.agent.state.isStreaming) return;
 
 		// At interval and not blocked — fire and reset
-		this.#shakeTurnCounter = 0;
+		this.#shakeToolCallCounter = 0;
 		logger.debug("Periodic shake firing", {
 			interval,
 			wasCompacting: this.isCompacting,
 			wasStreaming: this.agent.state.isStreaming,
 		});
 		try {
-			const result = await this.shake("elide");
+			const result = await this.shake("elide", { config: DEFAULT_SHAKE_CONFIG });
 			this.emitNotice("info", formatShakeSummary(result), "shake");
 		} catch (error) {
 			logger.warn("Periodic shake failed", { error: error instanceof Error ? error.message : String(error) });

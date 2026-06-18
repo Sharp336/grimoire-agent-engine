@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { type AfterToolCallContext, Agent } from "@oh-my-pi/pi-agent-core";
+import { DEFAULT_SHAKE_CONFIG } from "@oh-my-pi/pi-agent-core/compaction";
 import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -298,6 +299,176 @@ describe("AgentSession shake", () => {
 				e => e.type === "auto_compaction_start" && (e as { action?: string }).action === "context-full",
 			);
 			expect(fullStart).toBeDefined();
+		});
+	});
+
+	describe("periodic shake interval", () => {
+		let toolCallCounter = 0;
+
+		/** Bump the periodic shake counter by invoking afterToolCall with a minimal fixture. */
+		function bumpToolCallCounter(): void {
+			const ctx: AfterToolCallContext = {
+				assistantMessage: {
+					role: "assistant" as const,
+					content: [{ type: "text", text: "" }],
+					...apiInfo,
+					stopReason: "stop",
+					usage,
+					timestamp: Date.now(),
+				},
+				toolCall: { type: "toolCall" as const, id: `tc_${toolCallCounter++}`, name: "bash", arguments: {} },
+				args: {},
+				result: { content: [{ type: "text", text: "" }] },
+				isError: false,
+				context: { systemPrompt: [], messages: [] },
+			};
+			session.agent.afterToolCall!(ctx);
+		}
+
+		/** Minimal assistant message fixture for emitEnd helper. */
+		function makeAssistantMessage(text = "response"): AssistantMessage {
+			return {
+				role: "assistant",
+				content: [{ type: "text", text }],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: Date.now(),
+			};
+		}
+
+		/** Emit message_end + agent_end for a given message. */
+		function emitEnd(msg: AssistantMessage): void {
+			session.agent.emitExternalEvent({ type: "message_end", message: msg });
+			session.agent.emitExternalEvent({ type: "agent_end", messages: [msg] });
+		}
+
+		it("disabled interval resets pending counter so re-enabling starts fresh", async () => {
+			session.settings.set("compaction.strategy", "off");
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+
+			// Bump counter then disable
+			bumpToolCallCounter();
+			session.settings.set("shake.interval", 0);
+			emitEnd(makeAssistantMessage());
+			await Bun.sleep(30);
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+
+			// Re-enable and emit another end without a new tool call
+			session.settings.set("shake.interval", 1);
+			emitEnd(makeAssistantMessage("again"));
+			await Bun.sleep(30);
+
+			// Still no call — counter was reset when interval was 0
+			expect(shakeSpy).not.toHaveBeenCalled();
+		});
+
+		it("fires at interval boundary with conservative config and resets", async () => {
+			session.settings.set("compaction.strategy", "off");
+			session.settings.set("shake.interval", 2);
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+
+			// First tool call + end — below interval
+			bumpToolCallCounter();
+			emitEnd(makeAssistantMessage());
+			await Bun.sleep(30);
+			expect(shakeSpy).not.toHaveBeenCalled();
+
+			// Second tool call + end — reaches interval
+			bumpToolCallCounter();
+			emitEnd(makeAssistantMessage("second"));
+			await Bun.sleep(30);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: DEFAULT_SHAKE_CONFIG }));
+
+			// Extra end without tool call — counter was reset, no second fire
+			emitEnd(makeAssistantMessage("third"));
+			await Bun.sleep(30);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("fires once after multiple tool calls in one autonomous turn", async () => {
+			session.settings.set("compaction.strategy", "off");
+			session.settings.set("shake.interval", 3);
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+
+			// Three tool calls, then a single agent_end
+			bumpToolCallCounter();
+			bumpToolCallCounter();
+			bumpToolCallCounter();
+			emitEnd(makeAssistantMessage());
+			await Bun.sleep(30);
+
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("defers shake while streaming and fires when unblocked", async () => {
+			session.settings.set("compaction.strategy", "off");
+			session.settings.set("shake.interval", 1);
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+
+			bumpToolCallCounter();
+
+			// Blocked: streaming
+			session.agent.state.isStreaming = true;
+			emitEnd(makeAssistantMessage());
+			await Bun.sleep(30);
+			expect(shakeSpy).not.toHaveBeenCalled();
+
+			// Unblocked: next end fires
+			session.agent.state.isStreaming = false;
+			emitEnd(makeAssistantMessage("unblocked"));
+			await Bun.sleep(30);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("skips periodic shake when compaction continuation owns the next turn", async () => {
+			// Use handoff strategy (doesn't call shake) with threshold trigger to
+			// produce COMPACTION_CHECK_DEFERRED_HANDOFF (continuationScheduled: true).
+			session.settings.override("compaction.autoContinue", true);
+			session.settings.set("compaction.strategy", "handoff");
+			session.settings.set("compaction.thresholdPercent", 1);
+			session.settings.set("contextPromotion.enabled", false);
+			session.settings.set("shake.interval", 1);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 10_000 });
+
+			bumpToolCallCounter(); // periodic counter = 1
+
+			// High-usage assistant message to trigger threshold compaction
+			const assistantMessage: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "trigger" }],
+				...apiInfo,
+				stopReason: "stop",
+				usage: {
+					input: 10_000,
+					output: 1_000,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 11_000,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			};
+			emitEnd(assistantMessage);
+			await Bun.sleep(50);
+
+			// Periodic shake should be suppressed — compaction owns the next turn.
+			// The handoff path doesn't call session.shake, so zero calls means
+			// periodic shake was correctly skipped.
+			expect(shakeSpy).toHaveBeenCalledTimes(0);
 		});
 	});
 });

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `shake.interval` setting (default `0`, disabled) for periodic tool-output pruning (shake) every N tool calls, independent of the compaction strategy. Uses conservative auto-shake config and runs before the hasToolCalls guard so long-running tool-heavy sessions still get periodic maintenance without competing with compaction-owned turns ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
+
 ### Fixed
 
 - Fixed `omp update` reporting `EPERM: operation not permitted, unlink '<binary>.bak'` on Windows when self-replacing a standalone binary, even though the new binary had already been installed. The backed-up old executable is still the running process image and cannot be unlinked until the process exits, so the post-verify backup cleanup is now best-effort, backups use a unique per-attempt name, and stale backups are swept on the next update ([#845](https://github.com/can1357/oh-my-pi/issues/845)).
