@@ -45,6 +45,10 @@
 
 - Fixed provider setup sign-in URLs to attempt clipboard/OSC 52 copy and expose an Alt+C retry shortcut, so authentication is not blocked when TUI selection is unavailable ([#2908](https://github.com/can1357/oh-my-pi/issues/2908)).
 
+### Added
+
+- Added the `symbol` tool — tree-sitter symbol `overview`/`find`/`manipulate` addressed by name, a lighter alternative to `ast_grep`/`ast_edit` (no AST patterns) and `lsp` (no running language server) for TypeScript/TSX/JavaScript/Python/Rust/Go/Java. `manipulate` previews the edit as a diff and applies it through the existing hashline pipeline (plan-mode read-only, stale-tag validation, LSP write-through).
+
 ## [16.0.5] - 2026-06-17
 
 ### Added

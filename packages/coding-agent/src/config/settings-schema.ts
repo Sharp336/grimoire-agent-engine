@@ -3122,6 +3122,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"symbol.enabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tools",
+			group: "Available Tools",
+			label: "Symbol",
+			description: "Enable the symbol tool for tree-sitter symbol overview, find, and edit",
+		},
+	},
+
 	// Optional tools
 
 	"debug.enabled": {

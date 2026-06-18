@@ -82,6 +82,7 @@ describe("createTools", () => {
 		expect(names).toContain("todo");
 		expect(names).toContain("web_search");
 		expect(names).toContain("resolve");
+		expect(names).toContain("symbol");
 		expect(names).not.toContain("fetch");
 		expect(names).not.toContain("vim");
 	});
@@ -205,6 +206,7 @@ describe("createTools", () => {
 				"web_search.enabled": false,
 				"browser.enabled": false,
 				"inspect_image.enabled": false,
+				"symbol.enabled": false,
 			}),
 		});
 		const tools = await createTools(session);
@@ -218,6 +220,7 @@ describe("createTools", () => {
 		expect(names).not.toContain("web_search");
 		expect(names).not.toContain("browser");
 		expect(names).not.toContain("inspect_image");
+		expect(names).not.toContain("symbol");
 
 		const requestedTools = await createTools(session, ["bash", "read"]);
 		expect(requestedTools.map(t => t.name)).toEqual(["read", "resolve"]);
