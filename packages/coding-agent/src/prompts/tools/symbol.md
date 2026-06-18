@@ -10,7 +10,7 @@ Outlines, finds, and edits code symbols by name via native tree-sitter (no langu
 </instruction>
 
 <output>
-- `overview`: per file, a header `<relpath> — <count> symbol(s)` then pre-order lines `<indent><kind> <name>[ <detail>] @ line <selectionLine>` (indent = nesting depth). Unsupported language or parse error → `<relpath> — no symbols (unsupported language or parse error)`
+- `overview`: per file, a header `<relpath> — <count> symbol(s)` then pre-order lines `<indent><kind> <name>[ <detail>] @ line <selectionLine>` (indent = nesting depth). Empty file or parse error → `<relpath> — no symbols (empty file or parse error)`
 - `find`: flat lines `<kind> <name>[ (<container>)] @ <relpath>:<selectionLine>`, prefixed by `Found <n> symbol(s) matching "<name>":`. Paginate with `skip`/`limit`; a `… <m> more; pass skip=<skip+limit>` line marks truncation
 - `manipulate`: a diff preview of the staged edit. `resolve` applies it (returning a fresh `[<relpath>#<tag>]`) or discards it; the edit routes through the same pipeline as `edit` (plan-mode read-only, stale-tag validation, LSP write-through)
 </output>
