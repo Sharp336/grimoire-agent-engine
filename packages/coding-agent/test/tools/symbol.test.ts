@@ -71,6 +71,39 @@ describe("symbol overview", () => {
 		expect(text).toContain("function helper");
 	});
 
+	it("outlines a newly-supported language (Kotlin) through the native gate", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-kt-"));
+		try {
+			const kt = path.join(tmp, "demo.kt");
+			await fs.writeFile(
+				kt,
+				["class Greeter {", '\tfun greet(): String = "hi"', "}", "fun topLevel() {}", ""].join("\n"),
+			);
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const text = textOf(await tool.execute("t", { action: "overview", path: kt }));
+			expect(text).toContain("class Greeter");
+			expect(text).toMatch(/\n\s+method greet/);
+			expect(text).toContain("function topLevel");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("accepts an extensionless shell rc file via the native path gate", async () => {
+		// `.bashrc` has no extension, so an extension-only gate would reject it;
+		// the native resolver maps the special-name file to Bash.
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-rc-"));
+		try {
+			const rc = path.join(tmp, ".bashrc");
+			await fs.writeFile(rc, ["greet() {", "\techo hi", "}", ""].join("\n"));
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const text = textOf(await tool.execute("t", { action: "overview", path: rc }));
+			expect(text).toContain("function greet");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("groups a directory scope and excludes unsupported files", async () => {
 		const result = await symbolTool().execute("t", { action: "overview", path: dir });
 		const text = textOf(result);

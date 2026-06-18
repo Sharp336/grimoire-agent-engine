@@ -16,6 +16,8 @@ import {
 	grep,
 	hasMatch,
 	outlineCode,
+	outlineLanguages,
+	isOutlineSupportedPath,
 	type OutlineResult,
 	type SymbolEntry,
 } from "@oh-my-pi/pi-natives";
@@ -107,29 +109,28 @@ function kindIcon(kind: string): string {
 }
 
 // =============================================================================
-// Supported extensions (v1 language set)
+// Supported languages (derived from the native outline extractor)
 // =============================================================================
 
-const SUPPORTED_EXTENSIONS: Record<string, true> = {
-	".ts": true,
-	".tsx": true,
-	".js": true,
-	".jsx": true,
-	".mjs": true,
-	".cjs": true,
-	".py": true,
-	".rs": true,
-	".go": true,
-	".java": true,
-};
+/** Default scan glob: a brace-union of every outline-supported extension,
+ *  derived ONCE from the native `outlineLanguages()` so the Rust extractor and
+ *  this scan filter never drift. Computed lazily (never at module load) so
+ *  importing the tool does not force the native addon to load. A capped walk
+ *  then counts SUPPORTED files rather than unsupported ones that could hide
+ *  later source files before the cap. */
+let supportedGlobCache: string | undefined;
 
-/** Brace-union glob matching only the v1-supported extensions. Used as the
- *  default scan pattern so a capped walk counts SUPPORTED files rather than
- *  unsupported ones that could hide later source files before the cap. */
-const SUPPORTED_GLOB = "**/*.{ts,tsx,js,jsx,mjs,cjs,py,rs,go,java}";
-
-function hasSupportedExtension(absPath: string): boolean {
-	return SUPPORTED_EXTENSIONS[path.extname(absPath).toLowerCase()] === true;
+function supportedGlob(): string {
+	if (supportedGlobCache === undefined) {
+		const exts = new Set<string>();
+		for (const lang of outlineLanguages()) {
+			for (const ext of lang.extensions) {
+				exts.add(ext.toLowerCase());
+			}
+		}
+		supportedGlobCache = `**/*.{${[...exts].sort().join(",")}}`;
+	}
+	return supportedGlobCache;
 }
 
 // =============================================================================
@@ -161,7 +162,7 @@ async function listScopeFiles(
 	maxResults: number,
 ): Promise<{ files: string[]; truncated: boolean }> {
 	if (!scope.isDirectory && !scope.multiTargets && !scope.exactFilePaths) {
-		return { files: hasSupportedExtension(scope.searchPath) ? [scope.searchPath] : [], truncated: false };
+		return { files: isOutlineSupportedPath(scope.searchPath) ? [scope.searchPath] : [], truncated: false };
 	}
 	const collected: string[] = [];
 	let truncated = false;
@@ -186,7 +187,7 @@ async function listScopeFiles(
 				continue;
 			}
 			const result: GlobResult = await glob({
-				pattern: target.glob ?? SUPPORTED_GLOB,
+				pattern: target.glob ?? supportedGlob(),
 				path: target.basePath,
 				fileType: FileType.File,
 				gitignore: true,
@@ -204,7 +205,7 @@ async function listScopeFiles(
 	// Single directory scope (no exact files, no multi-targets).
 	if (scope.isDirectory && !scope.exactFilePaths && !scope.multiTargets) {
 		const result = await glob({
-			pattern: scope.globFilter ?? SUPPORTED_GLOB,
+			pattern: scope.globFilter ?? supportedGlob(),
 			path: scope.searchPath,
 			fileType: FileType.File,
 			gitignore: true,
@@ -222,7 +223,7 @@ async function listScopeFiles(
 	// (single file, file targets, directory walk) behaves consistently. Always
 	// passing `maxResults` bounds the walk; `truncated` flags a capped glob so a
 	// caller treats the scope as too large rather than silently dropping files.
-	return { files: [...new Set(collected.filter(hasSupportedExtension))], truncated };
+	return { files: [...new Set(collected.filter(p => isOutlineSupportedPath(p)))], truncated };
 }
 
 // =============================================================================
@@ -665,13 +666,13 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 				});
 				for (const match of result.matches) {
 					const abs = path.resolve(cwd, base, match.path);
-					if (hasSupportedExtension(abs)) candidateSet.add(abs);
+					if (isOutlineSupportedPath(abs)) candidateSet.add(abs);
 				}
 			};
 			if (scope.exactFilePaths) {
 				for (const file of scope.exactFilePaths) {
 					const abs = path.resolve(cwd, file);
-					if (hasSupportedExtension(abs) && (await fileMatchesName(abs))) candidateSet.add(abs);
+					if (isOutlineSupportedPath(abs) && (await fileMatchesName(abs))) candidateSet.add(abs);
 				}
 			}
 			if (scope.multiTargets) {
@@ -684,14 +685,14 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 					}
 					if (stat.isFile()) {
 						const abs = path.resolve(cwd, target.basePath);
-						if (hasSupportedExtension(abs) && (await fileMatchesName(abs))) candidateSet.add(abs);
+						if (isOutlineSupportedPath(abs) && (await fileMatchesName(abs))) candidateSet.add(abs);
 					} else {
-						await grepDir(target.basePath, target.glob ?? SUPPORTED_GLOB);
+						await grepDir(target.basePath, target.glob ?? supportedGlob());
 					}
 				}
 			}
 			if (!scope.exactFilePaths && !scope.multiTargets) {
-				await grepDir(scope.searchPath, scope.globFilter ?? SUPPORTED_GLOB);
+				await grepDir(scope.searchPath, scope.globFilter ?? supportedGlob());
 			}
 			candidates = [...candidateSet];
 			if (candidates.length > FIND_PARSE_CAP) {
@@ -780,7 +781,7 @@ export class SymbolTool implements AgentTool<typeof symbolSchema, SymbolToolDeta
 		}
 		const abs = scope.searchPath;
 		const relPath = formatPathRelativeToCwd(abs, cwd);
-		if (!hasSupportedExtension(abs)) {
+		if (!isOutlineSupportedPath(abs)) {
 			throw new ToolError(`symbol manipulate does not support ${relPath} (unsupported language)`);
 		}
 		if (/[\r\n]/.test(relPath)) {

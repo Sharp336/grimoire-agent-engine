@@ -47,7 +47,7 @@
 
 ### Added
 
-- Added the `symbol` tool — tree-sitter symbol `overview`/`find`/`manipulate` addressed by name, a lighter alternative to `ast_grep`/`ast_edit` (no AST patterns) and `lsp` (no running language server) for TypeScript/TSX/JavaScript/Python/Rust/Go/Java. `manipulate` previews the edit as a diff and applies it through the existing hashline pipeline (plan-mode read-only, stale-tag validation, LSP write-through).
+- Added the `symbol` tool — tree-sitter symbol `overview`/`find`/`manipulate` addressed by name, a lighter alternative to `ast_grep`/`ast_edit` (no AST patterns) and `lsp` (no running language server). Covers 33 programming languages (TS/TSX/JS, Python, Rust, Go, Java, C, C++, Objective-C, C#, Kotlin, Scala, Swift, Dart, PHP, Ruby, Lua, Perl, Odin, Bash, Solidity, Starlark, R, Julia, Zig, Haskell, OCaml, Elixir, Erlang, Clojure, Emacs Lisp, PowerShell); the supported file set is derived from the native extractor so it never drifts. `manipulate` previews the edit as a diff and applies it through the existing hashline pipeline (plan-mode read-only, stale-tag validation, LSP write-through).
 
 ## [16.0.5] - 2026-06-17
 
