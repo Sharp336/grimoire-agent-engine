@@ -269,6 +269,7 @@ export class DapSessionManager {
 	#pendingInstructionBreakpoints: DapInstructionBreakpoint[] = [];
 	#pendingDataBreakpoints: DapDataBreakpoint[] = [];
 	#globalStopResolvers = new Set<DapGlobalStopResolver>();
+	#terminalDisposalSessionIds = new Set<string>();
 	constructor() {
 		this.#startCleanupTimer();
 	}
@@ -1626,11 +1627,14 @@ export class DapSessionManager {
 		});
 		client.onEvent("exited", body => {
 			session.exitCode = (body as DapExitedEventBody | undefined)?.exitCode;
+			session.status = "terminated";
 			this.#resolveGlobalStop(session);
+			this.#scheduleTerminalSessionDisposal(session);
 		});
 		client.onEvent("terminated", () => {
 			session.status = "terminated";
 			this.#resolveGlobalStop(session);
+			this.#scheduleTerminalSessionDisposal(session);
 		});
 		this.#sessions.set(session.id, session);
 		if (parentSessionId) {
@@ -1983,6 +1987,22 @@ export class DapSessionManager {
 		}
 	}
 
+	#scheduleTerminalSessionDisposal(session: DapSession): void {
+		if (this.#terminalDisposalSessionIds.has(session.id)) {
+			return;
+		}
+		this.#terminalDisposalSessionIds.add(session.id);
+		const timer = setTimeout(() => {
+			this.#terminalDisposalSessionIds.delete(session.id);
+			const current = this.#sessions.get(session.id);
+			if (current?.status !== "terminated") {
+				return;
+			}
+			this.#disposeSession(current);
+		}, 0);
+		timer.unref?.();
+	}
+
 	#getLiveSessionsForBreakpointSync(): DapSession[] {
 		for (const session of [...this.#sessions.values()]) {
 			if (session.status === "terminated" || !session.client.isAlive()) {
@@ -2015,6 +2035,7 @@ export class DapSessionManager {
 
 	#disposeSession(session: DapSession) {
 		if (!this.#sessions.has(session.id)) return;
+		this.#terminalDisposalSessionIds.delete(session.id);
 		for (const childId of [...session.childSessionIds]) {
 			const child = this.#sessions.get(childId);
 			if (child) {

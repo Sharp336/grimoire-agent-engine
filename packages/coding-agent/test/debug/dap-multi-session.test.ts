@@ -363,6 +363,39 @@ describe("DAP multi-session debugging", () => {
 		expect(childClient.isAlive()).toBe(false);
 	});
 
+	it("disposes the session tree when the root debuggee exits naturally", async () => {
+		const manager = new DapSessionManager();
+
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
+		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
+
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		await parentClient.triggerReverseRequest("startDebugging", {
+			request: "attach",
+			configuration: {
+				type: "pwa-node",
+				name: "child-worker",
+			},
+		});
+
+		parentClient.emitEvent("exited", { exitCode: 0 });
+		await Bun.sleep(10);
+
+		expect(manager.listSessions().length).toBe(0);
+		expect(parentClient.isAlive()).toBe(false);
+		expect(childClient.isAlive()).toBe(false);
+	});
+
 	it("removes all live instruction breakpoints for a reference when offset is omitted", async () => {
 		const manager = new DapSessionManager();
 
