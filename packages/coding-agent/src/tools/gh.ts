@@ -3416,8 +3416,7 @@ async function executeIssueCreate(
 		});
 		const url =
 			output
-				.split("
-")
+				.split("\n")
 				.map(line => line.trim())
 				.find(line => line.startsWith("https://github.com/")) ?? output.trim();
 		const parsed = parseIssueUrl(url);
