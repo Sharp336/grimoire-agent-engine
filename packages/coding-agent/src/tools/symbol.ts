@@ -112,23 +112,32 @@ function kindIcon(kind: string): string {
 // Supported languages (derived from the native outline extractor)
 // =============================================================================
 
-/** Default scan glob: a brace-union of every outline-supported extension,
- *  derived ONCE from the native `outlineLanguages()` so the Rust extractor and
- *  this scan filter never drift. Computed lazily (never at module load) so
- *  importing the tool does not force the native addon to load. A capped walk
- *  then counts SUPPORTED files rather than unsupported ones that could hide
- *  later source files before the cap. */
+/** Default scan glob: a path-level brace-union of every outline-supported
+ *  extension AND fixed-name file (Dockerfile, Makefile, CMakeLists.txt,
+ *  justfile, ...), derived ONCE from the native `outlineLanguages()` so the
+ *  Rust extractor and this scan filter never drift. Computed lazily (never at
+ *  module load) so importing the tool does not force the native addon to load.
+ *  A capped walk then counts SUPPORTED files rather than unsupported ones that
+ *  could hide later source files before the cap. Extensionless dotfiles (shell
+ *  rc files, `.emacs`) resolve via `isOutlineSupportedPath` for an explicit
+ *  target but are not surfaced by a `hidden:false` directory walk. */
 let supportedGlobCache: string | undefined;
 
 function supportedGlob(): string {
 	if (supportedGlobCache === undefined) {
-		const exts = new Set<string>();
+		// Path-level union (`**/{*.ts,Dockerfile,...}`): a fixed name must be a
+		// whole brace member, NOT inside the extension group — `**/*.{Dockerfile}`
+		// would match `foo.Dockerfile`, never a bare `Dockerfile`.
+		const patterns = new Set<string>();
 		for (const lang of outlineLanguages()) {
 			for (const ext of lang.extensions) {
-				exts.add(ext.toLowerCase());
+				patterns.add(`*.${ext.toLowerCase()}`);
+			}
+			for (const name of lang.filenames) {
+				patterns.add(name);
 			}
 		}
-		supportedGlobCache = `**/*.{${[...exts].sort().join(",")}}`;
+		supportedGlobCache = `**/{${[...patterns].sort().join(",")}}`;
 	}
 	return supportedGlobCache;
 }

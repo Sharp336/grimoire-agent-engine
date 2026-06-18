@@ -121,6 +121,24 @@ describe("symbol overview", () => {
 		}
 	});
 
+	it("discovers a canonically-named build file (Dockerfile) in a directory scan", async () => {
+		const tmp = await fs.mkdtemp(path.join(os.tmpdir(), "symbol-docker-"));
+		try {
+			// Extensionless `Dockerfile` is surfaced by the name-based scan glob
+			// (not only the per-file gate), and its named stage is outlined.
+			await fs.writeFile(
+				path.join(tmp, "Dockerfile"),
+				["FROM ubuntu:22.04 AS builder", "RUN echo hi", ""].join("\n"),
+			);
+			const tool = new SymbolTool({ cwd: tmp, settings: Settings.isolated() } as unknown as ToolSession);
+			const text = textOf(await tool.execute("t", { action: "overview", path: tmp }));
+			expect(text).toContain("Dockerfile");
+			expect(text).toContain("builder");
+		} finally {
+			await fs.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
 	it("groups a directory scope and excludes unsupported files", async () => {
 		const result = await symbolTool().execute("t", { action: "overview", path: dir });
 		const text = textOf(result);
