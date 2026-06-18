@@ -140,12 +140,12 @@ pub fn outline_code(options: OutlineOptions) -> Result<OutlineResult> {
 
 /// The languages [`outline_code`] emits symbols for: the bespoke-emitter set
 /// plus every language routed through the generic table-driven emitter with a
-/// populated [`symbol_kind`] table. Data / markup / config languages (JSON,
-/// YAML, TOML, CSS, HTML, Markdown, Diff, ...) are intentionally excluded —
-/// they have no addressable code symbols, so widening a file scan to them
-/// would only inflate file counts with empty outlines. The `symbol` TS tool
-/// derives its supported file extensions from this set (through the NAPI
-/// layer) so the two never drift.
+/// populated [`symbol_kind`] table. Only data, markup, and component-wrapper
+/// formats with no addressable code symbols (JSON, YAML, CSS, HTML, Markdown,
+/// Astro, Svelte, Vue, ...) are excluded — scanning them would only inflate
+/// file counts with empty outlines. The `symbol` TS tool derives its supported
+/// file set from this set (through the NAPI layer) so the Rust extractor and
+/// the TS scan filter never drift.
 pub const fn outline_languages() -> &'static [SupportLang] {
 	use SupportLang::*;
 	&[
@@ -4461,9 +4461,10 @@ class Outer {
 	#[test]
 	fn all_languages_are_classified_supported_or_excluded() {
 		use SupportLang::*;
-		// Data / markup / config / schema / DSL / HDL / spec languages: no
-		// addressable *code* symbols for an outline. Every programming language
-		// lives in outline_languages() instead.
+		// Data, markup, and component-wrapper formats with no addressable code
+		// symbols (Astro/Svelte/Vue embed scripts the grammar does not expose as
+		// a code AST). Every language with named definitions — including the
+		// DSL/HDL/schema and build/task-file languages — is in outline_languages().
 		const EXCLUDED: &[SupportLang] = &[
 			Astro, Css, Diff, Html, Ini, Json, Markdown, Regex, Svelte, Toml, Vue, Xml, Yaml,
 		];
