@@ -44,6 +44,26 @@ function hasPasteText(value: unknown): value is PasteTarget {
 	return typeof value === "object" && value !== null && typeof (value as PasteTarget).pasteText === "function";
 }
 
+function pythonCommandPrefixLength(trimmedText: string): 0 | 1 | 2 {
+	if (trimmedText.charCodeAt(0) !== 36 /* $ */) return 0;
+	if (trimmedText.charCodeAt(1) === 123 /* { */) return 0;
+
+	const prefixLength = trimmedText.charCodeAt(1) === 36 /* $ */ ? 2 : 1;
+	const next = trimmedText.charCodeAt(prefixLength);
+	if (Number.isNaN(next)) return prefixLength;
+	return next === 32 || next === 9 || next === 10 || next === 13 ? prefixLength : 0;
+}
+
+function parsePythonCommandInput(text: string): { code: string; isExcluded: boolean } | undefined {
+	const trimmed = text.trimStart();
+	const prefixLength = pythonCommandPrefixLength(trimmed);
+	if (prefixLength === 0) return undefined;
+	return {
+		code: trimmed.slice(prefixLength).trim(),
+		isExcluded: prefixLength === 2,
+	};
+}
+
 /** Wrap pasted text in `<attachment>` tags so the model treats it as one quoted block. */
 function wrapPasteInAttachmentBlock(content: string): string {
 	return `<attachment>\n${content}\n</attachment>`;
@@ -78,6 +98,7 @@ export class InputController {
 
 	#enhancedPaste?: EnhancedPasteController;
 	#focusedLeftTapListenerInstalled = false;
+	#btwBranchListenerInstalled = false;
 	// Tap counter for the double-← gesture; reset whenever a quiet gap
 	// (>= LEFT_DOUBLE_TAP_MAX_GAP_MS) starts a fresh sequence. See
 	// #detectLeftDoubleTap.
@@ -140,6 +161,16 @@ export class InputController {
 				if (!matchesKey(data, "left")) return undefined;
 				if (this.ctx.editor.getText().trim()) return undefined;
 				this.#handleFocusedLeftTap();
+				return { consume: true };
+			});
+		}
+		if (!this.#btwBranchListenerInstalled) {
+			this.#btwBranchListenerInstalled = true;
+			this.ctx.ui.addInputListener(data => {
+				if (!matchesKey(data, "b")) return undefined;
+				if (!this.ctx.canBranchBtw()) return undefined;
+				if (this.ctx.editor.getText().trim()) return undefined;
+				void this.ctx.handleBtwBranchKey();
 				return { consume: true };
 			});
 		}
@@ -304,6 +335,8 @@ export class InputController {
 		this.ctx.editor.onExpandTools = () => this.toggleToolOutputExpansion();
 		this.ctx.editor.setActionKeys("app.message.dequeue", this.ctx.keybindings.getKeys("app.message.dequeue"));
 		this.ctx.editor.onDequeue = () => this.handleDequeue();
+		this.ctx.editor.setActionKeys("app.retry", this.ctx.keybindings.getKeys("app.retry"));
+		this.ctx.editor.onRetry = () => void this.handleRetry();
 		this.ctx.editor.clearCustomKeyHandlers();
 		// Wire up extension shortcuts
 		this.registerExtensionShortcuts();
@@ -368,8 +401,8 @@ export class InputController {
 			const wasBashMode = this.ctx.isBashMode;
 			const wasPythonMode = this.ctx.isPythonMode;
 			const trimmed = text.trimStart();
-			this.ctx.isBashMode = text.trimStart().startsWith("!");
-			this.ctx.isPythonMode = trimmed.startsWith("$") && !trimmed.startsWith("${");
+			this.ctx.isBashMode = trimmed.startsWith("!");
+			this.ctx.isPythonMode = pythonCommandPrefixLength(trimmed) > 0;
 			if (wasBashMode !== this.ctx.isBashMode || wasPythonMode !== this.ctx.isPythonMode) {
 				this.ctx.updateEditorBorderColor();
 			}
@@ -537,7 +570,7 @@ export class InputController {
 					this.ctx.editor.setText("");
 					return;
 				}
-				if (text.startsWith("!") || text.startsWith("$")) {
+				if (text.startsWith("!") || parsePythonCommandInput(text)) {
 					this.ctx.showStatus("Local execution is host-only during a collab session");
 					this.ctx.editor.setText("");
 					return;
@@ -585,10 +618,11 @@ export class InputController {
 				}
 			}
 
-			// Handle python command ($ for normal, $$ for excluded from context)
-			if (text.startsWith("$")) {
-				const isExcluded = text.startsWith("$$");
-				const code = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
+			// Handle python command (`$ <code>` for normal, `$$ <code>` for excluded from context).
+			// Shell-style variables such as `$HOME` are normal prose unless a space follows the sigil.
+			const pythonCommand = parsePythonCommandInput(text);
+			if (pythonCommand) {
+				const { code, isExcluded } = pythonCommand;
 				if (code) {
 					if (this.ctx.session.isEvalRunning) {
 						this.ctx.showWarning("A Python execution is already running. Press Esc to cancel it first.");
@@ -755,7 +789,7 @@ export class InputController {
 			}
 			return;
 		}
-		if (text.startsWith("/") || text.startsWith("!") || text.startsWith("$")) {
+		if (text.startsWith("/") || text.startsWith("!") || parsePythonCommandInput(text)) {
 			this.ctx.showStatus("Commands run in the main session — press ←← to return first");
 			return; // editor text not cleared: Editor does not auto-clear on submit
 		}
@@ -923,6 +957,22 @@ export class InputController {
 			this.ctx.showError(`Failed to load skill: ${err instanceof Error ? err.message : String(err)}`);
 		}
 		return true;
+	}
+
+	async handleRetry(): Promise<void> {
+		if (this.ctx.collabGuest) {
+			this.ctx.showStatus("/retry is host-only during a collab session");
+			return;
+		}
+		const didRetry = await this.ctx.viewSession.retry();
+		if (didRetry) {
+			this.ctx.editor.setText("");
+			this.ctx.pendingImages = [];
+			this.ctx.pendingImageLinks = [];
+			this.ctx.editor.imageLinks = undefined;
+		} else {
+			this.ctx.showStatus("Nothing to retry");
+		}
 	}
 
 	/** Send editor text as a follow-up message (queued behind current stream). */

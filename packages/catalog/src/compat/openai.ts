@@ -13,6 +13,7 @@ import {
 	isClaudeModelId,
 	isDeepseekModelIdOrName,
 	isGlm52ReasoningEffortModelId,
+	isGrokReasoningEffortCapable,
 	isKimiK26ModelId,
 	isKimiModelId,
 	isMimoModelIdOrName,
@@ -48,6 +49,32 @@ const DSML_HEALING_PROVIDERS = new Set([
 	"opencode-go",
 	"openrouter",
 ]);
+
+/**
+ * Ollama's OpenAI-compatible `reasoning.effort` only accepts
+ * `high|medium|low|max|none`; OMP's `minimal`/`xhigh` levels make the server
+ * reject the turn with HTTP 400 `invalid reasoning value`. Map the two
+ * unsupported levels onto the closest accepted ones. Stamped in the compat
+ * builder (not only at discovery) so stale-cached and custom `ollama`-provider
+ * specs are backfilled on every `buildModel`, not just on a fresh
+ * `omp models refresh`. Custom OpenAI-compatible providers pointed at a local
+ * Ollama port under a different provider id are not covered — they must set
+ * `compat.reasoningEffortMap` themselves.
+ */
+const OLLAMA_REASONING_EFFORT_MAP: ResolvedOpenAISharedCompat["reasoningEffortMap"] = { minimal: "low", xhigh: "max" };
+
+/**
+ * Merge the Ollama default effort map under any explicit overrides (overrides
+ * win). No-op off the local `ollama` provider or for non-reasoning models.
+ */
+function mergeOllamaReasoningEffortMap(
+	compat: ResolvedOpenAISharedCompat,
+	provider: string,
+	reasoning: boolean | undefined,
+): void {
+	if (provider !== "ollama" || !reasoning) return;
+	compat.reasoningEffortMap = { ...OLLAMA_REASONING_EFFORT_MAP, ...compat.reasoningEffortMap };
+}
 
 function resolveReasoningDisableMode(
 	thinkingFormat: ResolvedOpenAISharedCompat["thinkingFormat"],
@@ -300,7 +327,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		supportsForcedToolChoice: true,
 		maxTokensField: useMaxTokens ? "max_tokens" : "max_completion_tokens",
 		requiresToolResultName: isMistral,
-		requiresAssistantAfterToolResult: false,
+		requiresAssistantAfterToolResult: isMistral,
 		requiresThinkingAsText: isMistral,
 		requiresMistralToolIds: isMistral,
 		// Only Kimi's native hosts (Moonshot / Kimi-code, matched by `isMoonshotKimi`)
@@ -352,6 +379,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		supportsStrictMode: detectStrictModeSupport(provider, baseUrl),
 		extraBody: isDirectDeepseekReasoning ? { thinking: { type: "enabled" } } : undefined,
 		toolStrictMode: isCerebras ? "all_strict" : "mixed",
+		toolSchemaFlavor: isMoonshotNative ? "moonshot-mfjs" : undefined,
 		streamIdleTimeoutMs,
 		stripDeepseekSpecialTokens:
 			isDeepseekModelIdOrName(spec.id) && (provider === "nvidia" || provider === "deepseek"),
@@ -371,6 +399,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	if (spec.compat?.omitReasoningEffort === undefined && !compat.supportsReasoningEffort) {
 		compat.omitReasoningEffort = true;
 	}
+	mergeOllamaReasoningEffortMap(compat, provider, spec.reasoning);
 
 	const whenThinkingPolicy =
 		spec.compat?.whenThinking ?? (isOpenCodeProvider && spec.reasoning ? OPENCODE_WHEN_THINKING : undefined);
@@ -383,6 +412,7 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		if (whenThinkingPolicy.omitReasoningEffort === undefined && !variant.supportsReasoningEffort) {
 			variant.omitReasoningEffort = true;
 		}
+		mergeOllamaReasoningEffortMap(variant, provider, spec.reasoning);
 		compat.whenThinking = variant;
 	}
 
@@ -424,11 +454,17 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 		supportsDeveloperRole: isAzure || isOpenAIUrl || hostMatchesUrl(baseUrl, "githubCopilot"),
 		supportsStrictMode:
 			spec.provider === "openai" || isAzure || spec.provider === "github-copilot" || isOpenRouter || isOpenAIUrl,
-		supportsReasoningEffort: true,
+		supportsReasoningEffort: spec.provider !== "xai-oauth" || isGrokReasoningEffortCapable(id),
 		supportsLongPromptCacheRetention: isOpenAIUrl,
 		// Azure OpenAI and GitHub Copilot Responses paths require tool results
 		// to strictly match prior tool calls when building Responses inputs.
 		strictResponsesPairing: isAzure || spec.provider === "github-copilot",
+		// GitHub Copilot's Responses endpoint rejects the `detail: "original"`
+		// image hint with a 400; every other host preserves native-resolution
+		// frames (snapcompact relies on `original`). Detect Copilot by provider id
+		// or base-URL host (mirroring the Anthropic compat builder) so a model
+		// pointed at the Copilot host under a different provider id still clamps.
+		supportsImageDetailOriginal: !modelMatchesHost({ provider: spec.provider, baseUrl }, "githubCopilot"),
 		requiresJuiceZeroHack: spec.name.toLowerCase().startsWith("gpt-5"),
 		reasoningEffortMap: {},
 		supportsReasoningParams: true,
@@ -474,6 +510,7 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 	if (spec.compat?.omitReasoningEffort === undefined && !compat.supportsReasoningEffort) {
 		compat.omitReasoningEffort = true;
 	}
+	mergeOllamaReasoningEffortMap(compat, spec.provider, spec.reasoning);
 	return compat;
 }
 
@@ -483,6 +520,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 	return {
 		supportsLongPromptCacheRetention: compat.supportsLongPromptCacheRetention,
 		strictResponsesPairing: compat.strictResponsesPairing,
+		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		requiresJuiceZeroHack: compat.requiresJuiceZeroHack,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
 	} satisfies ResponsesOnlyCompat;

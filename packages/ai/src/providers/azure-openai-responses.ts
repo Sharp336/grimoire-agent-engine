@@ -297,6 +297,7 @@ function buildParams(
 		model,
 		context,
 		strictResponsesPairing: true,
+		supportsImageDetailOriginal: model.compat.supportsImageDetailOriginal,
 		systemRole,
 		includeThinkingSignatures: true,
 		developerStringContent: true,
@@ -322,7 +323,7 @@ function buildParams(
 			parameters: sanitizeSchemaForOpenAIResponses(toolWireSchema(tool)),
 			strict: false,
 		}));
-		if (options?.toolChoice) {
+		if (options?.toolChoice && context.tools.length > 0) {
 			const toolChoice = mapToOpenAIResponsesToolChoice(options.toolChoice);
 			if (
 				toolChoice &&

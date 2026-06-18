@@ -1003,7 +1003,8 @@ function convertContentBlocks(
 	return blocks;
 }
 
-export type AnthropicEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export type AnthropicOutputEffort = "low" | "medium" | "high" | "xhigh" | "max";
+export type AnthropicEffort = AnthropicOutputEffort | "adaptive";
 export type AnthropicThinkingDisplay = "summarized" | "omitted";
 
 export interface AnthropicOptions extends StreamOptions {
@@ -1026,11 +1027,13 @@ export interface AnthropicOptions extends StreamOptions {
 	requestModelId?: string;
 	/**
 	 * Effort level for adaptive thinking.
-	 * Controls how much thinking Claude allocates:
+	 * Controls how much Claude allocates, or uses "adaptive" for MiniMax's
+	 * binary adaptive-thinking tag:
 	 * - "max": Always thinks with no constraints
 	 * - "high": Always thinks, deep reasoning (default)
 	 * - "medium": Moderate thinking, may skip for simple queries
 	 * - "low": Minimal thinking, skips for simple tasks
+	 * - "adaptive": Sends `thinking.type: "adaptive"` without `output_config.effort`
 	 * Ignored for older models.
 	 */
 	effort?: AnthropicEffort;
@@ -1650,13 +1653,16 @@ export const streamAnthropic: StreamFunction<"anthropic-messages"> = (
 				// `output_config.effort` ships on thinking-on requests AND on the
 				// thinking-off adaptive pin (adaptive-only models get effort:"low" so
 				// the toggle cannot 400); the beta must accompany the field in both.
+				// MiniMax uses `thinking.type:"adaptive"` itself as the control surface,
+				// so the sentinel "adaptive" value intentionally sends no output_config.
 				const sendsAdaptiveEffortPin =
 					options?.thinkingEnabled === false &&
 					model.thinking?.mode === "anthropic-adaptive" &&
-					!model.compat.disableAdaptiveThinking;
+					!model.compat.disableAdaptiveThinking &&
+					!usesAdaptiveThinkingTagOnly(model);
 				if (
 					model.reasoning &&
-					(options?.thinkingEnabled || sendsAdaptiveEffortPin) &&
+					((options?.thinkingEnabled && options.effort !== "adaptive") || sendsAdaptiveEffortPin) &&
 					!extraBetas.includes(effortBeta)
 				) {
 					extraBetas.push(effortBeta);
@@ -2783,11 +2789,22 @@ function enforceCacheControlLimit(params: MessageCreateParamsStreaming, maxBreak
 	}
 }
 
+function usesAdaptiveThinkingTagOnly(model: Model<"anthropic-messages">): boolean {
+	const thinking = model.thinking;
+	if (thinking?.mode !== "anthropic-adaptive") return false;
+	const effortMap = thinking.effortMap;
+	if (!effortMap) return false;
+	for (const effort of thinking.efforts) {
+		if (effortMap[effort] !== "adaptive") return false;
+	}
+	return thinking.efforts.length > 0;
+}
+
 function resolveAnthropicAdaptiveEffort(
 	model: Model<"anthropic-messages">,
 	options: AnthropicOptions,
 ): AnthropicEffort | undefined {
-	if (options.effort) return options.effort;
+	if (options.effort) return usesAdaptiveThinkingTagOnly(model) ? "adaptive" : options.effort;
 	const requestedEffort = options.reasoning;
 	if (!requestedEffort) return undefined;
 	return mapEffortToAnthropicAdaptiveEffort(model, requestedEffort);
@@ -2854,7 +2871,7 @@ function buildParams(
 
 	// Pre-compute thinking + output_config effort.
 	let thinking: MessageCreateParamsStreaming["thinking"] | undefined;
-	let outputConfigEffort: AnthropicEffort | undefined;
+	let outputConfigEffort: AnthropicOutputEffort | undefined;
 	if (model.reasoning) {
 		if (options?.thinkingEnabled) {
 			const mode = model.thinking?.mode;
@@ -2872,18 +2889,22 @@ function buildParams(
 					adaptive.display = options.thinkingDisplay ?? "summarized";
 				}
 				thinking = adaptive;
-				if (effort) outputConfigEffort = effort;
+				if (effort && effort !== "adaptive") outputConfigEffort = effort;
 			} else {
 				thinking = {
 					type: "enabled",
 					budget_tokens: options.thinkingBudgetTokens || 1024,
 					display: options.thinkingDisplay ?? "summarized",
 				};
-				if (mode === "anthropic-budget-effort" && effort) outputConfigEffort = effort;
+				if (mode === "anthropic-budget-effort" && effort && effort !== "adaptive") outputConfigEffort = effort;
 			}
 		} else if (options?.thinkingEnabled === false) {
 			const compat = model.compat;
-			if (model.thinking?.mode === "anthropic-adaptive" && !compat.disableAdaptiveThinking) {
+			if (
+				model.thinking?.mode === "anthropic-adaptive" &&
+				!compat.disableAdaptiveThinking &&
+				!usesAdaptiveThinkingTagOnly(model)
+			) {
 				// Adaptive-only Claude models (Opus 4.6+, Sonnet 4.6+, Fable/Mythos 5) reject
 				// `thinking.type: "disabled"` — adaptive thinking cannot be switched off.
 				// Omit the thinking field (the API defaults to adaptive) and pin the
@@ -3265,8 +3286,9 @@ export function convertAnthropicMessages(
 /**
  * JSON Schema whitelist for Anthropic tool `input_schema` nodes.
  *
- * Mirrors the Anthropic Python SDK's `lib/_parse/_transform.py::transform_schema`:
- * we keep only structural/metadata keywords Anthropic's validator honors, and demote
+ * Tracks the Anthropic Python SDK's `lib/_parse/_transform.py::transform_schema`,
+ * with live Messages API guardrails for keywords the SDK preserves but the API rejects.
+ * We keep only structural/metadata keywords Anthropic's validator honors, and demote
  * anything else into the node's `description` as `\n\n{key: value, ...}` so the model
  * still sees the constraint as a natural-language hint.
  *
@@ -3281,7 +3303,6 @@ const ANTHROPIC_TOOL_SCHEMA_UNIVERSAL_KEEP = new Set([
 	"definitions",
 	"type",
 	"anyOf",
-	"oneOf",
 	"allOf",
 	"enum",
 	"const",
@@ -3377,13 +3398,16 @@ function anthropicPerTypeKeep(scalarType: string | undefined): Set<string> | und
  * Applies the full whitelist semantics from the Anthropic Python SDK's
  * `lib/_parse/_transform.py::transform_schema`:
  *
- * 1. Universal keys (`$ref`, `$defs`, `type`, `anyOf`/`oneOf`/`allOf`, `enum`, `const`,
- *    `description`, `title`, `default`, `nullable`) are preserved on every node.
+ * 1. Universal keys (`$ref`, `$defs`, `type`, `anyOf`, `allOf`, `enum`, `const`,
+ *    `description`, `title`, `default`, `nullable`) are preserved on every node, with
+ *    one position-dependent exception: the combinator keys. Root `anyOf`/`allOf` are
+ *    spilled (recent Anthropic Messages validators reject combinators at the tool
+ *    `input_schema` root) but kept when nested; `oneOf` is spilled at every position
+ *    (it is not in the documented supported subset).
  * 2. Per-type keys are kept additively (object → `properties`/`required`/`additionalProperties`,
  *    array → `items`/`prefixItems` plus `minItems` only when 0 or 1, string → `format`
  *    only when in the supported value set).
  * 3. Everything else is demoted into the node's `description` as `\n\n{key: value, ...}`
- *    so the model still sees the constraint as a natural-language hint.
  *
  * Object nodes default to `additionalProperties: false`, but explicit open-map
  * declarations (`additionalProperties: true` or a schema literal — Zod's
@@ -3394,6 +3418,7 @@ function anthropicPerTypeKeep(scalarType: string | undefined): Set<string> | und
 function normalizeAnthropicToolSchemaNode(
 	schema: unknown,
 	cache: WeakMap<Record<string, unknown>, Record<string, unknown>>,
+	isRoot = false,
 ): unknown {
 	if (Array.isArray(schema)) return schema.map(entry => normalizeAnthropicToolSchemaNode(entry, cache));
 	if (!isRecord(schema)) return schema;
@@ -3411,7 +3436,8 @@ function normalizeAnthropicToolSchemaNode(
 	for (const key in schema) {
 		if (!Object.hasOwn(schema, key)) continue;
 		const value = schema[key];
-		if (ANTHROPIC_TOOL_SCHEMA_UNIVERSAL_KEEP.has(key) || perTypeKeep?.has(key)) {
+		const isRootCombinator = isRoot && COMBINATOR_KEYS.includes(key as (typeof COMBINATOR_KEYS)[number]);
+		if (!isRootCombinator && (ANTHROPIC_TOOL_SCHEMA_UNIVERSAL_KEEP.has(key) || perTypeKeep?.has(key))) {
 			result[key] = value;
 		} else {
 			spill.push([key, value]);
@@ -3486,7 +3512,7 @@ function normalizeAnthropicToolSchemaNode(
 }
 
 export function normalizeAnthropicToolSchema(schema: unknown): unknown {
-	return normalizeAnthropicToolSchemaNode(schema, new WeakMap());
+	return normalizeAnthropicToolSchemaNode(schema, new WeakMap(), true);
 }
 
 type AnthropicToolSchemaPlan = {

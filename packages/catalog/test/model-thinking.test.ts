@@ -284,12 +284,33 @@ describe("model thinking derivation", () => {
 			api: "bedrock-converse-stream",
 			provider: "amazon-bedrock",
 		});
+		const minimaxM2 = createModel({ id: "MiniMax-M2.7", api: "anthropic-messages", provider: "minimax" });
+		const minimaxM3 = createModel({ id: "MiniMax-M3", api: "anthropic-messages", provider: "minimax" });
 
 		expect(opus45.thinking?.mode).toBe("anthropic-budget-effort");
 		expect(opus46.thinking?.mode).toBe("anthropic-adaptive");
 		expect(sonnet46.thinking?.mode).toBe("anthropic-adaptive");
 		expect(mythosBedrock.thinking?.mode).toBe("anthropic-adaptive");
-
+		expect(minimaxM2.thinking).toEqual({
+			mode: "anthropic-adaptive",
+			efforts: [Effort.Low, Effort.Medium, Effort.High],
+			effortMap: {
+				low: "adaptive",
+				medium: "adaptive",
+				high: "adaptive",
+			},
+			requiresEffort: true,
+		});
+		expect(minimaxM3.thinking).toEqual({
+			mode: "anthropic-adaptive",
+			efforts: [Effort.Low, Effort.Medium, Effort.High],
+			effortMap: {
+				low: "adaptive",
+				medium: "adaptive",
+				high: "adaptive",
+			},
+		});
+		expect(mapEffortToAnthropicAdaptiveEffort(minimaxM3, Effort.High)).toBe("adaptive");
 		// Opus 4.6 has no real xhigh level — the baked 4-tier map aliases XHigh to "max".
 		expect(opus46.thinking?.effortMap).toEqual({ minimal: "low", xhigh: "max" });
 		expect(mapEffortToAnthropicAdaptiveEffort(opus46, Effort.XHigh)).toBe("max");
@@ -498,6 +519,26 @@ describe("model thinking runtime helpers", () => {
 			},
 		});
 		expect(requireSupportedEffort(model, Effort.XHigh)).toBe(Effort.XHigh);
+	});
+
+	it("maps Ollama Cloud GLM-5.2 xhigh to max and hides unsupported lower efforts", () => {
+		const model = createModel({
+			id: "glm-5.2",
+			api: "ollama-chat",
+			provider: "ollama-cloud",
+			baseUrl: "https://ollama.com",
+		});
+
+		expect(model.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.High, Effort.XHigh],
+			effortMap: {
+				xhigh: "max",
+			},
+		});
+		expect(requireSupportedEffort(model, Effort.High)).toBe(Effort.High);
+		expect(requireSupportedEffort(model, Effort.XHigh)).toBe(Effort.XHigh);
+		expect(() => requireSupportedEffort(model, Effort.Medium)).toThrow(/Supported efforts: high, xhigh/);
 	});
 
 	it("derives binary-thinking fallback from resolved compat when catalog compat is partial", () => {

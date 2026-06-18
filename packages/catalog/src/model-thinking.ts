@@ -25,6 +25,7 @@ import {
 	isDeepseekModelIdOrName,
 	isGlm52ReasoningEffortModelId,
 	isMinimaxM2FamilyModelId,
+	isMinimaxM3FamilyModelId,
 	isOpenAIGptOssModelId,
 	supportsAdaptiveThinkingDisplay,
 } from "./identity/family";
@@ -57,6 +58,7 @@ const GEMINI_3_FLASH_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, E
 const GPT_5_2_PLUS_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 const GPT_5_1_CODEX_MINI_EFFORTS: readonly Effort[] = [Effort.Medium, Effort.High];
 const LOW_MEDIUM_HIGH_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High];
+const GLM_52_HIGH_MAX_REASONING_EFFORTS: readonly Effort[] = [Effort.High, Effort.XHigh];
 
 type EffortMap = Partial<Record<Effort, string>>;
 
@@ -84,6 +86,9 @@ const ZAI_GLM_52_REASONING_EFFORT_MAP: Readonly<EffortMap> = {
 	[Effort.High]: "high",
 	[Effort.XHigh]: "max",
 };
+const OLLAMA_CLOUD_GLM_52_REASONING_EFFORT_MAP: Readonly<EffortMap> = {
+	[Effort.XHigh]: "max",
+};
 
 /**
  * Effort → wire-value map for the 5-tier adaptive scale (Opus 4.7+ and
@@ -107,6 +112,12 @@ export const ANTHROPIC_ADAPTIVE_EFFORT_MAP_5_TIER: Readonly<Partial<Record<Effor
 export const ANTHROPIC_ADAPTIVE_EFFORT_MAP_4_TIER: Readonly<Partial<Record<Effort, string>>> = {
 	[Effort.Minimal]: "low",
 	[Effort.XHigh]: "max",
+};
+
+const MINIMAX_ANTHROPIC_ADAPTIVE_EFFORT_MAP: Readonly<EffortMap> = {
+	[Effort.Low]: "adaptive",
+	[Effort.Medium]: "adaptive",
+	[Effort.High]: "adaptive",
 };
 
 // ---------------------------------------------------------------------------
@@ -221,7 +232,7 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
  * True when the model reasons natively but rejects the wire `reasoning.effort`
  * param. Scoped to openai-responses* because that's the only API surface where
  * `compat.supportsReasoningEffort: false` means "omit the field entirely"
- * (xAI Grok off the GROK_EFFORT_CAPABLE_PREFIXES allowlist: grok-build,
+ * (xAI Grok off the `isGrokReasoningEffortCapable` allowlist: grok-build,
  * grok-4.20-0309-reasoning). openai-completions keeps its thinking config even
  * without effort support — binary thinking formats (zai/qwen) drive reasoning
  * through other request fields.
@@ -274,6 +285,9 @@ function getModelDefinedEfforts<TApi extends Api>(spec: ModelSpec<TApi>): readon
 	if (isOpenAICompatReasoningApi(spec.api) && isZaiGlm52ReasoningEffortModel(spec)) {
 		return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
 	}
+	if (isOllamaCloudGlm52ReasoningEffortModel(spec)) {
+		return GLM_52_HIGH_MAX_REASONING_EFFORTS;
+	}
 	return isOpenAICompatReasoningApi(spec.api) && (isMinimaxM2FamilyModelId(spec.id) || isOpenAIGptOssModelId(spec.id))
 		? LOW_MEDIUM_HIGH_REASONING_EFFORTS
 		: undefined;
@@ -282,6 +296,14 @@ function getModelDefinedEfforts<TApi extends Api>(spec: ModelSpec<TApi>): readon
 function isZaiGlm52ReasoningEffortModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
 	if (!isGlm52ReasoningEffortModelId(spec.id)) return false;
 	return modelMatchesHost(spec, "zai") || modelMatchesHost(spec, "zhipu");
+}
+
+function isOllamaCloudGlm52ReasoningEffortModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
+	return spec.api === "ollama-chat" && spec.provider === "ollama-cloud" && isGlm52ReasoningEffortModelId(spec.id);
+}
+
+function isMinimaxReasoningModelOnAnthropicEndpoint<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
+	return spec.api === "anthropic-messages" && (isMinimaxM2FamilyModelId(spec.id) || isMinimaxM3FamilyModelId(spec.id));
 }
 
 function readCompatEffortMap(compat: CompatOf<Api>): EffortMap | undefined {
@@ -298,9 +320,15 @@ function inferDetectedEffortMap<TApi extends Api>(
 	mode: ThinkingConfig["mode"],
 ): EffortMap | undefined {
 	if (mode === "anthropic-adaptive") {
+		if (isMinimaxReasoningModelOnAnthropicEndpoint(spec)) {
+			return MINIMAX_ANTHROPIC_ADAPTIVE_EFFORT_MAP;
+		}
 		return anthropicModelHasRealXHighEffort(spec, parsedModel)
 			? ANTHROPIC_ADAPTIVE_EFFORT_MAP_5_TIER
 			: ANTHROPIC_ADAPTIVE_EFFORT_MAP_4_TIER;
+	}
+	if (isOllamaCloudGlm52ReasoningEffortModel(spec)) {
+		return OLLAMA_CLOUD_GLM_52_REASONING_EFFORT_MAP;
 	}
 	if (!isOpenAICompatReasoningApi(spec.api)) {
 		return undefined;
@@ -432,6 +460,9 @@ function inferAnthropicSupportedEfforts<TApi extends Api>(
 }
 
 function inferFallbackEfforts<TApi extends Api>(spec: ModelSpec<TApi>, compat: CompatOf<TApi>): readonly Effort[] {
+	if (isMinimaxReasoningModelOnAnthropicEndpoint(spec)) {
+		return LOW_MEDIUM_HIGH_REASONING_EFFORTS;
+	}
 	if (spec.api === "anthropic-messages") {
 		return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
 	}
@@ -474,6 +505,9 @@ function inferThinkingControlMode<TApi extends Api>(
 				: "budget";
 
 		case "anthropic-messages":
+			if (isMinimaxReasoningModelOnAnthropicEndpoint(spec)) {
+				return "anthropic-adaptive";
+			}
 			if (parsedModel.family === "anthropic") {
 				if (semverGte(parsedModel.version, "4.6")) {
 					return "anthropic-adaptive";
@@ -612,9 +646,15 @@ export function mapEffortToGoogleThinkingLevel(effort: Effort): "MINIMAL" | "LOW
 export function mapEffortToAnthropicAdaptiveEffort<TApi extends Api>(
 	model: ApiModel<TApi>,
 	effort: Effort,
-): "low" | "medium" | "high" | "xhigh" | "max" {
+): "low" | "medium" | "high" | "xhigh" | "max" | "adaptive" {
 	const supported = requireSupportedEffort(model, effort);
-	return (model.thinking?.effortMap?.[supported] ?? supported) as "low" | "medium" | "high" | "xhigh" | "max";
+	return (model.thinking?.effortMap?.[supported] ?? supported) as
+		| "low"
+		| "medium"
+		| "high"
+		| "xhigh"
+		| "max"
+		| "adaptive";
 }
 
 /**

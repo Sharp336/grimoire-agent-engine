@@ -34,7 +34,6 @@ import {
 	type CompactionSummaryMessage,
 	countTokens,
 	resolveTelemetry,
-	STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL,
 	ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import {
@@ -1235,13 +1234,12 @@ export class AgentSession {
 	#ttsrResumePromise: Promise<void> | undefined = undefined;
 	#ttsrResumeResolve: (() => void) | undefined = undefined;
 
-	/** One-shot flag set in InteractiveMode.#approvePlan(compactBeforeExecute=true)
-	 *  before the plan-mode → compaction transition. Consumed inside
-	 *  #handleAgentEvent for the matching `message_end` + `stopReason: "aborted"`;
-	 *  cleared unconditionally by the caller's `finally` so it cannot leak into
-	 *  later unrelated aborts (e.g. when compaction returns cancelled/failed
-	 *  without producing an aborted message_end). */
-	#planCompactAbortPending = false;
+	/** One-shot flag for expected internal plan-mode aborts. Approval actions may
+	 *  abort the post-`resolve` continuation before compaction, execution, or
+	 *  manual refinement. Consumed inside `#handleAgentEvent` for the matching
+	 *  `message_end` + `stopReason: "aborted"`; callers clear it in `finally` so
+	 *  it cannot leak into later unrelated aborts. */
+	#planInternalAbortPending = false;
 
 	#postPromptTasks = new Set<Promise<unknown>>();
 	#postPromptTasksPromise: Promise<void> | undefined = undefined;
@@ -1675,6 +1673,33 @@ export class AgentSession {
 	// start, so duplicate concern/blocker advice is also downgraded.
 	#recordAdvisorInterruptDelivered(): void {
 		this.#advisorInterruptImmuneTurnStart = this.#advisorPrimaryTurnsCompleted + 1;
+	}
+
+	/**
+	 * Re-prime the advisor across a conversation boundary: `/new`, `/branch`,
+	 * `/btw`, `/tree`, and session switch/resume. Beyond {@link AdvisorRuntime.reset}
+	 * (which only re-primes the advisor's transcript view and is also fired by
+	 * within-conversation rewrites like compaction/shake/rewind), this clears the
+	 * session-level interrupt latches so the prior conversation's cooldown cannot
+	 * leak into the new one: the post-interrupt immune-turn window
+	 * (`#advisorPrimaryTurnsCompleted`, `#advisorInterruptImmuneTurnStart`) and the
+	 * user-interrupt auto-resume suppression flag. It also drops advisor deliveries
+	 * still queued against the prior conversation — pending asides in the yield
+	 * queue (advisor entries use `skipIdleFlush`, so they linger until the next
+	 * `drainLazy` rather than self-flushing), interrupting cards parked in the
+	 * agent steer/follow-up queues, and preserved cards deferred to the next turn —
+	 * so none of them inject into the new conversation.
+	 */
+	#resetAdvisorSessionState(): void {
+		this.#advisorRuntime?.reset();
+		this.#advisorPrimaryTurnsCompleted = 0;
+		this.#advisorInterruptImmuneTurnStart = undefined;
+		this.#advisorAutoResumeSuppressed = false;
+		this.yieldQueue.clear("advisor");
+		this.#extractQueuedAdvisorCards();
+		if (this.#pendingNextTurnMessages.some(isAdvisorCard)) {
+			this.#pendingNextTurnMessages = this.#pendingNextTurnMessages.filter(m => !isAdvisorCard(m));
+		}
 	}
 
 	#buildAdvisorRuntime(seedToCurrent = false): boolean {
@@ -2115,25 +2140,24 @@ export class AgentSession {
 		return this.#ttsrAbortPending;
 	}
 
-	/** Whether the plan-mode → compaction transition's expected internal abort is
-	 *  pending. Consumed by `#handleAgentEvent` to stamp `SILENT_ABORT_MARKER`
-	 *  on the next aborted assistant message_end; cleared unconditionally by
-	 *  `InteractiveMode.#approvePlan`'s `finally` block. */
-	get isPlanCompactAbortPending(): boolean {
-		return this.#planCompactAbortPending;
+	/** Whether an expected internal plan-mode abort is pending. Consumed by
+	 *  `#handleAgentEvent` to stamp `SILENT_ABORT_MARKER` on the next aborted
+	 *  assistant message_end; callers clear it in `finally`. */
+	get isPlanInternalAbortPending(): boolean {
+		return this.#planInternalAbortPending;
 	}
 
 	/** Arm the silent-abort marker for the next aborted assistant message_end.
-	 *  Caller MUST clear via `clearPlanCompactAbortPending()` in a `finally`
+	 *  Caller MUST clear via `clearPlanInternalAbortPending()` in a `finally`
 	 *  to guarantee no leak. */
-	markPlanCompactAbortPending(): void {
-		this.#planCompactAbortPending = true;
+	markPlanInternalAbortPending(): void {
+		this.#planInternalAbortPending = true;
 	}
 
 	/** Unconditionally clear the silent-abort flag. Idempotent: safe when the
 	 *  flag was never set OR was already consumed by `#handleAgentEvent`. */
-	clearPlanCompactAbortPending(): void {
-		this.#planCompactAbortPending = false;
+	clearPlanInternalAbortPending(): void {
+		this.#planInternalAbortPending = false;
 	}
 
 	getAsyncJobSnapshot(options?: { recentLimit?: number }): AsyncJobSnapshot | null {
@@ -2283,7 +2307,7 @@ export class AgentSession {
 	};
 
 	#processAgentEvent = async (event: AgentEvent): Promise<void> => {
-		// Plan-mode → compaction transition: stamp `SILENT_ABORT_MARKER` on the
+		// Plan-mode internal transition: stamp `SILENT_ABORT_MARKER` on the
 		// persisted message BEFORE the obfuscator's display-side copy below.
 		// Invariant (must hold across refactors): this branch precedes the
 		// `let displayEvent = event; ... displayEvent = { ...event, message: { ...message, content: deobfuscated } }`
@@ -2291,18 +2315,16 @@ export class AgentSession {
 		// and `event.message` (in-place mutation, used by SessionManager
 		// persistence) carry the marker, guaranteeing streaming render and
 		// history replay branch identically. The one-shot flag is consumed
-		// here, scoped strictly to this aborted message_end; the caller's
-		// `finally` (in `InteractiveMode.#approvePlan`) clears it again on
-		// every terminal compaction outcome (`ok` / `cancelled` / `failed` /
-		// throw) so a leaked flag cannot silence a later unrelated abort.
+		// here, scoped strictly to this aborted message_end; callers still clear it
+		// in `finally` so a leaked flag cannot silence a later unrelated abort.
 		if (
 			event.type === "message_end" &&
 			event.message.role === "assistant" &&
 			event.message.stopReason === "aborted" &&
-			this.#planCompactAbortPending
+			this.#planInternalAbortPending
 		) {
 			(event.message as AssistantMessage).errorMessage = SILENT_ABORT_MARKER;
-			this.#planCompactAbortPending = false;
+			this.#planInternalAbortPending = false;
 		}
 
 		// Deobfuscate assistant message content for display emission — the LLM echoes back
@@ -2498,6 +2520,13 @@ export class AgentSession {
 						attempt: this.#retryAttempt,
 					});
 					this.#retryAttempt = 0;
+				}
+				if (assistantMsg.provider === "opencode-go") {
+					this.#modelRegistry.authStorage.recordUsageCost(assistantMsg.provider, assistantMsg.usage.cost.total, {
+						sessionId: this.#activeProviderSessionId(),
+						recordedAt: assistantMsg.timestamp,
+						baseUrl: this.#modelRegistry.getProviderBaseUrl?.(assistantMsg.provider),
+					});
 				}
 			}
 			if (event.message.role === "toolResult") {
@@ -4985,20 +5014,15 @@ export class AgentSession {
 		const antigravityEndpointMode =
 			provider === "google-antigravity" ? this.settings.get("providers.antigravityEndpoint") : undefined;
 
-		if (
-			!sessionOnPayload &&
-			!sessionOnResponse &&
-			!sessionMetadata &&
-			!sessionOnSseEvent &&
-			!openrouterVariant &&
-			!antigravityEndpointMode
-		)
-			return options;
-
 		const preparedOptions: SimpleStreamOptions = {
 			...options,
 			...(openrouterVariant !== undefined && { openrouterVariant }),
 			...(antigravityEndpointMode !== undefined && { antigravityEndpointMode }),
+			loopGuard: {
+				enabled: this.settings.get("model.loopGuard.enabled"),
+				checkAssistantContent: this.settings.get("model.loopGuard.checkAssistantContent"),
+				...options.loopGuard,
+			},
 		};
 
 		// Stamp session metadata (e.g. user_id={session_id}) onto direct-call requests so
@@ -6550,7 +6574,7 @@ export class AgentSession {
 		this.#todoReminderAwaitingProgress = false;
 		this.#planReferenceSent = false;
 		this.#planReferencePath = "local://PLAN.md";
-		this.#advisorRuntime?.reset();
+		this.#resetAdvisorSessionState();
 		this.#reconnectToAgent();
 
 		// Emit session_switch event with reason "new" to hooks
@@ -7351,7 +7375,7 @@ export class AgentSession {
 			throw new Error("Compaction already in progress");
 		}
 		this.#disconnectFromAgent();
-		await this.abort();
+		await this.abort({ goalReason: "internal" });
 		const compactionAbortController = new AbortController();
 		this.#compactionAbortController = compactionAbortController;
 
@@ -7519,6 +7543,10 @@ export class AgentSession {
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			// Compaction discarded the conversation history that carried the approved
+			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
+			// the plan from disk and re-injects it on the next turn (issue #1246).
+			this.#planReferenceSent = false;
 			this.#advisorRuntime?.reset();
 			this.#syncTodoPhasesFromBranch();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
@@ -9385,6 +9413,10 @@ export class AgentSession {
 			const newEntries = this.sessionManager.getEntries();
 			const sessionContext = this.buildDisplaySessionContext();
 			this.agent.replaceMessages(sessionContext.messages);
+			// Compaction discarded the conversation history that carried the approved
+			// plan reference. Clear the sent-flag so #buildPlanReferenceMessage re-reads
+			// the plan from disk and re-injects it on the next turn (issue #1246).
+			this.#planReferenceSent = false;
 			this.#advisorRuntime?.reset();
 			this.#syncTodoPhasesFromBranch();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
@@ -9688,21 +9720,21 @@ export class AgentSession {
 
 		if (this.#isClassifierRefusal(message)) return true;
 		if (this.#isProviderErrorFinishReasonBeforeToolUse(message)) return true;
-		if (this.#streamInterruptedAfterObservableOutput(message)) return false;
+		if (this.#isMalformedFunctionCallError(message)) return true;
+		if (this.#hasReplayUnsafeToolOutput(message)) return false;
 		if (this.#isStaleOpenAIResponsesReplayError(message)) return true;
 
 		const err = message.errorMessage;
 		return this.#isTransientErrorMessage(err) || isUsageLimitError(err);
 	}
-	#streamInterruptedAfterObservableOutput(message: AssistantMessage): boolean {
-		if (message.stopDetails?.type === STREAM_INTERRUPTED_AFTER_CONTENT_STOP_DETAIL) return true;
-		for (const block of message.content) {
-			if (block.type === "toolCall") return true;
-			if (block.type === "text" && block.text.length > 0) return true;
-			if (block.type === "thinking" && block.thinking.length > 0) return true;
-			if (block.type === "redactedThinking" && block.data.length > 0) return true;
-		}
-		return false;
+	/**
+	 * Retried turns remove the failed assistant message from active context.
+	 * Text/thinking-only partials are safe to discard and replay. Retained
+	 * tool calls are not: a completed tool call may already have emitted its
+	 * tool result after this assistant message, so replaying can duplicate work.
+	 */
+	#hasReplayUnsafeToolOutput(message: AssistantMessage): boolean {
+		return message.content.some(block => block.type === "toolCall");
 	}
 
 	#isStaleOpenAIResponsesReplayError(message: AssistantMessage): boolean {
@@ -9736,6 +9768,11 @@ export class AgentSession {
 		if (!message.errorMessage) return false;
 		if (message.content.some(block => block.type === "toolCall")) return false;
 		return /\bProvider (?:returned error finish_reason|finish_reason:\s*error)\b/i.test(message.errorMessage);
+	}
+
+	#isMalformedFunctionCallError(message: AssistantMessage): boolean {
+		if (!message.errorMessage) return false;
+		return /\bmalformed.?function.?call\b/i.test(message.errorMessage);
 	}
 
 	#isTransientErrorMessage(errorMessage: string): boolean {
@@ -10931,7 +10968,7 @@ export class AgentSession {
 		}
 
 		this.#disconnectFromAgent();
-		await this.abort();
+		await this.abort({ goalReason: "internal" });
 
 		// Flush pending writes before switching so restore snapshots reflect committed state.
 		await this.sessionManager.flush();
@@ -10989,6 +11026,7 @@ export class AgentSession {
 			}
 
 			this.agent.replaceMessages(sessionContext.messages);
+			this.#resetAdvisorSessionState();
 			this.#syncTodoPhasesFromBranch();
 			if (switchingToDifferentSession) {
 				this.#closeAllProviderSessions("session switch");
@@ -11194,11 +11232,99 @@ export class AgentSession {
 
 		if (!skipConversationRestore) {
 			this.agent.replaceMessages(sessionContext.messages);
-			this.#advisorRuntime?.reset();
+			this.#resetAdvisorSessionState();
 			this.#closeCodexProviderSessionsForHistoryRewrite();
 		}
 
 		return { selectedText, cancelled: false };
+	}
+
+	async branchFromBtw(
+		question: string,
+		assistantMessage: AssistantMessage,
+	): Promise<{ cancelled: boolean; sessionFile: string | undefined }> {
+		const previousSessionFile = this.sessionFile;
+		if (!this.sessionManager.getSessionFile()) {
+			throw new Error("Cannot branch /btw: session is not persisted");
+		}
+
+		const leafId = this.sessionManager.getLeafId();
+		if (!leafId) {
+			throw new Error("Cannot branch /btw: current session has no leaf");
+		}
+
+		if (
+			this.isBashRunning ||
+			this.isEvalRunning ||
+			this.isCompacting ||
+			this.isGeneratingHandoff ||
+			this.isRetrying
+		) {
+			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
+		}
+
+		if (this.#extensionRunner?.hasHandlers("session_before_branch")) {
+			const result = (await this.#extensionRunner.emit({
+				type: "session_before_branch",
+				entryId: leafId,
+			})) as SessionBeforeBranchResult | undefined;
+
+			if (result?.cancel) {
+				return { cancelled: true, sessionFile: previousSessionFile };
+			}
+		}
+
+		await this.#cancelPostPromptTasks();
+		if (
+			this.isBashRunning ||
+			this.isEvalRunning ||
+			this.isCompacting ||
+			this.isGeneratingHandoff ||
+			this.isRetrying
+		) {
+			throw new Error("Cannot branch /btw while session maintenance or user work is still running");
+		}
+
+		this.#pendingNextTurnMessages = [];
+		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.agent.replaceQueues([], []);
+		if (this.isStreaming) {
+			await this.abort({ goalReason: "internal", reason: "branching /btw" });
+			this.agent.replaceQueues([], []);
+		}
+		await this.sessionManager.flush();
+		this.#cancelOwnAsyncJobs();
+
+		this.sessionManager.createBranchedSession(leafId);
+		this.sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: question }],
+			timestamp: Date.now(),
+		});
+		this.sessionManager.appendMessage(assistantMessage);
+		this.#syncTodoPhasesFromBranch();
+		this.#freshProviderSessionId = undefined;
+		this.#syncAgentSessionId();
+		this.#rekeyHindsightMemoryForCurrentSessionId();
+		this.#rekeyMnemopiMemoryForCurrentSessionId();
+		this.#resetHindsightConversationTrackingIfHindsight();
+		this.#resetMnemopiConversationTrackingIfMnemopi();
+
+		const sessionContext = this.buildDisplaySessionContext();
+		await this.#restoreMCPSelectionsForSessionContext(sessionContext);
+
+		if (this.#extensionRunner) {
+			await this.#extensionRunner.emit({
+				type: "session_branch",
+				previousSessionFile,
+			});
+		}
+
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#resetAdvisorSessionState();
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+
+		return { cancelled: false, sessionFile: this.sessionFile };
 	}
 
 	// =========================================================================
@@ -11361,7 +11487,7 @@ export class AgentSession {
 		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);
 		await this.#restoreMCPSelectionsForSessionContext(displayContext);
 		this.agent.replaceMessages(displayContext.messages);
-		this.#advisorRuntime?.reset();
+		this.#resetAdvisorSessionState();
 		this.#syncTodoPhasesFromBranch();
 		this.#closeCodexProviderSessionsForHistoryRewrite();
 
