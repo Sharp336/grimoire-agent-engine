@@ -386,6 +386,81 @@ describe("github tool", () => {
 		expect(jsonSpy).not.toHaveBeenCalled();
 	});
 
+	it("creates an issue via gh and renders the resulting summary", async () => {
+		const textCalls: string[][] = [];
+		const textSpy = vi.spyOn(git.github, "text").mockImplementation(async (_cwd, args) => {
+			textCalls.push([...args]);
+			return "https://github.com/owner/repo/issues/42\n";
+		});
+		const jsonCalls: string[][] = [];
+		const jsonSpy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+			jsonCalls.push([...args]);
+			return {
+				number: 42,
+				title: "Bug report",
+				state: "OPEN",
+				author: { login: "octocat" },
+				createdAt: "2026-05-01T09:00:00Z",
+				labels: [{ name: "bug" }, { name: "priority:high" }],
+				body: "Something is broken.",
+				url: "https://github.com/owner/repo/issues/42",
+			} as never;
+		});
+
+		const tool = new GithubTool(createSession());
+		const result = await tool.execute("issue-create", {
+			op: "issue_create",
+			repo: "owner/repo",
+			title: "Bug report",
+			body: "Something is broken.",
+			label: ["bug", "priority:high"],
+			assignee: ["octocat"],
+		});
+		const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+		// gh issue create invocation: must pass --repo, --title, --label, --assignee,
+		// and route the body through --body-file (not --body, to keep multi-KB bodies
+		// clear of argv-length limits).
+		expect(textSpy).toHaveBeenCalledTimes(1);
+		const createArgs = textCalls[0];
+		expect(createArgs.slice(0, 2)).toEqual(["issue", "create"]);
+		expect(createArgs).toEqual(expect.arrayContaining(["--repo", "owner/repo"]));
+		expect(createArgs).toEqual(expect.arrayContaining(["--title", "Bug report"]));
+		expect(createArgs).toEqual(expect.arrayContaining(["--label", "bug"]));
+		expect(createArgs).toEqual(expect.arrayContaining(["--label", "priority:high"]));
+		expect(createArgs).toEqual(expect.arrayContaining(["--assignee", "octocat"]));
+		const bodyFlagIndex = createArgs.indexOf("--body-file");
+		expect(bodyFlagIndex).toBeGreaterThanOrEqual(0);
+		const bodyFilePath = createArgs[bodyFlagIndex + 1];
+		expect(bodyFilePath).toMatch(/gh-issue-body-/);
+		expect(createArgs).not.toContain("--body");
+
+		// Follow-up summary fetch must target the parsed issue number/repo.
+		expect(jsonSpy).toHaveBeenCalledTimes(1);
+		const viewArgs = jsonCalls[0];
+		expect(viewArgs.slice(0, 3)).toEqual(["issue", "view", "42"]);
+		expect(viewArgs).toEqual(expect.arrayContaining(["--repo", "owner/repo"]));
+
+		// Output: issue number + summary rendered, URL surfaces, body block included.
+		expect(text).toContain("# Created Issue #42: Bug report");
+		expect(text).toContain("URL: https://github.com/owner/repo/issues/42");
+		expect(text).toContain("State: OPEN");
+		expect(text).toContain("Labels: bug, priority:high");
+		expect(text).toContain("Something is broken.");
+	});
+
+	it("rejects issue_create when title is not supplied", async () => {
+		const textSpy = vi.spyOn(git.github, "text");
+		const jsonSpy = vi.spyOn(git.github, "json");
+		const tool = new GithubTool(createSession());
+
+		await expect(tool.execute("issue-create", { op: "issue_create", repo: "owner/repo" })).rejects.toThrow(
+			"title is required",
+		);
+		expect(textSpy).not.toHaveBeenCalled();
+		expect(jsonSpy).not.toHaveBeenCalled();
+	});
+
 	it("formats pull request search results", async () => {
 		vi.spyOn(git.github, "json").mockResolvedValue({
 			items: [
