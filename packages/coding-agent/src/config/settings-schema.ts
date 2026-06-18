@@ -2307,6 +2307,26 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Periodic shake (independent of compaction strategy)
+	"shake.interval": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "context",
+			group: "Shake",
+			label: "Shake Interval",
+			description:
+				"Tool-output pruning (shake) every N tool calls; 0 = disabled. Runs independently of auto-compaction to keep tool tax low between full compaction cycles.",
+			options: [
+				{ value: "0", label: "Disabled", description: "Do not auto-shake" },
+				{ value: "5", label: "Every 5 tool calls" },
+				{ value: "10", label: "Every 10 tool calls" },
+				{ value: "20", label: "Every 20 tool calls" },
+				{ value: "50", label: "Every 50 tool calls" },
+			],
+		},
+	},
+
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
 		type: "enum",
