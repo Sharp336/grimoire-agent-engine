@@ -4455,9 +4455,9 @@ class Outer {
 		}
 	}
 	/// Boundary lock: every `SupportLang` is EITHER an outline language OR an
-	/// explicitly-excluded data/markup/config/DSL language — never both, never
-	/// neither. A newly added `SupportLang` variant fails this test until it is
-	/// consciously classified.
+	/// explicitly-excluded data/markup/component-wrapper format — never both,
+	/// never neither. A newly added `SupportLang` variant fails this test until
+	/// it is consciously classified.
 	#[test]
 	fn all_languages_are_classified_supported_or_excluded() {
 		use SupportLang::*;
