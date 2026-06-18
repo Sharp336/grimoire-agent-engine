@@ -854,6 +854,15 @@ async function buildSessionOptions(
 		options.thinkingLevel = scopedModels[0].thinkingLevel;
 	}
 
+	// Opt-in model-generated audio output (--audio-output, optional --audio-voice).
+	// Only effective on audio-capable models (e.g. gpt-4o-audio).
+	if (parsed.audioOutput) {
+		options.audioOutput = {
+			format: "wav",
+			...(parsed.audioVoice ? { voice: parsed.audioVoice } : {}),
+		};
+	}
+
 	// Scoped models for Ctrl+P cycling - fill in default thinking levels when not explicit
 	if (scopedModels.length > 0) {
 		// `auto` is a session-level concept only; per-scoped-model (Ctrl+P) thinking

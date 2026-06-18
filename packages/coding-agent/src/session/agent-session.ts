@@ -73,6 +73,7 @@ import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/to
 import type {
 	AssistantMessage,
 	AudioContent,
+	AudioOutputOptions,
 	Context,
 	ImageContent,
 	Message,
@@ -417,6 +418,8 @@ export interface AgentSessionConfig {
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Initial session thinking selector. */
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Opt-in model-generated audio output (e.g. --audio-output with gpt-4o-audio). */
+	audioOutput?: AudioOutputOptions;
 	/** Prompt templates for expansion */
 	promptTemplates?: PromptTemplate[];
 	/** File-based slash commands for expansion */
@@ -1471,6 +1474,7 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		if (config.audioOutput) this.agent.audioOutput = config.audioOutput;
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
 		this.#autoApprove = config.autoApprove === true;
@@ -8583,9 +8587,6 @@ export class AgentSession {
 			this.#closeProviderSessionsForModelSwitch(currentModel, model);
 		}
 		this.agent.setModel(model);
-		// Enable model-generated audio output implicitly for audio-capable models
-		// (e.g. gpt-4o-audio). A user-facing toggle can override this later.
-		this.agent.audioOutput = model.id.toLowerCase().includes("audio") ? { format: "wav" } : undefined;
 
 		// Re-evaluate append-only context mode — provider or setting may have changed
 		this.#syncAppendOnlyContext(model);

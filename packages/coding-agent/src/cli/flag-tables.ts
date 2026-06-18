@@ -191,6 +191,9 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 	"--audio": (result, value) => {
 		result.audio.push(value);
 	},
+	"--audio-voice": (result, value) => {
+		result.audioVoice = value;
+	},
 	"--skills": (result, value) => {
 		result.skills = value.split(",").map(s => s.trim());
 	},

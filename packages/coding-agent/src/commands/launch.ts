@@ -169,6 +169,7 @@ export default class Index extends Command {
 		`# Interactive mode with initial prompt\n  ${APP_NAME} "List all .ts files in src/"`,
 		`# Include files in initial message\n  ${APP_NAME} @prompt.md @image.png "What color is the sky?"`,
 		`# Attach audio in non-interactive mode\n  ${APP_NAME} -p --model openai/gpt-audio-mini --audio ./sound.wav "What do you hear?"`,
+		`# Generate audio output (gpt-4o-audio); clip is written to ./audio-output-*.wav\n  ${APP_NAME} -p --model openai/gpt-4o-audio-preview --audio-output --audio-voice alloy "Read this aloud"`,
 		`# Non-interactive mode (process and exit)\n  ${APP_NAME} -p "List all .ts files in src/"`,
 		`# Continue previous session\n  ${APP_NAME} --continue "What did we discuss?"`,
 		`# Create a shell shortcut for a work profile\n  ${APP_NAME} --profile work --alias omp-work`,

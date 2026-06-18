@@ -67,6 +67,10 @@ export interface Args {
 	messages: string[];
 	fileArgs: string[];
 	audio: string[];
+	/** Enable model-generated audio output (--audio-output). */
+	audioOutput?: boolean;
+	/** Voice preset for generated audio (--audio-voice <name>). */
+	audioVoice?: string;
 	/** Extension-registered flags this parse recognized — name to value. */
 	unknownFlags: Map<string, boolean | string>;
 	/**
@@ -105,6 +109,7 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 		messages: [],
 		fileArgs: [],
 		audio: [],
+		audioOutput: false,
 		unknownFlags: new Map(),
 		unrecognizedFlags: [],
 	};
@@ -205,6 +210,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.print = true;
 		} else if (arg === "--print-thoughts") {
 			result.printThoughts = true;
+		} else if (arg === "--audio-output") {
+			result.audioOutput = true;
 		} else if (arg === "--no-extensions") {
 			result.noExtensions = true;
 		} else if (arg === "--no-skills") {

@@ -9,6 +9,7 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import {
+	type AudioOutputOptions,
 	type Context,
 	type CredentialDisabledEvent,
 	type Message,
@@ -401,6 +402,8 @@ export interface CreateAgentSessionOptions {
 	modelPattern?: string;
 	/** Thinking selector. Default: from settings, else unset */
 	thinkingLevel?: ConfiguredThinkingLevel;
+	/** Opt-in model-generated audio output (e.g. --audio-output with gpt-4o-audio). */
+	audioOutput?: AudioOutputOptions;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 
@@ -2589,6 +2592,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			advisorWatchdogPrompt,
 			agent,
 			thinkingLevel: autoThinking ? AUTO_THINKING : effectiveThinkingLevel,
+			audioOutput: options.audioOutput,
 			sessionManager,
 			settings,
 			autoApprove: options.autoApprove,
