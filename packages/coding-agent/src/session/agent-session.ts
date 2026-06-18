@@ -295,7 +295,7 @@ import type { BranchSummaryEntry, CompactionEntry, NewSessionOptions } from "./s
 import { EPHEMERAL_MODEL_CHANGE_ROLE } from "./session-entries";
 import { formatSessionHistoryMarkdown } from "./session-history-format";
 import type { SessionManager } from "./session-manager";
-import type { ShakeMode, ShakeResult } from "./shake-types";
+import { formatShakeSummary, type ShakeMode, type ShakeResult } from "./shake-types";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { classifyUnexpectedStop, isUnexpectedStopCandidate } from "./unexpected-stop-classifier";
 import { YieldQueue } from "./yield-queue";
@@ -2649,6 +2649,8 @@ export class AgentSession {
 			const compactionTask = this.#checkCompaction(msg);
 			this.#trackPostPromptTask(compactionTask);
 			const compactionResult = await compactionTask;
+			// Periodic shake — independent of compaction strategy/auto-compaction
+			await this.#runPeriodicShake();
 			// Check for incomplete todos only after a final assistant stop, not intermediate tool-use turns.
 			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
 			if (hasToolCalls) {
@@ -2664,8 +2666,6 @@ export class AgentSession {
 				return;
 			}
 
-			// Periodic shake — independent of compaction strategy/auto-compaction
-			await this.#runPeriodicShake();
 			if (msg.stopReason !== "error") {
 				if (this.#enforceRewindBeforeYield()) {
 					await emitAgentEndNotification();
@@ -9652,12 +9652,19 @@ export class AgentSession {
 		}
 		this.#shakeTurnCounter++;
 		if (this.#shakeTurnCounter < interval) return;
+
+		if (this.isCompacting || this.agent.state.isStreaming) return;
+
+		// At interval and not blocked — fire and reset
 		this.#shakeTurnCounter = 0;
-
-		if (this.isCompacting || this.isStreaming) return;
-
+		logger.debug("Periodic shake firing", {
+			interval,
+			wasCompacting: this.isCompacting,
+			wasStreaming: this.agent.state.isStreaming,
+		});
 		try {
-			await this.shake("elide");
+			const result = await this.shake("elide");
+			this.emitNotice("info", formatShakeSummary(result), "shake");
 		} catch (error) {
 			logger.warn("Periodic shake failed", { error: error instanceof Error ? error.message : String(error) });
 		}

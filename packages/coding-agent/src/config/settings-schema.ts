@@ -1808,7 +1808,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "Shake",
 			label: "Shake Interval",
-			description: "Tool-output pruning (shake) every N turns; 0 = disabled. Runs independently of auto-compaction to keep tool tax low between full compaction cycles.",
+			description:
+				"Tool-output pruning (shake) every N turns; 0 = disabled. Runs independently of auto-compaction to keep tool tax low between full compaction cycles.",
 			options: [
 				{ value: "0", label: "Disabled", description: "Do not auto-shake" },
 				{ value: "5", label: "Every 5 turns" },
