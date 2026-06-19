@@ -438,97 +438,136 @@ export class DapSessionManager {
 		throw error;
 	}
 
+	async #sendBreakpointRequest<TBody>(
+		session: DapSession,
+		command: string,
+		args: unknown,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	): Promise<TBody> {
+		const response = await session.client.sendRequest<TBody>(command, args, signal, timeoutMs);
+		this.#touchSessionAndAncestors(session);
+		return response;
+	}
+
 	async #applyPendingBreakpointsToSession(
 		session: DapSession,
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<void> {
-		for (const [sourcePath, record] of this.#pendingBreakpoints.entries()) {
-			try {
-				const response = await session.client.sendRequest<{ breakpoints?: DapBreakpoint[] }>(
-					"setBreakpoints",
-					{
-						source: { path: sourcePath, name: path.basename(sourcePath) },
-						breakpoints: record.map<DapSourceBreakpoint>(entry => ({
-							line: entry.line,
-							...(entry.condition ? { condition: entry.condition } : {}),
-						})),
-					},
-					signal,
-					timeoutMs,
-				);
-				session.breakpoints.set(sourcePath, this.#mapSourceBreakpoints(record, response?.breakpoints));
-			} catch (err) {
-				logger.warn("Failed to propagate source breakpoints to session", {
-					sessionId: session.id,
-					sourcePath,
-					error: toErrorMessage(err),
-				});
-			}
+		const pendingSourceBreakpoints = Array.from(this.#pendingBreakpoints.entries(), ([sourcePath, record]) => ({
+			sourcePath,
+			record: record.map(entry => ({ ...entry })),
+		}));
+		const pendingFunctionBreakpoints = this.#pendingFunctionBreakpoints.map(entry => ({ ...entry }));
+		const pendingInstructionBreakpoints = this.#pendingInstructionBreakpoints.map(entry => ({ ...entry }));
+		const pendingDataBreakpoints = this.#pendingDataBreakpoints.map(entry => ({ ...entry }));
+
+		if (
+			pendingSourceBreakpoints.length === 0 &&
+			pendingFunctionBreakpoints.length === 0 &&
+			pendingInstructionBreakpoints.length === 0 &&
+			pendingDataBreakpoints.length === 0
+		) {
+			return;
 		}
 
-		if (this.#pendingFunctionBreakpoints.length > 0) {
-			try {
-				const response = await session.client.sendRequest<{ breakpoints?: DapBreakpoint[] }>(
-					"setFunctionBreakpoints",
-					{
-						breakpoints: this.#pendingFunctionBreakpoints.map<DapFunctionBreakpoint>(entry => ({
-							name: entry.name,
-							...(entry.condition ? { condition: entry.condition } : {}),
-						})),
-					},
-					signal,
-					timeoutMs,
-				);
-				session.functionBreakpoints = this.#mapFunctionBreakpoints(
-					this.#pendingFunctionBreakpoints,
-					response?.breakpoints,
-				);
-			} catch (err) {
-				logger.warn("Failed to propagate function breakpoints to session", {
-					sessionId: session.id,
-					error: toErrorMessage(err),
-				});
-			}
-		}
+		await this.#serializeBreakpointMutation(
+			session,
+			async () => {
+				for (const { sourcePath, record } of pendingSourceBreakpoints) {
+					try {
+						const response = await this.#sendBreakpointRequest<{ breakpoints?: DapBreakpoint[] }>(
+							session,
+							"setBreakpoints",
+							{
+								source: { path: sourcePath, name: path.basename(sourcePath) },
+								breakpoints: record.map<DapSourceBreakpoint>(entry => ({
+									line: entry.line,
+									...(entry.condition ? { condition: entry.condition } : {}),
+								})),
+							},
+							signal,
+							timeoutMs,
+						);
+						session.breakpoints.set(sourcePath, this.#mapSourceBreakpoints(record, response?.breakpoints));
+					} catch (err) {
+						logger.warn("Failed to propagate source breakpoints to session", {
+							sessionId: session.id,
+							sourcePath,
+							error: toErrorMessage(err),
+						});
+					}
+				}
 
-		if (this.#pendingInstructionBreakpoints.length > 0) {
-			try {
-				await session.client.sendRequest(
-					"setInstructionBreakpoints",
-					{
-						breakpoints: this.#pendingInstructionBreakpoints,
-					},
-					signal,
-					timeoutMs,
-				);
-				session.instructionBreakpoints = [...this.#pendingInstructionBreakpoints];
-			} catch (err) {
-				logger.warn("Failed to propagate instruction breakpoints to session", {
-					sessionId: session.id,
-					error: toErrorMessage(err),
-				});
-			}
-		}
+				if (pendingFunctionBreakpoints.length > 0) {
+					try {
+						const response = await this.#sendBreakpointRequest<{ breakpoints?: DapBreakpoint[] }>(
+							session,
+							"setFunctionBreakpoints",
+							{
+								breakpoints: pendingFunctionBreakpoints.map<DapFunctionBreakpoint>(entry => ({
+									name: entry.name,
+									...(entry.condition ? { condition: entry.condition } : {}),
+								})),
+							},
+							signal,
+							timeoutMs,
+						);
+						session.functionBreakpoints = this.#mapFunctionBreakpoints(
+							pendingFunctionBreakpoints,
+							response?.breakpoints,
+						);
+					} catch (err) {
+						logger.warn("Failed to propagate function breakpoints to session", {
+							sessionId: session.id,
+							error: toErrorMessage(err),
+						});
+					}
+				}
 
-		if (this.#pendingDataBreakpoints.length > 0) {
-			try {
-				await session.client.sendRequest(
-					"setDataBreakpoints",
-					{
-						breakpoints: this.#pendingDataBreakpoints,
-					},
-					signal,
-					timeoutMs,
-				);
-				session.dataBreakpoints = [...this.#pendingDataBreakpoints];
-			} catch (err) {
-				logger.debug("Best-effort data breakpoints propagation to session failed (ignored)", {
-					sessionId: session.id,
-					error: toErrorMessage(err),
-				});
-			}
-		}
+				if (pendingInstructionBreakpoints.length > 0) {
+					try {
+						await this.#sendBreakpointRequest(
+							session,
+							"setInstructionBreakpoints",
+							{
+								breakpoints: pendingInstructionBreakpoints,
+							},
+							signal,
+							timeoutMs,
+						);
+						session.instructionBreakpoints = pendingInstructionBreakpoints.map(entry => ({ ...entry }));
+					} catch (err) {
+						logger.warn("Failed to propagate instruction breakpoints to session", {
+							sessionId: session.id,
+							error: toErrorMessage(err),
+						});
+					}
+				}
+
+				if (pendingDataBreakpoints.length > 0) {
+					try {
+						await this.#sendBreakpointRequest(
+							session,
+							"setDataBreakpoints",
+							{
+								breakpoints: pendingDataBreakpoints,
+							},
+							signal,
+							timeoutMs,
+						);
+						session.dataBreakpoints = pendingDataBreakpoints.map(entry => ({ ...entry }));
+					} catch (err) {
+						logger.debug("Best-effort data breakpoints propagation to session failed (ignored)", {
+							sessionId: session.id,
+							error: toErrorMessage(err),
+						});
+					}
+				}
+			},
+			signal,
+		);
 	}
 
 	async #updateSourceBreakpointsGlobally(
@@ -553,7 +592,7 @@ export class DapSessionManager {
 							deduped.push({ verified: false, line, condition });
 							deduped.sort((left, right) => left.line - right.line);
 						}
-						const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
+						const response = await this.#sendBreakpointRequest<{ breakpoints?: DapBreakpoint[] }>(
 							session,
 							"setBreakpoints",
 							{
@@ -575,7 +614,7 @@ export class DapSessionManager {
 							sessionId: session.id,
 							rollback: () =>
 								this.#serializeBreakpointMutation(session, async () => {
-									const rollbackResponse = await this.#sendRequestWithConfig<{
+									const rollbackResponse = await this.#sendBreakpointRequest<{
 										breakpoints?: DapBreakpoint[];
 									}>(
 										session,
@@ -631,7 +670,7 @@ export class DapSessionManager {
 							current.push({ verified: false, name, condition });
 							current.sort((left, right) => left.name.localeCompare(right.name));
 						}
-						const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
+						const response = await this.#sendBreakpointRequest<{ breakpoints?: DapBreakpoint[] }>(
 							session,
 							"setFunctionBreakpoints",
 							{
@@ -648,7 +687,7 @@ export class DapSessionManager {
 							sessionId: session.id,
 							rollback: () =>
 								this.#serializeBreakpointMutation(session, async () => {
-									const rollbackResponse = await this.#sendRequestWithConfig<{
+									const rollbackResponse = await this.#sendBreakpointRequest<{
 										breakpoints?: DapBreakpoint[];
 									}>(
 										session,
@@ -717,7 +756,7 @@ export class DapSessionManager {
 								return (left.offset ?? 0) - (right.offset ?? 0);
 							});
 						}
-						const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
+						const response = await this.#sendBreakpointRequest<{ breakpoints?: DapBreakpoint[] }>(
 							session,
 							"setInstructionBreakpoints",
 							{
@@ -732,7 +771,7 @@ export class DapSessionManager {
 							sessionId: session.id,
 							rollback: () =>
 								this.#serializeBreakpointMutation(session, async () => {
-									await this.#sendRequestWithConfig(
+									await this.#sendBreakpointRequest(
 										session,
 										"setInstructionBreakpoints",
 										{
@@ -788,7 +827,7 @@ export class DapSessionManager {
 							current.push({ dataId, accessType, condition, hitCondition });
 							current.sort((left, right) => left.dataId.localeCompare(right.dataId));
 						}
-						const response = await this.#sendRequestWithConfig<{ breakpoints?: DapBreakpoint[] }>(
+						const response = await this.#sendBreakpointRequest<{ breakpoints?: DapBreakpoint[] }>(
 							session,
 							"setDataBreakpoints",
 							{
@@ -803,7 +842,7 @@ export class DapSessionManager {
 							sessionId: session.id,
 							rollback: () =>
 								this.#serializeBreakpointMutation(session, async () => {
-									await this.#sendRequestWithConfig(
+									await this.#sendBreakpointRequest(
 										session,
 										"setDataBreakpoints",
 										{

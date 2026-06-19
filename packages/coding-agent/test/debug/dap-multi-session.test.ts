@@ -59,6 +59,7 @@ class FakeDapClient {
 	readonly #reverseHandlers = new Map<string, DapReverseRequestHandler>();
 	#alive = true;
 	emitInitialStopped = true;
+	readonly commandDelayMs = new Map<string, number>();
 	readonly stalledCommands = new Set<string>();
 	readonly sentRequests: SentDapRequest[] = [];
 
@@ -102,6 +103,10 @@ class FakeDapClient {
 				signal?.addEventListener("abort", abort, { once: true });
 			}
 			return await promise;
+		}
+		const delayMs = this.commandDelayMs.get(command);
+		if (delayMs !== undefined) {
+			await Bun.sleep(delayMs);
 		}
 		if (command === "setBreakpoints") {
 			return {
@@ -290,6 +295,61 @@ describe("DAP multi-session debugging", () => {
 		expect(manager.listSessions().length).toBe(0);
 		expect(parentClient.isAlive()).toBe(false);
 		expect(childClient.isAlive()).toBe(false);
+	});
+
+	it("serializes initial child breakpoint propagation with live source mutations", async () => {
+		const manager = new DapSessionManager();
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
+		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
+
+		const bpFile = path.resolve(process.cwd(), "src/serialized-child.ts");
+		await manager.setBreakpoint(bpFile, 42);
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		childClient.commandDelayMs.set("setBreakpoints", 50);
+		const childBreakpointRequests = () => {
+			return childClient.sentRequests.filter(request => {
+				return request.command === "setBreakpoints" && getRequestSourcePath(request.args) === bpFile;
+			});
+		};
+
+		const startDebuggingPromise = parentClient.triggerReverseRequest("startDebugging", {
+			request: "attach",
+			configuration: {
+				type: "pwa-node",
+				name: "child-worker",
+			},
+		});
+
+		for (let attempt = 0; attempt < 50 && childBreakpointRequests().length === 0; attempt++) {
+			await Bun.sleep(1);
+		}
+		expect(
+			childBreakpointRequests().map(request => getSourceBreakpoints(request.args).map(entry => entry.line)),
+		).toEqual([[42]]);
+
+		const mutationPromise = manager.setBreakpoint(bpFile, 100);
+		await Bun.sleep(5);
+		expect(
+			childBreakpointRequests().map(request => getSourceBreakpoints(request.args).map(entry => entry.line)),
+		).toEqual([[42]]);
+
+		await startDebuggingPromise;
+		await mutationPromise;
+		expect(
+			childBreakpointRequests().map(request => getSourceBreakpoints(request.args).map(entry => entry.line)),
+		).toEqual([[42], [42, 100]]);
+
+		await manager.terminate();
 	});
 
 	it("returns a stopped child when launch waits are resolved by the child stop", async () => {
