@@ -24,7 +24,14 @@ import type { ClientBridge } from "../session/client-bridge";
 import type { CustomMessage } from "../session/messages";
 import type { UsageStatistics } from "../session/session-entries";
 import type { ToolChoiceQueue } from "../session/tool-choice-queue";
-import { TaskTool } from "../task";
+// Lazy-loaded: TaskTool pulls in 18MB of subagent machinery (MCPManager,
+// model-resolver, theme, worktree isolation). Only loaded when the
+// agent actually spawns a subagent, not every session.
+let TaskToolCtor: typeof import("../task").TaskTool | undefined;
+async function getTaskTool() {
+	if (!TaskToolCtor) TaskToolCtor = (await import("../task")).TaskTool;
+	return TaskToolCtor;
+}
 import type { AgentOutputManager } from "../task/output-manager";
 import { canSpawnAtDepth } from "../task/types";
 import { countToolsForAutoDiscovery, resolveEffectiveToolDiscoveryMode } from "../tool-discovery/mode";
@@ -69,7 +76,8 @@ export * from "../edit";
 export * from "../goals";
 export * from "../lsp";
 export * from "../session/streaming-output";
-export * from "../task";
+// Lazy: task module (18MB) loads on first use, not at import.
+// Consumers that need TaskTool types use `import type` which is erased at runtime.
 export * from "../web/search";
 export * from "./ask";
 export * from "./ast-edit";
@@ -445,7 +453,7 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	browser: s => new BrowserTool(s),
 	checkpoint: CheckpointTool.createIf,
 	rewind: RewindTool.createIf,
-	task: s => TaskTool.create(s),
+	task: async s => (await getTaskTool()).create(s),
 	job: s => new JobTool(s),
 	irc: IrcTool.createIf,
 	todo: s => new TodoTool(s),

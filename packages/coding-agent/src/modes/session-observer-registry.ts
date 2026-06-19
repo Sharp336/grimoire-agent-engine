@@ -1,5 +1,5 @@
-import type { AgentProgress, SubagentLifecyclePayload, SubagentProgressPayload } from "../task";
-import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task";
+import type { AgentProgress, SubagentLifecyclePayload, SubagentProgressPayload } from "../task/types";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, TASK_SUBAGENT_PROGRESS_CHANNEL } from "../task/types";
 import type { EventBus } from "../utils/event-bus";
 
 export interface ObservableSession {
