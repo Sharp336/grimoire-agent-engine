@@ -1816,6 +1816,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.toolResultCapKb": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Tool Result Cap (KB)",
+			description: "Truncate old tool-result text blocks beyond this many KB, keeping the 3 most recent full. 0 = disabled. Reduces memory for long sessions.",
+		},
+	},
+
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
 		type: "enum",
@@ -4582,6 +4593,7 @@ export interface CompactionSettings {
 	idleTimeoutSeconds: number;
 	supersedeReads: boolean;
 	dropUseless: boolean;
+	toolResultCapKb: number;
 }
 
 export interface ContextPromotionSettings {

@@ -85,6 +85,9 @@
 - Cache-miss marker no longer fires on providers with implicit, best-effort prompt caching (Google/Gemini, OpenAI, Fireworks). Those report `cacheWrite: 0` and drop `cacheRead` to zero intermittently as routine propagation noise that self-heals the next turn. Only explicit, prefix-controlled caches (Anthropic/Bedrock `cache_control`), which re-create the prefix on a cold turn as `cacheWrite > 0`, now surface a marker — where a zero `cacheRead` genuinely means the prefix broke.
 - Fixed advisor dependent settings staying visible while `advisor.enabled` is off ([#3027](https://github.com/can1357/oh-my-pi/issues/3027)).
 - Fixed LSP servers that dynamically register capabilities, including Expert, hanging semantic requests after `client/registerCapability` was rejected ([#3029](https://github.com/can1357/oh-my-pi/issues/3029)).
+### Added
+
+- Added `compaction.toolResultCapKb` setting: when set above 0, truncates old tool-result text blocks beyond the specified KB limit in-place each turn (keeping the 3 most-recent results full). Reduces peak JS-heap usage by ~11% and retained session state by ~95% in long sessions with large tool outputs. Disabled by default (0). The cap mutates shared message objects directly — no `rewriteEntries`/`replaceMessages` rebuild overhead.
 
 ## [16.1.0] - 2026-06-19
 

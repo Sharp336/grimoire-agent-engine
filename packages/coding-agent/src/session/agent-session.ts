@@ -2800,7 +2800,8 @@ export class AgentSession {
 			}
 			this.#resolveRetry();
 
-			const compactionTask = this.#checkCompaction(msg);
+			this.#applyRetentionCap();
+		const compactionTask = this.#checkCompaction(msg);
 			this.#trackPostPromptTask(compactionTask);
 			const compactionResult = await compactionTask;
 			// Check for incomplete todos only after a final assistant stop, not intermediate tool-use turns.
@@ -7367,6 +7368,34 @@ export class AgentSession {
 	#withPlanProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T {
 		const planMatcher = createPlanReadMatcher(() => this.#planReferencePath);
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
+	}
+
+	/**
+	 * Lightweight in-place retention cap: truncates old tool-result text blocks
+	 * that exceed the configured KB limit, keeping the 3 most-recent results full.
+	 * Runs every turn before #checkCompaction. Unlike #pruneToolOutputs, this does
+	 * NOT call rewriteEntries/replaceMessages — it mutates the shared message
+	 * objects in-place (agent.state.messages and sessionManager branch entries
+	 * share the same references), so there is no rebuild overhead.
+	 */
+	#applyRetentionCap(): void {
+		const capKb = this.settings.getGroup("compaction").toolResultCapKb;
+		if (!capKb || capKb <= 0) return;
+		const capBytes = capKb * 1024;
+		const keepCount = 3;
+		const messages = this.agent.state.messages;
+		let toolResultCount = 0;
+		for (let i = messages.length - 1; i >= 0; i--) {
+			const msg = messages[i];
+			if (msg.role !== "toolResult" || !Array.isArray(msg.content)) continue;
+			toolResultCount++;
+			if (toolResultCount <= keepCount) continue;
+			for (const block of msg.content) {
+				if (block.type === "text" && block.text.length > capBytes) {
+					block.text = `[truncated — ${block.text.length} bytes]`;
+				}
+			}
+		}
 	}
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
