@@ -175,9 +175,17 @@ export class AutonomousController {
 		// Honor a deliberate stop (user interrupt / internal abort) or a failed
 		// turn: re-queueing an error would loop on a broken state and burn tokens.
 		if (failed) return;
-		// A turn that started in plan/goal mode is owned by that mode; its agent_end
-		// fires before exit cleanup settles, so skip to avoid racing it.
-		if (startedInPlanOrGoal) return;
+		// A turn that started in plan/goal mode, or entered it mid-turn via the
+		// interactive slash command, is owned by that mode; its agent_end fires
+		// before mode cleanup/continuation scheduling settles, so skip to avoid
+		// queueing hidden auto-next prompts into the mode-owned flow.
+		if (
+			startedInPlanOrGoal ||
+			this.#session.getPlanModeState()?.enabled === true ||
+			this.#session.getGoalModeState()?.enabled === true
+		) {
+			return;
+		}
 		// Pure-steps completion: an autonomous continuation that performed no
 		// action means the objective is done — disarm rather than loop forever.
 		// Only counts for turns the controller queued, so a user's question

@@ -313,6 +313,22 @@ describe("AutonomousController loop", () => {
 		emit(agentEndEvent([assistantActing("stop")]));
 		expect(sent).toHaveLength(0);
 	});
+
+	it("skips a turn that entered plan or goal mode mid-turn", () => {
+		const goal = setup({ autoNextSteps: true });
+		goal.controller.begin({ startupFailed: false });
+		goal.emit(START); // turn began outside goal mode
+		goal.setGoalMode(true); // /goal enabled while the autonomous turn was streaming
+		goal.emit(agentEndEvent([assistantActing("stop")]));
+		expect(goal.sent).toHaveLength(0);
+
+		const plan = setup({ autoNextSteps: true });
+		plan.controller.begin({ startupFailed: false });
+		plan.emit(START); // turn began outside plan mode
+		plan.setPlanMode(true); // /plan enabled while the autonomous turn was streaming
+		plan.emit(agentEndEvent([assistantActing("stop")]));
+		expect(plan.sent).toHaveLength(0);
+	});
 });
 
 describe("AutonomousController steps completion", () => {
