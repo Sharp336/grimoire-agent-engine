@@ -106,6 +106,11 @@ interface DapGlobalStopResolver {
 	rootSessionId: string;
 }
 
+interface DapBreakpointRollback {
+	sessionId: string;
+	rollback: () => Promise<void>;
+}
+
 export interface DapOutputSnapshot {
 	snapshot: DapSessionSummary;
 	output: string;
@@ -440,6 +445,19 @@ export class DapSessionManager {
 		return run;
 	}
 
+	async #rollbackBreakpointMutations(rollbacks: DapBreakpointRollback[], error: unknown): Promise<never> {
+		const results = await Promise.allSettled(rollbacks.map(entry => entry.rollback()));
+		for (const [index, result] of results.entries()) {
+			if (result.status === "rejected") {
+				logger.warn("Failed to roll back partial breakpoint sync", {
+					sessionId: rollbacks[index]?.sessionId,
+					error: toErrorMessage(result.reason),
+				});
+			}
+		}
+		throw error;
+	}
+
 	async #applyPendingBreakpointsToSession(
 		session: DapSession,
 		signal?: AbortSignal,
@@ -542,12 +560,14 @@ export class DapSessionManager {
 		timeoutMs: number = 30_000,
 	): Promise<void> {
 		const sessions = this.#getLiveSessionsForBreakpointSync();
-		await Promise.all(
+		const rollbacks: DapBreakpointRollback[] = [];
+		const results = await Promise.allSettled(
 			sessions.map(session =>
 				this.#serializeBreakpointMutation(
 					session,
 					async () => {
-						const current = [...(session.breakpoints.get(sourcePath) ?? [])];
+						const previous = [...(session.breakpoints.get(sourcePath) ?? [])];
+						const current = [...previous];
 						const deduped = current.filter(entry => entry.line !== line);
 						if (op === "add") {
 							deduped.push({ verified: false, line, condition });
@@ -571,11 +591,44 @@ export class DapSessionManager {
 						} else {
 							session.breakpoints.set(sourcePath, this.#mapSourceBreakpoints(deduped, response?.breakpoints));
 						}
+						rollbacks.push({
+							sessionId: session.id,
+							rollback: () =>
+								this.#serializeBreakpointMutation(session, async () => {
+									const rollbackResponse = await this.#sendRequestWithConfig<{
+										breakpoints?: DapBreakpoint[];
+									}>(
+										session,
+										"setBreakpoints",
+										{
+											source: { path: sourcePath, name: path.basename(sourcePath) },
+											breakpoints: previous.map<DapSourceBreakpoint>(entry => ({
+												line: entry.line,
+												...(entry.condition ? { condition: entry.condition } : {}),
+											})),
+										},
+										undefined,
+										timeoutMs,
+									);
+									if (previous.length === 0) {
+										session.breakpoints.delete(sourcePath);
+									} else {
+										session.breakpoints.set(
+											sourcePath,
+											this.#mapSourceBreakpoints(previous, rollbackResponse?.breakpoints),
+										);
+									}
+								}),
+						});
 					},
 					signal,
 				),
 			),
 		);
+		const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+		if (failed) {
+			await this.#rollbackBreakpointMutations(rollbacks, failed.reason);
+		}
 	}
 
 	async #updateFunctionBreakpointsGlobally(
@@ -586,12 +639,14 @@ export class DapSessionManager {
 		timeoutMs: number = 30_000,
 	): Promise<void> {
 		const sessions = this.#getLiveSessionsForBreakpointSync();
-		await Promise.all(
+		const rollbacks: DapBreakpointRollback[] = [];
+		const results = await Promise.allSettled(
 			sessions.map(session =>
 				this.#serializeBreakpointMutation(
 					session,
 					async () => {
-						const current = session.functionBreakpoints.filter(entry => entry.name !== name);
+						const previous = [...session.functionBreakpoints];
+						const current = previous.filter(entry => entry.name !== name);
 						if (op === "add") {
 							current.push({ verified: false, name, condition });
 							current.sort((left, right) => left.name.localeCompare(right.name));
@@ -609,11 +664,39 @@ export class DapSessionManager {
 							timeoutMs,
 						);
 						session.functionBreakpoints = this.#mapFunctionBreakpoints(current, response?.breakpoints);
+						rollbacks.push({
+							sessionId: session.id,
+							rollback: () =>
+								this.#serializeBreakpointMutation(session, async () => {
+									const rollbackResponse = await this.#sendRequestWithConfig<{
+										breakpoints?: DapBreakpoint[];
+									}>(
+										session,
+										"setFunctionBreakpoints",
+										{
+											breakpoints: previous.map<DapFunctionBreakpoint>(entry => ({
+												name: entry.name,
+												...(entry.condition ? { condition: entry.condition } : {}),
+											})),
+										},
+										undefined,
+										timeoutMs,
+									);
+									session.functionBreakpoints = this.#mapFunctionBreakpoints(
+										previous,
+										rollbackResponse?.breakpoints,
+									);
+								}),
+						});
 					},
 					signal,
 				),
 			),
 		);
+		const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+		if (failed) {
+			await this.#rollbackBreakpointMutations(rollbacks, failed.reason);
+		}
 	}
 
 	async #updateInstructionBreakpointsGlobally(
@@ -626,14 +709,16 @@ export class DapSessionManager {
 		timeoutMs: number = 30_000,
 	): Promise<DapInstructionBreakpointRecord[]> {
 		const sessions = this.#getLiveSessionsForBreakpointSync();
+		const rollbacks: DapBreakpointRollback[] = [];
 		let activeSessionRecord: DapInstructionBreakpointRecord[] = [];
-		await Promise.all(
+		const results = await Promise.allSettled(
 			sessions.map(async session => {
 				let responseBreakpoints: DapBreakpoint[] | undefined;
 				await this.#serializeBreakpointMutation(
 					session,
 					async () => {
-						const current = session.instructionBreakpoints.filter(entry => {
+						const previous = session.instructionBreakpoints.map(entry => ({ ...entry }));
+						const current = previous.filter(entry => {
 							if (entry.instructionReference !== instructionReference) {
 								return true;
 							}
@@ -663,6 +748,22 @@ export class DapSessionManager {
 						);
 						session.instructionBreakpoints = current;
 						responseBreakpoints = response?.breakpoints;
+						rollbacks.push({
+							sessionId: session.id,
+							rollback: () =>
+								this.#serializeBreakpointMutation(session, async () => {
+									await this.#sendRequestWithConfig(
+										session,
+										"setInstructionBreakpoints",
+										{
+											breakpoints: previous,
+										} satisfies DapSetInstructionBreakpointsArguments,
+										undefined,
+										timeoutMs,
+									);
+									session.instructionBreakpoints = previous;
+								}),
+						});
 					},
 					signal,
 				);
@@ -672,6 +773,10 @@ export class DapSessionManager {
 				}
 			}),
 		);
+		const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+		if (failed) {
+			await this.#rollbackBreakpointMutations(rollbacks, failed.reason);
+		}
 
 		if (activeSessionRecord.length === 0) {
 			activeSessionRecord = this.#mapInstructionBreakpoints(this.#pendingInstructionBreakpoints, undefined);
@@ -689,14 +794,16 @@ export class DapSessionManager {
 		timeoutMs: number = 30_000,
 	): Promise<DapDataBreakpointRecord[]> {
 		const sessions = this.#getLiveSessionsForBreakpointSync();
+		const rollbacks: DapBreakpointRollback[] = [];
 		let activeSessionRecord: DapDataBreakpointRecord[] = [];
-		await Promise.all(
+		const results = await Promise.allSettled(
 			sessions.map(async session => {
 				let responseBreakpoints: DapBreakpoint[] | undefined;
 				await this.#serializeBreakpointMutation(
 					session,
 					async () => {
-						const current = session.dataBreakpoints.filter(entry => entry.dataId !== dataId);
+						const previous = session.dataBreakpoints.map(entry => ({ ...entry }));
+						const current = previous.filter(entry => entry.dataId !== dataId);
 						if (op === "add") {
 							current.push({ dataId, accessType, condition, hitCondition });
 							current.sort((left, right) => left.dataId.localeCompare(right.dataId));
@@ -712,6 +819,22 @@ export class DapSessionManager {
 						);
 						session.dataBreakpoints = current;
 						responseBreakpoints = response?.breakpoints;
+						rollbacks.push({
+							sessionId: session.id,
+							rollback: () =>
+								this.#serializeBreakpointMutation(session, async () => {
+									await this.#sendRequestWithConfig(
+										session,
+										"setDataBreakpoints",
+										{
+											breakpoints: previous,
+										} satisfies DapSetDataBreakpointsArguments,
+										undefined,
+										timeoutMs,
+									);
+									session.dataBreakpoints = previous;
+								}),
+						});
 					},
 					signal,
 				);
@@ -721,6 +844,10 @@ export class DapSessionManager {
 				}
 			}),
 		);
+		const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+		if (failed) {
+			await this.#rollbackBreakpointMutations(rollbacks, failed.reason);
+		}
 
 		if (activeSessionRecord.length === 0) {
 			activeSessionRecord = this.#mapDataBreakpoints(this.#pendingDataBreakpoints, undefined);

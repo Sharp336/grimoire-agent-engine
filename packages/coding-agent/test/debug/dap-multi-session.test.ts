@@ -45,6 +45,13 @@ function getSourceBreakpoints(args: unknown): DapSourceBreakpoint[] {
 	});
 }
 
+function getRequestSourcePath(args: unknown): string | undefined {
+	if (!isRecord(args) || !isRecord(args.source)) {
+		return undefined;
+	}
+	return typeof args.source.path === "string" ? args.source.path : undefined;
+}
+
 class FakeDapClient {
 	readonly proc: DapClientState["proc"];
 	readonly #exited = Promise.withResolvers<void>();
@@ -472,6 +479,47 @@ describe("DAP multi-session debugging", () => {
 				}),
 			}),
 		);
+
+		await manager.terminate();
+	});
+
+	it("rolls back live source breakpoints after partial sync failure", async () => {
+		const manager = new DapSessionManager();
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
+		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
+
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		await parentClient.triggerReverseRequest("startDebugging", {
+			request: "attach",
+			configuration: {
+				type: "pwa-node",
+				name: "child-worker",
+			},
+		});
+
+		const bpFile = path.resolve(process.cwd(), "src/partial-sync.ts");
+		childClient.stalledCommands.add("setBreakpoints");
+
+		await expect(manager.setBreakpoint(bpFile, 21, undefined, AbortSignal.timeout(5), 30_000)).rejects.toThrow(
+			"aborted",
+		);
+
+		const parentBreakpointRequests = parentClient.sentRequests.filter(request => {
+			return request.command === "setBreakpoints" && getRequestSourcePath(request.args) === bpFile;
+		});
+		expect(
+			parentBreakpointRequests.map(request => getSourceBreakpoints(request.args).map(entry => entry.line)),
+		).toEqual([[21], []]);
 
 		await manager.terminate();
 	});
