@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { AgentSessionEvent } from "../../session/agent-session";
+import type { CustomMessage } from "../../session/messages";
 import { AutonomousController, type AutonomousSession } from "../controller";
 
 /** Build an `agent_end` event carrying the given turn messages. */
@@ -23,6 +24,28 @@ function assistantActing(stopReason: AssistantMessage["stopReason"]): AssistantM
 		stopReason,
 		content: [{ type: "toolCall", id: "t1", name: "edit", arguments: {} }],
 	} as AssistantMessage;
+}
+
+function autonomousPrompt(): CustomMessage {
+	return {
+		role: "custom",
+		customType: "autonomous-continuation",
+		content: "Continue autonomously",
+		display: false,
+		attribution: "user",
+		timestamp: 0,
+	};
+}
+
+function autolearnPrompt(): CustomMessage {
+	return {
+		role: "custom",
+		customType: "autolearn-nudge",
+		content: "Capture a lesson",
+		display: false,
+		attribution: "user",
+		timestamp: 0,
+	};
 }
 
 interface FakeOptions {
@@ -55,7 +78,7 @@ function setup(options: FakeOptions) {
 		sendCustomMessage: async (message, opts) => {
 			const content = typeof message.content === "string" ? message.content : "";
 			sent.push({ content, triggerTurn: opts?.triggerTurn, deliverAs: opts?.deliverAs });
-			return !queueFollowUps;
+			return !(queueFollowUps || streaming);
 		},
 	};
 	const controller = new AutonomousController({
@@ -67,6 +90,9 @@ function setup(options: FakeOptions) {
 		sent,
 		controller,
 		emit: (event: AgentSessionEvent) => handler?.(event),
+		appendHistory: (message: AgentMessage) => {
+			history.push(message);
+		},
 		setStreaming: (value: boolean) => {
 			streaming = value;
 		},
@@ -170,7 +196,7 @@ describe("AutonomousController loop", () => {
 		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
 		emit(agentEndEvent([assistantActing("stop")])); // working turn -> queue
 		expect(sent).toHaveLength(1);
-		emit(agentEndEvent([])); // --max-time expiry: agent_end with no assistant message
+		emit(agentEndEvent([autonomousPrompt()])); // --max-time expiry after the autonomous prompt: no assistant
 		expect(sent).toHaveLength(1); // no spin (idea/combined would otherwise loop past the deadline)
 		// The failed path clears the autonomous marker, so the next clean no-action
 		// turn re-queues instead of being false-halted as a completed objective.
@@ -182,11 +208,21 @@ describe("AutonomousController loop", () => {
 		const { controller, emit, sent } = setup({ autoNextIdea: true });
 		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false }); // queues first
 		expect(sent).toHaveLength(1);
-		emit(agentEndEvent([])); // deadline expiry: no assistant message
+		emit(agentEndEvent([autonomousPrompt()])); // deadline expiry after the autonomous prompt: no assistant
 		expect(sent).toHaveLength(1); // idea would otherwise loop forever appending continuations
 	});
 
-	it("does not re-queue while a new turn is already streaming", () => {
+	it("queues a continuation behind a turn another controller already started", () => {
+		const { appendHistory, controller, emit, sent, setStreaming } = setup({ autoNextSteps: true });
+		controller.begin({ startupFailed: false });
+		setStreaming(true); // e.g. AutoLearnController.autoContinue started capture from the same agent_end
+		appendHistory(autolearnPrompt());
+		emit(agentEndEvent([assistantActing("stop")]));
+		expect(sent).toHaveLength(1);
+		expect(sent[0]!.deliverAs).toBe("followUp");
+	});
+
+	it("does not queue from a generic stale agent_end while another turn is streaming", () => {
 		const { controller, emit, sent, setStreaming } = setup({ autoNextSteps: true });
 		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
 		setStreaming(true);
@@ -224,7 +260,7 @@ describe("AutonomousController steps completion", () => {
 		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
 		emit(agentEndEvent([assistantActing("stop")])); // queues; next turn is autonomous
 		expect(sent).toHaveLength(1);
-		emit(agentEndEvent([assistant("stop")])); // autonomous turn, no action -> halt
+		emit(agentEndEvent([autonomousPrompt(), assistant("stop")])); // autonomous turn, no action -> halt
 		expect(sent).toHaveLength(1);
 		emit(agentEndEvent([assistantActing("stop")])); // disarmed: no further queue
 		expect(sent).toHaveLength(1);
@@ -239,7 +275,19 @@ describe("AutonomousController steps completion", () => {
 		setQueueFollowUps(false);
 		// The queued follow-up eventually runs; its no-action agent_end must still be
 		// classified autonomous and halt (would re-queue to 2 if !started cleared the marker).
-		emit(agentEndEvent([assistant("stop")]));
+		emit(agentEndEvent([autonomousPrompt(), assistant("stop")]));
+		expect(sent).toHaveLength(1);
+	});
+
+	it("keeps the autonomous marker when the preceding queued turn aborts before draining it", () => {
+		const { controller, emit, sent, setQueueFollowUps } = setup({ autoNextSteps: true });
+		controller.begin({ startupFailed: false });
+		setQueueFollowUps(true);
+		emit(agentEndEvent([assistantActing("stop")])); // queue behind another turn
+		expect(sent).toHaveLength(1);
+		setQueueFollowUps(false);
+		emit(agentEndEvent([assistant("aborted")])); // preceding synthetic turn, no autonomous prompt yet
+		emit(agentEndEvent([autonomousPrompt(), assistant("stop")])); // queued autonomous follow-up finally runs
 		expect(sent).toHaveLength(1);
 	});
 
@@ -253,7 +301,24 @@ describe("AutonomousController steps completion", () => {
 		expect(sent).toHaveLength(1);
 		setStreaming(false);
 		// The real autonomous agent_end must still be classified autonomous and halt.
-		emit(agentEndEvent([assistant("stop")])); // no action -> halt (would queue if the stale event cleared the marker)
+		emit(agentEndEvent([autonomousPrompt(), assistant("stop")])); // no action -> halt (would queue if the stale event cleared the marker)
+		expect(sent).toHaveLength(1);
+	});
+
+	it("ignores earlier synthetic tool activity when checking autonomous completion", () => {
+		const { controller, emit, sent } = setup({ autoNextSteps: true });
+		controller.begin({ startupFailed: false });
+		emit(agentEndEvent([assistantActing("stop")])); // queue -> next turn is autonomous
+		expect(sent).toHaveLength(1);
+		emit(agentEndEvent([assistantActing("stop"), autonomousPrompt(), assistant("stop")]));
+		expect(sent).toHaveLength(1);
+	});
+
+	it("treats no assistant after the autonomous boundary as a deadline halt", () => {
+		const { controller, emit, sent } = setup({ autoNextIdea: true });
+		controller.begin({ startupFailed: false });
+		expect(sent).toHaveLength(1);
+		emit(agentEndEvent([assistantActing("stop"), autonomousPrompt()]));
 		expect(sent).toHaveLength(1);
 	});
 
@@ -268,15 +333,15 @@ describe("AutonomousController steps completion", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true });
 		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
 		emit(agentEndEvent([assistantActing("stop")])); // queue (turn becomes autonomous)
-		emit(agentEndEvent([assistant("aborted")])); // autonomous turn aborted -> must reset latch
+		emit(agentEndEvent([autonomousPrompt(), assistant("aborted")])); // autonomous turn aborted -> must reset latch
 		emit(agentEndEvent([assistant("stop")])); // manual turn, no action -> must NOT halt
 		expect(sent).toHaveLength(2);
 	});
 
 	it("idea mode never halts on an action-free turn (endless by design)", () => {
 		const { controller, emit, sent } = setup({ autoNextIdea: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false }); // queues first
-		emit(agentEndEvent([assistant("stop")])); // autonomous, no action -> still continues
+		controller.begin({ startupFailed: false }); // queues first
+		emit(agentEndEvent([autonomousPrompt(), assistant("stop")])); // autonomous, no action -> still continues
 		expect(sent).toHaveLength(2);
 	});
 
@@ -284,7 +349,7 @@ describe("AutonomousController steps completion", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true, autoNextIdea: true });
 		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
 		expect(sent[0]!.content).toContain("fully autonomous");
-		emit(agentEndEvent([assistant("stop")])); // combined never halts
+		emit(agentEndEvent([autonomousPrompt(), assistant("stop")])); // combined never halts
 		expect(sent).toHaveLength(2);
 	});
 });

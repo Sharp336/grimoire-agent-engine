@@ -28,9 +28,9 @@
  * clear the live flag mid-turn.
  *
  * Completion (steps mode only): a pure-steps autonomous continuation that takes
- * no action (no tool calls) means the objective is done, so the controller
- * disarms instead of re-queuing forever. Idea and combined modes are endless by
- * design ("until interrupted") and never auto-halt.
+ * no action after its continuation prompt (no tool calls) means the objective is
+ * done, so the controller disarms instead of re-queuing forever.
+ * Idea and combined modes are endless by design ("until interrupted") and never auto-halt.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -40,6 +40,8 @@ import combinedPrompt from "./combined.md" with { type: "text" };
 import ideaPrompt from "./next-idea.md" with { type: "text" };
 import stepsPrompt from "./next-steps.md" with { type: "text" };
 
+const AUTONOMOUS_CONTINUATION_MESSAGE_TYPE = "autonomous-continuation";
+const AUTOLEARN_NUDGE_MESSAGE_TYPE = "autolearn-nudge";
 const AUTONOMOUS_STEPS = stepsPrompt.trim();
 const AUTONOMOUS_IDEA = ideaPrompt.trim();
 const AUTONOMOUS_COMBINED = combinedPrompt.trim();
@@ -121,19 +123,35 @@ export class AutonomousController {
 	}
 
 	#onAgentEnd(event: Extract<AgentSessionEvent, { type: "agent_end" }>): void {
+		// Locate our continuation prompt before classifying the turn: agent_end can
+		// cover multiple drained queued turns, so an auto-learn capture before the
+		// autonomous follow-up must not mask the follow-up's failure/deadline state.
+		const autonomousPromptIndex = lastAutonomousPromptIndex(event.messages);
+		// If a queued autonomous turn is pending and this agent_end does not contain
+		// that autonomous prompt, the event belongs to another turn (for example an
+		// auto-learn capture that aborted before draining follow-ups). Leave the
+		// autonomous marker intact for the follow-up's eventual agent_end.
+		if (this.#pendingAutonomousTurn && autonomousPromptIndex === -1) return;
+		const autonomousPayloadStartIndex = autonomousPromptIndex === -1 ? 0 : autonomousPromptIndex + 1;
 		// Record the outcome on every turn (even suppressed ones) so begin() can
 		// honor a failed startup turn.
-		const failed = lastAssistantTurnFailed(event.messages);
+		const failed = lastAssistantTurnFailed(event.messages, autonomousPayloadStartIndex);
 		this.#lastTurnFailed = failed;
 		// Suppressed until begin() arms us after startup drains. Leave
 		// #turnStartedInPlanOrGoal set so begin() can read the last startup turn's
 		// mode (a goal/plan completion can clear the live flag before agent_end).
 		if (!this.#armed) return;
-		// A superseded agent_end: a fresh turn is already streaming. Don't consume
-		// the per-turn latches here — the real agent_end for the in-flight turn is
-		// still coming, and clearing #pendingAutonomousTurn now would make that turn
-		// look non-autonomous (see event-controller's #handleAgentEnd for the guard).
-		if (this.#session.isStreaming) return;
+		// If some other turn is already streaming, only queue behind the known
+		// AutoLearn capture turn. Generic in-flight turns can be delayed/stale
+		// agent_end delivery after a real new user turn started; those must not
+		// synthesize an autonomous follow-up.
+		if (
+			this.#session.isStreaming &&
+			!this.#pendingAutonomousTurn &&
+			!isAutoLearnCaptureInFlight(this.#session.messages)
+		) {
+			return;
+		}
 		// Consume the per-turn latches before the failed/plan-goal early returns: an
 		// aborted autonomous turn must clear #pendingAutonomousTurn so the next
 		// manual turn isn't misclassified, and a stale start-mode latch can't carry
@@ -151,8 +169,10 @@ export class AutonomousController {
 		// Pure-steps completion: an autonomous continuation that performed no
 		// action means the objective is done — disarm rather than loop forever.
 		// Only counts for turns the controller queued, so a user's question
-		// (a non-autonomous turn) can't halt the loop.
-		if (wasAutonomous && this.#stepsOnly && !turnHadToolActivity(event.messages)) {
+		// (a non-autonomous turn) can't halt the loop. When the autonomous prompt
+		// ran as a queued follow-up behind another synthetic turn, ignore tool
+		// activity before our prompt boundary.
+		if (wasAutonomous && this.#stepsOnly && !turnHadToolActivity(event.messages, autonomousPayloadStartIndex)) {
 			this.#armed = false;
 			return;
 		}
@@ -193,7 +213,7 @@ export class AutonomousController {
 		this.#session
 			.sendCustomMessage(
 				{
-					customType: "autonomous-continuation",
+					customType: AUTONOMOUS_CONTINUATION_MESSAGE_TYPE,
 					content: this.#prompt,
 					display: false,
 					attribution: "user",
@@ -216,9 +236,11 @@ export class AutonomousController {
  * deadline. Read from the public event payload so the controller needs no
  * private session state.
  */
-function lastAssistantTurnFailed(messages: readonly AgentMessage[] | undefined): boolean {
-	if (!messages || messages.length === 0) return true;
-	for (let i = messages.length - 1; i >= 0; i--) {
+function lastAssistantTurnFailed(messages: readonly AgentMessage[] | undefined, startIndex: number): boolean {
+	if (!messages) return true;
+	const firstIndex = startIndex < 0 ? 0 : startIndex;
+	if (firstIndex >= messages.length) return true;
+	for (let i = messages.length - 1; i >= firstIndex; i--) {
 		const message = messages[i]!;
 		if (message.role === "assistant") {
 			return message.stopReason === "aborted" || message.stopReason === "error";
@@ -227,15 +249,44 @@ function lastAssistantTurnFailed(messages: readonly AgentMessage[] | undefined):
 	return true;
 }
 
+/** Return the last autonomous continuation prompt in an agent_end payload, if present. */
+function lastAutonomousPromptIndex(messages: readonly AgentMessage[] | undefined): number {
+	if (!messages) return -1;
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i]!;
+		if (message.role === "custom" && message.customType === AUTONOMOUS_CONTINUATION_MESSAGE_TYPE) {
+			return i;
+		}
+	}
+	return -1;
+}
+
 /**
- * True when the turn performed any action — an assistant tool call or a tool
- * result. `agent_end` carries the turn's own messages, so an empty result means
- * the agent responded with prose only (no next step), the steps-mode completion
- * signal.
+ * True when the live streaming turn was started by AutoLearn's synthetic
+ * capture prompt. Scan backward past assistant/tool-result messages so a capture
+ * that is already working still resolves to its initiating custom prompt.
  */
-function turnHadToolActivity(messages: readonly AgentMessage[] | undefined): boolean {
+function isAutoLearnCaptureInFlight(messages: readonly AgentMessage[]): boolean {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i]!;
+		if (message.role === "assistant" || message.role === "toolResult") continue;
+		return message.role === "custom" && message.customType === AUTOLEARN_NUDGE_MESSAGE_TYPE;
+	}
+	return false;
+}
+
+/**
+ * True when the selected message window performed any action — an assistant tool
+ * call or a tool result. `agent_end` can include multiple drained queued turns;
+ * `startIndex` lets steps-mode completion consider only messages after this
+ * controller's autonomous continuation prompt, so a preceding synthetic turn
+ * (for example auto-learn capture) cannot mask a no-action autonomous follow-up.
+ */
+function turnHadToolActivity(messages: readonly AgentMessage[] | undefined, startIndex: number): boolean {
 	if (!messages) return false;
-	for (const message of messages) {
+	const firstIndex = startIndex < 0 ? 0 : startIndex;
+	for (let i = firstIndex; i < messages.length; i++) {
+		const message = messages[i]!;
 		if (message.role === "toolResult") return true;
 		if (message.role === "assistant") {
 			for (const block of message.content) {
