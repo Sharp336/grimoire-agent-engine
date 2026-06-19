@@ -9,6 +9,20 @@
 ### Fixed
 
 - Fixed periodic shake running after compaction pruned the trailing assistant and recovery failed, which would re-introduce the failed/truncated assistant into the next prompt ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
+## [16.1.1] - 2026-06-19
+
+### Changed
+
+- Migrated legacy macOS power settings to a single sleep prevention enum
+- Defaulted `display.cacheMissMarker` setting to `false` to suppress the cache-miss marker by default.
+- Replaced the four separate `power.preventIdleSleep`, `power.preventSystemSleep`, `power.declareUserActive`, and `power.preventDisplaySleep` boolean settings with a single cumulative `power.sleepPrevention` enum (`off` → `idle` → `display` → `system`). Each level adds the caffeinate flags of all lower levels. Existing configs are migrated automatically.
+
+### Fixed
+
+- Cache-miss marker no longer fires on providers with implicit, best-effort prompt caching (Google/Gemini, OpenAI, Fireworks). Those report `cacheWrite: 0` and drop `cacheRead` to zero intermittently as routine propagation noise that self-heals the next turn. Only explicit, prefix-controlled caches (Anthropic/Bedrock `cache_control`), which re-create the prefix on a cold turn as `cacheWrite > 0`, now surface a marker — where a zero `cacheRead` genuinely means the prefix broke.
+- Fixed advisor dependent settings staying visible while `advisor.enabled` is off ([#3027](https://github.com/can1357/oh-my-pi/issues/3027)).
+- Fixed LSP servers that dynamically register capabilities, including Expert, hanging semantic requests after `client/registerCapability` was rejected ([#3029](https://github.com/can1357/oh-my-pi/issues/3029)).
+
 ## [16.1.0] - 2026-06-19
 
 ### Added
