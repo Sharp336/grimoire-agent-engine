@@ -340,6 +340,9 @@
 ### Removed
 
 - Removed the built-in `render_mermaid` tool and its `renderMermaid.enabled` setting, so it can no longer be invoked directly
+### Fixed
+
+- Fixed actionable URLs in turn-ending provider errors being truncated out of view. The pinned error banner and the inline transcript error block now wrap long error messages instead of clipping each line at a fixed width, so a Cloud Code Assist account-verification link (`Account verification required … Visit https://…`) is shown in full rather than cut to `Visit https://acco…`.
 
 ## [16.0.2] - 2026-06-16
 

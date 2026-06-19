@@ -10,7 +10,7 @@ import * as path from "node:path";
 import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { getKeybindings, replaceTabs, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { pluralize } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { settings } from "../config/settings";
@@ -97,6 +97,49 @@ export function expandKeyHint(): string {
 export function getPreviewLines(text: string, maxLines: number, maxLineLen: number, ellipsis?: Ellipsis): string[] {
 	const lines = text.split("\n").filter(l => l.trim());
 	return lines.slice(0, maxLines).map(l => truncateToWidth(l.trim(), maxLineLen, ellipsis));
+}
+
+/**
+ * Like {@link getPreviewLines}, but WRAPS over-long logical lines across
+ * multiple output lines instead of hard-truncating each at `wrapWidth`. Used by
+ * error renderers where embedded content — e.g. an account-verification URL —
+ * must stay intact even when the whole message is one long line that would
+ * otherwise be severed mid-token. Output is still capped at `maxLines`; the last
+ * retained line gets a trailing ellipsis only when wrapped content genuinely
+ * overflows the budget.
+ */
+export function getWrappedPreviewLines(
+	text: string,
+	maxLines: number,
+	wrapWidth: number,
+	ellipsis?: Ellipsis,
+): string[] {
+	const out: string[] = [];
+	let overflowed = false;
+	// A single logical line never yields more than `maxLines` retained pieces, so
+	// cap its length before wrapping. Without this, a pathological one-line body —
+	// e.g. a proxy 502 whose body is a full HTML page — would be wrapped in full
+	// (one substring per ~wrapWidth chars) only to discard all but the first
+	// `maxLines` pieces. The +1 keeps just enough input to still detect overflow.
+	const maxLineChars = (maxLines + 1) * wrapWidth;
+	for (const rawLine of text.split("\n")) {
+		const trimmed = rawLine.trim();
+		if (!trimmed) continue;
+		const line = trimmed.length > maxLineChars ? trimmed.slice(0, maxLineChars) : trimmed;
+		for (const piece of wrapTextWithAnsi(line, wrapWidth)) {
+			if (out.length >= maxLines) {
+				overflowed = true;
+				break;
+			}
+			out.push(piece);
+		}
+		if (overflowed) break;
+	}
+	if (overflowed && out.length > 0) {
+		// Force an overflow marker even when the final wrapped piece is short.
+		out[out.length - 1] = truncateToWidth(`${out[out.length - 1]} …`, wrapWidth, ellipsis);
+	}
+	return out;
 }
 
 // =============================================================================

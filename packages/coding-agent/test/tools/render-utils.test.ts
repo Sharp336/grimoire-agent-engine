@@ -12,6 +12,8 @@ import {
 	formatExpandHint,
 	formatParseErrors,
 	formatScreenshot,
+	getPreviewLines,
+	getWrappedPreviewLines,
 	shortenPath,
 	truncateDiffByHunk,
 } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
@@ -94,7 +96,7 @@ describe("formatScreenshot", () => {
 				savedByteLength: 2048,
 				dest: filePath,
 				resized,
-			}),
+			}).map(line => line.replaceAll("\\", "/")),
 		).toEqual([
 			"Screenshot captured",
 			"Saved: image/png (2.00 KB) to ~/screenshots/capture.png",
@@ -333,5 +335,42 @@ describe("formatExpandHint / expandKeyHint", () => {
 		setKeybindings(KeybindingsManager.inMemory());
 		expect(formatExpandHint(plainTheme, true, true)).toBe("");
 		expect(formatExpandHint(plainTheme, false, false)).toBe("");
+	});
+});
+
+describe("getWrappedPreviewLines", () => {
+	// Mirrors the Cloud Code Assist account-verification error: a single long
+	// line whose actionable URL sits well past the per-line width.
+	const validationUrl =
+		"https://accounts.google.com/signin/continue?sarp=1&scc=1&plt=AKgnsbt0123456789abcdefghijklmnopqrstuvwxyzTOKEN";
+	const message = `Cloud Code Assist API error (403): Account verification required for user@example.com. Visit ${validationUrl} to continue, then retry your request.`;
+
+	it("keeps an embedded URL intact instead of truncating it mid-token", () => {
+		const wrapped = getWrappedPreviewLines(message, 6, 110);
+		expect(wrapped.join("")).toContain(validationUrl);
+		// Contrast: the truncating helper severs the URL on the single clipped line.
+		expect(getPreviewLines(message, 6, 110).join("")).not.toContain(validationUrl);
+	});
+
+	it("caps output at maxLines and marks the overflow with an ellipsis", () => {
+		const long = `${"x".repeat(400)} ${"y".repeat(400)}`;
+		const wrapped = getWrappedPreviewLines(long, 3, 40);
+		expect(wrapped).toHaveLength(3);
+		expect(wrapped[wrapped.length - 1].endsWith("…")).toBe(true);
+	});
+
+	it("returns content verbatim when it fits within the budget", () => {
+		expect(getWrappedPreviewLines("short error", 6, 110)).toEqual(["short error"]);
+	});
+
+	it("bounds work on a pathological single-line body while preserving early content", () => {
+		// A proxy 502 can return a multi-megabyte single-line HTML body. The helper
+		// must not wrap the whole thing just to keep `maxLines`; the leading URL
+		// must still survive and the output stays capped with an overflow marker.
+		const giant = `Visit ${validationUrl} to continue. ${"x".repeat(2_000_000)}`;
+		const wrapped = getWrappedPreviewLines(giant, 6, 110);
+		expect(wrapped).toHaveLength(6);
+		expect(wrapped.join("")).toContain(validationUrl);
+		expect(wrapped[wrapped.length - 1].endsWith("…")).toBe(true);
 	});
 });

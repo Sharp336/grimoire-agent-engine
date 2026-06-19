@@ -1,10 +1,16 @@
 import { Container, Spacer, Text } from "@oh-my-pi/pi-tui";
-import { getPreviewLines, TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import { getWrappedPreviewLines, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
 import { DynamicBorder } from "./dynamic-border";
 
-/** Max lines of the error message shown in the pinned banner. */
-const MAX_BANNER_LINES = 3;
+/**
+ * Max lines of the error message shown in the pinned banner. Lines wrap rather
+ * than truncate (see {@link getWrappedPreviewLines}) so an actionable URL — e.g.
+ * a Cloud Code Assist account-verification link — is never severed mid-token;
+ * the cap is generous enough to fit a long URL while still bounding a runaway
+ * error body.
+ */
+const MAX_BANNER_LINES = 6;
 
 /**
  * A persistent error banner pinned above the editor. Unlike the transcript
@@ -16,7 +22,7 @@ const MAX_BANNER_LINES = 3;
 export class ErrorBannerComponent extends Container {
 	constructor(message: string) {
 		super();
-		const lines = getPreviewLines(message, MAX_BANNER_LINES, TRUNCATE_LENGTHS.LINE);
+		const lines = getWrappedPreviewLines(message, MAX_BANNER_LINES, TRUNCATE_LENGTHS.LINE);
 		if (lines.length === 0) {
 			lines.push("Unknown error");
 		}

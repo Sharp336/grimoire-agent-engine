@@ -204,7 +204,7 @@ describe("ErrorBannerComponent", () => {
 		const banner = new ErrorBannerComponent(huge);
 		const lines = Bun.stripANSI(banner.render(120).join("\n")).split("\n");
 		const detailLines = lines.filter(line => line.includes("error detail line"));
-		expect(detailLines.length).toBeLessThanOrEqual(3);
+		expect(detailLines.length).toBeLessThanOrEqual(6);
 		expect(detailLines.length).toBeGreaterThan(0);
 	});
 });

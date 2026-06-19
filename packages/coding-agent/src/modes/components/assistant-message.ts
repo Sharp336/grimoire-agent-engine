@@ -3,16 +3,16 @@ import { Container, Image, type ImageBudget, ImageProtocol, Markdown, Spacer, TE
 import type { AssistantThinkingRenderer } from "../../extensibility/extensions/types";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { resolveAbortLabel, shouldRenderAbortReason } from "../../session/messages";
-import { getPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
+import { getWrappedPreviewLines, resolveImageOptions, TRUNCATE_LENGTHS } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { type CacheInvalidation, CacheInvalidationMarkerComponent } from "./cache-invalidation-marker";
 
 /**
  * Max lines of a turn-ending provider error rendered inline in the transcript.
  * Bounds pathological error bodies — e.g. a proxy 502 whose body is a full HTML
- * page — so they can't flood the scrollback. Blank lines are dropped and each
- * line is width-truncated by {@link getPreviewLines}. Full text is still kept in
- * the persisted session.
+ * page — so they can't flood the scrollback. Blank lines are dropped and over-
+ * long lines are wrapped (not truncated) by {@link getWrappedPreviewLines} so an
+ * embedded URL survives intact. Full text is still kept in the persisted session.
  */
 const MAX_TRANSCRIPT_ERROR_LINES = 8;
 
@@ -287,12 +287,13 @@ export class AssistantMessageComponent extends Container {
 
 	/**
 	 * Render a turn-ending provider error inline. Drops blank lines, clamps the
-	 * line count to {@link MAX_TRANSCRIPT_ERROR_LINES}, and width-truncates each
-	 * line so a pathological body — e.g. the HTML page a proxy returns on a 502 —
-	 * can't flood the transcript. Mirrors {@link ErrorBannerComponent}.
+	 * line count to {@link MAX_TRANSCRIPT_ERROR_LINES}, and wraps over-long lines
+	 * so a pathological body — e.g. the HTML page a proxy returns on a 502 —
+	 * can't flood the transcript while an actionable URL stays intact. Mirrors
+	 * {@link ErrorBannerComponent}.
 	 */
 	#appendErrorBlock(message: string): void {
-		const lines = getPreviewLines(message, MAX_TRANSCRIPT_ERROR_LINES, TRUNCATE_LENGTHS.LINE);
+		const lines = getWrappedPreviewLines(message, MAX_TRANSCRIPT_ERROR_LINES, TRUNCATE_LENGTHS.LINE);
 		if (lines.length === 0) lines.push("Unknown error");
 		this.#contentContainer.addChild(new Spacer(1));
 		this.#contentContainer.addChild(new Text(theme.fg("error", `Error: ${lines[0]}`), 1, 0));
