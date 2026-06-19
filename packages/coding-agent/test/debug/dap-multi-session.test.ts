@@ -61,6 +61,7 @@ class FakeDapClient {
 	readonly #reverseHandlers = new Map<string, DapReverseRequestHandler>();
 	#alive = true;
 	emitInitialStopped = true;
+	supportsConfigurationDoneRequest = true;
 	readonly commandDelayMs = new Map<string, number>();
 	readonly stalledCommands = new Set<string>();
 	readonly sentRequests: SentDapRequest[] = [];
@@ -91,7 +92,7 @@ class FakeDapClient {
 				this.#emit("stopped", { reason: "entry", threadId: 1 });
 			}
 		});
-		return { supportsConfigurationDoneRequest: true };
+		return { supportsConfigurationDoneRequest: this.supportsConfigurationDoneRequest };
 	}
 
 	async sendRequest<TBody = unknown>(command: string, args?: unknown, signal?: AbortSignal): Promise<TBody> {
@@ -297,6 +298,39 @@ describe("DAP multi-session debugging", () => {
 		expect(manager.listSessions().length).toBe(0);
 		expect(parentClient.isAlive()).toBe(false);
 		expect(childClient.isAlive()).toBe(false);
+	});
+
+	it("applies pending breakpoints when an adapter does not use configurationDone", async () => {
+		const manager = new DapSessionManager();
+		const client = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		client.supportsConfigurationDoneRequest = false;
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => client as unknown as DapClient);
+
+		const bpFile = path.resolve(process.cwd(), "src/no-configuration-done.ts");
+		await manager.setBreakpoint(bpFile, 42);
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		expect(client.sentRequests).toContainEqual(
+			expect.objectContaining({
+				command: "setBreakpoints",
+				args: expect.objectContaining({
+					source: expect.objectContaining({ path: bpFile }),
+					breakpoints: expect.arrayContaining([expect.objectContaining({ line: 42 })]),
+				}),
+			}),
+		);
+		expect(client.sentRequests).not.toContainEqual(
+			expect.objectContaining({
+				command: "configurationDone",
+			}),
+		);
+
+		await manager.terminate();
 	});
 
 	it("serializes initial child breakpoint propagation with live source mutations", async () => {

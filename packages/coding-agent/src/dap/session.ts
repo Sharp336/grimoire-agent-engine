@@ -1613,7 +1613,11 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<void> {
-		if (!childSession.needsConfigurationDone || childSession.configurationDoneSent) {
+		if (childSession.configurationDoneSent) {
+			return;
+		}
+		if (!childSession.needsConfigurationDone) {
+			await this.#applyPendingBreakpointsToSession(childSession, signal, timeoutMs);
 			return;
 		}
 		if (!childSession.initializedSeen) {
@@ -1883,7 +1887,11 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<void> {
-		if (!session.needsConfigurationDone || session.configurationDoneSent) {
+		if (session.configurationDoneSent) {
+			return;
+		}
+		if (!session.needsConfigurationDone) {
+			await this.#applyPendingBreakpointsToSession(session, signal, timeoutMs);
 			return;
 		}
 		if (!session.initializedSeen) {
