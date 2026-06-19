@@ -523,6 +523,7 @@ memory:
 | `compaction.keepRecentTokens` | number | `20000` | Recent tokens always preserved. |
 | `compaction.remoteEnabled` | boolean | `true` | Allow remote compaction service. |
 | `compaction.autoContinue` | boolean | `true` | Continue automatically after compaction. |
+| `compaction.toolResultCapKb` | number | `0` | When `> 0`, truncate old tool-result text blocks beyond this KB limit in-place each turn (keeping the 3 most-recent full). Reduces retained session state. `0` = disabled. |
 | `memory.backend` | enum | `off` | `off`, `local`, `hindsight`, `mnemopi`. Each backend has its own `hindsight.*` / `mnemopi.*` / `memories.*` tuning keys. |
 | `autolearn.enabled` | boolean | `false` | Experimental: after the agent stops, nudge it to capture lessons to memory and create/enhance isolated managed skills under `~/.omp/agent/managed-skills`. Enables the `manage_skill` tool (and `learn` when a memory backend is active). |
 | `autolearn.autoContinue` | boolean | `false` | When `autolearn.enabled`, auto-run one capture turn at stop (uses extra tokens). Off = a passive reminder rides your next turn. |

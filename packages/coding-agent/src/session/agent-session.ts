@@ -1250,6 +1250,8 @@ export class AgentSession {
 	#reloadSshTool: (() => Promise<AgentTool | null>) | undefined;
 	#disconnectOwnedMcpManager: (() => Promise<void>) | undefined;
 	#requestedToolNames: ReadonlySet<string> | undefined;
+	/** Token savings from the most recent #applyRetentionCap run; consumed by #checkCompaction's threshold path. */
+	#retentionCapTokensSaved: number = 0;
 	#baseSystemPrompt: string[];
 	/**
 	 * Signature of the (toolNames, tool descriptions) tuple passed to the most
@@ -2801,7 +2803,7 @@ export class AgentSession {
 			this.#resolveRetry();
 
 			this.#applyRetentionCap();
-		const compactionTask = this.#checkCompaction(msg);
+			const compactionTask = this.#checkCompaction(msg);
 			this.#trackPostPromptTask(compactionTask);
 			const compactionResult = await compactionTask;
 			// Check for incomplete todos only after a final assistant stop, not intermediate tool-use turns.
@@ -7369,7 +7371,6 @@ export class AgentSession {
 		const planMatcher = createPlanReadMatcher(() => this.#planReferencePath);
 		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
 	}
-
 	/**
 	 * Lightweight in-place retention cap: truncates old tool-result text blocks
 	 * that exceed the configured KB limit, keeping the 3 most-recent results full.
@@ -7377,14 +7378,21 @@ export class AgentSession {
 	 * NOT call rewriteEntries/replaceMessages — it mutates the shared message
 	 * objects in-place (agent.state.messages and sessionManager branch entries
 	 * share the same references), so there is no rebuild overhead.
+	 *
+	 * Stores the estimated token savings on #retentionCapTokensSaved so the
+	 * threshold path in #checkCompaction can deduct them from the usage-derived
+	 * context estimate; otherwise compaction could over-trigger on a context
+	 * that the cap has already shrunk below threshold.
 	 */
 	#applyRetentionCap(): void {
+		this.#retentionCapTokensSaved = 0;
 		const capKb = this.settings.getGroup("compaction").toolResultCapKb;
 		if (!capKb || capKb <= 0) return;
 		const capBytes = capKb * 1024;
 		const keepCount = 3;
 		const messages = this.agent.state.messages;
 		let toolResultCount = 0;
+		let bytesSaved = 0;
 		for (let i = messages.length - 1; i >= 0; i--) {
 			const msg = messages[i];
 			if (msg.role !== "toolResult" || !Array.isArray(msg.content)) continue;
@@ -7392,10 +7400,14 @@ export class AgentSession {
 			if (toolResultCount <= keepCount) continue;
 			for (const block of msg.content) {
 				if (block.type === "text" && block.text.length > capBytes) {
-					block.text = `[truncated — ${block.text.length} bytes]`;
+					const notice = `[truncated — ${block.text.length} bytes]`;
+					bytesSaved += block.text.length - notice.length;
+					block.text = notice;
 				}
 			}
 		}
+		// 4 chars/token matches the estimate used by compaction's prune savings.
+		this.#retentionCapTokensSaved = Math.ceil(bytesSaved / 4);
 	}
 
 	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
@@ -8237,6 +8249,13 @@ export class AgentSession {
 		}
 		if (pruneResult) {
 			contextTokens = Math.max(0, contextTokens - pruneResult.tokensSaved);
+		}
+		// Deduct the in-place retention cap's savings (set by #applyRetentionCap)
+		// so threshold compaction reflects the already-shrunk context. Not reset
+		// here — the pre-prompt #checkCompaction call also needs the savings.
+		// Cleared naturally on the next #applyRetentionCap run.
+		if (this.#retentionCapTokensSaved > 0) {
+			contextTokens = Math.max(0, contextTokens - this.#retentionCapTokensSaved);
 		}
 		if (shouldCompact(contextTokens, contextWindow, compactionSettings)) {
 			// Try promotion first — if a larger model is available, switch instead of compacting

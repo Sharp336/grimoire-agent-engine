@@ -87,11 +87,11 @@
 - Fixed LSP servers that dynamically register capabilities, including Expert, hanging semantic requests after `client/registerCapability` was rejected ([#3029](https://github.com/can1357/oh-my-pi/issues/3029)).
 ### Added
 
-- Added `compaction.toolResultCapKb` setting: when set above 0, truncates old tool-result text blocks beyond the specified KB limit in-place each turn (keeping the 3 most-recent results full). Reduces peak JS-heap usage by ~11% and retained session state by ~95% in long sessions with large tool outputs. Disabled by default (0). The cap mutates shared message objects directly — no `rewriteEntries`/`replaceMessages` rebuild overhead.
+- Added `compaction.toolResultCapKb` setting: when set above 0, truncates old tool-result text blocks beyond the specified KB limit in-place each turn (keeping the 3 most-recent results full). Reduces retained session state in long sessions with large tool outputs. Disabled by default (0). The cap mutates shared message objects directly — no `rewriteEntries`/`replaceMessages` rebuild overhead, and its estimated savings are deducted from the compaction threshold so it does not over-trigger.
 
 ### Changed
 
-- Lazy-loaded the `task` tool module (18MB of subagent machinery) so it only loads when the agent actually spawns a subagent, not on every session startup
+- Redirected `collab/host.ts` and `modes/session-observer-registry.ts` imports from the heavy `../task` barrel to the lightweight `../task/types` module, removing two eager import paths into the 18MB subagent machinery (MCPManager, model-resolver, theme, worktree isolation) for sessions that never spawn a subagent.
 
 ## [16.1.0] - 2026-06-19
 

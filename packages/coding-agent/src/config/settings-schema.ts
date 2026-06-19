@@ -1823,7 +1823,8 @@ export const SETTINGS_SCHEMA = {
 			tab: "context",
 			group: "Compaction",
 			label: "Tool Result Cap (KB)",
-			description: "Truncate old tool-result text blocks beyond this many KB, keeping the 3 most recent full. 0 = disabled. Reduces memory for long sessions.",
+			description:
+				"Truncate old tool-result text blocks beyond this many KB, keeping the 3 most recent full. 0 = disabled. Reduces memory for long sessions.",
 		},
 	},
 
