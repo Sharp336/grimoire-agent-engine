@@ -2727,6 +2727,10 @@ export class AgentSession {
 			if (!compactionResult.tailPruned) {
 				// Periodic shake — independent of compaction strategy/auto-compaction
 				await this.#runPeriodicShake();
+			} else {
+				// Consume the due counter so the next normal turn doesn't immediately
+				// fire shake and reintroduce the pruned assistant via state rebuild.
+				this.#shakeToolCallCounter = 0;
 			}
 			// Check for incomplete todos only after a final assistant stop, not intermediate tool-use turns.
 			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
@@ -5954,6 +5958,7 @@ export class AgentSession {
 		this.#memory.rekeyForCurrentSessionId();
 		await this.#memory.resetContextForNewTranscript();
 		this.#pendingNextTurnMessages = [];
+		this.#shakeToolCallCounter = 0;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
@@ -6055,6 +6060,7 @@ export class AgentSession {
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
 		await this.#memory.resetContextForNewTranscript();
+		this.#shakeToolCallCounter = 0;
 
 		// Emit session_switch event with reason "fork" to hooks
 		if (this.#extensionRunner) {
@@ -7461,6 +7467,7 @@ export class AgentSession {
 				suppressContinuation,
 			);
 			if (outcome !== "fallback") return outcome;
+
 			fallbackFromShake = true;
 		}
 		// "overflow" and "incomplete" force inline execution because they are recovery
@@ -8780,6 +8787,7 @@ export class AgentSession {
 
 		this.agent.clearAllQueues();
 		this.#pendingNextTurnMessages = [];
+		this.#shakeToolCallCounter = 0;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		try {
@@ -8998,6 +9006,7 @@ export class AgentSession {
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
+		this.#shakeToolCallCounter = 0;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		await this.#bash.flushPending();
