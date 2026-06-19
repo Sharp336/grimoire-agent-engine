@@ -336,6 +336,43 @@ describe("DAP multi-session debugging", () => {
 		);
 	});
 
+	it("restores stopped state when continue cannot resolve a thread", async () => {
+		const manager = new DapSessionManager();
+		const adapter: DapResolvedAdapter = {
+			...TEST_ADAPTER,
+			name: "generic-debug-adapter",
+		};
+		const client = new FakeDapClient(adapter, process.cwd());
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => client as unknown as DapClient);
+
+		await manager.launch({
+			adapter,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		client.emitEvent("stopped", { reason: "breakpoint" });
+		expect(manager.getActiveSession()).toMatchObject({
+			status: "stopped",
+			stopReason: "breakpoint",
+		});
+
+		await expect(manager.continue(undefined, 10)).rejects.toThrow("Debugger reported no threads.");
+
+		expect(manager.getActiveSession()).toMatchObject({
+			status: "stopped",
+			stopReason: "breakpoint",
+		});
+		expect(client.sentRequests).not.toContainEqual(
+			expect.objectContaining({
+				command: "continue",
+			}),
+		);
+
+		await manager.terminate();
+	});
+
 	it("disposes the session tree when termination requests time out", async () => {
 		const manager = new DapSessionManager();
 

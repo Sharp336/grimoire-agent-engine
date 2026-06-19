@@ -1241,6 +1241,10 @@ export class DapSessionManager {
 		// js-debug root launcher sessions may have no threads while worker child
 		// sessions are still being registered via startDebugging. The global waiter
 		// must already be armed when that child stop event arrives.
+		const previousStatus = session.status;
+		const previousStop = { ...session.stop };
+		const previousStackFrames = [...session.lastStackFrames];
+		const previousThreads = [...session.threads];
 		session.stop = {};
 		session.lastStackFrames = [];
 		session.status = "running";
@@ -1253,6 +1257,10 @@ export class DapSessionManager {
 			if (this.#shouldWaitForChildStopAfterThreadlessContinue(session, error)) {
 				return this.#awaitStopOutcome(session, outcomePromise, signal, timeoutMs);
 			}
+			session.status = previousStatus;
+			session.stop = previousStop;
+			session.lastStackFrames = previousStackFrames;
+			session.threads = previousThreads;
 			throw error;
 		}
 
