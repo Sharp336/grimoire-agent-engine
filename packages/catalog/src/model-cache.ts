@@ -3,6 +3,7 @@
  * Replaces per-provider JSON files with a single cache.db.
  */
 import { Database } from "bun:sqlite";
+import * as fs from "node:fs";
 import { getModelDbPath } from "@oh-my-pi/pi-utils";
 import type { Api, Model, ModelSpec } from "./types";
 
@@ -45,6 +46,36 @@ interface CacheEntry<TApi extends Api = Api> {
 
 let sharedDb: Database | null = null;
 let sharedDbPath: string | null = null;
+
+/**
+ * Close the shared model-cache DB, checkpointing its WAL first so the
+ * -wal/-shm sidecar files are released. On Windows, an unclosed shared DB
+ * keeps these files locked, causing EBUSY when tests clean up temp dirs.
+ */
+export function closeModelCacheDb(): void {
+	if (sharedDb) {
+		try {
+			sharedDb.run("PRAGMA wal_checkpoint(TRUNCATE)");
+		} catch {
+			// best-effort — checkpoint may fail if the DB is already in use
+		}
+		const dbPath = sharedDbPath;
+		sharedDb.close();
+		sharedDb = null;
+		sharedDbPath = null;
+		// On Windows, bun:sqlite's close does not delete the -wal/-shm sidecar
+		// files. Delete them so fs.rmSync on the parent directory doesn't hit
+		// EBUSY during test cleanup.
+		if (dbPath && process.platform === "win32") {
+			try {
+				fs.unlinkSync(`${dbPath}-wal`);
+			} catch {}
+			try {
+				fs.unlinkSync(`${dbPath}-shm`);
+			} catch {}
+		}
+	}
+}
 
 function getDb(dbPath?: string): Database {
 	const resolvedPath = dbPath ?? getModelDbPath();

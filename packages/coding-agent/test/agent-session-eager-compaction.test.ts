@@ -4,6 +4,7 @@ import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-cor
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { TextContent } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { closeModelCacheDb } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -243,6 +244,7 @@ describe("AgentSession eager prelude re-injection after compaction", () => {
 		cleanups.push(async () => {
 			await session.dispose();
 			authStorage.close();
+			closeModelCacheDb();
 		});
 		return { session, observedCalls, sessionManager, waitForCall };
 	}

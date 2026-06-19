@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `SqliteAuthCredentialStore.close()` to finalize `#insertUsageCostStmt` and `#listUsageCostsStmt` (previously leaked) and run `PRAGMA wal_checkpoint(TRUNCATE)` before `db.close()`, so the `-wal`/`-shm` sidecar files are released on Windows.
+
 ## [16.1.0] - 2026-06-19
 
 ### Added

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `closeModelCacheDb()` export to shut down the shared model-cache SQLite DB, checkpointing its WAL and deleting the `-wal`/`-shm` sidecar files on Windows. The shared DB was previously never closed, keeping file handles locked for the process lifetime and causing `EBUSY` errors during test cleanup.
+
 ## [16.0.9] - 2026-06-18
 
 ### Fixed

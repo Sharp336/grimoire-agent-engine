@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Increased `TempDir.removeSync` retry budget from 4×10ms to 10×50ms on Windows, giving the OS more time to release SQLite file handles after `db.close()` before retrying `fs.rmSync`.
+
 ## [16.0.11] - 2026-06-19
 
 ### Removed

@@ -5334,6 +5334,11 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#lastUsageHistoryStmt.finalize();
 		this.#listUsageHistoryStmt.finalize();
 		this.#updateUsageHistoryStmt.finalize();
+		this.#insertUsageCostStmt.finalize();
+		this.#listUsageCostsStmt.finalize();
+		// -wal/-shm sidecar files are released. On Windows, bun:sqlite's close
+		// does not guarantee sidecar deletion, leaving fs.rmSync to hit EBUSY.
+		this.#db.run("PRAGMA wal_checkpoint(TRUNCATE)");
 		this.#db.close();
 	}
 }
