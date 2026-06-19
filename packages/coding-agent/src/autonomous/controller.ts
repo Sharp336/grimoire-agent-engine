@@ -243,24 +243,21 @@ export class AutonomousController {
 
 /**
  * True when the turn did not end with a clean assistant message: a user
- * interrupt / internal abort (`aborted`), a failed turn (`error`), or no
- * assistant message at all. That last case is the `--max-time` deadline path
- * (the agent loop exits with an empty/degenerate `agent_end`), which must not
- * trigger another continuation — idea/combined would otherwise spin past the
- * deadline. Read from the public event payload so the controller needs no
- * private session state.
+ * interrupt / internal abort (`aborted`), a failed turn (`error`), no assistant
+ * message at all, or tool results with no later assistant response. The last
+ * two cases cover `--max-time` deadline paths: one exits before an assistant
+ * exists, and one exits after appending skipped/aborted tool results for an
+ * assistant tool-call turn. Both must not trigger another continuation —
+ * idea/combined would otherwise spin past the deadline. Read from the public
+ * event payload so the controller needs no private session state.
  */
 function lastAssistantTurnFailed(messages: readonly AgentMessage[] | undefined, startIndex: number): boolean {
 	if (!messages) return true;
 	const firstIndex = startIndex < 0 ? 0 : startIndex;
 	if (firstIndex >= messages.length) return true;
-	for (let i = messages.length - 1; i >= firstIndex; i--) {
-		const message = messages[i]!;
-		if (message.role === "assistant") {
-			return message.stopReason === "aborted" || message.stopReason === "error";
-		}
-	}
-	return true;
+	const finalMessage = messages[messages.length - 1]!;
+	if (finalMessage.role !== "assistant") return true;
+	return finalMessage.stopReason === "aborted" || finalMessage.stopReason === "error";
 }
 
 /** Return the last autonomous continuation prompt in an agent_end payload, if present. */

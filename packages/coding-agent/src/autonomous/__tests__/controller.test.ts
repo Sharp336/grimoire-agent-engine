@@ -1,6 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import type { CustomMessage } from "../../session/messages";
 import { AutonomousController, type AutonomousSession } from "../controller";
@@ -24,6 +24,17 @@ function assistantActing(stopReason: AssistantMessage["stopReason"]): AssistantM
 		stopReason,
 		content: [{ type: "toolCall", id: "t1", name: "edit", arguments: {} }],
 	} as AssistantMessage;
+}
+
+function abortedToolResult(): ToolResultMessage {
+	return {
+		role: "toolResult",
+		toolCallId: "t1",
+		toolName: "edit",
+		content: [{ type: "text", text: "Deadline exceeded" }],
+		isError: true,
+		timestamp: 0,
+	};
 }
 
 function autonomousPrompt(): CustomMessage {
@@ -252,6 +263,14 @@ describe("AutonomousController loop", () => {
 		expect(sent).toHaveLength(1);
 		emit(agentEndEvent([autonomousPrompt()])); // deadline expiry after the autonomous prompt: no assistant
 		expect(sent).toHaveLength(1); // idea would otherwise loop forever appending continuations
+	});
+
+	it("idea mode does not spin past deadline-truncated tool turns", () => {
+		const { controller, emit, sent } = setup({ autoNextIdea: true });
+		controller.begin({ startupFailed: false }); // queues first (canKickoff)
+		expect(sent).toHaveLength(1);
+		emit(agentEndEvent([autonomousPrompt(), assistantActing("stop"), abortedToolResult()]));
+		expect(sent).toHaveLength(1);
 	});
 
 	it("queues a continuation behind a turn another controller already started", () => {
