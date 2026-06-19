@@ -262,9 +262,54 @@ describe("createTools", () => {
 
 		expect(names).toContain("search_tool_bm25");
 	});
+	it("includes enter_plan_mode when the host supports agent plan entry", async () => {
+		const session = createTestSession({ supportsAgentPlanEntry: true });
+		const names = (await createTools(session)).map(t => t.name);
+		expect(names).toContain("enter_plan_mode");
+	});
 
-	it("HIDDEN_TOOLS contains review tools and goal", () => {
+	it("omits enter_plan_mode when the host does not support agent plan entry", async () => {
+		const session = createTestSession({ supportsAgentPlanEntry: false });
+		const names = (await createTools(session)).map(t => t.name);
+		expect(names).not.toContain("enter_plan_mode");
+	});
+
+	it("omits enter_plan_mode when plan mode is disabled", async () => {
+		const session = createTestSession({
+			supportsAgentPlanEntry: true,
+			settings: createSettingsWithOverrides({ "plan.enabled": false }),
+		});
+		const names = (await createTools(session)).map(t => t.name);
+		expect(names).not.toContain("enter_plan_mode");
+	});
+
+	it("omits enter_plan_mode when plan.allowAgentEntry is off", async () => {
+		const session = createTestSession({
+			supportsAgentPlanEntry: true,
+			settings: createSettingsWithOverrides({ "plan.allowAgentEntry": false }),
+		});
+		const names = (await createTools(session)).map(t => t.name);
+		expect(names).not.toContain("enter_plan_mode");
+	});
+
+	it("omits enter_plan_mode once already in plan mode", async () => {
+		const session = createTestSession({
+			supportsAgentPlanEntry: true,
+			getPlanModeState: () => ({ enabled: true, planFilePath: "local://PLAN.md" }),
+		});
+		const names = (await createTools(session)).map(t => t.name);
+		expect(names).not.toContain("enter_plan_mode");
+	});
+
+	it("omits enter_plan_mode for subagents (taskDepth > 0)", async () => {
+		const session = createTestSession({ supportsAgentPlanEntry: true, taskDepth: 1 });
+		const names = (await createTools(session)).map(t => t.name);
+		expect(names).not.toContain("enter_plan_mode");
+	});
+
+	it("HIDDEN_TOOLS contains review tools, goal, and enter_plan_mode", () => {
 		expect(Object.keys(HIDDEN_TOOLS).sort()).toEqual([
+			"enter_plan_mode",
 			"goal",
 			"report_finding",
 			"report_tool_issue",

@@ -369,6 +369,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 			modelRegistry: args.modelRegistry,
 			agentId,
 			hasUI: false,
+			supportsAgentPlanEntry: true,
 			enableMCP: false,
 		});
 		if (args.parsedArgs.apiKey && !args.baseOptions.model && nextSession.model) {
@@ -1169,6 +1170,7 @@ export async function runRootCommand(
 	sessionOptions.authStorage = authStorage;
 	sessionOptions.modelRegistry = modelRegistry;
 	sessionOptions.hasUI = isInteractive || mode === "rpc-ui";
+	sessionOptions.supportsAgentPlanEntry = isInteractive || mode === "rpc-ui";
 	sessionOptions.settings = settingsInstance;
 
 	// OTEL: register the global OTLP trace exporter when an OTLP endpoint is

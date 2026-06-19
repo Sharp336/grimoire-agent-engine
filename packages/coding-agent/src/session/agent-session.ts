@@ -1087,6 +1087,11 @@ export class AgentSession {
 	#advisorPrimaryTurnsCompleted = 0;
 	#advisorInterruptImmuneTurnStart: number | undefined;
 	#planModeState: PlanModeState | undefined;
+	/** Frontend-installed handler that switches the session into plan mode on the
+	 *  agent's behalf (the `enter_plan_mode` tool). Interactive mode points this at
+	 *  `#enterPlanMode`; ACP at `#applyModeChange`. Absent in headless/subagent
+	 *  sessions, where agent-initiated entry is unsupported. */
+	#planModeEntryHandler: (() => Promise<void> | void) | undefined;
 	#goalModeState: GoalModeState | undefined;
 	#goalRuntime: GoalRuntime;
 	#advisorRuntime?: AdvisorRuntime;
@@ -5081,6 +5086,27 @@ export class AgentSession {
 			this.#planReferenceSent = false;
 			this.#planReferencePath = state.planFilePath;
 		}
+	}
+
+	/** Install (or clear with `null`) the handler invoked by {@link requestEnterPlanMode}.
+	 *  Installed once per frontend session and stable for its lifetime. */
+	setPlanModeEntryHandler(handler: (() => Promise<void> | void) | null): void {
+		this.#planModeEntryHandler = handler ?? undefined;
+	}
+
+	/** True when the host can switch into plan mode at the agent's request. */
+	canEnterPlanMode(): boolean {
+		return this.#planModeEntryHandler !== undefined;
+	}
+
+	/** Switch into plan mode on the agent's behalf. Throws when no host handler is
+	 *  installed — the `enter_plan_mode` tool gates on {@link canEnterPlanMode} first. */
+	async requestEnterPlanMode(): Promise<void> {
+		const handler = this.#planModeEntryHandler;
+		if (!handler) {
+			throw new Error("Plan mode entry is not supported in this session.");
+		}
+		await handler();
 	}
 
 	getGoalModeState(): GoalModeState | undefined {

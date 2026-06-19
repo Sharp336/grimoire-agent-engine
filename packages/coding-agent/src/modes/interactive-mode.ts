@@ -548,6 +548,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.mcpManager = mcpManager;
 		this.#eventBus = eventBus;
 		this.titleSystemPrompt = titleSystemPrompt;
+		// Let the agent enter plan mode on its own via the `enter_plan_mode` tool.
+		// The session is reused across /new and session switches, so install once.
+		this.session.setPlanModeEntryHandler(() => this.#enterPlanMode());
 		if (eventBus) {
 			this.#eventBusUnsubscribers.push(
 				eventBus.on(LSP_STARTUP_EVENT_CHANNEL, data => {
@@ -1845,7 +1848,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		const planFilePath = options?.planFilePath ?? (await this.#getPlanFilePath());
 		const previousTools = this.session.getActiveToolNames();
 		const hasResolveTool = this.session.getToolByName("resolve") !== undefined;
-		const planTools = hasResolveTool ? [...previousTools, "resolve"] : previousTools;
+		// Drop `enter_plan_mode` from the plan toolset — re-entry while planning is a
+		// no-op. It stays in `#planModePreviousTools` so exit restores it.
+		const planToolBase = previousTools.filter(name => name !== "enter_plan_mode");
+		const planTools = hasResolveTool ? [...planToolBase, "resolve"] : planToolBase;
 		const uniquePlanTools = [...new Set(planTools)];
 
 		this.#planModePreviousTools = previousTools;

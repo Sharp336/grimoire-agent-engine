@@ -3509,6 +3509,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"plan.allowAgentEntry": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Agent Can Enter Plan Mode",
+			description:
+				"Let the agent switch into plan mode on its own via the enter_plan_mode tool when a task warrants planning",
+			condition: "planModeEnabled",
+		},
+	},
+
 	"goal.enabled": {
 		type: "boolean",
 		default: true,

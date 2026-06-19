@@ -532,6 +532,10 @@ export interface CreateAgentSessionOptions {
 	/** Whether UI is available (enables interactive tools like ask). Default: false */
 	hasUI?: boolean;
 
+	/** Whether the host supports agent-initiated plan mode entry (the `enter_plan_mode`
+	 *  tool). Set true by the interactive TUI / rpc-ui and ACP frontends. Default: false */
+	supportsAgentPlanEntry?: boolean;
+
 	/**
 	 * Opt-in OpenTelemetry instrumentation forwarded to the underlying Agent.
 	 * Passing `{}` enables the loop's GenAI-semantic-convention spans. See
@@ -1493,6 +1497,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return sessionManager.getCwd();
 			},
 			hasUI: options.hasUI ?? false,
+			supportsAgentPlanEntry: options.supportsAgentPlanEntry ?? false,
 			enableLsp,
 			get hasEditTool() {
 				const requestedToolNames = options.toolNames
@@ -1528,6 +1533,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getActiveModel: () => agent?.state.model ?? model,
 			getPlanModeState: () => session?.getPlanModeState(),
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
+			canEnterPlanMode: () => session?.canEnterPlanMode() ?? false,
+			requestEnterPlanMode: () => {
+				if (!session) throw new Error("Session not ready for plan mode entry.");
+				return session.requestEnterPlanMode();
+			},
 			getGoalModeState: () => session?.getGoalModeState(),
 			getGoalRuntime: () => session?.goalRuntime,
 			getUsageStatistics: () => sessionManager.getUsageStatistics(),

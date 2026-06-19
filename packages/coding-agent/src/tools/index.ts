@@ -40,6 +40,7 @@ import { BrowserTool } from "./browser";
 import type { BuiltinToolName } from "./builtin-names";
 import { type CheckpointState, CheckpointTool, RewindTool } from "./checkpoint";
 import { DebugTool } from "./debug";
+import { EnterPlanModeTool } from "./enter-plan-mode";
 import { EvalTool } from "./eval";
 import { resolveEvalBackends } from "./eval-backends";
 import { FindTool } from "./find";
@@ -78,6 +79,7 @@ export * from "./bash";
 export * from "./browser";
 export * from "./checkpoint";
 export * from "./debug";
+export * from "./enter-plan-mode";
 export * from "./eval";
 export * from "./eval-backends";
 export * from "./find";
@@ -262,6 +264,14 @@ export interface ToolSession {
 	getPlanModeState?: () => PlanModeState | undefined;
 	/** Path of the session's active plan reference (e.g. `local://<title>.md`); defaults to `local://PLAN.md`. */
 	getPlanReferencePath?: () => string;
+	/** Whether the host supports agent-initiated plan mode entry (`enter_plan_mode`
+	 *  tool). Set at construction by the interactive/ACP frontends; false for
+	 *  print/headless and subagents. */
+	supportsAgentPlanEntry?: boolean;
+	/** True when plan mode entry is currently possible (frontend handler installed). */
+	canEnterPlanMode?: () => boolean;
+	/** Request the host to switch the session into plan mode on the agent's behalf. */
+	requestEnterPlanMode?: () => Promise<void>;
 	/** Goal mode state (if active or paused) */
 	getGoalModeState?: () => GoalModeState | undefined;
 	/** Goal runtime for the active agent session. */
@@ -451,6 +461,7 @@ export const HIDDEN_TOOLS: Record<string, ToolFactory> = {
 	report_tool_issue: s => createReportToolIssueTool(s),
 	resolve: s => new ResolveTool(s),
 	goal: s => new GoalTool(s),
+	enter_plan_mode: EnterPlanModeTool.createIf,
 };
 
 export type ToolName = BuiltinToolName;
@@ -468,6 +479,16 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 	if (goalModeActive && requestedTools && !requestedTools.includes("goal")) {
 		requestedTools = [...requestedTools, "goal"];
 	}
+	// `enter_plan_mode` is active by default at the top level when the host supports
+	// agent-initiated entry and plan mode is both enabled and agent-entry-permitted.
+	// Removed once already in plan mode (re-entry is a no-op). Mirror of the `goal`
+	// gating, inverted: present by default rather than only after the mode is active.
+	const planEntryToolActive =
+		(session.taskDepth ?? 0) === 0 &&
+		session.supportsAgentPlanEntry === true &&
+		session.settings.get("plan.enabled") &&
+		session.settings.get("plan.allowAgentEntry") &&
+		session.getPlanModeState?.()?.enabled !== true;
 	const backends = resolveEvalBackends(session);
 	const allowPython = backends.python;
 	const allowJs = backends.js;
@@ -581,6 +602,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "task") {
 			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
 		}
+		if (name === "enter_plan_mode") return planEntryToolActive;
 		return true;
 	};
 	if (includeYield && requestedTools && !requestedTools.includes("yield")) {
@@ -597,6 +619,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 						.map(([name, factory]) => [name, factory] as const),
 					...(includeYield ? ([["yield", HIDDEN_TOOLS.yield]] as const) : []),
 					...(goalModeActive ? ([["goal", HIDDEN_TOOLS.goal]] as const) : []),
+					...(planEntryToolActive ? ([["enter_plan_mode", HIDDEN_TOOLS.enter_plan_mode]] as const) : []),
 				];
 
 	const baseResults = await Promise.all(

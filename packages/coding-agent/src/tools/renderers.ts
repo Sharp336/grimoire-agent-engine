@@ -17,6 +17,7 @@ import { astGrepToolRenderer } from "./ast-grep";
 import { bashToolRenderer } from "./bash";
 import { browserToolRenderer } from "./browser/render";
 import { debugToolRenderer } from "./debug";
+import { enterPlanModeToolRenderer } from "./enter-plan-mode";
 import { evalToolRenderer } from "./eval-render";
 import { findToolRenderer } from "./find";
 import { githubToolRenderer } from "./gh-renderer";
@@ -62,6 +63,7 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	browser: browserToolRenderer as ToolRenderer,
 	debug: debugToolRenderer as ToolRenderer,
 	eval: evalToolRenderer as ToolRenderer,
+	enter_plan_mode: enterPlanModeToolRenderer as ToolRenderer,
 	edit: editToolRenderer as ToolRenderer,
 	apply_patch: editToolRenderer as ToolRenderer,
 	find: findToolRenderer as ToolRenderer,

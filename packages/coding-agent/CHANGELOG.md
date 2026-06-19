@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an `enter_plan_mode` tool so the agent can switch into read-only plan mode on its own (parity with Claude Code's `EnterPlanMode`) when a task warrants up-front planning, instead of relying on `/plan` or the keybinding. Gated by the new `plan.allowAgentEntry` setting (default `true`, under `plan.enabled`); available in the interactive TUI and ACP, and never exposed to headless/print sessions or subagents.
+
 ## [16.0.5] - 2026-06-17
 
 ### Added

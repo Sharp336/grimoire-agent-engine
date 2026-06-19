@@ -1032,6 +1032,24 @@ export class AcpAgent implements Agent {
 	async #registerPreparedSession(session: AgentSession, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session);
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
+		// Agent-initiated plan mode entry (`enter_plan_mode` tool): mirror the
+		// client-driven `setSessionMode` path, then notify the client so its mode
+		// selector and config option reflect the switch the agent made.
+		session.setPlanModeEntryHandler?.(async () => {
+			this.#applyModeChange(session, ACP_PLAN_MODE_ID);
+			try {
+				await this.#connection.sessionUpdate({
+					sessionId: session.sessionId,
+					update: this.#buildCurrentModeUpdate(session),
+				});
+				await this.#pushConfigOptionUpdateForSession(session);
+			} catch (error) {
+				logger.warn("Failed to emit mode updates after agent-initiated plan entry", {
+					sessionId: session.sessionId,
+					error,
+				});
+			}
+		});
 		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
 		// so it shares the bootstrap race guard — see that comment for why.
 		try {
