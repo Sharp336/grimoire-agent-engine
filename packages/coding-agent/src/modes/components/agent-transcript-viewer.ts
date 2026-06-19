@@ -7,16 +7,15 @@
  * compositing into the live transcript's scrollback. It renders a parked
  * subagent / advisor / collab-guest transcript that has no live in-view session.
  *
- * The transcript is rebuilt from scratch on every refresh ({@link ChatTranscriptBuilder.rebuild})
- * rather than synced incrementally, so a growing file-backed transcript (the
- * advisor appends while you watch) can never duplicate or misorder rows. Scroll
- * is owned end-to-end by a single {@link ScrollView}; the viewer follows the tail
+ * The transcript builder is append-only for normal growth and falls back to a
+ * full rebuild only when the backing file/remote transcript rewinds. Scroll is
+ * owned end-to-end by a single {@link ScrollView}; the viewer follows the tail
  * until the reader scrolls up.
  *
- * Local agents re-read the whole session file whenever its size or mtime changes
- * (covering SessionManager's in-place rewrites, not just appends). Collab guests
- * keep the incremental byte cursor the host's capped `readTranscript` requires
- * and rebuild components from the accumulated entries.
+ * Local agents tail appended bytes when the file grows and re-read the whole
+ * session file only on rewrite/truncation (covering SessionManager's in-place
+ * rewrites). Collab guests keep the incremental byte cursor the host's capped
+ * `readTranscript` requires and append parsed entries to the builder.
  */
 import * as fs from "node:fs";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
@@ -62,6 +61,7 @@ export interface AgentTranscriptViewerDeps {
 
 /** How often to re-stat a file-backed transcript for growth (advisor/live tail). */
 const POLL_MS = 250;
+const LOCAL_APPEND_PREFIX_BYTES = 4096;
 
 function statusBadge(status: AgentStatus): string {
 	switch (status) {
@@ -84,10 +84,16 @@ export class AgentTranscriptViewer implements Component {
 	#notice: string | undefined;
 	#expanded = false;
 
-	// Local file transcript state: re-read when the file size or mtime changes.
+	// Local file transcript state: append-only growth is tailed by byte offset
+	// only while the file identity and edge bytes still match; rewrites and
+	// truncation fall back to a full rebuild.
 	#lastSignature = "";
-	// Remote transcript state (incremental; the host caps each read).
-	#remoteEntries: SessionMessageEntry[] = [];
+	#localBytes = 0;
+	#localFileKey = "";
+	#localPrefix = "";
+	#localSuffix = "";
+	#pendingBottomScroll: number | "top" | undefined;
+	#viewportHeight = 10;
 	#remoteBytes = 0;
 	#remoteFetchInFlight = false;
 	#remoteToken = 0;
@@ -154,13 +160,18 @@ export class AgentTranscriptViewer implements Component {
 		if (!sessionFile) {
 			if (this.#lastSignature !== "none") {
 				this.#lastSignature = "none";
+				this.#localBytes = 0;
+				this.#localFileKey = "";
+				this.#localPrefix = "";
+				this.#localSuffix = "";
 				this.#rebuild([]);
 			}
 			return;
 		}
+		let stat: fs.Stats;
 		let signature: string;
 		try {
-			const stat = fs.statSync(sessionFile);
+			stat = fs.statSync(sessionFile);
 			// Include the path: a different file with the same size/mtime must not alias.
 			signature = `${sessionFile}:${stat.size}:${stat.mtimeMs}`;
 		} catch {
@@ -168,12 +179,37 @@ export class AgentTranscriptViewer implements Component {
 			// clear stale content once instead of freezing on it forever.
 			if (this.#lastSignature !== "missing") {
 				this.#lastSignature = "missing";
+				this.#localBytes = 0;
+				this.#localFileKey = "";
+				this.#localPrefix = "";
+				this.#localSuffix = "";
 				this.#model = undefined;
 				this.#rebuild([]);
 			}
 			return;
 		}
 		if (signature === this.#lastSignature) return;
+		const fileKey = `${stat.dev}:${stat.ino}`;
+		const canTail =
+			this.#localBytes > 0 &&
+			stat.size > this.#localBytes &&
+			fileKey === this.#localFileKey &&
+			this.#readLocalPrefix(sessionFile) === this.#localPrefix &&
+			this.#readLocalSuffix(sessionFile) === this.#localSuffix;
+		if (canTail) {
+			const chunk = this.#readLocalRange(sessionFile, this.#localBytes, stat.size - this.#localBytes);
+			if (chunk === undefined) return;
+			const lastNewline = chunk.lastIndexOf("\n");
+			if (lastNewline >= 0) {
+				const completeChunk = chunk.slice(0, lastNewline + 1);
+				const previousModel = this.#model;
+				this.#localBytes += Buffer.byteLength(completeChunk, "utf-8");
+				this.#lastSignature = this.#localBytes === stat.size ? signature : "";
+				this.#append(this.#extractMessages(parseSessionEntries(completeChunk)), this.#model !== previousModel);
+				this.#refreshLocalEdgeSentinels(sessionFile);
+				return;
+			}
+		}
 		let text: string;
 		try {
 			text = fs.readFileSync(sessionFile, "utf-8");
@@ -182,9 +218,15 @@ export class AgentTranscriptViewer implements Component {
 			logger.debug("transcript viewer: read failed", { err: String(err) });
 			return;
 		}
-		this.#lastSignature = signature;
+		const lastNewline = text.lastIndexOf("\n");
+		const completeText = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
+		this.#localBytes = Buffer.byteLength(completeText, "utf-8");
+		this.#lastSignature = this.#localBytes === stat.size ? signature : "";
+		this.#localFileKey = fileKey;
+		this.#localPrefix = completeText.slice(0, LOCAL_APPEND_PREFIX_BYTES);
+		this.#localSuffix = completeText.slice(-LOCAL_APPEND_PREFIX_BYTES);
 		this.#model = undefined;
-		this.#rebuild(this.#extractMessages(parseSessionEntries(text)));
+		this.#rebuild(this.#extractMessages(parseSessionEntries(completeText)));
 	}
 
 	#fetchRemote(): void {
@@ -209,7 +251,7 @@ export class AgentTranscriptViewer implements Component {
 				if (result.newSize < fromByte) {
 					// Host transcript rotated/truncated — restart from 0.
 					this.#remoteBytes = 0;
-					this.#remoteEntries = [];
+					this.#builder.reset();
 					this.#fetchRemote();
 					return;
 				}
@@ -220,12 +262,10 @@ export class AgentTranscriptViewer implements Component {
 				if (lastNewline >= 0) {
 					const completeChunk = result.text.slice(0, lastNewline + 1);
 					this.#remoteBytes = fromByte + Buffer.byteLength(completeChunk, "utf-8");
+					const previousModel = this.#model;
 					const parsed = this.#extractMessages(parseSessionEntries(completeChunk));
-					if (parsed.length > 0) {
-						this.#remoteEntries.push(...parsed);
-						this.#rebuild(this.#remoteEntries);
-						return;
-					}
+					this.#append(parsed, this.#model !== previousModel);
+					return;
 				}
 				// First completed fetch (even empty) clears the "Loading…" placeholder.
 				if (firstData) this.deps.requestRender();
@@ -255,6 +295,53 @@ export class AgentTranscriptViewer implements Component {
 		this.deps.requestRender();
 	}
 
+	#append(entries: SessionMessageEntry[], forceRender = false): void {
+		if (entries.length > 0) this.#builder.append(entries);
+		if (forceRender || entries.length > 0) this.deps.requestRender();
+	}
+
+	#readLocalPrefix(sessionFile: string): string {
+		if (this.#localPrefix.length === 0) return "";
+		const prefix = this.#readLocalRange(sessionFile, 0, Buffer.byteLength(this.#localPrefix, "utf-8"));
+		return prefix ?? "";
+	}
+
+	#readLocalSuffix(sessionFile: string): string {
+		if (this.#localSuffix.length === 0) return "";
+		const length = Buffer.byteLength(this.#localSuffix, "utf-8");
+		const start = Math.max(0, this.#localBytes - length);
+		const suffix = this.#readLocalRange(sessionFile, start, length);
+		return suffix ?? "";
+	}
+
+	#refreshLocalEdgeSentinels(sessionFile: string): void {
+		const prefixLength = Math.min(LOCAL_APPEND_PREFIX_BYTES, this.#localBytes);
+		this.#localPrefix = this.#readLocalRange(sessionFile, 0, prefixLength) ?? "";
+		this.#localSuffix = this.#readLocalSuffix(sessionFile);
+	}
+
+	#readLocalRange(sessionFile: string, position: number, length: number): string | undefined {
+		if (length <= 0) return "";
+		let fd: number | undefined;
+		try {
+			fd = fs.openSync(sessionFile, "r");
+			const buffer = Buffer.allocUnsafe(length);
+			let offset = 0;
+			while (offset < length) {
+				const bytesRead = fs.readSync(fd, buffer, offset, length - offset, position + offset);
+				if (bytesRead === 0) break;
+				offset += bytesRead;
+			}
+			if (offset < length) return undefined;
+			return buffer.subarray(0, offset).toString("utf-8");
+		} catch (err) {
+			logger.debug("transcript viewer: tail read failed", { err: String(err) });
+			return undefined;
+		} finally {
+			if (fd !== undefined) fs.closeSync(fd);
+		}
+	}
+
 	// ========================================================================
 	// Input
 	// ========================================================================
@@ -263,8 +350,14 @@ export class AgentTranscriptViewer implements Component {
 		if (data.startsWith("\x1b[<")) {
 			const event = parseSgrMouse(data);
 			if (event?.wheel != null) {
-				this.#scrollView.scroll(event.wheel * 3);
-				this.#syncFollow();
+				const delta = event.wheel * 3;
+				if (this.#followBottom && delta < 0) {
+					this.#followBottom = false;
+					this.#pendingBottomScroll = delta;
+				} else {
+					this.#scrollView.scroll(delta);
+					this.#syncFollow();
+				}
 				this.deps.requestRender();
 			}
 			return;
@@ -310,6 +403,13 @@ export class AgentTranscriptViewer implements Component {
 
 	/** Returns true when the key was a scroll command. ScrollView owns the offset. */
 	#handleScroll(data: string): boolean {
+		const bottomIntent = this.#followBottom ? this.#bottomScrollIntent(data) : undefined;
+		if (bottomIntent !== undefined) {
+			this.#followBottom = false;
+			this.#pendingBottomScroll = bottomIntent;
+			this.deps.requestRender();
+			return true;
+		}
 		if (this.#scrollView.handleScrollKey(data)) {
 			this.#syncFollow();
 			this.deps.requestRender();
@@ -333,6 +433,14 @@ export class AgentTranscriptViewer implements Component {
 
 	#syncFollow(): void {
 		this.#followBottom = this.#scrollView.getScrollOffset() >= this.#scrollView.getMaxScrollOffset();
+	}
+
+	#bottomScrollIntent(data: string): number | "top" | undefined {
+		if (matchesKey(data, "home") || data === "g") return "top";
+		if (matchesKey(data, "pageUp")) return -Math.max(1, this.#viewportHeight - 1);
+		if (matchesKey(data, "shift+up")) return -5;
+		if (matchesKey(data, "up") || data === "k" || matchesSelectUp(data)) return -1;
+		return undefined;
 	}
 
 	#submit(text: string): void {
@@ -386,13 +494,33 @@ export class AgentTranscriptViewer implements Component {
 		// Chrome: top border + header rows + divider border + (notice) + editor + footer + bottom border.
 		const chrome = headerLines.length + 2 + editorLines.length + footerLines.length + (noticeLine ? 1 : 0) + 1;
 		const viewportHeight = Math.max(3, termHeight - chrome);
+		this.#viewportHeight = viewportHeight;
 
-		const contentLines = this.#builder.isEmpty
-			? [` ${theme.fg("dim", this.#placeholder())}`]
-			: this.#builder.container.render(contentWidth);
-		this.#scrollView.setLines(contentLines);
 		this.#scrollView.setHeight(viewportHeight);
-		if (this.#followBottom) this.#scrollView.scrollToBottom();
+		if (this.#builder.isEmpty) {
+			this.#scrollView.setLines([` ${theme.fg("dim", this.#placeholder())}`]);
+			this.#scrollView.setTotalRows(undefined);
+		} else if (this.#followBottom) {
+			const contentLines = this.#builder.container.renderViewportTail(contentWidth, viewportHeight);
+			this.#scrollView.setLines(contentLines);
+			this.#scrollView.setTotalRows(Math.max(contentLines.length, this.#builder.container.children.length));
+			this.#scrollView.scrollToBottom();
+		} else {
+			const contentLines = this.#builder.container.render(contentWidth);
+			this.#scrollView.setLines(contentLines);
+			this.#scrollView.setTotalRows(undefined);
+			const pending = this.#pendingBottomScroll;
+			if (pending !== undefined) {
+				if (pending === "top") {
+					this.#scrollView.scrollToTop();
+				} else {
+					this.#scrollView.scrollToBottom();
+					this.#scrollView.scroll(pending);
+				}
+				this.#pendingBottomScroll = undefined;
+				this.#syncFollow();
+			}
+		}
 
 		const lines: string[] = [];
 		lines.push(...new DynamicBorder().render(width));

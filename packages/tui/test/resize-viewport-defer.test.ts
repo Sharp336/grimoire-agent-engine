@@ -189,6 +189,45 @@ class TailTranscript implements Component, ViewportTailProvider {
 	}
 }
 
+class WrappingBlock implements Component {
+	renderCount = 0;
+	#text: string;
+	constructor(text: string) {
+		this.#text = text;
+	}
+	invalidate(): void {}
+	render(width: number): string[] {
+		this.renderCount++;
+		const safeWidth = Math.max(1, width);
+		const rows: string[] = [];
+		for (let offset = 0; offset < this.#text.length; offset += safeWidth) {
+			rows.push(this.#text.slice(offset, offset + safeWidth));
+		}
+		return rows;
+	}
+}
+
+class WrappingTranscript implements Component, ViewportTailProvider {
+	blocks: WrappingBlock[];
+	constructor(blocks: WrappingBlock[]) {
+		this.blocks = blocks;
+	}
+	invalidate(): void {}
+	render(width: number): string[] {
+		const out: string[] = [];
+		for (const block of this.blocks) out.push(...block.render(width));
+		return out;
+	}
+	renderViewportTail(width: number, maxRows: number): readonly string[] {
+		const tail: string[] = [];
+		for (let i = this.blocks.length - 1; i >= 0 && tail.length < maxRows; i--) {
+			const rows = this.blocks[i]!.render(width);
+			for (let r = rows.length - 1; r >= 0 && tail.length < maxRows; r--) tail.unshift(rows[r]!);
+		}
+		return tail;
+	}
+}
+
 describe("non-multiplexer resize viewport fast path", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
@@ -285,6 +324,101 @@ describe("non-multiplexer resize viewport fast path", () => {
 					expect(buffer.filter(line => line === `b${i}-y`).length).toBe(1);
 				}
 				expect(visible(term).at(-1)).toBe("b14-y");
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("keeps large transcripts on the viewport path when the drag settles", async () => {
+		await withEnvPatch(NO_MULTIPLEXER_ENV, async () => {
+			const term = new VirtualTerminal(40, 10, 4000);
+			const blocks = Array.from({ length: 600 }, (_v, i) => new CountingBlock([`b${i}-x`, `b${i}-y`]));
+			const scheduler = new DeferScheduler();
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			tui.addChild(new TailTranscript(blocks));
+			try {
+				tui.start();
+				await scheduler.flushImmediates(term);
+
+				const baselineFull = tui.fullRedraws;
+				const writes = captureWrites(term);
+
+				term.resize(80, 10);
+				await scheduler.flushImmediates(term);
+				for (const b of blocks) b.renderCount = 0;
+
+				await scheduler.flushAll(term);
+
+				expect(tui.resizeViewportActive).toBe(false);
+				expect(tui.fullRedraws).toBe(baselineFull);
+				expect(eraseScrollbackCount(writes)).toBe(0);
+				expect(blocks.slice(0, 590).every(b => b.renderCount === 0)).toBe(true);
+				expect(visible(term).at(-1)).toBe("b599-y");
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("does not diff against stale pre-resize rows after a large settled viewport paint", async () => {
+		await withEnvPatch(NO_MULTIPLEXER_ENV, async () => {
+			const term = new VirtualTerminal(40, 10, 4000);
+			const blocks = Array.from({ length: 600 }, (_v, i) => new CountingBlock([`b${i}-x`, `b${i}-y`]));
+			const scheduler = new DeferScheduler();
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			tui.addChild(new TailTranscript(blocks));
+			try {
+				tui.start();
+				await scheduler.flushImmediates(term);
+				term.resize(80, 10);
+				await scheduler.flushImmediates(term);
+				await scheduler.flushAll(term);
+
+				const writes = captureWrites(term);
+				tui.requestRender();
+				await scheduler.flushAll(term);
+
+				expect(writes.join("")).toBe("");
+			} finally {
+				tui.stop();
+			}
+		});
+	});
+
+	it("keeps narrowed transcripts on the viewport path when wrapping crosses the large threshold", async () => {
+		await withEnvPatch(NO_MULTIPLEXER_ENV, async () => {
+			const term = new VirtualTerminal(120, 10, 4000);
+			const blocks = Array.from({ length: 400 }, (_v, i) => new WrappingBlock(`${i}:`.padEnd(240, "x")));
+			const scheduler = new DeferScheduler();
+			const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+			tui.addChild(new WrappingTranscript(blocks));
+			try {
+				tui.start();
+				await scheduler.flushImmediates(term);
+				const baselineFull = tui.fullRedraws;
+				const writes = captureWrites(term);
+				term.resize(20, 10);
+				await scheduler.flushImmediates(term);
+				for (const block of blocks) block.renderCount = 0;
+
+				await scheduler.flushAll(term);
+
+				expect(tui.fullRedraws).toBe(baselineFull);
+				expect(eraseScrollbackCount(writes)).toBe(0);
+				expect(blocks.slice(0, 390).every(block => block.renderCount === 0)).toBe(true);
+				const fullAfterSettle = tui.fullRedraws;
+				const writesBeforeOrdinaryRender = writes.length;
+				tui.requestRender();
+				await scheduler.flushAll(term);
+				expect(tui.fullRedraws).toBe(fullAfterSettle);
+				expect(writes.slice(writesBeforeOrdinaryRender).join("")).toBe("");
+				const fullBeforeAppend = tui.fullRedraws;
+				blocks.push(new WrappingBlock("appended"));
+				tui.requestRender();
+				await scheduler.flushAll(term);
+				expect(tui.fullRedraws).toBe(fullBeforeAppend);
+				expect(visible(term).at(-1)).toBe("appended");
 			} finally {
 				tui.stop();
 			}

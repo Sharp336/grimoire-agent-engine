@@ -72,9 +72,7 @@ async function resolvePersistedBlobRefs(value: unknown, blobStore: BlobStore, ke
 }
 
 export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: BlobStore): Promise<void> {
-	await Promise.all(
-		entries.filter(entry => entry.type !== "session").map(entry => resolvePersistedBlobRefs(entry, blobStore)),
-	);
+	await Promise.all(entries.map(entry => resolvePersistedBlobRefs(entry, blobStore)));
 }
 
 /**

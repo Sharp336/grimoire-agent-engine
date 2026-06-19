@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced large-session Agent Hub and display-memory pressure by tail-rendering follow-bottom transcript views, tailing appended transcript files, and collapsing compacted display history while preserving branchable image history on resume.
+
 ## [16.0.11] - 2026-06-19
 
 ### Added

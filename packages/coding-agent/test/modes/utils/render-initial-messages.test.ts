@@ -1,10 +1,10 @@
 /**
  * Contract: renderInitialMessages renders the DISPLAY TRANSCRIPT, not the LLM
  * context. The transcript comes from `session.buildTranscriptSessionContext()`
- * (full history, compactions inline); `sessionManager.buildSessionContext()`
- * — the LLM-context builder — must not be consulted for display. Feeding the
- * compacted LLM context to the chat is exactly the old "session starts over
- * after compaction" bug.
+ * (with old compacted history collapsed for the hot TUI surface);
+ * `sessionManager.buildSessionContext()` — the LLM-context builder — must not
+ * be consulted for display. Feeding the compacted LLM context to the chat is
+ * exactly the old "session starts over after compaction" bug.
  *
  * Also guards the cold-launch terminal cleanup: `omp` / `omp -c` leave the
  * previous run's transcript in native scrollback because the TUI's initial

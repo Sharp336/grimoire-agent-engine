@@ -60,6 +60,12 @@ export interface BuildSessionContextOptions {
 	 * result to a provider.
 	 */
 	transcript?: boolean;
+	/**
+	 * For display surfaces that only need the current branch tail, replace the
+	 * history before the latest compaction with that compaction summary. Full
+	 * exports keep this false so no transcript rows are lost.
+	 */
+	collapseCompactedHistory?: boolean;
 }
 
 /**
@@ -211,7 +217,7 @@ export function buildSessionContext(
 		}
 	};
 
-	if (options?.transcript) {
+	if (options?.transcript && !options.collapseCompactedHistory) {
 		// Display transcript: every entry in chronological order. Compactions do
 		// not erase prior history here — each renders inline (as a divider in the
 		// TUI) at the point it fired, with any snapcompact frames re-attached so
@@ -246,7 +252,7 @@ export function buildSessionContext(
 				items: remote.replacementHistory as Array<Record<string, unknown>>,
 			};
 		})();
-		const remoteReplacementHistory = providerPayload?.items;
+		const remoteReplacementHistory = options?.transcript ? undefined : providerPayload?.items;
 
 		// Emit summary first; re-attach any archived snapcompact frames so the
 		// model can keep reading the archived history after every context rebuild.
@@ -257,7 +263,7 @@ export function buildSessionContext(
 				compaction.tokensBefore,
 				compaction.timestamp,
 				compaction.shortSummary,
-				providerPayload,
+				options?.transcript ? undefined : providerPayload,
 				snapcompactArchive ? snapcompact.images(snapcompactArchive) : undefined,
 			),
 		);

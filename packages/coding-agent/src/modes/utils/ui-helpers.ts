@@ -595,9 +595,9 @@ export class UiHelpers {
 		this.ctx.pendingBashComponents = [];
 		this.ctx.pendingPythonComponents = [];
 
-		// Display always uses the full-history transcript: compactions show as
-		// inline dividers instead of restarting the visible conversation.
-		const context = this.ctx.viewSession.buildTranscriptSessionContext();
+		// Display collapses history before the latest compaction so the hot TUI
+		// surface does not rebuild rows the model context already summarized.
+		const context = this.ctx.viewSession.buildTranscriptSessionContext({ collapseCompactedHistory: true });
 		this.ctx.renderSessionContext(context, {
 			updateFooter: true,
 			populateHistory: !this.ctx.focusedAgentId,

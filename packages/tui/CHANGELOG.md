@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Avoided the resize-settle full replay for large transcripts; after a drag, the TUI keeps the latest viewport responsive instead of erasing and replaying all scrollback.
+
 ## [16.0.11] - 2026-06-19
 
 ### Breaking Changes

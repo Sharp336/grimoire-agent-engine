@@ -5,11 +5,9 @@
  * viewer ({@link AgentTranscriptViewer}) to render a parked subagent / advisor /
  * collab-guest transcript that has no live session.
  *
- * Unlike the old incremental hub sync, {@link ChatTranscriptBuilder.rebuild}
- * always discards prior components and rebuilds the whole transcript from the
- * supplied entries. Re-rendering a growing transcript is therefore O(n) in the
- * entry count, but it cannot duplicate or misorder rows the way incremental
- * component reuse could.
+ * {@link ChatTranscriptBuilder.rebuild} is reserved for true rewrites/truncation.
+ * Normal file/remote growth uses {@link ChatTranscriptBuilder.append}, preserving
+ * existing components and materializing only newly parsed entries.
  */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
@@ -91,6 +89,11 @@ export class ChatTranscriptBuilder {
 		// Flush the trailing turn's usage row only once its tools are materialized
 		// (a read whose result has not arrived stays pending); otherwise the row
 		// would sit above its tools. The drain happens here at the end of the pass.
+		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
+	}
+
+	append(entries: SessionMessageEntry[]): void {
+		for (const entry of entries) this.#appendChatMessage(entry.message);
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
 

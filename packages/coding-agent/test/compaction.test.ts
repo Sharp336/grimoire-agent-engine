@@ -1,4 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import {
@@ -15,6 +17,7 @@ import * as ai from "@oh-my-pi/pi-ai";
 import { encodeTextSignatureV1 } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { AssistantMessage, Model, ProviderPayload, Usage } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { BlobStore } from "@oh-my-pi/pi-coding-agent/session/blob-store";
 import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type {
 	CompactionEntry,
@@ -23,7 +26,7 @@ import type {
 	SessionMessageEntry,
 	ThinkingLevelChangeEntry,
 } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { parseSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-loader";
+import { parseSessionEntries, resolveBlobRefsInEntries } from "@oh-my-pi/pi-coding-agent/session/session-loader";
 import { migrateSessionEntries } from "@oh-my-pi/pi-coding-agent/session/session-migrations";
 import { mockFetch } from "./helpers/fetch-mock";
 import { e2eApiKey } from "./utilities";
@@ -864,6 +867,140 @@ describe("buildSessionContext", () => {
 		// LLM context is untouched by the option: latest compaction replaces history.
 		const llm = buildSessionContext(entries);
 		expect(llm.messages.map(m => m.role)).toEqual(["compactionSummary", "user", "user"]);
+	});
+
+	it("collapsed transcript option replaces compacted history with latest summary", () => {
+		const u1 = createMessageEntry(createUserMessage("1"));
+		const a1 = createMessageEntry(createAssistantMessage("a"));
+		const compact1 = createCompactionEntry("First summary", u1.id);
+		const u2 = createMessageEntry(createUserMessage("2"));
+		const compact2 = createCompactionEntry("Second summary", u2.id);
+		const u3 = createMessageEntry(createUserMessage("3"));
+		const entries: SessionEntry[] = [u1, a1, compact1, u2, compact2, u3];
+
+		const transcript = buildSessionContext(entries, undefined, undefined, {
+			transcript: true,
+			collapseCompactedHistory: true,
+		});
+
+		expect(transcript.messages.map(m => m.role)).toEqual(["compactionSummary", "user", "user"]);
+		const summary = transcript.messages[0] as { summary: string };
+		expect(summary.summary).toContain("Second summary");
+	});
+
+	it("collapsed transcript preserves kept turns for remote compactions", () => {
+		const u1 = createMessageEntry(createUserMessage("1"));
+		const kept = createMessageEntry(createUserMessage("kept"));
+		const compact = createCompactionEntry("Remote summary", kept.id);
+		compact.preserveData = {
+			openaiRemoteCompaction: {
+				provider: "openai",
+				replacementHistory: [{ type: "message", id: "remote-history" }],
+			},
+		};
+		const after = createMessageEntry(createUserMessage("after"));
+		const entries: SessionEntry[] = [u1, kept, compact, after];
+
+		const transcript = buildSessionContext(entries, undefined, undefined, {
+			transcript: true,
+			collapseCompactedHistory: true,
+		});
+		expect(transcript.messages.map(message => message.role)).toEqual(["compactionSummary", "user", "user"]);
+		expect(transcript.messages[1]).toMatchObject({ role: "user", content: "kept" });
+
+		const llm = buildSessionContext(entries);
+		expect(llm.messages.map(message => message.role)).toEqual(["compactionSummary", "user"]);
+	});
+
+	it("resolves persisted image blobs for branchable compacted history", async () => {
+		const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-blobs-"));
+		try {
+			const blobs = new BlobStore(dir);
+			const beforeRef = blobs.putSync(Buffer.from("before")).ref;
+			const afterRef = blobs.putSync(Buffer.from("after")).ref;
+			const before = createMessageEntry({
+				role: "user",
+				content: [{ type: "image", data: beforeRef, mimeType: "image/png" }],
+				timestamp: Date.now(),
+			});
+			const after = createMessageEntry({
+				role: "user",
+				content: [{ type: "image", data: afterRef, mimeType: "image/png" }],
+				timestamp: Date.now(),
+			});
+			const compact = createCompactionEntry("Image summary", after.id);
+			const entries: SessionEntry[] = [before, after, compact];
+
+			await resolveBlobRefsInEntries(entries, blobs);
+
+			const beforeImage =
+				before.message.role === "user" && Array.isArray(before.message.content)
+					? before.message.content[0]
+					: undefined;
+			const afterImage =
+				after.message.role === "user" && Array.isArray(after.message.content)
+					? after.message.content[0]
+					: undefined;
+			expect(beforeImage).toEqual({ type: "image", data: "YmVmb3Jl", mimeType: "image/png" });
+			expect(afterImage).toEqual({ type: "image", data: "YWZ0ZXI=", mimeType: "image/png" });
+		} finally {
+			await fs.promises.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves image blobs on the active branch when a sibling branch was compacted", async () => {
+		const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-blobs-"));
+		try {
+			const blobs = new BlobStore(dir);
+			const activeRef = blobs.putSync(Buffer.from("active")).ref;
+			const root = createMessageEntry({
+				role: "user",
+				content: [{ type: "image", data: activeRef, mimeType: "image/png" }],
+				timestamp: Date.now(),
+			});
+			const sibling = createCompactionEntry("Sibling summary", root.id);
+			const activeLeaf: SessionMessageEntry = {
+				type: "message",
+				id: "active-leaf",
+				parentId: root.id,
+				timestamp: new Date().toISOString(),
+				message: { role: "user", content: "active branch", timestamp: Date.now() },
+			};
+			const entries: SessionEntry[] = [root, sibling, activeLeaf];
+
+			await resolveBlobRefsInEntries(entries, blobs);
+
+			const image =
+				root.message.role === "user" && Array.isArray(root.message.content) ? root.message.content[0] : undefined;
+			expect(image).toEqual({ type: "image", data: "YWN0aXZl", mimeType: "image/png" });
+		} finally {
+			await fs.promises.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves kept blobs when remote compaction metadata lacks a provider", async () => {
+		const dir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "omp-blobs-"));
+		try {
+			const blobs = new BlobStore(dir);
+			const keptRef = blobs.putSync(Buffer.from("kept")).ref;
+			const kept = createMessageEntry({
+				role: "user",
+				content: [{ type: "image", data: keptRef, mimeType: "image/png" }],
+				timestamp: Date.now(),
+			});
+			const compact = createCompactionEntry("Summary", kept.id);
+			compact.preserveData = { openaiRemoteCompaction: { replacementHistory: [] } };
+			const after = createMessageEntry({ role: "user", content: "after", timestamp: Date.now() });
+			const entries: SessionEntry[] = [kept, compact, after];
+
+			await resolveBlobRefsInEntries(entries, blobs);
+
+			const image =
+				kept.message.role === "user" && Array.isArray(kept.message.content) ? kept.message.content[0] : undefined;
+			expect(image).toEqual({ type: "image", data: "a2VwdA==", mimeType: "image/png" });
+		} finally {
+			await fs.promises.rm(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("should handle multiple compactions (only latest matters)", () => {
