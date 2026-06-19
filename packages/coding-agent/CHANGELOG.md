@@ -89,6 +89,10 @@
 
 - Added `compaction.toolResultCapKb` setting: when set above 0, truncates old tool-result text blocks beyond the specified KB limit in-place each turn (keeping the 3 most-recent results full). Reduces peak JS-heap usage by ~11% and retained session state by ~95% in long sessions with large tool outputs. Disabled by default (0). The cap mutates shared message objects directly — no `rewriteEntries`/`replaceMessages` rebuild overhead.
 
+### Changed
+
+- Lazy-loaded the `task` tool module (18MB of subagent machinery) so it only loads when the agent actually spawns a subagent, not on every session startup
+
 ## [16.1.0] - 2026-06-19
 
 ### Added
