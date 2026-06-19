@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed linked image placeholders crashing when they render before settings initialization.
+
 ## [16.1.3] - 2026-06-19
 
 ### Changed

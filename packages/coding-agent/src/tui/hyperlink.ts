@@ -7,7 +7,7 @@
  */
 import * as url from "node:url";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
-import { settings } from "../config/settings";
+import { isSettingsInitialized, settings } from "../config/settings";
 import {
 	LocalProtocolHandler,
 	memoryRootsFromRegistry,
@@ -47,6 +47,7 @@ function buildFileUri(filePath: string, opts?: { line?: number; col?: number }):
  * - `"always"`: unconditionally (useful for viewers that support OSC 8 without advertising it)
  */
 export function isHyperlinkEnabled(): boolean {
+	if (!isSettingsInitialized()) return false;
 	const mode = settings.get("tui.hyperlinks");
 	if (mode === "off") return false;
 	if (mode === "always") return true;
