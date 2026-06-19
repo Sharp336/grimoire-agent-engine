@@ -58,6 +58,7 @@ class FakeDapClient {
 	readonly #handlers = new Map<string, Set<DapEventHandler>>();
 	readonly #reverseHandlers = new Map<string, DapReverseRequestHandler>();
 	#alive = true;
+	emitInitialStopped = true;
 	readonly stalledCommands = new Set<string>();
 	readonly sentRequests: SentDapRequest[] = [];
 
@@ -83,7 +84,9 @@ class FakeDapClient {
 	async initialize(): Promise<DapCapabilities> {
 		void Bun.sleep(10).then(() => {
 			this.#emit("initialized", {});
-			this.#emit("stopped", { reason: "entry", threadId: 1 });
+			if (this.emitInitialStopped) {
+				this.#emit("stopped", { reason: "entry", threadId: 1 });
+			}
 		});
 		return { supportsConfigurationDoneRequest: true };
 	}
@@ -287,6 +290,54 @@ describe("DAP multi-session debugging", () => {
 		expect(manager.listSessions().length).toBe(0);
 		expect(parentClient.isAlive()).toBe(false);
 		expect(childClient.isAlive()).toBe(false);
+	});
+
+	it("returns a stopped child when launch waits are resolved by the child stop", async () => {
+		const manager = new DapSessionManager();
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+		parentClient.emitInitialStopped = false;
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
+		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
+
+		const launchPromise = manager.launch(
+			{
+				adapter: TEST_ADAPTER,
+				program: "test.js",
+				cwd: process.cwd(),
+			},
+			undefined,
+			1_000,
+		);
+
+		await Bun.sleep(1);
+		await parentClient.triggerReverseRequest("startDebugging", {
+			request: "attach",
+			configuration: {
+				type: "pwa-node",
+				name: "child-worker",
+			},
+		});
+
+		const summary = await launchPromise;
+
+		expect(summary).toMatchObject({
+			id: "debug-2",
+			status: "stopped",
+			stopReason: "entry",
+			frameName: "main",
+			line: 1,
+		});
+		expect(childClient.sentRequests).toContainEqual(
+			expect.objectContaining({
+				command: "stackTrace",
+			}),
+		);
+
+		await manager.terminate();
 	});
 
 	it("waits for a stopped child when continuing a threadless js-debug root", async () => {

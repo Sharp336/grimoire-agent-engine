@@ -347,17 +347,7 @@ export class DapSessionManager {
 			await launchPromise;
 			// Try to capture initial stopped state (e.g. stopOnEntry).
 			// Timeout is acceptable — the program may simply be running.
-			try {
-				await untilAborted(signal, initialStopPromise);
-				if (session.status === "stopped") {
-					await this.#fetchTopFrame(session, signal, Math.min(timeoutMs, STOP_CAPTURE_TIMEOUT_MS));
-				}
-			} catch {
-				if (session.initializedSeen && session.status === "launching") {
-					session.status = session.configurationDoneSent ? "running" : "configuring";
-				}
-			}
-			return buildSummary(session);
+			return await this.#buildInitialStartSummary(session, initialStopPromise, signal, timeoutMs);
 		} catch (error) {
 			await this.#disposeSession(session);
 			const mapped = mapDebugpyMissingModule(options.adapter.name, error);
@@ -406,17 +396,7 @@ export class DapSessionManager {
 				await throwPreferredDapStartError("attach", attachFailure, error);
 			}
 			await attachPromise;
-			try {
-				await untilAborted(signal, initialStopPromise);
-				if (session.status === "stopped") {
-					await this.#fetchTopFrame(session, signal, Math.min(timeoutMs, STOP_CAPTURE_TIMEOUT_MS));
-				}
-			} catch {
-				if (session.initializedSeen && session.status === "launching") {
-					session.status = session.configurationDoneSent ? "running" : "configuring";
-				}
-			}
-			return buildSummary(session);
+			return await this.#buildInitialStartSummary(session, initialStopPromise, signal, timeoutMs);
 		} catch (error) {
 			await this.#disposeSession(session);
 			const mapped = mapDebugpyMissingModule(options.adapter.name, error);
@@ -1577,18 +1557,7 @@ export class DapSessionManager {
 
 			await startPromise;
 
-			try {
-				await untilAborted(signal, initialStopPromise);
-				if (session.status === "stopped") {
-					await this.#fetchTopFrame(session, signal, Math.min(timeoutMs, STOP_CAPTURE_TIMEOUT_MS));
-				}
-			} catch {
-				if (session.initializedSeen && session.status === "launching") {
-					session.status = session.configurationDoneSent ? "running" : "configuring";
-				}
-			}
-
-			return buildSummary(session);
+			return await this.#buildInitialStartSummary(session, initialStopPromise, signal, timeoutMs);
 		} catch (error) {
 			await this.#disposeSession(session);
 			const mapped = mapDebugpyMissingModule(options.adapter.name, error);
@@ -1936,6 +1905,31 @@ export class DapSessionManager {
 				error: toErrorMessage(error),
 			});
 		}
+	}
+
+	async #buildInitialStartSummary(
+		session: DapSession,
+		initialStopPromise: Promise<unknown>,
+		signal?: AbortSignal,
+		timeoutMs: number = 30_000,
+	): Promise<DapSessionSummary> {
+		try {
+			await untilAborted(signal, initialStopPromise);
+			const activeSession = this.#getActiveSessionOrNull();
+			const stoppedSession =
+				activeSession && this.#getRootSessionId(activeSession) === this.#getRootSessionId(session)
+					? activeSession
+					: session;
+			if (stoppedSession.status === "stopped") {
+				await this.#fetchTopFrame(stoppedSession, signal, Math.min(timeoutMs, STOP_CAPTURE_TIMEOUT_MS));
+				return buildSummary(stoppedSession);
+			}
+		} catch {
+			if (session.initializedSeen && session.status === "launching") {
+				session.status = session.configurationDoneSent ? "running" : "configuring";
+			}
+		}
+		return buildSummary(session);
 	}
 
 	async #step(command: "stepIn" | "stepOut" | "next", signal?: AbortSignal, timeoutMs: number = 30_000) {
