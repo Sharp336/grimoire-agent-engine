@@ -470,5 +470,66 @@ describe("AgentSession shake", () => {
 			// periodic shake was correctly skipped.
 			expect(shakeSpy).toHaveBeenCalledTimes(0);
 		});
+
+		it("skips periodic shake when overflow recovery fails and tail was pruned", async () => {
+			// Disable context promotion so overflow goes to compaction
+			session.settings.set("contextPromotion.enabled", false);
+			session.settings.set("shake.interval", 1);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+
+			// Mock model registry to return no candidates — forces compaction failure
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([]);
+
+			bumpToolCallCounter(); // periodic counter = 1
+
+			// Overflow assistant with context-overflow matching error message
+			const overflowMsg: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "" }],
+				...apiInfo,
+				stopReason: "error",
+				errorMessage: "prompt is too long",
+				usage,
+				timestamp: Date.now(),
+			};
+			emitEnd(overflowMsg);
+			await Bun.sleep(50);
+
+			// Periodic shake should NOT fire — tail was pruned by overflow handling
+			// and compaction recovery failed (no available models),
+			// so #processAgentEvent sees tailPruned: true and skips periodic shake.
+			expect(shakeSpy).not.toHaveBeenCalled();
+		});
+
+		it("skips periodic shake when length-stop recovery fails and tail was pruned", async () => {
+			session.settings.set("contextPromotion.enabled", false);
+			session.settings.set("shake.interval", 1);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([]);
+
+			bumpToolCallCounter(); // periodic counter = 1
+
+			const lengthMsg: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "" }],
+				...apiInfo,
+				stopReason: "length",
+				usage,
+				timestamp: Date.now(),
+			};
+			emitEnd(lengthMsg);
+			await Bun.sleep(50);
+
+			// Periodic shake should NOT fire — tail was pruned by length-stop handling
+			// and compaction recovery failed.
+			expect(shakeSpy).not.toHaveBeenCalled();
+		});
 	});
 });

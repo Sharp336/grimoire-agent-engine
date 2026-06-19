@@ -7921,7 +7921,10 @@ export class AgentSession {
 			// No promotion target available fall through to compaction
 			const compactionSettings = this.settings.getGroup("compaction");
 			if (compactionSettings.enabled && compactionSettings.strategy !== "off") {
-				return await this.#runAutoCompaction("overflow", true, false, allowDefer, { autoContinue });
+				return await this.#runAutoCompaction("overflow", true, false, allowDefer, {
+					autoContinue,
+					tailPruned: true,
+				});
 			}
 			return COMPACTION_CHECK_NONE_TAIL_PRUNED;
 		}
@@ -7956,6 +7959,7 @@ export class AgentSession {
 				return await this.#runAutoCompaction("incomplete", true, false, allowDefer, {
 					autoContinue,
 					triggerContextTokens: calculateContextTokens(assistantMessage.usage),
+					tailPruned: true,
 				});
 			}
 			// Neither promotion nor compaction is available — surface the dead-end so
@@ -9057,13 +9061,15 @@ export class AgentSession {
 		willRetry: boolean,
 		deferred = false,
 		allowDefer = true,
-		options: { autoContinue?: boolean; triggerContextTokens?: number } = {},
+		options: { autoContinue?: boolean; triggerContextTokens?: number; tailPruned?: boolean } = {},
 	): Promise<CompactionCheckResult> {
 		const compactionSettings = this.settings.getGroup("compaction");
-		if (compactionSettings.strategy === "off") return COMPACTION_CHECK_NONE;
-		if (reason !== "idle" && !compactionSettings.enabled) return COMPACTION_CHECK_NONE;
 		const generation = this.#promptGeneration;
 		const shouldAutoContinue = options.autoContinue !== false && compactionSettings.autoContinue !== false;
+		const tailPruned = options.tailPruned === true;
+		const noneResult = tailPruned ? COMPACTION_CHECK_NONE_TAIL_PRUNED : COMPACTION_CHECK_NONE;
+		if (compactionSettings.strategy === "off") return noneResult;
+		if (reason !== "idle" && !compactionSettings.enabled) return noneResult;
 		// Shake runs inline (cheap, no remote LLM). On overflow recovery, if shake
 		// reclaims nothing we fall through to the summary-compaction body below so
 		// the oversized input still gets resolved.
@@ -9074,6 +9080,7 @@ export class AgentSession {
 				generation,
 				shouldAutoContinue,
 				options.triggerContextTokens,
+				tailPruned,
 			);
 			if (outcome !== "fallback") return outcome;
 		}
@@ -9144,7 +9151,7 @@ export class AgentSession {
 							aborted: true,
 							willRetry: false,
 						});
-						return COMPACTION_CHECK_NONE;
+						return noneResult;
 					}
 					logger.warn("Auto-handoff returned no document; falling back to context-full maintenance", {
 						reason,
@@ -9163,7 +9170,7 @@ export class AgentSession {
 					if (continuationScheduled) {
 						this.#scheduleAutoContinuePrompt(generation);
 					}
-					return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE;
+					return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : noneResult;
 				}
 			}
 
@@ -9176,7 +9183,7 @@ export class AgentSession {
 					willRetry: false,
 					skipped: true,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 
 			const availableModels = this.#modelRegistry.getAvailable();
@@ -9189,7 +9196,7 @@ export class AgentSession {
 					willRetry: false,
 					skipped: true,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 
 			const pathEntries = this.sessionManager.getBranch();
@@ -9212,7 +9219,7 @@ export class AgentSession {
 					});
 					return COMPACTION_CHECK_CONTINUATION;
 				}
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 
 			let hookCompaction: CompactionResult | undefined;
@@ -9236,7 +9243,7 @@ export class AgentSession {
 						aborted: true,
 						willRetry: false,
 					});
-					return COMPACTION_CHECK_NONE;
+					return noneResult;
 				}
 
 				if (hookResult?.compaction) {
@@ -9431,7 +9438,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 
 			this.sessionManager.appendCompaction(
@@ -9512,7 +9519,7 @@ export class AgentSession {
 				});
 				continuationScheduled = true;
 			}
-			return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE;
+			return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : noneResult;
 		} catch (error) {
 			if (autoCompactionSignal.aborted) {
 				await this.#emitSessionEvent({
@@ -9522,7 +9529,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 			const errorMessage = error instanceof Error ? error.message : "compaction failed";
 			await this.#emitSessionEvent({
@@ -9543,7 +9550,7 @@ export class AgentSession {
 				this.#autoCompactionAbortController = undefined;
 			}
 		}
-		return COMPACTION_CHECK_NONE;
+		return noneResult;
 	}
 
 	/**
@@ -9562,8 +9569,10 @@ export class AgentSession {
 		generation: number,
 		autoContinue: boolean,
 		triggerContextTokens?: number,
+		tailPruned = false,
 	): Promise<CompactionCheckResult | "fallback"> {
 		const action = "shake";
+		const noneResult = tailPruned ? COMPACTION_CHECK_NONE_TAIL_PRUNED : COMPACTION_CHECK_NONE;
 		await this.#emitSessionEvent({ type: "auto_compaction_start", reason, action });
 		this.#autoCompactionAbortController?.abort();
 		const controller = new AbortController();
@@ -9579,7 +9588,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 			const reclaimed = result.toolResultsDropped + result.blocksDropped > 0;
 			// Detect the dead-loop reported in issues #2119/#2275: the threshold check
@@ -9668,7 +9677,7 @@ export class AgentSession {
 				});
 				continuationScheduled = true;
 			}
-			return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : COMPACTION_CHECK_NONE;
+			return continuationScheduled ? COMPACTION_CHECK_CONTINUATION : noneResult;
 		} catch (error) {
 			if (signal.aborted) {
 				await this.#emitSessionEvent({
@@ -9678,7 +9687,7 @@ export class AgentSession {
 					aborted: true,
 					willRetry: false,
 				});
-				return COMPACTION_CHECK_NONE;
+				return noneResult;
 			}
 			const message = error instanceof Error ? error.message : "shake failed";
 			await this.#emitSessionEvent({
@@ -9690,7 +9699,7 @@ export class AgentSession {
 				errorMessage: `Auto-shake failed: ${message}`,
 			});
 			// Overflow still needs recovery even if shake threw.
-			return reason === "overflow" ? "fallback" : COMPACTION_CHECK_NONE;
+			return reason === "overflow" ? "fallback" : noneResult;
 		} finally {
 			if (this.#autoCompactionAbortController === controller) {
 				this.#autoCompactionAbortController = undefined;
