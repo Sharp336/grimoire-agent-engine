@@ -56,6 +56,8 @@ export interface AutonomousSession {
 		message: Pick<CustomMessage, "customType" | "content" | "display" | "attribution">,
 		options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
 	): Promise<boolean>;
+	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
+	hasQueuedCustomMessage(customType: string): boolean;
 	readonly isStreaming: boolean;
 	getPlanModeState(): { enabled: boolean } | undefined;
 	getGoalModeState(): { enabled: boolean } | undefined;
@@ -128,10 +130,20 @@ export class AutonomousController {
 		// autonomous follow-up must not mask the follow-up's failure/deadline state.
 		const autonomousPromptIndex = lastAutonomousPromptIndex(event.messages);
 		// If a queued autonomous turn is pending and this agent_end does not contain
-		// that autonomous prompt, the event belongs to another turn (for example an
-		// auto-learn capture that aborted before draining follow-ups). Leave the
-		// autonomous marker intact for the follow-up's eventual agent_end.
-		if (this.#pendingAutonomousTurn && autonomousPromptIndex === -1) return;
+		// that autonomous prompt, the event belongs to another turn. Preserve the
+		// marker for clean stale/superseded events and for failed turns that still
+		// have the queued hidden follow-up. Clear it only when the intervening
+		// failure also removed the queued prompt (Esc drops hidden continuations via
+		// clearQueue({ forInterrupt: true })).
+		if (this.#pendingAutonomousTurn && autonomousPromptIndex === -1) {
+			const interveningFailed = lastAssistantTurnFailed(event.messages, 0);
+			this.#lastTurnFailed = interveningFailed;
+			if (interveningFailed && !this.#session.hasQueuedCustomMessage(AUTONOMOUS_CONTINUATION_MESSAGE_TYPE)) {
+				this.#pendingAutonomousTurn = false;
+				this.#turnStartedInPlanOrGoal = false;
+			}
+			return;
+		}
 		const autonomousPayloadStartIndex = autonomousPromptIndex === -1 ? 0 : autonomousPromptIndex + 1;
 		// Record the outcome on every turn (even suppressed ones) so begin() can
 		// honor a failed startup turn.
@@ -222,7 +234,9 @@ export class AutonomousController {
 			)
 			.catch(err => {
 				this.#pendingAutonomousTurn = false;
-				logger.warn("autonomous continuation failed", { err: String(err) });
+				const message = err instanceof Error ? err.message : String(err);
+				this.#session.emitNotice("error", `Autonomous continuation failed: ${message}`, "auto-next");
+				logger.warn("autonomous continuation failed", { err: message });
 			});
 	}
 }

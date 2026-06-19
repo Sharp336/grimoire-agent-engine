@@ -6451,6 +6451,12 @@ export class AgentSession {
 		return { steering, followUp };
 	}
 
+	hasQueuedCustomMessage(customType: string): boolean {
+		const matches = (message: AgentMessage): boolean =>
+			message.role === "custom" && message.customType === customType;
+		return this.agent.peekSteeringQueue().some(matches) || this.agent.peekFollowUpQueue().some(matches);
+	}
+
 	/** Number of pending displayable messages (includes steering, follow-up, and next-turn messages).
 	 *  Reflects actual queued work (advisor cards included) — feeds hasPendingMessages()/RPC and the
 	 *  empty-submit abort gate. The user-restorable subset is surfaced by getQueuedMessages()/clearQueue(). */

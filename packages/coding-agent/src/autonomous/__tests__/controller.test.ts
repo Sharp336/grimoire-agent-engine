@@ -63,6 +63,9 @@ function setup(options: FakeOptions) {
 	let queueFollowUps = false;
 	let handler: ((event: AgentSessionEvent) => void) | undefined;
 	const sent: Array<{ content: string; triggerTurn?: boolean; deliverAs?: string }> = [];
+	const queuedCustomTypes = new Set<string>();
+	const notices: Array<{ level: "info" | "warning" | "error"; message: string; source?: string }> = [];
+	let sendError: Error | undefined;
 	const session: AutonomousSession = {
 		subscribe: h => {
 			handler = h;
@@ -75,10 +78,19 @@ function setup(options: FakeOptions) {
 		},
 		getPlanModeState: () => ({ enabled: planEnabled }),
 		getGoalModeState: () => ({ enabled: goalEnabled }),
+		emitNotice: (level, message, source) => {
+			notices.push({ level, message, source });
+		},
+		hasQueuedCustomMessage: customType => queuedCustomTypes.has(customType),
 		sendCustomMessage: async (message, opts) => {
+			if (sendError) throw sendError;
 			const content = typeof message.content === "string" ? message.content : "";
 			sent.push({ content, triggerTurn: opts?.triggerTurn, deliverAs: opts?.deliverAs });
-			return !(queueFollowUps || streaming);
+			if (queueFollowUps || streaming) {
+				queuedCustomTypes.add(message.customType);
+				return false;
+			}
+			return true;
 		},
 	};
 	const controller = new AutonomousController({
@@ -88,10 +100,23 @@ function setup(options: FakeOptions) {
 	});
 	return {
 		sent,
+		notices,
 		controller,
-		emit: (event: AgentSessionEvent) => handler?.(event),
+		emit: (event: AgentSessionEvent) => {
+			const messages = "messages" in event ? event.messages : [];
+			for (const message of messages) {
+				if (message.role === "custom") queuedCustomTypes.delete(message.customType);
+			}
+			handler?.(event);
+		},
 		appendHistory: (message: AgentMessage) => {
 			history.push(message);
+		},
+		dropQueuedCustomType: (customType: string) => {
+			queuedCustomTypes.delete(customType);
+		},
+		setSendError: (error: Error | undefined) => {
+			sendError = error;
 		},
 		setStreaming: (value: boolean) => {
 			streaming = value;
@@ -124,7 +149,24 @@ describe("AutonomousController arming", () => {
 		expect(idea.sent[0]!.content).toContain("ideation mode");
 	});
 
-	it("steps-only with no message and no resume idles (nothing to continue)", () => {
+	it("surfaces hidden kickoff send failures", async () => {
+		const { controller, notices, sent, setSendError } = setup({ autoNextIdea: true });
+		setSendError(new Error("missing API key"));
+		controller.begin({ startupFailed: false });
+		await Promise.resolve();
+		expect(sent).toHaveLength(0);
+		expect(notices).toEqual([
+			{
+				level: "error",
+				message: "Autonomous continuation failed: missing API key",
+				source: "auto-next",
+			},
+		]);
+	});
+
+	it("steps-only idles with no restored transcript (continue fallback to fresh)", () => {
+		// `--continue --auto-next-steps` in a project with no prior session opens an
+		// empty transcript; steps-only must not invent an objective.
 		const steps = setup({ autoNextSteps: true });
 		steps.controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
 		expect(steps.sent).toHaveLength(0);
@@ -289,6 +331,19 @@ describe("AutonomousController steps completion", () => {
 		emit(agentEndEvent([assistant("aborted")])); // preceding synthetic turn, no autonomous prompt yet
 		emit(agentEndEvent([autonomousPrompt(), assistant("stop")])); // queued autonomous follow-up finally runs
 		expect(sent).toHaveLength(1);
+	});
+
+	it("clears the autonomous marker when an interrupt dropped the queued follow-up", () => {
+		const { controller, dropQueuedCustomType, emit, sent, setQueueFollowUps } = setup({ autoNextSteps: true });
+		controller.begin({ startupFailed: false });
+		setQueueFollowUps(true);
+		emit(agentEndEvent([assistantActing("stop")])); // queue behind another turn
+		expect(sent).toHaveLength(1);
+		dropQueuedCustomType("autonomous-continuation"); // clearQueue({ forInterrupt: true }) dropped the hidden prompt
+		setQueueFollowUps(false);
+		emit(agentEndEvent([assistant("aborted")])); // no autonomous prompt will drain now
+		emit(agentEndEvent([assistant("stop")])); // next manual clean turn resumes the loop
+		expect(sent).toHaveLength(2);
 	});
 
 	it("a superseded agent_end while streaming does not consume the autonomous marker", () => {
