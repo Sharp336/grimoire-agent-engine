@@ -27,20 +27,22 @@ describe("task agent capability descriptions", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("classifies bundled explore as the only read-only delegated agent", () => {
+	it("classifies bundled explore and fastcontext as read-only delegated agents", () => {
 		const agents = loadBundledAgents();
 
 		expect(isReadOnlyAgent(agentByName(agents, "explore"))).toBe(true);
+		expect(isReadOnlyAgent(agentByName(agents, "fastcontext"))).toBe(true);
 		for (const name of ["task", "quick_task", "plan", "reviewer", "oracle", "designer"]) {
 			expect(isReadOnlyAgent(agentByName(agents, name))).toBe(false);
 		}
 	});
 
-	it("disables read summarization for explore and librarian, leaves other agents summarizing", () => {
+	it("disables read summarization for explore, librarian, and fastcontext", () => {
 		const agents = loadBundledAgents();
 
 		expect(agentByName(agents, "explore").readSummarize).toBe(false);
 		expect(agentByName(agents, "librarian").readSummarize).toBe(false);
+		expect(agentByName(agents, "fastcontext").readSummarize).toBe(false);
 		for (const name of ["task", "quick_task", "plan", "reviewer", "oracle", "designer"]) {
 			expect(agentByName(agents, name).readSummarize).toBeUndefined();
 		}

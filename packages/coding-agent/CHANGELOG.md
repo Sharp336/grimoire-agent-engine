@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `fastcontext` bundled subagent: a read-only repository explorer that returns structured file:line citations. Port of [Microsoft FastContext](https://github.com/microsoft/fastcontext)'s exploration contract as a native TS subagent profile, reusing the existing `TaskTool` read-only classification, soft-request-budget convergence, and `yield`-enforced output schema. Uses `pi/smol` by default and works with any model — override via `task.agentModelOverrides` or the `model:` field in a task delegation.
+
 ## [16.1.7] - 2026-06-20
 
 ### Fixed
@@ -98,7 +102,6 @@
 - Cache-miss marker no longer fires on providers with implicit, best-effort prompt caching (Google/Gemini, OpenAI, Fireworks). Those report `cacheWrite: 0` and drop `cacheRead` to zero intermittently as routine propagation noise that self-heals the next turn. Only explicit, prefix-controlled caches (Anthropic/Bedrock `cache_control`), which re-create the prefix on a cold turn as `cacheWrite > 0`, now surface a marker — where a zero `cacheRead` genuinely means the prefix broke.
 - Fixed advisor dependent settings staying visible while `advisor.enabled` is off ([#3027](https://github.com/can1357/oh-my-pi/issues/3027)).
 - Fixed LSP servers that dynamically register capabilities, including Expert, hanging semantic requests after `client/registerCapability` was rejected ([#3029](https://github.com/can1357/oh-my-pi/issues/3029)).
-
 ## [16.1.0] - 2026-06-19
 
 ### Added
