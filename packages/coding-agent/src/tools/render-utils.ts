@@ -10,7 +10,7 @@ import * as path from "node:path";
 import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { getKeybindings, replaceTabs, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+import { getKeybindings, replaceTabs, truncateToWidth, visibleWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 import { pluralize } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { settings } from "../config/settings";
@@ -105,15 +105,12 @@ export function getPreviewLines(text: string, maxLines: number, maxLineLen: numb
  * error renderers where embedded content — e.g. an account-verification URL —
  * must stay intact even when the whole message is one long line that would
  * otherwise be severed mid-token. Output is still capped at `maxLines`; the last
- * retained line gets a trailing ellipsis only when wrapped content genuinely
- * overflows the budget.
+ * retained line gets a trailing overflow marker only when wrapped content
+ * genuinely overflows the budget AND the marker fits without severing that
+ * line — a long token (e.g. an account-verification URL) is never clipped just
+ * to make room for the marker. Full text is still kept in the persisted session.
  */
-export function getWrappedPreviewLines(
-	text: string,
-	maxLines: number,
-	wrapWidth: number,
-	ellipsis?: Ellipsis,
-): string[] {
+export function getWrappedPreviewLines(text: string, maxLines: number, wrapWidth: number): string[] {
 	const out: string[] = [];
 	let overflowed = false;
 	// A single logical line never yields more than `maxLines` retained pieces, so
@@ -136,8 +133,16 @@ export function getWrappedPreviewLines(
 		if (overflowed) break;
 	}
 	if (overflowed && out.length > 0) {
-		// Force an overflow marker even when the final wrapped piece is short.
-		out[out.length - 1] = truncateToWidth(`${out[out.length - 1]} …`, wrapWidth, ellipsis);
+		// Best-effort overflow hint. Append it only when it fits without clipping
+		// the retained line — severing a visible token (e.g. an intact URL) to make
+		// room for the marker would defeat the point of wrapping. When the final
+		// line is already full, leave it intact; the persisted session keeps the
+		// full text either way.
+		const marker = " …";
+		const last = out[out.length - 1];
+		if (visibleWidth(last) + visibleWidth(marker) <= wrapWidth) {
+			out[out.length - 1] = `${last}${marker}`;
+		}
 	}
 	return out;
 }

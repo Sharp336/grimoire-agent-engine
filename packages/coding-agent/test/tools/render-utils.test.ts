@@ -352,11 +352,23 @@ describe("getWrappedPreviewLines", () => {
 		expect(getPreviewLines(message, 6, 110).join("")).not.toContain(validationUrl);
 	});
 
-	it("caps output at maxLines and marks the overflow with an ellipsis", () => {
-		const long = `${"x".repeat(400)} ${"y".repeat(400)}`;
+	it("caps output at maxLines and marks the overflow when the final line has room", () => {
+		const long = ["alpha", "bravo", "charlie", "delta", "echo"].join("\n");
 		const wrapped = getWrappedPreviewLines(long, 3, 40);
 		expect(wrapped).toHaveLength(3);
-		expect(wrapped[wrapped.length - 1].endsWith("…")).toBe(true);
+		// The marker is appended (not clipped in) because "charlie" leaves room.
+		expect(wrapped[wrapped.length - 1]).toBe("charlie …");
+	});
+
+	it("keeps a full-width URL on the final retained line intact instead of clipping it for the marker", () => {
+		// The URL lands on the last retained line and fills it (109 cells); the
+		// overflow marker (" …", 2 cells) cannot fit without severing the URL, so
+		// it is dropped and the URL survives — the whole point of the helper.
+		const msg = `padding header line\n${validationUrl}\ntrailing content that overflows the budget`;
+		const wrapped = getWrappedPreviewLines(msg, 2, 110);
+		expect(wrapped).toHaveLength(2);
+		expect(wrapped[wrapped.length - 1]).toBe(validationUrl);
+		expect(wrapped[wrapped.length - 1].endsWith("…")).toBe(false);
 	});
 
 	it("returns content verbatim when it fits within the budget", () => {
@@ -366,11 +378,10 @@ describe("getWrappedPreviewLines", () => {
 	it("bounds work on a pathological single-line body while preserving early content", () => {
 		// A proxy 502 can return a multi-megabyte single-line HTML body. The helper
 		// must not wrap the whole thing just to keep `maxLines`; the leading URL
-		// must still survive and the output stays capped with an overflow marker.
+		// must still survive and the output stays capped at maxLines.
 		const giant = `Visit ${validationUrl} to continue. ${"x".repeat(2_000_000)}`;
 		const wrapped = getWrappedPreviewLines(giant, 6, 110);
 		expect(wrapped).toHaveLength(6);
 		expect(wrapped.join("")).toContain(validationUrl);
-		expect(wrapped[wrapped.length - 1].endsWith("…")).toBe(true);
 	});
 });
