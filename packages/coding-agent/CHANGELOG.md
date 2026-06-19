@@ -39,6 +39,10 @@
 - Added `--auto-next-steps` and `--auto-next-idea` CLI flags for autonomous operation. After each completed turn the agent automatically queues a follow-up so it keeps working without user input: `--auto-next-steps` continues the current objective (including running tests), `--auto-next-idea` brainstorms and implements a new improvement, and both together cycle indefinitely. The controller arms only after startup prompts drain and is restricted to interactive mode (disabled for `--print`/rpc/acp). It halts on a user interrupt (Esc) or a failed turn, leaves plan/goal mode to their own drivers, and `--auto-next-steps` (alone) also stops once an autonomous turn performs no further action (objective complete); idea/combined run until interrupted.
 - Added `--auto-commit` and `--auto-pr` launch flags for autonomous operation. They extend the hidden auto-next prompt so completed, verified work is committed through the existing commit workflow and published through the GitHub pull-request path before the agent continues.
 
+### Fixed
+
+- Fixed `--auto-next-*` autonomous continuation reordering itself ahead of a stranded user follow-up. When a user follow-up lands in the queue after the agent loop final queue poll, `#endInFlight` flushes `agent_end` (which fires the autonomous continuation) before the stranded-queue drain runs. `sendCustomMessage` with `deliverAs: "followUp"` and `triggerTurn` on an idle session with queued messages now queues behind them instead of starting a turn immediately, preserving user to autonomous ordering.
+
 ## [16.0.10] - 2026-06-18
 
 ### Added

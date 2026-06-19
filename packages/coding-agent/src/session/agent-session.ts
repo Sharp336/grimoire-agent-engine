@@ -6361,6 +6361,20 @@ export class AgentSession {
 			return false;
 		}
 
+		// `deliverAs: "followUp"` with a turn trigger but already-queued messages
+		// (e.g. a user follow-up that landed after the loop's final queue poll and
+		// strands in #drainStrandedQueuedMessages): starting a turn immediately
+		// would reorder the new message ahead of the queued user input. Queue it
+		// behind the existing work instead and let the idle-queue drain drive the
+		// turn once #endInFlight settles. Without this, an autonomous continuation
+		// (#onAgentEnd → sendCustomMessage) can jump in front of a stranded user
+		// follow-up because agent_end is flushed before the stranded drain runs.
+		if (options?.deliverAs === "followUp" && options?.triggerTurn && this.agent.hasQueuedMessages()) {
+			this.agent.followUp(normalizedAppMessage);
+			this.#scheduleIdleQueueDrain();
+			return false;
+		}
+
 		if (options?.triggerTurn) {
 			if (this.#clientBridge?.deferAgentInitiatedTurns && !this.#allowAcpAgentInitiatedTurns) {
 				this.#queueHiddenNextTurnMessage(normalizedAppMessage, false);
