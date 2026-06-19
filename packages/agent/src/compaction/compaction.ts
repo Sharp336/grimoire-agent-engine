@@ -286,9 +286,9 @@ export function estimateTokens(message: AgentMessage): number {
 		case "assistant": {
 			const assistant = message as AssistantMessage;
 			for (const block of assistant.content) {
-				if (block.type === "text") {
+				if (block.type === "text" && block.text) {
 					fragments.push(block.text);
-				} else if (block.type === "thinking") {
+				} else if (block.type === "thinking" && block.thinking) {
 					fragments.push(block.thinking);
 					// Providers charge for the opaque signature/reasoning payload that
 					// rides alongside the thinking text (OpenAI Responses encrypted
