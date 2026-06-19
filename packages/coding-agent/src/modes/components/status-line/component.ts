@@ -19,6 +19,7 @@ import { calculateTokensPerSecond } from "./token-rate";
 import type {
 	CollabStatus,
 	EffectiveStatusLineSettings,
+	GoalModeStatus,
 	StatusLineSegmentId,
 	StatusLineSegmentOptions,
 	StatusLineSettings,
@@ -190,7 +191,7 @@ export class StatusLineComponent implements Component {
 	#sessionStartTime: number = Date.now();
 	#planModeStatus: { enabled: boolean; paused: boolean } | null = null;
 	#loopModeStatus: { enabled: boolean } | null = null;
-	#goalModeStatus: { enabled: boolean; paused: boolean } | null = null;
+	#goalModeStatus: GoalModeStatus | null = null;
 	#collabStatus: CollabStatus | null = null;
 	#focusedAgentId: string | undefined;
 
@@ -292,7 +293,7 @@ export class StatusLineComponent implements Component {
 		this.#loopModeStatus = status ?? null;
 	}
 
-	setGoalModeStatus(status: { enabled: boolean; paused: boolean } | undefined): void {
+	setGoalModeStatus(status: GoalModeStatus | undefined): void {
 		this.#goalModeStatus = status ?? null;
 	}
 

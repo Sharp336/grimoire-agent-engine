@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { StatusLineComponent, type StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { STATUS_LINE_PRESETS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/presets";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -31,7 +32,23 @@ afterEach(() => {
 	projectDir = "";
 });
 
-function makeSession(sessionName = "Cache Session") {
+function createGoalState(objective: string): GoalModeState {
+	return {
+		enabled: true,
+		mode: "active",
+		goal: {
+			id: "goal-1",
+			objective,
+			status: "active",
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			createdAt: 0,
+			updatedAt: 0,
+		},
+	};
+}
+
+function makeSession(sessionName = "Cache Session", goalState?: GoalModeState | null) {
 	const messages: unknown[] = [];
 	const model = { id: "test-model", name: "Test Model", contextWindow: 100_000 };
 	return {
@@ -46,7 +63,7 @@ function makeSession(sessionName = "Cache Session") {
 		autoResolvedThinkingLevel: () => undefined,
 		isFastModeActive: () => false,
 		isAdvisorActive: () => false,
-		getGoalModeState: () => null,
+		getGoalModeState: () => goalState ?? undefined,
 		getAsyncJobSnapshot: () => ({ running: [] }),
 		settings: { get: () => false },
 		modelRegistry: { isUsingOAuth: () => false },
@@ -65,8 +82,11 @@ function makeSession(sessionName = "Cache Session") {
 	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
 }
 
-function makeComponent(statusLineSettings: StatusLineSettings): StatusLineComponent {
-	const component = new StatusLineComponent(makeSession());
+function makeComponent(
+	statusLineSettings: StatusLineSettings,
+	session: ConstructorParameters<typeof StatusLineComponent>[0] = makeSession(),
+): StatusLineComponent {
+	const component = new StatusLineComponent(session);
 	component.updateSettings(statusLineSettings);
 	return component;
 }
@@ -170,6 +190,23 @@ describe("StatusLineComponent effective settings cache", () => {
 		component.setHookStatus("hook", "hook done");
 		expect(component.render(80)).toEqual(["hook done"]);
 		expect(component.getEffectiveSettingsForTest()).toBe(effective);
+	});
+
+	it("renders goal objectives through custom segment arrays", () => {
+		const component = makeComponent(
+			{
+				preset: "custom",
+				leftSegments: ["mode", "goal"],
+				rightSegments: [],
+				separator: "pipe",
+				segmentOptions: { goal: { maxLength: 32 } },
+			},
+			makeSession("Cache Session", createGoalState("Ship auth hardening")),
+		);
+		component.setGoalModeStatus({ enabled: true, paused: false });
+		const plain = stripVTControlCharacters(component.getTopBorder(120).content);
+		expect(plain).toContain("Goal");
+		expect(plain).toContain("Ship auth hardening");
 	});
 
 	it("does not mutate shared preset segment options during narrow renders", () => {

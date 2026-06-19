@@ -1,14 +1,15 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { TERMINAL, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
+import type { GoalStatus } from "../../../goals/state";
 import { type ThemeColor, theme } from "../../../modes/theme/theme";
 import { shortenPath } from "../../../tools/render-utils";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
 import { sanitizeStatusText } from "../../shared";
 import { formatContextUsage, getContextUsageLevel, getContextUsageThemeColor } from "./context-thresholds";
-import type { RenderedSegment, SegmentContext, StatusLineSegment, StatusLineSegmentId } from "./types";
+import type { GoalModeStatus, RenderedSegment, SegmentContext, StatusLineSegment, StatusLineSegmentId } from "./types";
 
 export type { SegmentContext } from "./types";
 
@@ -134,11 +135,8 @@ function formatGoalBudget(current: number, budget?: number): string {
 	return `${used}/${formatNumber(budget)}`;
 }
 
-function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: boolean }): RenderedSegment {
-	const goal = ctx.session.getGoalModeState()?.goal;
-	const status = goal?.status ?? (mode.paused ? "paused" : "active");
-
-	let icon: string = theme.icon.goal;
+function goalStatusStyle(status: GoalStatus): { icon: string; color: ThemeColor } {
+	let icon = theme.icon.goal;
 	let color: ThemeColor = "accent";
 	switch (status) {
 		case "paused":
@@ -160,7 +158,13 @@ function renderGoalMode(ctx: SegmentContext, mode: { enabled: boolean; paused: b
 		default:
 			break;
 	}
+	return { icon, color };
+}
 
+function renderGoalMode(ctx: SegmentContext, mode: GoalModeStatus): RenderedSegment {
+	const goal = ctx.session.getGoalModeState()?.goal;
+	const status = goal?.status ?? mode.status ?? (mode.paused ? "paused" : "active");
+	const { icon, color } = goalStatusStyle(status);
 	const parts: string[] = [withIcon(icon, "Goal")];
 	const showBudget = ctx.session.settings.get("goal.statusInFooter") === true;
 	if (showBudget && goal) {
@@ -183,7 +187,7 @@ const modeSegment: StatusLineSegment = {
 		}
 
 		const goal = ctx.goalMode;
-		if (goal && (goal.enabled || goal.paused)) {
+		if (goal && (goal.enabled || goal.paused || goal.status === "complete")) {
 			return renderGoalMode(ctx, goal);
 		}
 
@@ -194,6 +198,27 @@ const modeSegment: StatusLineSegment = {
 		}
 
 		return { content: "", visible: false };
+	},
+};
+
+const goalSegment: StatusLineSegment = {
+	id: "goal",
+	render(ctx) {
+		if (!ctx.goalMode || (!ctx.goalMode.enabled && !ctx.goalMode.paused && ctx.goalMode.status !== "complete")) {
+			return { content: "", visible: false };
+		}
+		const goal = ctx.session.getGoalModeState()?.goal;
+		if (!goal) return { content: "", visible: false };
+		const objective = sanitizeStatusText(goal.objective);
+		if (!objective) return { content: "", visible: false };
+		const configuredMaxLength = ctx.options.goal?.maxLength;
+		const maxLength =
+			typeof configuredMaxLength === "number" && Number.isFinite(configuredMaxLength) && configuredMaxLength > 0
+				? Math.max(4, Math.floor(configuredMaxLength))
+				: 40;
+		const { icon, color } = goalStatusStyle(goal.status);
+		const content = withIcon(icon, truncateToWidth(objective, maxLength));
+		return { content: theme.fg(color, content), visible: true };
 	},
 };
 
@@ -582,6 +607,7 @@ export const SEGMENTS: Record<StatusLineSegmentId, StatusLineSegment> = {
 	pi: piSegment,
 	model: modelSegment,
 	mode: modeSegment,
+	goal: goalSegment,
 	path: pathSegment,
 	git: gitSegment,
 	pr: prSegment,

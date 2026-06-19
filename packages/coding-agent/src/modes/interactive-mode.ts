@@ -1615,9 +1615,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#updateGoalModeStatus(): void {
+		const goal = this.session.getGoalModeState()?.goal;
+		const completed = goal?.status === "complete";
 		const status =
-			this.goalModeEnabled || this.goalModePaused
-				? { enabled: this.goalModeEnabled, paused: this.goalModePaused }
+			this.goalModeEnabled || this.goalModePaused || completed
+				? { enabled: this.goalModeEnabled, paused: this.goalModePaused, status: goal?.status }
 				: undefined;
 		this.statusLine.setGoalModeStatus(status);
 		this.updateEditorTopBorder();

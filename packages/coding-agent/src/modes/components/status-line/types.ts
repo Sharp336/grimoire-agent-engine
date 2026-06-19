@@ -1,5 +1,6 @@
 import type { CollabSessionState } from "../../../collab/protocol";
 import type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle } from "../../../config/settings-schema";
+import type { GoalStatus } from "../../../goals/state";
 import type { AgentSession } from "../../../session/agent-session";
 
 export type { StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
@@ -12,10 +13,17 @@ export interface CollabStatus {
 	stateOverride?: CollabSessionState | null;
 }
 
+export interface GoalModeStatus {
+	enabled: boolean;
+	paused: boolean;
+	status?: GoalStatus;
+}
+
 export interface StatusLineSegmentOptions {
 	model?: { showThinkingLevel?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
+	goal?: { maxLength?: number };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
 }
 
@@ -56,10 +64,7 @@ export interface SegmentContext {
 	loopMode: {
 		enabled: boolean;
 	} | null;
-	goalMode: {
-		enabled: boolean;
-		paused: boolean;
-	} | null;
+	goalMode: GoalModeStatus | null;
 	collab: CollabStatus | null;
 	// Cached values for performance (computed once per render)
 	usageStats: {

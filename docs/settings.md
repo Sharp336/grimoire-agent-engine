@@ -571,7 +571,18 @@ tui:
 | `images.blockImages` | boolean | `false` | Never send images to providers. |
 | `tui.hyperlinks` | enum | `auto` | `off`, `auto`, `always`. |
 
-For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`.
+For a custom status line, set `statusLine.preset: custom` and configure `statusLine.leftSegments`, `statusLine.rightSegments`, and `statusLine.segmentOptions`. The existing `mode` segment keeps the Goal/Plan/Loop badge; the `goal` segment exposes the active goal objective for configs like:
+
+```yaml
+# ~/.omp/agent/config.yml
+statusLine:
+  preset: custom
+  leftSegments: [model, mode, goal, path, git]
+  rightSegments: [session_name, context_pct]
+  segmentOptions:
+    goal:
+      maxLength: 36
+```
 
 ### Interaction
 
