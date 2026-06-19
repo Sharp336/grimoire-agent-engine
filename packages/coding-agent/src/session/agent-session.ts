@@ -1174,6 +1174,8 @@ export class AgentSession {
 
 	// Periodic shake state (shake.interval setting)
 	#shakeToolCallCounter = 0;
+	#shakeNeedsAgentSync = false;
+	#midRunShakeRunning = false;
 
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
@@ -10000,7 +10002,7 @@ export class AgentSession {
 			this.#shakeToolCallCounter = 0;
 			return;
 		}
-		if (this.#shakeToolCallCounter < interval) return;
+		if (this.#shakeToolCallCounter < interval && !this.#shakeNeedsAgentSync) return;
 
 		if (this.isCompacting || this.agent.state.isStreaming) return;
 
@@ -10014,6 +10016,7 @@ export class AgentSession {
 		try {
 			const result = await this.shake("elide", { config: DEFAULT_SHAKE_CONFIG });
 			this.emitNotice("info", formatShakeSummary(result), "shake");
+			this.#shakeNeedsAgentSync = false;
 		} catch (error) {
 			logger.warn("Periodic shake failed", { error: error instanceof Error ? error.message : String(error) });
 		}
@@ -10027,17 +10030,23 @@ export class AgentSession {
 	 * loop continues safely with its original message reference.
 	 */
 	async #runMidRunShake(): Promise<void> {
-		this.#shakeToolCallCounter = 0;
+		// Guard against concurrent entry from parallel tool calls
+		if (this.#midRunShakeRunning) return;
+		this.#midRunShakeRunning = true;
 		try {
+			this.#shakeToolCallCounter = 0;
 			const result = await this.shake("elide", {
 				config: DEFAULT_SHAKE_CONFIG,
 				skipAgentUpdate: true,
 			});
 			this.emitNotice("info", formatShakeSummary(result), "shake");
+			this.#shakeNeedsAgentSync = true;
 		} catch (error) {
 			logger.warn("Mid-run shake failed", {
 				error: error instanceof Error ? error.message : String(error),
 			});
+		} finally {
+			this.#midRunShakeRunning = false;
 		}
 	}
 
@@ -11375,6 +11384,7 @@ export class AgentSession {
 		this.agent.clearAllQueues();
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#shakeToolCallCounter = 0;
 
 		try {
 			await this.sessionManager.setSessionFile(sessionPath);
@@ -11663,6 +11673,7 @@ export class AgentSession {
 		}
 
 		this.#pendingNextTurnMessages = [];
+		this.#shakeToolCallCounter = 0;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.agent.replaceQueues([], []);
 		if (this.isStreaming) {

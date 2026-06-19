@@ -425,17 +425,18 @@ describe("AgentSession shake", () => {
 			await Bun.sleep(30);
 			expect(shakeSpy).not.toHaveBeenCalled();
 
-			// Second tool call + end — reaches interval
+			// Second tool call + end — reaches interval.
+			// Shakes twice: once mid-run (skipAgentUpdate) and once at agent_end (sync state).
 			bumpToolCallCounter();
 			emitEnd(makeAssistantMessage("second"));
 			await Bun.sleep(30);
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
 			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: DEFAULT_SHAKE_CONFIG }));
 
-			// Extra end without tool call — counter was reset, no second fire
+			// Extra end without tool call — counter was reset, sync flag cleared, no third fire
 			emitEnd(makeAssistantMessage("third"));
 			await Bun.sleep(30);
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
 		});
 
 		it("fires once after multiple tool calls in one autonomous turn", async () => {
@@ -445,17 +446,18 @@ describe("AgentSession shake", () => {
 				.spyOn(session, "shake")
 				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
 
-			// Three tool calls, then a single agent_end
+			// Three tool calls in one turn — third hits interval.
+			// Shakes twice: once mid-run (skipAgentUpdate) and once at agent_end (sync state).
 			bumpToolCallCounter();
 			bumpToolCallCounter();
 			bumpToolCallCounter();
 			emitEnd(makeAssistantMessage());
 			await Bun.sleep(30);
 
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
 		});
 
-		it("fires mid-run and suppresses at agent_end guards", async () => {
+		it("fires mid-run and syncs agent state at agent_end", async () => {
 			session.settings.set("compaction.strategy", "off");
 			session.settings.set("shake.interval", 1);
 			const shakeSpy = vi
@@ -467,11 +469,12 @@ describe("AgentSession shake", () => {
 			await Bun.sleep(10);
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
 
-			// Agent_end: counter was reset by mid-run, no re-fire
+			// Agent_end: #shakeNeedsAgentSync triggers sync shake (w/ replaceMessages)
 			emitEnd(makeAssistantMessage());
 			await Bun.sleep(30);
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
 		});
+
 		it("skips periodic shake when compaction continuation owns the next turn", async () => {
 			// Use handoff strategy (doesn't call shake) with threshold trigger to
 			// produce COMPACTION_CHECK_DEFERRED_HANDOFF (continuationScheduled: true).
