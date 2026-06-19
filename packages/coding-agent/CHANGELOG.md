@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `shake.interval` setting for periodic tool-result elision in long sessions, independent of compaction strategy ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
+
+### Fixed
+
+- Fixed periodic shake running after compaction pruned the trailing assistant and recovery failed, which would re-introduce the failed/truncated assistant into the next prompt ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
+
 ## [16.0.9] - 2026-06-18
 
 ### Added
