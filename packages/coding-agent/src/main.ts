@@ -504,8 +504,6 @@ async function runInteractiveMode(
 	// failing turn.
 	if (autonomousController) {
 		autonomousController.begin({
-			hadInitialMessage: initialMessage !== undefined || initialMessages.length > 0,
-			resuming,
 			startupFailed: startupPromptFailed,
 		});
 	}
@@ -1328,8 +1326,16 @@ export async function runRootCommand(
 		// for interactive sessions — print/protocol modes are one-shot. Optional
 		// publishing flags only extend the hidden continuation prompt; side effects
 		// stay model-driven so mid-objective turns are not committed or pushed.
+		// When active, disable compaction.autoContinue so the controller owns
+		// post-handoff continuation: without this, auto-handoff schedules a generic
+		// "resume work" prompt that races — and lacks — the autonomous steps/idea/
+		// commit/PR instructions the controller would queue on the next agent_end.
+		const hasAutonomousFlags = parsedArgs.autoNextSteps || parsedArgs.autoNextIdea;
+		if (isInteractive && hasAutonomousFlags) {
+			settingsInstance.override("compaction.autoContinue", false);
+		}
 		const autonomousController =
-			isInteractive && (parsedArgs.autoNextSteps || parsedArgs.autoNextIdea)
+			isInteractive && hasAutonomousFlags
 				? new AutonomousController({
 						session,
 						autoNextSteps: parsedArgs.autoNextSteps === true,

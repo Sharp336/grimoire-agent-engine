@@ -66,6 +66,7 @@ interface FakeOptions {
 	autoPr?: boolean;
 	planMode?: boolean;
 	goalMode?: boolean;
+	history?: AgentMessage[];
 }
 
 function setup(options: FakeOptions) {
@@ -91,12 +92,16 @@ function setup(options: FakeOptions) {
 		get isStreaming() {
 			return streaming;
 		},
+		get messages() {
+			return history;
+		},
 		getPlanModeState: () => ({ enabled: planEnabled }),
 		getGoalModeState: () => goalState,
 		emitNotice: (level, message, source) => {
 			notices.push({ level, message, source });
 		},
 		hasQueuedCustomMessage: customType => queuedCustomTypes.has(customType),
+		dropQueuedCustomMessage: customType => queuedCustomTypes.delete(customType),
 		sendCustomMessage: async (message, opts) => {
 			if (sendError) throw sendError;
 			const content = typeof message.content === "string" ? message.content : "";
@@ -155,16 +160,16 @@ function setup(options: FakeOptions) {
 
 describe("AutonomousController arming", () => {
 	it("ignores agent_end until begin() arms it", () => {
-		const { controller, emit, sent } = setup({ autoNextSteps: true });
+		const { controller, emit, sent } = setup({ autoNextSteps: true, history: [assistant("stop")] });
 		emit(agentEndEvent([assistantActing("stop")]));
 		expect(sent).toHaveLength(0);
-		controller.begin({ hadInitialMessage: true, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		expect(sent).toHaveLength(1);
 	});
 
 	it("idea/combined self-starts with no message", () => {
 		const idea = setup({ autoNextIdea: true });
-		idea.controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		idea.controller.begin({ startupFailed: false });
 		expect(idea.sent).toHaveLength(1);
 		expect(idea.sent[0]!.content).toContain("ideation mode");
 	});
@@ -173,6 +178,7 @@ describe("AutonomousController arming", () => {
 		const { controller, notices, sent, setSendError } = setup({ autoNextIdea: true });
 		setSendError(new Error("missing API key"));
 		controller.begin({ startupFailed: false });
+		await Promise.resolve();
 		await Promise.resolve();
 		expect(sent).toHaveLength(0);
 		expect(notices).toEqual([
@@ -188,32 +194,31 @@ describe("AutonomousController arming", () => {
 		// `--continue --auto-next-steps` in a project with no prior session opens an
 		// empty transcript; steps-only must not invent an objective.
 		const steps = setup({ autoNextSteps: true });
-		steps.controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		steps.controller.begin({ startupFailed: false });
 		expect(steps.sent).toHaveLength(0);
 	});
-
 	it("steps-only self-starts on resume (transcript already holds an objective)", () => {
-		const steps = setup({ autoNextSteps: true });
-		steps.controller.begin({ hadInitialMessage: false, resuming: true, startupFailed: false });
+		const steps = setup({ autoNextSteps: true, history: [assistant("stop")] });
+		steps.controller.begin({ startupFailed: false });
 		expect(steps.sent).toHaveLength(1);
 	});
 
 	it("begin() honors a failed/aborted startup turn instead of re-queueing", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true });
 		emit(agentEndEvent([assistant("aborted")])); // suppressed (not armed), but recorded
-		controller.begin({ hadInitialMessage: true, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		expect(sent).toHaveLength(0);
 	});
 
 	it("begin() honors a startup prompt that threw without an agent_end (startupFailed)", () => {
 		const { controller, sent } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: true, resuming: false, startupFailed: true });
+		controller.begin({ startupFailed: true });
 		expect(sent).toHaveLength(0);
 	});
 
 	it("begin() leaves plan/goal mode to its own driver", () => {
 		const plan = setup({ autoNextIdea: true, planMode: true });
-		plan.controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		plan.controller.begin({ startupFailed: false });
 		expect(plan.sent).toHaveLength(0);
 	});
 
@@ -223,7 +228,7 @@ describe("AutonomousController arming", () => {
 		emit(START); // startup turn began in goal mode
 		setGoalMode(false); // goal completed mid-turn; live flag clears before agent_end
 		emit(agentEndEvent([assistantActing("stop")])); // suppressed (not armed)
-		controller.begin({ hadInitialMessage: true, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		expect(sent).toHaveLength(0);
 	});
 });
@@ -231,7 +236,7 @@ describe("AutonomousController arming", () => {
 describe("AutonomousController loop", () => {
 	it("queues a continuation after a working turn", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false }); // arm, no queue
+		controller.begin({ startupFailed: false }); // arm, no queue
 		emit(agentEndEvent([assistantActing("stop")]));
 		expect(sent).toHaveLength(1);
 		expect(sent[0]!.triggerTurn).toBe(true);
@@ -241,21 +246,21 @@ describe("AutonomousController loop", () => {
 
 	it("does not re-queue after an interrupted (aborted) turn", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		emit(agentEndEvent([assistantActing("aborted")]));
 		expect(sent).toHaveLength(0);
 	});
 
 	it("does not re-queue after a failed (error) turn", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		emit(agentEndEvent([assistantActing("error")]));
 		expect(sent).toHaveLength(0);
 	});
 
 	it("does not re-queue a deadline-style agent_end with no assistant message", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		emit(agentEndEvent([assistantActing("stop")])); // working turn -> queue
 		expect(sent).toHaveLength(1);
 		emit(agentEndEvent([autonomousPrompt()])); // --max-time expiry after the autonomous prompt: no assistant
@@ -268,7 +273,7 @@ describe("AutonomousController loop", () => {
 
 	it("idea mode does not spin past --max-time (no-assistant agent_end)", () => {
 		const { controller, emit, sent } = setup({ autoNextIdea: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false }); // queues first
+		controller.begin({ startupFailed: false }); // queues first
 		expect(sent).toHaveLength(1);
 		emit(agentEndEvent([autonomousPrompt()])); // deadline expiry after the autonomous prompt: no assistant
 		expect(sent).toHaveLength(1); // idea would otherwise loop forever appending continuations
@@ -294,7 +299,7 @@ describe("AutonomousController loop", () => {
 
 	it("does not queue from a generic stale agent_end while another turn is streaming", () => {
 		const { controller, emit, sent, setStreaming } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		setStreaming(true);
 		emit(agentEndEvent([assistantActing("stop")]));
 		expect(sent).toHaveLength(0);
@@ -302,7 +307,7 @@ describe("AutonomousController loop", () => {
 
 	it("skips a turn that started in goal mode (avoids the exit-cleanup race)", () => {
 		const { controller, emit, sent, setGoalMode } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		setGoalMode(true);
 		emit(START); // latch start-of-turn goal state
 		setGoalMode(false); // goal completed mid-turn, live flag clears before agent_end
@@ -316,7 +321,7 @@ describe("AutonomousController loop", () => {
 
 	it("skips a turn that started in plan mode", () => {
 		const { controller, emit, sent, setPlanMode } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		setPlanMode(true);
 		emit(START);
 		emit(agentEndEvent([assistantActing("stop")]));
@@ -347,12 +352,19 @@ describe("AutonomousController loop", () => {
 		goal.emit(agentEndEvent([assistantActing("stop")]));
 		expect(goal.sent).toHaveLength(0);
 	});
+
+	it("begin() skips when goal mode is exiting after startup", () => {
+		const goal = setup({ autoNextIdea: true, goalMode: true });
+		goal.setGoalModeState({ enabled: false, mode: "exiting" }); // startup turn completed a goal
+		goal.controller.begin({ startupFailed: false });
+		expect(goal.sent).toHaveLength(0);
+	});
 });
 
 describe("AutonomousController steps completion", () => {
 	it("disarms when an autonomous turn performs no action (objective done)", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		emit(agentEndEvent([assistantActing("stop")])); // queues; next turn is autonomous
 		expect(sent).toHaveLength(1);
 		emit(agentEndEvent([autonomousPrompt(), assistant("stop")])); // autonomous turn, no action -> halt
@@ -401,7 +413,7 @@ describe("AutonomousController steps completion", () => {
 
 	it("a superseded agent_end while streaming does not consume the autonomous marker", () => {
 		const { controller, emit, sent, setStreaming } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		emit(agentEndEvent([assistantActing("stop")])); // queue -> next turn is autonomous + streaming
 		expect(sent).toHaveLength(1);
 		setStreaming(true);
@@ -432,14 +444,14 @@ describe("AutonomousController steps completion", () => {
 
 	it("a user turn with no action does NOT halt the loop", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		emit(agentEndEvent([assistant("stop")])); // non-autonomous turn (nothing queued yet)
 		expect(sent).toHaveLength(1);
 	});
 
 	it("an aborted autonomous turn does not misclassify the next manual turn", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		emit(agentEndEvent([assistantActing("stop")])); // queue (turn becomes autonomous)
 		emit(agentEndEvent([autonomousPrompt(), assistant("aborted")])); // autonomous turn aborted -> must reset latch
 		emit(agentEndEvent([assistant("stop")])); // manual turn, no action -> must NOT halt
@@ -455,7 +467,7 @@ describe("AutonomousController steps completion", () => {
 
 	it("uses the combined prompt when both flags are set", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true, autoNextIdea: true });
-		controller.begin({ hadInitialMessage: false, resuming: false, startupFailed: false });
+		controller.begin({ startupFailed: false });
 		expect(sent[0]!.content).toContain("fully autonomous");
 		emit(agentEndEvent([autonomousPrompt(), assistant("stop")])); // combined never halts
 		expect(sent).toHaveLength(2);
@@ -474,5 +486,52 @@ describe("AutonomousController steps completion", () => {
 		expect(sent[0]!.content).toContain("existing commit workflow");
 		expect(sent[0]!.content).toContain("--auto-pr is enabled");
 		expect(sent[0]!.content).toContain("`github` tool `pr_create`");
+	});
+
+	it("drops queued autonomous continuation when plan mode enters", () => {
+		const { controller, emit, sent, setQueueFollowUps, setPlanMode, dropQueuedCustomType } = setup({
+			autoNextSteps: true,
+			history: [assistant("stop")],
+		});
+		setQueueFollowUps(true); // before begin so the first continuation queues as follow-up
+		controller.begin({ startupFailed: false });
+		expect(sent).toHaveLength(1);
+
+		// The autonomous turn runs and ends cleanly (with tool activity, so it doesn't halt).
+		emit(agentEndEvent([autonomousPrompt(), assistantActing("stop")]));
+		expect(sent).toHaveLength(2); // queues next continuation
+
+		// Simulate plan mode entry: session drops the queued message and emits mode_changed.
+		setPlanMode(true);
+		dropQueuedCustomType("autonomous-continuation");
+		emit({ type: "mode_changed", mode: "plan", active: true, droppedCustomType: "autonomous-continuation" });
+
+		// The mode turn's agent_end has no autonomous prompt; controller must not be stuck.
+		setPlanMode(false);
+		emit(agentEndEvent([assistantActing("stop")]));
+		// After mode exits, a clean turn should resume the loop (marker was cleared).
+		expect(sent).toHaveLength(3);
+	});
+
+	it("drops queued autonomous continuation on goal_updated with enabled state", () => {
+		const { controller, emit, sent, setQueueFollowUps } = setup({
+			autoNextSteps: true,
+			history: [assistant("stop")],
+		});
+		controller.begin({ startupFailed: false });
+		expect(sent).toHaveLength(1); // begin queues first continuation
+
+		// The autonomous turn runs and ends cleanly (with tool activity, so it doesn't halt).
+		setQueueFollowUps(true); // before the autonomous turn so its continuation queues as follow-up
+		emit(agentEndEvent([autonomousPrompt(), assistantActing("stop")]));
+		expect(sent).toHaveLength(2); // queues next continuation
+
+		// GoalRuntime emits goal_updated with state.enabled before setGoalModeState runs.
+		// The controller's goal_updated handler drops the queued continuation and clears the marker.
+		emit({ type: "goal_updated", goal: null, state: { enabled: true } });
+
+		// A subsequent clean turn should resume the loop (marker was cleared, not stuck).
+		emit(agentEndEvent([assistantActing("stop")]));
+		expect(sent).toHaveLength(3);
 	});
 });

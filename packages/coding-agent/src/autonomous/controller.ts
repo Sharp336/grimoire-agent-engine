@@ -63,7 +63,10 @@ export interface AutonomousSession {
 	): Promise<boolean>;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
 	hasQueuedCustomMessage(customType: string): boolean;
+	dropQueuedCustomMessage(customType: string): boolean;
 	readonly isStreaming: boolean;
+	/** Live transcript — used to tell a restored session from a fresh empty one. */
+	readonly messages: readonly AgentMessage[];
 	getPlanModeState(): { enabled: boolean } | undefined;
 	getGoalModeState(): { enabled: boolean; mode?: "active" | "exiting" } | undefined;
 }
@@ -77,10 +80,6 @@ export interface AutonomousControllerOptions {
 }
 
 export interface AutonomousBeginOptions {
-	/** A user message was submitted this launch (initial prompt or extra positionals). */
-	hadInitialMessage: boolean;
-	/** Resuming/forking an existing session, so the transcript already holds an objective. */
-	resuming: boolean;
 	/** A startup prompt threw before producing an agent_end (e.g. no model/API key). */
 	startupFailed: boolean;
 }
@@ -136,6 +135,24 @@ export class AutonomousController {
 			// Latch the start-of-turn mode before any tool can flip it.
 			this.#turnStartedInPlanOrGoal =
 				this.#session.getPlanModeState()?.enabled === true || this.#session.getGoalModeState()?.enabled === true;
+			return;
+		}
+		if (event.type === "mode_changed" && event.droppedCustomType === AUTONOMOUS_CONTINUATION_MESSAGE_TYPE) {
+			// Plan/goal mode entry dropped our queued autonomous continuation
+			// synchronously. Clear the marker so the mode turn's agent_end doesn't
+			// leave the controller stuck — and so the next clean turn after mode
+			// exits resumes the loop normally.
+			this.#pendingAutonomousTurn = false;
+			return;
+		}
+		if (event.type === "goal_updated" && event.state?.enabled) {
+			// GoalRuntime can emit goal_updated with state.enabled before
+			// InteractiveMode calls setGoalModeState(). Drop any queued
+			// autonomous continuation so it doesn't drain into the goal turn
+			// during that window.
+			if (this.#session.dropQueuedCustomMessage(AUTONOMOUS_CONTINUATION_MESSAGE_TYPE)) {
+				this.#pendingAutonomousTurn = false;
+			}
 			return;
 		}
 		if (event.type === "agent_end") {
@@ -235,8 +252,9 @@ export class AutonomousController {
 		this.#turnStartedInPlanOrGoal = false;
 		if (this.#lastTurnFailed || options.startupFailed || startedInPlanOrGoal) return;
 		if (this.#session.getPlanModeState()?.enabled) return;
-		if (this.#session.getGoalModeState()?.enabled) return;
-		if (options.hadInitialMessage || options.resuming || this.#canKickoff) {
+		const liveGoalState = this.#session.getGoalModeState();
+		if (liveGoalState?.enabled || liveGoalState?.mode === "exiting") return;
+		if (this.#session.messages.length > 0 || this.#canKickoff) {
 			this.#queueContinuation();
 		}
 	}
@@ -249,7 +267,6 @@ export class AutonomousController {
 		// turn) and WILL still run — so keep the marker for that follow-up's
 		// eventual agent_end; only a failed send clears it (the catch below).
 		// Clearing on !started would make the queued turn's agent_end look manual
-		// and skip the steps-mode completion halt.
 		this.#pendingAutonomousTurn = true;
 		this.#session
 			.sendCustomMessage(
@@ -261,12 +278,32 @@ export class AutonomousController {
 				},
 				{ deliverAs: "followUp", triggerTurn: true },
 			)
+			.then(started => {
+				// If the continuation was queued (!started) and plan/goal mode was
+				// entered before the follow-up drained, drop it so the autonomous
+				// prompt doesn't run inside the mode-owned flow. The async gap between
+				// sendCustomMessage and the follow-up landing in the queue is the race
+				// window; this .then closes it by checking mode state after the send
+				// resolves and removing the queued message if a mode is now active.
+				if (!started && this.#isModeActive()) {
+					this.#session.dropQueuedCustomMessage(AUTONOMOUS_CONTINUATION_MESSAGE_TYPE);
+					this.#pendingAutonomousTurn = false;
+				}
+			})
 			.catch(err => {
 				this.#pendingAutonomousTurn = false;
 				const message = err instanceof Error ? err.message : String(err);
 				this.#session.emitNotice("error", `Autonomous continuation failed: ${message}`, "auto-next");
 				logger.warn("autonomous continuation failed", { err: message });
 			});
+	}
+
+	#isModeActive(): boolean {
+		return (
+			this.#session.getPlanModeState()?.enabled === true ||
+			this.#session.getGoalModeState()?.enabled === true ||
+			this.#session.getGoalModeState()?.mode === "exiting"
+		);
 	}
 }
 

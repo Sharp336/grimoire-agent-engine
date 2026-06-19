@@ -341,7 +341,8 @@ export type AgentSessionEvent =
 			/** The level `auto` resolved to this turn, once classified. */
 			resolved?: Effort;
 	  }
-	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
+	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState }
+	| { type: "mode_changed"; mode: "plan" | "goal"; active: boolean; droppedCustomType?: string };
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
 
@@ -5239,6 +5240,13 @@ export class AgentSession {
 			this.#planReferenceSent = false;
 			this.#planReferencePath = state.planFilePath;
 		}
+		const dropped = state?.enabled ? this.dropQueuedCustomMessage("autonomous-continuation") : false;
+		this.#emit({
+			type: "mode_changed",
+			mode: "plan",
+			active: state?.enabled === true,
+			droppedCustomType: dropped ? "autonomous-continuation" : undefined,
+		});
 	}
 
 	getGoalModeState(): GoalModeState | undefined {
@@ -5247,6 +5255,13 @@ export class AgentSession {
 
 	setGoalModeState(state: GoalModeState | undefined): void {
 		this.#goalModeState = state;
+		const dropped = state?.enabled ? this.dropQueuedCustomMessage("autonomous-continuation") : false;
+		this.#emit({
+			type: "mode_changed",
+			mode: "goal",
+			active: state?.enabled === true,
+			droppedCustomType: dropped ? "autonomous-continuation" : undefined,
+		});
 	}
 
 	get goalRuntime(): GoalRuntime {
@@ -6281,7 +6296,13 @@ export class AgentSession {
 	async #promptAgentInitiatedMessage(message: CustomMessage): Promise<void> {
 		this.#beginInFlight();
 		try {
-			await this.agent.prompt(message);
+			// Inject pending "nextTurn" context (e.g. todo error reminders) so it is
+			// delivered alongside the agent-initiated turn. #promptWithMessage does
+			// this at line ~5837, but this path bypasses it — without this, autonomous
+			// continuations would skip next-turn guidance every turn.
+			const messages: AgentMessage[] = [...this.#pendingNextTurnMessages, message];
+			this.#pendingNextTurnMessages = [];
+			await this.agent.prompt(messages);
 			await this.#waitForPostPromptRecovery();
 		} finally {
 			this.#endInFlight();
@@ -6468,7 +6489,45 @@ export class AgentSession {
 	hasQueuedCustomMessage(customType: string): boolean {
 		const matches = (message: AgentMessage): boolean =>
 			message.role === "custom" && message.customType === customType;
-		return this.agent.peekSteeringQueue().some(matches) || this.agent.peekFollowUpQueue().some(matches);
+		return (
+			this.agent.peekSteeringQueue().some(matches) ||
+			this.agent.peekFollowUpQueue().some(matches) ||
+			this.#pendingNextTurnMessages.some(matches)
+		);
+	}
+
+	dropQueuedCustomMessage(customType: string): boolean {
+		const matches = (message: AgentMessage): boolean =>
+			message.role === "custom" && message.customType === customType;
+		const steering = [...this.agent.peekSteeringQueue()];
+		const followUp = [...this.agent.peekFollowUpQueue()];
+		const nextTurn = [...this.#pendingNextTurnMessages];
+		let dropped = false;
+		const keptSteering = steering.filter(msg => {
+			if (matches(msg)) {
+				dropped = true;
+				return false;
+			}
+			return true;
+		});
+		const keptFollowUp = followUp.filter(msg => {
+			if (matches(msg)) {
+				dropped = true;
+				return false;
+			}
+			return true;
+		});
+		const keptNextTurn = nextTurn.filter(msg => {
+			if (matches(msg)) {
+				dropped = true;
+				return false;
+			}
+			return true;
+		});
+		if (!dropped) return false;
+		this.agent.replaceQueues(keptSteering, keptFollowUp);
+		this.#pendingNextTurnMessages = keptNextTurn;
+		return true;
 	}
 
 	/** Number of pending displayable messages (includes steering, follow-up, and next-turn messages).
