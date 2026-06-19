@@ -2833,6 +2833,10 @@ export class AgentSession {
 			if (!compactionResult.tailPruned) {
 				// Periodic shake — independent of compaction strategy/auto-compaction
 				await this.#runPeriodicShake();
+			} else {
+				// Consume the due counter so the next normal turn doesn't immediately
+				// fire shake and reintroduce the pruned assistant via state rebuild.
+				this.#shakeToolCallCounter = 0;
 			}
 
 			// Check for incomplete todos only after a final assistant stop, not intermediate tool-use turns.
@@ -6764,6 +6768,7 @@ export class AgentSession {
 		this.#resetHindsightConversationTrackingIfHindsight();
 		this.#resetMnemopiConversationTrackingIfMnemopi();
 		this.#pendingNextTurnMessages = [];
+		this.#shakeToolCallCounter = 0;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		this.sessionManager.appendThinkingLevelChange(this.thinkingLevel);
@@ -6860,6 +6865,7 @@ export class AgentSession {
 		this.#rekeyHindsightMemoryForCurrentSessionId();
 		this.#rekeyMnemopiMemoryForCurrentSessionId();
 		this.#resetMnemopiConversationTrackingIfMnemopi();
+		this.#shakeToolCallCounter = 0;
 
 		// Emit session_switch event with reason "fork" to hooks
 		if (this.#extensionRunner) {
@@ -7999,6 +8005,7 @@ export class AgentSession {
 			this.#resetHindsightConversationTrackingIfHindsight();
 			this.#resetMnemopiConversationTrackingIfMnemopi();
 			this.#pendingNextTurnMessages = [];
+			this.#shakeToolCallCounter = 0;
 			this.#scheduledHiddenNextTurnGeneration = undefined;
 			this.#todoReminderCount = 0;
 			this.#todoReminderAwaitingProgress = false;
@@ -9321,13 +9328,20 @@ export class AgentSession {
 			if (outcome !== "fallback") return outcome;
 			// Shake rebuilds agent.state from persisted session entries, so a
 			// preceding tail-prune (done by #checkCompaction before calling us)
-			// was undone by the shake() call. If we returned "fallback" without
+			// was undone by the shake() call. If it returned "fallback" without
 			// scheduling continuation, re-prune the tail so subsequent recovery
 			// or the final noneResult doesn't surface the pruned assistant.
 			if (tailPruned) {
 				const messages = this.agent.state.messages;
-				if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
-					this.agent.replaceMessages(messages.slice(0, -1));
+				if (messages.length > 0) {
+					const last = messages[messages.length - 1];
+					// After shake() rebuilt state, the last assistant is the original
+					// error/length turn that was pruned. Only re-prune when that's the
+					// case — if shake() threw before replaceMessages the state is
+					// already pruned (last is user/toolResult) and must not be sliced.
+					if (last.role === "assistant" && (last.stopReason === "error" || last.stopReason === "length")) {
+						this.agent.replaceMessages(messages.slice(0, -1));
+					}
 				}
 			}
 		}
@@ -11524,6 +11538,7 @@ export class AgentSession {
 
 		// Clear pending messages (bound to old session state)
 		this.#pendingNextTurnMessages = [];
+		this.#shakeToolCallCounter = 0;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 
 		// Flush pending writes before branching
