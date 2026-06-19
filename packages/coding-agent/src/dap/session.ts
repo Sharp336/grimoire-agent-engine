@@ -191,6 +191,15 @@ function mapDebugpyMissingModule(adapterName: string, error: unknown): Error | n
 	return new Error("adapter 'debugpy' is not available: install with 'pip install debugpy'");
 }
 
+function adapterSupportsChildDebugType(adapter: DapResolvedAdapter, configType: string): boolean {
+	return (adapter.childSessionTypes ?? []).some(entry => {
+		if (entry.endsWith("*")) {
+			return configType.startsWith(entry.slice(0, -1));
+		}
+		return entry === configType;
+	});
+}
+
 function normalizePath(filePath: string): string {
 	return path.resolve(filePath);
 }
@@ -1492,14 +1501,7 @@ export class DapSessionManager {
 		if (!configType) {
 			return parentAdapter;
 		}
-		if (
-			parentAdapter.name === "js-debug-adapter" &&
-			(configType.startsWith("pwa-") ||
-				configType === "node" ||
-				configType === "chrome" ||
-				configType === "node-terminal" ||
-				configType === "msedge")
-		) {
+		if (adapterSupportsChildDebugType(parentAdapter, configType)) {
 			return parentAdapter;
 		}
 		let targetAdapterName: string | undefined;
@@ -2101,7 +2103,7 @@ export class DapSessionManager {
 	#shouldWaitForChildStopAfterThreadlessContinue(session: DapSession, error: unknown): boolean {
 		return (
 			session.parentSessionId === undefined &&
-			session.adapter.name === "js-debug-adapter" &&
+			session.adapter.threadlessContinueNeedsChildStopWait === true &&
 			toErrorMessage(error) === "Debugger reported no threads."
 		);
 	}

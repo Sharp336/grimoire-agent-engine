@@ -95,10 +95,11 @@ server = Bun.listen({
 	socket: {
 		open(socket) {
 			connections++;
-			socket.end();
 			if (connections === 1) {
-				server.stop();
+				server.stop(true);
+				return;
 			}
+			socket.end();
 		},
 		data() {},
 		close() {},

@@ -478,6 +478,16 @@ export interface DapClientState {
 export interface DapAdapterConfig {
 	command: string;
 	args?: string[];
+	/** Optional command used to launch the adapter after `command` has been
+	 * resolved as the install probe. Useful for adapters whose executable is a
+	 * package wrapper but whose debug server must be launched through a runtime. */
+	runtimeCommand?: string;
+	/** Environment variable containing an adapter server entrypoint path. */
+	serverPathEnv?: string;
+	/** Package name used when discovering server entrypoints from local/global installs. */
+	serverPackageName?: string;
+	/** Relative paths probed from discovered package roots for the adapter server entrypoint. */
+	serverPathCandidates?: string[];
 	languages?: string[];
 	fileTypes?: string[];
 	rootMarkers?: string[];
@@ -488,6 +498,12 @@ export interface DapAdapterConfig {
 	 *  On Linux, connects via a unix domain socket.
 	 *  On macOS, the adapter dials into a local TCP listener (--client-addr). */
 	connectMode?: "stdio" | "socket" | "tcp";
+	/** Debug configuration `type` values that should stay on this adapter for
+	 * reverse `startDebugging` child sessions. A trailing `*` matches prefixes. */
+	childSessionTypes?: string[];
+	/** Some root adapters report no threads during continue while child sessions
+	 * own the stopped state; when true, continue waits for a child stop instead. */
+	threadlessContinueNeedsChildStopWait?: boolean;
 	/** When true, the adapter accepts a directory as the launch `program`
 	 *  (e.g. dlv treats it as a Go package path). When false/undefined, the
 	 *  debug tool rejects directory programs upfront. */
@@ -505,6 +521,8 @@ export interface DapResolvedAdapter {
 	launchDefaults: Record<string, unknown>;
 	attachDefaults: Record<string, unknown>;
 	connectMode: "stdio" | "socket" | "tcp";
+	childSessionTypes?: string[];
+	threadlessContinueNeedsChildStopWait?: boolean;
 	acceptsDirectoryProgram: boolean;
 }
 

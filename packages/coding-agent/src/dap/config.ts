@@ -7,7 +7,7 @@ import DEFAULTS from "./defaults.json" with { type: "json" };
 import type { DapAdapterConfig, DapResolvedAdapter } from "./types";
 
 const EXTENSIONLESS_DEBUGGER_ORDER = ["gdb", "lldb-dap"] as const;
-const DAP_PORT_ARGUMENT = "$" + "{port}";
+const DAP_SERVER_PATH_ARGUMENT = "$" + "{serverPath}";
 
 function normalizeStringArray(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
@@ -25,15 +25,30 @@ function normalizeAdapterConfig(config: unknown): DapAdapterConfig | null {
 		config.connectMode === "socket" || config.connectMode === "tcp"
 			? (config.connectMode as "socket" | "tcp")
 			: undefined;
+	const runtimeCommand =
+		typeof config.runtimeCommand === "string" && config.runtimeCommand.length > 0 ? config.runtimeCommand : undefined;
+	const serverPathEnv =
+		typeof config.serverPathEnv === "string" && config.serverPathEnv.length > 0 ? config.serverPathEnv : undefined;
+	const serverPackageName =
+		typeof config.serverPackageName === "string" && config.serverPackageName.length > 0
+			? config.serverPackageName
+			: undefined;
+	const serverPathCandidates = normalizeStringArray(config.serverPathCandidates);
 	return {
 		command: config.command,
 		args: normalizeStringArray(config.args),
+		...(runtimeCommand ? { runtimeCommand } : {}),
+		...(serverPathEnv ? { serverPathEnv } : {}),
+		...(serverPackageName ? { serverPackageName } : {}),
+		...(serverPathCandidates.length > 0 ? { serverPathCandidates } : {}),
 		languages: normalizeStringArray(config.languages),
 		fileTypes: normalizeStringArray(config.fileTypes).map(entry => entry.toLowerCase()),
 		rootMarkers: normalizeStringArray(config.rootMarkers),
 		launchDefaults: normalizeObject(config.launchDefaults),
 		attachDefaults: normalizeObject(config.attachDefaults),
 		acceptsDirectoryProgram: config.acceptsDirectoryProgram === true,
+		childSessionTypes: normalizeStringArray(config.childSessionTypes),
+		threadlessContinueNeedsChildStopWait: config.threadlessContinueNeedsChildStopWait === true,
 		...(connectMode ? { connectMode } : {}),
 	};
 }
@@ -55,17 +70,81 @@ export function getAdapterConfigs(): Record<string, DapAdapterConfig> {
 	return { ...DEFAULT_ADAPTERS };
 }
 
-function resolveDapDebugServerPath(): string | null {
-	if (process.env.JS_DEBUG_DAP_SERVER) {
-		return process.env.JS_DEBUG_DAP_SERVER;
+function addSearchRootWithAncestors(roots: Set<string>, start: string, maxDepth: number = 4): void {
+	let current = path.resolve(start);
+	for (let depth = 0; depth <= maxDepth; depth++) {
+		roots.add(current);
+		const parent = path.dirname(current);
+		if (parent === current) break;
+		current = parent;
 	}
-	const home = os.homedir();
-	const candidate = path.join(
-		home,
-		".local/share/nvim/mason/packages/js-debug-adapter/js-debug/src/dapDebugServer.js",
-	);
-	if (fs.existsSync(candidate)) {
-		return candidate;
+}
+
+function getXdgDataDirs(): string[] {
+	const dirs = new Set<string>();
+	dirs.add(process.env.XDG_DATA_HOME || path.join(os.homedir(), ".local", "share"));
+	for (const entry of (process.env.XDG_DATA_DIRS || "/usr/local/share:/usr/share").split(path.delimiter)) {
+		if (entry.length > 0) {
+			dirs.add(entry);
+		}
+	}
+	return Array.from(dirs);
+}
+
+function getServerSearchRoots(config: DapAdapterConfig, resolvedAdapterCommand: string | null): string[] {
+	const roots = new Set<string>();
+	const addCommandPath = (commandPath: string) => {
+		addSearchRootWithAncestors(roots, path.dirname(commandPath));
+	};
+
+	if (resolvedAdapterCommand) {
+		addCommandPath(resolvedAdapterCommand);
+		try {
+			addCommandPath(fs.realpathSync(resolvedAdapterCommand));
+		} catch {
+			/* command may not have a stable realpath */
+		}
+	}
+
+	if (config.serverPackageName) {
+		for (const root of Array.from(roots)) {
+			const packageRoot = path.join(root, config.serverPackageName);
+			if (fs.existsSync(packageRoot)) {
+				roots.add(packageRoot);
+			}
+		}
+		for (const dataDir of getXdgDataDirs()) {
+			roots.add(path.join(dataDir, "nvim", "mason", "packages", config.serverPackageName));
+		}
+	}
+
+	return Array.from(roots);
+}
+
+function resolveConfiguredServerPath(
+	config: DapAdapterConfig,
+	resolvedAdapterCommand: string | null,
+	cwd: string,
+): string | null {
+	if (config.serverPathEnv) {
+		const envPath = process.env[config.serverPathEnv];
+		if (envPath && envPath.length > 0) {
+			const candidate = path.isAbsolute(envPath) ? envPath : path.resolve(cwd, envPath);
+			return fs.existsSync(candidate) ? candidate : null;
+		}
+	}
+
+	const candidates = config.serverPathCandidates ?? [];
+	if (candidates.length === 0) {
+		return null;
+	}
+	for (const root of getServerSearchRoots(config, resolvedAdapterCommand)) {
+		for (const relativeCandidate of candidates) {
+			const candidate = path.resolve(root, relativeCandidate);
+			if (fs.existsSync(candidate)) {
+				return candidate;
+			}
+		}
 	}
 	return null;
 }
@@ -74,34 +153,18 @@ export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAda
 	const config = DEFAULT_ADAPTERS[adapterName];
 	if (!config) return null;
 
-	if (adapterName === "js-debug-adapter") {
-		const serverPath = resolveDapDebugServerPath();
-		if (serverPath) {
-			const nodeResolved = resolveCommand("node", cwd);
-			if (nodeResolved) {
-				return {
-					name: adapterName,
-					command: "node",
-					args: [serverPath, DAP_PORT_ARGUMENT, "127.0.0.1"],
-					resolvedCommand: nodeResolved,
-					languages: config.languages ?? [],
-					fileTypes: config.fileTypes ?? [],
-					rootMarkers: config.rootMarkers ?? [],
-					launchDefaults: config.launchDefaults ?? {},
-					attachDefaults: config.attachDefaults ?? {},
-					connectMode: "tcp",
-					acceptsDirectoryProgram: config.acceptsDirectoryProgram === true,
-				};
-			}
-		}
-	}
+	const resolvedAdapterCommand = resolveCommand(config.command, cwd);
+	const usesServerPath = Boolean(config.serverPathEnv || (config.serverPathCandidates?.length ?? 0) > 0);
+	const serverPath = usesServerPath ? resolveConfiguredServerPath(config, resolvedAdapterCommand, cwd) : null;
+	if (usesServerPath && !serverPath) return null;
 
-	const resolvedCommand = resolveCommand(config.command, cwd);
+	const launchCommand = config.runtimeCommand ?? config.command;
+	const resolvedCommand = config.runtimeCommand ? resolveCommand(config.runtimeCommand, cwd) : resolvedAdapterCommand;
 	if (!resolvedCommand) return null;
 	return {
 		name: adapterName,
-		command: config.command,
-		args: config.args ?? [],
+		command: launchCommand,
+		args: (config.args ?? []).map(arg => (serverPath ? arg.replace(DAP_SERVER_PATH_ARGUMENT, serverPath) : arg)),
 		resolvedCommand,
 		languages: config.languages ?? [],
 		fileTypes: config.fileTypes ?? [],
@@ -109,6 +172,8 @@ export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAda
 		launchDefaults: config.launchDefaults ?? {},
 		attachDefaults: config.attachDefaults ?? {},
 		connectMode: config.connectMode ?? "stdio",
+		childSessionTypes: config.childSessionTypes,
+		threadlessContinueNeedsChildStopWait: config.threadlessContinueNeedsChildStopWait,
 		acceptsDirectoryProgram: config.acceptsDirectoryProgram === true,
 	};
 }

@@ -21,6 +21,8 @@ const TEST_ADAPTER: DapResolvedAdapter = {
 	launchDefaults: {},
 	attachDefaults: {},
 	connectMode: "tcp",
+	childSessionTypes: ["pwa-*", "node", "chrome", "node-terminal", "msedge"],
+	threadlessContinueNeedsChildStopWait: true,
 	acceptsDirectoryProgram: false,
 };
 
@@ -489,6 +491,8 @@ describe("DAP multi-session debugging", () => {
 		const adapter: DapResolvedAdapter = {
 			...TEST_ADAPTER,
 			name: "generic-debug-adapter",
+			childSessionTypes: [],
+			threadlessContinueNeedsChildStopWait: false,
 		};
 		const client = new FakeDapClient(adapter, process.cwd());
 
