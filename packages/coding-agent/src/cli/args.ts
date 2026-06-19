@@ -68,6 +68,10 @@ export interface Args {
 	autoNextSteps?: boolean;
 	/** --auto-next-idea: brainstorm and implement a new improvement after each turn. */
 	autoNextIdea?: boolean;
+	/** --auto-commit: commit verified autonomous work before continuing. */
+	autoCommit?: boolean;
+	/** --auto-pr: open a pull request for verified autonomous work. */
+	autoPr?: boolean;
 	messages: string[];
 	fileArgs: string[];
 	/** Extension-registered flags this parse recognized — name to value. */
@@ -221,6 +225,10 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.autoNextSteps = true;
 		} else if (arg === "--auto-next-idea") {
 			result.autoNextIdea = true;
+		} else if (arg === "--auto-commit") {
+			result.autoCommit = true;
+		} else if (arg === "--auto-pr") {
+			result.autoPr = true;
 		} else if (arg.startsWith("@")) {
 			let filePath = arg.slice(1);
 			if (filePath.startsWith('"') && filePath.endsWith('"') && filePath.length > 1) {

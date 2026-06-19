@@ -2,11 +2,12 @@
  * Autonomous continuation controller (`--auto-next-steps` / `--auto-next-idea`).
  *
  * After each completed turn the controller queues a follow-up prompt so the
- * agent keeps working without user input. `--auto-next-steps` drives it through
- * the next concrete steps of the current objective (including running tests);
- * `--auto-next-idea` pivots it to brainstorming and implementing a new
- * improvement once the current plan is done. With both flags it cycles between
- * the two until the user interrupts.
+ * agent keeps working without user input. `--auto-next-steps` drives the next
+ * concrete steps of the current objective (including running tests);
+ * `--auto-next-idea` pivots to brainstorming and implementing improvements.
+ * `--auto-commit` and `--auto-pr` append completion-time publishing
+ * instructions to that hidden prompt. With both next flags it cycles until the
+ * user interrupts.
  *
  * Installed once per interactive session. The session's listener array retains
  * the controller for its lifetime (same pattern as AutoLearnController), so no
@@ -36,6 +37,8 @@ import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { CustomMessage } from "../session/messages";
+import autoCommitPrompt from "./auto-commit.md" with { type: "text" };
+import autoPrPrompt from "./auto-pr.md" with { type: "text" };
 import combinedPrompt from "./combined.md" with { type: "text" };
 import ideaPrompt from "./next-idea.md" with { type: "text" };
 import stepsPrompt from "./next-steps.md" with { type: "text" };
@@ -45,6 +48,8 @@ const AUTOLEARN_NUDGE_MESSAGE_TYPE = "autolearn-nudge";
 const AUTONOMOUS_STEPS = stepsPrompt.trim();
 const AUTONOMOUS_IDEA = ideaPrompt.trim();
 const AUTONOMOUS_COMBINED = combinedPrompt.trim();
+const AUTONOMOUS_AUTO_COMMIT = autoCommitPrompt.trim();
+const AUTONOMOUS_AUTO_PR = autoPrPrompt.trim();
 
 /**
  * Minimal session surface the controller depends on. {@link AgentSession}
@@ -67,6 +72,8 @@ export interface AutonomousControllerOptions {
 	session: AutonomousSession;
 	autoNextSteps: boolean;
 	autoNextIdea: boolean;
+	autoCommit: boolean;
+	autoPr: boolean;
 }
 
 export interface AutonomousBeginOptions {
@@ -76,6 +83,19 @@ export interface AutonomousBeginOptions {
 	resuming: boolean;
 	/** A startup prompt threw before producing an agent_end (e.g. no model/API key). */
 	startupFailed: boolean;
+}
+
+function selectContinuationPrompt(options: AutonomousControllerOptions): string {
+	if (options.autoNextSteps && options.autoNextIdea) return AUTONOMOUS_COMBINED;
+	if (options.autoNextIdea) return AUTONOMOUS_IDEA;
+	return AUTONOMOUS_STEPS;
+}
+
+function buildAutonomousPrompt(options: AutonomousControllerOptions): string {
+	const parts = [selectContinuationPrompt(options)];
+	if (options.autoCommit) parts.push(AUTONOMOUS_AUTO_COMMIT);
+	if (options.autoPr) parts.push(AUTONOMOUS_AUTO_PR);
+	return parts.join("\n\n");
 }
 
 export class AutonomousController {
@@ -99,12 +119,11 @@ export class AutonomousController {
 	constructor(options: AutonomousControllerOptions) {
 		this.#session = options.session;
 		// Steps → continue the objective; idea → brainstorm/improve; both → cycle.
-		this.#prompt =
-			options.autoNextSteps && options.autoNextIdea
-				? AUTONOMOUS_COMBINED
-				: options.autoNextIdea
-					? AUTONOMOUS_IDEA
-					: AUTONOMOUS_STEPS;
+		// Commit/PR flags add completion-time publishing instructions to that base
+		// prompt instead of running side effects from this event listener: agent_end
+		// can represent mid-objective turns, and committing there would publish
+		// partial work.
+		this.#prompt = buildAutonomousPrompt(options);
 		this.#stepsOnly = options.autoNextSteps && !options.autoNextIdea;
 		this.#canKickoff = options.autoNextIdea;
 		// The listener closure captures `this`, so the session keeps the

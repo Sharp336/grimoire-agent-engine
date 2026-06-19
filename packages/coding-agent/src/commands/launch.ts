@@ -158,14 +158,20 @@ export default class Index extends Command {
 			options: ["always-ask", "write", "yolo"],
 			description: "Override tools.approvalMode for this session (always-ask|write|yolo)",
 		}),
-		// `--auto-next-steps` / `--auto-next-idea`: declared here so oclif's auto-generated
-		// `--help` lists them. Runtime parsing happens in `cli/args.ts parseArgs` — runRootCommand
-		// consumes the manual-parser output, not these oclif flag values.
+		// Autonomous launch flags: declared here so oclif's auto-generated
+		// `--help` lists them. Runtime parsing happens in `cli/args.ts parseArgs` —
+		// runRootCommand consumes the manual-parser output, not these oclif flag values.
 		"auto-next-steps": Flags.boolean({
 			description: "Keep working through the next steps after each turn (until interrupted)",
 		}),
 		"auto-next-idea": Flags.boolean({
 			description: "After each turn, brainstorm and implement a new improvement (until interrupted)",
+		}),
+		"auto-commit": Flags.boolean({
+			description: "Commit verified autonomous work before continuing",
+		}),
+		"auto-pr": Flags.boolean({
+			description: "Create or update a pull request for verified autonomous work",
 		}),
 	};
 

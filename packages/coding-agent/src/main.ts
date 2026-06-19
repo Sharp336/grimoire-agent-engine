@@ -1325,15 +1325,17 @@ export async function runRootCommand(
 			authStorage.setRuntimeApiKey(session.model.provider, parsedArgs.apiKey);
 		}
 		// Autonomous continuation (--auto-next-steps / --auto-next-idea): armed only
-		// for interactive sessions — print/protocol modes are one-shot. The controller
-		// subscribes to the session event stream for its lifetime; runInteractiveMode
-		// calls kickoff() to start the first turn when no initial user message is given.
+		// for interactive sessions — print/protocol modes are one-shot. Optional
+		// publishing flags only extend the hidden continuation prompt; side effects
+		// stay model-driven so mid-objective turns are not committed or pushed.
 		const autonomousController =
 			isInteractive && (parsedArgs.autoNextSteps || parsedArgs.autoNextIdea)
 				? new AutonomousController({
 						session,
 						autoNextSteps: parsedArgs.autoNextSteps === true,
 						autoNextIdea: parsedArgs.autoNextIdea === true,
+						autoCommit: parsedArgs.autoCommit === true,
+						autoPr: parsedArgs.autoPr === true,
 					})
 				: undefined;
 

@@ -62,6 +62,8 @@ function autolearnPrompt(): CustomMessage {
 interface FakeOptions {
 	autoNextSteps?: boolean;
 	autoNextIdea?: boolean;
+	autoCommit?: boolean;
+	autoPr?: boolean;
 	planMode?: boolean;
 	goalMode?: boolean;
 }
@@ -110,6 +112,8 @@ function setup(options: FakeOptions) {
 		session,
 		autoNextSteps: options.autoNextSteps ?? false,
 		autoNextIdea: options.autoNextIdea ?? false,
+		autoCommit: options.autoCommit ?? false,
+		autoPr: options.autoPr ?? false,
 	});
 	return {
 		sent,
@@ -455,5 +459,20 @@ describe("AutonomousController steps completion", () => {
 		expect(sent[0]!.content).toContain("fully autonomous");
 		emit(agentEndEvent([autonomousPrompt(), assistant("stop")])); // combined never halts
 		expect(sent).toHaveLength(2);
+	});
+
+	it("adds auto-commit and auto-pr instructions to the continuation prompt", () => {
+		const { controller, sent } = setup({
+			autoNextSteps: true,
+			autoCommit: true,
+			autoPr: true,
+			history: [assistant("stop")],
+		});
+		controller.begin({ startupFailed: false });
+		expect(sent[0]!.content).toContain("continuation mode");
+		expect(sent[0]!.content).toContain("--auto-commit is enabled");
+		expect(sent[0]!.content).toContain("existing commit workflow");
+		expect(sent[0]!.content).toContain("--auto-pr is enabled");
+		expect(sent[0]!.content).toContain("`github` tool `pr_create`");
 	});
 });

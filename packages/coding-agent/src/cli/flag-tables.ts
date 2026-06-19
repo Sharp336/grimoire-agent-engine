@@ -279,4 +279,6 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--yolo",
 	"--auto-next-steps",
 	"--auto-next-idea",
+	"--auto-commit",
+	"--auto-pr",
 ]);
