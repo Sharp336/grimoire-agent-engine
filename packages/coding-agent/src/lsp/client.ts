@@ -482,6 +482,33 @@ async function handleServerRequest(client: LspClient, message: LspJsonRpcRequest
 		await sendResponse(client, message.id, null, message.method);
 		return;
 	}
+	if (message.method === "window/showMessageRequest") {
+		// Server-initiated request asking the client to prompt the user with a set
+		// of actions. omp runs headless — there is no modal to surface — so answer
+		// with `null`, the spec-defined "no action selected" response. Returning
+		// `-32601` here is incorrect (this is a defined method) and some servers
+		// stall waiting on a real reply.
+		await sendResponse(client, message.id, null, message.method);
+		return;
+	}
+	if (message.method === "window/showDocument") {
+		// Server-initiated request asking the client to display a document. The
+		// agent drives no editor surface, so decline with `{ success: false }` —
+		// the spec requires the server to accept this and treat the doc as not
+		// shown — rather than erroring with `Method not found`.
+		await sendResponse(client, message.id, { success: false }, message.method);
+		return;
+	}
+	if (message.method.startsWith("workspace/") && message.method.endsWith("/refresh")) {
+		// `workspace/<feature>/refresh` requests (semanticTokens, inlayHint,
+		// codeLens, codeAction, diagnostic, …) ask the client to re-pull a feature.
+		// omp does not auto-refetch on server demand, but the request still
+		// requires a `null` (void) acknowledgement. These are defined methods, so
+		// `Method not found` is the wrong answer and can block servers that await
+		// the response before continuing.
+		await sendResponse(client, message.id, null, message.method);
+		return;
+	}
 	await sendResponse(client, message.id, null, message.method, {
 		code: -32601,
 		message: `Method not found: ${message.method}`,

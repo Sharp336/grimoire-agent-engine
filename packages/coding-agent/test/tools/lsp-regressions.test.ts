@@ -380,6 +380,68 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("answers server-initiated UI/refresh requests instead of returning Method not found", async () => {
+		// LSP defines several server->client requests beyond the configuration /
+		// workspaceFolders / applyEdit / registerCapability set. Answering them with
+		// `-32601 Method not found` is incorrect (they ARE defined methods) and can
+		// stall servers that block on a real reply — the same failure class as the
+		// registerCapability hang above. omp runs headless, so it cannot honour the
+		// UI surface, but it must still answer with the spec-correct no-op: `null`
+		// for showMessageRequest and the refresh family, `{ success: false }` for
+		// showDocument.
+		const tempDir = TempDir.createSync("@omp-lsp-server-requests-");
+		try {
+			const server = installFakeLsp((message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: {} } });
+				} else if (message.method === "initialized") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: 9101,
+						method: "window/showMessageRequest",
+						params: { type: 1, message: "Indexing workspace…", actions: [{ title: "Cancel" }] },
+					});
+					srv.send({
+						jsonrpc: "2.0",
+						id: 9102,
+						method: "window/showDocument",
+						params: { uri: fileToUri(path.join(tempDir.path(), "README.md")) },
+					});
+					srv.send({ jsonrpc: "2.0", id: 9103, method: "workspace/semanticTokens/refresh" });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+
+			const config: ServerConfig = {
+				command: "fake-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+			};
+
+			await lspClient.getOrCreateClient(config, tempDir.path(), 1_000);
+
+			const showMsg = await server.waitFor(message => message.id === 9101 && message.method === undefined);
+			const showDoc = await server.waitFor(message => message.id === 9102 && message.method === undefined);
+			const refresh = await server.waitFor(message => message.id === 9103 && message.method === undefined);
+
+			// showMessageRequest: `null` == "no action selected", not a -32601 error.
+			expect(showMsg.error).toBeUndefined();
+			expect(showMsg.result).toBeNull();
+			// showDocument: `{ success: false }` == "not displayed", not a -32601 error.
+			expect(showDoc.error).toBeUndefined();
+			expect(showDoc.result).toEqual({ success: false });
+			// workspace/<feature>/refresh: `null` (void) acknowledgement.
+			expect(refresh.error).toBeUndefined();
+			expect(refresh.result).toBeNull();
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("opens rust-analyzer Cargo workspace files before polling workspace readiness", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-rust-workspace-");
 		try {
