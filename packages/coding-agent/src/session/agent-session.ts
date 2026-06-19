@@ -2816,25 +2816,25 @@ export class AgentSession {
 			const compactionTask = this.#checkCompaction(msg);
 			this.#trackPostPromptTask(compactionTask);
 			const compactionResult = await compactionTask;
-
 			// When compaction queued recovery, skip periodic shake and any
 			// rewind/todo/session_stop passes: any reminder or hook continuation
 			// we append here would race the handoff, retry, auto-continue prompt,
 			// or queued-message drain that already owns the next turn.
-			// Also skip when compaction pruned the trailing assistant (overflow / length
-			// stop with no recovery path) — periodic shake would rebuild agent.state from
-			// persisted entries and reintroduce the pruned assistant into the prompt.
-			if (
-				compactionResult.deferredHandoff ||
-				compactionResult.continuationScheduled ||
-				compactionResult.tailPruned
-			) {
+			if (compactionResult.deferredHandoff || compactionResult.continuationScheduled) {
 				await emitAgentEndNotification();
 				return;
 			}
 
-			// Periodic shake — independent of compaction strategy/auto-compaction
-			await this.#runPeriodicShake();
+			// When compaction pruned the trailing assistant (overflow / length
+			// stop with no recovery path), periodic shake would rebuild agent.state
+			// from persisted entries and reintroduce the pruned assistant into the
+			// prompt. Skip it but allow normal agent_end processing (session_stop
+			// hooks, rewind, todo checks) to continue.
+			if (!compactionResult.tailPruned) {
+				// Periodic shake — independent of compaction strategy/auto-compaction
+				await this.#runPeriodicShake();
+			}
+
 			// Check for incomplete todos only after a final assistant stop, not intermediate tool-use turns.
 			const hasToolCalls = msg.content.some(content => content.type === "toolCall");
 			if (hasToolCalls) {
