@@ -493,6 +493,9 @@ export class AgentSession {
 
 	// Periodic shake state (shake.interval setting)
 	#shakeToolCallCounter = 0;
+	#shakeNeedsAgentSync = false;
+	#midRunShakeDue = false;
+	#midRunShakeRunning = false;
 
 	// Branch summarization state
 	#branchSummaryAbortController: AbortController | undefined = undefined;
@@ -1224,9 +1227,17 @@ export class AgentSession {
 			this.#loopGuards.onAssistantEvent(message, assistantMessageEvent);
 		});
 		// Per-tool TTSR reminders are folded into the matched tool's result via this hook.
-		// Also increment the periodic shake counter per tool call.
-		this.agent.afterToolCall = ctx => {
+		this.agent.afterToolCall = async (ctx, _signal) => {
 			this.#shakeToolCallCounter++;
+
+			// Flag mid-run shake when counter reaches interval. The actual shake
+			// fires from turn_end so tool results are already emitted and persisted
+			// when shake scans sessionManager.getBranch().
+			const interval = this.settings.get("shake.interval") as number;
+			if (Number.isFinite(interval) && interval > 0 && this.#shakeToolCallCounter >= interval) {
+				this.#midRunShakeDue = true;
+			}
+
 			return this.#afterToolCall(ctx);
 		};
 		this.agent.providerSessionState = this.#providerSessionState;
@@ -2322,6 +2333,13 @@ export class AgentSession {
 				this.#planModeReminderCount = 0;
 				this.#planModeReminderAwaitingProgress = false;
 			}
+		}
+
+		// Fire deferred mid-run shake after tool results are emitted and
+		// persisted, so shake() sees the latest result in getBranch().
+		if (event.type === "turn_end" && this.#midRunShakeDue) {
+			this.#midRunShakeDue = false;
+			await this.#runMidRunShake();
 		}
 
 		if (await this.#ttsr.checkMessageUpdate(event)) return;
@@ -6215,6 +6233,197 @@ export class AgentSession {
 	}
 
 	/**
+	 * already carry skill protection). The matcher reads the current plan
+	 * reference path at match time, so retitled plans are covered.
+	 */
+	#withPlanProtection<T extends { protectedTools: ProtectedToolMatcher[] }>(config: T): T {
+		const planMatcher = createPlanReadMatcher(() => this.#planReferencePath);
+		return { ...config, protectedTools: [...config.protectedTools, planMatcher] };
+	}
+
+	async #pruneToolOutputs(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+		const branchEntries = this.sessionManager.getBranch();
+		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const result = pruneToolOutputs(
+			branchEntries,
+			this.#withPlanProtection({
+				...DEFAULT_PRUNE_CONFIG,
+				pruneUseless: this.settings.getGroup("compaction").dropUseless,
+				// Cache-stable boundary: never re-write the warm, already-sent prefix
+				// (deep stale/age victims) or summarized-away entries every turn.
+				keepBoundaryId,
+				cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+			}),
+		);
+		if (result.prunedCount === 0) {
+			return undefined;
+		}
+
+		await this.sessionManager.rewriteEntries();
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#resetAllAdvisorRuntimes();
+		this.#syncTodoPhasesFromBranch();
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+		return result;
+	}
+
+	/**
+	 * Per-turn stale-result pass: prune older `read` results that a newer read
+	 * of the same file has made stale, plus results their tool flagged
+	 * contextually useless. Cache-aware (only fires when the suffix after a
+	 * candidate is small or the session has been idle long enough that the
+	 * provider prompt cache is cold), so it is cheap to run every turn. Gated
+	 * on the `compaction.supersedeReads` and `compaction.dropUseless` settings.
+	 *
+	 * Persists via `rewriteEntries` like every other history rewrite — the
+	 * session file must match the live (pruned) context or file-based forks
+	 * (`/fork`, `/tan`) and resume rebuild a divergent prefix and cold-miss the
+	 * provider prompt cache.
+	 */
+	async #pruneStaleToolResults(): Promise<{ prunedCount: number; tokensSaved: number } | undefined> {
+		const { supersedeReads, dropUseless } = this.settings.getGroup("compaction");
+		if (!supersedeReads && !dropUseless) return undefined;
+		const branchEntries = this.sessionManager.getBranch();
+		const keepBoundaryId = getLatestCompactionEntry(branchEntries)?.firstKeptEntryId;
+		const result = pruneSupersededToolResults(
+			branchEntries,
+			this.#withPlanProtection({
+				supersedeKey: supersedeReads ? readToolSupersedeKey : undefined,
+				pruneUseless: dropUseless,
+				protectedTools: [...DEFAULT_PRUNE_CONFIG.protectedTools],
+				// Never re-write summarized-away entries; only flush the whole sent
+				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
+				keepBoundaryId,
+				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
+			}),
+		);
+		if (result.prunedCount === 0) {
+			return undefined;
+		}
+
+		await this.sessionManager.rewriteEntries();
+		const sessionContext = this.buildDisplaySessionContext();
+		this.agent.replaceMessages(sessionContext.messages);
+		this.#resetAllAdvisorRuntimes();
+		this.#syncTodoPhasesFromBranch();
+		this.#closeCodexProviderSessionsForHistoryRewrite();
+		return result;
+	}
+
+	/**
+	 * Strip image content blocks from every message on the current branch and
+	 * persist the rewrite. Walks `SessionManager.getBranch()` in place — both
+	 * `SessionMessageEntry.message` and `CustomMessageEntry.content` arrays
+	 * are mutated, then `rewriteEntries` durably commits the new shape. The
+	 * agent's runtime view is rebuilt from the freshly-mutated entries so any
+	 * provider sessions caching message identity (Codex Responses) are torn
+	 * down to force a clean replay on the next turn.
+	 *
+	 * No-op when the branch carries no images; returns `{ removed: 0 }` and
+	 * skips the disk rewrite.
+	 */
+	 *
+	 * - `images` delegates to {@link dropImages}.
+	 * - `elide` replaces whole tool-call results and large fenced/XML blocks
+	 *   with short placeholders that embed an `artifact://` recovery link.
+	 *
+	 * Mutates the branch in place, persists via `rewriteEntries`, replays the
+	 * rebuilt context through the agent, and tears down provider sessions that
+	 * cache message identity — same rewrite contract as {@link dropImages}.
+	 *
+	 * No-op (zero counts) when nothing is eligible.
+	 */
+	async shake(
+		mode: ShakeMode,
+		opts: { config?: ShakeConfig; signal?: AbortSignal; skipAgentUpdate?: boolean } = {},
+	): Promise<ShakeResult> {
+		if (mode === "images") {
+			const { removed } = await this.dropImages();
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
+		}
+
+		const branchEntries = this.sessionManager.getBranch();
+		const config = this.#withPlanProtection({
+			...(opts.config ?? AGGRESSIVE_SHAKE_CONFIG),
+			// Skip entries summarized away by the latest compaction — shaking them
+			// only churns persisted history with no prompt/cache effect.
+			keepBoundaryId: getLatestCompactionEntry(branchEntries)?.firstKeptEntryId,
+		});
+		const regions = collectShakeRegions(branchEntries, config);
+		if (regions.length === 0) {
+			return { mode, toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 };
+		}
+
+		const artifactId = await this.#saveShakeArtifact(regions);
+		const replacements = regions.map((region, index) => this.#shakeElidePlaceholder(region, index, artifactId));
+
+		let toolResultsDropped = 0;
+		let blocksDropped = 0;
+		let originalTokens = 0;
+		let replacementTokens = 0;
+		const items = regions.map((region, index) => {
+			if (region.kind === "toolResult") toolResultsDropped++;
+			else blocksDropped++;
+			originalTokens += region.tokens;
+			const replacement = replacements[index];
+			if (replacement.length > 0) replacementTokens += countTokens(replacement);
+			return { region, replacement };
+		});
+
+		applyShakeRegions(items);
+
+		await this.sessionManager.rewriteEntries();
+		if (!opts.skipAgentUpdate) {
+			const sessionContext = this.buildDisplaySessionContext();
+			this.agent.replaceMessages(sessionContext.messages);
+			this.#resetAllAdvisorRuntimes();
+			this.#closeCodexProviderSessionsForHistoryRewrite();
+		}
+
+		return {
+			mode,
+			toolResultsDropped,
+			blocksDropped,
+			tokensFreed: Math.max(0, originalTokens - replacementTokens),
+			artifactId,
+		};
+	}
+
+	#shakeElidePlaceholder(region: ShakeRegion, index: number, artifactId: string | undefined): string {
+		if (artifactId) {
+			return `[shaken ~${region.tokens} tokens — recover: artifact://${artifactId} (region ${index + 1})]`;
+		}
+		return `[shaken ~${region.tokens} tokens]`;
+	}
+
+	/**
+	 * Concatenate the original region contents into one session artifact so the
+	 * agent can read them back via `artifact://<id>`. Returns `undefined` when
+	 * the session is not persisted or the write fails — callers degrade to a
+	 * bare placeholder.
+	 */
+	async #saveShakeArtifact(regions: ShakeRegion[]): Promise<string | undefined> {
+		const parts: string[] = [];
+		for (let i = 0; i < regions.length; i++) {
+			const region = regions[i];
+			parts.push(`### region ${i + 1} (${region.label}, ~${region.tokens} tok)`, "", region.originalText, "");
+		}
+		try {
+			return await this.sessionManager.saveArtifact(parts.join("\n"), "shake");
+		} catch {
+			return undefined;
+		}
+	}
+
+	/**
+	 * Manually compact the session context.
+	 * Aborts current agent operation first.
+	 * @param customInstructions Optional instructions for the compaction summary
+	 * @param options Optional callbacks for completion/error handling
+	 */
+
+	/**
 	 * Cancel in-progress branch summarization.
 	 */
 	abortBranchSummary(): void {
@@ -8380,7 +8589,7 @@ export class AgentSession {
 			this.#shakeToolCallCounter = 0;
 			return;
 		}
-		if (this.#shakeToolCallCounter < interval) return;
+		if (this.#shakeToolCallCounter < interval && !this.#shakeNeedsAgentSync) return;
 
 		if (this.isCompacting || this.agent.state.isStreaming) return;
 
@@ -8392,10 +8601,52 @@ export class AgentSession {
 			wasStreaming: this.agent.state.isStreaming,
 		});
 		try {
+			const wasSync = this.#shakeNeedsAgentSync;
+			this.#shakeNeedsAgentSync = false;
 			const result = await this.shake("elide", { config: DEFAULT_SHAKE_CONFIG });
-			this.emitNotice("info", formatShakeSummary(result), "shake");
+			// When shake was triggered by a pending mid-run sync (#shakeNeedsAgentSync),
+			// explicitly rebuild agent.state even if shake found no new regions. The
+			// mid-run pass (skipAgentUpdate:true) already rewrote persisted entries, so
+			// agent.state.messages may still carry unshaken tool output.
+			if (wasSync && result.blocksDropped === 0 && result.tokensFreed === 0) {
+				const sessionContext = this.buildDisplaySessionContext();
+				this.agent.replaceMessages(sessionContext.messages);
+				this.#advisorRuntime?.reset();
+				this.#closeCodexProviderSessionsForHistoryRewrite();
+			}
+			if (result.blocksDropped > 0 || result.tokensFreed > 0) {
+				this.emitNotice("info", formatShakeSummary(result), "shake");
+			}
 		} catch (error) {
 			logger.warn("Periodic shake failed", { error: error instanceof Error ? error.message : String(error) });
+		}
+	}
+
+	/**
+	 * Mid-run periodic shake, fired from afterToolCall during an autonomous
+	 * agent loop. Prunes session entries with skipAgentUpdate:true to avoid
+	 * mutating agent.state.messages while the loop holds a reference to it.
+	 * The pruned session takes effect on the next run/continue; the current
+	 * loop continues safely with its original message reference.
+	 */
+	async #runMidRunShake(): Promise<void> {
+		// Guard against concurrent entry from parallel tool calls
+		if (this.#midRunShakeRunning) return;
+		this.#midRunShakeRunning = true;
+		try {
+			this.#shakeToolCallCounter = 0;
+			const result = await this.shake("elide", {
+				config: DEFAULT_SHAKE_CONFIG,
+				skipAgentUpdate: true,
+			});
+			this.emitNotice("info", formatShakeSummary(result), "shake");
+			this.#shakeNeedsAgentSync = true;
+		} catch (error) {
+			logger.warn("Mid-run shake failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		} finally {
+			this.#midRunShakeRunning = false;
 		}
 	}
 
@@ -8789,6 +9040,7 @@ export class AgentSession {
 		this.#pendingNextTurnMessages = [];
 		this.#shakeToolCallCounter = 0;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
+		this.#shakeToolCallCounter = 0;
 
 		try {
 			await this.sessionManager.setSessionFile(sessionPath);
@@ -9105,6 +9357,7 @@ export class AgentSession {
 		}
 
 		this.#pendingNextTurnMessages = [];
+		this.#shakeToolCallCounter = 0;
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 		this.agent.replaceQueues([], []);
 		if (this.isStreaming) {

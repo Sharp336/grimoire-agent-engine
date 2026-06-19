@@ -616,12 +616,20 @@ describe("AgentSession shake", () => {
 				timestamp: Date.now(),
 			};
 		}
+		/** Emit a turn_end event to flush deferred mid-run shake. */
+		function emitTurnEnd(msg = makeAssistantMessage()): void {
+			session.agent.emitExternalEvent({ type: "turn_end", message: msg, toolResults: [] });
+		}
 
 		/** Emit message_end + agent_end for a given message. */
 		function emitEnd(msg: AssistantMessage): void {
 			session.agent.emitExternalEvent({ type: "message_end", message: msg });
 			session.agent.emitExternalEvent({ type: "agent_end", messages: [msg] });
 		}
+
+		afterEach(() => {
+			toolCallCounter = 0;
+		});
 
 		it("disabled interval resets pending counter so re-enabling starts fresh", async () => {
 			session.settings.set("compaction.strategy", "off");
@@ -659,17 +667,20 @@ describe("AgentSession shake", () => {
 			await Bun.sleep(30);
 			expect(shakeSpy).not.toHaveBeenCalled();
 
-			// Second tool call + end — reaches interval
+			// Second tool call + turn_end (mid-run) + agent_end (sync) — reaches interval.
+			// Shakes twice: once mid-run (skipAgentUpdate) and once at agent_end (sync state).
 			bumpToolCallCounter();
+			emitTurnEnd();
+			await Bun.sleep(10);
 			emitEnd(makeAssistantMessage("second"));
 			await Bun.sleep(30);
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
 			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: DEFAULT_SHAKE_CONFIG }));
 
-			// Extra end without tool call — counter was reset, no second fire
+			// Extra end without tool call — counter was reset, sync flag cleared, no third fire
 			emitEnd(makeAssistantMessage("third"));
 			await Bun.sleep(30);
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
 		});
 
 		it("fires once after multiple tool calls in one autonomous turn", async () => {
@@ -679,36 +690,36 @@ describe("AgentSession shake", () => {
 				.spyOn(session, "shake")
 				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
 
-			// Three tool calls, then a single agent_end
+			// Three tool calls in one turn — third hits interval.
+			// Shakes twice: once mid-run (skipAgentUpdate) and once at agent_end (sync state).
 			bumpToolCallCounter();
 			bumpToolCallCounter();
 			bumpToolCallCounter();
+			emitTurnEnd();
+			await Bun.sleep(10);
 			emitEnd(makeAssistantMessage());
 			await Bun.sleep(30);
 
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
 		});
 
-		it("defers shake while streaming and fires when unblocked", async () => {
+		it("fires mid-run and syncs agent state at agent_end", async () => {
 			session.settings.set("compaction.strategy", "off");
 			session.settings.set("shake.interval", 1);
 			const shakeSpy = vi
 				.spyOn(session, "shake")
 				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
 
+			// Mid-run: bump counter, then turn_end fires deferred shake
 			bumpToolCallCounter();
+			emitTurnEnd();
+			await Bun.sleep(10);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
 
-			// Blocked: streaming
-			session.agent.state.isStreaming = true;
+			// Agent_end: #shakeNeedsAgentSync triggers sync shake (w/ replaceMessages)
 			emitEnd(makeAssistantMessage());
 			await Bun.sleep(30);
-			expect(shakeSpy).not.toHaveBeenCalled();
-
-			// Unblocked: next end fires
-			session.agent.state.isStreaming = false;
-			emitEnd(makeAssistantMessage("unblocked"));
-			await Bun.sleep(30);
-			expect(shakeSpy).toHaveBeenCalledTimes(1);
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
 		});
 
 		it("skips periodic shake when compaction continuation owns the next turn", async () => {
@@ -724,7 +735,11 @@ describe("AgentSession shake", () => {
 				.spyOn(session, "shake")
 				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 10_000 });
 
-			bumpToolCallCounter(); // periodic counter = 1
+			// Mid-run: counter reaches interval, turn_end fires mid-run shake
+			bumpToolCallCounter();
+			emitTurnEnd();
+			await Bun.sleep(10);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
 
 			// High-usage assistant message to trigger threshold compaction
 			const assistantMessage: AssistantMessage = {
@@ -745,10 +760,124 @@ describe("AgentSession shake", () => {
 			emitEnd(assistantMessage);
 			await Bun.sleep(50);
 
-			// Periodic shake should be suppressed — compaction owns the next turn.
-			// The handoff path doesn't call session.shake, so zero calls means
-			// periodic shake was correctly skipped.
-			expect(shakeSpy).toHaveBeenCalledTimes(0);
+			// Agent_end: compaction continuation guard prevents re-fire.
+			// Total remains 1 (only mid-run call).
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("skips periodic shake when overflow recovery fails and tail was pruned", async () => {
+			// Disable context promotion so overflow goes to compaction
+			session.settings.set("contextPromotion.enabled", false);
+			session.settings.set("shake.interval", 1);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+
+			// Mock model registry to return no candidates — forces compaction failure
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([]);
+
+			// Mid-run: counter reaches interval, turn_end fires mid-run shake
+			bumpToolCallCounter();
+			emitTurnEnd();
+			await Bun.sleep(10);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+
+			// Overflow assistant with context-overflow matching error message
+			const overflowMsg: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "" }],
+				...apiInfo,
+				stopReason: "error",
+				errorMessage: "prompt is too long",
+				usage,
+				timestamp: Date.now(),
+			};
+			emitEnd(overflowMsg);
+			await Bun.sleep(50);
+
+			// Agent_end: tailPruned guard prevents re-fire.
+			// Total remains 1 (only mid-run call).
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("skips periodic shake when length-stop recovery fails and tail was pruned", async () => {
+			session.settings.set("contextPromotion.enabled", false);
+			session.settings.set("shake.interval", 1);
+
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+
+			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([]);
+
+			// Mid-run: counter reaches interval, turn_end fires mid-run shake
+			bumpToolCallCounter();
+			emitTurnEnd();
+			await Bun.sleep(10);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+
+			const lengthMsg: AssistantMessage = {
+				role: "assistant",
+				content: [{ type: "text", text: "" }],
+				...apiInfo,
+				stopReason: "length",
+				usage,
+				timestamp: Date.now(),
+			};
+			emitEnd(lengthMsg);
+			await Bun.sleep(50);
+
+			// Agent_end: tailPruned guard prevents re-fire.
+			// Total remains 1 (only mid-run call).
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("deferred mid-run shake does not fire without turn_end event", async () => {
+			session.settings.set("compaction.strategy", "off");
+			session.settings.set("shake.interval", 1);
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
+
+			// Bump counter without turn_end — shake should NOT fire mid-run
+			bumpToolCallCounter();
+			await Bun.sleep(10);
+			expect(shakeSpy).not.toHaveBeenCalled();
+
+			// Agent_end still fires the sync shake via #shakeNeedsAgentSync
+			emitEnd(makeAssistantMessage());
+			await Bun.sleep(30);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+		});
+
+		it("state sync rebuilds agent state even when shake finds no regions", async () => {
+			session.settings.set("compaction.strategy", "off");
+			session.settings.set("shake.interval", 1);
+			const shakeSpy = vi
+				.spyOn(session, "shake")
+				// Simulate no-op shake (no regions found, e.g. already pruned by mid-run pass)
+				.mockResolvedValue({ mode: "elide", toolResultsDropped: 0, blocksDropped: 0, tokensFreed: 0 });
+			const replaceSpy = vi.spyOn(session.agent, "replaceMessages");
+
+			// Mid-run: set flag via afterToolCall + turn_end
+			bumpToolCallCounter();
+			emitTurnEnd();
+			await Bun.sleep(10);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
+
+			// Agent_end: sync shake returns no-op (0 regions found), but
+			// #shakeNeedsAgentSync should still trigger replaceMessages rebuild
+			// because wasSync && blocks===0 && tokens===0 triggers the rebuild branch.
+			emitEnd(makeAssistantMessage());
+			await Bun.sleep(30);
+
+			// Two shake calls: one mid-run, one agent_end sync
+			expect(shakeSpy).toHaveBeenCalledTimes(2);
+			// replaceMessages should have been called by the sync path
+			// (the mid-run pass with skipAgentUpdate does NOT call replaceMessages;
+			// the agent_end sync does — either via shake's internal path or our rebuild)
+			expect(replaceSpy).toHaveBeenCalled();
 		});
 	});
 });
