@@ -83,7 +83,7 @@
 		"connectMode": "tcp",
 		"serverPathEnv": "JS_DEBUG_DAP_SERVER",
 		"serverPackageName": "js-debug-adapter",
-		"serverPathCandidates": ["js-debug/src/dapDebugServer.js", "src/dapDebugServer.js", "dapDebugServer.js"],
+		"serverPathCandidates": ["js-debug/src/dapDebugServer.js", "dist/src/dapDebugServer.js", "src/dapDebugServer.js", "dapDebugServer.js"],
 		"childSessionTypes": ["pwa-*", "node", "chrome", "node-terminal", "msedge"],
 		"threadlessContinueNeedsChildStopWait": true,
 		"languages": ["javascript", "typescript"],

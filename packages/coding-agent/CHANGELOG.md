@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed `js-debug-adapter` DAP server discovery to inspect the resolved adapter launcher/package instead of assuming Unix XDG Neovim Mason paths, so Windows and non-Mason installs work.
 - Fixed DAP hierarchical multi-session debugging by implementing support for `startDebugging` reverse requests and spawning child debug sessions.
 - Fixed debugger breakpoint synchronization by copying pending breakpoints to the root debug session and propagating them to all dynamically spawned child sessions during the configuration handshake, ensuring breakpoints inside worker threads or child processes are bound and hit before the program executes.
 - Fixed debugger termination by propagating terminate and disconnect requests recursively to all active child debug sessions in the tree.
