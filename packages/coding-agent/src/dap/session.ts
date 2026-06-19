@@ -1557,7 +1557,8 @@ export class DapSessionManager {
 
 			await startPromise;
 
-			return await this.#buildInitialStartSummary(session, initialStopPromise, signal, timeoutMs);
+			void this.#buildInitialStartSummary(session, initialStopPromise, signal, timeoutMs);
+			return buildSummary(session);
 		} catch (error) {
 			await this.#disposeSession(session);
 			const mapped = mapDebugpyMissingModule(options.adapter.name, error);

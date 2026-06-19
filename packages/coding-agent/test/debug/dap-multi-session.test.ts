@@ -340,6 +340,43 @@ describe("DAP multi-session debugging", () => {
 		await manager.terminate();
 	});
 
+	it("returns from child start without waiting for stop capture timeout", async () => {
+		const manager = new DapSessionManager();
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+		childClient.emitInitialStopped = false;
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
+		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
+
+		await manager.launch({
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+
+		const startDebuggingPromise = parentClient.triggerReverseRequest("startDebugging", {
+			request: "attach",
+			configuration: {
+				type: "pwa-node",
+				name: "running-child",
+			},
+		});
+
+		await expect(
+			Promise.race([startDebuggingPromise.then(() => "started"), Bun.sleep(100).then(() => "timeout")]),
+		).resolves.toBe("started");
+		expect(childClient.sentRequests).not.toContainEqual(
+			expect.objectContaining({
+				command: "stackTrace",
+			}),
+		);
+
+		await manager.terminate();
+	});
+
 	it("waits for a stopped child when continuing a threadless js-debug root", async () => {
 		const manager = new DapSessionManager();
 
