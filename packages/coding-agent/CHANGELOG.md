@@ -5,6 +5,41 @@
 ### Fixed
 
 - Reduced large-session Agent Hub and display-memory pressure by tail-rendering follow-bottom transcript views, tailing appended transcript files, and collapsing compacted display history while preserving branchable image history on resume.
+## [16.1.1] - 2026-06-19
+
+### Changed
+
+- Migrated legacy macOS power settings to a single sleep prevention enum
+- Defaulted `display.cacheMissMarker` setting to `false` to suppress the cache-miss marker by default.
+- Replaced the four separate `power.preventIdleSleep`, `power.preventSystemSleep`, `power.declareUserActive`, and `power.preventDisplaySleep` boolean settings with a single cumulative `power.sleepPrevention` enum (`off` → `idle` → `display` → `system`). Each level adds the caffeinate flags of all lower levels. Existing configs are migrated automatically.
+
+### Fixed
+
+- Cache-miss marker no longer fires on providers with implicit, best-effort prompt caching (Google/Gemini, OpenAI, Fireworks). Those report `cacheWrite: 0` and drop `cacheRead` to zero intermittently as routine propagation noise that self-heals the next turn. Only explicit, prefix-controlled caches (Anthropic/Bedrock `cache_control`), which re-create the prefix on a cold turn as `cacheWrite > 0`, now surface a marker — where a zero `cacheRead` genuinely means the prefix broke.
+- Fixed advisor dependent settings staying visible while `advisor.enabled` is off ([#3027](https://github.com/can1357/oh-my-pi/issues/3027)).
+- Fixed LSP servers that dynamically register capabilities, including Expert, hanging semantic requests after `client/registerCapability` was rejected ([#3029](https://github.com/can1357/oh-my-pi/issues/3029)).
+
+## [16.1.0] - 2026-06-19
+
+### Added
+
+- Added a prompt-cache miss marker: a slim `⊘ cache miss · <n> tokens` divider above an assistant turn whose request lost the provider prompt cache. Detected from per-turn usage — the previous turn cached a meaningful prefix but this request read none of it back and reprocessed the prompt (e.g. after a thinking-level / service-tier / model change, tool or system-prompt change, or a history rewrite). Reports the reprocessed token count. Toggle with the `display.cacheMissMarker` setting (Appearance → Display, on by default).
+
+### Changed
+
+- Optimized preview workflows by removing forced tool choices, reducing prompt cache invalidations
+- Unified injected message styling with consistent rounded outlines and icon-tagged headers
+- Refreshed branch summary messages with a uniform banner style to match compaction points
+- Updated skill invocation UI with a compact header, home-shortened paths, and dynamic line counts
+- Refined session context to utilize history blocks instead of raw images for snapcompact summaries
+- Refreshed the skill-prompt transcript message to match the rest of the TUI: an icon-tagged `✦ skill <name>` header (with invocation args trailing), a single meta line with a home-shortened, click-to-open path in the accent color and the prompt size in muted, and a rounded outline around the card. Replaces the old `[skill]` label with the flat `Skill:`/`Path:`/`Prompt:` key/value dump (which also leaked the absolute home directory).
+- Refreshed the default custom/hook transcript message frame to a rounded, icon-tagged card: the `[customType]` bracket label is replaced by an `<icon> <type>` header (📦 for extension messages, 🪝 for legacy hook-role messages) with a subtle outline, matching the skill card. Covers every extension/hook custom type without a bespoke renderer.
+- Refreshed the branch-summary transcript message to render as the same slim divider banner as `/compact`, handoff, and snapcompact (`⑂ branch · ctrl+o`, summary revealed on expand) instead of a `[branch]` box.
+- Optimized network traffic by stripping tool descriptions from provider tool schemas
+- Renamed the prompt setting from `repeatToolDescriptions` / "Repeat Tool Descriptions" to `inlineToolDescriptors` / "Inline Tool Descriptors" and enabled inline descriptors by default.
+- Snapcompact compaction summaries now reach the model as ordered history blocks instead of one lead-in text block plus appended images: plain text at the oldest edge, an imaged middle, then plain text at the newest edge. This matches the new text-first snapcompact archive layout and preserves chronological order in the provider prompt.
+- Fixed `/dump` output repeating the tool inventory twice when `inlineToolDescriptors` is enabled.
+- Unified TUI border corners on the rounded style: tool-result frames, overlays, code fences, debug frames, and the interactive bash box now draw rounded corners (`╭╮╰╯`) to match the editor and message cards, instead of mixing rounded boxes with sharp (`┌┐└┘`) ones. `boxRound` now carries the sharp tee/cross junction glyphs (no rounded variant exists), so dividers still honor `boxSharp.tee*`/`cross` theme overrides. Markdown tables intentionally keep the fully sharp `boxSharp` set; its corner tokens now affect tables only.
 
 ## [16.0.11] - 2026-06-19
 

@@ -5,6 +5,11 @@
 ### Fixed
 
 - Avoided the resize-settle full replay for large transcripts; after a drag, the TUI keeps the latest viewport responsive instead of erasing and replaying all scrollback.
+## [16.1.0] - 2026-06-19
+
+### Added
+
+- `Box` now accepts an optional `border` (box-drawing glyphs + colorizer) and exposes `setBorder()`, drawing a colored outline around its padded/background content. The border is automatically dropped at widths too narrow to frame so a bordered box never overflows its given width.
 
 ## [16.0.11] - 2026-06-19
 
