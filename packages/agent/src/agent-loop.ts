@@ -5,12 +5,9 @@
 import {
 	type AssistantMessage,
 	type AssistantMessageEvent,
-	arkToWireSchema,
 	type Context,
 	EventStream,
 	isApiKeyResolver,
-	isArkSchema,
-	isZodSchema,
 	resolveApiKeyOnce,
 	seedApiKeyResolver,
 	streamSimple,
@@ -20,7 +17,6 @@ import {
 	type TSchema,
 	toolWireSchema,
 	validateToolArguments,
-	zodToWireSchema,
 } from "@oh-my-pi/pi-ai";
 import {
 	type Dialect,
@@ -40,7 +36,7 @@ import {
 	signalListLabel,
 } from "@oh-my-pi/pi-ai/utils/harmony-leak";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
-import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { sanitizeText, structuredCloneJSON } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { type AgentRunCoverage, type AgentRunSummary, ToolCallBlockedError } from "./run-collector";
 import {
@@ -150,22 +146,6 @@ function resolveOwnedDialectFromEnv(value: string | undefined): Dialect | undefi
 
 type AssistantContentBlock = AssistantMessage["content"][number];
 type AssistantToolCallBlock = Extract<AssistantContentBlock, { type: "toolCall" }>;
-type CloneableRecord = Record<string, unknown>;
-
-function cloneUnknown(value: unknown): unknown {
-	if (Array.isArray(value)) return value.map(cloneUnknown);
-	if (!value || typeof value !== "object") return value;
-	const source = value as CloneableRecord;
-	const out: CloneableRecord = {};
-	for (const [key, child] of Object.entries(source)) {
-		out[key] = cloneUnknown(child);
-	}
-	return out;
-}
-
-function cloneToolArguments(args: AssistantToolCallBlock["arguments"]): AssistantToolCallBlock["arguments"] {
-	return cloneUnknown(args) as AssistantToolCallBlock["arguments"];
-}
 
 function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantContentBlock {
 	switch (block.type) {
@@ -176,7 +156,7 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 		case "redactedThinking":
 			return { ...block };
 		case "toolCall":
-			return { ...block, arguments: cloneToolArguments(block.arguments) };
+			return { ...block, arguments: structuredCloneJSON(block.arguments) };
 	}
 }
 
@@ -192,10 +172,19 @@ function snapshotAssistantMessage(message: AssistantMessage): AssistantMessage {
 	};
 }
 
-function snapshotAssistantMessageEvent(event: AssistantMessageEvent): AssistantMessageEvent {
+/**
+ * Deep-clone an assistant streaming event so subscribers get an immutable view.
+ * Pass `partialSnapshot` when the caller has already snapshotted `event.partial`
+ * (the `message_update` push sites alias it as the event's `message`) so the
+ * identical partial is not deep-cloned twice per streaming delta.
+ */
+function snapshotAssistantMessageEvent(
+	event: AssistantMessageEvent,
+	partialSnapshot?: AssistantMessage,
+): AssistantMessageEvent {
 	switch (event.type) {
 		case "start":
-			return { ...event, partial: snapshotAssistantMessage(event.partial) };
+			return { ...event, partial: partialSnapshot ?? snapshotAssistantMessage(event.partial) };
 		case "text_start":
 		case "text_delta":
 		case "text_end":
@@ -204,12 +193,12 @@ function snapshotAssistantMessageEvent(event: AssistantMessageEvent): AssistantM
 		case "thinking_end":
 		case "toolcall_start":
 		case "toolcall_delta":
-			return { ...event, partial: snapshotAssistantMessage(event.partial) };
+			return { ...event, partial: partialSnapshot ?? snapshotAssistantMessage(event.partial) };
 		case "toolcall_end":
 			return {
 				...event,
 				toolCall: snapshotAssistantContentBlock(event.toolCall) as AssistantToolCallBlock,
-				partial: snapshotAssistantMessage(event.partial),
+				partial: partialSnapshot ?? snapshotAssistantMessage(event.partial),
 			};
 		case "done":
 			return { ...event, message: snapshotAssistantMessage(event.message) };
@@ -598,23 +587,15 @@ export function normalizeTools(
 		// specs without their descriptions (top-level + nested schema annotations)
 		// so they are not duplicated on the wire. Strip the STABLE wire schema (the
 		// memoized `stripSchemaDescriptions` result is reused across requests), then
-		// re-inject `_i` (without its hint, which `describeIntent: false` omits) so
+		// re-inject `i` (without its hint, which `describeIntent: false` omits) so
 		// intent tracing keeps the field while no descriptions ride the wire.
 		if (pruneDescriptions) {
 			let parameters = stripSchemaDescriptions(toolWireSchema(t)) as TSchema;
 			if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode, false) as TSchema;
 			return { ...t, parameters, description: "" };
 		}
-		let parameters: TSchema = t.parameters;
-		if (doInjectIntent) {
-			if (isZodSchema(parameters)) {
-				parameters = injectIntentIntoSchema(zodToWireSchema(parameters), intentMode) as TSchema;
-			} else if (isArkSchema(parameters)) {
-				parameters = injectIntentIntoSchema(arkToWireSchema(parameters), intentMode) as TSchema;
-			} else {
-				parameters = injectIntentIntoSchema(parameters, intentMode) as TSchema;
-			}
-		}
+		let parameters = toolWireSchema(t) as TSchema;
+		if (doInjectIntent) parameters = injectIntentIntoSchema(parameters, intentMode) as TSchema;
 		const description = t.description ?? "";
 		const examplesBlock = exampleDialect
 			? renderToolExamples({ ...t, parameters }, exampleDialect, doInjectIntent ? INTENT_FIELD : undefined)
@@ -725,7 +706,7 @@ async function runLoopBody(
 	stepCounter: StepCounter,
 	streamFn?: StreamFn,
 ): Promise<void> {
-	let deadlineTimer: ReturnType<typeof setTimeout> | undefined;
+	let deadlineTimer: Timer | undefined;
 	if (config.deadline !== undefined) {
 		const deadlineAbortController = new AbortController();
 		const delay = config.deadline - Date.now();
@@ -1412,10 +1393,15 @@ async function streamAssistantResponse(
 							if (addedPartial) {
 								context.messages[context.messages.length - 1] = partialMessage;
 								completedToolCallIds.clear();
+								// `message` and `assistantMessageEvent.partial` intentionally share one
+								// immutable snapshot of the streaming partial: every message_update
+								// consumer treats both as read-only, so cloning the identical partial
+								// twice per delta was pure waste.
+								const messageSnapshot = snapshotAssistantMessage(partialMessage);
 								stream.push({
 									type: "message_update",
-									assistantMessageEvent: snapshotAssistantMessageEvent(event),
-									message: snapshotAssistantMessage(partialMessage),
+									assistantMessageEvent: snapshotAssistantMessageEvent(event, messageSnapshot),
+									message: messageSnapshot,
 								});
 							} else {
 								context.messages.push(partialMessage);
@@ -1440,10 +1426,15 @@ async function streamAssistantResponse(
 								partialMessage = event.partial;
 								context.messages[context.messages.length - 1] = partialMessage;
 								config.onAssistantMessageEvent?.(partialMessage, event);
+								// `message` and `assistantMessageEvent.partial` intentionally share one
+								// immutable snapshot of the streaming partial: every message_update
+								// consumer treats both as read-only, so cloning the identical partial
+								// twice per delta was pure waste.
+								const messageSnapshot = snapshotAssistantMessage(partialMessage);
 								stream.push({
 									type: "message_update",
-									assistantMessageEvent: snapshotAssistantMessageEvent(event),
-									message: snapshotAssistantMessage(partialMessage),
+									assistantMessageEvent: snapshotAssistantMessageEvent(event, messageSnapshot),
+									message: messageSnapshot,
 								});
 							}
 							break;
@@ -1753,7 +1744,44 @@ async function executeToolCalls(
 				}
 			}
 		}
-		record.args = argsForExecution;
+		let effectiveArgs: Record<string, unknown>;
+		try {
+			if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
+			effectiveArgs = validateToolArguments(tool, { ...toolCall, arguments: argsForExecution });
+		} catch (validationError) {
+			if (tool?.lenientArgValidation) {
+				effectiveArgs = { ...argsForExecution };
+				delete effectiveArgs.__parseError;
+				delete effectiveArgs.__rawJson;
+			} else {
+				if ("__parseError" in argsForExecution) {
+					record.args = {
+						__parseError: argsForExecution.__parseError,
+					};
+				} else {
+					record.args = argsForExecution;
+				}
+				emitToolResult(
+					record,
+					{
+						content: [
+							{
+								type: "text" as const,
+								text: validationError instanceof Error ? validationError.message : String(validationError),
+							},
+						],
+						details: {
+							isError: true,
+							error: validationError instanceof Error ? validationError.message : String(validationError),
+						},
+					},
+					true,
+				);
+				return;
+			}
+		}
+
+		record.args = effectiveArgs;
 		if (toolSignal.aborted) {
 			record.skipped = true;
 			recordSkippedTool(telemetry, {
@@ -1769,7 +1797,7 @@ async function executeToolCalls(
 			type: "tool_execution_start",
 			toolCallId: toolCall.id,
 			toolName: toolCall.name,
-			args: argsForExecution,
+			args: effectiveArgs,
 			intent: toolCall.intent,
 		});
 
@@ -1777,7 +1805,7 @@ async function executeToolCalls(
 			tool,
 			toolName: toolCall.name,
 			toolCallId: toolCall.id,
-			args: argsForExecution,
+			args: effectiveArgs,
 			parent: invokeAgentSpan,
 		});
 		if (toolSpan && toolCall.intent) {
@@ -1796,17 +1824,6 @@ async function executeToolCalls(
 					result = createToolSignalAbortedResult(toolSignal);
 					isError = true;
 					return;
-				}
-
-				let effectiveArgs: Record<string, unknown>;
-				try {
-					effectiveArgs = validateToolArguments(tool, { ...toolCall, arguments: argsForExecution });
-				} catch (validationError) {
-					if (tool.lenientArgValidation) {
-						effectiveArgs = argsForExecution;
-					} else {
-						throw validationError;
-					}
 				}
 
 				if (beforeToolCall) {
