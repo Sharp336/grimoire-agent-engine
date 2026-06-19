@@ -4,6 +4,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { AuthStorage, type OAuthCredential, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
+import { registerOAuthProvider, unregisterOAuthProviders } from "../src/registry/oauth";
 
 const LEGACY_TIMESTAMP = 1_700_000_000;
 
@@ -360,7 +361,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 			const legacyDbPath = path.join(tempDir, "legacy-v1-anthropic-agent.db");
 			const legacyDb = new Database(legacyDbPath);
-			legacyDb.exec(`
+			legacyDb.run(`
 				CREATE TABLE auth_schema_version (
 					id INTEGER PRIMARY KEY CHECK (id = 1),
 					version INTEGER NOT NULL
@@ -442,7 +443,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 		const futureDbPath = path.join(tempDir, "future-schema-agent.db");
 		const futureDb = new Database(futureDbPath);
-		futureDb.exec(`
+		futureDb.run(`
 			CREATE TABLE auth_schema_version (
 				id INTEGER PRIMARY KEY CHECK (id = 1),
 				version INTEGER NOT NULL
@@ -505,7 +506,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 		const legacyDbPath = path.join(tempDir, "legacy-v3-agent.db");
 		const legacyDb = new Database(legacyDbPath);
-		legacyDb.exec(`
+		legacyDb.run(`
 			CREATE TABLE auth_schema_version (
 				id INTEGER PRIMARY KEY CHECK (id = 1),
 				version INTEGER NOT NULL
@@ -561,7 +562,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 		const legacyDbPath = path.join(tempDir, "legacy-v1-agent.db");
 		const legacyDb = new Database(legacyDbPath);
-		legacyDb.exec(`
+		legacyDb.run(`
 			CREATE TABLE auth_schema_version (
 				id INTEGER PRIMARY KEY CHECK (id = 1),
 				version INTEGER NOT NULL
@@ -612,7 +613,7 @@ describe("AuthStorage openai-codex email dedupe", () => {
 
 		const legacyDbPath = path.join(tempDir, "legacy-agent.db");
 		const legacyDb = new Database(legacyDbPath);
-		legacyDb.exec(`
+		legacyDb.run(`
 			CREATE TABLE auth_credentials (
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				provider TEXT NOT NULL,
@@ -647,6 +648,97 @@ describe("AuthStorage openai-codex email dedupe", () => {
 			]);
 		} finally {
 			migratedStore.close();
+		}
+	});
+});
+
+describe("AuthStorage OAuth login upgrade and multi-account coexistence", () => {
+	let tempDir = "";
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-auth-login-test-"));
+	});
+
+	afterEach(async () => {
+		unregisterOAuthProviders("auth-storage-login-upgrade-test");
+		if (tempDir) {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("allows multiple OAuth accounts to coexist and replaces legacy api_key rows on OAuth login", async () => {
+		if (!tempDir) throw new Error("test setup failed");
+
+		const dbPath = path.join(tempDir, "login-upgrade.db");
+		const authStorage = await AuthStorage.create(dbPath);
+
+		try {
+			// 1. Setup a legacy api_key credential
+			await authStorage.set("unit-login-upgrade", { type: "api_key", key: "sk-legacy-key" });
+			expect(await authStorage.getApiKey("unit-login-upgrade")).toBe("sk-legacy-key");
+
+			// 2. Register custom oauth provider
+			let loginReturns: (Omit<OAuthCredential, "type"> & { type?: string }) | null = null;
+			registerOAuthProvider({
+				id: "unit-login-upgrade",
+				name: "Unit Login Upgrade",
+				sourceId: "auth-storage-login-upgrade-test",
+				login: async () => {
+					if (!loginReturns) throw new Error("no credentials");
+					const { type, ...rest } = loginReturns;
+					return rest;
+				},
+				refreshToken: async () => {
+					if (!loginReturns) throw new Error("no credentials");
+					const { type, ...rest } = loginReturns;
+					return rest;
+				},
+			});
+
+			// 3. Login first OAuth account
+			loginReturns = {
+				refresh: "refresh-token-1",
+				access: "access-token-1",
+				expires: Date.now() + 60_000,
+				projectId: "project-1",
+				email: "user-1@example.com",
+			};
+			await authStorage.login("unit-login-upgrade", {
+				onAuth: () => {},
+				onPrompt: async () => "",
+			});
+
+			// Legacy api_key should be gone/replaced, and first oauth account is active.
+			// getApiKey should now return the first OAuth access token (since the api_key is gone).
+			expect(await authStorage.getApiKey("unit-login-upgrade")).toBe("access-token-1");
+			const firstRows = readStoredIdentityRows(dbPath, "unit-login-upgrade");
+			expect(firstRows).toEqual([
+				{ identity_key: null, disabled_cause: "replaced by oauth login" },
+				{ identity_key: "email:user-1@example.com", disabled_cause: null },
+			]);
+
+			// 4. Login second OAuth account
+			loginReturns = {
+				refresh: "refresh-token-2",
+				access: "access-token-2",
+				expires: Date.now() + 60_000,
+				projectId: "project-2",
+				email: "user-2@example.com",
+			};
+			await authStorage.login("unit-login-upgrade", {
+				onAuth: () => {},
+				onPrompt: async () => "",
+			});
+
+			// Both OAuth accounts should coexist! No accounts should be disabled
+			const secondRows = readStoredIdentityRows(dbPath, "unit-login-upgrade");
+			expect(secondRows).toEqual([
+				{ identity_key: null, disabled_cause: "replaced by oauth login" },
+				{ identity_key: "email:user-1@example.com", disabled_cause: null },
+				{ identity_key: "email:user-2@example.com", disabled_cause: null },
+			]);
+		} finally {
+			authStorage.close();
 		}
 	});
 });
