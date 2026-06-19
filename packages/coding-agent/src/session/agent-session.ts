@@ -9319,6 +9319,17 @@ export class AgentSession {
 				tailPruned,
 			);
 			if (outcome !== "fallback") return outcome;
+			// Shake rebuilds agent.state from persisted session entries, so a
+			// preceding tail-prune (done by #checkCompaction before calling us)
+			// was undone by the shake() call. If we returned "fallback" without
+			// scheduling continuation, re-prune the tail so subsequent recovery
+			// or the final noneResult doesn't surface the pruned assistant.
+			if (tailPruned) {
+				const messages = this.agent.state.messages;
+				if (messages.length > 0 && messages[messages.length - 1].role === "assistant") {
+					this.agent.replaceMessages(messages.slice(0, -1));
+				}
+			}
 		}
 		// "overflow" and "incomplete" force inline execution because they are recovery
 		// paths the caller wants resolved before scheduling the next turn. "idle" is
