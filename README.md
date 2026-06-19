@@ -24,7 +24,7 @@
 
 The most capable agent surface that ships. Continuously tuned by real-world use — complete out of the box, open all the way down.
 
-**40+** providers · **32** built-in tools · **14** lsp ops · **28** dap ops · **~55k** lines of Rust core.
+**45+** providers · **32** built-in tools · **14** lsp ops · **28** dap ops · **~55k** lines of Rust core.
 
 ## Install
 
@@ -276,7 +276,7 @@ Setting-gated, off by default: `github`, `inspect_image`, `tts`, `checkpoint`, `
 
 [Full reference →](https://omp.sh/docs/tools)
 
-## Forty-plus providers, hundreds of models, _one /model away_.
+## Forty-five providers, hundreds of models, _one /model away_.
 
 Roles route work by intent. `default` for normal turns. `smol` for cheap subagent fan-out. `slow` for deep reasoning. `plan` for plan mode. `commit` for changelogs. Override at launch with `--smol`, `--slow`, or `--plan`; cycle through the configured models for the active role with `Ctrl+P`. Swap the active model mid-session with the `/model` slash command.
 
@@ -286,7 +286,7 @@ Auth tags below: `oauth` signs in with your provider account, `plan` routes thro
 
 Direct APIs and gateways. Mix providers per role.
 
-Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Antigravity `oauth` · xAI · Mistral · Groq · Cerebras · Fireworks · Together · Hugging Face · NVIDIA · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Perplexity `oauth`
+Anthropic `oauth` · OpenAI · OpenAI Codex `oauth` · Google Gemini · Google Antigravity `oauth` · xAI · Mistral · Groq · Cerebras · Fireworks · Together · Hugging Face · NVIDIA · OpenRouter · Synthetic · Vercel AI Gateway · Cloudflare AI Gateway · Wafer Serverless · Neuralwatt · Perplexity `oauth`
 
 ### Coding plans
 
