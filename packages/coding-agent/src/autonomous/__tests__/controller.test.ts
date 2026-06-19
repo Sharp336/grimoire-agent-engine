@@ -69,7 +69,9 @@ interface FakeOptions {
 function setup(options: FakeOptions) {
 	let streaming = false;
 	let planEnabled = options.planMode ?? false;
-	let goalEnabled = options.goalMode ?? false;
+	let goalState: { enabled: boolean; mode?: "active" | "exiting" } | undefined = options.goalMode
+		? { enabled: true, mode: "active" }
+		: undefined;
 	const history = options.history ?? [];
 	let queueFollowUps = false;
 	let handler: ((event: AgentSessionEvent) => void) | undefined;
@@ -88,7 +90,7 @@ function setup(options: FakeOptions) {
 			return streaming;
 		},
 		getPlanModeState: () => ({ enabled: planEnabled }),
-		getGoalModeState: () => ({ enabled: goalEnabled }),
+		getGoalModeState: () => goalState,
 		emitNotice: (level, message, source) => {
 			notices.push({ level, message, source });
 		},
@@ -136,7 +138,10 @@ function setup(options: FakeOptions) {
 			planEnabled = value;
 		},
 		setGoalMode: (value: boolean) => {
-			goalEnabled = value;
+			goalState = value ? { enabled: true, mode: "active" } : undefined;
+		},
+		setGoalModeState: (state: { enabled: boolean; mode?: "active" | "exiting" } | undefined) => {
+			goalState = state;
 		},
 		setQueueFollowUps: (value: boolean) => {
 			queueFollowUps = value;
@@ -328,6 +333,15 @@ describe("AutonomousController loop", () => {
 		plan.setPlanMode(true); // /plan enabled while the autonomous turn was streaming
 		plan.emit(agentEndEvent([assistantActing("stop")]));
 		expect(plan.sent).toHaveLength(0);
+	});
+
+	it("skips a mid-turn goal that completed before agent_end cleanup", () => {
+		const goal = setup({ autoNextSteps: true });
+		goal.controller.begin({ startupFailed: false });
+		goal.emit(START); // turn began outside goal mode
+		goal.setGoalModeState({ enabled: false, mode: "exiting" }); // goal tool completed before agent_end
+		goal.emit(agentEndEvent([assistantActing("stop")]));
+		expect(goal.sent).toHaveLength(0);
 	});
 });
 

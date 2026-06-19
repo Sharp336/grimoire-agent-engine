@@ -60,7 +60,7 @@ export interface AutonomousSession {
 	hasQueuedCustomMessage(customType: string): boolean;
 	readonly isStreaming: boolean;
 	getPlanModeState(): { enabled: boolean } | undefined;
-	getGoalModeState(): { enabled: boolean } | undefined;
+	getGoalModeState(): { enabled: boolean; mode?: "active" | "exiting" } | undefined;
 }
 
 export interface AutonomousControllerOptions {
@@ -179,10 +179,12 @@ export class AutonomousController {
 		// interactive slash command, is owned by that mode; its agent_end fires
 		// before mode cleanup/continuation scheduling settles, so skip to avoid
 		// queueing hidden auto-next prompts into the mode-owned flow.
+		const liveGoalState = this.#session.getGoalModeState();
 		if (
 			startedInPlanOrGoal ||
 			this.#session.getPlanModeState()?.enabled === true ||
-			this.#session.getGoalModeState()?.enabled === true
+			liveGoalState?.enabled === true ||
+			liveGoalState?.mode === "exiting"
 		) {
 			return;
 		}
