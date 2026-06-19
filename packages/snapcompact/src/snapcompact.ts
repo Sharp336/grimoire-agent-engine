@@ -772,8 +772,8 @@ export function serializeConversation(messages: Message[], options?: SerializeOp
 					if (uselessCallIds.has(block.id)) continue;
 					flushAssistant();
 					const args = block.arguments as Record<string, unknown>;
-					// Prefer the harness-derived intent, else the raw `_i` arg; render it as
-					// a one-line `//comment` and drop `_i` from the args below.
+					// Prefer the harness-derived intent, else the raw intent arg; render it as
+					// a one-line `//comment` and drop it from the args below.
 					const rawIntent =
 						typeof block.intent === "string"
 							? block.intent
@@ -987,6 +987,47 @@ export function normalize(text: string): string {
 		}
 	}
 	return out;
+}
+
+/**
+ * Scan text to determine the proportion of graphic characters that will hit the
+ * `?` fallback during {@link normalize}. Used as a preflight check to abort
+ * snapcompact and fall back to the text summarizer when the input is heavily
+ * non-renderable (e.g., CJK).
+ */
+export function scanRenderability(text: string): { isSafe: boolean; unrenderableRatio: number } {
+	const stripped = text.includes("\u001b") ? Bun.stripANSI(text) : text;
+	const collapsed = stripped
+		.replace(COLLAPSIBLE, run => (LINE_BREAK.test(run) ? NEWLINE_GLYPH : /[^\p{Cf}]/u.test(run) ? " " : ""))
+		.replace(EDGE_RUNS, "");
+	let totalGraphics = 0;
+	let fallbackCount = 0;
+	for (const ch of collapsed) {
+		const cp = ch.codePointAt(0) as number;
+		if ((cp >= 0x20 && cp < 0x7f) || (cp >= 0xa0 && cp <= 0xff)) {
+			totalGraphics++;
+			continue;
+		}
+		if (ch === DIM_ON || ch === DIM_OFF || ch === NEWLINE_GLYPH) {
+			continue;
+		}
+		const fold = CHAR_FOLD[ch];
+		if (fold !== undefined) {
+			totalGraphics++;
+		} else if (cp >= 0x2500 && cp <= 0x257f) {
+			totalGraphics++;
+		} else {
+			const folded = foldToAscii(ch);
+			if (folded !== undefined) {
+				totalGraphics++;
+			} else if (!UNRENDERABLE.test(ch)) {
+				totalGraphics++;
+				fallbackCount++;
+			}
+		}
+	}
+	const unrenderableRatio = totalGraphics > 0 ? fallbackCount / totalGraphics : 0;
+	return { isSafe: unrenderableRatio <= 0.05, unrenderableRatio };
 }
 
 // ============================================================================

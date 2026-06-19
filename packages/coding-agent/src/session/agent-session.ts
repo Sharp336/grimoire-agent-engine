@@ -104,6 +104,7 @@ import {
 	streamSimple,
 } from "@oh-my-pi/pi-ai";
 import { stripToolDescriptions } from "@oh-my-pi/pi-ai/utils/schema";
+import { THINKING_LOOP_ERROR_MARKER } from "@oh-my-pi/pi-ai/utils/thinking-loop";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { MacOSPowerAssertion } from "@oh-my-pi/pi-natives";
@@ -205,6 +206,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { IrcBus, type IrcMessage } from "../irc/bus";
 import { resolveMemoryBackend } from "../memory-backend";
+import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
 import { getCurrentThemeName, theme } from "../modes/theme/theme";
@@ -3860,7 +3862,11 @@ export class AgentSession {
 		if (event.type === "agent_start") {
 			this.#turnIndex = 0;
 			await this.#extensionRunner.emit({ type: "agent_start" });
-		} else if (event.type === "agent_end") {
+			return;
+		}
+
+		if (!this.#extensionRunner.hasHandlers(event.type)) return;
+		if (event.type === "agent_end") {
 			// `agent_end` extension notification is emitted from the settled
 			// agent_end maintenance path so `session_stop` control hooks are not
 			// blocked by unrelated notification-only work.
@@ -4204,6 +4210,11 @@ export class AgentSession {
 		hindsightState?.dispose();
 		const mnemopiState = setMnemopiSessionState(this, undefined);
 		await mnemopiState?.dispose();
+		// Tear down the embeddings subprocess AFTER mnemopi state.dispose:
+		// consolidate-on-dispose may still call `embed()` to store the final
+		// memories, and that round-trips through the worker we are about to
+		// hard-kill (issue #3031).
+		await shutdownMnemopiEmbedClient();
 		this.#disconnectFromAgent();
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();
@@ -7645,13 +7656,24 @@ export class AgentSession {
 			// both take the summarizer path (the latter loudly).
 			const wantsSnapcompact =
 				compactionPrep.kind !== "fromHook" && effectiveSettings.strategy === "snapcompact" && !customInstructions;
-			const snapcompactReady = wantsSnapcompact && this.model.input.includes("image");
+			let snapcompactReady = wantsSnapcompact && this.model.input.includes("image");
 			if (wantsSnapcompact && !snapcompactReady) {
 				this.emitNotice(
 					"warning",
 					`snapcompact needs a vision-capable model (${this.model.id} is text-only) — using an LLM summary instead`,
 					"compaction",
 				);
+			} else if (snapcompactReady) {
+				const text = snapcompact.serializeConversation(convertToLlm(preparation.messagesToSummarize));
+				const renderScan = snapcompact.scanRenderability(text);
+				if (!renderScan.isSafe) {
+					this.emitNotice(
+						"warning",
+						`snapcompact disabled: high non-ASCII rate detected (${(renderScan.unrenderableRatio * 100).toFixed(1)}%). Falling back to an LLM summary to prevent data loss.`,
+						"compaction",
+					);
+					snapcompactReady = false;
+				}
 			}
 
 			let summary: string;
@@ -9962,6 +9984,7 @@ export class AgentSession {
 		if (this.#isProviderErrorFinishReasonBeforeToolUse(message)) return true;
 		if (this.#isMalformedFunctionCallError(message)) return true;
 		if (this.#hasReplayUnsafeToolOutput(message)) return false;
+		if (message.errorMessage.includes(THINKING_LOOP_ERROR_MARKER)) return true;
 		if (this.#isStaleOpenAIResponsesReplayError(message)) return true;
 
 		const err = message.errorMessage;
