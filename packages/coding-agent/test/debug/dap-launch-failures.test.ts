@@ -78,7 +78,59 @@ server = Bun.listen({
 });
 await Bun.sleep(2_000);
 server.stop();
-`;
+	`;
+
+const TCP_CONNECT_FAILS_AFTER_READY_ADAPTER = `
+const port = Number(process.argv[2]);
+const killedPath = process.argv[3];
+let server;
+process.on("SIGTERM", () => {
+	server?.stop();
+	Bun.write(killedPath, "killed").finally(() => process.exit(0));
+});
+let connections = 0;
+server = Bun.listen({
+	hostname: "127.0.0.1",
+	port,
+	socket: {
+		open(socket) {
+			connections++;
+			socket.end();
+			if (connections === 1) {
+				server.stop();
+			}
+		},
+		data() {},
+		close() {},
+		error() {},
+	},
+});
+await Bun.sleep(2_000);
+server.stop();
+	`;
+
+const TCP_CLOSE_AFTER_DELAY_STAYS_ALIVE_ADAPTER = `
+const port = Number(process.argv[2]);
+let server;
+process.on("SIGTERM", () => {
+	server?.stop();
+	process.exit(0);
+});
+server = Bun.listen({
+	hostname: "127.0.0.1",
+	port,
+	socket: {
+		open(socket) {
+			setTimeout(() => socket.end(), 50);
+		},
+		data() {},
+		close() {},
+		error() {},
+	},
+});
+await Bun.sleep(2_000);
+server.stop();
+	`;
 
 type DapEventHandler = (body: unknown, event: DapEventMessage) => void | Promise<void>;
 
@@ -386,6 +438,55 @@ describe("DAP launch failure handling", () => {
 			for (let attempt = 0; attempt < 50 && client.isAlive(); attempt++) {
 				await Bun.sleep(10);
 			}
+			expect(client.proc.exitCode).toBeNull();
+			expect(client.isAlive()).toBe(false);
+		} finally {
+			await client?.dispose();
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("kills spawned TCP adapters when the post-readiness socket connect fails", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-tcp-connect-fail-"));
+		const adapterPath = path.join(cwd, "tcp-connect-fails-after-ready-adapter.mjs");
+		const killedPath = path.join(cwd, "killed.txt");
+		await Bun.write(adapterPath, TCP_CONNECT_FAILS_AFTER_READY_ADAPTER);
+		const adapter: DapResolvedAdapter = {
+			...TEST_ADAPTER,
+			name: "tcp-connect-fail-adapter",
+			command: process.execPath,
+			args: [adapterPath, TCP_PORT_PLACEHOLDER, killedPath],
+			resolvedCommand: process.execPath,
+			connectMode: "tcp",
+		};
+
+		try {
+			await expect(DapClient.spawn({ adapter, cwd })).rejects.toThrow();
+			for (let attempt = 0; attempt < 50 && !(await Bun.file(killedPath).exists()); attempt++) {
+				await Bun.sleep(10);
+			}
+			expect(await Bun.file(killedPath).exists()).toBe(true);
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("rejects event waiters when a spawned TCP transport closes before the server process exits", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-tcp-event-close-"));
+		const adapterPath = path.join(cwd, "tcp-close-after-delay-stays-alive-adapter.mjs");
+		await Bun.write(adapterPath, TCP_CLOSE_AFTER_DELAY_STAYS_ALIVE_ADAPTER);
+		const adapter: DapResolvedAdapter = {
+			...TEST_ADAPTER,
+			name: "tcp-event-close-adapter",
+			command: process.execPath,
+			args: [adapterPath, TCP_PORT_PLACEHOLDER],
+			resolvedCommand: process.execPath,
+			connectMode: "tcp",
+		};
+		let client: DapClient | undefined;
+		try {
+			client = await DapClient.spawn({ adapter, cwd });
+			await expect(client.waitForEvent("stopped", undefined, undefined, 1_000)).rejects.toThrow("transport closed");
 			expect(client.proc.exitCode).toBeNull();
 			expect(client.isAlive()).toBe(false);
 		} finally {
