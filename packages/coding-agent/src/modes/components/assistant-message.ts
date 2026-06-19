@@ -456,6 +456,13 @@ export class AssistantMessageComponent extends Container {
 				if (hasVisibleContentAfter) {
 					this.#contentContainer.addChild(new Spacer(1));
 				}
+			} else if (content.type === "audio_output" && content.path) {
+				// Surface the materialized audio file path so the user can open the clip.
+				// The audio_output block itself carries base64 bytes, not renderable text.
+				const note = `*[generated audio clip: ${content.path}]*`;
+				const md = new Markdown(note, 1, 0, getMarkdownTheme());
+				md.transientRenderCache = this.#lastUpdateTransient;
+				this.#contentContainer.addChild(md);
 			}
 		}
 

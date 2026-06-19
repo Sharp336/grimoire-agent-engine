@@ -161,17 +161,32 @@ function isGemini3Model(modelId: string): boolean {
  * ~20 MB (prompt + inline files combined). Base64 audio expands raw bytes
  * ~1.34x and the agent's system prompt/history already consume part of that
  * budget, so an oversized inline clip would fail with an opaque provider
- * 400/413. Cap each inline audio block conservatively and surface a clear
- * note otherwise (full support would require the Files API).
+ * 400/413. Cap each inline audio block conservatively and track the cumulative
+ * total across the whole request so multiple clips that are each under the
+ * per-block cap can't combine to exceed the request limit. Surface a clear
+ * note instead of letting an oversized clip hit an opaque 400/413 (full support
+ * would require the Files API).
  */
 const GEMINI_INLINE_AUDIO_MAX_BYTES = 10 * 1024 * 1024;
+const GEMINI_INLINE_AUDIO_REQUEST_BUDGET = 18 * 1024 * 1024;
 
-function geminiAudioInlinePart(block: AudioContent): Part {
+interface GeminiInlineAudioBudget {
+	/** Cumulative base64 bytes of inline audio already emitted in this request. */
+	used: number;
+}
+
+function geminiAudioInlinePart(block: AudioContent, budget: GeminiInlineAudioBudget): Part {
 	if (block.data.length > GEMINI_INLINE_AUDIO_MAX_BYTES) {
 		return {
 			text: "[audio omitted: exceeds Gemini's inline request size limit; use a shorter clip]",
 		};
 	}
+	if (budget.used + block.data.length > GEMINI_INLINE_AUDIO_REQUEST_BUDGET) {
+		return {
+			text: "[audio omitted: Gemini's inline request size budget has been reached; use shorter or fewer clips]",
+		};
+	}
+	budget.used += block.data.length;
 	return { inlineData: { mimeType: block.mimeType, data: block.data } };
 }
 
@@ -180,6 +195,10 @@ function geminiAudioInlinePart(block: AudioContent): Part {
  */
 export function convertMessages<T extends GoogleApiType>(model: Model<T>, context: Context): Content[] {
 	const contents: Content[] = [];
+	// Cumulative inline-audio budget shared across all user/tool-result turns so
+	// multiple clips that are each under the per-block cap can't combine to exceed
+	// Gemini's ~20 MB total inline-request limit.
+	const inlineAudioBudget: GeminiInlineAudioBudget = { used: 0 };
 	const normalizeToolCallId = (id: string): string => {
 		if (!requiresToolCallId(model.id)) return id;
 		return id.replace(/[^a-zA-Z0-9_-]/g, "_").slice(0, 64);
@@ -231,7 +250,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 							omittedImages = true;
 						}
 					} else if (supportsAudio) {
-						parts.push(geminiAudioInlinePart(item));
+						parts.push(geminiAudioInlinePart(item, inlineAudioBudget));
 					} else {
 						omittedAudio = true;
 					}
@@ -350,7 +369,9 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					data: imageBlock.data,
 				},
 			}));
-			const audioParts: Part[] = audioContent.map(audioBlock => geminiAudioInlinePart(audioBlock));
+			const audioParts: Part[] = audioContent.map(audioBlock =>
+				geminiAudioInlinePart(audioBlock, inlineAudioBudget),
+			);
 			const mediaParts = [...imageParts, ...audioParts];
 
 			const includeId = requiresToolCallId(model.id);

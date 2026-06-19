@@ -5,7 +5,7 @@
  * - `omp -p "prompt"` - text output
  * - `omp --mode json "prompt"` - JSON event stream
  */
-import type { AssistantMessage, AudioContent, ImageContent } from "@oh-my-pi/pi-ai";
+import type { AssistantAudioContent, AssistantMessage, AudioContent, ImageContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { AgentSession } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
@@ -118,9 +118,18 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 					process.stdout.write(`${sanitizeText(content.thinking)}\n`);
 				}
 			}
+			// Surface materialized audio output paths so the user can open the clips
+			// (the audio_output block itself is not rendered as text).
+			const audioPaths = assistantMsg.content
+				.filter((c): c is AssistantAudioContent => c.type === "audio_output")
+				.map(c => c.path)
+				.filter((p): p is string => Boolean(p));
+			if (audioPaths.length > 0) {
+				const note = `[generated ${audioPaths.length} audio clip${audioPaths.length === 1 ? "" : "s"}: ${audioPaths.join(", ")}]`;
+				process.stdout.write(`${note}\n`);
+			}
 		}
 	}
-
 	// Ensure stdout is fully flushed before returning
 	// This prevents race conditions where the process exits before all output is written
 	await new Promise<void>((resolve, reject) => {

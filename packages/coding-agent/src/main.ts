@@ -74,6 +74,7 @@ import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { AUTO_THINKING } from "./thinking";
 import type { LspStartupServerInfo } from "./tools";
+import { audioInputSupportedByApi } from "./utils/audio-input";
 import {
 	getChangelogPath,
 	getNewEntries,
@@ -1348,6 +1349,21 @@ export async function runRootCommand(
 				),
 			);
 			process.exit(1);
+		}
+		// Also reject formats the active model's transport can't serialize (e.g. M4A/AAC/OGG/FLAC
+		// on OpenAI-family APIs, which only accept MP3/WAV). Without this the adapter silently
+		// downgrades the clip to a text placeholder after the CLI has already accepted it.
+		if (initialAudio && initialAudio.length > 0 && session.model) {
+			const unsupported = initialAudio.filter(clip => !audioInputSupportedByApi(clip.mimeType, session.model!.api));
+			if (unsupported.length > 0) {
+				const mime = unsupported[0]!.mimeType;
+				process.stderr.write(
+					chalk.red(
+						`The active model (${session.model.provider}/${session.model.id}) only accepts MP3/WAV audio input, but ${mime} was attached. Convert the clip to MP3 or WAV, or use an audio-capable model that accepts this format.\n`,
+					),
+				);
+				process.exit(1);
+			}
 		}
 
 		if (mode === "rpc" || mode === "rpc-ui") {
