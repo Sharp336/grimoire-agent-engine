@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Collab guest prompts now carry the author's name into the agent's context as `<collab-message from="NAME">…</collab-message>`, so skills and rules can act on per-user identity ([#2975](https://github.com/can1357/oh-my-pi/issues/2975)).
+
 ## [16.0.11] - 2026-06-19
 
 ### Added

@@ -19,6 +19,8 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
+import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "@oh-my-pi/pi-wire";
+import collabPromptTemplate from "../prompts/collab/guest-prompt.md" with { type: "text" };
 import userInterjectionTemplate from "../prompts/steering/user-interjection.md" with { type: "text" };
 
 export {
@@ -475,6 +477,61 @@ export function sanitizeRehydratedOpenAIResponsesAssistantMessage(message: Assis
 	};
 }
 
+/** Resolve the collab author name for an identity tag, neutralizing tag-breaking
+ *  characters. Mirrors the TUI fallback in collab-prompt-message.ts (`|| "guest"`). */
+function resolveCollabPromptFrom(details: unknown): string {
+	const raw = (details as CollabPromptDetails | undefined)?.from ?? "";
+	return raw.replace(/[\r\n"<>]/g, " ").trim() || "guest";
+}
+
+/** Defang any collab-message tag delimiters a guest embeds in their prompt body
+ *  so a hostile body cannot forge a second `<collab-message from="…">` block and
+ *  impersonate another collaborator. Drops the opening `<` of any collab-message
+ *  open/close token to a space — the same "replace tag-breaking chars with space"
+ *  approach as the name sanitizer, and (unlike a zero-width marker) safe against
+ *  the unicode normalization in edit/normalize.ts that strips `\u200B-\u200D`. */
+function defangCollabTags(text: string): string {
+	return text.replace(/<(\s*\/?\s*collab-message)/gi, " $1");
+}
+
+/** Wrap a collab-prompt's LLM content in a single identity envelope the model
+ *  (and skills/rules) can read. Mirrors `wrapSteeringUserMessage`: all guest text
+ *  is collapsed into one rendered envelope body and only genuine `image` blocks
+ *  follow it.
+ *
+ *  Collapsing every text block (not just the leading one) is load-bearing for
+ *  security: a write-enabled guest controls the prompt frame JSON, and `host.ts`
+ *  spreads `frame.images` (typed `ImageContent[]`, unvalidated at runtime) straight
+ *  into the content array, so a guest can smuggle extra `{ type: "text" }` blocks
+ *  there. Wrapping only the first block would let that forged text reach the model
+ *  OUTSIDE the envelope and re-open the impersonation hole; merging all text — and
+ *  dropping any non-image block — guarantees no guest text escapes attribution.
+ *
+ *  `resolveCollabPromptFrom` (name) and `defangCollabTags` (body) stay in code
+ *  because the template is filled with raw, unescaped values. We use
+ *  `prompt.compile` (Handlebars, `noEscape`) rather than `prompt.render` so the
+ *  guest body is inserted byte-exact: `render` post-formats the whole string,
+ *  collapsing blank-line runs and trimming trailing whitespace outside code
+ *  fences, which would corrupt a guest's whitespace-sensitive content (unfenced
+ *  patches, hard breaks). `trimEnd` drops only the template's trailing newline.
+ *  Applied at convert time over unwrapped stored content, so it is never
+ *  double-applied. */
+function wrapCollabPromptContent(
+	content: string | (TextContent | ImageContent)[],
+	details: unknown,
+): (TextContent | ImageContent)[] {
+	const from = resolveCollabPromptFrom(details);
+	const rawText = typeof content === "string" ? content : getArrayContentText(content);
+	const body = defangCollabTags(rawText);
+	const wrapped: (TextContent | ImageContent)[] = [
+		{ type: "text", text: prompt.compile(collabPromptTemplate)({ from, body }).trimEnd() },
+	];
+	if (typeof content !== "string") {
+		wrapped.push(...getArrayContentImages(content));
+	}
+	return wrapped;
+}
+
 /**
  * Transform AgentMessages (including custom types) to LLM-compatible Messages.
  *
@@ -527,7 +584,13 @@ export function convertToLlm(messages: AgentMessage[]): Message[] {
 						timestamp: m.timestamp,
 					};
 				}
-				case "custom":
+				case "custom": {
+					const base = convertMessageToLlm(m);
+					if (m.customType === COLLAB_PROMPT_MESSAGE_TYPE && base?.role === "developer") {
+						return { ...base, content: wrapCollabPromptContent(base.content, m.details) };
+					}
+					return base;
+				}
 				case "hookMessage":
 				case "branchSummary":
 				case "compactionSummary":
