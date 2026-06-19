@@ -455,28 +455,23 @@ describe("AgentSession shake", () => {
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
 
-		it("defers shake while streaming and fires when unblocked", async () => {
+		it("fires mid-run and suppresses at agent_end guards", async () => {
 			session.settings.set("compaction.strategy", "off");
 			session.settings.set("shake.interval", 1);
 			const shakeSpy = vi
 				.spyOn(session, "shake")
 				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 1_000 });
 
+			// Mid-run: afterToolCall fires shake when counter reaches interval
 			bumpToolCallCounter();
+			await Bun.sleep(10);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
 
-			// Blocked: streaming
-			session.agent.state.isStreaming = true;
+			// Agent_end: counter was reset by mid-run, no re-fire
 			emitEnd(makeAssistantMessage());
-			await Bun.sleep(30);
-			expect(shakeSpy).not.toHaveBeenCalled();
-
-			// Unblocked: next end fires
-			session.agent.state.isStreaming = false;
-			emitEnd(makeAssistantMessage("unblocked"));
 			await Bun.sleep(30);
 			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
-
 		it("skips periodic shake when compaction continuation owns the next turn", async () => {
 			// Use handoff strategy (doesn't call shake) with threshold trigger to
 			// produce COMPACTION_CHECK_DEFERRED_HANDOFF (continuationScheduled: true).
@@ -490,7 +485,10 @@ describe("AgentSession shake", () => {
 				.spyOn(session, "shake")
 				.mockResolvedValue({ mode: "elide", toolResultsDropped: 1, blocksDropped: 0, tokensFreed: 10_000 });
 
-			bumpToolCallCounter(); // periodic counter = 1
+			// Mid-run: counter reaches interval, shake fires once
+			bumpToolCallCounter(); // afterToolCall fires mid-run shake
+			await Bun.sleep(10);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
 
 			// High-usage assistant message to trigger threshold compaction
 			const assistantMessage: AssistantMessage = {
@@ -511,10 +509,9 @@ describe("AgentSession shake", () => {
 			emitEnd(assistantMessage);
 			await Bun.sleep(50);
 
-			// Periodic shake should be suppressed — compaction owns the next turn.
-			// The handoff path doesn't call session.shake, so zero calls means
-			// periodic shake was correctly skipped.
-			expect(shakeSpy).toHaveBeenCalledTimes(0);
+			// Agent_end: compaction continuation guard prevents re-fire.
+			// Total remains 1 (only mid-run call).
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
 
 		it("skips periodic shake when overflow recovery fails and tail was pruned", async () => {
@@ -529,7 +526,10 @@ describe("AgentSession shake", () => {
 			// Mock model registry to return no candidates — forces compaction failure
 			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([]);
 
-			bumpToolCallCounter(); // periodic counter = 1
+			// Mid-run: counter reaches interval, shake fires once
+			bumpToolCallCounter(); // afterToolCall fires mid-run shake
+			await Bun.sleep(10);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
 
 			// Overflow assistant with context-overflow matching error message
 			const overflowMsg: AssistantMessage = {
@@ -544,12 +544,10 @@ describe("AgentSession shake", () => {
 			emitEnd(overflowMsg);
 			await Bun.sleep(50);
 
-			// Periodic shake should NOT fire — tail was pruned by overflow handling
-			// and compaction recovery failed (no available models),
-			// so #processAgentEvent sees tailPruned: true and skips periodic shake.
-			expect(shakeSpy).not.toHaveBeenCalled();
+			// Agent_end: tailPruned guard prevents re-fire.
+			// Total remains 1 (only mid-run call).
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
-
 		it("skips periodic shake when length-stop recovery fails and tail was pruned", async () => {
 			session.settings.set("contextPromotion.enabled", false);
 			session.settings.set("shake.interval", 1);
@@ -560,7 +558,10 @@ describe("AgentSession shake", () => {
 
 			vi.spyOn(modelRegistry, "getAvailable").mockReturnValue([]);
 
-			bumpToolCallCounter(); // periodic counter = 1
+			// Mid-run: counter reaches interval, shake fires once
+			bumpToolCallCounter(); // afterToolCall fires mid-run shake
+			await Bun.sleep(10);
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
 
 			const lengthMsg: AssistantMessage = {
 				role: "assistant",
@@ -573,9 +574,9 @@ describe("AgentSession shake", () => {
 			emitEnd(lengthMsg);
 			await Bun.sleep(50);
 
-			// Periodic shake should NOT fire — tail was pruned by length-stop handling
-			// and compaction recovery failed.
-			expect(shakeSpy).not.toHaveBeenCalled();
+			// Agent_end: tailPruned guard prevents re-fire.
+			// Total remains 1 (only mid-run call).
+			expect(shakeSpy).toHaveBeenCalledTimes(1);
 		});
 	});
 });

@@ -1669,8 +1669,17 @@ export class AgentSession {
 		});
 		// Per-tool TTSR reminders are folded into the matched tool's result via this hook.
 		// Also increment the periodic shake counter per tool call.
-		this.agent.afterToolCall = ctx => {
+		this.agent.afterToolCall = async (ctx, _signal) => {
 			this.#shakeToolCallCounter++;
+
+			// Fire periodic shake mid-run when counter reaches interval,
+			// without waiting for agent_end. Uses skipAgentUpdate:true to
+			// prune session entries without mutating agent.state.messages.
+			const interval = this.settings.get("shake.interval") as number;
+			if (Number.isFinite(interval) && interval > 0 && this.#shakeToolCallCounter >= interval) {
+				await this.#runMidRunShake();
+			}
+
 			return this.#ttsrAfterToolCall(ctx);
 		};
 		this.agent.providerSessionState = this.#providerSessionState;
@@ -7518,7 +7527,10 @@ export class AgentSession {
 	 *
 	 * No-op (zero counts) when nothing is eligible.
 	 */
-	async shake(mode: ShakeMode, opts: { config?: ShakeConfig; signal?: AbortSignal } = {}): Promise<ShakeResult> {
+	async shake(
+		mode: ShakeMode,
+		opts: { config?: ShakeConfig; signal?: AbortSignal; skipAgentUpdate?: boolean } = {},
+	): Promise<ShakeResult> {
 		if (mode === "images") {
 			const { removed } = await this.dropImages();
 			return { mode, toolResultsDropped: 0, blocksDropped: 0, imagesDropped: removed, tokensFreed: 0 };
@@ -7555,10 +7567,12 @@ export class AgentSession {
 		applyShakeRegions(items);
 
 		await this.sessionManager.rewriteEntries();
-		const sessionContext = this.buildDisplaySessionContext();
-		this.agent.replaceMessages(sessionContext.messages);
-		this.#advisorRuntime?.reset();
-		this.#closeCodexProviderSessionsForHistoryRewrite();
+		if (!opts.skipAgentUpdate) {
+			const sessionContext = this.buildDisplaySessionContext();
+			this.agent.replaceMessages(sessionContext.messages);
+			this.#advisorRuntime?.reset();
+			this.#closeCodexProviderSessionsForHistoryRewrite();
+		}
 
 		return {
 			mode,
@@ -10002,6 +10016,28 @@ export class AgentSession {
 			this.emitNotice("info", formatShakeSummary(result), "shake");
 		} catch (error) {
 			logger.warn("Periodic shake failed", { error: error instanceof Error ? error.message : String(error) });
+		}
+	}
+
+	/**
+	 * Mid-run periodic shake, fired from afterToolCall during an autonomous
+	 * agent loop. Prunes session entries with skipAgentUpdate:true to avoid
+	 * mutating agent.state.messages while the loop holds a reference to it.
+	 * The pruned session takes effect on the next run/continue; the current
+	 * loop continues safely with its original message reference.
+	 */
+	async #runMidRunShake(): Promise<void> {
+		this.#shakeToolCallCounter = 0;
+		try {
+			const result = await this.shake("elide", {
+				config: DEFAULT_SHAKE_CONFIG,
+				skipAgentUpdate: true,
+			});
+			this.emitNotice("info", formatShakeSummary(result), "shake");
+		} catch (error) {
+			logger.warn("Mid-run shake failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
 		}
 	}
 
