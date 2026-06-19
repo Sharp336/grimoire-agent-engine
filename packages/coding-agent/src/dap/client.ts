@@ -121,6 +121,7 @@ export class DapClient {
 	#messageBuffer: Buffer = Buffer.alloc(0);
 	#isReading = false;
 	#disposed = false;
+	#transportClosed = false;
 	#lastActivity = Date.now();
 	#capabilities?: DapCapabilities;
 	#eventHandlers = new Map<string, Set<DapEventHandler>>();
@@ -221,9 +222,11 @@ export class DapClient {
 			throw err;
 		}
 
-		const { readable, writeSink, socket } = await connectTcpSocket(host, port);
+		const transportClosed = Promise.withResolvers<void>();
+		const { readable, writeSink, socket } = await connectTcpSocket(host, port, transportClosed);
 		const client = new DapClient(adapter, cwd, proc, { readable, writeSink, socket });
 		client.port = port;
+		transportClosed.promise.then(() => client.#handleTransportClose());
 		proc.exited.then(() => client.#handleProcessExit());
 		void client.#startMessageReader();
 		return client;
@@ -337,7 +340,7 @@ export class DapClient {
 	}
 
 	isAlive(): boolean {
-		return !this.#disposed && this.proc.exitCode === null;
+		return !this.#disposed && !this.#transportClosed && this.proc.exitCode === null;
 	}
 
 	async initialize(args: DapInitializeArguments, signal?: AbortSignal, timeoutMs?: number): Promise<DapCapabilities> {
@@ -423,7 +426,7 @@ export class DapClient {
 		if (signal?.aborted) {
 			throw signal.reason instanceof Error ? signal.reason : new ToolAbortError();
 		}
-		if (this.#disposed) {
+		if (this.#disposed || this.#transportClosed) {
 			throw new Error(`DAP adapter ${this.adapter.name} is not running`);
 		}
 		const requestSeq = ++this.#requestSeq;
@@ -682,6 +685,12 @@ export class DapClient {
 				: `DAP adapter exited unexpectedly (code ${exitCode})`,
 		);
 		this.#rejectPendingRequests(error);
+	}
+
+	#handleTransportClose(): void {
+		if (this.#disposed || this.#transportClosed) return;
+		this.#transportClosed = true;
+		this.#rejectPendingRequests(new Error(`DAP adapter ${this.adapter.name} transport closed`));
 	}
 
 	#rejectPendingRequests(error: Error): void {

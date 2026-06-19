@@ -29,6 +29,8 @@ const TEST_ADAPTER: DapResolvedAdapter = {
 	acceptsDirectoryProgram: false,
 };
 
+const TCP_PORT_PLACEHOLDER = "$" + "{port}";
+
 const DELAYED_UNIX_SOCKET_ADAPTER = `
 const listenPrefix = "--listen=unix:";
 const listenArg = process.argv.find(arg => arg.startsWith(listenPrefix));
@@ -46,6 +48,29 @@ server = Bun.listen({
 	unix: socketPath,
 	socket: {
 		open() {},
+		data() {},
+		close() {},
+		error() {},
+	},
+});
+await Bun.sleep(2_000);
+server.stop();
+`;
+
+const TCP_CLOSE_STAYS_ALIVE_ADAPTER = `
+const port = Number(process.argv[2]);
+let server;
+process.on("SIGTERM", () => {
+	server?.stop();
+	process.exit(0);
+});
+server = Bun.listen({
+	hostname: "127.0.0.1",
+	port,
+	socket: {
+		open(socket) {
+			socket.end();
+		},
 		data() {},
 		close() {},
 		error() {},
@@ -337,6 +362,32 @@ describe("DAP launch failure handling", () => {
 		try {
 			client = await DapClient.spawn({ adapter, cwd });
 			expect(client.isAlive()).toBe(true);
+		} finally {
+			await client?.dispose();
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("marks spawned TCP clients dead when the DAP socket closes before the server process exits", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-tcp-close-"));
+		const adapterPath = path.join(cwd, "tcp-close-stays-alive-adapter.mjs");
+		await Bun.write(adapterPath, TCP_CLOSE_STAYS_ALIVE_ADAPTER);
+		const adapter: DapResolvedAdapter = {
+			...TEST_ADAPTER,
+			name: "tcp-close-adapter",
+			command: process.execPath,
+			args: [adapterPath, TCP_PORT_PLACEHOLDER],
+			resolvedCommand: process.execPath,
+			connectMode: "tcp",
+		};
+		let client: DapClient | undefined;
+		try {
+			client = await DapClient.spawn({ adapter, cwd });
+			for (let attempt = 0; attempt < 50 && client.isAlive(); attempt++) {
+				await Bun.sleep(10);
+			}
+			expect(client.proc.exitCode).toBeNull();
+			expect(client.isAlive()).toBe(false);
 		} finally {
 			await client?.dispose();
 			await fs.rm(cwd, { recursive: true, force: true });

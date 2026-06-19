@@ -780,12 +780,18 @@ export class DapSessionManager {
 	}
 
 	async setFunctionBreakpoint(name: string, condition?: string, signal?: AbortSignal, timeoutMs: number = 30_000) {
+		const previous = this.#pendingFunctionBreakpoints;
 		const current = this.#pendingFunctionBreakpoints.filter(entry => entry.name !== name);
 		current.push({ verified: false, name, condition });
 		current.sort((left, right) => left.name.localeCompare(right.name));
 		this.#pendingFunctionBreakpoints = current;
 
-		await this.#updateFunctionBreakpointsGlobally(name, "add", condition, signal, timeoutMs);
+		try {
+			await this.#updateFunctionBreakpointsGlobally(name, "add", condition, signal, timeoutMs);
+		} catch (error) {
+			this.#pendingFunctionBreakpoints = previous;
+			throw error;
+		}
 
 		const session = this.#getActiveSessionOrNull();
 		return {
@@ -795,9 +801,15 @@ export class DapSessionManager {
 	}
 
 	async removeFunctionBreakpoint(name: string, signal?: AbortSignal, timeoutMs: number = 30_000) {
+		const previous = this.#pendingFunctionBreakpoints;
 		this.#pendingFunctionBreakpoints = this.#pendingFunctionBreakpoints.filter(entry => entry.name !== name);
 
-		await this.#updateFunctionBreakpointsGlobally(name, "remove", undefined, signal, timeoutMs);
+		try {
+			await this.#updateFunctionBreakpointsGlobally(name, "remove", undefined, signal, timeoutMs);
+		} catch (error) {
+			this.#pendingFunctionBreakpoints = previous;
+			throw error;
+		}
 
 		const session = this.#getActiveSessionOrNull();
 		return {
@@ -814,21 +826,28 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	) {
+		const previous = this.#pendingInstructionBreakpoints;
 		const current = this.#pendingInstructionBreakpoints.filter(
 			entry => entry.instructionReference !== instructionReference || entry.offset !== offset,
 		);
 		current.push({ instructionReference, offset, condition, hitCondition });
 		this.#pendingInstructionBreakpoints = current;
 
-		const breakpoints = await this.#updateInstructionBreakpointsGlobally(
-			instructionReference,
-			offset,
-			"add",
-			condition,
-			hitCondition,
-			signal,
-			timeoutMs,
-		);
+		let breakpoints: DapInstructionBreakpointRecord[];
+		try {
+			breakpoints = await this.#updateInstructionBreakpointsGlobally(
+				instructionReference,
+				offset,
+				"add",
+				condition,
+				hitCondition,
+				signal,
+				timeoutMs,
+			);
+		} catch (error) {
+			this.#pendingInstructionBreakpoints = previous;
+			throw error;
+		}
 
 		const session = this.#getActiveSessionOrNull();
 		return {
@@ -843,6 +862,7 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	) {
+		const previous = this.#pendingInstructionBreakpoints;
 		this.#pendingInstructionBreakpoints = this.#pendingInstructionBreakpoints.filter(entry => {
 			if (entry.instructionReference !== instructionReference) {
 				return true;
@@ -853,15 +873,21 @@ export class DapSessionManager {
 			return entry.offset !== offset;
 		});
 
-		const breakpoints = await this.#updateInstructionBreakpointsGlobally(
-			instructionReference,
-			offset,
-			"remove",
-			undefined,
-			undefined,
-			signal,
-			timeoutMs,
-		);
+		let breakpoints: DapInstructionBreakpointRecord[];
+		try {
+			breakpoints = await this.#updateInstructionBreakpointsGlobally(
+				instructionReference,
+				offset,
+				"remove",
+				undefined,
+				undefined,
+				signal,
+				timeoutMs,
+			);
+		} catch (error) {
+			this.#pendingInstructionBreakpoints = previous;
+			throw error;
+		}
 
 		const session = this.#getActiveSessionOrNull();
 		return {
@@ -878,20 +904,27 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	) {
+		const previous = this.#pendingDataBreakpoints;
 		const current = this.#pendingDataBreakpoints.filter(entry => entry.dataId !== dataId);
 		current.push({ dataId, accessType, condition, hitCondition });
 		current.sort((left, right) => left.dataId.localeCompare(right.dataId));
 		this.#pendingDataBreakpoints = current;
 
-		const breakpoints = await this.#updateDataBreakpointsGlobally(
-			dataId,
-			"add",
-			accessType,
-			condition,
-			hitCondition,
-			signal,
-			timeoutMs,
-		);
+		let breakpoints: DapDataBreakpointRecord[];
+		try {
+			breakpoints = await this.#updateDataBreakpointsGlobally(
+				dataId,
+				"add",
+				accessType,
+				condition,
+				hitCondition,
+				signal,
+				timeoutMs,
+			);
+		} catch (error) {
+			this.#pendingDataBreakpoints = previous;
+			throw error;
+		}
 
 		const session = this.#getActiveSessionOrNull();
 		return {
@@ -901,17 +934,24 @@ export class DapSessionManager {
 	}
 
 	async removeDataBreakpoint(dataId: string, signal?: AbortSignal, timeoutMs: number = 30_000) {
+		const previous = this.#pendingDataBreakpoints;
 		this.#pendingDataBreakpoints = this.#pendingDataBreakpoints.filter(entry => entry.dataId !== dataId);
 
-		const breakpoints = await this.#updateDataBreakpointsGlobally(
-			dataId,
-			"remove",
-			undefined,
-			undefined,
-			undefined,
-			signal,
-			timeoutMs,
-		);
+		let breakpoints: DapDataBreakpointRecord[];
+		try {
+			breakpoints = await this.#updateDataBreakpointsGlobally(
+				dataId,
+				"remove",
+				undefined,
+				undefined,
+				undefined,
+				signal,
+				timeoutMs,
+			);
+		} catch (error) {
+			this.#pendingDataBreakpoints = previous;
+			throw error;
+		}
 
 		const session = this.#getActiveSessionOrNull();
 		return {
