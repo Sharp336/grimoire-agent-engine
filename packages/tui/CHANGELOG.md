@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced `ReturnType<typeof setInterval>` with `Timer` for `#progressTimer` to match the three adjacent timer fields in `Terminal` (per the repo convention against `ReturnType<>`)
+
 ## [16.0.11] - 2026-06-19
 
 ### Breaking Changes
