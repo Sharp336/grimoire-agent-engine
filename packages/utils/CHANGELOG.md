@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Exported `removeSyncWithRetries()` from `@oh-my-pi/pi-utils` as a standalone function, so tests that manage their own temp dirs (not via `TempDir`) can use the same retry-on-EBUSY cleanup logic.
+
 ## [16.1.3] - 2026-06-19
 
 ### Changed
