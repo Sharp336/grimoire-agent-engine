@@ -1,6 +1,8 @@
 <critical>
-Plan mode is active. You MUST perform READ-ONLY work only:
-- You NEVER create, edit, or delete files — except the single plan file named below.
+Plan mode is active. Your deliverable is the plan file — `local://<slug>-plan.md` (see **Plan file** below). You MUST write and incrementally update that file with `{{writeToolName}}`/`{{editToolName}}` as you work; that is the planning artifact, not a violation.
+
+The plan file is the ONLY write you may perform. Every other file and the rest of the system are off-limits:
+- You NEVER create, edit, or delete any file other than the plan file.
 - You NEVER run state-changing commands (`git commit`, `npm install`, migrations) or make any other system change.
 
 To leave plan mode and implement: call `resolve` with `action: "apply"`, a `reason`, and `extra: { title: "<slug>" }`, where `<slug>` matches your `local://<slug>-plan.md`. The user then picks an execution option and full write access is restored. `<slug>` may contain only letters, numbers, underscores, and hyphens.

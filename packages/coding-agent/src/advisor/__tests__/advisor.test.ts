@@ -48,7 +48,7 @@ describe("advisor", () => {
 
 	describe("formatSessionHistoryMarkdown expandPrimaryContext", () => {
 		const planRule =
-			"Plan mode is active. You MUST perform READ-ONLY work only:\n- You NEVER create, edit, or delete files — except the single plan file named below.";
+			"Plan mode is active. Your deliverable is the plan file — local://<slug>-plan.md. The plan file is the ONLY write you may perform.\n- You NEVER create, edit, or delete any file other than the plan file.";
 		const planMsg = {
 			role: "custom",
 			customType: "plan-mode-context",
@@ -62,13 +62,13 @@ describe("advisor", () => {
 			expect(md).toContain("[plan-mode-context]");
 			// The one-liner cap cuts the rule off before its load-bearing exception —
 			// the exact truncation that made the advisor misread plan mode.
-			expect(md).not.toContain("except the single plan file named below");
+			expect(md).not.toContain("any file other than the plan file");
 		});
 
 		it("expands plan context verbatim and wrapped when expandPrimaryContext is set", () => {
 			const md = formatSessionHistoryMarkdown([planMsg], { watchedRoles: true, expandPrimaryContext: true });
 			expect(md).toContain('<primary-context kind="plan-mode-context">');
-			expect(md).toContain("except the single plan file named below");
+			expect(md).toContain("any file other than the plan file");
 			expect(md).toContain("</primary-context>");
 		});
 
@@ -451,7 +451,7 @@ describe("advisor", () => {
 			const promptInputs: string[] = [];
 			const agent = makeAgent(promptInputs);
 			const rule =
-				"Plan mode is active. You MUST perform READ-ONLY work only:\n- You NEVER create, edit, or delete files — except the single plan file named below.";
+				"Plan mode is active. Your deliverable is the plan file — local://<slug>-plan.md. The plan file is the ONLY write you may perform.\n- You NEVER create, edit, or delete any file other than the plan file.";
 			const messages: AgentMessage[] = [];
 			const host: AdvisorRuntimeHost = {
 				snapshotMessages: () => messages,
@@ -473,7 +473,7 @@ describe("advisor", () => {
 
 			expect(promptInputs).toHaveLength(1);
 			expect(promptInputs[0]).toContain('<primary-context kind="plan-mode-context">');
-			expect(promptInputs[0]).toContain("except the single plan file named below");
+			expect(promptInputs[0]).toContain("any file other than the plan file");
 
 			// A later turn re-injects the byte-identical rule as a fresh message object.
 			messages.push({
@@ -494,7 +494,7 @@ describe("advisor", () => {
 
 			expect(promptInputs).toHaveLength(2);
 			expect(promptInputs[1]).toContain("unchanged — still in effect");
-			expect(promptInputs[1]).not.toContain("except the single plan file named below");
+			expect(promptInputs[1]).not.toContain("any file other than the plan file");
 		});
 
 		it("renders the watched delta with a heading, watched-role labels, and no inner ## headings", () => {
