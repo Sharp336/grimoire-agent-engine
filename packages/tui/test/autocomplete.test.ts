@@ -76,6 +76,20 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result.cursorCol).toBe("/skills:fix-bug ".length);
 		});
 
+		it("preserves leading whitespace while replacing a slash command prefix", () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const result = provider.applyCompletion(
+				["  /ski"],
+				0,
+				6,
+				{ value: "skills:fix-bug", label: "/skills:fix-bug" },
+				"  /s",
+			);
+
+			expect(result.lines[0]).toBe("  /skills:fix-bug ");
+			expect(result.cursorCol).toBe("  /skills:fix-bug ".length);
+		});
+
 		it("preserves earlier slash command arguments when completing a path inside the last argument", () => {
 			const provider = new CombinedAutocompleteProvider([], "/tmp");
 			const result = provider.applyCompletion(
@@ -247,6 +261,50 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(values).toContain("./src/");
 		});
 	});
+
+	describe("slash command leading whitespace", () => {
+		it("suggests slash commands when slash is the first non-whitespace token", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{ name: "model", description: "Switch AI model" },
+					{ name: "skill:reviewer", description: "Review code" },
+				],
+				"/tmp",
+			);
+
+			const bareResult = await provider.getSuggestions(["  /"], 0, 3);
+			expect(bareResult).not.toBeNull();
+			expect(bareResult!.prefix).toBe("  /");
+			expect(bareResult!.items.map(item => item.value)).toEqual(["model", "skill:reviewer"]);
+
+			const partialLine = "  /ski";
+			const partialResult = await provider.getSuggestions([partialLine], 0, partialLine.length);
+			expect(partialResult).not.toBeNull();
+			expect(partialResult!.prefix).toBe(partialLine);
+			expect(partialResult!.items.map(item => item.value)).toEqual(["skill:reviewer"]);
+		});
+
+		it("completes slash command arguments and inline hints after leading whitespace", async () => {
+			const provider = new CombinedAutocompleteProvider(
+				[
+					{
+						name: "setup",
+						aliases: ["onboarding"],
+						getArgumentCompletions: prefix =>
+							"providers".startsWith(prefix) ? [{ value: "providers ", label: "providers" }] : null,
+						getInlineHint: argumentText => (argumentText === "pro" ? "viders" : null),
+					},
+				],
+				"/tmp",
+			);
+			const line = "  /onboarding pro";
+			const result = await provider.getSuggestions([line], 0, line.length);
+			expect(result?.prefix).toBe("pro");
+			expect(result?.items.map(item => item.value)).toEqual(["providers "]);
+			expect(provider.getInlineHint([line], 0, line.length)).toBe("viders");
+		});
+	});
+
 });
 describe("trySyncSlashCompletion", () => {
 	it("returns null for bare '/' (no prefix to match)", () => {
@@ -333,6 +391,17 @@ describe("trySyncSlashCompletion", () => {
 		const provider = new CombinedAutocompleteProvider([{ value: "model", label: "Switch model" }], "/tmp");
 		const result = provider.trySyncSlashCompletion("/mod");
 		expect(result).not.toBeNull();
+		expect(result!.items.map(i => i.value)).toEqual(["model"]);
+	});
+
+	it("matches slash command names after leading whitespace", () => {
+		const provider = new CombinedAutocompleteProvider(
+			[{ name: "model", description: "Switch AI model", value: "model" }],
+			"/tmp",
+		);
+		const result = provider.trySyncSlashCompletion("  /mo");
+		expect(result).not.toBeNull();
+		expect(result!.prefix).toBe("  /mo");
 		expect(result!.items.map(i => i.value)).toEqual(["model"]);
 	});
 

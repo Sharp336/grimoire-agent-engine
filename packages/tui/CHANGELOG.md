@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed autocomplete trigger and synchronous completion for slash commands containing leading whitespace.
+
 ## [16.1.0] - 2026-06-19
 
 ### Added
