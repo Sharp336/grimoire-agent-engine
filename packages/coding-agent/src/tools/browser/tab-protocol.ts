@@ -3,7 +3,7 @@ import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 export type Transferable = Bun.Transferable;
 
 export interface ObservationEntry {
-	id: number;
+	id: string;
 	role: string;
 	name?: string;
 	value?: string | number;
@@ -15,7 +15,7 @@ export interface ObservationEntry {
 export interface Observation {
 	url: string;
 	title?: string;
-	viewport: { width: number; height: number; deviceScaleFactor?: number };
+	viewport: { width: number; height: number };
 	scroll: {
 		x: number;
 		y: number;
@@ -45,7 +45,8 @@ export interface SessionSnapshot {
 export type WorkerInitPayload =
 	| {
 			mode: "headless";
-			browserWSEndpoint: string;
+			/** WebSocket endpoint from chromium.launchServer() */
+			endpoint: string;
 			safeDir: string;
 			viewport?: { width: number; height: number; deviceScaleFactor?: number };
 			dialogs?: "accept" | "dismiss";
@@ -55,7 +56,8 @@ export type WorkerInitPayload =
 	  }
 	| {
 			mode: "attach";
-			browserWSEndpoint: string;
+			/** CDP URL (http://host:port) for connectOverCDP */
+			endpoint: string;
 			safeDir: string;
 			targetId: string;
 			dialogs?: "accept" | "dismiss";
@@ -73,7 +75,7 @@ export type WorkerInbound =
 export interface ReadyInfo {
 	url: string;
 	title?: string;
-	viewport: { width: number; height: number; deviceScaleFactor?: number };
+	viewport: { width: number; height: number };
 	targetId: string;
 }
 

@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { pickElectronTarget } from "@oh-my-pi/pi-coding-agent/tools/browser/attach";
 import { normalizeConnectedCdpUrl } from "@oh-my-pi/pi-coding-agent/tools/browser/registry";
-import type { Browser, Page, Target } from "puppeteer-core";
+import type { Browser, BrowserContext, Page } from "patchright";
 
 interface FakePageOptions {
 	url: string;
@@ -15,49 +15,49 @@ function fakePage(options: FakePageOptions): Page {
 	} as unknown as Page;
 }
 
-function fakeTarget(type: string, page: Page | null): Target {
+function fakeBrowser(pages: Page[]): Browser {
+	const ctx: BrowserContext = { pages: () => pages } as unknown as BrowserContext;
 	return {
-		type: () => type,
-		page: async () => page,
-	} as unknown as Target;
+		contexts: () => [ctx],
+	} as unknown as Browser;
 }
 
 describe("pickElectronTarget", () => {
-	test("uses discovered CDP page targets when browser.pages is empty", async () => {
-		const page = fakePage({ url: "https://www.google.com/", title: "Google" });
-		let pagesCalled = false;
-		const browser = {
-			targets: () => [fakeTarget("browser", null), fakeTarget("page", page)],
-			pages: async () => {
-				pagesCalled = true;
-				return [];
-			},
-		} as unknown as Browser;
-
-		await expect(pickElectronTarget(browser, "google")).resolves.toBe(page);
-		expect(pagesCalled).toBe(false);
-	});
-
-	test("falls back to browser.pages when discovered targets have no usable page", async () => {
+	test("returns the first page when no matcher is given", async () => {
 		const page = fakePage({ url: "https://example.com/", title: "Example" });
-		const browser = {
-			targets: () => [fakeTarget("browser", null), fakeTarget("service_worker", null)],
-			pages: async () => [page],
-		} as unknown as Browser;
+		const browser = fakeBrowser([page]);
 
 		await expect(pickElectronTarget(browser)).resolves.toBe(page);
 	});
 
+	test("matches by URL substring", async () => {
+		const google = fakePage({ url: "https://www.google.com/", title: "Google" });
+		const example = fakePage({ url: "https://example.com/", title: "Example" });
+		const browser = fakeBrowser([google, example]);
+
+		await expect(pickElectronTarget(browser, "google")).resolves.toBe(google);
+	});
+
+	test("matches by title substring", async () => {
+		const page = fakePage({ url: "https://example.com/", title: "My App Dashboard" });
+		const browser = fakeBrowser([page]);
+
+		await expect(pickElectronTarget(browser, "dashboard")).resolves.toBe(page);
+	});
+
 	test("reports available pages when the matcher misses", async () => {
 		const page = fakePage({ url: "https://example.com/", title: "Example" });
-		const browser = {
-			targets: () => [fakeTarget("page", page)],
-			pages: async () => [],
-		} as unknown as Browser;
+		const browser = fakeBrowser([page]);
 
 		await expect(pickElectronTarget(browser, "missing")).rejects.toThrow(
 			'No page target matched "missing". Available pages:\n- Example  https://example.com/',
 		);
+	});
+
+	test("throws when no pages are available", async () => {
+		const browser = fakeBrowser([]);
+
+		await expect(pickElectronTarget(browser)).rejects.toThrow("No page targets available on the attached browser");
 	});
 
 	test("rejects websocket cdp_url values with an actionable diagnostic", () => {

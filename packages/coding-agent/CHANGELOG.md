@@ -1,6 +1,19 @@
 # Changelog
 
 ## [Unreleased]
+### Changed
+
+- Improved aria-label identification to honor `aria-labelledby` attributes
+- Updated browser tool selector documentation to reflect support for implicit ARIA roles and labels
+- Migrated browser tool from `puppeteer-core` to `patchright` (undetected Playwright drop-in). Removes all 14 custom stealth injection scripts; stealth is now built-in to patchright (Runtime.enable leak avoidance, Console.enable disable, command-flag leak fixes). `ariaSnapshot` replaces the removed `page.accessibility.snapshot()` for `tab.observe()`. Element IDs in observation output changed from `number` to `string` (aria-ref format like `"e2"`). `tab.id(ref)` returns a Playwright `Locator` instead of a Puppeteer `ElementHandle`. `tab.waitForResponse()` returns a Playwright `Response`. Legacy `aria/X`, `text/X`, `xpath/X`, `pierce/X` selectors are auto-translated to Playwright `text=X`, `xpath=X`, `role=` equivalents. `patchright` is lazy-loaded — the heavy `patchright-core` bundle no longer executes at `omp` startup. Chromium provisioning uses `npx patchright install chromium` with a `node` CLI fallback.
+
+### Fixed
+
+- Fixed screenshot capability to correctly re-encode as JPEG/WebP when saving to requested path
+- Fixed `tab.id()` to prevent resolution of stale elements after navigation
+- Fixed `tab.goto()` to clear cached element references upon navigation
+- Ensured `role=button` selectors resolve correctly via ARIA roles rather than failing as selectors
+- cmux browser backend now matches the headless patchright surface: `role=`/`aria/` selectors resolve by ARIA role (including implicit roles like `<button>`, `<a href>`, form inputs) plus accessible name (now honoring `aria-labelledby`) instead of dropping the role or forwarding an invalid CSS selector; `tab.goto()` invalidates the prior snapshot's aria-refs so a stale `tab.id(...)` rejects with a re-observe hint instead of resolving a different element that reused the ref; and explicit `.webp`/`.jpg` `tab.screenshot({ save })` paths re-encode to the requested format instead of writing PNG bytes under a mismatched extension. The agent prompt now flags that cmux `page`/`browser` are a limited facade (prefer `tab.*`) and that `tab.screenshot` `fullPage` / `tab.observe` `viewportOnly` are cmux no-ops.
 
 ## [16.1.8] - 2026-06-20
 

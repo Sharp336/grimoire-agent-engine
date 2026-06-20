@@ -65,7 +65,6 @@
 		"@opentelemetry/resources": "catalog:",
 		"@opentelemetry/sdk-trace-base": "catalog:",
 		"@opentelemetry/sdk-trace-node": "catalog:",
-		"@puppeteer/browsers": "catalog:",
 		"@types/turndown": "catalog:",
 		"@xterm/headless": "catalog:",
 		"arktype": "catalog:",
@@ -77,7 +76,7 @@
 		"lru-cache": "catalog:",
 		"mammoth": "catalog:",
 		"mupdf": "catalog:",
-		"puppeteer-core": "catalog:",
+		"patchright": "catalog:",
 		"turndown": "catalog:",
 		"turndown-plugin-gfm": "catalog:",
 		"zod": "catalog:"

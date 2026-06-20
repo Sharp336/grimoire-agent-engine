@@ -82,13 +82,18 @@ export function cmuxSnapshotToObservation(
 	for (const ref in refs) {
 		const value = refs[ref];
 		if (!value) continue;
-		const id = Number.parseInt(ref.replace(/^@?e/, ""), 10);
-		if (Number.isNaN(id)) continue;
+		// Keep the full ref string (e.g. "e2") as the element ID for aria-ref selectors.
+		const normalizedRef = ref.startsWith("@") ? ref.slice(1) : ref;
+		if (!normalizedRef.startsWith("e")) continue;
 		const role = typeof value.role === "string" && value.role.length > 0 ? value.role : "generic";
 		const name = typeof value.name === "string" && value.name.length > 0 ? value.name : undefined;
-		elements.push({ id, role, name, states: [] });
+		elements.push({ id: normalizedRef, role, name, states: [] });
 	}
-	elements.sort((a, b) => a.id - b.id);
+	elements.sort((a, b) => {
+		const aNum = Number.parseInt(a.id.replace(/^e/, ""), 10) || 0;
+		const bNum = Number.parseInt(b.id.replace(/^e/, ""), 10) || 0;
+		return aNum - bNum;
+	});
 
 	const url =
 		(typeof result.url === "string" && result.url.length > 0 ? result.url : undefined) ??
@@ -153,4 +158,79 @@ export function resolveCmuxKind(
 		password: env.CMUX_SOCKET_PASSWORD || undefined,
 		surface: options?.surface,
 	};
+}
+
+export type SelectorKind = "css" | "ref" | "text" | "aria" | "xpath" | "pierce" | "ax";
+
+export interface SelectorSpec {
+	kind: SelectorKind;
+	value: string;
+	raw: string;
+	ref?: string;
+	name?: string;
+	role?: string;
+}
+
+function ariaNameFrom(value: string): string | undefined {
+	const m = value.match(/\[\s*name\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\]]+))\s*\]/);
+	return (m?.[1] ?? m?.[2] ?? m?.[3])?.trim();
+}
+
+/**
+ * Parse a selector string into a {@link SelectorSpec} the cmux selector pipeline
+ * understands. Accepts CSS, aria-ref ids (`e2` / `@e2`), the legacy slash query
+ * handlers (`text/`, `aria/`, `xpath/`, `pierce/`, plus their `p-` variants), and
+ * the Playwright engine syntax advertised to agents (`text=`, `xpath=`, `role=`).
+ *
+ * `role=button` / `role=button[name="Save"]` resolve to a role-aware aria spec so
+ * cmux matches the same elements Playwright's `role=` engine does in the headless
+ * worker (implicit roles + accessible name) instead of dropping the role or
+ * forwarding an invalid CSS selector.
+ */
+export function cmuxSelectorSpec(selector: string): SelectorSpec {
+	const raw = selector;
+	let normalized = selector;
+	// Translate Playwright engine= syntax (text=, xpath=, role=) before the legacy
+	// slash handling so both selector dialects reach the same matcher.
+	const eqIdx = selector.indexOf("=");
+	if (
+		eqIdx > 0 &&
+		!selector.startsWith("aria/") &&
+		!selector.startsWith("text/") &&
+		!selector.startsWith("xpath/") &&
+		!selector.startsWith("pierce/")
+	) {
+		const prefix = selector.slice(0, eqIdx);
+		const value = selector.slice(eqIdx + 1);
+		if (prefix === "text") normalized = `text/${value}`;
+		else if (prefix === "xpath") normalized = `xpath/${value}`;
+		else if (prefix === "role") {
+			const name = ariaNameFrom(value);
+			const role = value.replace(/\[.*$/, "").trim();
+			if (role) return { kind: "aria", value: name ?? role, raw, role, name };
+		}
+	}
+	if (normalized.startsWith("p-text/")) normalized = `text/${normalized.slice("p-text/".length)}`;
+	else if (normalized.startsWith("p-aria/")) normalized = `aria/${normalized.slice("p-aria/".length)}`;
+	else if (normalized.startsWith("p-xpath/")) normalized = `xpath/${normalized.slice("p-xpath/".length)}`;
+	else if (normalized.startsWith("p-pierce/")) normalized = `pierce/${normalized.slice("p-pierce/".length)}`;
+	const ref = /^@?(e\d+)$/.exec(normalized);
+	if (ref) return { kind: "ref", value: ref[1]!, raw, ref: `@${ref[1]}` };
+	const slash = normalized.indexOf("/");
+	if (slash > 0) {
+		const prefix = normalized.slice(0, slash);
+		const value = normalized.slice(slash + 1);
+		if (prefix === "aria") {
+			const name = ariaNameFrom(value);
+			const roleMatch = value.match(/^(\w+)\s*\[\s*name\s*=/);
+			const role = roleMatch?.[1];
+			// `aria/Save` (bare token) is an accessible name; `aria/role[name="…"]` carries both.
+			const resolvedName = name ?? (role ? undefined : value.trim() || undefined);
+			return { kind: "aria", value: resolvedName ?? value, raw, role, name: resolvedName };
+		}
+		if (prefix === "text" || prefix === "xpath" || prefix === "pierce") {
+			return { kind: prefix, value, raw };
+		}
+	}
+	return { kind: "css", value: normalized, raw };
 }

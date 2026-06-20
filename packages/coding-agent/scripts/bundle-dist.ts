@@ -22,8 +22,9 @@ const ALWAYS_EXTERNAL = ["mupdf", "@oh-my-pi/pi-natives", "@huggingface/transfor
 // @ark/schema is patched, so it — and arktype, which pulls @ark/schema — stay
 // bundled).
 const RUNTIME_EXTERNAL = [
-	"puppeteer-core",
-	"@puppeteer/browsers",
+	"patchright",
+	"patchright-core",
+	"chromium-bidi",
 	"@babel/parser",
 	"@xterm/headless",
 	"turndown",

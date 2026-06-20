@@ -65,6 +65,8 @@ async function main(): Promise<void> {
 					"fastembed",
 					"--external",
 					"onnxruntime-node",
+					"--external",
+					"chromium-bidi",
 					"--root",
 					".",
 					"./packages/coding-agent/src/cli.ts",

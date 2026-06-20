@@ -1,6 +1,6 @@
 import * as net from "node:net";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
-import type { Browser, Page } from "puppeteer-core";
+import type { Browser, Page } from "patchright";
 import { ToolError, throwIfAborted } from "../tool-errors";
 
 const ATTACH_TARGET_SKIP_PATTERN =
@@ -119,27 +119,16 @@ export async function findReusableCdp(
 }
 
 /**
- * Pick the best page target on an attached browser. Prefer discoverable page
- * targets first so Chromium/Edge attach flows that hide pages from
- * `browser.pages()` can still return a usable tab.
+ * Pick the best page on an attached browser. In Playwright, pages are accessed
+ * via browser contexts rather than target objects. We gather all pages across
+ * all contexts and pick the best match.
  */
 export async function pickElectronTarget(browser: Browser, matcher?: string): Promise<Page> {
-	const discoveredPages = await Promise.all(
-		browser.targets().map(async target => {
-			if (String(target.type()) !== "page") return null;
-			return await target.page().catch(() => null);
-		}),
-	);
-	const usablePages = discoveredPages.filter((page): page is Page => page !== null);
-	if (usablePages.length > 0) {
-		return pickPageFromList(usablePages, matcher);
-	}
-
-	const fallbackPages = await browser.pages();
-	if (!fallbackPages.length) {
+	const pages = browser.contexts().flatMap(ctx => ctx.pages());
+	if (!pages.length) {
 		throw new ToolError("No page targets available on the attached browser");
 	}
-	return pickPageFromList(fallbackPages, matcher);
+	return pickPageFromList(pages, matcher);
 }
 
 async function enrichPages(pages: Page[]): Promise<Array<{ page: Page; url: string; title: string }>> {

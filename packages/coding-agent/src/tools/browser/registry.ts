@@ -1,12 +1,12 @@
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Subprocess } from "bun";
-import type { Browser, CDPSession } from "puppeteer-core";
+import type { Browser, BrowserServer } from "patchright";
 import { ToolAbortError, ToolError } from "../tool-errors";
 import { findFreeCdpPort, findReusableCdp, gracefulKillTreeOnce, killExistingByPath, waitForCdp } from "./attach";
 import type { CmuxKind } from "./cmux/rpc";
 import { CmuxSocketClient } from "./cmux/socket-client";
-import { BROWSER_PROTOCOL_TIMEOUT_MS, launchHeadlessBrowser, loadPuppeteer, type UserAgentOverride } from "./launch";
+import { connectOverCDP, launchHeadlessBrowser } from "./launch";
 
 export type PuppeteerBrowserKind =
 	| { kind: "headless"; headless: boolean }
@@ -25,11 +25,11 @@ interface BrowserHandleCommon {
 
 export interface PuppeteerBrowserHandle extends BrowserHandleCommon {
 	kind: PuppeteerBrowserKind;
-	browser: Browser;
+	/** BrowserServer (headless) or Browser (connected/spawned) */
+	browser: BrowserServer | Browser;
 	cdpUrl?: string;
 	pid?: number;
 	subprocess?: Subprocess;
-	stealth: { browserSession: CDPSession | null; override: UserAgentOverride | null };
 }
 
 export interface CmuxBrowserHandle extends BrowserHandleCommon {
@@ -62,12 +62,26 @@ export interface AcquireBrowserOptions {
 	signal?: AbortSignal;
 }
 
+/** Check if a Browser or BrowserServer is still alive. */
+function browserAlive(browser: Browser | BrowserServer): boolean {
+	// Browser (connected): check isConnected().
+	if ("isConnected" in browser && typeof browser.isConnected === "function") return browser.isConnected();
+	// BrowserServer: check the child process. `killed` is only true if we sent a
+	// signal; a process that exited or crashed on its own has killed===false but
+	// a non-null exitCode or signalCode.
+	const proc = "process" in browser && typeof browser.process === "function" ? browser.process() : null;
+	if (!proc) return false;
+	if (proc.killed) return false;
+	if (proc.exitCode !== null || proc.signalCode !== null) return false;
+	return true;
+}
+
 export async function acquireBrowser(kind: BrowserKind, opts: AcquireBrowserOptions): Promise<BrowserHandle> {
 	const key = browserKey(kind);
 	const existing = browsers.get(key);
 	if (existing) {
 		if ("client" in existing) return existing;
-		if (existing.browser.connected) return existing;
+		if (browserAlive(existing.browser)) return existing;
 		browsers.delete(key);
 		await disposeBrowserHandle(existing, { kill: false });
 	}
@@ -106,25 +120,18 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 			kind,
 			browser,
 			refCount: 0,
-			stealth: { browserSession: null, override: null },
 		};
 	}
 	if (kind.kind === "connected") {
 		const cdpUrl = normalizeConnectedCdpUrl(kind.cdpUrl);
 		await waitForCdp(cdpUrl, 5_000, opts.signal);
-		const puppeteer = await loadPuppeteer();
-		const browser = await puppeteer.connect({
-			browserURL: cdpUrl,
-			defaultViewport: null,
-			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
-		});
+		const browser = await connectOverCDP(cdpUrl);
 		return {
 			key: browserKey(kind),
 			kind,
 			browser,
 			cdpUrl,
 			refCount: 0,
-			stealth: { browserSession: null, override: null },
 		};
 	}
 
@@ -166,17 +173,12 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		}
 	}
 
-	const puppeteer = await loadPuppeteer();
 	let browser: Browser;
 	try {
-		browser = await puppeteer.connect({
-			browserURL: cdpUrl,
-			defaultViewport: null,
-			protocolTimeout: BROWSER_PROTOCOL_TIMEOUT_MS,
-		});
+		browser = await connectOverCDP(cdpUrl);
 	} catch (err) {
 		if (subprocess) await gracefulKillTreeOnce(subprocess.pid);
-		throw new ToolError(`Connected to ${cdpUrl} but puppeteer.connect failed: ${(err as Error).message}`);
+		throw new ToolError(`Connected to ${cdpUrl} but connectOverCDP failed: ${(err as Error).message}`);
 	}
 	return {
 		key: browserKey(kind),
@@ -186,7 +188,6 @@ async function openBrowserHandle(kind: BrowserKind, opts: AcquireBrowserOptions)
 		pid,
 		subprocess,
 		refCount: 0,
-		stealth: { browserSession: null, override: null },
 	};
 }
 
@@ -211,28 +212,33 @@ async function disposeBrowserHandle(handle: BrowserHandle, opts: { kill: boolean
 		return;
 	}
 	if (handle.kind.kind === "headless") {
-		if (handle.browser.connected) {
+		if (browserAlive(handle.browser)) {
 			try {
-				await handle.browser.close();
+				// BrowserServer.close() kills the server process; Browser has no close on server.
+				if ("close" in handle.browser) await (handle.browser as BrowserServer).close();
 			} catch (err) {
-				logger.debug("Failed to close headless browser", { error: (err as Error).message });
+				logger.debug("Failed to close headless browser server", { error: (err as Error).message });
 			}
 		}
 		return;
 	}
 	if (handle.kind.kind === "connected") {
-		if (handle.browser.connected) {
+		// CDP-attached browser: browser.close() disconnects the CDP client
+		// without killing the user's browser or its pages (tested). Without it,
+		// the WebSocket connection leaks.
+		if (browserAlive(handle.browser)) {
 			try {
-				handle.browser.disconnect();
+				await (handle.browser as Browser).close();
 			} catch (err) {
-				logger.debug("Failed to disconnect from remote browser", { error: (err as Error).message });
+				logger.debug("Failed to disconnect from CDP-attached browser", { error: (err as Error).message });
 			}
 		}
 		return;
 	}
-	if (handle.browser.connected) {
+	// Spawned (app.path): close the CDP connection, then kill the process if requested.
+	if (browserAlive(handle.browser)) {
 		try {
-			handle.browser.disconnect();
+			await (handle.browser as Browser).close();
 		} catch (err) {
 			logger.debug("Failed to disconnect from spawned browser", { error: (err as Error).message });
 		}

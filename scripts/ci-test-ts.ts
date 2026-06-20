@@ -124,7 +124,7 @@ const codingAgentNativeContentMarkers = [
 	"Bun.serve",
 	"new Worker",
 	"Worker(",
-	"puppeteer",
+	"patchright",
 	"bun:sqlite",
 	"Redis",
 	"redis",

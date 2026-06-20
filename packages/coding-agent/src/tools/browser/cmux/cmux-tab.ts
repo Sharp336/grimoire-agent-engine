@@ -19,6 +19,8 @@ import {
 	type CmuxScreenshotResult,
 	type CmuxSnapshotResult,
 	type CmuxUrlGetResult,
+	type SelectorSpec,
+	cmuxSelectorSpec,
 	cmuxSnapshotToObservation,
 	GEOMETRY_SCRIPT,
 	mapWaitUntil,
@@ -49,16 +51,6 @@ interface RunContext {
 
 type WaitUntil = "load" | "domcontentloaded" | "networkidle0" | "networkidle2";
 type DragTarget = string | { readonly x: number; readonly y: number };
-type SelectorKind = "css" | "ref" | "text" | "aria" | "xpath" | "pierce" | "ax";
-
-interface SelectorSpec {
-	kind: SelectorKind;
-	value: string;
-	raw: string;
-	ref?: string;
-	name?: string;
-	role?: string;
-}
 
 interface CachedElementRef {
 	ref: string;
@@ -114,13 +106,65 @@ const pierceQuery = (root, selector) => {
 	}
 	return null;
 };
-const accessibleName = element =>
-	(
-		element.getAttribute("aria-label") ||
-		element.getAttribute("alt") ||
-		element.getAttribute("title") ||
-		textOf(element)
-	).trim();
+const accessibleName = element => {
+	const label = (element.getAttribute("aria-label") || "").trim();
+	if (label) return label;
+	const labelledby = element.getAttribute("aria-labelledby");
+	if (labelledby) {
+		const text = labelledby
+			.split(/\\s+/)
+			.map(id => document.getElementById(id))
+			.filter(node => node)
+			.map(node => (node.innerText || node.textContent || "").trim())
+			.filter(Boolean)
+			.join(" ")
+			.trim();
+		if (text) return text;
+	}
+	return (element.getAttribute("alt") || element.getAttribute("title") || textOf(element)).trim();
+};
+const IMPLICIT_INPUT_ROLES = {
+	button: "button",
+	submit: "button",
+	reset: "button",
+	image: "button",
+	checkbox: "checkbox",
+	radio: "radio",
+	range: "slider",
+	number: "spinbutton",
+	search: "searchbox",
+	email: "textbox",
+	tel: "textbox",
+	url: "textbox",
+	text: "textbox",
+};
+const implicitRole = element => {
+	const tag = element.tagName.toLowerCase();
+	if (tag === "a" || tag === "area") return element.hasAttribute("href") ? "link" : null;
+	if (tag === "button") return "button";
+	if (tag === "nav") return "navigation";
+	if (tag === "main") return "main";
+	if (tag === "header") return "banner";
+	if (tag === "footer") return "contentinfo";
+	if (tag === "aside") return "complementary";
+	if (tag === "ul" || tag === "ol") return "list";
+	if (tag === "li") return "listitem";
+	if (tag === "table") return "table";
+	if (tag === "img") return element.getAttribute("alt") === "" ? "presentation" : "img";
+	if (/^h[1-6]$/.test(tag)) return "heading";
+	if (tag === "select") return element.multiple || element.size > 1 ? "listbox" : "combobox";
+	if (tag === "textarea") return "textbox";
+	if (tag === "input") {
+		const type = (element.getAttribute("type") || "text").toLowerCase();
+		return IMPLICIT_INPUT_ROLES[type] || (type === "hidden" || type === "password" ? null : "textbox");
+	}
+	return null;
+};
+const matchesRole = (element, role) => {
+	const explicit = (element.getAttribute("role") || "").trim();
+	if (explicit) return explicit.split(/\\s+/).includes(role);
+	return implicitRole(element) === role;
+};
 const findElement = spec => {
 	if (spec.kind === "css") return document.querySelector(spec.value);
 	if (spec.kind === "pierce") return pierceQuery(document, spec.value);
@@ -133,12 +177,13 @@ const findElement = spec => {
 		return allElements().find(element => isVisible(element) && textOf(element).includes(wanted)) || null;
 	}
 	if (spec.kind === "aria" || spec.kind === "ax") {
-		const wanted = (spec.name || spec.value).trim();
-		const role = spec.role || "";
+		const wanted = (spec.name || "").trim();
+		const role = (spec.role || "").trim();
 		return (
 			allElements().find(element => {
 				if (!isVisible(element)) return false;
-				if (role && element.getAttribute("role") !== role) return false;
+				if (role && !matchesRole(element, role)) return false;
+				if (!wanted) return true;
 				const name = accessibleName(element);
 				return name === wanted || name.includes(wanted);
 			}) || null
@@ -246,7 +291,7 @@ export class CmuxTab {
 	#lastViewport: ReadyInfo["viewport"] = DEFAULT_VIEWPORT;
 	#runContext: RunContext | undefined;
 	#runtime: JsRuntime | undefined;
-	readonly #elementRefs = new Map<number, CachedElementRef>();
+	readonly #elementRefs = new Map<string, CachedElementRef>();
 	#pageFacade: CmuxPageFacade | undefined;
 	#browserFacade: CmuxBrowserFacade | undefined;
 	constructor(opts: { client: CmuxSocketClient; surfaceId: string; url?: string; title?: string }) {
@@ -278,7 +323,6 @@ export class CmuxTab {
 		this.#lastViewport = {
 			width: viewport.width,
 			height: viewport.height,
-			deviceScaleFactor: viewport.deviceScaleFactor,
 		};
 	}
 
@@ -298,9 +342,7 @@ export class CmuxTab {
 			this.#lastUrl = urlResult.url;
 		}
 		const geometry = await this.#readGeometry().catch(() => undefined);
-		this.#lastViewport = geometry
-			? { width: geometry.innerWidth, height: geometry.innerHeight, deviceScaleFactor: geometry.dpr }
-			: viewport;
+		this.#lastViewport = geometry ? { width: geometry.innerWidth, height: geometry.innerHeight } : viewport;
 		await this.title().catch(() => "");
 		return {
 			url: this.#lastUrl,
@@ -320,6 +362,11 @@ export class CmuxTab {
 
 	async goto(url: string, opts?: { waitUntil?: WaitUntil; timeoutMs?: number }): Promise<void> {
 		const timeoutMs = opts?.timeoutMs ?? this.#runContext?.timeoutMs ?? 30_000;
+		// Navigation invalidates the prior snapshot's aria-refs; drop them up front (even
+		// if navigate times out mid-flight) so a stale tab.id(...) rejects with a
+		// re-observe hint instead of resolving a new-page element that reused the ref
+		// (matches the headless worker, which clears before page.goto).
+		this.#elementRefs.clear();
 		const result = await this.#request("browser.navigate", { url }, timeoutMs);
 		const navigatedUrl = result.url;
 		this.#lastUrl = typeof navigatedUrl === "string" && navigatedUrl.length > 0 ? navigatedUrl : url;
@@ -342,7 +389,6 @@ export class CmuxTab {
 		const viewport = {
 			width: geometry.innerWidth,
 			height: geometry.innerHeight,
-			deviceScaleFactor: geometry.dpr,
 		};
 		this.#lastViewport = viewport;
 		const observation = cmuxSnapshotToObservation(snapshot as CmuxSnapshotResult, viewport, geometry);
@@ -459,8 +505,25 @@ export class CmuxTab {
 		const explicitPath = opts.save ? resolveToCwd(opts.save, context.session.cwd) : undefined;
 		const returnedPath = typeof result.path === "string" && result.path.length > 0 ? result.path : undefined;
 		const saveFullRes = !!(explicitPath || context.session.browserScreenshotDir || returnedPath);
-		const savedBuffer = saveFullRes ? buffer : Buffer.from(resized.buffer);
-		const savedMimeType = saveFullRes ? captureMime : resized.mimeType;
+		// The cmux backend only returns PNG, so re-encode to JPEG/WebP when the save
+		// path's extension asks for one — never write PNG bytes to a .webp/.jpg file
+		// (matches the headless worker's save contract).
+		const pathFormat = explicitPath ? imageFormatForPath(explicitPath) : "png";
+		let savedBuffer: Buffer;
+		let savedMimeType: string;
+		if (pathFormat === "webp") {
+			savedBuffer = Buffer.from(await new Bun.Image(buffer).webp({ quality: 80 }).bytes());
+			savedMimeType = "image/webp";
+		} else if (pathFormat === "jpeg") {
+			savedBuffer = Buffer.from(await new Bun.Image(buffer).jpeg({ quality: 80 }).bytes());
+			savedMimeType = "image/jpeg";
+		} else if (saveFullRes) {
+			savedBuffer = buffer;
+			savedMimeType = captureMime;
+		} else {
+			savedBuffer = Buffer.from(resized.buffer);
+			savedMimeType = resized.mimeType;
+		}
 		const ext = savedMimeType === "image/webp" ? "webp" : savedMimeType === "image/jpeg" ? "jpg" : "png";
 		const dest =
 			explicitPath ??
@@ -476,8 +539,8 @@ export class CmuxTab {
 			dest,
 			mimeType: savedMimeType,
 			bytes: savedBuffer.length,
-			width: resized.width,
-			height: resized.height,
+			width: pathFormat === "webp" || pathFormat === "jpeg" ? resized.originalWidth : resized.width,
+			height: pathFormat === "webp" || pathFormat === "jpeg" ? resized.originalHeight : resized.height,
 		};
 		context.screenshots.push(info);
 		if (!opts.silent) {
@@ -575,10 +638,13 @@ export class CmuxTab {
 		throw new ToolError(`tab.waitForResponse() timed out after ${timeoutMs}ms`);
 	}
 
-	async id(id: number): Promise<CmuxElementHandle> {
-		const ref = this.#elementRefs.get(id)?.ref ?? `@e${id}`;
-		await this.#waitForSelector(ref, this.#runContext?.timeoutMs ?? 30_000);
-		return new CmuxElementHandle(this, ref);
+	async id(id: string): Promise<CmuxElementHandle> {
+		const cached = this.#elementRefs.get(id);
+		if (!cached) {
+			throw new ToolError(`Unknown element id ${id}. Run tab.observe() to refresh the element list.`);
+		}
+		await this.#waitForSelector(cached.ref, this.#runContext?.timeoutMs ?? 30_000);
+		return new CmuxElementHandle(this, cached.ref);
 	}
 
 	ensureRuntime(session: SessionSnapshot): JsRuntime {
@@ -808,7 +874,7 @@ export class CmuxTab {
 	}
 
 	async #selectorExists(spec: SelectorSpec): Promise<boolean> {
-		if (spec.kind === "ref") return this.#elementRefs.has(Number(spec.value));
+		if (spec.kind === "ref") return this.#elementRefs.has(spec.value);
 		const script = `(() => {
 			const spec = ${JSON.stringify(spec)};
 			${PAGE_SELECTOR_HELPERS}
@@ -887,23 +953,7 @@ export class CmuxTab {
 	}
 
 	#selectorSpec(selector: string): SelectorSpec {
-		const raw = selector;
-		let normalized = selector;
-		if (normalized.startsWith("p-text/")) normalized = `text/${normalized.slice("p-text/".length)}`;
-		else if (normalized.startsWith("p-aria/")) normalized = `aria/${normalized.slice("p-aria/".length)}`;
-		else if (normalized.startsWith("p-xpath/")) normalized = `xpath/${normalized.slice("p-xpath/".length)}`;
-		else if (normalized.startsWith("p-pierce/")) normalized = `pierce/${normalized.slice("p-pierce/".length)}`;
-		const ref = /^@?e(\d+)$/.exec(normalized);
-		if (ref) return { kind: "ref", value: ref[1]!, raw, ref: `@e${ref[1]}` };
-		const slash = normalized.indexOf("/");
-		if (slash > 0) {
-			const prefix = normalized.slice(0, slash);
-			const value = normalized.slice(slash + 1);
-			if (prefix === "text" || prefix === "aria" || prefix === "xpath" || prefix === "pierce") {
-				return { kind: prefix, value, raw, name: prefix === "aria" ? value : undefined };
-			}
-		}
-		return { kind: "css", value: normalized, raw };
+		return cmuxSelectorSpec(selector);
 	}
 
 	#nativeSelector(spec: SelectorSpec): string | undefined {
@@ -916,7 +966,7 @@ export class CmuxTab {
 		this.#elementRefs.clear();
 		for (const element of observation.elements) {
 			this.#elementRefs.set(element.id, {
-				ref: `@e${element.id}`,
+				ref: `@${element.id}`,
 				name: element.name,
 				role: element.role,
 			});
@@ -1057,7 +1107,7 @@ class CmuxPageFacade {
 	readonly #tab: CmuxTab;
 	readonly keyboard: { press: (key: string) => Promise<void> };
 	readonly mouse: {
-		wheel: (delta: { deltaX?: number; deltaY?: number }) => Promise<void>;
+		wheel: (deltaXOrObj?: number | { deltaX?: number; deltaY?: number }, deltaY?: number) => Promise<void>;
 		move: (x: number, y: number) => Promise<void>;
 		down: () => Promise<void>;
 		up: () => Promise<void>;
@@ -1069,7 +1119,10 @@ class CmuxPageFacade {
 		let lastPoint = { x: 0, y: 0 };
 		let dragStart: { x: number; y: number } | undefined;
 		this.mouse = {
-			wheel: delta => this.#tab.scroll(delta.deltaX ?? 0, delta.deltaY ?? 0),
+			wheel: (deltaXOrObj?: number | { deltaX?: number; deltaY?: number }, deltaY?: number) => {
+				if (typeof deltaXOrObj === "number") return this.#tab.scroll(deltaXOrObj, deltaY ?? 0);
+				return this.#tab.scroll(deltaXOrObj?.deltaX ?? 0, deltaXOrObj?.deltaY ?? 0);
+			},
 			move: (x, y) => {
 				lastPoint = { x, y };
 				return Promise.resolve();
@@ -1261,4 +1314,17 @@ function cloneSafe(value: unknown): unknown {
 
 function numberFrom(value: unknown, fallback: number): number {
 	return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+/** Map a save path's extension to an image format (default png), matching the headless worker. */
+function imageFormatForPath(filePath: string): "png" | "jpeg" | "webp" {
+	switch (path.extname(filePath).toLowerCase()) {
+		case ".webp":
+			return "webp";
+		case ".jpg":
+		case ".jpeg":
+			return "jpeg";
+		default:
+			return "png";
+	}
 }

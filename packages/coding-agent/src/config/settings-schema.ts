@@ -3341,7 +3341,7 @@ export const SETTINGS_SCHEMA = {
 			tab: "tools",
 			group: "Available Tools",
 			label: "Browser",
-			description: "Enable the browser tool for scripted Chromium automation (puppeteer)",
+			description: "Enable the browser tool for scripted Chromium automation (patchright)",
 		},
 	},
 
