@@ -5880,6 +5880,9 @@ export class AgentSession {
 			// next microtask alongside the new turn.
 			const lastAssistant = this.#findLastAssistantMessage();
 			if (lastAssistant && !options?.skipCompactionCheck) {
+				// Apply the retention cap before the pre-prompt compaction check so
+				// threshold detection reflects already-truncated tool results.
+				this.#applyRetentionCap();
 				await this.#checkCompaction(lastAssistant, false, false, false);
 			}
 
