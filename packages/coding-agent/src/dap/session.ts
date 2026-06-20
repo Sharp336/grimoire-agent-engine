@@ -98,6 +98,7 @@ interface DapSession {
 	parentSessionId?: string;
 	childSessionIds: Set<string>;
 	port?: number;
+	topFrameFetchPromise?: Promise<void>;
 }
 
 interface DapGlobalStopResolver {
@@ -583,7 +584,7 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<void> {
-		const sessions = this.#getLiveSessionsForBreakpointSync();
+		const sessions = this.#getRequiredSessionsForBreakpointSync();
 		const rollbacks: DapBreakpointRollback[] = [];
 		const results = await Promise.allSettled(
 			sessions.map(session =>
@@ -662,7 +663,7 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<void> {
-		const sessions = this.#getLiveSessionsForBreakpointSync();
+		const sessions = this.#getRequiredSessionsForBreakpointSync();
 		const rollbacks: DapBreakpointRollback[] = [];
 		const results = await Promise.allSettled(
 			sessions.map(session =>
@@ -732,7 +733,7 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<DapInstructionBreakpointRecord[]> {
-		const sessions = this.#getLiveSessionsForBreakpointSync();
+		const sessions = this.#getRequiredSessionsForBreakpointSync();
 		const rollbacks: DapBreakpointRollback[] = [];
 		let activeSessionRecord: DapInstructionBreakpointRecord[] = [];
 		const results = await Promise.allSettled(
@@ -817,7 +818,7 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<DapDataBreakpointRecord[]> {
-		const sessions = this.#getLiveSessionsForBreakpointSync();
+		const sessions = this.#getRequiredSessionsForBreakpointSync();
 		const rollbacks: DapBreakpointRollback[] = [];
 		let activeSessionRecord: DapDataBreakpointRecord[] = [];
 		const results = await Promise.allSettled(
@@ -1566,7 +1567,9 @@ export class DapSessionManager {
 
 			await startPromise;
 
-			void this.#buildInitialStartSummary(session, initialStopPromise, signal, timeoutMs);
+			void this.#buildInitialStartSummary(session, initialStopPromise, signal, timeoutMs, {
+				preferActiveSession: false,
+			});
 			return buildSummary(session);
 		} catch (error) {
 			await this.#disposeSession(session);
@@ -1891,6 +1894,7 @@ export class DapSessionManager {
 			text: stopped.text,
 		};
 		session.lastStackFrames = [];
+		session.topFrameFetchPromise = undefined;
 	}
 
 	#applyTopFrame(session: DapSession, frame: DapStackFrame | undefined): void {
@@ -1910,20 +1914,35 @@ export class DapSessionManager {
 	 */
 	async #fetchTopFrame(session: DapSession, signal?: AbortSignal, timeoutMs: number = 5_000): Promise<void> {
 		if (session.stop.threadId === undefined) return;
+		const threadId = session.stop.threadId;
+		if (session.topFrameFetchPromise) {
+			await session.topFrameFetchPromise;
+			return;
+		}
+		const fetchPromise = (async () => {
+			try {
+				const response = await session.client.sendRequest<DapStackTraceResponse>(
+					"stackTrace",
+					{ threadId, levels: 1 } satisfies DapStackTraceArguments,
+					signal,
+					timeoutMs,
+				);
+				session.lastStackFrames = response?.stackFrames ?? [];
+				this.#applyTopFrame(session, session.lastStackFrames[0]);
+			} catch (error) {
+				logger.debug("Failed to capture stopped frame", {
+					sessionId: session.id,
+					error: toErrorMessage(error),
+				});
+			}
+		})();
+		session.topFrameFetchPromise = fetchPromise;
 		try {
-			const response = await session.client.sendRequest<DapStackTraceResponse>(
-				"stackTrace",
-				{ threadId: session.stop.threadId, levels: 1 } satisfies DapStackTraceArguments,
-				signal,
-				timeoutMs,
-			);
-			session.lastStackFrames = response?.stackFrames ?? [];
-			this.#applyTopFrame(session, session.lastStackFrames[0]);
-		} catch (error) {
-			logger.debug("Failed to capture stopped frame", {
-				sessionId: session.id,
-				error: toErrorMessage(error),
-			});
+			await fetchPromise;
+		} finally {
+			if (session.topFrameFetchPromise === fetchPromise) {
+				session.topFrameFetchPromise = undefined;
+			}
 		}
 	}
 
@@ -1932,10 +1951,11 @@ export class DapSessionManager {
 		initialStopPromise: Promise<unknown>,
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
+		options: { preferActiveSession?: boolean } = {},
 	): Promise<DapSessionSummary> {
 		try {
 			await untilAborted(signal, initialStopPromise);
-			const activeSession = this.#getActiveSessionOrNull();
+			const activeSession = options.preferActiveSession === false ? null : this.#getActiveSessionOrNull();
 			const stoppedSession =
 				activeSession && this.#getRootSessionId(activeSession) === this.#getRootSessionId(session)
 					? activeSession
@@ -2224,14 +2244,18 @@ export class DapSessionManager {
 		timer.unref?.();
 	}
 
-	#getLiveSessionsForBreakpointSync(): DapSession[] {
+	#getRequiredSessionsForBreakpointSync(): DapSession[] {
 		for (const session of [...this.#sessions.values()]) {
 			if (session.status === "terminated" || !session.client.isAlive()) {
 				this.#disposeSession(session);
 			}
 		}
+		const activeSessionId = this.#getActiveSessionOrNull()?.id;
 		return [...this.#sessions.values()].filter(session => {
-			return session.status !== "terminated" && session.client.isAlive();
+			if (session.status === "terminated" || !session.client.isAlive()) return false;
+			if (session.id === activeSessionId) return true;
+			if (session.status === "launching" || session.status === "configuring") return true;
+			return session.needsConfigurationDone && !session.configurationDoneSent;
 		});
 	}
 

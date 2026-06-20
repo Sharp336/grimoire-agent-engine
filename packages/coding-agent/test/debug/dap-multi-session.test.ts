@@ -269,17 +269,17 @@ describe("DAP multi-session debugging", () => {
 			}),
 		);
 
+		const parentBreakpointRequestCount = parentClient.sentRequests.filter(request => {
+			return request.command === "setBreakpoints" && getRequestSourcePath(request.args) === bpFile;
+		}).length;
+
 		await manager.removeBreakpoint(bpFile, 42);
 
-		expect(parentClient.sentRequests).toContainEqual(
-			expect.objectContaining({
-				command: "setBreakpoints",
-				args: expect.objectContaining({
-					source: expect.objectContaining({ path: bpFile }),
-					breakpoints: [],
-				}),
+		expect(
+			parentClient.sentRequests.filter(request => {
+				return request.command === "setBreakpoints" && getRequestSourcePath(request.args) === bpFile;
 			}),
-		);
+		).toHaveLength(parentBreakpointRequestCount);
 
 		expect(childClient.sentRequests).toContainEqual(
 			expect.objectContaining({
@@ -463,6 +463,7 @@ describe("DAP multi-session debugging", () => {
 		const parentClientWrapper = parentClient as unknown as DapClient;
 		parentClientWrapper.port = 9999;
 		parentClient.emitInitialStopped = false;
+		childClient.commandDelayMs.set("stackTrace", 20);
 
 		spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
 		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
@@ -495,11 +496,7 @@ describe("DAP multi-session debugging", () => {
 			frameName: "main",
 			line: 1,
 		});
-		expect(childClient.sentRequests).toContainEqual(
-			expect.objectContaining({
-				command: "stackTrace",
-			}),
-		);
+		expect(childClient.sentRequests.filter(request => request.command === "stackTrace")).toHaveLength(1);
 
 		await manager.terminate();
 	});
@@ -774,7 +771,7 @@ describe("DAP multi-session debugging", () => {
 		await manager.terminate();
 	});
 
-	it("rolls back live source breakpoints after partial sync failure", async () => {
+	it("does not let inactive running parents block active child breakpoint sync", async () => {
 		const manager = new DapSessionManager();
 		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
 		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
@@ -799,18 +796,28 @@ describe("DAP multi-session debugging", () => {
 		});
 
 		const bpFile = path.resolve(process.cwd(), "src/partial-sync.ts");
-		childClient.stalledCommands.add("setBreakpoints");
+		parentClient.stalledCommands.add("setBreakpoints");
 
-		await expect(manager.setBreakpoint(bpFile, 21, undefined, AbortSignal.timeout(5), 30_000)).rejects.toThrow(
-			"aborted",
+		const result = await manager.setBreakpoint(bpFile, 21, undefined, AbortSignal.timeout(50), 30_000);
+
+		expect(result.snapshot?.id).toBe("debug-2");
+		expect(childClient.sentRequests).toContainEqual(
+			expect.objectContaining({
+				command: "setBreakpoints",
+				args: expect.objectContaining({
+					source: expect.objectContaining({ path: bpFile }),
+					breakpoints: expect.arrayContaining([expect.objectContaining({ line: 21 })]),
+				}),
+			}),
 		);
-
-		const parentBreakpointRequests = parentClient.sentRequests.filter(request => {
-			return request.command === "setBreakpoints" && getRequestSourcePath(request.args) === bpFile;
-		});
-		expect(
-			parentBreakpointRequests.map(request => getSourceBreakpoints(request.args).map(entry => entry.line)),
-		).toEqual([[21], []]);
+		expect(parentClient.sentRequests).not.toContainEqual(
+			expect.objectContaining({
+				command: "setBreakpoints",
+				args: expect.objectContaining({
+					source: expect.objectContaining({ path: bpFile }),
+				}),
+			}),
+		);
 
 		await manager.terminate();
 	});
