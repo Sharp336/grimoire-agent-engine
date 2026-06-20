@@ -1177,6 +1177,7 @@ export class AgentSession {
 	// Periodic shake state (shake.interval setting)
 	#shakeToolCallCounter = 0;
 	#shakeNeedsAgentSync = false;
+	#midRunShakeDue = false;
 	#midRunShakeRunning = false;
 
 	// Branch summarization state
@@ -1672,16 +1673,15 @@ export class AgentSession {
 			this.#maybeAbortStreamingEdit(event);
 		});
 		// Per-tool TTSR reminders are folded into the matched tool's result via this hook.
-		// Also increment the periodic shake counter per tool call.
 		this.agent.afterToolCall = async (ctx, _signal) => {
 			this.#shakeToolCallCounter++;
 
-			// Fire periodic shake mid-run when counter reaches interval,
-			// without waiting for agent_end. Uses skipAgentUpdate:true to
-			// prune session entries without mutating agent.state.messages.
+			// Flag mid-run shake when counter reaches interval. The actual shake
+			// fires from turn_end so tool results are already emitted and persisted
+			// when shake scans sessionManager.getBranch().
 			const interval = this.settings.get("shake.interval") as number;
 			if (Number.isFinite(interval) && interval > 0 && this.#shakeToolCallCounter >= interval) {
-				await this.#runMidRunShake();
+				this.#midRunShakeDue = true;
 			}
 
 			return this.#ttsrAfterToolCall(ctx);
@@ -2552,6 +2552,13 @@ export class AgentSession {
 			const report = this.#pendingRewindReport;
 			this.#pendingRewindReport = undefined;
 			await this.#applyRewind(report);
+		}
+
+		// Fire deferred mid-run shake after tool results are emitted and
+		// persisted, so shake() sees the latest result in getBranch().
+		if (event.type === "turn_end" && this.#midRunShakeDue) {
+			this.#midRunShakeDue = false;
+			await this.#runMidRunShake();
 		}
 
 		// TTSR: Check for pattern matches on assistant text/thinking and tool argument deltas
@@ -10042,9 +10049,21 @@ export class AgentSession {
 			wasStreaming: this.agent.state.isStreaming,
 		});
 		try {
-			const result = await this.shake("elide", { config: DEFAULT_SHAKE_CONFIG });
-			this.emitNotice("info", formatShakeSummary(result), "shake");
+			const wasSync = this.#shakeNeedsAgentSync;
 			this.#shakeNeedsAgentSync = false;
+			const result = await this.shake("elide", { config: DEFAULT_SHAKE_CONFIG });
+			// When shake was triggered by a pending mid-run sync (#shakeNeedsAgentSync),
+			// explicitly rebuild agent.state even if shake found no new regions. The
+			// mid-run pass (skipAgentUpdate:true) already rewrote persisted entries, so
+			// agent.state.messages may still carry unshaken tool output.
+			if (wasSync && result.blocksDropped === 0 && result.tokensFreed === 0) {
+				const sessionContext = this.buildDisplaySessionContext();
+				this.agent.replaceMessages(sessionContext.messages);
+				this.#advisorRuntime?.reset();
+			}
+			if (result.blocksDropped > 0 || result.tokensFreed > 0) {
+				this.emitNotice("info", formatShakeSummary(result), "shake");
+			}
 		} catch (error) {
 			logger.warn("Periodic shake failed", { error: error instanceof Error ? error.message : String(error) });
 		}
