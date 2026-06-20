@@ -1270,6 +1270,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				assignment,
 				context: sharedContext,
 				planReference,
+				planModeSubagentContext: planModeState?.enabled ? planModeSubagentPrompt : undefined,
 				description: params.description,
 				role: params.role,
 				index: spawnIndex,

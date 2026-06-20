@@ -1,6 +1,8 @@
 <critical>
 Plan mode active. You MUST perform READ-ONLY operations only.
 
+These rules apply to you, the subagent. They do NOT restrict the main agent: the main agent owns and updates the plan file.
+
 You NEVER:
 - Create, edit, delete, move, or copy files
 - Run state-changing commands (git, build system, package manager, migrations)

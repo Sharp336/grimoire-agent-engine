@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -48,16 +49,17 @@ function createAssistantStopMessage(text: string): AssistantMessage {
 
 function createYieldingSession(): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
-	const state = { messages: [] as AssistantMessage[] };
+	const state = { messages: [] as AgentMessage[] };
 
 	const emit = (event: AgentSessionEvent) => {
 		for (const listener of listeners) listener(event);
 	};
 
+	const agentState = { messages: state.messages, systemPrompt: ["test"] };
+
 	return {
 		state,
-		agent: { state: { systemPrompt: ["test"] } },
-		model: undefined,
+		agent: { state: agentState },
 		extensionRunner: undefined,
 		sessionManager: {
 			appendSessionInit: () => {},
@@ -84,8 +86,18 @@ function createYieldingSession(): AgentSession {
 				isError: false,
 			});
 		},
+		sendCustomMessage: async (message: { customType: string; content: string; display: boolean }) => {
+			state.messages.push({
+				role: "custom",
+				customType: message.customType,
+				content: message.content,
+				display: message.display,
+				timestamp: Date.now(),
+			} as AgentMessage);
+			return false;
+		},
 		waitForIdle: async () => {},
-		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
+		getLastAssistantMessage: () => state.messages[state.messages.length - 1] as AssistantMessage,
 		abort: async () => {},
 		dispose: async () => {},
 	} as unknown as AgentSession;
@@ -130,18 +142,23 @@ function mockAgents(agent: AgentDefinition): void {
 	});
 }
 
-function mockCreateAgentSession(): { getOptions: () => CreateAgentSessionOptions | undefined } {
+function mockCreateAgentSession(): {
+	getOptions: () => CreateAgentSessionOptions | undefined;
+	getSession: () => AgentSession | undefined;
+} {
 	let capturedOptions: CreateAgentSessionOptions | undefined;
+	let capturedSession: AgentSession | undefined;
 	vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async (options = {}) => {
 		capturedOptions = options;
+		capturedSession = createYieldingSession();
 		return {
-			session: createYieldingSession(),
+			session: capturedSession,
 			extensionsResult: {} as unknown as LoadExtensionsResult,
 			setToolUIContext: () => {},
 			eventBus: new EventBus(),
 		} satisfies CreateAgentSessionResult;
 	});
-	return { getOptions: () => capturedOptions };
+	return { getOptions: () => capturedOptions, getSession: () => capturedSession };
 }
 
 function mockIsolation(): void {
@@ -274,7 +291,7 @@ describe("subagent LSP availability", () => {
 			source: "bundled",
 			tools: ["bash", "ast_grep", "report_finding", "memory_edit", "retain", "todo"],
 		});
-		const { getOptions } = mockCreateAgentSession();
+		const { getOptions, getSession } = mockCreateAgentSession();
 		const planMode = { enabled: true, planFilePath: "local://PLAN.md" };
 
 		const tool = await TaskTool.create(createSession({ planMode, taskEnableLsp: true }));
@@ -287,5 +304,12 @@ describe("subagent LSP availability", () => {
 		expect(toolNames).not.toContain("memory_edit");
 		expect(toolNames).not.toContain("retain");
 		expect(toolNames).not.toContain("todo");
+
+		const planModeContext = getSession()?.agent.state.messages.find(
+			(message): message is AgentMessage & { customType: string; content: string } =>
+				message.role === "custom" && (message as { customType?: string }).customType === "plan-mode-context",
+		);
+		expect(planModeContext?.content).toContain("These rules apply to you, the subagent");
+		expect(planModeContext?.content).toContain("They do NOT restrict the main agent");
 	});
 });

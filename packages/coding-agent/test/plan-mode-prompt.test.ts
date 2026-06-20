@@ -8,6 +8,7 @@
 import { describe, expect, it } from "bun:test";
 import { prompt } from "@oh-my-pi/pi-utils";
 import planModeActivePrompt from "../src/prompts/system/plan-mode-active.md" with { type: "text" };
+import planModeSubagentPrompt from "../src/prompts/system/plan-mode-subagent.md" with { type: "text" };
 
 function render(extra: Record<string, unknown> = {}): string {
 	return prompt.render(planModeActivePrompt, {
@@ -48,5 +49,13 @@ describe("plan-mode-active prompt", () => {
 		// reading the constraint cannot drop the exception by truncating after a
 		// period or a paragraph break.
 		expect(rendered).toMatch(/NEVER create, edit, or delete any file other than the plan file/);
+	});
+});
+
+describe("plan-mode-subagent prompt", () => {
+	it("scopes its read-only rule to the subagent and preserves the main plan-file owner", () => {
+		expect(planModeSubagentPrompt).toContain("These rules apply to you, the subagent");
+		expect(planModeSubagentPrompt).toContain("They do NOT restrict the main agent");
+		expect(planModeSubagentPrompt).toContain("the main agent owns and updates the plan file");
 	});
 });

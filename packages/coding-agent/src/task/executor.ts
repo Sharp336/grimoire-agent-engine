@@ -269,6 +269,12 @@ export interface ExecutorOptions {
 	 * the session did not start with a plan (or while plan mode is still active).
 	 */
 	planReference?: { path: string; content: string };
+	/**
+	 * Plan-mode subagent contract, mirrored into the subagent transcript so
+	 * advisors/transcript viewers see the scoped read-only rule without relying
+	 * on hidden system prompts.
+	 */
+	planModeSubagentContext?: string;
 	description?: string;
 	/** Specialist role/expertise for this spawn; drives the system-prompt preamble, display name, and telemetry identity. */
 	role?: string;
@@ -2226,6 +2232,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						{ triggerTurn: false },
 					);
 				}
+			}
+
+			if (options.planModeSubagentContext) {
+				await session.sendCustomMessage(
+					{
+						customType: "plan-mode-context",
+						content: options.planModeSubagentContext,
+						display: false,
+						attribution: "agent",
+					},
+					{ triggerTurn: false },
+				);
 			}
 
 			readyAt = performance.now();
