@@ -10060,6 +10060,7 @@ export class AgentSession {
 				const sessionContext = this.buildDisplaySessionContext();
 				this.agent.replaceMessages(sessionContext.messages);
 				this.#advisorRuntime?.reset();
+				this.#closeCodexProviderSessionsForHistoryRewrite();
 			}
 			if (result.blocksDropped > 0 || result.tokensFreed > 0) {
 				this.emitNotice("info", formatShakeSummary(result), "shake");

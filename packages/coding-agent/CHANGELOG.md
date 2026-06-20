@@ -11,6 +11,7 @@
 - Fixed periodic shake running after compaction pruned the trailing assistant and recovery failed, which would re-introduce the failed/truncated assistant into the next prompt ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
 - Fixed mid-run periodic shake timing to fire after tool results are emitted and persisted, so the current tool result is visible when shake scans session entries for region collection ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
 - Fixed periodic shake state sync at agent_end to rebuild agent state when the mid-run pass already rewrote persisted entries but agent.state.messages still carried unshaken tool output ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
+- Fixed periodic shake state rebuild at agent_end to close open Codex provider sessions, preventing stale server-side history from being used as the basis for the next turn ([#2990](https://github.com/can1357/oh-my-pi/pull/2990)).
 ## [16.1.5] - 2026-06-19
 
 ### Changed
