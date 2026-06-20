@@ -475,6 +475,8 @@ export interface DapClientState {
 	capabilities?: DapCapabilities;
 }
 
+export type DapServerResolverName = "js-debug";
+
 export interface DapAdapterConfig {
 	command: string;
 	args?: string[];
@@ -482,6 +484,8 @@ export interface DapAdapterConfig {
 	 * resolved as the install probe. Useful for adapters whose executable is a
 	 * package wrapper but whose debug server must be launched through a runtime. */
 	runtimeCommand?: string;
+	/** Adapter-specific server entrypoint resolver. */
+	serverResolver?: DapServerResolverName;
 	/** Environment variable containing an adapter server entrypoint path. */
 	serverPathEnv?: string;
 	/** Package name used when discovering server entrypoints from local/global installs. */
@@ -491,6 +495,8 @@ export interface DapAdapterConfig {
 	languages?: string[];
 	fileTypes?: string[];
 	rootMarkers?: string[];
+	/** DAP launch/attach `type` values this adapter can serve. A trailing `*` matches prefixes. */
+	debugConfigTypes?: string[];
 	launchDefaults?: Record<string, unknown>;
 	attachDefaults?: Record<string, unknown>;
 	/** "stdio" (default): communicate via stdin/stdout pipes.
@@ -498,9 +504,6 @@ export interface DapAdapterConfig {
 	 *  On Linux, connects via a unix domain socket.
 	 *  On macOS, the adapter dials into a local TCP listener (--client-addr). */
 	connectMode?: "stdio" | "socket" | "tcp";
-	/** Debug configuration `type` values that should stay on this adapter for
-	 * reverse `startDebugging` child sessions. A trailing `*` matches prefixes. */
-	childSessionTypes?: string[];
 	/** Some root adapters report no threads during continue while child sessions
 	 * own the stopped state; when true, continue waits for a child stop instead. */
 	threadlessContinueNeedsChildStopWait?: boolean;
@@ -518,10 +521,10 @@ export interface DapResolvedAdapter {
 	languages: string[];
 	fileTypes: string[];
 	rootMarkers: string[];
+	debugConfigTypes: string[];
 	launchDefaults: Record<string, unknown>;
 	attachDefaults: Record<string, unknown>;
 	connectMode: "stdio" | "socket" | "tcp";
-	childSessionTypes?: string[];
 	threadlessContinueNeedsChildStopWait?: boolean;
 	acceptsDirectoryProgram: boolean;
 }

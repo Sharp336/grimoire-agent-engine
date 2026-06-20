@@ -4,7 +4,7 @@ import { logger, ptree, untilAborted } from "@oh-my-pi/pi-utils";
 import { NON_INTERACTIVE_ENV } from "../exec/non-interactive-env";
 import { ToolAbortError } from "../tools/tool-errors";
 import { DapClient } from "./client";
-import { resolveAdapter } from "./config";
+import { resolveChildAdapterForConfigType } from "./config";
 import type {
 	DapAttachArguments,
 	DapAttachSessionOptions,
@@ -191,17 +191,13 @@ function mapDebugpyMissingModule(adapterName: string, error: unknown): Error | n
 	return new Error("adapter 'debugpy' is not available: install with 'pip install debugpy'");
 }
 
-function adapterSupportsChildDebugType(adapter: DapResolvedAdapter, configType: string): boolean {
-	return (adapter.childSessionTypes ?? []).some(entry => {
-		if (entry.endsWith("*")) {
-			return configType.startsWith(entry.slice(0, -1));
-		}
-		return entry === configType;
-	});
-}
-
 function normalizePath(filePath: string): string {
 	return path.resolve(filePath);
+}
+
+function resolveSessionRelativeCwd(cwd: string | undefined, sessionCwd: string): string {
+	const rawCwd = cwd && cwd.length > 0 ? cwd : sessionCwd;
+	return path.resolve(sessionCwd, rawCwd);
 }
 
 function truncateOutput(session: DapSession, output: string): void {
@@ -1266,9 +1262,9 @@ export class DapSessionManager {
 	async continue(signal?: AbortSignal, timeoutMs: number = 30_000): Promise<DapContinueOutcome> {
 		const session = this.#touchActiveSession();
 		// Reset state and subscribe BEFORE resolving threads or sending continue.
-		// js-debug root launcher sessions may have no threads while worker child
-		// sessions are still being registered via startDebugging. The global waiter
-		// must already be armed when that child stop event arrives.
+		// Root launcher sessions may have no threads while child sessions are still
+		// being registered via startDebugging. The global waiter must already be
+		// armed when that child stop event arrives.
 		const previousStatus = session.status;
 		const previousStop = { ...session.stop };
 		const previousStackFrames = [...session.lastStackFrames];
@@ -1491,34 +1487,6 @@ export class DapSessionManager {
 				this.#disposeSession(session);
 			}
 		}
-	}
-
-	#resolveChildAdapter(
-		configType: string | undefined,
-		parentAdapter: DapResolvedAdapter,
-		cwd: string,
-	): DapResolvedAdapter {
-		if (!configType) {
-			return parentAdapter;
-		}
-		if (adapterSupportsChildDebugType(parentAdapter, configType)) {
-			return parentAdapter;
-		}
-		let targetAdapterName: string | undefined;
-		if (configType === "python" || configType === "debugpy") {
-			targetAdapterName = "debugpy";
-		} else if (configType === "go" || configType === "dlv") {
-			targetAdapterName = "dlv";
-		} else if (configType === "cppdbg" || configType === "lldb") {
-			targetAdapterName = "lldb-dap";
-		}
-		if (targetAdapterName) {
-			const resolved = resolveAdapter(targetAdapterName, cwd);
-			if (resolved) {
-				return resolved;
-			}
-		}
-		return parentAdapter;
 	}
 
 	async #startChildSession(
@@ -1749,7 +1717,7 @@ export class DapSessionManager {
 				Object.entries(args.env ?? {}).filter((entry): entry is [string, string] => entry[1] !== null),
 			);
 			const proc = ptree.spawn(args.args, {
-				cwd: args.cwd ?? session.cwd,
+				cwd: resolveSessionRelativeCwd(args.cwd, session.cwd),
 				stdin: "pipe",
 				env: {
 					...Bun.env,
@@ -1772,15 +1740,17 @@ export class DapSessionManager {
 				name: typeof configuration.name === "string" ? configuration.name : undefined,
 			});
 
-			const childAdapter = this.#resolveChildAdapter(
-				typeof configuration.type === "string" ? configuration.type : undefined,
-				session.adapter,
+			const cwd = resolveSessionRelativeCwd(
+				typeof configuration.cwd === "string" ? configuration.cwd : undefined,
 				session.cwd,
 			);
+			const childAdapter = resolveChildAdapterForConfigType(
+				typeof configuration.type === "string" ? configuration.type : undefined,
+				session.adapter,
+				cwd,
+			);
 
-			const cwd = typeof configuration.cwd === "string" ? configuration.cwd : session.cwd;
-
-			const extraArguments = { ...configuration };
+			const extraArguments = { ...configuration, cwd };
 
 			try {
 				await this.#startChildSession(

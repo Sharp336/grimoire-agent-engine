@@ -1,4 +1,6 @@
 import { afterEach, describe, expect, it, spyOn, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import { DapClient } from "@oh-my-pi/pi-coding-agent/dap/client";
 import { DapSessionManager } from "@oh-my-pi/pi-coding-agent/dap/session";
@@ -21,7 +23,7 @@ const TEST_ADAPTER: DapResolvedAdapter = {
 	launchDefaults: {},
 	attachDefaults: {},
 	connectMode: "tcp",
-	childSessionTypes: ["pwa-*", "node", "chrome", "node-terminal", "msedge"],
+	debugConfigTypes: ["pwa-*", "node", "chrome", "node-terminal", "msedge"],
 	threadlessContinueNeedsChildStopWait: true,
 	acceptsDirectoryProgram: false,
 };
@@ -300,6 +302,72 @@ describe("DAP multi-session debugging", () => {
 		expect(childClient.isAlive()).toBe(false);
 	});
 
+	it("resolves relative child cwd before adapter selection and start request", async () => {
+		const manager = new DapSessionManager();
+		const parentCwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dap-child-cwd-"));
+		const childRelativeCwd = "child-project";
+		const childCwd = path.join(parentCwd, childRelativeCwd);
+		const childPythonPath = path.join(childCwd, ".venv", "bin", "python");
+
+		await fs.mkdir(path.dirname(childPythonPath), { recursive: true });
+		await Bun.write(path.join(childCwd, "pyproject.toml"), '[project]\nname = "child"\n');
+		await Bun.write(childPythonPath, "#!/bin/sh\nexit 0\n");
+		await fs.chmod(childPythonPath, 0o755);
+
+		const parentClient = new FakeDapClient(TEST_ADAPTER, parentCwd);
+		const childClient = new FakeDapClient(TEST_ADAPTER, childCwd);
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+
+		const spawnSpy = spyOn(DapClient, "spawn").mockImplementation(async options => {
+			if (options.adapter.name === TEST_ADAPTER.name) {
+				return parentClientWrapper;
+			}
+			return childClient as unknown as DapClient;
+		});
+
+		try {
+			await manager.launch({
+				adapter: TEST_ADAPTER,
+				program: "test.js",
+				cwd: parentCwd,
+			});
+
+			await parentClient.triggerReverseRequest("startDebugging", {
+				request: "attach",
+				configuration: {
+					type: "python",
+					name: "python-child",
+					cwd: childRelativeCwd,
+					port: 5678,
+				},
+			});
+
+			const childSummary = manager.listSessions().find(session => session.parentSessionId === "debug-1");
+			expect(childSummary).toMatchObject({
+				adapter: "debugpy",
+				cwd: childCwd,
+			});
+			expect(spawnSpy.mock.calls[1]?.[0]).toMatchObject({
+				cwd: childCwd,
+				adapter: expect.objectContaining({ name: "debugpy" }),
+			});
+			expect(childClient.sentRequests).toContainEqual(
+				expect.objectContaining({
+					command: "attach",
+					args: expect.objectContaining({
+						type: "python",
+						cwd: childCwd,
+						port: 5678,
+					}),
+				}),
+			);
+		} finally {
+			await manager.terminate().catch(() => undefined);
+			await fs.rm(parentCwd, { recursive: true, force: true });
+		}
+	});
+
 	it("applies pending breakpoints when an adapter does not use configurationDone", async () => {
 		const manager = new DapSessionManager();
 		const client = new FakeDapClient(TEST_ADAPTER, process.cwd());
@@ -525,7 +593,7 @@ describe("DAP multi-session debugging", () => {
 		const adapter: DapResolvedAdapter = {
 			...TEST_ADAPTER,
 			name: "generic-debug-adapter",
-			childSessionTypes: [],
+			debugConfigTypes: [],
 			threadlessContinueNeedsChildStopWait: false,
 		};
 		const client = new FakeDapClient(adapter, process.cwd());

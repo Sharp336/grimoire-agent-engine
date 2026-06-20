@@ -23,6 +23,7 @@ const TEST_ADAPTER: DapResolvedAdapter = {
 	languages: [],
 	fileTypes: [],
 	rootMarkers: [],
+	debugConfigTypes: [],
 	launchDefaults: {},
 	attachDefaults: {},
 	connectMode: "stdio",

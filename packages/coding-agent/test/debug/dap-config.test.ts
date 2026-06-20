@@ -42,7 +42,7 @@ describe("DAP adapter config resolution", () => {
 			expect(adapter?.resolvedCommand).toBe(nodePath);
 			expect(adapter?.connectMode).toBe("tcp");
 			expect(adapter?.args).toEqual([serverPath, DAP_PORT_ARGUMENT, "127.0.0.1"]);
-			expect(adapter?.childSessionTypes).toContain("pwa-*");
+			expect(adapter?.debugConfigTypes).toContain("pwa-*");
 			expect(adapter?.threadlessContinueNeedsChildStopWait).toBe(true);
 		} finally {
 			restoreEnv("JS_DEBUG_DAP_SERVER", previousServerPath);

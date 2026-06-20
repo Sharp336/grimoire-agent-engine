@@ -20,6 +20,7 @@
 		"languages": ["c", "cpp", "objc", "swift", "rust", "zig"],
 		"fileTypes": [".c", ".cc", ".cpp", ".cxx", ".m", ".mm", ".swift", ".rs", ".zig"],
 		"rootMarkers": ["Package.swift", "Cargo.toml", "Makefile", "CMakeLists.txt", "build.zig"],
+		"debugConfigTypes": ["lldb", "cppdbg"],
 		"launchDefaults": {
 			"request": "launch",
 			"stopOnEntry": true
@@ -48,6 +49,7 @@
 		"languages": ["python"],
 		"fileTypes": [".py"],
 		"rootMarkers": ["pyproject.toml", "setup.py", "requirements.txt", "Pipfile"],
+		"debugConfigTypes": ["python", "debugpy"],
 		"launchDefaults": {
 			"request": "launch",
 			"justMyCode": false,
@@ -65,6 +67,7 @@
 		"languages": ["go"],
 		"fileTypes": [".go"],
 		"rootMarkers": ["go.mod", "go.sum"],
+		"debugConfigTypes": ["go", "dlv"],
 		"acceptsDirectoryProgram": true,
 		"launchDefaults": {
 			"request": "launch",
@@ -81,10 +84,11 @@
 		"runtimeCommand": "node",
 		"args": ["${serverPath}", "${port}", "127.0.0.1"],
 		"connectMode": "tcp",
+		"serverResolver": "js-debug",
 		"serverPathEnv": "JS_DEBUG_DAP_SERVER",
 		"serverPackageName": "js-debug-adapter",
 		"serverPathCandidates": ["js-debug/src/dapDebugServer.js", "dist/src/dapDebugServer.js", "src/dapDebugServer.js", "dapDebugServer.js"],
-		"childSessionTypes": ["pwa-*", "node", "chrome", "node-terminal", "msedge"],
+		"debugConfigTypes": ["pwa-*", "node", "chrome", "node-terminal", "msedge"],
 		"threadlessContinueNeedsChildStopWait": true,
 		"languages": ["javascript", "typescript"],
 		"fileTypes": [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"],

@@ -9,6 +9,8 @@
 - Fixed debugger breakpoint synchronization by copying pending breakpoints to the root debug session and propagating them to all dynamically spawned child sessions during the configuration handshake, ensuring breakpoints inside worker threads or child processes are bound and hit before the program executes.
 - Fixed debugger termination by propagating terminate and disconnect requests recursively to all active child debug sessions in the tree.
 - Fixed debugger `continue` on threadless JS debug root launcher sessions to wait for stopped child sessions instead of timing out while a child has already hit a breakpoint.
+- Fixed DAP child debug sessions to resolve relative child `cwd` values against the parent debug session and pass the resolved cwd into child launch/attach requests, so child adapters installed under the child project are selected correctly.
+
 ## [16.1.7] - 2026-06-20
 
 ### Fixed
