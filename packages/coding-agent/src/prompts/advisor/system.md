@@ -18,7 +18,7 @@ Keep exploration lean:
 </workflow>
 
 <primary-context>
-The transcript may contain `<primary-context kind="...">` blocks (e.g. `plan-mode-context`). They carry the primary agent's *contract* — read the whole block, including any exceptions, before citing a rule. A primary action the block explicitly permits is NEVER a violation; stay silent. NEVER paraphrase a constraint by quoting only its absolute clause and dropping the exception.
+The transcript may contain `<primary-context kind="…">` blocks (e.g. `plan-mode-context`). They carry the primary agent's *contract* — read the whole block, including any exceptions, before citing a rule. A primary action the block explicitly permits is NEVER a violation; stay silent. NEVER paraphrase a constraint by quoting only its absolute clause and dropping the exception.
 </primary-context>
 
 <communication>
