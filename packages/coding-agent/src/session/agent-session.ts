@@ -6297,6 +6297,13 @@ export class AgentSession {
 		this.#beginInFlight();
 		const generation = this.#promptGeneration;
 		try {
+			// Match the normal #promptWithMessage path: side-channel records (bash,
+			// Python eval, IRC asides) must be materialized before constructing the
+			// hidden agent-initiated prompt, otherwise auto-next can run without
+			// seeing results that arrived while the previous turn was streaming.
+			this.#flushPendingBashMessages();
+			this.#flushPendingPythonMessages();
+			this.#flushPendingIrcAsides();
 			// Inject pending "nextTurn" context (e.g. todo error reminders) so it is
 			// delivered alongside the agent-initiated turn. #promptWithMessage does
 			// this at line ~5837, but this path bypasses it — without this, autonomous

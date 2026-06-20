@@ -102,6 +102,17 @@ describe("AgentSession agent-initiated nextTurn context", () => {
 			},
 			{ deliverAs: "nextTurn", triggerTurn: false },
 		);
+		activeSession.recordBashResult("echo result", {
+			output: "bash output",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			totalLines: 1,
+			totalBytes: 11,
+			outputLines: 1,
+			outputBytes: 11,
+		});
+		expect(activeSession.hasPendingBashMessages).toBe(true);
 		await activeSession.abort();
 		await firstPrompt.catch(() => {});
 		await activeSession.waitForIdle();
@@ -124,6 +135,15 @@ describe("AgentSession agent-initiated nextTurn context", () => {
 				{ deliverAs: "nextTurn", triggerTurn: true },
 			),
 		).rejects.toThrow("missing model");
+		expect(activeSession.hasPendingBashMessages).toBe(false);
+		expect(
+			activeSession.agent.state.messages.some(
+				message =>
+					message.role === "bashExecution" &&
+					message.command === "echo result" &&
+					message.output === "bash output",
+			),
+		).toBe(true);
 
 		promptSpy.mockImplementationOnce(async messages => {
 			promptInputs.push(Array.isArray(messages) ? messages : [messages as AgentMessage]);
