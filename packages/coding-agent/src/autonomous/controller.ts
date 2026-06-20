@@ -242,13 +242,14 @@ export class AutonomousController {
 			return;
 		}
 		// Pure-steps completion: an autonomous continuation that performed no
-		// action means the objective is done — disarm rather than loop forever.
+		// action means the current objective is done — skip this requeue rather than
+		// loop forever. Keep the controller armed so a later manual prompt in the
+		// same `--auto-next-steps` session still receives autonomous follow-ups.
 		// Only counts for turns the controller queued, so a user's question
 		// (a non-autonomous turn) can't halt the loop. When the autonomous prompt
 		// ran as a queued follow-up behind another synthetic turn, ignore tool
 		// activity before our prompt boundary.
 		if (wasAutonomous && this.#stepsOnly && !turnHadToolActivity(event.messages, autonomousPayloadStartIndex)) {
-			this.#armed = false;
 			return;
 		}
 		this.#queueContinuation();

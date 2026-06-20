@@ -376,15 +376,15 @@ describe("AutonomousController loop", () => {
 });
 
 describe("AutonomousController steps completion", () => {
-	it("disarms when an autonomous turn performs no action (objective done)", () => {
+	it("skips immediate requeue when an autonomous turn performs no action", () => {
 		const { controller, emit, sent } = setup({ autoNextSteps: true });
 		controller.begin({ startupFailed: false });
 		emit(agentEndEvent([assistantActing("stop")])); // queues; next turn is autonomous
 		expect(sent).toHaveLength(1);
-		emit(agentEndEvent([autonomousPrompt(), assistant("stop")])); // autonomous turn, no action -> halt
+		emit(agentEndEvent([autonomousPrompt(), assistant("stop")])); // autonomous turn, no action -> halt current objective
 		expect(sent).toHaveLength(1);
-		emit(agentEndEvent([assistantActing("stop")])); // disarmed: no further queue
-		expect(sent).toHaveLength(1);
+		emit(agentEndEvent([assistantActing("stop")])); // later manual objective: controller remains armed
+		expect(sent).toHaveLength(2);
 	});
 
 	it("keeps the autonomous marker when a continuation is queued behind another turn", () => {
