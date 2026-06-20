@@ -580,6 +580,7 @@ export interface DapStopLocation {
 
 export interface DapSessionSummary {
 	id: string;
+	ownerId: string;
 	adapter: string;
 	cwd: string;
 	program?: string;
@@ -613,6 +614,7 @@ export interface DapContinueOutcome {
 }
 
 export interface DapLaunchSessionOptions {
+	ownerId?: string;
 	adapter: DapResolvedAdapter;
 	program: string;
 	args?: string[];
@@ -627,6 +629,7 @@ export interface DapLaunchSessionOptions {
 
 export interface DapAttachSessionOptions {
 	adapter: DapResolvedAdapter;
+	ownerId?: string;
 	cwd: string;
 	pid?: number;
 	port?: number;

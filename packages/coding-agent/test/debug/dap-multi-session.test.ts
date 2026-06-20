@@ -1014,11 +1014,139 @@ describe("DAP multi-session debugging", () => {
 				program: "other.js",
 				cwd: process.cwd(),
 			}),
-		).rejects.toThrow("Debug session debug-1 is still active. Terminate it before launching another.");
+		).rejects.toThrow("Debug session debug-1 is still active for this agent. Terminate it before launching another.");
 
 		expect(spawnSpy).toHaveBeenCalledTimes(1);
 
 		await manager.terminate();
 		expect(manager.listSessions().length).toBe(0);
+	});
+
+	it("returns the requested child session summary when terminating a debug tree", async () => {
+		const manager = new DapSessionManager();
+		const parentClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const childClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const parentClientWrapper = parentClient as unknown as DapClient;
+		parentClientWrapper.port = 9999;
+
+		spyOn(DapClient, "spawn").mockImplementation(async () => parentClientWrapper);
+		spyOn(DapClient, "connect").mockImplementation(async () => childClient as unknown as DapClient);
+
+		await manager.launch({
+			ownerId: "agent-a",
+			adapter: TEST_ADAPTER,
+			program: "test.js",
+			cwd: process.cwd(),
+		});
+		await parentClient.triggerReverseRequest("startDebugging", {
+			request: "attach",
+			configuration: {
+				type: "pwa-node",
+				name: "child-worker",
+			},
+		});
+
+		const child = manager.listSessions().find(session => session.parentSessionId === "debug-1");
+		expect(child?.id).toBe("debug-2");
+
+		const terminated = await manager.terminate(undefined, undefined, { ownerId: "agent-a", sessionId: "debug-2" });
+		expect(terminated?.id).toBe("debug-2");
+		expect(terminated?.status).toBe("terminated");
+		expect(manager.listSessions()).toEqual([]);
+	});
+
+	it("allows parallel top-level sessions for different owners", async () => {
+		const manager = new DapSessionManager();
+		const firstClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const secondClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const clients = [firstClient, secondClient];
+		const spawnSpy = spyOn(DapClient, "spawn").mockImplementation(async () => {
+			const client = clients.shift();
+			if (!client) throw new Error("unexpected spawn");
+			return client as unknown as DapClient;
+		});
+
+		const first = await manager.launch({
+			ownerId: "agent-a",
+			adapter: TEST_ADAPTER,
+			program: "first.js",
+			cwd: process.cwd(),
+		});
+		const second = await manager.launch({
+			ownerId: "agent-b",
+			adapter: TEST_ADAPTER,
+			program: "second.js",
+			cwd: process.cwd(),
+		});
+
+		expect(first.id).toBe("debug-1");
+		expect(second.id).toBe("debug-2");
+		expect(manager.getActiveSession("agent-a")?.id).toBe("debug-1");
+		expect(manager.getActiveSession("agent-b")?.id).toBe("debug-2");
+		await expect(
+			manager.launch({
+				ownerId: "agent-a",
+				adapter: TEST_ADAPTER,
+				program: "third.js",
+				cwd: process.cwd(),
+			}),
+		).rejects.toThrow("Debug session debug-1 is still active for this agent. Terminate it before launching another.");
+		expect(spawnSpy).toHaveBeenCalledTimes(2);
+
+		await manager.terminate(undefined, undefined, { ownerId: "agent-a" });
+		await manager.terminate(undefined, undefined, { ownerId: "agent-b" });
+	});
+
+	it("scopes pending breakpoints by owner and clears them on termination", async () => {
+		const manager = new DapSessionManager();
+		const firstClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const secondClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const restartedFirstClient = new FakeDapClient(TEST_ADAPTER, process.cwd());
+		const clients = [firstClient, secondClient, restartedFirstClient];
+		spyOn(DapClient, "spawn").mockImplementation(async () => {
+			const client = clients.shift();
+			if (!client) throw new Error("unexpected spawn");
+			return client as unknown as DapClient;
+		});
+
+		const bpFile = path.resolve(process.cwd(), "src/owner-scoped.ts");
+		await manager.setBreakpoint(bpFile, 42, undefined, undefined, undefined, { ownerId: "agent-a" });
+		await manager.setBreakpoint(bpFile, 100, undefined, undefined, undefined, { ownerId: "agent-b" });
+
+		await manager.launch({
+			ownerId: "agent-a",
+			adapter: TEST_ADAPTER,
+			program: "first.js",
+			cwd: process.cwd(),
+		});
+		await manager.launch({
+			ownerId: "agent-b",
+			adapter: TEST_ADAPTER,
+			program: "second.js",
+			cwd: process.cwd(),
+		});
+
+		const firstBreakpointRequests = firstClient.sentRequests.filter(request => request.command === "setBreakpoints");
+		const secondBreakpointRequests = secondClient.sentRequests.filter(
+			request => request.command === "setBreakpoints",
+		);
+		expect(
+			firstBreakpointRequests.map(request => getSourceBreakpoints(request.args).map(entry => entry.line)),
+		).toEqual([[42]]);
+		expect(
+			secondBreakpointRequests.map(request => getSourceBreakpoints(request.args).map(entry => entry.line)),
+		).toEqual([[100]]);
+
+		await manager.terminate(undefined, undefined, { ownerId: "agent-a" });
+		await manager.launch({
+			ownerId: "agent-a",
+			adapter: TEST_ADAPTER,
+			program: "first-again.js",
+			cwd: process.cwd(),
+		});
+		expect(restartedFirstClient.sentRequests.some(request => request.command === "setBreakpoints")).toBe(false);
+
+		await manager.terminate(undefined, undefined, { ownerId: "agent-a" });
+		await manager.terminate(undefined, undefined, { ownerId: "agent-b" });
 	});
 });

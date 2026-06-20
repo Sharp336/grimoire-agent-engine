@@ -10,6 +10,7 @@
 - Fixed debugger termination by propagating terminate and disconnect requests recursively to all active child debug sessions in the tree.
 - Fixed debugger `continue` on threadless JS debug root launcher sessions to wait for stopped child sessions instead of timing out while a child has already hit a breakpoint.
 - Fixed DAP child debug sessions to resolve relative child `cwd` values against the parent debug session and pass the resolved cwd into child launch/attach requests, so child adapters installed under the child project are selected correctly.
+- Fixed debugger state isolation so parallel agents can run separate top-level DAP sessions without sharing active session focus or pending breakpoints; terminating a session now clears that agent's pending breakpoints.
 
 ## [16.1.7] - 2026-06-20
 
