@@ -108,7 +108,7 @@ const debugSchema = type({
 	action: debugActionSchema,
 	"program?": type("string").describe("program path"),
 	"args?": type("string[]").describe("program arguments"),
-	"adapter?": type("string").describe("debugger adapter (gdb, lldb-dap, debugpy, dlv)"),
+	"adapter?": type("string").describe("debugger adapter (gdb, lldb-dap, debugpy, dlv, js-debug-adapter)"),
 	cwd: "string?",
 	"file?": type("string").describe("source file"),
 	"line?": type("number").describe("source line"),
@@ -672,6 +672,15 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 		{
 			caption: "Launch a Python script with debugpy",
 			call: { action: "launch", adapter: "debugpy", program: "scripts/job.py", args: ["--flag"] },
+		},
+		{
+			caption: "Launch a Vitest test with js-debug-adapter",
+			call: {
+				action: "launch",
+				adapter: "js-debug-adapter",
+				program: "./node_modules/vitest/vitest.mjs",
+				args: ["run", "--config", "vitest.config.ts", "--reporter=minimal", "src/example.test.ts"],
+			},
 		},
 		{
 			caption: "Raw debugger command through repl",

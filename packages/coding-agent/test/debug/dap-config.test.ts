@@ -147,41 +147,50 @@ describe("DAP adapter config resolution", () => {
 		}
 	});
 
-	it("does not require Neovim Mason XDG data paths", async () => {
+	it("discovers js-debug server entrypoints from default XDG Mason packages without the adapter wrapper", async () => {
 		const previousServerPath = process.env.JS_DEBUG_DAP_SERVER;
 		const previousXdgDataHome = process.env.XDG_DATA_HOME;
 		const previousXdgDataDirs = process.env.XDG_DATA_DIRS;
-		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dap-config-no-mason-"));
+		const previousHome = process.env.HOME;
+		const previousPath = process.env.PATH;
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dap-config-default-xdg-mason-"));
 		try {
 			delete process.env.JS_DEBUG_DAP_SERVER;
+			delete process.env.XDG_DATA_HOME;
+			process.env.XDG_DATA_DIRS = path.join(cwd, "xdg-system-data");
+			process.env.HOME = cwd;
+			process.env.PATH = "";
 			await Bun.write(path.join(cwd, "package.json"), "{}");
 			const binDir = path.join(cwd, "node_modules", ".bin");
 			await fs.mkdir(binDir, { recursive: true });
-			await writeExecutable(path.join(binDir, "node"));
-			await writeExecutable(path.join(binDir, "js-debug-adapter"));
-			process.env.XDG_DATA_HOME = path.join(cwd, "xdg-data");
-			process.env.XDG_DATA_DIRS = path.join(cwd, "xdg-system-data");
-			await Bun.write(
-				path.join(
-					process.env.XDG_DATA_HOME,
-					"nvim",
-					"mason",
-					"packages",
-					"js-debug-adapter",
-					"js-debug",
-					"src",
-					"dapDebugServer.js",
-				),
-				"",
+			const nodePath = path.join(binDir, "node");
+			await writeExecutable(nodePath);
+			const serverPath = path.join(
+				cwd,
+				".local",
+				"share",
+				"nvim",
+				"mason",
+				"packages",
+				"js-debug-adapter",
+				"js-debug",
+				"src",
+				"dapDebugServer.js",
 			);
+			await Bun.write(serverPath, "");
 
 			const adapter = resolveAdapter("js-debug-adapter", cwd);
 
-			expect(adapter).toBeNull();
+			expect(adapter?.command).toBe("node");
+			expect(adapter?.resolvedCommand).toBe(nodePath);
+			expect(adapter?.connectMode).toBe("tcp");
+			expect(adapter?.args).toEqual([serverPath, DAP_PORT_ARGUMENT, "127.0.0.1"]);
 		} finally {
 			restoreEnv("JS_DEBUG_DAP_SERVER", previousServerPath);
 			restoreEnv("XDG_DATA_HOME", previousXdgDataHome);
 			restoreEnv("XDG_DATA_DIRS", previousXdgDataDirs);
+			restoreEnv("HOME", previousHome);
+			restoreEnv("PATH", previousPath);
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
 	});

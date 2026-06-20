@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { hasRootMarkers, resolveCommand } from "../lsp/config";
@@ -19,6 +20,14 @@ const LAUNCHER_SCRIPT_DIR_REFERENCES = [
 	"$DIR",
 	"$" + "{DIR}",
 	"%~dp0",
+] as const;
+
+const DEFAULT_XDG_DATA_DIRS = ["/usr/local/share", "/usr/share"] as const;
+const DATA_DIR_PACKAGE_PARENT_SEGMENTS = [
+	["nvim", "mason", "packages"],
+	["mason", "packages"],
+	["packages"],
+	[],
 ] as const;
 
 function normalizeStringArray(value: unknown): string[] {
@@ -195,6 +204,43 @@ function getServerSearchRoots(config: DapAdapterConfig, resolvedAdapterCommand: 
 	return Array.from(roots);
 }
 
+function addDataDirRoot(roots: Set<string>, dir: string | undefined): void {
+	if (!dir || dir.length === 0) return;
+	roots.add(path.resolve(dir));
+}
+
+function getXdgDataDirs(): string[] {
+	const roots = new Set<string>();
+	const xdgDataHome = process.env.XDG_DATA_HOME;
+	if (xdgDataHome && xdgDataHome.length > 0) {
+		addDataDirRoot(roots, xdgDataHome);
+	} else {
+		const home = process.env.HOME && process.env.HOME.length > 0 ? process.env.HOME : os.homedir();
+		if (home.length > 0) {
+			roots.add(path.join(home, ".local", "share"));
+		}
+	}
+
+	const dataDirs = process.env.XDG_DATA_DIRS;
+	const systemDirs =
+		dataDirs && dataDirs.length > 0 ? dataDirs.split(path.delimiter) : Array.from(DEFAULT_XDG_DATA_DIRS);
+	for (const dir of systemDirs) {
+		addDataDirRoot(roots, dir);
+	}
+	return Array.from(roots);
+}
+
+function getDataDirPackageSearchRoots(config: DapAdapterConfig): string[] {
+	if (!config.serverPackageName) return [];
+	const roots = new Set<string>();
+	for (const dataDir of getXdgDataDirs()) {
+		for (const segments of DATA_DIR_PACKAGE_PARENT_SEGMENTS) {
+			roots.add(path.join(dataDir, ...segments, config.serverPackageName));
+		}
+	}
+	return Array.from(roots);
+}
+
 function resolveConfiguredServerPath(
 	config: DapAdapterConfig,
 	resolvedAdapterCommand: string | null,
@@ -226,7 +272,10 @@ function resolveConfiguredServerPath(
 			}
 		}
 	}
-	for (const root of getServerSearchRoots(config, resolvedAdapterCommand)) {
+	for (const root of [
+		...getServerSearchRoots(config, resolvedAdapterCommand),
+		...getDataDirPackageSearchRoots(config),
+	]) {
 		for (const relativeCandidate of candidates) {
 			const candidate = path.resolve(root, relativeCandidate);
 			if (fs.existsSync(candidate)) {
