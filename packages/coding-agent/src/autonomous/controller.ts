@@ -34,10 +34,12 @@
  * Idea and combined modes are endless by design ("until interrupted") and never auto-halt.
  */
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { CustomMessage } from "../session/messages";
+import autoAgentsPrompt from "./auto-agents.md" with { type: "text" };
 import autoCommitPrompt from "./auto-commit.md" with { type: "text" };
+import autoGroupPrPrompt from "./auto-group-pr.md" with { type: "text" };
 import autoPrPrompt from "./auto-pr.md" with { type: "text" };
 import combinedPrompt from "./combined.md" with { type: "text" };
 import ideaPrompt from "./next-idea.md" with { type: "text" };
@@ -50,6 +52,8 @@ const AUTONOMOUS_IDEA = ideaPrompt.trim();
 const AUTONOMOUS_COMBINED = combinedPrompt.trim();
 const AUTONOMOUS_AUTO_COMMIT = autoCommitPrompt.trim();
 const AUTONOMOUS_AUTO_PR = autoPrPrompt.trim();
+const AUTONOMOUS_AUTO_AGENTS = autoAgentsPrompt.trim();
+const AUTONOMOUS_AUTO_GROUP_PR = autoGroupPrPrompt.trim();
 
 /**
  * Minimal session surface the controller depends on. {@link AgentSession}
@@ -77,6 +81,8 @@ export interface AutonomousControllerOptions {
 	autoNextIdea: boolean;
 	autoCommit: boolean;
 	autoPr: boolean;
+	autoGroupPr: boolean;
+	autoAgents?: number;
 }
 
 export interface AutonomousBeginOptions {
@@ -92,8 +98,16 @@ function selectContinuationPrompt(options: AutonomousControllerOptions): string 
 
 function buildAutonomousPrompt(options: AutonomousControllerOptions): string {
 	const parts = [selectContinuationPrompt(options)];
-	if (options.autoCommit) parts.push(AUTONOMOUS_AUTO_COMMIT);
-	if (options.autoPr) parts.push(AUTONOMOUS_AUTO_PR);
+	if (options.autoAgents !== undefined && options.autoAgents > 0) {
+		parts.push(prompt.render(AUTONOMOUS_AUTO_AGENTS, { autoAgents: options.autoAgents }));
+	}
+	if (options.autoGroupPr) {
+		parts.push(AUTONOMOUS_AUTO_GROUP_PR);
+	} else if (options.autoPr) {
+		parts.push(AUTONOMOUS_AUTO_PR);
+	} else if (options.autoCommit) {
+		parts.push(AUTONOMOUS_AUTO_COMMIT);
+	}
 	return parts.join("\n\n");
 }
 
@@ -133,8 +147,11 @@ export class AutonomousController {
 	#onEvent(event: AgentSessionEvent): void {
 		if (event.type === "agent_start") {
 			// Latch the start-of-turn mode before any tool can flip it.
+			const goalState = this.#session.getGoalModeState();
 			this.#turnStartedInPlanOrGoal =
-				this.#session.getPlanModeState()?.enabled === true || this.#session.getGoalModeState()?.enabled === true;
+				this.#session.getPlanModeState()?.enabled === true ||
+				goalState?.enabled === true ||
+				goalState?.mode === "exiting";
 			return;
 		}
 		if (event.type === "mode_changed" && event.droppedCustomType === AUTONOMOUS_CONTINUATION_MESSAGE_TYPE) {

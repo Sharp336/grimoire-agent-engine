@@ -1,4 +1,4 @@
---auto-commit is enabled.
+--auto-commit is enabled without a pull-request publishing mode.
 
 After every completed, verified work unit:
 - Use the existing commit workflow (`omp commit`) before declaring done or starting another idea.

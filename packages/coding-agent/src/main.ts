@@ -1342,6 +1342,8 @@ export async function runRootCommand(
 						autoNextIdea: parsedArgs.autoNextIdea === true,
 						autoCommit: parsedArgs.autoCommit === true,
 						autoPr: parsedArgs.autoPr === true,
+						autoGroupPr: parsedArgs.autoGroupPr === true,
+						autoAgents: parsedArgs.autoAgents,
 					})
 				: undefined;
 

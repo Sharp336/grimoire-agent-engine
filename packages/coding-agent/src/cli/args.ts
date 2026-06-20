@@ -72,6 +72,10 @@ export interface Args {
 	autoCommit?: boolean;
 	/** --auto-pr: open a pull request for verified autonomous work. */
 	autoPr?: boolean;
+	/** --auto-group-pr: publish autonomous work through one shared pull request. */
+	autoGroupPr?: boolean;
+	/** --auto-agents <N>: spawn up to N autonomous subagents per work unit. */
+	autoAgents?: number;
 	messages: string[];
 	fileArgs: string[];
 	/** Extension-registered flags this parse recognized — name to value. */
@@ -229,6 +233,8 @@ export function parseArgs(inputArgs: string[], extensionFlags?: Map<string, { ty
 			result.autoCommit = true;
 		} else if (arg === "--auto-pr") {
 			result.autoPr = true;
+		} else if (arg === "--auto-group-pr") {
+			result.autoGroupPr = true;
 		} else if (arg.startsWith("@")) {
 			let filePath = arg.slice(1);
 			if (filePath.startsWith('"') && filePath.endsWith('"') && filePath.length > 1) {

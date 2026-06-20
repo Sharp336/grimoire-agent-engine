@@ -64,6 +64,8 @@ interface FakeOptions {
 	autoNextIdea?: boolean;
 	autoCommit?: boolean;
 	autoPr?: boolean;
+	autoGroupPr?: boolean;
+	autoAgents?: number;
 	planMode?: boolean;
 	goalMode?: boolean;
 	history?: AgentMessage[];
@@ -119,6 +121,8 @@ function setup(options: FakeOptions) {
 		autoNextIdea: options.autoNextIdea ?? false,
 		autoCommit: options.autoCommit ?? false,
 		autoPr: options.autoPr ?? false,
+		autoGroupPr: options.autoGroupPr ?? false,
+		autoAgents: options.autoAgents,
 	});
 	return {
 		sent,
@@ -319,6 +323,16 @@ describe("AutonomousController loop", () => {
 		expect(sent).toHaveLength(1);
 	});
 
+	it("skips a turn that started while goal mode was exiting", () => {
+		const { controller, emit, sent, setGoalModeState } = setup({ autoNextSteps: true });
+		controller.begin({ startupFailed: false });
+		setGoalModeState({ enabled: false, mode: "exiting" });
+		emit(START); // latch exiting goal cleanup as mode-owned
+		setGoalModeState(undefined); // cleanup clears before agent_end
+		emit(agentEndEvent([assistantActing("stop")]));
+		expect(sent).toHaveLength(0);
+	});
+
 	it("skips a turn that started in plan mode", () => {
 		const { controller, emit, sent, setPlanMode } = setup({ autoNextSteps: true });
 		controller.begin({ startupFailed: false });
@@ -473,7 +487,20 @@ describe("AutonomousController steps completion", () => {
 		expect(sent).toHaveLength(2);
 	});
 
-	it("adds auto-commit and auto-pr instructions to the continuation prompt", () => {
+	it("adds auto-commit instructions when no PR publishing mode is active", () => {
+		const { controller, sent } = setup({
+			autoNextSteps: true,
+			autoCommit: true,
+			history: [assistant("stop")],
+		});
+		controller.begin({ startupFailed: false });
+		expect(sent[0]!.content).toContain("continuation mode");
+		expect(sent[0]!.content).toContain("--auto-commit is enabled");
+		expect(sent[0]!.content).toContain("existing commit workflow");
+		expect(sent[0]!.content).not.toContain("--auto-pr is enabled");
+	});
+
+	it("auto-pr overrides auto-commit so combined flags always publish through a PR", () => {
 		const { controller, sent } = setup({
 			autoNextSteps: true,
 			autoCommit: true,
@@ -481,11 +508,35 @@ describe("AutonomousController steps completion", () => {
 			history: [assistant("stop")],
 		});
 		controller.begin({ startupFailed: false });
-		expect(sent[0]!.content).toContain("continuation mode");
-		expect(sent[0]!.content).toContain("--auto-commit is enabled");
-		expect(sent[0]!.content).toContain("existing commit workflow");
 		expect(sent[0]!.content).toContain("--auto-pr is enabled");
-		expect(sent[0]!.content).toContain("`github` tool `pr_create`");
+		expect(sent[0]!.content).toContain("pull-request branch");
+		expect(sent[0]!.content).toContain("NEVER treat a local commit alone as complete");
+		expect(sent[0]!.content).not.toContain("--auto-commit is enabled");
+	});
+
+	it("auto-group-pr overrides auto-pr and uses one shared pull request", () => {
+		const { controller, sent } = setup({
+			autoNextSteps: true,
+			autoPr: true,
+			autoGroupPr: true,
+			history: [assistant("stop")],
+		});
+		controller.begin({ startupFailed: false });
+		expect(sent[0]!.content).toContain("--auto-group-pr is enabled");
+		expect(sent[0]!.content).toContain("one shared pull request");
+		expect(sent[0]!.content).toContain("overrides `--auto-pr`");
+		expect(sent[0]!.content).not.toContain("--auto-pr is enabled");
+	});
+
+	it("adds auto-agents instructions with the configured subagent count", () => {
+		const { controller, sent } = setup({
+			autoNextSteps: true,
+			autoAgents: 3,
+			history: [assistant("stop")],
+		});
+		controller.begin({ startupFailed: false });
+		expect(sent[0]!.content).toContain("--auto-agents is enabled with 3 subagent");
+		expect(sent[0]!.content).toContain("Coordinate through the irc tool");
 	});
 
 	it("drops queued autonomous continuation when plan mode enters", () => {
@@ -528,7 +579,16 @@ describe("AutonomousController steps completion", () => {
 
 		// GoalRuntime emits goal_updated with state.enabled before setGoalModeState runs.
 		// The controller's goal_updated handler drops the queued continuation and clears the marker.
-		emit({ type: "goal_updated", goal: null, state: { enabled: true } });
+		const goal = {
+			id: "goal-1",
+			objective: "finish",
+			status: "active" as const,
+			tokensUsed: 0,
+			timeUsedSeconds: 0,
+			createdAt: 0,
+			updatedAt: 0,
+		};
+		emit({ type: "goal_updated", goal, state: { enabled: true, mode: "active", goal } });
 
 		// A subsequent clean turn should resume the loop (marker was cleared, not stuck).
 		emit(agentEndEvent([assistantActing("stop")]));

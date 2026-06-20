@@ -3,12 +3,22 @@ import { parseArgs } from "../src/cli/args";
 import { extractProfileFlags } from "../src/cli/profile-bootstrap";
 
 describe("parseArgs — autonomous publish flags", () => {
-	it("parses --auto-commit and --auto-pr as boolean launch flags", () => {
-		const result = parseArgs(["--auto-next-steps", "--auto-commit", "--auto-pr", "ship it"]);
+	it("parses autonomous publish flags as launch flags", () => {
+		const result = parseArgs([
+			"--auto-next-steps",
+			"--auto-commit",
+			"--auto-pr",
+			"--auto-group-pr",
+			"--auto-agents",
+			"3",
+			"ship it",
+		]);
 
 		expect(result.autoNextSteps).toBe(true);
 		expect(result.autoCommit).toBe(true);
 		expect(result.autoPr).toBe(true);
+		expect(result.autoGroupPr).toBe(true);
+		expect(result.autoAgents).toBe(3);
 		expect(result.messages).toEqual(["ship it"]);
 	});
 
@@ -18,6 +28,13 @@ describe("parseArgs — autonomous publish flags", () => {
 		expect(result.autoPr).toBe(true);
 		expect(result.model).toBe("opus");
 		expect(result.messages).toEqual([]);
+	});
+
+	it("parses --auto-agents=N form", () => {
+		const result = parseArgs(["--auto-next-steps", "--auto-agents=2", "ship it"]);
+
+		expect(result.autoAgents).toBe(2);
+		expect(result.messages).toEqual(["ship it"]);
 	});
 });
 
@@ -30,6 +47,19 @@ describe("profile bootstrap — autonomous publish flags", () => {
 		});
 		expect(extractProfileFlags(["--auto-pr", "--profile", "work"])).toEqual({
 			argv: ["--auto-pr"],
+			profile: "work",
+			aliasName: undefined,
+		});
+		expect(extractProfileFlags(["--auto-group-pr", "--profile", "work"])).toEqual({
+			argv: ["--auto-group-pr"],
+			profile: "work",
+			aliasName: undefined,
+		});
+	});
+
+	it("preserves --auto-agents value while extracting trailing profiles", () => {
+		expect(extractProfileFlags(["--auto-agents", "3", "--profile", "work"])).toEqual({
+			argv: ["--auto-agents", "3"],
 			profile: "work",
 			aliasName: undefined,
 		});

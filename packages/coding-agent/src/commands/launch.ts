@@ -167,11 +167,17 @@ export default class Index extends Command {
 		"auto-next-idea": Flags.boolean({
 			description: "After each turn, brainstorm and implement a new improvement (until interrupted)",
 		}),
+		"auto-agents": Flags.string({
+			description: "Spawn up to N autonomous subagents per completed work unit",
+		}),
 		"auto-commit": Flags.boolean({
 			description: "Commit verified autonomous work before continuing",
 		}),
 		"auto-pr": Flags.boolean({
 			description: "Create or update a pull request for verified autonomous work",
+		}),
+		"auto-group-pr": Flags.boolean({
+			description: "Publish autonomous work through one shared pull request",
 		}),
 	};
 

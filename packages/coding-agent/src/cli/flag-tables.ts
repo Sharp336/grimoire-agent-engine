@@ -128,6 +128,14 @@ export const STRING_SETTERS: Record<string, StringSetter> = {
 			deps.logger.warn("Invalid seconds passed to --max-time", { value });
 		}
 	},
+	"--auto-agents": (result, value, deps) => {
+		const count = Number(value);
+		if (Number.isSafeInteger(count) && count > 0) {
+			result.autoAgents = count;
+		} else {
+			deps.logger.warn("Invalid count passed to --auto-agents", { value });
+		}
+	},
 	"--api-key": (result, value) => {
 		result.apiKey = value;
 	},
@@ -281,4 +289,5 @@ export const VALUELESS_FLAGS: ReadonlySet<string> = new Set([
 	"--auto-next-idea",
 	"--auto-commit",
 	"--auto-pr",
+	"--auto-group-pr",
 ]);

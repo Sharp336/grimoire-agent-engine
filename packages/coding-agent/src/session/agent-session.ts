@@ -6295,15 +6295,26 @@ export class AgentSession {
 
 	async #promptAgentInitiatedMessage(message: CustomMessage): Promise<void> {
 		this.#beginInFlight();
+		const generation = this.#promptGeneration;
 		try {
 			// Inject pending "nextTurn" context (e.g. todo error reminders) so it is
 			// delivered alongside the agent-initiated turn. #promptWithMessage does
 			// this at line ~5837, but this path bypasses it — without this, autonomous
 			// continuations would skip next-turn guidance every turn.
-			const messages: AgentMessage[] = [...this.#pendingNextTurnMessages, message];
+			const nextTurnMessages = [...this.#pendingNextTurnMessages];
+			const messages: AgentMessage[] = [...nextTurnMessages, message];
+			await this.#runPrePromptCompactionIfNeeded(messages);
+			if (this.#promptGeneration !== generation) {
+				return;
+			}
 			this.#pendingNextTurnMessages = [];
-			await this.agent.prompt(messages);
-			await this.#waitForPostPromptRecovery();
+			try {
+				await this.agent.prompt(messages);
+				await this.#waitForPostPromptRecovery();
+			} catch (error) {
+				this.#pendingNextTurnMessages = [...nextTurnMessages, ...this.#pendingNextTurnMessages];
+				throw error;
+			}
 		} finally {
 			this.#endInFlight();
 		}

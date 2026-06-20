@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `--auto-next-steps` and `--auto-next-idea` CLI flags for autonomous operation. After each completed turn the agent automatically queues a follow-up so it keeps working without user input: `--auto-next-steps` continues the current objective (including running tests), `--auto-next-idea` brainstorms and implements a new improvement, and both together cycle indefinitely.
+- Added `--auto-commit`, `--auto-pr`, `--auto-group-pr`, and `--auto-agents <N>` launch flags for autonomous operation. Pull-request modes override commit-only publishing, `--auto-group-pr` keeps autonomous changes under one shared PR, and `--auto-agents` tells autonomous turns how many IRC-enabled subagents to use.
+
+### Fixed
+
+- Fixed `--auto-next-*` autonomous continuation queueing so it preserves user follow-up ordering, carries pending next-turn context, runs pre-prompt compaction before hidden turns, and respects goal-mode exit cleanup.
+
 ## [16.0.11] - 2026-06-19
 
 ### Added
@@ -36,12 +45,6 @@
 ### Removed
 
 - Removed `display.tabWidth` setting and configurable tab width support
-- Added `--auto-next-steps` and `--auto-next-idea` CLI flags for autonomous operation. After each completed turn the agent automatically queues a follow-up so it keeps working without user input: `--auto-next-steps` continues the current objective (including running tests), `--auto-next-idea` brainstorms and implements a new improvement, and both together cycle indefinitely. The controller arms only after startup prompts drain and is restricted to interactive mode (disabled for `--print`/rpc/acp). It halts on a user interrupt (Esc) or a failed turn, leaves plan/goal mode to their own drivers, and `--auto-next-steps` (alone) also stops once an autonomous turn performs no further action (objective complete); idea/combined run until interrupted.
-- Added `--auto-commit` and `--auto-pr` launch flags for autonomous operation. They extend the hidden auto-next prompt so completed, verified work is committed through the existing commit workflow and published through the GitHub pull-request path before the agent continues.
-
-### Fixed
-
-- Fixed `--auto-next-*` autonomous continuation reordering itself ahead of a stranded user follow-up. When a user follow-up lands in the queue after the agent loop final queue poll, `#endInFlight` flushes `agent_end` (which fires the autonomous continuation) before the stranded-queue drain runs. `sendCustomMessage` with `deliverAs: "followUp"` and `triggerTurn` on an idle session with queued messages now queues behind them instead of starting a turn immediately, preserving user to autonomous ordering.
 
 ## [16.0.10] - 2026-06-18
 
@@ -113,9 +116,6 @@
 
 - Fixed `/model` in the TUI to open the model setup picker again, leaving `/switch` as the temporary session model switcher ([#2933](https://github.com/can1357/oh-my-pi/issues/2933)).
 - Fixed OpenCode Go sessions recording per-request cost history so `/usage` can show local cap utilization. ([#2942](https://github.com/can1357/oh-my-pi/issues/2942))
-### Added
-
-- Added `--auto-next-steps` and `--auto-next-idea` CLI flags for autonomous operation. After each completed turn the agent automatically queues a follow-up so it keeps working without user input: `--auto-next-steps` continues the current objective (including running tests), `--auto-next-idea` brainstorms and implements a new improvement, and both together cycle indefinitely. The controller arms only after startup prompts drain and is restricted to interactive mode (disabled for `--print`/rpc/acp). It halts on a user interrupt (Esc) or a failed turn, leaves plan/goal mode to their own drivers, and `--auto-next-steps` (alone) also stops once an autonomous turn performs no further action (objective complete); idea/combined run until interrupted.
 
 ## [16.0.6] - 2026-06-18
 
