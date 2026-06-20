@@ -10,6 +10,7 @@ import {
 import type {
 	DapCapabilities,
 	DapClientState,
+	DapErrorBody,
 	DapEventMessage,
 	DapInitializeArguments,
 	DapPendingRequest,
@@ -20,6 +21,7 @@ import type {
 
 type DapEventHandler = (body: unknown, event: DapEventMessage) => void | Promise<void>;
 type DapReverseRequestHandler = (args: unknown) => unknown | Promise<unknown>;
+type DapResponseError = Partial<DapErrorBody> & { message?: string };
 
 interface DapEventWaiter {
 	reject(error: Error): void;
@@ -489,7 +491,22 @@ export class DapClient {
 			pending.resolve(message.body);
 			return;
 		}
-		const errorMessage = message.message ?? `DAP request ${pending.command} failed`;
+		const baseMessage = message.message ?? `DAP request ${pending.command} failed`;
+		const bodyError = (message.body as { error?: string | DapResponseError } | undefined)?.error;
+		let bodyMessage: string | undefined;
+		if (typeof bodyError === "string") {
+			bodyMessage = bodyError;
+		} else if (bodyError) {
+			if (typeof bodyError.format === "string") {
+				bodyMessage = bodyError.format.replace(
+					/\{([^}]+)\}/g,
+					(match, key: string) => bodyError.variables?.[key] ?? match,
+				);
+			} else if (typeof bodyError.message === "string") {
+				bodyMessage = bodyError.message;
+			}
+		}
+		const errorMessage = bodyMessage && bodyMessage !== baseMessage ? `${baseMessage}: ${bodyMessage}` : baseMessage;
 		pending.reject(new Error(errorMessage));
 	}
 

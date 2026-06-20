@@ -195,6 +195,7 @@ function formatSessionSnapshot(snapshot: DapSessionSummary): string[] {
 	if (snapshot.program) lines.push(`Program: ${snapshot.program}`);
 	if (snapshot.stopReason) lines.push(`Stop reason: ${snapshot.stopReason}`);
 	if (snapshot.frameName) lines.push(`Frame: ${snapshot.frameName}`);
+	if (snapshot.frameId !== undefined) lines.push(`Frame id: #${snapshot.frameId}`);
 	if (snapshot.instructionPointerReference) {
 		lines.push(`Instruction pointer: ${snapshot.instructionPointerReference}`);
 	}
