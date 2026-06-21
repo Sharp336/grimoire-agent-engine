@@ -2,6 +2,37 @@
 
 ## [Unreleased]
 
+## [16.1.11] - 2026-06-21
+
+### Added
+
+- Added `tab.waitForSelector` for more robust element-wait behavior
+- Added `tab.waitForNavigation` to monitor and await page transitions
+
+### Changed
+
+- Standardized public HTML exports to use the brand web palette instead of the local TUI theme
+- Updated export logic to allow choosing between brand-web or local TUI color palettes
+- Clamped browser tool timeouts to fail fast with named errors instead of opaque cell timeouts
+- Added strict validation to block unsupported Playwright-only selector engines in browser tools
+
+### Fixed
+
+- Fixed Codex image reads re-encoding to WebP and then failing the next request with an invalid `input_image.image_url`; Codex-bound images now stay in PNG/JPEG-compatible formats.
+- Fixed prompt-template and file slash-command submissions rendering both the raw slash invocation and the expanded prompt in the interactive transcript. ([#3199](https://github.com/can1357/oh-my-pi/issues/3199))
+- Fixed the `/model` thinking picker labeling the OpenAI GPT-5.5 top effort as `max` instead of the catalog-declared `xhigh` ([#3194](https://github.com/can1357/oh-my-pi/issues/3194)).
+- Fixed session-title generation silently falling back to the online `smol` model (and billing whatever provider held the resolved API key — OpenRouter in the reporter's case) when the user had explicitly configured a **local** `providers.tinyModel`: `generateSessionTitle` raced local against online with a 10s timeout and fired the online request immediately whenever the local worker returned `null` (unknown key, model not downloaded, transformers.js failure). Now an explicit local-model choice is honored end-to-end — on local failure the session is left untitled with a `logger.warn` instead of billing the smol fallback ([#3187](https://github.com/can1357/oh-my-pi/issues/3187))
+- Fixed OpenCode MCP discovery so array commands are normalized into a stdio executable plus arguments, `environment` is accepted as the OpenCode env key, and argument lists are omitted when empty. ([#3180](https://github.com/can1357/oh-my-pi/issues/3180))
+- Fixed plan mode leaving `write` hidden under `tools.discoveryMode: "all"`, which made the agent attempt to create the plan file via `edit` and stall. Plan-mode entry now force-activates `write` whenever the registry built it, matching the `write`+`edit` instructions in the plan-mode prompt ([#3165](https://github.com/can1357/oh-my-pi/issues/3165))
+- Fixed `edit` and `patch` tool writes bypassing the ACP client's open buffer when Zed (or another ACP client) advertises the `fs.writeTextFile` capability: all three write-mode tools (`edit`, `patch`, `replace`) now route through the client bridge when it is available, so the editor's TypeScript diagnostics panel updates immediately instead of requiring a workspace reload.
+- Fixed the agent dashboard new-agent description and the hook editor (default hook-style mode) treating Ctrl+Q as plain text on Windows Terminal, leaving Windows users unable to submit because the terminal cannot deliver a distinct Ctrl+Enter event. Both forms now submit on the shared `app.message.followUp` chord (Ctrl+Q or Ctrl+Enter), matching the main prompt editor and any user remap of `app.message.followUp` ([#2118](https://github.com/can1357/oh-my-pi/issues/2118)).
+- Fixed `pi.sendMessage({ display: true })` rendering the custom message twice when fired from a `session_start` extension handler (or any other non-streaming dispatch before the initial transcript render). `ExtensionUiController.#applyCustomMessageDisplay` rebuilt the chat from the freshly-persisted session entry, and `main.ts`'s subsequent `renderInitialMessages(undefined, { preserveExistingChat: true })` then both re-rendered from session entries AND re-appended the preserved chat children — duplicating the message. The rebuild now waits until `renderInitialMessages` has completed at least once (tracked via `InteractiveModeContext.initialChatRendered`); after that, post-init extension sends still rebuild as before so messages from `tool_result` / `agent_end` / etc. surface immediately ([#1955](https://github.com/can1357/oh-my-pi/issues/1955)).
+- Fixed Git-mutating automation silently mis-handling pure Jujutsu workspaces (`.jj/repo/` present, no colocated `.git/`). `task/worktree.ts#getRepoRoot` previously threw a generic "Git repository not found" for isolated subagent setup, and `autoresearch/git.ts#ensureAutoresearchBranch` returned a soft "Not in a git repository" warning that let `/autoresearch` proceed with no branch isolation or auto-commits. Both paths now detect a pure jj workspace via the new `jj.isPureJjRepo` helper and surface an actionable Jujutsu-specific error pointing at `jj git init --colocate`. Colocated jj-git (both `.jj/` and `.git/` at the same root) and plain Git checkouts behave exactly as before ([#1935](https://github.com/can1357/oh-my-pi/issues/1935)).
+- Fixed `auto` thinking mode being silently dropped when a session is resumed (`--continue`/`--resume`/in-app switch). The session log persisted only the resolved per-turn effort, not the `auto` selector, so resume froze the session at the last concrete level and never reclassified again. The log now records the configured selector (`auto` vs concrete) alongside the resolved effort, so resumed `auto` sessions stay in auto (shown as pending until the next turn reclassifies) and manual concrete pins still restore as concrete — including a pin whose level matches the effort `auto` had just resolved to.
+- Fixed transcript scrollback stability on terminals with eager erase risk so completed assistant messages remain stable while new streaming lines are rendering
+- Fixed Hindsight retain (and the shared mnemopi/Hindsight recall paths) framing assistant turns whose only content was punctuation/whitespace — most commonly the lone `.` some providers emit for tool-call-only or thinking-only turns — into `[role: assistant]\n.\n[assistant:end]` blocks that polluted the bank, wasted retain tokens, and degraded recall. `prepareRetentionTranscript`, `extractMessages`, and `flattenMessagesForRecall` now require at least one letter or digit per message via a shared `hasSubstantiveContent` predicate ([#1806](https://github.com/can1357/oh-my-pi/issues/1806)).
+- Fixed `/resume` rendering forked child sessions without a fork tag, making them indistinguishable from their parent when titles match ([#1792](https://github.com/can1357/oh-my-pi/issues/1792)).
+
 ## [16.1.10] - 2026-06-21
 
 ### Added
