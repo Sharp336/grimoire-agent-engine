@@ -34,12 +34,10 @@ beforeAll(async () => {
 
 afterAll(async () => {
 	await closeCodemapDb(client);
-	// Give the libSQL client a moment to release file handles on Windows
-	await Bun.sleep(100);
 	try {
 		fs.rmSync(tmpDir, { recursive: true, force: true });
 	} catch {
-		// Best-effort cleanup — may fail on Windows if handles aren't fully released
+		// Best-effort cleanup — may fail on Windows if libSQL handles aren't fully released
 	}
 });
 
