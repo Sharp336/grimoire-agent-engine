@@ -1,19 +1,34 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import {
+	AuthStorage,
+	clearCustomApis,
+	registerCustomApi,
+	SqliteAuthCredentialStore,
+	startAuthGateway,
+} from "@oh-my-pi/pi-ai";
 import { encodeStream, formatError, parseRequest } from "@oh-my-pi/pi-ai/providers/pi-native-server";
 import type {
+	Api,
 	AssistantMessage,
 	AssistantMessageEvent,
-	AssistantMessageEventStream,
+	AssistantMessageEventStream as AssistantMessageEventStreamType,
 	Context,
+	Model,
+	SimpleStreamOptions,
 	Usage,
 } from "@oh-my-pi/pi-ai/types";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
-function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
+function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStreamType {
 	async function* iter() {
 		for (const e of events) yield e;
 	}
-	const stream = iter() as unknown as AssistantMessageEventStream;
+	const stream = iter() as unknown as AssistantMessageEventStreamType;
 	(stream as { result(): Promise<AssistantMessage> }).result = async () => final;
 	return stream;
 }
@@ -64,6 +79,10 @@ const baseContext: Context = {
 	systemPrompt: ["you are helpful"],
 	messages: [{ role: "user", content: "hi", timestamp: 0 }],
 };
+
+afterEach(() => {
+	clearCustomApis();
+});
 
 describe("pi-native parseRequest", () => {
 	it("accepts modelId + context and returns canonical shape", () => {
@@ -267,6 +286,289 @@ describe("pi-native encodeStream", () => {
 		expect((parsed[0] as { type: string }).type).toBe("start");
 		expect(parsed[1]).toEqual({ type: "error", reason: "error", errorMessage: "connection reset" });
 		expect(parsed[2]).toBe("[DONE]");
+	});
+});
+
+describe("auth-gateway model listing", () => {
+	it("returns qualified ids and OMP metadata for listed models", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-gateway-models-list-"));
+		const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const storage = new AuthStorage(store);
+		await storage.reload();
+		const handle = startAuthGateway({
+			storage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			resolveModel: () => undefined,
+			listModels: () => [
+				buildModel({
+					id: "same-id",
+					name: "Acme Same",
+					provider: "acme",
+					api: "openai-completions",
+					baseUrl: "https://acme.example/v1",
+					reasoning: true,
+					input: ["text", "image"],
+					cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
+					contextWindow: 123456,
+					maxTokens: 7890,
+					supportsTools: true,
+				}),
+				buildModel({
+					id: "same-id",
+					name: "Beta Same",
+					provider: "beta",
+					api: "openai-completions",
+					baseUrl: "https://beta.example/v1",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 64000,
+					maxTokens: 2048,
+				}),
+			],
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/models`);
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as { data: Array<Record<string, unknown>> };
+			expect(body.data.map(item => item.id)).toEqual(["acme/same-id", "beta/same-id"]);
+			expect(body.data[0]).toMatchObject({
+				id: "acme/same-id",
+				owned_by: "acme",
+				api: "openai-completions",
+				name: "Acme Same",
+				reasoning: true,
+				input: ["text", "image"],
+				contextWindow: 123456,
+				maxTokens: 7890,
+				supportsTools: true,
+				cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
+			});
+		} finally {
+			await handle.close();
+			storage.close();
+			store.close();
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+});
+
+describe("pi-native keyless gateway dispatch", () => {
+	it("allows auth:none catalog models without broker credentials", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-gateway-keyless-"));
+		const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const storage = new AuthStorage(store);
+		await storage.reload();
+		const final = baseAssistant({ api: "keyless-test-api", provider: "keyless", model: "free-chat" });
+		const seenKeys: unknown[] = [];
+		registerCustomApi("keyless-test-api", (_model: Model<Api>, _context: Context, options?: SimpleStreamOptions) => {
+			seenKeys.push(options?.apiKey);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => stream.end(final));
+			return stream;
+		});
+		const handle = startAuthGateway({
+			storage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			resolveModel: () => ({
+				...buildModel({
+					id: "free-chat",
+					name: "Free Chat",
+					provider: "keyless",
+					api: "keyless-test-api",
+					baseUrl: "https://keyless.example/v1",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 16384,
+				}),
+				auth: "none" as const,
+			}),
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: "keyless/free-chat", context: baseContext, stream: false }),
+			});
+			expect(res.status).toBe(200);
+			expect(await res.json()).toEqual({ message: JSON.parse(JSON.stringify(final)) });
+			expect(seenKeys).toEqual([undefined]);
+		} finally {
+			await handle.close();
+			storage.close();
+			store.close();
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+	it("routes pi-native qualified remote ids without local gateway provider prefix", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-gateway-qualified-pi-native-"));
+		const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const storage = new AuthStorage(store);
+		await storage.setRuntimeApiKey("acme", "test-key");
+		await storage.reload();
+		let requestedModelId: string | undefined;
+		const final = baseAssistant({ api: "qualified-test-api", provider: "acme", model: "same-id" });
+		registerCustomApi("qualified-test-api", (model: Model<Api>) => {
+			requestedModelId = model.id;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => stream.end(final));
+			return stream;
+		});
+		const handle = startAuthGateway({
+			storage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			resolveModel: id => {
+				if (id !== "acme/same-id") return undefined;
+				return buildModel({
+					id: "same-id",
+					name: "Acme Same",
+					provider: "acme",
+					api: "qualified-test-api",
+					baseUrl: "https://acme.example/v1",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 16384,
+				});
+			},
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: "acme/same-id", context: baseContext, stream: false }),
+			});
+			expect(res.status).toBe(200);
+			expect((await res.json()) as { message: unknown }).toEqual({ message: JSON.parse(JSON.stringify(final)) });
+			expect(requestedModelId).toBe("same-id");
+		} finally {
+			await handle.close();
+			storage.close();
+			store.close();
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps local provider prefix for slashy non-gateway model ids", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-gateway-slashy-pi-native-"));
+		const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const storage = new AuthStorage(store);
+		await storage.reload();
+		let requestedModelId: string | undefined;
+		await storage.setRuntimeApiKey("openrouter", "test-key");
+		const final = baseAssistant({ api: "slashy-test-api", provider: "openrouter", model: "anthropic/claude-sonnet" });
+		registerCustomApi("slashy-test-api", (model: Model<Api>) => {
+			requestedModelId = `${model.provider}/${model.id}`;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => stream.end(final));
+			return stream;
+		});
+		const handle = startAuthGateway({
+			storage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			resolveModel: id => {
+				if (id !== "openrouter/anthropic/claude-sonnet") return undefined;
+				return buildModel({
+					id: "anthropic/claude-sonnet",
+					name: "OpenRouter Claude",
+					provider: "openrouter",
+					api: "slashy-test-api",
+					baseUrl: "https://openrouter.example/v1",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 16384,
+				});
+			},
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({
+					modelId: "openrouter/anthropic/claude-sonnet",
+					context: baseContext,
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(200);
+			expect(requestedModelId).toBe("openrouter/anthropic/claude-sonnet");
+		} finally {
+			await handle.close();
+			storage.close();
+			store.close();
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("allows auth:none OpenAI-compatible models without broker credentials", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-gateway-keyless-openai-"));
+		const store = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
+		const storage = new AuthStorage(store);
+		await storage.reload();
+		await storage.setRuntimeApiKey("keyless-openai", "must-not-leak");
+		let receivedAuthorization: string | null = null;
+		const upstream = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: async request => {
+				receivedAuthorization = request.headers.get("authorization");
+				return new Response(
+					[
+						'data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{"content":"ok"}}]}',
+						'data: {"id":"chatcmpl-test","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}',
+						"data: [DONE]",
+						"",
+					].join("\n\n"),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				);
+			},
+		});
+		const handle = startAuthGateway({
+			storage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [],
+			resolveModel: () => ({
+				...buildModel({
+					id: "free-chat",
+					name: "Free Chat",
+					provider: "keyless-openai",
+					api: "openai-completions",
+					baseUrl: `http://127.0.0.1:${upstream.port}/v1`,
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128000,
+					maxTokens: 16384,
+				}),
+				auth: "none" as const,
+			}),
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/pi/stream`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json" },
+				body: JSON.stringify({ modelId: "keyless-openai/free-chat", context: baseContext, stream: false }),
+			});
+			expect(res.status).toBe(200);
+			const body = (await res.json()) as { message: { content: unknown } };
+			expect(body.message.content).toEqual([{ type: "text", text: "ok" }]);
+			expect(receivedAuthorization).toBeNull();
+		} finally {
+			await handle.close();
+			upstream.stop(true);
+			storage.close();
+			store.close();
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });
 

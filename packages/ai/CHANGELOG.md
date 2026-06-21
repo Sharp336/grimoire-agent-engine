@@ -195,6 +195,21 @@
 - Fixed OpenRouter Responses requests tagging the streamed assistant message with a hardcoded `openai-responses` API instead of the runtime `model.api`, which silently disabled native-history replay (`buildResponsesInput`) and cross-model tool-call item-id stripping on subsequent OpenRouter turns. The message now carries `model.api` (matching the Chat Completions path).
 - Fixed OpenAI-family streaming leaking a pre-retry `errorMessage` onto a successful turn: the OpenRouter Anthropic compiled-grammar strict-tool fallback set `errorMessage` before retrying with strict tools disabled and never cleared it on success, and the Chat Completions success path could carry an `errorMessage` from an internally-retried attempt — both made a successful turn read as errored in agent state and telemetry. The Responses fallback no longer assigns `errorMessage`, and the Completions success path clears it before emitting the terminal `done` event.
 - Fixed Codex stream-error `.code` resolution to use the same nested-first precedence (`error.code` → `error.type` → top-level `code`) as `isRetryableCodexFailureEvent` and the formatted message. Previously the error factory resolved top-level-first, so a failure event carrying both a top-level and a differing nested error code surfaced a `.code` that could disagree with its own `retryable` flag and message text.
+### Added
+
+- Added auth-broker catalog wire schemas, `AuthBrokerClient.fetchCatalog()`, and `RemoteAuthCredentialStore` catalog-change callbacks for forward-compatible gateway catalog integration.
+- Added broker-side `/v1/models-config` serving and `/v1/catalog/reload` with `catalog-changed` SSE pulses for shared catalog reloads.
+- Added encrypted broker catalog cache helpers for gateway offline boot from the latest sanitized catalog.
+
+### Changed
+
+- Changed auth-gateway model listing to return provider-qualified model IDs with OMP metadata so broker catalog clients can distinguish duplicate model IDs.
+
+### Fixed
+
+- Fixed auth-broker snapshot stream clients to ignore unknown future events after the initial snapshot while still surfacing `catalog-changed` events.
+- Fixed broker-catalog `auth: none` OpenAI-compatible models so gateway requests do not require or inject API keys.
+- Fixed pi-native gateway routing for provider-qualified catalog model IDs so clients do not prepend their local gateway provider name.
 
 ## [16.0.5] - 2026-06-17
 

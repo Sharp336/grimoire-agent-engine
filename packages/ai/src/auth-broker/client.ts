@@ -15,6 +15,7 @@ import type {
 	CredentialUploadRequest,
 	CredentialUploadResponse,
 	HealthzResponse,
+	ModelsConfigResponse,
 	SnapshotResponse,
 	SnapshotStreamEvent,
 	UsageResponse,
@@ -24,6 +25,7 @@ import {
 	credentialRefreshResponseSchema,
 	credentialUploadResponseSchema,
 	healthzResponseSchema,
+	modelsConfigResponseSchema,
 	snapshotResponseSchema,
 	snapshotStreamEventSchema,
 	usageResponseSchema,
@@ -89,6 +91,13 @@ function parseGenerationTag(header: string | null): number | undefined {
 
 const DEFAULT_TIMEOUT_MS = 10_000;
 const DEFAULT_MAX_RETRIES = 1;
+const KNOWN_SNAPSHOT_STREAM_EVENT_KINDS = new Set<string>(["snapshot", "entry", "removed", "catalog-changed"]);
+
+function readStreamEventKind(value: unknown): string | undefined {
+	if (typeof value !== "object" || value === null || !("kind" in value)) return undefined;
+	const kind = value.kind;
+	return typeof kind === "string" ? kind : undefined;
+}
 
 export class AuthBrokerClient {
 	readonly #baseUrl: string;
@@ -202,6 +211,8 @@ export class AuthBrokerClient {
 			}
 			const validated = snapshotStreamEventSchema(parsed);
 			if (validated instanceof type.errors) {
+				const kind = readStreamEventKind(parsed);
+				if (sawFirstEvent && !KNOWN_SNAPSHOT_STREAM_EVENT_KINDS.has(kind ?? "")) continue;
 				throw new AuthBrokerError("Auth broker stream event failed schema validation", {
 					body: validated.summary,
 				});
@@ -223,6 +234,13 @@ export class AuthBrokerClient {
 				{ status: response.status },
 			);
 		}
+	}
+
+	fetchCatalog(signal?: AbortSignal): Promise<ModelsConfigResponse> {
+		return this.#request("GET", "/v1/models-config", {
+			schema: modelsConfigResponseSchema,
+			signal,
+		}) as Promise<ModelsConfigResponse>;
 	}
 
 	fetchUsage(signal?: AbortSignal): Promise<UsageResponse> {

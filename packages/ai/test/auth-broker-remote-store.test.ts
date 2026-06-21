@@ -130,4 +130,26 @@ describe("RemoteAuthCredentialStore SSE integration", () => {
 		expect(callbacks[0].generation).toBe(refreshed.generation);
 		expect(callbacks[0].snapshot).toEqual(refreshed);
 	});
+
+	test("calls onCatalogChanged when the broker stream reports catalog changes", async () => {
+		const client = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await client.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected initial snapshot");
+		const events: Array<{ kind: "catalog-changed"; generatedAt: number }> = [];
+		vi.spyOn(client, "openSnapshotStream").mockImplementation(async function* () {
+			yield { kind: "snapshot", ...initialResult.snapshot };
+			yield { kind: "catalog-changed", generatedAt: 444 };
+			await new Promise<never>(() => {});
+		});
+		remote = new RemoteAuthCredentialStore({
+			client,
+			onCatalogChanged: event => {
+				events.push(event);
+			},
+		});
+
+		await waitUntil(() => events.length === 1);
+
+		expect(events).toEqual([{ kind: "catalog-changed", generatedAt: 444 }]);
+	});
 });

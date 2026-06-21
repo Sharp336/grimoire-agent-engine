@@ -651,6 +651,88 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(fallback?.contextWindow).toBe(128000);
 	});
 
+	test("openai-models-list discovery preserves gateway-qualified OMP metadata", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9997",
+				api: "openai-completions",
+				auth: "none",
+				transport: "pi-native",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9997/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "acme/same-id",
+								name: "Acme Same",
+								owned_by: "acme",
+								api: "openai-completions",
+								reasoning: true,
+								input: ["text", "image"],
+								cost: { input: 1, output: 2, cacheRead: 3, cacheWrite: 4 },
+								contextWindow: 123456,
+								maxTokens: 7890,
+								supportsTools: true,
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("gateway", "acme/same-id");
+		expect(model?.provider).toBe("gateway");
+		expect(model?.id).toBe("acme/same-id");
+		expect(model?.name).toBe("Acme Same");
+		expect(model?.transport).toBe("pi-native");
+		expect(model?.reasoning).toBe(true);
+		expect(model?.input).toEqual(["text", "image"]);
+		expect(model?.cost).toEqual({ input: 1, output: 2, cacheRead: 3, cacheWrite: 4 });
+		expect(model?.contextWindow).toBe(123456);
+		expect(model?.maxTokens).toBe(7890);
+		expect(model?.supportsTools).toBe(true);
+	});
+
+	test("openai-models-list discovery ignores invalid API-reported input modalities", async () => {
+		writeRawModelsJson({
+			gateway: {
+				baseUrl: "http://127.0.0.1:9996",
+				api: "openai-completions",
+				auth: "none",
+				discovery: { type: "openai-models-list" },
+			},
+		});
+		const fetchMock: FetchImpl = async input => {
+			const url = String(input);
+			if (url === "http://127.0.0.1:9996/v1/models") {
+				return new Response(
+					JSON.stringify({
+						data: [
+							{
+								id: "acme/audio-model",
+								input: ["text", "audio"],
+							},
+						],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+		await registry.refresh();
+		const model = registry.find("gateway", "acme/audio-model");
+		expect(model?.input).toEqual(["text"]);
+	});
+
 	test("proxy discovery honors API-reported context_length and endpoint routing", async () => {
 		writeRawModelsJson({
 			"proxy-test": {

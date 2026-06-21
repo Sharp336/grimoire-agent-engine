@@ -451,4 +451,14 @@ describe("streamSimple resolver auth retry", () => {
 		expect((caught as Error).message).toMatch(/No API key for provider/);
 		expect(attempts).toBe(0);
 	});
+
+	it("rejects auth:none for APIs without explicit keyless support", async () => {
+		const keylessAnthropic = {
+			...model(),
+			api: "anthropic-messages",
+			provider: "anthropic",
+			auth: "none",
+		} as Model<Api>;
+		expect(() => streamSimple(keylessAnthropic, context)).toThrow(/does not support auth:none/);
+	});
 });

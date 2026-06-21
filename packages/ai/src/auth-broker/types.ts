@@ -6,6 +6,7 @@
  * credential expires or a 401 surfaces on a supposedly-fresh credential.
  */
 
+import type { Api, ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import type { AuthCredential, AuthCredentialSnapshot, AuthCredentialSnapshotEntry } from "../auth-storage";
 import type { UsageReport } from "../usage";
 
@@ -74,7 +75,7 @@ export interface CredentialUploadResponse {
  * `kind` field inside the JSON body so a Zod discriminated union can validate
  * the payload without consulting the line metadata.
  */
-export type SnapshotStreamEventKind = "snapshot" | "entry" | "removed";
+export type SnapshotStreamEventKind = "snapshot" | "entry" | "removed" | "catalog-changed";
 
 /** Initial frame emitted on connect — the full {@link SnapshotResponse}. */
 export interface SnapshotStreamSnapshotEvent extends SnapshotResponse {
@@ -99,8 +100,55 @@ export interface SnapshotStreamRemovedEvent {
 	id: number;
 }
 
+/** Broker-side catalog changed; clients should refetch `GET /v1/models-config`. */
+export interface SnapshotStreamCatalogChangedEvent {
+	kind: "catalog-changed";
+	generatedAt: number;
+}
+
+export interface SanitizedModelDefinition extends Partial<ModelSpec<Api>> {
+	id: string;
+}
+
+export type SanitizedModelOverride = Partial<Omit<ModelSpec<Api>, "id" | "provider">>;
+
+export interface SanitizedProviderDiscoveryConfig {
+	type: string;
+	[key: string]: unknown;
+}
+
+export interface SanitizedProviderConfig {
+	baseUrl?: string;
+	api?: Api;
+	headers?: Record<string, string>;
+	authHeader?: false;
+	auth?: "apiKey" | "none" | "oauth";
+	discovery?: SanitizedProviderDiscoveryConfig;
+	models?: SanitizedModelDefinition[];
+	modelOverrides?: Record<string, SanitizedModelOverride>;
+	disableStrictTools?: boolean;
+	compat?: ModelSpec<Api>["compat"];
+	[key: string]: unknown;
+}
+
+export interface ModelsConfigResponse {
+	generatedAt: number;
+	schemaVersion: 1;
+	providers: Record<string, SanitizedProviderConfig>;
+	equivalence?: {
+		overrides?: Record<string, string>;
+		exclude?: string[];
+		[key: string]: unknown;
+	};
+	[key: string]: unknown;
+}
+
 /** Discriminated union of every event the snapshot stream emits. */
-export type SnapshotStreamEvent = SnapshotStreamSnapshotEvent | SnapshotStreamEntryEvent | SnapshotStreamRemovedEvent;
+export type SnapshotStreamEvent =
+	| SnapshotStreamSnapshotEvent
+	| SnapshotStreamEntryEvent
+	| SnapshotStreamRemovedEvent
+	| SnapshotStreamCatalogChangedEvent;
 
 /**
  * Default bearer-protected route prefix. The broker exposes `/v1/healthz`

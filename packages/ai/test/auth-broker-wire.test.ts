@@ -6,11 +6,15 @@ import { AuthStorage, REMOTE_REFRESH_SENTINEL, SqliteAuthCredentialStore } from 
 import {
 	AuthBrokerClient,
 	type AuthBrokerServerHandle,
+	type AuthBrokerServerOptions,
 	AuthBrokerStreamUnsupportedError,
+	type ModelsConfigResponse,
 	type SnapshotStreamEvent,
 	startAuthBroker,
 } from "@oh-my-pi/pi-ai/auth-broker";
+import { modelsConfigResponseSchema } from "@oh-my-pi/pi-ai/auth-broker/wire-schemas";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
+import { type } from "arktype";
 
 const ANTHROPIC_ENV = ["ANTHROPIC_API_KEY", "ANTHROPIC_OAUTH_TOKEN"] as const;
 const savedEnv: Partial<Record<(typeof ANTHROPIC_ENV)[number], string | undefined>> = {};
@@ -180,9 +184,357 @@ describe("auth-broker wire surface", () => {
 		expect(res.status).toBe(404);
 	});
 
+	test("GET /v1/models-config client validates broker catalog responses", async () => {
+		const served = {
+			generatedAt: 123_456,
+			schemaVersion: 1 as const,
+			providers: {
+				acme: {
+					baseUrl: "https://acme.example/v1",
+					api: "openai-completions",
+					headers: { "X-Acme": "served" },
+					authHeader: false as const,
+					auth: "oauth" as const,
+					discovery: { type: "openai-models-list", future: "kept" },
+					models: [
+						{
+							id: "acme-model",
+							name: "Acme Model",
+							api: "openai-completions",
+							baseUrl: "https://acme.example/v1",
+							reasoning: true,
+							input: ["text" as const],
+							supportsTools: true,
+							cost: { input: 1, output: 2, cacheRead: 0.25, cacheWrite: 0.5 },
+							contextWindow: 128_000,
+							maxTokens: 8192,
+							headers: { "X-Model": "served" },
+							compat: { supportsDeveloperRole: true },
+							futureModelField: "kept",
+						},
+					],
+					modelOverrides: {
+						"acme-model": {
+							maxTokens: 4096,
+							compat: { supportsStrictMode: false },
+							futureOverrideField: "kept",
+						},
+					},
+					disableStrictTools: true,
+					compat: { requiresToolResultName: true },
+					futureProviderField: "kept",
+				},
+			},
+			equivalence: {
+				overrides: { "acme/alias": "acme/acme-model" },
+				exclude: ["acme/hidden"],
+				futureEquivalenceField: "kept",
+			},
+			futureTopLevelField: "kept",
+		};
+		const dummy = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: request => {
+				expect(new URL(request.url).pathname).toBe("/v1/models-config");
+				expect(request.headers.get("authorization")).toBe(`Bearer ${token}`);
+				return Response.json(served);
+			},
+		});
+		try {
+			const client = new AuthBrokerClient({ url: `http://${dummy.hostname}:${dummy.port}`, token });
+
+			const catalog = await client.fetchCatalog();
+
+			expect(catalog).toEqual(served);
+			expect(catalog.providers.acme).not.toHaveProperty("apiKey");
+			expect(catalog.providers.acme).not.toHaveProperty("transport");
+		} finally {
+			dummy.stop(true);
+		}
+	});
+
+	test("GET /v1/models-config serves the broker catalog callback", async () => {
+		const catalog: ModelsConfigResponse = {
+			generatedAt: 321,
+			schemaVersion: 1,
+			providers: {
+				acme: {
+					baseUrl: "https://acme.example/v1",
+					api: "openai-completions",
+					headers: { "X-Team": "platform" },
+					models: [{ id: "acme-model", name: "Acme Model" }],
+				},
+			},
+		};
+		const localStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "catalog.db"));
+		const localStorage = new AuthStorage(localStore);
+		await localStorage.reload();
+		const localHandle = startAuthBroker({
+			storage: localStorage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [token],
+			disableRefresher: true,
+			getSharedCatalog: () => catalog,
+		} as AuthBrokerServerOptions & { getSharedCatalog: () => ModelsConfigResponse });
+		try {
+			const client = new AuthBrokerClient({ url: localHandle.url, token });
+
+			await expect(client.fetchCatalog()).resolves.toEqual(catalog);
+		} finally {
+			await localHandle.close();
+			localStorage.close();
+			localStore.close();
+		}
+	});
+
+	test("POST /v1/catalog/reload calls broker reload and emits catalog-changed", async () => {
+		let generatedAt = 400;
+		const localStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "catalog-reload.db"));
+		const localStorage = new AuthStorage(localStore);
+		await localStorage.reload();
+		const localHandle = startAuthBroker({
+			storage: localStorage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [token],
+			disableRefresher: true,
+			getSharedCatalog: () => ({ generatedAt, schemaVersion: 1, providers: {} }),
+			reloadSharedCatalog: async () => {
+				generatedAt = 401;
+				return { generatedAt, schemaVersion: 1, providers: {} };
+			},
+		} as AuthBrokerServerOptions & {
+			getSharedCatalog: () => ModelsConfigResponse;
+			reloadSharedCatalog: () => Promise<ModelsConfigResponse>;
+		});
+		const controller = new AbortController();
+		const client = new AuthBrokerClient({ url: localHandle.url, token });
+		const iter = client.openSnapshotStream({ signal: controller.signal });
+		try {
+			const first = await iter.next();
+			if (first.done) throw new Error("expected snapshot frame");
+
+			const reloadResponse = await fetch(`${localHandle.url}/v1/catalog/reload`, {
+				method: "POST",
+				headers: { Authorization: `Bearer ${token}` },
+			});
+
+			expect(reloadResponse.status).toBe(200);
+			expect(await reloadResponse.json()).toEqual({ generatedAt: 401 });
+			const event = await nextMatching(iter, value => value.kind === "catalog-changed");
+			expect(event).toEqual({ kind: "catalog-changed", generatedAt: 401 });
+		} finally {
+			controller.abort();
+			await iter.return(undefined).catch(() => {});
+			await localHandle.close();
+			localStorage.close();
+			localStore.close();
+		}
+	});
+
+	test("server handle can emit catalog-changed for background reloads", async () => {
+		const localStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "catalog-background-reload.db"));
+		const localStorage = new AuthStorage(localStore);
+		await localStorage.reload();
+		const localHandle = startAuthBroker({
+			storage: localStorage,
+			bind: "127.0.0.1:0",
+			bearerTokens: [token],
+			disableRefresher: true,
+			getSharedCatalog: () => ({ generatedAt: 500, schemaVersion: 1, providers: {} }),
+		});
+		const controller = new AbortController();
+		const client = new AuthBrokerClient({ url: localHandle.url, token });
+		const iter = client.openSnapshotStream({ signal: controller.signal });
+		try {
+			const first = await iter.next();
+			if (first.done) throw new Error("expected snapshot frame");
+
+			localHandle.emitCatalogChanged(501);
+			const event = await nextMatching(iter, value => value.kind === "catalog-changed");
+			expect(event).toEqual({ kind: "catalog-changed", generatedAt: 501 });
+		} finally {
+			controller.abort();
+			await iter.return(undefined).catch(() => {});
+			await localHandle.close();
+			localStorage.close();
+			localStore.close();
+		}
+	});
+
+	test("catalog response schema rejects credential-bearing provider config", () => {
+		const parsed = modelsConfigResponseSchema({
+			generatedAt: 1,
+			schemaVersion: 1,
+			providers: {
+				unsafe: {
+					baseUrl: "https://unsafe.example/v1",
+					apiKey: "secret",
+				},
+			},
+		});
+
+		expect(parsed instanceof type.errors).toBe(true);
+	});
+
 	test("GET /v1/snapshot/stream requires bearer", async () => {
 		const res = await fetch(`${handle!.url}/v1/snapshot/stream`);
 		expect(res.status).toBe(401);
+	});
+
+	test("SSE stream ignores unknown future events after initial snapshot", async () => {
+		const snapshotResult = await new AuthBrokerClient({ url: handle!.url, token }).fetchSnapshot();
+		if (snapshotResult.status !== 200) throw new Error("expected snapshot");
+		const dummy = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				new Response(
+					[
+						`event: snapshot`,
+						`data: ${JSON.stringify({ kind: "snapshot", ...snapshotResult.snapshot })}`,
+						"",
+						`event: future-event`,
+						`data: ${JSON.stringify({ kind: "future-event", payload: { value: 1 } })}`,
+						"",
+						`event: entry`,
+						`data: ${JSON.stringify({
+							kind: "entry",
+							generation: snapshotResult.generation + 1,
+							serverNowMs: Date.now(),
+							refresher: snapshotResult.snapshot.refresher,
+							entry: { ...snapshotResult.snapshot.credentials[0], rotatesInMs: null },
+						})}`,
+						"",
+					].join("\n"),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				),
+		});
+		const controller = new AbortController();
+		try {
+			const client = new AuthBrokerClient({ url: `http://${dummy.hostname}:${dummy.port}`, token });
+			const iter = client.openSnapshotStream({ signal: controller.signal });
+			const first = await iter.next();
+			if (first.done) throw new Error("expected snapshot frame");
+			expect(first.value.kind).toBe("snapshot");
+
+			const next = await iter.next();
+
+			if (next.done) throw new Error("expected entry frame");
+			expect(next.value.kind).toBe("entry");
+		} finally {
+			controller.abort();
+			dummy.stop(true);
+		}
+	});
+
+	test("SSE stream yields catalog-changed events", async () => {
+		const snapshotResult = await new AuthBrokerClient({ url: handle!.url, token }).fetchSnapshot();
+		if (snapshotResult.status !== 200) throw new Error("expected snapshot");
+		const catalogEvent = { kind: "catalog-changed" as const, generatedAt: 987_654 };
+		const dummy = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				new Response(
+					[
+						`event: snapshot`,
+						`data: ${JSON.stringify({ kind: "snapshot", ...snapshotResult.snapshot })}`,
+						"",
+						`event: catalog-changed`,
+						`data: ${JSON.stringify(catalogEvent)}`,
+						"",
+					].join("\n"),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				),
+		});
+		const controller = new AbortController();
+		try {
+			const client = new AuthBrokerClient({ url: `http://${dummy.hostname}:${dummy.port}`, token });
+			const iter = client.openSnapshotStream({ signal: controller.signal });
+			const first = await iter.next();
+			if (first.done) throw new Error("expected snapshot frame");
+
+			const next = await iter.next();
+
+			if (next.done) throw new Error("expected catalog frame");
+			expect(next.value).toEqual(catalogEvent);
+		} finally {
+			controller.abort();
+			dummy.stop(true);
+		}
+	});
+
+	test("SSE stream ignores unknown future events before catalog-changed", async () => {
+		const snapshotResult = await new AuthBrokerClient({ url: handle!.url, token }).fetchSnapshot();
+		if (snapshotResult.status !== 200) throw new Error("expected snapshot");
+		const dummy = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				new Response(
+					[
+						`event: snapshot`,
+						`data: ${JSON.stringify({ kind: "snapshot", ...snapshotResult.snapshot })}`,
+						"",
+						`event: mystery`,
+						`data: ${JSON.stringify({ kind: "mystery", value: 1 })}`,
+						"",
+						`event: catalog-changed`,
+						`data: ${JSON.stringify({ kind: "catalog-changed", generatedAt: 42 })}`,
+						"",
+					].join("\n"),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				),
+		});
+		const controller = new AbortController();
+		try {
+			const client = new AuthBrokerClient({ url: `http://${dummy.hostname}:${dummy.port}`, token });
+			const iter = client.openSnapshotStream({ signal: controller.signal });
+			const first = await iter.next();
+			if (first.done) throw new Error("expected snapshot frame");
+
+			const next = await iter.next();
+
+			if (next.done) throw new Error("expected catalog frame");
+			expect(next.value.kind).toBe("catalog-changed");
+		} finally {
+			controller.abort();
+			dummy.stop(true);
+		}
+	});
+
+	test("SSE stream rejects malformed known events after initial snapshot", async () => {
+		const snapshotResult = await new AuthBrokerClient({ url: handle!.url, token }).fetchSnapshot();
+		if (snapshotResult.status !== 200) throw new Error("expected snapshot");
+		const dummy = Bun.serve({
+			hostname: "127.0.0.1",
+			port: 0,
+			fetch: () =>
+				new Response(
+					[
+						`event: snapshot`,
+						`data: ${JSON.stringify({ kind: "snapshot", ...snapshotResult.snapshot })}`,
+						"",
+						`event: catalog-changed`,
+						`data: ${JSON.stringify({ kind: "catalog-changed" })}`,
+						"",
+					].join("\n"),
+					{ headers: { "Content-Type": "text/event-stream" } },
+				),
+		});
+		const controller = new AbortController();
+		try {
+			const client = new AuthBrokerClient({ url: `http://${dummy.hostname}:${dummy.port}`, token });
+			const iter = client.openSnapshotStream({ signal: controller.signal });
+			const first = await iter.next();
+			if (first.done) throw new Error("expected snapshot frame");
+
+			await expect(iter.next()).rejects.toThrow(/schema validation/);
+		} finally {
+			controller.abort();
+			dummy.stop(true);
+		}
 	});
 
 	test("SSE stream emits initial snapshot then upsert delta", async () => {

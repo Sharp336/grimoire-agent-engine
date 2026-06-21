@@ -386,15 +386,19 @@ const streamOpenAIResponsesOnce = (
 			// avoid perturbing provider conversation state without cold-starting the cache.
 			const routingSessionId = getOpenAIResponsesRoutingSessionId(options);
 			const promptCacheSessionId = getOpenAIResponsesPromptCacheKey(options);
-			const apiKey = options?.apiKey || getEnvApiKey(model.provider) || "";
+			const keyless = model.auth === "none";
+			const apiKey = options?.apiKey || (keyless ? "" : getEnvApiKey(model.provider) || "");
 			const { headers, copilotPremiumRequests, baseUrl } = resolveOpenAIRequestSetup(model, {
-				apiKey,
+				apiKey: keyless ? "unused-keyless-api-key" : apiKey,
 				extraHeaders: options?.headers,
 				initiatorOverride: options?.initiatorOverride,
 				messages: context.messages,
 				openAISessionId: routingSessionId,
 				promptCacheSessionId,
 			});
+			if (keyless) {
+				delete headers.Authorization;
+			}
 			const premiumRequestsTotal = copilotPremiumRequests;
 			const providerSessionState = getOpenAIResponsesProviderSessionState(model, options?.providerSessionState);
 			const strictToolsScope = getOpenAIStrictToolsScope(model, baseUrl);

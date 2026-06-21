@@ -22,13 +22,25 @@ import {
 	type CompletionProbeInput,
 	type CredentialCompletionResult,
 	completeSimple,
+	DEFAULT_CATALOG_CACHE_TTL_MS,
 	type Model,
+	type ModelsConfigResponse,
+	readAuthBrokerCatalogCache,
+	writeAuthBrokerCatalogCache,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, RemoteAuthCredentialStore, type SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker";
 import { DEFAULT_AUTH_GATEWAY_BIND, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { type GeneratedProvider, getBundledModels, getBundledProviders } from "@oh-my-pi/pi-catalog/models";
-import { getConfigRootDir, isEnoent, VERSION } from "@oh-my-pi/pi-utils";
+import { getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import {
+	buildCustomModelOverlay,
+	finalizeCustomModel,
+	type ModelPatch,
+	mergeCompat,
+} from "../config/custom-model-builder";
+import type { ProviderAuthMode } from "../config/models-config-schema";
+import { settings } from "../config/settings";
 import { type AuthBrokerClientConfig, resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
 export type AuthGatewayAction = "serve" | "token" | "status" | "check";
@@ -61,6 +73,8 @@ const ACTIONS: readonly AuthGatewayAction[] = ["serve", "token", "status", "chec
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-gateway.token");
 }
+
+const DEFAULT_GATEWAY_CATALOG_POLL_INTERVAL_MS = 60_000;
 
 async function readToken(): Promise<string | null> {
 	try {
@@ -135,6 +149,309 @@ async function fetchBrokerSnapshot(client: AuthBrokerClient): Promise<SnapshotRe
 	return result.snapshot;
 }
 
+export interface GatewayCatalogConfig {
+	enabled: boolean;
+	allowedBaseUrls: readonly string[];
+}
+
+export type GatewayCatalogModel = Model<Api> & { auth?: "none" };
+
+export interface GatewayModelIndex {
+	models: GatewayCatalogModel[];
+	byId: Map<string, GatewayCatalogModel>;
+}
+
+function addGatewayModel(
+	qualifiedModels: Map<string, GatewayCatalogModel>,
+	bareModels: Map<string, GatewayCatalogModel>,
+	model: GatewayCatalogModel,
+): void {
+	const key = `${model.provider}/${model.id}`;
+	const replacesExistingQualified = qualifiedModels.has(key);
+	qualifiedModels.set(key, model);
+	if (replacesExistingQualified || !bareModels.has(model.id)) bareModels.set(model.id, model);
+}
+
+export function isGatewayCatalogBaseUrlAllowed(baseUrl: string, allowlist: readonly string[]): boolean {
+	if (allowlist.length === 0) return true;
+	let candidate: URL;
+	try {
+		candidate = new URL(baseUrl);
+	} catch {
+		return false;
+	}
+	return allowlist.some(entry => {
+		let allowed: URL;
+		try {
+			allowed = new URL(entry);
+		} catch {
+			return false;
+		}
+		if (candidate.protocol !== allowed.protocol) return false;
+		if (candidate.hostname !== allowed.hostname) return false;
+		if (candidate.port !== allowed.port) return false;
+		const prefix = allowed.pathname.endsWith("/") ? allowed.pathname : `${allowed.pathname}/`;
+		return candidate.pathname === allowed.pathname || candidate.pathname.startsWith(prefix);
+	});
+}
+
+function providerHasCredential(snapshot: SnapshotResponse, provider: string): boolean {
+	return snapshot.credentials.some(entry => entry.provider === provider);
+}
+
+function toModelPatch(
+	patch: NonNullable<ModelsConfigResponse["providers"][string]["modelOverrides"]>[string] | undefined,
+): ModelPatch | undefined {
+	if (!patch) return undefined;
+	return {
+		name: patch.name,
+		reasoning: patch.reasoning,
+		thinking: patch.thinking,
+		input: patch.input,
+		supportsTools: patch.supportsTools,
+		cost: patch.cost,
+		contextWindow: patch.contextWindow ?? undefined,
+		maxTokens: patch.maxTokens ?? undefined,
+		omitMaxOutputTokens: patch.omitMaxOutputTokens,
+		headers: patch.headers,
+		compat: patch.compat,
+		contextPromotionTarget: patch.contextPromotionTarget,
+		premiumMultiplier: patch.premiumMultiplier,
+	};
+}
+
+function applyModelPatch(model: GatewayCatalogModel, patch: ModelPatch | undefined): GatewayCatalogModel {
+	if (!patch) return model;
+	const patched = finalizeCustomModel(
+		{
+			id: model.id,
+			provider: model.provider,
+			api: model.api,
+			requestModelId: model.requestModelId,
+			baseUrl: model.baseUrl,
+			name: patch.name ?? model.name,
+			reasoning: patch.reasoning ?? model.reasoning,
+			thinking: patch.thinking ?? model.thinking,
+			input: patch.input ?? model.input,
+			supportsTools: patch.supportsTools ?? model.supportsTools,
+			cost: patch.cost ? { ...(model.cost ?? {}), ...patch.cost } : model.cost,
+			contextWindow: patch.contextWindow ?? model.contextWindow ?? undefined,
+			maxTokens: patch.maxTokens ?? model.maxTokens ?? undefined,
+			omitMaxOutputTokens: patch.omitMaxOutputTokens ?? model.omitMaxOutputTokens,
+			headers: { ...(model.headers ?? {}), ...(patch.headers ?? {}) },
+			compat: mergeCompat(model.compatConfig, patch.compat),
+			contextPromotionTarget: patch.contextPromotionTarget ?? model.contextPromotionTarget,
+			premiumMultiplier: patch.premiumMultiplier ?? model.premiumMultiplier,
+			isOAuth: model.isOAuth,
+		},
+		{ useDefaults: false },
+	);
+	return model.auth === "none" ? { ...patched, auth: "none" } : patched;
+}
+
+export function buildGatewayModelIndex(
+	snapshot: SnapshotResponse,
+	catalog: ModelsConfigResponse | undefined,
+	config: GatewayCatalogConfig,
+): GatewayModelIndex {
+	const qualifiedModels = new Map<string, GatewayCatalogModel>();
+	const bareModels = new Map<string, GatewayCatalogModel>();
+	const providersWithCreds = new Set<string>();
+	for (const entry of snapshot.credentials) providersWithCreds.add(entry.provider);
+
+	for (const provider of getBundledProviders()) {
+		if (!providersWithCreds.has(provider)) continue;
+		for (const model of getBundledModels(provider as GeneratedProvider))
+			addGatewayModel(qualifiedModels, bareModels, model);
+	}
+
+	if (config.enabled && catalog) {
+		for (const [provider, providerConfig] of Object.entries(catalog.providers)) {
+			if (providerConfig.auth !== "none" && !providerHasCredential(snapshot, provider)) continue;
+			if (providerConfig.baseUrl && !isGatewayCatalogBaseUrlAllowed(providerConfig.baseUrl, config.allowedBaseUrls))
+				continue;
+			const providerCompat = providerConfig.disableStrictTools
+				? mergeCompat(providerConfig.compat, { disableStrictTools: true })
+				: providerConfig.compat;
+			const overrides = providerConfig.modelOverrides ?? {};
+			for (const modelDef of providerConfig.models ?? []) {
+				const modelBaseUrl = modelDef.baseUrl ?? providerConfig.baseUrl;
+				if (!modelBaseUrl || !isGatewayCatalogBaseUrlAllowed(modelBaseUrl, config.allowedBaseUrls)) continue;
+				const overlay = buildCustomModelOverlay(
+					provider,
+					modelBaseUrl,
+					providerConfig.api,
+					providerConfig.headers,
+					undefined,
+					providerConfig.authHeader,
+					providerCompat,
+					providerConfig.auth as ProviderAuthMode | undefined,
+					{
+						id: modelDef.id,
+						api: modelDef.api,
+						baseUrl: modelDef.baseUrl,
+						requestModelId: modelDef.requestModelId,
+						name: modelDef.name,
+						reasoning: modelDef.reasoning,
+						thinking: modelDef.thinking,
+						input: modelDef.input,
+						supportsTools: modelDef.supportsTools,
+						cost: modelDef.cost,
+						contextWindow: modelDef.contextWindow ?? undefined,
+						maxTokens: modelDef.maxTokens ?? undefined,
+						omitMaxOutputTokens: modelDef.omitMaxOutputTokens,
+						headers: modelDef.headers,
+						compat: mergeCompat(providerCompat, modelDef.compat),
+						contextPromotionTarget: modelDef.contextPromotionTarget,
+						premiumMultiplier: modelDef.premiumMultiplier,
+					},
+				);
+				if (!overlay) continue;
+				const model = finalizeCustomModel(overlay, { useDefaults: true });
+				const gatewayModel = providerConfig.auth === "none" ? { ...model, auth: "none" as const } : model;
+				addGatewayModel(
+					qualifiedModels,
+					bareModels,
+					applyModelPatch(gatewayModel, toModelPatch(overrides[model.id])),
+				);
+			}
+		}
+	}
+
+	const byId = new Map<string, GatewayCatalogModel>();
+	for (const [id, model] of qualifiedModels) byId.set(id, model);
+	for (const [id, model] of bareModels) if (!byId.has(id)) byId.set(id, model);
+	return { models: [...qualifiedModels.values()], byId };
+}
+
+function resolveGatewayCatalogConfig(): GatewayCatalogConfig {
+	try {
+		return {
+			enabled: settings.get("auth.broker.catalog.enabled"),
+			allowedBaseUrls: settings.get("auth.broker.catalog.allowedBaseUrls"),
+		};
+	} catch {
+		return { enabled: false, allowedBaseUrls: [] };
+	}
+}
+
+function getGatewayCatalogCachePath(): string {
+	return (
+		process.env.OMP_AUTH_BROKER_CATALOG_CACHE ?? path.join(getConfigRootDir(), "cache", "auth-broker-catalog.enc")
+	);
+}
+
+function resolveCatalogCacheTtlMs(): number {
+	const raw = process.env.OMP_AUTH_BROKER_CATALOG_TTL_MS;
+	if (raw === undefined) return DEFAULT_CATALOG_CACHE_TTL_MS;
+	const value = raw.trim();
+	if (value === "") return DEFAULT_CATALOG_CACHE_TTL_MS;
+	const ttlMs = Number(value);
+	if (Number.isFinite(ttlMs) && ttlMs >= 0) return ttlMs;
+	logger.warn("Invalid OMP_AUTH_BROKER_CATALOG_TTL_MS; using default", { value: raw });
+	return DEFAULT_CATALOG_CACHE_TTL_MS;
+}
+
+function resolveGatewayCatalogPollIntervalMs(): number {
+	const raw = process.env.OMP_AUTH_BROKER_CATALOG_POLL_INTERVAL_MS;
+	if (raw === undefined) return DEFAULT_GATEWAY_CATALOG_POLL_INTERVAL_MS;
+	const value = raw.trim();
+	if (value === "") return DEFAULT_GATEWAY_CATALOG_POLL_INTERVAL_MS;
+	const intervalMs = Number(value);
+	if (Number.isFinite(intervalMs) && intervalMs >= 0) return intervalMs;
+	logger.warn("Invalid OMP_AUTH_BROKER_CATALOG_POLL_INTERVAL_MS; using default", { value: raw });
+	return DEFAULT_GATEWAY_CATALOG_POLL_INTERVAL_MS;
+}
+
+export interface GatewayCatalogPollingOptions {
+	intervalMs: number;
+	refresh: () => Promise<void>;
+}
+
+export function startGatewayCatalogPolling(opts: GatewayCatalogPollingOptions): (() => void) | undefined {
+	if (opts.intervalMs <= 0) return undefined;
+	let refreshing = false;
+	const timer: NodeJS.Timeout = setInterval(() => {
+		if (refreshing) return;
+		refreshing = true;
+		opts
+			.refresh()
+			.catch(error => {
+				logger.warn("auth-gateway catalog poll refresh failed", { error: String(error) });
+			})
+			.finally(() => {
+				refreshing = false;
+			});
+	}, opts.intervalMs);
+	timer.unref?.();
+	return () => clearInterval(timer);
+}
+
+async function fetchBrokerCatalogWithCache(
+	client: AuthBrokerClient,
+	brokerConfig: AuthBrokerClientConfig,
+	cachePath: string,
+): Promise<ModelsConfigResponse> {
+	try {
+		const catalog = await client.fetchCatalog();
+		void writeAuthBrokerCatalogCache({
+			path: cachePath,
+			token: brokerConfig.token,
+			url: brokerConfig.url,
+			catalog,
+		}).catch(error => {
+			logger.debug("auth-broker catalog cache write failed", { error: String(error) });
+		});
+		return catalog;
+	} catch (error) {
+		const ttlMs = resolveCatalogCacheTtlMs();
+		const cached =
+			ttlMs > 0
+				? await readAuthBrokerCatalogCache({
+						path: cachePath,
+						token: brokerConfig.token,
+						url: brokerConfig.url,
+						ttlMs,
+					}).catch(readError => {
+						logger.debug("auth-broker catalog cache read failed", { error: String(readError) });
+						return null;
+					})
+				: null;
+		if (cached) return cached;
+		throw error;
+	}
+}
+
+async function fetchBrokerCatalogIfEnabled(
+	client: AuthBrokerClient,
+	brokerConfig: AuthBrokerClientConfig,
+	cachePath: string,
+	config: GatewayCatalogConfig,
+): Promise<ModelsConfigResponse | undefined> {
+	if (!config.enabled) return undefined;
+	return fetchBrokerCatalogWithCache(client, brokerConfig, cachePath);
+}
+
+export interface GatewayCatalogRefreshStore {
+	readonly snapshot: SnapshotResponse;
+	refreshSnapshot(): Promise<SnapshotResponse>;
+}
+
+export interface GatewayCatalogRefreshOptions {
+	catalogConfig: GatewayCatalogConfig;
+	store: GatewayCatalogRefreshStore;
+	fetchCatalog: () => Promise<ModelsConfigResponse>;
+	onCatalog: (catalog: ModelsConfigResponse) => void;
+	onModelIndex: (index: GatewayModelIndex) => void;
+}
+
+export async function refreshGatewayCatalogIndex(opts: GatewayCatalogRefreshOptions): Promise<void> {
+	if (!opts.catalogConfig.enabled) return;
+	const [catalog, snapshot] = await Promise.all([opts.fetchCatalog(), opts.store.refreshSnapshot()]);
+	opts.onCatalog(catalog);
+	opts.onModelIndex(buildGatewayModelIndex(snapshot, catalog, opts.catalogConfig));
+}
+
 async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	const brokerConfig = await resolveAuthBrokerConfig();
 	if (!brokerConfig) {
@@ -149,7 +466,42 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	// in sdk.ts. The gateway never touches local SQLite.
 	const client = createBrokerClient(brokerConfig);
 	const initialSnapshot = await fetchBrokerSnapshot(client);
-	const store = new RemoteAuthCredentialStore({ client, initialSnapshot });
+	const catalogConfig = resolveGatewayCatalogConfig();
+	const catalogCachePath = getGatewayCatalogCachePath();
+	void Bun.file(catalogCachePath)
+		.arrayBuffer()
+		.catch(() => undefined);
+	let currentCatalog = await fetchBrokerCatalogIfEnabled(client, brokerConfig, catalogCachePath, catalogConfig);
+	let modelIndex = buildGatewayModelIndex(initialSnapshot, currentCatalog, catalogConfig);
+	let store: RemoteAuthCredentialStore;
+	const refreshCatalog = async (): Promise<void> => {
+		await refreshGatewayCatalogIndex({
+			catalogConfig,
+			store,
+			fetchCatalog: () => fetchBrokerCatalogWithCache(client, brokerConfig, catalogCachePath),
+			onCatalog: catalog => {
+				currentCatalog = catalog;
+			},
+			onModelIndex: index => {
+				modelIndex = index;
+			},
+		});
+	};
+	store = new RemoteAuthCredentialStore({
+		client,
+		initialSnapshot,
+		onSnapshot: snapshot => {
+			modelIndex = buildGatewayModelIndex(snapshot, currentCatalog, catalogConfig);
+		},
+		onCatalogChanged: () => {
+			void refreshCatalog().catch(error => {
+				logger.warn("auth-gateway catalog refresh failed", { error: String(error) });
+			});
+		},
+	});
+	const stopCatalogPolling = catalogConfig.enabled
+		? startGatewayCatalogPolling({ intervalMs: resolveGatewayCatalogPollIntervalMs(), refresh: refreshCatalog })
+		: undefined;
 	// Refresh + usage both flow through the store's broker hooks automatically —
 	// `RemoteAuthCredentialStore.refreshOAuthCredential` and `.fetchUsageReports`.
 	// AuthStorage discovers them when no explicit option overrides them, so the
@@ -159,31 +511,13 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 	});
 	await storage.reload();
 
-	// Build the model resolver + catalog from pi-ai's bundled metadata, scoped
-	// to providers we hold credentials for. Format handlers ask `resolveModel`
-	// to translate a client-requested `model` field into a pi-ai `Model<Api>`
-	// before dispatch; `listModels` powers `/v1/models`.
-	const snapshot = storage.exportSnapshot();
-	const providersWithCreds = new Set<string>();
-	for (const entry of snapshot.credentials) providersWithCreds.add(entry.provider);
-	const modelById = new Map<string, Model<Api>>();
-	for (const provider of getBundledProviders()) {
-		if (!providersWithCreds.has(provider)) continue;
-		for (const model of getBundledModels(provider as GeneratedProvider)) {
-			// Always set the qualified key (no collision possible)
-			modelById.set(`${model.provider}/${model.id}`, model);
-			// Bare id as fallback for legacy clients (first-write-wins)
-			if (!modelById.has(model.id)) modelById.set(model.id, model);
-		}
-	}
-
 	const handle = startAuthGateway({
 		storage,
 		bind,
 		bearerTokens: gatewayToken ? [gatewayToken] : [],
 		version: VERSION,
-		resolveModel: (id: string) => modelById.get(id),
-		listModels: () => modelById.values(),
+		resolveModel: (id: string) => modelIndex.byId.get(id),
+		listModels: () => modelIndex.models,
 	});
 	process.stdout.write(`auth-gateway listening on ${handle.url}\n`);
 	if (gatewayToken) {
@@ -201,6 +535,7 @@ async function runServe(flags: AuthGatewayCommandArgs["flags"]): Promise<void> {
 		process.stdout.write(`\nReceived ${signal}, shutting down...\n`);
 		let closeError: unknown;
 		try {
+			stopCatalogPolling?.();
 			await handle.close();
 		} catch (error) {
 			closeError = error;

@@ -49,6 +49,13 @@ export default class AuthBroker extends Command {
 			description: "Also upload OAuth from local SQLite during migrate (default skips them)",
 		}),
 		"dry-run": Flags.boolean({ description: "Print actions without executing (import / login --via / migrate)" }),
+		"dangerously-allow-local-raw-keys": Flags.boolean({
+			description: "Allow literal apiKey values in models-shared.yml for local broker ingestion only (serve)",
+		}),
+		"catalog-refresh-interval-ms": Flags.integer({
+			description:
+				"Periodically reload and rediscover the shared broker catalog at this interval in milliseconds (serve; 0 disables)",
+		}),
 	};
 
 	static examples = [
@@ -91,6 +98,8 @@ export default class AuthBroker extends Command {
 				includeEnv: flags["include-env"],
 				includeOauth: flags["include-oauth"],
 				dryRun: flags["dry-run"],
+				dangerouslyAllowLocalRawKeys: flags["dangerously-allow-local-raw-keys"],
+				catalogRefreshIntervalMs: flags["catalog-refresh-interval-ms"],
 			},
 		};
 		await initTheme();

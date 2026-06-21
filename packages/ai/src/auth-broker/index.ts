@@ -1,3 +1,4 @@
+export * from "./catalog-cache";
 export * from "./client";
 export * from "./discover";
 export * from "./refresher";

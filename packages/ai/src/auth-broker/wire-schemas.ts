@@ -129,9 +129,17 @@ export const snapshotStreamRemovedEventSchema = type({
 });
 
 /** Discriminated union over every event frame the snapshot stream emits. */
+export const snapshotStreamCatalogChangedEventSchema = type({
+	"+": "reject",
+	kind: "'catalog-changed'",
+	generatedAt: "number",
+});
+
+/** Discriminated union over every known event frame the snapshot stream emits. */
 export const snapshotStreamEventSchema = snapshotStreamSnapshotEventSchema
 	.or(snapshotStreamEntryEventSchema)
-	.or(snapshotStreamRemovedEventSchema);
+	.or(snapshotStreamRemovedEventSchema)
+	.or(snapshotStreamCatalogChangedEventSchema);
 
 // ─── Healthz ────────────────────────────────────────────────────────────────
 
@@ -206,6 +214,97 @@ export const usageResponseSchema = type({
 	"+": "reject",
 	generatedAt: "number",
 	reports: arkUsageReportSchema.array(),
+});
+
+// ─── Catalog ────────────────────────────────────────────────────────────────
+
+const effortSchema = type("'minimal' | 'low' | 'medium' | 'high' | 'xhigh'");
+const thinkingConfigSchema = type({
+	mode: "string",
+	"efforts?": effortSchema.array(),
+	"defaultLevel?": effortSchema,
+	"effortMap?": { "[string]": "string" },
+	"supportsDisplay?": "boolean",
+	"effortRouting?": { "[string]": "string" },
+	"effortBudgets?": { "[string]": "number" },
+	"suppressWhenOff?": "boolean",
+	"requiresEffort?": "boolean",
+});
+
+const modelCostSchema = type({
+	"input?": "number",
+	"output?": "number",
+	"cacheRead?": "number",
+	"cacheWrite?": "number",
+});
+
+const modelPatchSchema = type({
+	"name?": "string",
+	"api?": "string",
+	"baseUrl?": "string",
+	"reasoning?": "boolean",
+	"input?": '("text" | "image")[]',
+	"supportsTools?": "boolean",
+	"cost?": modelCostSchema,
+	"premiumMultiplier?": "number",
+	"contextWindow?": "number | null",
+	"maxTokens?": "number | null",
+	"omitMaxOutputTokens?": "boolean",
+	"headers?": { "[string]": "string" },
+	"compat?": { "[string]": "unknown" },
+	"contextPromotionTarget?": "string",
+	"thinking?": thinkingConfigSchema,
+});
+
+export const sanitizedModelDefinitionSchema = type({
+	id: type("string").atLeastLength(1),
+	"name?": "string",
+	"api?": "string",
+	"requestModelId?": "string",
+	"baseUrl?": "string",
+	"reasoning?": "boolean",
+	"input?": '("text" | "image")[]',
+	"supportsTools?": "boolean",
+	"cost?": modelCostSchema,
+	"premiumMultiplier?": "number",
+	"contextWindow?": "number | null",
+	"maxTokens?": "number | null",
+	"omitMaxOutputTokens?": "boolean",
+	"headers?": { "[string]": "string" },
+	"compat?": { "[string]": "unknown" },
+	"contextPromotionTarget?": "string",
+	"thinking?": thinkingConfigSchema,
+});
+
+export const sanitizedModelOverrideSchema = modelPatchSchema;
+
+export const sanitizedProviderConfigSchema = type({
+	"baseUrl?": "string",
+	"api?": "string",
+	"headers?": { "[string]": "string" },
+	"authHeader?": "false",
+	"auth?": "'apiKey' | 'none' | 'oauth'",
+	"discovery?": {
+		type: "string",
+	},
+	"models?": sanitizedModelDefinitionSchema.array(),
+	"modelOverrides?": { "[string]": sanitizedModelOverrideSchema },
+	"disableStrictTools?": "boolean",
+	"compat?": { "[string]": "unknown" },
+}).narrow((value, ctx) => {
+	if ("apiKey" in value) return ctx.mustBe("not include apiKey");
+	if ("transport" in value) return ctx.mustBe("not include transport");
+	return true;
+});
+
+export const modelsConfigResponseSchema = type({
+	generatedAt: "number",
+	schemaVersion: "1",
+	providers: { "[string]": sanitizedProviderConfigSchema },
+	"equivalence?": {
+		"overrides?": { "[string]": "string" },
+		"exclude?": "string[]",
+	},
 });
 
 // ─── Refresh ───────────────────────────────────────────────────────────────

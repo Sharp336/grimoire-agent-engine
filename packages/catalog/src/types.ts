@@ -674,6 +674,8 @@ export interface Model<TApi extends Api = Api> {
 	 * `options.isOAuth = true` for the underlying provider call.
 	 */
 	isOAuth?: boolean;
+	/** Provider auth mode for gateway/catalog models; `none` skips credential injection. */
+	auth?: "none";
 }
 
 /**

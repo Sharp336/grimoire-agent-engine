@@ -382,6 +382,14 @@
 ### Security
 
 - Secured PDF image reads by validating requested image members against the extracted member list before opening files and refusing traversal-style names
+### Added
+
+- Added auth-broker shared catalog loading from `models-shared.yml`, including broker-side API-key resolution, fail-closed secret validation, and sanitized catalog serving hooks.
+- Added auth-gateway broker catalog consumption, including opt-in trust settings, broker-served custom model indexing, hot catalog rebuilds, and keyless custom-provider routing.
+- Added `omp auth-broker serve --dangerously-allow-local-raw-keys` for local-only ingestion of literal shared-catalog API keys while still serving sanitized catalogs.
+- Added broker-side discovery materialization for shared catalogs so discovery-only `models-shared.yml` providers are served with concrete models.
+- Added `omp auth-broker serve --catalog-refresh-interval-ms` to periodically reload and rediscover broker-served shared catalogs.
+- Added gateway catalog polling fallback so broker-served catalog updates still refresh when snapshot SSE is unavailable.
 
 ## [16.0.5] - 2026-06-17
 
@@ -397,6 +405,9 @@
 - Added `--max-time <seconds>` so CLI sessions can stop after a wall-clock deadline.
 
 ### Changed
+
+- Extracted custom model builder helpers from `ModelRegistry` for reuse by broker-served catalog code.
+- Changed proxy model discovery to preserve OMP metadata returned by broker-backed gateways, including context window, output limit, reasoning, input modes, costs, and tool support.
 
 - Changed google-antigravity usage report lookups to honor the selected antigravity endpoint mode when resolving the reporting base URL
 - Changed context usage reporting to always return numeric token counts and percentages, so status-line and footer now show estimated values instead of `?` immediately after compaction

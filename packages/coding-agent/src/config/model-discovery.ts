@@ -130,6 +130,29 @@ function toPositiveNumberOrUndefined(value: unknown): number | undefined {
 	return undefined;
 }
 
+function toBooleanOrUndefined(value: unknown): boolean | undefined {
+	return typeof value === "boolean" ? value : undefined;
+}
+
+function toInputModalitiesOrUndefined(value: unknown): ("text" | "image")[] | undefined {
+	if (!Array.isArray(value)) return undefined;
+	const modalities: ("text" | "image")[] = [];
+	for (const item of value) {
+		if (item !== "text" && item !== "image") return undefined;
+		modalities.push(item);
+	}
+	return modalities;
+}
+
+function toCostOrUndefined(value: unknown): ModelSpec<Api>["cost"] | undefined {
+	if (!isRecord(value)) return undefined;
+	const input = toPositiveNumberOrUndefined(value.input) ?? 0;
+	const output = toPositiveNumberOrUndefined(value.output) ?? 0;
+	const cacheRead = toPositiveNumberOrUndefined(value.cacheRead) ?? 0;
+	const cacheWrite = toPositiveNumberOrUndefined(value.cacheWrite) ?? 0;
+	return { input, output, cacheRead, cacheWrite };
+}
+
 function extractOllamaContextWindow(payload: Record<string, unknown>): number | undefined {
 	const modelInfo = payload.model_info;
 	if (isRecord(modelInfo)) {
@@ -404,7 +427,20 @@ export async function discoverOpenAIModelsList(
 		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
 		: await attempt(baseHeaders);
 	const payload = (await response.json()) as {
-		data?: Array<{ id?: string; max_model_len?: unknown; context_length?: unknown }>;
+		data?: Array<{
+			id?: string;
+			name?: string;
+			api?: Api;
+			max_model_len?: unknown;
+			context_length?: unknown;
+			reasoning?: boolean;
+			input?: unknown;
+			cost?: unknown;
+			contextWindow?: unknown;
+			maxTokens?: unknown;
+			supportsTools?: boolean;
+			requestModelId?: string;
+		}>;
 	};
 	const models = payload.data ?? [];
 	const discovered: Model<Api>[] = [];
@@ -412,25 +448,31 @@ export async function discoverOpenAIModelsList(
 		const id = item.id;
 		if (!id) continue;
 		const nativeMetadataForModel = nativeMetadata?.get(id);
+		const api = item.api ?? providerConfig.api;
 		const contextWindow =
+			toPositiveNumberOrUndefined(item.contextWindow) ??
 			toPositiveNumberOrUndefined(item.max_model_len) ??
 			toPositiveNumberOrUndefined(item.context_length) ??
 			nativeMetadataForModel?.contextWindow ??
 			128000;
+		const discoveryName = typeof item.name === "string" ? item.name.trim() : "";
 		discovered.push(
 			buildModel({
 				id,
-				name: id,
-				api: providerConfig.api,
+				name: discoveryName && discoveryName !== id ? discoveryName : id,
+				api,
 				provider: providerConfig.provider,
 				baseUrl,
-				reasoning: false,
-				input: nativeMetadataForModel?.input ?? ["text"],
+				reasoning: toBooleanOrUndefined(item.reasoning) ?? false,
+				input: toInputModalitiesOrUndefined(item.input) ?? nativeMetadataForModel?.input ?? ["text"],
 				...(providerConfig.discovery.type === "lm-studio" ? { imageInputDecoder: "stb" as const } : {}),
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				cost: toCostOrUndefined(item.cost) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow,
-				maxTokens: Math.min(contextWindow, discoveryDefaultMaxTokens(providerConfig.api)),
+				maxTokens:
+					toPositiveNumberOrUndefined(item.maxTokens) ?? Math.min(contextWindow, discoveryDefaultMaxTokens(api)),
 				headers,
+				requestModelId: typeof item.requestModelId === "string" ? item.requestModelId : undefined,
+				supportsTools: toBooleanOrUndefined(item.supportsTools),
 				compat: {
 					supportsStore: false,
 					supportsDeveloperRole: false,
@@ -482,7 +524,19 @@ export async function discoverProxyModels(
 		? await withAuth(apiKey, key => attempt({ ...baseHeaders, Authorization: `Bearer ${key}` }))
 		: await attempt(baseHeaders);
 	const payload = (await response.json()) as {
-		data?: Array<{ id?: string; name?: string; supported_endpoint_types?: string[]; context_length?: number }>;
+		data?: Array<{
+			id?: string;
+			name?: string;
+			supported_endpoint_types?: string[];
+			context_length?: number;
+			api?: Api;
+			reasoning?: boolean;
+			input?: unknown;
+			cost?: unknown;
+			contextWindow?: unknown;
+			maxTokens?: unknown;
+			supportsTools?: boolean;
+		}>;
 	};
 	const items = payload.data ?? [];
 	const discovered: Model<Api>[] = [];
@@ -494,7 +548,7 @@ export async function discoverProxyModels(
 			? "anthropic-messages"
 			: endpoints.includes("openai")
 				? "openai-completions"
-				: providerConfig.api;
+				: (item.api ?? providerConfig.api);
 		if (!api) continue;
 		const isAnthropic = api === "anthropic-messages";
 		const reference = resolveModelReference(id, getBundledModelReferenceIndex());
@@ -511,18 +565,20 @@ export async function discoverProxyModels(
 				api,
 				provider: providerConfig.provider,
 				baseUrl,
-				reasoning: reference?.reasoning ?? false,
+				reasoning: toBooleanOrUndefined(item.reasoning) ?? reference?.reasoning ?? false,
 				thinking: reference?.thinking,
-				input: reference?.input ?? ["text"],
-				// Proxy pricing is provider-specific and usually does not match
-				// upstream bundled catalogs, so keep costs local-unknown even when
-				// we successfully recover the upstream model identity.
-				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-				// Prefer the context_length the API reports for this model; fall
-				// back to the bundled reference, then a sane default.
-				contextWindow: toPositiveNumberOrUndefined(item.context_length) ?? reference?.contextWindow ?? 128000,
-				maxTokens: reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
+				input: toInputModalitiesOrUndefined(item.input) ?? reference?.input ?? ["text"],
+				cost: toCostOrUndefined(item.cost) ?? { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				// Prefer explicit OMP metadata, then OpenAI-ish context_length, then bundled reference/default.
+				contextWindow:
+					toPositiveNumberOrUndefined(item.contextWindow) ??
+					toPositiveNumberOrUndefined(item.context_length) ??
+					reference?.contextWindow ??
+					128000,
+				maxTokens:
+					toPositiveNumberOrUndefined(item.maxTokens) ?? reference?.maxTokens ?? discoveryDefaultMaxTokens(api),
 				headers,
+				supportsTools: toBooleanOrUndefined(item.supportsTools),
 				// OpenAI-compat fields are no-ops on anthropic models; the
 				// Anthropic SDK ignores them. Provider-level disableStrictTools
 				// flows in via #applyProviderCompat for the third-party-Anthropic

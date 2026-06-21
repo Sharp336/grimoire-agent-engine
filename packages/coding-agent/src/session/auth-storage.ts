@@ -12,6 +12,7 @@ export type {
 	AuthStorageOptions,
 	CredentialOrigin,
 	CredentialOriginKind,
+	ModelsConfigResponse,
 	OAuthAccountIdentity,
 	OAuthCredential,
 	ResetCreditAccountStatus,
@@ -20,5 +21,17 @@ export type {
 	SerializedAuthStorage,
 	StoredAuthCredential,
 } from "@oh-my-pi/pi-ai";
-export { AuthStorage, REMOTE_REFRESH_SENTINEL, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
+export {
+	AuthBrokerClient,
+	AuthStorage,
+	DEFAULT_CATALOG_CACHE_TTL_MS,
+	DEFAULT_SNAPSHOT_CACHE_TTL_MS,
+	REMOTE_REFRESH_SENTINEL,
+	RemoteAuthCredentialStore,
+	readAuthBrokerCatalogCache,
+	readAuthBrokerSnapshotCache,
+	SqliteAuthCredentialStore,
+	writeAuthBrokerCatalogCache,
+	writeAuthBrokerSnapshotCache,
+} from "@oh-my-pi/pi-ai";
 export type { SnapshotResponse } from "@oh-my-pi/pi-ai/auth-broker/types";

@@ -1,7 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-completions";
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
-import type { Context, Model } from "@oh-my-pi/pi-ai/types";
+import type { Context, Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 
 afterEach(() => {
@@ -77,6 +78,34 @@ describe("GitHub Copilot OpenAI transport base URL", () => {
 
 		expect(result.stopReason).toBe("error");
 		expect(requestedUrls[0]).toBe("https://api.githubcopilot.com/responses");
+	});
+
+	it("omits Authorization for auth:none responses-compatible models", async () => {
+		const requestedAuthHeaders: Array<string | null> = [];
+		const fetchMock = vi.fn(async (input: string | URL | Request, init?: RequestInit) => {
+			requestedAuthHeaders.push(getRequestHeader(input, init, "Authorization"));
+			return createUnauthorizedResponse();
+		});
+
+		const model = buildModel({
+			id: "free-responses",
+			name: "Free Responses",
+			api: "openai-responses",
+			provider: "keyless-responses",
+			baseUrl: "https://free.example/v1",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128000,
+			maxTokens: 16384,
+			auth: "none",
+		} as ModelSpec<"openai-responses">);
+		const result = await streamOpenAIResponses(model, testContext, {
+			fetch: fetchMock as unknown as typeof fetch,
+		}).result();
+
+		expect(result.stopReason).toBe("error");
+		expect(requestedAuthHeaders).toEqual([null]);
 	});
 
 	it("routes structured enterprise credentials to the enterprise chat completions host", async () => {

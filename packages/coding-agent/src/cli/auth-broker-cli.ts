@@ -22,9 +22,12 @@ import {
 	type AuthCredential,
 	AuthStorage,
 	type CredentialDisabledEvent,
+	type FetchImpl,
 	getEnvApiKey,
 	getOAuthProviders,
 	listProvidersWithEnvKey,
+	type Model,
+	type ModelsConfigResponse,
 	type OAuthCredential,
 	type OAuthProvider,
 	type OAuthProviderInfo,
@@ -36,6 +39,10 @@ import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, V
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
 import chalk from "chalk";
+import { looksLikeLiteralSecret, resolveConfigHeaders, resolveConfigValue } from "../config/custom-model-builder";
+import { discoverModelsByProviderType } from "../config/model-discovery";
+import { ModelsConfigFile } from "../config/models-config";
+import type { ModelsConfig } from "../config/models-config-schema";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
@@ -59,6 +66,8 @@ export interface AuthBrokerCommandArgs {
 		includeEnv?: boolean;
 		/** `migrate`: required `--from-local` source. Reserved for future sources. */
 		fromLocal?: boolean;
+		dangerouslyAllowLocalRawKeys?: boolean;
+		catalogRefreshIntervalMs?: number;
 	};
 }
 
@@ -118,6 +127,450 @@ async function ensureToken(): Promise<string> {
 	return token;
 }
 
+export type BrokerOwnedCredentialMap = Map<string, Set<number>>;
+
+export interface SharedBrokerCatalogLoad {
+	catalog: ModelsConfigResponse;
+	brokerOwnedCredentials: BrokerOwnedCredentialMap;
+}
+
+export interface SharedBrokerCatalogLoadOptions {
+	dangerouslyAllowLocalRawKeys?: boolean;
+	fetch?: FetchImpl;
+}
+
+type SharedProviderConfig = NonNullable<ModelsConfig["providers"]>[string];
+type SharedModelDefinition = NonNullable<SharedProviderConfig["models"]>[number];
+type SharedModelOverride = NonNullable<SharedProviderConfig["modelOverrides"]>[string];
+type SanitizedModelDefinition = NonNullable<ModelsConfigResponse["providers"][string]["models"]>[number];
+type SanitizedModelOverride = NonNullable<ModelsConfigResponse["providers"][string]["modelOverrides"]>[string];
+
+function getDefaultSharedCatalogPath(): string {
+	return path.join(getConfigRootDir(), "models-shared.yml");
+}
+
+function isSecretReference(value: string): boolean {
+	if (value.startsWith("!")) return true;
+	if (looksLikeLiteralSecret(value)) return true;
+	return /^[A-Z_][A-Z0-9_]*$/.test(value);
+}
+
+function resolveSharedApiKey(value: string, opts: SharedBrokerCatalogLoadOptions = {}): string | undefined {
+	if (value.startsWith("!")) return resolveConfigValue(value);
+	if (looksLikeLiteralSecret(value) && opts.dangerouslyAllowLocalRawKeys) return value;
+	return Bun.env[value];
+}
+
+function isSupportedApiKeyReference(value: string): boolean {
+	if (value.startsWith("!")) return true;
+	return /^[A-Z_][A-Z0-9_]*$/.test(value);
+}
+
+function isSecretHeaderName(header: string): boolean {
+	const normalized = header.toLowerCase();
+	return (
+		normalized === "authorization" ||
+		normalized === "proxy-authorization" ||
+		normalized === "api-key" ||
+		normalized === "x-api-key" ||
+		normalized === "x-auth-token" ||
+		normalized === "x-access-token"
+	);
+}
+
+function validateSharedHeaders(context: string, headers: Record<string, string> | undefined): void {
+	for (const [header, value] of Object.entries(headers ?? {})) {
+		if (isSecretHeaderName(header) || isSecretReference(value)) {
+			throw new Error(`${context} header ${header} is not allowed in broker shared catalog`);
+		}
+	}
+}
+
+function validateNoNestedApiKey(context: string, value: object): void {
+	if ("apiKey" in value) throw new Error(`${context} apiKey is not allowed in broker shared catalog`);
+}
+
+function validateNoSecretUnknownProviderFields(provider: string, providerConfig: SharedProviderConfig): void {
+	const knownFields = new Set([
+		"baseUrl",
+		"api",
+		"apiKey",
+		"headers",
+		"authHeader",
+		"auth",
+		"discovery",
+		"models",
+		"modelOverrides",
+		"disableStrictTools",
+		"compat",
+		"transport",
+	]);
+	for (const [field, value] of Object.entries(providerConfig)) {
+		if (knownFields.has(field) || typeof value !== "string") continue;
+		if (isSecretReference(value)) {
+			throw new Error(`Provider ${provider}: unknown field ${field} is not allowed in broker shared catalog`);
+		}
+	}
+}
+
+function sanitizeProviderConfig(providerConfig: SharedProviderConfig): ModelsConfigResponse["providers"][string] {
+	const { baseUrl, api, headers, authHeader, auth, discovery, disableStrictTools, compat } = providerConfig;
+	return {
+		...(baseUrl !== undefined ? { baseUrl } : {}),
+		...(api !== undefined ? { api } : {}),
+		...(headers !== undefined ? { headers } : {}),
+		...(authHeader === false ? { authHeader } : {}),
+		...(auth !== undefined ? { auth } : {}),
+		...(discovery !== undefined ? { discovery } : {}),
+		...(disableStrictTools !== undefined ? { disableStrictTools } : {}),
+		...(compat !== undefined ? { compat: compat as ModelsConfigResponse["providers"][string]["compat"] } : {}),
+	};
+}
+
+function sanitizeModelDefinition(model: SharedModelDefinition): SanitizedModelDefinition {
+	const {
+		id,
+		requestModelId,
+		name,
+		api,
+		baseUrl,
+		reasoning,
+		thinking,
+		input,
+		supportsTools,
+		cost,
+		premiumMultiplier,
+		contextWindow,
+		maxTokens,
+		omitMaxOutputTokens,
+		headers,
+		compat,
+		contextPromotionTarget,
+	} = model;
+	return {
+		id,
+		...(requestModelId !== undefined ? { requestModelId } : {}),
+		...(name !== undefined ? { name } : {}),
+		...(api !== undefined ? { api } : {}),
+		...(baseUrl !== undefined ? { baseUrl } : {}),
+		...(reasoning !== undefined ? { reasoning } : {}),
+		...(thinking !== undefined ? { thinking } : {}),
+		...(input !== undefined ? { input } : {}),
+		...(supportsTools !== undefined ? { supportsTools } : {}),
+		...(cost !== undefined ? { cost } : {}),
+		...(premiumMultiplier !== undefined ? { premiumMultiplier } : {}),
+		...(contextWindow !== undefined ? { contextWindow } : {}),
+		...(maxTokens !== undefined ? { maxTokens } : {}),
+		...(omitMaxOutputTokens !== undefined ? { omitMaxOutputTokens } : {}),
+		...(headers !== undefined ? { headers } : {}),
+		...(compat !== undefined ? { compat } : {}),
+		...(contextPromotionTarget !== undefined ? { contextPromotionTarget } : {}),
+	};
+}
+
+function sanitizeModelOverride(override: SharedModelOverride): SanitizedModelOverride {
+	const {
+		name,
+		reasoning,
+		thinking,
+		input,
+		supportsTools,
+		cost,
+		premiumMultiplier,
+		contextWindow,
+		maxTokens,
+		omitMaxOutputTokens,
+		headers,
+		compat,
+		contextPromotionTarget,
+	} = override;
+	const sanitized = {
+		...(name !== undefined ? { name } : {}),
+		...(reasoning !== undefined ? { reasoning } : {}),
+		...(thinking !== undefined ? { thinking } : {}),
+		...(input !== undefined ? { input } : {}),
+		...(supportsTools !== undefined ? { supportsTools } : {}),
+		...(cost !== undefined ? { cost } : {}),
+		...(premiumMultiplier !== undefined ? { premiumMultiplier } : {}),
+		...(contextWindow !== undefined ? { contextWindow } : {}),
+		...(maxTokens !== undefined ? { maxTokens } : {}),
+		...(omitMaxOutputTokens !== undefined ? { omitMaxOutputTokens } : {}),
+		...(headers !== undefined ? { headers } : {}),
+		...(compat !== undefined ? { compat } : {}),
+		...(contextPromotionTarget !== undefined ? { contextPromotionTarget } : {}),
+	};
+	return sanitized as SanitizedModelOverride;
+}
+
+export function validateSharedBrokerCatalog(config: ModelsConfig, opts: SharedBrokerCatalogLoadOptions = {}): void {
+	for (const [provider, providerConfig] of Object.entries(config.providers ?? {})) {
+		const apiKey = providerConfig.apiKey;
+		if (apiKey !== undefined) {
+			if (apiKey.length === 0)
+				throw new Error(`Provider ${provider}: empty apiKey is not allowed in models-shared.yml`);
+			if (looksLikeLiteralSecret(apiKey)) {
+				if (!opts.dangerouslyAllowLocalRawKeys) {
+					throw new Error(`Provider ${provider}: apiKey appears to be a literal secret`);
+				}
+			} else if (!isSupportedApiKeyReference(apiKey)) {
+				throw new Error(`Provider ${provider}: apiKey reference must be an environment variable or !cmd`);
+			}
+		}
+		if (providerConfig.transport !== undefined) {
+			throw new Error(`Provider ${provider}: transport is not supported in broker shared catalog`);
+		}
+		if (providerConfig.authHeader === true && !opts.dangerouslyAllowLocalRawKeys) {
+			throw new Error(`Provider ${provider}: authHeader is not supported in broker shared catalog`);
+		}
+		validateSharedHeaders(`Provider ${provider}: secret-bearing`, providerConfig.headers);
+		validateNoSecretUnknownProviderFields(provider, providerConfig);
+		for (const model of providerConfig.models ?? []) {
+			validateNoNestedApiKey(`Provider ${provider}: model ${model.id}`, model);
+			validateSharedHeaders(`Provider ${provider}: model ${model.id}`, model.headers);
+		}
+		for (const [modelId, override] of Object.entries(providerConfig.modelOverrides ?? {})) {
+			validateNoNestedApiKey(`Provider ${provider}: model override ${modelId}`, override);
+			validateSharedHeaders(`Provider ${provider}: model override ${modelId}`, override.headers);
+		}
+	}
+}
+
+async function materializeSharedCatalogDiscovery(
+	config: ModelsConfig,
+	resolvedApiKeys: Map<string, string>,
+	opts: SharedBrokerCatalogLoadOptions,
+): Promise<ModelsConfig> {
+	const providers = { ...(config.providers ?? {}) };
+	const fetchImpl = opts.fetch ?? fetch;
+	for (const [provider, providerConfig] of Object.entries(providers)) {
+		if (!providerConfig.discovery) continue;
+		if (!providerConfig.api && providerConfig.discovery.type !== "proxy") continue;
+		const headers = resolveConfigHeaders(providerConfig.headers) ?? {};
+		const apiKey = resolvedApiKeys.get(provider);
+		const discoveryHeaders =
+			providerConfig.authHeader && apiKey ? { ...headers, Authorization: `Bearer ${apiKey}` } : headers;
+		let discovered: Model[];
+		try {
+			discovered = await discoverModelsByProviderType(
+				{
+					provider,
+					api: providerConfig.api ?? "openai-completions",
+					baseUrl: providerConfig.baseUrl,
+					headers: discoveryHeaders,
+					compat: providerConfig.compat,
+					discovery: providerConfig.discovery,
+				},
+				{
+					fetch: fetchImpl,
+					getBearerApiKeyResolver: async id =>
+						id === provider && !providerConfig.authHeader ? apiKey : undefined,
+				},
+			);
+		} catch (error) {
+			logger.warn("auth-broker shared catalog discovery failed", { provider, error: String(error) });
+			continue;
+		}
+		const discoveredModels: NonNullable<NonNullable<ModelsConfig["providers"]>[string]["models"]> = discovered.map(
+			model => ({
+				id: model.id,
+				name: model.name,
+				api: model.api as NonNullable<
+					NonNullable<NonNullable<ModelsConfig["providers"]>[string]["models"]>[number]["api"]
+				>,
+				baseUrl: model.baseUrl === providerConfig.baseUrl ? undefined : model.baseUrl,
+				reasoning: model.reasoning,
+				thinking: model.thinking,
+				input: model.input,
+				cost: model.cost,
+				supportsTools: model.supportsTools,
+				contextWindow: model.contextWindow ?? undefined,
+				maxTokens: model.maxTokens ?? undefined,
+				omitMaxOutputTokens: model.omitMaxOutputTokens,
+				compat: model.compatConfig,
+				contextPromotionTarget: model.contextPromotionTarget,
+				premiumMultiplier: model.premiumMultiplier,
+				requestModelId: model.requestModelId,
+			}),
+		);
+		const configuredModels = providerConfig.models ?? [];
+		const configuredIds = new Set(configuredModels.map(model => model.id));
+		providers[provider] = {
+			...providerConfig,
+			models: [...configuredModels, ...discoveredModels.filter(model => !configuredIds.has(model.id))],
+		};
+	}
+	return { ...config, providers };
+}
+
+function sanitizeSharedCatalog(config: ModelsConfig, generatedAt: number): ModelsConfigResponse {
+	const providers: ModelsConfigResponse["providers"] = {};
+	for (const [provider, providerConfig] of Object.entries(config.providers ?? {})) {
+		const { models, modelOverrides, compat } = providerConfig;
+		const providerResponse = sanitizeProviderConfig(providerConfig);
+		if (models) providerResponse.models = models.map(sanitizeModelDefinition);
+		if (modelOverrides) {
+			providerResponse.modelOverrides = Object.fromEntries(
+				Object.entries(modelOverrides).map(([modelId, override]) => [modelId, sanitizeModelOverride(override)]),
+			);
+		}
+		if (compat) providerResponse.compat = compat as ModelsConfigResponse["providers"][string]["compat"];
+		providers[provider] = providerResponse;
+	}
+	return {
+		generatedAt,
+		schemaVersion: 1,
+		providers,
+		...(config.equivalence ? { equivalence: config.equivalence } : {}),
+	};
+}
+
+function getBrokerOwnedCredentialsPath(sharedPath: string): string {
+	const hash = crypto.createHash("sha256").update(path.resolve(sharedPath)).digest("hex").slice(0, 16);
+	return path.join(getConfigRootDir(), `auth-broker-shared-credentials.${hash}.json`);
+}
+
+async function readBrokerOwnedCredentials(sharedPath: string): Promise<BrokerOwnedCredentialMap> {
+	try {
+		const parsed = (await Bun.file(getBrokerOwnedCredentialsPath(sharedPath)).json()) as unknown;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+		const map: BrokerOwnedCredentialMap = new Map();
+		for (const [provider, ids] of Object.entries(parsed)) {
+			if (!Array.isArray(ids)) continue;
+			const numericIds = ids.filter((id): id is number => Number.isSafeInteger(id));
+			if (numericIds.length > 0) map.set(provider, new Set(numericIds));
+		}
+		return map;
+	} catch (error) {
+		if (!isEnoent(error))
+			logger.debug("auth-broker shared credential ownership unreadable", { error: String(error) });
+		return new Map();
+	}
+}
+
+async function writeBrokerOwnedCredentials(sharedPath: string, credentials: BrokerOwnedCredentialMap): Promise<void> {
+	const payload = Object.fromEntries([...credentials].map(([provider, ids]) => [provider, [...ids]]));
+	await Bun.write(getBrokerOwnedCredentialsPath(sharedPath), JSON.stringify(payload));
+}
+
+function hasBrokerOwnedCredentials(credentials: BrokerOwnedCredentialMap): boolean {
+	for (const ids of credentials.values()) if (ids.size > 0) return true;
+	return false;
+}
+
+async function removeStaleBrokerOwnedKeys(
+	storage: AuthStorage,
+	previous: BrokerOwnedCredentialMap,
+	next: BrokerOwnedCredentialMap,
+): Promise<void> {
+	for (const [provider, ids] of previous) {
+		const kept = next.get(provider);
+		for (const id of ids) {
+			if (kept?.has(id)) continue;
+			await storage.removeCredential(provider, id);
+		}
+	}
+}
+
+export async function loadSharedBrokerCatalog(
+	sharedPath: string,
+	storage: AuthStorage,
+	previousBrokerOwnedCredentials: BrokerOwnedCredentialMap = new Map(),
+	opts: SharedBrokerCatalogLoadOptions = {},
+): Promise<SharedBrokerCatalogLoad | undefined> {
+	const file = ModelsConfigFile.relocate(sharedPath);
+	file.invalidate();
+	const previousCredentials = hasBrokerOwnedCredentials(previousBrokerOwnedCredentials)
+		? previousBrokerOwnedCredentials
+		: await readBrokerOwnedCredentials(sharedPath);
+	const result = await file.tryLoadAsync();
+	if (result.status === "not-found") {
+		await removeStaleBrokerOwnedKeys(storage, previousCredentials, new Map());
+		await writeBrokerOwnedCredentials(sharedPath, new Map());
+		return {
+			catalog: { generatedAt: Date.now(), schemaVersion: 1, providers: {} },
+			brokerOwnedCredentials: new Map(),
+		};
+	}
+	if (result.status === "error") throw result.error;
+	const config = result.value;
+	validateSharedBrokerCatalog(config, opts);
+	const brokerOwnedCredentials: BrokerOwnedCredentialMap = new Map();
+	const resolvedApiKeys = new Map<string, string>();
+	for (const [provider, providerConfig] of Object.entries(config.providers ?? {})) {
+		if (!providerConfig.apiKey) continue;
+		const resolved = resolveSharedApiKey(providerConfig.apiKey, opts);
+		if (!resolved) throw new Error(`Unable to resolve apiKey for shared provider ${provider}`);
+		resolvedApiKeys.set(provider, resolved);
+	}
+	for (const [provider, resolved] of resolvedApiKeys) {
+		const entries = storage.upsertCredential(provider, { type: "api_key", key: resolved });
+		const brokerOwnedIds = entries
+			.filter(entry => entry.credential.type === "api_key" && entry.credential.key === resolved)
+			.map(entry => entry.id);
+		brokerOwnedCredentials.set(provider, new Set(brokerOwnedIds));
+	}
+	await removeStaleBrokerOwnedKeys(storage, previousCredentials, brokerOwnedCredentials);
+	await writeBrokerOwnedCredentials(sharedPath, brokerOwnedCredentials);
+	const materializedConfig = await materializeSharedCatalogDiscovery(config, resolvedApiKeys, opts);
+	return { catalog: sanitizeSharedCatalog(materializedConfig, Date.now()), brokerOwnedCredentials };
+}
+
+export interface SharedCatalogAutoRefreshOptions {
+	intervalMs?: number;
+	reload: () => Promise<ModelsConfigResponse>;
+	onReload?: (catalog: ModelsConfigResponse) => void;
+}
+
+export function startSharedCatalogAutoRefresh(opts: SharedCatalogAutoRefreshOptions): (() => void) | undefined {
+	const intervalMs = opts.intervalMs;
+	if (intervalMs === undefined || intervalMs <= 0) return undefined;
+	let reloading = false;
+	const timer: NodeJS.Timeout = setInterval(() => {
+		if (reloading) return;
+		reloading = true;
+		opts
+			.reload()
+			.then(catalog => {
+				opts.onReload?.(catalog);
+				logger.info("auth-broker shared catalog auto-refresh completed", { generatedAt: catalog.generatedAt });
+			})
+			.catch(error => {
+				logger.warn("auth-broker shared catalog auto-refresh failed", { error: String(error) });
+			})
+			.finally(() => {
+				reloading = false;
+			});
+	}, intervalMs);
+	timer.unref?.();
+	return () => clearInterval(timer);
+}
+
+export interface AuthBrokerShutdownHandlers {
+	done: Promise<void>;
+	shutdown(signal: NodeJS.Signals): Promise<void>;
+}
+
+export function createAuthBrokerShutdownHandlers(
+	shutdown: (signal: NodeJS.Signals) => Promise<void>,
+): AuthBrokerShutdownHandlers {
+	const done = Promise.withResolvers<void>();
+	let shuttingDown = false;
+	const runShutdown = async (signal: NodeJS.Signals): Promise<void> => {
+		if (shuttingDown) return done.promise;
+		shuttingDown = true;
+		try {
+			await shutdown(signal);
+			done.resolve();
+		} catch (error) {
+			done.reject(error);
+		}
+		return done.promise;
+	};
+	process.once("SIGINT", () => void runShutdown("SIGINT"));
+	process.once("SIGTERM", () => void runShutdown("SIGTERM"));
+	return { done: done.promise, shutdown: runShutdown };
+}
+
 async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	// The broker is a long-running headless service: route structured logs to
 	// stdout so a process supervisor (pm2, journald, k8s) captures them, and
@@ -130,14 +583,45 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const store = await SqliteAuthCredentialStore.open(dbPath);
 	const storage = new AuthStorage(store);
 	await storage.reload();
+	const sharedCatalogPath = Bun.env.OMP_BROKER_SHARED_CONFIG ?? getDefaultSharedCatalogPath();
+	if (flags.dangerouslyAllowLocalRawKeys) {
+		logger.warn("auth-broker accepting literal apiKey values from shared catalog for local ingestion only");
+	}
+	let sharedCatalog = await loadSharedBrokerCatalog(sharedCatalogPath, storage, new Map(), flags);
+	const reloadSharedCatalog = async (): Promise<ModelsConfigResponse> => {
+		const reloaded = await loadSharedBrokerCatalog(
+			sharedCatalogPath,
+			storage,
+			sharedCatalog?.brokerOwnedCredentials ?? new Map(),
+			flags,
+		);
+		if (!reloaded) throw new Error(`Shared catalog not found: ${sharedCatalogPath}`);
+		sharedCatalog = reloaded;
+		return reloaded.catalog;
+	};
+
 	const handle = startAuthBroker({
 		storage,
 		bind,
 		bearerTokens: [token],
 		version: VERSION,
+		getSharedCatalog: () => sharedCatalog?.catalog,
+		reloadSharedCatalog,
+	});
+	const stopCatalogAutoRefresh = startSharedCatalogAutoRefresh({
+		intervalMs: flags.catalogRefreshIntervalMs,
+		reload: reloadSharedCatalog,
+		onReload: catalog => handle.emitCatalogChanged(catalog.generatedAt),
 	});
 	logger.info("auth-broker listening", { url: handle.url });
 	logger.info("auth-broker bearer token loaded", { path: getTokenFilePath(), mode: "0600" });
+	if (sharedCatalog) {
+		logger.info("auth-broker shared catalog loaded", {
+			path: sharedCatalogPath,
+			providers: Object.keys(sharedCatalog.catalog.providers).length,
+			generatedAt: sharedCatalog.catalog.generatedAt,
+		});
+	}
 
 	const credentialDisabledUnsub = storage.onCredentialDisabled((event: CredentialDisabledEvent) => {
 		logger.warn("auth-broker credential disabled", { ...event });
@@ -145,16 +629,15 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 
 	const shutdown = async (signal: NodeJS.Signals): Promise<void> => {
 		logger.info("auth-broker shutting down", { signal });
+		stopCatalogAutoRefresh?.();
 		credentialDisabledUnsub();
 		await handle.close();
-		storage.close();
-		process.exit(0);
 	};
-	process.once("SIGINT", () => void shutdown("SIGINT"));
-	process.once("SIGTERM", () => void shutdown("SIGTERM"));
 
-	// Block forever; lifecycle is signal-driven.
-	await new Promise<never>(() => {});
+	const shutdownHandlers = createAuthBrokerShutdownHandlers(shutdown);
+
+	// Block until signal-driven shutdown finishes.
+	await shutdownHandlers.done;
 }
 
 async function runToken(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {

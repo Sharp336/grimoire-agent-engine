@@ -19,9 +19,11 @@ import type {
 	CredentialRefreshResponse,
 	CredentialUploadResponse,
 	HealthzResponse,
+	ModelsConfigResponse,
 	RefresherSchedule,
 	SnapshotEntry,
 	SnapshotResponse,
+	SnapshotStreamCatalogChangedEvent,
 	SnapshotStreamEntryEvent,
 	SnapshotStreamRemovedEvent,
 	SnapshotStreamSnapshotEvent,
@@ -56,6 +58,10 @@ export interface AuthBrokerServerOptions {
 	 * without long sleeps. Default {@link DEFAULT_STREAM_KEEPALIVE_MS}.
 	 */
 	streamKeepaliveMs?: number;
+	/** Optional broker-owned shared catalog getter. Omitted until catalog serving is enabled. */
+	getSharedCatalog?: () => ModelsConfigResponse | undefined | Promise<ModelsConfigResponse | undefined>;
+	/** Optional broker-owned shared catalog reload hook. Successful reloads emit `catalog-changed`. */
+	reloadSharedCatalog?: () => ModelsConfigResponse | Promise<ModelsConfigResponse>;
 }
 
 export interface AuthBrokerServerHandle {
@@ -63,6 +69,7 @@ export interface AuthBrokerServerHandle {
 	url: string;
 	port: number;
 	hostname: string;
+	emitCatalogChanged(generatedAt: number): void;
 	close(): Promise<void>;
 }
 
@@ -349,12 +356,14 @@ function serveSnapshotStream(
 	refresher: AuthBrokerRefresher | undefined,
 	peer: string,
 	keepaliveMs: number,
+	registerCatalogListener?: (listener: (generatedAt: number) => void) => () => void,
 ): Response {
 	const encoder = new TextEncoder();
 	const openedAt = Date.now();
 	const lastByCredId = new Map<number, string>();
 	let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
 	let unsubscribe: (() => void) | null = null;
+	let unsubscribeCatalog: (() => void) | null = null;
 	let keepaliveTimer: NodeJS.Timeout | undefined;
 	let abortHandler: (() => void) | null = null;
 	let processing = false;
@@ -372,6 +381,10 @@ function serveSnapshotStream(
 		if (unsubscribe) {
 			unsubscribe();
 			unsubscribe = null;
+		}
+		if (unsubscribeCatalog) {
+			unsubscribeCatalog();
+			unsubscribeCatalog = null;
 		}
 		if (abortHandler) {
 			req.signal.removeEventListener("abort", abortHandler);
@@ -476,6 +489,12 @@ function serveSnapshotStream(
 			unsubscribe = storage.onGenerationChanged(() => {
 				void processGenerationBump();
 			});
+			if (registerCatalogListener) {
+				unsubscribeCatalog = registerCatalogListener(generatedAt => {
+					const payload: SnapshotStreamCatalogChangedEvent = { kind: "catalog-changed", generatedAt };
+					write(sseEvent("catalog-changed", payload));
+				});
+			}
 			abortHandler = (): void => cleanup();
 			req.signal.addEventListener("abort", abortHandler);
 			logger.info("auth-broker stream opened", { peer, generation: initial.generation });
@@ -512,6 +531,16 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 			});
 	refresher?.start();
 	const generationGate = new GenerationGate(opts.storage);
+	const catalogListeners = new Set<(generatedAt: number) => void>();
+	const registerCatalogListener = (listener: (generatedAt: number) => void): (() => void) => {
+		catalogListeners.add(listener);
+		return () => {
+			catalogListeners.delete(listener);
+		};
+	};
+	const emitCatalogChanged = (generatedAt: number): void => {
+		for (const listener of catalogListeners) listener(generatedAt);
+	};
 
 	const server = Bun.serve({
 		hostname: bind.hostname,
@@ -532,7 +561,32 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 					return json(401, { error: "unauthorized" });
 				}
 				if (req.method === "GET" && pathname === "/v1/snapshot/stream") {
-					return serveSnapshotStream(req, opts.storage, refresher, peer, streamKeepaliveMs);
+					return serveSnapshotStream(
+						req,
+						opts.storage,
+						refresher,
+						peer,
+						streamKeepaliveMs,
+						registerCatalogListener,
+					);
+				}
+				if (req.method === "GET" && pathname === "/v1/models-config") {
+					if (!opts.getSharedCatalog) return json(404, { error: "shared catalog unavailable" });
+					const catalog = await opts.getSharedCatalog();
+					if (!catalog) return json(404, { error: "shared catalog unavailable" });
+					return json(200, catalog);
+				}
+				if (req.method === "POST" && pathname === "/v1/catalog/reload") {
+					if (!opts.reloadSharedCatalog) return json(404, { error: "shared catalog reload unavailable" });
+					try {
+						const catalog = await opts.reloadSharedCatalog();
+						emitCatalogChanged(catalog.generatedAt);
+						return json(200, { generatedAt: catalog.generatedAt });
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						logger.warn("auth-broker catalog reload failed", { peer, error: message });
+						return json(500, { error: message });
+					}
 				}
 				if (req.method === "GET" && pathname === "/v1/snapshot") {
 					return serveSnapshot(req, url, opts.storage, generationGate, refresher, peer);
@@ -636,7 +690,9 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 		url: `http://${boundHost}:${boundPort}`,
 		port: boundPort,
 		hostname: boundHost,
+		emitCatalogChanged,
 		close: async () => {
+			catalogListeners.clear();
 			refresher?.stop();
 			generationGate.close();
 			server.stop(true);

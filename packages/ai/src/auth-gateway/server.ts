@@ -42,6 +42,11 @@ import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
 // ParsedFormatRequest / ParsedFormatOptions / FormatModule come from ./types.
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
+type GatewayModel = Model<Api> & { auth?: "none" };
+
+function isKeylessGatewayModel(model: Model<Api>): boolean {
+	return (model as GatewayModel).auth === "none";
+}
 
 export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	/** Source of credentials. Caller wires this to a broker-backed AuthStorage. */
@@ -486,36 +491,39 @@ async function handleFormatEndpoint(
 	// For OAuth providers this returns the access token (refreshed via the
 	// broker override on AuthStorage when needed).
 	let apiKey: string | undefined;
-	try {
-		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
-			modelId: model.id,
-			signal: controller.signal,
-		});
-	} catch (error) {
-		if (controller.signal.aborted) return clientClosedResponse(route);
-		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		return route.module.formatError(classified.status, classified.type, classified.message);
+	if (!isKeylessGatewayModel(model)) {
+		try {
+			apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
+				modelId: model.id,
+				signal: controller.signal,
+			});
+		} catch (error) {
+			if (controller.signal.aborted) return clientClosedResponse(route);
+			const classified = classifyGatewayError(error);
+			logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
+			return route.module.formatError(classified.status, classified.type, classified.message);
+		}
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
-	if (!apiKey) {
+	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
+	if (!apiKey && !isKeylessGatewayModel(model)) {
 		return route.module.formatError(
 			401,
 			"authentication_error",
 			`No credential available for provider ${model.provider}`,
 		);
 	}
-
-	const streamOpts = buildStreamOptions(parsed, model.api, controller.signal);
-	streamOpts.apiKey = buildGatewayApiKeyResolver(
-		bootOpts.storage,
-		model,
-		sessionId,
-		apiKey,
-		controller.signal,
-		route.label,
-		peer,
-	);
+	if (apiKey) {
+		streamOpts.apiKey = buildGatewayApiKeyResolver(
+			bootOpts.storage,
+			model,
+			sessionId,
+			apiKey,
+			controller.signal,
+			route.label,
+			peer,
+		);
+	}
 
 	logger.info("auth-gateway request", {
 		format: route.label,
@@ -642,19 +650,21 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	parsed.options.sessionId ??= sessionId;
 
 	let apiKey: string | undefined;
-	try {
-		apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
-			modelId: model.id,
-			signal: controller.signal,
-		});
-	} catch (error) {
-		if (controller.signal.aborted) return aborted();
-		const classified = classifyGatewayError(error);
-		logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
-		return piNative.formatError(classified.status, classified.type, classified.message);
+	if (!isKeylessGatewayModel(model)) {
+		try {
+			apiKey = await bootOpts.storage.getApiKey(model.provider, sessionId, {
+				modelId: model.id,
+				signal: controller.signal,
+			});
+		} catch (error) {
+			if (controller.signal.aborted) return aborted();
+			const classified = classifyGatewayError(error);
+			logger.warn("auth-gateway getApiKey threw", { provider: model.provider, peer, error: classified.message });
+			return piNative.formatError(classified.status, classified.type, classified.message);
+		}
 	}
 	if (controller.signal.aborted) return aborted();
-	if (!apiKey) {
+	if (!apiKey && !isKeylessGatewayModel(model)) {
 		return piNative.formatError(
 			401,
 			"authentication_error",
@@ -666,16 +676,18 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	// trust the client's options (already allow-listed by `parseRequest`) and
 	// only inject server-controlled fields. The codex sampling strip mirrors
 	// `buildStreamOptions` — Codex rejects every one with a 400 (#3117).
-	const streamOpts: SimpleStreamOptions = { ...parsed.options, apiKey, signal: controller.signal };
-	streamOpts.apiKey = buildGatewayApiKeyResolver(
-		bootOpts.storage,
-		model,
-		sessionId,
-		apiKey,
-		controller.signal,
-		"pi-native",
-		peer,
-	);
+	const streamOpts: SimpleStreamOptions = { ...parsed.options, signal: controller.signal };
+	if (apiKey) {
+		streamOpts.apiKey = buildGatewayApiKeyResolver(
+			bootOpts.storage,
+			model,
+			sessionId,
+			apiKey,
+			controller.signal,
+			"pi-native",
+			peer,
+		);
+	}
 	if (model.api === "openai-codex-responses") {
 		delete streamOpts.temperature;
 		delete streamOpts.topP;
@@ -794,10 +806,19 @@ async function handleCredentialsCheck(storage: AuthStorage, signal: AbortSignal)
 function handleModelsList(opts: AuthGatewayBootOptions): Response {
 	const list = opts.listModels ? Array.from(opts.listModels()) : [];
 	const data = list.map(model => ({
-		id: model.id,
+		id: `${model.provider}/${model.id}`,
 		object: "model" as const,
 		owned_by: model.provider,
 		api: model.api,
+		name: model.name,
+		reasoning: model.reasoning,
+		thinking: model.thinking,
+		input: model.input,
+		cost: model.cost,
+		contextWindow: model.contextWindow,
+		maxTokens: model.maxTokens,
+		requestModelId: `${model.provider}/${model.id}`,
+		...(model.supportsTools !== undefined ? { supportsTools: model.supportsTools } : {}),
 	}));
 	return json(200, { object: "list", data });
 }

@@ -21,7 +21,13 @@ import type { OAuthCredentials } from "../registry/oauth/types";
 import type { Provider } from "../types";
 import type { UsageReport } from "../usage";
 import { type AuthBrokerClient, AuthBrokerStreamUnsupportedError } from "./client";
-import type { RefresherSchedule, SnapshotEntry, SnapshotResponse, SnapshotStreamEvent } from "./types";
+import type {
+	RefresherSchedule,
+	SnapshotEntry,
+	SnapshotResponse,
+	SnapshotStreamCatalogChangedEvent,
+	SnapshotStreamEvent,
+} from "./types";
 
 /**
  * Client-side TTL for the aggregate `/v1/usage` response. Set below the
@@ -78,12 +84,15 @@ export interface RemoteAuthCredentialStoreOptions {
 	 * initial snapshot intentionally does not trigger this hook.
 	 */
 	onSnapshot?: (snapshot: SnapshotResponse, generation: number) => void;
+	/** Called after the broker reports that `GET /v1/models-config` changed. */
+	onCatalogChanged?: (event: SnapshotStreamCatalogChangedEvent) => void;
 }
 
 export class RemoteAuthCredentialStore implements AuthCredentialStore {
 	readonly #client: AuthBrokerClient;
 	readonly #streamSnapshots: boolean;
 	readonly #onSnapshot?: (snapshot: SnapshotResponse, generation: number) => void;
+	readonly #onCatalogChanged?: (event: SnapshotStreamCatalogChangedEvent) => void;
 	#snapshot: SnapshotResponse = emptySnapshot();
 	#snapshotReceivedAt = Date.now();
 	#generation = 0;
@@ -107,6 +116,7 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 		this.#streamSnapshots = opts.streamSnapshots ?? true;
 		this.#applySnapshot(opts.initialSnapshot ?? emptySnapshot(), opts.initialSnapshot?.generation ?? 0);
 		this.#onSnapshot = opts.onSnapshot;
+		this.#onCatalogChanged = opts.onCatalogChanged;
 		void this.#runBackground();
 	}
 
@@ -207,6 +217,20 @@ export class RemoteAuthCredentialStore implements AuthCredentialStore {
 				this.#removeStreamCredential(event.id, event.refresher, event.generation, event.serverNowMs);
 				return;
 			}
+			case "catalog-changed": {
+				this.#notifyCatalogChanged(event);
+				return;
+			}
+		}
+	}
+
+	#notifyCatalogChanged(event: SnapshotStreamCatalogChangedEvent): void {
+		const onCatalogChanged = this.#onCatalogChanged;
+		if (!onCatalogChanged) return;
+		try {
+			onCatalogChanged(event);
+		} catch (error) {
+			logger.debug("auth-broker catalog callback failed", { error: String(error) });
 		}
 	}
 

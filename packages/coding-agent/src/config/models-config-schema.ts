@@ -125,6 +125,7 @@ const ModelDefinitionSchema = type({
 		'"openai-completions" | "openai-responses" | "openai-codex-responses" | "azure-openai-responses" | "anthropic-messages" | "google-generative-ai" | "google-gemini-cli" | "google-vertex"',
 	"baseUrl?": "string",
 	"reasoning?": "boolean",
+	"requestModelId?": "string",
 	"thinking?": ModelThinkingSchema,
 	"input?": '("text" | "image")[]',
 	"supportsTools?": "boolean",
