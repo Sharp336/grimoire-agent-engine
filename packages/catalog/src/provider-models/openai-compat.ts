@@ -4,7 +4,7 @@ import {
 	type OpenAICompatibleModelRecord,
 } from "../discovery/openai-compatible";
 import { Effort } from "../effort";
-import { toFireworksPublicModelId } from "../fireworks-model-id";
+import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
 import { isGlmVisionModelId, isGrokReasoningEffortCapable, isReasoningGlmModelId } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModels } from "../models";
@@ -1259,6 +1259,51 @@ export function clampKimiK27CodeMaxTokens(modelId: string, candidate: number | n
 }
 
 /**
+ * Fireworks Fast variants we surface. Each inherits the base model's
+ * limits/modalities/thinking and overrides only the cost with the Standard-column
+ * Fast prices from the Serverless pricing table; `cacheWrite` stays 0 (Fireworks
+ * bills no cache-write). Derived from the bundled base entries so metadata stays
+ * in lockstep, and the runtime auto-falls back to the base id on a failed fast
+ * request. See https://docs.fireworks.ai/serverless/pricing.
+ */
+const FIREWORKS_FAST_VARIANT_SPECS: ReadonlyArray<{
+	base: string;
+	name: string;
+	cost: { input: number; output: number; cacheRead: number };
+}> = [
+	{ base: "kimi-k2.7-code", name: "Kimi K2.7 Code Fast", cost: { input: 1.9, output: 8, cacheRead: 0.38 } },
+	{ base: "kimi-k2.6", name: "Kimi K2.6 Fast", cost: { input: 2, output: 8, cacheRead: 0.3 } },
+	{ base: "glm-5.1", name: "GLM-5.1 Fast", cost: { input: 2.8, output: 8.8, cacheRead: 0.52 } },
+];
+
+/**
+ * Build the Fireworks Fast seed by projecting each base bundled spec into a
+ * `<id>-fast` variant. Pushed into the generated catalog (Fast routers never
+ * appear in the serverless control-plane list, so discovery cannot surface
+ * them) and deduped behind any identical previous-snapshot entry.
+ */
+export function buildFireworksFastSeed(): ModelSpec<"openai-completions">[] {
+	const bundled = createBundledReferenceMap<"openai-completions">("fireworks");
+	const seeds: ModelSpec<"openai-completions">[] = [];
+	for (const variant of FIREWORKS_FAST_VARIANT_SPECS) {
+		const base = bundled.get(variant.base);
+		if (!base) continue;
+		seeds.push({
+			...base,
+			id: `${variant.base}${FIREWORKS_FAST_SUFFIX}`,
+			name: variant.name,
+			cost: {
+				input: variant.cost.input,
+				output: variant.cost.output,
+				cacheRead: variant.cost.cacheRead,
+				cacheWrite: 0,
+			},
+		});
+	}
+	return seeds;
+}
+
+/**
  * Fireworks DeepSeek V4 accepts effort via `reasoning_effort` but rejects the
  * DeepSeek-native binary `thinking` toggle when both are present.
  */
@@ -2448,7 +2493,10 @@ export function moonshotModelManagerOptions(
 	config?: MoonshotModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
 	const apiKey = config?.apiKey;
-	const baseUrl = config?.baseUrl ?? "https://api.moonshot.ai/v1";
+	// `MOONSHOT_BASE_URL` redirects discovery (and the streaming request that
+	// inherits this baseUrl) at the Kimi China platform `api.moonshot.cn`; an
+	// explicit `config.baseUrl` still wins. Mirrors LITELLM_BASE_URL/LM_STUDIO_BASE_URL. (#2883)
+	const baseUrl = config?.baseUrl ?? Bun.env.MOONSHOT_BASE_URL ?? "https://api.moonshot.ai/v1";
 	const references = createBundledReferenceMap<"openai-completions">("moonshot");
 	return {
 		providerId: "moonshot",
