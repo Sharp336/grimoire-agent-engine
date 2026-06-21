@@ -45,6 +45,8 @@
 ### Fixed
 
 - Fixed FastContext hint-mode failing to find barrel files (`index.ts`/`index.js`) in subdirectories whose names match query keywords. `#nativeGlob` now expands directory matches to their immediate file children (glob can return directory paths like `provider-models/` instead of `index.ts` inside it), and barrel files whose parent directory name contains a query keyword get a +3 content-score boost to compensate for their near-empty re-export content. Feature benchmark improved from 17/18 to 18/18 (100%).
+- Fixed FastContext `isWithinCwd` not resolving symlinks before checking workspace containment — a symlink inside the workspace could point outside cwd and bypass the security check. Now uses `realpathSync` to resolve both candidate and cwd before comparing.
+- Fixed FastContext hint-mode failing to find type definitions in files with generic basenames (e.g. `interface AgentTool` in `types.ts`). Added directory-path globs (`**/agent/**/*`) for identifier segments ≥5 chars, placed first in merge order so they survive the 200-file cap. Added directory-segment boost +2 when any path component matches an identifier segment and a definition-site match already fired.
 
 ## [16.1.11] - 2026-06-21
 
