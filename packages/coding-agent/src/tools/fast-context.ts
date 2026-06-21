@@ -420,12 +420,14 @@ function identifierKeywords(query: string): Set<string> {
 	// Avoids matching single-word capitals like "The" or "Find".
 	const camelCase = (query.match(/\b[A-Z][a-z]+(?:[A-Z][a-z0-9]*)+\b/g) ?? []).map(id => id.toLowerCase());
 	// Lower-camelCase: starts lowercase, has ≥1 internal uppercase (e.g.
-	// streamSimple, isEnoent, untilAborted). These get 3x content weighting
-	// and segment globs but do NOT trigger the definition-site boost (see
-	// strongIdentifierKeywords). Two filters prevent false positives:
-	// 1. Property-access filter: skip identifiers followed by `.` (e.g.
-	//    `fastContext.enabled` — fastContext is a qualifier, not the target)
-	// 2. Verb-position filter: skip identifiers followed by an action verb
+	// streamSimple, isEnoent, untilAborted). These get 3x content weighting,
+	// segment globs, AND trigger the definition-site boost. Three filters
+	// prevent false positives:
+	// 1. Dot-preceded filter: skip identifiers preceded by `.` (catches
+	//    `baseUrl` in `fastContext.baseUrl`)
+	// 2. Dot-followed filter: skip identifiers followed by `.` (catches
+	//    `fastContext` in `fastContext.enabled`)
+	// 3. Verb-position filter: skip identifiers followed by action verbs
 	//    (e.g. `applyGeneratedModelPolicies sets` — the identifier is being
 	//    called, not searched for). Identifiers followed by a noun (function,
 	//    helper, error) are the search target.
@@ -477,18 +479,6 @@ function identifierKeywords(query: string): Set<string> {
 		.map(id => id.toLowerCase());
 	return new Set([...upperSnake, ...camelCase, ...lowerCamelCase]);
 }
-
-/**
- * Return only "strong" identifiers (UPPER_SNAKE_CASE + uppercase-first CamelCase)
- * for the definition-site boost. Lowercase-first camelCase identifiers are excluded
- * because they're often function calls or property accesses, not definitions.
- */
-function strongIdentifierKeywords(query: string): Set<string> {
-	const upperSnake = (query.match(/\b[A-Z][A-Z0-9_]{4,}\b/g) ?? []).map(id => id.toLowerCase());
-	const camelCase = (query.match(/\b[A-Z][a-z]+(?:[A-Z][a-z0-9]*)+\b/g) ?? []).map(id => id.toLowerCase());
-	return new Set([...upperSnake, ...camelCase]);
-}
-
 async function citationMatchesQuery(
 	resolvedPath: string,
 	lineStart: number,
