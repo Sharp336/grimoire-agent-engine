@@ -97,6 +97,13 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	codemapActive: () => {
+		try {
+			return Settings.instance.get("codemap.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
 	autolearnActive: () => {
 		try {
 			return Settings.instance.get("autolearn.enabled") === true;

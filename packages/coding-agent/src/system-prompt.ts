@@ -417,6 +417,8 @@ export interface BuildSystemPromptOptions {
 	workspaceTree?: WorkspaceTree | Promise<WorkspaceTree>;
 	/** Whether the local memory://root summary is active. */
 	memoryRootEnabled?: boolean;
+	/** Whether the codemap (code summaries) feature is enabled. */
+	codemapEnabled?: boolean;
 	/** Active model identifier (e.g. "anthropic/claude-opus-4") surfaced to the agent. */
 	model?: string;
 	/** Personality preset rendered into the default system prompt. "none" omits the block. Default: "default" */
@@ -459,6 +461,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		secretsEnabled = false,
 		workspaceTree: providedWorkspaceTree,
 		memoryRootEnabled = false,
+		codemapEnabled = false,
 		model,
 		personality = "default",
 	} = options;
@@ -669,6 +672,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		taskBatch,
 		secretsEnabled,
 		hasMemoryRoot: memoryRootEnabled,
+		hasCodemap: codemapEnabled,
 		hasObsidian: hasObsidian(),
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);

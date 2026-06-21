@@ -46,6 +46,7 @@
 	},
 	"dependencies": {
 		"@agentclientprotocol/sdk": "catalog:",
+		"@libsql/client": "^0.17.4",
 		"@babel/parser": "catalog:",
 		"@mozilla/readability": "catalog:",
 		"@oh-my-pi/hashline": "catalog:",

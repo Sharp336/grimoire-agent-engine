@@ -2519,6 +2519,76 @@ export const SETTINGS_SCHEMA = {
 	"hindsight.mentalModelRefreshIntervalMs": { type: "number", default: 5 * 60 * 1000 },
 	"hindsight.mentalModelMaxRenderChars": { type: "number", default: 16_000 },
 
+	// Codemap (code summaries) — DISTINCT feature module at packages/coding-agent/src/task-context/.
+	// NOT a memory.backend enum value. Composable with any memory backend including "off".
+	"codemap.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "memory",
+			group: "Codemap",
+			label: "Enable Code Summaries",
+			description:
+				"Enable agent-written code summaries with task-relevant retrieval (Turso/libSQL + vector search).",
+		},
+	},
+	"codemap.autoInject": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Codemap",
+			label: "Codemap Auto Inject",
+			description: "Automatically retrieve and inject task-relevant summaries on the first turn of each session.",
+			condition: "codemapActive",
+		},
+	},
+	"codemap.dbPath": { type: "string", default: "" },
+	"codemap.tokenBudget": { type: "number", default: 8000 },
+	"codemap.maxResults": { type: "number", default: 20 },
+	"codemap.maxSummaryChars": { type: "number", default: 1000 },
+	"codemap.embedding.variant": {
+		type: "enum",
+		values: ["en", "multilingual"] as const,
+		default: "en",
+		ui: {
+			tab: "memory",
+			group: "Codemap",
+			label: "Codemap Embedding Variant",
+			description: "Local embedding model family. en = 768d English; multilingual = 1024d cross-language.",
+			options: [
+				{
+					value: "en",
+					label: "English (bge-base-en-v1.5)",
+					description: "BAAI/bge-base-en-v1.5 (768d), English-only",
+				},
+				{
+					value: "multilingual",
+					label: "Multilingual (multilingual-e5-large)",
+					description: "intfloat/multilingual-e5-large (1024d), cross-language",
+				},
+			],
+			condition: "codemapActive",
+		},
+	},
+	"codemap.embedding.model": { type: "string", default: undefined },
+	"codemap.embedding.apiUrl": { type: "string", default: undefined },
+	"codemap.embedding.apiKey": { type: "string", default: undefined },
+	"codemap.turso.syncUrl": { type: "string", default: "" },
+	"codemap.turso.authToken": { type: "string", default: "" },
+	"codemap.turso.autoProvision": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Codemap",
+			label: "Codemap Turso Auto-Provision",
+			description: "Automatically provision a Turso database when TURSO_API_TOKEN is available.",
+			condition: "codemapActive",
+		},
+	},
+	"codemap.turso.org": { type: "string", default: "" },
+
 	// TTSR
 	"ttsr.enabled": {
 		type: "boolean",

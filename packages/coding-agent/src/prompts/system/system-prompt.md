@@ -66,6 +66,10 @@ Special URLs for internal resources; with most FS/bash tools they auto-resolve t
 - `issue://<N>` (or `issue://<owner>/<repo>/<N>`): GitHub issue, disk-cached. Bare lists recent issues; `?state=open|closed|all&limit=&author=&label=`.
 - `pr://<N>` (or `pr://<owner>/<repo>/<N>`): GitHub PR, same cache; `?comments=0` drops comments. Bare lists recent PRs; `?state=open|closed|merged|all&limit=&author=&label=`.
 - `omp://`: harness docs; AVOID unless the user asks about the harness itself.
+{{#if hasCodemap}}
+## Code Summaries (codemap)
+File-level code summaries are available for this repo. Before reading unfamiliar files, call `get_task_context` with your task to retrieve relevant summaries (packed within a token budget). After reading a non-trivial file or making load-bearing changes, call `set_file_summary` to record a short note (purpose, key symbols, gotchas, invariants). Summaries are anchored to file content via `Bun.hash` — if a file changes, its summary is flagged `stale` and should be refreshed.
+{{/if}}
 
 {{#if toolInfo.length}}
 {{#if toolListMode}}

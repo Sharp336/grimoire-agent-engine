@@ -27,6 +27,12 @@ import type { ToolChoiceQueue } from "../session/tool-choice-queue";
 import { TaskTool } from "../task";
 import type { AgentOutputManager } from "../task/output-manager";
 import { canSpawnAtDepth } from "../task/types";
+import {
+	DeleteFileSummaryTool,
+	GetFileSummaryTool,
+	GetTaskContextTool,
+	SetFileSummaryTool,
+} from "../task-context/tools";
 import { countToolsForAutoDiscovery, resolveEffectiveToolDiscoveryMode } from "../tool-discovery/mode";
 import type { DiscoverableTool, DiscoverableToolSearchIndex } from "../tool-discovery/tool-index";
 import type { EventBus } from "../utils/event-bus";
@@ -457,6 +463,10 @@ export const BUILTIN_TOOLS: Record<BuiltinToolName, ToolFactory> = {
 	recall: MemoryRecallTool.createIf,
 	reflect: MemoryReflectTool.createIf,
 	learn: LearnTool.createIf,
+	set_file_summary: SetFileSummaryTool.createIf,
+	get_file_summary: GetFileSummaryTool.createIf,
+	get_task_context: GetTaskContextTool.createIf,
+	delete_file_summary: DeleteFileSummaryTool.createIf,
 	manage_skill: ManageSkillTool.createIf,
 };
 
@@ -553,6 +563,11 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				requestedTools.push("learn");
 			}
 		}
+		if (session.settings.get("codemap.enabled")) {
+			for (const name of ["set_file_summary", "get_file_summary", "get_task_context", "delete_file_summary"]) {
+				if (!requestedTools.includes(name)) requestedTools.push(name);
+			}
+		}
 	}
 	// Resolve effective tool discovery mode.
 	// tools.discoveryMode controls the new modes; mcp.discoveryMode remains a back-compat alias for "mcp-only".
@@ -595,6 +610,14 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}
 		if (name === "task") {
 			return canSpawnAtDepth(session.settings.get("task.maxRecursionDepth") ?? 2, session.taskDepth ?? 0);
+		}
+		if (
+			name === "set_file_summary" ||
+			name === "get_file_summary" ||
+			name === "get_task_context" ||
+			name === "delete_file_summary"
+		) {
+			return session.settings.get("codemap.enabled") === true;
 		}
 		return true;
 	};

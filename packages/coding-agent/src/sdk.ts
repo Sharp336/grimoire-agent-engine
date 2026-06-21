@@ -125,6 +125,7 @@ import {
 	loadProjectContextFiles as loadContextFilesInternal,
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
+import { resolveCodemap } from "./task-context";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -2195,6 +2196,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				secretsEnabled,
 				workspaceTree: workspaceTreePromise,
 				memoryRootEnabled: memoryBackend.id === "local",
+				codemapEnabled: settings.get("codemap.enabled"),
 				model: settings.get("includeModelInPrompt") ? getActiveModelString() : undefined,
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
 			});
@@ -2805,6 +2807,19 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		} else {
 			void logger.time("startMemoryStartupTask", startMemoryBackend);
 		}
+
+		// Initialize codemap (code summaries) if enabled. Distinct from the memory
+		// backend — runs independently of memory.backend. Opens the Turso/libSQL DB,
+		// runs auto-provisioning if configured, and stores session state. Non-blocking
+		// so the session starts without waiting for DB init; the first-turn injection
+		// in #buildSystemPromptForAgentStart handles a not-yet-ready state gracefully.
+		void (async () => {
+			try {
+				await resolveCodemap(session, settings);
+			} catch (error) {
+				logger.debug("codemap: initialization failed", { error: String(error) });
+			}
+		})();
 
 		// Wire MCP manager callbacks to session for reactive tool updates.
 		// Skip when reusing a parent's manager — the parent owns the callbacks.

@@ -24,6 +24,7 @@ const MEMORIES_REGEX = /<memories>[\s\S]*?<\/memories>/g;
 const LEGACY_HINDSIGHT_MEMORIES_REGEX = /<hindsight_memories>[\s\S]*?<\/hindsight_memories>/g;
 const LEGACY_RELEVANT_MEMORIES_REGEX = /<relevant_memories>[\s\S]*?<\/relevant_memories>/g;
 const MENTAL_MODELS_REGEX = /<mental_models>[\s\S]*?<\/mental_models>/g;
+const CODEMAP_REGEX = /<codemap>[\s\S]*?<\/codemap>/g;
 
 /**
  * Strip `<memories>`, `<mental_models>`, and legacy memory blocks.
@@ -39,6 +40,7 @@ export function stripMemoryTags(content: string): string {
 	return content
 		.replace(MEMORIES_REGEX, "")
 		.replace(MENTAL_MODELS_REGEX, "")
+		.replace(CODEMAP_REGEX, "")
 		.replace(LEGACY_HINDSIGHT_MEMORIES_REGEX, "")
 		.replace(LEGACY_RELEVANT_MEMORIES_REGEX, "");
 }

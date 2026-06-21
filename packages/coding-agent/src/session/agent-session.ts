@@ -240,6 +240,10 @@ import {
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
+import { shutdownCodemap } from "../task-context";
+import { buildCodemapInjectionBlock } from "../task-context/prompt";
+import { getTaskContext } from "../task-context/retrieve";
+import { getCodemapSessionState, markFirstTurnInjected } from "../task-context/state";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -4283,6 +4287,9 @@ export class AgentSession {
 		// memories, and that round-trips through the worker we are about to
 		// hard-kill (issue #3031).
 		await shutdownMnemopiEmbedClient();
+		// Shut down codemap (code summaries): close the libSQL client and the
+		// embedding subprocess. Safe to call even if codemap was never initialized.
+		await shutdownCodemap(this);
 		this.#disconnectFromAgent();
 		if (this.#unsubscribeAppendOnly) {
 			this.#unsubscribeAppendOnly();
@@ -4942,15 +4949,57 @@ export class AgentSession {
 		this.#lastAppliedToolSignature = this.#computeAppliedToolSignature(activeToolNames, activeTools);
 	}
 
+	/**
+	 * Composable first-turn injection for codemap (code summaries).
+	 *
+	 * Runs REGARDLESS of memory.backend — codemap is a distinct feature axis
+	 * that composes with any memory backend including "off" (the default).
+	 * Gated only on `codemap.enabled` and `codemap.autoInject`.
+	 *
+	 * Fires once per session via `hasInjectedForFirstTurn` flag (mirrors
+	 * mnemopi/state.ts:313 `hasRecalledForFirstTurn`).
+	 */
+	async #injectCodemapTaskContext(promptText: string): Promise<string | null> {
+		try {
+			if (!this.settings.get("codemap.enabled")) return null;
+			if (!this.settings.get("codemap.autoInject")) return null;
+
+			const state = getCodemapSessionState(this);
+			if (!state) return null; // codemap not initialized for this session
+			if (state.hasInjectedForFirstTurn) return null;
+
+			const projectLabel = path.basename(this.sessionManager.getCwd());
+			const result = await getTaskContext(
+				state.client,
+				state.config,
+				promptText,
+				projectLabel,
+				this.sessionManager.getCwd(),
+			);
+			markFirstTurnInjected(this);
+			const block = buildCodemapInjectionBlock(result);
+			return block || null;
+		} catch (err) {
+			logger.debug("codemap: first-turn injection failed", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+			return null;
+		}
+	}
+
 	async #buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {
+		// Composable first-turn injection — runs regardless of memory.backend.
+		const codemapBlock = await this.#injectCodemapTaskContext(promptText);
+		const baseWithCodemap = codemapBlock ? [...this.#baseSystemPrompt, codemapBlock] : this.#baseSystemPrompt;
+
 		const backend = await resolveMemoryBackend(this.settings);
-		if (!backend.beforeAgentStartPrompt) return this.#baseSystemPrompt;
+		if (!backend.beforeAgentStartPrompt) return baseWithCodemap;
 
 		try {
 			const injected = await backend.beforeAgentStartPrompt(this, promptText);
-			if (!injected) return this.#baseSystemPrompt;
+			if (!injected) return baseWithCodemap;
 
-			const previousBaseSystemPrompt = this.#baseSystemPrompt;
+			const previousBaseSystemPrompt = baseWithCodemap;
 			try {
 				await this.refreshBaseSystemPrompt();
 			} catch (refreshErr) {
@@ -4977,7 +5026,7 @@ export class AgentSession {
 				backend: backend.id,
 				error: String(err),
 			});
-			return this.#baseSystemPrompt;
+			return baseWithCodemap;
 		}
 	}
 

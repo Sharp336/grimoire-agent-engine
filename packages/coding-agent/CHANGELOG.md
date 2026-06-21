@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added task-relevant code summaries (codemap): agent-written file-level summaries persisted in Turso/libSQL with native vector search, retrieved as minimal task-relevant context via hybrid FTS5 + vector_top_k retrieval with reciprocal rank fusion and budget packing. Distinct feature module (`codemap.*` settings) that composes with any memory backend including "off". Features automatic Turso database provisioning, lazy embedding on retrieval, staleness tracking via `Bun.hash`, and a pluggable language adapter interface (TS adapter ships in v1 via the existing LSP client).
+
 ## [16.1.9] - 2026-06-21
 
 ### Added

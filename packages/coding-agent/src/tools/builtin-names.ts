@@ -29,6 +29,10 @@ export const BUILTIN_TOOL_NAMES = [
 	"reflect",
 	"learn",
 	"manage_skill",
+	"set_file_summary",
+	"get_file_summary",
+	"get_task_context",
+	"delete_file_summary",
 ] as const;
 
 export type BuiltinToolName = (typeof BUILTIN_TOOL_NAMES)[number];
