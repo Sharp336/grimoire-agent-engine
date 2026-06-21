@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `isUsageLimitError` not recognizing OpenCode Go's `401 Insufficient balance` quota-exhaustion phrasing, which prevented the retry pipeline from engaging and left fallback chains unused for exhausted OpenCode Go accounts. ([#3169](https://github.com/can1357/oh-my-pi/issues/3169))
+
 ## [16.1.9] - 2026-06-21
 
 ### Added
