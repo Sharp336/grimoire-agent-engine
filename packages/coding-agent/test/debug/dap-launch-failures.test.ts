@@ -696,6 +696,50 @@ describe("DebugTool launch validation", () => {
 		}
 	});
 
+	it("passes Bun inspector URLs through attach routing", async () => {
+		const bunAdapter: DapResolvedAdapter = {
+			...TEST_ADAPTER,
+			name: "bun",
+			command: "omp",
+			resolvedCommand: process.execPath,
+			attachDefaults: { request: "attach", type: "bun" },
+		};
+		const attachSpy = spyOn(dapModule, "selectAttachAdapter").mockReturnValue(bunAdapter);
+		const sessionAttachSpy = spyOn(dapModule.dapSessionManager, "attach").mockImplementation(async opts => {
+			throw Object.assign(new Error("captured attach"), { capturedOptions: opts });
+		});
+		try {
+			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-debug-bun-attach-"));
+			try {
+				const session: ToolSession = {
+					cwd,
+					hasUI: false,
+					getSessionFile: () => null,
+					getSessionSpawns: () => "*",
+					settings: Settings.isolated({ "debug.enabled": true }),
+				};
+				const tool = new DebugTool(session);
+				const inspectorUrl = "ws://127.0.0.1:6499/session";
+
+				await expect(
+					tool.execute("call", { action: "attach", adapter: "bun", inspector_url: inspectorUrl }),
+				).rejects.toThrow(/captured attach/);
+
+				expect(attachSpy).toHaveBeenCalledWith(cwd, "bun", undefined, inspectorUrl);
+				const [opts] = sessionAttachSpy.mock.calls[0]!;
+				expect(opts.adapter.name).toBe("bun");
+				expect(opts.url).toBe(inspectorUrl);
+				expect(opts.pid).toBeUndefined();
+				expect(opts.port).toBeUndefined();
+			} finally {
+				await fs.rm(cwd, { recursive: true, force: true });
+			}
+		} finally {
+			sessionAttachSpy.mockRestore();
+			attachSpy.mockRestore();
+		}
+	});
+
 	it("falls back to the generic 'No debugger adapter' error when adapter is unspecified", async () => {
 		const launchSpy = spyOn(dapModule, "selectLaunchAdapter").mockReturnValue(null);
 		try {

@@ -109,7 +109,7 @@ const debugSchema = type({
 	action: debugActionSchema,
 	"program?": type("string").describe("program path"),
 	"args?": type("string[]").describe("program arguments"),
-	"adapter?": type("string").describe("debugger adapter (gdb, lldb-dap, debugpy, dlv, js-debug-adapter)"),
+	"adapter?": type("string").describe("debugger adapter (bun, gdb, lldb-dap, debugpy, dlv, js-debug-adapter)"),
 	cwd: "string?",
 	session_id: "string?",
 	"file?": type("string").describe("source file"),
@@ -126,6 +126,9 @@ const debugSchema = type({
 	"pid?": type("number").describe("process id for attach"),
 	"port?": type("number").describe("remote attach port"),
 	"host?": type("string").describe("remote attach host"),
+	"url?": type("string").describe("remote attach URL"),
+	"inspector_url?": type("string").describe("Bun inspector WebSocket URL"),
+	"path?": type("string").describe("remote attach URL path"),
 	"levels?": type("number").describe("max stack frames"),
 	"memory_reference?": type("string").describe("memory reference or address"),
 	instruction_reference: "string?",
@@ -219,7 +222,7 @@ function formatBreakpoints(filePath: string, breakpoints: DapBreakpointRecord[])
 	}
 	for (const breakpoint of breakpoints) {
 		lines.push(
-			`- line ${breakpoint.line}: ${breakpoint.verified ? "verified" : "pending"}${breakpoint.condition ? ` if ${breakpoint.condition}` : ""}${breakpoint.message ? ` (${breakpoint.message})` : ""}`,
+			`- line ${breakpoint.line}: ${breakpoint.verified ? "verified" : "pending"}${breakpoint.condition ? ` if ${breakpoint.condition}` : ""}${breakpoint.hitCondition ? ` after ${breakpoint.hitCondition}` : ""}${breakpoint.message ? ` (${breakpoint.message})` : ""}`,
 		);
 	}
 	return lines.join("\n");
@@ -683,6 +686,10 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 			note: '1. debug(action: "launch", program: "./my_app")\n2. debug(action: "set_breakpoint", file: "src/main.c", line: 42)\n3. debug(action: "continue")\n4. If the program appears hung: debug(action: "pause")\n5. Inspect state with `threads`, `stack_trace`, `scopes`, and `variables`',
 		},
 		{
+			caption: "Launch a Bun script",
+			call: { action: "launch", adapter: "bun", program: "src/index.ts" },
+		},
+		{
 			caption: "Launch a Python script with debugpy",
 			call: { action: "launch", adapter: "debugpy", program: "scripts/job.py", args: ["--flag"] },
 		},
@@ -755,11 +762,12 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 				return result.text(formatSessionSnapshot(snapshot).join("\n")).done();
 			}
 			case "attach": {
-				if (params.pid === undefined && params.port === undefined) {
-					throw new ToolError("attach requires pid or port");
+				const inspectorUrl = params.inspector_url ?? params.url;
+				if (params.pid === undefined && params.port === undefined && !inspectorUrl) {
+					throw new ToolError("attach requires pid, port, or url");
 				}
 				const commandCwd = params.cwd ? resolveToCwd(params.cwd, this.session.cwd) : this.session.cwd;
-				const adapter = selectAttachAdapter(commandCwd, params.adapter, params.port);
+				const adapter = selectAttachAdapter(commandCwd, params.adapter, params.port, inspectorUrl);
 				if (!adapter) {
 					if (params.adapter === "debugpy") {
 						throw new ToolError("adapter 'debugpy' is not available: python not found in PATH");
@@ -769,7 +777,16 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 					);
 				}
 				const snapshot = await dapSessionManager.attach(
-					{ ownerId, adapter, cwd: commandCwd, pid: params.pid, port: params.port, host: params.host },
+					{
+						ownerId,
+						adapter,
+						cwd: commandCwd,
+						pid: params.pid,
+						port: params.port,
+						host: params.host,
+						url: inspectorUrl,
+						path: params.path,
+					},
 					combinedSignal,
 					timeoutSec * 1000,
 				);
@@ -801,6 +818,7 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 					combinedSignal,
 					timeoutSec * 1000,
 					target,
+					{ hitCondition: params.hit_condition },
 				);
 				details.snapshot = response.snapshot;
 				details.breakpoints = response.breakpoints;
@@ -948,7 +966,13 @@ export class DebugTool implements AgentTool<typeof debugSchema, DebugToolDetails
 			case "pause": {
 				const snapshot = await dapSessionManager.pause(combinedSignal, timeoutSec * 1000, target);
 				details.snapshot = snapshot;
-				return result.text(formatSessionSnapshot(snapshot).concat("Program paused.").join("\n")).done();
+				const lines = formatSessionSnapshot(snapshot);
+				lines.push(
+					snapshot.status === "stopped"
+						? "Program paused."
+						: `Pause requested, but the program is still ${snapshot.status}. No stopped stack is available.`,
+				);
+				return result.text(lines.join("\n")).done();
 			}
 			case "evaluate": {
 				if (!params.expression) {

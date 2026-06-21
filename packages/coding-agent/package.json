@@ -78,6 +78,7 @@
 		"mammoth": "catalog:",
 		"mupdf": "catalog:",
 		"puppeteer-core": "catalog:",
+		"source-map-js": "catalog:",
 		"turndown": "catalog:",
 		"turndown-plugin-gfm": "catalog:",
 		"zod": "catalog:"

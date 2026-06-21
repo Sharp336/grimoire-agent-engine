@@ -11,6 +11,7 @@
   - `packages/coding-agent/src/dap/config.ts` — adapter resolution and auto-selection
   - `packages/coding-agent/src/dap/defaults.json` — built-in adapter definitions
   - `packages/coding-agent/src/dap/types.ts` — request/response/capability shapes
+  - `packages/coding-agent/src/dap/bun/adapter.ts` — bundled Bun DAP adapter worker
   - `packages/coding-agent/src/tools/tool-timeouts.ts` — per-tool timeout clamp
   - `packages/coding-agent/src/debug/index.ts` — interactive debug selector menu
   - `packages/coding-agent/src/debug/log-viewer.ts` — recent-log TUI viewer
@@ -29,7 +30,7 @@
 | `action` | `"launch" \| "attach" \| "set_breakpoint" \| "remove_breakpoint" \| "set_instruction_breakpoint" \| "remove_instruction_breakpoint" \| "data_breakpoint_info" \| "set_data_breakpoint" \| "remove_data_breakpoint" \| "continue" \| "step_over" \| "step_in" \| "step_out" \| "pause" \| "evaluate" \| "stack_trace" \| "threads" \| "scopes" \| "variables" \| "disassemble" \| "read_memory" \| "write_memory" \| "modules" \| "loaded_sources" \| "custom_request" \| "output" \| "terminate" \| "sessions"` | Yes | Dispatch key for the tool switch in `packages/coding-agent/src/tools/debug.ts`. |
 | `program` | `string` | No | Launch target path. Required for `launch`. Resolved relative to `cwd` if provided, otherwise session cwd. |
 | `args` | `string[]` | No | Program argv for `launch`. |
-| `adapter` | `string` | No | Explicit adapter name. Otherwise `selectLaunchAdapter()` / `selectAttachAdapter()` auto-pick from `packages/coding-agent/src/dap/config.ts`. |
+| `adapter` | `string` | No | Explicit adapter name (`bun`, `debugpy`, `js-debug-adapter`, etc.). Otherwise `selectLaunchAdapter()` / `selectAttachAdapter()` auto-pick from `packages/coding-agent/src/dap/config.ts`. |
 | `cwd` | `string` | No | Launch/attach working directory. Defaults to session cwd. |
 | `file` | `string` | No | Source file path for source breakpoints. |
 | `line` | `number` | No | Source line for source breakpoints. |
@@ -42,9 +43,12 @@
 | `frame_id` | `number` | No | Frame selector for `evaluate`, `scopes`, `data_breakpoint_info`. `scopes` and `evaluate` default to the current stopped frame when omitted. |
 | `scope_id` | `number` | No | Variables reference from a scope. Accepted by `variables`; also used as a fallback variables reference for `data_breakpoint_info`. |
 | `variable_ref` | `number` | No | Variables reference for `variables`; preferred over `scope_id` when both are present. |
-| `pid` | `number` | No | Local process id for `attach`. `attach` requires `pid` or `port`. |
-| `port` | `number` | No | Remote attach port. If no adapter is forced, attach prefers `debugpy` when `port` is present. |
+| `pid` | `number` | No | Local process id for `attach`. `attach` requires `pid`, `port`, or `url`/`inspector_url`. |
+| `port` | `number` | No | Remote attach port. If no adapter is forced, attach still prefers `debugpy` when only `port` is present. |
 | `host` | `string` | No | Remote attach host for `attach`. |
+| `url` | `string` | No | Remote DAP/inspector attach URL. Bun WebSocket URLs auto-select the bundled Bun adapter when `adapter` is omitted. |
+| `inspector_url` | `string` | No | Bun inspector WebSocket URL alias for `url`. |
+| `path` | `string` | No | Remote attach URL path, used with Bun `host`/`port` attach. |
 | `levels` | `number` | No | Max stack frames for `stack_trace`. |
 | `memory_reference` | `string` | No | Memory reference/address for `disassemble`, `read_memory`, `write_memory`. `disassemble` uses this when provided; otherwise it falls back to the current stopped location's instruction-pointer reference if the adapter supplied one. |
 | `instruction_reference` | `string` | No | Instruction breakpoint reference; required for instruction breakpoint actions. Not used by `disassemble`. |
@@ -65,7 +69,7 @@
 
 ### Action-specific requirements
 - `launch`: `program`
-- `attach`: `pid` or `port`
+- `attach`: `pid`, `port`, or `url`/`inspector_url`
 - `set_breakpoint` / `remove_breakpoint`: `function`, or `file` + `line`
 - `set_instruction_breakpoint` / `remove_instruction_breakpoint`: `instruction_reference`
 - `data_breakpoint_info`: `name`

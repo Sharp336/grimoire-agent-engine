@@ -415,6 +415,8 @@ export class DapSessionManager {
 				...(options.pid !== undefined ? { pid: options.pid, processId: options.pid } : {}),
 				...(options.port !== undefined ? { port: options.port } : {}),
 				...(options.host ? { host: options.host } : {}),
+				...(options.url ? { url: options.url, inspectorUrl: options.url } : {}),
+				...(options.path ? { path: options.path } : {}),
 			};
 			const initialStopPromise = this.#prepareStopOutcome(
 				session,
@@ -523,6 +525,7 @@ export class DapSessionManager {
 								breakpoints: record.map<DapSourceBreakpoint>(entry => ({
 									line: entry.line,
 									...(entry.condition ? { condition: entry.condition } : {}),
+									...(entry.hitCondition ? { hitCondition: entry.hitCondition } : {}),
 								})),
 							},
 							signal,
@@ -614,6 +617,7 @@ export class DapSessionManager {
 		line: number,
 		op: "add" | "remove",
 		condition?: string,
+		hitCondition?: string,
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 	): Promise<void> {
@@ -628,7 +632,7 @@ export class DapSessionManager {
 						const current = [...previous];
 						const deduped = current.filter(entry => entry.line !== line);
 						if (op === "add") {
-							deduped.push({ verified: false, line, condition });
+							deduped.push({ verified: false, line, condition, hitCondition });
 							deduped.sort((left, right) => left.line - right.line);
 						}
 						const response = await this.#sendBreakpointRequest<{ breakpoints?: DapBreakpoint[] }>(
@@ -639,6 +643,7 @@ export class DapSessionManager {
 								breakpoints: deduped.map<DapSourceBreakpoint>(entry => ({
 									line: entry.line,
 									...(entry.condition ? { condition: entry.condition } : {}),
+									...(entry.hitCondition ? { hitCondition: entry.hitCondition } : {}),
 								})),
 							},
 							signal,
@@ -663,6 +668,7 @@ export class DapSessionManager {
 											breakpoints: previous.map<DapSourceBreakpoint>(entry => ({
 												line: entry.line,
 												...(entry.condition ? { condition: entry.condition } : {}),
+												...(entry.hitCondition ? { hitCondition: entry.hitCondition } : {}),
 											})),
 										},
 										undefined,
@@ -925,6 +931,7 @@ export class DapSessionManager {
 		signal?: AbortSignal,
 		timeoutMs: number = 30_000,
 		target?: DapSessionTarget,
+		sourceOptions?: { hitCondition?: string },
 	) {
 		const ownerId = this.#resolveOwnerId(target);
 		const owner = this.#getOwnerState(ownerId);
@@ -932,12 +939,21 @@ export class DapSessionManager {
 		const previous = owner.pendingBreakpoints.get(sourcePath);
 		const current = [...(owner.pendingBreakpoints.get(sourcePath) ?? [])];
 		const deduped = current.filter(entry => entry.line !== line);
-		deduped.push({ verified: false, line, condition });
+		deduped.push({ verified: false, line, condition, hitCondition: sourceOptions?.hitCondition });
 		deduped.sort((left, right) => left.line - right.line);
 
 		this.#setPendingSourceBreakpoints(owner, sourcePath, deduped);
 		try {
-			await this.#updateSourceBreakpointsGlobally(sourcePath, ownerId, line, "add", condition, signal, timeoutMs);
+			await this.#updateSourceBreakpointsGlobally(
+				sourcePath,
+				ownerId,
+				line,
+				"add",
+				condition,
+				sourceOptions?.hitCondition,
+				signal,
+				timeoutMs,
+			);
 		} catch (error) {
 			this.#restorePendingSourceBreakpoints(owner, sourcePath, previous);
 			throw error;
@@ -966,7 +982,16 @@ export class DapSessionManager {
 
 		this.#setPendingSourceBreakpoints(owner, sourcePath, current);
 		try {
-			await this.#updateSourceBreakpointsGlobally(sourcePath, ownerId, line, "remove", undefined, signal, timeoutMs);
+			await this.#updateSourceBreakpointsGlobally(
+				sourcePath,
+				ownerId,
+				line,
+				"remove",
+				undefined,
+				undefined,
+				signal,
+				timeoutMs,
+			);
 		} catch (error) {
 			this.#restorePendingSourceBreakpoints(owner, sourcePath, previous);
 			throw error;
@@ -1944,6 +1969,7 @@ export class DapSessionManager {
 		});
 		client.onEvent("exited", body => {
 			session.exitCode = (body as DapExitedEventBody | undefined)?.exitCode;
+			session.status = "terminated";
 			this.#resolveGlobalStop(session);
 		});
 		client.onEvent("terminated", () => {
@@ -2293,6 +2319,7 @@ export class DapSessionManager {
 		return input.map((entry, index) => ({
 			line: entry.line,
 			condition: entry.condition,
+			hitCondition: entry.hitCondition,
 			id: responseBreakpoints?.[index]?.id,
 			verified: responseBreakpoints?.[index]?.verified ?? false,
 			message: responseBreakpoints?.[index]?.message,

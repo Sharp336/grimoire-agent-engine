@@ -79,6 +79,23 @@
 			"mode": "local"
 		}
 	},
+	"bun": {
+		"command": "omp",
+		"builtinWorkerArg": "__omp_worker_bun_dap",
+		"debugConfigTypes": ["bun"],
+		"requiresRootMarkerForAutoSelect": true,
+		"languages": ["javascript", "typescript"],
+		"fileTypes": [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs"],
+		"rootMarkers": ["bun.lock", "bun.lockb", "bunfig.toml"],
+		"launchDefaults": {
+			"request": "launch",
+			"type": "bun"
+		},
+		"attachDefaults": {
+			"request": "attach",
+			"type": "bun"
+		}
+	},
 	"js-debug-adapter": {
 		"command": "js-debug-adapter",
 		"runtimeCommand": "node",

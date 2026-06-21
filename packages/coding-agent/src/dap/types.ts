@@ -484,6 +484,8 @@ export interface DapAdapterConfig {
 	 * resolved as the install probe. Useful for adapters whose executable is a
 	 * package wrapper but whose debug server must be launched through a runtime. */
 	runtimeCommand?: string;
+	/** Hidden CLI worker argv selector for bundled adapters. */
+	builtinWorkerArg?: string;
 	/** Adapter-specific server entrypoint resolver. */
 	serverResolver?: DapServerResolverName;
 	/** Environment variable containing an adapter server entrypoint path. */
@@ -497,6 +499,8 @@ export interface DapAdapterConfig {
 	rootMarkers?: string[];
 	/** DAP launch/attach `type` values this adapter can serve. A trailing `*` matches prefixes. */
 	debugConfigTypes?: string[];
+	/** Require a root marker before this adapter participates in implicit launch selection. */
+	requiresRootMarkerForAutoSelect?: boolean;
 	launchDefaults?: Record<string, unknown>;
 	attachDefaults?: Record<string, unknown>;
 	/** "stdio" (default): communicate via stdin/stdout pipes.
@@ -527,6 +531,7 @@ export interface DapResolvedAdapter {
 	connectMode: "stdio" | "socket" | "tcp";
 	threadlessContinueNeedsChildStopWait?: boolean;
 	acceptsDirectoryProgram: boolean;
+	requiresRootMarkerForAutoSelect?: boolean;
 }
 
 export interface DapBreakpointRecord {
@@ -534,6 +539,7 @@ export interface DapBreakpointRecord {
 	verified: boolean;
 	line: number;
 	condition?: string;
+	hitCondition?: string;
 	message?: string;
 }
 
@@ -634,6 +640,8 @@ export interface DapAttachSessionOptions {
 	pid?: number;
 	port?: number;
 	host?: string;
+	url?: string;
+	path?: string;
 	extraAttachArguments?: Record<string, unknown>;
 	parentSessionId?: string;
 }

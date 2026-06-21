@@ -2,7 +2,18 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a bundled `bun` DAP adapter for `debug`, including Bun launch/attach routing, source breakpoints, stack/scopes/variables/evaluate support, and CLI worker re-entry for source, npm, and binary installs.
+
 ### Fixed
+
+- Fixed bundled Bun DAP variable reporting for arrays and marked sessions terminated on Bun `exited` events after `continue`.
+- Fixed bundled Bun DAP source breakpoint handling for `hit_condition`, loaded imported TypeScript files, and direct `.ts` source-map paths.
+- Fixed bundled Bun DAP source stepping for local TypeScript call targets and added breakpoint-location support for source-aware stepping.
+- Fixed bundled Bun DAP TypeScript source mapping for breakpoint stops so reported stack/source lines stay on user source instead of generated offsets.
+- Fixed bundled Bun DAP pre-launch TypeScript source breakpoints when erased source lines make Bun reject the direct generated-line bind before OMP can use the source map.
+- Fixed bundled Bun DAP pause output so a busy target that does not produce a stopped stack is reported as still running instead of “Program paused.”
 
 - Fixed `js-debug-adapter` DAP server discovery to inspect resolved adapter launchers/packages first and fall back to XDG data-dir Mason packages when the wrapper is not on PATH, so existing Neovim Mason installs and non-Mason installs both work.
 - Fixed DAP hierarchical multi-session debugging by implementing support for `startDebugging` reverse requests and spawning child debug sessions.

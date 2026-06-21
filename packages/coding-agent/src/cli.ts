@@ -27,6 +27,7 @@ import {
 import { declareWorkerHostEntry, installWorkerInbox } from "@oh-my-pi/pi-utils/worker-host";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
+import { BUN_DAP_WORKER_ARG } from "./dap/bun/constants";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -142,6 +143,11 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === JS_EVAL_WORKER_ARG) {
 		if (parentPort) installWorkerInbox(parentPort);
 		await import("./eval/js/worker-entry");
+		return true;
+	}
+	if (arg === BUN_DAP_WORKER_ARG) {
+		const { runBunDapAdapter } = await import("./dap/bun/adapter");
+		await runBunDapAdapter();
 		return true;
 	}
 	if (arg === STT_WORKER_ARG) {

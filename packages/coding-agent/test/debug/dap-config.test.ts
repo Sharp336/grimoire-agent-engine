@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { resolveAdapter } from "@oh-my-pi/pi-coding-agent/dap/config";
+import { resolveAdapter, selectAttachAdapter, selectLaunchAdapter } from "@oh-my-pi/pi-coding-agent/dap/config";
 
 const DAP_PORT_ARGUMENT = "$" + "{port}";
 
@@ -24,6 +24,50 @@ async function writeExecutable(filePath: string): Promise<void> {
 }
 
 describe("DAP adapter config resolution", () => {
+	it("resolves bundled Bun adapter through the CLI worker entry", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dap-config-bun-"));
+		try {
+			const adapter = resolveAdapter("bun", cwd);
+
+			expect(adapter?.command).toBe("omp");
+			expect(adapter?.resolvedCommand).toBe(process.execPath);
+			expect(adapter?.args.at(-1)).toBe("__omp_worker_bun_dap");
+			expect(adapter?.connectMode).toBe("stdio");
+			expect(adapter?.debugConfigTypes).toContain("bun");
+			expect(adapter?.launchDefaults).toMatchObject({ request: "launch", type: "bun" });
+			expect(adapter?.attachDefaults).toMatchObject({ request: "attach", type: "bun" });
+			expect(adapter?.requiresRootMarkerForAutoSelect).toBe(true);
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("auto-selects Bun only under Bun root markers", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dap-config-bun-select-"));
+		try {
+			const program = path.join(cwd, "app.ts");
+			await Bun.write(program, "console.log('ok');\n");
+
+			expect(selectLaunchAdapter(program, cwd)?.name).not.toBe("bun");
+
+			await Bun.write(path.join(cwd, "bun.lock"), "");
+			expect(selectLaunchAdapter(program, cwd)?.name).toBe("bun");
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("routes Bun inspector URL attaches to the Bun adapter", async () => {
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dap-config-bun-attach-"));
+		try {
+			const adapter = selectAttachAdapter(cwd, undefined, undefined, "ws://127.0.0.1:6499/test");
+
+			expect(adapter?.name).toBe("bun");
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
 	it("uses an explicit js-debug server path without requiring the adapter wrapper", async () => {
 		const previousServerPath = process.env.JS_DEBUG_DAP_SERVER;
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dap-config-env-"));

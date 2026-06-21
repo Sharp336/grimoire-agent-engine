@@ -2,11 +2,18 @@ import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { hasRootMarkers, resolveCommand } from "../lsp/config";
 import { adapterRequiresServerPath, resolveAdapterServerPath } from "./adapter-server-resolution";
+import { BUN_DAP_WORKER_ARG } from "./bun/constants";
+import { resolveBunDapWorkerCommand } from "./bun/worker-command";
 import DEFAULTS from "./defaults.json" with { type: "json" };
 import type { DapAdapterConfig, DapResolvedAdapter, DapServerResolverName } from "./types";
 
 const EXTENSIONLESS_DEBUGGER_ORDER = ["gdb", "lldb-dap"] as const;
 const DAP_SERVER_PATH_ARGUMENT = "$" + "{serverPath}";
+
+interface BuiltinWorkerCommand {
+	resolvedCommand: string;
+	args: string[];
+}
 
 function normalizeStringArray(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
@@ -26,6 +33,10 @@ function normalizeAdapterConfig(config: unknown): DapAdapterConfig | null {
 			: undefined;
 	const runtimeCommand =
 		typeof config.runtimeCommand === "string" && config.runtimeCommand.length > 0 ? config.runtimeCommand : undefined;
+	const builtinWorkerArg =
+		typeof config.builtinWorkerArg === "string" && config.builtinWorkerArg.length > 0
+			? config.builtinWorkerArg
+			: undefined;
 	const serverResolver: DapServerResolverName | undefined =
 		config.serverResolver === "js-debug" ? "js-debug" : undefined;
 	const serverPathEnv =
@@ -40,6 +51,7 @@ function normalizeAdapterConfig(config: unknown): DapAdapterConfig | null {
 		command: config.command,
 		args: normalizeStringArray(config.args),
 		...(runtimeCommand ? { runtimeCommand } : {}),
+		...(builtinWorkerArg ? { builtinWorkerArg } : {}),
 		...(serverResolver ? { serverResolver } : {}),
 		...(serverPathEnv ? { serverPathEnv } : {}),
 		...(serverPackageName ? { serverPackageName } : {}),
@@ -48,6 +60,7 @@ function normalizeAdapterConfig(config: unknown): DapAdapterConfig | null {
 		fileTypes: normalizeStringArray(config.fileTypes).map(entry => entry.toLowerCase()),
 		rootMarkers: normalizeStringArray(config.rootMarkers),
 		debugConfigTypes,
+		requiresRootMarkerForAutoSelect: config.requiresRootMarkerForAutoSelect === true,
 		launchDefaults: normalizeObject(config.launchDefaults),
 		attachDefaults: normalizeObject(config.attachDefaults),
 		acceptsDirectoryProgram: config.acceptsDirectoryProgram === true,
@@ -73,22 +86,37 @@ export function getAdapterConfigs(): Record<string, DapAdapterConfig> {
 	return { ...DEFAULT_ADAPTERS };
 }
 
+function resolveBuiltinWorkerCommand(workerArg: string): BuiltinWorkerCommand | null {
+	if (workerArg === BUN_DAP_WORKER_ARG) return resolveBunDapWorkerCommand();
+	return null;
+}
+
 export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAdapter | null {
 	const config = DEFAULT_ADAPTERS[adapterName];
 	if (!config) return null;
 
-	const resolvedAdapterCommand = resolveCommand(config.command, cwd);
+	const builtinWorkerCommand = config.builtinWorkerArg ? resolveBuiltinWorkerCommand(config.builtinWorkerArg) : null;
+	if (config.builtinWorkerArg && !builtinWorkerCommand) return null;
+	const resolvedAdapterCommand = builtinWorkerCommand?.resolvedCommand ?? resolveCommand(config.command, cwd);
 	const requiresServerPath = adapterRequiresServerPath(config);
 	const serverPath = requiresServerPath ? resolveAdapterServerPath(config, resolvedAdapterCommand, cwd) : null;
 	if (requiresServerPath && !serverPath) return null;
 
-	const launchCommand = config.runtimeCommand ?? config.command;
-	const resolvedCommand = config.runtimeCommand ? resolveCommand(config.runtimeCommand, cwd) : resolvedAdapterCommand;
+	const launchCommand = config.builtinWorkerArg ? config.command : (config.runtimeCommand ?? config.command);
+	const resolvedCommand = config.builtinWorkerArg
+		? resolvedAdapterCommand
+		: config.runtimeCommand
+			? resolveCommand(config.runtimeCommand, cwd)
+			: resolvedAdapterCommand;
 	if (!resolvedCommand) return null;
+	const configuredArgs = (config.args ?? []).map(arg =>
+		serverPath ? arg.replace(DAP_SERVER_PATH_ARGUMENT, serverPath) : arg,
+	);
+	const args = builtinWorkerCommand ? [...builtinWorkerCommand.args, ...configuredArgs] : configuredArgs;
 	return {
 		name: adapterName,
 		command: launchCommand,
-		args: (config.args ?? []).map(arg => (serverPath ? arg.replace(DAP_SERVER_PATH_ARGUMENT, serverPath) : arg)),
+		args,
 		resolvedCommand,
 		languages: config.languages ?? [],
 		fileTypes: config.fileTypes ?? [],
@@ -99,6 +127,7 @@ export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAda
 		connectMode: config.connectMode ?? "stdio",
 		threadlessContinueNeedsChildStopWait: config.threadlessContinueNeedsChildStopWait,
 		acceptsDirectoryProgram: config.acceptsDirectoryProgram === true,
+		requiresRootMarkerForAutoSelect: config.requiresRootMarkerForAutoSelect,
 	};
 }
 
@@ -134,19 +163,23 @@ export function resolveChildAdapterForConfigType(
 	return adapter ?? parentAdapter;
 }
 
+function hasAdapterRootMatch(adapter: DapResolvedAdapter, cwd: string): boolean {
+	return adapter.rootMarkers.length > 0 && hasRootMarkers(cwd, adapter.rootMarkers);
+}
+
+function isImplicitLaunchCandidate(adapter: DapResolvedAdapter, cwd: string): boolean {
+	return !adapter.requiresRootMarkerForAutoSelect || hasAdapterRootMatch(adapter, cwd);
+}
+
 function getMatchingAdapters(program: string, cwd: string): DapResolvedAdapter[] {
 	const extension = path.extname(program).toLowerCase();
-	const available = getAvailableAdapters(cwd);
+	const available = getAvailableAdapters(cwd).filter(adapter => isImplicitLaunchCandidate(adapter, cwd));
 	if (!extension) {
 		// For extensionless binaries, only consider native debuggers (gdb, lldb-dap)
 		// or adapters that match by root markers. Don't silently fall back to
 		// unrelated adapters like debugpy for a C binary.
 		const nativeDebuggers: ReadonlySet<string> = new Set(EXTENSIONLESS_DEBUGGER_ORDER);
-		return available.filter(
-			adapter =>
-				nativeDebuggers.has(adapter.name) ||
-				(adapter.rootMarkers.length > 0 && hasRootMarkers(cwd, adapter.rootMarkers)),
-		);
+		return available.filter(adapter => nativeDebuggers.has(adapter.name) || hasAdapterRootMatch(adapter, cwd));
 	}
 	const exactMatches = available.filter(adapter => adapter.fileTypes.includes(extension));
 	if (exactMatches.length > 0) {
@@ -160,7 +193,7 @@ function sortAdaptersForLaunch(program: string, cwd: string, adapters: DapResolv
 	const rootAware = adapters.map(adapter => ({
 		adapter,
 		hasExtensionMatch: extension.length > 0 && adapter.fileTypes.includes(extension),
-		hasRootMatch: adapter.rootMarkers.length > 0 && hasRootMarkers(cwd, adapter.rootMarkers),
+		hasRootMatch: hasAdapterRootMatch(adapter, cwd),
 	}));
 	rootAware.sort((left, right) => {
 		if (left.hasExtensionMatch !== right.hasExtensionMatch) {
@@ -201,11 +234,20 @@ export function selectLaunchAdapter(
 	return sorted[0] ?? null;
 }
 
-export function selectAttachAdapter(cwd: string, adapterName?: string, port?: number): DapResolvedAdapter | null {
+export function selectAttachAdapter(
+	cwd: string,
+	adapterName?: string,
+	port?: number,
+	inspectorUrl?: string,
+): DapResolvedAdapter | null {
 	if (adapterName) {
 		return resolveAdapter(adapterName, cwd);
 	}
 	const available = getAvailableAdapters(cwd);
+	if (inspectorUrl) {
+		const bun = available.find(adapter => adapter.name === "bun");
+		if (bun) return bun;
+	}
 	if (port !== undefined) {
 		const debugpy = available.find(adapter => adapter.name === "debugpy");
 		if (debugpy) return debugpy;
