@@ -1377,10 +1377,22 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 				try {
 					const stat = await fs.stat(p);
 					if (stat.isDirectory()) {
-						const entries = await fs.readdir(p, { withFileTypes: true });
-						for (const entry of entries) {
-							if (entry.isFile()) {
-								expanded.push(path.resolve(p, entry.name));
+						// Use glob (not fs.readdir) to respect gitignore and
+						// hidden-file filtering — same as the direct-path branch.
+						const dirResult = await glob({
+							pattern: "*",
+							path: p,
+							hidden: pattern.startsWith("."),
+							gitignore: true,
+							maxResults: MAX_TOOL_LINES,
+							sortByMtime: false,
+							recursive: false,
+							signal: requestSignal(signal, TOOL_TIMEOUT_MS),
+							timeoutMs: TOOL_TIMEOUT_MS,
+						});
+						for (const m of dirResult.matches) {
+							if (m.path) {
+								expanded.push(path.isAbsolute(m.path) ? m.path : path.resolve(p, m.path));
 							}
 						}
 					} else {
