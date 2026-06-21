@@ -80,8 +80,8 @@
 		}
 	},
 	"bun": {
-		"command": "omp",
-		"builtinWorkerArg": "__omp_worker_bun_dap",
+		"command": "bun-dap-x",
+		"commandResolver": "bun-dap-x",
 		"debugConfigTypes": ["bun"],
 		"requiresRootMarkerForAutoSelect": true,
 		"languages": ["javascript", "typescript"],

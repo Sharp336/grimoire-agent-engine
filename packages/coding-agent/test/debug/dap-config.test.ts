@@ -23,21 +23,60 @@ async function writeExecutable(filePath: string): Promise<void> {
 	await fs.chmod(filePath, 0o755);
 }
 
+async function withBunDapCommand(cwd: string, fn: (commandPath: string) => Promise<void>): Promise<void> {
+	const previousCommand = process.env.OMP_BUN_DAP_COMMAND;
+	const previousAutoInstall = process.env.OMP_BUN_DAP_AUTO_INSTALL;
+	const commandPath = path.join(cwd, "bun-dap-x");
+	await writeExecutable(commandPath);
+	process.env.OMP_BUN_DAP_COMMAND = commandPath;
+	process.env.OMP_BUN_DAP_AUTO_INSTALL = "0";
+	try {
+		await fn(commandPath);
+	} finally {
+		restoreEnv("OMP_BUN_DAP_COMMAND", previousCommand);
+		restoreEnv("OMP_BUN_DAP_AUTO_INSTALL", previousAutoInstall);
+	}
+}
+
 describe("DAP adapter config resolution", () => {
-	it("resolves bundled Bun adapter through the CLI worker entry", async () => {
+	it("resolves external Bun adapter through OMP_BUN_DAP_COMMAND", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dap-config-bun-"));
 		try {
+			await withBunDapCommand(cwd, async commandPath => {
+				const adapter = resolveAdapter("bun", cwd);
+
+				expect(adapter?.command).toBe("bun-dap-x");
+				expect(adapter?.resolvedCommand).toBe(commandPath);
+				expect(adapter?.args).toEqual([]);
+				expect(adapter?.connectMode).toBe("stdio");
+				expect(adapter?.debugConfigTypes).toContain("bun");
+				expect(adapter?.launchDefaults).toMatchObject({ request: "launch", type: "bun" });
+				expect(adapter?.attachDefaults).toMatchObject({ request: "attach", type: "bun" });
+				expect(adapter?.requiresRootMarkerForAutoSelect).toBe(true);
+			});
+		} finally {
+			await fs.rm(cwd, { recursive: true, force: true });
+		}
+	});
+
+	it("resolves external Bun adapter from a project-local bun-dap-x package", async () => {
+		const previousCommand = process.env.OMP_BUN_DAP_COMMAND;
+		const previousAutoInstall = process.env.OMP_BUN_DAP_AUTO_INSTALL;
+		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dap-config-bun-local-"));
+		try {
+			delete process.env.OMP_BUN_DAP_COMMAND;
+			process.env.OMP_BUN_DAP_AUTO_INSTALL = "0";
+			const commandPath = path.join(cwd, "node_modules", "bun-dap-x", "bin", "bun-dap-x");
+			await fs.mkdir(path.dirname(commandPath), { recursive: true });
+			await writeExecutable(commandPath);
+
 			const adapter = resolveAdapter("bun", cwd);
 
-			expect(adapter?.command).toBe("omp");
-			expect(adapter?.resolvedCommand).toBe(process.execPath);
-			expect(adapter?.args.at(-1)).toBe("__omp_worker_bun_dap");
-			expect(adapter?.connectMode).toBe("stdio");
-			expect(adapter?.debugConfigTypes).toContain("bun");
-			expect(adapter?.launchDefaults).toMatchObject({ request: "launch", type: "bun" });
-			expect(adapter?.attachDefaults).toMatchObject({ request: "attach", type: "bun" });
-			expect(adapter?.requiresRootMarkerForAutoSelect).toBe(true);
+			expect(adapter?.resolvedCommand).toBe(commandPath);
+			expect(adapter?.args).toEqual([]);
 		} finally {
+			restoreEnv("OMP_BUN_DAP_COMMAND", previousCommand);
+			restoreEnv("OMP_BUN_DAP_AUTO_INSTALL", previousAutoInstall);
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
 	});
@@ -45,13 +84,15 @@ describe("DAP adapter config resolution", () => {
 	it("auto-selects Bun only under Bun root markers", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dap-config-bun-select-"));
 		try {
-			const program = path.join(cwd, "app.ts");
-			await Bun.write(program, "console.log('ok');\n");
+			await withBunDapCommand(cwd, async () => {
+				const program = path.join(cwd, "app.ts");
+				await Bun.write(program, "console.log('ok');\n");
 
-			expect(selectLaunchAdapter(program, cwd)?.name).not.toBe("bun");
+				expect(selectLaunchAdapter(program, cwd)?.name).not.toBe("bun");
 
-			await Bun.write(path.join(cwd, "bun.lock"), "");
-			expect(selectLaunchAdapter(program, cwd)?.name).toBe("bun");
+				await Bun.write(path.join(cwd, "bun.lock"), "");
+				expect(selectLaunchAdapter(program, cwd)?.name).toBe("bun");
+			});
 		} finally {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}
@@ -60,9 +101,11 @@ describe("DAP adapter config resolution", () => {
 	it("routes Bun inspector URL attaches to the Bun adapter", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-dap-config-bun-attach-"));
 		try {
-			const adapter = selectAttachAdapter(cwd, undefined, undefined, "ws://127.0.0.1:6499/test");
+			await withBunDapCommand(cwd, async () => {
+				const adapter = selectAttachAdapter(cwd, undefined, undefined, "ws://127.0.0.1:6499/test");
 
-			expect(adapter?.name).toBe("bun");
+				expect(adapter?.name).toBe("bun");
+			});
 		} finally {
 			await fs.rm(cwd, { recursive: true, force: true });
 		}

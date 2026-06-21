@@ -2,21 +2,7 @@
 
 ## [Unreleased]
 
-### Added
-
-- Added a bundled `bun` DAP adapter for `debug`, including Bun launch/attach routing, source breakpoints, stack/scopes/variables/evaluate support, and CLI worker re-entry for source, npm, and binary installs.
-
 ### Fixed
-
-- Fixed bundled Bun DAP variable reporting for arrays and marked sessions terminated on Bun `exited` events after `continue`.
-- Fixed bundled Bun DAP source breakpoint handling for `hit_condition`, loaded imported TypeScript files, and direct `.ts` source-map paths.
-- Fixed bundled Bun DAP source stepping for local TypeScript call targets and added breakpoint-location support for source-aware stepping.
-- Fixed bundled Bun DAP TypeScript source mapping for breakpoint stops so reported stack/source lines stay on user source instead of generated offsets.
-- Fixed bundled Bun DAP pre-launch TypeScript source breakpoints when erased source lines make Bun reject the direct generated-line bind before OMP can use the source map.
-- Fixed bundled Bun DAP pre-launch TypeScript loop-body breakpoints so source-mapped pending breakpoints stop with live loop locals instead of generated post-loop scope.
-- Fixed bundled Bun DAP pre-launch TypeScript top-level breakpoints whose original source lines are beyond Bun's generated JavaScript line range.
-- Fixed bundled Bun DAP `step_over` and `step_out` from TypeScript loop call sites so intermediate generated loop-control locations are skipped in favor of coherent source call-site stops.
-- Fixed bundled Bun DAP pause output so a busy target that does not produce a stopped stack is reported as still running instead of “Program paused.”
 
 - Fixed `js-debug-adapter` DAP server discovery to inspect resolved adapter launchers/packages first and fall back to XDG data-dir Mason packages when the wrapper is not on PATH, so existing Neovim Mason installs and non-Mason installs both work.
 - Fixed DAP hierarchical multi-session debugging by implementing support for `startDebugging` reverse requests and spawning child debug sessions.
@@ -25,8 +11,6 @@
 - Fixed debugger `continue` on threadless JS debug root launcher sessions to wait for stopped child sessions instead of timing out while a child has already hit a breakpoint.
 - Fixed DAP child debug sessions to resolve relative child `cwd` values against the parent debug session and pass the resolved cwd into child launch/attach requests, so child adapters installed under the child project are selected correctly.
 - Fixed debugger state isolation so parallel agents can run separate top-level DAP sessions without sharing active session focus or pending breakpoints; terminating a session now clears that agent's pending breakpoints.
-### Fixed
-
 - Fixed `omp list` and `omp remove` silently starting an interactive agent session (forwarding the bare verb to the model as a prompt) instead of surfacing the real `omp plugin list` / `omp plugin uninstall <name>` commands ([#2935](https://github.com/can1357/oh-my-pi/issues/2935))
 - Fixed lazy-initialized LSP servers (basedpyright/pyright, and likely gopls/rust-analyzer) hanging on the first request: the message reader matched incoming messages against pending client requests by id before checking for a `method`, so a server-originated `workspace/configuration` pull whose id collided with an in-flight request was swallowed as a bogus response, leaving the pull unanswered and the server wedged. The reader now routes any message carrying a `method` as a server request before id-matching ([#3001](https://github.com/can1357/oh-my-pi/issues/3001))
 - Fixed `omp --approval-mode=yolo acp` and other global option flags placed before a subcommand being rewritten to `launch` with the subcommand swallowed as prompt text; the CLI resolver now skips leading global flags (using the launch parser's value-consumption contract) and dispatches the real subcommand with the flags applied, so ACP mode honors the configured approval policy. ([#2970](https://github.com/can1357/oh-my-pi/issues/2970))

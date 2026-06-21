@@ -1,4 +1,4 @@
-import { resolveJsDebugServerPath } from "./js-debug-resolution";
+import { resolveJsDebugServerPath } from "./resolution/js-debug-resolution";
 import type { DapAdapterConfig } from "./types";
 
 export function adapterRequiresServerPath(config: DapAdapterConfig): boolean {

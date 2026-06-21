@@ -2,18 +2,12 @@ import * as path from "node:path";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { hasRootMarkers, resolveCommand } from "../lsp/config";
 import { adapterRequiresServerPath, resolveAdapterServerPath } from "./adapter-server-resolution";
-import { BUN_DAP_WORKER_ARG } from "./bun/constants";
-import { resolveBunDapWorkerCommand } from "./bun/worker-command";
 import DEFAULTS from "./defaults.json" with { type: "json" };
-import type { DapAdapterConfig, DapResolvedAdapter, DapServerResolverName } from "./types";
+import { resolveBunDapXAdapterCommand } from "./resolution/bun-dap-x-resolution";
+import type { DapAdapterConfig, DapCommandResolverName, DapResolvedAdapter, DapServerResolverName } from "./types";
 
 const EXTENSIONLESS_DEBUGGER_ORDER = ["gdb", "lldb-dap"] as const;
 const DAP_SERVER_PATH_ARGUMENT = "$" + "{serverPath}";
-
-interface BuiltinWorkerCommand {
-	resolvedCommand: string;
-	args: string[];
-}
 
 function normalizeStringArray(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
@@ -33,10 +27,8 @@ function normalizeAdapterConfig(config: unknown): DapAdapterConfig | null {
 			: undefined;
 	const runtimeCommand =
 		typeof config.runtimeCommand === "string" && config.runtimeCommand.length > 0 ? config.runtimeCommand : undefined;
-	const builtinWorkerArg =
-		typeof config.builtinWorkerArg === "string" && config.builtinWorkerArg.length > 0
-			? config.builtinWorkerArg
-			: undefined;
+	const commandResolver: DapCommandResolverName | undefined =
+		config.commandResolver === "bun-dap-x" ? "bun-dap-x" : undefined;
 	const serverResolver: DapServerResolverName | undefined =
 		config.serverResolver === "js-debug" ? "js-debug" : undefined;
 	const serverPathEnv =
@@ -51,7 +43,7 @@ function normalizeAdapterConfig(config: unknown): DapAdapterConfig | null {
 		command: config.command,
 		args: normalizeStringArray(config.args),
 		...(runtimeCommand ? { runtimeCommand } : {}),
-		...(builtinWorkerArg ? { builtinWorkerArg } : {}),
+		...(commandResolver ? { commandResolver } : {}),
 		...(serverResolver ? { serverResolver } : {}),
 		...(serverPathEnv ? { serverPathEnv } : {}),
 		...(serverPackageName ? { serverPackageName } : {}),
@@ -86,33 +78,23 @@ export function getAdapterConfigs(): Record<string, DapAdapterConfig> {
 	return { ...DEFAULT_ADAPTERS };
 }
 
-function resolveBuiltinWorkerCommand(workerArg: string): BuiltinWorkerCommand | null {
-	if (workerArg === BUN_DAP_WORKER_ARG) return resolveBunDapWorkerCommand();
-	return null;
-}
-
 export function resolveAdapter(adapterName: string, cwd: string): DapResolvedAdapter | null {
 	const config = DEFAULT_ADAPTERS[adapterName];
 	if (!config) return null;
 
-	const builtinWorkerCommand = config.builtinWorkerArg ? resolveBuiltinWorkerCommand(config.builtinWorkerArg) : null;
-	if (config.builtinWorkerArg && !builtinWorkerCommand) return null;
-	const resolvedAdapterCommand = builtinWorkerCommand?.resolvedCommand ?? resolveCommand(config.command, cwd);
+	const commandResolution = config.commandResolver === "bun-dap-x" ? resolveBunDapXAdapterCommand(cwd) : null;
+	const resolvedAdapterCommand = commandResolution?.resolvedCommand ?? resolveCommand(config.command, cwd);
 	const requiresServerPath = adapterRequiresServerPath(config);
 	const serverPath = requiresServerPath ? resolveAdapterServerPath(config, resolvedAdapterCommand, cwd) : null;
 	if (requiresServerPath && !serverPath) return null;
 
-	const launchCommand = config.builtinWorkerArg ? config.command : (config.runtimeCommand ?? config.command);
-	const resolvedCommand = config.builtinWorkerArg
-		? resolvedAdapterCommand
-		: config.runtimeCommand
-			? resolveCommand(config.runtimeCommand, cwd)
-			: resolvedAdapterCommand;
+	const launchCommand = config.runtimeCommand ?? config.command;
+	const resolvedCommand = config.runtimeCommand ? resolveCommand(config.runtimeCommand, cwd) : resolvedAdapterCommand;
 	if (!resolvedCommand) return null;
 	const configuredArgs = (config.args ?? []).map(arg =>
 		serverPath ? arg.replace(DAP_SERVER_PATH_ARGUMENT, serverPath) : arg,
 	);
-	const args = builtinWorkerCommand ? [...builtinWorkerCommand.args, ...configuredArgs] : configuredArgs;
+	const args = commandResolution?.args ?? configuredArgs;
 	return {
 		name: adapterName,
 		command: launchCommand,
@@ -245,8 +227,7 @@ export function selectAttachAdapter(
 	}
 	const available = getAvailableAdapters(cwd);
 	if (inspectorUrl) {
-		const bun = available.find(adapter => adapter.name === "bun");
-		if (bun) return bun;
+		return available.find(adapter => adapter.name === "bun") ?? null;
 	}
 	if (port !== undefined) {
 		const debugpy = available.find(adapter => adapter.name === "debugpy");

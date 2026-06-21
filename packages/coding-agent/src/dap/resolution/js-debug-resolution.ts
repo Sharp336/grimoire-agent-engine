@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { DapAdapterConfig } from "./types";
+import type { DapAdapterConfig } from "../types";
 
 const DAP_SERVER_FILE_NAME = "dapDebugServer.js";
 const LAUNCHER_SCRIPT_MAX_BYTES = 64 * 1024;

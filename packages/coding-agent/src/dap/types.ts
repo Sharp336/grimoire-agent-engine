@@ -475,6 +475,7 @@ export interface DapClientState {
 	capabilities?: DapCapabilities;
 }
 
+export type DapCommandResolverName = "bun-dap-x";
 export type DapServerResolverName = "js-debug";
 
 export interface DapAdapterConfig {
@@ -484,8 +485,8 @@ export interface DapAdapterConfig {
 	 * resolved as the install probe. Useful for adapters whose executable is a
 	 * package wrapper but whose debug server must be launched through a runtime. */
 	runtimeCommand?: string;
-	/** Hidden CLI worker argv selector for bundled adapters. */
-	builtinWorkerArg?: string;
+	/** Adapter-specific executable resolver. */
+	commandResolver?: DapCommandResolverName;
 	/** Adapter-specific server entrypoint resolver. */
 	serverResolver?: DapServerResolverName;
 	/** Environment variable containing an adapter server entrypoint path. */
