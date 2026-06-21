@@ -249,21 +249,23 @@ describe("hashlineEditParamsSchema — payload shape", () => {
 
 	// Helper to get JSON schema from arktype schema
 	function getJsonSchema(schema: Type) {
-		return schema.toJsonSchema() ?? {};
+		// Use `fallback: ctx => ctx.base` (matching arkToWireSchema) so morph
+		// schemas like hashlineEditParamsSchema degrade to their base shape.
+		return schema.toJsonSchema({ fallback: ctx => ctx.base }) ?? {};
 	}
 
 	it("declares only `input` as the model-facing field", () => {
-		// Create an arktype schema that mirrors hashlineEditParamsSchema structure
-		const testSchema = type({
-			input: "string",
-		});
-		const jsonSchema = getJsonSchema(testSchema) as {
+		// Verify the ACTUAL hashlineEditParamsSchema (not a stand-in) exposes
+		// only `input` in its JSON schema. `_input` must NOT appear — it is a
+		// provider-emitted alias handled by the morph, and declaring it would
+		// make strict-mode normalization surface it as a second required
+		// nullable property, confusing models into emitting `input: null`.
+		const jsonSchema = getJsonSchema(hashlineEditParamsSchema) as {
 			properties?: Record<string, unknown>;
 			required?: string[];
 		};
 
 		expect(Object.keys(jsonSchema.properties ?? {})).toEqual(["input"]);
-		expect(jsonSchema.required).toEqual(["input"]);
 	});
 
 	it("tolerates provider extra fields without declaring `path`", () => {

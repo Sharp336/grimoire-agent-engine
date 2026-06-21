@@ -7,7 +7,14 @@
 import { type } from "arktype";
 
 const requiredInputSchema = type({ input: "string" });
-const inputAliasSchema = type({ "input?": "string", "_input?": "string" });
+// Declare only `input` so the JSON schema the model sees exposes a single
+// field. `_input` is accepted as an undeclared extra key (ArkType allows
+// extra keys by default) and promoted to `input` by the morph below — keeping
+// the alias invisible to the model and out of strict-mode `required`/nullable
+// wrapping. Declaring `_input?` here would surface it as a second required
+// nullable property after strict normalization, confusing models (notably
+// GLM-5.x via OpenRouter) into emitting `input: null` and burning cycles.
+const inputAliasSchema = type({ "input?": "string" });
 
 export const hashlineEditParamsSchema = inputAliasSchema
 	.pipe(raw => {

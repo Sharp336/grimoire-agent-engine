@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed the `edit` tool's hashline schema exposing `_input` as a second required nullable property alongside `input` after strict-mode normalization. The ArkType schema declared `_input?` explicitly, which `enforceStrictSchema` promoted to `required` + `anyOf: [string, null]` — surfacing two identical-looking fields to the model. Models with weaker schema-following (notably GLM-5.x via OpenRouter) then emitted `input: null` (or split the payload across both fields) and burned cycles retrying before falling back to `write`. `_input` is now an undeclared extra key accepted by the morph, invisible to the model; the wire schema exposes only `input`.
+
 ## [16.1.11] - 2026-06-21
 
 ### Added
