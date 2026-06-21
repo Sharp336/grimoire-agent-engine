@@ -17,7 +17,7 @@ import type { Settings } from "../config/settings";
 import type { AgentSession } from "../session/agent-session";
 import { loadCodemapConfig } from "./config";
 import { closeCodemapDb, openCodemapDb } from "./db";
-import { shutdownCodemapEmbedClient } from "./embed";
+import { embedText, shutdownCodemapEmbedClient } from "./embed";
 import { buildCodemapInjectionBlock } from "./prompt";
 import { getTaskContext } from "./retrieve";
 import { type CodemapSessionState, getCodemapSessionState, setCodemapSessionState } from "./state";
@@ -96,7 +96,18 @@ export async function injectCodemapTaskContext(
 		if (state.hasInjectedForFirstTurn) return null;
 
 		const projectLabel = path.basename(cwd);
-		const result = await getTaskContext(state.client, state.config, promptText, projectLabel, cwd);
+		// Generate query embedding for vector search (lazy — may return null
+		// if the embedding model is unavailable, in which case retrieval is
+		// FTS-only, which is acceptable).
+		const queryEmbedding = await embedText(promptText, state.config.embedding);
+		const result = await getTaskContext(
+			state.client,
+			state.config,
+			promptText,
+			projectLabel,
+			cwd,
+			queryEmbedding ? { queryEmbedding } : {},
+		);
 		markInjected();
 		const block = buildCodemapInjectionBlock(result);
 		return block || null;

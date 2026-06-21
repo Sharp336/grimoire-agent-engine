@@ -7,6 +7,7 @@ import type { ToolSession } from "../tools";
 import type { CodemapConfig } from "./config";
 import { loadCodemapConfig } from "./config";
 import { closeCodemapDb, openCodemapDb } from "./db";
+import { embedText } from "./embed";
 import { getTaskContext } from "./retrieve";
 import { checkStaleness, computeFileHash } from "./staleness";
 import { deleteSummary, getSummary, upsertSummary } from "./store";
@@ -232,9 +233,14 @@ export class GetTaskContextTool implements AgentTool<typeof getTaskContextSchema
 	async execute(_id: string, params: GetTaskContextParams): Promise<AgentToolResult> {
 		const { client, config } = await getClient(this.session);
 		const projectLabel = resolveProjectLabel(this.session.cwd);
-		const opts: { maxFiles?: number; tokenBudget?: number } = {};
+		const opts: { maxFiles?: number; tokenBudget?: number; queryEmbedding?: number[] } = {};
 		if (params.max_files !== undefined) opts.maxFiles = params.max_files;
 		if (params.token_budget !== undefined) opts.tokenBudget = params.token_budget;
+		// Generate query embedding for vector search (lazy — may return null
+		// if the embedding model is unavailable, in which case retrieval is
+		// FTS-only, which is acceptable).
+		const queryEmbedding = await embedText(params.task, config.embedding);
+		if (queryEmbedding) opts.queryEmbedding = queryEmbedding;
 		const result = await getTaskContext(client, config, params.task, projectLabel, this.session.cwd, opts);
 		const header = `Task context for: ${params.task}`;
 		const body = JSON.stringify(result, null, 2);
