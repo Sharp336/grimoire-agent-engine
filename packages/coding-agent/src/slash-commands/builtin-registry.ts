@@ -125,6 +125,22 @@ const shutdownHandlerTui = (_command: ParsedSlashCommand, runtime: TuiSlashComma
 	return commandConsumed();
 };
 
+async function queueMessageHandlerTui(
+	command: ParsedSlashCommand,
+	runtime: TuiSlashCommandRuntime,
+): Promise<SlashCommandResult> {
+	const message = command.args.trim();
+	if (!message) {
+		runtime.ctx.showError("Usage: /queue <message>");
+		runtime.ctx.editor.setText("");
+		return commandConsumed();
+	}
+
+	runtime.ctx.editor.setText("");
+	await runtime.ctx.handleQueueCommand(message);
+	return commandConsumed();
+}
+
 async function handleUsageResetCommand(
 	arg: string,
 	session: AgentSession,
@@ -1357,6 +1373,13 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			runtime.ctx.editor.setText("");
 			await runtime.ctx.handleBtwCommand(question);
 		},
+	},
+	{
+		name: "queue",
+		description: "Queue a follow-up message after the current turn",
+		inlineHint: "<message>",
+		allowArgs: true,
+		handleTui: queueMessageHandlerTui,
 	},
 	{
 		name: "tan",

@@ -3745,6 +3745,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#inputController.handleImagePaste();
 	}
 
+	handleQueueCommand(message: string): Promise<void> {
+		return this.#inputController.submitFollowUpText(message, { parseSlashCommands: false });
+	}
+
 	handleBtwCommand(question: string): Promise<void> {
 		return this.#btwController.start(question);
 	}

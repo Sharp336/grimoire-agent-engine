@@ -35,6 +35,7 @@ function createContext(opts: { isStreaming: boolean; pendingImages: ImageContent
 	const prompt = vi.fn(async (_text: string, _options?: PromptOptionsLike) => {});
 	const updatePendingMessagesDisplay = vi.fn();
 	const requestRender = vi.fn();
+	const showError = vi.fn();
 
 	const ctx = {
 		editor,
@@ -55,6 +56,7 @@ function createContext(opts: { isStreaming: boolean; pendingImages: ImageContent
 		locallySubmittedUserSignatures: new Set<string>(),
 		updatePendingMessagesDisplay,
 		withLocalSubmission: async (_text: string, fn: () => unknown) => fn(),
+		showError,
 	} as unknown as InteractiveModeContext;
 
 	return { ctx, editor, prompt };
@@ -113,5 +115,36 @@ describe("InputController.handleFollowUp image forwarding", () => {
 		if (!call) throw new Error("expected session.prompt to be called");
 		expect(call[1]?.images).toBeUndefined();
 		expect(call[1]?.streamingBehavior).toBe("followUp");
+	});
+
+	it("submits provided queue text as a streaming follow-up message", async () => {
+		const image: ImageContent = { type: "image", mimeType: "image/png", data: "cXVldWU=" };
+		const { ctx, editor, prompt } = createContext({ isStreaming: true, pendingImages: [image] });
+
+		const controller = new InputController(ctx);
+		await controller.submitFollowUpText("finish this after the turn", { parseSlashCommands: false });
+
+		expect(prompt).toHaveBeenCalledTimes(1);
+		const call = prompt.mock.calls[0];
+		if (!call) throw new Error("expected session.prompt to be called");
+		expect(call[0]).toBe("finish this after the turn");
+		expect(call[1]?.streamingBehavior).toBe("followUp");
+		expect(call[1]?.images).toEqual([image]);
+		expect(editor.getText()).toBe("");
+		expect(ctx.pendingImages).toEqual([]);
+		expect(ctx.pendingImageLinks).toEqual([]);
+	});
+
+	it("submits provided queue text normally when no turn is streaming", async () => {
+		const { ctx, prompt } = createContext({ isStreaming: false, pendingImages: [] });
+
+		const controller = new InputController(ctx);
+		await controller.submitFollowUpText("start this now", { parseSlashCommands: false });
+
+		expect(prompt).toHaveBeenCalledTimes(1);
+		const call = prompt.mock.calls[0];
+		if (!call) throw new Error("expected session.prompt to be called");
+		expect(call[0]).toBe("start this now");
+		expect(call[1]?.streamingBehavior).toBeUndefined();
 	});
 });

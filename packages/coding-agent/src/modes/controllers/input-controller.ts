@@ -975,9 +975,9 @@ export class InputController {
 		}
 	}
 
-	/** Send editor text as a follow-up message (queued behind current stream). */
-	async handleFollowUp(): Promise<void> {
-		let text = this.ctx.editor.getText().trim();
+	/** Submit text as a follow-up message (queued behind current stream). */
+	async submitFollowUpText(rawText: string, options: { parseSlashCommands?: boolean } = {}): Promise<void> {
+		let text = rawText.trim();
 		if (!text) return;
 
 		// Focused subagent session: follow-ups go to it; non-chat input is gated.
@@ -998,21 +998,24 @@ export class InputController {
 			return;
 		}
 
-		const slashResult = await executeBuiltinSlashCommand(text, {
-			ctx: this.ctx,
-		});
-		if (slashResult === true) {
-			return;
-		}
-		if (typeof slashResult === "string") {
-			text = slashResult;
-		}
+		if (options.parseSlashCommands !== false) {
+			const slashResult = await executeBuiltinSlashCommand(text, {
+				ctx: this.ctx,
+			});
+			if (slashResult === true) {
+				return;
+			}
+			if (typeof slashResult === "string") {
+				text = slashResult;
+				if (!text) return;
+			}
 
-		// Skill commands invoke through the custom-message path regardless of
-		// which keybinding submitted them. Enter routes them as `steer`;
-		// Ctrl+Enter (this handler) routes them as `followUp`.
-		if (await this.#invokeSkillCommand(text, "followUp")) {
-			return;
+			// Skill commands invoke through the custom-message path regardless of
+			// which keybinding submitted them. Enter routes them as `steer`;
+			// Ctrl+Enter (this handler) routes them as `followUp`.
+			if (await this.#invokeSkillCommand(text, "followUp")) {
+				return;
+			}
 		}
 
 		// Forward any pending clipboard-pasted images alongside the queued text;
@@ -1044,6 +1047,11 @@ export class InputController {
 		await this.ctx.withLocalSubmission(text, () => this.ctx.session.prompt(text, { images }), {
 			imageCount: images?.length ?? 0,
 		});
+	}
+
+	/** Send editor text as a follow-up message (queued behind current stream). */
+	async handleFollowUp(): Promise<void> {
+		await this.submitFollowUpText(this.ctx.editor.getText(), { parseSlashCommands: true });
 	}
 
 	restoreQueuedMessagesToEditor(options?: { abort?: boolean; currentText?: string }): number {
