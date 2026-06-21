@@ -66,6 +66,14 @@ describe("parseRateLimitReason", () => {
 			),
 		).toBe("QUOTA_EXHAUSTED");
 	});
+
+	it("classifies OpenCode Go 'Insufficient balance' as QUOTA_EXHAUSTED", () => {
+		expect(
+			parseRateLimitReason(
+				"401 Insufficient balance. Manage your billing here: https://opencode.ai/workspace/<id>",
+			),
+		).toBe("QUOTA_EXHAUSTED");
+	});
 });
 
 describe("isUsageLimitError", () => {
@@ -98,6 +106,14 @@ describe("isUsageLimitError", () => {
 		expect(
 			isUsageLimitError(
 				"Cloud Code Assist API error (429): Individual quota reached. Contact your administrator to enable overages.",
+			),
+		).toBe(true);
+	});
+
+	it("detects OpenCode Go 'Insufficient balance' as a credential-rotatable usage limit", () => {
+		expect(
+			isUsageLimitError(
+				"401 Insufficient balance. Manage your billing here: https://opencode.ai/workspace/<id>",
 			),
 		).toBe(true);
 	});
