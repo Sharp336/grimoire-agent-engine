@@ -6,8 +6,7 @@ Primary implementation:
 
 - `packages/coding-agent/src/system-prompt.ts` (`buildSystemPrompt`, `loadSystemPromptFiles`)
 - `packages/coding-agent/src/main.ts` (`discoverSystemPromptFile`, `discoverAppendSystemPromptFile`)
-- `packages/coding-agent/src/prompts/system/system-prompt.md` (default stable instruction template)
-- `packages/coding-agent/src/prompts/system/custom-system-prompt.md` (custom-prompt template; used when `--system-prompt` / `SYSTEM.md` or SDK `customSystemPrompt` is provided)
+- `packages/coding-agent/src/prompts/system/system-prompt.md` (unified template; handles both default and custom prompts via `{{#if customPrompt}}` conditionals)
 - `packages/coding-agent/src/prompts/system/project-prompt.md` (project/environment footer)
 
 ---
@@ -39,23 +38,13 @@ For append, the same precedence applies between `--append-system-prompt`, projec
 
 CLI startup passes resolved `SYSTEM.md` / `--system-prompt` text as `options.customSystemPrompt` and resolved `APPEND_SYSTEM.md` / `--append-system-prompt` text as `options.appendSystemPrompt` via `applyResolvedSystemPromptInputs` in `packages/coding-agent/src/main.ts`. These flow into `buildSystemPrompt` as `resolvedCustomPrompt` and `resolvedAppendSystemPrompt`.
 
-`buildSystemPrompt` selects the rendering template based on whether `resolvedCustomPrompt` is set (`system-prompt.ts` line 686):
+`buildSystemPrompt` always renders a single unified template (`system-prompt.md`). The template internally uses `{{#if customPrompt}}` / `{{else}}` conditionals to branch:
 
-```ts
-const rendered = prompt.render(
-    resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data
-);
-```
+**Without** a custom system prompt (`customPrompt` is falsy), the `{{else}}` branch renders the full stable default instructions (staff-engineer preamble, ROLE, Engineering Principles, Execution Workflow, Delivery Contract, Tool Inventory, Skills, Rules, etc.) plus a `<critical>` block with operational guardrails.
 
-**Without** a custom system prompt, the default template (`system-prompt.md`) renders the full stable default instructions (staff-engineer preamble, tool inventory, skills, rules, exploration rules, workflow rules, etc.) plus any append prompt.
+**With** a custom system prompt, the `{{#if customPrompt}}` branch renders the custom text verbatim, followed by a `<critical>` block with the same operational guardrails, and then the append prompt. The default ROLE/Engineering Principles/Execution Workflow/Delivery Contract sections are skipped entirely.
 
-**With** a custom system prompt, the custom template (`custom-system-prompt.md`) renders instead. This template outputs:
-
-1. the custom system prompt text (`customPrompt`);
-2. the append prompt text, if any (`appendPrompt`);
-3. project/environment context (context files, git info, skills, rules).
-
-In both cases `buildSystemPrompt` also renders `project-prompt.md` as a second block carrying environment metadata (workstation info, cwd, workspace tree, etc.), which is always preserved.
+In both cases, `buildSystemPrompt` also renders `project-prompt.md` as a second block carrying environment metadata (workstation info, context files, dir-context list, workspace tree, current date, cwd, and related project context), which is always preserved.
 
 When a custom system prompt is provided, `callerControlsCustomPrompt` is set to `true` in `buildSystemPrompt`, which suppresses the secondary capability path (`loadSystemPromptFiles`) entirely — `systemPromptCustomization` is `null`. This prevents the auto-discovered `SYSTEM.md` from being loaded a second time through the capability layer.
 
@@ -73,11 +62,12 @@ If you want to keep both default blocks and add to them, use `--append-system-pr
 
 **Contents of `SYSTEM.md`, `APPEND_SYSTEM.md`, `--system-prompt`, and `--append-system-prompt` are treated as plain text.** They are resolved before prompt-block replacement and are not rendered as Handlebars templates.
 
-The built-in prompt templates are Handlebars (`packages/utils/src/prompt.ts`), but user-provided strings are not compiled with that renderer. The secondary capability path can insert `systemPromptCustomization` into a Handlebars parent template, but a `{{value}}` reference in Handlebars still does not recursively render its substituted contents — the value is emitted as a string. Concretely:
+The built-in prompt templates are Handlebars (`packages/utils/src/prompt.ts`), but user-provided strings are not compiled with that renderer. A `{{value}}` reference in Handlebars still does not recursively render its substituted contents — the value is emitted as a string. Concretely:
+
 ```handlebars
-{{! parent template — handled by Handlebars }}
-{{#if systemPromptCustomization}}
-{{systemPromptCustomization}}
+{{! The custom prompt is emitted verbatim inside the template }}
+{{#if customPrompt}}
+{{customPrompt}}
 {{/if}}
 ```
 
@@ -155,10 +145,7 @@ There is no built-in way to inherit specific sections from `system-prompt.md` wh
 
 When a CLI flag or discovered `SYSTEM.md` provides a custom system prompt, `applyResolvedSystemPromptInputs` sets `options.customSystemPrompt`. Inside `buildSystemPrompt`, this sets `callerControlsCustomPrompt = true`, which suppresses the secondary capability path (`loadSystemPromptFiles`) entirely — `systemPromptCustomization` is resolved to `null` without ever loading the capability-layer `SYSTEM.md`. There is no double injection to deduplicate at the template level.
 
-When the SDK supplies `customSystemPrompt` directly (without the CLI path), the capability path can still run. `buildSystemPrompt` deduplicates in that case:
-
-- `dedupePromptSource` drops a `systemPromptCustomization` block when it already appears in an internally supplied `customPrompt` or append prompt.
-- `dedupeAlwaysApplyRules` omits always-apply rules whose body appears verbatim in any of `{customPrompt, appendPrompt, systemPromptCustomization}`.
+Always-apply rules are deduplicated against all prompt sources via `dedupeAlwaysApplyRules`: a rule whose content already appears verbatim in the custom prompt, append prompt, or any context file is omitted from the always-apply injection. This prevents the same instruction from being injected twice when a user's `SYSTEM.md` or `APPEND_SYSTEM.md` already contains it.
 
 ---
 
@@ -167,7 +154,7 @@ When the SDK supplies `customSystemPrompt` directly (without the CLI path), the 
 Only one path actually drives the customization a CLI user sees: the primary CLI path. The capability layer exists but its `SYSTEM.md` output never reaches the rendered prompt under normal CLI startup.
 
 - The primary CLI path (`discoverSystemPromptFile` / `discoverAppendSystemPromptFile` in `main.ts`, which feeds `resolvedSystemPrompt` / `resolvedAppendPrompt`) calls `findConfigFile`. `findConfigFile` checks only `<cwd>/.omp`, `<cwd>/.claude`, `<cwd>/.codex`, `<cwd>/.gemini`, and the user-level equivalents — it does **not** walk up ancestors. Files in `<ancestor>/.omp/SYSTEM.md` are ignored when `omp` is started from a subdirectory.
-- The secondary capability path (`loadSystemPromptFiles` → builtin discovery) does walk up via `findNearestProjectConfigDir` and requires the project `.omp/` directory to be non-empty. Its result is rendered into the template variable `systemPromptCustomization`. Under normal CLI startup the default template (`system-prompt.md`) never references that variable, so ancestor-walk capability content has no user-visible effect.
+- The secondary capability path (`loadSystemPromptFiles` → builtin discovery) does walk up via `findNearestProjectConfigDir` and requires the project `.omp/` directory to be non-empty. Under normal CLI startup, `callerControlsCustomPrompt` suppresses this path entirely when the primary path found a custom prompt.
 
 Net effect for CLI users: put `SYSTEM.md` / `APPEND_SYSTEM.md` directly under `<cwd>/.omp` (or another supported config base under cwd) or in the user-level location (`~/.omp/agent/SYSTEM.md` etc.). Ancestor paths are not searched.
 
