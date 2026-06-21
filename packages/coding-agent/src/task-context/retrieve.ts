@@ -58,14 +58,14 @@ const STOPWORDS: Record<string, true> = {
 	works: true,
 };
 
-function extractKeywords(task: string): string[] {
+export function extractKeywords(task: string): string[] {
 	// Tokenize on non-alphanumeric, lowercase, keep >= 3 chars, drop stopwords
 	const tokens = task.toLowerCase().match(/[a-z0-9]+/g) ?? [];
 	return tokens.filter(t => t.length >= 3 && !STOPWORDS[t]);
 }
 
 // Split camelCase and snake_case for richer FTS queries
-function splitTokens(tokens: string[]): string[] {
+export function splitTokens(tokens: string[]): string[] {
 	const result: string[] = [];
 	for (const token of tokens) {
 		result.push(token);
@@ -83,7 +83,7 @@ function splitTokens(tokens: string[]): string[] {
 
 // --- Reciprocal Rank Fusion ---
 
-function reciprocalRankFusion(
+export function reciprocalRankFusion(
 	ftsResults: RankedSummary[],
 	vectorResults: RankedSummary[],
 	ftsWeight: number,
@@ -114,11 +114,11 @@ function reciprocalRankFusion(
 // --- Budget packer ---
 
 // Codemap's exact documented token formula: ceil(summary_text.length / 4) + 20
-function tokenCost(summaryText: string): number {
+export function tokenCost(summaryText: string): number {
 	return Math.ceil(summaryText.length / 4) + 20;
 }
 
-function packBudget(
+export function packBudget(
 	ranked: RankedSummary[],
 	tokenBudget: number,
 	maxFiles: number,

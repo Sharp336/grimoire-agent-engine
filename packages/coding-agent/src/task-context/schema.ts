@@ -19,7 +19,8 @@ import type { Client } from "@libsql/client";
  *   `postSyncMaintenance()` in db.ts rebuilds both FTS and the vector index
  *   after a remote sync.
  */
-export const SCHEMA_SQL = `
+export function buildSchemaSql(dimensions: number = 768): string {
+	return `
 CREATE TABLE IF NOT EXISTS schema_migrations (
   version    INTEGER PRIMARY KEY,
   applied_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -31,7 +32,7 @@ CREATE TABLE IF NOT EXISTS summaries (
   file_path        TEXT NOT NULL,
   summary_text     TEXT NOT NULL,
   content_hash     TEXT NOT NULL DEFAULT '',
-  embedding        F32_BLOB(768),
+  embedding        F32_BLOB(${dimensions}),
   embed_model      TEXT,
   symbol_name      TEXT,
   symbol_kind      TEXT,
@@ -70,6 +71,10 @@ CREATE TRIGGER IF NOT EXISTS summaries_au AFTER UPDATE ON summaries BEGIN
   VALUES(new.rowid, new.summary_text, new.file_path);
 END;
 `;
+}
+
+/** Default schema SQL (768 dimensions — bge-base-en-v1.5). */
+export const SCHEMA_SQL = buildSchemaSql(768);
 
 /**
  * Bootstrap the codemap summaries schema on the given libSQL client.
@@ -77,10 +82,12 @@ END;
  * Runs all DDL via `executeMultiple` (which accepts semicolon-separated
  * statements) and then records schema version 1 via `execute` (single
  * statement). `INSERT OR IGNORE` makes this idempotent across re-runs.
+ * Pass `dimensions` to match the configured embedding model (768 for en,
+ * 1024 for multilingual).
  */
-export async function initSchema(client: Client): Promise<void> {
+export async function initSchema(client: Client, dimensions: number = 768): Promise<void> {
 	// Execute all DDL statements
-	await client.executeMultiple(SCHEMA_SQL);
+	await client.executeMultiple(buildSchemaSql(dimensions));
 	// Record schema version
 	await client.execute({
 		sql: "INSERT OR IGNORE INTO schema_migrations (version, applied_at) VALUES (?, datetime('now'))",

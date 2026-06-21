@@ -119,12 +119,14 @@ export async function deleteSummary(client: Client, projectLabel: string, filePa
 /**
  * Build an FTS5 MATCH expression from a free-text query.
  *
- * Mirrors `history-storage.ts:212-215`: tokenize on non-alphanumeric, lowercase,
- * then wrap each token as `"token"*` (quoted, prefix-wildcard) joined by spaces
- * — FTS5 token-AND with prefix matching. Double quotes inside tokens are
- * escaped by doubling (`""`), the FTS5 string-literal escape. Tokens shorter
- * than 3 chars are dropped (they match too broadly to be useful seeds).
- * Returns "" when no usable tokens remain, signalling the caller to short-circuit.
+ * Tokenize on non-alphanumeric, lowercase, then wrap each token as
+ * `"token"*` (quoted, prefix-wildcard) joined by ` OR ` — FTS5 token-OR
+ * with prefix matching. Task queries describe intent, not exact content,
+ * so OR (any keyword matches) is more appropriate than AND (all required).
+ * Double quotes inside tokens are escaped by doubling (`""`), the FTS5
+ * string-literal escape. Tokens shorter than 3 chars are dropped (they
+ * match too broadly to be useful seeds). Returns "" when no usable tokens
+ * remain, signalling the caller to short-circuit.
  */
 function buildFtsQuery(query: string): string {
 	const tokens = query.toLowerCase().match(/[a-z0-9]+/g) ?? [];

@@ -27,7 +27,7 @@ export async function openCodemapDb(config: CodemapConfig): Promise<Client> {
 	});
 
 	// Schema bootstrap
-	await initSchema(client);
+	await initSchema(client, config.embedding.dimensions);
 
 	if (hasTursoSync) {
 		try {

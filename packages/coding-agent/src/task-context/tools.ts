@@ -15,26 +15,53 @@ import { deleteSummary, getSummary, upsertSummary } from "./store";
 
 let cachedClient: Client | null = null;
 let cachedConfig: CodemapConfig | null = null;
+let clientPromise: Promise<{ client: Client; config: CodemapConfig }> | null = null;
 
 /**
  * Resolve (or reuse) a codemap DB client for the session.
  *
- * The client is cached at module level keyed by `config.dbPath` so that
- * repeated tool calls within a session don't reopen the libSQL native
- * binding each time. If the dbPath changed (e.g. settings edited mid-session),
- * the previous client is closed before opening the new one.
+ * The client is cached at module level keyed by `config.dbPath` + Turso
+ * connection fields so that repeated tool calls don't reopen the libSQL
+ * native binding each time. If connection-shaping fields changed (e.g.
+ * settings edited mid-session), the previous client is closed before
+ * opening the new one.
+ *
+ * Uses an in-flight promise guard to prevent concurrent callers from
+ * double-opening: all concurrent calls await the same open promise.
  */
 async function getClient(session: ToolSession): Promise<{ client: Client; config: CodemapConfig }> {
 	const config = loadCodemapConfig(session.settings, getAgentDir());
-	if (cachedClient && cachedConfig?.dbPath === config.dbPath) {
+	const cacheKey = `${config.dbPath}|${config.turso.syncUrl}|${config.turso.authToken}`;
+	const cachedKey = cachedConfig
+		? `${cachedConfig.dbPath}|${cachedConfig.turso.syncUrl}|${cachedConfig.turso.authToken}`
+		: null;
+
+	if (cachedClient && cacheKey === cachedKey) {
 		return { client: cachedClient, config };
 	}
-	if (cachedClient) {
-		await closeCodemapDb(cachedClient);
+
+	// If an open is already in flight, await it instead of starting a second
+	if (clientPromise) {
+		return clientPromise;
 	}
-	cachedClient = await openCodemapDb(config);
-	cachedConfig = config;
-	return { client: cachedClient, config };
+
+	const promise = (async () => {
+		if (cachedClient) {
+			await closeCodemapDb(cachedClient);
+			cachedClient = null;
+			cachedConfig = null;
+		}
+		const client = await openCodemapDb(config);
+		cachedClient = client;
+		cachedConfig = config;
+		return { client, config };
+	})();
+	clientPromise = promise;
+	try {
+		return await promise;
+	} finally {
+		clientPromise = null;
+	}
 }
 
 /**
