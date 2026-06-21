@@ -302,6 +302,82 @@ describe("bundled Bun DAP adapter", () => {
 		}
 	}, 45_000);
 
+	it("keeps TypeScript loop step-over and step-out stops on source call sites", async () => {
+		const source = [
+			"type Sample = { label: string; value: number };",
+			"",
+			"function doubleValue(value: number): number {",
+			"  const doubled = value * 2;",
+			"  return doubled;",
+			"}",
+			"",
+			"function summarize(samples: readonly Sample[]): number {",
+			"  let total = 0;",
+			"  for (let index = 0; index < samples.length; index += 1) {",
+			"    const sample = samples[index];",
+			"    total += doubleValue(sample.value);",
+			"  }",
+			"  return total;",
+			"}",
+			"",
+			"const samples: Sample[] = [",
+			"  { label: 'alpha', value: 2 },",
+			"  { label: 'beta', value: 4 },",
+			"  { label: 'gamma', value: 6 },",
+			"];",
+			"",
+			"const total = summarize(samples);",
+			"console.log('indexed-total=' + total);",
+			"",
+		].join("\n");
+		for (const testCase of [
+			{ ownerPrefix: "step-over-loop", breakpointLine: 12, action: "over" },
+			{ ownerPrefix: "step-out-loop", breakpointLine: 4, action: "out" },
+		] as const) {
+			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), `omp-bun-dap-${testCase.ownerPrefix}-`));
+			const manager = new DapSessionManager();
+			const ownerId = `bun-dap-${testCase.ownerPrefix}-${Bun.randomUUIDv7()}`;
+			try {
+				const program = path.join(cwd, "indexed-loop.ts");
+				await Bun.write(program, source);
+				await manager.setBreakpoint(program, testCase.breakpointLine, undefined, undefined, 10_000, { ownerId });
+
+				const snapshot = await manager.launch(
+					{ ownerId, adapter: requireBunAdapter(cwd), program, cwd },
+					undefined,
+					30_000,
+				);
+				expect(snapshot.status).toBe("stopped");
+				expect(snapshot.line).toBe(testCase.breakpointLine);
+
+				const stepped =
+					testCase.action === "over"
+						? await manager.stepOver(undefined, 10_000, { ownerId })
+						: await manager.stepOut(undefined, 10_000, { ownerId });
+				expect(stepped.state).toBe("stopped");
+				expect(stepped.snapshot.frameName).toBe("summarize");
+				expect(stepped.snapshot.line).toBe(12);
+				expect(
+					(
+						await manager.evaluate(
+							"String(index) + ':' + sample.label + ':' + String(total)",
+							"watch",
+							1,
+							undefined,
+							10_000,
+							{
+								ownerId,
+							},
+						)
+					).evaluation?.result,
+				).toBe("1:beta:4");
+			} finally {
+				await manager.terminate(undefined, 10_000, { ownerId }).catch(() => undefined);
+				await fs.rm(cwd, { recursive: true, force: true });
+			}
+		}
+	}, 60_000);
+
 	it("steps into local TypeScript call targets using temporary source breakpoints", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bun-dap-step-in-local-"));
 		const manager = new DapSessionManager();
@@ -348,58 +424,85 @@ describe("bundled Bun DAP adapter", () => {
 		}
 	}, 45_000);
 
-	it("honors conditional breakpoints in indexed TypeScript loops", async () => {
-		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bun-dap-index-condition-"));
-		const manager = new DapSessionManager();
-		const ownerId = `bun-dap-index-condition-${Bun.randomUUIDv7()}`;
-		try {
-			const program = path.join(cwd, "indexed-loop.ts");
-			await Bun.write(
-				program,
-				[
-					"type Sample = { label: string; value: number };",
-					"function doubleValue(value: number): number {",
-					"  return value * 2;",
-					"}",
-					"function summarize(samples: Sample[]) {",
-					"  let total = 0;",
-					"  for (let index = 0; index < samples.length; index += 1) {",
-					"    const sample = samples[index];",
-					"    total += doubleValue(sample.value);",
-					"  }",
-					"  return total;",
-					"}",
-					"summarize([",
-					"  { label: 'alpha', value: 2 },",
-					"  { label: 'beta', value: 4 },",
-					"  { label: 'gamma', value: 6 },",
-					"]);",
-					"",
-				].join("\n"),
-			);
-			await manager.setBreakpoint(program, 9, "index === 1", undefined, 10_000, { ownerId });
+	it("maps pre-launch TypeScript loop breakpoints through Bun source maps", async () => {
+		for (const testCase of [
+			{
+				ownerPrefix: "plain",
+				condition: undefined,
+				expectedIndex: "0",
+				expectedSample: "alpha",
+				expectedTotal: "0",
+			},
+			{
+				ownerPrefix: "condition",
+				condition: "index === 1",
+				expectedIndex: "1",
+				expectedSample: "beta",
+				expectedTotal: "4",
+			},
+		]) {
+			const cwd = await fs.mkdtemp(path.join(os.tmpdir(), `omp-bun-dap-index-${testCase.ownerPrefix}-`));
+			const manager = new DapSessionManager();
+			const ownerId = `bun-dap-index-${testCase.ownerPrefix}-${Bun.randomUUIDv7()}`;
+			try {
+				const program = path.join(cwd, "indexed-loop.ts");
+				await Bun.write(
+					program,
+					[
+						"type Sample = { label: string; value: number };",
+						"",
+						"function doubleValue(value: number): number {",
+						"  const doubled = value * 2;",
+						"  return doubled;",
+						"}",
+						"",
+						"function summarize(samples: Sample[]): number {",
+						"  let total = 0;",
+						"  for (let index = 0; index < samples.length; index += 1) {",
+						"    const sample = samples[index];",
+						"    total += doubleValue(sample.value);",
+						"  }",
+						"  return total;",
+						"}",
+						"",
+						"const samples: Sample[] = [",
+						"  { label: 'alpha', value: 2 },",
+						"  { label: 'beta', value: 4 },",
+						"  { label: 'gamma', value: 6 },",
+						"];",
+						"",
+						"const total = summarize(samples);",
+						"console.log('total', total);",
+						"",
+					].join("\n"),
+				);
+				await manager.setBreakpoint(program, 12, testCase.condition, undefined, 10_000, { ownerId });
 
-			const snapshot = await manager.launch(
-				{ ownerId, adapter: requireBunAdapter(cwd), program, cwd },
-				undefined,
-				30_000,
-			);
+				const snapshot = await manager.launch(
+					{ ownerId, adapter: requireBunAdapter(cwd), program, cwd },
+					undefined,
+					30_000,
+				);
 
-			expect(snapshot.status).toBe("stopped");
-			expect(snapshot.frameName).toBe("summarize");
-			expect(snapshot.line).toBe(9);
-			expect(
-				(await manager.evaluate("index", "repl", undefined, undefined, 10_000, { ownerId })).evaluation?.result,
-			).toBe("1");
-			expect(
-				(await manager.evaluate("sample.label", "repl", undefined, undefined, 10_000, { ownerId })).evaluation
-					?.result,
-			).toBe("beta");
-		} finally {
-			await manager.terminate(undefined, 10_000, { ownerId }).catch(() => undefined);
-			await fs.rm(cwd, { recursive: true, force: true });
+				expect(snapshot.status).toBe("stopped");
+				expect(snapshot.frameName).toBe("summarize");
+				expect(snapshot.line).toBe(12);
+				expect(
+					(await manager.evaluate("total", "repl", undefined, undefined, 10_000, { ownerId })).evaluation?.result,
+				).toBe(testCase.expectedTotal);
+				expect(
+					(await manager.evaluate("index", "repl", undefined, undefined, 10_000, { ownerId })).evaluation?.result,
+				).toBe(testCase.expectedIndex);
+				expect(
+					(await manager.evaluate("sample.label", "repl", undefined, undefined, 10_000, { ownerId })).evaluation
+						?.result,
+				).toBe(testCase.expectedSample);
+			} finally {
+				await manager.terminate(undefined, 10_000, { ownerId }).catch(() => undefined);
+				await fs.rm(cwd, { recursive: true, force: true });
+			}
 		}
-	}, 45_000);
+	}, 60_000);
 
 	it("maps TypeScript function breakpoints back to source frames", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bun-dap-source-map-"));
@@ -555,7 +658,7 @@ describe("bundled Bun DAP adapter", () => {
 		}
 	}, 45_000);
 
-	it("stops at top-level TypeScript call-site breakpoints", async () => {
+	it("stops at late top-level TypeScript call-site breakpoints", async () => {
 		const cwd = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bun-dap-top-level-"));
 		const manager = new DapSessionManager();
 		const ownerId = `bun-dap-top-level-${Bun.randomUUIDv7()}`;
@@ -565,16 +668,33 @@ describe("bundled Bun DAP adapter", () => {
 				program,
 				[
 					"type Sample = { label: string; value: number };",
-					"function summarize(samples: Sample[]) {",
-					"  return samples.map(sample => sample.label).join(',');",
+					"",
+					"function doubleValue(value: number): number {",
+					"  const doubled = value * 2;",
+					"  return doubled;",
 					"}",
-					"const samples: Sample[] = [{ label: 'alpha', value: 2 }];",
-					"const summary = summarize(samples);",
-					"console.log(summary);",
+					"",
+					"function summarize(samples: Sample[]): number {",
+					"  let total = 0;",
+					"  for (let index = 0; index < samples.length; index += 1) {",
+					"    const sample = samples[index];",
+					"    total += doubleValue(sample.value);",
+					"  }",
+					"  return total;",
+					"}",
+					"",
+					"const samples: Sample[] = [",
+					"  { label: 'alpha', value: 2 },",
+					"  { label: 'beta', value: 4 },",
+					"  { label: 'gamma', value: 6 },",
+					"];",
+					"",
+					"const total = summarize(samples);",
+					"console.log('total', total);",
 					"",
 				].join("\n"),
 			);
-			await manager.setBreakpoint(program, 6, undefined, undefined, 10_000, { ownerId });
+			await manager.setBreakpoint(program, 23, undefined, undefined, 10_000, { ownerId });
 
 			const snapshot = await manager.launch(
 				{ ownerId, adapter: requireBunAdapter(cwd), program, cwd },
@@ -584,7 +704,11 @@ describe("bundled Bun DAP adapter", () => {
 
 			expect(snapshot.status).toBe("stopped");
 			expect(snapshot.frameName).toBe("module code");
-			expect(snapshot.line).toBe(6);
+			expect(snapshot.line).toBe(23);
+			expect(
+				(await manager.evaluate("samples.length", "repl", undefined, undefined, 10_000, { ownerId })).evaluation
+					?.result,
+			).toBe("3");
 		} finally {
 			await manager.terminate(undefined, 10_000, { ownerId }).catch(() => undefined);
 			await fs.rm(cwd, { recursive: true, force: true });

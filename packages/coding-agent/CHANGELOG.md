@@ -13,6 +13,9 @@
 - Fixed bundled Bun DAP source stepping for local TypeScript call targets and added breakpoint-location support for source-aware stepping.
 - Fixed bundled Bun DAP TypeScript source mapping for breakpoint stops so reported stack/source lines stay on user source instead of generated offsets.
 - Fixed bundled Bun DAP pre-launch TypeScript source breakpoints when erased source lines make Bun reject the direct generated-line bind before OMP can use the source map.
+- Fixed bundled Bun DAP pre-launch TypeScript loop-body breakpoints so source-mapped pending breakpoints stop with live loop locals instead of generated post-loop scope.
+- Fixed bundled Bun DAP pre-launch TypeScript top-level breakpoints whose original source lines are beyond Bun's generated JavaScript line range.
+- Fixed bundled Bun DAP `step_over` and `step_out` from TypeScript loop call sites so intermediate generated loop-control locations are skipped in favor of coherent source call-site stops.
 - Fixed bundled Bun DAP pause output so a busy target that does not produce a stopped stack is reported as still running instead of “Program paused.”
 
 - Fixed `js-debug-adapter` DAP server discovery to inspect resolved adapter launchers/packages first and fall back to XDG data-dir Mason packages when the wrapper is not on PATH, so existing Neovim Mason installs and non-Mason installs both work.

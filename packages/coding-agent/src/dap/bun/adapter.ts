@@ -203,6 +203,17 @@ function inspectorUrlForSource(key: string): string {
 	return canonicalizeSourcePath(key);
 }
 
+function sourceNeedsGeneratedMapping(sourceKey: string): boolean {
+	const extension = path.extname(sourceKey).toLowerCase();
+	return (
+		extension === ".ts" ||
+		extension === ".tsx" ||
+		extension === ".mts" ||
+		extension === ".cts" ||
+		extension === ".jsx"
+	);
+}
+
 function defaultColumnForSourceLine(sourcePath: string, line: number): number {
 	if (line <= 0 || /^[a-z][a-z\d+.-]*:\/\//i.test(sourcePath)) return 0;
 	try {
@@ -246,6 +257,39 @@ function isSourceStepCandidate(line: string): boolean {
 	return trimmed.length > 0 && !trimmed.startsWith("//") && !/^[{}()[\];,]+$/.test(trimmed);
 }
 
+function isSourceMapSentinelCandidate(line: string): boolean {
+	const trimmed = line.trim();
+	return (
+		isSourceStepCandidate(trimmed) &&
+		!/^(?:type|interface|declare)\b/.test(trimmed) &&
+		!/^(?:import|export)\s+type\b/.test(trimmed) &&
+		!/^[{[]/.test(trimmed)
+	);
+}
+
+function previousSourceMapSentinelLine(sourcePath: string, line: number): number | undefined {
+	const lines = sourceLines(sourcePath);
+	for (let index = Math.max(line - 2, 0); index >= 0; index--) {
+		if (isSourceMapSentinelCandidate(lines[index] ?? "")) return index + 1;
+	}
+	return undefined;
+}
+
+function sourceCanDriftBeforeLine(sourcePath: string, line: number): boolean {
+	const lines = sourceLines(sourcePath);
+	for (let index = 0; index < Math.max(line - 1, 0); index++) {
+		const trimmed = (lines[index] ?? "").trim();
+		if (
+			trimmed.length === 0 ||
+			/^(?:type|interface|declare)\b/.test(trimmed) ||
+			/^(?:import|export)\s+type\b/.test(trimmed)
+		) {
+			return true;
+		}
+	}
+	return false;
+}
+
 function nextSourceStepLine(sourcePath: string | undefined, afterLine: number): number | undefined {
 	const lines = sourceLines(sourcePath);
 	for (let index = Math.max(afterLine, 0); index < lines.length; index++) {
@@ -263,6 +307,10 @@ function sourceEnclosingLoopLine(sourcePath: string | undefined, line: number): 
 		if (trimmed === "}") return undefined;
 	}
 	return undefined;
+}
+
+function pendingSourceMapPlaceholderLine(sourcePath: string, line: number): number {
+	return sourceEnclosingLoopLine(sourcePath, line) ?? previousSourceMapSentinelLine(sourcePath, line) ?? line;
 }
 
 function sourceLineIsInsideLoop(sourcePath: string | undefined, line: number): boolean {
@@ -873,6 +921,7 @@ class BunDebugAdapter {
 		column: number;
 	};
 	#pendingStepLocationOverride?: { sourcePath: string; line: number; column: number };
+	#pendingLoopSourceStep?: StepInTarget;
 	#stepDisabledBreakpoints: StoredBreakpoint[] = [];
 	#lastStopBreakpointId?: string;
 	#nextBreakpointId = 1;
@@ -977,7 +1026,7 @@ class BunDebugAdapter {
 					this.#sendResponse(request, {});
 					return;
 				case "stepOut":
-					await this.#debuggerCommand("Debugger.stepOut");
+					if (!(await this.#sourceStepOut())) await this.#debuggerCommand("Debugger.stepOut");
 					this.#sendResponse(request, {});
 					return;
 				case "pause":
@@ -1143,6 +1192,7 @@ class BunDebugAdapter {
 		const inspector = this.#requiredInspector();
 		await inspector.send("Debugger.setBreakpointsActive", { active: true });
 		await inspector.send("Inspector.initialized");
+		await this.#rebindBreakpointsForLoadedScripts();
 		if (this.#suppressInitialPause && this.#deferredInitialPause !== undefined) {
 			this.#deferredInitialPause = undefined;
 			await inspector.send("Debugger.resume").catch(() => undefined);
@@ -1192,21 +1242,28 @@ class BunDebugAdapter {
 				})
 			: false;
 		if (boundLoadedScript) return entry;
-		const params: Record<string, unknown> = {
-			url: inspectorUrlForSource(key),
-			lineNumber: Math.max(breakpoint.line - 1, 0),
-			columnNumber: breakpointColumn(key, breakpoint),
-		};
-		const options = breakpointOptions(breakpoint);
-		if (options) params.options = options;
-		try {
-			const result = await inspector.send<InspectorSetBreakpointResult>("Debugger.setBreakpointByUrl", params);
-			entry.inspectorId = result.breakpointId;
-			entry.location = result.locations?.[0] ?? result.actualLocation;
-			entry.verified = entry.location !== undefined;
-			if (entry.inspectorId) this.#breakpointsByInspectorId.set(entry.inspectorId, entry);
-		} catch (error) {
-			entry.message = entry.message ?? toErrorMessage(error);
+		const shouldDeferUntilSourceMap =
+			!loadedScript &&
+			sourceNeedsGeneratedMapping(key) &&
+			breakpoint.line > 1 &&
+			sourceCanDriftBeforeLine(key, breakpoint.line);
+		if (!shouldDeferUntilSourceMap) {
+			const params: Record<string, unknown> = {
+				url: inspectorUrlForSource(key),
+				lineNumber: Math.max(breakpoint.line - 1, 0),
+				columnNumber: breakpointColumn(key, breakpoint),
+			};
+			const options = breakpointOptions(breakpoint);
+			if (options) params.options = options;
+			try {
+				const result = await inspector.send<InspectorSetBreakpointResult>("Debugger.setBreakpointByUrl", params);
+				entry.inspectorId = result.breakpointId;
+				entry.location = result.locations?.[0] ?? result.actualLocation;
+				entry.verified = entry.location !== undefined;
+				if (entry.inspectorId) this.#breakpointsByInspectorId.set(entry.inspectorId, entry);
+			} catch (error) {
+				entry.message = entry.message ?? toErrorMessage(error);
+			}
 		}
 		if (!loadedScript && breakpoint.line > 1) {
 			await this.#installPendingSourceMapPlaceholder(entry).catch(() => undefined);
@@ -1233,12 +1290,20 @@ class BunDebugAdapter {
 	async #installPendingSourceMapPlaceholder(entry: StoredBreakpoint): Promise<void> {
 		const inspector = this.#inspector;
 		if (!inspector) return;
-		const result = await inspector.send<InspectorSetBreakpointResult>("Debugger.setBreakpointByUrl", {
-			url: inspectorUrlForSource(entry.sourceKey),
-			lineNumber: 0,
-			columnNumber: 0,
-		});
-		if (result.breakpointId) this.#placeholderBreakpointsByInspectorId.set(result.breakpointId, entry);
+		const lines = new Set([1]);
+		if (sourceCanDriftBeforeLine(entry.sourceKey, entry.request.line)) {
+			lines.add(pendingSourceMapPlaceholderLine(entry.sourceKey, entry.request.line));
+		}
+		for (const line of lines) {
+			const result = await inspector
+				.send<InspectorSetBreakpointResult>("Debugger.setBreakpointByUrl", {
+					url: inspectorUrlForSource(entry.sourceKey),
+					lineNumber: Math.max(line - 1, 0),
+					columnNumber: defaultColumnForSourceLine(entry.sourceKey, line),
+				})
+				.catch(() => undefined);
+			if (result?.breakpointId) this.#placeholderBreakpointsByInspectorId.set(result.breakpointId, entry);
+		}
 	}
 
 	#findScriptForSource(sourceKey: string): InspectorScript | undefined {
@@ -1450,9 +1515,76 @@ class BunDebugAdapter {
 		if (!current?.sourcePath || !path.isAbsolute(current.sourcePath)) return false;
 		const nextLine = nextSourceStepLine(current.sourcePath, current.line);
 		if (!nextLine) return false;
+		if (sourceLineIsInsideLoop(current.sourcePath, current.line)) {
+			const entries = [...this.#breakpointEntriesForSourceLine(current.sourcePath, current.line)];
+			const currentFrame = this.#frames[0];
+			if (currentFrame) entries.push(...this.#breakpointEntriesForLocation(currentFrame.location));
+			await this.#temporarilyDisableBreakpoints(entries);
+			if (this.#lastStopBreakpointId) {
+				await this.#requiredInspector()
+					.send("Debugger.removeBreakpoint", { breakpointId: this.#lastStopBreakpointId })
+					.catch(() => undefined);
+			}
+			this.#pendingLoopSourceStep = {
+				sourcePath: current.sourcePath,
+				line: current.line,
+				column: current.column,
+			};
+			await this.#requiredInspector().send("Debugger.stepNext");
+			return true;
+		}
 		this.#pendingStepLocationOverride = { sourcePath: current.sourcePath, line: nextLine, column: 1 };
 		if (!(await this.#setTemporaryStepBreakpointBySource(current.sourcePath, nextLine))) return false;
 		await this.#requiredInspector().send("Debugger.stepNext");
+		return true;
+	}
+
+	async #sourceStepOut(): Promise<boolean> {
+		const current = this.#sourceStopLocation();
+		const caller = this.#sourceStopLocation(this.#frames[1]);
+		if (!current?.sourcePath || !caller?.sourcePath || !path.isAbsolute(caller.sourcePath)) return false;
+		if (!sourceLineIsInsideLoop(caller.sourcePath, caller.line)) return false;
+		const entries = [...this.#breakpointEntriesForSourceLine(current.sourcePath, current.line)];
+		const currentFrame = this.#frames[0];
+		if (currentFrame) entries.push(...this.#breakpointEntriesForLocation(currentFrame.location));
+		await this.#temporarilyDisableBreakpoints(entries);
+		this.#pendingLoopSourceStep = { sourcePath: caller.sourcePath, line: caller.line, column: caller.column };
+		await this.#requiredInspector().send("Debugger.stepOut");
+		return true;
+	}
+
+	async #continuePendingLoopSourceStep(frame?: InspectorCallFrame): Promise<boolean> {
+		const pending = this.#pendingLoopSourceStep;
+		if (!pending || !frame) return false;
+		const current = this.#sourceStopLocation(frame);
+		const loopLine = sourceEnclosingLoopLine(pending.sourcePath, pending.line);
+		if (
+			!current?.sourcePath ||
+			loopLine === undefined ||
+			!pathsLikelyMatch(current.sourcePath, pending.sourcePath) ||
+			current.line !== loopLine
+		) {
+			this.#pendingLoopSourceStep = undefined;
+			return false;
+		}
+		const targets = new Set([pending.line]);
+		const fallbackLine = nextSourceStepLine(pending.sourcePath, pending.line);
+		if (fallbackLine) targets.add(fallbackLine);
+		await this.#temporarilyDisableBreakpoints(this.#breakpointEntriesForSourceLine(pending.sourcePath, pending.line));
+		let installed = false;
+		for (const line of targets) {
+			installed =
+				(await this.#setTemporaryStepBreakpointByInstalledSource(pending.sourcePath, line).catch(() => false)) ||
+				installed;
+		}
+		if (!installed) {
+			this.#pendingLoopSourceStep = undefined;
+			return false;
+		}
+		this.#pendingStepLocationOverride = pending;
+		await this.#requiredInspector()
+			.send("Debugger.resume")
+			.catch(() => undefined);
 		return true;
 	}
 
@@ -1613,13 +1745,20 @@ class BunDebugAdapter {
 	async #rebindBreakpointsForScript(script: InspectorScript): Promise<void> {
 		for (const entries of this.#breakpointsBySource.values()) {
 			for (const entry of entries) {
-				if (entry.verified || !sourceMatchesScript(entry.sourceKey, script)) continue;
+				if (!sourceMatchesScript(entry.sourceKey, script)) continue;
+				if (entry.verified && script.sourceMap?.matchesSource(entry.sourceKey) !== true) continue;
 				const rebound = await this.#tryBindLoadedScript(entry, script).catch(error => {
 					entry.message = toErrorMessage(error);
 					return false;
 				});
 				if (rebound) this.#sendEvent("breakpoint", { reason: "changed", breakpoint: this.#toDapBreakpoint(entry) });
 			}
+		}
+	}
+
+	async #rebindBreakpointsForLoadedScripts(): Promise<void> {
+		for (const script of this.#scriptsById.values()) {
+			await this.#rebindBreakpointsForScript(script);
 		}
 	}
 
@@ -1828,9 +1967,20 @@ class BunDebugAdapter {
 			await this.#handlePendingSourceMapPlaceholderPause(breakpointId, placeholder, frames[0]);
 			return;
 		}
-		const hit = breakpointId ? this.#breakpointsByInspectorId.get(breakpointId) : undefined;
-		const temporaryStep = breakpointId ? this.#temporaryBreakpointIds.has(breakpointId) : false;
+		const locationEntries = frames[0] ? this.#breakpointEntriesForLocation(frames[0].location) : [];
+		const locationTemporaryHit = locationEntries.find(
+			entry => entry.inspectorId !== undefined && this.#temporaryBreakpointIds.has(entry.inspectorId),
+		);
+		const hit = breakpointId
+			? this.#breakpointsByInspectorId.get(breakpointId)
+			: locationEntries.find(entry => entry !== locationTemporaryHit && entry.inspectorId !== undefined);
+		const temporaryStep = breakpointId
+			? this.#temporaryBreakpointIds.has(breakpointId)
+			: locationTemporaryHit !== undefined;
+		const stepHit = temporaryStep ? (breakpointId ? hit : locationTemporaryHit) : undefined;
 		const pendingStep = this.#pendingStepLocationOverride;
+		if (!temporaryStep && (await this.#continuePendingLoopSourceStep(frames[0]))) return;
+		if (!temporaryStep) this.#pendingLoopSourceStep = undefined;
 		if (hit && !temporaryStep && frames[0]) {
 			this.#lastStepLocationOverride = {
 				scriptId: frames[0].location.scriptId,
@@ -1844,12 +1994,13 @@ class BunDebugAdapter {
 			this.#lastStepLocationOverride = {
 				scriptId: frames[0].location.scriptId,
 				lineNumber: frames[0].location.lineNumber,
-				sourcePath: hit?.sourceKey ?? pendingStep?.sourcePath ?? "",
-				line: hit?.request.line ?? pendingStep?.line ?? frames[0].location.lineNumber + 1,
-				column: hit?.request.column ?? pendingStep?.column ?? 1,
+				sourcePath: stepHit?.sourceKey ?? pendingStep?.sourcePath ?? "",
+				line: stepHit?.request.line ?? pendingStep?.line ?? frames[0].location.lineNumber + 1,
+				column: stepHit?.request.column ?? pendingStep?.column ?? 1,
 			};
 		}
 		this.#pendingStepLocationOverride = undefined;
+		this.#pendingLoopSourceStep = undefined;
 		if (this.#temporaryBreakpointIds.size > 0) await this.#clearTemporaryStepBreakpoints();
 		if (this.#stepDisabledBreakpoints.length > 0) await this.#restoreStepDisabledBreakpoints();
 		this.#sendEvent("stopped", {
@@ -1866,16 +2017,44 @@ class BunDebugAdapter {
 		frame?: InspectorCallFrame,
 	): Promise<void> {
 		const inspector = this.#inspector;
-		this.#placeholderBreakpointsByInspectorId.delete(breakpointId);
+		const placeholderIds = new Set([breakpointId]);
+		for (const [id, candidate] of this.#placeholderBreakpointsByInspectorId) {
+			if (candidate === entry) placeholderIds.add(id);
+		}
+		for (const id of placeholderIds) {
+			this.#placeholderBreakpointsByInspectorId.delete(id);
+		}
 		if (!inspector) return;
-		await inspector.send("Debugger.removeBreakpoint", { breakpointId }).catch(() => undefined);
+		for (const id of placeholderIds) {
+			await inspector.send("Debugger.removeBreakpoint", { breakpointId: id }).catch(() => undefined);
+		}
+		const script = frame ? this.#scriptsById.get(frame.location.scriptId) : undefined;
 		if (!entry.verified) {
-			const script = frame ? this.#scriptsById.get(frame.location.scriptId) : undefined;
 			const rebound = await this.#tryBindLoadedScript(entry, script).catch(error => {
 				entry.message = toErrorMessage(error);
 				return false;
 			});
 			if (rebound) this.#sendEvent("breakpoint", { reason: "changed", breakpoint: this.#toDapBreakpoint(entry) });
+		}
+		const mapsToRequestedLine =
+			frame !== undefined &&
+			script !== undefined &&
+			this.#locationMapsToSourceLine(script, frame.location, entry.sourceKey, entry.request.line);
+		if (mapsToRequestedLine && !entry.request.condition && !entry.request.hitCondition) {
+			this.#lastStepLocationOverride = {
+				scriptId: frame.location.scriptId,
+				lineNumber: frame.location.lineNumber,
+				sourcePath: entry.sourceKey,
+				line: entry.request.line,
+				column: entry.request.column ?? 1,
+			};
+			this.#sendEvent("stopped", {
+				reason: "breakpoint",
+				threadId: THREAD_ID,
+				allThreadsStopped: true,
+				hitBreakpointIds: [entry.dapId],
+			});
+			return;
 		}
 		await inspector.send("Debugger.resume").catch(() => undefined);
 	}
