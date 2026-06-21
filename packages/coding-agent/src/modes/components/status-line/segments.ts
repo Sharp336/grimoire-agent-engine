@@ -1,9 +1,11 @@
 import * as os from "node:os";
 import * as path from "node:path";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { Effort } from "@oh-my-pi/pi-ai";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, getProjectDir, pathIsWithin, relativePathWithinRoot } from "@oh-my-pi/pi-utils";
 import { type ThemeColor, theme } from "../../../modes/theme/theme";
+import { getEffortDisplayLevel } from "../../../thinking";
 import { shortenPath } from "../../../tools/render-utils";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../../../utils/session-color";
 import { sanitizeStatusText } from "../../shared";
@@ -106,7 +108,10 @@ const modelSegment: StatusLineSegment = {
 			} else {
 				const level = state.thinkingLevel ?? ThinkingLevel.Off;
 				if (level !== ThinkingLevel.Off) {
-					const thinkingText = theme.thinking[level as keyof typeof theme.thinking];
+					const displayLevel = getEffortDisplayLevel(state.model, level as Effort);
+					const thinkingText =
+						theme.thinking[displayLevel as keyof typeof theme.thinking] ??
+						theme.thinking[level as keyof typeof theme.thinking];
 					if (thinkingText) {
 						tail += `${theme.sep.dot}${thinkingText}`;
 					}

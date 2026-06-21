@@ -2,11 +2,13 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { stripVTControlCharacters } from "node:util";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { Effort } from "@oh-my-pi/pi-ai";
 import { type Component, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatNumber, getProjectDir } from "@oh-my-pi/pi-utils";
 import { settings } from "../../config/settings";
 import { theme } from "../../modes/theme/theme";
 import type { AgentSession } from "../../session/agent-session";
+import { getEffortDisplayLabel } from "../../thinking";
 import { shortenPath } from "../../tools/render-utils";
 import * as git from "../../utils/git";
 import { sanitizeStatusText } from "../shared";
@@ -212,7 +214,7 @@ export class FooterComponent implements Component {
 			} else {
 				const thinkingLevel = state.thinkingLevel ?? ThinkingLevel.Off;
 				if (thinkingLevel !== ThinkingLevel.Off) {
-					rightSide = `${modelName} • ${thinkingLevel}`;
+					rightSide = `${modelName} • ${getEffortDisplayLabel(state.model, thinkingLevel as Effort)}`;
 				}
 			}
 		}

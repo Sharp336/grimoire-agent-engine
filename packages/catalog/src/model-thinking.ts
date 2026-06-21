@@ -322,12 +322,13 @@ function getModelDefinedEfforts<TApi extends Api>(
 ): readonly Effort[] | undefined {
 	if (isGlm52ReasoningEffortModelId(spec.id)) {
 		// Z.ai/Zhipu and OpenRouter both surface GLM-5.2's full effort ladder,
-		// including the top `xhigh` (= "max") tier; Ollama Cloud exposes only
-		// high/xhigh.
+		// including the top `xhigh` (= "max") tier; Ollama Cloud and Anthropic
+		// Messages endpoints (Z.ai, Umans) expose only high/xhigh because
+		// GLM-5.2 only supports none/high/max.
 		if (isZaiThinkingFormat(compat) || isOpenRouterThinkingFormat(compat)) {
 			return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
 		}
-		if (isOllamaCloudGlm52ReasoningEffortModel(spec)) {
+		if (isOllamaCloudGlm52ReasoningEffortModel(spec) || isGlm52ReasoningModelOnAnthropicEndpoint(spec)) {
 			return GLM_52_HIGH_MAX_REASONING_EFFORTS;
 		}
 	}
@@ -341,6 +342,13 @@ function getModelDefinedEfforts<TApi extends Api>(
 
 function isOllamaCloudGlm52ReasoningEffortModel<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
 	return spec.api === "ollama-chat" && spec.provider === "ollama-cloud" && isGlm52ReasoningEffortModelId(spec.id);
+}
+
+function isGlm52ReasoningModelOnAnthropicEndpoint<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
+	return (
+		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
+		isGlm52ReasoningEffortModelId(spec.id)
+	);
 }
 
 function isMinimaxReasoningModelOnAnthropicEndpoint<TApi extends Api>(spec: ModelSpec<TApi>): boolean {
@@ -385,6 +393,9 @@ function inferDetectedEffortMap<TApi extends Api>(
 	if (mode === "anthropic-adaptive") {
 		if (isMinimaxReasoningModelOnAnthropicEndpoint(spec)) {
 			return MINIMAX_ANTHROPIC_ADAPTIVE_EFFORT_MAP;
+		}
+		if (isGlm52ReasoningModelOnAnthropicEndpoint(spec)) {
+			return GLM_52_XHIGH_MAX_EFFORT_MAP;
 		}
 		return anthropicModelHasRealXHighEffort(spec, parsedModel)
 			? ANTHROPIC_ADAPTIVE_EFFORT_MAP_5_TIER
@@ -588,7 +599,7 @@ function inferThinkingControlMode<TApi extends Api>(
 				: "budget";
 
 		case "anthropic-messages":
-			if (isMinimaxReasoningModelOnAnthropicEndpoint(spec)) {
+			if (isMinimaxReasoningModelOnAnthropicEndpoint(spec) || isGlm52ReasoningModelOnAnthropicEndpoint(spec)) {
 				return "anthropic-adaptive";
 			}
 			if (parsedModel.family === "anthropic") {

@@ -1,5 +1,5 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import type { Model } from "@oh-my-pi/pi-ai";
+import type { Effort, Model } from "@oh-my-pi/pi-ai";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import {
@@ -23,7 +23,12 @@ import { getKnownRoleIds, getRoleInfo, MODEL_ROLE_IDS, MODEL_ROLES } from "../..
 import type { Settings } from "../../config/settings";
 import { type ThemeColor, theme } from "../../modes/theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../../modes/utils/keybinding-matchers";
-import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
+import {
+	AUTO_THINKING,
+	type ConfiguredThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
+	getEffortDisplayLabel,
+} from "../../thinking";
 import { getTabBarTheme } from "../shared";
 import { DynamicBorder } from "./dynamic-border";
 
@@ -43,12 +48,12 @@ function makeRoleBadgeToken(label: string, color: ThemeColor, assigned: RoleAssi
 		if (assigned.thinkingLevel === ThinkingLevel.Inherit) {
 			return badge;
 		}
-		const thinkingLabel = getConfiguredThinkingLevelMetadata(assigned.thinkingLevel).label;
+		const thinkingLabel = getEffortDisplayLabel(assigned.model, assigned.thinkingLevel as Effort);
 		return `${badge} ${theme.fg("dim", `(${thinkingLabel})`)}`;
 	}
 
 	const badge = makeInvertedBadge(label, color);
-	const thinkingLabel = getConfiguredThinkingLevelMetadata(assigned.thinkingLevel).label;
+	const thinkingLabel = getEffortDisplayLabel(assigned.model, assigned.thinkingLevel as Effort);
 	return `${badge} ${theme.fg("dim", `(${thinkingLabel})`)}`;
 }
 
@@ -1144,7 +1149,12 @@ export class ModelSelectorComponent extends Container {
 		const optionLines = showingThinking
 			? thinkingOptions.map((thinkingLevel, index) => {
 					const prefix = index === this.#menuSelectedIndex ? `  ${theme.nav.cursor} ` : "    ";
-					const label = getConfiguredThinkingLevelMetadata(thinkingLevel).label;
+					const label =
+						thinkingLevel === AUTO_THINKING ||
+						thinkingLevel === ThinkingLevel.Inherit ||
+						thinkingLevel === ThinkingLevel.Off
+							? getConfiguredThinkingLevelMetadata(thinkingLevel).label
+							: getEffortDisplayLabel(selectedItem.model, thinkingLevel as Effort);
 					return `${prefix}${label}`;
 				})
 			: this.#menuRoleActions.map((action, index) => {

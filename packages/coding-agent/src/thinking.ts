@@ -190,3 +190,33 @@ export function resolveProvisionalAutoLevel(model: Model | undefined): Effort | 
 	if (!model?.reasoning) return undefined;
 	return clampAutoThinkingEffort(model, model.thinking?.defaultLevel ?? Effort.High);
 }
+
+/**
+ * Returns the display label for an effort, honoring the model's wire effortMap.
+ * When an effort maps to a different known effort wire value that is not
+ * already a distinct picker tier (e.g. GLM-5.2's `xhigh → "max"`), the
+ * mapped effort's label is shown so the picker reflects the provider's own
+ * tier name.
+ */
+export function getEffortDisplayLabel(model: Model | undefined, effort: Effort): string {
+	return getThinkingLevelMetadata(getEffortDisplayLevel(model, effort)).label;
+}
+
+/**
+ * Returns the effort value to use for display (theme glyph, label lookup).
+ * When the model's effortMap remaps an effort to a different known effort
+ * that isn't already a separate picker tier, returns the mapped effort.
+ */
+export function getEffortDisplayLevel(model: Model | undefined, effort: Effort): Effort {
+	const wireValue = model?.thinking?.effortMap?.[effort];
+	if (wireValue !== undefined) {
+		const wireEffort = parseEffort(wireValue);
+		if (wireEffort !== undefined && wireEffort !== effort) {
+			const efforts = model ? getSupportedEfforts(model) : [];
+			if (!efforts.includes(wireEffort)) {
+				return wireEffort;
+			}
+		}
+	}
+	return effort;
+}
