@@ -105,6 +105,7 @@ describe("generated model policies", () => {
 			mode: "anthropic-adaptive",
 			efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 			effortMap: { minimal: "low" },
+			defaultLevel: Effort.XHigh,
 			supportsDisplay: true,
 		});
 	});

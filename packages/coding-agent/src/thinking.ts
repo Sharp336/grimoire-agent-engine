@@ -140,7 +140,7 @@ export interface ConfiguredThinkingLevelMetadata {
 const AUTO_THINKING_METADATA: ConfiguredThinkingLevelMetadata = {
 	value: AUTO_THINKING,
 	label: "auto",
-	description: "Auto-detect per prompt (low–max)",
+	description: "Auto-detect per prompt (low–xhigh)",
 };
 
 /**

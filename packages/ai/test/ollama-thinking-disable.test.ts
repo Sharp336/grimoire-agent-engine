@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { AssistantMessage, Context, ToolResultMessage, Usage } from "@oh-my-pi/pi-ai";
+import { type AssistantMessage, type Context, Effort, type ToolResultMessage, type Usage } from "@oh-my-pi/pi-ai";
 import { streamOllama } from "@oh-my-pi/pi-ai/providers/ollama";
 import { NON_VISION_IMAGE_PLACEHOLDER } from "@oh-my-pi/pi-ai/providers/vision-guard";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -30,13 +30,16 @@ const emptyUsage: Usage = {
 	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 };
 
-function createReasoningOllamaModel(input: Array<"text" | "image"> = ["text"]) {
+function createReasoningOllamaModel(
+	input: Array<"text" | "image"> = ["text"],
+	provider: "ollama" | "ollama-cloud" = "ollama-cloud",
+) {
 	return buildModel({
 		id: "deepseek-v4-flash",
 		name: "DeepSeek V4 Flash",
 		api: "ollama-chat",
-		provider: "ollama-cloud",
-		baseUrl: "https://ollama.com",
+		provider,
+		baseUrl: provider === "ollama-cloud" ? "https://ollama.com" : "http://127.0.0.1:11434",
 		reasoning: true,
 		input,
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -69,6 +72,71 @@ describe("Ollama chat thinking controls", () => {
 		}).result();
 
 		expect(payload?.think).toBe(false);
+	});
+
+	it("coerces max reasoning to high for local Ollama", async () => {
+		let payload: OllamaChatRequestPayload | undefined;
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const parsed: unknown = JSON.parse(String(init?.body));
+			if (!isOllamaChatRequestPayload(parsed)) {
+				throw new Error("Expected Ollama payload object");
+			}
+			payload = parsed;
+			return new Response('{"message":{"content":"ok"},"done":true,"prompt_eval_count":1,"eval_count":1}\n', {
+				status: 200,
+			});
+		};
+		const context: Context = {
+			messages: [{ role: "user", content: "Explain the plan", timestamp: 0 }],
+		};
+
+		await streamOllama(createReasoningOllamaModel(["text"], "ollama"), context, {
+			apiKey: "test-key",
+			reasoning: Effort.Max,
+			fetch: fetchMock,
+		}).result();
+
+		expect(payload?.think).toBe("high");
+	});
+
+	it("preserves mapped max reasoning for Ollama Cloud", async () => {
+		let payload: OllamaChatRequestPayload | undefined;
+		const fetchMock = async (_input: string | URL | Request, init?: RequestInit): Promise<Response> => {
+			const parsed: unknown = JSON.parse(String(init?.body));
+			if (!isOllamaChatRequestPayload(parsed)) {
+				throw new Error("Expected Ollama payload object");
+			}
+			payload = parsed;
+			return new Response('{"message":{"content":"ok"},"done":true,"prompt_eval_count":1,"eval_count":1}\n', {
+				status: 200,
+			});
+		};
+		const context: Context = {
+			messages: [{ role: "user", content: "Explain the plan", timestamp: 0 }],
+		};
+
+		await streamOllama(
+			buildModel({
+				id: "glm-5.2",
+				name: "GLM 5.2",
+				api: "ollama-chat",
+				provider: "ollama-cloud",
+				baseUrl: "https://ollama.com",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_000_000,
+				maxTokens: 8192,
+			}),
+			context,
+			{
+				apiKey: "test-key",
+				reasoning: Effort.XHigh,
+				fetch: fetchMock,
+			},
+		).result();
+
+		expect(payload?.think).toBe("max");
 	});
 
 	it("omits tool-result images for text-only Ollama chat models", async () => {

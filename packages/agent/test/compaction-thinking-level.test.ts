@@ -58,6 +58,12 @@ function getAnthropicModel(): Model {
 	return model;
 }
 
+function getAnthropicMaxModel(): Model {
+	const model = getBundledModel("anthropic", "claude-opus-4-7");
+	if (!model) throw new Error("Expected built-in anthropic/claude-opus-4-7 to exist");
+	return model;
+}
+
 function getGrokBuildModel(): Model {
 	const model = getBundledModel("xai-oauth", "grok-build");
 	if (!model) throw new Error("Expected built-in xai-oauth/grok-build to exist");
@@ -129,6 +135,20 @@ describe("compaction thinking-level resolution (regression)", () => {
 		const call = spy.mock.calls[0];
 		if (!call) throw new Error("expected completeSimple call");
 		expect(call[2]?.reasoning).toBe(ai.Effort.XHigh);
+	});
+
+	test("ThinkingLevel.Max on Opus 4.7 → reasoning=max", async () => {
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "handoff" }]));
+		await generateHandoff(messages, getAnthropicMaxModel(), "test-key", {
+			systemPrompt: ["sp"],
+			tools: [],
+			thinkingLevel: ThinkingLevel.Max,
+		});
+		const call = spy.mock.calls[0];
+		if (!call) throw new Error("expected completeSimple call");
+		expect(call[2]?.reasoning).toBe(ai.Effort.Max);
 	});
 
 	test("ThinkingLevel.High on xai-oauth/grok-build → reasoning=undefined (clamp)", async () => {
@@ -246,6 +266,21 @@ describe("compact() propagates thinkingLevel to all three summarizers (regressio
 		expect(spy).toHaveBeenCalledTimes(3);
 		for (const [, , opts] of spy.mock.calls) {
 			expect(opts?.reasoning).toBe(ai.Effort.XHigh);
+		}
+	});
+
+	test("ThinkingLevel.Max on Opus 4.7 → every fan-out call keeps reasoning=max", async () => {
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "summary" }]));
+
+		await compact(makePreparation(), getAnthropicMaxModel(), "test-key", undefined, undefined, {
+			thinkingLevel: ThinkingLevel.Max,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(3);
+		for (const [, , opts] of spy.mock.calls) {
+			expect(opts?.reasoning).toBe(ai.Effort.Max);
 		}
 	});
 

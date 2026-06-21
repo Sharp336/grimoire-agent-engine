@@ -73,7 +73,6 @@ describe("auto thinking classifier helpers", () => {
 
 	it("maps online classifier labels to effort levels", () => {
 		expect(parseDifficultyLevel("x-high")).toBe(Effort.XHigh);
-		expect(parseDifficultyLevel("max")).toBe(Effort.Max);
 		expect(parseDifficultyLevel("The answer is HIGH.")).toBe(Effort.High);
 		expect(parseDifficultyLevel("med")).toBe(Effort.Medium);
 		expect(parseDifficultyLevel("low")).toBe(Effort.Low);
@@ -83,7 +82,7 @@ describe("auto thinking classifier helpers", () => {
 	it("maps local 3-bucket labels to coarse effort levels", () => {
 		expect(parseDifficultyBucket("trivial")).toBe(Effort.Low);
 		expect(parseDifficultyBucket("moderate")).toBe(Effort.High);
-		expect(parseDifficultyBucket("hard")).toBe(Effort.Max);
+		expect(parseDifficultyBucket("hard")).toBe(Effort.XHigh);
 		expect(parseDifficultyBucket("medium")).toBeUndefined();
 	});
 

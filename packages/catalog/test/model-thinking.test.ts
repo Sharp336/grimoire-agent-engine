@@ -231,7 +231,13 @@ describe("model thinking derivation", () => {
 			high: "high",
 			xhigh: "max-plus",
 		});
-		expect(openRouterAnthropic.thinking?.effortMap).toEqual({ minimal: "low" });
+		expect(openRouterAnthropic.thinking?.effortMap).toEqual({
+			minimal: "low",
+			low: "medium",
+			medium: "high",
+			high: "xhigh",
+			xhigh: "max",
+		});
 	});
 
 	it("maps GLM-5.2 reasoning effort per host dialect", () => {
@@ -420,12 +426,14 @@ describe("model thinking derivation", () => {
 			Effort.Max,
 		]);
 		expect(opus47.thinking?.effortMap).toEqual({ minimal: "low" });
+		expect(opus47.thinking?.defaultLevel).toBe(Effort.XHigh);
 		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.Minimal)).toBe("low");
 		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.High)).toBe("high");
 		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.XHigh)).toBe("xhigh");
 		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.Max)).toBe("max");
 		expect(mapEffortToAnthropicAdaptiveEffort(mythos, Effort.XHigh)).toBe("xhigh");
 		expect(mapEffortToAnthropicAdaptiveEffort(mythos, Effort.Max)).toBe("max");
+		expect(mythos.thinking?.defaultLevel).toBe(Effort.XHigh);
 		expect(mapEffortToAnthropicAdaptiveEffort(mythosBedrock, Effort.XHigh)).toBe("max");
 		// Bedrock Converse keeps the four-tier legacy mapping; xhigh aliases to "max".
 		expect(opus47Bedrock.thinking?.effortMap).toEqual({ minimal: "low", xhigh: "max" });
@@ -473,20 +481,22 @@ describe("model thinking derivation", () => {
 			supportsDisplay: true,
 		});
 
-		// Explicit wire facts are authoritative — including `false`.
+		// Explicit wire facts are authoritative — including `false`; defaultLevel is
+		// still backfilled for full-range adaptive Anthropic metadata.
 		const pinned = createModel({
 			id: "claude-opus-4-8",
 			api: "anthropic-messages",
 			provider: "anthropic",
 			thinking: {
 				mode: "anthropic-adaptive",
-				efforts: [Effort.Low, Effort.High],
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
 				effortMap: { xhigh: "max" },
 				supportsDisplay: false,
 			},
 		});
 		expect(pinned.thinking?.effortMap).toEqual({ xhigh: "max" });
 		expect(pinned.thinking?.supportsDisplay).toBe(false);
+		expect(pinned.thinking?.defaultLevel).toBe(Effort.XHigh);
 	});
 
 	it("infers thinking when explicit metadata omits efforts", () => {

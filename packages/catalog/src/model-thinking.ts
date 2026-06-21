@@ -112,6 +112,13 @@ const MIMO_REASONING_EFFORT_MAP: Readonly<EffortMap> = {
 export const ANTHROPIC_ADAPTIVE_EFFORT_MAP_5_TIER: Readonly<Partial<Record<Effort, string>>> = {
 	[Effort.Minimal]: "low",
 };
+const OPENROUTER_ANTHROPIC_ADAPTIVE_EFFORT_MAP_5_TIER: Readonly<Partial<Record<Effort, string>>> = {
+	[Effort.Minimal]: "low",
+	[Effort.Low]: "medium",
+	[Effort.Medium]: "high",
+	[Effort.High]: "xhigh",
+	[Effort.XHigh]: "max",
+};
 
 /**
  * Effort → wire-value map for the legacy 4-tier adaptive scale (Opus 4.6,
@@ -191,7 +198,12 @@ function fillThinkingWireDefaults<TApi extends Api>(
 		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
 		supportsAdaptiveThinkingDisplay(spec.id);
 	const needsRequiresEffort = thinking.requiresEffort === undefined && impliesMandatoryReasoning(parsed, spec.id);
-	if (!effortsChanged && !shouldReplaceEffortMap && !needsDisplay && !needsRequiresEffort) {
+	const needsDefaultLevel =
+		thinking.defaultLevel === undefined &&
+		thinking.mode === "anthropic-adaptive" &&
+		normalizedEfforts.includes(Effort.Max) &&
+		anthropicModelHasRealXHighEffort(spec, parsed);
+	if (!effortsChanged && !shouldReplaceEffortMap && !needsDisplay && !needsRequiresEffort && !needsDefaultLevel) {
 		return thinking;
 	}
 	const filled: ThinkingConfig = { ...thinking };
@@ -211,6 +223,9 @@ function fillThinkingWireDefaults<TApi extends Api>(
 	if (needsRequiresEffort) {
 		filled.requiresEffort = true;
 	}
+	if (needsDefaultLevel) {
+		filled.defaultLevel = Effort.XHigh;
+	}
 	return filled;
 }
 
@@ -228,6 +243,13 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 	const effortMap = inferEffortMap(spec, compat, parsed, config.mode, config.efforts);
 	if (effortMap !== undefined) {
 		config.effortMap = effortMap;
+	}
+	if (
+		config.mode === "anthropic-adaptive" &&
+		anthropicModelHasRealXHighEffort(spec, parsed) &&
+		config.efforts.includes(Effort.Max)
+	) {
+		config.defaultLevel = Effort.XHigh;
 	}
 	if (
 		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
@@ -431,7 +453,7 @@ function getOpenRouterAnthropicReasoningEffortMap(modelId: string): EffortMap | 
 	if (!isFableOrMythos(parsed.kind) && !isOpusAdaptive) return undefined;
 
 	const hasRealXHigh = isFableOrMythos(parsed.kind) || semverGte(parsed.version, "4.7");
-	return hasRealXHigh ? ANTHROPIC_ADAPTIVE_EFFORT_MAP_5_TIER : ANTHROPIC_ADAPTIVE_EFFORT_MAP_4_TIER;
+	return hasRealXHigh ? OPENROUTER_ANTHROPIC_ADAPTIVE_EFFORT_MAP_5_TIER : ANTHROPIC_ADAPTIVE_EFFORT_MAP_4_TIER;
 }
 
 function inferSupportedEfforts<TApi extends Api>(

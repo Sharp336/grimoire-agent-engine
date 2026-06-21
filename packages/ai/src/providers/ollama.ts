@@ -127,7 +127,7 @@ function mapReasoning(
 		case "high":
 			return "high";
 		case "max":
-			return "max";
+			return model.provider === "ollama-cloud" ? "max" : "high";
 		case "xhigh":
 			return "high";
 		default:
