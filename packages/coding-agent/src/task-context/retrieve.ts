@@ -44,6 +44,18 @@ const STOPWORDS: Record<string, true> = {
 	would: true,
 	could: true,
 	should: true,
+	how: true,
+	does: true,
+	what: true,
+	when: true,
+	where: true,
+	why: true,
+	who: true,
+	can: true,
+	use: true,
+	using: true,
+	work: true,
+	works: true,
 };
 
 function extractKeywords(task: string): string[] {

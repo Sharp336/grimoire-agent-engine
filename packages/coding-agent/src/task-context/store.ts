@@ -130,7 +130,7 @@ function buildFtsQuery(query: string): string {
 	const tokens = query.toLowerCase().match(/[a-z0-9]+/g) ?? [];
 	const filtered = tokens.filter(t => t.length >= 3);
 	if (filtered.length === 0) return "";
-	return filtered.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" ");
+	return filtered.map(tok => `"${tok.replace(/"/g, '""')}"*`).join(" OR ");
 }
 
 /**
@@ -186,12 +186,12 @@ export async function searchVector(
 	if (queryVector.length === 0) return [];
 	const vecStr = `[${queryVector.join(",")}]`;
 	const result = await client.execute({
-		sql: `SELECT s.*, v.distance as vec_distance
+		sql: `SELECT s.*, vector_distance_cos(s.embedding, vector32(?)) as vec_distance
 			FROM vector_top_k('idx_summaries_embedding', vector32(?), ?) v
 			JOIN summaries s ON s.rowid = v.id
 			WHERE s.project_label = ?
-			ORDER BY v.distance`,
-		args: [vecStr, limit, projectLabel],
+			ORDER BY vec_distance`,
+		args: [vecStr, vecStr, limit, projectLabel],
 	});
 	return result.rows.map(row => {
 		const mapped = mapRow(row);
