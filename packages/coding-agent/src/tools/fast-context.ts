@@ -1118,6 +1118,19 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 									}
 								}
 							}
+							// Barrel boost: index.ts/index.js files whose parent
+							// directory name contains a query keyword get +3. Barrel
+							// files have almost no content (just `export * from`),
+							// so they lose on content scoring. The parent-dir match
+							// mirrors how a human finds barrels — "the provider-models
+							// barrel" → look for index.ts inside the provider-models dir.
+							const lowerBasename2 = path.basename(entry.file).toLowerCase();
+							if (
+								(lowerBasename2 === "index.ts" || lowerBasename2 === "index.js") &&
+								lowerKeywords.some(kw => path.basename(path.dirname(entry.file)).toLowerCase().includes(kw))
+							) {
+								contentScore += 3;
+							}
 						} catch {}
 						return {
 							file: entry.file,
@@ -1346,10 +1359,39 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 				signal: requestSignal(signal, TOOL_TIMEOUT_MS),
 				timeoutMs: TOOL_TIMEOUT_MS,
 			});
-			return result.matches
+			const rawPaths = result.matches
 				.map(m => m.path)
 				.filter((p): p is string => Boolean(p))
 				.map(p => (path.isAbsolute(p) ? p : path.resolve(cwd, p)));
+			// Expand directory matches to their immediate file children.
+			// glob can return directory paths when the pattern matches a directory
+			// name (e.g. `**/*provider*` matches `provider-models/` the directory,
+			// not `index.ts` inside it). Without expansion, the directory path enters
+			// the candidate pool but fails silently on content read, and the barrel
+			// file inside (found only by filename) is excluded from the 200-file cap.
+			// Optimization: only stat paths without a file extension — directories
+			// never have extensions, so this avoids 100+ stat calls per glob.
+			const dirPaths = rawPaths.filter(p => !path.extname(p));
+			const expanded: string[] = rawPaths.filter(p => path.extname(p));
+			for (const p of dirPaths) {
+				try {
+					const stat = await fs.stat(p);
+					if (stat.isDirectory()) {
+						const entries = await fs.readdir(p, { withFileTypes: true });
+						for (const entry of entries) {
+							if (entry.isFile()) {
+								expanded.push(path.resolve(p, entry.name));
+							}
+						}
+					} else {
+						// Extensionless file (Makefile, Dockerfile, LICENSE, etc.)
+						expanded.push(p);
+					}
+				} catch {
+					// Not a directory or unreadable — skip
+				}
+			}
+			return expanded;
 		} catch {
 			return [];
 		}
