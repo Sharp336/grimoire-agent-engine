@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+## [16.1.8] - 2026-06-20
+
+### Breaking Changes
+
+- Changed `transformProviderContext` and `buildSideRequestContext` to return a Promise
+
+### Added
+
+- Added `buildSideRequestContext` to the `Agent` class to build prompt-cache-friendly provider Contexts for side-channels or ephemeral requests.
+- Added `compactionContextTokens(providerContextTokens, storedConversationEstimate)`: floors the provider-reported context tokens by a local estimate of the stored conversation for the compaction decision, so a `before_provider_request` payload transform (a compression extension, obfuscator, or inline snapcompact) that shrinks the request can no longer deflate provider usage below the true history size and suppress auto-compaction.
+
+### Changed
+
+- Exported helper functions `normalizeMessagesForProvider` and `resolveOwnedDialectFromEnv` from `packages/agent/src/agent-loop.ts`.
+
+## [16.1.5] - 2026-06-19
+
+### Fixed
+
+- Wire-encoded `normalizeTools` parameters unconditionally so tools whose `intent` resolves to `"omit"` (function intent or `intent: "omit"`, e.g. builtin `eval` / `resolve`) no longer leak raw arktype/zod schema objects in `parameters` ([#3074](https://github.com/can1357/oh-my-pi/issues/3074))
+
+## [16.1.2] - 2026-06-19
+
+### Fixed
+
+- Prevented sensitive raw JSON payloads from leaking into agent events during tool validation
+- Ensured tool validation errors are handled correctly for malformed JSON parse inputs
+- Ensure deep-cloning of tool-call arguments respects own enumerable properties
+- Prevent direct object references between agent message snapshots and streaming events
+
 ## [16.1.0] - 2026-06-19
 
 ### Added

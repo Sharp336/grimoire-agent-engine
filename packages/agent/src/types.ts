@@ -8,6 +8,7 @@ import type {
 	ImageContent,
 	Message,
 	Model,
+	ServiceTier,
 	SimpleStreamOptions,
 	Static,
 	streamSimple,
@@ -154,7 +155,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * normalization, and append-only context handling, but before telemetry capture
 	 * and provider send.
 	 */
-	transformProviderContext?: (context: Context, model: Model) => Context;
+	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 
 	/**
 	 * Resolves the API key or resolver for the current model before each LLM call.
@@ -273,7 +274,7 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 *
 	 * When set, the loop reads messages from the append-only log (stable
 	 * byte prefix) and caches system prompt + tools. Tools exclude per-turn
-	 * `_i` intent fields.
+	 * `i` intent fields.
 	 */
 	appendOnlyContext?: AppendOnlyContextManager;
 
@@ -314,6 +315,17 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * to the next provider call.
 	 */
 	getDisableReasoning?: () => boolean | undefined;
+
+	/**
+	 * Per-call effective service-tier resolver. Unlike {@link getReasoning},
+	 * this is *authoritative*: when set, its return value (including
+	 * `undefined`) fully replaces the static `serviceTier` for the request and
+	 * its telemetry. The resolver receives the model being requested so the
+	 * caller can scope the tier per provider/model without mutating the shared
+	 * session `serviceTier` (e.g. opting a Fireworks model into the Priority
+	 * serving path while leaving the OpenAI/Anthropic tier untouched).
+	 */
+	getServiceTier?: (model: Model) => ServiceTier | undefined;
 
 	/**
 	 * Called after a tool call has been validated and is about to execute.
@@ -584,11 +596,11 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	 */
 	interruptible?: boolean;
 	/**
-	 * Controls how the INTENT_FIELD (`_i`) is handled for this tool.
-	 * - `"require"` (default): `_i` is injected and required in the parameter schema.
-	 * - `"optional"`: `_i` is injected as an optional/nullable field.
-	 * - `"omit"`: `_i` is NOT injected. Use for tools where intent is obvious (yield, resolve, todo, …).
-	 * - function: `_i` is NOT injected; intent is derived dynamically from (potentially partial / streaming) args.
+	 * Controls how the INTENT_FIELD (`i`) is handled for this tool.
+	 * - `"require"` (default): `i` is injected and required in the parameter schema.
+	 * - `"optional"`: `i` is injected as an optional/nullable field.
+	 * - `"omit"`: `i` is NOT injected. Use for tools where intent is obvious (yield, resolve, todo, …).
+	 * - function: `i` is NOT injected; intent is derived dynamically from (potentially partial / streaming) args.
 	 */
 	intent?: "omit" | "optional" | "require" | ((args: Partial<Static<TParameters>>) => string | undefined);
 

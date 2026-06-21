@@ -57,6 +57,7 @@ export interface ChatTranscriptBuilderDeps {
 	getMessageRenderer?: (customType: string) => MessageRenderer | undefined;
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
+	proseOnlyThinking?: () => boolean;
 	requestRender: () => void;
 }
 
@@ -250,8 +251,13 @@ export class ChatTranscriptBuilder {
 	}
 
 	#appendAssistantMessage(message: Extract<AgentMessage, { role: "assistant" }>): void {
-		const assistantComponent = new AssistantMessageComponent(message, this.deps.hideThinkingBlock?.() ?? false, () =>
-			this.deps.requestRender(),
+		const assistantComponent = new AssistantMessageComponent(
+			message,
+			this.deps.hideThinkingBlock?.() ?? false,
+			() => this.deps.requestRender(),
+			this.deps.getMessageRenderer ? undefined : [], // placeholder for thinkingRenderers
+			undefined, // placeholder for imageBudget
+			this.deps.proseOnlyThinking ? this.deps.proseOnlyThinking() : true,
 		);
 		this.container.addChild(assistantComponent);
 

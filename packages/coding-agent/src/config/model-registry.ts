@@ -24,12 +24,6 @@ import {
 	resolveVariantAlias,
 } from "@oh-my-pi/pi-catalog/variant-collapse";
 
-// Sentinels for local-only OAuth tokens — declared inline to avoid loading
-// provider modules at startup. Must match packages/ai/src/registry/lm-studio.ts
-// and packages/ai/src/registry/vllm.ts.
-const DEFAULT_LOCAL_TOKEN = "lm-studio-local";
-const DEFAULT_VLLM_LOCAL_TOKEN = "vllm-local";
-
 const SPECIAL_MODEL_MANAGER_PROVIDER_IDS: readonly string[] = [
 	"google-antigravity",
 	"google-gemini-cli",
@@ -40,6 +34,11 @@ const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = [
 	...PROVIDER_DESCRIPTORS.map(descriptor => descriptor.providerId),
 	...SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
 ];
+
+// Sentinels for local-only OAuth tokens — declared inline to avoid loading
+// provider modules at startup. Must match packages/ai/src/registry/llama-cpp.ts,
+// packages/ai/src/registry/lm-studio.ts, and packages/ai/src/registry/vllm.ts.
+const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(["llama-cpp-local", "lm-studio-local", "vllm-local"]);
 
 import type { ApiKeyResolver, FetchImpl } from "@oh-my-pi/pi-ai";
 import { registerOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
@@ -85,7 +84,7 @@ export function isAuthenticated(apiKey: string | undefined | null): apiKey is st
 }
 
 function isDiscoveryBearerApiKey(apiKey: string | undefined | null): apiKey is string {
-	return isAuthenticated(apiKey) && apiKey !== DEFAULT_LOCAL_TOKEN && apiKey !== DEFAULT_VLLM_LOCAL_TOKEN;
+	return isAuthenticated(apiKey) && !LOCAL_PROVIDER_PLACEHOLDERS.has(apiKey);
 }
 
 /** Provider override config (baseUrl, headers, apiKey, compat, transport) without custom models */
@@ -900,6 +899,7 @@ export class ModelRegistry {
 				...replacementModel,
 				contextWindow: replacementModel.contextWindow ?? existing.contextWindow,
 				maxTokens: replacementModel.maxTokens ?? existing.maxTokens,
+				omitMaxOutputTokens: replacementModel.omitMaxOutputTokens ?? existing.omitMaxOutputTokens,
 				...(supportsTools !== undefined ? { supportsTools } : {}),
 			};
 		});
@@ -1023,12 +1023,21 @@ export class ModelRegistry {
 	}
 
 	#normalizeDiscoverableModels(providerConfig: DiscoveryProviderConfig, models: Model<Api>[]): Model<Api>[] {
+		const withDecoderMetadata =
+			providerConfig.discovery.type === "ollama" ||
+			providerConfig.discovery.type === "llama.cpp" ||
+			providerConfig.discovery.type === "lm-studio"
+				? models.map(model =>
+						buildModel({ ...model, imageInputDecoder: "stb", compat: model.compatConfig } as ModelSpec<Api>),
+					)
+				: models;
+
 		if (providerConfig.provider !== "ollama" || providerConfig.api !== "openai-responses") {
-			return models;
+			return withDecoderMetadata;
 		}
 
 		const contextLengthOverride = getOllamaContextLengthOverride();
-		return models.map(model => {
+		return withDecoderMetadata.map(model => {
 			const normalized =
 				model.api === "openai-completions"
 					? buildModel({
@@ -1269,7 +1278,12 @@ export class ModelRegistry {
 					models: cached?.models.map(model => model.id) ?? [],
 				});
 				this.#lastDiscoveryWarnings.delete(providerConfig.provider);
-				return cached ? cached.models.map(model => buildModel(model)) : [];
+				return cached
+					? this.#normalizeDiscoverableModels(
+							providerConfig,
+							cached.models.map(model => buildModel(model)),
+						)
+					: [];
 			}
 		}
 
@@ -1569,6 +1583,9 @@ export class ModelRegistry {
 	}
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
 		return models.map(model => {
+			if (model.provider === "ollama-cloud" && model.omitMaxOutputTokens !== true) {
+				model = applyModelOverride(model, { omitMaxOutputTokens: true });
+			}
 			if (model.id !== "gpt-5.4" || model.provider === "github-copilot") {
 				return model;
 			}

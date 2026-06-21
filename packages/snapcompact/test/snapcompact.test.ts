@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AssistantMessage, Message, Usage } from "@oh-my-pi/pi-ai";
+import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import * as snapcompact from "../src";
 
 // Small frames keep render time negligible. Legacy 5x8 shape: 320px → 64 cols
@@ -66,6 +67,36 @@ function makePreparation(
 		...overrides,
 	};
 }
+
+describe("scanRenderability", () => {
+	it("considers pure ASCII text safe", () => {
+		const res = snapcompact.scanRenderability("function hello() { return 'world'; }");
+		expect(res.isSafe).toBe(true);
+		expect(res.unrenderableRatio).toBe(0);
+	});
+
+	it("considers Latin-1 text safe", () => {
+		const res = snapcompact.scanRenderability("café résumé naïve");
+		expect(res.isSafe).toBe(true);
+		expect(res.unrenderableRatio).toBe(0);
+	});
+
+	it("detects high unrenderable rates in CJK text and marks it unsafe", () => {
+		// Mix of ASCII and CJK: "const a = '你好世界';"
+		// Total graphics: ~15. Unrenderable: 4. Ratio > 5% (0.05).
+		const res = snapcompact.scanRenderability("const a = '你好世界';");
+		expect(res.isSafe).toBe(false);
+		expect(res.unrenderableRatio).toBeGreaterThan(0.05);
+	});
+
+	it("ignores whitespace, ANSI, and zero-width markers in ratio calculations", () => {
+		// \u001b[31m is ANSI.
+		// \u000e \u000f are DIM markers.
+		const res = snapcompact.scanRenderability("\u001b[31mhello \u000e \u000f \n\t   world\u001b[0m");
+		expect(res.isSafe).toBe(true);
+		expect(res.unrenderableRatio).toBe(0);
+	});
+});
 
 describe("computeFileLists", () => {
 	it("drops scheme:// URLs from legacy fileOps before rendering <files>", () => {
@@ -342,11 +373,11 @@ describe("shape resolution", () => {
 });
 
 describe("render", () => {
-	it("produces an indexed PNG of the declared geometry with sentence-cycled ink (legacy 5x8)", () => {
+	it("produces an indexed PNG of the declared geometry with sentence-cycled ink (legacy 5x8)", async () => {
 		const geometry = snapcompact.geometry(snapcompact.SHAPES.legacy, TEST_FRAME_SIZE);
 		expect(geometry).toEqual({ cols: 64, rows: 40, capacity: 2560 });
 
-		const frame = snapcompact.render(
+		const frame = await snapcompact.render(
 			"First sentence here. Second one differs.",
 			snapcompact.SHAPES.legacy,
 			TEST_FRAME_SIZE,
@@ -369,12 +400,12 @@ describe("render", () => {
 		expect(used.has(3)).toBe(false);
 	});
 
-	it("renders the repeated grid with doubled lines, black ink, and highlight bands", () => {
+	it("renders the repeated grid with doubled lines, black ink, and highlight bands", async () => {
 		const repeated = snapcompact.resolveShape({ api: "anthropic-messages" }, "8x8r-bw");
 		const geometry = snapcompact.geometry(repeated, TEST_FRAME_SIZE);
 		expect(geometry).toEqual({ cols: 40, rows: 20, capacity: 800 });
 
-		const frame = snapcompact.render("Hello world. Again.", repeated, TEST_FRAME_SIZE);
+		const frame = await snapcompact.render("Hello world. Again.", repeated, TEST_FRAME_SIZE);
 		const decoded = decodePng(Buffer.from(frame.data, "base64"));
 		expect(decoded.colorType).toBe(3);
 		const used = new Set(decoded.pixels);
@@ -383,11 +414,11 @@ describe("render", () => {
 		expect(used.has(1)).toBe(false); // no sentence hues in bw
 	});
 
-	it("renders the anthropic default (tracked 8x13) in plain black, no dim or bands", () => {
+	it("renders the anthropic default (tracked 8x13) in plain black, no dim or bands", async () => {
 		const geometry = snapcompact.geometry(snapcompact.SHAPES.anthropic, TEST_FRAME_SIZE);
 		expect(geometry).toEqual({ cols: 29, rows: 20, capacity: 580 });
 
-		const frames = snapcompact.renderMany("Reading the films of the archive. Again.", {
+		const frames = await snapcompact.renderMany("Reading the films of the archive. Again.", {
 			shape: snapcompact.SHAPES.anthropic,
 			frameSize: TEST_FRAME_SIZE,
 		});
@@ -400,9 +431,9 @@ describe("render", () => {
 		expect(used.has(1)).toBe(false); // no sentence hues
 	});
 
-	it("still dims stopwords on the selectable 6x12-dim variant", () => {
+	it("still dims stopwords on the selectable 6x12-dim variant", async () => {
 		const dim = snapcompact.resolveShape({ api: "anthropic-messages" }, "6x12-dim");
-		const frames = snapcompact.renderMany("Reading the films of the archive. Again.", {
+		const frames = await snapcompact.renderMany("Reading the films of the archive. Again.", {
 			shape: dim,
 			frameSize: TEST_FRAME_SIZE,
 		});
@@ -411,23 +442,27 @@ describe("render", () => {
 		expect(used.has(9)).toBe(true); // dim gray ink for stopwords ("the", "of")
 	});
 
-	it("renders a stretched shape as truecolor RGB", () => {
+	it("renders a stretched shape as truecolor RGB", async () => {
 		const stretched = snapcompact.resolveShape({ api: "openai-responses" }, "6x6u-sent");
-		const frame = snapcompact.render("Hello world.", stretched, TEST_FRAME_SIZE);
+		const frame = await snapcompact.render("Hello world.", stretched, TEST_FRAME_SIZE);
 		// IHDR color type byte: 2 = truecolor RGB (anti-aliased stretch output).
 		expect(Buffer.from(frame.data, "base64")[25]).toBe(2);
 		expect(frame.cols).toBe(Math.floor(TEST_FRAME_SIZE / 6));
 	});
 
-	it("caps printed characters at frame capacity", () => {
+	it("caps printed characters at frame capacity", async () => {
 		const { capacity } = snapcompact.geometry(snapcompact.SHAPES.legacy, TEST_FRAME_SIZE);
-		const frame = snapcompact.render("x".repeat(capacity + 500), snapcompact.SHAPES.legacy, TEST_FRAME_SIZE);
+		const frame = await snapcompact.render("x".repeat(capacity + 500), snapcompact.SHAPES.legacy, TEST_FRAME_SIZE);
 		expect(frame.chars).toBe(capacity);
 	});
 
-	it("fills a full pitch-black cell for the newline glyph", () => {
+	it("fills a full pitch-black cell for the newline glyph", async () => {
 		// Legacy 5x8 cells: the glyph at row 0, col 1 spans x 5..10, y 0..8.
-		const frame = snapcompact.render(`a${snapcompact.NEWLINE_GLYPH}b`, snapcompact.SHAPES.legacy, TEST_FRAME_SIZE);
+		const frame = await snapcompact.render(
+			`a${snapcompact.NEWLINE_GLYPH}b`,
+			snapcompact.SHAPES.legacy,
+			TEST_FRAME_SIZE,
+		);
 		expect(frame.chars).toBe(3); // the block occupies exactly one cell
 		const decoded = decodePng(Buffer.from(frame.data, "base64"));
 		for (let y = 0; y < 8; y++) {
@@ -440,36 +475,36 @@ describe("render", () => {
 });
 
 describe("renderMany", () => {
-	it("returns no frames for empty or whitespace-only input", () => {
-		expect(snapcompact.renderMany("", { shape: snapcompact.SHAPES.anthropic, frameSize: TEST_FRAME_SIZE })).toEqual(
-			[],
-		);
+	it("returns no frames for empty or whitespace-only input", async () => {
 		expect(
-			snapcompact.renderMany("  \n\t  ", { shape: snapcompact.SHAPES.anthropic, frameSize: TEST_FRAME_SIZE }),
+			await snapcompact.renderMany("", { shape: snapcompact.SHAPES.anthropic, frameSize: TEST_FRAME_SIZE }),
+		).toEqual([]);
+		expect(
+			await snapcompact.renderMany("  \n\t  ", { shape: snapcompact.SHAPES.anthropic, frameSize: TEST_FRAME_SIZE }),
 		).toEqual([]);
 		expect(snapcompact.frames("", { shape: snapcompact.SHAPES.anthropic, frameSize: TEST_FRAME_SIZE })).toBe(0);
 	});
 
-	it("pages text into image blocks matching the predicted frame count", () => {
+	it("pages text into image blocks matching the predicted frame count", async () => {
 		const shape = snapcompact.SHAPES.anthropic;
 		const { capacity } = snapcompact.geometry(shape, TEST_FRAME_SIZE);
 
-		const short = snapcompact.renderMany("hello world", { shape, frameSize: TEST_FRAME_SIZE });
+		const short = await snapcompact.renderMany("hello world", { shape, frameSize: TEST_FRAME_SIZE });
 		expect(short).toHaveLength(1);
 		expect(short[0].type).toBe("image");
 		expect(short[0].mimeType).toBe("image/png");
 		expect(short[0].data.length).toBeGreaterThan(0);
 
 		const text = "x".repeat(capacity * 2 + 10);
-		const frames = snapcompact.renderMany(text, { shape, frameSize: TEST_FRAME_SIZE });
+		const frames = await snapcompact.renderMany(text, { shape, frameSize: TEST_FRAME_SIZE });
 		expect(frames).toHaveLength(3);
 		expect(snapcompact.frames(text, { shape, frameSize: TEST_FRAME_SIZE })).toBe(3);
 	});
 
-	it("honors maxFrames and propagates the shape's detail hint", () => {
+	it("honors maxFrames and propagates the shape's detail hint", async () => {
 		const shape = snapcompact.SHAPES.openai;
 		const { capacity } = snapcompact.geometry(shape, TEST_FRAME_SIZE);
-		const frames = snapcompact.renderMany("x".repeat(capacity * 3), {
+		const frames = await snapcompact.renderMany("x".repeat(capacity * 3), {
 			shape,
 			frameSize: TEST_FRAME_SIZE,
 			maxFrames: 2,
@@ -477,7 +512,10 @@ describe("renderMany", () => {
 		expect(frames).toHaveLength(2);
 		// The openai shape carries imageDetail: "original"; anthropic carries none.
 		expect(frames[0].detail).toBe("original");
-		const bw = snapcompact.renderMany("hi", { shape: snapcompact.SHAPES.anthropic, frameSize: TEST_FRAME_SIZE });
+		const bw = await snapcompact.renderMany("hi", {
+			shape: snapcompact.SHAPES.anthropic,
+			frameSize: TEST_FRAME_SIZE,
+		});
 		expect(bw[0].detail).toBeUndefined();
 	});
 });
@@ -537,11 +575,16 @@ describe("serializeConversation", () => {
 		expect(out).toBe("# User ¶\ndo the thing\n\n# Assistant ¶\ndone");
 	});
 
-	it("merges a tool call with its paired result into one block, _i as a // comment", () => {
+	it("merges a tool call with its paired result into one block, intent as a // comment", () => {
 		const out = snapcompact.serializeConversation(
 			[
 				createAssistantMessage([
-					{ type: "toolCall", id: "c1", name: "bash", arguments: { _i: "Running tests", command: "bun test" } },
+					{
+						type: "toolCall",
+						id: "c1",
+						name: "bash",
+						arguments: { [INTENT_FIELD]: "Running tests", command: "bun test" },
+					},
 				]),
 				{ ...createToolResultMessage("3 pass"), toolCallId: "c1" } as Message,
 			],
@@ -550,21 +593,21 @@ describe("serializeConversation", () => {
 		expect(out).toBe('# Tool call ¶\n//Running tests\nbash(command="bun test")\n<out>\n3 pass\n</out>');
 	});
 
-	it("prefers the harness-derived intent over the raw _i arg and squashes newlines", () => {
+	it("prefers the harness-derived intent over the raw intent arg and squashes newlines", () => {
 		const out = snapcompact.serializeConversation([
 			createAssistantMessage([
 				{
 					type: "toolCall",
 					id: "c1",
 					name: "bash",
-					arguments: { _i: "raw arg", command: "ls" },
+					arguments: { [INTENT_FIELD]: "raw arg", command: "ls" },
 					intent: "Derived\nintent  line",
 				},
 			]),
 		]);
 		expect(out).toContain("//Derived intent line");
 		expect(out).not.toContain("raw arg");
-		expect(out).not.toContain("_i=");
+		expect(out).not.toContain(`${INTENT_FIELD}=`);
 	});
 
 	it("folds thinking into the assistant block as italics above the text", () => {
@@ -769,6 +812,57 @@ describe("compact", () => {
 		expect(archive?.text).toContain("A short follow-up turn.");
 		expect(archive?.textTail ?? archive?.textHead).toContain("A short follow-up turn.");
 		expect(archive?.frames.length).toBe(5);
+	});
+
+	it("keeps the original text head across later compactions", async () => {
+		const first = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [
+					createUserMessage(`ORIGINAL BEGINNING SENTINEL. ${"A long first turn. ".repeat(500)}`),
+				],
+			}),
+			{ frameSize: TEST_FRAME_SIZE, maxFrames: 5 },
+		);
+		const second = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [createUserMessage("A short follow-up turn.")],
+				previousSummary: first.summary,
+				previousPreserveData: first.preserveData,
+			}),
+			{ frameSize: TEST_FRAME_SIZE, maxFrames: 5 },
+		);
+		const archive = snapcompact.getPreservedArchive(second.preserveData);
+		expect(archive?.text).toContain("ORIGINAL BEGINNING SENTINEL.");
+		expect(archive?.textHead).toContain("ORIGINAL BEGINNING SENTINEL.");
+		expect(archive?.textTail ?? archive?.textHead).toContain("A short follow-up turn.");
+	});
+
+	it("keeps continuity for legacy frame-only archives by falling back to the prior summary", async () => {
+		const result = await snapcompact.compact(
+			makePreparation({
+				messagesToSummarize: [createUserMessage("New work after a legacy archive.")],
+				previousSummary: "Legacy beginning summary: user approved PLAN.md and started auth work.",
+				previousPreserveData: {
+					snapcompact: {
+						frames: [
+							{
+								data: btoa("legacy-frame"),
+								mimeType: "image/png",
+								cols: 1,
+								rows: 1,
+								chars: 12,
+							},
+						],
+						totalChars: 12,
+						truncatedChars: 0,
+					},
+				},
+			}),
+			{ frameSize: TEST_FRAME_SIZE, maxFrames: 5 },
+		);
+		const archive = snapcompact.getPreservedArchive(result.preserveData);
+		expect(archive?.text).toContain("Legacy beginning summary");
+		expect(result.summary).toContain("condensed digest of still-older context");
 	});
 
 	it("includes the previous text summary when the prior compaction was not snapcompact", async () => {

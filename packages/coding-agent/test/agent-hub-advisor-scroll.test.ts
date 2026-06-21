@@ -204,10 +204,22 @@ function withViewer(fn: (viewer: AgentTranscriptViewer) => void): void {
 }
 
 describe("AgentTranscriptViewer", () => {
+	let rowsDesc: PropertyDescriptor | undefined;
+
 	beforeEach(async () => {
 		resetSettingsForTest();
 		await Settings.init({ inMemory: true });
 		initTheme();
+		rowsDesc = Object.getOwnPropertyDescriptor(process.stdout, "rows");
+		Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => 24 });
+	});
+
+	afterEach(() => {
+		if (rowsDesc) {
+			Object.defineProperty(process.stdout, "rows", rowsDesc);
+		} else {
+			Object.defineProperty(process.stdout, "rows", { configurable: true, value: undefined, writable: true });
+		}
 	});
 	afterEach(() => {
 		vi.restoreAllMocks();
