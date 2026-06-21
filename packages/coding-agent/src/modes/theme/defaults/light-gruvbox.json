@@ -83,6 +83,7 @@
 		"thinkingMedium": "aqua",
 		"thinkingHigh": "purple",
 		"thinkingXhigh": "purpleBright",
+		"thinkingMax": "purpleBright",
 		"bashMode": "green",
 		"statusLineBg": "bg2",
 		"statusLineSep": "fg3",

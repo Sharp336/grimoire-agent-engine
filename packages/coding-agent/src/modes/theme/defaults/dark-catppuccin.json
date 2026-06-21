@@ -82,6 +82,7 @@
 		"thinkingMedium": "sapphire",
 		"thinkingHigh": "mauve",
 		"thinkingXhigh": "pink",
+		"thinkingMax": "pink",
 		"bashMode": "teal",
 		"statusLineBg": "crust",
 		"statusLineSep": "surface1",

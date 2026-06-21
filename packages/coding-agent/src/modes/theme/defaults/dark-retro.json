@@ -67,6 +67,7 @@
 		"thinkingMedium": "phosphor",
 		"thinkingHigh": "phosphorBright",
 		"thinkingXhigh": "crtGlow",
+		"thinkingMax": "crtGlow",
 		"bashMode": "glowBlue",
 		"statusLineBg": "crtBlack",
 		"statusLineSep": 238,

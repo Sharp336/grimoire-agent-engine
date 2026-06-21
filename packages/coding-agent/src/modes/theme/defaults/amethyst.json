@@ -71,6 +71,7 @@
 		"thinkingMedium": "violet",
 		"thinkingHigh": "amethyst",
 		"thinkingXhigh": "lavender",
+		"thinkingMax": "lavender",
 		"bashMode": "amethyst",
 		"statusLineBg": "caveDeep",
 		"statusLineSep": 240,

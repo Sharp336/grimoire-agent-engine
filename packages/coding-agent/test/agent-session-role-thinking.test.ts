@@ -209,6 +209,8 @@ describe("AgentSession role model thinking behavior", () => {
 
 		session.setThinkingLevel(Effort.XHigh);
 		expect(session.thinkingLevel).toBe(Effort.High);
+		session.setThinkingLevel(Effort.Max);
+		expect(session.thinkingLevel).toBe(Effort.High);
 		expect(session.getAvailableThinkingLevels()).not.toContain("xhigh");
 	});
 

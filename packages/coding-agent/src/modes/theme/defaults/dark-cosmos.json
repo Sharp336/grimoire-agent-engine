@@ -65,6 +65,7 @@
 		"thinkingMedium": "galaxy",
 		"thinkingHigh": "nebula",
 		"thinkingXhigh": "starlight",
+		"thinkingMax": "starlight",
 		"bashMode": "starblue",
 		"statusLineBg": "#07070d",
 		"statusLineSep": "#26223a",

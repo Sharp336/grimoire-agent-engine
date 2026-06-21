@@ -67,6 +67,7 @@
 		"thinkingMedium": "lightSmudge",
 		"thinkingHigh": "warmLead",
 		"thinkingXhigh": "pencilYellow",
+		"thinkingMax": "pencilYellow",
 		"bashMode": "lightSmudge",
 		"statusLineBg": "#18191c",
 		"statusLineSep": 240,

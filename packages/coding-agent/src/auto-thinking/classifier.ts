@@ -5,10 +5,10 @@
  * {@link Effort}, clamped into the active model's supported range (never below
  * {@link Effort.Low}). Two backends, selected by `providers.autoThinkingModel`:
  *
- * - `online` (default): a smol model classifies into `low|medium|high|xhigh`.
+ * - `online` (default): a smol model classifies into `low|medium|high|xhigh|max`.
  * - a local key: an on-device memory model classifies into the coarser
  *   `trivial|moderate|hard` scheme (3-class is more reliable than 4-way ordinal
- *   on sub-2B models), mapped to `low|high|xhigh`.
+ *   on sub-2B models), mapped to `low|high|max`.
  *
  * Throws on any failure (no model, no key, unparseable output, abort/timeout);
  * the caller falls back to a concrete level and continues the turn.
@@ -135,6 +135,8 @@ async function classifyLocal(input: string, modelKey: string, deps: ClassifyDiff
 export function parseDifficultyLevel(text: string): Effort | undefined {
 	const lower = text.toLowerCase();
 	const candidates: Array<[number, Effort]> = [];
+	const max = lower.search(/\bmax(?:imum)?\b/);
+	if (max >= 0) candidates.push([max, Effort.Max]);
 	// `xhigh` must be probed as its own token: `\bhigh\b` cannot match the "high"
 	// inside "xhigh" (no word boundary between `x` and `h`), so the two never collide.
 	const xhigh = lower.search(/x[\s_-]?high/);
@@ -157,7 +159,7 @@ export function parseDifficultyBucket(text: string): Effort | undefined {
 	const moderate = lower.search(/\bmoderate\b/);
 	if (moderate >= 0) candidates.push([moderate, Effort.High]);
 	const hard = lower.search(/\bhard\b/);
-	if (hard >= 0) candidates.push([hard, Effort.XHigh]);
+	if (hard >= 0) candidates.push([hard, Effort.Max]);
 	return earliest(candidates);
 }
 

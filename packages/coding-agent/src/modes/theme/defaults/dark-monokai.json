@@ -73,6 +73,7 @@
 		"thinkingMedium": "monokaiPurple",
 		"thinkingHigh": "monokaiPink",
 		"thinkingXhigh": "monokaiOrange",
+		"thinkingMax": "monokaiOrange",
 		"bashMode": "monokaiGreen",
 		"statusLineBg": "#1a1b17",
 		"statusLineSep": "#49483e",

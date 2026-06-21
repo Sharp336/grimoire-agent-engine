@@ -70,6 +70,7 @@
 		"thinkingMedium": "cyan",
 		"thinkingHigh": "accent",
 		"thinkingXhigh": "red",
+		"thinkingMax": "red",
 		"bashMode": "accent",
 		"statusLineBg": "#2c313a",
 		"statusLineSep": "#5c6370",

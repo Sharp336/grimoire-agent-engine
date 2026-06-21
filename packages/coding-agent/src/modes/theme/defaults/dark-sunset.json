@@ -74,6 +74,7 @@
 		"thinkingMedium": "violet",
 		"thinkingHigh": "magenta",
 		"thinkingXhigh": "softPink",
+		"thinkingMax": "softPink",
 		"bashMode": "horizonGlow",
 		"statusLineBg": "#0f0a14",
 		"statusLineSep": 237,

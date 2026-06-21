@@ -66,6 +66,7 @@
 		"thinkingMedium": "abyssCyan",
 		"thinkingHigh": "glowCyan",
 		"thinkingXhigh": "crystalBlue",
+		"thinkingMax": "crystalBlue",
 		"bashMode": "abyssCyan",
 		"statusLineBg": "#05070B",
 		"statusLineSep": "slateBlue",

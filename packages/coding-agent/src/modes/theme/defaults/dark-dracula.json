@@ -73,6 +73,7 @@
 		"thinkingMedium": "purple",
 		"thinkingHigh": "pink",
 		"thinkingXhigh": "orange",
+		"thinkingMax": "orange",
 		"bashMode": "green",
 		"statusLineBg": "background",
 		"statusLineSep": "currentLine",

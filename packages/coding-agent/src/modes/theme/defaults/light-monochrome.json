@@ -76,6 +76,7 @@
 		"thinkingMedium": "gray500",
 		"thinkingHigh": "gray600",
 		"thinkingXhigh": "gray700",
+		"thinkingMax": "gray700",
 		"bashMode": "gray700",
 		"statusLineBg": "gray100",
 		"statusLineSep": "gray300",

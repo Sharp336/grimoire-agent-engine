@@ -14,6 +14,7 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import {
 	AUTO_THINKING,
 	clampAutoThinkingEffort,
+	getThinkingLevelMetadata,
 	parseConfiguredThinkingLevel,
 	parseEffort,
 	parseThinkingLevel,
@@ -65,8 +66,14 @@ describe("auto thinking classifier helpers", () => {
 		expect(parseThinkingLevel(ThinkingLevel.Off)).toBe(ThinkingLevel.Off);
 	});
 
-	it("maps online 4-way classifier labels to effort levels", () => {
+	it("labels xhigh separately from max", () => {
+		expect(getThinkingLevelMetadata(ThinkingLevel.XHigh).label).toBe("xhigh");
+		expect(getThinkingLevelMetadata(ThinkingLevel.Max).label).toBe("max");
+	});
+
+	it("maps online classifier labels to effort levels", () => {
 		expect(parseDifficultyLevel("x-high")).toBe(Effort.XHigh);
+		expect(parseDifficultyLevel("max")).toBe(Effort.Max);
 		expect(parseDifficultyLevel("The answer is HIGH.")).toBe(Effort.High);
 		expect(parseDifficultyLevel("med")).toBe(Effort.Medium);
 		expect(parseDifficultyLevel("low")).toBe(Effort.Low);
@@ -76,7 +83,7 @@ describe("auto thinking classifier helpers", () => {
 	it("maps local 3-bucket labels to coarse effort levels", () => {
 		expect(parseDifficultyBucket("trivial")).toBe(Effort.Low);
 		expect(parseDifficultyBucket("moderate")).toBe(Effort.High);
-		expect(parseDifficultyBucket("hard")).toBe(Effort.XHigh);
+		expect(parseDifficultyBucket("hard")).toBe(Effort.Max);
 		expect(parseDifficultyBucket("medium")).toBeUndefined();
 	});
 
@@ -132,10 +139,10 @@ describe("auto thinking classifier helpers", () => {
 		expect(clampAutoThinkingEffort(model, Effort.Minimal)).toBe(Effort.Low);
 	});
 
-	it("accepts max as the top configured thinking alias", () => {
-		expect(parseEffort("max")).toBe(Effort.XHigh);
-		expect(parseThinkingLevel("max")).toBeUndefined();
-		expect(parseConfiguredThinkingLevel("max")).toBe(ThinkingLevel.XHigh);
+	it("accepts max as a concrete thinking tier", () => {
+		expect(parseEffort("max")).toBe(Effort.Max);
+		expect(parseThinkingLevel("max")).toBe(ThinkingLevel.Max);
+		expect(parseConfiguredThinkingLevel("max")).toBe(ThinkingLevel.Max);
 	});
 
 	it("rejects inherited object keys as thinking selectors", () => {

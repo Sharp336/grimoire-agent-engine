@@ -66,6 +66,7 @@
 		"thinkingMedium": "sunsetOrange",
 		"thinkingHigh": "riverBlue",
 		"thinkingXhigh": "acaciaGreen",
+		"thinkingMax": "acaciaGreen",
 		"bashMode": "acaciaGreen",
 		"statusLineBg": "#F3EBDD",
 		"statusLineSep": "savannaBorder",

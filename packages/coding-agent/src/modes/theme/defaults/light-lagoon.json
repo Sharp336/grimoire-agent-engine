@@ -66,6 +66,7 @@
 		"thinkingMedium": "turquoise",
 		"thinkingHigh": "palmGreen",
 		"thinkingXhigh": "coral",
+		"thinkingMax": "coral",
 		"bashMode": "turquoise",
 		"statusLineBg": "#E7F1F4",
 		"statusLineSep": "lagoonBorder",

@@ -1922,12 +1922,25 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		if (!model && options.modelPattern) {
 			const availableModels = modelRegistry.getAll();
 			const matchPreferences = getModelMatchPreferences(settings);
-			const { model: resolved } = parseModelPattern(options.modelPattern, availableModels, matchPreferences, {
+			const {
+				model: resolved,
+				thinkingLevel: parsedThinkingLevel,
+				explicitThinkingLevel,
+			} = parseModelPattern(options.modelPattern, availableModels, matchPreferences, {
 				modelRegistry,
 			});
 			if (resolved) {
 				model = resolved;
 				modelFallbackMessage = undefined;
+				thinkingLevel = explicitThinkingLevel ? parsedThinkingLevel : pickInitialThinkingLevel(resolved);
+				autoThinking = thinkingLevel === AUTO_THINKING;
+				effectiveThinkingLevel = thinkingLevel === AUTO_THINKING ? undefined : thinkingLevel;
+				effectiveThinkingLevel = logger.time("resolveThinkingLevelForModel", () =>
+					autoThinking
+						? resolveProvisionalAutoLevel(resolved)
+						: resolveThinkingLevelForModel(resolved, effectiveThinkingLevel),
+				);
+				preconnectModelHost(resolved.baseUrl);
 			} else {
 				modelFallbackMessage = `Model "${options.modelPattern}" not found`;
 			}

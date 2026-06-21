@@ -66,6 +66,7 @@
 		"thinkingMedium": "frostBlue",
 		"thinkingHigh": "auroraGreen",
 		"thinkingXhigh": "snowWhite",
+		"thinkingMax": "snowWhite",
 		"bashMode": "auroraGreen",
 		"statusLineBg": "#080C0A",
 		"statusLineSep": "spruce",

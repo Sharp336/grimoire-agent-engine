@@ -65,6 +65,7 @@
 		"thinkingMedium": "aurora",
 		"thinkingHigh": "ice",
 		"thinkingXhigh": "#e4edf9",
+		"thinkingMax": "#e4edf9",
 		"bashMode": "aurora",
 		"statusLineBg": "#0a101f",
 		"statusLineSep": "#2a334a",

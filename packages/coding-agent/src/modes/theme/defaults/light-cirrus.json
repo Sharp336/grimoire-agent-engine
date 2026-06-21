@@ -65,6 +65,7 @@
 		"thinkingMedium": "sky",
 		"thinkingHigh": "blue",
 		"thinkingXhigh": "#1f5f9e",
+		"thinkingMax": "#1f5f9e",
 		"bashMode": "blue",
 		"statusLineBg": "#eef2f7",
 		"statusLineSep": "#c7d0dc",

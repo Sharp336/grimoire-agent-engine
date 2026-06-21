@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Added `ThinkingLevel.Max` handling to compaction reasoning selection, clamping unsupported models down to their highest supported effort. ([#3210](https://github.com/can1357/oh-my-pi/issues/3210))
+
 ## [16.1.10] - 2026-06-21
 
 ### Fixed

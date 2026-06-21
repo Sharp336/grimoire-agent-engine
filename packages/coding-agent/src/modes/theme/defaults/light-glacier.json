@@ -66,6 +66,7 @@
 		"thinkingMedium": "crevasseBlue",
 		"thinkingHigh": "iceTeal",
 		"thinkingXhigh": "warningAmber",
+		"thinkingMax": "warningAmber",
 		"bashMode": "crevasseBlue",
 		"statusLineBg": "#EEF5F9",
 		"statusLineSep": "glacierBorder",

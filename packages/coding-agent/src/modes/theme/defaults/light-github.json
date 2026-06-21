@@ -90,6 +90,7 @@
 		"thinkingMedium": "success",
 		"thinkingHigh": "attention",
 		"thinkingXhigh": "done",
+		"thinkingMax": "done",
 		"bashMode": "success",
 		"statusLineBg": "statusBg",
 		"statusLineSep": "borderDefault",

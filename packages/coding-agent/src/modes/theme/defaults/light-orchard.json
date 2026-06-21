@@ -66,6 +66,7 @@
 		"thinkingMedium": "blossomPink",
 		"thinkingHigh": "leafGreen",
 		"thinkingXhigh": "honeyGold",
+		"thinkingMax": "honeyGold",
 		"bashMode": "leafGreen",
 		"statusLineBg": "#F1EBE1",
 		"statusLineSep": "orchardBorder",

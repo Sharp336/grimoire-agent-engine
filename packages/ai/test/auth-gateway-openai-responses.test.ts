@@ -94,7 +94,7 @@ describe("openai-responses parseRequest", () => {
 			max_output_tokens: 1024,
 			temperature: 0.1,
 			top_p: 0.9,
-			reasoning: { effort: "high", summary: "detailed" },
+			reasoning: { effort: "max", summary: "detailed" },
 			store: true,
 			previous_response_id: "resp_prev",
 			stream: true,
@@ -151,7 +151,7 @@ describe("openai-responses parseRequest", () => {
 		expect(parsed.options.temperature).toBe(0.1);
 		expect(parsed.options.topP).toBe(0.9);
 		expect(parsed.options.toolChoice).toEqual({ name: "math" });
-		expect(parsed.options.reasoning).toBe(Effort.High);
+		expect(parsed.options.reasoning).toBe(Effort.Max);
 		// `reasoning.summary: "detailed"` is treated as the default visible-summary
 		// case (only "none" toggles hideThinkingSummary).
 		expect(parsed.options.hideThinkingSummary).toBeUndefined();

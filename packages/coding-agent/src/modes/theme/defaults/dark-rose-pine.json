@@ -71,6 +71,7 @@
 		"thinkingMedium": "foam",
 		"thinkingHigh": "iris",
 		"thinkingXhigh": "#e0c1ff",
+		"thinkingMax": "#e0c1ff",
 		"bashMode": "foam",
 		"statusLineBg": "overlay",
 		"statusLineSep": "highlightMed",

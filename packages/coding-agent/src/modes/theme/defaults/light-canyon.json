@@ -66,6 +66,7 @@
 		"thinkingMedium": "ironRed",
 		"thinkingHigh": "riverTeal",
 		"thinkingXhigh": "pinonGreen",
+		"thinkingMax": "pinonGreen",
 		"bashMode": "pinonGreen",
 		"statusLineBg": "#F2E8DD",
 		"statusLineSep": "canyonBorder",

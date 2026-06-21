@@ -87,6 +87,7 @@
 		"thinkingMedium": "blue",
 		"thinkingHigh": "neutralPurple",
 		"thinkingXhigh": "purple",
+		"thinkingMax": "purple",
 		"bashMode": "aqua",
 		"statusLineBg": "#1d2021",
 		"statusLineSep": "bg3",

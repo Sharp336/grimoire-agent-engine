@@ -66,6 +66,7 @@
 		"thinkingMedium": "auroraGreen",
 		"thinkingHigh": "iceWhite",
 		"thinkingXhigh": "warningGold",
+		"thinkingMax": "warningGold",
 		"bashMode": "auroraGreen",
 		"statusLineBg": "#080B0E",
 		"statusLineSep": "coldBorder",

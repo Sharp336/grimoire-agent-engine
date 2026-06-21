@@ -78,6 +78,7 @@
 		"thinkingMedium": "neonMagenta",
 		"thinkingHigh": "hotPink",
 		"thinkingXhigh": "neonCyan",
+		"thinkingMax": "neonCyan",
 		"bashMode": "neonCyan",
 		"statusLineBg": "darkBg",
 		"statusLineSep": 240,

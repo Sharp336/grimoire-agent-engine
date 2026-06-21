@@ -82,6 +82,7 @@
 		"thinkingMedium": "frost1",
 		"thinkingHigh": "aurora4",
 		"thinkingXhigh": "#7B68A6",
+		"thinkingMax": "#7B68A6",
 		"bashMode": "aurora3",
 		"statusLineBg": "snow2",
 		"statusLineSep": "ice1",

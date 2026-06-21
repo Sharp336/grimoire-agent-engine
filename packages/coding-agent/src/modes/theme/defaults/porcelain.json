@@ -66,6 +66,7 @@
 		"thinkingMedium": "wedgwoodBlue",
 		"thinkingHigh": "deepWedgwood",
 		"thinkingXhigh": "cobaltBlack",
+		"thinkingMax": "cobaltBlack",
 		"bashMode": "goldTrim",
 		"statusLineBg": "porcelainWhite",
 		"statusLineSep": "delicateGray",

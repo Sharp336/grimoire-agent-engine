@@ -66,6 +66,7 @@
 		"thinkingMedium": "$veinDim",
 		"thinkingHigh": "$vein",
 		"thinkingXhigh": "$bronze",
+		"thinkingMax": "$bronze",
 		"bashMode": "$vein",
 		"statusLineBg": "$band1",
 		"statusLineSep": "$band3",

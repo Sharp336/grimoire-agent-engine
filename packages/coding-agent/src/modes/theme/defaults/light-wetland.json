@@ -66,6 +66,7 @@
 		"thinkingMedium": "heronBlue",
 		"thinkingHigh": "marshGreen",
 		"thinkingXhigh": "warningGold",
+		"thinkingMax": "warningGold",
 		"bashMode": "marshGreen",
 		"statusLineBg": "#E9F0EC",
 		"statusLineSep": "wetlandBorder",

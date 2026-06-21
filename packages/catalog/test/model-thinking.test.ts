@@ -9,6 +9,7 @@ import {
 	minimumSupportedEffort,
 	requireSupportedEffort,
 } from "@oh-my-pi/pi-catalog/model-thinking";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { Api, Model, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
 
 function createModel<TApi extends Api>(overrides: {
@@ -64,6 +65,17 @@ describe("model thinking derivation", () => {
 			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
 		});
 		expect(requireSupportedEffort(model, Effort.XHigh)).toBe(Effort.XHigh);
+	});
+
+	it("keeps bundled ChatGPT 5.4 and 5.5 capped at xhigh", () => {
+		const gpt54 = getBundledModel("amazon-bedrock", "openai.gpt-5.4");
+		const gpt55 = getBundledModel("amazon-bedrock", "openai.gpt-5.5");
+		if (!gpt54 || !gpt55) throw new Error("Expected bundled Bedrock GPT-5.4/5.5 models");
+
+		expect(getSupportedEfforts(gpt54)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(getSupportedEfforts(gpt55)).toEqual([Effort.Low, Effort.Medium, Effort.High, Effort.XHigh]);
+		expect(getSupportedEfforts(gpt54)).not.toContain(Effort.Max);
+		expect(getSupportedEfforts(gpt55)).not.toContain(Effort.Max);
 	});
 
 	it("stores MiniMax M2 and GPT-OSS OpenAI-compatible effort limits in model metadata", () => {
@@ -219,13 +231,7 @@ describe("model thinking derivation", () => {
 			high: "high",
 			xhigh: "max-plus",
 		});
-		expect(openRouterAnthropic.thinking?.effortMap).toEqual({
-			minimal: "low",
-			low: "medium",
-			medium: "high",
-			high: "xhigh",
-			xhigh: "max",
-		});
+		expect(openRouterAnthropic.thinking?.effortMap).toEqual({ minimal: "low" });
 	});
 
 	it("maps GLM-5.2 reasoning effort per host dialect", () => {
@@ -403,19 +409,23 @@ describe("model thinking derivation", () => {
 		// Opus 4.6 has no real xhigh level — the baked 4-tier map aliases XHigh to "max".
 		expect(opus46.thinking?.effortMap).toEqual({ minimal: "low", xhigh: "max" });
 		expect(mapEffortToAnthropicAdaptiveEffort(opus46, Effort.XHigh)).toBe("max");
-		// Opus 4.7+ on the Messages API exposes the full five-tier scale: the baked
-		// map shifts each user-facing effort up one notch so the top tier reaches "max".
-		expect(opus47.thinking?.effortMap).toEqual({
-			minimal: "low",
-			low: "medium",
-			medium: "high",
-			high: "xhigh",
-			xhigh: "max",
-		});
+		// Opus 4.7+ on the Messages API exposes the full provider scale, so the
+		// user-facing `xhigh` and `max` tiers stay distinct.
+		expect(opus47.thinking?.efforts).toEqual([
+			Effort.Minimal,
+			Effort.Low,
+			Effort.Medium,
+			Effort.High,
+			Effort.XHigh,
+			Effort.Max,
+		]);
+		expect(opus47.thinking?.effortMap).toEqual({ minimal: "low" });
 		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.Minimal)).toBe("low");
-		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.High)).toBe("xhigh");
-		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.XHigh)).toBe("max");
-		expect(mapEffortToAnthropicAdaptiveEffort(mythos, Effort.High)).toBe("xhigh");
+		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.High)).toBe("high");
+		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.XHigh)).toBe("xhigh");
+		expect(mapEffortToAnthropicAdaptiveEffort(opus47, Effort.Max)).toBe("max");
+		expect(mapEffortToAnthropicAdaptiveEffort(mythos, Effort.XHigh)).toBe("xhigh");
+		expect(mapEffortToAnthropicAdaptiveEffort(mythos, Effort.Max)).toBe("max");
 		expect(mapEffortToAnthropicAdaptiveEffort(mythosBedrock, Effort.XHigh)).toBe("max");
 		// Bedrock Converse keeps the four-tier legacy mapping; xhigh aliases to "max".
 		expect(opus47Bedrock.thinking?.effortMap).toEqual({ minimal: "low", xhigh: "max" });
@@ -449,8 +459,8 @@ describe("model thinking derivation", () => {
 	});
 
 	it("backfills wire facts onto explicit thinking, explicit values winning", () => {
-		// Authored capability surface (mode/efforts) keeps identity-derived wire
-		// facts: configs never need to know Anthropic's tier tables.
+		// Authored capability surface (mode/efforts) keeps identity-derived
+		// non-wire facts such as adaptive display support.
 		const filled = createModel({
 			id: "claude-opus-4-8",
 			api: "anthropic-messages",
@@ -460,7 +470,6 @@ describe("model thinking derivation", () => {
 		expect(filled.thinking).toEqual({
 			mode: "anthropic-adaptive",
 			efforts: [Effort.Low, Effort.High],
-			effortMap: { low: "medium", high: "xhigh" },
 			supportsDisplay: true,
 		});
 
@@ -543,6 +552,7 @@ describe("model thinking runtime helpers", () => {
 		expect(model.thinking).toEqual({ mode: "effort", efforts: [Effort.Medium, Effort.High], requiresEffort: true });
 		expect(clampThinkingLevelForModel(model, Effort.Minimal)).toBe(Effort.Medium);
 		expect(clampThinkingLevelForModel(model, Effort.XHigh)).toBe(Effort.High);
+		expect(clampThinkingLevelForModel(model, Effort.Max)).toBe(Effort.High);
 		expect(clampThinkingLevelForModel(model, Effort.High)).toBe(Effort.High);
 	});
 

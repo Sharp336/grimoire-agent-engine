@@ -66,6 +66,7 @@
 		"thinkingMedium": "crystalBlue",
 		"thinkingHigh": "veinBlue",
 		"thinkingXhigh": "amber",
+		"thinkingMax": "amber",
 		"bashMode": "crystalBlue",
 		"statusLineBg": "#0B0D10",
 		"statusLineSep": "stalactite",

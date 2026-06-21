@@ -65,6 +65,7 @@
 		"thinkingMedium": "dimAluminum",
 		"thinkingHigh": "electricBlue",
 		"thinkingXhigh": "titaniumGold",
+		"thinkingMax": "titaniumGold",
 		"bashMode": "readoutGreen",
 		"statusLineBg": "darkTitanium",
 		"statusLineSep": "subtleGray",

@@ -39,7 +39,7 @@ export class OllamaApiError extends ProviderHttpError {
 }
 
 export interface OllamaChatOptions extends StreamOptions {
-	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh";
+	reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 	disableReasoning?: boolean;
 	toolChoice?: ToolChoice;
 }

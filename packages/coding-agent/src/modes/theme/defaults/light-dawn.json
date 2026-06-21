@@ -65,6 +65,7 @@
 		"thinkingMedium": "sky",
 		"thinkingHigh": "gold",
 		"thinkingXhigh": "sunrise",
+		"thinkingMax": "sunrise",
 		"bashMode": "sky",
 		"statusLineBg": "#f4f6fa",
 		"statusLineSep": "#c9d1dc",

@@ -66,6 +66,7 @@
 		"thinkingMedium": "orchidPurple",
 		"thinkingHigh": "treefrogOrange",
 		"thinkingXhigh": "fireflyGold",
+		"thinkingMax": "fireflyGold",
 		"bashMode": "orchidPurple",
 		"statusLineBg": "#080C0A",
 		"statusLineSep": "barkBorder",

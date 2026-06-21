@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Anthropic adaptive thinking metadata to expose a distinct user-facing `max` tier for Claude Opus 4.7+/4.8 and Claude Fable/Mythos 5, while keeping models such as Bedrock GPT-5.4/GPT-5.5 capped at `xhigh`. ([#3210](https://github.com/can1357/oh-my-pi/issues/3210))
+
 ## [16.1.11] - 2026-06-21
 
 ### Fixed

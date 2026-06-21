@@ -69,6 +69,7 @@
 		"thinkingMedium": "gray6",
 		"thinkingHigh": "gray7",
 		"thinkingXhigh": "gray8",
+		"thinkingMax": "gray8",
 		"bashMode": "accent",
 		"statusLineBg": "#0d0d0d",
 		"statusLineSep": "gray4",

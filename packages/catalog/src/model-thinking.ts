@@ -54,6 +54,14 @@ const DEFAULT_REASONING_EFFORTS_WITH_XHIGH: readonly Effort[] = [
 	Effort.High,
 	Effort.XHigh,
 ];
+const DEFAULT_REASONING_EFFORTS_WITH_MAX: readonly Effort[] = [
+	Effort.Minimal,
+	Effort.Low,
+	Effort.Medium,
+	Effort.High,
+	Effort.XHigh,
+	Effort.Max,
+];
 const GEMINI_3_PRO_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High];
 const GEMINI_3_FLASH_EFFORTS: readonly Effort[] = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High];
 const GPT_5_2_PLUS_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
@@ -96,17 +104,13 @@ const MIMO_REASONING_EFFORT_MAP: Readonly<EffortMap> = {
 };
 
 /**
- * Effort → wire-value map for the 5-tier adaptive scale (Opus 4.7+ and
- * Fable/Mythos 5 on the Messages API). User-facing efforts shift up one notch
- * so the top tier reaches the genuine "max" and "high" lands on Anthropic's
- * recommended "xhigh" coding/agentic default.
+ * Effort → wire-value map for the full adaptive scale (Opus 4.7+ and
+ * Fable/Mythos 5 on the Messages API). Anthropic has no `minimal` wire effort,
+ * so `minimal` aliases the lowest provider tier; `low..max` pass through
+ * one-for-one so `xhigh` and `max` stay distinct user-facing choices.
  */
 export const ANTHROPIC_ADAPTIVE_EFFORT_MAP_5_TIER: Readonly<Partial<Record<Effort, string>>> = {
 	[Effort.Minimal]: "low",
-	[Effort.Low]: "medium",
-	[Effort.Medium]: "high",
-	[Effort.High]: "xhigh",
-	[Effort.XHigh]: "max",
 };
 
 /**
@@ -118,6 +122,10 @@ export const ANTHROPIC_ADAPTIVE_EFFORT_MAP_4_TIER: Readonly<Partial<Record<Effor
 	[Effort.Minimal]: "low",
 	[Effort.XHigh]: "max",
 };
+
+function anthropicParsedModelHasRealXHighEffort(parsedModel: AnthropicModel): boolean {
+	return isFableOrMythos(parsedModel.kind) || (parsedModel.kind === "opus" && semverGte(parsedModel.version, "4.7"));
+}
 
 const MINIMAX_ANTHROPIC_ADAPTIVE_EFFORT_MAP: Readonly<EffortMap> = {
 	[Effort.Low]: "adaptive",
@@ -497,9 +505,12 @@ function inferAnthropicSupportedEfforts<TApi extends Api>(
 		(spec.api === "anthropic-messages" || spec.api === "bedrock-converse-stream") &&
 		semverGte(parsedModel.version, "4.6")
 	) {
-		return parsedModel.kind === "opus" || isFableOrMythos(parsedModel.kind)
-			? DEFAULT_REASONING_EFFORTS_WITH_XHIGH
-			: DEFAULT_REASONING_EFFORTS;
+		if (parsedModel.kind === "opus" || isFableOrMythos(parsedModel.kind)) {
+			return anthropicModelHasRealXHighEffort(spec, parsedModel)
+				? DEFAULT_REASONING_EFFORTS_WITH_MAX
+				: DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
+		}
+		return DEFAULT_REASONING_EFFORTS;
 	}
 	if (isOpenRouterAnthropicAdaptiveReasoningModel(parsedModel, spec)) {
 		return DEFAULT_REASONING_EFFORTS_WITH_XHIGH;
@@ -598,14 +609,14 @@ function isOpenRouterAnthropicAdaptiveReasoningModel<TApi extends Api>(
 
 /**
  * Opus 4.7+ and Fable/Mythos on the Messages API expose the full five-tier
- * adaptive scale (low/medium/high/xhigh/max). Bedrock Converse stays on the
- * four-tier scale regardless of model version.
+ * adaptive scale (low/medium/high/xhigh/max), so they surface a distinct
+ * user-facing `max` above `xhigh`. Bedrock Converse stays on the legacy
+ * non-distinct top tier regardless of model version.
  */
 function anthropicModelHasRealXHighEffort<TApi extends Api>(spec: ModelSpec<TApi>, parsedModel: ParsedModel): boolean {
 	if (spec.api !== "anthropic-messages") return false;
 	if (parsedModel.family !== "anthropic") return false;
-	if (isFableOrMythos(parsedModel.kind)) return true;
-	return parsedModel.kind === "opus" && semverGte(parsedModel.version, "4.7");
+	return anthropicParsedModelHasRealXHighEffort(parsedModel);
 }
 
 // ---------------------------------------------------------------------------
@@ -685,6 +696,7 @@ export function mapEffortToGoogleThinkingLevel(effort: Effort): "MINIMAL" | "LOW
 			return "MEDIUM";
 		case Effort.High:
 		case Effort.XHigh:
+		case Effort.Max:
 			return "HIGH";
 	}
 }

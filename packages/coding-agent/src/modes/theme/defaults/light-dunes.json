@@ -66,6 +66,7 @@
 		"thinkingMedium": "sunBakedOrange",
 		"thinkingHigh": "seaBlue",
 		"thinkingXhigh": "successGreen",
+		"thinkingMax": "successGreen",
 		"bashMode": "seaFoam",
 		"statusLineBg": "#F4EBDD",
 		"statusLineSep": "dunesBorder",

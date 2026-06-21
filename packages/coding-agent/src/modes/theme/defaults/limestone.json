@@ -69,6 +69,7 @@
 		"thinkingMedium": "#a07840",
 		"thinkingHigh": "#886030",
 		"thinkingXhigh": "#704020",
+		"thinkingMax": "#704020",
 		"bashMode": "sage",
 		"statusLineBg": "#e8e4d8",
 		"statusLineSep": "#a0988c",

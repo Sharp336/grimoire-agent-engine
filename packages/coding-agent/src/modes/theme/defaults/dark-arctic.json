@@ -79,6 +79,7 @@
 		"thinkingMedium": "frost2",
 		"thinkingHigh": "auroraPurple",
 		"thinkingXhigh": "#c8a0d1",
+		"thinkingMax": "#c8a0d1",
 		"bashMode": "iceBlue",
 		"statusLineBg": "#1a1f2b",
 		"statusLineSep": 240,

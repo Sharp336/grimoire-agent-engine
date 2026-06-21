@@ -65,6 +65,7 @@
 		"thinkingMedium": "swampCyan",
 		"thinkingHigh": "fireflyGold",
 		"thinkingXhigh": "algaeGreen",
+		"thinkingMax": "algaeGreen",
 		"bashMode": "swampCyan",
 		"statusLineBg": "#080D0C",
 		"statusLineSep": "mossGray",

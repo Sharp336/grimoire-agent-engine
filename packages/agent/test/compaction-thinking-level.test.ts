@@ -117,6 +117,20 @@ describe("compaction thinking-level resolution (regression)", () => {
 		expect(call[2]?.reasoning).toBe(ai.Effort.Low);
 	});
 
+	test("ThinkingLevel.Max on Anthropic → reasoning=xhigh (clamp to model ceiling)", async () => {
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "handoff" }]));
+		await generateHandoff(messages, getAnthropicModel(), "test-key", {
+			systemPrompt: ["sp"],
+			tools: [],
+			thinkingLevel: ThinkingLevel.Max,
+		});
+		const call = spy.mock.calls[0];
+		if (!call) throw new Error("expected completeSimple call");
+		expect(call[2]?.reasoning).toBe(ai.Effort.XHigh);
+	});
+
 	test("ThinkingLevel.High on xai-oauth/grok-build → reasoning=undefined (clamp)", async () => {
 		const spy = vi
 			.spyOn(ai, "completeSimple")
@@ -217,6 +231,21 @@ describe("compact() propagates thinkingLevel to all three summarizers (regressio
 		expect(spy).toHaveBeenCalledTimes(3);
 		for (const [, , opts] of spy.mock.calls) {
 			expect(opts?.reasoning).toBe(ai.Effort.Low);
+		}
+	});
+
+	test("ThinkingLevel.Max → every fan-out call clamps to reasoning=xhigh", async () => {
+		const spy = vi
+			.spyOn(ai, "completeSimple")
+			.mockResolvedValue(createAssistantMessage([{ type: "text", text: "summary" }]));
+
+		await compact(makePreparation(), getAnthropicModel(), "test-key", undefined, undefined, {
+			thinkingLevel: ThinkingLevel.Max,
+		});
+
+		expect(spy).toHaveBeenCalledTimes(3);
+		for (const [, , opts] of spy.mock.calls) {
+			expect(opts?.reasoning).toBe(ai.Effort.XHigh);
 		}
 	});
 

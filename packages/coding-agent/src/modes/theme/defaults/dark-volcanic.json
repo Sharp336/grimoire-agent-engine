@@ -66,6 +66,7 @@
 		"thinkingMedium": "magmaOrange",
 		"thinkingHigh": "sulfurYellow",
 		"thinkingXhigh": "emberGold",
+		"thinkingMax": "emberGold",
 		"bashMode": "magmaOrange",
 		"statusLineBg": "#0B0706",
 		"statusLineSep": "emberBorder",

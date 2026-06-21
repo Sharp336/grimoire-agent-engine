@@ -66,6 +66,7 @@
 		"thinkingMedium": "anemonePurple",
 		"thinkingHigh": "coralPink",
 		"thinkingXhigh": "fishYellow",
+		"thinkingMax": "fishYellow",
 		"bashMode": "coralPink",
 		"statusLineBg": "#070B10",
 		"statusLineSep": "borderBlue",

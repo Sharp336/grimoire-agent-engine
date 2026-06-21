@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/openai-chat-server";
 import type { AssistantMessage, AssistantMessageEvent, AssistantMessageEventStream } from "@oh-my-pi/pi-ai/types";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 
 function makeEventStream(events: AssistantMessageEvent[], final: AssistantMessage): AssistantMessageEventStream {
 	async function* iter() {
@@ -97,6 +98,7 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 			tool_choice: { type: "function", function: { name: "lookup" } },
 			response_format: { type: "json_object" },
 			stream_options: { include_usage: true },
+			reasoning_effort: "max",
 		});
 
 		expect(parsed.modelId).toBe("gpt-5.2");
@@ -137,6 +139,7 @@ describe("auth-gateway openai-chat: parseRequest", () => {
 		expect(parsed.options.temperature).toBe(0.2);
 		expect(parsed.options.topP).toBe(0.9);
 		expect(parsed.options.stopSequences).toEqual(["\n\n"]);
+		expect(parsed.options.reasoning).toBe(Effort.Max);
 		expect(parsed.options.toolChoice).toEqual({ name: "lookup" });
 		expect(parsed.options.responseFormat).toEqual({ type: "json_object" });
 		expect(parsed.options.extra).toEqual({ includeStreamingUsage: true });

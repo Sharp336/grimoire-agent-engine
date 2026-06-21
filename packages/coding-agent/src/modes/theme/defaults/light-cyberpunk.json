@@ -71,6 +71,7 @@
 		"thinkingMedium": "cyberPurple",
 		"thinkingHigh": "neonMagenta",
 		"thinkingXhigh": "deepMagenta",
+		"thinkingMax": "deepMagenta",
 		"bashMode": "acidGreen",
 		"statusLineBg": "lightGray",
 		"statusLineSep": "neonMagenta",

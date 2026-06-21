@@ -14,19 +14,27 @@ import { Snowflake } from "@oh-my-pi/pi-utils";
 describe("createAgentSession deferred model pattern resolution", () => {
 	let tempDir: string;
 	const authStoragesToClose: AuthStorage[] = [];
+	const originalCwd = process.cwd();
 
 	beforeEach(() => {
 		tempDir = path.join(os.tmpdir(), `pi-sdk-model-selection-${Snowflake.next()}`);
 		fs.mkdirSync(tempDir, { recursive: true });
 	});
 
-	afterEach(() => {
+	afterEach(async () => {
 		for (const authStorage of authStoragesToClose) {
 			authStorage.close();
 		}
 		authStoragesToClose.length = 0;
+		process.chdir(originalCwd);
 		if (tempDir && fs.existsSync(tempDir)) {
-			fs.rmSync(tempDir, { recursive: true, force: true });
+			await fs.promises
+				.rm(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+				.catch(error => {
+					// Windows can hold the just-disposed temp dir briefly after session shutdown.
+					if (process.platform === "win32" && (error as NodeJS.ErrnoException).code === "EBUSY") return;
+					throw error;
+				});
 		}
 	});
 
@@ -81,6 +89,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
+			skipPythonPreflight: true,
 			modelPattern,
 		};
 	}
@@ -90,10 +99,28 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			await buildSessionOptions("runtime-provider/runtime-model"),
 		);
 
-		expect(session.model).toBeDefined();
-		expect(session.model?.provider).toBe("runtime-provider");
-		expect(session.model?.id).toBe("runtime-model");
-		expect(modelFallbackMessage).toBeUndefined();
+		try {
+			expect(session.model).toBeDefined();
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-model");
+			expect(modelFallbackMessage).toBeUndefined();
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	test("preserves explicit thinking suffixes when modelPattern resolves after extension providers register", async () => {
+		const { session } = await createAgentSession(
+			await buildSessionOptions("runtime-provider/runtime-reasoning-model:max"),
+		);
+
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-reasoning-model");
+			expect(session.thinkingLevel).toBe(Effort.XHigh);
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	test("does not silently fallback when explicit modelPattern is unresolved", async () => {
@@ -103,6 +130,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 
 		expect(session.model).toBeUndefined();
 		expect(modelFallbackMessage).toBe('Model "missing-provider/missing-model" not found');
+		await session.dispose();
 	});
 
 	test("does not apply default role thinking override when modelPattern is explicit", async () => {
@@ -115,12 +143,16 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			settings,
 		});
 
-		expect(session.model?.provider).toBe("runtime-provider");
-		expect(session.model?.id).toBe("runtime-reasoning-model");
-		expect(session.thinkingLevel).toBe("off");
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-reasoning-model");
+			expect(session.thinkingLevel).toBe("off");
+		} finally {
+			await session.dispose();
+		}
 	});
 
-	test("normalizes max default thinking level from settings", async () => {
+	test("clamps max default thinking level from settings to the model ceiling", async () => {
 		const settings = Settings.isolated({ defaultThinkingLevel: "max" });
 
 		const { session } = await createAgentSession({
@@ -128,9 +160,13 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			settings,
 		});
 
-		expect(session.model?.provider).toBe("runtime-provider");
-		expect(session.model?.id).toBe("runtime-reasoning-model");
-		expect(session.thinkingLevel).toBe(Effort.XHigh);
+		try {
+			expect(session.model?.provider).toBe("runtime-provider");
+			expect(session.model?.id).toBe("runtime-reasoning-model");
+			expect(session.thinkingLevel).toBe(Effort.XHigh);
+		} finally {
+			await session.dispose();
+		}
 	});
 
 	test("selects the settings default model without synchronously validating auth", async () => {

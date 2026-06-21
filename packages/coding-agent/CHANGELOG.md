@@ -15,6 +15,9 @@
 
 - Fixed secret obfuscation corrupting Codex image reads (and other provider requests) with `Invalid 'input[N].content[].image_url'. Expected a base64-encoded data URL ... but got an invalid base64-encoded value`. The obfuscator deep-walked every string in the outbound request — including inline image base64 and opaque provider replay/signature fields — so a configured secret that happened to be a substring of the base64 (or of an ordinary word like `response`) injected `#HASH#` placeholders mid-payload. Obfuscation is now opt-in and fully typed: only user messages, tool-result messages, and user-attributed developer messages (`@file` mentions) are redacted; system prompts and tool schemas pass through untouched; image bytes and signature/encrypted-reasoning fields are never rewritten; and tool-call arguments are the only JSON walked. Configured plain secrets and regex matches shorter than 8 characters are now ignored to stop false matches on short words.
 - Fixed RPC/ACP startup clobbering explicit caller/project/global configuration for `task.isolation.{mode,merge,commits}`, `task.eager`, `task.batch`, `task.maxConcurrency`, `task.maxRecursionDepth`, `task.disabledAgents`, `task.agentModelOverrides`, `memory.backend`, `memories.enabled`, `advisor.{enabled,subagents,syncBacklog,immuneTurns}`, plus the RPC-only `async.{enabled,maxJobs}` and `bash.autoBackground.{enabled,thresholdMs}`. `applyDefaultSettingOverrides` re-asserted the schema default as a runtime override after settings load, regressing the `isConfigured()` guard added for #2598 and ignoring every explicit value the embedder, project, `--config` overlay, or global config had set. The guard is restored, so the host default now only fills holes ([#3207](https://github.com/can1357/oh-my-pi/issues/3207)).
+### Fixed
+
+- Fixed thinking selectors and UI labels to expose a distinct `max` tier without renaming `xhigh`, so models that stop at `xhigh` (for example ChatGPT 5.4/5.5) no longer display the wrong top-tier label. ([#3210](https://github.com/can1357/oh-my-pi/issues/3210))
 
 ## [16.1.11] - 2026-06-21
 
@@ -53,14 +56,19 @@
 
 - Added `tab.ariaSnapshot(selector?)` to the browser tool for Playwright-format ARIA-tree YAML
 - Added `tab.ref("e5")` and support for `aria-ref=e5` selectors in all `tab` action methods
+- Added task-relevant code summaries (codemap): agent-written file-level summaries persisted in Turso/libSQL with native vector search, retrieved as minimal task-relevant context via hybrid FTS5 + vector_top_k retrieval with reciprocal rank fusion and budget packing. Distinct feature module (`codemap.*` settings) that composes with any memory backend including "off". Features automatic Turso database provisioning, lazy embedding on retrieval, staleness tracking via `Bun.hash`, and a pluggable language adapter interface (TS adapter ships in v1 via the existing LSP client).
 
 ### Changed
 
 - Made `write` and `find` tools essential so they are always available initially (surviving `tools.discoveryMode === "all"` hiding) to ensure instructions to write/find files are immediately executable ([#3165](https://github.com/can1357/oh-my-pi/issues/3165))
+- Changed `codemap.turso.autoProvision` default from `true` to `false` (opt-in) to match the design spec — auto-provisioning fires network calls to Turso's API, creates cloud databases, and persists credentials via `settings.set()`, so it must be explicitly enabled.
+- Extracted `injectCodemapTaskContext` from `AgentSession.#injectCodemapTaskContext` into a testable standalone function in the `task-context` module.
 
 ### Fixed
 
 - Fixed streamed tool-call previews freezing on their placeholder body (`$ …`, `Write: …`, an empty args tree) even after the tool finished: the pending card was created while arguments streamed, but when the closing full-arguments `message_update` never arrived (smooth-streaming disabled leaving the throttled arguments stale, an owned-dialect projector, or a superseded/aborted turn that still ran the call) nothing re-applied the final args. `tool_execution_start` — the one event every execution path emits with validated full arguments right before the result — now reconciles them onto the existing pending card and cancels any in-flight reveal so a late tick can't re-truncate the body.
+- Fixed path traversal vulnerability in `toStoredPath` — file paths like `../../etc/passwd` were stored without boundary checking. The guard now rejects paths that resolve outside the project cwd, and `toStoredPath` runs before DB access in all tool `execute()` methods (fail-fast on invalid input).
+- Removed unused `fmtOps` function from `benchmark.ts` (lint warning).
 
 ## [16.1.9] - 2026-06-21
 

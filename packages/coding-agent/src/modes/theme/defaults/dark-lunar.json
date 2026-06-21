@@ -64,6 +64,7 @@
 		"thinkingMedium": "glow",
 		"thinkingHigh": "moonlight",
 		"thinkingXhigh": "#eef3f8",
+		"thinkingMax": "#eef3f8",
 		"bashMode": "ice",
 		"statusLineBg": "#0a0c11",
 		"statusLineSep": "#2b2f3a",

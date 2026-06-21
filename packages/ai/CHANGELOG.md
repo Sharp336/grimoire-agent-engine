@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed OpenAI-compatible auth-gateway request parsing and provider option types to accept the distinct `max` reasoning effort tier alongside `xhigh`. ([#3210](https://github.com/can1357/oh-my-pi/issues/3210))
+
 ## [16.1.11] - 2026-06-21
 
 ### Fixed

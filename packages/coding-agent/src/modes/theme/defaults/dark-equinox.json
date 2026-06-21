@@ -65,6 +65,7 @@
 		"thinkingMedium": "violet",
 		"thinkingHigh": "warm",
 		"thinkingXhigh": "light",
+		"thinkingMax": "light",
 		"bashMode": "cool",
 		"statusLineBg": "#0f1115",
 		"statusLineSep": "#2a2e36",

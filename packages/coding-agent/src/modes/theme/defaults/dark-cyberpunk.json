@@ -77,6 +77,7 @@
 		"thinkingMedium": "electricBlue",
 		"thinkingHigh": "violet",
 		"thinkingXhigh": "neonMagenta",
+		"thinkingMax": "neonMagenta",
 		"bashMode": "acidYellow",
 		"statusLineBg": "#091833",
 		"statusLineSep": 236,

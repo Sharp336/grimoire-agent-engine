@@ -65,6 +65,7 @@
 		"thinkingMedium": "violet",
 		"thinkingHigh": "magenta",
 		"thinkingXhigh": "star",
+		"thinkingMax": "star",
 		"bashMode": "teal",
 		"statusLineBg": "#0a0a13",
 		"statusLineSep": "#2a2336",

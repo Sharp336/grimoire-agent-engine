@@ -72,6 +72,7 @@
 		"thinkingMedium": "nord9",
 		"thinkingHigh": "nord15",
 		"thinkingXhigh": "nord7",
+		"thinkingMax": "nord7",
 		"bashMode": "nord8",
 		"statusLineBg": "nord0",
 		"statusLineSep": "nord3",

@@ -65,6 +65,7 @@
 		"thinkingMedium": "sea",
 		"thinkingHigh": "terracotta",
 		"thinkingXhigh": "sun",
+		"thinkingMax": "sun",
 		"bashMode": "sea",
 		"statusLineBg": "#f1ebe0",
 		"statusLineSep": "#cdbfae",

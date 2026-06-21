@@ -74,6 +74,7 @@
 		"thinkingMedium": "golden",
 		"thinkingHigh": "duskPurple",
 		"thinkingXhigh": "#7a5d8e",
+		"thinkingMax": "#7a5d8e",
 		"bashMode": "warmBrown",
 		"statusLineBg": "#ffecd6",
 		"statusLineSep": "#b89f8f",

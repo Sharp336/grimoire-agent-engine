@@ -76,6 +76,7 @@
 		"thinkingMedium": "teal",
 		"thinkingHigh": "aquamarine",
 		"thinkingXhigh": "#D4A5FF",
+		"thinkingMax": "#D4A5FF",
 		"bashMode": "aquamarine",
 		"statusLineBg": "abyssBlack",
 		"statusLineSep": 236,

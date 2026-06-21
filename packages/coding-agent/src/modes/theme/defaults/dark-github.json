@@ -80,6 +80,7 @@
 		"thinkingMedium": "blue",
 		"thinkingHigh": "purple",
 		"thinkingXhigh": "#eddeff",
+		"thinkingMax": "#eddeff",
 		"bashMode": "blue",
 		"statusLineBg": "#010409",
 		"statusLineSep": "#30363d",

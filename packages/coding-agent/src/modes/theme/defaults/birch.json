@@ -70,6 +70,7 @@
 		"thinkingMedium": "mossSage",
 		"thinkingHigh": "#5a7a60",
 		"thinkingXhigh": "#4a6050",
+		"thinkingMax": "#4a6050",
 		"bashMode": "lightMoss",
 		"statusLineBg": "#ebe7dc",
 		"statusLineSep": "barkStriation",

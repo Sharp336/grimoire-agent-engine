@@ -66,6 +66,7 @@
 		"thinkingMedium": "violet",
 		"thinkingHigh": "ember",
 		"thinkingXhigh": "corona",
+		"thinkingMax": "corona",
 		"bashMode": "astral",
 		"statusLineBg": "#0b0b10",
 		"statusLineSep": "#2a2635",

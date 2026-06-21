@@ -71,6 +71,7 @@
 		"thinkingMedium": "hunter",
 		"thinkingHigh": "fern",
 		"thinkingXhigh": "moss",
+		"thinkingMax": "moss",
 		"bashMode": "sage",
 		"statusLineBg": "#0A120E",
 		"statusLineSep": "#3A4A40",

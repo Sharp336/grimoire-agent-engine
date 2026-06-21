@@ -140,6 +140,7 @@ export type SymbolKey =
 	| "thinking.medium"
 	| "thinking.high"
 	| "thinking.xhigh"
+	| "thinking.max"
 	| "thinking.autoPending"
 	// Checkboxes
 	| "checkbox.checked"
@@ -340,6 +341,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"thinking.medium": "◒ med",
 	"thinking.high": "◕ high",
 	"thinking.xhigh": "◉ xhigh",
+	"thinking.max": "● max",
 	"thinking.autoPending": "⟳",
 	// Checkboxes
 	"checkbox.checked": "☑",
@@ -632,6 +634,7 @@ const NERD_SYMBOLS: SymbolMap = {
 	"thinking.high": "\u{F111} high",
 	// pick: 🧠 xhi | alt:  xhi  xhi
 	"thinking.xhigh": "\u{F06D} xhi",
+	"thinking.max": "\u{F111} max",
 	// pick:  (fa-circle-o-notch) | alt: 󰂼 (nf-md-cached) ⟳
 	"thinking.autoPending": "\uf1ce",
 	// Checkboxes
@@ -843,6 +846,7 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"thinking.medium": "[med]",
 	"thinking.high": "[high]",
 	"thinking.xhigh": "[xhi]",
+	"thinking.max": "[max]",
 	"thinking.autoPending": "[~]",
 	// Checkboxes
 	"checkbox.checked": "[x]",
@@ -1030,6 +1034,7 @@ const themeColorsSchema = type({
 	thinkingMedium: "string | number",
 	thinkingHigh: "string | number",
 	thinkingXhigh: "string | number",
+	"thinkingMax?": "string | number",
 	bashMode: "string | number",
 	pythonMode: "string | number",
 	statusLineBg: "string | number",
@@ -1134,6 +1139,7 @@ export type ThemeColor =
 	| "thinkingMedium"
 	| "thinkingHigh"
 	| "thinkingXhigh"
+	| "thinkingMax"
 	| "bashMode"
 	| "pythonMode"
 	| "statusLineSep"
@@ -1196,6 +1202,7 @@ const THEME_COLOR_RECORD = {
 	thinkingMedium: true,
 	thinkingHigh: true,
 	thinkingXhigh: true,
+	thinkingMax: true,
 	bashMode: true,
 	pythonMode: true,
 	statusLineSep: true,
@@ -1296,15 +1303,16 @@ function resolveVarRefs(
 	return resolveVarRefs(vars[value], vars, visited);
 }
 
-function resolveThemeColors<T extends Record<string, ColorValue>>(
+function resolveThemeColors<T extends Record<string, ColorValue | undefined>>(
 	colors: T,
 	vars: Record<string, ColorValue> = {},
-): Record<keyof T, string | number> {
+): Partial<Record<keyof T, string | number>> {
 	const resolved: Record<string, string | number> = {};
 	for (const [key, value] of Object.entries(colors)) {
+		if (value === undefined) continue;
 		resolved[key] = resolveVarRefs(value, vars);
 	}
-	return resolved as Record<keyof T, string | number>;
+	return resolved as Partial<Record<keyof T, string | number>>;
 }
 
 // ============================================================================
@@ -1630,6 +1638,8 @@ export class Theme {
 				return (str: string) => this.fg("thinkingHigh", str);
 			case "xhigh":
 				return (str: string) => this.fg("thinkingXhigh", str);
+			case "max":
+				return (str: string) => this.fg("thinkingMax", str);
 			default:
 				return (str: string) => this.fg("thinkingOff", str);
 		}
@@ -1814,6 +1824,7 @@ export class Theme {
 			medium: this.#symbols["thinking.medium"],
 			high: this.#symbols["thinking.high"],
 			xhigh: this.#symbols["thinking.xhigh"],
+			max: this.#symbols["thinking.max"],
 			autoPending: this.#symbols["thinking.autoPending"],
 		};
 	}
@@ -1997,6 +2008,8 @@ function createTheme(themeJson: ThemeJson, options: CreateThemeOptions = {}): Th
 	const { mode, symbolPresetOverride, colorBlindMode } = options;
 	const colorMode = mode ?? detectColorMode();
 	const resolvedColors = resolveThemeColors(themeJson.colors, themeJson.vars);
+	const resolvedColorRecord = resolvedColors as Record<string, string | number>;
+	resolvedColorRecord.thinkingMax ??= resolvedColorRecord.thinkingXhigh;
 
 	if (colorBlindMode) {
 		const added = resolvedColors.toolDiffAdded;

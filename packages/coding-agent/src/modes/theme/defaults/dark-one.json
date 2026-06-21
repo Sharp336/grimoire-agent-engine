@@ -75,6 +75,7 @@
 		"thinkingMedium": "syntaxAccent",
 		"thinkingHigh": "hue3",
 		"thinkingXhigh": "#e5b9ff",
+		"thinkingMax": "#e5b9ff",
 		"bashMode": "hue1",
 		"statusLineBg": "#1e2227",
 		"statusLineSep": "#3e4451",

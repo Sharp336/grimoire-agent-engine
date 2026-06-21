@@ -72,6 +72,7 @@
 		"thinkingMedium": "cedar",
 		"thinkingHigh": "brass",
 		"thinkingXhigh": "amber",
+		"thinkingMax": "amber",
 		"bashMode": "brass",
 		"statusLineBg": "woodBase",
 		"statusLineSep": 237,
