@@ -7,7 +7,7 @@ Primary implementation:
 - `packages/coding-agent/src/system-prompt.ts` (`buildSystemPrompt`, `loadSystemPromptFiles`)
 - `packages/coding-agent/src/main.ts` (`discoverSystemPromptFile`, `discoverAppendSystemPromptFile`)
 - `packages/coding-agent/src/prompts/system/system-prompt.md` (default stable instruction template)
-- `packages/coding-agent/src/prompts/system/custom-system-prompt.md` (internal custom-prompt template; not the normal CLI `SYSTEM.md` path)
+- `packages/coding-agent/src/prompts/system/custom-system-prompt.md` (custom-prompt template; used when `--system-prompt` / `SYSTEM.md` or SDK `customSystemPrompt` is provided)
 - `packages/coding-agent/src/prompts/system/project-prompt.md` (project/environment footer)
 
 ---
@@ -37,28 +37,33 @@ For append, the same precedence applies between `--append-system-prompt`, projec
 
 ## 2) Replace vs. append
 
-Normal CLI startup builds the default provider-facing prompt blocks first, then applies CLI / discovered file overrides in `packages/coding-agent/src/main.ts`:
+CLI startup passes resolved `SYSTEM.md` / `--system-prompt` text as `options.customSystemPrompt` and resolved `APPEND_SYSTEM.md` / `--append-system-prompt` text as `options.appendSystemPrompt` via `applyResolvedSystemPromptInputs` in `packages/coding-agent/src/main.ts`. These flow into `buildSystemPrompt` as `resolvedCustomPrompt` and `resolvedAppendSystemPrompt`.
+
+`buildSystemPrompt` selects the rendering template based on whether `resolvedCustomPrompt` is set (`system-prompt.ts` line 686):
 
 ```ts
-if (resolvedSystemPrompt && resolvedAppendPrompt) {
-  options.systemPrompt = defaultPrompt => [resolvedSystemPrompt, resolvedAppendPrompt, ...defaultPrompt.slice(1)];
-} else if (resolvedSystemPrompt) {
-  options.systemPrompt = defaultPrompt => [resolvedSystemPrompt, ...defaultPrompt.slice(1)];
-} else if (resolvedAppendPrompt) {
-  options.systemPrompt = defaultPrompt => [...defaultPrompt, resolvedAppendPrompt];
-}
+const rendered = prompt.render(
+    resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data
+);
 ```
 
-The default blocks come from `buildSystemPrompt`:
+**Without** a custom system prompt, the default template (`system-prompt.md`) renders the full stable default instructions (staff-engineer preamble, tool inventory, skills, rules, exploration rules, workflow rules, etc.) plus any append prompt.
 
-- block 0: `system-prompt.md` — the stable default instructions (staff-engineer preamble, tool inventory, exploration rules, workflow rules, etc.);
-- block 1, when non-empty: `project-prompt.md` — dynamic project/environment context (workstation info, context files, dir-context list, workspace tree, current date/cwd, and other project footer content).
+**With** a custom system prompt, the custom template (`custom-system-prompt.md`) renders instead. This template outputs:
+
+1. the custom system prompt text (`customPrompt`);
+2. the append prompt text, if any (`appendPrompt`);
+3. project/environment context (context files, git info, skills, rules).
+
+In both cases `buildSystemPrompt` also renders `project-prompt.md` as a second block carrying environment metadata (workstation info, cwd, workspace tree, etc.), which is always preserved.
+
+When a custom system prompt is provided, `callerControlsCustomPrompt` is set to `true` in `buildSystemPrompt`, which suppresses the secondary capability path (`loadSystemPromptFiles`) entirely — `systemPromptCustomization` is `null`. This prevents the auto-discovered `SYSTEM.md` from being loaded a second time through the capability layer.
 
 Consequences for normal CLI use:
 
-- Providing `--system-prompt` or `SYSTEM.md` replaces only block 0. The stable default instructions are removed, but the dynamic project/environment footer from `project-prompt.md` remains as `defaultPrompt.slice(1)`.
-- Providing `--append-system-prompt` or `APPEND_SYSTEM.md` without a custom system prompt appends a new block after all default blocks.
-- Providing both a custom system prompt and an append prompt produces: custom system prompt block, append prompt block, then the preserved dynamic project/environment footer.
+- Providing `--system-prompt` or `SYSTEM.md` replaces the stable default instructions. The dynamic project/environment footer from `project-prompt.md` remains.
+- Providing `--append-system-prompt` or `APPEND_SYSTEM.md` without a custom system prompt appends text after all default blocks.
+- Providing both produces: custom system prompt, append prompt, then the preserved dynamic project/environment footer.
 
 If you want to keep both default blocks and add to them, use `--append-system-prompt` / `APPEND_SYSTEM.md` without `--system-prompt` / `SYSTEM.md`. If you want to replace the stable default instructions while keeping the dynamic footer, use `--system-prompt` / `SYSTEM.md`.
 
@@ -148,9 +153,9 @@ There is no built-in way to inherit specific sections from `system-prompt.md` wh
 
 ## 5) Deduplication
 
-The CLI path avoids double-injecting discovered `SYSTEM.md` by replacing block 0 after the default prompt blocks are rendered. Any `systemPromptCustomization` from the secondary capability path would have been rendered into block 0, and that block is discarded when `main.ts` applies `[resolvedSystemPrompt, ...defaultPrompt.slice(1)]`.
+When a CLI flag or discovered `SYSTEM.md` provides a custom system prompt, `applyResolvedSystemPromptInputs` sets `options.customSystemPrompt`. Inside `buildSystemPrompt`, this sets `callerControlsCustomPrompt = true`, which suppresses the secondary capability path (`loadSystemPromptFiles`) entirely — `systemPromptCustomization` is resolved to `null` without ever loading the capability-layer `SYSTEM.md`. There is no double injection to deduplicate at the template level.
 
-Inside `buildSystemPrompt` itself, secondary customization and always-apply rules are still deduplicated:
+When the SDK supplies `customSystemPrompt` directly (without the CLI path), the capability path can still run. `buildSystemPrompt` deduplicates in that case:
 
 - `dedupePromptSource` drops a `systemPromptCustomization` block when it already appears in an internally supplied `customPrompt` or append prompt.
 - `dedupeAlwaysApplyRules` omits always-apply rules whose body appears verbatim in any of `{customPrompt, appendPrompt, systemPromptCustomization}`.
