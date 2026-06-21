@@ -240,9 +240,7 @@ import {
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
-import { shutdownCodemap } from "../task-context";
-import { buildCodemapInjectionBlock } from "../task-context/prompt";
-import { getTaskContext } from "../task-context/retrieve";
+import { injectCodemapTaskContext, shutdownCodemap } from "../task-context";
 import { getCodemapSessionState, markFirstTurnInjected } from "../task-context/state";
 import {
 	AUTO_THINKING,
@@ -4960,31 +4958,13 @@ export class AgentSession {
 	 * mnemopi/state.ts:313 `hasRecalledForFirstTurn`).
 	 */
 	async #injectCodemapTaskContext(promptText: string): Promise<string | null> {
-		try {
-			if (!this.settings.get("codemap.enabled")) return null;
-			if (!this.settings.get("codemap.autoInject")) return null;
-
-			const state = getCodemapSessionState(this);
-			if (!state) return null; // codemap not initialized for this session
-			if (state.hasInjectedForFirstTurn) return null;
-
-			const projectLabel = path.basename(this.sessionManager.getCwd());
-			const result = await getTaskContext(
-				state.client,
-				state.config,
-				promptText,
-				projectLabel,
-				this.sessionManager.getCwd(),
-			);
-			markFirstTurnInjected(this);
-			const block = buildCodemapInjectionBlock(result);
-			return block || null;
-		} catch (err) {
-			logger.debug("codemap: first-turn injection failed", {
-				error: err instanceof Error ? err.message : String(err),
-			});
-			return null;
-		}
+		return injectCodemapTaskContext(
+			this.settings,
+			getCodemapSessionState(this),
+			this.sessionManager.getCwd(),
+			promptText,
+			() => markFirstTurnInjected(this),
+		);
 	}
 
 	async #buildSystemPromptForAgentStart(promptText: string): Promise<string[]> {

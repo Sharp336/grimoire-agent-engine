@@ -89,10 +89,6 @@ function fmtMs(ms: number): string {
 	return `${ms.toFixed(1)}ms`;
 }
 
-function fmtOps(ms: number, count: number): string {
-	return `${(count / (ms / 1000)).toFixed(0)} ops/s`;
-}
-
 async function bench(label: string, fn: () => Promise<void>, iterations = 1): Promise<number> {
 	// Warmup
 	await fn();

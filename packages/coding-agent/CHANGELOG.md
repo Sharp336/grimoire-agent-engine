@@ -6,6 +6,16 @@
 
 - Added task-relevant code summaries (codemap): agent-written file-level summaries persisted in Turso/libSQL with native vector search, retrieved as minimal task-relevant context via hybrid FTS5 + vector_top_k retrieval with reciprocal rank fusion and budget packing. Distinct feature module (`codemap.*` settings) that composes with any memory backend including "off". Features automatic Turso database provisioning, lazy embedding on retrieval, staleness tracking via `Bun.hash`, and a pluggable language adapter interface (TS adapter ships in v1 via the existing LSP client).
 
+### Changed
+
+- Changed `codemap.turso.autoProvision` default from `true` to `false` (opt-in) to match the design spec — auto-provisioning fires network calls to Turso's API, creates cloud databases, and persists credentials via `settings.set()`, so it must be explicitly enabled.
+- Extracted `injectCodemapTaskContext` from `AgentSession.#injectCodemapTaskContext` into a testable standalone function in the `task-context` module.
+
+### Fixed
+
+- Fixed path traversal vulnerability in `toStoredPath` — file paths like `../../etc/passwd` were stored without boundary checking. The guard now rejects paths that resolve outside the project cwd, and `toStoredPath` runs before DB access in all tool `execute()` methods (fail-fast on invalid input).
+- Removed unused `fmtOps` function from `benchmark.ts` (lint warning).
+
 ## [16.1.9] - 2026-06-21
 
 ### Added

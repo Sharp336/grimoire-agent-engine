@@ -73,10 +73,18 @@ function resolveProjectLabel(cwd: string): string {
 	return path.basename(cwd);
 }
 
-/** Normalize a resolved path to forward-slash relative form for storage. */
+/** Normalize a resolved path to forward-slash relative form for storage.
+ * Rejects paths that escape the project cwd (path traversal). */
 function toStoredPath(cwd: string, filePath: string): { relativePath: string; absolutePath: string } {
 	const absolutePath = path.resolve(cwd, filePath);
-	const relativePath = path.relative(cwd, absolutePath).replace(/\\/g, "/");
+	// Guard against path traversal: the resolved path must be inside cwd.
+	const normalizedCwd = path.resolve(cwd);
+	const rel = path.relative(normalizedCwd, absolutePath);
+	const escapes = rel.startsWith("..") || path.isAbsolute(rel);
+	if (escapes) {
+		throw new Error(`Path "${filePath}" resolves outside the project directory.`);
+	}
+	const relativePath = rel.replace(/\\/g, "/");
 	return { relativePath, absolutePath };
 }
 
@@ -109,8 +117,9 @@ export class SetFileSummaryTool implements AgentTool<typeof setFileSummarySchema
 	}
 
 	async execute(_id: string, params: SetFileSummaryParams): Promise<AgentToolResult> {
-		const { client, config } = await getClient(this.session);
+		// Validate path before opening DB — fail fast on traversal attempts.
 		const { relativePath, absolutePath } = toStoredPath(this.session.cwd, params.file);
+		const { client, config } = await getClient(this.session);
 		const contentHash = await computeFileHash(absolutePath);
 		const projectLabel = resolveProjectLabel(this.session.cwd);
 		const row = await upsertSummary(client, {
@@ -154,10 +163,10 @@ export class GetFileSummaryTool implements AgentTool<typeof getFileSummarySchema
 		if (!session.settings.get("codemap.enabled")) return null;
 		return new GetFileSummaryTool(session);
 	}
-
 	async execute(_id: string, params: GetFileSummaryParams): Promise<AgentToolResult> {
-		const { client } = await getClient(this.session);
+		// Validate path before opening DB — fail fast on traversal attempts.
 		const { relativePath, absolutePath } = toStoredPath(this.session.cwd, params.file);
+		const { client } = await getClient(this.session);
 		const projectLabel = resolveProjectLabel(this.session.cwd);
 		const row = await getSummary(client, projectLabel, relativePath);
 		if (!row) {
@@ -260,10 +269,10 @@ export class DeleteFileSummaryTool implements AgentTool<typeof deleteFileSummary
 		if (!session.settings.get("codemap.enabled")) return null;
 		return new DeleteFileSummaryTool(session);
 	}
-
 	async execute(_id: string, params: DeleteFileSummaryParams): Promise<AgentToolResult> {
-		const { client } = await getClient(this.session);
+		// Validate path before opening DB — fail fast on traversal attempts.
 		const { relativePath } = toStoredPath(this.session.cwd, params.file);
+		const { client } = await getClient(this.session);
 		const projectLabel = resolveProjectLabel(this.session.cwd);
 		const removed = await deleteSummary(client, projectLabel, relativePath);
 		if (!removed) {

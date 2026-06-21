@@ -2578,7 +2578,7 @@ export const SETTINGS_SCHEMA = {
 	"codemap.turso.authToken": { type: "string", default: "" },
 	"codemap.turso.autoProvision": {
 		type: "boolean",
-		default: true,
+		default: false,
 		ui: {
 			tab: "memory",
 			group: "Codemap",
