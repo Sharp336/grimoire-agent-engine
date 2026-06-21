@@ -74,7 +74,8 @@ describe("SYSTEM.md prompt assembly", () => {
 		const promptText = renderedPrompt.join("\n\n");
 		const matches = promptText.match(new RegExp(escapeRegExp(systemPrompt), "g")) ?? [];
 		expect(matches).toHaveLength(1);
-		expect(promptText).toContain('<skill name="focused-work">');
+		expect(promptText).toContain("focused-work");
+		expect(promptText).toContain("Focused work instructions");
 	});
 
 	it("does not resolve already-loaded prompt text as a path", async () => {

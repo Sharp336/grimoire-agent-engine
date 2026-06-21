@@ -2011,6 +2011,18 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
 
+			const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+				agent: agent.systemPrompt,
+				role: subagentRole ? oneLineLabel(subagentRole) : "",
+				context: options.context?.trim() ?? "",
+				planReference: options.planReference?.content ?? "",
+				planReferencePath: options.planReference?.path ?? "",
+				worktree: worktree ?? "",
+				outputSchema: normalizedOutputSchema,
+				ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
+				ircSelfId: ircEnabled ? id : "",
+			});
+
 			// Captured by the lifecycle reviver: rebuilding an equivalent session from
 			// the same JSONL file re-invokes createAgentSession with the exact options
 			// of the original run (same agent id, tools, model, system prompt,
@@ -2032,22 +2044,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				rules: options.rules,
 				preloadedExtensionPaths: options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: options.preloadedCustomToolPaths,
-				systemPrompt: defaultPrompt => {
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-						agent: agent.systemPrompt,
-						role: subagentRole ? oneLineLabel(subagentRole) : "",
-						context: options.context?.trim() ?? "",
-						planReference: options.planReference?.content ?? "",
-						planReferencePath: options.planReference?.path ?? "",
-						worktree: worktree ?? "",
-						outputSchema: normalizedOutputSchema,
-						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
-						ircSelfId: ircEnabled ? id : "",
-					});
-					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-				},
+				customSystemPrompt: subagentPrompt,
 				sessionManager: sessionManagerForRun,
 				hasUI: false,
 				spawns: spawnsEnv,
