@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Simplified system prompt assembly by merging the custom system prompt template into the main template with conditional rendering, removing the separate `custom-system-prompt.md` file and the redundant `dedupePromptSource` helper. Custom prompts from CLI/SDK now take precedence over `SYSTEM.md` discovery, and the `<critical>` block moved from `project-prompt.md` into `system-prompt.md` for a single-pass assembly.
+
 ## [16.1.12] - 2026-06-21
 
 ### Changed
