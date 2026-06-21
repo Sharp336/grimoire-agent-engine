@@ -587,7 +587,7 @@ function normalizeUmansBaseUrl(baseUrl: string | undefined): string {
 }
 
 function umansSupportsVision(value: unknown): boolean {
-	return value === true || (typeof value === "string" && value.length > 0);
+	return value === true;
 }
 
 function umansReasoningSupported(value: unknown): boolean {

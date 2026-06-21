@@ -53,6 +53,16 @@ describe("umans provider catalog", () => {
 							reasoning: { supported: true, can_disable: false, default_level: "medium" },
 						},
 					},
+					"umans-glm-5.2": {
+						display_name: "Umans GLM 5.2",
+						capabilities: {
+							context_window: 405_504,
+							recommended_max_tokens: 131_071,
+							supports_vision: "via-handoff",
+							supports_tools: true,
+							reasoning: { supported: true, can_disable: false, default_level: "high" },
+						},
+					},
 				}),
 				{ status: 200, headers: { "Content-Type": "application/json" } },
 			);
@@ -87,6 +97,14 @@ describe("umans provider catalog", () => {
 			maxTokens: 32_768,
 			thinking: { defaultLevel: "medium", requiresEffort: true },
 			compat: { escapeBuiltinToolNames: true },
+		});
+		const handoffVisionModel = models?.find(item => item.id === "umans-glm-5.2");
+		expect(handoffVisionModel).toMatchObject({
+			id: "umans-glm-5.2",
+			input: ["text"],
+			contextWindow: 405_504,
+			maxTokens: 131_071,
+			thinking: { defaultLevel: "high", requiresEffort: true },
 		});
 	});
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Umans models that report `supports_vision: "via-handoff"` being advertised as native image-input models; only boolean `true` now enables direct image attachment.
+
 ## [16.1.9] - 2026-06-21
 
 ### Fixed
