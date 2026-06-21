@@ -1,3 +1,4 @@
+import { realpathSync } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -279,7 +280,18 @@ function parseArguments<T>(raw: string): T {
 }
 
 function isWithinCwd(candidate: string, cwd: string): boolean {
-	const relative = path.relative(cwd, candidate);
+	// Resolve symlinks before comparing — without this, a symlink inside the
+	// workspace could point outside cwd and bypass the containment check.
+	// Uses sync realpath to avoid making every call site async.
+	let realCandidate = candidate;
+	let realCwd = cwd;
+	try {
+		realCandidate = realpathSync(candidate);
+	} catch {}
+	try {
+		realCwd = realpathSync(cwd);
+	} catch {}
+	const relative = path.relative(realCwd, realCandidate);
 	return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
@@ -927,10 +939,23 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 			.map(seg => seg.slice(0, 5))
 			.filter((seg, i, arr) => arr.indexOf(seg) === i)
 			.map(seg => `**/*${seg}*`);
-		// Segment globs + prefix globs come BEFORE generic keyword globs —
-		// they're more targeted (definition-site filename matches) and must
-		// survive the 200-file dedup cap.
-		const allSupplementaryGlobs = [...segmentGlobs, ...prefixGlobs, ...supplementaryGlobs];
+		// Directory-path globs for segments ≥5 chars: `**/agent/**/*`
+		// matches files in directories named "agent". This catches files
+		// with generic basenames (types.ts) that define a CamelCase
+		// identifier whose segments match a directory name, not the
+		// filename. Without this, AgentTool defined in types.ts never
+		// enters the candidate pool — `**/*agent*` matches basenames
+		// containing "agent", not files inside an "agent/" directory.
+		// Segments <5 chars (e.g. "tool") are excluded to avoid flooding
+		// (every file in tools/ would match).
+		const dirGlobs = [...identifierSegments].filter(seg => seg.length >= 5).map(seg => `**/${seg}/**/*`);
+		// Directory globs come first (most targeted — files in a named
+		// directory), then segment globs (filename matches), then prefix
+		// globs, then generic keyword globs. All must survive the 200-file
+		// dedup cap — directory globs first prevent generic segment globs
+		// (e.g. `**/*agent*` = 109 files) from flooding the cap before the
+		// more targeted directory globs (`**/agent/**/*` = 72 files) run.
+		const allSupplementaryGlobs = [...dirGlobs, ...segmentGlobs, ...prefixGlobs, ...supplementaryGlobs];
 		const allGrepCandidates = [...effectivePlan.keywords, ...queryKws]
 			.filter(kw => kw.length >= 5)
 			.sort(byIdentifierThenLength);
@@ -1130,6 +1155,31 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 								lowerKeywords.some(kw => path.basename(path.dirname(entry.file)).toLowerCase().includes(kw))
 							) {
 								contentScore += 3;
+							}
+							// Directory-segment boost: if any path component matches
+							// an identifier segment (e.g. "agent" matches the "agent/"
+							// in packages/agent/src/types.ts), add +2. This catches
+							// files with generic basenames (types.ts) that define a
+							// CamelCase identifier whose segments match a directory name,
+							// not the filename. Only applies when the file also has a
+							// definition-site match (checked above) to prevent generic
+							// segments like "tool" from boosting every file in tools/.
+							if (identifierSegments.size > 0) {
+								const pathParts = entry.file.replace(/\\/g, "/").toLowerCase().split("/");
+								let dirSegMatch = false;
+								for (const seg of identifierSegments) {
+									if (pathParts.includes(seg)) {
+										dirSegMatch = true;
+										break;
+									}
+								}
+								// Only boost if a definition-site match already fired
+								// (contentScore includes the +8 from defPattern). This
+								// prevents false boosts on files that merely live in a
+								// matching directory but don't define the identifier.
+								if (dirSegMatch && contentScore >= 8) {
+									contentScore += 2;
+								}
 							}
 						} catch {}
 						return {
