@@ -104,13 +104,15 @@ export function getPreviewLines(text: string, maxLines: number, maxLineLen: numb
  * multiple output lines instead of hard-truncating each at `wrapWidth`. Used by
  * error renderers where embedded content — e.g. an account-verification URL —
  * must stay intact even when the whole message is one long line that would
- * otherwise be severed mid-token. Output is still capped at `maxLines`; the last
- * retained line gets a trailing overflow marker only when wrapped content
- * genuinely overflows the budget AND the marker fits without severing that
- * line — a long token (e.g. an account-verification URL) is never clipped just
- * to make room for the marker. Full text is still kept in the persisted session.
+ * otherwise be severed mid-token. Sanitizes tabs to spaces. Output is still
+ * capped at `maxLines`; the last retained line gets a trailing overflow marker
+ * only when wrapped content genuinely overflows the budget AND the marker fits
+ * without severing that line — a long token (e.g. an account-verification URL)
+ * is never clipped just to make room for the marker. Full text is still kept in
+ * the persisted session.
  */
 export function getWrappedPreviewLines(text: string, maxLines: number, wrapWidth: number): string[] {
+	const sanitized = replaceTabs(text);
 	const out: string[] = [];
 	let overflowed = false;
 	// A single logical line never yields more than `maxLines` retained pieces, so
@@ -119,7 +121,7 @@ export function getWrappedPreviewLines(text: string, maxLines: number, wrapWidth
 	// (one substring per ~wrapWidth chars) only to discard all but the first
 	// `maxLines` pieces. The +1 keeps just enough input to still detect overflow.
 	const maxLineChars = (maxLines + 1) * wrapWidth;
-	for (const rawLine of text.split("\n")) {
+	for (const rawLine of sanitized.split("\n")) {
 		const trimmed = rawLine.trim();
 		if (!trimmed) continue;
 		const line = trimmed.length > maxLineChars ? trimmed.slice(0, maxLineChars) : trimmed;

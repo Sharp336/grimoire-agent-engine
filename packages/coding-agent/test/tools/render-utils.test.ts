@@ -375,6 +375,10 @@ describe("getWrappedPreviewLines", () => {
 		expect(getWrappedPreviewLines("short error", 6, 110)).toEqual(["short error"]);
 	});
 
+	it("sanitizes tabs to spaces", () => {
+		expect(getWrappedPreviewLines("error\twith\ttabs", 6, 110)).toEqual(["error   with   tabs"]);
+	});
+
 	it("bounds work on a pathological single-line body while preserving early content", () => {
 		// A proxy 502 can return a multi-megabyte single-line HTML body. The helper
 		// must not wrap the whole thing just to keep `maxLines`; the leading URL
