@@ -90,11 +90,6 @@ export const isGrokReasoningEffortCapable = memo((modelId: string): boolean => {
 	return GROK_EFFORT_CAPABLE_PREFIXES.some(prefix => hasModelIdPrefix(bare, prefix));
 });
 
-/** Any Grok model id, across `provider/` and `x-ai/` namespaces (`grok-…`). */
-export const isGrokModelId = memo((modelId: string): boolean => {
-	return bareModelId(modelId).trim().toLowerCase().startsWith("grok-");
-});
-
 /**
  * MiniMax M2-generation family (M2, M2.1, M2.5, M2.7, including `-highspeed`/
  * `-lightning`/`-her`/`-turbo` variants, dotless aliases like `minimax-m21`,

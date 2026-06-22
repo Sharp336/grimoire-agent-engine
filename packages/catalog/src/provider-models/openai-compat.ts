@@ -825,24 +825,6 @@ export interface XaiModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
-/** Dedicated xAI providers expose only these curated chat SKUs. */
-const XAI_CHAT_MODEL_IDS: ReadonlySet<string> = new Set(["grok-4.3", "grok-build-0.1"]);
-
-export function xaiModelManagerOptions(config?: XaiModelManagerConfig): ModelManagerOptions<"openai-completions"> {
-	const base = createSimpleOpenAICompletionsOptions("xai", "https://api.x.ai/v1", config);
-	if (!base.fetchDynamicModels) return base;
-	const inner = base.fetchDynamicModels;
-	// Lock online discovery to the supported SKUs so an `online refresh` against
-	// xAI's /v1/models can't re-introduce curated-out / retired Grok models.
-	return {
-		...base,
-		fetchDynamicModels: async () => {
-			const dynamic = await inner();
-			return dynamic == null ? dynamic : dynamic.filter(model => XAI_CHAT_MODEL_IDS.has(model.id));
-		},
-	};
-}
-
 export interface XaiOAuthModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
@@ -872,6 +854,23 @@ export const XAI_OAUTH_CURATED_MODELS: readonly XAICuratedModel[] = [
 	},
 	{ id: "grok-4.3", contextWindow: 1_000_000, name: "Grok 4.3", input: ["text", "image"] },
 ] as const;
+
+const XAI_CHAT_MODEL_IDS: ReadonlySet<string> = new Set(XAI_OAUTH_CURATED_MODELS.map(model => model.id));
+
+export function xaiModelManagerOptions(config?: XaiModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	const base = createSimpleOpenAICompletionsOptions("xai", "https://api.x.ai/v1", config);
+	if (!base.fetchDynamicModels) return base;
+	const inner = base.fetchDynamicModels;
+	// Lock online discovery to the supported SKUs so an `online refresh` against
+	// xAI's /v1/models can't re-introduce curated-out / retired Grok models.
+	return {
+		...base,
+		fetchDynamicModels: async () => {
+			const dynamic = await inner();
+			return dynamic == null ? dynamic : dynamic.filter(model => XAI_CHAT_MODEL_IDS.has(model.id));
+		},
+	};
+}
 
 // Tool-only xAI models are routed through dedicated tools, not the chat picker.
 const XAI_NON_CHAT_PREFIXES = ["grok-imagine-", "grok-stt-", "grok-voice-"] as const;

@@ -24,7 +24,6 @@ import {
 	findThinkingVariantToken,
 	isDeepseekModelIdOrName,
 	isGlm52ReasoningEffortModelId,
-	isGrokModelId,
 	isMimoModelIdOrName,
 	isMinimaxM2FamilyModelId,
 	isMinimaxM3FamilyModelId,
@@ -244,8 +243,11 @@ function omitsWireReasoningEffort<TApi extends Api>(spec: ModelSpec<TApi>, compa
 		return (compat as ResolvedOpenAIResponsesCompat | undefined)?.supportsReasoningEffort === false;
 	}
 	if (spec.api === "openai-completions" || spec.api === "openrouter") {
-		if (!isGrokModelId(spec.id)) return false;
-		return (compat as ResolvedOpenAICompat | undefined)?.supportsReasoningEffort === false;
+		const resolved = compat as ResolvedOpenAICompat | undefined;
+		return (
+			resolved?.supportsReasoningEffort === false &&
+			(resolved.thinkingFormat === "openai" || resolved.thinkingFormat === "openrouter")
+		);
 	}
 	return false;
 }
