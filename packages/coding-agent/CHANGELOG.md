@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- FastContext now auto-selects `devin/swe-1-6-fast` when no model is explicitly set and Devin credentials are present, so enabling FastContext works with zero configuration for Devin users (no local llama.cpp server required). The resolved default is persisted on first use so the model picker and the server-URL field reflect the effective backend.
+
+- FastContext usage is now visible in the TUI. When a spawned subagent (e.g. the bundled `explore`) calls `fast_context`, the task-tool card shows a compact badge line (`{icon.fast} fast_context · {model} · {calls} call(s) · {files} files`) in both the live-streaming and rebuilt-transcript views, so you can see exploration fired without drilling into the subagent transcript. The badge is aggregated from the structured `FastContextToolDetails` (model + citation count), not parsed from result text.
+
+- Added a `fastContext.mode` setting (Hint / Agent) under Context → Fast Context, selectable in `/settings`. Controls the default retrieval mode the explore subagent uses: Hint (default, ~2-3s — one model turn expands the query into keywords/globs/grep, then native search runs) or Agent (the full multi-turn FastContext Read/Glob/Grep loop — slower, more thorough). The `fast_context` tool defaults to it and the explore subagent honors it.
+
+### Changed
+
+- `fast_context` is now a first-class tool available to the **main agent** (and any agent that requests it), not just the `explore` subagent. When `fastContext.enabled` is on, the main agent can call `fast_context` directly for broad repository retrieval — a ranked file shortlist via the configured model (e.g. `devin/swe-1-6-fast`) — instead of only reaching it through explore. The `search` and `ast_grep` tool guidance now points to `fast_context` first for open-ended / cross-subsystem retrieval. Previously the tool gate required the caller to explicitly request `fast_context` (only `explore` did), so the main agent never used it.
+- The main-agent system prompt now makes `fast_context` the **first action** for any codebase-retrieval question (where / find / is-there / list X, dead code, unused refs) — a forceful directive in the Exploration section, ahead of `find`/`search`/`read`/`bash`. It is conditioned on `fast_context` being active (`{{#has tools "fast_context"}}`), so it never fires for agents that don't have it (e.g. librarian/plan/reviewer, or when FastContext is disabled) — verified by a rendering test.
+- FastContext model selection is now a picker instead of a free-text field. `fastContext.model` renders as a dropdown listing provider models from your logged-in providers (e.g. `devin/swe-1-6-fast`, `zai/glm-5-turbo`) plus a "Local llama.cpp server" option; a `local` sentinel explicitly selects the local server and auto-discovers its model via `/v1/models`.
+- The `fastContext.baseUrl` (local server URL) field is now hidden whenever a provider model is in use — there is no reason to configure a local OpenAI-compatible endpoint when FastContext routes through a provider. It only appears for the local-server backend (the "Local llama.cpp server" picker choice, a bare model id, or an unset model with no logged-in provider default).
+
 ## [16.1.14] - 2026-06-22
 
 ### Added
@@ -28,6 +43,9 @@
 ### Removed
 
 - Removed the `readHashLines` setting (the "Hash Lines" toggle under Files → Reading). Hashline read/search anchors (`[PATH#TAG]` snapshot headers plus `LINE:content`) are now driven solely by `edit.mode === "hashline"`: the toggle was redundant when off (anchors are already suppressed for non-hashline edit modes) and a footgun when on (turning it off left the default hashline edit tool with no addressable anchors, since `read` then skips recording the snapshot tag). Existing configs are migrated automatically by dropping the stale key.
+### Added
+
+- FastContext can now route its LLM calls through any registered model provider instead of a locally-hosted OpenAI-compatible server. Set `fastContext.model` to a provider-prefixed id (e.g. `devin/swe-1-6-fast`, `zai/glm-5-turbo`, `pi/smol`) and FastContext resolves it through the model registry using your configured provider credentials — no local llama.cpp instance required. A bare id or blank keeps the existing local `/chat/completions` path. Both hint and agent modes route through the same backend dispatch. On the 8-case cross-package retrieval bench, `devin/swe-1-6-fast` hits 100% at ~1.6s (hint) / ~3.3s (agent) — faster than a local 4B model and ~20-40x faster than the reasoning-heavy `devin/swe-1-6-slow` (34s / 127s), with identical accuracy and no local GPU.
 
 ## [16.1.12] - 2026-06-21
 
@@ -42,6 +60,11 @@
 
 - Fixed secret obfuscation corrupting Codex image reads (and other provider requests) with `Invalid 'input[N].content[].image_url'. Expected a base64-encoded data URL ... but got an invalid base64-encoded value`. The obfuscator deep-walked every string in the outbound request — including inline image base64 and opaque provider replay/signature fields — so a configured secret that happened to be a substring of the base64 (or of an ordinary word like `response`) injected `#HASH#` placeholders mid-payload. Obfuscation is now opt-in and fully typed: only user messages, tool-result messages, and user-attributed developer messages (`@file` mentions) are redacted; system prompts and tool schemas pass through untouched; image bytes and signature/encrypted-reasoning fields are never rewritten; and tool-call arguments are the only JSON walked. Configured plain secrets and regex matches shorter than 8 characters are now ignored to stop false matches on short words.
 - Fixed RPC/ACP startup clobbering explicit caller/project/global configuration for `task.isolation.{mode,merge,commits}`, `task.eager`, `task.batch`, `task.maxConcurrency`, `task.maxRecursionDepth`, `task.disabledAgents`, `task.agentModelOverrides`, `memory.backend`, `memories.enabled`, `advisor.{enabled,subagents,syncBacklog,immuneTurns}`, plus the RPC-only `async.{enabled,maxJobs}` and `bash.autoBackground.{enabled,thresholdMs}`. `applyDefaultSettingOverrides` re-asserted the schema default as a runtime override after settings load, regressing the `isConfigured()` guard added for #2598 and ignoring every explicit value the embedder, project, `--config` overlay, or global config had set. The guard is restored, so the host default now only fills holes ([#3207](https://github.com/can1357/oh-my-pi/issues/3207)).
+### Fixed
+
+- Fixed FastContext hint-mode failing to find barrel files (`index.ts`/`index.js`) in subdirectories whose names match query keywords. `#nativeGlob` now expands directory matches to their immediate file children (glob can return directory paths like `provider-models/` instead of `index.ts` inside it), and barrel files whose parent directory name contains a query keyword get a +3 content-score boost to compensate for their near-empty re-export content. Feature benchmark improved from 17/18 to 18/18 (100%).
+- Fixed FastContext `isWithinCwd` not resolving symlinks before checking workspace containment — a symlink inside the workspace could point outside cwd and bypass the security check. Now uses `realpathSync` to resolve both candidate and cwd before comparing.
+- Fixed FastContext hint-mode failing to find type definitions in files with generic basenames (e.g. `interface AgentTool` in `types.ts`). Added directory-path globs (`**/agent/**/*`) for identifier segments ≥5 chars, placed first in merge order so they survive the 200-file cap. Added directory-segment boost +2 when any path component matches an identifier segment and a definition-site match already fired.
 
 ## [16.1.11] - 2026-06-21
 
@@ -73,6 +96,9 @@
 - Fixed transcript scrollback stability on terminals with eager erase risk so completed assistant messages remain stable while new streaming lines are rendering
 - Fixed Hindsight retain (and the shared mnemopi/Hindsight recall paths) framing assistant turns whose only content was punctuation/whitespace — most commonly the lone `.` some providers emit for tool-call-only or thinking-only turns — into `[role: assistant]\n.\n[assistant:end]` blocks that polluted the bank, wasted retain tokens, and degraded recall. `prepareRetentionTranscript`, `extractMessages`, and `flattenMessagesForRecall` now require at least one letter or digit per message via a shared `hasSubstantiveContent` predicate ([#1806](https://github.com/can1357/oh-my-pi/issues/1806)).
 - Fixed `/resume` rendering forked child sessions without a fork tag, making them indistinguishable from their parent when titles match ([#1792](https://github.com/can1357/oh-my-pi/issues/1792)).
+### Changed
+
+- Improved FastContext hint-mode fallback ranking: CamelCase and lower-camelCase identifier extraction (with property-access and verb-position filters), definition-site boost (+8) for filtered identifiers, identifier segment globs with prefix globs, glob-before-grep merge order, graduated multiplicative penalties, programming keyword stop words, and identifier-priority keyword sorting. Precision@5 improved from 0.75 (grade B) to 1.0 (grade A) on the non-FC baseline benchmark. FC vs non-FC delta improved from 0.60 to 0.85.
 
 ## [16.1.10] - 2026-06-21
 
@@ -88,6 +114,9 @@
 ### Fixed
 
 - Fixed streamed tool-call previews freezing on their placeholder body (`$ …`, `Write: …`, an empty args tree) even after the tool finished: the pending card was created while arguments streamed, but when the closing full-arguments `message_update` never arrived (smooth-streaming disabled leaving the throttled arguments stale, an owned-dialect projector, or a superseded/aborted turn that still ran the call) nothing re-applied the final args. `tool_execution_start` — the one event every execution path emits with validated full arguments right before the result — now reconciles them onto the existing pending card and cancels any in-flight reveal so a late tick can't re-truncate the body.
+### Added
+
+- Added an opt-in FastContext adapter for the bundled `explore` subagent, with `fastContext.enabled`, `fastContext.baseUrl`, and `fastContext.model` settings for local OpenAI-compatible Chat Completions endpoints. The adapter has two modes: `hint` (default, ~2-3s) — one LLM turn expands the query into keywords/globs/grep patterns, then native ripgrep/glob executes them in parallel; and `agent` — full multi-turn FastContext agentic loop with `Read`/`Glob`/`Grep` tool names and `<final_answer>` citation validation.
 
 ## [16.1.9] - 2026-06-21
 

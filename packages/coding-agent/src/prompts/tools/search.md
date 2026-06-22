@@ -17,5 +17,5 @@ Searches files using regex.
 </output>
 
 <critical>
-- Open-ended search needing multiple rounds? MUST use the Task tool with the explore subagent, NOT chained `search` calls.
+- Open-ended search needing multiple rounds? If `fast_context` is available, call it FIRST for a ranked file shortlist (~2-3s) before falling back to the Task tool + explore subagent. NEVER chain `search` calls.
 </critical>

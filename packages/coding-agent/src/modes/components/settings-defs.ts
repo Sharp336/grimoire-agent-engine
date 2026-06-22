@@ -83,6 +83,25 @@ const CONDITIONS: Record<string, () => boolean> = {
 			return false;
 		}
 	},
+	fastContextEnabled: () => {
+		try {
+			return Settings.instance.get("fastContext.enabled") === true;
+		} catch {
+			return false;
+		}
+	},
+	fastContextUsesLocalServer: () => {
+		try {
+			if (Settings.instance.get("fastContext.enabled") !== true) return false;
+			const model = Settings.instance.get("fastContext.model");
+			// A provider-prefixed model (e.g. devin/swe-1-6-fast) routes through the
+			// registry, so the local server URL is irrelevant. Blank, bare, or the
+			// "local" sentinel all keep the local-server path (and reveal this field).
+			return !model || !String(model).includes("/");
+		} catch {
+			return false;
+		}
+	},
 	hindsightActive: () => {
 		try {
 			return Settings.instance.get("memory.backend") === "hindsight";

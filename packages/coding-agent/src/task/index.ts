@@ -28,6 +28,7 @@ import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.m
 import taskDescriptionTemplate from "../prompts/tools/task.md" with { type: "text" };
 import taskSummaryTemplate from "../prompts/tools/task-summary.md" with { type: "text" };
 import { truncateForPrompt } from "../tools/approval";
+import type { FastContextToolDetails } from "../tools/fast-context";
 import { isIrcEnabled } from "../tools/irc";
 import { formatBytes, formatDuration } from "../tools/render-utils";
 import {
@@ -54,7 +55,7 @@ import { runSubprocess } from "./executor";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimit, Semaphore } from "./parallel";
-import { renderResult, renderCall as renderTaskCall } from "./render";
+import { aggregateFastContext, renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
 import {
 	applyNestedPatches,
@@ -145,6 +146,7 @@ export const READ_ONLY_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"read",
 	"search",
 	"find",
+	"fast_context",
 	"web_search",
 	"ast_grep",
 	"yield",
@@ -673,6 +675,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				jobId: single ? jobId : primaryJobId,
 				type: "task",
 			},
+			fastContext: aggregateFastContext(
+				spawns.flatMap(
+					spawn => (spawn.progress.extractedToolData?.fast_context as FastContextToolDetails[] | undefined) ?? [],
+				),
+			),
 		});
 
 		const started: Array<{ agentId: string; jobId: string; description?: string }> = [];
@@ -1004,6 +1011,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				totalDurationMs: Date.now() - startTime,
 				usage: hasUsage ? usageTotals : undefined,
 				outputPaths: outputPaths.length > 0 ? outputPaths : undefined,
+				fastContext: aggregateFastContext(
+					results.flatMap(r => (r.extractedToolData?.fast_context as FastContextToolDetails[] | undefined) ?? []),
+				),
 			},
 		};
 	}
@@ -1574,6 +1584,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				totalDurationMs,
 				usage: result.usage,
 				outputPaths: result.outputPath ? [result.outputPath] : undefined,
+				fastContext: aggregateFastContext(
+					result.extractedToolData?.fast_context as FastContextToolDetails[] | undefined,
+				),
 			},
 		};
 	}

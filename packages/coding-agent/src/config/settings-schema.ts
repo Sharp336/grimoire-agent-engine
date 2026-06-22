@@ -119,7 +119,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Agent",
 		"Git",
 	],
-	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
+	context: ["General", "Fast Context", "Compaction", "Rules (TTSR)", "Experimental"],
 	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Runtimes"],
@@ -1647,6 +1647,63 @@ export const SETTINGS_SCHEMA = {
 			group: "General",
 			label: "Auto-Promote Context",
 			description: "Promote to a larger-context model on context overflow instead of compacting",
+		},
+	},
+
+	// FastContext repository exploration
+	"fastContext.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "context",
+			group: "Fast Context",
+			label: "Enable FastContext",
+			description:
+				"Enable the `fast_context` read-only retrieval adapter. When on, the main agent and the `explore` subagent can call `fast_context` to get a ranked file shortlist (via the configured FastContext model, e.g. devin/swe-1-6-fast) for broad queries, then verify with `read`/`search`.",
+		},
+	},
+
+	"fastContext.baseUrl": {
+		type: "string",
+		default: "http://127.0.0.1:8080",
+		ui: {
+			tab: "context",
+			group: "Fast Context",
+			label: "FastContext Server URL",
+			description:
+				"Base URL for the locally served FastContext OpenAI-compatible chat completions endpoint (e.g. llama.cpp at http://127.0.0.1:8080). Only used when the FastContext Model is set to the local server.",
+			condition: "fastContextUsesLocalServer",
+		},
+	},
+
+	"fastContext.model": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "context",
+			group: "Fast Context",
+			label: "FastContext Model",
+			description:
+				"Model FastContext uses for query expansion. Pick a provider model (e.g. devin/swe-1-6-fast, zai/glm-5-turbo) to route through your configured provider credentials — no local server needed — or the local llama.cpp server. When unset and Devin is logged in, devin/swe-1-6-fast is used automatically.",
+			condition: "fastContextEnabled",
+			options: "runtime",
+		},
+	},
+
+	"fastContext.mode": {
+		type: "string",
+		default: "hint",
+		ui: {
+			tab: "context",
+			group: "Fast Context",
+			label: "FastContext Mode",
+			description:
+				"Default retrieval mode. Hint (default) expands the query into keywords/globs/grep patterns in one model turn, then runs native search (~2-3s). Agent runs the full multi-turn FastContext loop with Read/Glob/Grep (slower, more thorough).",
+			condition: "fastContextEnabled",
+			options: [
+				{ value: "hint", label: "Hint", description: "Fast: one turn → keywords/globs/grep (~2-3s)" },
+				{ value: "agent", label: "Agent", description: "Full multi-turn loop (slower, more thorough)" },
+			],
 		},
 	},
 
@@ -4664,6 +4721,13 @@ export type Personality = SettingValue<"personality">;
 // Typed Group Definitions
 // ═══════════════════════════════════════════════════════════════════════════
 
+export interface FastContextSettings {
+	enabled: boolean;
+	baseUrl: string | undefined;
+	model: string | undefined;
+	mode: "hint" | "agent";
+}
+
 export interface CompactionSettings {
 	enabled: boolean;
 	strategy: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
@@ -4818,6 +4882,7 @@ export interface CodexResetsSettings {
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
 	contextPromotion: ContextPromotionSettings;
+	fastContext: FastContextSettings;
 	retry: RetrySettings;
 	memories: MemoriesSettings;
 	branchSummary: BranchSummarySettings;
