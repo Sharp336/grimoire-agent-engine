@@ -167,11 +167,11 @@ If you don't want to run a local model, point FastContext at any registered prov
 
 ```bash
 omp config set fastContext.enabled true
-omp config set fastContext.model devin/swe-1-6-slow   # Devin/Windsurf Cascade (login: /login devin)
+omp config set fastContext.model devin/swe-1-6-fast   # Devin SWE-1.6 fast tier (login: /login devin) — 100% retrieval @ ~1.6s hint / ~3.3s agent, no local GPU
+# other devin tiers: devin/swe-1-6 (standard), devin/swe-1-6-slow (reasoning-heavy, ~34s hint)
 # or any provider model: zai/glm-5-turbo, openai-codex/gpt-5.5, pi/smol, ...
-```
 
-A provider-prefixed value (containing `/`) always selects the registry path; a bare id or blank keeps the local-endpoint behavior above. Both hint and agent modes are supported. Agent mode reuses one cascade id across all turns so the provider can thread the conversation. Note that reasoning models like `swe-1-6-slow` are slower per turn than a local 4B model but need no local hardware.
+A provider-prefixed value (containing `/`) always selects the registry path; a bare id or blank keeps the local-endpoint behavior above. Both hint and agent modes are supported. Agent mode reuses one cascade id across all turns so the provider can thread the conversation. The `devin/swe-1-6-fast` tier (Cerebras 950 tok/s, same intelligence as `swe-1-6`) is the fastest option — faster than even a local 4B model — while `swe-1-6-slow` is reasoning-heavy and much slower per turn.
 
 ## How it works
 
