@@ -219,9 +219,9 @@ describe("totalTokens field", () => {
 
 	describe.skipIf(!e2eApiKey("XAI_API_KEY"))("xAI", () => {
 		it(
-			"grok-3-fast - should return totalTokens equal to sum of components",
+			"grok-4.3 - should return totalTokens equal to sum of components",
 			async () => {
-				const llm = getBundledModel("xai", "grok-3-fast");
+				const llm = getBundledModel("xai", "grok-4.3");
 
 				console.log(`\nxAI / ${llm.id}:`);
 				const { first, second } = await testTotalTokensWithCache(llm, { apiKey: Bun.env.XAI_API_KEY });

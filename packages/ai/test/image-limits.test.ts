@@ -673,10 +673,10 @@ describe("Image Limits E2E Tests", () => {
 	});
 
 	// -------------------------------------------------------------------------
-	// xAI (grok-2-vision)
+	// xAI (grok-4.3)
 	// -------------------------------------------------------------------------
-	describe.skipIf(!e2eApiKey("XAI_API_KEY"))("xAI (grok-2-vision)", () => {
-		const model = getBundledModel("xai", "grok-2-vision");
+	describe.skipIf(!e2eApiKey("XAI_API_KEY"))("xAI (grok-4.3)", () => {
+		const model = getBundledModel("xai", "grok-4.3");
 
 		it("should accept a small number of images (5)", async () => {
 			const result = await testImageCount(model, 5, smallImage);
@@ -1078,7 +1078,7 @@ describe("Image Limits E2E Tests", () => {
 		it.skipIf(!e2eApiKey("XAI_API_KEY"))(
 			"xAI: max ~20MB images before rejection",
 			async () => {
-				const model = getBundledModel("xai", "grok-2-vision");
+				const model = getBundledModel("xai", "grok-4.3");
 				const image20mb = await getImageAtSize(20);
 				// Test progressively
 				const counts = [1, 2, 5, 10, 20];

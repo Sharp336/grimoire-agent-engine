@@ -564,7 +564,7 @@ Request shaping:
 
 Reasoning / thinking:
 
-- `supportsReasoningEffort` — accept `reasoning_effort`. Default: auto (off for Grok, Z.ai/Zhipu, and Xiaomi MiMo).
+- `supportsReasoningEffort` — accept `reasoning_effort`. Default: auto (off for Z.ai/Zhipu, and Xiaomi MiMo).
 - `supportsReasoningParams` — whether request shaping may send reasoning params at all. Default: auto (off for GitHub Copilot chat-completions).
 - `reasoningEffortMap` — partial map from internal effort levels (`minimal|low|medium|high|xhigh`) to provider-specific strings (e.g. DeepSeek maps `xhigh -> "max"`).
 - `thinkingFormat` — request shape for thinking: `"openai"` (`reasoning_effort`), `"openrouter"` (`reasoning: { effort }`), `"zai"` (`thinking: { type: "enabled" }`), `"qwen"` (top-level `enable_thinking`), or `"qwen-chat-template"` (`chat_template_kwargs.enable_thinking`). Default: `"openai"`.

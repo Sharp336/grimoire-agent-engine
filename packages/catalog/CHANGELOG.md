@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Scoped the dedicated xAI providers (`xai` API key + `xai-oauth` SuperGrok) to two Grok chat SKUs — `grok-4.3` and `grok-build-0.1` — and made `grok-build-0.1` the default model for both. The generator `filterModel` and the model-manager discovery wrappers apply the same allowlist, and `applyXAIOAuthCuration` is now authoritative, so an online `/v1/models` refresh can no longer re-introduce retired/curated-out Grok models. Grok served via other gateways (aimlapi, openrouter, github-copilot, vercel-ai-gateway, …) is untouched.
+
+### Fixed
+
+- Fixed the `xai` (API-key, chat-completions) path silently dropping `reasoning_effort` for every Grok model. Effort support now respects `isGrokReasoningEffortCapable`, so `grok-4.3` sends the selected effort (previously it always ran at the server default), while off-allowlist reasoners such as `grok-build-0.1` correctly omit the wire param — and now also drop their (non-functional) effort dial on the completions path, matching the Responses path.
+- Added `xai-oauth` to the `xai` known-host class so Grok wire-compat detection still applies when the SuperGrok provider is pointed at a custom (non-`api.x.ai`) base URL.
+
 ## [16.1.11] - 2026-06-21
 
 ### Fixed

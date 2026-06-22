@@ -70,6 +70,14 @@ export const isMimoModelIdOrName = memo((value: string): boolean => {
 });
 
 const GROK_EFFORT_CAPABLE_PREFIXES = ["grok-3-mini", "grok-4.20-multi-agent", "grok-4.3"] as const;
+const GROK_EFFORT_CAPABLE_DELIMITERS = new Set(["-", ".", ":", "_"]);
+
+function hasModelIdPrefix(value: string, prefix: string): boolean {
+	if (value === prefix) return true;
+	if (!value.startsWith(prefix)) return false;
+	const next = value[prefix.length];
+	return next !== undefined && GROK_EFFORT_CAPABLE_DELIMITERS.has(next);
+}
 
 /**
  * Grok SKUs that expose the wire `reasoning.effort` dial. Other Grok reasoners
@@ -79,7 +87,12 @@ const GROK_EFFORT_CAPABLE_PREFIXES = ["grok-3-mini", "grok-4.20-multi-agent", "g
 export const isGrokReasoningEffortCapable = memo((modelId: string): boolean => {
 	const bare = bareModelId(modelId).trim().toLowerCase();
 	if (!bare) return false;
-	return GROK_EFFORT_CAPABLE_PREFIXES.some(prefix => bare.startsWith(prefix));
+	return GROK_EFFORT_CAPABLE_PREFIXES.some(prefix => hasModelIdPrefix(bare, prefix));
+});
+
+/** Any Grok model id, across `provider/` and `x-ai/` namespaces (`grok-…`). */
+export const isGrokModelId = memo((modelId: string): boolean => {
+	return bareModelId(modelId).trim().toLowerCase().startsWith("grok-");
 });
 
 /**

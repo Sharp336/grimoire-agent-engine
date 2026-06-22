@@ -189,6 +189,51 @@ describe("xAI-OAuth Responses reasoning-effort suppression", () => {
 	});
 });
 
+describe("xAI completions reasoning-effort suppression (api-key path)", () => {
+	const grokCompletionsSpec = (
+		id: string,
+		overrides: Partial<ModelSpec<"openai-completions">> = {},
+	): ModelSpec<"openai-completions"> => ({
+		id,
+		name: id,
+		api: "openai-completions",
+		provider: "xai",
+		baseUrl: "https://api.x.ai/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 256_000,
+		maxTokens: 30_000,
+		...overrides,
+	});
+
+	it("sends reasoning_effort and keeps the dial for grok-4.3 (on the allowlist)", () => {
+		const compat = buildOpenAICompat(grokCompletionsSpec("grok-4.3"));
+		expect(compat.supportsReasoningEffort).toBe(true);
+		expect(compat.omitReasoningEffort).toBe(false);
+		expect(buildModel(grokCompletionsSpec("grok-4.3")).thinking?.efforts.length ?? 0).toBeGreaterThan(0);
+	});
+
+	it("omits reasoning_effort and the dial for off-allowlist grok-build-0.1", () => {
+		const compat = buildOpenAICompat(grokCompletionsSpec("grok-build-0.1"));
+		expect(compat.supportsReasoningEffort).toBe(false);
+		expect(compat.omitReasoningEffort).toBe(true);
+		expect(buildModel(grokCompletionsSpec("grok-build-0.1")).thinking).toBeUndefined();
+	});
+
+	it("lets explicit compat opt a custom Grok completions model back into the effort dial", () => {
+		const model = buildModel(
+			grokCompletionsSpec("grok-build-0.1", {
+				compat: { supportsReasoningEffort: true },
+			}),
+		);
+
+		expect(model.compat.supportsReasoningEffort).toBe(true);
+		expect(model.compat.omitReasoningEffort).toBe(false);
+		expect(model.thinking?.efforts.length ?? 0).toBeGreaterThan(0);
+	});
+});
+
 describe("openai-completions wire-quirk compat detection", () => {
 	it("derives wireModelIdMode from provider/host", () => {
 		expect(buildOpenAICompat(completionsSpec({ provider: "firepass" })).wireModelIdMode).toBe("firepass");

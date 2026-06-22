@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models";
 
 describe("catalog provider descriptors", () => {
@@ -18,6 +19,13 @@ describe("catalog provider descriptors", () => {
 		expect(DEFAULT_MODEL_PER_PROVIDER["minimax-code-cn"]).toBe("MiniMax-M3");
 		// Login-only tools have no default model.
 		expect(DEFAULT_MODEL_PER_PROVIDER).not.toHaveProperty("kagi");
+	});
+
+	test("dedicated xAI defaults resolve to bundled curated chat models", () => {
+		expect(DEFAULT_MODEL_PER_PROVIDER.xai).toBe("grok-build-0.1");
+		expect(DEFAULT_MODEL_PER_PROVIDER["xai-oauth"]).toBe("grok-build-0.1");
+		expect(getBundledModel("xai", DEFAULT_MODEL_PER_PROVIDER.xai)).toBeDefined();
+		expect(getBundledModel("xai-oauth", DEFAULT_MODEL_PER_PROVIDER["xai-oauth"])).toBeDefined();
 	});
 
 	test("every descriptor has a default model and a factory that preserves provider identity", () => {

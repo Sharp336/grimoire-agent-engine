@@ -121,7 +121,7 @@ describe("Token Statistics on Abort", () => {
 	});
 
 	describe.skipIf(!e2eApiKey("XAI_API_KEY"))("xAI Provider", () => {
-		const llm = getBundledModel("xai", "grok-3-fast");
+		const llm = getBundledModel("xai", "grok-4.3");
 
 		it(
 			"should include token stats when aborted mid-stream",

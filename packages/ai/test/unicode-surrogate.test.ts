@@ -586,7 +586,7 @@ describe("AI Providers Unicode Surrogate Pair Tests", () => {
 	});
 
 	describe.skipIf(!e2eApiKey("XAI_API_KEY"))("xAI Provider Unicode Handling", () => {
-		const llm = getBundledModel("xai", "grok-3");
+		const llm = getBundledModel("xai", "grok-4.3");
 
 		it(
 			"should handle emoji in tool results",

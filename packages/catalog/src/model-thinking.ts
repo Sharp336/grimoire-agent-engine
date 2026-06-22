@@ -24,6 +24,7 @@ import {
 	findThinkingVariantToken,
 	isDeepseekModelIdOrName,
 	isGlm52ReasoningEffortModelId,
+	isGrokModelId,
 	isMimoModelIdOrName,
 	isMinimaxM2FamilyModelId,
 	isMinimaxM3FamilyModelId,
@@ -149,7 +150,7 @@ export function resolveModelThinking<TApi extends Api>(
 	compat: CompatOf<TApi>,
 ): ThinkingConfig | undefined {
 	if (!spec.reasoning) return undefined;
-	if (omitsWireReasoningEffort(spec.api, compat)) return undefined;
+	if (omitsWireReasoningEffort(spec, compat)) return undefined;
 	if (spec.thinking && Array.isArray(spec.thinking.efforts) && spec.thinking.efforts.length > 0) {
 		return fillThinkingWireDefaults(spec, compat, spec.thinking);
 	}
@@ -233,20 +234,20 @@ export function deriveThinking<TApi extends Api>(spec: ModelSpec<TApi>, compat: 
 	return config;
 }
 
-/**
- * True when the model reasons natively but rejects the wire `reasoning.effort`
- * param. Scoped to openai-responses* because that's the only API surface where
- * `compat.supportsReasoningEffort: false` means "omit the field entirely"
- * (xAI Grok off the `isGrokReasoningEffortCapable` allowlist: grok-build,
- * grok-4.20-0309-reasoning). openai-completions keeps its thinking config even
- * without effort support — binary thinking formats (zai/qwen) drive reasoning
- * through other request fields.
- */
-function omitsWireReasoningEffort(api: Api, compat: CompatOf<Api>): boolean {
-	if (api !== "openai-responses" && api !== "openai-codex-responses" && api !== "azure-openai-responses") {
-		return false;
+/** True when a reasoning model should expose no user-selectable effort dial. */
+function omitsWireReasoningEffort<TApi extends Api>(spec: ModelSpec<TApi>, compat: CompatOf<TApi>): boolean {
+	if (
+		spec.api === "openai-responses" ||
+		spec.api === "openai-codex-responses" ||
+		spec.api === "azure-openai-responses"
+	) {
+		return (compat as ResolvedOpenAIResponsesCompat | undefined)?.supportsReasoningEffort === false;
 	}
-	return (compat as ResolvedOpenAIResponsesCompat | undefined)?.supportsReasoningEffort === false;
+	if (spec.api === "openai-completions" || spec.api === "openrouter") {
+		if (!isGrokModelId(spec.id)) return false;
+		return (compat as ResolvedOpenAICompat | undefined)?.supportsReasoningEffort === false;
+	}
+	return false;
 }
 
 function inferEffortMap<TApi extends Api>(

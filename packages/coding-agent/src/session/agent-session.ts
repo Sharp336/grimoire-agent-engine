@@ -9343,7 +9343,7 @@ export class AgentSession {
 						// Honor the user's /model thinking selection (incl. `off`) on
 						// the manual `/compact` path. Clamped per-model inside compact()
 						// via resolveCompactionEffort so unsupported-effort models
-						// (xai-oauth/grok-build) don't trip requireSupportedEffort.
+						// (xai-oauth/grok-build-0.1) don't trip requireSupportedEffort.
 						thinkingLevel: this.thinkingLevel,
 					},
 				);

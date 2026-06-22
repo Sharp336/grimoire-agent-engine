@@ -336,7 +336,13 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 		// OpenAI's reasoning-API surface.
 		supportsDeveloperRole: isOpenAIHost || isAzureHost,
 		supportsMultipleSystemMessages: supportsMultipleSystemMessagesDefault,
-		supportsReasoningEffort: !isGrok && !isXiaomiMimo && (!(isZai || isZhipu) || supportsZaiReasoningEffort),
+		// Only effort-capable Grok SKUs accept reasoning_effort; off-allowlist Grok
+		// (grok-build*, grok-4.20-0309-*, grok-4*) rejects it. Mirrors the xai-oauth
+		// Responses gate below so the API-key path doesn't silently drop effort.
+		supportsReasoningEffort:
+			(!isGrok || isGrokReasoningEffortCapable(spec.id)) &&
+			!isXiaomiMimo &&
+			(!(isZai || isZhipu) || supportsZaiReasoningEffort),
 		// GitHub Copilot's chat-completions endpoint rejects reasoning params wholesale.
 		supportsReasoningParams: provider !== "github-copilot",
 		reasoningEffortMap: isMimoReasoningEffortModel ? MIMO_REASONING_EFFORT_MAP : {},

@@ -360,17 +360,17 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "xai",
-		defaultModel: "grok-4-fast-non-reasoning",
+		defaultModel: "grok-build-0.1",
 		envVars: ["XAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => xaiModelManagerOptions(config),
 	},
 	{
 		id: "xai-oauth",
-		defaultModel: "grok-4.3",
+		defaultModel: "grok-build-0.1",
 		envVars: ["XAI_OAUTH_TOKEN", "XAI_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => xaiOAuthModelManagerOptions(config),
 		catalogDiscovery: {
-			label: "xAI Grok OAuth (SuperGrok)",
+			label: "xAI Grok OAuth (SuperGrok or X Premium+)",
 			oauthProvider: "xai-oauth",
 		},
 	},

@@ -147,7 +147,7 @@ describe("Tool Call Without Result Tests", () => {
 	});
 
 	describe.skipIf(!e2eApiKey("XAI_API_KEY"))("xAI Provider", () => {
-		const model = getBundledModel("xai", "grok-3-fast");
+		const model = getBundledModel("xai", "grok-4.3");
 
 		it(
 			"should filter out tool calls without corresponding tool results",

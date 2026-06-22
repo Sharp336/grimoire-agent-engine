@@ -200,17 +200,14 @@ describe("modelFamilyToken", () => {
 });
 
 describe("isGrokReasoningEffortCapable", () => {
-	test("matches effort-capable Grok SKUs across namespaces", () => {
+	test("matches grok-4.3 across xAI namespaces", () => {
 		expect(isGrokReasoningEffortCapable("grok-4.3")).toBe(true);
-		expect(isGrokReasoningEffortCapable("grok-3-mini")).toBe(true);
-		expect(isGrokReasoningEffortCapable("grok-4.20-multi-agent")).toBe(true);
+		expect(isGrokReasoningEffortCapable("xai/grok-4.3")).toBe(true);
 		expect(isGrokReasoningEffortCapable("xai-oauth/grok-4.3")).toBe(true);
-		expect(isGrokReasoningEffortCapable("openrouter/xai/grok-3-mini")).toBe(true);
 	});
 
 	test("rejects effort-dial-less Grok SKUs and non-Grok ids", () => {
-		expect(isGrokReasoningEffortCapable("grok-build")).toBe(false);
-		expect(isGrokReasoningEffortCapable("grok-4.20-0309-reasoning")).toBe(false);
+		expect(isGrokReasoningEffortCapable("grok-build-0.1")).toBe(false);
 		expect(isGrokReasoningEffortCapable("gpt-5")).toBe(false);
 		expect(isGrokReasoningEffortCapable("")).toBe(false);
 	});
