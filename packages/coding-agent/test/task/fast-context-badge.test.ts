@@ -3,6 +3,7 @@ import type { RenderResultOptions } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { getThemeByName, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { aggregateFastContext, taskToolRenderer } from "@oh-my-pi/pi-coding-agent/task/render";
+import { subprocessToolRegistry } from "@oh-my-pi/pi-coding-agent/task/subprocess-tool-registry";
 import type { AgentProgress, SingleResult, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { FastContextToolDetails } from "@oh-my-pi/pi-coding-agent/tools/fast-context";
 
@@ -11,16 +12,14 @@ function fcCall(overrides: Partial<FastContextToolDetails> = {}): FastContextToo
 		model: "devin/swe-1-6-fast",
 		mode: "hint",
 		turns: 1,
+		toolCalls: 0,
 		citations: ["code/Auth.ts:1-10", "code/Login.ts:5-20"],
+		keywords: ["auth", "login"],
 		...overrides,
 	};
 }
 
-function rendered(
-	details: TaskToolDetails,
-	theme: Theme,
-	isPartial: boolean,
-): string {
+function rendered(details: TaskToolDetails, theme: Theme, isPartial: boolean): string {
 	const options: RenderResultOptions = { expanded: true, isPartial, spinnerFrame: 0 };
 	const component = taskToolRenderer.renderResult(
 		{ content: [{ type: "text", text: isPartial ? "running" : "done" }], details },
@@ -148,5 +147,37 @@ describe("aggregateFastContext", () => {
 	it("returns undefined when there are no calls (common path stays untouched)", () => {
 		expect(aggregateFastContext(undefined)).toBeUndefined();
 		expect(aggregateFastContext([])).toBeUndefined();
+	});
+});
+
+describe("fast_context subprocess capture", () => {
+	it("registers a handler that extracts FastContextToolDetails from a tool-end event", () => {
+		const handler = subprocessToolRegistry.getHandler("fast_context");
+		expect(handler).toBeDefined();
+		expect(handler?.extractData).toBeTypeOf("function");
+		const extracted = handler!.extractData!({
+			toolName: "fast_context",
+			toolCallId: "c1",
+			result: {
+				content: [],
+				details: { model: "devin/swe-1-6-fast", mode: "hint", turns: 1, citations: ["code/A.ts:1-2"] },
+			},
+		});
+		expect(extracted).toMatchObject({ model: "devin/swe-1-6-fast", citations: ["code/A.ts:1-2"] });
+	});
+
+	it("returns undefined for errored or malformed results", () => {
+		const handler = subprocessToolRegistry.getHandler("fast_context")!;
+		expect(
+			handler.extractData!({
+				toolName: "fast_context",
+				toolCallId: "c",
+				isError: true,
+				result: { content: [], details: { model: "x", citations: [] } },
+			}),
+		).toBeUndefined();
+		expect(
+			handler.extractData!({ toolName: "fast_context", toolCallId: "c", result: { content: [] } }),
+		).toBeUndefined();
 	});
 });

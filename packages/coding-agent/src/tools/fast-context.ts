@@ -797,7 +797,7 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		return untilAborted(signal, async () => {
 			const apiBaseUrl = normalizeFastContextBaseUrl(this.#session.settings.get("fastContext.baseUrl"));
 			const backend = await this.#resolveBackend(apiBaseUrl, signal);
-			const mode = params.mode ?? "hint";
+			const mode = params.mode ?? this.#session.settings.get("fastContext.mode") ?? "hint";
 			return mode === "hint"
 				? this.#executeHint(backend, params, signal)
 				: this.#executeAgent(backend, params, signal);

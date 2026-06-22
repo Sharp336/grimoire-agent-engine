@@ -143,6 +143,7 @@ All settings appear in `/settings` under **Context → Fast Context**. The `mode
 |---|---|---|
 | `fastContext.enabled` | `false` | Toggle the FastContext adapter on/off. |
 | `fastContext.model` | *(auto)* | Model for query expansion. Pick a provider model (e.g. `devin/swe-1-6-fast`, `zai/glm-5-turbo`) to route through your provider credentials — no local server needed — or **Local llama.cpp server**. When unset and Devin is logged in, `devin/swe-1-6-fast` is used automatically (a `local` sentinel or bare id forces the local server). |
+| `fastContext.mode` | `hint` | Retrieval mode: **Hint** (default — one turn → native search, ~2-3s) or **Agent** (full multi-turn Read/Glob/Grep loop, slower and more thorough). Set in `/settings` → Context → Fast Context. |
 | `fastContext.baseUrl` | `http://127.0.0.1:8080` | Base URL for the local OpenAI-compatible chat completions endpoint. Only shown when the model is set to the local server. |
 
 ### YAML config
@@ -151,6 +152,7 @@ All settings appear in `/settings` under **Context → Fast Context**. The `mode
 fastContext:
   enabled: true
   model: ""  # auto: devin/swe-1-6-fast if Devin is logged in, else local server
+  mode: hint  # hint (fast, default) or agent (full multi-turn loop)
   baseUrl: http://127.0.0.1:8080  # only used by the local server backend
 ```
 

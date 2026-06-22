@@ -1690,6 +1690,23 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"fastContext.mode": {
+		type: "string",
+		default: "hint",
+		ui: {
+			tab: "context",
+			group: "Fast Context",
+			label: "FastContext Mode",
+			description:
+				"Default retrieval mode. Hint (default) expands the query into keywords/globs/grep patterns in one model turn, then runs native search (~2-3s). Agent runs the full multi-turn FastContext loop with Read/Glob/Grep (slower, more thorough).",
+			condition: "fastContextEnabled",
+			options: [
+				{ value: "hint", label: "Hint", description: "Fast: one turn → keywords/globs/grep (~2-3s)" },
+				{ value: "agent", label: "Agent", description: "Full multi-turn loop (slower, more thorough)" },
+			],
+		},
+	},
+
 	// Compaction
 	"compaction.enabled": {
 		type: "boolean",
@@ -4708,6 +4725,7 @@ export interface FastContextSettings {
 	enabled: boolean;
 	baseUrl: string | undefined;
 	model: string | undefined;
+	mode: "hint" | "agent";
 }
 
 export interface CompactionSettings {

@@ -8,6 +8,8 @@
 
 - FastContext usage is now visible in the TUI. When a spawned subagent (e.g. the bundled `explore`) calls `fast_context`, the task-tool card shows a compact badge line (`{icon.fast} fast_context · {model} · {calls} call(s) · {files} files`) in both the live-streaming and rebuilt-transcript views, so you can see exploration fired without drilling into the subagent transcript. The badge is aggregated from the structured `FastContextToolDetails` (model + citation count), not parsed from result text.
 
+- Added a `fastContext.mode` setting (Hint / Agent) under Context → Fast Context, selectable in `/settings`. Controls the default retrieval mode the explore subagent uses: Hint (default, ~2-3s — one model turn expands the query into keywords/globs/grep, then native search runs) or Agent (the full multi-turn FastContext Read/Glob/Grep loop — slower, more thorough). The `fast_context` tool defaults to it and the explore subagent honors it.
+
 ### Changed
 
 - FastContext model selection is now a picker instead of a free-text field. `fastContext.model` renders as a dropdown listing provider models from your logged-in providers (e.g. `devin/swe-1-6-fast`, `zai/glm-5-turbo`) plus a "Local llama.cpp server" option; a `local` sentinel explicitly selects the local server and auto-discovers its model via `/v1/models`.
