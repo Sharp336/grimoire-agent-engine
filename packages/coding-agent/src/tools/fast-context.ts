@@ -1625,54 +1625,80 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		return results.flat();
 	}
 	async #resolveBackend(apiBaseUrl: string, signal?: AbortSignal): Promise<FastContextBackend> {
-		const configured = this.#session.settings.get("fastContext.model")?.trim();
+		const raw = this.#session.settings.get("fastContext.model")?.trim() || "";
+		// "local" sentinel = explicit local server (auto-discovers the model via
+		// /v1/models). Anything else containing "/" is a provider-prefixed id that
+		// routes through the registry.
+		const configured = raw === "local" ? undefined : raw || undefined;
 
-		// Registry backend: a provider-prefixed model id (e.g. devin/swe-1-6-slow,
-		// zai/glm-5-turbo) routes through the model registry via completeSimple,
-		// removing the need to host a local OpenAI-compatible server.
+		// Registry backend: an explicit provider-prefixed model id routes through
+		// the model registry via completeSimple, removing the need for a local
+		// OpenAI-compatible server.
 		if (configured?.includes("/")) {
-			const modelRegistry = this.#session.modelRegistry;
-			if (!modelRegistry) {
-				// No registry available — fall back to the local endpoint (some
-				// OpenAI-compatible servers accept arbitrary model strings).
-				return this.#resolveLocalBackend(apiBaseUrl, configured, signal);
-			}
-			const resolveModel = (): Model<Api> | undefined => {
-				const available = modelRegistry.getAvailable();
-				return resolveModelFromString(
-					expandRoleAlias(configured, this.#session.settings),
-					available,
-					getModelMatchPreferences(this.#session.settings),
-					modelRegistry,
-				);
-			};
-			let model = resolveModel();
-			if (!model) {
-				// Dynamic providers (e.g. Devin) populate getAvailable() via
-				// background discovery that may not have completed yet — refresh
-				// then retry once.
-				await modelRegistry.refreshProvider(configured.split("/")[0]!, "online-if-uncached");
-				model = resolveModel();
-			}
-			if (!model) {
+			const backend = await this.#resolveRegistryBackend(configured);
+			if (!backend) {
 				throw new Error(
 					`FastContext model "${configured}" could not be resolved against available registered ` +
 						`models. Check provider credentials and model id, or set fastContext.model to a bare ` +
 						`id to use the local OpenAI-compatible endpoint.`,
 				);
 			}
-			const apiKey = await modelRegistry.getApiKey(model);
-			if (!apiKey) {
-				throw new Error(
-					`FastContext model "${configured}" resolved to ${model.provider}/${model.id} but no API ` +
-						`key is available. Configure credentials for the ${model.provider} provider.`,
-				);
-			}
-			return { kind: "registry", model, apiKey, modelId: `${model.provider}/${model.id}` };
+			return backend;
 		}
 
-		// Local backend: bare model id or unset → existing /chat/completions path.
+		// Auto-default: no explicit model is set. When Devin credentials are
+		// present, prefer devin/swe-1-6-fast (fast, accurate, no local server
+		// needed) and persist the resolved id so the model picker and the
+		// baseUrl-visibility condition reflect the effective backend. Any explicit
+		// choice (including the "local" sentinel) is preserved. Falls back to the
+		// local endpoint if the default model can't resolve.
+		if (configured === undefined && this.#session.modelRegistry?.authStorage?.hasAuth("devin")) {
+			const backend = await this.#resolveRegistryBackend("devin/swe-1-6-fast");
+			if (backend) {
+				try {
+					this.#session.settings.set("fastContext.model", backend.modelId);
+				} catch {
+					// Best-effort persist: the effective default still works for this call.
+				}
+				return backend;
+			}
+		}
+
+		// Local backend: bare model id, "local" sentinel, or unset → /chat/completions.
 		return this.#resolveLocalBackend(apiBaseUrl, configured, signal);
+	}
+
+	/**
+	 * Resolve a provider-prefixed model id through the registry. Returns
+	 * `undefined` (rather than throwing) when the model can't be resolved or has
+	 * no API key, so callers can choose between surfacing an error (an explicit
+	 * model choice) and falling back to the local endpoint (the auto-default).
+	 */
+	async #resolveRegistryBackend(
+		modelId: string,
+	): Promise<Extract<FastContextBackend, { kind: "registry" }> | undefined> {
+		const modelRegistry = this.#session.modelRegistry;
+		if (!modelRegistry) return undefined;
+		const resolveModel = (): Model<Api> | undefined => {
+			const available = modelRegistry.getAvailable();
+			return resolveModelFromString(
+				expandRoleAlias(modelId, this.#session.settings),
+				available,
+				getModelMatchPreferences(this.#session.settings),
+				modelRegistry,
+			);
+		};
+		let model = resolveModel();
+		if (!model) {
+			// Dynamic providers (e.g. Devin) populate getAvailable() via background
+			// discovery that may not have completed yet — refresh then retry once.
+			await modelRegistry.refreshProvider(modelId.split("/")[0]!, "online-if-uncached");
+			model = resolveModel();
+		}
+		if (!model) return undefined;
+		const apiKey = await modelRegistry.getApiKey(model);
+		if (!apiKey) return undefined;
+		return { kind: "registry", model, apiKey, modelId: `${model.provider}/${model.id}` };
 	}
 
 	async #resolveLocalBackend(

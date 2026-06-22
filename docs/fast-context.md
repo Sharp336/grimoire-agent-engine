@@ -124,6 +124,8 @@ omp config set fastContext.enabled true
 
 Or interactively: `/settings` → **Context** tab → **Fast Context** group → toggle **Enable FastContext**.
 
+If you are logged in to **Devin**, you can skip the server and model setup entirely — FastContext automatically uses `devin/swe-1-6-fast` (no local llama.cpp server needed). Otherwise, continue with the local server setup below, or pick a provider model from the **FastContext Model** dropdown in `/settings`.
+
 ### Step 5: Verify it works
 
 Start an omp session and ask the explore subagent to find something:
@@ -135,21 +137,21 @@ If FastContext is working, the explore subagent will call `fast_context` first a
 
 ## Settings
 
-All settings appear in `/settings` under **Context → Fast Context**. The `baseUrl` and `model` fields are hidden until `enabled` is toggled on.
+All settings appear in `/settings` under **Context → Fast Context**. The `model` and `baseUrl` fields are hidden until `enabled` is toggled on.
 
 | Setting | Default | Description |
 |---|---|---|
 | `fastContext.enabled` | `false` | Toggle the FastContext adapter on/off. |
-| `fastContext.baseUrl` | `http://127.0.0.1:8080` | Base URL for the local OpenAI-compatible chat completions endpoint. |
-| `fastContext.model` | *(auto-detect)* | Optional model id. A provider-prefixed id (e.g. `devin/swe-1-6-slow`, `zai/glm-5-turbo`) routes through the model registry using your credentials — no local server needed. A bare id or blank uses the local endpoint's `/v1/models`. |
+| `fastContext.model` | *(auto)* | Model for query expansion. Pick a provider model (e.g. `devin/swe-1-6-fast`, `zai/glm-5-turbo`) to route through your provider credentials — no local server needed — or **Local llama.cpp server**. When unset and Devin is logged in, `devin/swe-1-6-fast` is used automatically (a `local` sentinel or bare id forces the local server). |
+| `fastContext.baseUrl` | `http://127.0.0.1:8080` | Base URL for the local OpenAI-compatible chat completions endpoint. Only shown when the model is set to the local server. |
 
 ### YAML config
 
 ```yaml
 fastContext:
   enabled: true
-  baseUrl: http://127.0.0.1:8080
-  model: ""  # auto-detect
+  model: ""  # auto: devin/swe-1-6-fast if Devin is logged in, else local server
+  baseUrl: http://127.0.0.1:8080  # only used by the local server backend
 ```
 
 ### Using LM Studio or Ollama instead of llama.cpp

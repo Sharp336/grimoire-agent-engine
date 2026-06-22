@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- FastContext now auto-selects `devin/swe-1-6-fast` when no model is explicitly set and Devin credentials are present, so enabling FastContext works with zero configuration for Devin users (no local llama.cpp server required). The resolved default is persisted on first use so the model picker and the server-URL field reflect the effective backend.
+
+### Changed
+
+- FastContext model selection is now a picker instead of a free-text field. `fastContext.model` renders as a dropdown listing provider models from your logged-in providers (e.g. `devin/swe-1-6-fast`, `zai/glm-5-turbo`) plus a "Local llama.cpp server" option; a `local` sentinel explicitly selects the local server and auto-discovers its model via `/v1/models`.
+- The `fastContext.baseUrl` (local server URL) field is now hidden whenever a provider model is in use — there is no reason to configure a local OpenAI-compatible endpoint when FastContext routes through a provider. It only appears for the local-server backend (the "Local llama.cpp server" picker choice, a bare model id, or an unset model with no logged-in provider default).
+
 ## [16.1.14] - 2026-06-22
 
 ### Added

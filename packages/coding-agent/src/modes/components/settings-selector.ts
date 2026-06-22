@@ -266,6 +266,8 @@ export interface SettingsRuntimeContext {
 	imageBudget?: ImageBudget;
 	/** Schedules a re-render after async preview work completes. */
 	requestRender?: () => void;
+	/** FastContext model picker options: authed provider models + a local-server sentinel. */
+	availableFastContextModels?: ReadonlyArray<SelectItem>;
 }
 
 /** Status line settings subset for preview */
@@ -749,6 +751,18 @@ export class SettingsSelectorComponent implements Component {
 		if (path === "compaction.thresholdTokens" && (rawValue === "-1" || rawValue === "")) {
 			return "default";
 		}
+		if (path === "fastContext.model") {
+			const options = this.context.availableFastContextModels ?? [];
+			if (rawValue) {
+				return (
+					options.find(o => o.value === rawValue)?.label ??
+					(rawValue === "local" ? "Local llama.cpp server" : rawValue)
+				);
+			}
+			// Unset: surface the effective default (first option — devin/swe-1-6-fast
+			// when Devin is logged in, else the local server).
+			return options[0]?.label ?? "Local llama.cpp server";
+		}
 		return rawValue;
 	}
 
@@ -761,6 +775,7 @@ export class SettingsSelectorComponent implements Component {
 		done: (value?: string) => void,
 	): Container {
 		let options = def.options;
+		let selectedValue = currentValue;
 
 		// Special case: inject runtime options for thinking level
 		if (def.path === "defaultThinkingLevel") {
@@ -772,6 +787,15 @@ export class SettingsSelectorComponent implements Component {
 			});
 		} else if (def.path === "theme.dark" || def.path === "theme.light") {
 			options = this.context.availableThemes.map(t => ({ value: t, label: t }));
+		} else if (def.path === "fastContext.model") {
+			// Runtime-injected picker: authed provider models (from the registry)
+			// plus a "Local llama.cpp server" sentinel that clears the provider
+			// routing. The effective current value is the explicit choice, else the
+			// recommended default (first option — devin/swe-1-6-fast when Devin is
+			// logged in), else the local sentinel.
+			options = this.context.availableFastContextModels ?? [{ value: "local", label: "Local llama.cpp server" }];
+			const raw = (settings.get("fastContext.model") || "").trim();
+			selectedValue = raw && options.some(o => o.value === raw) ? raw : (options[0]?.value ?? "local");
 		}
 
 		// Preview handlers
@@ -835,7 +859,7 @@ export class SettingsSelectorComponent implements Component {
 			def.label,
 			def.description,
 			options,
-			currentValue,
+			selectedValue,
 			value => {
 				this.#setSettingValue(def.path, value);
 				this.callbacks.onChange(def.path, value);

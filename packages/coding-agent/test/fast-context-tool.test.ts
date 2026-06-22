@@ -608,4 +608,146 @@ describe("FastContext registry backend", () => {
 			await temp.remove();
 		}
 	});
+
+	it("treats the 'local' sentinel as the local server endpoint, not the registry", async () => {
+		const temp = TempDir.createSync("omp-fc-local-sentinel-");
+		try {
+			const cwd = path.resolve(temp.path());
+			await Bun.write(path.join(cwd, "y.ts"), "export const y = 2;\n");
+			let completeCalls = 0;
+			let chatCalls = 0;
+			const fetchMock = async (url: string): Promise<Response> => {
+				if (url.endsWith("/models")) {
+					return Response.json({ data: [{ id: "FastContext-1.0-4B-RL-Q4_K_M" }] });
+				}
+				if (url.endsWith("/chat/completions")) {
+					chatCalls++;
+					return Response.json({
+						choices: [
+							{
+								message: {
+									role: "assistant",
+									content: `<final_answer>\n${path.join(cwd, "y.ts")}:1-1\n</final_answer>`,
+								},
+							},
+						],
+					});
+				}
+				return new Response("not found", { status: 404 });
+			};
+			const completeFn = (async () => {
+				completeCalls++;
+				return fcFakeAssistantMessage([]);
+			}) as unknown as typeof completeSimple;
+			const session = createSession(cwd, {
+				"fastContext.enabled": true,
+				"fastContext.model": "local",
+			});
+			// Devin IS logged in — the sentinel must still override the auto-default.
+			session.modelRegistry = {
+				getAvailable: () => [],
+				getApiKey: async () => undefined,
+				refreshProvider: async () => {},
+				authStorage: { hasAuth: () => true },
+			} as unknown as ToolSession["modelRegistry"];
+			const tool = new FastContextTool(session, { fetch: fetchMock, completeFn });
+
+			await tool.execute("call", { query: "find y", mode: "agent", max_turns: 1 });
+
+			expect(completeCalls).toBe(0);
+			expect(chatCalls).toBeGreaterThanOrEqual(1);
+		} finally {
+			await temp.remove();
+		}
+	});
+
+	it("auto-defaults to devin/swe-1-6-fast when unset and Devin is logged in, and persists it", async () => {
+		const temp = TempDir.createSync("omp-fc-autodefault-");
+		try {
+			const cwd = path.resolve(temp.path());
+			const targetPath = path.join(cwd, "src", "login.ts");
+			await Bun.write(targetPath, "export function login() {}\n");
+			let fetchCalled = false;
+			const fetchMock = async (): Promise<Response> => {
+				fetchCalled = true;
+				return new Response("local endpoint should not be hit", { status: 500 });
+			};
+			const completeFn = (async () =>
+				fcFakeAssistantMessage([
+					{ type: "text", text: `Found it.\n\n<final_answer>\n${targetPath}:1-1\n</final_answer>` },
+				])) as unknown as typeof completeSimple;
+			const session = createSession(cwd, { "fastContext.enabled": true });
+			const fastModel = {
+				...fcFakeDevinModel(),
+				id: "swe-1-6-fast",
+				name: "SWE 1.6 fast",
+			} as unknown as Model<Api>;
+			session.modelRegistry = {
+				getAvailable: () => [fastModel],
+				getApiKey: async () => "devin-session-token$fake",
+				refreshProvider: async () => {},
+				authStorage: { hasAuth: (p: string) => p === "devin" },
+			} as unknown as ToolSession["modelRegistry"];
+			const tool = new FastContextTool(session, { fetch: fetchMock, completeFn });
+
+			const result = await tool.execute("call", { query: "where is login", mode: "agent", max_turns: 1 });
+
+			expect(fetchCalled).toBe(false);
+			expect(result.details?.baseUrl).toBe("registry");
+			expect(result.details?.model).toBe("devin/swe-1-6-fast");
+			// The effective default is persisted so the UI condition + picker stay in sync.
+			expect(session.settings.get("fastContext.model")).toBe("devin/swe-1-6-fast");
+		} finally {
+			await temp.remove();
+		}
+	});
+
+	it("does not auto-default when Devin is not logged in (keeps the local endpoint, no persist)", async () => {
+		const temp = TempDir.createSync("omp-fc-no-autodefault-");
+		try {
+			const cwd = path.resolve(temp.path());
+			await Bun.write(path.join(cwd, "z.ts"), "export const z = 3;\n");
+			let chatCalls = 0;
+			let completeCalls = 0;
+			const fetchMock = async (url: string): Promise<Response> => {
+				if (url.endsWith("/models")) {
+					return Response.json({ data: [{ id: "qwen-test" }] });
+				}
+				if (url.endsWith("/chat/completions")) {
+					chatCalls++;
+					return Response.json({
+						choices: [
+							{
+								message: {
+									role: "assistant",
+									content: `<final_answer>\n${path.join(cwd, "z.ts")}:1-1\n</final_answer>`,
+								},
+							},
+						],
+					});
+				}
+				return new Response("not found", { status: 404 });
+			};
+			const completeFn = (async () => {
+				completeCalls++;
+				return fcFakeAssistantMessage([]);
+			}) as unknown as typeof completeSimple;
+			const session = createSession(cwd, { "fastContext.enabled": true });
+			session.modelRegistry = {
+				getAvailable: () => [],
+				getApiKey: async () => undefined,
+				refreshProvider: async () => {},
+				authStorage: { hasAuth: () => false },
+			} as unknown as ToolSession["modelRegistry"];
+			const tool = new FastContextTool(session, { fetch: fetchMock, completeFn });
+
+			await tool.execute("call", { query: "find z", mode: "agent", max_turns: 1 });
+
+			expect(completeCalls).toBe(0);
+			expect(chatCalls).toBeGreaterThanOrEqual(1);
+			expect(session.settings.get("fastContext.model")).toBeUndefined();
+		} finally {
+			await temp.remove();
+		}
+	});
 });
