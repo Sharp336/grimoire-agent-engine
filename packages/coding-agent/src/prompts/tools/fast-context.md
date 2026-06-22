@@ -1,3 +1,5 @@
+Call this FIRST for any codebase-retrieval question (where is / find / list / is there X, dead code, unused refs) — before `search`/`find`/`read`/`bash` or spawning subagents. Returns a ranked file shortlist in seconds, then `read` the top hits.
+
 Delegates repository exploration to a local FastContext model.
 
 Two modes:
