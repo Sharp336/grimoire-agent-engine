@@ -28,6 +28,9 @@
 ### Removed
 
 - Removed the `readHashLines` setting (the "Hash Lines" toggle under Files → Reading). Hashline read/search anchors (`[PATH#TAG]` snapshot headers plus `LINE:content`) are now driven solely by `edit.mode === "hashline"`: the toggle was redundant when off (anchors are already suppressed for non-hashline edit modes) and a footgun when on (turning it off left the default hashline edit tool with no addressable anchors, since `read` then skips recording the snapshot tag). Existing configs are migrated automatically by dropping the stale key.
+### Added
+
+- FastContext can now route its LLM calls through any registered model provider instead of a locally-hosted OpenAI-compatible server. Set `fastContext.model` to a provider-prefixed id (e.g. `devin/swe-1-6-slow`, `zai/glm-5-turbo`, `pi/smol`) and FastContext resolves it through the model registry using your configured provider credentials — no local llama.cpp instance required. A bare id or blank keeps the existing local `/chat/completions` path. Both hint and agent modes route through the same backend dispatch; verified end-to-end with `devin/swe-1-6-slow` (free account).
 
 ## [16.1.12] - 2026-06-21
 

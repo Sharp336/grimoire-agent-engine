@@ -1684,7 +1684,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Fast Context",
 			label: "FastContext Model",
 			description:
-				"Optional model id for FastContext. Leave blank to use the first model returned by the local endpoint's /v1/models response.",
+				"Model for FastContext. A provider-prefixed id (e.g. devin/swe-1-6-slow, zai/glm-5-turbo, pi/smol) routes FastContext through the model registry using your configured provider credentials — no local server needed. A bare id (e.g. qwen2.5-coder) or blank uses the local OpenAI-compatible endpoint's /v1/models.",
 			condition: "fastContextEnabled",
 		},
 	},

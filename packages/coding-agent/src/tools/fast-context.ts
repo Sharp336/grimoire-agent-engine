@@ -3,10 +3,13 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
+import type { Api, AssistantMessage, Context, Message, Model, TextContent, Tool, ToolCall } from "@oh-my-pi/pi-ai";
+import { completeSimple } from "@oh-my-pi/pi-ai";
 import type { GrepMatch } from "@oh-my-pi/pi-natives";
 import { GrepOutputMode, glob, grep } from "@oh-my-pi/pi-natives";
 import { prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
+import { expandRoleAlias, getModelMatchPreferences, resolveModelFromString } from "../config/model-resolver";
 import fastContextDescription from "../prompts/tools/fast-context.md" with { type: "text" };
 import citationRetryPrompt from "../prompts/tools/fast-context-citation-retry.md" with { type: "text" };
 import finalTurnPrompt from "../prompts/tools/fast-context-final.md" with { type: "text" };
@@ -34,6 +37,22 @@ const fastContextSchema = type({
 });
 
 export type FastContextToolInput = typeof fastContextSchema.infer;
+/**
+ * Resolved LLM backend for a FastContext invocation.
+ *
+ * - `local`: raw OpenAI-compatible `/chat/completions` endpoint (e.g. llama.cpp).
+ *   `model` is the bare model id sent in the request body.
+ * - `registry`: a registered provider model (Devin, z.ai, ...) resolved through
+ *   the model registry and called via `completeSimple`. `modelId` is the
+ *   provider-prefixed display string (`${provider}/${id}`) used for diagnostics.
+ *
+ * The switch is `fastContext.model`: a value containing `/` (e.g.
+ * `devin/swe-1-6-slow`) selects the registry backend; a bare id or unset value
+ * keeps the existing local endpoint path.
+ */
+type FastContextBackend =
+	| { kind: "local"; url: string; model: string }
+	| { kind: "registry"; model: Model<Api>; apiKey: string; modelId: string };
 
 type FetchFunction = (input: string, init?: RequestInit) => Promise<Response>;
 type ChatRole = "system" | "user" | "assistant" | "tool";
@@ -41,6 +60,8 @@ type FastContextToolName = "Read" | "Glob" | "Grep";
 
 interface FastContextOptions {
 	fetch?: FetchFunction;
+	/** Registry-backend completion function. Defaults to `completeSimple`; tests inject a fake. */
+	completeFn?: typeof completeSimple;
 }
 
 interface ChatMessage {
@@ -629,6 +650,118 @@ async function buildWorkspaceListing(cwd: string, signal?: AbortSignal): Promise
 	}
 }
 
+/**
+ * Convert FastContext `ChatMessage[]` to omp `Context` fields for the registry
+ * backend. `system` messages are collected into `Context.systemPrompt` (Devin
+ * consumes it as the request `prompt` field); `assistant` messages with
+ * `tool_calls` become ToolCall content blocks (arguments parsed from JSON
+ * string to object); `tool` messages become `ToolResultMessage` with `toolName`
+ * resolved from the matching assistant tool call. Timestamps are synthesized —
+ * history-replay paths only read role + content.
+ */
+function fcMessagesToContext(messages: ChatMessage[]): { systemPrompt?: string[]; messages: Message[] } {
+	const systemSegments: string[] = [];
+	const toolNameById = new Map<string, string>();
+	for (const msg of messages) {
+		if (msg.role === "assistant" && msg.tool_calls) {
+			for (const call of msg.tool_calls) {
+				if (call.id && call.function?.name) toolNameById.set(call.id, call.function.name);
+			}
+		}
+	}
+	const now = Date.now();
+	const out: Message[] = [];
+	for (const msg of messages) {
+		if (msg.role === "system") {
+			if (msg.content) systemSegments.push(msg.content);
+			continue;
+		}
+		if (msg.role === "user") {
+			out.push({ role: "user", content: msg.content ?? "", timestamp: now });
+			continue;
+		}
+		if (msg.role === "assistant") {
+			const content: (TextContent | ToolCall)[] = [];
+			if (msg.content) content.push({ type: "text", text: msg.content });
+			for (const call of msg.tool_calls ?? []) {
+				let args: Record<string, unknown> = {};
+				try {
+					args = call.function.arguments ? (JSON.parse(call.function.arguments) as Record<string, unknown>) : {};
+				} catch {
+					args = {};
+				}
+				content.push({ type: "toolCall", id: call.id, name: call.function.name, arguments: args });
+				toolNameById.set(call.id, call.function.name);
+			}
+			out.push({
+				role: "assistant",
+				content,
+				api: "openai-completions" as Api,
+				provider: "fastcontext",
+				model: "",
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "stop",
+				timestamp: now,
+			});
+			continue;
+		}
+		// role === "tool" — tool result; FastContext carries only tool_call_id + content.
+		const toolCallId = msg.tool_call_id ?? "";
+		out.push({
+			role: "toolResult",
+			toolCallId,
+			toolName: toolNameById.get(toolCallId) ?? toolCallId,
+			content: [{ type: "text", text: msg.content ?? "" }],
+			isError: false,
+			timestamp: now,
+		});
+	}
+	return { ...(systemSegments.length > 0 ? { systemPrompt: systemSegments } : {}), messages: out };
+}
+
+/** Map FastContext's OpenAI-shape tool definitions to omp `Tool[]` (parameters pass through as JSON Schema). */
+function fcToolsToOmpTools(tools: readonly (typeof FAST_CONTEXT_TOOLS)[number][]): Tool[] {
+	return tools.map(def => ({
+		name: def.function.name,
+		description: def.function.description,
+		parameters: def.function.parameters as Tool["parameters"],
+	}));
+}
+
+/** Convert an omp `AssistantMessage` (from `completeSimple`) into FastContext's `{ message, toolCalls }` shape. */
+function assistantToFcResponse(msg: AssistantMessage): { message: ChatMessage; toolCalls: FastContextToolCall[] } {
+	const textParts: string[] = [];
+	const toolCalls: FastContextToolCall[] = [];
+	for (const block of msg.content) {
+		if (block.type === "text") {
+			textParts.push(block.text);
+		} else if (block.type === "toolCall") {
+			toolCalls.push({
+				id: block.id,
+				type: "function",
+				function: { name: block.name, arguments: JSON.stringify(block.arguments ?? {}) },
+			});
+		}
+	}
+	const content = textParts.length > 0 ? textParts.join("") : null;
+	return {
+		message: { role: "assistant", content, ...(toolCalls.length > 0 ? { tool_calls: toolCalls } : {}) },
+		toolCalls,
+	};
+}
+/** Derive `baseUrl`/`model` display fields for `FastContextToolDetails` from the resolved backend. */
+function backendDisplay(backend: FastContextBackend): { baseUrl: string; model: string } {
+	return backend.kind === "registry"
+		? { baseUrl: "registry", model: backend.modelId }
+		: { baseUrl: backend.url, model: backend.model };
+}
 export class FastContextTool implements AgentTool<typeof fastContextSchema, FastContextToolDetails> {
 	readonly name = "fast_context";
 	readonly approval = "read" as const;
@@ -641,11 +774,13 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 
 	#session: ToolSession;
 	#fetch: FetchFunction;
-	#resolvedModel: { url: string; model: string } | null = null;
+	#completeFn: typeof completeSimple;
+	#resolvedBackend: { kind: "local"; url: string; model: string } | null = null;
 
 	constructor(session: ToolSession, options?: FastContextOptions) {
 		this.#session = session;
 		this.#fetch = options?.fetch ?? fetch;
+		this.#completeFn = options?.completeFn ?? completeSimple;
 	}
 
 	static createIf(session: ToolSession): FastContextTool | null {
@@ -661,20 +796,20 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 	): Promise<AgentToolResult<FastContextToolDetails>> {
 		return untilAborted(signal, async () => {
 			const apiBaseUrl = normalizeFastContextBaseUrl(this.#session.settings.get("fastContext.baseUrl"));
-			const model = await this.#resolveModel(apiBaseUrl, signal);
+			const backend = await this.#resolveBackend(apiBaseUrl, signal);
 			const mode = params.mode ?? "hint";
 			return mode === "hint"
-				? this.#executeHint(apiBaseUrl, model, params, signal)
-				: this.#executeAgent(apiBaseUrl, model, params, signal);
+				? this.#executeHint(backend, params, signal)
+				: this.#executeAgent(backend, params, signal);
 		});
 	}
 
 	async #executeAgent(
-		apiBaseUrl: string,
-		model: string,
+		backend: FastContextBackend,
 		params: FastContextToolInput,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<FastContextToolDetails>> {
+		const { baseUrl, model } = backendDisplay(backend);
 		const maxTurns = clampedTurns(params.max_turns);
 		const messages: ChatMessage[] = [
 			{
@@ -691,17 +826,23 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 
 		let toolCalls = 0;
 		let finalText = "";
+		// Stable cascade id shared across all turns of this invocation so the
+		// provider (Devin) can thread the conversation and reuse cross-turn
+		// prompt-cache state instead of treating every turn as a fresh context.
+		const fcCascadeId = crypto.randomUUID();
 		for (let turn = 1; turn <= maxTurns + 1; turn++) {
 			const isFinalTurn = turn === maxTurns + 1;
 			if (isFinalTurn) {
 				messages.push({ role: "user", content: prompt.render(finalTurnPrompt) });
 			}
 			const response = await this.#chat(
-				apiBaseUrl,
-				model,
+				backend,
 				messages,
 				signal,
 				isFinalTurn ? AGENT_FINAL_TURN_MAX_TOKENS : AGENT_TOOL_TURN_MAX_TOKENS,
+				FAST_CONTEXT_TOOLS,
+				REQUEST_TIMEOUT_MS,
+				fcCascadeId,
 			);
 			const boundedCalls = response.toolCalls.slice(0, MAX_PARALLEL_TOOL_CALLS);
 			// Truncate tool_calls in saved message to match bounded calls (PR review: P2)
@@ -728,7 +869,7 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 					const confidence = earlyCites.length > 0 ? "HIGH" : "LOW";
 					const diagnosticPrefix = `[FastContext agent: ${turn} turns, ${toolCalls + response.toolCalls.length} tool calls, ${allEarly.length} citations, confidence ${confidence}]`;
 					const details: FastContextToolDetails = {
-						baseUrl: apiBaseUrl,
+						baseUrl,
 						model,
 						mode: "agent",
 						turns: turn,
@@ -754,10 +895,10 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 				}
 				// Hint-mode fallback when agent returns no citations
 				if (allCitations.length === 0) {
-					const hintResult = await this.#executeHint(apiBaseUrl, model, params, signal);
+					const hintResult = await this.#executeHint(backend, params, signal);
 					if ((hintResult.details?.citations ?? []).length > 0) return hintResult;
 					const details: FastContextToolDetails = {
-						baseUrl: apiBaseUrl,
+						baseUrl,
 						model,
 						mode: "agent",
 						turns: turn,
@@ -775,7 +916,7 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 				const confidence = citations.length > 0 ? "HIGH" : lowConfidenceCitations.length > 0 ? "LOW" : "NONE";
 				const diagnosticPrefix = `[FastContext agent: ${turn} turns, ${toolCalls} tool calls, ${allCitations.length} citations, confidence ${confidence}]`;
 				const details: FastContextToolDetails = {
-					baseUrl: apiBaseUrl,
+					baseUrl,
 					model,
 					mode: "agent",
 					turns: turn,
@@ -799,12 +940,12 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		}
 
 		// Hint-mode fallback: when agent loop exhausts without converging
-		const hintResult = await this.#executeHint(apiBaseUrl, model, params, signal);
+		const hintResult = await this.#executeHint(backend, params, signal);
 		if ((hintResult.details?.citations ?? []).length > 0) return hintResult;
 
 		finalText = `No final answer after ${maxTurns} turns; hint fallback also found no files.`;
 		return toolResult<FastContextToolDetails>({
-			baseUrl: apiBaseUrl,
+			baseUrl,
 			model,
 			mode: "agent",
 			turns: maxTurns,
@@ -819,13 +960,13 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 	}
 
 	#hintError(
-		apiBaseUrl: string,
-		model: string,
+		backend: FastContextBackend,
 		params: FastContextToolInput,
 		errorMsg: string,
 	): AgentToolResult<FastContextToolDetails> {
+		const { baseUrl, model } = backendDisplay(backend);
 		return toolResult<FastContextToolDetails>({
-			baseUrl: apiBaseUrl,
+			baseUrl,
 			model,
 			mode: "hint",
 			turns: 1,
@@ -840,39 +981,32 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 	}
 
 	async #executeHint(
-		apiBaseUrl: string,
-		model: string,
+		backend: FastContextBackend,
 		params: FastContextToolInput,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<FastContextToolDetails>> {
+		const { baseUrl, model } = backendDisplay(backend);
 		const workDirListing = await buildWorkspaceListing(this.#session.cwd, signal);
 		const systemContent = prompt.render(hintSystemPrompt, {
 			workDir: this.#session.cwd,
 			workDirListing,
 		});
-		const response = await this.#fetch(`${apiBaseUrl}/chat/completions`, {
-			method: "POST",
-			headers: { "Content-Type": "application/json" },
-			body: JSON.stringify({
-				model,
-				messages: [
-					{ role: "system", content: systemContent },
-					{ role: "user", content: params.query.trim() },
-				],
-				max_completion_tokens: 2048,
-				temperature: 0.3,
-				top_p: 0.9,
-				top_k: 20,
-				chat_template_kwargs: { enable_thinking: false },
-			}),
-			signal: requestSignal(signal, HINT_REQUEST_TIMEOUT_MS),
-		});
-		if (!response.ok) {
-			const detail = await readResponseErrorSnippet(response);
-			return this.#hintError(apiBaseUrl, model, params, `FastContext hint failed: HTTP ${response.status}${detail}`);
+		const hintMessages: ChatMessage[] = [
+			{ role: "system", content: systemContent },
+			{ role: "user", content: params.query.trim() },
+		];
+		let rawText: string;
+		try {
+		// Cloud/reasoning models (registry backend) need a longer budget than the
+		// 30s hint timeout tuned for a fast local model — otherwise the single
+		// query-expansion turn times out before the model emits a plan.
+		const hintTimeout = backend.kind === "registry" ? REQUEST_TIMEOUT_MS : HINT_REQUEST_TIMEOUT_MS;
+		const response = await this.#chat(backend, hintMessages, signal, 2048, null, hintTimeout);
+			rawText = response.message.content ?? "";
+		} catch (err) {
+			const errorMsg = err instanceof Error ? err.message : String(err);
+			return this.#hintError(backend, params, `FastContext hint failed: ${errorMsg}`);
 		}
-		const data = (await response.json()) as ChatCompletionResponse;
-		const rawText = data.choices?.[0]?.message?.content ?? "";
 		const plan = parseHintPlan(rawText);
 		// When the model returns unparseable output, fall through to the
 		// query-derived fallback path instead of returning an error — the
@@ -1288,7 +1422,7 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		const citations = allFiles.map(f => `${f}:1-1`);
 
 		const details: FastContextToolDetails = {
-			baseUrl: apiBaseUrl,
+			baseUrl,
 			model,
 			mode: "hint",
 			turns: 1,
@@ -1490,15 +1624,75 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		);
 		return results.flat();
 	}
-	async #resolveModel(apiBaseUrl: string, signal?: AbortSignal): Promise<string> {
+	async #resolveBackend(apiBaseUrl: string, signal?: AbortSignal): Promise<FastContextBackend> {
 		const configured = this.#session.settings.get("fastContext.model")?.trim();
-		if (configured) return configured;
+
+		// Registry backend: a provider-prefixed model id (e.g. devin/swe-1-6-slow,
+		// zai/glm-5-turbo) routes through the model registry via completeSimple,
+		// removing the need to host a local OpenAI-compatible server.
+		if (configured?.includes("/")) {
+			const modelRegistry = this.#session.modelRegistry;
+			if (!modelRegistry) {
+				// No registry available — fall back to the local endpoint (some
+				// OpenAI-compatible servers accept arbitrary model strings).
+				return this.#resolveLocalBackend(apiBaseUrl, configured, signal);
+			}
+			const resolveModel = (): Model<Api> | undefined => {
+				const available = modelRegistry.getAvailable();
+				return resolveModelFromString(
+					expandRoleAlias(configured, this.#session.settings),
+					available,
+					getModelMatchPreferences(this.#session.settings),
+					modelRegistry,
+				);
+			};
+			let model = resolveModel();
+			if (!model) {
+				// Dynamic providers (e.g. Devin) populate getAvailable() via
+				// background discovery that may not have completed yet — refresh
+				// then retry once.
+				await modelRegistry.refreshProvider(configured.split("/")[0]!, "online-if-uncached");
+				model = resolveModel();
+			}
+			if (!model) {
+				throw new Error(
+					`FastContext model "${configured}" could not be resolved against available registered ` +
+						`models. Check provider credentials and model id, or set fastContext.model to a bare ` +
+						`id to use the local OpenAI-compatible endpoint.`,
+				);
+			}
+			const apiKey = await modelRegistry.getApiKey(model);
+			if (!apiKey) {
+				throw new Error(
+					`FastContext model "${configured}" resolved to ${model.provider}/${model.id} but no API ` +
+						`key is available. Configure credentials for the ${model.provider} provider.`,
+				);
+			}
+			return { kind: "registry", model, apiKey, modelId: `${model.provider}/${model.id}` };
+		}
+
+		// Local backend: bare model id or unset → existing /chat/completions path.
+		return this.#resolveLocalBackend(apiBaseUrl, configured, signal);
+	}
+
+	async #resolveLocalBackend(
+		apiBaseUrl: string,
+		configured: string | undefined,
+		signal?: AbortSignal,
+	): Promise<FastContextBackend> {
+		if (configured) {
+			return { kind: "local", url: apiBaseUrl, model: configured };
+		}
 		// Cache resolved model keyed by endpoint URL — if the user changes
 		// fastContext.baseUrl mid-session, the stale model id from the old
 		// server won't be sent to the new one (different servers validate
 		// the model field differently).
-		if (this.#resolvedModel?.url === apiBaseUrl) return this.#resolvedModel.model;
-		const response = await this.#fetch(`${apiBaseUrl}/models`, { signal: requestSignal(signal, REQUEST_TIMEOUT_MS) });
+		if (this.#resolvedBackend?.kind === "local" && this.#resolvedBackend.url === apiBaseUrl) {
+			return this.#resolvedBackend;
+		}
+		const response = await this.#fetch(`${apiBaseUrl}/models`, {
+			signal: requestSignal(signal, REQUEST_TIMEOUT_MS),
+		});
 		if (!response.ok) {
 			const detail = await readResponseErrorSnippet(response);
 			throw new Error(
@@ -1509,37 +1703,70 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		if (data.error?.message) throw new Error(`FastContext model discovery failed: ${data.error.message}`);
 		const model = data.data?.find(entry => entry.id)?.id;
 		if (!model) throw new Error(`FastContext model discovery returned no models from ${apiBaseUrl}/models`);
-		this.#resolvedModel = { url: apiBaseUrl, model };
-		return model;
+		this.#resolvedBackend = { kind: "local", url: apiBaseUrl, model };
+		return this.#resolvedBackend;
 	}
 
 	async #chat(
-		apiBaseUrl: string,
-		model: string,
+		backend: FastContextBackend,
 		messages: ChatMessage[],
 		signal?: AbortSignal,
 		maxCompletionTokens: number = AGENT_TOOL_TURN_MAX_TOKENS,
+		tools: readonly unknown[] | null = FAST_CONTEXT_TOOLS,
+		timeoutMs: number = REQUEST_TIMEOUT_MS,
+		sessionId?: string,
 	): Promise<{ message: ChatMessage; toolCalls: FastContextToolCall[] }> {
-		const response = await this.#fetch(`${apiBaseUrl}/chat/completions`, {
+		if (backend.kind === "registry") {
+			// Registry backend: route through the registered provider (e.g. Devin)
+			// via completeSimple. The provider handles the wire format; we convert
+			// FastContext's OpenAI-style messages/tools to/from the omp model.
+			const { systemPrompt, messages: ompMessages } = fcMessagesToContext(messages);
+			const ompTools =
+				tools && tools.length > 0
+					? fcToolsToOmpTools(tools as readonly (typeof FAST_CONTEXT_TOOLS)[number][])
+					: undefined;
+			const context: Context = {
+				...(systemPrompt ? { systemPrompt } : {}),
+				messages: ompMessages,
+				...(ompTools ? { tools: ompTools } : {}),
+			};
+			const result = await this.#completeFn(backend.model, context, {
+				apiKey: backend.apiKey,
+				...(sessionId ? { sessionId } : {}),
+				signal: requestSignal(signal, timeoutMs),
+				maxTokens: maxCompletionTokens,
+				temperature: 0.3,
+				disableReasoning: true,
+				...(ompTools ? { toolChoice: "auto" } : {}),
+			});
+			if (result.errorMessage) {
+				throw new Error(
+					`FastContext chat failed via ${backend.modelId}: ${result.errorMessage}` +
+						(result.errorStatus ? ` (HTTP ${result.errorStatus})` : ""),
+				);
+			}
+			return assistantToFcResponse(result);
+		}
+		// Local backend: raw OpenAI-compatible /chat/completions (llama.cpp).
+		const response = await this.#fetch(`${backend.url}/chat/completions`, {
 			method: "POST",
 			headers: { "Content-Type": "application/json" },
 			body: JSON.stringify({
-				model,
+				model: backend.model,
 				messages,
-				tools: FAST_CONTEXT_TOOLS,
-				parallel_tool_calls: true,
+				...(tools && tools.length > 0 ? { tools, parallel_tool_calls: true } : {}),
 				max_completion_tokens: maxCompletionTokens,
 				temperature: 0.3,
 				top_p: 0.9,
 				top_k: 20,
 				chat_template_kwargs: { enable_thinking: false },
 			}),
-			signal: requestSignal(signal, REQUEST_TIMEOUT_MS),
+			signal: requestSignal(signal, timeoutMs),
 		});
 		if (!response.ok) {
 			const detail = await readResponseErrorSnippet(response);
 			throw new Error(
-				`FastContext chat failed: HTTP ${response.status} from ${apiBaseUrl}/chat/completions${detail}`,
+				`FastContext chat failed: HTTP ${response.status} from ${backend.url}/chat/completions${detail}`,
 			);
 		}
 		const data = (await response.json()) as ChatCompletionResponse;

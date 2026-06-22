@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
+import type { Api, AssistantMessage, Context, completeSimple, Model } from "@oh-my-pi/pi-ai";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { createTools, FastContextTool, normalizeFastContextBaseUrl } from "@oh-my-pi/pi-coding-agent/tools";
@@ -437,6 +438,172 @@ describe("FastContext tool", () => {
 			session.settings.override("fastContext.baseUrl", "http://127.0.0.1:9090");
 			await tool.execute("call", { query: "find auth", max_turns: 1, mode: "agent" });
 			expect(modelsCalls).toBe(2);
+		} finally {
+			await temp.remove();
+		}
+	});
+});
+
+function fcFakeDevinModel(): Model<Api> {
+	return {
+		provider: "devin",
+		id: "swe-1-6-slow",
+		name: "SWE 1.6 slow",
+		api: "devin-agent",
+		baseUrl: "https://server.codeium.com",
+		reasoning: false,
+		input: ["text"],
+		supportsTools: true,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 200_000,
+		maxTokens: 64_000,
+	} as unknown as Model<Api>;
+}
+
+function fcFakeAssistantMessage(content: AssistantMessage["content"]): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: "devin-agent",
+		provider: "devin",
+		model: "swe-1-6-slow",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: Date.now(),
+	} as unknown as AssistantMessage;
+}
+
+describe("FastContext registry backend", () => {
+	it("routes agent mode through completeFn for a provider-prefixed model", async () => {
+		const temp = TempDir.createSync("omp-fc-registry-agent-");
+		try {
+			const cwd = path.resolve(temp.path());
+			const targetPath = path.join(cwd, "src", "auth.ts");
+			await Bun.write(targetPath, "export function authenticate() {\n\treturn true;\n}\n");
+			const calls: { tools?: unknown[]; messages?: unknown }[] = [];
+			let turn = 0;
+			const completeFn = (async (_model: Model<Api>, context: Context) => {
+				calls.push({ tools: context.tools as unknown[], messages: context.messages });
+				turn++;
+				if (turn === 1) {
+					return fcFakeAssistantMessage([
+						{ type: "toolCall", id: "call_read", name: "Read", arguments: { path: targetPath } },
+					]);
+				}
+				return fcFakeAssistantMessage([
+					{ type: "text", text: `Auth lives here.\n\n<final_answer>\n${targetPath}:1-3\n</final_answer>` },
+				]);
+			}) as unknown as typeof completeSimple;
+			let fetchCalled = false;
+			const fetchMock = async (): Promise<Response> => {
+				fetchCalled = true;
+				return new Response("local endpoint should not be hit", { status: 500 });
+			};
+			const session = createSession(cwd, {
+				"fastContext.enabled": true,
+				"fastContext.model": "devin/swe-1-6-slow",
+			});
+			session.modelRegistry = {
+				getAvailable: () => [fcFakeDevinModel()],
+				getApiKey: async () => "devin-session-token$fake",
+				refreshProvider: async () => {},
+			} as unknown as ToolSession["modelRegistry"];
+			const tool = new FastContextTool(session, { fetch: fetchMock, completeFn });
+
+			const result = await tool.execute("call", {
+				query: "where is authenticate implemented",
+				max_turns: 3,
+				mode: "agent",
+			});
+
+			expect(fetchCalled).toBe(false);
+			expect(calls.length).toBeGreaterThanOrEqual(1);
+			expect(calls[0]?.tools).toBeInstanceOf(Array);
+			expect((calls[0]?.tools as Array<{ name?: string }> | undefined)?.map(t => t.name)).toEqual([
+				"Read",
+				"Glob",
+				"Grep",
+			]);
+			expect(result.details?.model).toBe("devin/swe-1-6-slow");
+			expect(result.details?.baseUrl).toBe("registry");
+			expect((result.details?.citations ?? []).some(c => c.includes("auth.ts"))).toBe(true);
+		} finally {
+			await temp.remove();
+		}
+	});
+
+	it("keeps the local fetch path for a bare (non-provider-prefixed) model", async () => {
+		const temp = TempDir.createSync("omp-fc-local-still-");
+		try {
+			const cwd = path.resolve(temp.path());
+			await Bun.write(path.join(cwd, "x.ts"), "export const x = 1;\n");
+			let completeCalls = 0;
+			let chatCalls = 0;
+			const fetchMock = async (url: string): Promise<Response> => {
+				if (url.endsWith("/models")) {
+					return Response.json({ data: [{ id: "qwen-test" }] });
+				}
+				if (url.endsWith("/chat/completions")) {
+					chatCalls++;
+					return Response.json({
+						choices: [
+							{
+								message: {
+									role: "assistant",
+									content: `<final_answer>\n${path.join(cwd, "x.ts")}:1-1\n</final_answer>`,
+								},
+							},
+						],
+					});
+				}
+				return new Response("not found", { status: 404 });
+			};
+			const completeFn = (async () => {
+				completeCalls++;
+				return fcFakeAssistantMessage([]);
+			}) as unknown as typeof completeSimple;
+			const session = createSession(cwd, {
+				"fastContext.enabled": true,
+				"fastContext.model": "qwen-test",
+			});
+			const tool = new FastContextTool(session, { fetch: fetchMock, completeFn });
+
+			await tool.execute("call", { query: "find x", mode: "agent", max_turns: 1 });
+
+			expect(completeCalls).toBe(0);
+			expect(chatCalls).toBeGreaterThanOrEqual(1);
+		} finally {
+			await temp.remove();
+		}
+	});
+
+	it("throws a clear error when a provider-prefixed model cannot be resolved", async () => {
+		const temp = TempDir.createSync("omp-fc-unresolved-");
+		try {
+			const cwd = path.resolve(temp.path());
+			const session = createSession(cwd, {
+				"fastContext.enabled": true,
+				"fastContext.model": "devin/does-not-exist",
+			});
+			session.modelRegistry = {
+				getAvailable: () => [],
+				getApiKey: async () => undefined,
+				refreshProvider: async () => {},
+			} as unknown as ToolSession["modelRegistry"];
+			const tool = new FastContextTool(session, {
+				completeFn: (async () => fcFakeAssistantMessage([])) as unknown as typeof completeSimple,
+			});
+
+			await expect(tool.execute("call", { query: "anything", mode: "hint" })).rejects.toThrow(
+				/could not be resolved/,
+			);
 		} finally {
 			await temp.remove();
 		}

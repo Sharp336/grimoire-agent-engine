@@ -141,7 +141,7 @@ All settings appear in `/settings` under **Context → Fast Context**. The `base
 |---|---|---|
 | `fastContext.enabled` | `false` | Toggle the FastContext adapter on/off. |
 | `fastContext.baseUrl` | `http://127.0.0.1:8080` | Base URL for the local OpenAI-compatible chat completions endpoint. |
-| `fastContext.model` | *(auto-detect)* | Optional model id. Leave blank to use the first model from `/v1/models`. |
+| `fastContext.model` | *(auto-detect)* | Optional model id. A provider-prefixed id (e.g. `devin/swe-1-6-slow`, `zai/glm-5-turbo`) routes through the model registry using your credentials — no local server needed. A bare id or blank uses the local endpoint's `/v1/models`. |
 
 ### YAML config
 
@@ -160,6 +160,18 @@ Any OpenAI-compatible local endpoint works — just point `baseUrl` at the port:
 omp config set fastContext.baseUrl http://127.0.0.1:1234  # LM Studio
 omp config set fastContext.baseUrl http://127.0.0.1:11434  # Ollama
 ```
+
+### Using a cloud provider model instead of a local server
+
+If you don't want to run a local model, point FastContext at any registered provider model by setting `fastContext.model` to a provider-prefixed id. FastContext resolves it through the model registry using your configured credentials and calls it directly — no llama.cpp/LM Studio/Ollama required.
+
+```bash
+omp config set fastContext.enabled true
+omp config set fastContext.model devin/swe-1-6-slow   # Devin/Windsurf Cascade (login: /login devin)
+# or any provider model: zai/glm-5-turbo, openai-codex/gpt-5.5, pi/smol, ...
+```
+
+A provider-prefixed value (containing `/`) always selects the registry path; a bare id or blank keeps the local-endpoint behavior above. Both hint and agent modes are supported. Agent mode reuses one cascade id across all turns so the provider can thread the conversation. Note that reasoning models like `swe-1-6-slow` are slower per turn than a local 4B model but need no local hardware.
 
 ## How it works
 
