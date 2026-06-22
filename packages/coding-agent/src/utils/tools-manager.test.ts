@@ -1,12 +1,13 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { downloadFile } from "./tools-manager";
+import { __internalsForTesting } from "./tools-manager";
 
-const realFetch = globalThis.fetch;
+const { downloadFile } = __internalsForTesting;
+
 afterEach(() => {
-	globalThis.fetch = realFetch;
+	vi.restoreAllMocks();
 });
 
 // A chunked streaming body. `Bun.write(dest, response)` deadlocks on a body like
@@ -26,7 +27,7 @@ function streamingResponse(chunks: number, chunkSize: number): Response {
 test("downloadFile streams a chunked response body to disk without deadlocking", async () => {
 	const chunks = 300;
 	const chunkSize = 64 * 1024;
-	globalThis.fetch = (async () => streamingResponse(chunks, chunkSize)) as unknown as typeof fetch;
+	vi.spyOn(globalThis, "fetch").mockResolvedValue(streamingResponse(chunks, chunkSize));
 	const dest = path.join(os.tmpdir(), `omp-dl-${process.pid}-${Math.random().toString(36).slice(2)}`);
 	try {
 		await downloadFile("https://example.test/asset", dest);

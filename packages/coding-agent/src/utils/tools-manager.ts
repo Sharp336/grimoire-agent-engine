@@ -156,7 +156,7 @@ async function getLatestVersion(repo: string, signal?: AbortSignal): Promise<str
 }
 
 // Download a file from URL
-export async function downloadFile(url: string, dest: string, signal?: AbortSignal): Promise<void> {
+async function downloadFile(url: string, dest: string, signal?: AbortSignal): Promise<void> {
 	let response: Response;
 	try {
 		response = await fetch(url, {
@@ -176,6 +176,13 @@ export async function downloadFile(url: string, dest: string, signal?: AbortSign
 	// Stream to disk — Bun.write(dest, response) deadlocks on a streaming body (oven-sh/bun#30594).
 	await pipeline(response.body, fs.createWriteStream(dest));
 }
+
+/**
+ * Test-only handle for the internal download helper. NOT part of the public
+ * API; exposed so the regression test can drive the streaming write without
+ * re-exporting `downloadFile` through the package's `./utils/*` entry.
+ */
+export const __internalsForTesting = { downloadFile };
 
 // Download and install a tool
 async function downloadTool(tool: ToolName, signal?: AbortSignal): Promise<string> {
