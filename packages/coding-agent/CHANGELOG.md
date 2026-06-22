@@ -6,6 +6,8 @@
 
 - FastContext now auto-selects `devin/swe-1-6-fast` when no model is explicitly set and Devin credentials are present, so enabling FastContext works with zero configuration for Devin users (no local llama.cpp server required). The resolved default is persisted on first use so the model picker and the server-URL field reflect the effective backend.
 
+- FastContext usage is now visible in the TUI. When a spawned subagent (e.g. the bundled `explore`) calls `fast_context`, the task-tool card shows a compact badge line (`{icon.fast} fast_context · {model} · {calls} call(s) · {files} files`) in both the live-streaming and rebuilt-transcript views, so you can see exploration fired without drilling into the subagent transcript. The badge is aggregated from the structured `FastContextToolDetails` (model + citation count), not parsed from result text.
+
 ### Changed
 
 - FastContext model selection is now a picker instead of a free-text field. `fastContext.model` renders as a dropdown listing provider models from your logged-in providers (e.g. `devin/swe-1-6-fast`, `zai/glm-5-turbo`) plus a "Local llama.cpp server" option; a `local` sentinel explicitly selects the local server and auto-discovers its model via `/v1/models`.

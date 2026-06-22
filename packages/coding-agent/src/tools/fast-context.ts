@@ -100,7 +100,7 @@ interface ModelsResponse {
 	error?: { message?: string };
 }
 
-interface FastContextToolDetails {
+export interface FastContextToolDetails {
 	meta?: OutputMeta;
 	baseUrl?: string;
 	model: string;
