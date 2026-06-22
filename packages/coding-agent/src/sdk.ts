@@ -46,7 +46,9 @@ import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
+import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
+import { disposeAllRubyKernelSessions, disposeRubyKernelSessionsByOwner } from "./eval/rb/executor";
 import { defaultEvalSessionId } from "./eval/session-id";
 import {
 	type CustomCommandsLoadResult,
@@ -472,7 +474,7 @@ export interface CreateAgentSessionOptions {
 
 	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
 	enableLsp?: boolean;
-	/** Skip Python kernel availability check and prelude warmup */
+	/** Skip subprocess-kernel availability checks and prelude warmup */
 	skipPythonPreflight?: boolean;
 	/** Tool names explicitly requested (enables disabled-by-default tools) */
 	toolNames?: string[];
@@ -866,12 +868,14 @@ function registerSshCleanup(): void {
 	postmortem.register("ssh-cleanup", cleanupSshResources);
 }
 
-let pythonCleanupRegistered = false;
+let evalCleanupRegistered = false;
 
-function registerPythonCleanup(): void {
-	if (pythonCleanupRegistered) return;
-	pythonCleanupRegistered = true;
+function registerEvalCleanup(): void {
+	if (evalCleanupRegistered) return;
+	evalCleanupRegistered = true;
 	postmortem.register("python-cleanup", disposeAllKernelSessions);
+	postmortem.register("ruby-cleanup", disposeAllRubyKernelSessions);
+	postmortem.register("julia-cleanup", disposeAllJuliaKernelSessions);
 }
 
 function customToolToDefinition(tool: CustomTool): ToolDefinition {
@@ -1080,7 +1084,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const eventBus = options.eventBus ?? new EventBus();
 
 	registerSshCleanup();
-	registerPythonCleanup();
+	registerEvalCleanup();
 
 	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
@@ -2693,7 +2697,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const originalDispose = session.dispose.bind(session);
 			session.dispose = async () => {
 				try {
-					// Reject new session work (Python/eval starts) the moment disposal
+					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
@@ -2913,6 +2917,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					await asyncJobManager.dispose({ timeoutMs: 3_000 });
 				}
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);
+				await disposeRubyKernelSessionsByOwner(evalKernelOwnerId);
+				await disposeJuliaKernelSessionsByOwner(evalKernelOwnerId);
 				if (ownsAuthStorage) authStorage.close();
 			}
 		} catch (cleanupError) {

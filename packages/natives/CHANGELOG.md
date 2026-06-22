@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+## [16.1.14] - 2026-06-22
+
+### Fixed
+
+- Enabled full Julia syntax highlighting support in highlightCode
+
 ## [16.1.12] - 2026-06-21
 
 ### Added

@@ -15,6 +15,7 @@ import { ProviderHttpError } from "./errors";
 import type { BedrockOptions } from "./providers/amazon-bedrock";
 import type { AnthropicOptions } from "./providers/anthropic";
 import type { CursorOptions } from "./providers/cursor";
+import type { DevinOptions } from "./providers/devin";
 import { isGitLabDuoModel, streamGitLabDuo } from "./providers/gitlab-duo";
 import type { GoogleOptions } from "./providers/google";
 import { getVertexAccessToken } from "./providers/google-auth";
@@ -37,6 +38,7 @@ import {
 	streamAzureOpenAIResponses,
 	streamBedrock,
 	streamCursor,
+	streamDevin,
 	streamGoogle,
 	streamGoogleGeminiCli,
 	streamGoogleVertex,
@@ -62,6 +64,7 @@ import type {
 	ToolChoice,
 } from "./types";
 import { AssistantMessageEventStream } from "./utils/event-stream";
+import { wrapFetchForProxy } from "./utils/proxy";
 import { withRequestDebugFetch } from "./utils/request-debug";
 import { withGeminiThinkingLoopGuard } from "./utils/thinking-loop";
 
@@ -235,9 +238,12 @@ function streamDispatch<TApi extends Api>(
 	context: Context,
 	options?: OptionsForApi<TApi>,
 ): AssistantMessageEventStream {
-	const requestOptions = withRequestDebugFetch(options as StreamOptions | undefined) as
-		| OptionsForApi<TApi>
-		| undefined;
+	const baseOptions = (options || {}) as StreamOptions;
+	const debugOptions = withRequestDebugFetch(baseOptions);
+	const requestOptions = {
+		...debugOptions,
+		fetch: wrapFetchForProxy(debugOptions.fetch ?? (globalThis.fetch as FetchImpl), model.provider),
+	} as OptionsForApi<TApi>;
 
 	// Check custom API registry first (extension-provided APIs like "vertex-claude-api")
 	const customApiProvider = getCustomApi(model.api);
@@ -246,12 +252,12 @@ function streamDispatch<TApi extends Api>(
 	}
 
 	if (isGitLabDuoModel(model)) {
-		const apiKey = (requestOptions as StreamOptions | undefined)?.apiKey || getEnvApiKey(model.provider);
+		const apiKey = requestOptions.apiKey || getEnvApiKey(model.provider);
 		if (!apiKey) {
 			throw new Error(`No API key for provider: ${model.provider}`);
 		}
 		return streamGitLabDuo(model, context, {
-			...(requestOptions as SimpleStreamOptions | undefined),
+			...(requestOptions as SimpleStreamOptions),
 			apiKey,
 		});
 	}
@@ -261,14 +267,10 @@ function streamDispatch<TApi extends Api>(
 		return streamGoogleVertex(model as Model<"google-vertex">, context, requestOptions as GoogleVertexOptions);
 	} else if (model.api === "bedrock-converse-stream") {
 		// Bedrock doesn't have any API keys instead it sources credentials from standard AWS env variables or from given AWS profile.
-		return streamBedrock(
-			model as Model<"bedrock-converse-stream">,
-			context,
-			(requestOptions || {}) as BedrockOptions,
-		);
+		return streamBedrock(model as Model<"bedrock-converse-stream">, context, requestOptions as BedrockOptions);
 	}
 
-	const apiKey = requestOptions?.apiKey || getEnvApiKey(model.provider);
+	const apiKey = requestOptions.apiKey || getEnvApiKey(model.provider);
 	if (!apiKey) {
 		throw new Error(`No API key for provider: ${model.provider}`);
 	}
@@ -276,7 +278,7 @@ function streamDispatch<TApi extends Api>(
 		? {
 				...requestOptions,
 				apiKey: "vertex-adc",
-				fetch: createVertexAuthenticatedFetch(requestOptions as StreamOptions | undefined),
+				fetch: createVertexAuthenticatedFetch(requestOptions),
 			}
 		: { ...requestOptions, apiKey };
 
@@ -293,22 +295,46 @@ function streamDispatch<TApi extends Api>(
 		case "openrouter": {
 			const useResponses = $env.PI_OPENROUTER_RESPONSES !== "0";
 			if (useResponses) {
-				return streamOpenAIResponses(model as Model<"openai-responses">, context, providerOptions as any);
+				return streamOpenAIResponses(
+					model as Model<"openai-responses">,
+					context,
+					providerOptions as OptionsForApi<"openai-responses">,
+				);
 			}
-			return streamOpenAICompletions(model as Model<"openai-completions">, context, providerOptions as any);
+			return streamOpenAICompletions(
+				model as Model<"openai-completions">,
+				context,
+				providerOptions as OptionsForApi<"openai-completions">,
+			);
 		}
 
 		case "openai-completions":
-			return streamOpenAICompletions(model as Model<"openai-completions">, context, providerOptions as any);
+			return streamOpenAICompletions(
+				model as Model<"openai-completions">,
+				context,
+				providerOptions as OptionsForApi<"openai-completions">,
+			);
 
 		case "openai-responses":
-			return streamOpenAIResponses(model as Model<"openai-responses">, context, providerOptions as any);
+			return streamOpenAIResponses(
+				model as Model<"openai-responses">,
+				context,
+				providerOptions as OptionsForApi<"openai-responses">,
+			);
 
 		case "azure-openai-responses":
-			return streamAzureOpenAIResponses(model as Model<"azure-openai-responses">, context, providerOptions as any);
+			return streamAzureOpenAIResponses(
+				model as Model<"azure-openai-responses">,
+				context,
+				providerOptions as OptionsForApi<"azure-openai-responses">,
+			);
 
 		case "openai-codex-responses":
-			return streamOpenAICodexResponses(model as Model<"openai-codex-responses">, context, providerOptions as any);
+			return streamOpenAICodexResponses(
+				model as Model<"openai-codex-responses">,
+				context,
+				providerOptions as OptionsForApi<"openai-codex-responses">,
+			);
 
 		case "google-generative-ai":
 			return streamGoogle(model as Model<"google-generative-ai">, context, providerOptions);
@@ -325,6 +351,9 @@ function streamDispatch<TApi extends Api>(
 
 		case "cursor-agent":
 			return streamCursor(model as Model<"cursor-agent">, context, providerOptions as CursorOptions);
+
+		case "devin-agent":
+			return streamDevin(model as Model<"devin-agent">, context, providerOptions as DevinOptions);
 
 		default:
 			throw new Error(`Unhandled API: ${api}`);
@@ -381,7 +410,12 @@ export function streamSimple<TApi extends Api>(
 	context: Context,
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream {
-	const requestOptions = withRequestDebugFetch(options);
+	const baseOptions = (options || {}) as SimpleStreamOptions;
+	const debugOptions = withRequestDebugFetch(baseOptions);
+	const requestOptions = {
+		...debugOptions,
+		fetch: wrapFetchForProxy(debugOptions.fetch ?? (globalThis.fetch as FetchImpl), model.provider),
+	} as SimpleStreamOptions;
 	const apiKeyResolver = isApiKeyResolver(requestOptions?.apiKey) ? requestOptions.apiKey : undefined;
 	if (apiKeyResolver) {
 		const outer = new AssistantMessageEventStream();
@@ -1114,6 +1148,18 @@ function mapOptionsForApi<TApi extends Api>(
 				...base,
 				execHandlers,
 				onToolResult,
+			});
+		}
+
+		case "devin-agent": {
+			const devinModel = model as Model<"devin-agent">;
+			const effort =
+				options?.reasoning && !options.disableReasoning
+					? requireSupportedEffort(devinModel, options.reasoning)
+					: undefined;
+			return castApi<"devin-agent">({
+				...base,
+				chatModelUid: resolveWireModelId(devinModel, effort),
 			});
 		}
 

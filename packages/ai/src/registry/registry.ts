@@ -8,6 +8,7 @@ import { cerebrasProvider } from "./cerebras";
 import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { cursorProvider } from "./cursor";
 import { deepseekProvider } from "./deepseek";
+import { devinProvider } from "./devin";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
 import { githubCopilotProvider } from "./github-copilot";
@@ -43,6 +44,7 @@ import { parallelProvider } from "./parallel";
 import { perplexityProvider } from "./perplexity";
 import { qianfanProvider } from "./qianfan";
 import { qwenPortalProvider } from "./qwen-portal";
+import { sakanaProvider } from "./sakana";
 import { syntheticProvider } from "./synthetic";
 import { tavilyProvider } from "./tavily";
 import { togetherProvider } from "./together";
@@ -78,6 +80,7 @@ const ALL = [
 	openrouterProvider,
 	githubCopilotProvider,
 	cursorProvider,
+	devinProvider,
 	googleAntigravityProvider,
 	googleGeminiCliProvider,
 	openaiCodexDeviceProvider,
@@ -88,6 +91,7 @@ const ALL = [
 	zhipuCodingPlanProvider,
 	umansProvider,
 	qwenPortalProvider,
+	sakanaProvider,
 	minimaxCodeProvider,
 	minimaxCodeCnProvider,
 	xiaomiProvider,
