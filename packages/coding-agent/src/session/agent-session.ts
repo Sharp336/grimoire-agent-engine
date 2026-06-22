@@ -164,12 +164,14 @@ import { RawSseDebugBuffer } from "../debug/raw-sse-buffer";
 import { loadCapability } from "../discovery";
 import { expandApplyPatchToEntries, normalizeDiff, normalizeToLF, ParseError, previewPatch, stripBom } from "../edit";
 import { getFileSnapshotStore } from "../edit/file-snapshot-store";
+import { disposeJuliaKernelSessionsByOwner } from "../eval/jl/executor";
 import { namespaceSessionId as namespacePythonSessionId } from "../eval/py";
 import {
 	disposeKernelSessionsByOwner,
 	executePython as executePythonCommand,
 	type PythonResult,
 } from "../eval/py/executor";
+import { disposeRubyKernelSessionsByOwner } from "../eval/rb/executor";
 import { defaultEvalSessionId } from "../eval/session-id";
 import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
 import type { TtsrManager, TtsrMatchContext } from "../export/ttsr";
@@ -210,7 +212,7 @@ import { resolveMemoryBackend } from "../memory-backend";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
-import { getCurrentThemeName, theme } from "../modes/theme/theme";
+import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
 import { containsUltrathink, ULTRATHINK_NOTICE } from "../modes/ultrathink";
 import { computeNonMessageBreakdown, computeNonMessageTokens } from "../modes/utils/context-usage";
@@ -234,9 +236,10 @@ import ttsrInterruptTemplate from "../prompts/system/ttsr-interrupt.md" with { t
 import ttsrToolReminderTemplate from "../prompts/system/ttsr-tool-reminder.md" with { type: "text" };
 import unexpectedStopRetryTemplate from "../prompts/system/unexpected-stop-retry.md" with { type: "text" };
 import {
+	deobfuscateAssistantContent,
 	deobfuscateSessionContext,
+	obfuscateMessages,
 	obfuscateProviderContext,
-	obfuscateProviderTools,
 	type SecretObfuscator,
 } from "../secrets/obfuscator";
 import { invalidateHostMetadata } from "../ssh/connection-manager";
@@ -477,6 +480,8 @@ export interface AgentSessionConfig {
 	modelRegistry: ModelRegistry;
 	/** Tool registry for LSP and settings */
 	toolRegistry?: Map<string, AgentTool>;
+	/** Tool names whose current registry entry is still the built-in implementation. */
+	builtInToolNames?: Iterable<string>;
 	/** Current session pre-LLM message transform pipeline */
 	transformContext?: (messages: AgentMessage[], signal?: AbortSignal) => AgentMessage[] | Promise<AgentMessage[]>;
 	/** Provider payload hook used by the active session request path */
@@ -517,7 +522,7 @@ export interface AgentSessionConfig {
 	obfuscator?: SecretObfuscator;
 	/** Inherited eval executor session id from a parent agent. */
 	parentEvalSessionId?: string;
-	/** Logical owner for retained Python kernels created by this session. */
+	/** Logical owner for retained eval kernels created by this session. */
 	evalKernelOwnerId?: string;
 	/**
 	 * AsyncJobManager that this session installed as the process-global instance.
@@ -1290,6 +1295,7 @@ export class AgentSession {
 	// Generic tool discovery (covers built-in + MCP + extension when tools.discoveryMode === "all")
 	#discoverableToolSearchIndex: DiscoverableToolSearchIndex | null = null;
 	#selectedDiscoveredToolNames = new Set<string>();
+	#builtInToolNames = new Set<string>();
 	#rpcHostToolNames = new Set<string>();
 	#defaultSelectedMCPServerNames = new Set<string>();
 	#defaultSelectedMCPToolNames = new Set<string>();
@@ -1566,6 +1572,7 @@ export class AgentSession {
 		this.#pruneToolDescriptions = config.pruneToolDescriptions === true;
 		this.#validateRetryFallbackChains();
 		this.#toolRegistry = config.toolRegistry ?? new Map();
+		this.#builtInToolNames = new Set(config.builtInToolNames ?? []);
 		this.#requestedToolNames = config.requestedToolNames;
 		this.#transformContext = config.transformContext ?? (messages => messages);
 		this.#onPayload = config.onPayload;
@@ -2496,7 +2503,7 @@ export class AgentSession {
 		const obfuscator = this.#obfuscator;
 		if (obfuscator && event.type === "message_end" && event.message.role === "assistant") {
 			const message = event.message;
-			const deobfuscatedContent = obfuscator.deobfuscateObject(message.content);
+			const deobfuscatedContent = deobfuscateAssistantContent(obfuscator, message.content);
 			if (deobfuscatedContent !== message.content) {
 				displayEvent = { ...event, message: { ...message, content: deobfuscatedContent } };
 			}
@@ -4168,7 +4175,7 @@ export class AgentSession {
 
 	/**
 	 * Synchronously mark the session as disposing so new work is rejected
-	 * immediately: Python/eval starts throw, queued asides are dropped, and the
+	 * immediately: eval starts throw, queued asides are dropped, and the
 	 * aside provider is detached. Idempotent; `dispose()` runs it first.
 	 *
 	 * Wrappers that await other teardown before delegating to `dispose()` MUST
@@ -4230,13 +4237,13 @@ export class AgentSession {
 				AsyncJobManager.setInstance(undefined);
 			}
 		}
-		const pythonExecutionsSettled = await this.#prepareEvalExecutionsForDispose();
-		if (!pythonExecutionsSettled) {
-			logger.warn(
-				"Detaching retained Python kernel ownership during dispose while Python execution is still active",
-			);
+		const evalExecutionsSettled = await this.#prepareEvalExecutionsForDispose();
+		if (!evalExecutionsSettled) {
+			logger.warn("Detaching retained eval-kernel ownership during dispose while eval execution is still active");
 		}
 		await disposeKernelSessionsByOwner(this.#evalKernelOwnerId);
+		await disposeRubyKernelSessionsByOwner(this.#evalKernelOwnerId);
+		await disposeJuliaKernelSessionsByOwner(this.#evalKernelOwnerId);
 		await shutdownTinyTitleClient();
 		this.#releasePowerAssertion();
 		await this.sessionManager.close();
@@ -4494,6 +4501,11 @@ export class AgentSession {
 	 */
 	getToolByName(name: string): AgentTool | undefined {
 		return this.#toolRegistry.get(name);
+	}
+
+	/** True when the current registry entry for `name` came from a built-in factory. */
+	hasBuiltInTool(name: string): boolean {
+		return this.#builtInToolNames.has(name);
 	}
 
 	/**
@@ -5223,28 +5235,17 @@ export class AgentSession {
 		return deobfuscateSessionContext(this.sessionManager.buildSessionContext({ transcript: true }), this.#obfuscator);
 	}
 
-	#obfuscateForProvider<T>(value: T): T {
-		if (!this.#obfuscator?.hasSecrets()) return value;
-		return this.#obfuscator.obfuscateObject(value);
-	}
-
 	#obfuscateTextForProvider(text: string | undefined): string | undefined {
 		if (!text || !this.#obfuscator?.hasSecrets()) return text;
 		return this.#obfuscator.obfuscate(text);
 	}
 
 	#obfuscatePreparationForProvider(preparation: CompactionPreparation): CompactionPreparation {
-		if (!this.#obfuscator?.hasSecrets()) return preparation;
-		if (!preparation.previousSummary && !preparation.previousPreserveData) return preparation;
-		return {
-			...preparation,
-			previousSummary: preparation.previousSummary
-				? this.#obfuscator.obfuscate(preparation.previousSummary)
-				: preparation.previousSummary,
-			previousPreserveData: preparation.previousPreserveData
-				? this.#obfuscator.obfuscateObject(preparation.previousPreserveData)
-				: preparation.previousPreserveData,
-		};
+		if (!this.#obfuscator?.hasSecrets() || !preparation.previousSummary) return preparation;
+		// `previousPreserveData` is opaque provider-replay state (e.g. OpenAI remote-compaction
+		// `encrypted_content`); rewriting it would corrupt replay, so only the plaintext summary
+		// is redacted.
+		return { ...preparation, previousSummary: this.#obfuscator.obfuscate(preparation.previousSummary) };
 	}
 
 	#deobfuscateFromProvider(text: string): string {
@@ -5261,7 +5262,8 @@ export class AgentSession {
 	}
 
 	#convertToLlmForSideRequest(messages: AgentMessage[]): Message[] {
-		return this.#obfuscateForProvider(convertToLlm(messages));
+		const converted = convertToLlm(messages);
+		return this.#obfuscator?.hasSecrets() ? obfuscateMessages(this.#obfuscator, converted) : converted;
 	}
 
 	/** Convert session messages using the same pre-LLM pipeline as the active session. */
@@ -6835,7 +6837,7 @@ export class AgentSession {
 		this.#pendingNextTurnMessages = [];
 		this.#scheduledHiddenNextTurnGeneration = undefined;
 
-		this.sessionManager.appendThinkingLevelChange(this.thinkingLevel);
+		this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
 		this.sessionManager.appendServiceTierChange(this.serviceTier ?? null);
 		if (nextDiscoverySessionToolNames) {
 			await this.#applyActiveToolsByName(nextDiscoverySessionToolNames, { persistMCPSelection: false });
@@ -7234,16 +7236,20 @@ export class AgentSession {
 			return;
 		}
 
+		const wasAuto = this.#autoThinking;
 		this.#autoThinking = false;
 		this.#autoResolvedLevel = undefined;
 		const effectiveLevel = resolveThinkingLevelForModel(this.model, level);
-		const isChanging = effectiveLevel !== this.#thinkingLevel;
+		// Leaving auto must persist even when the resolved effort is unchanged (e.g.
+		// auto resolved to medium, then the user pins medium): otherwise the latest
+		// session entry keeps `configured: "auto"` and resume re-enables auto.
+		const isChanging = wasAuto || effectiveLevel !== this.#thinkingLevel;
 
 		this.#thinkingLevel = effectiveLevel;
 		this.#applyThinkingLevelToAgent(effectiveLevel);
 
 		if (isChanging) {
-			this.sessionManager.appendThinkingLevelChange(effectiveLevel);
+			this.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
 				this.settings.set("defaultThinkingLevel", effectiveLevel);
 			}
@@ -7332,7 +7338,7 @@ export class AgentSession {
 		this.#thinkingLevel = effort;
 		this.#applyThinkingLevelToAgent(effort);
 		if (shouldPersistResolution) {
-			this.sessionManager.appendThinkingLevelChange(effort);
+			this.sessionManager.appendThinkingLevelChange(effort, AUTO_THINKING);
 		}
 		this.#emit({
 			type: "thinking_level_changed",
@@ -7852,8 +7858,8 @@ export class AgentSession {
 						compactionAbortController.signal,
 						{
 							promptOverride: this.#obfuscateTextForProvider(compactionPrep.hookPrompt),
-							extraContext: this.#obfuscateForProvider(compactionPrep.hookContext),
-							remoteInstructions: this.#obfuscateForProvider(this.#baseSystemPrompt.join("\n\n")),
+							extraContext: compactionPrep.hookContext,
+							remoteInstructions: this.#baseSystemPrompt.join("\n\n"),
 							convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 						},
 					);
@@ -8047,11 +8053,10 @@ export class AgentSession {
 				model,
 				this.#modelRegistry.resolver(model, this.sessionId),
 				{
-					systemPrompt: this.#obfuscateForProvider(this.#baseSystemPrompt),
-					tools: obfuscateProviderTools(
-						this.#obfuscator,
-						this.#pruneToolDescriptions ? stripToolDescriptions(this.agent.state.tools) : this.agent.state.tools,
-					),
+					systemPrompt: this.#baseSystemPrompt,
+					tools: this.#pruneToolDescriptions
+						? stripToolDescriptions(this.agent.state.tools)
+						: this.agent.state.tools,
 					customInstructions: this.#obfuscateTextForProvider(customInstructions),
 					convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
 					initiatorOverride: "agent",
@@ -9739,8 +9744,8 @@ export class AgentSession {
 								autoCompactionSignal,
 								{
 									promptOverride: this.#obfuscateTextForProvider(compactionPrep.hookPrompt),
-									extraContext: this.#obfuscateForProvider(compactionPrep.hookContext),
-									remoteInstructions: this.#obfuscateForProvider(this.#baseSystemPrompt.join("\n\n")),
+									extraContext: compactionPrep.hookContext,
+									remoteInstructions: this.#baseSystemPrompt.join("\n\n"),
 									metadata: this.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
@@ -11366,7 +11371,7 @@ export class AgentSession {
 			}
 			if (event.type === "done") {
 				assistantMessage = this.#obfuscator?.hasSecrets()
-					? { ...event.message, content: this.#obfuscator.deobfuscateObject(event.message.content) }
+					? { ...event.message, content: deobfuscateAssistantContent(this.#obfuscator, event.message.content) }
 					: event.message;
 				break;
 			}
@@ -11608,18 +11613,26 @@ export class AgentSession {
 				.some(entry => entry.type === "service_tier_change");
 			const defaultThinkingLevel = parseConfiguredThinkingLevel(this.settings.get("defaultThinkingLevel"));
 			const configuredServiceTier = this.settings.get("serviceTier");
-			// Session log entries store only concrete levels. When `auto` has resolved
-			// for a turn, the persisted context may already carry that concrete level
-			// even if the branch scan races a just-flushed thinking entry under isolated
-			// parallel test workers. Prefer the concrete context value in that case;
-			// otherwise keep the configured `auto` selector so fresh sessions still
-			// classify their first turn.
+			// Restore the thinking selector. Each change persists the configured
+			// selector (`auto` or a concrete level), so prefer it: an `auto` session
+			// resumes in auto mode (reclassifying the next turn) instead of freezing at
+			// the last resolved level. Entries written before the `configured` field
+			// existed fall back to the concrete level (legacy pin-on-resume behavior).
+			// With no thinking entry, fall back to the global default so fresh sessions
+			// still classify their first turn.
+			const restoredConfigured = sessionContext.configuredThinkingLevel;
 			const restoredThinkingLevel: ConfiguredThinkingLevel | undefined =
 				hasThinkingEntry || (defaultThinkingLevel === AUTO_THINKING && sessionContext.thinkingLevel !== "off")
-					? (sessionContext.thinkingLevel as ThinkingLevel | undefined)
+					? restoredConfigured === AUTO_THINKING
+						? AUTO_THINKING
+						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
 			if (restoredThinkingLevel === AUTO_THINKING) {
 				this.#autoThinking = true;
+				// Resume in auto (pending) like a fresh auto session: the next user
+				// turn reclassifies. We intentionally do not seed the last resolved
+				// effort, so the cold (--continue) and in-app switch paths display
+				// identically as `auto` until then.
 				this.#autoResolvedLevel = undefined;
 				this.#thinkingLevel = resolveProvisionalAutoLevel(this.model);
 			} else {
@@ -12513,9 +12526,12 @@ export class AgentSession {
 	 * @returns Path to exported file
 	 */
 	async exportToHtml(outputPath?: string): Promise<string> {
-		const themeName = getCurrentThemeName();
+		// Public HTML export ships in the omp brand palette (collab-web
+		// pink/purple), matching my.omp.sh — not the host's terminal theme.
+		// Callers who want a themed export can pass `palette: "theme"` with
+		// `themeName` directly to `exportSessionToHtml`.
 		const { exportSessionToHtml } = await import("../export/html");
-		return exportSessionToHtml(this.sessionManager, this.state, { outputPath, themeName });
+		return exportSessionToHtml(this.sessionManager, this.state, { outputPath, palette: "web" });
 	}
 
 	// =========================================================================

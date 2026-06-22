@@ -568,6 +568,7 @@ const UMANS_REASONING_EFFORT_BY_LEVEL: Record<string, Effort> = {
 	xhigh: Effort.XHigh,
 };
 const UMANS_DEFAULT_REASONING_EFFORTS = [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.XHigh] as const;
+const UMANS_VIA_HANDOFF_MODEL_IDS = ["umans-glm-5.1", "umans-glm-5.2"] as const;
 
 export interface UmansModelManagerConfig {
 	apiKey?: string;
@@ -586,8 +587,18 @@ function normalizeUmansBaseUrl(baseUrl: string | undefined): string {
 	return normalized.endsWith("/v1") ? normalized.slice(0, -3) : normalized;
 }
 
+/**
+ * Umans `models/info` reports `supports_vision: true` for natively
+ * vision-capable models and a non-empty string sentinel (e.g.
+ * `"via-handoff"`) for models that route image inputs through a vision
+ * handoff pre-analysis step instead of accepting raw image blocks. Only
+ * `true` means the model accepts image content directly; sentinel values
+ * MUST map to text-only so the agent's vision-handoff path runs instead
+ * of triggering an upstream HTTP 400 (`This model does not support image
+ * inputs`).
+ */
 function umansSupportsVision(value: unknown): boolean {
-	return value === true || (typeof value === "string" && value.length > 0);
+	return value === true;
 }
 
 function umansReasoningSupported(value: unknown): boolean {
@@ -704,6 +715,7 @@ export function umansModelManagerOptions(config?: UmansModelManagerConfig): Mode
 	return {
 		providerId: "umans",
 		dynamicModelsAuthoritative: true,
+		dropCachedModelIdsOnStaticMismatch: UMANS_VIA_HANDOFF_MODEL_IDS,
 		fetchDynamicModels: () => fetchUmansModelsInfo({ baseUrl, apiKey, fetch: config?.fetch, references }),
 	};
 }
@@ -2501,6 +2513,101 @@ export function moonshotModelManagerOptions(
 									? { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High] }
 									: undefined),
 						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
+// 16.5 Sakana AI
+// ---------------------------------------------------------------------------
+
+const SAKANA_DEFAULT_BASE_URL = "https://api.sakana.ai/v1";
+const SAKANA_FREE_ROUTER_COST = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 } as const;
+const SAKANA_FUGU_ULTRA_COST = { input: 5, output: 30, cacheRead: 0.5, cacheWrite: 0 } as const;
+const SAKANA_FUGU_THINKING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.High, Effort.XHigh],
+	effortMap: { [Effort.XHigh]: "max" },
+};
+const SAKANA_RESPONSES_COMPAT: ModelSpec<"openai-responses">["compat"] = {
+	includeEncryptedReasoning: false,
+	streamIdleTimeoutMs: 300_000,
+};
+
+function normalizeSakanaBaseUrl(baseUrl: string | undefined): string {
+	const value = baseUrl?.trim() || SAKANA_DEFAULT_BASE_URL;
+	const normalized = value.replace(/\/+$/, "");
+	return normalized.endsWith("/v1") ? normalized : `${normalized}/v1`;
+}
+
+function isSakanaFuguModelId(modelId: string): boolean {
+	return /^fugu(?:$|-)/i.test(modelId);
+}
+
+function createSakanaFuguStaticModel(
+	id: string,
+	name: string,
+	cost: ModelSpec<"openai-responses">["cost"],
+): ModelSpec<"openai-responses"> {
+	return {
+		id,
+		name,
+		api: "openai-responses",
+		provider: "sakana",
+		baseUrl: SAKANA_DEFAULT_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { ...cost },
+		contextWindow: null,
+		maxTokens: null,
+		thinking: { ...SAKANA_FUGU_THINKING },
+		compat: { ...SAKANA_RESPONSES_COMPAT },
+	};
+}
+
+export const SAKANA_FUGU_STATIC_MODELS: readonly ModelSpec<"openai-responses">[] = [
+	createSakanaFuguStaticModel("fugu", "Fugu", SAKANA_FREE_ROUTER_COST),
+	createSakanaFuguStaticModel("fugu-ultra", "Fugu Ultra", SAKANA_FUGU_ULTRA_COST),
+	createSakanaFuguStaticModel("fugu-ultra-20260615", "Fugu Ultra 20260615", SAKANA_FUGU_ULTRA_COST),
+];
+
+const SAKANA_FUGU_STATIC_MODEL_BY_ID = new Map(SAKANA_FUGU_STATIC_MODELS.map(model => [model.id, model] as const));
+
+export interface SakanaModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function sakanaModelManagerOptions(config?: SakanaModelManagerConfig): ModelManagerOptions<"openai-responses"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = normalizeSakanaBaseUrl(config?.baseUrl ?? Bun.env.SAKANA_BASE_URL ?? Bun.env.FUGU_BASE_URL);
+	const references = createBundledReferenceMap<"openai-responses">("sakana");
+	return {
+		providerId: "sakana",
+		dynamicModelsAuthoritative: true,
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-responses",
+					provider: "sakana",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id) ?? SAKANA_FUGU_STATIC_MODEL_BY_ID.get(defaults.id);
+						const model = mapWithBundledReference(entry, defaults, reference);
+						if (!reference && isSakanaFuguModelId(model.id)) {
+							return {
+								...model,
+								reasoning: true,
+								thinking: { ...SAKANA_FUGU_THINKING },
+								compat: { ...SAKANA_RESPONSES_COMPAT },
+							};
+						}
+						return model;
 					},
 					fetch: config?.fetch,
 				}),

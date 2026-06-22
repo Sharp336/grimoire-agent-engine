@@ -2,11 +2,12 @@
  * TUI rendering for the eval tool.
  *
  * Split out from `eval.ts` so the renderer can be imported by `renderers.ts`
- * without dragging the eval *runtime* (JS/Python backends -> agent bridge ->
- * task executor -> sdk -> extension loader -> root barrel) into the renderer
- * module graph. That transitive chain re-enters `renderers.ts` while `eval.ts`
- * is still initializing, which previously crashed module load with a TDZ
- * `Cannot access 'evalToolRenderer' before initialization`.
+ * without dragging the eval *runtime* (JS/Python/Ruby/Julia backends ->
+ * agent bridge -> task executor -> sdk -> extension loader -> root barrel)
+ * into the renderer module graph. That transitive chain re-enters
+ * `renderers.ts` while `eval.ts` is still initializing, which previously
+ * crashed module load with a TDZ `Cannot access 'evalToolRenderer' before
+ * initialization`.
  */
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Markdown, Text } from "@oh-my-pi/pi-tui";
@@ -41,8 +42,11 @@ import {
 } from "./render-utils";
 export const EVAL_DEFAULT_PREVIEW_LINES = 10;
 
-function languageForHighlighter(language: EvalLanguage | undefined): "python" | "javascript" {
-	return language === "js" ? "javascript" : "python";
+function languageForHighlighter(language: EvalLanguage | undefined): "python" | "javascript" | "ruby" | "julia" {
+	if (language === "js") return "javascript";
+	if (language === "ruby") return "ruby";
+	if (language === "julia") return "julia";
+	return "python";
 }
 
 interface EvalRenderCellArg {
@@ -70,7 +74,10 @@ interface EvalRenderCell {
 }
 
 function normalizeRenderLanguage(value: string | undefined): EvalLanguage {
-	return value === "js" ? "js" : "python";
+	if (value === "js") return "js";
+	if (value === "rb" || value === "ruby") return "ruby";
+	if (value === "jl" || value === "julia") return "julia";
+	return "python";
 }
 
 function getRenderCells(args: EvalRenderArgs | undefined): EvalRenderCell[] {
@@ -506,6 +513,7 @@ export const evalToolRenderer = {
 						{
 							code: cell.code,
 							language: languageForHighlighter(cell.language),
+							showLanguage: true,
 							index: i,
 							total: cells.length,
 							title: cell.title,
@@ -608,6 +616,7 @@ export const evalToolRenderer = {
 							{
 								code: cell.code,
 								language: languageForHighlighter(cell.language ?? details?.language),
+								showLanguage: true,
 								index: i,
 								total: cellResults.length,
 								title: cell.title,

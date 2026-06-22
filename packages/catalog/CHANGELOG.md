@@ -2,6 +2,35 @@
 
 ## [Unreleased]
 
+## [16.1.14] - 2026-06-22
+
+### Added
+
+- Added Sakana AI provider support with Fugu model integration
+- Added Sakana AI/Fugu provider catalog entries with Fugu model discovery and Responses API metadata
+- Added support for "xhigh" reasoning tier across model configurations
+- Added configuration for new models GCP-5.4 Mini, GPT-5.5, and variants
+- Added `devin` variant collapse table to streamline model tiering
+
+### Changed
+
+- Updated reasoning label pattern to include "minimal" and "max" efforts
+- Simplified model identification logic for Devin-powered reasoning models
+- Refactored variant routing to consolidate and standardize tier definitions
+
+## [16.1.13] - 2026-06-22
+
+### Added
+
+- Added support for Devin as a model provider
+- Added capability to fetch dynamic models from the Devin model manager
+
+## [16.1.11] - 2026-06-21
+
+### Fixed
+
+- Fixed Umans `umans-glm-5.1` / `umans-glm-5.2` advertising native image input. The `models/info` endpoint reports `supports_vision: "via-handoff"` for the GLM models, meaning vision routes through a separate handoff pre-analysis step instead of accepting raw image blocks; `umansSupportsVision` treated any non-empty string as native vision support, so image prompts went directly to GLM and were rejected with `400 This model does not support image inputs`. The helper now requires `supports_vision === true`, the bundled GLM 5.1/5.2 rows are corrected to text-only, and stale mismatched Umans cache rows for those ids are dropped so the vision-handoff path runs even before a successful refresh. ([#3184](https://github.com/can1357/oh-my-pi/issues/3184))
+
 ## [16.1.9] - 2026-06-21
 
 ### Fixed

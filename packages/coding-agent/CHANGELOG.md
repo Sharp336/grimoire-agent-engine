@@ -2,6 +2,78 @@
 
 ## [Unreleased]
 
+## [16.1.14] - 2026-06-22
+
+### Added
+
+- Added a Ruby eval backend (`language: "rb"`): a persistent subprocess Ruby kernel that shares the standard agent tool bridge and evaluation model, supporting IRB-style auto-display of results in a persistent session
+- Added a Julia eval backend (`language: "jl"`): a persistent subprocess Julia kernel that shares the standard agent tool bridge and evaluation model, supporting Julia REPL-style auto-display of results in a persistent session
+- Added configuration options `eval.rb` and `eval.jl` to enable or disable the Ruby and Julia backends (both opt-in, disabled by default), as well as `ruby.interpreter` and `julia.interpreter` paths for explicit runtime control
+- Added a Ruby eval backend (`language: "rb"`): a persistent subprocess Ruby kernel modeled on the Python kernel, speaking the same NDJSON protocol with isolated frame/stdout channels, clean SIGINT cancellation that preserves kernel state, and per-owner kernel cleanup. Ships the full prelude helper surface (`display`/`read`/`write`/`append`/`tree`/`diff`/`env`/`output`/`sort`/`uniq`/`counter`, the `tool.<name>` bridge proxy, and `completion`/`agent`/`parallel`/`pipeline`/`log`/`phase`/`budget`) over the shared loopback tool bridge, honors `local://` roots, and auto-displays the last expression IRB-style (suppressing assignments/definitions). Gated by the `eval.rb` setting and `PI_RB` env flag, with an optional `ruby.interpreter` override.
+- Added a Julia eval backend (`language: "jl"`): a persistent subprocess Julia kernel with the same NDJSON/result-display/tool-bridge model as the Python and Ruby eval runtimes, including `eval.jl` / `PI_JL` gating, `julia.interpreter` override support, persistent per-session state, clean cancellation, owner-based kernel cleanup, `local://` path roots, and the current Julia prelude helper surface (`display`/`read`/`write`/`append`/`tree`/`diff`/`env`/`output`, the `tool.<name>` bridge proxy, and bridge-backed `completion`/`agent`/`parallel`/`pipeline`/`log`/`phase`/`budget`, including structured `schema` parsing and `return_handle` DAG shaping).
+- The eval tool advertises only the runtimes enabled for the session: a disabled backend (rb/jl are off by default) is omitted from the tool's `language` enum, schema field descriptions, discovery summary, and prelude documentation, so disabled backends are never surfaced to the model
+
+### Changed
+
+- Refactored internal evaluation logic to consolidate shared kernel management and IPC handling
+- Refactored internal draft state to consolidate images and text into the editor component
+- Unified transcript rendering logic for background jobs, IRC traffic, and file mentions
+- Unified subprocess lifecycle management for mnemopi, speech, tiny-model, and TTS workers
+- Softened the system-prompt and tool-prompt guidance that hard-forbade reaching for shell equivalents of dedicated tools (`grep`/`rg`, `sed`/`perl -i`, `cat`/`head`/`tail`, `find`/`fd`). The "Specialized Tool Priority" section, the `bash`/`search`/`find`/`read`/`replace` tool prompts, and the FORBIDDEN/NEVER framing now state the dedicated tools as the preferred default rather than an absolute prohibition, so the agent no longer fights itself when a quick shell command is the right call. The opt-in `bashInterceptor` (default off) still hard-blocks these commands for users who enable it.
+- Unified subprocess lifecycle management for mnemopi, speech, tiny-model, and TTS workers
+- Refined TUI dashboard and list component layout logic for consistent rendering
+- Standardized scrollbar behaviors and keyboard navigation across all list components
+- Optimized internal message framing logic for better performance when handling large data bursts
+
+### Removed
+
+- Removed the `readHashLines` setting (the "Hash Lines" toggle under Files → Reading). Hashline read/search anchors (`[PATH#TAG]` snapshot headers plus `LINE:content`) are now driven solely by `edit.mode === "hashline"`: the toggle was redundant when off (anchors are already suppressed for non-hashline edit modes) and a footgun when on (turning it off left the default hashline edit tool with no addressable anchors, since `read` then skips recording the snapshot tag). Existing configs are migrated automatically by dropping the stale key.
+
+## [16.1.12] - 2026-06-21
+
+### Changed
+
+- Refined secret obfuscation to only target message roles and fields containing operator secrets
+- Restricted obfuscator to ignore secrets and regex matches shorter than 8 characters
+- Optimized obfuscation to skip static system prompts and tool schemas in provider contexts
+- Ensured image data bytes are never modified to prevent corrupted data URL payloads
+
+### Fixed
+
+- Fixed secret obfuscation corrupting Codex image reads (and other provider requests) with `Invalid 'input[N].content[].image_url'. Expected a base64-encoded data URL ... but got an invalid base64-encoded value`. The obfuscator deep-walked every string in the outbound request — including inline image base64 and opaque provider replay/signature fields — so a configured secret that happened to be a substring of the base64 (or of an ordinary word like `response`) injected `#HASH#` placeholders mid-payload. Obfuscation is now opt-in and fully typed: only user messages, tool-result messages, and user-attributed developer messages (`@file` mentions) are redacted; system prompts and tool schemas pass through untouched; image bytes and signature/encrypted-reasoning fields are never rewritten; and tool-call arguments are the only JSON walked. Configured plain secrets and regex matches shorter than 8 characters are now ignored to stop false matches on short words.
+- Fixed RPC/ACP startup clobbering explicit caller/project/global configuration for `task.isolation.{mode,merge,commits}`, `task.eager`, `task.batch`, `task.maxConcurrency`, `task.maxRecursionDepth`, `task.disabledAgents`, `task.agentModelOverrides`, `memory.backend`, `memories.enabled`, `advisor.{enabled,subagents,syncBacklog,immuneTurns}`, plus the RPC-only `async.{enabled,maxJobs}` and `bash.autoBackground.{enabled,thresholdMs}`. `applyDefaultSettingOverrides` re-asserted the schema default as a runtime override after settings load, regressing the `isConfigured()` guard added for #2598 and ignoring every explicit value the embedder, project, `--config` overlay, or global config had set. The guard is restored, so the host default now only fills holes ([#3207](https://github.com/can1357/oh-my-pi/issues/3207)).
+
+## [16.1.11] - 2026-06-21
+
+### Added
+
+- Added `tab.waitForSelector` for more robust element-wait behavior
+- Added `tab.waitForNavigation` to monitor and await page transitions
+
+### Changed
+
+- Standardized public HTML exports to use the brand web palette instead of the local TUI theme
+- Updated export logic to allow choosing between brand-web or local TUI color palettes
+- Clamped browser tool timeouts to fail fast with named errors instead of opaque cell timeouts
+- Added strict validation to block unsupported Playwright-only selector engines in browser tools
+
+### Fixed
+
+- Fixed Codex image reads re-encoding to WebP and then failing the next request with an invalid `input_image.image_url`; Codex-bound images now stay in PNG/JPEG-compatible formats.
+- Fixed prompt-template and file slash-command submissions rendering both the raw slash invocation and the expanded prompt in the interactive transcript. ([#3199](https://github.com/can1357/oh-my-pi/issues/3199))
+- Fixed the `/model` thinking picker labeling the OpenAI GPT-5.5 top effort as `max` instead of the catalog-declared `xhigh` ([#3194](https://github.com/can1357/oh-my-pi/issues/3194)).
+- Fixed session-title generation silently falling back to the online `smol` model (and billing whatever provider held the resolved API key — OpenRouter in the reporter's case) when the user had explicitly configured a **local** `providers.tinyModel`: `generateSessionTitle` raced local against online with a 10s timeout and fired the online request immediately whenever the local worker returned `null` (unknown key, model not downloaded, transformers.js failure). Now an explicit local-model choice is honored end-to-end — on local failure the session is left untitled with a `logger.warn` instead of billing the smol fallback ([#3187](https://github.com/can1357/oh-my-pi/issues/3187))
+- Fixed OpenCode MCP discovery so array commands are normalized into a stdio executable plus arguments, `environment` is accepted as the OpenCode env key, and argument lists are omitted when empty. ([#3180](https://github.com/can1357/oh-my-pi/issues/3180))
+- Fixed plan mode leaving `write` hidden under `tools.discoveryMode: "all"`, which made the agent attempt to create the plan file via `edit` and stall. Plan-mode entry now force-activates `write` whenever the registry built it, matching the `write`+`edit` instructions in the plan-mode prompt ([#3165](https://github.com/can1357/oh-my-pi/issues/3165))
+- Fixed `edit` and `patch` tool writes bypassing the ACP client's open buffer when Zed (or another ACP client) advertises the `fs.writeTextFile` capability: all three write-mode tools (`edit`, `patch`, `replace`) now route through the client bridge when it is available, so the editor's TypeScript diagnostics panel updates immediately instead of requiring a workspace reload.
+- Fixed the agent dashboard new-agent description and the hook editor (default hook-style mode) treating Ctrl+Q as plain text on Windows Terminal, leaving Windows users unable to submit because the terminal cannot deliver a distinct Ctrl+Enter event. Both forms now submit on the shared `app.message.followUp` chord (Ctrl+Q or Ctrl+Enter), matching the main prompt editor and any user remap of `app.message.followUp` ([#2118](https://github.com/can1357/oh-my-pi/issues/2118)).
+- Fixed `pi.sendMessage({ display: true })` rendering the custom message twice when fired from a `session_start` extension handler (or any other non-streaming dispatch before the initial transcript render). `ExtensionUiController.#applyCustomMessageDisplay` rebuilt the chat from the freshly-persisted session entry, and `main.ts`'s subsequent `renderInitialMessages(undefined, { preserveExistingChat: true })` then both re-rendered from session entries AND re-appended the preserved chat children — duplicating the message. The rebuild now waits until `renderInitialMessages` has completed at least once (tracked via `InteractiveModeContext.initialChatRendered`); after that, post-init extension sends still rebuild as before so messages from `tool_result` / `agent_end` / etc. surface immediately ([#1955](https://github.com/can1357/oh-my-pi/issues/1955)).
+- Fixed Git-mutating automation silently mis-handling pure Jujutsu workspaces (`.jj/repo/` present, no colocated `.git/`). `task/worktree.ts#getRepoRoot` previously threw a generic "Git repository not found" for isolated subagent setup, and `autoresearch/git.ts#ensureAutoresearchBranch` returned a soft "Not in a git repository" warning that let `/autoresearch` proceed with no branch isolation or auto-commits. Both paths now detect a pure jj workspace via the new `jj.isPureJjRepo` helper and surface an actionable Jujutsu-specific error pointing at `jj git init --colocate`. Colocated jj-git (both `.jj/` and `.git/` at the same root) and plain Git checkouts behave exactly as before ([#1935](https://github.com/can1357/oh-my-pi/issues/1935)).
+- Fixed `auto` thinking mode being silently dropped when a session is resumed (`--continue`/`--resume`/in-app switch). The session log persisted only the resolved per-turn effort, not the `auto` selector, so resume froze the session at the last concrete level and never reclassified again. The log now records the configured selector (`auto` vs concrete) alongside the resolved effort, so resumed `auto` sessions stay in auto (shown as pending until the next turn reclassifies) and manual concrete pins still restore as concrete — including a pin whose level matches the effort `auto` had just resolved to.
+- Fixed transcript scrollback stability on terminals with eager erase risk so completed assistant messages remain stable while new streaming lines are rendering
+- Fixed Hindsight retain (and the shared mnemopi/Hindsight recall paths) framing assistant turns whose only content was punctuation/whitespace — most commonly the lone `.` some providers emit for tool-call-only or thinking-only turns — into `[role: assistant]\n.\n[assistant:end]` blocks that polluted the bank, wasted retain tokens, and degraded recall. `prepareRetentionTranscript`, `extractMessages`, and `flattenMessagesForRecall` now require at least one letter or digit per message via a shared `hasSubstantiveContent` predicate ([#1806](https://github.com/can1357/oh-my-pi/issues/1806)).
+- Fixed `/resume` rendering forked child sessions without a fork tag, making them indistinguishable from their parent when titles match ([#1792](https://github.com/can1357/oh-my-pi/issues/1792)).
+
 ## [16.1.10] - 2026-06-21
 
 ### Added

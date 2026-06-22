@@ -5,7 +5,7 @@ import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
-import { AssistantMessageComponent } from "../../modes/components/assistant-message";
+import type { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
 import {
 	ReadToolGroupComponent,
@@ -25,6 +25,7 @@ import type { ResolveToolDetails } from "../../tools/resolve";
 import { vocalizer } from "../../tts/vocalizer";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { interruptHint } from "../shared";
+import { createAssistantMessageComponent } from "../utils/interactive-context-helpers";
 import { StreamingRevealController } from "./streaming-reveal";
 import { ToolArgsRevealController } from "./tool-args-reveal";
 
@@ -296,8 +297,15 @@ export class EventController {
 			this.#resetReadGroup();
 			this.#resolveDisplaceablePoll();
 			const wasOptimistic = this.ctx.optimisticUserMessageSignature === signature;
-			const wasLocallySubmitted = this.ctx.locallySubmittedUserSignatures.delete(signature) || wasOptimistic;
-			if (!wasOptimistic) {
+			const matchedLocalSubmission = this.ctx.locallySubmittedUserSignatures.delete(signature);
+			const replacesOptimistic =
+				this.ctx.optimisticUserMessageSignature !== undefined && !wasOptimistic && !matchedLocalSubmission;
+			const wasLocallySubmitted = matchedLocalSubmission || wasOptimistic || replacesOptimistic;
+			if (wasOptimistic) {
+				this.ctx.clearOptimisticUserMessage();
+			} else if (replacesOptimistic) {
+				this.ctx.replaceOptimisticUserMessage(event.message);
+			} else {
 				// Append synchronously: #emit dispatches to this listener fire-and-forget
 				// (see AgentSession.#emit), so any await between the user message_start and
 				// addMessageToChat lets later events (assistant message_start, tool execution
@@ -305,9 +313,6 @@ export class EventController {
 				// live-region block boundaries. addMessageToChat materializes clickable image
 				// links via the synchronous putBlobSync fallback, so no await is needed here.
 				this.ctx.addMessageToChat(event.message);
-			}
-			if (wasOptimistic) {
-				this.ctx.optimisticUserMessageSignature = undefined;
 			}
 
 			// Clear the editor only when the submission did not originate from a
@@ -328,14 +333,7 @@ export class EventController {
 			this.ctx.ui.requestRender();
 		} else if (event.message.role === "assistant") {
 			this.#lastVisibleBlockCount = 0;
-			this.ctx.streamingComponent = new AssistantMessageComponent(
-				undefined,
-				this.ctx.hideThinkingBlock,
-				() => this.ctx.ui.requestRender(),
-				this.ctx.viewSession.extensionRunner?.getAssistantThinkingRenderers(),
-				this.ctx.ui.imageBudget,
-				this.ctx.proseOnlyThinking,
-			);
+			this.ctx.streamingComponent = createAssistantMessageComponent(this.ctx);
 			this.ctx.streamingMessage = event.message;
 			this.ctx.chatContainer.addChild(this.ctx.streamingComponent);
 			this.#streamingReveal.begin(this.ctx.streamingComponent, this.ctx.streamingMessage);

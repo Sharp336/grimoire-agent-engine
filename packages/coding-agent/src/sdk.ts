@@ -46,7 +46,9 @@ import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers } from "./cursor";
 import "./discovery";
 import { initializeWithSettings } from "./discovery";
+import { disposeAllJuliaKernelSessions, disposeJuliaKernelSessionsByOwner } from "./eval/jl/executor";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
+import { disposeAllRubyKernelSessions, disposeRubyKernelSessionsByOwner } from "./eval/rb/executor";
 import { defaultEvalSessionId } from "./eval/session-id";
 import {
 	type CustomCommandsLoadResult,
@@ -97,6 +99,7 @@ import { AgentRegistry, MAIN_AGENT_ID } from "./registry/agent-registry";
 import {
 	collectEnvSecrets,
 	deobfuscateSessionContext,
+	deobfuscateToolArguments,
 	loadSecrets,
 	obfuscateMessages,
 	obfuscateProviderContext,
@@ -471,7 +474,7 @@ export interface CreateAgentSessionOptions {
 
 	/** Enable LSP integration (tool, formatting, diagnostics, warmup). Default: true */
 	enableLsp?: boolean;
-	/** Skip Python kernel availability check and prelude warmup */
+	/** Skip subprocess-kernel availability checks and prelude warmup */
 	skipPythonPreflight?: boolean;
 	/** Tool names explicitly requested (enables disabled-by-default tools) */
 	toolNames?: string[];
@@ -865,12 +868,14 @@ function registerSshCleanup(): void {
 	postmortem.register("ssh-cleanup", cleanupSshResources);
 }
 
-let pythonCleanupRegistered = false;
+let evalCleanupRegistered = false;
 
-function registerPythonCleanup(): void {
-	if (pythonCleanupRegistered) return;
-	pythonCleanupRegistered = true;
+function registerEvalCleanup(): void {
+	if (evalCleanupRegistered) return;
+	evalCleanupRegistered = true;
 	postmortem.register("python-cleanup", disposeAllKernelSessions);
+	postmortem.register("ruby-cleanup", disposeAllRubyKernelSessions);
+	postmortem.register("julia-cleanup", disposeAllJuliaKernelSessions);
 }
 
 function customToolToDefinition(tool: CustomTool): ToolDefinition {
@@ -1079,7 +1084,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const eventBus = options.eventBus ?? new EventBus();
 
 	registerSshCleanup();
-	registerPythonCleanup();
+	registerEvalCleanup();
 
 	// Pin authStorage to modelRegistry.authStorage: ModelRegistry.getApiKey() routes refresh
 	// failures through that instance, so any divergent storage handed to the bridge / mcpManager
@@ -1288,7 +1293,9 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const pickInitialThinkingLevel = (selectedModel: Model | undefined): ConfiguredThinkingLevel | undefined => {
 		let level = options.thinkingLevel;
 		if (level === undefined && hasExistingSession && hasThinkingEntry) {
-			level = parseThinkingLevel(existingSession.thinkingLevel);
+			level =
+				parseConfiguredThinkingLevel(existingSession.configuredThinkingLevel) ??
+				parseThinkingLevel(existingSession.thinkingLevel);
 		}
 		if (level === undefined && !hasThinkingEntry && restoredSessionThinkingLevel !== undefined) {
 			level = restoredSessionThinkingLevel;
@@ -2019,18 +2026,22 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		);
 
 		// All built-in tools are active (conditional tools like git/ask return null from factory if disabled)
+		const builtInRegistryToolNames = new Set<string>();
 		const toolRegistry = new Map<string, Tool>();
 		for (const tool of builtinTools) {
 			toolRegistry.set(tool.name, tool);
+			builtInRegistryToolNames.add(tool.name);
 		}
 		if (!toolRegistry.has("goal") && settings.get("goal.enabled")) {
 			const goalTool = await logger.time("createTools:goal:session", HIDDEN_TOOLS.goal, toolSession);
 			if (goalTool) {
 				toolRegistry.set(goalTool.name, wrapToolWithMetaNotice(goalTool));
+				builtInRegistryToolNames.add(goalTool.name);
 			}
 		}
 		for (const tool of wrappedExtensionTools) {
 			toolRegistry.set(tool.name, tool);
+			builtInRegistryToolNames.delete(tool.name);
 		}
 		if (deferMCPDiscoveryForUI && mcpManager) {
 			for (const name of collectPendingMCPToolNames(options.toolNames, existingSession.selectedMCPToolNames)) {
@@ -2048,6 +2059,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		}
 		if (model?.provider === "cursor") {
 			toolRegistry.delete("edit");
+			builtInRegistryToolNames.delete("edit");
 		}
 
 		// `resolve` is hidden but must stay in the registry whenever any code path can invoke it:
@@ -2060,10 +2072,12 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		const needsResolveTool = hasDeferrableTools || planModeAvailable;
 		if (!needsResolveTool) {
 			toolRegistry.delete("resolve");
+			builtInRegistryToolNames.delete("resolve");
 		} else if (!toolRegistry.has("resolve")) {
 			const resolveTool = await logger.time("createTools:resolve:session", HIDDEN_TOOLS.resolve, toolSession);
 			if (resolveTool) {
 				toolRegistry.set(resolveTool.name, wrapToolWithMetaNotice(resolveTool));
+				builtInRegistryToolNames.add(resolveTool.name);
 			}
 		}
 
@@ -2080,6 +2094,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				searchTool.name,
 				new ExtensionToolWrapper(wrapToolWithMetaNotice(searchTool), extensionRunner) as Tool,
 			);
+			builtInRegistryToolNames.add(searchTool.name);
 		}
 		let mcpDiscoveryEnabled = effectiveDiscoveryMode !== "off"; // back-compat: true when any discovery active
 
@@ -2525,7 +2540,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					result = { ...result, timeout: Math.min(result.timeout, maxTimeout) };
 				}
 				if (obfuscator?.hasSecrets()) {
-					result = obfuscator.deobfuscateObject(result);
+					result = deobfuscateToolArguments(obfuscator, result);
 				}
 				return result;
 			},
@@ -2623,6 +2638,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			skillsSettings: settings.getGroup("skills"),
 			modelRegistry,
 			toolRegistry,
+			builtInToolNames: builtInRegistryToolNames,
 			transformContext,
 			onPayload,
 			onResponse,
@@ -2681,7 +2697,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const originalDispose = session.dispose.bind(session);
 			session.dispose = async () => {
 				try {
-					// Reject new session work (Python/eval starts) the moment disposal
+					// Reject new session work (eval starts) the moment disposal
 					// begins — the lifecycle await below opens an async gap before
 					// AgentSession.dispose() would otherwise set its guards.
 					session.beginDispose();
@@ -2901,6 +2917,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					await asyncJobManager.dispose({ timeoutMs: 3_000 });
 				}
 				await disposeKernelSessionsByOwner(evalKernelOwnerId);
+				await disposeRubyKernelSessionsByOwner(evalKernelOwnerId);
+				await disposeJuliaKernelSessionsByOwner(evalKernelOwnerId);
 				if (ownsAuthStorage) authStorage.close();
 			}
 		} catch (cleanupError) {
