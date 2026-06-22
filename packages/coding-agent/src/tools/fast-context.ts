@@ -997,11 +997,11 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		];
 		let rawText: string;
 		try {
-		// Cloud/reasoning models (registry backend) need a longer budget than the
-		// 30s hint timeout tuned for a fast local model — otherwise the single
-		// query-expansion turn times out before the model emits a plan.
-		const hintTimeout = backend.kind === "registry" ? REQUEST_TIMEOUT_MS : HINT_REQUEST_TIMEOUT_MS;
-		const response = await this.#chat(backend, hintMessages, signal, 2048, null, hintTimeout);
+			// Cloud/reasoning models (registry backend) need a longer budget than the
+			// 30s hint timeout tuned for a fast local model — otherwise the single
+			// query-expansion turn times out before the model emits a plan.
+			const hintTimeout = backend.kind === "registry" ? REQUEST_TIMEOUT_MS : HINT_REQUEST_TIMEOUT_MS;
+			const response = await this.#chat(backend, hintMessages, signal, 2048, null, hintTimeout);
 			rawText = response.message.content ?? "";
 		} catch (err) {
 			const errorMsg = err instanceof Error ? err.message : String(err);
