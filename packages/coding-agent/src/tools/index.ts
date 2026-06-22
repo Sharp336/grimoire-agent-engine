@@ -597,7 +597,13 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		if (name === "debug") return session.settings.get("debug.enabled");
 		if (name === "todo") return !includeYield && session.settings.get("todo.enabled");
 		if (name === "fast_context")
-			return session.settings.get("fastContext.enabled") && requestedTools?.includes("fast_context") === true;
+			// First-class retrieval tool: available to the main agent (requestedTools
+			// undefined) and any agent that explicitly requests it (e.g. explore).
+			// Matches the eval gate pattern above, not gated to explore only.
+			return (
+				session.settings.get("fastContext.enabled") &&
+				(requestedTools === undefined || requestedTools.includes("fast_context"))
+			);
 		if (name === "find") return session.settings.get("find.enabled");
 		if (name === "search") return session.settings.get("search.enabled");
 		if (name === "github") return session.settings.get("github.enabled");

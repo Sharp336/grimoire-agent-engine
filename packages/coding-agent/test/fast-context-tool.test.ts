@@ -29,16 +29,27 @@ describe("FastContext tool", () => {
 		expect(normalizeFastContextBaseUrl("http://127.0.0.1:8080/v1/")).toBe("http://127.0.0.1:8080/v1");
 	});
 
-	it("only exposes fast_context when FastContext is enabled", async () => {
+	it("exposes fast_context to the main agent and explore when enabled", async () => {
+		// Disabled → never exposed, even when explicitly requested.
 		const disabledTools = await createTools(createSession(process.cwd()), ["fast_context"]);
 		expect(disabledTools.some(tool => tool.name === "fast_context")).toBe(false);
-		const defaultTools = await createTools(createSession(process.cwd(), { "fastContext.enabled": true }));
-		expect(defaultTools.some(tool => tool.name === "fast_context")).toBe(false);
 
-		const enabledTools = await createTools(createSession(process.cwd(), { "fastContext.enabled": true }), [
+		// Main agent (no requestedTools) → exposed when enabled (first-class tool).
+		const mainAgentTools = await createTools(createSession(process.cwd(), { "fastContext.enabled": true }));
+		expect(mainAgentTools.some(tool => tool.name === "fast_context")).toBe(true);
+
+		// explore (explicitly requests it) → exposed when enabled.
+		const exploreTools = await createTools(createSession(process.cwd(), { "fastContext.enabled": true }), [
 			"fast_context",
 		]);
-		expect(enabledTools.some(tool => tool.name === "fast_context")).toBe(true);
+		expect(exploreTools.some(tool => tool.name === "fast_context")).toBe(true);
+
+		// A subagent with a restricted tool list that omits fast_context → not exposed.
+		const restrictedTools = await createTools(createSession(process.cwd(), { "fastContext.enabled": true }), [
+			"search",
+			"read",
+		]);
+		expect(restrictedTools.some(tool => tool.name === "fast_context")).toBe(false);
 	});
 
 	it("runs a Chat Completions loop with exact FastContext tool names and citations", async () => {

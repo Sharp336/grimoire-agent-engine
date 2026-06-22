@@ -1659,7 +1659,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Fast Context",
 			label: "Enable FastContext",
 			description:
-				"Allow the explore subagent to call a local FastContext model through a read-only adapter before falling back to normal search.",
+				"Enable the `fast_context` read-only retrieval adapter. When on, the main agent and the `explore` subagent can call `fast_context` to get a ranked file shortlist (via the configured FastContext model, e.g. devin/swe-1-6-fast) for broad queries, then verify with `read`/`search`.",
 		},
 	},
 
