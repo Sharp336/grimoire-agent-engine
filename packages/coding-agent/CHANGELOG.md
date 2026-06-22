@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `/goal` auto-compaction never triggering during long autonomous runs with `compaction.strategy: context-full`. Threshold compaction was only evaluated at `agent_end` and before a fresh prompt, but an active goal driven by a relentless model (e.g. a local `omlx` model) can iterate tool-call turns for the entire goal inside a single agent run that never settles to `agent_end` — so the soft threshold was never checked and context grew unbounded until the provider overflowed or the user aborted. A per-turn `onTurnEnd` maintenance pass now compacts in place between tool-call turns when an active goal run crosses the threshold (mirroring the in-place rewind path), keeping context bounded across the run. [#3147](https://github.com/can1357/oh-my-pi/issues/3147) fixed only the post-yield early-return path; this covers the continuation loop that never yields ([#3174](https://github.com/can1357/oh-my-pi/issues/3174)).
+
 ## [16.1.15] - 2026-06-22
 
 ### Added
