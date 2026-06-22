@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a regression test pinning that the snapcompact compaction strategy degrades to a context-full LLM summary — never invoking the rasterizer or attaching image frames to the provider request, and warning the user — when the active model is text-only. This is the case for `umans-glm-5.2`, whose `input` is `["text"]` because Umans reports `supports_vision: "via-handoff"` and rejects inline image blocks with a 400 ([#3186](https://github.com/can1357/oh-my-pi/pull/3186)).
+
 ## [16.1.12] - 2026-06-21
 
 ### Changed
