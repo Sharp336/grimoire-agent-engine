@@ -88,7 +88,7 @@ describe("AnySearch web search provider", () => {
 			fetch: fetchMock,
 		});
 
-		expect(authHeader).toBe("Bearer test-anysearch-key");
+		expect(authHeader as any).toBe("Bearer test-anysearch-key");
 		expect(requestBody).toMatchObject({
 			method: "tools/call",
 			params: {
