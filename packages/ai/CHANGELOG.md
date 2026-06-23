@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Replaced `new Promise((resolve, reject) => ...)` with `Promise.withResolvers()` in `callback-server.ts` and `auth-storage.ts`/`auth-broker/remote-store.ts` race-with-signal helpers, per the project convention.
+- Replaced `new Promise((resolve, reject) => ...)` with `Promise.withResolvers()` in `callback-server.ts` and `auth-storage.ts`/`auth-broker/remote-store.ts` race-with-signal helpers, per the project convention. ([#3336](https://github.com/can1357/oh-my-pi/pull/3336) by [@oldschoola](https://github.com/oldschoola))
 
 ## [16.1.16] - 2026-06-23
 

@@ -120,10 +120,14 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	// Ensure stdout is fully flushed before returning
 	// This prevents race conditions where the process exits before all output is written
 	const { promise, resolve, reject } = Promise.withResolvers<void>();
-	process.stdout.write("", err => {
-		if (err) reject(err);
-		else resolve();
-	});
+	try {
+		process.stdout.write("", err => {
+			if (err) reject(err);
+			else resolve();
+		});
+	} catch (err) {
+		reject(err);
+	}
 	await promise;
 
 	await session.dispose();
