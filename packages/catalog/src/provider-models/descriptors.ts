@@ -43,6 +43,7 @@ import {
 	vercelAiGatewayModelManagerOptions,
 	vllmModelManagerOptions,
 	waferServerlessModelManagerOptions,
+	wandbModelManagerOptions,
 	xaiModelManagerOptions,
 	xaiOAuthModelManagerOptions,
 	xiaomiModelManagerOptions,
@@ -374,6 +375,13 @@ export const CATALOG_PROVIDERS = [
 			label: "Wafer Serverless",
 			oauthProvider: "wafer-serverless",
 		},
+	},
+	{
+		id: "wandb",
+		defaultModel: "openai/gpt-oss-120b",
+		envVars: ["WANDB_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => wandbModelManagerOptions(config),
+		catalogDiscovery: { label: "Weights & Biases" },
 	},
 	{
 		id: "xai",

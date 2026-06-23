@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Weights & Biases Serverless Inference as an OpenAI-compatible provider with models.dev-backed bundled catalog metadata.
+
 ## [16.1.14] - 2026-06-22
 
 ### Added

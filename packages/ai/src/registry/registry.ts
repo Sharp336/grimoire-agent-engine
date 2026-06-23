@@ -54,6 +54,7 @@ import { veniceProvider } from "./venice";
 import { vercelAiGatewayProvider } from "./vercel-ai-gateway";
 import { vllmProvider } from "./vllm";
 import { waferServerlessProvider } from "./wafer-serverless";
+import { wandbProvider } from "./wandb";
 import { xaiProvider } from "./xai";
 import { xaiOauthProvider } from "./xai-oauth";
 import { xiaomiProvider } from "./xiaomi";
@@ -112,6 +113,7 @@ const ALL = [
 	syntheticProvider,
 	nanogptProvider,
 	waferServerlessProvider,
+	wandbProvider,
 	vercelAiGatewayProvider,
 	cloudflareAiGatewayProvider,
 	litellmProvider,

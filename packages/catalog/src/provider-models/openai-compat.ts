@@ -2464,6 +2464,20 @@ export function togetherModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 15.5 Weights & Biases
+// ---------------------------------------------------------------------------
+
+export interface WandbModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function wandbModelManagerOptions(config?: WandbModelManagerConfig): ModelManagerOptions<"openai-completions"> {
+	return createSimpleOpenAICompletionsOptions("wandb", "https://api.inference.wandb.ai/v1", config);
+}
+
+// ---------------------------------------------------------------------------
 // 16. Moonshot
 // ---------------------------------------------------------------------------
 
@@ -3630,6 +3644,8 @@ const MODELS_DEV_PROVIDER_DESCRIPTORS_CORE: readonly ModelsDevProviderDescriptor
 	openAiCompletionsDescriptor("cerebras", "cerebras", "https://api.cerebras.ai/v1"),
 	// --- Together ---
 	openAiCompletionsDescriptor("togetherai", "together", "https://api.together.xyz/v1"),
+	// --- Weights & Biases ---
+	openAiCompletionsDescriptor("wandb", "wandb", "https://api.inference.wandb.ai/v1"),
 	// --- NVIDIA ---
 	openAiCompletionsDescriptor("nvidia", "nvidia", "https://integrate.api.nvidia.com/v1", {
 		defaultContextWindow: 131072,

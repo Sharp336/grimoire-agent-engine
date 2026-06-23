@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Weights & Biases Serverless Inference provider login support via `WANDB_API_KEY`.
+
 ## [16.1.16] - 2026-06-23
 
 ### Fixed
