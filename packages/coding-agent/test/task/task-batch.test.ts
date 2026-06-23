@@ -13,6 +13,7 @@
  *    item; with `async.enabled=false`, it blocks and returns merged results.
  *    Both modes forward the shared `context`; the flat form stays accepted at
  *    runtime for internal callers.
+ * 4. task.maxConcurrency=0 preserves full-width synchronous batch fan-out.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
@@ -74,6 +75,16 @@ function makeResult(id: string, overrides: Partial<SingleResult> = {}): SingleRe
 		requests: 1,
 		...overrides,
 	};
+}
+
+interface Deferred {
+	promise: Promise<void>;
+	resolve: () => void;
+}
+
+function deferred(): Deferred {
+	const { promise, resolve } = Promise.withResolvers<void>();
+	return { promise, resolve };
 }
 
 function mockDiscovery(): void {
@@ -363,5 +374,49 @@ describe("task.batch spawning", () => {
 			"# Goal\nShared synchronous context.",
 			"# Goal\nShared synchronous context.",
 		]);
+	});
+
+	it("treats task.maxConcurrency 0 as unlimited for synchronous batch fan-out", async () => {
+		mockDiscovery();
+		const bothStarted = deferred();
+		const release = deferred();
+		const started: string[] = [];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			started.push(id);
+			if (started.length === 2) bothStarted.resolve();
+			await release.promise;
+			return makeResult(id);
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(
+			createSession({
+				manager,
+				settings: { "async.enabled": false, "task.batch": true, "task.maxConcurrency": 0 },
+			}),
+		);
+
+		const pending = tool.execute("tc-sync-unlimited", {
+			agent: "task",
+			context: "# Goal\nShared synchronous context.",
+			tasks: [
+				{ id: "Alpha", assignment: "Do A." },
+				{ id: "Beta", assignment: "Do B." },
+			],
+		} as TaskParams);
+
+		const race = await Promise.race([
+			bothStarted.promise.then(() => "started" as const),
+			Bun.sleep(250).then(() => "timeout" as const),
+		]);
+		expect(race).toBe("started");
+		expect([...started].sort()).toEqual(["Alpha", "Beta"]);
+
+		release.resolve();
+		const result = await pending;
+		expect(getFirstText(result)).toContain("All done.");
+		expect(result.details?.async).toBeUndefined();
+		expect(result.details?.results.map(item => item.id).sort()).toEqual(["Alpha", "Beta"]);
 	});
 });

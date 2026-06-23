@@ -7,6 +7,7 @@
  * 2. The session-scoped spawn semaphore (task.maxConcurrency) serializes job
  *    bodies: with concurrency 1 the second body does not start until the
  *    first releases.
+ * 3. task.maxConcurrency=0 means unlimited rather than one-at-a-time.
  *
  * Param validation (missing agent / missing assignment) is covered by
  * test/task/task-schema.test.ts.
@@ -184,6 +185,49 @@ describe("task spawn routing", () => {
 
 		gates.get("Second")!.resolve();
 		await secondJob.promise;
+		expect(firstJob.status).toBe("completed");
+		expect(secondJob.status).toBe("completed");
+	});
+
+	it("treats task.maxConcurrency 0 as unlimited for background spawns", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		const started: string[] = [];
+		const gates = new Map<string, Deferred>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const id = options.id ?? "?";
+			started.push(id);
+			const gate = deferred();
+			gates.set(id, gate);
+			await gate.promise;
+			return makeResult(id);
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager, settings: { "task.maxConcurrency": 0 } }));
+
+		const first = await tool.execute("tc-unlimited-1", {
+			agent: "task",
+			id: "First",
+			assignment: "Work A.",
+		} as TaskParams);
+		const second = await tool.execute("tc-unlimited-2", {
+			agent: "task",
+			id: "Second",
+			assignment: "Work B.",
+		} as TaskParams);
+		const firstJob = manager.getJob(first.details!.async!.jobId)!;
+		const secondJob = manager.getJob(second.details!.async!.jobId)!;
+
+		await pollUntil(() => started.length === 2);
+		expect(started).toEqual(["First", "Second"]);
+		expect(secondJob.queued).toBe(false);
+
+		gates.get("First")!.resolve();
+		gates.get("Second")!.resolve();
+		await Promise.all([firstJob.promise, secondJob.promise]);
 		expect(firstJob.status).toBe("completed");
 		expect(secondJob.status).toBe("completed");
 	});
