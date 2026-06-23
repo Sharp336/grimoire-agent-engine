@@ -1765,6 +1765,28 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"fastContext.maxTurns": {
+		type: "number",
+		default: 4,
+		ui: {
+			tab: "context",
+			group: "Fast Context",
+			label: "FastContext Max Turns",
+			description:
+				"Agent mode: max search rounds before forcing citations. More turns = deeper retrieval but slower. Hint mode ignores this (always 1 turn).",
+			condition: "fastContextEnabled",
+			options: [
+				{ value: "1", label: "1 turn" },
+				{ value: "2", label: "2 turns" },
+				{ value: "3", label: "3 turns" },
+				{ value: "4", label: "4 turns (default)" },
+				{ value: "5", label: "5 turns" },
+				{ value: "6", label: "6 turns" },
+				{ value: "8", label: "8 turns" },
+			],
+		},
+	},
+
 	"fastContext.fastTools": {
 		type: "boolean",
 		default: false,

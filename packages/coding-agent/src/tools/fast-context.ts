@@ -837,7 +837,7 @@ export class FastContextTool implements AgentTool<typeof fastContextSchema, Fast
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<FastContextToolDetails>> {
 		const { baseUrl, model } = backendDisplay(backend);
-		const maxTurns = clampedTurns(params.max_turns);
+		const maxTurns = clampedTurns(params.max_turns ?? this.#session.settings.get("fastContext.maxTurns"));
 		const messages: ChatMessage[] = [
 			{
 				role: "system",
